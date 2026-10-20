@@ -307,6 +307,7 @@ if TYPE_CHECKING:
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool | None = None
+    VLLM_SHARDED_GREEDY_VERIFY: bool = False
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
@@ -2133,6 +2134,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Flag to control the v2 model runner. If unset, use config defaults.
     "VLLM_USE_V2_MODEL_RUNNER": lambda: maybe_convert_bool(
         os.getenv("VLLM_USE_V2_MODEL_RUNNER", None)
+    ),
+    # V2 model runner: verify all-greedy speculative decoding batches from
+    # all-gathered per-block argmax statistics of the vocab-parallel logits
+    # instead of all-gathering the full logits. Requires TP > 1 and a model
+    # implementing compute_logits_local.
+    "VLLM_SHARDED_GREEDY_VERIFY": lambda: bool(
+        int(os.getenv("VLLM_SHARDED_GREEDY_VERIFY", "0"))
     ),
     # Log model inspection after loading.
     # If enabled, logs a transformers-style hierarchical view of the model

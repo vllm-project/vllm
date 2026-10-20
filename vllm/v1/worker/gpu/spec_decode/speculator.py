@@ -139,7 +139,6 @@ class DraftModelSpeculator(BaseSpeculator):
         self.use_local_argmax_reduction = (
             self.speculative_config.use_local_argmax_reduction
         )
-        self._use_minimax_fused_draft_argmax = False
 
         # DP configuration
         self.dp_size = vllm_config.parallel_config.data_parallel_size
@@ -228,11 +227,6 @@ class DraftModelSpeculator(BaseSpeculator):
         )
 
         self.model = self.load_draft_model(target_model, target_attn_layer_names)
-        from vllm.models.minimax_m3.amd.ops.n03_sampling import (
-            configure_draft,
-        )
-
-        self._use_minimax_fused_draft_argmax = configure_draft(self)
         self._validate_local_argmax_reduction()
 
         all_attn_layers = get_layers_from_vllm_config(
@@ -455,21 +449,6 @@ class DraftModelSpeculator(BaseSpeculator):
         spec_step_idx: int = 0,
         num_steps: int = 1,
     ) -> torch.Tensor:
-        if (
-            self._use_minimax_fused_draft_argmax
-            and draft_logits is None
-            and self.acceptance_estimator is None
-            and self.draft_watermarker is None
-            and hidden_states.ndim == 2
-            and hidden_states.shape[0] > 0
-            and hidden_states.shape[1] == 6144
-            and hidden_states.dtype == torch.bfloat16
-        ):
-            from vllm.models.minimax_m3.amd.ops.draft_argmax import (
-                identity_vocab_top_tokens,
-            )
-
-            return identity_vocab_top_tokens(self.model, hidden_states)
         if draft_logits is None and self.use_local_argmax_reduction:
             return self.get_draft_top_tokens(hidden_states, spec_step_idx)
 

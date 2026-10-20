@@ -167,7 +167,7 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     RejectionSampler,
     get_max_chunk_logits,
 )
-from vllm.v1.worker.gpu.spec_decode.sharded_greedy_rejection_sampler import (
+from vllm.v1.worker.gpu.spec_decode.sharded_greedy_verifier import (
     ShardedGreedyVerifier,
     create_sharded_greedy_verifier,
 )
@@ -523,7 +523,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     ),
                 )
             self.sharded_greedy_verifier = create_sharded_greedy_verifier(
-                self.model, self.rejection_sampler, self.speculator, self.vllm_config
+                self.model, self.rejection_sampler, self.vllm_config, self.vocab_size
             )
             self.prompt_logprobs_worker = PromptLogprobsWorker(
                 self.max_num_reqs,
@@ -1618,7 +1618,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     ) -> tuple[SamplerOutput, torch.Tensor, torch.Tensor]:
         if self.sharded_greedy_verifier is not None:
             output = self.sharded_greedy_verifier.try_sample(
-                hidden_states, input_batch, grammar_output
+                hidden_states,
+                input_batch,
+                grammar_output,
+                self.speculator.draft_logits if self.speculator is not None else None,
             )
             if output is not None:
                 return output, output.num_sampled, output.num_rejected
