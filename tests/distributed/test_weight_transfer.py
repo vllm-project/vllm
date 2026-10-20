@@ -1999,9 +1999,13 @@ def test_nccl_trainer_three_source_round_failure_uses_all_gather():
     )
     metadata_group = MagicMock()
     metadata_group.all_gather_obj.return_value = [
-        {"source_rank": 0, "error": None},
-        {"source_rank": 1, "error": None},
-        {"source_rank": 2, "error": "RuntimeError: transfer failed"},
+        {"phase": "round_outcome", "source_rank": 0, "error": None},
+        {"phase": "round_outcome", "source_rank": 1, "error": None},
+        {
+            "phase": "round_outcome",
+            "source_rank": 2,
+            "error": "RuntimeError: transfer failed",
+        },
     ]
     engine.source_metadata_group = metadata_group
 
@@ -2009,10 +2013,287 @@ def test_nccl_trainer_three_source_round_failure_uses_all_gather():
         engine._check_round_outcomes(None)
 
     metadata_group.all_gather_obj.assert_called_once_with(
-        {"source_rank": 0, "error": None}
+        {"phase": "round_outcome", "source_rank": 0, "error": None}
     )
     metadata_group.send_obj.assert_not_called()
     metadata_group.recv_obj.assert_not_called()
+
+
+def test_nccl_trainer_rpc_failure_is_shared_before_broadcast(monkeypatch):
+    import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
+
+    class ImmediateFailure:
+        def add_done_callback(self, callback):
+            callback(self)
+
+        def done(self):
+            return True
+
+        def result(self):
+            raise RuntimeError("worker RPC failed")
+
+    class ImmediateExecutor:
+        def __init__(self, **kwargs):
+            pass
+
+        def submit(self, func, *args):
+            return ImmediateFailure()
+
+        def shutdown(self, **kwargs):
+            pass
+
+    monkeypatch.setattr(nccl_engine_mod, "ThreadPoolExecutor", ImmediateExecutor)
+
+    engine = NCCLTrainerWeightTransferEngine(
+        client=RecordingClient(),
+        source=MagicMock(spec=WeightSource),
+        source_rank=0,
+        num_source_ranks=2,
+        packed=False,
+    )
+    engine.update_infos = [
+        NCCLWeightTransferUpdateInfo(
+            names=["weight"],
+            dtype_names=["float32"],
+            shapes=[[4]],
+            src=0,
+        )
+    ]
+    model_update_group = MagicMock()
+    engine.model_update_group = model_update_group
+    metadata_group = MagicMock()
+
+    def gather(payload):
+        return [
+            payload,
+            {**payload, "source_rank": 1, "error": None},
+        ]
+
+    metadata_group.all_gather_obj.side_effect = gather
+    engine.source_metadata_group = metadata_group
+
+    with pytest.raises(RuntimeError, match="worker RPC failed"):
+        engine._send_updates()
+
+    payload = metadata_group.all_gather_obj.call_args.args[0]
+    assert payload["phase"] == "update_rpc_start"
+    model_update_group.broadcast.assert_not_called()
+    model_update_group.destroy.assert_called_once()
+
+
+@pytest.mark.parametrize("packed", [False, True])
+def test_nccl_trainer_coordinates_source_failure_before_broadcast(monkeypatch, packed):
+    import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
+
+    engine = NCCLTrainerWeightTransferEngine(
+        client=RecordingClient(),
+        source=MagicMock(spec=WeightSource),
+        source_rank=0,
+        num_source_ranks=2,
+        packed=packed,
+    )
+    model_update_group = MagicMock()
+    model_update_group.device = torch.device("cpu")
+    engine.model_update_group = model_update_group
+    metadata_group = MagicMock()
+    metadata_group.all_gather_obj.return_value = [
+        {
+            "phase": "source_collective",
+            "source_rank": 0,
+            "src": 1,
+            "step": 0,
+            "error": None,
+        },
+        {
+            "phase": "source_collective",
+            "source_rank": 1,
+            "src": 1,
+            "step": 0,
+            "error": "ValueError: source tensor is invalid",
+        },
+    ]
+    engine.source_metadata_group = metadata_group
+    monkeypatch.setattr(torch.cuda, "current_stream", MagicMock())
+    if packed:
+        monkeypatch.setattr(
+            nccl_engine_mod,
+            "packed_nccl_broadcast_consumer",
+            lambda *, group, src, **kwargs: group.broadcast(
+                torch.empty(4, dtype=torch.float32), src=src
+            ),
+        )
+
+    with pytest.raises(RuntimeError, match="source rank 1"):
+        engine._broadcast_update(
+            NCCLWeightTransferUpdateInfo(
+                names=["weight"],
+                dtype_names=["float32"],
+                shapes=[[4]],
+                src=1,
+            )
+        )
+
+    model_update_group.broadcast.assert_not_called()
+    model_update_group.destroy.assert_called_once()
+
+
+@pytest.mark.parametrize("packed", [False, True])
+def test_nccl_trainer_coordinates_local_validation_failure(monkeypatch, packed):
+    import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
+
+    class InvalidSource(WeightSource):
+        def metadata(self):
+            return [ParamMeta("weight", torch.float32, (4,))]
+
+        def __iter__(self):
+            yield "weight", torch.zeros(4, dtype=torch.bfloat16)
+
+    engine = NCCLTrainerWeightTransferEngine(
+        client=RecordingClient(),
+        source=InvalidSource(),
+        is_sender=False,
+        source_rank=1,
+        num_source_ranks=2,
+        packed=packed,
+    )
+    model_update_group = MagicMock()
+    model_update_group.device = torch.device("cpu")
+    engine.model_update_group = model_update_group
+    metadata_group = MagicMock()
+
+    def gather(payload):
+        return [
+            {**payload, "source_rank": 0, "error": None},
+            payload,
+        ]
+
+    metadata_group.all_gather_obj.side_effect = gather
+    engine.source_metadata_group = metadata_group
+    monkeypatch.setattr(torch.cuda, "current_stream", MagicMock())
+    if packed:
+        monkeypatch.setattr(
+            nccl_engine_mod,
+            "packed_nccl_broadcast_producer",
+            lambda *, iterator, **kwargs: list(iterator),
+        )
+
+    with pytest.raises(ValueError, match="disagrees with iteration"):
+        engine._broadcast_update(
+            NCCLWeightTransferUpdateInfo(
+                names=["weight"],
+                dtype_names=["float32"],
+                shapes=[[4]],
+                src=1,
+            )
+        )
+
+    payload = metadata_group.all_gather_obj.call_args.args[0]
+    assert payload["source_rank"] == 1
+    assert "ValueError" in payload["error"]
+    model_update_group.broadcast.assert_not_called()
+    model_update_group.destroy.assert_called_once()
+
+
+@pytest.mark.parametrize("packed", [False, True])
+def test_nccl_trainer_broadcast_failure_coordinates_next_step(monkeypatch, packed):
+    import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
+
+    engine = NCCLTrainerWeightTransferEngine(
+        client=RecordingClient(),
+        source=MagicMock(spec=WeightSource),
+        source_rank=0,
+        num_source_ranks=2,
+        packed=packed,
+    )
+    model_update_group = MagicMock()
+    model_update_group.device = torch.device("cpu")
+    model_update_group.broadcast.side_effect = RuntimeError("broadcast failed")
+    engine.model_update_group = model_update_group
+    metadata_group = MagicMock()
+
+    def gather(payload):
+        peer = {**payload, "source_rank": 1, "error": None}
+        return [payload, peer]
+
+    metadata_group.all_gather_obj.side_effect = gather
+    engine.source_metadata_group = metadata_group
+    monkeypatch.setattr(torch.cuda, "current_stream", MagicMock())
+    if packed:
+        monkeypatch.setattr(
+            nccl_engine_mod,
+            "packed_nccl_broadcast_consumer",
+            lambda *, group, src, **kwargs: group.broadcast(
+                torch.empty(4, dtype=torch.float32), src=src
+            ),
+        )
+
+    with pytest.raises(RuntimeError, match="broadcast from source rank 1 failed"):
+        engine._broadcast_update(
+            NCCLWeightTransferUpdateInfo(
+                names=["weight"],
+                dtype_names=["float32"],
+                shapes=[[4]],
+                src=1,
+            )
+        )
+
+    assert metadata_group.all_gather_obj.call_count == 2
+    failure_payload = metadata_group.all_gather_obj.call_args_list[1].args[0]
+    assert failure_payload["step"] == 1
+    assert "broadcast failed" in failure_payload["error"]
+    model_update_group.destroy.assert_called_once()
+
+
+@pytest.mark.parametrize("packed", [False, True])
+def test_nccl_trainer_async_failure_coordinates_drain_step(monkeypatch, packed):
+    import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
+
+    engine = NCCLTrainerWeightTransferEngine(
+        client=RecordingClient(),
+        source=MagicMock(spec=WeightSource),
+        source_rank=0,
+        num_source_ranks=2,
+        packed=packed,
+    )
+    model_update_group = MagicMock()
+    model_update_group.device = torch.device("cpu")
+    engine.model_update_group = model_update_group
+    metadata_group = MagicMock()
+
+    def gather(payload):
+        peer = {**payload, "source_rank": 1, "error": None}
+        return [payload, peer]
+
+    metadata_group.all_gather_obj.side_effect = gather
+    engine.source_metadata_group = metadata_group
+    stream = MagicMock()
+    stream.synchronize.side_effect = RuntimeError("async NCCL failure")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda: stream)
+    if packed:
+        monkeypatch.setattr(
+            nccl_engine_mod,
+            "packed_nccl_broadcast_consumer",
+            lambda *, group, src, **kwargs: group.broadcast(
+                torch.empty(4, dtype=torch.float32), src=src
+            ),
+        )
+
+    with pytest.raises(RuntimeError, match="async NCCL failure"):
+        engine._broadcast_update(
+            NCCLWeightTransferUpdateInfo(
+                names=["weight"],
+                dtype_names=["float32"],
+                shapes=[[4]],
+                src=1,
+            )
+        )
+
+    assert metadata_group.all_gather_obj.call_count == 3
+    failure_payload = metadata_group.all_gather_obj.call_args_list[2].args[0]
+    assert failure_payload["step"] == 2
+    assert "async NCCL failure" in failure_payload["error"]
+    model_update_group.destroy.assert_called_once()
 
 
 @pytest.mark.parametrize(
@@ -2175,6 +2456,20 @@ def test_nccl_trainer_init_non_sender_skips_rendezvous_and_client():
 
     # send_weights on a non-sender only iterates the source (packed mode needs
     # no CUDA stream on non-senders), never the client.
+    engine.send_weights()
+    assert client.order == []
+
+
+def test_nccl_trainer_direct_non_sender_defaults_to_gather_only(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    client = RecordingClient()
+    engine = NCCLTrainerWeightTransferEngine(
+        client=client,
+        source=ModuleSource(_module_with(("w", torch.zeros(4)))),
+        is_sender=False,
+    )
+
+    assert engine.source_rank is None
     engine.send_weights()
     assert client.order == []
 

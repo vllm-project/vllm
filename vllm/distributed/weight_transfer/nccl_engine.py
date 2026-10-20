@@ -5,6 +5,7 @@
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
+from threading import Lock
 from typing import TYPE_CHECKING, ClassVar, Self
 
 import torch
@@ -42,6 +43,11 @@ from vllm.distributed.weight_transfer.packed_tensor import (
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+
+class _NCCLSourceCollectiveError(RuntimeError):
+    pass
+
 
 # NCCLWeightTransferInitInfo is re-exported here for convenience; its canonical
 # home is nccl_common, shared with the sparse backend.
@@ -314,14 +320,14 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         client: VLLMWeightSyncClient,
         source: WeightSource,
         is_sender: bool = True,
-        source_rank: int | None = 0,
+        source_rank: int | None = None,
         num_source_ranks: int = 1,
         packed: bool = True,
         packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
         packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS,
     ) -> None:
         super().__init__(client=client, source=source, is_sender=is_sender)
-        self.source_rank = source_rank
+        self.source_rank = 0 if is_sender and source_rank is None else source_rank
         self.num_source_ranks = num_source_ranks
         self.packed = packed
         self.packed_buffer_size_bytes = packed_buffer_size_bytes
@@ -329,6 +335,8 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         self.model_update_group: PyNcclCommunicator | None = None
         self.update_infos: list[NCCLWeightTransferUpdateInfo] = []
         self.source_metadata_group: StatelessProcessGroup | None = None
+        self._group_lock = Lock()
+        self._rpc_failure: BaseException | None = None
 
     @classmethod
     def trainer_init(
@@ -526,23 +534,92 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         self._check_round_outcomes(None)
 
     def _send_updates(self) -> None:
-        for update_info in self.update_infos:
+        for update_index, update_info in enumerate(self.update_infos):
             future = None
             executor = None
+            start_failure = None
             if self.is_sender:
+                with self._group_lock:
+                    self._rpc_failure = None
                 executor = ThreadPoolExecutor(max_workers=1)
-                future = executor.submit(
-                    self.client.update_weights, asdict(update_info)
-                )
-                if future.done():
-                    future.result()
+                try:
+                    future = executor.submit(
+                        self.client.update_weights, asdict(update_info)
+                    )
+                    future.add_done_callback(self._abort_on_rpc_failure)
+                    if future.done():
+                        future.result()
+                except BaseException as exc:
+                    start_failure = exc
             try:
+                self._check_update_rpc_outcomes(update_index, "start", start_failure)
+                if start_failure is not None:
+                    raise start_failure
                 self._broadcast_update(update_info)
+                finish_failure = None
                 if future is not None:
-                    future.result()
+                    try:
+                        future.result()
+                    except BaseException as exc:
+                        finish_failure = exc
+                self._check_update_rpc_outcomes(update_index, "finish", finish_failure)
+                if finish_failure is not None:
+                    raise finish_failure
             finally:
                 if executor is not None:
                     executor.shutdown(wait=False, cancel_futures=True)
+
+    def _abort_on_rpc_failure(self, future) -> None:
+        try:
+            future.result()
+        except BaseException as exc:
+            with self._group_lock:
+                self._rpc_failure = exc
+            self._abort_model_update_group()
+
+    def _check_update_rpc_outcomes(
+        self,
+        update_index: int,
+        stage: str,
+        failure: BaseException | None,
+    ) -> None:
+        if self.source_metadata_group is None:
+            if failure is not None:
+                self._abort_model_update_group()
+            return
+        phase = f"update_rpc_{stage}"
+        outcomes = self.source_metadata_group.all_gather_obj(
+            {
+                "phase": phase,
+                "source_rank": self.source_rank,
+                "update_index": update_index,
+                "error": (
+                    None if failure is None else f"{type(failure).__name__}: {failure}"
+                ),
+            }
+        )
+        expected = (phase, update_index)
+        if [outcome.get("source_rank") for outcome in outcomes] != list(
+            range(self.num_source_ranks)
+        ) or any(
+            (outcome.get("phase"), outcome.get("update_index")) != expected
+            for outcome in outcomes
+        ):
+            self._abort_model_update_group()
+            raise _NCCLSourceCollectiveError(
+                "NCCL source ranks reached different update RPC phases"
+            )
+        errors = [
+            f"source rank {outcome['source_rank']}: {outcome['error']}"
+            for outcome in outcomes
+            if outcome["error"] is not None
+        ]
+        if errors:
+            self._abort_model_update_group()
+            if failure is None:
+                raise _NCCLSourceCollectiveError(
+                    "NCCL worker update RPC failed: " + "; ".join(errors)
+                )
 
     def _check_start_outcomes(self, local_error: str | None) -> None:
         if self.source_metadata_group is None:
@@ -567,16 +644,19 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
             return
         outcomes = self.source_metadata_group.all_gather_obj(
             {
+                "phase": "round_outcome",
                 "source_rank": self.source_rank,
                 "error": (
                     None if failure is None else f"{type(failure).__name__}: {failure}"
                 ),
             }
         )
-        if [outcome["source_rank"] for outcome in outcomes] != list(
+        if [outcome.get("source_rank") for outcome in outcomes] != list(
             range(self.num_source_ranks)
         ):
             raise RuntimeError("NCCL round outcomes are not ordered by source rank")
+        if any(outcome.get("phase") != "round_outcome" for outcome in outcomes):
+            raise RuntimeError("NCCL source ranks reached different round phases")
         errors = [
             f"source rank {outcome['source_rank']}: {outcome['error']}"
             for outcome in outcomes
@@ -586,8 +666,6 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
             raise RuntimeError("NCCL weight transfer failed: " + "; ".join(errors))
 
     def _broadcast_update(self, update_info: NCCLWeightTransferUpdateInfo) -> None:
-        assert self.model_update_group is not None
-        is_source = self.source_rank == update_info.src
         meta = [
             ParamMeta(name, getattr(torch, dtype_name), tuple(shape))
             for name, dtype_name, shape in zip(
@@ -597,12 +675,55 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
             )
         ]
         if self.packed:
-            if is_source:
+            drain_step = self._broadcast_packed(update_info.src, meta)
+        else:
+            drain_step = self._broadcast_unpacked(update_info.src, meta)
+
+        failure = None
+        try:
+            self._post_send_sync()
+        except BaseException as exc:
+            failure = exc
+            self._abort_model_update_group()
+        self._check_source_collective(update_info.src, drain_step, failure)
+        if failure is not None:
+            raise failure
+
+    def _broadcast_packed(self, src: int, meta: list[ParamMeta]) -> int:
+        with self._group_lock:
+            group = self.model_update_group
+            failure = self._rpc_failure if self.is_sender else None
+        if group is None:
+            if failure is None:
+                failure = RuntimeError("NCCL model update group is unavailable")
+            self._check_source_collective(src, 0, failure)
+            raise failure
+        assert group is not None
+        model_update_group = group
+        step = 0
+        engine = self
+
+        class CoordinatedGroup:
+            def broadcast(self, tensor, src, stream=None):
+                nonlocal step
+                engine._check_source_collective(src, step, None)
+                step += 1
+                try:
+                    model_update_group.broadcast(tensor, src=src, stream=stream)
+                except BaseException as exc:
+                    engine._abort_model_update_group()
+                    engine._check_source_collective(src, step, exc)
+                    raise _NCCLSourceCollectiveError(
+                        f"NCCL broadcast from source rank {src} failed"
+                    ) from exc
+
+        try:
+            if self.source_rank == src:
                 assert self.source is not None
                 packed_nccl_broadcast_producer(
                     iterator=self._checked_iter(self._iter_owned(self.source), meta),
-                    group=self.model_update_group,
-                    src=update_info.src,
+                    group=CoordinatedGroup(),
+                    src=src,
                     post_iter_func=lambda item: item[1],
                     buffer_size_bytes=self.packed_buffer_size_bytes,
                     num_buffers=self.packed_num_buffers,
@@ -612,37 +733,154 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
                     iterator=(
                         (item.name, (list(item.shape), item.dtype)) for item in meta
                     ),
-                    group=self.model_update_group,
-                    src=update_info.src,
+                    group=CoordinatedGroup(),
+                    src=src,
                     post_unpack_func=lambda weights: None,
                     buffer_size_bytes=self.packed_buffer_size_bytes,
                     num_buffers=self.packed_num_buffers,
-                    device=self.model_update_group.device,
+                    device=model_update_group.device,
                 )
-        else:
-            stream = torch.cuda.current_stream()
-            tensors: Iterator[tuple[str, torch.Tensor]]
-            if is_source:
-                assert self.source is not None
-                tensors = self._checked_iter(self._iter_owned(self.source), meta)
-            else:
-                tensors = (
-                    (
-                        item.name,
-                        torch.empty(
-                            item.shape,
-                            dtype=item.dtype,
-                            device=self.model_update_group.device,
-                        ),
+        except _NCCLSourceCollectiveError:
+            raise
+        except BaseException as exc:
+            self._check_source_collective(src, step, exc)
+            raise
+        self._check_source_collective(src, step, None)
+        return step + 1
+
+    def _broadcast_unpacked(self, src: int, meta: list[ParamMeta]) -> int:
+        with self._group_lock:
+            group = self.model_update_group
+            failure = self._rpc_failure if self.is_sender else None
+        if group is None:
+            if failure is None:
+                failure = RuntimeError("NCCL model update group is unavailable")
+            self._check_source_collective(src, 0, failure)
+            raise failure
+        assert group is not None
+        stream = torch.cuda.current_stream()
+        pairs = None
+        if self.source_rank == src:
+            assert self.source is not None
+            pairs = iter(self._checked_iter(self._iter_owned(self.source), meta))
+
+        for step, item in enumerate(meta):
+            failure = None
+            send = None
+            try:
+                if pairs is not None:
+                    _, tensor = next(pairs)
+                else:
+                    tensor = torch.empty(
+                        item.shape,
+                        dtype=item.dtype,
+                        device=group.device,
                     )
-                    for item in meta
-                )
-            for _name, tensor in tensors:
                 send = tensor if tensor.is_contiguous() else tensor.contiguous()
-                self.model_update_group.broadcast(
-                    send, src=update_info.src, stream=stream
+            except BaseException as exc:
+                failure = exc
+            self._check_source_collective(src, step, failure)
+            if failure is not None:
+                raise failure
+            assert send is not None
+            try:
+                group.broadcast(send, src=src, stream=stream)
+            except BaseException as exc:
+                self._abort_model_update_group()
+                self._check_source_collective(src, step + 1, exc)
+                raise _NCCLSourceCollectiveError(
+                    f"NCCL broadcast from source rank {src} failed"
+                ) from exc
+
+        failure = None
+        if pairs is not None:
+            try:
+                next(pairs)
+            except StopIteration:
+                pass
+            except BaseException as exc:
+                failure = exc
+        self._check_source_collective(src, len(meta), failure)
+        if failure is not None:
+            raise failure
+        return len(meta) + 1
+
+    def _check_source_collective(
+        self, src: int, step: int, failure: BaseException | None
+    ) -> None:
+        local_failure = failure
+        if local_failure is None and self.is_sender:
+            with self._group_lock:
+                local_failure = self._rpc_failure
+        if self.source_metadata_group is None:
+            if local_failure is not None:
+                self._abort_model_update_group()
+                if failure is None:
+                    raise _NCCLSourceCollectiveError(
+                        "NCCL worker update RPC failed"
+                    ) from local_failure
+            return
+        outcomes = self.source_metadata_group.all_gather_obj(
+            {
+                "phase": "source_collective",
+                "source_rank": self.source_rank,
+                "src": src,
+                "step": step,
+                "error": (
+                    None
+                    if local_failure is None
+                    else f"{type(local_failure).__name__}: {local_failure}"
+                ),
+            }
+        )
+        if [outcome.get("source_rank") for outcome in outcomes] != list(
+            range(self.num_source_ranks)
+        ):
+            self._abort_model_update_group()
+            raise _NCCLSourceCollectiveError(
+                "NCCL source readiness outcomes are not ordered by source rank"
+            )
+        expected = ("source_collective", src, step)
+        if any(
+            (
+                outcome.get("phase"),
+                outcome.get("src"),
+                outcome.get("step"),
+            )
+            != expected
+            for outcome in outcomes
+        ):
+            self._abort_model_update_group()
+            raise _NCCLSourceCollectiveError(
+                "NCCL source ranks reached different collective steps"
+            )
+        errors = [
+            f"source rank {outcome['source_rank']}: {outcome['error']}"
+            for outcome in outcomes
+            if outcome["error"] is not None
+        ]
+        if errors:
+            self._abort_model_update_group()
+            if failure is None:
+                raise _NCCLSourceCollectiveError(
+                    "NCCL source failed before broadcast: " + "; ".join(errors)
                 )
-        self._post_send_sync()
+
+    def _abort_model_update_group(self) -> None:
+        lock = getattr(self, "_group_lock", None)
+        if lock is None:
+            group = self.model_update_group
+            self.model_update_group = None
+        else:
+            with lock:
+                group = self.model_update_group
+                self.model_update_group = None
+        if group is None:
+            return
+        try:
+            group.destroy()
+        except BaseException:
+            logger.exception("failed to abort NCCL model update group")
 
     @staticmethod
     def _build_update_infos(
@@ -786,7 +1024,5 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
             torch.cuda.current_stream().synchronize()
 
     def shutdown(self) -> None:
-        if self.model_update_group is not None:
-            self.model_update_group.destroy()
-            self.model_update_group = None
+        self._abort_model_update_group()
         self.source_metadata_group = None
