@@ -4,19 +4,18 @@ meta:
   provider: "MiniMax"
   description: "MiniMax M3 vision-language MoE (427B total / 26B active) for frontier coding, agent toolchains, and 1M-token reasoning via MSA sparse attention — native multimodal (image + video + computer use); BF16 plus MXFP8, NVIDIA Blackwell NVFP4, and AMD MI355X MXFP4 variants. Runs on NVIDIA (Hopper/Blackwell) and AMD CDNA4/CDNA3."
   date_added: 2026-06-12
-  date_updated: 2026-10-19
+  date_updated: 2026-10-20
   tasks:
     - text
     - multimodal
   performance_headline: "Frontier coding and agent (SWE-Bench Pro 59.0, Terminal-Bench 2.1 66.0); MSA sparse attention; 1M context"
   related_recipes: []
-  default_variant:
-    gb200: nvfp4
   hardware:
     h200: verified
     b200: verified
     b300: verified
-    # GB200: NVFP4 AgentX lane (InferenceX #4281, run 39150937290).
+    # GB200: verified with the NVFP4 variant only (InferenceX #4281,
+    # run 39150937290); other variants on GB200 are not qualified.
     gb200: verified
     mi300x: verified
     mi355x: verified
@@ -84,7 +83,9 @@ features:
           - '{"method": "eagle3", "model": "Inferact/MiniMax-M3-EAGLE3-GQA", "num_speculative_tokens": 3, "attention_backend": "FLASH_ATTN"}'
         hardware_overrides:
           # GB200 AgentX lane (InferenceX #4281): FlashInfer draft attention
-          # with local argmax reduction across TP ranks.
+          # with local argmax reduction across TP ranks. Feature modes can't be
+          # scoped to a variant, so this applies to every variant on GB200;
+          # only NVFP4 was qualified.
           gb200:
             args:
               - "--speculative-config"
@@ -217,7 +218,7 @@ variants:
     model_id: "nvidia/MiniMax-M3-NVFP4"
     precision: nvfp4
     vram_minimum_gb: 257
-    description: "NVIDIA-quantized NVFP4 weights (ModelOpt) for Blackwell (B200/B300) — native FP4 tensor cores, ~half the VRAM of MXFP8."
+    description: "NVIDIA-quantized NVFP4 weights (ModelOpt) for Blackwell (B200/B300/GB200) — native FP4 tensor cores, ~half the VRAM of MXFP8."
     extra_args:
       - "--trust-remote-code"
       - "--kv-cache-dtype"
@@ -306,7 +307,9 @@ hardware_overrides:
 strategy_overrides:
   multi_node_tp:
     hardware_overrides:
-      # TP8 across two GB200 trays all-reduces over MNNVL.
+      # TP8 across two GB200 trays all-reduces over MNNVL. Strategy overrides
+      # can't be scoped to a variant, so this applies to every variant on
+      # GB200; only NVFP4 was qualified.
       gb200:
         extra_env:
           VLLM_FLASHINFER_ALLREDUCE_BACKEND: "mnnvl"
@@ -776,9 +779,11 @@ guide: |
 
   ## GB200: InferenceX AgentX aggregated (Dynamo + vLLM)
 
-  The GB200 AgentX lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`minimaxm3-fp4-gb200-dynamo-vllm-agentic-agg-mtp`, [SemiAnalysisAI/InferenceX#4281](https://github.com/SemiAnalysisAI/InferenceX/pull/4281)) serves the NVFP4 checkpoint with the GQA EAGLE3 draft (three speculative tokens) as one aggregated vLLM worker behind the Dynamo frontend's KV-aware router. TP4 runs on one 4-GPU GB200 tray; TP8 spans two trays. Image `vllm/vllm-openai:nightly-5555a2d8f7116b2b4877f66516f4128176cf722a`, Dynamo `1.6.0.dev20261016` (`pip install ai-dynamo==1.6.0.dev20261016`).
+  The GB200 AgentX lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`minimaxm3-fp4-gb200-dynamo-vllm-agentic-agg-mtp`, [SemiAnalysisAI/InferenceX#4281](https://github.com/SemiAnalysisAI/InferenceX/pull/4281)) serves the NVFP4 checkpoint with the GQA EAGLE3 draft (three speculative tokens) as one aggregated vLLM worker behind the Dynamo frontend's KV-aware router. TP4 runs on one 4-GPU GB200 tray; TP8 spans two trays. Image `vllm/vllm-openai:nightly-5555a2d8f7116b2b4877f66516f4128176cf722a@sha256:8896fd7b29fc4ee7ce839f146cb4757984c476ec79d0234ffa8c995dee6e339a`, Dynamo `1.6.0.dev20261016` (`pip install ai-dynamo==1.6.0.dev20261016`).
 
-  In the command builder, pick **GB200** (it defaults to the NVFP4 variant), turn on **Spec Decoding → GQA**, and use **Single-node TP** for TP4 or **Multi-node TP** with 2 nodes for TP8; that renders the worker flags and environment below. For the host-KV-offload points, the **KV Offload → Simple** pill adds the SimpleCPUOffloadConnector with its default per-rank budget; the qualified sizes are in the command further down. The per-concurrency settings in this table, the Dynamo KV-router frontend and its services stay in this guide.
+  In the command builder, pick **GB200** and the **NVFP4** variant (the builder keeps the current variant when you switch hardware, so select NVFP4 explicitly), turn on **Spec Decoding → GQA** and **Text-only**, and use **Single-node TP** for TP4 or **Multi-node TP** with 2 nodes for TP8. That renders the worker flags and environment below as a `vllm serve` command. Direct links: [TP4](https://recipes.vllm.ai/MiniMaxAI/MiniMax-M3?hardware=gb200&variant=nvfp4&features=tool_calling,reasoning,spec_decoding,text_only&fmode=spec_decoding:eagle3_gqa&strategy=single_node_tp) and [TP8 on two trays](https://recipes.vllm.ai/MiniMaxAI/MiniMax-M3?hardware=gb200&variant=nvfp4&features=tool_calling,reasoning,spec_decoding,text_only&fmode=spec_decoding:eagle3_gqa&strategy=multi_node_tp&nodes=2). The GB200 **Verified** badge applies to this NVFP4 profile only; the GQA draft and TP8 all-reduce overrides also apply to the other variants on GB200, which were not qualified.
+
+  For the host-KV-offload points, don't use the **KV Offload → Simple** pill as is: its budget is fixed at 220 GiB per rank (880 GiB per 4-GPU tray) with `lazy_offload: false`, which is more host memory than a GB200 tray can give KV blocks. Replace its `--kv-transfer-config` with the qualified one below and set `VLLM_USE_SIMPLE_KV_OFFLOAD=1`. The per-concurrency settings in this table, the Dynamo KV-router frontend and its services stay in this guide.
 
   | Clients | TP | `--max-num-seqs` | Host KV offload | CUDA graph capture sizes |
   |---:|---:|---:|---|---|
@@ -791,18 +796,21 @@ guide: |
 
   Every list ends with `256,512,1024,2048` and uses `{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[...]}`. Sizes 1 and 2 give the drafter's decode steps full CUDA graphs at concurrency 1.
 
+  The InferenceX throughput points replaced block verification with synthetic rejection at the committed golden EAGLE3-GQA acceptance length (2.78 for MiniMax-M3 with three draft tokens, thinking on; [`minimaxm3_eagle3_gqa.yaml`](https://github.com/SemiAnalysisAI/InferenceX/blob/main/golden_al_distribution/minimaxm3_eagle3_gqa.yaml)) so every point is measured at the same acceptance rate. Production serving keeps the default rejection sampler, as in the command below; the lane's accuracy evals ran that way.
+
   ### Services and environment
 
-  Start etcd and NATS (32 MB max payload) once:
+  Start etcd and NATS (JetStream on, 32 MB max payload) once:
 
   ```bash
   etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://<infra-host>:2379
-  printf 'max_payload: 33554432\n' > nats.conf && nats-server -c nats.conf
+  printf 'max_payload: 33554432\njetstream {}\n' > nats.conf && nats-server -c nats.conf
   ```
 
-  On every worker tray:
+  On every worker tray (and on the frontend host, point the same two variables at the services):
 
   ```bash
+  export ETCD_ENDPOINTS=http://<infra-host>:2379 NATS_SERVER=nats://<infra-host>:4222
   export VLLM_FLOAT32_MATMUL_PRECISION=high VLLM_FLASHINFER_ALLREDUCE_BACKEND=trtllm
   export NCCL_CUMEM_ENABLE=1 NCCL_MNNVL_ENABLE=1 NCCL_NVLS_ENABLE=1
   export UCX_MEMTYPE_CACHE=n UCX_TLS=cuda_copy,cuda_ipc,rc
@@ -826,7 +834,7 @@ guide: |
     --reasoning-parser minimax_m3 --dyn-reasoning-parser minimax_m3 --dyn-tool-call-parser minimax_m3
   ```
 
-  For TP8, run the same command on both trays with `--tensor-parallel-size 8 --nnodes 2 --node-rank <0|1> --master-addr <first-tray-ip>`.
+  For TP8, run the same command on both trays with `--tensor-parallel-size 8 --nnodes 2 --node-rank <0|1> --master-addr <first-tray-ip>`, adding `--headless` on node rank 1.
 
   For the host-KV-offload points, also set `VLLM_USE_SIMPLE_KV_OFFLOAD=1` and add:
 
@@ -839,13 +847,14 @@ guide: |
   ### Frontend
 
   ```bash
-  export DYN_TOKENIZER=fastokens DYN_TOKENIZER_CACHE_BYTES=8589934592
+  export ETCD_ENDPOINTS=http://<infra-host>:2379 NATS_SERVER=nats://<infra-host>:4222 DYN_REQUEST_PLANE=tcp
+  export DYN_TOKENIZER=fastokens DYN_TOKENIZER_CACHE_BYTES=8589934592 DYN_TCP_REQUEST_TIMEOUT=60
   python3 -m dynamo.frontend --trust-remote-code \
     --router-mode kv --router-kv-events --router-temperature 0 \
     --router-session-affinity-ttl-secs 14400 --kv-cache-block-size 128
   ```
 
-  The KV router uses the workers' KV events to send each request to the worker holding its prefix, and session affinity keeps a conversation on that worker; send the conversation ID as the Dynamo session ID.
+  The KV router uses the workers' KV events to send each request to the worker holding its prefix, and session affinity keeps a conversation on that worker: send a stable conversation ID in the `X-Dynamo-Session-ID` request header. This Dynamo build warns that `--router-temperature` is deprecated and will be removed in v1.7; newer builds take `router_temperature` in the default policy parameters of `--router-policy-config`.
 
   ## Quantized Variant (MXFP4 on MI355X)
 
