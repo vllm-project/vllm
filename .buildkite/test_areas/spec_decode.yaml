@@ -90,6 +90,7 @@ steps:
 
 - label: ":nvidia: (B200) Spec Decode Eagle Nightly"
   key: spec-decode-eagle-nightly-b200
+  automatic_shard: true
   timeout_in_minutes: 25
   device: b200-k8s
   optional: true
@@ -102,6 +103,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) Spec Decode Eagle Nightly"
+      automatic_shard: true
       dind: false
       device: mi355_1
       num_devices: 1
@@ -246,6 +248,7 @@ steps:
 
 - label: ":nvidia: (B200) Spec Decode Speculators + MTP Nightly"
   key: spec-decode-speculators-mtp-nightly-b200
+  automatic_shard: true
   timeout_in_minutes: 30
   device: b200-k8s
   optional: true
@@ -260,6 +263,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) Spec Decode Speculators + MTP Nightly"
+      automatic_shard: true
       dind: false
       device: mi355_1
       num_devices: 1
@@ -436,6 +440,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 35GB) Spec Decode AL DFlash Nightly"
   key: spec-decode-dflash-nightly
+  automatic_shard: true
   timeout_in_minutes: 90
   device: h200_35gb
   optional: true
@@ -453,6 +458,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Spec Decode AL DFlash Nightly"
+      automatic_shard: true
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 120
