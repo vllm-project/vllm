@@ -28,7 +28,6 @@ def test_host_decode_indptr_matches_device_seqlen_kernel(topk):
     )
     n = seq_lens.numel()
     device_seqlen = generate_sparse_seqlen_triton(
-        torch.ones(n, dtype=torch.int32, device="cuda"),
         seq_lens.cuda(),
         torch.arange(n + 1, dtype=torch.int32, device="cuda"),
         topk,
