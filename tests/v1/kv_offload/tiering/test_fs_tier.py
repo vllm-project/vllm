@@ -454,6 +454,47 @@ def test_store_load_data_integrity(fs_tier, monkeypatch, use_c_ext, batch_size):
         )
 
 
+@pytest.mark.parametrize("use_c_ext", [True, False])
+def test_store_reports_only_newly_written_blocks(fs_tier, monkeypatch, use_c_ext):
+    """transfer_bytes counts the blocks a job wrote, not those already on disk."""
+    import vllm.v1.kv_offload.tiering.fs.io as io_mod
+
+    if use_c_ext and not io_mod._HAS_FSIO_C:
+        pytest.skip("fs_io_C extension not built")
+    monkeypatch.setattr(io_mod, "_HAS_FSIO_C", use_c_ext)
+
+    tier, tensor = fs_tier
+    tensor[:] = _page_aligned_rand_tensor(_NUM_BLOCKS, _BLOCK_ELEMENTS)
+    published = tier.file_mapper.get_file_name(key(2))
+
+    tier.submit_store(make_job(1, [key(1), key(2)], [0, 1]))
+    results = drain(tier)
+    assert len(results) == 1
+    assert results[0].success
+    assert results[0].transfer_bytes == 2 * tier._block_size
+    with open(published, "rb") as f:
+        published_bytes = f.read()
+
+    # Change block 2's source so a rewrite would show on disk.
+    tensor[1] = 1.0
+    tier.submit_store(make_job(2, [key(2), key(3)], [1, 2]))
+    results = drain(tier)
+    assert len(results) == 1
+    assert results[0].success
+    assert results[0].transfer_bytes == tier._block_size
+    with open(published, "rb") as f:
+        assert f.read() == published_bytes
+    assert os.path.exists(tier.file_mapper.get_file_name(key(3)))
+
+    # Re-storing a published prefix writes nothing.
+    tier.submit_store(make_job(3, [key(1), key(2)], [0, 1]))
+    results = drain(tier)
+    assert len(results) == 1
+    assert results[0].success
+    assert results[0].transfer_bytes == 0
+    assert tier._store_progress == {}
+
+
 def test_store_load_roundtrip_without_o_direct(tmp_path, monkeypatch):
     """Buffered fallback must round-trip data when O_DIRECT is unsupported.
 
