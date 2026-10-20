@@ -55,6 +55,7 @@ def test_prepare_attn_forwards_positions(monkeypatch: pytest.MonkeyPatch) -> Non
         prefill_runs_as_decode_np=None,
         dcp_local_seq_lens=None,
         positions=positions,
+        native_target=False,
         prompt_lens=torch.tensor([1024], dtype=torch.int32),
     )
     expected_metadata = {"layer": object()}
@@ -129,6 +130,7 @@ def test_padded_prompt_tail_builds_as_spec_decode(
         prefill_runs_as_decode_np=np.array([False, True, False]),
         dcp_local_seq_lens=None,
         positions=torch.zeros(12, dtype=torch.int64),
+        native_target=False,
         prompt_lens=None,
     )
     build_attn_metadata = Mock(return_value={})
@@ -207,6 +209,7 @@ def _input_batch(
         seq_lens=seq_lens,
         dcp_local_seq_lens=None,
         positions=torch.zeros(num_tokens, dtype=torch.int64),
+        native_target=False,
         prompt_lens=None,
     )
 
@@ -239,6 +242,21 @@ def _prepare_attn_metadata(
         kv_cache_config=Mock(),
     )
     return captured["model_specific_attn_metadata"]
+
+
+@pytest.mark.parametrize("native_target", [False, True])
+def test_native_metadata_excludes_speculative_state(monkeypatch, native_target):
+    state = _mamba_hybrid_state(3)
+    batch = _input_batch([1, 3], None, [False, True])
+    batch.native_target = native_target
+    metadata = _prepare_attn_metadata(state, monkeypatch, batch)
+    assert metadata.is_prefilling.tolist() == [False, True]
+    if native_target:
+        assert metadata.num_accepted_tokens is None
+        assert metadata.num_decode_draft_tokens_cpu is None
+    else:
+        assert metadata.num_accepted_tokens.tolist() == [4, 1]
+        assert metadata.num_decode_draft_tokens_cpu.tolist() == [0, -1]
 
 
 def test_prepare_attn_keeps_the_accepted_offset_when_the_batch_drafted_nothing(

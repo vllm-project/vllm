@@ -272,7 +272,11 @@ class MambaHybridModelState(DefaultModelState):
         # compute them during actual (non-capture) forward execution.
         num_accepted_tokens = None
         num_decode_draft_tokens_cpu = None
-        if not for_capture and self.vllm_config.num_speculative_tokens > 0:
+        if (
+            not for_capture
+            and not input_batch.native_target
+            and self.vllm_config.num_speculative_tokens > 0
+        ):
             num_accepted_tokens = self.num_accepted_tokens_gpu.new_ones(num_reqs)
             num_accepted_tokens[: input_batch.num_reqs] = self.num_accepted_tokens_gpu[
                 input_batch.idx_mapping

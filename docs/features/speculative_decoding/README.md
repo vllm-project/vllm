@@ -102,6 +102,18 @@ Mamba2 layers call `forward_mamba2_spec_rows(rows)` with a `Mamba2SpecRows`
 (ReplaySSM is refused with an extension); an extension that does not implement
 it raises at the first Mamba2 forward instead of verifying its drafts as chains.
 
+A speculator can also stop drafting when speculation no longer pays (for
+example, at large batch sizes). It sets `may_suspend_drafting = True` and
+overrides `suspend_drafting(num_reqs, req_ids)`, which Model Runner V2 asks once
+per scheduled batch. When it returns True, every request of the batch decodes
+with the target alone until it finishes: scheduled verification drains first,
+and then the batch runs on target-only attention metadata and decode CUDA graphs
+without draft KV. A batch that contains a suspended request stays suspended,
+because the skipped hidden states cannot populate the draft KV again. This path
+needs synchronous scheduling, eager execution or full decode graphs, and no
+prefix caching, KV transfer, DBO, context, data or pipeline parallelism, or
+recurrent replay/recovery; draft weights and KV capacity stay allocated.
+
 ## `--speculative-config` schema
 
 Use `--speculative-config` to pass speculative decoding settings as a JSON

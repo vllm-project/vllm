@@ -71,6 +71,64 @@ def test_non_last_pp_rank_uses_global_batch_for_sample_feedback(monkeypatch):
     restore_for_sampling.assert_not_called()
 
 
+def test_target_layer_selection_includes_kv_sharing_layers(monkeypatch):
+    from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.max_model_len = 32
+    runner.is_encoder_decoder = False
+    runner.parallel_config = SimpleNamespace(
+        cp_kv_cache_interleave_size=1, decode_context_parallel_size=1
+    )
+    runner.vllm_config = SimpleNamespace(
+        parallel_config=runner.parallel_config,
+        cache_config=SimpleNamespace(mamba_cache_mode="none"),
+    )
+    runner.device = torch.device("cpu")
+    runner.jit_warmup_registry = JitWarmupRegistry(runner.vllm_config)
+    runner.speculator = Mock(spec=DraftModelSpeculator)
+    runner.speculator.draft_attn_layer_names = {"draft"}
+    runner.speculator.enable_adaptive_verification = False
+    runner.model_state = SimpleNamespace(
+        get_additional_cg_support=lambda: (), num_new_sampled_tokens_per_step=1
+    )
+    runner.req_states = []
+    runner.input_buffers = SimpleNamespace(query_start_loc=None)
+    runner.vocab_size = 1
+    cache = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                layer_names=["target", "draft"],
+                kv_cache_spec=FullAttentionSpec(
+                    block_size=16, num_kv_heads=1, head_size=16, dtype=torch.bfloat16
+                ),
+            )
+        ],
+    )
+
+    def init_backend(kv_cache_config, *args, **kwargs):
+        kv_cache_config.kv_cache_groups[0].layer_names.append("sharing")
+        return [], SimpleNamespace(narrow=lambda *args: None), [16]
+
+    class LayersCaptured(Exception):
+        pass
+
+    def capture_layers(**kwargs):
+        assert kwargs["target_layer_names"] == {"target", "sharing"}
+        raise LayersCaptured
+
+    monkeypatch.setattr(model_runner_module, "init_attn_backend", init_backend)
+    monkeypatch.setattr(
+        model_runner_module,
+        "maybe_create_adaptive_verification_manager",
+        capture_layers,
+    )
+    with pytest.raises(LayersCaptured):
+        runner.initialize_kv_cache(cache)
+
+
 def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
     runner = GPUModelRunner.__new__(GPUModelRunner)
     runner.max_model_len = 262144
@@ -288,6 +346,8 @@ def _make_capture_runner(
         needs_capture=lambda: captured,
         capture=lambda *args, **kwargs: None,
     )
+    runner.native_cudagraph_manager = None
+    runner.native_attn_groups = []
     runner.lora_config = None
     monkeypatch.setattr(runner, "maybe_setup_dummy_loras", _no_dummy_loras)
     runner.speculator = None
