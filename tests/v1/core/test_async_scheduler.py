@@ -8,7 +8,7 @@ import pytest
 
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.request import RequestStatus
 from vllm.v1.structured_output import StructuredOutputGrammar
 from vllm.v1.utils import ConstantList
@@ -37,11 +37,12 @@ def _make_model_runner_output(
     [(8, 2, [4, 4]), (7, 2, [4, 3]), (7, 4, [2, 2, 2, 1])],
 )
 @pytest.mark.parametrize("num_spec_tokens", [None, 3])
+@pytest.mark.parametrize("async_scheduling", [False, True])
 def test_pp_balances_decodes_without_limiting_prefill(
-    max_num_seqs, pp_size, batch_sizes, num_spec_tokens
+    max_num_seqs, pp_size, batch_sizes, num_spec_tokens, async_scheduling
 ):
     scheduler = create_scheduler(
-        async_scheduling=True,
+        async_scheduling=async_scheduling,
         use_v2_model_runner=True,
         max_num_seqs=max_num_seqs,
         num_speculative_tokens=num_spec_tokens,
@@ -49,7 +50,8 @@ def test_pp_balances_decodes_without_limiting_prefill(
     )
     # Exercise PP scheduling on CPU without distributed/model validation.
     scheduler.use_pp = True
-    scheduler.decode_stagger = pp_size
+    if async_scheduling:
+        scheduler.decode_stagger = pp_size
     scheduler.max_num_scheduled_decodes = (max_num_seqs + pp_size - 1) // pp_size
     requests = create_requests(num_requests=max_num_seqs)
     for request in requests:
@@ -58,18 +60,36 @@ def test_pp_balances_decodes_without_limiting_prefill(
     prefill = scheduler.schedule()
     assert len(prefill.num_scheduled_tokens) == max_num_seqs
     scheduler.update_from_output(prefill, _make_model_runner_output(prefill))
-    for _ in range(pp_size - 1):
-        assert not scheduler.schedule().num_scheduled_tokens
+    if async_scheduling:
+        for _ in range(pp_size - 1):
+            assert not scheduler.schedule().num_scheduled_tokens
+    elif num_spec_tokens:
+        scheduler.update_draft_token_ids(
+            DraftTokenIds(
+                [request.request_id for request in requests],
+                [list(range(num_spec_tokens)) for _ in requests],
+            )
+        )
 
     scheduled_ids: set[str] = set()
+    outputs = []
     for batch_size in batch_sizes:
         output = scheduler.schedule()
+        outputs.append(output)
         batch_ids = set(output.num_scheduled_tokens)
         assert len(batch_ids) == batch_size
         assert set(output.num_scheduled_tokens.values()) == {1 + (num_spec_tokens or 0)}
         assert batch_ids.isdisjoint(scheduled_ids)
         scheduled_ids.update(batch_ids)
     assert scheduled_ids == {request.request_id for request in requests}
+    if not async_scheduling:
+        # Sync PP must await output only for requests already in flight.
+        assert not scheduler.schedule().num_scheduled_tokens
+        first = outputs[0]
+        scheduler.update_from_output(first, _make_model_runner_output(first))
+        assert set(scheduler.schedule().num_scheduled_tokens) == set(
+            first.num_scheduled_tokens
+        )
 
 
 @pytest.mark.parametrize("prefill_tokens", [6, 8])
@@ -178,7 +198,7 @@ def test_pp_priority_preemption_releases_decode_slot(monkeypatch):
 
 @pytest.mark.parametrize(
     ("async_scheduling", "use_v2", "pp_size", "decode_stagger"),
-    [(False, True, 2, 2), (True, False, 2, 2), (True, True, 1, 1), (True, True, 2, 1)],
+    [(False, False, 2, 2), (True, False, 2, 2), (True, True, 1, 1), (True, True, 2, 1)],
 )
 def test_pp_decode_limit_leaves_other_scheduling_modes_unchanged(
     async_scheduling, use_v2, pp_size, decode_stagger

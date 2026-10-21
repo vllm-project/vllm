@@ -599,7 +599,7 @@ def _mock_config_for_cudagraph_sizes(
         (1, True, True, 64),
         (4, True, True, 16),
         (3, True, True, 22),
-        (4, False, True, 64),
+        (4, False, True, 16),
         (4, True, False, 64),
     ],
 )
@@ -645,7 +645,10 @@ def test_pp_decode_capture_covers_rounded_request_limit(
 
 
 @pytest.mark.parametrize("microbatch", [False, True])
-def test_pp_decode_capture_respects_xpu_opt_out(monkeypatch, microbatch):
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_pp_decode_capture_respects_xpu_opt_out(
+    monkeypatch, microbatch, async_scheduling
+):
     monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
     monkeypatch.setenv("VLLM_XPU_PP_MICROBATCH", str(int(microbatch)))
     config = _mock_config_for_cudagraph_sizes(
@@ -656,6 +659,7 @@ def test_pp_decode_capture_respects_xpu_opt_out(monkeypatch, microbatch):
             cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY
         ),
         pipeline_parallel_size=4,
+        async_scheduling=async_scheduling,
     )
     VllmConfig._set_cudagraph_sizes(config)
     assert config.max_num_scheduled_decodes == (16 if microbatch else 64)

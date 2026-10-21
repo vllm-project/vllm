@@ -693,16 +693,12 @@ class VllmConfig:
         """Per-step established-decode limit, excluding prompt work."""
         max_num_seqs = self.scheduler_config.max_num_seqs
         pp_size = self.parallel_config.pipeline_parallel_size
-        if (
-            pp_size <= 1
-            or not self.scheduler_config.async_scheduling
-            or not self.use_v2_model_runner
-        ):
+        if pp_size <= 1 or not self.use_v2_model_runner:
             return max_num_seqs
 
         from vllm.platforms import current_platform
 
-        # Match AsyncScheduler's opt-out from PP decode staggering.
+        # Respect XPU's explicit PP microbatch opt-out.
         if current_platform.is_xpu() and not envs.VLLM_XPU_PP_MICROBATCH:
             return max_num_seqs
         return (max_num_seqs + pp_size - 1) // pp_size
