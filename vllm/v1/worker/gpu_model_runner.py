@@ -3013,6 +3013,7 @@ class GPUModelRunner(
 
         for req_id in self.input_batch.req_ids:
             mm_embeds_req: list[torch.Tensor] = []
+            mm_offsets_req: list[int] = []
 
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
             req_state = self.requests[req_id]
@@ -3075,6 +3076,7 @@ class GPUModelRunner(
                     ] |= is_embed
                 set_mm_embedding_modality(mm_embeds_item, mm_feature.modality)
                 mm_embeds_req.append(mm_embeds_item)
+                mm_offsets_req.append(start_pos)
 
             if self.is_multimodal_pruning_enabled and self.uses_mrope:
                 assert req_state.mrope_positions is not None
@@ -3086,6 +3088,7 @@ class GPUModelRunner(
                         multimodal_embeddings=mm_embeds_req,
                         mrope_positions=req_state.mrope_positions,
                         num_computed_tokens=req_state.num_computed_tokens,
+                        multimodal_offsets=mm_offsets_req,
                     )
                 )
                 mm_embeds_req = [

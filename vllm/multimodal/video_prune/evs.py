@@ -9,6 +9,7 @@
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 import typing
+from collections.abc import Sequence
 
 import torch
 
@@ -159,6 +160,7 @@ def recompute_mrope_positions(
     vision_start_token_id: int,
     image_token_id: int,
     video_token_id: int,
+    multimodal_offsets: Sequence[int] | None = None,
 ) -> tuple[torch.LongTensor, int]:
     """Update part of input mrope positions.
     Original mrope_positions are computed incorrectly, so once we prune media
@@ -200,6 +202,9 @@ def recompute_mrope_positions(
         vision_start_token_id: Token indicating start of vision media.
         image_token_id: Image token id
         video_token_id: Video token id
+        multimodal_offsets: Placeholder offset of the media item that each
+            multimodal_positions entry belongs to. When given, 5-channel
+            entries are placed by it instead of by vision start tokens.
 
     Returns:
         Tuple of (mrope_positions, mrope_position_delta).
@@ -220,6 +225,17 @@ def recompute_mrope_positions(
     if len(multimodal_positions) == 0:
         delta = int((positions.max().item() + 1) - N) if positions.numel() else -N
         return positions, delta
+
+    if multimodal_offsets is not None and all(
+        mm_pos.shape[0] == 5 for mm_pos in multimodal_positions
+    ):
+        return _recompute_at_placeholders(
+            positions,
+            text_mask,
+            multimodal_positions,
+            multimodal_offsets,
+            num_computed_tokens,
+        )
 
     total_mm_tokens = torch.count_nonzero(media_mask)
     seen_mm_tokens = torch.count_nonzero(media_mask[:num_computed_tokens])
@@ -356,6 +372,35 @@ def recompute_mrope_positions(
 
         # Include distance to the next vision start token
         num_computed_tokens += mm_pos.shape[1]
+
+    mrope_positions_delta = (positions.max() + 1 - N).item()
+    return positions, mrope_positions_delta
+
+
+def _recompute_at_placeholders(
+    positions: torch.LongTensor,
+    text_mask: torch.Tensor,
+    multimodal_positions: list[torch.Tensor],
+    multimodal_offsets: Sequence[int],
+    num_computed_tokens: int,
+) -> tuple[torch.LongTensor, int]:
+    """Write 5-channel positions into the placeholders they belong to.
+
+    Each entry is the part of its placeholder inside the current chunk, so it
+    starts at the chunk start when the chunk starts inside the placeholder.
+    Its positions are relative to the placeholder's first token.
+    """
+    N = positions.shape[1]
+    for mm_pos, offset in zip(multimodal_positions, multimodal_offsets, strict=True):
+        if mm_pos.shape[1] == 0:
+            continue
+        base = positions[-1, offset - 1] + 1 if offset > 0 else 0
+        local_start = max(num_computed_tokens, offset)
+        local_end = local_start + mm_pos.shape[1]
+        positions[:, local_start:local_end] = mm_pos[0:3] + base
+
+        text_pos_sum = torch.cumsum(text_mask[local_end:].long(), dim=0)
+        positions[:, local_end:N] = text_pos_sum + mm_pos[0:3].max() + base
 
     mrope_positions_delta = (positions.max() + 1 - N).item()
     return positions, mrope_positions_delta
