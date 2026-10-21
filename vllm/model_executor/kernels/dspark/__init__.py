@@ -43,7 +43,7 @@ def is_dspark_fused_available() -> bool:
 def dspark_confidence_fused(
     hidden: torch.Tensor,  # (n, H) bf16
     markov_embed: torch.Tensor,  # (n, r) bf16
-    weight: torch.Tensor,  # (H + r,) fp32
+    weight: torch.Tensor,  # (1, H + r) fp32 (ReplicatedLinear stores output_dim=1)
     temp: float = 1.0,
     *,
     max_fused_batch: int = 2048,
@@ -57,6 +57,12 @@ def dspark_confidence_fused(
     Returns: ``(n,) fp32`` post-sigmoid probabilities, or ``None``.
     """
     n = hidden.shape[0]
+    # vLLM's ReplicatedLinear stores weight as (output_size=1, input_size=H+r).
+    # The kernel treats GEMV as a 1D dot-product, so reshape (1, H+r) -> (H+r,).
+    if weight.dim() == 2 and weight.shape[0] == 1:
+        weight = weight.squeeze(0)
+    elif weight.dim() != 1:
+        return None
     r = weight.shape[0] - hidden.shape[-1]
 
     fused_ok = (
