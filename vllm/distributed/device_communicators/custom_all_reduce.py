@@ -119,6 +119,7 @@ from vllm.distributed.utils import is_weak_contiguous  # noqa: E402
 
 class CustomAllreduce:
     _SUPPORTED_WORLD_SIZES = [2, 4, 6, 8, 16]
+    batch_invariant = False
     _DEFAULT_ALL_GATHER_MAX_SIZE = 2 * 1024 * 1024
     _DEFAULT_MNNVL_ALL_GATHER_MAX_SIZES = {
         2: 8 * 1024 * 1024,
@@ -146,18 +147,22 @@ class CustomAllreduce:
             _DEFAULT_MNNVL_MULTIMEM_REDUCE_SCATTER_MAX_SIZE
         ),
         symm_mem_enabled=False,
+        *,
+        register_graph_buffers: bool = True,
     ) -> None:
         """Args:
             group: the process group to work on. If None, it will use the
                 default process group.
             device: the device to bind the CustomAllreduce to. If None,
                 it will be bound to f"cuda:{local_rank}".
+            register_graph_buffers: whether graph capture IPC-registers its buffers.
         It is the caller's responsibility to make sure each communicator
         is bind to a unique device, and all communicators in this group
         are in the same node.
 
         """
         self._IS_CAPTURING = False
+        self._capture_registered = register_graph_buffers
         self._ptr = 0
         self.disabled = True
         self.mnnvl_buffer = None
@@ -179,6 +184,7 @@ class CustomAllreduce:
         self.mnnvl_multimem_rs_local_ptr = 0
         self.mnnvl_multimem_rs_multicast_ptr = 0
         self.mnnvl_only = False
+        self.batch_invariant = envs.VLLM_BATCH_INVARIANT
 
         if not custom_ar:
             # disable because of missing custom allreduce library
@@ -504,7 +510,7 @@ class CustomAllreduce:
         # for 4 or more non NVLink-capable GPUs, custom allreduce provides
         # little performance improvement over NCCL.
         if self.world_size == 2 or self.fully_connected:
-            return inp_size < self.max_size
+            return self.batch_invariant or inp_size < self.max_size
         return False
 
     def all_reduce(
@@ -518,13 +524,27 @@ class CustomAllreduce:
         """
         if out is None:
             out = torch.empty_like(inp)
+        chunk_numel = self.max_size // inp.element_size()
+        if inp.numel() <= chunk_numel:
+            self._all_reduce_chunk(inp, out, registered)
+            return out
+        # Storage-order views: the gate only admits one contiguous block.
+        flat_inp = inp.as_strided((inp.numel(),), (1,), inp.storage_offset())
+        flat_out = out.as_strided((out.numel(),), (1,), out.storage_offset())
+        for start in range(0, flat_inp.numel(), chunk_numel):
+            end = start + chunk_numel
+            self._all_reduce_chunk(flat_inp[start:end], flat_out[start:end], registered)
+        return out
+
+    def _all_reduce_chunk(
+        self, inp: torch.Tensor, out: torch.Tensor, registered: bool
+    ) -> None:
         if registered:
             ops.all_reduce(self._ptr, inp, out, 0, 0)
         else:
             ops.all_reduce(
                 self._ptr, inp, out, self.buffer_ptrs[self.rank], self.max_size
             )
-        return out
 
     def custom_all_reduce(self, input: torch.Tensor) -> torch.Tensor | None:
         """The main allreduce API that provides support for cuda graph."""
@@ -533,7 +553,7 @@ class CustomAllreduce:
             return None
         if self._IS_CAPTURING:
             if torch.cuda.is_current_stream_capturing():
-                return self.all_reduce(input, registered=True)
+                return self.all_reduce(input, registered=self._capture_registered)
             else:
                 # If warm up, mimic the allocation pattern since custom
                 # allreduce is out-of-place.
@@ -602,6 +622,9 @@ class CustomAllreduce:
         self, inp: torch.Tensor
     ) -> _ReduceScatterBackend | None:
         if self.disabled or not current_platform.is_cuda():
+            return None
+        # The size gates below would switch backends per batch.
+        if self.batch_invariant:
             return None
         if self.world_size == 16 and not self.mnnvl_only:
             return None

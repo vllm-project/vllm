@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::num::NonZeroU32;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -23,7 +24,7 @@ use vllm_text::backend::hf::HfOverrides;
 /// when keep-alive is disabled (`0`).
 pub const DEFAULT_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// How the HTTP server obtains its listening socket.
+/// How the HTTP or gRPC server obtains its listening socket.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum HttpListenerMode {
     /// Bind a fresh TCP listener on the given host/port.
@@ -55,16 +56,20 @@ pub struct ApiServerOptions {
     pub enable_log_requests: bool,
     /// When `true`, include prompt token cache details in response usage.
     pub enable_prompt_tokens_details: bool,
+    /// Include request timing metrics in OpenAI chat and completion responses.
+    pub enable_per_request_metrics: bool,
     /// When `true`, set `X-Request-Id` on every HTTP response.
     pub enable_request_id_headers: bool,
     /// When `true`, register the scale-out `/inference/v1/generate` route.
     pub enable_scale_out: bool,
+    /// When `true`, register `/tokenizer_info`.
+    pub enable_tokenizer_info_endpoint: bool,
     /// Idle interval after which streaming SSE responses send a keep-alive
     /// comment. `None` disables keep-alive comments.
     pub sse_keep_alive_interval: Option<Duration>,
 }
 
-/// CORS settings mirroring Python's `CORSMiddleware`; the default is permissive.
+/// CORS settings mirroring Python's `CORSMiddleware`; origins are denied by default.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CorsConfig {
     /// Allowed origins. `["*"]` allows any origin.
@@ -80,7 +85,7 @@ pub struct CorsConfig {
 impl Default for CorsConfig {
     fn default() -> Self {
         Self {
-            allow_origins: vec!["*".to_string()],
+            allow_origins: Vec::new(),
             allow_methods: vec!["*".to_string()],
             allow_headers: vec!["*".to_string()],
             allow_credentials: false,
@@ -229,12 +234,15 @@ pub struct Config {
     pub served_model_name: Vec<String>,
     /// HTTP listener setup.
     pub listener_mode: HttpListenerMode,
+    /// gRPC listener setup. When `None`, no gRPC server is started.
+    pub grpc_listener_mode: Option<HttpListenerMode>,
     /// Tool-call parser selection.
     pub tool_call_parser: ParserSelection,
     /// Reasoning parser selection.
     pub reasoning_parser: ParserSelection,
-    /// Server-side floor for tool-call structural tags.
-    pub tool_strict_level: ToolStrictLevel,
+    /// Server-side floor for tool-call structural tags, or `None` for the
+    /// tool parser's default level.
+    pub tool_strict_level: Option<ToolStrictLevel>,
     /// Chat renderer selection.
     pub renderer: RendererSelection,
     /// Disable frontend-side multimodal preprocessing and render the model as
@@ -245,6 +253,11 @@ pub struct Config {
     pub chat_template: Option<String>,
     /// Server-default keyword arguments merged into every chat-template render.
     pub default_chat_template_kwargs: Option<HashMap<String, Value>>,
+    /// Whether requests may supply their own chat template.
+    pub trust_request_chat_template: bool,
+    /// Whether request-level tools are left out of the prompt when
+    /// `tool_choice` is `none`.
+    pub exclude_tools_when_tool_choice_none: bool,
     /// Maximum number of input items allowed per prompt for each modality.
     /// Unspecified modalities are unlimited.
     pub limit_mm_per_prompt: MmLimitPerPrompt,
@@ -256,6 +269,10 @@ pub struct Config {
     /// Optional maximum number of top log probabilities accepted by the
     /// frontend. `None` delegates to the text layer default.
     pub max_logprobs: Option<i32>,
+    /// Minimum number of newly generated tokens batched into each streamed
+    /// output after the first one. Requests can raise it with their own
+    /// `stream_interval`.
+    pub stream_interval: NonZeroU32,
     /// HTTP/API-server behavior switches.
     pub api_server_options: ApiServerOptions,
     /// CORS settings applied to every HTTP response.
@@ -268,13 +285,15 @@ pub struct Config {
     #[educe(Debug(method(fmt_redacted_api_keys)))]
     pub api_keys: Vec<String>,
     /// When `true`, suppress periodic stats logging (throughput, queue depth,
-    /// cache usage).
+    /// cache usage). Engines also stop recording stats, so metrics derived from
+    /// engine-reported scheduler stats and request lifecycle events are not
+    /// exported.
     pub disable_log_stats: bool,
-    /// TCP port for the gRPC Inference service. When `None`, no gRPC server is
-    /// started.
-    pub grpc_port: Option<u16>,
     /// Maximum time to wait for active HTTP/gRPC requests to drain on shutdown.
     pub shutdown_timeout: Duration,
+    /// Whether the caller manages the engine process and shuts it down when
+    /// the shutdown token is cancelled. Enables the gRPC `Control.Shutdown` RPC.
+    pub manages_engine: bool,
     /// Maximum idle time on a keep-alive HTTP connection before the server
     /// closes it (`VLLM_HTTP_TIMEOUT_KEEP_ALIVE`, default 5s).
     pub keep_alive_timeout: Duration,
@@ -287,6 +306,11 @@ impl Config {
     /// Validate frontend configuration that can be checked before engine
     /// startup.
     pub fn validate(&self) -> Result<()> {
+        if self.api_server_options.enable_per_request_metrics && self.disable_log_stats {
+            bail!(
+                "--enable-per-request-metrics requires engine statistics logging; remove --disable-log-stats"
+            );
+        }
         vllm_chat::validate_parser_overrides(&self.tool_call_parser, &self.reasoning_parser)?;
         self.cors.validate()?;
         if let Some(tls) = &self.tls {

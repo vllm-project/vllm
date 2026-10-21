@@ -193,6 +193,10 @@ def test_image_batches_preserve_item_identity(
                     },
                 )
                 entry["item_indices"].append(index)
+                # Mooncake aggregates by hash, retaining the last occurrence's ID.
+                entry["transfer_id"] = body["ec_transfer_params"]["ec_items"][index][
+                    "transfer_id"
+                ]
             # Response ordering must not affect the image-to-metadata mapping.
             return _EncoderResponse(dict(reversed(list(params.items()))))
 
@@ -235,8 +239,10 @@ def test_image_batches_preserve_item_identity(
             assert item["image_url"]["url"] in (
                 {"A", "C"} if url.startswith("http://e0/") else {"A", "D", "F"}
             )
-    assert [meta[i]["image_grid_thw"][-1] for i in range(6)] == list(map(ord, images))
-    assert [meta[i]["ec_mm_hash"] for i in range(6)] == [
+    assert [meta[i][0]["metadata"]["image_grid_thw"][-1] for i in range(6)] == list(
+        map(ord, images)
+    )
+    assert [meta[i][0]["mm_hash"] for i in range(6)] == [
         x + "-processed" for x in images
     ]
     assert handles["A-processed"]["peer_port"] == 1234
@@ -263,6 +269,50 @@ def test_image_batches_preserve_item_identity(
     assert [
         ECMooncakeScheduler._request_transfer_id(request, i) for i in range(len(images))
     ] == expected_transfers
+
+
+@pytest.mark.parametrize("consumer", [None, "tcp://consumer:1"])
+@pytest.mark.parametrize("has_indices", [False, True])
+@pytest.mark.parametrize("has_metadata", [False, True])
+def test_audio_in_video_accepts_single_video_feature(
+    proxy, monkeypatch, consumer, has_indices, has_metadata
+):
+    """A video-only encoder can ignore use_audio_in_video without breaking decode."""
+    seen = []
+    metadata = {"video_grid_thw": [1, 2, 4]} if has_metadata else {}
+    entry: dict[str, Any] = {"modality": "video", "metadata": metadata}
+    if has_indices:
+        entry["item_indices"] = [0]
+
+    class Session:
+        async def post(self, url, data=None, headers=None):
+            seen.append(msgspec.json.decode(data))
+            return _EncoderResponse({"video-hash": entry})
+
+    monkeypatch.setattr(proxy, "encode_session", Session())
+    monkeypatch.setattr(proxy, "NO_REWRITE", False)
+    video = {"type": "video_url", "video_url": {"url": "video-only"}}
+    body = {
+        "messages": [{"role": "user", "content": [video]}],
+        "mm_processor_kwargs": {"use_audio_in_video": True},
+    }
+    prepared, _, _ = asyncio.run(
+        proxy.prepare_for_decode(body, "r", ["http://encoder"], "", consumer)
+    )
+    content = prepared["messages"][0]["content"]
+    expected = (
+        {"type": "video_embeds", "video_embeds": metadata} if has_metadata else video
+    )
+    assert content == [{**expected, "uuid": proxy.content_uuid(video)}]
+    if consumer is not None:
+        assert prepared["ec_transfer_params"]["ec_items"] == [
+            {
+                "mm_hash": "video-hash",
+                "transfer_id": seen[0]["ec_transfer_params"]["ec_items"][0][
+                    "transfer_id"
+                ],
+            }
+        ]
 
 
 def test_batch_rejects_ambiguous_metadata(proxy, monkeypatch):
@@ -568,13 +618,21 @@ def test_pooled_connections_are_retired_before_the_server_closes_them(
 
 @pytest.mark.parametrize(
     "no_rewrite, transfer",
-    [(False, None), (True, None), (False, "push"), (False, "handle")],
+    [
+        (False, None),
+        (True, None),
+        (False, "push"),
+        (True, "push"),
+        (False, "handle"),
+    ],
 )
-def test_video_audio_fallback(proxy, monkeypatch, no_rewrite, transfer):
-    """Keep raw video and neighboring images, but never discard transfer handles."""
+@pytest.mark.parametrize("has_metadata", [False, True])
+def test_video_audio_rewrite(proxy, monkeypatch, no_rewrite, transfer, has_metadata):
+    """One video publishes two features; forward both even on raw fallback."""
     import copy
 
     from vllm.distributed.ec_transfer.ec_connector.utils import collect_ec_item_metadata
+    from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 
     video = {"type": "video_url", "video_url": {"url": "video-with-audio"}}
     images = [{"type": "image_url", "image_url": {"url": key}} for key in ("A", "B")]
@@ -586,11 +644,22 @@ def test_video_audio_fallback(proxy, monkeypatch, no_rewrite, transfer):
     # Collector indices describe two processed features from one video item.
     video_metadata = collect_ec_item_metadata(
         [
-            SimpleNamespace(identifier=key, modality=key, data=None)
+            MultiModalFeatureSpec(
+                data=None,
+                modality=key,
+                identifier=key,
+                mm_position=PlaceholderRange(offset=0, length=0),
+            )
             for key in ("video", "audio")
         ],
         SimpleNamespace(fields_for=lambda _: set()),
     )
+    if has_metadata:
+        video_metadata["video"]["metadata"] = {
+            "video_grid_thw": [4, 2, 2],
+            "second_per_grid_ts": [0.5],
+        }
+        video_metadata["audio"]["metadata"] = {"audio_feature_lengths": [100]}
     if transfer == "handle":
         video_metadata["audio"]["transfer_id"] = "reservation"
     image_metadata = {
@@ -604,26 +673,57 @@ def test_video_audio_fallback(proxy, monkeypatch, no_rewrite, transfer):
     monkeypatch.setattr(proxy, "encode_session", replies)
     consumer = "tcp://consumer:1" if transfer == "push" else None
     preparation = proxy.prepare_for_decode(body, "r", ["http://e0"], "", consumer)
-    if transfer:
-        with pytest.raises(proxy.HTTPException, match="cannot be matched"):
-            asyncio.run(preparation)
-        return
-
     prepared, _, _ = asyncio.run(preparation)
     assert body == original
     assert prepared["mm_processor_kwargs"] == body["mm_processor_kwargs"]
     final = prepared["messages"][0]["content"]
-    assert final[1] == video
     handles = prepared["ec_transfer_params"]
-    assert not video_metadata.keys() & handles.keys()
+    assert all(handles[key] == value for key, value in video_metadata.items())
     if no_rewrite:
         assert final == original["messages"][0]["content"]
-        assert "ec_items" not in handles
+        if consumer is None:
+            assert "ec_items" not in handles
+        else:
+            assert {entry["mm_hash"] for entry in handles["ec_items"]} == {
+                "A",
+                "B",
+                "video",
+                "audio",
+            }
+    elif not has_metadata:
+        assert [item["type"] for item in final] == [
+            "image_url",
+            "video_url",
+            "image_url",
+        ]
+        assert final[1]["uuid"] == proxy.content_uuid(video)
+        assert {entry["mm_hash"] for entry in handles["ec_items"]} == {
+            "A",
+            "B",
+            "video",
+            "audio",
+        }
     else:
+        assert [item["type"] for item in final] == [
+            "image_embeds",
+            "video_embeds",
+            "image_embeds",
+        ]
+        assert final[1] == {
+            "type": "video_embeds",
+            "video_embeds": video_metadata["video"]["metadata"],
+            "audio_embeds": video_metadata["audio"]["metadata"],
+            "uuid": proxy.content_uuid(video),
+        }
         for position, image, key in ((0, images[0], "A"), (2, images[1], "B")):
             assert final[position] == {
                 "type": "image_embeds",
                 "image_embeds": image_metadata[key]["metadata"],
                 "uuid": proxy.content_uuid(image),
             }
-        assert [item["mm_hash"] for item in handles["ec_items"]] == ["A", "B"]
+        assert [item["mm_hash"] for item in handles["ec_items"]] == [
+            "A",
+            "video",
+            "audio",
+            "B",
+        ]
