@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any
+
 import pytest
 
 from tests.utils import single_gpu_only
@@ -173,7 +175,7 @@ def test_suffix_decoding_acceptance(
     assert last_accept_rate > 0.80, f"Expected final acceptance rate > 0.80; {summary}"
 
 
-def _dynamic_sd_ngram_config(schedule: list[list[int]]) -> dict:
+def _dynamic_sd_ngram_config(schedule: list[tuple[int, int, int]]) -> dict[str, Any]:
     return {
         "method": "ngram",
         "prompt_lookup_max": 3,
@@ -191,7 +193,7 @@ def test_dynamic_sd_invalid_schedule_fails_at_config_time(vllm_runner):
         pytest.raises(ValueError, match="non-overlapping"),
         vllm_runner(
             "Qwen/Qwen3-0.6B",
-            speculative_config=_dynamic_sd_ngram_config([[1, 16, 3], [16, 32, 2]]),
+            speculative_config=_dynamic_sd_ngram_config([(1, 16, 3), (16, 32, 2)]),
         ),
     ):
         pass
