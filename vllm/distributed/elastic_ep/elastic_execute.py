@@ -166,6 +166,7 @@ class ElasticEPScalingExecutor:
             max_workers=1, thread_name_prefix="ElasticEPAsync"
         )
         self._async_future: Future[None] | None = None
+        self._group_cleanup_future: Future[None] | None = None
 
     @property
     def worker(self):
@@ -260,6 +261,21 @@ class ElasticEPScalingExecutor:
                 continue
             group.destroy()
 
+    def _start_group_cleanup(self, groups: tuple[GroupCoordinator | None, ...]) -> None:
+        # Only `_retire_groups` can hand this an empty tuple, by having already
+        # done the work. Goes away with the flag, and then this is `main` again.
+        if not groups:
+            return
+        assert self._group_cleanup_future is None
+        self._group_cleanup_future = self._async_executor.submit(
+            self._destroy_retired_groups, groups
+        )
+
+    def _wait_for_group_cleanup(self) -> None:
+        if (future := self._group_cleanup_future) is not None:
+            self._group_cleanup_future = None
+            future.result()
+
     def _destroy_released_parent_groups(self) -> None:
         """Retire deferred groups once their last child has gone.
 
@@ -292,10 +308,10 @@ class ElasticEPScalingExecutor:
         frees memory a live communicator is still using. Both surviving ranks
         faulted five seconds after a scale down that did exactly that.
 
-        Retiring early is the fix for the IPC refusal on the first collective,
-        so this cannot simply be dropped: deferring a group is only right for a
-        group that has a child, and the whole point is to find out whether the
-        refusal comes back when one group outlives the switch.
+        This exists only because the shrink does, so if the trio goes then so
+        does this. While it stays, deferring is only ever right for a group
+        that actually has a child, because holding anything else back would
+        keep buffers alive for no reason.
         """
         if os.getenv("VLLM_EEP_SHRINK_KEEP_PARENT") != "1":
             return False
@@ -406,8 +422,10 @@ class ElasticEPScalingExecutor:
 
         logger.warning("[EEP-DEBUG] ipc after %s: %s", label, rocm_debug.ipc_health())
 
-    def _retire_groups(self, groups: tuple[GroupCoordinator | None, ...]) -> None:
-        """Destroy the groups the reconfiguration replaced.
+    def _retire_groups(
+        self, groups: tuple[GroupCoordinator | None, ...]
+    ) -> tuple[GroupCoordinator | None, ...]:
+        """Destroy the groups the reconfiguration replaced, right here.
 
         This has to happen before the first collective on the new groups, and
         it has to be synchronous. RCCL exports IPC handles when it sets up the
@@ -419,27 +437,34 @@ class ElasticEPScalingExecutor:
         it then runs while the new transport is being set up, which faulted the
         GPU with a write to a read-only page.
 
-        Those measurements all predate the expert arena registration fix, and
-        two of the three places that refusal shows up turned out not to need
-        their workaround once the arena stopped being deregistered under a live
-        reader. The fault reason quoted above is the same one the arena controls
-        produced, so this may be the third. Until a run says otherwise the
-        retirement is opt in, which is why `VLLM_EEP_GROUP_RETIRE` gates it.
+        Every one of those measurements predates the expert arena registration
+        fix, and the run of 21 October showed they were measuring that fix
+        instead: six passes retired nothing and none was refused, against zero
+        of three before the arena stopped being deregistered under a live
+        reader. The read-only page fault quoted above is the same one the arena
+        controls produced, so it was failure 2 all along.
 
-        **If the experiment says the retirement is still needed, this default
-        has to be inverted before any of this goes upstream.** Destroying
-        replaced groups promptly is correct behaviour on its own, so the open
-        question is only whether it is load bearing, not whether it belongs.
+        So this is now the control arm rather than the default. With the flag
+        unset the replaced groups go back to the background cleanup `main`
+        already has, which is what should ship. The flag survives for one more
+        run because the eager cases cannot speak for captured graphs, where a
+        released graph still holds pointers into the arena.
+
+        Returns the groups still needing cleanup, which is nothing when this
+        has already done it.
         """
         live = sum(1 for group in groups if group is not None)
         if not live:
-            return
+            return ()
         if os.getenv("VLLM_EEP_GROUP_RETIRE") != "1":
+            # So a pass that took the background path can be told from one that
+            # did not. Drop with the rest of the diagnostics.
             logger.info(
-                "[Elastic EP] Left %d stale group(s) alive, retirement is off",
+                "[Elastic EP] Handed %d replaced group(s) to the background "
+                "cleanup, synchronous retirement is off",
                 live,
             )
-            return
+            return groups
         started = time.perf_counter()
         self._destroy_retired_groups(groups)
         logger.info(
@@ -447,6 +472,7 @@ class ElasticEPScalingExecutor:
             live,
             time.perf_counter() - started,
         )
+        return ()
 
     def _dump_group_pressure(self, label: str) -> None:
         """Record what is alive at the moments where the refusal happens.
@@ -532,7 +558,10 @@ class ElasticEPScalingExecutor:
         )
 
     def shutdown(self) -> None:
-        self._async_executor.shutdown()
+        try:
+            self._wait_for_group_cleanup()
+        finally:
+            self._async_executor.shutdown()
 
     def load_model(self) -> None:
         self.worker.load_model(load_dummy_weights=True)
@@ -540,6 +569,7 @@ class ElasticEPScalingExecutor:
     def prepare_reconfiguration(
         self, reconfig_request: ReconfigureDistributedRequest, use_all2all: bool
     ) -> None:
+        self._wait_for_group_cleanup()
         self._drain_reshuffle_if_requested()
         self.reconfig_request = reconfig_request
         new_dp_size = reconfig_request.new_data_parallel_size
@@ -779,6 +809,8 @@ class ElasticEPScalingExecutor:
         )
 
     def switch_and_remove(self) -> None:
+        # Removing ranks skipped preparation, so wait for prior cleanup here.
+        self._wait_for_group_cleanup()
         # The EPLB worker is a daemon thread that runs collectives on the EPLB
         # group, and the group is destroyed a few lines below. Every removed
         # worker was observed with that thread still alive here, and one of
@@ -799,8 +831,9 @@ class ElasticEPScalingExecutor:
         retired_groups = _replace_active_groups(
             world=None, dp=None, ep=None, eplb=None, node_count=None
         )
+        self._start_group_cleanup(self._retire_groups(retired_groups))
         # Finish collective cleanup before this worker is shut down.
-        self._retire_groups(retired_groups)
+        self._wait_for_group_cleanup()
 
     def switch_and_prepare(self) -> tuple[GroupCoordinator | None, ...]:
         if not self._can_reuse_fused_moe_kernel():
@@ -934,11 +967,12 @@ class ElasticEPScalingExecutor:
             )
 
     def commit_scale_up(self, is_existing_worker: bool) -> None:
+        retired_groups: tuple[GroupCoordinator | None, ...] = ()
         with self._watchdog("commit_scale_up"):
             with self._timed("scale_up switch"):
                 if is_existing_worker:
                     self.broadcast_expert_mapping()
-                    self._retire_groups(self.switch_and_prepare())
+                    retired_groups = self._retire_groups(self.switch_and_prepare())
                 else:
                     mapping = self.receive_expert_mapping()
                     self.worker.model_runner.setup_eplb_from_mapping(mapping)
@@ -954,8 +988,10 @@ class ElasticEPScalingExecutor:
                     self.warm_and_capture()
             with self._timed("scale_up reshuffle"):
                 self._perform_eplb_reshuffle(async_op=True)
+            self._start_group_cleanup(retired_groups)
 
     def commit_scale_down(self, new_dp_size: int, removing: bool) -> None:
+        retired_groups: tuple[GroupCoordinator | None, ...] = ()
         with self._watchdog("commit_scale_down"):
             with self._timed("scale_down reshuffle"):
                 self.perform_scale_down_eplb_reshuffle(new_dp_size)
@@ -964,7 +1000,7 @@ class ElasticEPScalingExecutor:
                     self.switch_and_remove()
             else:
                 with self._timed("scale_down switch"):
-                    self._retire_groups(self.switch_and_prepare())
+                    retired_groups = self._retire_groups(self.switch_and_prepare())
                 if current_platform.is_rocm():
                     with self._timed("scale_down empty_cache"):
                         groups = {"dp": get_dp_group(), "ep": get_ep_group()}
@@ -975,6 +1011,7 @@ class ElasticEPScalingExecutor:
                 if not self._can_reuse_fused_moe_kernel():
                     with self._timed("scale_down warm_and_capture"):
                         self.warm_and_capture()
+                self._start_group_cleanup(retired_groups)
 
     def perform_scale_down_eplb_reshuffle(self, new_dp_size: int) -> None:
         eplb_state = self.worker.model_runner.eplb_state
