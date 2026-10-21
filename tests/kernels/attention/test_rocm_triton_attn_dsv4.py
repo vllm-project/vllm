@@ -859,97 +859,142 @@ def test_sparse_attn_prefill_preserves_dense_triton_fallback(monkeypatch) -> Non
     assert torch.count_nonzero(output) == 0
 
 
-def test_sparse_attn_prefill_routes_gfx942_pa_prefill_sparse(monkeypatch) -> None:
-    """512 rows take pa_prefill_sparse. MLA off stays on Triton."""
+@pytest.mark.parametrize(
+    ("num_queries", "on_gfx942", "dtype", "kv_dtype", "expected"),
+    [
+        (512, True, torch.bfloat16, torch.bfloat16, True),
+        (512, True, torch.float16, torch.float16, True),
+        (511, True, torch.bfloat16, torch.bfloat16, False),
+        (512, False, torch.bfloat16, torch.bfloat16, False),
+        (512, True, torch.float32, torch.float32, False),
+        (512, True, torch.bfloat16, torch.float16, False),
+    ],
+)
+def test_can_use_aiter_pa_prefill_sparse(
+    monkeypatch,
+    num_queries: int,
+    on_gfx942: bool,
+    dtype: torch.dtype,
+    kv_dtype: torch.dtype,
+    expected: bool,
+) -> None:
+    """Literal gate. Expected values are not derived from the cutoff constant."""
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+
+    monkeypatch.setattr(mod, "_ON_GFX942", on_gfx942)
+    q = torch.empty(num_queries, 1, HEAD_DIM, dtype=dtype)
+    kv = torch.empty(4, 1, HEAD_DIM, dtype=kv_dtype)
+    assert mod._can_use_aiter_pa_prefill_sparse(q, kv) is expected
+
+
+@pytest.mark.parametrize(
+    ("mla_enabled", "on_gfx942", "returns_kernel"),
+    [(False, True, False), (True, False, False), (True, True, True)],
+)
+def test_pa_prefill_sparse_getter(
+    monkeypatch, mla_enabled: bool, on_gfx942: bool, returns_kernel: bool
+) -> None:
+    """Both flags are required. The positive case is the real AITER function."""
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
 
+    kernel = None
+    if returns_kernel:
+        pytest.importorskip("aiter.ops.triton.attention.pa_prefill_sparse")
+        from aiter.ops.triton.attention.pa_prefill_sparse import pa_prefill_sparse
+
+        kernel = pa_prefill_sparse
+
     getter = mod._get_aiter_pa_prefill_sparse
     getter.cache_clear()
-    monkeypatch.setattr(rocm_aiter_ops, "is_mla_enabled", lambda: False)
-    monkeypatch.setattr(mod, "_ON_GFX942", True)
+    monkeypatch.setattr(rocm_aiter_ops, "is_mla_enabled", lambda: mla_enabled)
+    monkeypatch.setattr(mod, "_ON_GFX942", on_gfx942)
     try:
-        assert getter() is None
-
-        getter.cache_clear()
-        monkeypatch.setattr(rocm_aiter_ops, "is_mla_enabled", lambda: True)
-        monkeypatch.setattr(mod, "_ON_GFX942", False)
-        assert getter() is None
-
-        try:
-            from aiter.ops.triton.attention.pa_prefill_sparse import (
-                pa_prefill_sparse,
-            )
-        except ImportError:
-            pa_prefill_sparse = None
-        if pa_prefill_sparse is not None:
-            getter.cache_clear()
-            monkeypatch.setattr(mod, "_ON_GFX942", True)
-            assert getter() is pa_prefill_sparse
-
-        # A skipped import above leaves this gate off.
-        monkeypatch.setattr(mod, "_ON_GFX942", True)
-        kernel = object()
-        aiter_calls: list[object] = []
-        triton_calls: list[int] = []
-
-        def fake_aiter(fn, **kwargs):
-            aiter_calls.append(fn)
-            kwargs["output"].zero_()
-
-        def fake_triton(*args, out, **kwargs):
-            triton_calls.append(1)
-            out.zero_()
-            return out
-
-        monkeypatch.setattr(
-            mod, "_can_use_aiter_sparse_prefill_opus", lambda *args: False
-        )
-        monkeypatch.setattr(mod, "_get_aiter_pa_prefill_sparse", lambda: kernel)
-        monkeypatch.setattr(mod, "_rocm_sparse_attn_prefill_aiter", fake_aiter)
-        monkeypatch.setattr(mod, "_rocm_sparse_attn_prefill_triton", fake_triton)
-        monkeypatch.setattr(
-            mod,
-            "_rocm_sparse_attn_prefill_ragged_triton",
-            lambda *args, **kwargs: pytest.fail("unexpected ragged Triton fallback"),
-        )
-        monkeypatch.setattr(
-            mod,
-            "build_ragged_indices_from_dense",
-            lambda *args, **kwargs: (
-                torch.zeros(1, dtype=torch.int32),
-                torch.tensor([0, 1], dtype=torch.int32),
-            ),
-        )
-
-        def run(num_queries: int) -> None:
-            q = torch.empty(num_queries, 1, HEAD_DIM, dtype=torch.bfloat16)
-            kv = torch.empty(4, 1, HEAD_DIM, dtype=torch.bfloat16)
-            output = torch.empty_like(q)
-            mod.rocm_sparse_attn_prefill(
-                q=q,
-                kv=kv,
-                indices=torch.zeros(num_queries, 1, dtype=torch.int32),
-                topk_length=torch.ones(num_queries, dtype=torch.int32),
-                scale=HEAD_DIM**-0.5,
-                head_dim=HEAD_DIM,
-                nope_head_dim=NOPE_HEAD_DIM,
-                rope_head_dim=ROPE_HEAD_DIM,
-                attn_sink=torch.empty(1, dtype=torch.float32),
-                output=output,
-            )
-
-        min_queries = mod._GFX942_AITER_PA_PREFILL_SPARSE_MIN_QUERIES
-        run(min_queries)
-        assert aiter_calls == [kernel]
-        assert triton_calls == []
-
-        aiter_calls.clear()
-        run(min_queries - 1)
-        assert aiter_calls == []
-        assert triton_calls == [1]
+        got = getter()
     finally:
         getter.cache_clear()
+    if returns_kernel:
+        assert got is kernel
+    else:
+        assert got is None
+
+
+@pytest.mark.parametrize(
+    ("num_queries", "mla_enabled", "expect_aiter"),
+    [(512, True, True), (511, True, False), (512, False, False)],
+)
+def test_sparse_attn_prefill_routes_gfx942_pa_prefill_sparse(
+    monkeypatch, num_queries: int, mla_enabled: bool, expect_aiter: bool
+) -> None:
+    """Call site launches only when the gate and the real getter both pass."""
+    from unittest.mock import Mock
+
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+
+    kernel = None
+    if expect_aiter:
+        pytest.importorskip("aiter.ops.triton.attention.pa_prefill_sparse")
+        from aiter.ops.triton.attention.pa_prefill_sparse import pa_prefill_sparse
+
+        kernel = pa_prefill_sparse
+
+    getter = mod._get_aiter_pa_prefill_sparse
+    getter.cache_clear()
+    monkeypatch.setattr(rocm_aiter_ops, "is_mla_enabled", lambda: mla_enabled)
+    monkeypatch.setattr(mod, "_ON_GFX942", True)
+    monkeypatch.setattr(mod, "_can_use_aiter_sparse_prefill_opus", lambda *args: False)
+
+    def zero_output(*args, **kwargs):
+        kwargs["output"].zero_()
+
+    def zero_out(*args, out, **kwargs):
+        out.zero_()
+        return out
+
+    fake_aiter = Mock(side_effect=zero_output)
+    fake_triton = Mock(side_effect=zero_out)
+    monkeypatch.setattr(mod, "_rocm_sparse_attn_prefill_aiter", fake_aiter)
+    monkeypatch.setattr(mod, "_rocm_sparse_attn_prefill_triton", fake_triton)
+    monkeypatch.setattr(
+        mod,
+        "_rocm_sparse_attn_prefill_ragged_triton",
+        lambda *args, **kwargs: pytest.fail("unexpected ragged Triton fallback"),
+    )
+    monkeypatch.setattr(
+        mod,
+        "build_ragged_indices_from_dense",
+        lambda *args, **kwargs: (
+            torch.zeros(1, dtype=torch.int32),
+            torch.tensor([0, 1], dtype=torch.int32),
+        ),
+    )
+    try:
+        q = torch.empty(num_queries, 1, HEAD_DIM, dtype=torch.bfloat16)
+        kv = torch.empty(4, 1, HEAD_DIM, dtype=torch.bfloat16)
+        output = torch.empty_like(q)
+        mod.rocm_sparse_attn_prefill(
+            q=q,
+            kv=kv,
+            indices=torch.zeros(num_queries, 1, dtype=torch.int32),
+            topk_length=torch.ones(num_queries, dtype=torch.int32),
+            scale=HEAD_DIM**-0.5,
+            head_dim=HEAD_DIM,
+            nope_head_dim=NOPE_HEAD_DIM,
+            rope_head_dim=ROPE_HEAD_DIM,
+            attn_sink=torch.empty(1, dtype=torch.float32),
+            output=output,
+        )
+    finally:
+        getter.cache_clear()
+
+    if expect_aiter:
+        fake_aiter.assert_called_once()
+        assert fake_aiter.call_args.args[0] is kernel
+        fake_triton.assert_not_called()
+    else:
+        fake_aiter.assert_not_called()
+        fake_triton.assert_called_once()
 
 
 @requires_gfx950
