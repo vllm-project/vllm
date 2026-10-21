@@ -277,7 +277,7 @@ mod tests {
         let info = qwen3_vl_info();
         // One clip flattened to 6 patches with 4 features each.
         let preprocessed = PreprocessedEncoderInputs {
-            encoder_input: ArrayD::zeros(vec![6, 4]),
+            encoder_input: ArrayD::zeros(vec![6, 4]).into(),
             feature_token_counts: vec![6],
             item_sizes: vec![(32, 32)],
             model_specific: HashMap::from([

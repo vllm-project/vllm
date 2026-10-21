@@ -22,7 +22,7 @@ use llm_multimodal::{
     ImageFrame, MediaConnector, MediaConnectorConfig, MediaContentPart, Modality, ModelMetadata,
     ModelProcessorSpec, ModelRegistry, PreProcessorConfig, PreprocessedEncoderInputs,
     PromptReplacement, Tokenizer as TokenResolver, TrackedMedia, VideoClip, VisionPreProcessor,
-    VisionPreprocessingContext, VisionProcessorRegistry,
+    VisionProcessorRegistry,
 };
 use serde::{Deserialize, Serialize};
 use thiserror_ext::AsReport as _;
@@ -55,8 +55,6 @@ pub use self::timing::{mm_request_span, mm_timing_layer};
 #[derive(Clone)]
 pub struct MultimodalModelInfo {
     context: MultimodalModelContext,
-    /// Rendered placeholder marker IDs for all resolved modalities.
-    placeholder_token_ids: Vec<u32>,
     image: Option<VisionModalitySupport>,
     video: Option<VisionModalitySupport>,
     audio: Option<AudioModalitySupport>,
@@ -159,8 +157,8 @@ impl MultimodalModelContext {
         &self,
         model_spec: &'static dyn ModelProcessorSpec,
         preprocessor_config: &PreProcessorConfig,
-    ) -> Option<Arc<dyn AudioPreProcessor>> {
-        model_spec.audio_processor(&self.config, preprocessor_config).map(Arc::from)
+    ) -> Result<Option<Arc<dyn AudioPreProcessor>>> {
+        Ok(model_spec.audio_processor(&self.config, preprocessor_config)?.map(Arc::from))
     }
 }
 
@@ -451,22 +449,16 @@ impl MultimodalModelInfo {
         }
 
         let media_connector = Arc::new(MediaConnector::new(
-            reqwest_0_13::Client::new(),
+            // The connector finishes the build (forcing its redirect policy
+            // and DNS resolver). TLS resolves to native-tls: reqwest's
+            // `native-tls` feature wins its default backend selection over
+            // llm-multimodal's provider-less `rustls` feature.
+            reqwest_0_13::Client::builder(),
             MediaConnectorConfig::default(),
         )?);
 
-        let placeholder_token_ids = [
-            image.as_ref().map(|support| support.placeholder.marker_token_id),
-            video.as_ref().map(|support| support.placeholder.marker_token_id),
-            audio.as_ref().map(|support| support.placeholder.marker_token_id),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-
         Ok(Some(Self {
             context,
-            placeholder_token_ids,
             image,
             video,
             audio,
@@ -562,7 +554,8 @@ impl MultimodalModelInfo {
             return Ok(None);
         }
 
-        let Some(processor) = context.resolve_audio_processor(raw_spec, preprocessor_config) else {
+        let Some(processor) = context.resolve_audio_processor(raw_spec, preprocessor_config)?
+        else {
             warn!(
                 model_id = context.model_id,
                 model_spec = raw_spec.name(),
@@ -590,20 +583,6 @@ impl MultimodalModelInfo {
             Modality::ImageEmbeds => None,
         }
     }
-
-    fn vision_preprocessing_context(
-        &self,
-        prompt_token_ids: &[u32],
-        max_model_len: Option<usize>,
-    ) -> VisionPreprocessingContext {
-        let text_prompt_length = prompt_token_ids
-            .iter()
-            .filter(|token_id| !self.placeholder_token_ids.contains(token_id))
-            .count();
-        VisionPreprocessingContext {
-            token_budget: max_model_len.map(|limit| limit.saturating_sub(text_prompt_length)),
-        }
-    }
 }
 
 /// Finalize a rendered chat prompt into text-generation input.
@@ -616,7 +595,6 @@ pub(crate) async fn finalize_rendered_prompt(
     rendered: RenderedPrompt,
     info: Option<&MultimodalModelInfo>,
     model_dtype: ModelDtype,
-    max_model_len: Option<usize>,
 ) -> Result<(Prompt, Option<MmFeatures>)> {
     let media_parts = extract_media_parts(request, rendered.media_order.as_deref())?;
     if media_parts.is_empty() {
@@ -632,12 +610,7 @@ pub(crate) async fn finalize_rendered_prompt(
         Prompt::TokenIds(token_ids) => token_ids,
     };
     let prepared = info
-        .prepare_multimodal(
-            media_parts,
-            &mut prompt_token_ids,
-            model_dtype,
-            max_model_len,
-        )
+        .prepare_multimodal(media_parts, &mut prompt_token_ids, model_dtype)
         .instrument(mm_request_span(&request.request_id))
         .await?;
 
@@ -829,18 +802,19 @@ impl MultimodalModelInfo {
     /// `prompt_token_ids` is mutated in place because placeholder expansion
     /// changes both the final prompt and the offsets recorded in
     /// `PlaceholderRange`.
+    ///
+    /// The expanded prompt's length is validated against `max_model_len`
+    /// downstream, when text generation resolves the request's max tokens.
     pub(crate) async fn prepare_multimodal(
         &self,
         media_parts: Vec<MediaContentPart>,
         prompt_token_ids: &mut Vec<u32>,
         model_dtype: ModelDtype,
-        max_model_len: Option<usize>,
     ) -> Result<MmFeatures> {
         if media_parts.is_empty() {
             return Ok(Vec::new());
         }
-        self.prepare_multimodal_timed(media_parts, prompt_token_ids, model_dtype, max_model_len)
-            .await
+        self.prepare_multimodal_timed(media_parts, prompt_token_ids, model_dtype).await
     }
 
     /// Timed body of [`Self::prepare_multimodal`]; each stage is a `tracing`
@@ -856,24 +830,15 @@ impl MultimodalModelInfo {
         media_parts: Vec<MediaContentPart>,
         prompt_token_ids: &mut Vec<u32>,
         model_dtype: ModelDtype,
-        max_model_len: Option<usize>,
     ) -> Result<MmFeatures> {
         let media_parts_len = media_parts.len();
         self.validate_mm_limits(&media_parts)?;
-        let vision_context = self.vision_preprocessing_context(prompt_token_ids, max_model_len);
         let fetched = self.fetch_media(media_parts).await?;
 
         let mut prepared = Vec::new();
         if !fetched.images.is_empty() {
-            prepared.push(
-                self.prepare_images(
-                    fetched.images,
-                    fetched.image_uuids,
-                    model_dtype,
-                    vision_context,
-                )
-                .await?,
-            );
+            prepared
+                .push(self.prepare_images(fetched.images, fetched.image_uuids, model_dtype).await?);
         }
         if !fetched.videos.is_empty() {
             prepared
@@ -1121,86 +1086,55 @@ mod tests {
         );
     }
 
-    #[test]
-    fn vision_preprocessing_context_uses_runtime_budget_and_text_tokens() {
-        let info = qwen3_vl_info();
-        let context = info.vision_preprocessing_context(
-            &[11, QWEN3_IMAGE_PAD_ID, 12, QWEN3_VIDEO_PAD_ID, 13],
-            Some(4096),
-        );
-
-        assert_eq!(context.token_budget, Some(4096 - 3));
-        assert_eq!(
-            info.vision_preprocessing_context(&[11, 12, 13], Some(2)).token_budget,
-            Some(0)
-        );
-        assert_eq!(
-            info.vision_preprocessing_context(&[11], None).token_budget,
-            None
-        );
-    }
-
     #[tokio::test]
-    async fn nemotron_budget_controls_preprocessing_and_engine_features() {
+    async fn nemotron_preprocessing_builds_engine_features() {
         use vllm_engine_core_client::protocol::multimodal::MmKwargValue;
 
         let tokenizer = TestTokenizer::new()
             .with_regular_token("<image>", 1018)
             .with_regular_token("<img>", 1019)
             .with_regular_token("</img>", 1020);
+        // The upstream spec refuses a config whose geometry differs from the
+        // checkpoint family it implements, so the test config spells the real
+        // checkpoint values.
         let config = serde_json::json!({
-            "model_type": "nemotron_h_omni",
-            "img_context_token_id": 1018,
-            "max_position_embeddings": 512,
+            "model_type": "NemotronH_Nano_Omni_Reasoning_V3",
             "patch_size": 16,
             "downsample_ratio": 0.5,
-            "norm_mean": [0.0, 0.0, 0.0],
-            "norm_std": [1.0, 1.0, 1.0],
+            "norm_mean": [0.48145466, 0.4578275, 0.40821073],
+            "norm_std": [0.26862954, 0.26130258, 0.27577711],
             "vision_config": {
-                "args": {"min_num_patches": 1024, "max_num_patches": 13312}
+                "args": {"min_num_patches": 1024, "max_num_patches": 13312},
+                "video_target_num_patches": 1024,
+                "video_temporal_patch_size": 2,
+                "video_maintain_aspect_ratio": true
             }
         });
-        // The stateless processor resolves patch size and normalization from
-        // the per-call preprocessor config (preprocessor_config.json); the
-        // checkpoint-only patch limits and downsample ratio reach it through
-        // the spec's processor kwargs, merged into `extra` at load time.
-        let preprocessor_config = PreProcessorConfig::from_value(serde_json::json!({
-            "patch_size": 16,
-            "image_mean": [0.0, 0.0, 0.0],
-            "image_std": [1.0, 1.0, 1.0]
-        }))
-        .unwrap();
         let context = MultimodalModelContext {
-            model_id: "nemotron_h_omni-test".to_string(),
-            model_type: Some("nemotron_h_omni".to_string()),
+            model_id: "nemotron-omni-test".to_string(),
+            model_type: Some("NemotronH_Nano_Omni_Reasoning_V3".to_string()),
             config,
             tokenizer: TokenizerResolver(Arc::new(tokenizer)),
         };
         let info = MultimodalModelInfo::from_loaded(
             context,
-            preprocessor_config,
+            PreProcessorConfig::default(),
             PreProcessorConfig::default(),
             HashMap::new(),
         )
         .unwrap()
-        .expect("nemotron_h_omni multimodal support");
+        .expect("Nemotron-H Omni multimodal support");
         let media = MediaContentPart::ImageUrl {
             url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=".to_string(),
             detail: None,
             uuid: None,
             max_long_side_pixel: None,
         };
-        let mut prompt = vec![11; 100];
-        prompt.push(1018);
+        let mut tokens = vec![11; 100];
+        tokens.push(1018);
 
-        let mut tokens = prompt.clone();
         let features = info
-            .prepare_multimodal(
-                vec![media.clone()],
-                &mut tokens,
-                ModelDtype::Float32,
-                Some(512),
-            )
+            .prepare_multimodal(vec![media], &mut tokens, ModelDtype::Float32)
             .await
             .unwrap();
         assert_eq!(features.len(), 1);
@@ -1214,29 +1148,20 @@ mod tests {
         assert!(tokens[101..357].iter().all(|&token| token == 1018));
         assert_eq!(tokens[357], 1020);
         let data = feature.data.as_ref().unwrap();
+        // The 1x1 image is upscaled to the 1024-patch minimum grid of 16px
+        // patches; the 2x2 pixel shuffle turns them into 256 feature tokens.
         assert!(matches!(
-            data["pixel_values_flat"].data.as_ref(),
-            Some(MmKwargValue::Tensor(tensor)) if tensor.shape == [3, 512, 512]
+            data["pixel_values"].data.as_ref(),
+            Some(MmKwargValue::Tensor(tensor)) if tensor.shape == [1024, 3 * 16 * 16]
         ));
-        assert_eq!(
-            data["num_tokens_per_image"].data,
-            Some(MmKwargValue::Int(256))
-        );
-        assert_eq!(
-            data["imgs_sizes"].data,
-            Some(MmKwargValue::List(vec![
-                MmKwargValue::Int(512),
-                MmKwargValue::Int(512),
-            ]))
-        );
-
-        let error = info
-            .prepare_multimodal(vec![media], &mut prompt, ModelDtype::Float32, Some(100))
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(error, Error::Multimodal(message) if message.contains("exceeding token_budget"))
-        );
+        assert!(matches!(
+            data["patches_per_image"].data.as_ref(),
+            Some(MmKwargValue::Tensor(tensor)) if tensor.shape.is_empty()
+        ));
+        assert!(matches!(
+            data["image_grid_hw"].data.as_ref(),
+            Some(MmKwargValue::Tensor(tensor)) if tensor.shape == [2]
+        ));
     }
 
     #[test]

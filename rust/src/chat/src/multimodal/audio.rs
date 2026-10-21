@@ -227,7 +227,7 @@ mod tests {
         ));
 
         let preprocessed = PreprocessedEncoderInputs {
-            encoder_input: ArrayD::zeros(vec![1, 128, 4]),
+            encoder_input: ArrayD::zeros(vec![1, 128, 4]).into(),
             feature_token_counts: vec![1],
             item_sizes: vec![(128, 4)],
             model_specific: HashMap::from([
@@ -274,7 +274,7 @@ mod tests {
             uuid: Some("audio-1".to_string()),
         }];
         async {
-            info.prepare_multimodal(parts, &mut vec![AUDIO_PAD_ID], ModelDtype::Float32, None)
+            info.prepare_multimodal(parts, &mut vec![AUDIO_PAD_ID], ModelDtype::Float32)
                 .instrument(mm_request_span("request-1"))
                 .await
                 .unwrap();

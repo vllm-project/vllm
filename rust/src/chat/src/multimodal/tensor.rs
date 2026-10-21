@@ -28,6 +28,11 @@ pub(super) enum KwargValue {
 /// `primary_key` names the encoder-input tensor as the model's forward kwargs
 /// expect it (e.g. `pixel_values` for images, `pixel_values_videos` for
 /// videos).
+///
+/// Byte-backed encoder inputs (pixel bytes or a pre-materialized wire dtype)
+/// are materialized as normalized `f32` here — the same values the processors
+/// produced when they normalized while patchifying — and converted to the
+/// model's float dtype below.
 pub(super) fn collect_tensors(
     preprocessed: PreprocessedEncoderInputs,
     primary_key: &str,
@@ -39,7 +44,7 @@ pub(super) fn collect_tensors(
         ..
     } = preprocessed;
 
-    let primary_value = KwargValue::from_f32_array(encoder_input, float_dtype)?;
+    let primary_value = KwargValue::from_f32_array(encoder_input.into_f32(), float_dtype)?;
 
     let mut tensors = HashMap::new();
     tensors.insert(primary_key.to_string(), primary_value);
