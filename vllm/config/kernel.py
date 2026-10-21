@@ -278,7 +278,8 @@ class KernelConfig:
     """
 
     enable_flashinfer_autotune: bool = None  # type: ignore[assignment]
-    """If True, run FlashInfer autotuning during kernel warmup."""
+    """Benchmark FlashInfer kernel implementations during warmup and use the
+    fastest. Enabled by default except at `-O0`; disable for faster startup."""
 
     enable_rocm_segmented_attn_autotune: bool = False
     """If True, autotune ROCm segmented attention during kernel warmup on RDNA GPUs."""
