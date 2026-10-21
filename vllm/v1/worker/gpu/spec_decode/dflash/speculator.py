@@ -543,6 +543,29 @@ class DFlashSpeculator(DraftModelSpeculator):
                 num_reqs,
             )
 
+        if (
+            num_speculative_tokens == 0
+            and not dummy_run
+            and not is_profile
+            and self.dp_size == 1
+        ):
+            # The runner discards every draft token when K is 0 for this step.
+            # Store the context K/V only, so the draft has the full context
+            # when K rises again, and skip the draft forward and sampling.
+            # With DP the draft forward is a DP-synchronized step that every
+            # rank must run, so this only applies without DP.
+            logger.info_once(
+                "%s: skipping the draft forward on K=0 steps", self._speculator_name
+            )
+            self._store_hidden_states(
+                num_target_tokens, last_hidden_states, aux_hidden_states
+            )
+            self.prepare_context_anchor(
+                num_reqs, input_batch.query_start_loc, num_rejected
+            )
+            self._precompute_context_kv(0, num_target_tokens)
+            return self.draft_tokens[:num_reqs]
+
         batch_sync, num_batch_tokens = (
             self._build_uniform_batch_dp_sync(
                 dp_sync_state,
