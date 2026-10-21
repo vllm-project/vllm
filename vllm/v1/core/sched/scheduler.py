@@ -834,6 +834,7 @@ class Scheduler(SchedulerInterface):
                         request,
                         num_new_tokens,
                         num_lookahead_tokens=self.num_lookahead_tokens,
+                        delay_cache_blocks=self.scheduler_config.num_layer_groups > 1,
                     )
 
                     if new_blocks is not None:
@@ -1317,7 +1318,9 @@ class Scheduler(SchedulerInterface):
                     new_computed_blocks=new_computed_blocks,
                     num_lookahead_tokens=effective_lookahead_tokens,
                     num_external_computed_tokens=num_external_computed_tokens,
-                    delay_cache_blocks=load_kv_async,
+                    delay_cache_blocks=(
+                        load_kv_async or self.scheduler_config.num_layer_groups > 1
+                    ),
                     skip_zeroing_group_ids=(
                         self.connector.get_loaded_kv_cache_group_ids(request)
                         if load_kv_async and self.connector is not None

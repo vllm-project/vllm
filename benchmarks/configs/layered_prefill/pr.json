@@ -1,0 +1,243 @@
+{
+  "experiment": {
+    "name": "Layered prefill PR serving suite",
+    "selection_basis": "Completed 48/48 TP=2 Figure 3 runs in layered-logs-v2-fix. Fixed configuration; results are not read when executing this suite.",
+    "reference_manifest_sha256": "6929f8d880debc622b7fea42bb57ab79e6914d9a29c77b8d962c00d31f694bcf",
+    "reference_command_caveat": "Historical reference runs and the first 54 PR runs used the CLI default custom_output_len=256 and server sampling defaults. They did not preserve the dataset output lengths. Corrected runs use per-request output limits and explicit greedy decoding; load points may need reassessment after remeasurement.",
+    "reference_tp2_results": [
+      {
+        "model": "qwen",
+        "dataset": "arxiv",
+        "request_rate": 1.3,
+        "chunked_512": {
+          "case_id": "f7a61f444ad1c0fc",
+          "request_throughput": 0.755,
+          "mean_ttft_ms": 166916.936,
+          "p99_itl_ms": 98.081,
+          "slo_attainment_pct": 6.0
+        },
+        "layered_8192": {
+          "case_id": "321aee00e632e781",
+          "request_throughput": 1.291,
+          "mean_ttft_ms": 5264.795,
+          "p99_itl_ms": 59.302,
+          "slo_attainment_pct": 95.833
+        }
+      },
+      {
+        "model": "gpt-oss",
+        "dataset": "arxiv",
+        "request_rate": 2.1,
+        "chunked_512": {
+          "case_id": "8006a16bb141d999",
+          "request_throughput": 1.412,
+          "mean_ttft_ms": 68700.093,
+          "p99_itl_ms": 62.908,
+          "slo_attainment_pct": 10.167
+        },
+        "layered_8192": {
+          "case_id": "52fc435bc4bac90c",
+          "request_throughput": 1.904,
+          "mean_ttft_ms": 16361.516,
+          "p99_itl_ms": 69.238,
+          "slo_attainment_pct": 28.333
+        }
+      },
+      {
+        "model": "qwen",
+        "dataset": "sharegpt",
+        "request_rate": 4.0,
+        "chunked_512": {
+          "case_id": "f597c9189814ef7f",
+          "request_throughput": 3.245,
+          "mean_ttft_ms": 13599.418,
+          "p99_itl_ms": 70.149,
+          "slo_attainment_pct": 35.667
+        },
+        "layered_8192": {
+          "case_id": "6b8fd7fcebc71cb5",
+          "request_throughput": 3.868,
+          "mean_ttft_ms": 1753.253,
+          "p99_itl_ms": 52.97,
+          "slo_attainment_pct": 99.5
+        }
+      },
+      {
+        "model": "gpt-oss",
+        "dataset": "sharegpt",
+        "request_rate": 6.4,
+        "chunked_512": {
+          "case_id": "4a8d498bfea745ae",
+          "request_throughput": 5.791,
+          "mean_ttft_ms": 3541.26,
+          "p99_itl_ms": 40.555,
+          "slo_attainment_pct": 59.667
+        },
+        "layered_8192": {
+          "case_id": "1facfed63e326d7c",
+          "request_throughput": 6.048,
+          "mean_ttft_ms": 1966.679,
+          "p99_itl_ms": 55.449,
+          "slo_attainment_pct": 99.5
+        }
+      }
+    ],
+    "rate_selection": "One lower-load candidate below observed chunked-512 throughput and one measured higher-load point per workload. GPT-OSS arXiv retains a point that overloads layered too; GPT-OSS ShareGPT retains its p99 ITL regression. TP and PP use identical offered loads; PP and EP capacities have not been measured.",
+    "baselines": "Compare layered-8192 with both chunked-512 (paper baseline) and chunked-8192 (equal token budget). These are synchronous Model Runner V2 comparisons, not comparisons to every upstream default.",
+    "coverage": "48 TP/PP cases (2 models x 2 datasets x 2 rates x 2 placements x 3 schedules) plus 6 Qwen TP+EP cases (2 datasets x 1 higher rate x 3 schedules). Both models are MoE; this performance suite does not replace dense model correctness tests.",
+    "layer_groups": "Qwen: 48 layers, 3 per group, TP=2 groups=16, PP=2 groups=8 per rank. GPT-OSS: 24 layers, 2 per group, TP=2 groups=12, PP=2 groups=6 per rank. Layered token budgets are divided by PP (8192 -> 4096 at PP=2); chunked budgets are not.",
+    "tbt_slo": "Every inter-token interval must be at most 150 ms for both models, for all schedules and placements. This replaces the paper's Table 5 values (Qwen 125 ms, GPT-OSS 100 ms): at PP=2 each decode token spans two pipeline ticks, so even chunked-512 exceeds 100 ms under arXiv load. figure3.json keeps the Table 5 values.",
+    "measurement": "600 measured requests per case, including lower rates; one measurement per case with seed 0 by default. 60-second warmup and cooldown. Identical sampled requests and arrival seed for all paired schedules and placements. Requested output lengths come from JSONL (--custom-output-len -1), temperature is 0, and EOS termination is enabled.",
+    "limitations": "Fixed groups; one prefill batch per rank, with new admission when the first rank is free and full decode every iteration. Historical PP measurements predate overlapping prefill batches and must be rerun alongside the corrected output-length commands before claiming gains. No TP=2+PP=2 run on two GPUs."
+  },
+  "output_subdir": "pr",
+  "engine_defaults": {
+    "dtype": "bfloat16",
+    "max_num_seqs": 256,
+    "max_model_len": 32768,
+    "gpu_memory_utilization": 0.85,
+    "tensor_parallel_size": 2,
+    "pipeline_parallel_size": 1,
+    "enable_expert_parallel": false,
+    "enforce_eager": false
+  },
+  "benchmark_defaults": {
+    "num_requests": 600,
+    "warmup_seconds": 60,
+    "relax_seconds": 60,
+    "burstiness": 1.0,
+    "continue_on_error": true
+  },
+  "models": {
+    "qwen": {
+      "model_name": "Qwen/Qwen3-30B-A3B",
+      "num_layer_groups": 16,
+      "tbt_slo_ms": 150,
+      "num_hidden_layers": 48,
+      "layers_per_group": 3
+    },
+    "gpt-oss": {
+      "model_name": "unsloth/gpt-oss-20b-BF16",
+      "paper_model": "openai/gpt-oss-20b",
+      "checkpoint_note": "Use a BF16 checkpoint to match Section 5.1. The official checkpoint stores MXFP4 expert weights; --dtype bfloat16 alone does not dequantize them. This is a BF16 conversion, not a separately trained model.",
+      "checkpoint_source": "https://huggingface.co/unsloth/gpt-oss-20b-BF16/blob/main/config.json",
+      "num_layer_groups": 12,
+      "tbt_slo_ms": 150,
+      "num_hidden_layers": 24,
+      "layers_per_group": 2
+    }
+  },
+  "parallelisms": {
+    "tp2": {
+      "tensor_parallel_size": 2,
+      "pipeline_parallel_size": 1,
+      "enable_expert_parallel": false
+    },
+    "pp2": {
+      "tensor_parallel_size": 1,
+      "pipeline_parallel_size": 2,
+      "enable_expert_parallel": false
+    },
+    "tp2-ep": {
+      "tensor_parallel_size": 2,
+      "pipeline_parallel_size": 1,
+      "enable_expert_parallel": true
+    }
+  },
+  "schedules": {
+    "chunked-512": {
+      "mode": "chunked-prefill",
+      "max_num_batched_tokens": 512
+    },
+    "chunked-8192": {
+      "mode": "chunked-prefill",
+      "max_num_batched_tokens": 8192
+    },
+    "layered-8192": {
+      "mode": "layered-prefill",
+      "max_num_batched_tokens": 8192
+    }
+  },
+  "panels": [
+    {
+      "id": "pr-qwen-arxiv",
+      "model": "qwen",
+      "dataset": "arxiv",
+      "request_rates": [
+        0.5,
+        1.3
+      ],
+      "ttft_slo_ms": 10000,
+      "parallelisms": [
+        "tp2",
+        "pp2"
+      ]
+    },
+    {
+      "id": "pr-gpt-oss-arxiv",
+      "model": "gpt-oss",
+      "dataset": "arxiv",
+      "request_rates": [
+        1.0,
+        2.1
+      ],
+      "ttft_slo_ms": 10000,
+      "parallelisms": [
+        "tp2",
+        "pp2"
+      ]
+    },
+    {
+      "id": "pr-qwen-sharegpt",
+      "model": "qwen",
+      "dataset": "sharegpt",
+      "request_rates": [
+        2.0,
+        4.0
+      ],
+      "ttft_slo_ms": 5000,
+      "parallelisms": [
+        "tp2",
+        "pp2"
+      ]
+    },
+    {
+      "id": "pr-gpt-oss-sharegpt",
+      "model": "gpt-oss",
+      "dataset": "sharegpt",
+      "request_rates": [
+        4.0,
+        6.4
+      ],
+      "ttft_slo_ms": 5000,
+      "parallelisms": [
+        "tp2",
+        "pp2"
+      ]
+    },
+    {
+      "id": "pr-ep-qwen-arxiv",
+      "model": "qwen",
+      "dataset": "arxiv",
+      "request_rates": [
+        1.3
+      ],
+      "ttft_slo_ms": 10000,
+      "parallelisms": [
+        "tp2-ep"
+      ]
+    },
+    {
+      "id": "pr-ep-qwen-sharegpt",
+      "model": "qwen",
+      "dataset": "sharegpt",
+      "request_rates": [
+        4.0
+      ],
+      "ttft_slo_ms": 5000,
+      "parallelisms": [
+        "tp2-ep"
+      ]
+    }
+  ]
+}

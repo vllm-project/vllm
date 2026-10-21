@@ -714,8 +714,13 @@ class EngineCore:
             if not self.is_mm_encoder_only:
                 model_executed = scheduler_output.total_num_scheduled_tokens > 0
 
-            if self.is_pooling_model or not model_executed:
-                # No sampling required (no requests scheduled).
+            completion = scheduler_output.layered_completion_output
+            if (
+                self.is_pooling_model
+                or not model_executed
+                or (completion is not None and not completion.num_scheduled_tokens)
+            ):
+                # Intermediate layer groups do not produce sampler rows.
                 future = cast(Future[ModelRunnerOutput], exec_future)
             else:
                 if not scheduler_output.pending_structured_output_tokens:

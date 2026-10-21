@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import threading
 from contextlib import nullcontext
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -28,8 +29,6 @@ if current_platform.is_xpu():
 def _enable_breakable_cudagraph(monkeypatch: pytest.MonkeyPatch):
     """Enable breakable cudagraphs for this module's tests only.
 
-    eager_break_during_capture reads the env at decoration time, which
-    happens inside the test bodies, so a per-test fixture suffices.
     monkeypatch restores the env so other test files running in the same
     pytest process are unaffected (a module-level os.environ assignment
     used to leak into test_cudagraph_dispatch.py and break it).
@@ -344,6 +343,31 @@ def test_decorator_breaks_when_invoked_inside_capture(cuda_capture_stream):
     assert torch.equal(x, torch.full((4,), 15.0, device=DEVICE_TYPE))
 
 
+def test_decorator_breaks_when_enabled_after_decoration(
+    cuda_capture_stream, monkeypatch
+):
+    """VllmConfig can enable breakable graphs after ops are imported."""
+    import vllm.envs as envs
+    from vllm.compilation.breakable_cudagraph import (
+        BreakableCUDAGraphCapture,
+        eager_break_during_capture,
+    )
+
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
+    envs.disable_envs_cache()
+
+    @eager_break_during_capture
+    def attention_like(t: torch.Tensor) -> None:
+        t.mul_(2.0)
+
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
+    x = torch.zeros(4, device=DEVICE_TYPE)
+    cap = BreakableCUDAGraphCapture()
+    with cap:
+        attention_like(x)
+    assert cap.num_eager_breaks == 1
+
+
 @pytest.mark.parametrize("keyword", [False, True])
 def test_quantized_activation_replay_does_not_retain_tensors(
     cuda_capture_stream, keyword
@@ -591,6 +615,88 @@ def test_wrapper_falls_through_on_runtime_mode_mismatch():
 
     assert calls == [1]
     assert not wrapper.entries
+
+
+@pytest.mark.parametrize("mode_name", ["PIECEWISE", "FULL"])
+def test_layer_groups_replay_distinct_graphs(
+    cuda_capture_stream, monkeypatch, mode_name
+):
+    """Equal batch shapes must replay the selected local group or full depth."""
+    import vllm.distributed.parallel_state as parallel_state
+    from vllm.compilation.breakable_cudagraph import (
+        BreakableCUDAGraphWrapper,
+        eager_break_during_capture,
+    )
+    from vllm.compilation.cuda_graph import CUDAGraphWrapper
+    from vllm.compilation.monitor import set_cudagraph_capturing_enabled
+    from vllm.config import CUDAGraphMode
+    from vllm.forward_context import BatchDescriptor, set_forward_context
+    from vllm.model_executor.layered_prefill import layer_group_context
+    from vllm.sequence import IntermediateTensors
+
+    @eager_break_during_capture
+    def attention(x, output):
+        output.copy_(x)
+
+    forwards = []
+
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.start_layer, self.end_layer = 0, 4
+            self.layers = torch.nn.ModuleList(torch.nn.Identity() for _ in range(4))
+
+        def forward(self, x):
+            forwards.append((self.start_layer, self.end_layer))
+            for layer in range(self.start_layer, self.end_layer):
+                output = torch.empty_like(x)
+                attention(x + layer + 1, output)
+                x = output
+            return IntermediateTensors({"hidden_states": x})
+
+    monkeypatch.setattr(
+        parallel_state, "_PP", SimpleNamespace(is_first_rank=True, is_last_rank=False)
+    )
+    model = Model()
+
+    mode = CUDAGraphMode[mode_name]
+    config = _mock_vllm_config()
+    config.use_cumem_cudagraph_pool = False
+    wrapper_type = (
+        BreakableCUDAGraphWrapper if mode_name == "PIECEWISE" else CUDAGraphWrapper
+    )
+    wrapper = wrapper_type(model, config, runtime_mode=mode)
+    inputs = torch.ones(4, device="cuda")
+
+    def run(group):
+        with (
+            layer_group_context(model, group, 2),
+            set_forward_context(
+                None,
+                config,
+                cudagraph_runtime_mode=mode,
+                batch_descriptor=BatchDescriptor(4, layer_group_idx=group),
+            ),
+        ):
+            output = wrapper(inputs)
+            assert isinstance(output, IntermediateTensors)
+            return output["hidden_states"]
+
+    set_cudagraph_capturing_enabled(True)
+    try:
+        for group in (None, 0, 1):
+            run(group)
+    finally:
+        set_cudagraph_capturing_enabled(False)
+
+    assert forwards == [(0, 4), (0, 2), (2, 4)]
+    forwards.clear()
+    for value, group in enumerate((1, None, 0, 1, 0, None)):
+        inputs.fill_(value)
+        result = run(group)
+        expected = value + {None: 10, 0: 3, 1: 7}[group]
+        torch.testing.assert_close(result, torch.full_like(inputs, expected))
+    assert not forwards  # Replays must not re-enter the Python layer loop.
 
 
 def test_wrapper_captures_on_runtime_mode_match():

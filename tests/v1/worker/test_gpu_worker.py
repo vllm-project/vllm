@@ -12,11 +12,39 @@ from tests.utils import create_new_process_for_each_test
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.worker import gpu_worker, startup_plan
+from vllm.v1.worker.gpu.layered_prefill import LayeredPrefillRunner
 from vllm.v1.worker.gpu_worker import maybe_rocm_profiling_fallback
 from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
     maybe_save_startup_plan,
 )
+
+
+def test_layered_continuations_reuse_capture_addresses_and_clear_padding():
+    from vllm.sequence import IntermediateTensors
+    from vllm.v1.worker.gpu.layered_prefill import stage_layered_intermediates
+
+    captured = IntermediateTensors(
+        {key: torch.empty(4, 4) for key in ("hidden_states", "residual")}
+    )
+    incoming = {
+        req_id: IntermediateTensors(
+            {key: torch.full((size, 4), value) for key in captured.tensors}
+        )
+        for req_id, size, value in (("a", 2, 3.0), ("b", 1, 5.0))
+    }
+    for req_ids in (["a", "b"], ["b", "a"], ["b"]):
+        batch = SimpleNamespace(
+            req_ids=req_ids,
+            num_tokens=sum(len(incoming[r]["hidden_states"]) for r in req_ids),
+            num_tokens_after_padding=4,
+        )
+        staged = stage_layered_intermediates(captured, batch, incoming)
+        for key, buffer in staged.items():
+            expected = torch.cat([incoming[req_id][key] for req_id in req_ids])
+            assert buffer.data_ptr() == captured[key].data_ptr()
+            torch.testing.assert_close(buffer[: len(expected)], expected)
+            assert not buffer[len(expected) :].count_nonzero()
 
 
 def test_sleep_preservation_restores_private_draft_not_shared_target():
@@ -418,25 +446,34 @@ def test_execute_model_waits_previous_pp_send_before_forward(
         log.append("forward")
         return IntermediateTensors({"hidden_states": torch.zeros(1)})
 
-    worker = SimpleNamespace(
-        vllm_config=SimpleNamespace(
-            parallel_config=SimpleNamespace(
-                pipeline_parallel_size=2, distributed_executor_backend="mp"
-            ),
-        ),
-        use_v2_model_runner=True,
-        model_runner=SimpleNamespace(execute_model=run_model, is_pooling_model=False),
-        annotate_profile=lambda scheduler_output: nullcontext(),
-        _pp_send_work=[previous_tensor_send],
+    from vllm.v1.core.sched.output import SchedulerOutput
+
+    worker = gpu_worker.Worker.__new__(gpu_worker.Worker)
+    worker.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=2, distributed_executor_backend="mp"
+        )
     )
-    scheduler_output = SimpleNamespace(
-        total_num_scheduled_tokens=4, num_scheduled_tokens={"r0": 4}
+    worker.use_v2_model_runner = True
+    worker.model_runner = SimpleNamespace(
+        execute_model=run_model, is_pooling_model=False
     )
+    worker.annotate_profile = lambda scheduler_output: nullcontext()
+    worker._pp_send_work = [previous_tensor_send]
+    worker._layered_prefill_runner = LayeredPrefillRunner(worker.model_runner, 2)
+    worker._layered_prefill_runner.activations["cancelled-prefill"] = (
+        IntermediateTensors({"hidden_states": torch.ones(1)})
+    )
+    scheduler_output = SchedulerOutput.make_empty()
+    scheduler_output.finished_req_ids = {"cancelled-prefill"}
+    scheduler_output.total_num_scheduled_tokens = 4
+    scheduler_output.num_scheduled_tokens = {"r0": 4}
 
     assert gpu_worker.Worker.execute_model(worker, scheduler_output) is None
 
     assert log == ["wait:prev-tensor", "forward", "isend"]
     assert worker._pp_send_work == [tensor_handle]
+    assert not worker._layered_prefill_runner.activations
 
 
 def test_jit_monitor_activation_follows_enable_jit_warmup(

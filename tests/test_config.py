@@ -59,6 +59,74 @@ from vllm.v1.attention.backend import AttentionCGSupport
 DEVICE_TYPE = current_platform.device_type
 
 
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("enforce_eager", [False, True])
+@pytest.mark.parametrize("gpt_oss", [False, True])
+def test_layered_prefill_selects_synchronous_runner(
+    monkeypatch, enforce_eager, gpt_oss, tmp_path
+):
+    from transformers import GptOssConfig, LlamaConfig
+
+    from vllm.config.vllm import default_breakable_cudagraph_architectures
+
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
+    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
+    monkeypatch.setattr(current_platform, "support_static_graph_mode", lambda: True)
+    hf_config = (
+        GptOssConfig(architectures=["GptOssForCausalLM"])
+        if gpt_oss
+        else LlamaConfig(architectures=["LlamaForCausalLM"])
+    )
+    hf_config.save_pretrained(tmp_path)
+    model = ModelConfig(
+        model=str(tmp_path), max_model_len=256, enforce_eager=enforce_eager
+    )
+    try:
+        config = VllmConfig(
+            model_config=model,
+            device_config=DeviceConfig(device="cpu"),
+            scheduler_config=SchedulerConfig(
+                max_model_len=256, is_encoder_decoder=False, num_layer_groups=2
+            ),
+        )
+        assert config.max_concurrent_batches == 1
+        assert config.use_v2_model_runner
+        assert not config.scheduler_config.async_scheduling
+        assert model.enforce_eager == enforce_eager
+        assert config.compilation_config.mode == CompilationMode.NONE
+        if enforce_eager:
+            assert config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+        else:
+            assert envs.VLLM_USE_BREAKABLE_CUDAGRAPH
+            assert (
+                config.compilation_config.cudagraph_mode
+                == CUDAGraphMode.FULL_AND_PIECEWISE
+            )
+        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+        with pytest.raises(ValueError, match="requires Model Runner V2"):
+            _ = config.use_v2_model_runner
+    finally:
+        os.environ.pop("VLLM_USE_BREAKABLE_CUDAGRAPH", None)
+        default_breakable_cudagraph_architectures.cache_clear()
+
+
+@pytest.mark.cpu_test
+def test_layered_prefill_rejects_more_groups_than_local_layers():
+    model = ModelConfig(model="Qwen/Qwen3-0.6B", max_model_len=256)
+    with pytest.raises(ValueError, match="layer count on any PP rank"):
+        VllmConfig(
+            model_config=model,
+            device_config=DeviceConfig(device="cpu"),
+            parallel_config=ParallelConfig(pipeline_parallel_size=2),
+            scheduler_config=SchedulerConfig(
+                max_model_len=256,
+                is_encoder_decoder=False,
+                num_layer_groups=model.hf_text_config.num_hidden_layers,
+            ),
+        )
+
+
 def test_nested_rope_validation_patch_preserves_flat_rope_parameters(monkeypatch):
     calls = []
 

@@ -102,6 +102,7 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
 )
 from vllm.v1.utils import compute_iteration_details, report_usage_stats
+from vllm.v1.worker.gpu.layered_prefill import LayeredPrefillRunner
 from vllm.v1.worker.sentinel.gpu_worker_sentinel import WorkerSentinel
 from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
@@ -242,6 +243,7 @@ class Worker(WorkerBase):
 
         # Device handles of the previous step's PP intermediate-tensor send.
         self._pp_send_work: list[Handle] = []
+        self._layered_prefill_runner: LayeredPrefillRunner | None = None
 
         # Resolved lazily on first sleep/wake; persists worker-process state.
         self._sleep_mode_backend: SleepModeBackend | None = None
@@ -746,6 +748,19 @@ class Worker(WorkerBase):
             - profile_result.non_kv_cache_memory
             - cudagraph_memory_estimate_applied
         )
+        if self.vllm_config.scheduler_config.num_layer_groups > 1:
+            # Retained hidden states and residuals outlive a group forward.
+            # A group's inputs and outputs coexist; downstream PP ranks also
+            # hold the next batch received while finishing the current one.
+            num_batches = 2 if get_pp_group().is_first_rank else 3
+            activation_bytes = (
+                2
+                * num_batches
+                * self.vllm_config.scheduler_config.max_num_batched_tokens
+                * self.model_config.get_hidden_size()
+                * torch.empty((), dtype=self.model_config.dtype).element_size()
+            )
+            self.available_kv_cache_memory_bytes -= activation_bytes
 
         unrequested_memory = self.init_snapshot.free_memory - self.requested_memory
         logger.debug(
@@ -1320,6 +1335,28 @@ class Worker(WorkerBase):
                 handle.wait()
             self._pp_send_work = []
 
+        if scheduler_output.layered_prefill_outputs is not None:
+            if self._layered_prefill_runner is None:
+                from vllm.v1.worker.gpu.model_runner import GPUModelRunner as V2Runner
+
+                assert isinstance(self.model_runner, V2Runner)
+                self._layered_prefill_runner = LayeredPrefillRunner(
+                    self.model_runner,
+                    self.vllm_config.scheduler_config.num_layer_groups,
+                    lambda decode: self._execute_model(decode, advance_pp=False),
+                    max_concurrent_batches=self.vllm_config.max_concurrent_batches,
+                )
+            with self.annotate_profile(scheduler_output):
+                return self._layered_prefill_runner.execute_model(scheduler_output)
+
+        if self._layered_prefill_runner is not None:
+            self._layered_prefill_runner.remove_requests(scheduler_output)
+        with self.annotate_profile(scheduler_output):
+            return self._execute_model(scheduler_output)
+
+    def _execute_model(
+        self, scheduler_output: "SchedulerOutput", advance_pp: bool = True
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass and not get_pp_group().is_first_rank:
@@ -1335,20 +1372,18 @@ class Worker(WorkerBase):
                 comm_postprocess=comm_postprocess,
             )
 
-        with self.annotate_profile(scheduler_output):
-            output = self.model_runner.execute_model(
-                scheduler_output, intermediate_tensors
-            )
-            if (
-                self.use_v2_model_runner
-                and self.model_runner.is_pooling_model
-                and output is None
-            ):
-                output = self.model_runner.pool()  # type: ignore
-            if isinstance(
-                output, ModelRunnerOutput | AsyncModelRunnerOutput | NoneType
-            ):
-                return output
+        kwargs = {} if advance_pp else {"advance_pp": False}
+        output = self.model_runner.execute_model(
+            scheduler_output, intermediate_tensors, **kwargs
+        )
+        if (
+            self.use_v2_model_runner
+            and self.model_runner.is_pooling_model
+            and output is None
+        ):
+            output = self.model_runner.pool()  # type: ignore
+        if isinstance(output, ModelRunnerOutput | AsyncModelRunnerOutput | NoneType):
+            return output
 
         assert isinstance(output, IntermediateTensors)
         parallel_config = self.vllm_config.parallel_config

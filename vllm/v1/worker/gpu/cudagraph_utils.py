@@ -33,6 +33,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layered_prefill import layer_group_context
 from vllm.model_executor.models.interfaces import requires_raw_input_tokens
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
@@ -83,6 +84,7 @@ class BatchExecutionDescriptor:
     num_active_loras: int = 0
     # Number of microbatches the batch is split into (DBO). 1 means no splitting.
     num_ubatches: int = 1
+    layer_group_idx: int | None = None
 
 
 def make_cudagraph_stats(
@@ -642,7 +644,7 @@ class ModelCudaGraphManager(CudaGraphManager):
 
         def store_capture_output(num_tokens: int, model_output: Any) -> None:
             """Copy outputs to persistent buffers, allocating on first use."""
-            if self.is_last_pp_rank:
+            if not isinstance(model_output, IntermediateTensors):
                 # Last PP rank (common case).
                 if self.use_aux_hidden_state_outputs:
                     hidden_states, aux_hidden_states = model_output
@@ -659,7 +661,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                 for i, aux in enumerate(aux_hidden_states):
                     self.aux_hidden_states[i][:num_tokens] = aux
             else:
-                # Non-last PP rank.
+                # Non-last PP rank or a non-final local layer group.
                 assert isinstance(model_output, IntermediateTensors)
                 intermediate_tensors = model_output
                 if self.intermediate_tensors is None:
@@ -691,8 +693,8 @@ class ModelCudaGraphManager(CudaGraphManager):
                 "intermediate_tensors": None,
                 **model_state.prepare_dummy_inputs(num_reqs, num_tokens),
             }
-            if not self.is_first_pp_rank:
-                # Update for non-first PP ranks.
+            if not self.is_first_pp_rank or (desc.layer_group_idx or 0) > 0:
+                # Resume a PP transfer or a local layer group.
                 if not requires_raw_input_tokens(model):
                     model_inputs["input_ids"] = None
                 model_inputs["inputs_embeds"] = None
@@ -758,16 +760,24 @@ class ModelCudaGraphManager(CudaGraphManager):
                         num_tokens=num_tokens,
                         has_lora=has_lora,
                         num_active_loras=desc.num_active_loras,
+                        layer_group_idx=desc.layer_group_idx,
                     )
-                with set_forward_context(
-                    attn_metadata,
-                    self.vllm_config,
-                    num_tokens=num_tokens,
-                    cudagraph_runtime_mode=cg_mode,
-                    num_tokens_across_dp=num_tokens_across_dp,
-                    slot_mapping=slot_mappings,
-                    batch_descriptor=batch_descriptor,
-                    is_padding=is_padding,
+                with (
+                    layer_group_context(
+                        model,
+                        desc.layer_group_idx,
+                        self.vllm_config.scheduler_config.num_layer_groups,
+                    ),
+                    set_forward_context(
+                        attn_metadata,
+                        self.vllm_config,
+                        num_tokens=num_tokens,
+                        cudagraph_runtime_mode=cg_mode,
+                        num_tokens_across_dp=num_tokens_across_dp,
+                        slot_mapping=slot_mappings,
+                        batch_descriptor=batch_descriptor,
+                        is_padding=is_padding,
+                    ),
                 ):
                     if cg_mode == CUDAGraphMode.PIECEWISE:
                         # PIECEWISE graph (compiled PW or breakable, chosen inside
@@ -792,7 +802,11 @@ class ModelCudaGraphManager(CudaGraphManager):
     ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]] | IntermediateTensors:
         """Replay a captured FULL cudagraph and return hidden states."""
         super().run_fullgraph(desc)
-        if not self.is_last_pp_rank:
+        if not self.is_last_pp_rank or (
+            desc.layer_group_idx is not None
+            and desc.layer_group_idx
+            < self.vllm_config.scheduler_config.num_layer_groups - 1
+        ):
             assert self.intermediate_tensors is not None
             return self.intermediate_tensors[: desc.num_tokens]
 

@@ -55,6 +55,8 @@ class BatchDescriptor:
     (like fused_moe_lora) whose grid size depends on num_active_loras
     to be properly captured.
     """
+    layer_group_idx: int | None = None
+    """Local layer group to execute, or None for the whole PP partition."""
 
 
 def _compute_sp_num_tokens(

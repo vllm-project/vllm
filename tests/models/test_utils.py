@@ -5,6 +5,10 @@ import pytest
 import regex as re
 import torch
 
+from vllm.model_executor.layered_prefill import (
+    get_layer_group_range,
+    layer_group_context,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -17,6 +21,80 @@ from vllm.model_executor.models.utils import (
 from vllm.platforms import current_platform
 
 DEVICE_TYPE = current_platform.device_type
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "start,end,groups,expected",
+    [
+        (0, 16, 2, [(0, 8), (8, 16)]),
+        (16, 32, 2, [(16, 24), (24, 32)]),
+        (7, 16, 2, [(7, 12), (12, 16)]),
+        (16, 32, 3, [(16, 22), (22, 27), (27, 32)]),
+    ],
+)
+def test_layer_groups_partition_the_local_pipeline_rank(start, end, groups, expected):
+    assert [
+        get_layer_group_range(start, end, idx, groups) for idx in range(groups)
+    ] == expected
+    with pytest.raises(ValueError, match="nonempty"):
+        get_layer_group_range(start, start + groups - 1, 0, groups)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("pp,groups", [(1, 3), (2, 3)])
+def test_layer_groups_compose_to_the_full_forward(monkeypatch, pp, groups):
+    """Each group behaves as a PP stage of a model following the PP contract."""
+    from types import SimpleNamespace
+
+    import vllm.distributed.parallel_state as parallel_state
+    from vllm.distributed import get_pp_group
+    from vllm.sequence import IntermediateTensors
+
+    class Decoder(torch.nn.Module):
+        def __init__(self, start_layer, end_layer):
+            super().__init__()
+            self.start_layer, self.end_layer = start_layer, end_layer
+            self.layers = torch.nn.ModuleList(
+                torch.nn.Linear(4, 4, bias=False) for _ in range(8)
+            )
+
+        def forward(self, input_ids, intermediate_tensors=None):
+            if get_pp_group().is_first_rank:
+                hidden = input_ids
+            else:
+                hidden = intermediate_tensors["hidden_states"]
+            for layer in self.layers[self.start_layer : self.end_layer]:
+                hidden = layer(hidden)
+            if not get_pp_group().is_last_rank:
+                return IntermediateTensors({"hidden_states": hidden})
+            return hidden * 2
+
+    torch.manual_seed(0)
+    inputs = torch.randn(5, 4)
+    full = Decoder(0, 8)
+    stages = [Decoder(r * 8 // pp, (r + 1) * 8 // pp) for r in range(pp)]
+    for stage in stages:
+        stage.load_state_dict(full.state_dict())
+
+    monkeypatch.setattr(
+        parallel_state, "_PP", SimpleNamespace(is_first_rank=True, is_last_rank=True)
+    )
+    expected = full(inputs)
+
+    output = None
+    for rank, stage in enumerate(stages):
+        pp_group = SimpleNamespace(is_first_rank=rank == 0, is_last_rank=rank == pp - 1)
+        monkeypatch.setattr(parallel_state, "_PP", pp_group)
+        for group in range(groups):
+            with layer_group_context(stage, group, groups):
+                output = stage(inputs, output)
+            assert get_pp_group() is pp_group
+            assert (stage.start_layer, stage.end_layer) == (
+                rank * 8 // pp,
+                (rank + 1) * 8 // pp,
+            )
+    torch.testing.assert_close(output, expected, rtol=0, atol=0)
 
 
 class ModuleWithBatchNorm(torch.nn.Module):

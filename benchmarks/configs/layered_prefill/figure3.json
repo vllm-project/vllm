@@ -1,0 +1,81 @@
+{
+  "paper": {
+    "url": "https://arxiv.org/html/2510.08055v2",
+    "figure": 3,
+    "hardware": "2 NVIDIA H100 80GB GPUs connected by NVLink",
+    "sources": {
+      "panels": "Figure 3(a-d): models, datasets and six request rates per panel",
+      "precision_parallelism": "Section 5.1: BF16 weights and activations, tensor parallelism on two GPUs",
+      "slo": "Table 5 and Section 5.1: TTFT and every subsequent TBT must meet their thresholds",
+      "group_policy": "Section 4.4: adaptive max(1, ceil(L / 512)); large chunks use 8192 tokens",
+      "runtime_defaults": "Original benchmarks/benchmark_batch.py: max sequences, context, memory fraction, 600-request/600-second cap, 60-second warmup/cooldown; these are not specified in Figure 3",
+      "fixed_groups": "Original benchmarks/benchmark_batch.py: Qwen 16, GPT 12. This runner currently uses fixed groups per PP rank, not the paper's adaptive policy"
+    }
+  },
+  "engine_defaults": {
+    "dtype": "bfloat16",
+    "max_num_seqs": 256,
+    "max_model_len": 32768,
+    "gpu_memory_utilization": 0.85,
+    "tensor_parallel_size": 2,
+    "pipeline_parallel_size": 1,
+    "enable_expert_parallel": false,
+    "enforce_eager": false
+  },
+  "benchmark_defaults": {
+    "num_requests": 600,
+    "max_seconds": 600,
+    "warmup_seconds": 60,
+    "relax_seconds": 60,
+    "burstiness": 1.0
+  },
+  "models": {
+    "qwen": {
+      "model_name": "Qwen/Qwen3-30B-A3B",
+      "num_layer_groups": 16,
+      "tbt_slo_ms": 125
+    },
+    "gpt-oss": {
+      "model_name": "unsloth/gpt-oss-20b-BF16",
+      "paper_model": "openai/gpt-oss-20b",
+      "checkpoint_note": "Use a BF16 checkpoint to match Section 5.1. The official checkpoint stores MXFP4 expert weights; --dtype bfloat16 alone does not dequantize them. This is a BF16 conversion, not a separately trained model.",
+      "checkpoint_source": "https://huggingface.co/unsloth/gpt-oss-20b-BF16/blob/main/config.json",
+      "num_layer_groups": 12,
+      "tbt_slo_ms": 100
+    }
+  },
+  "schedules": {
+    "chunked-prefill": {"max_num_batched_tokens": 512},
+    "layered-prefill": {"max_num_batched_tokens": 8192}
+  },
+  "panels": [
+    {
+      "id": "3a",
+      "model": "qwen",
+      "dataset": "arxiv",
+      "request_rates": [1.3, 1.4, 1.5, 1.6, 1.7, 1.8],
+      "ttft_slo_ms": 10000
+    },
+    {
+      "id": "3b",
+      "model": "gpt-oss",
+      "dataset": "arxiv",
+      "request_rates": [2.1, 2.3, 2.5, 2.7, 2.9, 3.1],
+      "ttft_slo_ms": 10000
+    },
+    {
+      "id": "3c",
+      "model": "qwen",
+      "dataset": "sharegpt",
+      "request_rates": [4.0, 4.2, 4.4, 4.6, 4.8, 5.0],
+      "ttft_slo_ms": 5000
+    },
+    {
+      "id": "3d",
+      "model": "gpt-oss",
+      "dataset": "sharegpt",
+      "request_rates": [5.8, 6.0, 6.2, 6.4, 6.6, 6.8],
+      "ttft_slo_ms": 5000
+    }
+  ]
+}

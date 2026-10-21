@@ -704,6 +704,7 @@ class EngineArgs:
     ignore_patterns: str | list[str] = get_field(LoadConfig, "ignore_patterns")
 
     enable_chunked_prefill: bool | None = None
+    num_layer_groups: int = SchedulerConfig.num_layer_groups
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
 
     scheduler_reserve_full_isl: bool = SchedulerConfig.scheduler_reserve_full_isl
@@ -1795,6 +1796,9 @@ class EngineArgs:
             "--async-scheduling", **scheduler_kwargs["async_scheduling"]
         )
         scheduler_group.add_argument(
+            "--num-layer-groups", **scheduler_kwargs["num_layer_groups"]
+        )
+        scheduler_group.add_argument(
             "--stream-interval", **scheduler_kwargs["stream_interval"]
         )
 
@@ -2647,6 +2651,7 @@ class EngineArgs:
             max_num_queued_tokens=self.max_num_queued_tokens,
             max_model_len=model_config.max_model_len,
             enable_chunked_prefill=self.enable_chunked_prefill,
+            num_layer_groups=self.num_layer_groups,
             disable_chunked_mm_input=self.disable_chunked_mm_input,
             is_multimodal_model=model_config.is_multimodal_model,
             is_encoder_decoder=model_config.is_encoder_decoder,

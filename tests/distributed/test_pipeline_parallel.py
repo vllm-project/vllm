@@ -16,12 +16,111 @@ import pytest
 
 from vllm.config.model import _FLOAT16_NOT_SUPPORTED_MODELS, RunnerOption
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.transformers_utils.config import get_config
 
 from ..models.registry import HF_EXAMPLE_MODELS
 from ..utils import compare_two_settings, create_new_process_for_each_test
 
 logger = init_logger("test_pipeline_parallel")
+
+
+def _layered_captured_groups(worker):
+    assert worker.use_v2_model_runner
+    manager = worker.model_runner.cudagraph_manager
+    groups = {"FULL": {desc.layer_group_idx for desc in manager.graphs}}
+    if manager.breakable_cg_runner is not None:
+        groups["PIECEWISE"] = {
+            desc.layer_group_idx for desc in manager.breakable_cg_runner.entries
+        }
+    return groups
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
+@pytest.mark.parametrize(
+    "model,tp,pp,ep,enforce_eager",
+    [
+        ("Qwen/Qwen3-0.6B", 1, 1, False, False),
+        ("Qwen/Qwen3-0.6B", 1, 2, False, True),
+        ("Qwen/Qwen3-0.6B", 1, 2, False, False),
+        ("Qwen/Qwen3-0.6B", 2, 1, False, False),
+        ("meta-llama/Llama-3.2-1B-Instruct", 1, 2, False, False),
+        ("deepseek-ai/DeepSeek-V2-Lite", 1, 2, False, False),
+        ("deepseek-ai/DeepSeek-V2-Lite", 2, 1, True, False),
+        ("unsloth/gpt-oss-20b-BF16", 1, 2, False, False),
+        ("Qwen/Qwen3-30B-A3B", 2, 1, True, False),
+        ("Qwen/Qwen3-30B-A3B", 2, 2, True, False),
+    ],
+)
+def test_layered_prefill_matches_full_depth(
+    vllm_runner, model, tp, pp, ep, enforce_eager, num_gpus_available, monkeypatch
+):
+    """Layer groups must preserve generation across architectures and placements."""
+    if num_gpus_available < tp * pp:
+        pytest.skip(f"Requires {tp * pp} GPUs")
+    _compare_layered_prefill(vllm_runner, model, tp, pp, ep, enforce_eager, monkeypatch)
+
+
+@create_new_process_for_each_test()
+def _compare_layered_prefill(
+    vllm_runner, model, tp, pp, ep, enforce_eager, monkeypatch
+):
+    from tests.models.utils import check_logprobs_close
+
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
+    # collective_rpc sends _layered_captured_groups to the workers.
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+    prompts = [
+        "The capital of France is",
+        "Explain why the sky is blue in one sentence.",
+        "Write a Python function to add two numbers.",
+    ]
+    results = []
+    for groups in (1, 2):
+        with vllm_runner(
+            model,
+            tensor_parallel_size=tp,
+            pipeline_parallel_size=pp,
+            enable_expert_parallel=ep,
+            distributed_executor_backend="mp",
+            enforce_eager=True if groups == 1 else enforce_eager,
+            compilation_config={"cudagraph_capture_sizes": [1, 2, 4, 8, 16, 32]},
+            async_scheduling=False,
+            num_layer_groups=groups,
+            max_model_len=256,
+            max_num_batched_tokens=32,
+            max_num_seqs=4,
+            enable_chunked_prefill=True,
+            enable_prefix_caching=True,
+            gpu_memory_utilization=0.1 if model == "Qwen/Qwen3-0.6B" else 0.5,
+            kv_cache_memory_bytes=256 * 1024**2,
+        ) as runner:
+            if groups > 1 and not enforce_eager:
+                for captures in runner.collective_rpc(_layered_captured_groups):
+                    assert captures["PIECEWISE"] == {None, 0, 1}
+                    assert captures["FULL"] == {None}
+            results.append(runner.generate_greedy_logprobs(prompts, 8, 5))
+            # Reuse completed prefixes after the pipeline has drained.
+            repeated = runner.generate_greedy_logprobs(prompts, 8, 5)
+            check_logprobs_close(
+                outputs_0_lst=results[-1],
+                outputs_1_lst=repeated,
+                name_0="cold",
+                name_1="prefix cache hit",
+                always_check_logprobs=True,
+            )
+    check_logprobs_close(
+        outputs_0_lst=results[0],
+        outputs_1_lst=results[1],
+        name_0="full depth",
+        name_1="layered prefill",
+        always_check_logprobs=True,
+    )
+
 
 VLLM_MULTI_NODE = os.getenv("VLLM_MULTI_NODE", "0") == "1"
 

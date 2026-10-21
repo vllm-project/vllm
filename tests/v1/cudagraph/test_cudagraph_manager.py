@@ -3,6 +3,7 @@
 
 from collections import defaultdict
 from contextlib import contextmanager
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -22,6 +23,7 @@ from vllm.v1.worker.gpu import cudagraph_utils as gpu_cudagraph_utils
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBuffers
+from vllm.v1.worker.gpu.layered_prefill import LayeredModelCudaGraphManager
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import (
     cudagraph_utils as spec_cudagraph_utils,
@@ -56,6 +58,30 @@ def _create_vllm_config() -> MagicMock:
     vllm_config.num_speculative_tokens = 0
     vllm_config.use_cumem_cudagraph_pool = False
     return vllm_config
+
+
+@pytest.mark.parametrize("mode", [CUDAGraphMode.FULL, CUDAGraphMode.FULL_AND_PIECEWISE])
+def test_layered_capture_keys_cover_prefill_groups_and_full_depth_decode(
+    monkeypatch, mode
+):
+    monkeypatch.setattr(
+        gpu_cudagraph_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+    monkeypatch.setattr(
+        gpu_cudagraph_utils.current_platform, "get_global_graph_pool", lambda: None
+    )
+    config = _create_vllm_config()
+    config.scheduler_config.num_layer_groups = 2
+    manager = LayeredModelCudaGraphManager(config, torch.device("cpu"), mode, 1)
+    manager._graphs_captured = True
+    prefill = manager.dispatch(1, 4, None, 0)
+    captured = manager._capture_descs[prefill.cg_mode]
+    assert all(replace(prefill, layer_group_idx=g) in captured for g in (None, 0, 1))
+    decode = manager.dispatch(4, 4, 1, 0, max_query_len=1)
+    assert decode.layer_group_idx is None
+    assert decode in manager._capture_descs[CUDAGraphMode.FULL]
 
 
 def test_full_capture_sets_graph_pool_id_before_cuda_graph(monkeypatch):
@@ -111,6 +137,7 @@ def test_full_capture_sets_graph_pool_id_before_cuda_graph(monkeypatch):
     with (
         patch.object(gpu_cudagraph_utils, "graph_capture", fake_graph_capture),
         patch.object(gpu_cudagraph_utils, "get_offloader", lambda: fake_offloader),
+        patch.object(gpu_cudagraph_utils, "current_stream", return_value=MagicMock()),
         patch.object(gpu_cudagraph_utils.torch.cuda, "CUDAGraph"),
         patch.object(
             gpu_cudagraph_utils.torch.cuda,

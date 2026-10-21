@@ -341,6 +341,12 @@ OPTIMIZATION_LEVEL_TO_CONFIG = {
 }
 
 
+def _uses_layered_prefill(config: "VllmConfig") -> bool:
+    # Partial configs (e.g. in tests) may omit the scheduler config.
+    scheduler_config = getattr(config, "scheduler_config", None)
+    return getattr(scheduler_config, "num_layer_groups", 1) > 1
+
+
 @config(config=ConfigDict(arbitrary_types_allowed=True))
 class VllmConfig:
     """Dataclass which contains all vllm-related configuration. This
@@ -705,6 +711,10 @@ class VllmConfig:
 
     @property
     def use_v2_model_runner(self) -> bool:
+        if _uses_layered_prefill(self):
+            if envs.VLLM_USE_V2_MODEL_RUNNER is False:
+                raise ValueError("Layered prefill requires Model Runner V2.")
+            return True
         if self.attention_config.hisparse_config is not None:
             if envs.VLLM_USE_V2_MODEL_RUNNER is False:
                 raise ValueError(
@@ -775,6 +785,9 @@ class VllmConfig:
         model_config = self.model_config
         if model_config is None:
             return False
+
+        if _uses_layered_prefill(self) and not model_config.enforce_eager:
+            return True
 
         architectures = set(model_config.architectures)
         return bool(architectures & default_breakable_cudagraph_architectures())
@@ -1465,6 +1478,53 @@ class VllmConfig:
         self.engram_config.verify_parallel_config(self.parallel_config)
         logger.info_once("Resolved Engram configuration: %s", str(self.engram_config))
 
+    def _validate_layered_prefill(self) -> None:
+        scheduler = self.scheduler_config
+        parallel = self.parallel_config
+        if scheduler.async_scheduling or scheduler.scheduler_cls is not None:
+            raise ValueError(
+                "Layered prefill requires synchronous scheduling and the "
+                "built-in scheduler."
+            )
+        scheduler.async_scheduling = False
+        unsupported = {
+            "speculative decoding": self.speculative_config is not None,
+            "KV transfer": self.kv_transfer_config is not None,
+            "encoder transfer": self.ec_transfer_config is not None,
+            "data parallelism": parallel.data_parallel_size > 1,
+            "context parallelism": parallel.decode_context_parallel_size > 1
+            or parallel.prefill_context_parallel_size > 1,
+            "DBO": parallel.enable_dbo,
+            "EPLB": parallel.enable_eplb,
+            "HiSparse": self.attention_config.hisparse_config is not None,
+        }
+        for feature, enabled in unsupported.items():
+            if enabled:
+                raise ValueError(f"Layered prefill does not yet support {feature}.")
+        model = self.model_config
+        if model is None:
+            return
+        if model.runner_type != "generate" or model.is_multimodal_model:
+            raise ValueError("Layered prefill requires text generation.")
+        if model.is_hybrid or model.is_attention_free:
+            raise ValueError("Layered prefill does not yet support recurrent layers.")
+        from vllm.distributed.utils import get_pp_indices
+
+        for rank in range(parallel.pipeline_parallel_size):
+            start, end = get_pp_indices(
+                model.hf_text_config.num_hidden_layers,
+                rank,
+                parallel.pipeline_parallel_size,
+            )
+            if end - start < scheduler.num_layer_groups:
+                raise ValueError(
+                    "num_layer_groups must not exceed the layer count on any PP rank."
+                )
+        # Layer selection is Python control flow. Capture each group directly
+        # instead of tracing a single full-depth torch.compile graph.
+        self.compilation_config.mode = CompilationMode.NONE
+        logger.info("Layered prefill uses Model Runner V2 without torch.compile.")
+
     def _reject_mismatched_float_kv_cache(self) -> None:
         """Reject an explicit float16/bfloat16 KV dtype that differs from the model."""
         cache_dtype = self.cache_config.cache_dtype
@@ -1493,6 +1553,9 @@ class VllmConfig:
             # and this view's empty architecture list makes the model-dependent checks
             # below unsafe (e.g. use_mla resolves the architecture registry).
             return
+
+        if self.scheduler_config.num_layer_groups > 1:
+            self._validate_layered_prefill()
 
         self._resolve_mm_encoder_only()
 
@@ -1614,6 +1677,11 @@ class VllmConfig:
 
         executor_backend = self.parallel_config.distributed_executor_backend
         executor_class = Executor.get_class(self)
+        if self.scheduler_config.num_layer_groups > 1 and executor_backend not in (
+            "mp",
+            "uni",
+        ):
+            raise ValueError("Layered prefill requires the mp or uni executor.")
         executor_supports_async_sched = executor_class.supports_async_scheduling()
         uses_rocm_deepep_ht_dbo = (
             current_platform.is_rocm()

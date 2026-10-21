@@ -232,6 +232,7 @@ hip_compat.h
 
 # Benchmark dataset
 benchmarks/**/*.json
+!benchmarks/configs/layered_prefill/*.json
 
 # Linting
 actionlint

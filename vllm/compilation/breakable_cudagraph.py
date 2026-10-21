@@ -95,9 +95,9 @@ def eager_break_during_capture(fn: F) -> F:
         def unified_attention_with_output(...):
             ...
     """
-    if not is_breakable_cudagraph_enabled():
-        return fn
 
+    # Always wrap: VllmConfig may enable breakable graphs after this decorator
+    # runs at import time. Without an active capture the call passes through.
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         capture = BreakableCUDAGraphCapture.current()

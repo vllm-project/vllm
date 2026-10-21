@@ -139,6 +139,13 @@ class SchedulerConfig:
     In real usage, this should be set in `EngineArgs.create_engine_config`.
     """
 
+    num_layer_groups: int = Field(default=1, ge=1)
+    """Number of prefill layer groups within each pipeline rank. Values above
+    one enable layered prefill: a prefill batch advances one local layer group
+    per iteration while running requests decode through all layers every
+    iteration. Requires Model Runner V2 and synchronous scheduling. Defaults to
+    1 (disabled)."""
+
     is_multimodal_model: bool = False
     """True if the model is multimodal."""
 
@@ -230,6 +237,10 @@ class SchedulerConfig:
 
     def get_scheduler_cls(self) -> type["SchedulerInterface"]:
         if self.scheduler_cls is None:
+            if self.num_layer_groups > 1:
+                from vllm.v1.core.sched.layered_prefill import LayeredPrefillScheduler
+
+                return LayeredPrefillScheduler
             if self.async_scheduling:
                 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 
@@ -282,6 +293,7 @@ class SchedulerConfig:
         # PLE and other model components allocate static per-request buffers.
         # Their shapes are captured in compiled graphs.
         factors.append(self.max_num_seqs)
+        factors.append(self.num_layer_groups)
 
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
