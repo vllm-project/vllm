@@ -213,7 +213,10 @@ OUTPUT_DIR = sys.argv[2] if len(sys.argv) > 2 else os.path.dirname(
 # Target archs, e.g. "gfx950" or "gfx942,gfx1100" (passed by CMake from
 # VLLM_GPU_ARCHES). is_navi_gpu() only selects the Navi launcher on gfx11/gfx12,
 # so when the build has no such arch the Navi kernel set can be dropped: it is
-# ~11% of the kernels emitted per translation unit.
+# ~11% of the kernels emitted per translation unit. Keep this predicate in sync
+# with is_navi_gpu() in csrc/rocm/attention_dispatch.cu. An empty arch list (no
+# argument, e.g. running the script by hand) keeps the Navi set, since the target
+# is unknown.
 ARCHS = [a for a in (sys.argv[1] if len(sys.argv) > 1 else "").split(",") if a]
 HAS_NAVI = any(a.startswith(("gfx11", "gfx12")) for a in ARCHS)
 
