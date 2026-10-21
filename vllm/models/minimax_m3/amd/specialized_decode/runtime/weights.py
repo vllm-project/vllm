@@ -42,7 +42,7 @@ def effective_activation_mode(experts) -> EffectiveActivationMode:
 
 def _require(condition: bool, message: str) -> None:
     if not condition:
-        raise ValueError(f"--monokernel {message}.")
+        raise ValueError(f"--specialized-decode {message}.")
 
 
 def _tensor(

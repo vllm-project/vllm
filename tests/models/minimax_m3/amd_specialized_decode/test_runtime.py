@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Host side of --monokernel: config and weight refusals, per-step routing,
+"""Host side of --specialized-decode: config and weight refusals, per-step routing,
 the per-forward plan, cache binding and the fail-stop gate."""
 
 from collections import Counter
@@ -105,7 +105,7 @@ def _vllm_config(layers=60, **parallel):
             resolve_indexer_kv_dtype=lambda _default: "fp8"
         ),
         compilation_config=SimpleNamespace(mode=CompilationMode.NONE),
-        kernel_config=SimpleNamespace(moe_backend="aiter", monokernel=True),
+        kernel_config=SimpleNamespace(moe_backend="aiter", specialized_decode=True),
         lora_config=None,
         kv_transfer_config=SimpleNamespace(kv_connector=None),
         aux_output_config=SimpleNamespace(enable_return_routed_experts=False),
