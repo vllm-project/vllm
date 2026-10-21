@@ -180,6 +180,7 @@ class BlockPool:
         # Cache for block lookup
         self.cached_block_hash_to_block: BlockHashToBlockMap = BlockHashToBlockMap()
         self.cached_block_hashes_by_block: dict[int, set[BlockHashWithGroupId]] = {}
+        self._allocation_generation = 0
 
         # To represent a placeholder block with block_id=0.
         # The ref_cnt of null_block is not maintained, needs special care to
@@ -679,13 +680,17 @@ class BlockPool:
             raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
 
         ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
-
+        if not ret:
+            return ret
+        self._allocation_generation += 1
+        generation = self._allocation_generation
         if self._reuse_watchers:
             self._notify_reuse(ret)
 
         # In order to only iterate the list once, we duplicated code a bit
         if self.enable_caching:
             for block in ret:
+                block.allocation_generation = generation
                 self._maybe_evict_cached_block(block)
                 assert block.ref_cnt == 0
                 block.ref_cnt += 1
@@ -693,6 +698,7 @@ class BlockPool:
                     self.metrics_collector.on_block_allocated(block)
         else:
             for block in ret:
+                block.allocation_generation = generation
                 assert block.ref_cnt == 0
                 block.ref_cnt += 1
                 if self.metrics_collector:

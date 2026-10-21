@@ -3599,6 +3599,48 @@ def test_maybe_evict_cached_block():
     assert pool.cached_block_hash_to_block._cache == {}
 
 
+def test_allocator_generation_survives_cached_touch_and_changes_on_reuse():
+    pool = BlockPool(num_gpu_blocks=2, enable_caching=True, hash_block_size=4)
+    block = pool.get_new_blocks(1)[0]
+    first = block.allocation_generation
+    block_hash = make_block_hash_with_group_id(BlockHash(b"generation"), 0)
+    block.set_block_hash(block_hash)
+    pool.cached_block_hash_to_block.insert(block_hash, block)
+
+    pool.free_blocks([block])
+    pool.touch([block])
+    assert block.allocation_generation == first
+    assert not pool.is_block_writable(block)
+
+    pool.free_blocks([block])
+    reused = pool.get_new_blocks(1)[0]
+    assert reused is block
+    assert reused.allocation_generation > first
+    assert reused.block_hash is None
+
+
+def test_finish_snapshot_clips_ids_and_allocation_generations_together():
+    block_size = 4
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(block_size, 6),
+        max_model_len=128,
+        enable_caching=False,
+        hash_block_size=block_size,
+    )
+    request = make_request("finish", list(range(10)), block_size, sha256)
+    assert manager.allocate_slots(request, 10) is not None
+
+    block_ids, identities = manager.get_block_ids_and_generations_for_computed_tokens(
+        request.request_id, num_computed_tokens=5
+    )
+
+    assert len(block_ids[0]) == len(identities[0]) == 2
+    assert identities[0] == [
+        (block_id, manager.block_pool.blocks[block_id].allocation_generation)
+        for block_id in block_ids[0]
+    ]
+
+
 @pytest.mark.parametrize("blocks_to_cache", [2, 3, 10])
 def test_kv_cache_events(blocks_to_cache: int):
     block_size = 16
