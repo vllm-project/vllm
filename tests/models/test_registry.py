@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import warnings
+from pathlib import Path
 
 import pytest
+import regex as re
 import torch.cuda
 
 from vllm.model_executor.models import (
@@ -16,9 +18,18 @@ from vllm.model_executor.models.adapters import (
     as_seq_cls_model,
 )
 from vllm.model_executor.models.registry import (
+    _EMBEDDING_MODELS,
+    _LATE_INTERACTION_MODELS,
     _MULTIMODAL_MODELS,
+    _OOT_SUPPORTED_MODELS,
+    _PREVIOUSLY_SUPPORTED_MODELS,
+    _REWARD_MODELS,
+    _SEQUENCE_CLASSIFICATION_MODELS,
     _SPECULATIVE_DECODING_MODELS,
     _TEXT_GENERATION_MODELS,
+    _TOKEN_CLASSIFICATION_MODELS,
+    _TRANSFORMERS_BACKEND_MODELS,
+    _TRANSFORMERS_SUPPORTED_MODELS,
     ModelRegistry,
     _LazyRegisteredModel,
 )
@@ -236,4 +247,114 @@ def test_hf_registry_coverage():
     assert not untested_archs, (
         "Please add the following architectures to "
         f"`tests/models/registry.py`: {untested_archs}"
+    )
+
+
+_DOCS_MODELS_DIR = Path(__file__).parents[2] / "docs" / "models"
+
+# Pooling-mode and truncation-policy values show up as first-column tokens in
+# the pooling docs tables; they are not architecture names.
+_POOLING_ENUM_TOKENS = frozenset(
+    {"ALL", "CLS", "END", "LAST", "MEAN", "NONE", "START", "STEP"}
+)
+
+_REGISTRY_ARCHS = (
+    set(_TEXT_GENERATION_MODELS)
+    | set(_EMBEDDING_MODELS)
+    | set(_LATE_INTERACTION_MODELS)
+    | set(_REWARD_MODELS)
+    | set(_TOKEN_CLASSIFICATION_MODELS)
+    | set(_SEQUENCE_CLASSIFICATION_MODELS)
+    | set(_MULTIMODAL_MODELS)
+)
+
+# Architectures served by other paths (out-of-tree plugins, the Transformers
+# fallback backend, speculative decoding) are listed in the docs without
+# being part of the model registry.
+_NON_REGISTRY_DOCS_ARCHS = (
+    set(_SPECULATIVE_DECODING_MODELS)
+    | set(_TRANSFORMERS_SUPPORTED_MODELS)
+    | set(_TRANSFORMERS_BACKEND_MODELS)
+    | set(_OOT_SUPPORTED_MODELS)
+)
+
+
+def _iter_docs_arch_tokens():
+    """Yield (token, page, is_converted_row) for every backticked token in the
+    first column of a model docs table."""
+    pages = [
+        _DOCS_MODELS_DIR / "supported_models.md",
+        _DOCS_MODELS_DIR / "structured_decisions_models.md",
+        *sorted((_DOCS_MODELS_DIR / "pooling_models").glob("*.md")),
+    ]
+    for page in pages:
+        for line in page.read_text(encoding="utf-8").splitlines():
+            if not line.startswith("|") or line.startswith("| -"):
+                continue
+            cells = line.split("|")
+            if len(cells) < 3:
+                continue
+            arch_cell = cells[1]
+            for token in re.findall(r"`([A-Za-z][A-Za-z0-9_.]+)`", arch_cell):
+                if any(c.isupper() for c in token):
+                    yield token, page.name, "<sup>C</sup>" in arch_cell
+
+
+def _require_docs_dir():
+    if not _DOCS_MODELS_DIR.exists():
+        pytest.skip("model docs are not available in this installation")
+
+
+# These tests only parse the registry dicts and the docs tables; no global
+# vLLM state is created, so the post-test cleanup is unnecessary.
+@pytest.mark.skip_global_cleanup
+def test_docs_architectures_are_registered():
+    """Docs table architectures must be registry architectures, converted
+    models (rows marked ``<sup>C</sup>``), or documented non-registry archs."""
+    _require_docs_dir()
+    unknown: dict[str, list[str]] = {}
+    for token, page, is_converted_row in _iter_docs_arch_tokens():
+        if token in _REGISTRY_ARCHS or token in _NON_REGISTRY_DOCS_ARCHS:
+            continue
+        if is_converted_row or token in _POOLING_ENUM_TOKENS:
+            continue
+        unknown.setdefault(page, []).append(token)
+
+    assert not unknown, (
+        "The model docs list architectures the registry does not know; fix "
+        f"the rows or register the architectures: {unknown}. Rows marked "
+        "with <sup>C</sup> are models converted from a generative "
+        "architecture and are exempt."
+    )
+
+
+@pytest.mark.skip_global_cleanup
+def test_registry_architectures_are_documented():
+    """Every architecture in the documented registry dicts must appear in the
+    model docs tables."""
+    _require_docs_dir()
+    documented = {token for token, _, _ in _iter_docs_arch_tokens()}
+    missing = sorted(_REGISTRY_ARCHS - documented)
+
+    assert not missing, (
+        "Registry architectures are missing from the model docs; add them "
+        "to docs/models/supported_models.md, the relevant "
+        "docs/models/pooling_models/ page, or "
+        f"docs/models/structured_decisions_models.md: {missing}"
+    )
+
+
+@pytest.mark.skip_global_cleanup
+def test_removed_architectures_are_absent_from_docs():
+    """Architectures dropped from vLLM must not remain in the docs tables."""
+    _require_docs_dir()
+    resurrected: dict[str, list[str]] = {}
+    for token, page, _ in _iter_docs_arch_tokens():
+        if token in _PREVIOUSLY_SUPPORTED_MODELS and token not in _REGISTRY_ARCHS:
+            resurrected.setdefault(token, []).append(page)
+
+    assert not resurrected, (
+        "Architectures removed from vLLM are still listed as supported in "
+        "the docs; drop those rows (the docs keep no previously-supported "
+        f"section): {resurrected}"
     )

@@ -37,9 +37,10 @@ You can compute pairwise similarity scores to build a similarity matrix using th
 
 | Architecture | Models | Example HF Models | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | ------------------------------ | ------------------------------------------ |
-| `BertModel` | BERT-based | `BAAI/bge-base-en-v1.5`, `Snowflake/snowflake-arctic-embed-xs`, etc. | ✅︎ | |
+| `BertModel`, `BertForMaskedLM` | BERT-based | `BAAI/bge-base-en-v1.5`, `Snowflake/snowflake-arctic-embed-xs`, etc. | ✅︎ | |
 | `BertSpladeSparseEmbeddingModel` | SPLADE | `naver/splade-v3` | | |
 | `BgeM3EmbeddingModel` | BGE-M3 | `BAAI/bge-m3` | | |
+| `DeepseekV3BidirectionalModel`<sup>C</sup> | DeepSeek-V3-based with bidirectional attention | `ai-sage/Giga-Embeddings-instruct-10B-A1.8B-0826`, etc. | ✅︎ | ✅︎ |
 | `Gemma2Model`<sup>C</sup> | Gemma 2-based | `BAAI/bge-multilingual-gemma2`, etc. | ✅︎ | ✅︎ |
 | `Gemma3TextModel`<sup>C</sup> | Gemma 3-based | `google/embeddinggemma-300m`, etc. | ✅︎ | ✅︎ |
 | `GteModel` | Arctic-Embed-2.0-M | `Snowflake/snowflake-arctic-embed-m-v2.0`. | | |
@@ -89,11 +90,13 @@ You can compute pairwise similarity scores to build a similarity matrix using th
 | Architecture | Models | Inputs | Example HF Models | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
 | ------------ | ------ | ------ | ----------------- | ------------------------------ | ------------------------------------------ |
 | `CLIPModel` | CLIP | T / I | `openai/clip-vit-base-patch32`, `openai/clip-vit-large-patch14`, etc. | | |
+| `EmbeddingGemma2Model` | EmbeddingGemma 2 | T + I | `google/embeddinggemma-2`, etc. | | |
 | `LlamaNemotronVLModel` | Llama Nemotron Embedding + SigLIP | T + I | `nvidia/llama-nemotron-embed-vl-1b-v2` | | |
 | `LlavaNextForConditionalGeneration`<sup>C</sup> | LLaVA-NeXT-based | T / I | `royokong/e5-v` | | ✅︎ |
 | `Phi3VForCausalLM`<sup>C</sup> | Phi-3-Vision-based | T + I | `TIGER-Lab/VLM2Vec-Full` | | ✅︎ |
 | `Qwen3VLForConditionalGeneration`<sup>C</sup> (see note) | Qwen3-VL | T + I + V | `Qwen/Qwen3-VL-Embedding-2B`, etc. | ✅︎ | ✅︎ |
 | `SiglipModel` | SigLIP, SigLIP2 | T / I | `google/siglip-base-patch16-224`, `google/siglip2-base-patch16-224` | | |
+| `Terratorch` | Terratorch (Prithvi-EO) | T + I | `ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11`, etc. | | |
 | `*ForConditionalGeneration`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | \* | N/A | \* | \* |
 
 <sup>C</sup> Automatically converted into an embedding model via `--convert embed`. ([details](./README.md#model-conversion))  
