@@ -58,3 +58,15 @@ The `gpu_name` can be automatically detected by calling `torch.cuda.get_device_n
 
 Optimal kernel configuration files are saved as JSON files with the structure `config_data[max_loras][num_slices][m][k][n][i]`,
 where `i` is an optional dimension in the `fused_moe_lora` configuration, representing the intermediate size of the MoE layer.
+
+## Determinism
+
+By default, the shrink kernels use `split_k > 1` and combine partial results with relaxed atomic additions. Their order can vary,
+so outputs may differ slightly between runs and can lead to different greedy tokens ([#50059](https://github.com/vllm-project/vllm/issues/50059)).
+
+For reproducible LoRA outputs, either:
+
+- Set `VLLM_BATCH_INVARIANT=1` to use deterministic shrink implementations for BF16/FP16 and FP8. Tuned configs are ignored in
+  this mode ([#59377](https://github.com/vllm-project/vllm/pull/59377)). See [Batch Invariance](../../../../docs/features/batch_invariance.md).
+- Or use a tuned `{gpu_name}_SHRINK.json` with `"split_k": 1` in every entry, loaded via `VLLM_TUNED_CONFIG_FOLDER`. This makes
+  the shrink reduction deterministic for a fixed batch shape, but it is not batch invariant.

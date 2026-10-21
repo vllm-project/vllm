@@ -1,14 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Batch-invariant LoRA shrink: fixed split-K partials, fixed-order reduction."""
+"""Batch-invariant LoRA shrink coverage for BF16/FP16 and FP8 paths."""
+
+import math
 
 import pytest
 import torch
+from tests.utils import requires_fp8
 from utils import skip_if_not_cuda_alike
 
+import vllm.lora.ops.triton_ops.lora_shrink_fp8_op as shrink_fp8_op
 import vllm.lora.ops.triton_ops.lora_shrink_op as shrink_op
 import vllm.lora.ops.triton_ops.utils as lora_utils
-from vllm.lora.ops.triton_ops import LoRAKernelMeta, lora_shrink
+from vllm.lora.ops.triton_ops import LoRAKernelMeta, lora_shrink, lora_shrink_fp8
 from vllm.lora.ops.triton_ops.utils import _LORA_A_PTR_DICT
 from vllm.utils.torch_utils import set_random_seed
 
@@ -36,6 +40,42 @@ def _shrink(inputs, weights, mapping, scaling):
     _LORA_A_PTR_DICT.clear()
     args = meta.meta_args(token_nums=num_tokens, specialize_active_lora=False)
     lora_shrink(inputs, weights, out, *args, scaling)
+    return out
+
+
+def _shrink_fp8(
+    inputs,
+    weights,
+    mapping,
+    scaling,
+    a_scale,
+    b_scales,
+    group_k,
+    group_n,
+):
+    num_tokens = inputs.size(0)
+    meta = LoRAKernelMeta.make(weights[0].size(0), num_tokens, device=DEVICE)
+    meta.prepare_tensors(mapping)
+    out = torch.zeros(
+        (len(weights), num_tokens, weights[0].size(1)),
+        dtype=torch.float32,
+        device=DEVICE,
+    )
+    _LORA_A_PTR_DICT.clear()
+    shrink_fp8_op._SHRINK_LORA_SCALE_PTR_DICT.clear()
+    args = meta.meta_args(token_nums=num_tokens, specialize_active_lora=False)
+    lora_shrink_fp8(
+        inputs,
+        weights,
+        out,
+        *args,
+        scaling,
+        b_scales,
+        a_scale=a_scale,
+        group_k=group_k,
+        group_n=group_n,
+        use_fp8_w8a8=True,
+    )
     return out
 
 
@@ -97,3 +137,58 @@ def test_lora_shrink_invariant_across_batch_sizes(monkeypatch, nslices):
         out = _shrink(inputs, weights, mapping, 0.7)
         assert torch.equal(out[:, pos], expected), num_tokens
     assert len(reduce_grids) == 7
+
+
+@requires_fp8
+def test_lora_shrink_fp8_invariant_across_batch_sizes():
+    set_random_seed(0)
+    dtype, hidden_size, group_k, group_n = torch.float8_e4m3fn, 2560, 128, 128
+    k_groups = math.ceil(hidden_size / group_k)
+    weights = [
+        (torch.randn((3, 16, hidden_size), device=DEVICE) / 4).to(dtype)
+    ]
+    b_scales = [
+        torch.rand((3, 1, k_groups), dtype=torch.float32, device=DEVICE) + 0.5
+    ]
+    target = (torch.randn((1, hidden_size), device=DEVICE) / 4).to(dtype)
+    target_scale = (
+        torch.rand((1, k_groups), dtype=torch.float32, device=DEVICE) + 0.5
+    )
+    target_id = torch.zeros(1, dtype=torch.int32, device=DEVICE)
+    expected = _shrink_fp8(
+        target,
+        weights,
+        target_id,
+        0.7,
+        target_scale,
+        b_scales,
+        group_k,
+        group_n,
+    )[:, 0]
+
+    for num_tokens in (31, 32, 33, 127, 128, 129):
+        inputs = (
+            torch.randn((num_tokens, hidden_size), device=DEVICE) / 4
+        ).to(dtype)
+        a_scale = (
+            torch.rand(
+                (num_tokens, k_groups), dtype=torch.float32, device=DEVICE
+            )
+            + 0.5
+        )
+        mapping = torch.randint(
+            -1, 3, (num_tokens,), dtype=torch.int32, device=DEVICE
+        )
+        pos = num_tokens // 2
+        inputs[pos], a_scale[pos], mapping[pos] = target[0], target_scale[0], 0
+        out = _shrink_fp8(
+            inputs,
+            weights,
+            mapping,
+            0.7,
+            a_scale,
+            b_scales,
+            group_k,
+            group_n,
+        )
+        assert torch.equal(out[:, pos], expected), num_tokens
