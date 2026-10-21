@@ -626,12 +626,6 @@ class AiterUnquantizedExperts(AiterExperts):
         SUPPORTED_W_A = [(None, None)]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
-    @staticmethod
-    def _supports_shape(hidden_dim: int) -> bool:
-        # The CK 2stages kernels tile hidden_dim up to 128 wide (the width
-        # grows with inter_dim and block_m) and reject a remainder at runtime.
-        return hidden_dim % 128 == 0
-
 
 class AiterFp8BlockExperts(AiterExperts):
     """128x128 block-quantized weight scale, 128-grouped dynamic

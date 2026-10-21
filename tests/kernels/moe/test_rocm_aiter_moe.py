@@ -30,8 +30,9 @@ import torch.nn.functional as F
 
 from tests.kernels.moe.utils import _interleave_gate_up_rows
 from tests.kernels.utils import _assert_deterministic
+from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_cdna, on_gfx942, on_gfx950
+from vllm.platforms.rocm import on_gfx942, on_gfx950
 from vllm.utils.torch_utils import set_random_seed
 
 pytestmark = pytest.mark.skipif(
@@ -1530,9 +1531,7 @@ def test_aiter_moe_reload_zeroes_intermediate_padding(
         assert torch.all(w2[:, :, intermediate:] == 0)
 
 
-def _aiter_accepts_intermediate(
-    intermediate: int, num_tokens: int, hidden_dim: int = 1024
-) -> bool:
+def _aiter_accepts_intermediate(intermediate: int, num_tokens: int) -> bool:
     """Run the real AITER CK MoE kernel and report whether it dispatched."""
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
         ActivationMethod,
@@ -1541,7 +1540,7 @@ def _aiter_accepts_intermediate(
 
     case = _make_moe_case(
         num_tokens=num_tokens,
-        hidden_dim=hidden_dim,
+        hidden_dim=1024,
         intermediate_dim=intermediate,
         num_experts=8,
         topk=2,
@@ -1563,8 +1562,8 @@ def _aiter_accepts_intermediate(
 
 
 @pytest.mark.skipif(
-    not on_cdna(),
-    reason="CDNA ROCm only",
+    not is_aiter_found_and_supported(),
+    reason="Only test on ROCm with AITER installed and supported",
 )
 @pytest.mark.parametrize("intermediate", [192, 224, 256])
 # With topk=2 and 8 experts, these token counts select block_m 32 / 64 / 128
@@ -1590,27 +1589,3 @@ def test_aiter_moe_alignment_rule_holds_across_block_m(intermediate, num_tokens)
         intermediate % alignment == 0
     )
     assert _aiter_accepts_intermediate(padded, num_tokens)
-
-
-@pytest.mark.skipif(
-    not on_cdna(),
-    reason="CDNA ROCm only",
-)
-@pytest.mark.parametrize("hidden_dim", [192, 256, 2880, 3072])
-def test_aiter_unquantized_moe_hidden_rule_matches_kernel(hidden_dim):
-    """AiterUnquantizedExperts must accept exactly the hidden sizes the kernel
-    runs on both sides of the ``inter_dim <= 192`` switch and at every
-    ``block_m``; 64-aligned sizes such as 2880 only run for some of them.
-    """
-    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
-        AiterUnquantizedExperts,
-    )
-
-    _assert_aiter_supported()
-
-    runs_everywhere = all(
-        _aiter_accepts_intermediate(intermediate, num_tokens, hidden_dim=hidden_dim)
-        for intermediate in (64, 256)
-        for num_tokens in (1024, 2560, 5120)
-    )
-    assert AiterUnquantizedExperts._supports_shape(hidden_dim) == runs_everywhere

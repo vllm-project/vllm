@@ -219,17 +219,7 @@ def test_select_default_backend_by_platform(
 @pytest.mark.skipif(
     not current_platform.is_rocm(), reason="ROCm-specific backend selection test"
 )
-@pytest.mark.parametrize(
-    ("hidden_dim", "expected_backend"),
-    [
-        (128, UnquantizedMoeBackend.AITER),
-        # e.g. tiny-random/qwen3-next-moe; AITER's CK kernels cannot run it.
-        (8, UnquantizedMoeBackend.TRITON),
-    ],
-)
-def test_select_rocm_aiter_backend(
-    mock_aiter_enabled, mock_has_flashinfer, hidden_dim, expected_backend
-):
+def test_select_rocm_aiter_backend(mock_aiter_enabled, mock_has_flashinfer):
     """Test ROCm backend selection when AITER is available."""
     with patch(
         "vllm.model_executor.layers.fused_moe.oracle.unquantized.current_platform"
@@ -241,12 +231,12 @@ def test_select_rocm_aiter_backend(
         mock_platform.is_tpu.return_value = False
         mock_platform.is_out_of_tree.return_value = False
 
-        moe_config = make_dummy_moe_config(hidden_dim=hidden_dim)
+        moe_config = make_dummy_moe_config()
         selected_backend, expert_cls = select_unquantized_moe_backend(
             moe_config=moe_config,
         )
 
-        assert selected_backend == expected_backend
+        assert selected_backend == UnquantizedMoeBackend.AITER
         assert expert_cls is not None
 
 
