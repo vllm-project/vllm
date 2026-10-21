@@ -481,3 +481,29 @@ def test_cudagraph_pool_sleep(level):
     weight.fill_(2.0)  # Level 2 discards weights; emulate the reload.
     held[0].replay()
     assert torch.equal(held[1], torch.full_like(x, 5.0))
+
+
+@create_new_process_for_each_test("spawn")
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="Only ROCm splits allocations"
+)
+def test_single_allocation_survives_sleep():
+    allocator = get_mem_allocator_instance()
+    numel = 600 * 1024 * 1024 // 4  # more than one 256 MiB chunk
+    with allocator.use_memory_pool("kv_cache", single_allocation=True):
+        kv = torch.full((numel,), 3.0, device=DEVICE_TYPE)
+    with allocator.use_memory_pool("weights"):
+        weights = torch.full((numel,), 2.0, device=DEVICE_TYPE)
+
+    def chunks(tag: str) -> list:
+        (data,) = [d for d in allocator.pointer_to_data.values() if d.tag == tag]
+        return data.handle[3]
+
+    single = chunks("kv_cache")
+    assert len(single) == 1 and len(chunks("weights")) > 1
+    allocator.sleep(offload_tags=("weights", "kv_cache"))
+    assert mapped_usage(allocator) == 0
+    allocator.wake_up()
+    assert chunks("kv_cache") == single
+    assert torch.equal(kv, torch.full_like(kv, 3.0))
+    assert torch.equal(weights, torch.full_like(weights, 2.0))
