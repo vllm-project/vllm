@@ -815,8 +815,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT": lambda: float(
         os.environ.get("VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT", "30")
     ),
-    # Maximum template instructions (MiniJinja fuel) for a single chat template
-    # render in the Rust frontend. Set to 0 to disable the limit.
+    # Maximum template instructions (MiniJinja fuel) for rendering a
+    # request-supplied chat template (--trust-request-chat-template) in the
+    # Rust frontend; the server's own template has no limit. Set to 0 to
+    # disable the limit.
     "VLLM_CHAT_TEMPLATE_FUEL": lambda: int(
         os.environ.get("VLLM_CHAT_TEMPLATE_FUEL", "500000")
     ),

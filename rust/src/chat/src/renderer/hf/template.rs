@@ -29,15 +29,15 @@ use crate::renderer::hf::{TemplateMessage, TemplateTool};
 
 type Result<T> = std::result::Result<T, TemplateError>;
 
-/// Default fuel budget for template rendering. Prevents unbounded loops and
-/// string operations from exhausting CPU. Each template instruction consumes
-/// one unit of fuel; when depleted, rendering aborts with an error.
+/// Default fuel budget for rendering request-supplied templates. Prevents
+/// unbounded loops and string operations from exhausting CPU. Each template
+/// instruction consumes one unit of fuel; when depleted, rendering aborts with
+/// an error.
 const DEFAULT_TEMPLATE_FUEL: u64 = 500_000;
 
-/// Fuel budget for each render, overridable with `VLLM_CHAT_TEMPLATE_FUEL`.
-/// `0` disables the limit.
-// TODO: separate budget for request templates once `--trust-request-chat-template` lands.
-fn template_fuel() -> Option<u64> {
+/// Fuel budget for request-supplied templates, overridable with
+/// `VLLM_CHAT_TEMPLATE_FUEL`. `0` disables the limit.
+pub(super) fn request_template_fuel() -> Option<u64> {
     let fuel = std::env::var("VLLM_CHAT_TEMPLATE_FUEL")
         .ok()
         .and_then(|value| value.parse().ok())
@@ -46,13 +46,11 @@ fn template_fuel() -> Option<u64> {
 }
 
 /// Build a pre-configured environment with the given template string.
-fn build_environment(template: String, fuel: Option<u64>) -> Result<Environment<'static>> {
+fn build_environment(template: String) -> Result<Environment<'static>> {
     let mut env = Environment::new();
 
     env.set_trim_blocks(true);
     env.set_lstrip_blocks(true);
-
-    env.set_fuel(fuel);
 
     env.add_template_owned("chat".to_owned(), template)?;
 
@@ -170,11 +168,18 @@ impl CompiledChatTemplate {
             ChatTemplateContentFormatOption::String => ChatTemplateContentFormat::String,
             ChatTemplateContentFormatOption::OpenAi => ChatTemplateContentFormat::OpenAi,
         };
-        let env = build_environment(template, template_fuel())?;
+        let env = build_environment(template)?;
         Ok(Self {
             env,
             content_format,
         })
+    }
+
+    /// Limit each render to `fuel` template instructions; `None` removes the
+    /// limit.
+    pub fn with_fuel(mut self, fuel: Option<u64>) -> Self {
+        self.env.set_fuel(fuel);
+        self
     }
 
     /// Apply the compiled template to the given context and return the rendered
@@ -307,9 +312,10 @@ mod tests {
         let template =
             "{% for turn in turns %}{% for _ in range(10) %}{{ turn }}{% endfor %}{% endfor %}";
         let template = CompiledChatTemplate {
-            env: build_environment(template.to_string(), fuel)?,
+            env: build_environment(template.to_string())?,
             content_format: ChatTemplateContentFormat::String,
-        };
+        }
+        .with_fuel(fuel);
         let mut kwargs = HashMap::new();
         kwargs.insert("turns".to_string(), serde_json::json!(vec![0; turns]));
         template.apply(TemplateContext {
