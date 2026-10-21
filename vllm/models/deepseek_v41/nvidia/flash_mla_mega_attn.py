@@ -186,7 +186,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
                 "wo_a group."
             )
         self.n_wv_group = self.padded_heads // WV_GROUP_SIZE
-        # On CPU: the loaders keep these, and weights-pool copies die in sleep.
+        # Load-time only (held by the weight loaders); on CPU so sleep cannot drop them.
         with torch.device("cpu"):
             q_perm = q_fused_permutation(self.n_local_heads, self.head_dim)
             o_perm = o_fused_permutation(WV_GROUP_SIZE, self.head_dim)
