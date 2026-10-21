@@ -110,7 +110,8 @@ mod tests {
     use super::MiniMaxM3ReasoningParser;
     use crate::reasoning::ReasoningParser;
     use crate::reasoning::tests::{
-        MM_THINK_END_ID, MM_THINK_START_ID, content_str, fake_tokenizer, push_str, reasoning_str,
+        MM_THINK_END_ID, MM_THINK_START_ID, content_str, decode, fake_tokenizer, push_str,
+        reasoning_str,
     };
 
     #[test]
@@ -148,8 +149,9 @@ mod tests {
         let tokenizer = Arc::new(fake_tokenizer());
         let mut parser = MiniMaxM3ReasoningParser::new(tokenizer).unwrap();
 
-        assert!(push_str(&mut parser, "</mm").is_empty());
-        let delta = push_str(&mut parser, ":think>answer");
+        let [head, rest] = decode(["</mm", ":think>answer"]);
+        assert!(parser.push(head).unwrap().is_empty());
+        let delta = parser.push(rest).unwrap();
         assert_eq!(delta.reasoning, None);
         assert_eq!(content_str(&delta), Some("answer"));
     }

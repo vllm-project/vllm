@@ -3,8 +3,8 @@
 
 use std::sync::Arc;
 
-use vllm_tokenizer::test_utils::TestTokenizer;
-use vllm_tokenizer::{DecodedText, DynTokenizer, TokenAnchor, TokenAttribution};
+use vllm_tokenizer::test_utils::{TestTokenizer, decode_chunks};
+use vllm_tokenizer::{DecodedText, DynTokenizer, TokenAnchor, TokenAttribution, Tokenizer as _};
 
 use super::{
     CohereCmdReasoningParser, DeepSeekR1ReasoningParser, DelimitedReasoningParser,
@@ -40,9 +40,17 @@ pub(crate) fn fake_tokenizer() -> TestTokenizer {
         .with_regular_token("</seed:think>", SEED_THINK_END_ID)
 }
 
-/// Feed an unattributed text delta into a reasoning parser.
+/// Decode `chunks` with [`fake_tokenizer`] as the frontend streams them:
+/// delimiters spelled in full are their dedicated tokens, and a delimiter split
+/// across chunks keeps its token anchor.
+pub(crate) fn decode<const N: usize>(chunks: [&str; N]) -> [DecodedText; N] {
+    decode_chunks(&fake_tokenizer(), &chunks).try_into().unwrap()
+}
+
+/// Feed one text delta into a reasoning parser as the frontend delivers it.
 pub(crate) fn push_str<P: ReasoningParser + ?Sized>(parser: &mut P, delta: &str) -> ReasoningDelta {
-    parser.push(DecodedText::unattributed(delta)).unwrap()
+    let [delta] = decode([delta]);
+    parser.push(delta).unwrap()
 }
 
 /// Return the reasoning text of a delta, if any.
@@ -62,7 +70,8 @@ fn delimited_content_only_stream() {
         .build()
         .unwrap();
 
-    let delta = parser.push(DecodedText::unattributed("plain content"));
+    let [delta] = decode(["plain content"]);
+    let delta = parser.push(delta);
     assert_eq!(content_str(&delta), Some("plain content"));
 }
 
@@ -73,7 +82,8 @@ fn delimited_single_chunk_with_reasoning_and_content() {
         .build()
         .unwrap();
 
-    let delta = parser.push(DecodedText::unattributed("<think>reason</think>answer"));
+    let [delta] = decode(["<think>reason</think>answer"]);
+    let delta = parser.push(delta);
     assert_eq!(reasoning_str(&delta), Some("reason"));
     assert_eq!(content_str(&delta), Some("answer"));
 }
@@ -85,8 +95,9 @@ fn delimited_partial_tokens_across_chunks() {
         .build()
         .unwrap();
 
-    assert!(parser.push(DecodedText::unattributed("<thi")).is_empty());
-    let delta = parser.push(DecodedText::unattributed("nk>reason</think>answer"));
+    let [head, rest] = decode(["<thi", "nk>reason</think>answer"]);
+    assert!(parser.push(head).is_empty());
+    let delta = parser.push(rest);
     assert_eq!(reasoning_str(&delta), Some("reason"));
     assert_eq!(content_str(&delta), Some("answer"));
 }
@@ -99,7 +110,9 @@ fn delimited_finish_flushes_buffer() {
         .unwrap();
     parser.initialize(&[THINK_START_ID]).unwrap();
 
-    let delta = parser.push(DecodedText::unattributed("unfinished</thi"));
+    // The stream ends inside a `</think>` token that output holdback split.
+    let [unfinished, _] = decode(["unfinished</thi", "nk>"]);
+    let delta = parser.push(unfinished);
     assert_eq!(reasoning_str(&delta), Some("unfinished"));
     let final_delta = parser.finish();
     assert_eq!(reasoning_str(&final_delta), Some("</thi"));
@@ -158,7 +171,7 @@ fn delimited_marker_tokens_are_dropped_from_attributions() {
 
     assert_eq!(collected.reasoning_text, "reason");
     assert_eq!(collected.content_text, "answer");
-    // The marker tokens (1 and 3) are dropped with their spans; only the
+    // The marker tokens (pieces 1 and 3) are dropped with their spans; only the
     // reasoning and content tokens remain attributed.
     assert_eq!(collected.reasoning_ids, [2]);
     assert_eq!(collected.content_ids, [4]);
@@ -204,7 +217,7 @@ fn reasoning_parsers_conserve_token_attributions() {
         parser.initialize(&[think_start_id]).unwrap();
 
         // Script: reasoning text (1), a zero-width token inside reasoning (2),
-        // the end marker (3), then visible content (4). The zero-width token
+        // the end marker token, then visible content (4). The zero-width token
         // is attributed to reasoning, matching Python's current-state rule;
         // the marker token is dropped with its span.
         let end_marker = match name {
@@ -228,14 +241,17 @@ fn reasoning_parsers_conserve_token_attributions() {
 /// Build one chunk per piece, each carrying a single token attributed to it.
 ///
 /// A `Some(text)` piece produces one token visibly anchored at the piece start;
-/// a `None` piece produces one zero-width token. Token IDs are 1-based
-/// positions in the script.
+/// a `None` piece produces one zero-width token. A piece spelling a delimiter
+/// of [`fake_tokenizer`] carries that delimiter's token ID; every other token
+/// ID is the 1-based position in the script.
 pub(crate) fn attributed_chunks(pieces: &[Option<&str>]) -> Vec<DecodedText> {
+    let tokenizer = fake_tokenizer();
     pieces
         .iter()
         .enumerate()
         .map(|(index, piece)| {
-            let token_id = index as u32 + 1;
+            let token_id =
+                piece.and_then(|text| tokenizer.token_to_id(text)).unwrap_or(index as u32 + 1);
             match piece {
                 Some(text) => DecodedText {
                     text: (*text).to_string(),
@@ -308,9 +324,10 @@ fn framed_parser() -> DelimitedReasoningParser {
 
 fn collect_framed(parser: &mut DelimitedReasoningParser, chunks: &[&str]) -> (String, String) {
     let mut result = (String::new(), String::new());
-    for chunk in chunks.iter().copied().map(Some).chain(std::iter::once(None)) {
+    let chunks = decode_chunks(&fake_tokenizer(), chunks);
+    for chunk in chunks.into_iter().map(Some).chain(std::iter::once(None)) {
         let delta = match chunk {
-            Some(chunk) => parser.push(DecodedText::unattributed(chunk)),
+            Some(chunk) => parser.push(chunk),
             None => parser.finish(),
         };
         if let Some(reasoning) = delta.reasoning {
@@ -403,12 +420,14 @@ fn delimited_prompt_initialization_consumes_only_remaining_framing() {
 #[test]
 fn delimited_framing_holds_only_boundary_candidates() {
     let mut parser = framed_parser();
-    let first = parser.push(DecodedText::unattributed("<think>\nreason\n"));
+    let [first, more, end, answer] =
+        decode(["<think>\nreason\n", "more\n", "</think>\n", "\n    answer"]);
+    let first = parser.push(first);
     assert_eq!(reasoning_str(&first), Some("reason"));
-    let more = parser.push(DecodedText::unattributed("more\n"));
+    let more = parser.push(more);
     assert_eq!(reasoning_str(&more), Some("\nmore"));
-    assert!(parser.push(DecodedText::unattributed("</think>\n")).is_empty());
-    let answer = parser.push(DecodedText::unattributed("\n    answer"));
+    assert!(parser.push(end).is_empty());
+    let answer = parser.push(answer);
     assert_eq!(content_str(&answer), Some("    answer"));
 }
 

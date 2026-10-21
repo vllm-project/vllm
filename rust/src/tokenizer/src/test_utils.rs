@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::{Result, Tokenizer, TokenizerError};
+use crate::{DecodedText, Result, Tokenizer, TokenizerError};
 
 const FIRST_CONFIGURED_TOKEN_ID: u32 = 256;
 
@@ -279,6 +279,23 @@ impl Tokenizer for TestTokenizer {
     fn is_special_id(&self, token_id: u32) -> bool {
         self.id_to_token.get(&token_id).is_some_and(|token| token.kind.is_special())
     }
+}
+
+/// Decode the concatenated `chunks` as the frontend streams them, split back
+/// at the chunk boundaries.
+///
+/// The concatenation is encoded with `tokenizer`'s configured tokens (so a
+/// marker spelled in full is its dedicated token) and run through the
+/// incremental decoder once, so every chunk carries the attributions of the
+/// tokens that produced it, and a token split across chunks keeps its anchor in
+/// the chunk holding its first byte.
+pub fn decode_chunks(tokenizer: &dyn Tokenizer, chunks: &[&str]) -> Vec<DecodedText> {
+    let mut decoder = tokenizer.create_decode_stream(&[], false, 0);
+    for token_id in tokenizer.encode(&chunks.concat(), false).unwrap() {
+        decoder.push_token(token_id).unwrap();
+    }
+    let mut rest = decoder.flush(None).unwrap().1;
+    chunks.iter().map(|chunk| rest.drain_prefix(chunk.len())).collect()
 }
 
 #[cfg(test)]
