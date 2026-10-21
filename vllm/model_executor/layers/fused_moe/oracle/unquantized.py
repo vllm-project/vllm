@@ -242,6 +242,13 @@ def select_unquantized_moe_backend(
                 "(TrtLlmBf16LoRAExperts)."
             )
             return UnquantizedMoeBackend.FLASHINFER_TRTLLM, TrtLlmBf16LoRAExperts
+        if current_platform.is_xpu():
+            from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
+                XPUExpertsBf16LoRA,
+            )
+
+            logger.info_once("Using XPU Unquantized MoE LoRA backend")
+            return UnquantizedMoeBackend.XPU, XPUExpertsBf16LoRA
         logger.info_once("Using TRITON Unquantized MoE LoRA backend")
         return UnquantizedMoeBackend.TRITON, backend_to_kernel_cls(
             UnquantizedMoeBackend.TRITON

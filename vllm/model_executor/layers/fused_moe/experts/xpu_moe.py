@@ -156,7 +156,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
     ):
         if self.moe_config.is_lora_enabled and apply_router_weight_on_input:
             raise NotImplementedError(
-                "XPU MXFP4 MoE LoRA requires routing weights on the output."
+                "XPU MoE LoRA requires routing weights on the output."
             )
         if self.fused_moe_impl is None:
             topk = topk_ids.size(-1)
@@ -338,7 +338,9 @@ class XPUExpertsWNA16(XPUExperts):
         )
 
 
-class XPUExpertsMxFp4(LoRAExpertsMixin, XPUExperts):
+class XPUExpertsLoRA(LoRAExpertsMixin, XPUExperts):
+    """XPU experts that inject LoRA deltas through XpuFusedMoe hooks."""
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -482,6 +484,8 @@ class XPUExpertsMxFp4(LoRAExpertsMixin, XPUExperts):
         logical_K = K if self.expects_unquantized_inputs else 2 * K
         return (0,), (0,), (M, logical_K)
 
+
+class XPUExpertsMxFp4(XPUExpertsLoRA):
     @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
@@ -492,3 +496,12 @@ class XPUExpertsMxFp4(LoRAExpertsMixin, XPUExperts):
             (kMxfp4Static, kMxfp4Dynamic),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
+
+
+class XPUExpertsBf16LoRA(XPUExpertsLoRA):
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return weight_key is None and activation_key is None
