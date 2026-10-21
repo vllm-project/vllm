@@ -12,6 +12,7 @@ import torch.distributed as dist
 
 import vllm.v1.attention.ops.cp_common as cp_common
 import vllm.v1.attention.ops.dcp as dcp
+from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
 
@@ -395,6 +396,7 @@ def test_mla_dcp_manager_selects_fallback_backends(monkeypatch):
     import vllm.v1.attention.ops.dcp as dcp_manager
 
     group = MagicMock(world_size=2)
+    group.device_communicator.aiter_ar_comm = None
     gathered_query = torch.empty(1, 4, 8)
     group.all_gather.return_value = gathered_query
     monkeypatch.setattr(dcp_manager, "get_dcp_group", lambda: group)
@@ -1127,6 +1129,106 @@ def test_distributed_direct_a2a_matches_reference(
             "TEST_LSE_LAYOUT": lse_layout,
             "LSE_BASE_E": lse_base_e,
         },
+    )
+
+
+def _distributed_aiter_q_gather_worker(env: dict[str, str]) -> None:
+    update_environment_variables(env)
+    local_rank = int(env["LOCAL_RANK"])
+    world_size = int(env["WORLD_SIZE"])
+    device = torch.device(f"cuda:{local_rank}")
+    torch.accelerator.set_device_index(local_rank)
+    from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+    from vllm.distributed import cleanup_dist_env_and_memory
+    from vllm.distributed.parallel_state import (
+        get_dcp_group,
+        graph_capture,
+        init_distributed_environment,
+        initialize_model_parallel,
+    )
+
+    config = VllmConfig(
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=world_size, decode_context_parallel_size=world_size
+        )
+    )
+    with set_current_vllm_config(config):
+        init_distributed_environment()
+        initialize_model_parallel(
+            tensor_model_parallel_size=world_size,
+            decode_context_model_parallel_size=world_size,
+        )
+        try:
+            rank = dist.get_rank()
+            dcp_comm = get_dcp_group().device_communicator
+            aiter_comm = dcp_comm.aiter_ar_comm
+            assert aiter_comm is not None
+            # DCP all-reduces must not route to the gather's AITER instance.
+            assert not dcp_comm.use_aiter_allreduce
+            dtype = _dtype_from_name(env["TEST_DTYPE"])
+            # Kimi-K3 at TP8: 12 local heads of kv_lora 512 + rope 64, padded to 128.
+            heads_per_rank, head_dim, padded_num_heads = 12, 576, 128
+            manager = MagicMock(padded_num_heads=padded_num_heads)
+            manager._gather_query = MagicMock(side_effect=AssertionError("fell back"))
+
+            def expected_bytes(local_query: torch.Tensor) -> torch.Tensor:
+                # Compare bytes: RCCL has no fp8 all-gather.
+                local_bytes = local_query.view(torch.uint8)
+                gathered = [torch.empty_like(local_bytes) for _ in range(world_size)]
+                dist.all_gather(gathered, local_bytes)
+                return torch.cat(gathered, dim=1)
+
+            def random_query(num_tokens: int) -> torch.Tensor:
+                return torch.randn(
+                    num_tokens, heads_per_rank, head_dim, device=device
+                ).to(dtype)
+
+            for num_tokens in (1, 7, 160):
+                local_query = random_query(num_tokens)
+                actual = dcp.MLADCPManager._aiter_query_gather(
+                    manager, aiter_comm, local_query
+                )
+                expected = expected_bytes(local_query)
+                assert actual.dtype == dtype
+                assert actual.view(torch.uint8).shape == expected.shape
+                assert actual.untyped_storage().nbytes() >= (
+                    num_tokens * padded_num_heads * head_dim * actual.element_size()
+                )
+                assert torch.equal(actual.view(torch.uint8), expected), (
+                    f"rank {rank} tokens {num_tokens}"
+                )
+
+            # vLLM's graph capture puts the DCP instance in capture mode, so the
+            # captured gather reads the query from registered graph buffers.
+            static_query = random_query(7)
+            with graph_capture(device) as capture_context:
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph, stream=capture_context.stream):
+                    captured = dcp.MLADCPManager._aiter_query_gather(
+                        manager, aiter_comm, static_query
+                    )
+            for replay in range(2):
+                local_query = random_query(7)
+                static_query.copy_(local_query)
+                graph.replay()
+                assert torch.equal(
+                    captured.view(torch.uint8), expected_bytes(local_query)
+                ), f"rank {rank} replay {replay}"
+        finally:
+            cleanup_dist_env_and_memory()
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="AITER is ROCm only.")
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 8, reason="Need at least 8 GPUs."
+)
+@pytest.mark.parametrize("dtype_name", ["bfloat16", "float8_e4m3fn"])
+def test_distributed_aiter_q_gather_matches_rccl(dtype_name: str):
+    """The last-dim AITER gather must equal the head-dim gather byte for byte."""
+    _distributed_run(
+        _distributed_aiter_q_gather_worker,
+        world_size=8,
+        extra_env={"TEST_DTYPE": dtype_name},
     )
 
 
