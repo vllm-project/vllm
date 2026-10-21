@@ -49,6 +49,7 @@ class EngineCoreSamplingParams(msgspec.Struct, dict=True, omit_defaults=True):
     _eos_token_id: int | None = None
     _all_stop_token_ids: set[int] = set()
     routed_experts_prompt_start: int = 0
+    return_routed_experts: bool = True
     output_kind: RequestOutputKind = RequestOutputKind.DELTA
 
 
@@ -171,6 +172,7 @@ request = EngineCoreRequest(
         _eos_token_id=151645,
         _all_stop_token_ids={151643, 151645},
         routed_experts_prompt_start=1,
+        return_routed_experts=False,
         output_kind=RequestOutputKind.FINAL_ONLY,
     ),
     pooling_params=None,

@@ -132,7 +132,8 @@ mod tests {
                 "logprobs": 2,
                 "prompt_logprobs": 1,
                 "ignore_eos": true,
-                "routed_experts_prompt_start": 2
+                "routed_experts_prompt_start": 2,
+                "return_routed_experts": false
             },
             "kv_transfer_params": {
                 "connector": "x"
@@ -162,6 +163,10 @@ mod tests {
         assert_eq!(
             prepared.text_request.sampling_params.routed_experts_prompt_start,
             Some(2)
+        );
+        assert_eq!(
+            prepared.text_request.sampling_params.return_routed_experts,
+            Some(false)
         );
         assert_eq!(prepared.text_request.priority, -3);
         assert_eq!(prepared.text_request.cache_salt.as_deref(), Some("salt"));

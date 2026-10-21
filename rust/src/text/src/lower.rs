@@ -127,6 +127,7 @@ pub fn lower_sampling_params(
         structured_outputs,
         skip_reading_prefix_cache,
         routed_experts_prompt_start,
+        return_routed_experts,
         vllm_xargs,
         stream_interval,
     } = sampling_params;
@@ -240,6 +241,7 @@ pub fn lower_sampling_params(
         skip_reading_prefix_cache,
         extra_args: vllm_xargs,
         routed_experts_prompt_start,
+        return_routed_experts: return_routed_experts.unwrap_or(true),
         stream_interval,
     };
     validate_resolved_sampling_params(&params)?;
@@ -793,6 +795,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                return_routed_experts: true,
                 stream_interval: None,
             }
         "#]]
@@ -847,6 +850,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                return_routed_experts: true,
                 stream_interval: None,
             }
         "#]]
@@ -1025,6 +1029,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                return_routed_experts: true,
                 stream_interval: None,
             }
         "#]]
@@ -1099,6 +1104,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                return_routed_experts: true,
                 stream_interval: None,
             }
         "#]]
@@ -1168,6 +1174,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                return_routed_experts: true,
                 stream_interval: None,
             }
         "#]]
@@ -1559,6 +1566,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                return_routed_experts: true,
                 stream_interval: None,
             }
         "#]]
