@@ -322,23 +322,33 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         rows = self.n_local_heads
         slots = self._pack_slots
 
-        # The SWA union is shared by every layer; the top-k union by every
-        # consumer of the same index source, so build each once per step.
-        cache = swa_metadata.packed_decode_cache
+        # The SWA union depends on the layer's KV-cache group block table, so
+        # it lives on that group's metadata. The top-k union and its split plan
+        # depend only on the index source and the compressed cache, so every
+        # consumer in any group shares them for the whole step.
+        swa_cache_union = swa_metadata.packed_decode_cache
         swa_key = "swa"
-        if swa_key not in cache:
+        if swa_key not in swa_cache_union:
             assert swa_metadata.decode_swa_indices is not None
             assert swa_metadata.decode_swa_lens is not None
-            cache[swa_key] = merge_slot_indices(
+            swa_cache_union[swa_key] = merge_slot_indices(
                 swa_metadata.decode_swa_indices.view(num_decode_tokens, -1),
                 swa_metadata.decode_swa_lens,
                 slots,
             )
-        swa_idx, swa_mask, swa_len = cache[swa_key]
+        swa_idx, swa_mask, swa_len = swa_cache_union[swa_key]
         extra_idx = extra_mask = extra_len = None
         if topk_indices is not None:
             assert topk_lens is not None
-            topk_key = ("topk", self.index_source_layer_id, self.compress_ratio)
+            cache = get_forward_context().additional_kwargs.setdefault(
+                "dsv41_packed_decode", {}
+            )
+            topk_key = (
+                "topk",
+                self.kv_source_layer_id,
+                self.index_source_layer_id,
+                self.compress_ratio,
+            )
             if topk_key not in cache:
                 cache[topk_key] = merge_slot_indices(
                     topk_indices.view(num_decode_tokens, -1),
