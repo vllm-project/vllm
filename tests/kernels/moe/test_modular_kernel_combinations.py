@@ -231,7 +231,12 @@ def rank_worker(
             # bias-free SwiGLU-OAI (~55% sign agreement, ~5x-small magnitude
             # on hardware), instead of raising. Only smoke-test until the
             # fix in https://github.com/vllm-project/vllm/pull/59766 lands.
-            if config.is_w4a16_mxfp4 and config.activation == MoEActivation.SWIGLUOAI:
+            # SWIGLUOAI_UNINTERLEAVE hits the same W4A16 mxfp4 kernel call
+            # (see is_nyi_config) so it shares the same caveat.
+            if config.is_w4a16_mxfp4 and config.activation in (
+                MoEActivation.SWIGLUOAI,
+                MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            ):
                 assert mk_out.shape == ref_out.shape, (
                     f"AiterMxfp4Experts output shape {mk_out.shape} != "
                     f"reference shape {ref_out.shape}."
@@ -293,6 +298,12 @@ MK_ACTIVATIONS = [
     MoEActivation.SILU,
     MoEActivation.GELU,
     MoEActivation.SWIGLUOAI,
+    MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+    # SITU currently generates zero test cases: is_nyi_config() below gates
+    # it off entirely because the installed AITER build's kernel codegen
+    # doesn't support it yet. Kept here so coverage turns on automatically
+    # (no test-harness changes needed) once AITER catches up.
+    MoEActivation.SITU,
 ]
 
 
@@ -308,17 +319,35 @@ def is_nyi_config(config: Config) -> bool:
         if unsupported_quant_config:
             return True
 
+    is_aiter = issubclass(config.fused_experts_type, AiterExperts)
+
     # AITER's W4A16 MXFP4 (mxfp4 weight, unquantized activation) scheme only
-    # has a heuristic-dispatch kernel specialization for SWIGLUOAI (matching
-    # gpt-oss' own usage); SILU/GELU hit "Unsupported kernel config for moe
-    # heuristic dispatch" at runtime despite being declared supported by
-    # AiterExperts._supports_activation(). https://github.com/ROCm/aiter/issues/2419
-    is_w4a16_mxfp4 = (
-        issubclass(config.fused_experts_type, AiterExperts) and config.is_w4a16_mxfp4
+    # has a heuristic-dispatch kernel specialization for the SWIGLUOAI family
+    # (matching gpt-oss' own usage); SWIGLUOAI_UNINTERLEAVE hits the same
+    # kernel as SWIGLUOAI here since rocm_aiter_fused_experts() forces
+    # gate_mode=INTERLEAVE for any W4A16 mxfp4 call regardless of activation,
+    # overriding the uninterleaved hint. SILU/GELU/SITU hit "Unsupported
+    # kernel config for moe heuristic dispatch" at runtime despite being
+    # declared supported by AiterExperts._supports_activation().
+    # https://github.com/ROCm/aiter/issues/2419
+    is_w4a16_mxfp4 = is_aiter and config.is_w4a16_mxfp4
+    is_swigluoai_family = config.activation in (
+        MoEActivation.SWIGLUOAI,
+        MoEActivation.SWIGLUOAI_UNINTERLEAVE,
     )
-    if config.activation == MoEActivation.SWIGLUOAI:
+    if is_swigluoai_family:
         return not is_w4a16_mxfp4
     if is_w4a16_mxfp4:
+        return True
+
+    # AITER's W4A4 MXFP4 (mxfp4 weight, mxfp4 activation) path is the only
+    # candidate kernel specialization for SITU (Kimi-K3 convention), but the
+    # installed AITER build's heuristic dispatch routes this shape through a
+    # ck2stages kernel whose JIT codegen (gen_instances.py) doesn't accept
+    # the "situv2" activation (only silu/gelu/swiglu/gelutanh are valid
+    # choices), so the kernel build itself fails before any numerics can be
+    # compared. Mark NYI until AITER's dispatch/codegen supports it.
+    if config.activation == MoEActivation.SITU:
         return True
 
     if config.activation != MoEActivation.SILU:
