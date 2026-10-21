@@ -57,15 +57,17 @@ def _get_mempolicy() -> int | None:
         return None
 
 
-def _is_auto_numa_available(verbose: bool = True, *, strict: bool = False) -> bool:
+def _is_auto_numa_available(
+    verbose: bool = True, *, require_unbound_process: bool = False
+) -> bool:
     """Check whether automatic GPU-to-NUMA detection should be attempted.
 
     Args:
         verbose: Log why detection is skipped at warning level; otherwise at
             debug level, for the default mode where skipping is expected.
-        strict: Require known unrestricted CPU affinity and the default memory
-            policy for automatic default binding. Explicit topology discovery
-            keeps its existing best-effort checks.
+        require_unbound_process: Require known unrestricted CPU affinity and
+            the default memory policy for default automatic binding. Explicit
+            topology discovery keeps its existing best-effort checks.
 
     """
     from vllm.platforms import current_platform
@@ -91,11 +93,11 @@ def _is_auto_numa_available(verbose: bool = True, *, strict: bool = False) -> bo
                 "explicitly to override."
             )
             return False
-        if cpu_count is None and strict:
+        if cpu_count is None and require_unbound_process:
             log("Could not determine CPU availability for automatic NUMA binding.")
             return False
     except (AttributeError, NotImplementedError, psutil.Error):
-        if strict:
+        if require_unbound_process:
             log("Could not check CPU affinity for automatic NUMA binding.")
             return False
 
@@ -107,7 +109,7 @@ def _is_auto_numa_available(verbose: bool = True, *, strict: bool = False) -> bo
             "try adding --cap-add SYS_NICE."
         )
         return False
-    if strict and mempolicy != _MPOL_DEFAULT:
+    if require_unbound_process and mempolicy != _MPOL_DEFAULT:
         log(
             "NUMA memory policy is already set for this process (mode=%d). "
             "Skipping automatic NUMA binding; pass --numa-bind explicitly "
@@ -173,7 +175,7 @@ def _can_auto_bind(
         from vllm.platforms import current_platform
         from vllm.utils.cpu_resource_utils import parse_id_list
 
-        if not _is_auto_numa_available(verbose=False, strict=True):
+        if not _is_auto_numa_available(verbose=False, require_unbound_process=True):
             return False
         numa_nodes = get_auto_numa_nodes()
         if not numa_nodes:
