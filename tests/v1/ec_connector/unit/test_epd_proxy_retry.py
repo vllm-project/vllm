@@ -632,6 +632,7 @@ def test_video_audio_rewrite(proxy, monkeypatch, no_rewrite, transfer, has_metad
     import copy
 
     from vllm.distributed.ec_transfer.ec_connector.utils import collect_ec_item_metadata
+    from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 
     video = {"type": "video_url", "video_url": {"url": "video-with-audio"}}
     images = [{"type": "image_url", "image_url": {"url": key}} for key in ("A", "B")]
@@ -643,7 +644,12 @@ def test_video_audio_rewrite(proxy, monkeypatch, no_rewrite, transfer, has_metad
     # Collector indices describe two processed features from one video item.
     video_metadata = collect_ec_item_metadata(
         [
-            SimpleNamespace(identifier=key, modality=key, data=None)
+            MultiModalFeatureSpec(
+                data=None,
+                modality=key,
+                identifier=key,
+                mm_position=PlaceholderRange(offset=0, length=0),
+            )
             for key in ("video", "audio")
         ],
         SimpleNamespace(fields_for=lambda _: set()),
