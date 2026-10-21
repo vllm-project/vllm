@@ -48,7 +48,13 @@ def bgmv_expand(
     if add_inputs:
         output_tensor[:, :common_len] += outputs[:limit, :common_len]
     else:
-        output_tensor[:, :common_len] = outputs[:limit, :common_len]
+        # Match the triton kernel, which exits early on lora_id == -1 and
+        # leaves those rows untouched instead of overwriting them.
+        output_tensor[:, :common_len] = torch.where(
+            no_lora_mask[:limit],
+            output_tensor[:, :common_len],
+            outputs[:limit, :common_len],
+        )
 
 
 def sgmv_shrink(
@@ -137,4 +143,8 @@ def bgmv_expand_slice(
     if add_inputs:
         output_tensor[:, slice_offset : slice_offset + slice_size] += outputs[:]
     else:
-        output_tensor[:, slice_offset : slice_offset + slice_size] = outputs[:]
+        output_tensor[:, slice_offset : slice_offset + slice_size] = torch.where(
+            no_lora_mask,
+            output_tensor[:, slice_offset : slice_offset + slice_size],
+            outputs[:],
+        )

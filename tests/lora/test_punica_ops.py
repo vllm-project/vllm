@@ -669,6 +669,13 @@ def test_torch_ops_bgmv_skips_no_lora_tokens():
     assert torch.count_nonzero(ye[1]) == 0
     torch.testing.assert_close(ye[0], xe[0] @ b[0].T)
 
+    # expand (overwrite): the no-LoRA row keeps its prior value, as the
+    # triton kernel leaves it untouched rather than writing zeros.
+    ye = torch.full((2, out_dim), 5.0)
+    torch_ops.bgmv_expand(xe, b, ye, lora_indices, add_inputs=False)
+    assert torch.equal(ye[1], torch.full((out_dim,), 5.0))
+    torch.testing.assert_close(ye[0], xe[0] @ b[0].T)
+
     # expand_slice (add into a column slice): [T, rank] x [L, slice, rank]
     offset = 3
     ys = torch.zeros(2, out_dim + offset)
@@ -676,4 +683,11 @@ def test_torch_ops_bgmv_skips_no_lora_tokens():
         xe, b, ys, lora_indices, offset, out_dim, add_inputs=True
     )
     assert torch.count_nonzero(ys[1]) == 0
+    torch.testing.assert_close(ys[0, offset : offset + out_dim], xe[0] @ b[0].T)
+
+    ys = torch.full((2, out_dim + offset), 5.0)
+    torch_ops.bgmv_expand_slice(
+        xe, b, ys, lora_indices, offset, out_dim, add_inputs=False
+    )
+    assert torch.equal(ys[1], torch.full((out_dim + offset,), 5.0))
     torch.testing.assert_close(ys[0, offset : offset + out_dim], xe[0] @ b[0].T)
