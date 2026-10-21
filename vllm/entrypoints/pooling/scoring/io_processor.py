@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
 from collections.abc import Sequence
+from dataclasses import replace
+from functools import cached_property
 from typing import Any, TypeAlias, cast
 
 import torch.nn.functional as F
@@ -93,6 +95,20 @@ def _apply_post_tokenization_to_token_type_ids(
         )
 
     return token_type_ids
+
+
+def _reserve_tokens(tok_params: TokenizeParams, num_tokens: int) -> TokenizeParams:
+    """Shrink every length limit by `num_tokens` that are appended afterwards."""
+
+    def shrink(length: int | None) -> int | None:
+        return length if length is None or length < 0 else max(length - num_tokens, 0)
+
+    return replace(
+        tok_params,
+        max_total_tokens=shrink(tok_params.max_total_tokens),
+        truncate_prompt_tokens=shrink(tok_params.truncate_prompt_tokens),
+        pad_prompt_tokens=shrink(tok_params.pad_prompt_tokens),
+    )
 
 
 class ScoringIOProcessor(PoolingIOProcessor):
@@ -619,6 +635,14 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
     #######################################
     # helpers
 
+    @cached_property
+    def num_post_process_tokens(self) -> int:
+        if self.model is None:
+            return 0
+        probe = TokensPrompt(prompt_token_ids=[])
+        self.model.post_process_tokens(probe)
+        return len(probe["prompt_token_ids"])
+
     def render(
         self,
         render_params: EncodeCMPLRenderParams
@@ -637,6 +661,11 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         params = render_params["params"]
         prompt_extras = render_params["prompt_extras"]
 
+        # Leave room for the tokens that post_process_tokens appends after
+        # truncation (e.g. the JinaVL score token), so the limits count them.
+        if self.num_post_process_tokens:
+            tok_params = _reserve_tokens(tok_params, self.num_post_process_tokens)
+
         _, engine_prompt = self.get_score_prompt(
             data_1=render_params["data_1"],
             data_2=render_params["data_2"],
@@ -651,8 +680,6 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
 
         tok_params.apply_post_tokenization(self.tokenizer, engine_prompt)
 
-        # Add model-specific tokens (e.g. the JinaVL score token) after
-        # truncation so that truncation cannot remove them.
         if self.model is not None:
             self.model.post_process_tokens(engine_prompt)
 

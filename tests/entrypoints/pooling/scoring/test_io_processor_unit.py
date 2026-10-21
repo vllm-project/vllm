@@ -134,9 +134,12 @@ def test_offline_scoring_uses_default_template_unless_overridden(
     assert prompt["prompt_token_ids"] == processor.tokenizer.encode(expected)
 
 
-def test_truncation_keeps_jinavl_score_token(llm_reranker_processor):
+@pytest.mark.parametrize("truncate_prompt_tokens,max_total_tokens", [(4, 32), (-1, 8)])
+def test_truncation_keeps_jinavl_score_token(
+    llm_reranker_processor, truncate_prompt_tokens, max_total_tokens
+):
     """JinaVL scores the token it appends to the prompt, so binding
-    truncation must not remove it."""
+    truncation must keep it within the requested length."""
     processor = llm_reranker_processor
     processor.supports_score_template = True
     processor.model = JinaVLForSequenceClassification
@@ -149,7 +152,10 @@ def test_truncation_keeps_jinavl_score_token(llm_reranker_processor):
             chat_template=None,
             max_tokens_per_query=0,
             max_tokens_per_doc=0,
-            tok_params=TokenizeParams(max_total_tokens=32, truncate_prompt_tokens=4),
+            tok_params=TokenizeParams(
+                max_total_tokens=max_total_tokens,
+                truncate_prompt_tokens=truncate_prompt_tokens,
+            ),
             prompt_extras=None,
             skip_mm_cache=False,
             params=PoolingParams(task="classify"),
@@ -159,7 +165,10 @@ def test_truncation_keeps_jinavl_score_token(llm_reranker_processor):
     )
 
     prompt_token_ids = engine_input["prompts"]["prompt_token_ids"]
-    assert len(prompt_token_ids) == 5
+    expected_len = (
+        truncate_prompt_tokens if truncate_prompt_tokens > 0 else max_total_tokens
+    )
+    assert len(prompt_token_ids) == expected_len
     assert prompt_token_ids[-1] == 100
 
 
