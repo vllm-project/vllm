@@ -1164,12 +1164,14 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                     )
                     weight_loader(param, loaded_weight, **kwargs)
             loaded_params.add(name)
+        return loaded_params
+
+    def finalize_mega_moe_weights(self) -> None:
         for layer in self.layers:
             if isinstance(layer, Glm5NextDecoderLayer) and isinstance(
                 layer.mlp, Glm5NextMoE
             ):
                 layer.mlp.finalize_mega_moe_weights()
-        return loaded_params
 
 
 class Glm5NextForCausalLM(
@@ -1263,6 +1265,9 @@ class Glm5NextForCausalLM(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
+
+    def process_weights_after_loading(self) -> None:
+        self.model.finalize_mega_moe_weights()
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -1363,6 +1368,9 @@ class Glm5NextForConditionalGeneration(
         # Glm5NextForCausalLM does not implement make_empty_intermediate_tensors,
         # so pipeline parallelism is gated off (consistent with the text-only
         # model) and we intentionally do not alias it here.
+
+    def process_weights_after_loading(self) -> None:
+        self.language_model.process_weights_after_loading()
 
     def set_moe_parameters(self) -> None:
         self.moe_mlp_layers = [
