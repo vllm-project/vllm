@@ -48,6 +48,12 @@ def init_speculator(
         )
 
         return DSparkSpeculator(vllm_config, device)
+    elif speculative_config.method == "mamba_attn_hybrid":
+        from vllm.v1.worker.gpu.spec_decode.mamba_attn_hybrid.speculator import (
+            MambaAttnHybridSpeculator,
+        )
+
+        return MambaAttnHybridSpeculator(vllm_config, device)
     elif speculative_config.use_gemma4_mtp():
         from vllm.v1.worker.gpu.spec_decode.gemma4.speculator import (
             Gemma4Speculator,

@@ -65,7 +65,7 @@ MTPModelTypes = Literal[
     "glm5_next_mtp",
 ]
 NgramGPUTypes = Literal["ngram_gpu"]
-DFlashModelTypes = Literal["dflash"]
+DFlashModelTypes = Literal["dflash", "mamba_attn_hybrid"]
 DSparkModelTypes = Literal["dspark"]
 EagleModelTypes = Literal[
     "eagle", "eagle3", "extract_hidden_states", MTPModelTypes, DFlashModelTypes
@@ -632,6 +632,7 @@ class SpeculativeConfig:
             "extract_hidden_states",
             "dflash",
             "dspark",
+            "mamba_attn_hybrid",
         )
         factors.append(uses_aux_hidden_states)
         if self.method == "dspark":
@@ -1309,7 +1310,13 @@ class SpeculativeConfig:
                 )
 
                 # Automatically detect the method
-                if self.method in ("eagle", "eagle3", "dflash", "dspark"):
+                if self.method in (
+                    "eagle",
+                    "eagle3",
+                    "dflash",
+                    "dspark",
+                    "mamba_attn_hybrid",
+                ):
                     pass
                 # examples:
                 # yuhuili/EAGLE-LLaMA3-Instruct-8B
@@ -1924,14 +1931,21 @@ class SpeculativeConfig:
         # NOTE: This method is usually a stand-in for "speculative decoding using
         # target model hidden states"
         # TODO(ben): Refactor this so the naming is clearer
-        return self.method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
+        return self.method in (
+            "eagle",
+            "eagle3",
+            "mtp",
+            "dflash",
+            "dspark",
+            "mamba_attn_hybrid",
+        )
 
     def use_eagle_block_drop(self) -> bool:
         """Whether volatile trailing cache blocks should be discarded."""
         return self.use_eagle() and not self.disable_eagle_block_drop
 
     def use_dflash(self) -> bool:
-        return self.method == "dflash"
+        return self.method in get_args(DFlashModelTypes)
 
     def use_dspark(self) -> bool:
         return self.method == "dspark"

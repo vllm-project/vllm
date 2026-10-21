@@ -207,3 +207,25 @@ def update_dspark(config_dict: dict, pre_trained_config: dict) -> None:
     ):
         if config_dict.get(key) is not None:
             pre_trained_config[key] = config_dict[key]
+
+
+@register_speculator("mamba_attn_hybrid")
+def update_mamba_attn_hybrid(config_dict: dict, pre_trained_config: dict) -> None:
+    pre_trained_config["architectures"] = ["MambaAttnHybridDraftModel"]
+    pre_trained_config["eagle_aux_hidden_state_layer_ids"] = config_dict[
+        "latent_fusion_layer_ids"
+    ]
+    pre_trained_config["sample_from_anchor"] = False
+    for key in (
+        "draft_vocab_size",
+        "mask_token_id",
+        "block_pattern",
+        "attn_kv_layer_ids",
+        "mamba_num_heads",
+        "mamba_head_dim",
+        "mamba_d_state",
+        "mamba_n_groups",
+        "mamba_conv_kernel",
+        "markov_rank",
+    ):
+        pre_trained_config[key] = config_dict[key]

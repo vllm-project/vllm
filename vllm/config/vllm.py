@@ -3046,6 +3046,8 @@ class VllmConfig:
         if self.speculative_config:
             if self.speculative_config.method == "dspark":
                 unsupported.append("dspark speculative decoding")
+            if self.speculative_config.method == "mamba_attn_hybrid":
+                unsupported.append("mamba_attn_hybrid speculative decoding")
             if self.speculative_config.enable_adaptive_verification:
                 unsupported.append("adaptive draft verification")
             if self.speculative_config.draft_lm_head_quantization is not None:
