@@ -133,6 +133,10 @@ def test_profile_summary():
 @pytest.mark.skipif(
     current_platform.is_rocm(), reason="Hangs on ROCm; the bench is CUDA-only."
 )
+@pytest.mark.skipif(
+    current_platform.is_xpu(),
+    reason="torch.profiler records no kernels when replaying XPU graphs.",
+)
 def test_bench_forward(tmp_path):
     output = tmp_path / "forward.json"
     command = [

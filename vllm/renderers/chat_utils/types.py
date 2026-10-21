@@ -110,6 +110,8 @@ class ChatCompletionContentPartVideoEmbedsParam(TypedDict, total=False):
     - A single base64 string representing a serialized torch tensor.
     - A dictionary of base64 tensors or numeric JSON metadata arrays.
     """
+    audio_embeds: MultiModalEmbedsPayload | None
+    """The video's audio track when `use_audio_in_video=True`, sharing its UUID."""
     type: Required[Literal["video_embeds"]]
     """The type of the content part."""
     uuid: str | None

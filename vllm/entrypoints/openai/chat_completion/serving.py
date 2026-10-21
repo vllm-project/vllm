@@ -40,6 +40,9 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionStreamResponse,
     ChatMessage,
 )
+from vllm.entrypoints.openai.chat_completion.stream_processor import (
+    ChatStreamProcessor,
+)
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import (
     CompletionTokenUsageInfo,
@@ -524,7 +527,6 @@ class OpenAIServingChat(GenerateBaseServing):
 
         # Send response for each token for each request.n (index)
         num_choices = 1 if request.n is None else request.n
-        previous_num_tokens = [0] * num_choices
         # TODO: Remove once all reasoning parsers use the Parser Engine.
         generated_token_ids: list[list[int]] = [[] for _ in range(num_choices)]
         previous_reasoning_tokens = [0] * num_choices
@@ -532,7 +534,6 @@ class OpenAIServingChat(GenerateBaseServing):
         num_prompt_tokens = 0
         num_cached_tokens = None
         num_cache_creation_tokens = None
-        tools_streamed = [False] * num_choices
 
         previous_texts = [""] * num_choices
 
@@ -542,12 +543,17 @@ class OpenAIServingChat(GenerateBaseServing):
                     raise ValueError(
                         "Tokenizer not available when `skip_tokenizer_init=True`"
                     )
-                parsers: list[Parser | None] = [
-                    self._make_parser(request, tokenizer, chat_template_kwargs)
+                processors = [
+                    ChatStreamProcessor(
+                        request,
+                        self._make_parser(request, tokenizer, chat_template_kwargs),
+                    )
                     for _ in range(num_choices)
                 ]
             else:
-                parsers = [None] * num_choices
+                processors = [
+                    ChatStreamProcessor(request, None) for _ in range(num_choices)
+                ]
         except Exception as e:
             logger.exception("Error in parser creation.")
             yield self.create_error_response(e)
@@ -666,7 +672,8 @@ class OpenAIServingChat(GenerateBaseServing):
 
                 for output in res.outputs:
                     i = output.index
-                    parser = parsers[i]
+                    processor = processors[i]
+                    parser = processor.parser
                     if finish_reason_sent[i]:
                         continue
 
@@ -687,39 +694,24 @@ class OpenAIServingChat(GenerateBaseServing):
 
                     delta_text = output.text
 
-                    nothing_generated = (
+                    if (
                         not delta_text
                         and not output.token_ids
-                        and not previous_num_tokens[i]
-                    )
-                    if nothing_generated and output.finish_reason is None:
+                        and not processor.num_output_tokens
+                        and output.finish_reason is None
+                    ):
                         # Chunked prefill case, don't return empty chunks
                         continue
 
-                    delta_message: DeltaMessage | None
-
-                    if nothing_generated:
-                        # Finished without output: send the final chunk unparsed.
-                        delta_message = DeltaMessage()
-                    elif parser is not None:
-                        delta_message = parser.parse_delta(
-                            delta_text=delta_text,
-                            delta_token_ids=as_list(output.token_ids),
-                            request=request,
-                            prompt_token_ids=res.prompt_token_ids,
-                            finished=output.finish_reason is not None,
-                        )
-                        if delta_message is not None and delta_message.tool_calls:
-                            tools_streamed[i] = True
-
-                    # handle streaming just a content delta (no parsers)
-                    else:
-                        delta_message = DeltaMessage(content=delta_text)
+                    delta_message, finish_reason = processor.step(
+                        delta_text,
+                        as_list(output.token_ids),
+                        output.finish_reason,
+                        res.prompt_token_ids,
+                    )
 
                     previous_texts[i] += delta_text
 
-                    # set the previous values for the next iteration
-                    previous_num_tokens[i] += len(output.token_ids)
                     if parser is not None and self._include_reasoning_tokens_details:
                         generated_token_ids[i].extend(output.token_ids)
                         if include_continuous_usage:
@@ -733,13 +725,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     # "control token" for tool calls or the parser otherwise
                     # wasn't ready to send a token, then
                     #   get the next token without streaming a chunk
-                    # When reasoning is hidden, suppress per-token
-                    # metadata (logprobs, token_ids) on every chunk to
-                    # prevent leaking reasoning tokens through decoded
-                    # token text in logprob entries or raw token IDs.
-                    hide_stream_metadata = (
-                        not request.include_reasoning and parser is not None
-                    )
+                    hide_stream_metadata = processor.hide_metadata
                     if hide_stream_metadata:
                         logprobs = None
 
@@ -806,9 +792,7 @@ class OpenAIServingChat(GenerateBaseServing):
                             index=i,
                             delta=delta_message,
                             logprobs=logprobs,
-                            finish_reason=resolve_finish_reason(
-                                output.finish_reason, request, tools_streamed[i]
-                            ),
+                            finish_reason=finish_reason,
                             stop_reason=output.stop_reason,
                             **indexer_response_fields(output),
                             token_ids=(
@@ -823,7 +807,6 @@ class OpenAIServingChat(GenerateBaseServing):
 
                         finish_reason_sent[i] = True
 
-                    choice_data = maybe_filter_parallel_tool_calls(choice_data, request)
                     chunk = ChatCompletionStreamResponse(
                         id=request_id,
                         object=chunk_object_type,
@@ -844,7 +827,7 @@ class OpenAIServingChat(GenerateBaseServing):
 
                     # handle usage stats if requested & if continuous
                     if include_continuous_usage:
-                        completion_tokens = previous_num_tokens[i]
+                        completion_tokens = processor.num_output_tokens
                         chunk.usage = UsageInfo(
                             prompt_tokens=num_prompt_tokens,
                             completion_tokens=completion_tokens,
@@ -861,7 +844,8 @@ class OpenAIServingChat(GenerateBaseServing):
                     yield chunk
 
             if self._include_reasoning_tokens_details and not include_continuous_usage:
-                for i, parser in enumerate(parsers):
+                for i, processor in enumerate(processors):
+                    parser = processor.parser
                     if parser is not None and generated_token_ids[i]:
                         previous_reasoning_tokens[i] = parser.count_reasoning_tokens(
                             tuple(generated_token_ids[i])
@@ -870,7 +854,7 @@ class OpenAIServingChat(GenerateBaseServing):
             # once the final token is handled, if stream_options.include_usage
             # is sent, send the usage
             if include_usage:
-                completion_tokens = sum(previous_num_tokens)
+                completion_tokens = sum(p.num_output_tokens for p in processors)
                 final_usage = UsageInfo(
                     prompt_tokens=num_prompt_tokens,
                     completion_tokens=completion_tokens,
@@ -921,7 +905,7 @@ class OpenAIServingChat(GenerateBaseServing):
                 yield final_usage_chunk
 
             # report to FastAPI middleware aggregate usage across all choices
-            num_completion_tokens = sum(previous_num_tokens)
+            num_completion_tokens = sum(p.num_output_tokens for p in processors)
             request_metadata.final_usage_info = UsageInfo(
                 prompt_tokens=num_prompt_tokens,
                 completion_tokens=num_completion_tokens,
@@ -936,11 +920,12 @@ class OpenAIServingChat(GenerateBaseServing):
             # Log complete streaming response if output logging is enabled
             if self.enable_log_outputs and self.request_logger:
                 # Log the complete response for each choice
-                for i in range(num_choices):
+                for i, processor in enumerate(processors):
+                    num_tokens = processor.num_output_tokens
                     full_text = (
                         previous_texts[i]
                         if previous_texts and i < len(previous_texts)
-                        else f"<streaming_complete: {previous_num_tokens[i]} tokens>"
+                        else f"<streaming_complete: {num_tokens} tokens>"
                     )
                     self.request_logger.log_outputs(
                         request_id=request_id,

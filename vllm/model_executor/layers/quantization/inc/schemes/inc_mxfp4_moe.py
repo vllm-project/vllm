@@ -35,7 +35,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_moe_fp4_layer_for_marlin,
 )
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -199,12 +199,8 @@ class INCMxfp4MoEMethod(FusedMoEMethodBase):
                 s2 = layer.w2_weight_scale[e_idx]
                 sw2 = swizzle_mxfp4_scales(s2, w2_M, w2_N)
                 swizzled_w2.append(sw2.reshape(w2_M, w2_scale_N))
-            layer.w13_weight_scale = torch.nn.Parameter(
-                torch.stack(swizzled_w13), requires_grad=False
-            )
-            layer.w2_weight_scale = torch.nn.Parameter(
-                torch.stack(swizzled_w2), requires_grad=False
-            )
+            replace_parameter(layer, "w13_weight_scale", torch.stack(swizzled_w13))
+            replace_parameter(layer, "w2_weight_scale", torch.stack(swizzled_w2))
         elif self.mxfp4_backend in B12X_BACKENDS or current_platform.is_xpu():
             pass
         else:
