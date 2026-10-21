@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import TypeAlias
 
-DynamicSDSchedule = list[tuple[int, int, int]]
+DynamicSDSchedule: TypeAlias = list[tuple[int, int, int]]
 
 
 def validate_and_normalize_dynamic_sd_schedule(

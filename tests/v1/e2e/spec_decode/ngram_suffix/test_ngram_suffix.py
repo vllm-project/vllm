@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -15,6 +17,9 @@ from ..utils import (
     get_spec_decode_metric_value,
     get_test_prompts,
 )
+
+if TYPE_CHECKING:
+    from vllm.v1.spec_decode.dynamic.utils import DynamicSDSchedule
 
 
 @pytest.fixture
@@ -175,7 +180,9 @@ def test_suffix_decoding_acceptance(
     assert last_accept_rate > 0.80, f"Expected final acceptance rate > 0.80; {summary}"
 
 
-def _dynamic_sd_ngram_config(schedule: list[tuple[int, int, int]]) -> dict[str, Any]:
+def _dynamic_sd_ngram_config(
+    schedule: DynamicSDSchedule,
+) -> dict[str, str | int | DynamicSDSchedule]:
     return {
         "method": "ngram",
         "prompt_lookup_max": 3,
