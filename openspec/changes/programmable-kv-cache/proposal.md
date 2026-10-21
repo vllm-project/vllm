@@ -28,7 +28,7 @@ Preserve the complementary backend-interpreted KVCR path.
 - Add multi-round rollout, shared-prefix, tool-wait, and memory-pressure experiments, including a router-directive baseline, policy ablations, failures, and overhead measurements.
   Performance improvements are hypotheses to measure.
 - Measure rollout reuse within one weight version and independently verify invalidation after weight updates.
-  Acceptance uses local Qwen3.8-27B TP=2 on GPUs 0 and 3, with conclusions scoped to the tested hardware and layouts.
+  Acceptance uses local Qwen3.8-27B TP=2 on the user-assigned GPUs: initially 0/3, and 0/2 for the October 20 continuation. Conclusions are scoped to each tested hardware allocation and layout; timings are not pooled across allocations.
 - Provide runnable control recipes for direct commands without policies, shared-prefix association, branching and task cleanup, range retention, paused-session movement, cross-engine reuse, policy competition, and recovery.
   Three reference policy algorithms do not define the scope of this contribution.
 

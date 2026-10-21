@@ -54,7 +54,9 @@ Separate correctness validation SHALL establish that local and external KV from 
 
 ### Requirement: Record the validated model and hardware scope
 
-Acceptance SHALL use Qwen3.8-27B TP=2 on the selected local GPUs 0 and 3.
+Acceptance SHALL use Qwen3.8-27B TP=2 on the user-assigned local GPU pair.
+The initial allocation was GPUs 0 and 3; the October 20 continuation uses GPUs 0 and 2.
+Reports SHALL keep the two allocations' measurements separate and SHALL NOT calculate speedups across them.
 Reports SHALL record the actual cache-group/layout and hardware coverage and SHALL NOT generalize measured results to untested configurations.
 
 #### Scenario: Local evaluation succeeds
