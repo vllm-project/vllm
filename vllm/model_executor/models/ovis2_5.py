@@ -477,7 +477,7 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP, SupportsEncoderCudaGrap
 
         self.config: PreTrainedConfig = config
         self.model_config = vllm_config.model_config
-        self.multimodal_config = vllm_config.model_config.multimodal_config
+        self.multimodal_config = vllm_config.model_config.get_multimodal_config()
 
         with self._mark_language_model(vllm_config):
             self.llm = init_vllm_registered_model(
