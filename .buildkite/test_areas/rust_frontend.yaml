@@ -175,8 +175,10 @@ steps:
       - tests/tool_use/
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (L4) Rust Frontend Distributed"
+- label: ":nvidia: (L4) [Nightly] Rust Frontend Distributed"
   key: rust-frontend-distributed
+  # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
+  optional: true
   timeout_in_minutes: 25
   device: l4
   num_devices: 4
@@ -204,6 +206,8 @@ steps:
   - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_hybrid_lb_dp.py -k "not 4 and not server_info"
   mirror:
     amd:
+      # Run on PRs even when the L4 step is optional (nightly only).
+      optional: false
       label: ":amd: (MI355) Rust Frontend Distributed"
       dind: false
       device: mi355_4
