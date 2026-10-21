@@ -130,7 +130,6 @@ def _request_group(
         enable_kv_split,
     ):
         metadata = builder.build(0, common).scheduler_metadata
-    assert metadata is not None
 
     # Workitem count is at byte 68; 48-byte items start at byte 192.
     words = metadata.view(torch.int32)
