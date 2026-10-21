@@ -2033,7 +2033,7 @@ def test_sparse_indexer_decode_topk_short_seq_lens(
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
 @torch.inference_mode()
 def test_sparse_indexer_topk_backend_resolution() -> None:
-    """Auto heuristic chain and fail-fast validation of explicit backends."""
+    """Auto chain and fail-fast validation of explicit backends."""
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.indexer_topk import SparseIndexerTopk
 
@@ -2063,25 +2063,17 @@ def test_sparse_indexer_topk_backend_resolution() -> None:
     has_gvr2 = _has_flashinfer_gvr2()
 
     if has_gvr2:
-        # Wide rows (>= 32K) go to gvr_2 regardless of the row count or the
-        # DeepSelect alignment; narrow rows keep the pre-existing chain.
-        assert resolve("auto") == "flashinfer_gvr2"
-        assert resolve("auto", k=512, num_rows=128) == "flashinfer_gvr2"
-        assert resolve("auto", unaligned_logits, num_rows=128) == "flashinfer_gvr2"
-        assert resolve("auto", k=5000) == "per_row"
         assert resolve("flashinfer_gvr2", num_rows=1) == "flashinfer_gvr2"
         with pytest.raises(RuntimeError, match="topk_tokens must be in"):
             resolve("flashinfer_gvr2", k=3000)
         with pytest.raises(RuntimeError, match="fp32"):
             resolve("flashinfer_gvr2", logits.to(torch.bfloat16))
-        # Row pitch not a multiple of 4 (float4 loads): refused explicitly,
-        # and "auto" never picks gvr_2 for it.
+        # Row pitch not a multiple of 4 (float4 loads).
         odd_pitch = torch.randn(64, 131074, dtype=torch.float32, device="cuda")[
             :, :131072
         ]
         with pytest.raises(RuntimeError, match="multiple of 4"):
             resolve("flashinfer_gvr2", odd_pitch)
-        assert resolve("auto", odd_pitch) != "flashinfer_gvr2"
         # A strided view whose last row ends at its width cannot be read as
         # [rows, stride]; as_fp32_logits output always can.
         from vllm.model_executor.layers.sparse_attn_indexer import as_fp32_logits
@@ -2093,22 +2085,20 @@ def test_sparse_indexer_topk_backend_resolution() -> None:
 
         with pytest.raises(RuntimeError, match="full stride"):
             resolve("flashinfer_gvr2", short_tail(torch.float32))
-        assert resolve("auto", short_tail(torch.float32)) != "flashinfer_gvr2"
         upcast = as_fp32_logits(
             short_tail(torch.bfloat16),
             torch.full((64,), 131072, dtype=torch.int32, device="cuda"),
         )
         assert upcast.stride(0) == 131328
         assert resolve("flashinfer_gvr2", upcast) == "flashinfer_gvr2"
-        logits = logits[:, :16384]
-        unaligned_logits = unaligned_logits[:, :16384]
     else:
         with pytest.raises(RuntimeError, match="gvr_2|SM100|CUDA"):
             resolve("flashinfer_gvr2")
 
-    # Otherwise "auto" is the chain cooperative -> persistent -> per_row, with
-    # the cooperative/persistent switch at cooperative_topk's cluster-wave row
-    # limit. It must never select the opt-in backends by itself.
+    # "auto" is the chain cooperative -> persistent -> per_row, with the
+    # cooperative/persistent switch at cooperative_topk's cluster-wave row
+    # limit. It must never select the opt-in backends (gvr_2 included, whose
+    # latency is data-dependent) by itself, even on wide rows.
     if has_coop:
         from vllm.model_executor.layers.indexer_topk import (
             AUTO_COOPERATIVE_MAX_ROWS,

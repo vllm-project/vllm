@@ -18,10 +18,6 @@ logger = init_logger(__name__)
 
 RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
 
-# Below this logits row width the cooperative/persistent kernels are as fast
-# as gvr_2 (measured on GB300) and "auto" keeps the pre-existing chain.
-GVR2_AUTO_MIN_ROW_WIDTH = 32768
-
 # Prefill chunks with fewer rows run faster on top_k_per_row_prefill (GB300),
 # and their many distinct small shapes would JIT-compile gvr_2 mid-serving.
 GVR2_PREFILL_MIN_ROWS = 1024
@@ -271,9 +267,8 @@ class SparseIndexerTopk(torch.nn.Module):
     def _resolve_auto(
         self, logits: torch.Tensor, topk_tokens: int, num_rows: int
     ) -> str:
-        """flashinfer_gvr2 for wide rows when available, otherwise the chain
-        cooperative -> persistent -> per_row. aiter/deep_select/flashinfer/torch
-        are opt-in only.
+        """The priority chain: cooperative -> persistent -> per_row.
+        aiter/deep_select/flashinfer/flashinfer_gvr2/torch are opt-in only.
 
         cooperative_topk is preferred whenever it is applicable, i.e. within
         its AUTO_COOPERATIVE_MAX_ROWS row limit; larger batches go to
@@ -282,12 +277,6 @@ class SparseIndexerTopk(torch.nn.Module):
         aiter not auto-resolved as it does not outperform the per-row on every shape,
         hence we delegate to the caller to decide when to use it.
         """
-        if (
-            self._has_flashinfer_gvr2
-            and logits.shape[1] >= GVR2_AUTO_MIN_ROW_WIDTH
-            and not self._gvr2_constraints(logits, topk_tokens)
-        ):
-            return "flashinfer_gvr2"
         if not self._cooperative_constraints(logits, topk_tokens, num_rows):
             return "cooperative"
         if self._is_cuda and topk_tokens in (512, 1024, 2048):
