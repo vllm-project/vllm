@@ -453,14 +453,19 @@ class AuxOutputWorkerConnector:
 
     def _make_output(self, token_start: int, rows: np.ndarray) -> AuxRequestOutput:
         if self._indexer is None:
-            return AuxRequestOutput(token_start, rows)
+            return AuxRequestOutput(token_start=token_start, routed_experts_rows=rows)
         n = len(rows)
-        r3 = rows[:, : self._r3_nbytes].copy()
+        routed_experts_rows = rows[:, : self._r3_nbytes].copy()
         if self._capturer is not None:
-            r3 = r3.view(self._r3_dtype).reshape(n, *self._r3_shape)
+            routed_experts_rows = routed_experts_rows.view(self._r3_dtype).reshape(
+                n, *self._r3_shape
+            )
         indexer = rows[:, self._r3_nbytes :].copy().view(np.int32)
         return AuxRequestOutput(
-            token_start, r3, indexer, self._indexer.profile_metadata
+            token_start=token_start,
+            routed_experts_rows=routed_experts_rows,
+            indexer_rows=indexer,
+            indexer_profile=self._indexer.profile_metadata,
         )
 
     def _publish_blocks(
