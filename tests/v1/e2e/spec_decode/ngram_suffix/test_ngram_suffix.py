@@ -171,3 +171,47 @@ def test_suffix_decoding_acceptance(
 
     # Heuristic: expect at least 80.0% acceptance rate at the end.
     assert last_accept_rate > 0.80, f"Expected final acceptance rate > 0.80; {summary}"
+
+
+def _dynamic_sd_ngram_config(schedule: list[list[int]]) -> dict:
+    return {
+        "method": "ngram",
+        "prompt_lookup_max": 3,
+        "prompt_lookup_min": 2,
+        "num_speculative_tokens": 3,
+        "num_speculative_tokens_per_batch_size": schedule,
+    }
+
+
+@single_gpu_only
+def test_dynamic_sd_invalid_schedule_fails_at_config_time(vllm_runner):
+    """An invalid schedule raises the config error itself, not an engine
+    startup failure after the model has loaded."""
+    with pytest.raises(ValueError, match="non-overlapping"):
+        vllm_runner(
+            "Qwen/Qwen3-0.6B",
+            speculative_config=_dynamic_sd_ngram_config([[1, 16, 3], [16, 32, 2]]),
+        )
+
+
+@single_gpu_only
+def test_dynamic_sd_empty_schedule_falls_back_to_static_k(
+    sampling_config: SamplingParams,
+    vllm_runner,
+):
+    """An empty schedule serves with the static num_speculative_tokens."""
+    with vllm_runner(
+        "Qwen/Qwen3-0.6B",
+        speculative_config=_dynamic_sd_ngram_config([]),
+        disable_log_stats=False,
+    ) as runner:
+        speculative_config = runner.llm.llm_engine.vllm_config.speculative_config
+        assert speculative_config.num_speculative_tokens_per_batch_size is None
+
+        runner.llm.chat(
+            get_test_prompts(mm_enabled=False, num_prompts=8), sampling_config
+        )
+        num_draft = get_spec_decode_metric_value(
+            runner.llm.get_metrics(), "vllm:spec_decode_num_draft_tokens"
+        )
+        assert num_draft > 0
