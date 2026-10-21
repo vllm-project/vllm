@@ -638,8 +638,9 @@ class OffloadingConnectorScheduler:
         self._stale_job_threshold: int = 0
         # Jobs flushed by a cache reset -> worker reports still due. Their
         # chunks are released at once, but a worker may still write them (a
-        # late DMA) until it reports, so the manager holds promotions, which
-        # could fill a released chunk, meanwhile.
+        # late DMA, or a remote node's slot push) until it reports, so the
+        # manager holds promotions, which could fill a released chunk,
+        # meanwhile.
         self._reset_fence: dict[int, int] = {}
         self._reset_fence_since = 0.0
         self._jobs: dict[int, TransferJobStatus] = {}

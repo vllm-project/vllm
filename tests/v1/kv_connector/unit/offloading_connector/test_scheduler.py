@@ -954,7 +954,8 @@ def _report_jobs(scheduler, output, job_ids: set[int]) -> None:
 @pytest.mark.parametrize("promotes", [True, False])
 def test_cache_reset_holds_promotions_until_flushed_jobs_report(promotes):
     # A flushed job may still write its released chunk until every worker
-    # reports it (a late DMA), so the manager promotes into no chunk meanwhile.
+    # reports it (a late DMA, or a remote node's slot push), so the manager
+    # promotes into no chunk meanwhile.
     scheduler, manager = _make_tiering_engine_scheduler(
         [{"type": "example"}] if promotes else []
     )

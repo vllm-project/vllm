@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for native offloading specs and their factory."""
 
+import sys
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -653,6 +654,7 @@ def _multi_node_tiering_spec(
         group=MagicMock(), rank=rank, on_head=on_head, remote_ranks=frozenset({1, 2})
     )
     regions: list[dict[str, Any]] = []
+    attached: list[dict[str, Any]] = []
     monkeypatch.setattr(
         module,
         "multi_node_topology",
@@ -662,17 +664,55 @@ def _multi_node_tiering_spec(
         module, "SharedOffloadRegion", lambda **kw: regions.append(kw) or MagicMock()
     )
     monkeypatch.setattr(module, "CPUOffloadingWorker", MagicMock())
-    return spec, module, regions
+    monkeypatch.setattr(module, "gather_construction_errors", lambda *args: None)
+    monkeypatch.setattr(
+        module,
+        "attach_region_mirror",
+        lambda *args, **kw: attached.append({"args": args, **kw}) or MagicMock(),
+    )
+    return spec, module, regions, attached
+
+
+def test_tiering_spec_head_worker_slot_follows_group_rank(monkeypatch):
+    spec, _, regions, attached = _multi_node_tiering_spec(
+        monkeypatch, on_head=True, rank=2
+    )
+
+    spec.create_worker(MagicMock())
+
+    assert regions[0]["rank"] == 2
+    assert regions[0]["engine_id"] == "test-engine"
+    assert attached[0]["args"][4].rank == 2
+
+
+def test_tiering_spec_remote_worker_region_holds_only_its_slot(monkeypatch):
+    spec, _, regions, attached = _multi_node_tiering_spec(
+        monkeypatch, on_head=False, rank=2
+    )
+
+    spec.create_worker(MagicMock())
+
+    head_layout, local_layout = attached[0]["args"][2:4]
+    assert regions[0]["rank"] == 0
+    # Workers sharing a remote node keep separate compact regions.
+    assert regions[0]["engine_id"] == "test-engine_r2"
+    assert regions[0]["kv_bytes_per_chunk"] == local_layout.row_stride
+    assert local_layout.row_stride < head_layout.row_stride
+    assert local_layout.size == head_layout.size
+    assert head_layout.num_slots == 3
 
 
 def test_tiering_spec_without_secondary_tiers_keeps_regions_node_local(
     monkeypatch,
 ):
-    spec, module, regions = _multi_node_tiering_spec(
+    spec, module, regions, _ = _multi_node_tiering_spec(
         monkeypatch, on_head=False, rank=2, secondary_tiers=False
     )
     monkeypatch.setattr(
         module, "multi_node_topology", MagicMock(side_effect=AssertionError)
+    )
+    monkeypatch.setattr(
+        module, "attach_region_mirror", MagicMock(side_effect=AssertionError)
     )
 
     spec.create_worker(MagicMock())
@@ -707,25 +747,65 @@ def test_tiering_spec_without_secondary_tiers_keeps_regions_node_local(
         ),
         # A replicated row keeps a single slot.
         ({"replicated_layout": True}, ValueError, "every worker's slot"),
-        ({}, NotImplementedError, "not supported yet"),
+        ({"extra_config": {**_FS_TIER, "mirror_attempts": 0}}, ValueError, "mirror"),
+        # Below the mirror's millisecond granularity.
+        (
+            {"extra_config": {**_FS_TIER, "mirror_timeout_s": 0.0005}},
+            ValueError,
+            "mirror_timeout_s",
+        ),
     ],
 )
-def test_tiering_spec_rejects_secondary_tiers_across_nodes(
+def test_tiering_spec_rejects_unsupported_multi_node_setups(
     monkeypatch, config, error, match
 ):
-    spec, _, regions = _multi_node_tiering_spec(
+    spec, _, _, _ = _multi_node_tiering_spec(
         monkeypatch, on_head=True, rank=0, **config
     )
 
     with pytest.raises(error, match=match):
         spec.create_worker(MagicMock())
-    # Every rank rejects the engine before it maps a region.
-    assert not regions
+
+
+def test_tiering_spec_shares_a_construction_failure_with_every_rank(monkeypatch):
+    spec, module, _, _ = _multi_node_tiering_spec(monkeypatch, on_head=False, rank=1)
+    region = MagicMock()
+    reported: list[Any] = []
+    monkeypatch.setattr(module, "SharedOffloadRegion", lambda **kw: region)
+    monkeypatch.setattr(
+        module, "CPUOffloadingWorker", MagicMock(side_effect=OSError("pin failed"))
+    )
+
+    def gather(topology, error):
+        reported.append(error)
+        raise RuntimeError("construction failed on {1: ...}")
+
+    monkeypatch.setattr(module, "gather_construction_errors", gather)
+
+    with pytest.raises(RuntimeError, match="construction failed"):
+        spec.create_worker(MagicMock())
+    assert isinstance(reported[0], OSError)
+    region.cleanup.assert_called_once()
+
+
+def test_tiering_spec_shuts_the_worker_down_when_attach_fails(monkeypatch):
+    spec, module, _, _ = _multi_node_tiering_spec(monkeypatch, on_head=False, rank=1)
+    worker = MagicMock()
+    monkeypatch.setattr(module, "CPUOffloadingWorker", lambda **kw: worker)
+    monkeypatch.setattr(
+        module,
+        "attach_region_mirror",
+        MagicMock(side_effect=RuntimeError("mirror handshake failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="handshake"):
+        spec.create_worker(MagicMock())
+    worker.shutdown.assert_called_once()
 
 
 def test_tiering_scheduler_must_join_the_workers_region(monkeypatch):
-    # Secondary tiers read worker rank 0's region, which the engine core must
-    # share.
+    # Remote slots are mirrored into worker rank 0's region, which the engine
+    # core must share.
     import vllm.v1.kv_offload.tiering.spec as module
 
     spec = _create_spec(
@@ -750,7 +830,7 @@ def test_tiering_spec_accepts_secondary_tiers_on_one_node(
 ):
     # No such backend reports its node count; the workers' group shows they
     # share one node.
-    spec, _, regions = _multi_node_tiering_spec(
+    spec, _, regions, _ = _multi_node_tiering_spec(
         monkeypatch,
         on_head=True,
         rank=1,
@@ -819,7 +899,7 @@ def test_tiering_spec_external_launcher_checks_each_data_parallel_replica(
     monkeypatch,
 ):
     # external_launcher's world_size counts both replicas of 3 workers.
-    spec, module, regions = _multi_node_tiering_spec(
+    spec, module, regions, _ = _multi_node_tiering_spec(
         monkeypatch,
         on_head=True,
         rank=1,
@@ -858,11 +938,45 @@ def test_tiering_spec_rejects_secondary_tiers_with_elastic_ep():
 def test_tiering_spec_rejects_an_unidentified_worker_group(monkeypatch):
     # Ray leaves local_world_size equal to world_size, so only the group
     # could show that the workers share a node.
-    spec, module, regions = _multi_node_tiering_spec(
+    spec, module, regions, _ = _multi_node_tiering_spec(
         monkeypatch, on_head=True, rank=0, executor_backend="ray", local_world_size=3
     )
     monkeypatch.setattr(module, "multi_node_topology", lambda world_size: (None, None))
 
     with pytest.raises(RuntimeError, match="could not be identified"):
+        spec.create_worker(MagicMock())
+    assert not regions
+
+
+_KVCR_MODULE = "vllm.v1.kv_offload.tiering.kvcr.manager"
+
+
+@pytest.mark.parametrize(
+    "tier",
+    [
+        {"type": "kvcr"},
+        # The same class through an out-of-tree module path.
+        {"type": "KVCRSecondaryTierManager", "module_path": _KVCR_MODULE},
+    ],
+)
+def test_tiering_spec_rejects_kvcr_tiers_across_nodes(monkeypatch, tier):
+    """KVCR keys would still hit rows stored before the mirror."""
+    import types
+
+    from vllm.v1.kv_offload.tiering.base import SecondaryTierManager
+
+    # The KVCR manager imports the kvcr package, which is optional.
+    kvcr_manager = types.ModuleType(_KVCR_MODULE)
+    kvcr_manager.KVCRSecondaryTierManager = type(
+        "KVCRSecondaryTierManager",
+        (SecondaryTierManager,),
+        {"__module__": _KVCR_MODULE},
+    )
+    monkeypatch.setitem(sys.modules, _KVCR_MODULE, kvcr_manager)
+    spec, _, regions, _ = _multi_node_tiering_spec(
+        monkeypatch, on_head=True, rank=0, extra_config={"secondary_tiers": [tier]}
+    )
+
+    with pytest.raises(ValueError, match="kvcr"):
         spec.create_worker(MagicMock())
     assert not regions
