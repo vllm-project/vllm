@@ -215,7 +215,7 @@ def test_real_triton_kernel_override_end_to_end() -> None:
         return "cpu"
 
     register_kernels({"vllm.tests.real_jit_kernel_home._add_one_kernel": cpu_impl})
-    assert module._add_one_kernel.arg_names == (  # type: ignore[attr-defined]
+    assert module._add_one_kernel.arg_names == (
         "x_ptr",
         "out_ptr",
         "BLOCK",
