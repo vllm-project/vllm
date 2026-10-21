@@ -526,6 +526,7 @@ def _capture_expert_mask(expert_mask, *, global_num_experts):
     from unittest import mock
 
     from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp8_moe import (
         AiterMxfp8Experts,
     )
@@ -556,7 +557,7 @@ def _capture_expert_mask(expert_mask, *, global_num_experts):
             w2=w2,
             topk_weights=tw,
             topk_ids=ti,
-            activation=None,
+            activation=MoEActivation.SILU,
             global_num_experts=global_num_experts,
             expert_map=expert_mask,
             a1q_scale=None,
