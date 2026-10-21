@@ -859,6 +859,19 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
         # weights and OOM.
         aiter_uses_128 = backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
 
+        # The aiter Triton a16w4 kernel behind AITER_TRITON_MXFP4_BF16 masks
+        # K tails (EVEN_K / MASK_K_LIMIT) and N tails itself, so its only hard
+        # alignment is the 32-wide e8m0 scale block, and its tuned configs
+        # stream K in 128-wide slabs. Align to 128 on gfx942 for the same
+        # reason as the CK carve-out: DeepSeek-V4.1-Flash (moe_intermediate
+        # 2304) is 576 -> 640 instead of 768 at TP4 and 288 -> 384 instead of
+        # 512 at TP8, i.e. 17-25 % fewer expert weight bytes per rank. gfx950
+        # keeps 256: its CDNA4 scale swizzle requires BLOCK_K % 256 == 0.
+        aiter_triton_uses_128 = (
+            backend == Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16
+            and get_cdna_version() == 3
+        )
+
         # matmul_ogs uses block_k=128 for MXFP4 on pre-CDNA4 GPUs.
         # CDNA4's F16xMXFP4 configuration uses block_k=256.
         triton_uses_128 = (
@@ -868,7 +881,11 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
 
         intermediate_alignment = (
             128
-            if aiter_w4a4 or (is_situ_or_silu and (aiter_uses_128 or triton_uses_128))
+            if aiter_w4a4
+            or (
+                is_situ_or_silu
+                and (aiter_uses_128 or aiter_triton_uses_128 or triton_uses_128)
+            )
             else 256
         )
         # W4A4 stage 1 still requires a 256-aligned hidden dimension.

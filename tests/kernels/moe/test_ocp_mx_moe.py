@@ -2557,8 +2557,9 @@ ROCM_MXFP4_ROUNDUP_CASES = [
     ("AITER_MXFP4_BF16", "SWIGLUOAI", 384, 384, 512, 512),
     # Backends that stay on the generic ROCm 256/256 round-up.
     ("AITER_MXFP4_FP8", "SILU", 384, 384, 512, 512),
-    ("AITER_TRITON_MXFP4_BF16", "SILU", 384, 384, 512, 512),
     ("TRITON", "SWIGLUOAI", 384, 384, 512, 512),
+    # AITER_TRITON_MXFP4_BF16 depends on the CDNA generation; see
+    # AITER_TRITON_MXFP4_ROUNDUP_CASES below.
 ]
 
 
@@ -2597,6 +2598,73 @@ def test_rocm_mxfp4_round_up_hidden_and_intermediate(
 
     assert (hidden, intermediate) == (hidden_out, inter_out), (
         f"{backend_name} / {activation_name}: "
+        f"hidden {hidden_in}->{hidden} (expected {hidden_out}), "
+        f"intermediate {inter_in}->{intermediate} (expected {inter_out})"
+    )
+
+
+# (cdna_version, activation, hidden_in, inter_in, hidden_out, inter_out)
+#
+# The aiter Triton a16w4 kernel masks K tails (EVEN_K / MASK_K_LIMIT) and N
+# tails itself and only needs the 32-wide e8m0 scale block, so on gfx942
+# (CDNA3) the per-partition intermediate of the SiTU/SILU W4A16 Triton backend
+# is aligned to 128 like the CK carve-out above. gfx950 (CDNA4) stays on 256:
+# its CDNA4 scale swizzle requires BLOCK_K % 256 == 0.
+AITER_TRITON_MXFP4_ROUNDUP_CASES = [
+    # DeepSeek-V4.1-Flash (hidden 5120, moe_intermediate 2304) at TP4 and TP8:
+    # 576 -> 640 instead of 768, 288 -> 384 instead of 512.
+    (3, "SILU", 5120, 576, 5120, 640),
+    (3, "SILU", 5120, 288, 5120, 384),
+    # An already 128-aligned shard is allocated at its real width.
+    (3, "SILU", 384, 384, 384, 384),
+    (3, "SITU", 384, 384, 384, 384),
+    # hidden_size follows the intermediate alignment, as in the CK carve-out.
+    (3, "SILU", 4480, 384, 4480, 384),
+    # Only for SiTU/SILU; SwigluOAI (gpt-oss) keeps the generic ROCm arm.
+    (3, "SWIGLUOAI", 384, 384, 512, 512),
+    # CDNA4 keeps the generic 256/256 round-up.
+    (4, "SILU", 384, 384, 512, 512),
+    (4, "SILU", 5120, 576, 5120, 768),
+]
+
+
+@pytest.mark.parametrize(
+    "cdna_version,activation_name,hidden_in,inter_in,hidden_out,inter_out",
+    AITER_TRITON_MXFP4_ROUNDUP_CASES,
+)
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="ROCm is required for this test")
+def test_rocm_mxfp4_round_up_aiter_triton_w4a16_by_arch(
+    monkeypatch: pytest.MonkeyPatch,
+    cdna_version: int,
+    activation_name: str,
+    hidden_in: int,
+    inter_in: int,
+    hidden_out: int,
+    inter_out: int,
+):
+    """Pin the AITER_TRITON_MXFP4_BF16 arm per CDNA generation.
+
+    The CDNA generation is mocked so the table is checked on every ROCm host
+    rather than only on the card the CI happens to run on.
+    """
+    import vllm.platforms.rocm as rocm_platform
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+        mxfp4_round_up_hidden_size_and_intermediate_size,
+    )
+
+    monkeypatch.setattr(rocm_platform, "get_cdna_version", lambda: cdna_version)
+
+    hidden, intermediate = mxfp4_round_up_hidden_size_and_intermediate_size(
+        Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16,
+        hidden_in,
+        inter_in,
+        MoEActivation[activation_name],
+    )
+
+    assert (hidden, intermediate) == (hidden_out, inter_out), (
+        f"CDNA{cdna_version} / {activation_name}: "
         f"hidden {hidden_in}->{hidden} (expected {hidden_out}), "
         f"intermediate {inter_in}->{intermediate} (expected {inter_out})"
     )
