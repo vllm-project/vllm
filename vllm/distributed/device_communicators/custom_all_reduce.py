@@ -12,6 +12,7 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.distributed.device_communicators.all_reduce_utils import (
     CUSTOM_ALL_REDUCE_MAX_SIZES,
+    GFX90A_CUSTOM_ALL_REDUCE_MAX_SIZES,
     gpu_p2p_access_check,
 )
 from vllm.distributed.parallel_state import in_the_same_node_as
@@ -252,6 +253,14 @@ class CustomAllreduce:
                     CUSTOM_ALL_REDUCE_MAX_SIZES[device_capability_str][world_size],
                     max_size,
                 )
+        elif (
+            current_platform.is_rocm()
+            and world_size in GFX90A_CUSTOM_ALL_REDUCE_MAX_SIZES
+        ):
+            from vllm.platforms.rocm import on_gfx90a
+
+            if on_gfx90a():
+                max_size = min(GFX90A_CUSTOM_ALL_REDUCE_MAX_SIZES[world_size], max_size)
         # device.index is a visible ordinal, not a logical local ID.
         fully_connected = False
         if same_node:

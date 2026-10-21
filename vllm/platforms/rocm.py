@@ -1224,7 +1224,10 @@ class RocmPlatform(Platform):
 
     @classmethod
     def use_custom_allreduce(cls) -> bool:
-        # We only enable custom allreduce for MI300 series
+        # We enable custom allreduce for MI300 series and newer, and for MI200
+        # (gfx90a) unless VLLM_ROCM_CUSTOM_AR_GFX90A=0.
+        if envs.VLLM_ROCM_CUSTOM_AR_GFX90A and "gfx90a" in _GCN_ARCH:
+            return True
         return any(gfx in _GCN_ARCH for gfx in ["gfx94", "gfx95"])
 
     @classmethod
