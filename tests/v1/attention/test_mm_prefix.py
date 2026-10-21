@@ -79,6 +79,49 @@ SLIDING_WINDOW_LEFT = 129
 STAGING_CAPACITY = 64
 
 
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm backend metadata")
+def test_segmented_mm_prefix_metadata():
+    from types import SimpleNamespace
+
+    from vllm.v1.attention.backends.rocm_segmented_attn import (
+        RocmSegmentedAttentionBackend,
+        RocmSegmentedAttentionMetadata,
+        RocmSegmentedAttentionMetadataBuilder,
+    )
+
+    builder = RocmSegmentedAttentionMetadataBuilder.__new__(
+        RocmSegmentedAttentionMetadataBuilder
+    )
+    common = SimpleNamespace(
+        num_actual_tokens=6,
+        num_reqs=3,
+        max_query_len=3,
+        max_seq_len=9,
+        query_start_loc=torch.tensor([0, 3, 5, 6], dtype=torch.int32),
+        seq_lens=torch.tensor([9, 7, 4], dtype=torch.int32),
+        block_table_tensor=torch.tensor([[0], [1], [2]], dtype=torch.int32),
+        slot_mapping=torch.arange(6),
+        causal=True,
+        mm_req_doc_ranges={0: [(0, 5), (7, 8)], 2: [(1, 3)]},
+    )
+    metadata = builder.build(0, common)
+    assert isinstance(metadata, RocmSegmentedAttentionMetadata)
+    assert RocmSegmentedAttentionBackend.supports_mm_prefix()
+    torch.testing.assert_close(
+        metadata.mm_prefix_range_tensor,
+        torch.tensor(
+            [[[0, 5], [7, 8]], [[0, 0], [0, 0]], [[1, 3], [0, 0]]], dtype=torch.int32
+        ),
+    )
+    assert metadata.query_start_loc is common.query_start_loc
+    assert metadata.seq_lens is common.seq_lens
+    assert metadata.block_table is common.block_table_tensor
+    assert metadata.slot_mapping is common.slot_mapping
+    for empty in (None, {}, {0: [], 1: [(0, 0)]}):
+        common.mm_req_doc_ranges = empty
+        assert builder.build(0, common).mm_prefix_range_tensor is None
+
+
 def _query_ranges(mm_ranges, query_lens, seq_lens):
     """Fill a staging buffer and return the written rows, or None if empty."""
     query_start_loc = torch.tensor(

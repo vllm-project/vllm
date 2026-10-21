@@ -568,10 +568,14 @@ def kernel_unified_attention(
         M, L, P, alpha = softmax_step(S, M, L)
         acc = acc * alpha[:, None]
 
-        if SLIDING_WINDOW:
+        # Unclamped image ranges override the window. Clamped ranges retain
+        # future image keys, so only the window's past bound can zero values.
+        if SLIDING_WINDOW and (not USE_MM_PREFIX or MM_PREFIX_CLAMP_SW):
             qpos_lo = q_block_local_idx * BLOCK_Q
             dist = context_len + qpos_lo - seq_offset[:, None]
-            if USE_PER_SEQ_CAUSAL:
+            if USE_MM_PREFIX:
+                sw_mask_v = dist < SLIDING_WINDOW
+            elif USE_PER_SEQ_CAUSAL:
                 is_causal_seq = tl.load(per_seq_causal_ptr + seq_idx)
                 sw_mask_v = tl.where(
                     is_causal_seq,

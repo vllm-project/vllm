@@ -3,6 +3,7 @@
 """ROCm attention backend for token-major segmented Triton attention."""
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
@@ -14,14 +15,21 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.v1.attention.backend import AttentionLayer, AttentionType
+from vllm.v1.attention.backend import (
+    AttentionLayer,
+    AttentionType,
+    CommonAttentionMetadata,
+)
 from vllm.v1.attention.backends.rocm_attn import (
     RocmAttentionBackend,
     RocmAttentionImpl,
     RocmAttentionMetadata,
     RocmAttentionMetadataBuilder,
 )
-from vllm.v1.attention.backends.utils import get_num_attention_heads_from_layers
+from vllm.v1.attention.backends.utils import (
+    compute_mm_prefix_range_tensor,
+    get_num_attention_heads_from_layers,
+)
 from vllm.v1.attention.ops.segmented_attention import (
     get_segmented_attention_workspace,
     segmented_attention,
@@ -46,6 +54,11 @@ def is_rdna() -> bool:
     return on_rdna()
 
 
+@dataclass
+class RocmSegmentedAttentionMetadata(RocmAttentionMetadata):
+    mm_prefix_range_tensor: torch.Tensor | None = None
+
+
 class RocmSegmentedAttentionMetadataBuilder(RocmAttentionMetadataBuilder):
     def __init__(
         self,
@@ -61,6 +74,27 @@ class RocmSegmentedAttentionMetadataBuilder(RocmAttentionMetadataBuilder):
         ) or model_config.get_num_attention_heads(vllm_config.parallel_config)
         self.num_heads_kv = kv_cache_spec.num_kv_heads
         self.headdim = kv_cache_spec.head_size
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> RocmSegmentedAttentionMetadata:
+        common = common_attn_metadata
+        return RocmSegmentedAttentionMetadata(
+            num_actual_tokens=common.num_actual_tokens,
+            max_query_len=common.max_query_len,
+            query_start_loc=common.query_start_loc,
+            max_seq_len=common.max_seq_len,
+            seq_lens=common.seq_lens,
+            block_table=common.block_table_tensor,
+            slot_mapping=common.slot_mapping,
+            causal=common.causal,
+            mm_prefix_range_tensor=compute_mm_prefix_range_tensor(
+                common.mm_req_doc_ranges, common.num_reqs, common.seq_lens.device
+            ),
+        )
 
 
 class RocmSegmentedAttentionBackend(RocmAttentionBackend):
@@ -112,7 +146,7 @@ class RocmSegmentedAttentionBackend(RocmAttentionBackend):
 
     @classmethod
     def supports_mm_prefix(cls) -> bool:
-        return False
+        return True
 
     @classmethod
     def supports_combination(
@@ -302,6 +336,10 @@ class RocmSegmentedAttentionImpl(RocmAttentionImpl):
             sinks=self.sinks,
             causal=attn_metadata.causal,
             softcap=self.logits_soft_cap,
+            mm_prefix_range=getattr(attn_metadata, "mm_prefix_range_tensor", None),
+            mm_prefix_clamp_sliding_window=getattr(
+                layer, "mm_prefix_clamp_sliding_window", False
+            ),
             workspace=workspace,
             use_tuned_config=self._autotune_enabled(),
         )
