@@ -17,6 +17,7 @@ worker completes or expires, and D-side retention while sibling READs drain.
 import contextlib
 import math
 from collections import defaultdict
+from dataclasses import dataclass
 from threading import Event, Lock
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -189,6 +190,7 @@ def _make_packed_mla_view_worker(
 
     config = create_vllm_config(block_size=block_size)
     config.parallel_config.pipeline_parallel_size = pp_size
+    assert config.kv_transfer_config is not None
     config.kv_transfer_config.kv_role = "kv_producer"
     config.cache_config.kv_cache_layout = "BLHNC"
     backends = []
@@ -417,6 +419,7 @@ def _register_overlaid_mla_worker(
     worker_cls = NixlPushConnectorWorker if push_pp else NixlConnectorWorker
     worker = object.__new__(worker_cls)
     if push_pp:
+        assert isinstance(worker, NixlPushConnectorWorker)
         worker._push_writer_stop = Event()
         worker._push_writer_wake = Event()
         worker._push_writer_thread = MagicMock()
@@ -575,6 +578,14 @@ def test_registration_ignores_a_sub_block_padding_tail(page_covers_view):
     assert _descriptor_geometry(padded) == _descriptor_geometry(unpadded)
 
 
+@dataclass
+class _MlaHybridWorkerFixture:
+    worker: NixlPullConnectorWorker | NixlPushConnectorWorker
+    tensors: list[torch.Tensor]
+    tensors_2d: list[torch.Tensor]
+    unified_page: int
+
+
 def _make_mla_hybrid_worker(
     local_block_size,
     kernel_block_size,
@@ -582,7 +593,7 @@ def _make_mla_hybrid_worker(
     worker_cls=None,
     kda_only_tensor=False,
     mamba=True,
-):
+) -> _MlaHybridWorkerFixture:
     """Build a real worker (pull by default) with a hybrid MLA + 2xKDA HMA
     layout, or a pure MLA one without `mamba`.
 
@@ -648,6 +659,7 @@ def _make_mla_hybrid_worker(
     # a CPU-only test host would make this a host-buffer worker: host xfer
     # buffers are per-layer, so the HMA shared-tensor regions this test builds
     # would not be deduplicated. Pin it to the faked device type.
+    assert vllm_config.kv_transfer_config is not None
     vllm_config.kv_transfer_config.kv_buffer_device = "cuda"
 
     fake_backend = MagicMock()
@@ -698,10 +710,9 @@ def _make_mla_hybrid_worker(
             }
         )
     # Keep tensors alive alongside the worker; flat views for byte checks.
-    worker._test_tensors = [t.view(-1) for t in tensors]
-    worker._test_tensors_2d = tensors
-    worker._test_unified_page = unified_page
-    return worker
+    return _MlaHybridWorkerFixture(
+        worker, [t.view(-1) for t in tensors], tensors, unified_page
+    )
 
 
 def _own_region_pairs(worker) -> bw._RegionPairs:
@@ -902,11 +913,11 @@ def _register_remote_agents(worker, metadata, tp_size):
     }
 
 
-def _owned_byte_ranges(worker, group_logical_ids):
+def _owned_byte_ranges(fixture: _MlaHybridWorkerFixture, group_logical_ids):
     """Byte ranges owned by a request: for each HMA region tensor, every
     logical block id of every group maps to one unified page."""
-    unified_page = worker._test_unified_page
-    bases = [t.data_ptr() for t in worker._test_tensors]
+    unified_page = fixture.unified_page
+    bases = [t.data_ptr() for t in fixture.tensors]
     owned = []
     for base in bases:
         for ids in group_logical_ids:
@@ -947,9 +958,10 @@ def test_hetero_ppl_multi_read_writes_stay_within_request_blocks():
         NixlConnectorMetadata,
     )
 
-    worker = _make_mla_hybrid_worker(
+    fixture = _make_mla_hybrid_worker(
         local_block_size=12, kernel_block_size=4, num_logical_blocks=8
     )
+    worker = fixture.worker
     assert worker._physical_blocks_per_logical_kv_block == 3
 
     meta_r = _make_remote_meta(
@@ -987,9 +999,10 @@ def test_hetero_ppl_multi_read_writes_stay_within_request_blocks():
     )
     worker._recving_metadata["req-b"] = meta
 
+    assert isinstance(worker, NixlPullConnectorWorker)
     worker._read_blocks_for_req("req-b", meta)
 
-    owned = _owned_byte_ranges(worker, local_ids)
+    owned = _owned_byte_ranges(fixture, local_ids)
     total = _assert_local_writes_within(worker, owned)
     # Multi-read: rank 0 carries the replicated MLA + its SSM shard,
     # rank 1 carries only its SSM shard.
@@ -1127,12 +1140,13 @@ def _run_hetero_case(
     n_local = -(-matched // local_block)  # D allocates for the pulled tokens
     n_remote = -(-matched // remote_block)
 
-    worker = _make_mla_hybrid_worker(
+    fixture = _make_mla_hybrid_worker(
         local_block_size=local_block,
         kernel_block_size=kernel,
         num_logical_blocks=max(2 * n_local + 4, 8),
         mamba=mamba,
     )
+    worker = fixture.worker
     # Local KDA state pages are (48, 64) bytes; the remote holds 1/tp_size
     # shards of each.
     meta_r = _make_remote_meta(
@@ -1175,20 +1189,21 @@ def _run_hetero_case(
     worker._recving_metadata["req-b"] = meta
 
     # Sentinel-fill the local KV so untouched bytes are detectable.
-    for t in worker._test_tensors:
+    for t in fixture.tensors:
         t.fill_(0xAA)
 
+    assert isinstance(worker, NixlPullConnectorWorker)
     worker._read_blocks_for_req("req-b", meta)
 
     # Invariant 1: all local writes within the request's own blocks.
-    owned = _owned_byte_ranges(worker, local_ids)
+    owned = _owned_byte_ranges(fixture, local_ids)
     _assert_local_writes_within(worker, owned)
 
     # Invariant 2: local<->remote attention pairs are token-aligned.
     nixl = worker.nixl_wrapper
-    local_bases = [t.data_ptr() for t in worker._test_tensors]
+    local_bases = [t.data_ptr() for t in fixture.tensors]
     remote_bases = [0x10_000_000, 0x20_000_000]
-    local_unified = worker._test_unified_page
+    local_unified = fixture.unified_page
     remote_unified = (local_unified // local_block) * remote_block
     # The local page is split into sub-descs of one transfer unit each.
     desc_page = worker.block_len_per_layer[0] * unit // kernel
@@ -1201,7 +1216,7 @@ def _run_hetero_case(
                 larr,
                 li,
                 local_bases,
-                len(worker._test_tensors[0]),
+                len(fixture.tensors[0]),
                 local_unified,
                 desc_page,
                 local_attn,
@@ -1254,7 +1269,7 @@ def _run_hetero_case(
         larr = nixl.dlists[lh]
         for li in lids:
             addr, length, _ = (int(x) for x in larr[int(li)])
-            for t in worker._test_tensors:
+            for t in fixture.tensors:
                 off = addr - t.data_ptr()
                 if 0 <= off < t.numel():
                     t[off : off + length] = 0  # simulate the RDMA write
@@ -1264,7 +1279,7 @@ def _run_hetero_case(
     n_excluded = -(-matched // local_block)
     stale = []
     for b in local_attn[cached:n_excluded]:
-        for region, t in enumerate(worker._test_tensors):
+        for region, t in enumerate(fixture.tensors):
             page = t[b * local_unified : (b + 1) * local_unified]
             n_stale = int((page == 0xAA).sum())
             if n_stale:
@@ -1328,12 +1343,13 @@ def test_hetero_non_divisible_block_sizes(local_block, remote_block, num_tokens)
 def test_hetero_block_split_is_declined(worker_cls, local_block, remote_block):
     """Pull pairs whose gcd would split each block into very many transfers,
     and every push pair, fail the handshake instead of being split."""
-    worker = _make_mla_hybrid_worker(
+    fixture = _make_mla_hybrid_worker(
         local_block_size=local_block,
         kernel_block_size=local_block,
         num_logical_blocks=8,
         worker_cls=worker_cls,
     )
+    worker = fixture.worker
     meta_r = _make_remote_meta(
         worker,
         remote_block_size=remote_block,
@@ -1426,9 +1442,10 @@ def test_mismatched_mla_kernel_page_rejected_for_mla_hybrid():
     """The MLA per-token page is TP-independent, so kernel block lengths
     differing by anything other than the block-size ratio must fail the
     handshake loudly rather than transfer at mismatched geometry."""
-    worker = _make_mla_hybrid_worker(
+    fixture = _make_mla_hybrid_worker(
         local_block_size=12, kernel_block_size=4, num_logical_blocks=8
     )
+    worker = fixture.worker
     meta_r = _make_remote_meta(
         worker,
         remote_block_size=8,
@@ -1637,6 +1654,7 @@ def _make_csa_linear_ple_worker(
 
     vllm_config = create_vllm_config(block_size=4)
     vllm_config.cache_config.enable_prefix_caching = False
+    assert vllm_config.kv_transfer_config is not None
     vllm_config.kv_transfer_config.kv_buffer_device = "cuda"
     fake_backend = MagicMock()
     fake_backend.get_supported_kernel_block_sizes.return_value = [4]
@@ -1919,6 +1937,7 @@ def _make_ring_worker():
 
     vllm_config = create_vllm_config(block_size=4)
     vllm_config.cache_config.enable_prefix_caching = False
+    assert vllm_config.kv_transfer_config is not None
     vllm_config.kv_transfer_config.kv_buffer_device = "cuda"
     fake_backend = MagicMock()
     fake_backend.get_supported_kernel_block_sizes.return_value = [4]
