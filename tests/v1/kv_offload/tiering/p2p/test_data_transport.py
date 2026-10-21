@@ -361,6 +361,7 @@ class TestNixlTransportWithMockedAgent:
         transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
 
         tid = transport.write_blocks("peer:1", [0], [1])
+        assert tid is not None
         transport._agent.check_xfer_state.return_value = state
 
         assert transport.cancel([tid], mode="wait") == [tid]
@@ -373,6 +374,7 @@ class TestNixlTransportWithMockedAgent:
         transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
 
         tid = transport.write_blocks("peer:1", [0], [1])
+        assert tid is not None
         transport._agent.check_xfer_state.side_effect = RuntimeError("NOT_FOUND")
 
         assert transport.cancel([tid], mode="wait") == [tid]
@@ -386,6 +388,7 @@ class TestNixlTransportWithMockedAgent:
         transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
 
         tid = transport.write_blocks("peer:1", [0], [1])
+        assert tid is not None
         transport._agent.check_xfer_state.side_effect = _remote_disconnect()
         transport._agent.release_xfer_handle.side_effect = RuntimeError("gone")
 
@@ -432,6 +435,7 @@ class TestNixlTransportWithMockedAgent:
         transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
 
         tid = transport.write_blocks("peer:1", [0], [1])
+        assert tid is not None
         transport._agent.check_xfer_state.return_value = "DONE"
         transport._agent.release_xfer_handle.side_effect = RuntimeError(
             "NIXL_ERR_REPOST_ACTIVE"
@@ -447,6 +451,7 @@ class TestNixlTransportWithMockedAgent:
         transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
 
         tid = transport.write_blocks("peer:1", [0], [1])
+        assert tid is not None
         transport._agent.release_xfer_handle.side_effect = RuntimeError("busy")
         assert transport.cancel([tid], mode="wait") == [tid]
         assert tid in transport._inflight
@@ -623,6 +628,7 @@ class TestNixlPeerFaults:
     def test_remote_disconnect_in_cancel_faults_the_peer(self):
         transport = self._make_transport()
         tid = transport.write_blocks("peer:1", [0], [1])
+        assert tid is not None
         transport._agent.check_xfer_state.side_effect = _remote_disconnect()
         assert transport.cancel([tid], mode="wait") == []
         transport._agent.check_xfer_state.side_effect = None
@@ -727,6 +733,7 @@ class TestNixlPeerFaults:
     def test_not_found_in_cancel_keeps_the_transfer(self):
         transport = self._make_transport()
         tid = transport.write_blocks("peer:1", [0], [1])
+        assert tid is not None
         transport._agent.check_xfer_state.side_effect = nixlNotFoundError(
             "NIXL_ERR_NOT_FOUND"
         )
