@@ -123,7 +123,9 @@ def position_ids_in_meshgrid(
     for patch in patch_embeds_list:
         height, width = patch.shape[-2:]
         h_ids, w_ids = torch.meshgrid(
-            torch.arange(height), torch.arange(width), indexing="ij"
+            torch.arange(height, device=patch.device),
+            torch.arange(width, device=patch.device),
+            indexing="ij",
         )
         positions.append(torch.stack([h_ids.flatten(), w_ids.flatten()], dim=-1))
     return torch.cat(positions, dim=0)
@@ -936,8 +938,8 @@ def position_meshgrid(
         [
             torch.stack(
                 torch.meshgrid(
-                    torch.arange(p.shape[-2]),
-                    torch.arange(p.shape[-1]),
+                    torch.arange(p.shape[-2], device=p.device),
+                    torch.arange(p.shape[-1], device=p.device),
                     indexing="ij",
                 ),
                 dim=-1,
@@ -1030,7 +1032,7 @@ class VisionTransformer(nn.Module):
         patch_embeds = self.ln_pre(patch_embeds)
 
         # positional embeddings
-        positions = position_meshgrid(patch_embeds_list).to(self.device)
+        positions = position_meshgrid(patch_embeds_list)
         freqs_cis = self.freqs_cis[positions[:, 0], positions[:, 1]]
 
         attention = self.transformer.layers[0].attention.attn
