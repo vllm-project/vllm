@@ -12,6 +12,7 @@ mod unsupported;
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -136,9 +137,10 @@ pub struct RenderArgs {
     #[arg(long, default_value_t)]
     reasoning_parser: ParserSelection,
     /// Server-side floor for structural-tag based tool calling: `auto`,
-    /// `function`, or `parameter`.
-    #[arg(long, default_value_t)]
-    tool_strict_level: ToolStrictLevel,
+    /// `function`, or `parameter`. When unset, the tool parser's default
+    /// level applies, else `auto`.
+    #[arg(long)]
+    tool_strict_level: Option<ToolStrictLevel>,
     /// Select the native chat renderer implementation.
     #[arg(long = "tokenizer-mode", default_value_t)]
     renderer: RendererSelection,
@@ -148,6 +150,11 @@ pub struct RenderArgs {
     /// Default JSON keyword arguments merged into every chat-template render.
     #[arg(long, value_parser = parse_json::<HashMap<String, Value>>, value_name = "JSON")]
     default_chat_template_kwargs: Option<HashMap<String, Value>>,
+    /// Whether to trust the chat template provided in the request. Only the HF
+    /// chat-template renderer honors request templates; native renderers ignore
+    /// them.
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
+    trust_request_chat_template: bool,
     /// How message content is exposed to the chat template.
     #[arg(long, default_value_t)]
     chat_template_content_format: ChatTemplateContentFormatOption,
@@ -180,6 +187,7 @@ impl RenderArgs {
             renderer: self.renderer,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs.unwrap_or_default(),
+            trust_request_chat_template: self.trust_request_chat_template,
             chat_template_content_format: self.chat_template_content_format,
             max_model_len: self.max_model_len,
             max_logprobs: self.max_logprobs,
@@ -251,10 +259,11 @@ pub struct SharedRuntimeArgs {
     /// top of the per-tool `strict` field: `auto` follows the request's
     /// tool choice and per-tool strictness,
     /// `function` constrains the tool-call envelope for every request with
-    /// tools, `parameter` additionally pins argument schemas.
-    #[arg(long, default_value_t)]
+    /// tools, `parameter` additionally pins argument schemas. When unset, the
+    /// tool parser's default level applies, else `auto`.
+    #[arg(long)]
     #[serde(default)]
-    pub tool_strict_level: ToolStrictLevel,
+    pub tool_strict_level: Option<ToolStrictLevel>,
     /// Select the chat renderer implementation.
     #[arg(long = "tokenizer-mode", default_value_t)]
     #[serde(default, rename = "tokenizer_mode")]
@@ -268,11 +277,13 @@ pub struct SharedRuntimeArgs {
     #[arg(long, value_parser = clap::value_parser!(i32).range(-1..), allow_negative_numbers = true)]
     #[serde(default)]
     pub max_logprobs: Option<i32>,
-    /// TCP port for the gRPC Inference service. When not set, no gRPC server is
-    /// started.
-    #[arg(long)]
-    #[serde(default)]
-    pub grpc_port: Option<u16>,
+    /// The interval (or buffer size) for streaming in terms of token length.
+    /// A smaller value (1) makes streaming smoother by sending each token
+    /// immediately, while a larger value (e.g., 10) reduces host overhead and
+    /// may increase throughput by batching multiple tokens before sending.
+    #[arg(long, default_value_t = NonZeroU32::MIN)]
+    #[serde(default = "default_stream_interval")]
+    pub stream_interval: NonZeroU32,
     /// Maximum time to wait for active requests to drain during shutdown.
     #[arg(long, default_value_t = 0)]
     #[serde(default)]
@@ -300,6 +311,14 @@ pub struct SharedRuntimeArgs {
     #[arg(long, value_parser = parse_json::<HashMap<String, Value>>, value_name = "JSON")]
     #[serde(default)]
     pub default_chat_template_kwargs: Option<HashMap<String, Value>>,
+
+    /// Whether to trust the chat template provided in the request. If False,
+    /// the server will always use the chat template specified by
+    /// `--chat-template` or the ones from tokenizer. Only the HF chat-template
+    /// renderer honors request templates; native renderers ignore them.
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
+    #[serde(default)]
+    pub trust_request_chat_template: bool,
 
     /// The maximum number of input items allowed per prompt for each
     /// modality, as a JSON object (e.g. `{"image": 16, "video": 2}`).
@@ -345,6 +364,11 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub enable_prompt_tokens_details: bool,
 
+    /// Include per-request timing metrics in API responses.
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
+    #[serde(default)]
+    pub enable_per_request_metrics: bool,
+
     /// If specified, API server will add X-Request-Id header to responses.
     #[arg(
         long,
@@ -362,6 +386,19 @@ pub struct SharedRuntimeArgs {
     )]
     #[serde(default)]
     pub enable_scale_out: bool,
+
+    /// Enable the `/tokenizer_info` endpoint. May expose chat
+    /// templates and other tokenizer configuration.
+    ///
+    /// The Rust frontend does not implement `/tokenizer_info` yet, so the
+    /// endpoint returns 501.
+    #[arg(
+        long,
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    #[serde(default)]
+    pub enable_tokenizer_info_endpoint: bool,
 
     /// Send an SSE keep-alive comment line every this many seconds when a
     /// streaming response is idle (queued, prefill, or between tokens), to
@@ -398,9 +435,9 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub served_model_name: Vec<String>,
 
-    /// CORS allowed origins as a JSON list. `["*"]` allows any origin.
-    #[arg(long, value_parser = parse_json::<JsonStringList>, value_name = "JSON", default_value = r#"["*"]"#)]
-    #[serde(default = "default_cors_wildcard")]
+    /// CORS allowed origins as a JSON list. Defaults to `[]` (no cross-origin access).
+    #[arg(long, value_parser = parse_json::<JsonStringList>, value_name = "JSON", default_value = "[]")]
+    #[serde(default = "default_cors_origins")]
     pub allowed_origins: JsonStringList,
 
     /// CORS allowed methods as a JSON list. `["*"]` allows the standard set.
@@ -505,8 +542,9 @@ impl SharedRuntimeArgs {
     fn into_bootstrapped_config(
         self,
         listen_fd: i32,
-        input_address: String,
-        output_address: String,
+        grpc_listen_fd: Option<i32>,
+        input_listener_fd: i32,
+        output_listener_fd: i32,
         coordinator_address: Option<String>,
         engine_start_index: u32,
         engine_count: usize,
@@ -522,8 +560,8 @@ impl SharedRuntimeArgs {
 
         Config {
             transport_mode: TransportMode::Bootstrapped {
-                input_address,
-                output_address,
+                input_listener_fd,
+                output_listener_fd,
                 engine_start_index,
                 engine_count,
                 data_parallel_size,
@@ -539,6 +577,7 @@ impl SharedRuntimeArgs {
             generation_config: self.generation_config,
             served_model_name: self.served_model_name,
             listener_mode: HttpListenerMode::InheritedFd { fd: listen_fd },
+            grpc_listener_mode: grpc_listen_fd.map(|fd| HttpListenerMode::InheritedFd { fd }),
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
             tool_strict_level: self.tool_strict_level,
@@ -546,16 +585,17 @@ impl SharedRuntimeArgs {
             language_model_only: self.language_model_only,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
+            trust_request_chat_template: self.trust_request_chat_template,
             limit_mm_per_prompt: self.limit_mm_per_prompt,
             lora_modules: self.lora_modules,
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
+            stream_interval: self.stream_interval,
             api_server_options,
             cors,
             tls,
             api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
-            grpc_port: self.grpc_port,
             shutdown_timeout,
             // The engine is launched and supervised by another process.
             manages_engine: false,
@@ -569,6 +609,7 @@ impl SharedRuntimeArgs {
     fn into_managed_config(
         self,
         listener_mode: HttpListenerMode,
+        grpc_listener_mode: Option<HttpListenerMode>,
         handshake_address: String,
         advertised_host: String,
         engine_count: usize,
@@ -600,6 +641,7 @@ impl SharedRuntimeArgs {
             generation_config: self.generation_config,
             served_model_name: self.served_model_name,
             listener_mode,
+            grpc_listener_mode,
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
             tool_strict_level: self.tool_strict_level,
@@ -607,16 +649,17 @@ impl SharedRuntimeArgs {
             language_model_only: self.language_model_only,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
+            trust_request_chat_template: self.trust_request_chat_template,
             limit_mm_per_prompt: self.limit_mm_per_prompt,
             lora_modules: self.lora_modules,
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
+            stream_interval: self.stream_interval,
             api_server_options,
             cors,
             tls,
             api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
-            grpc_port: self.grpc_port,
             shutdown_timeout,
             manages_engine,
             keep_alive_timeout,
@@ -628,8 +671,10 @@ impl SharedRuntimeArgs {
         ApiServerOptions {
             enable_log_requests: self.enable_log_requests,
             enable_prompt_tokens_details: self.enable_prompt_tokens_details,
+            enable_per_request_metrics: self.enable_per_request_metrics,
             enable_request_id_headers: self.enable_request_id_headers,
             enable_scale_out: self.enable_scale_out,
+            enable_tokenizer_info_endpoint: self.enable_tokenizer_info_endpoint,
             sse_keep_alive_interval: (self.sse_keep_alive_interval > 0)
                 .then(|| Duration::from_secs(self.sse_keep_alive_interval)),
         }
@@ -649,8 +694,16 @@ fn default_engine_ready_timeout_secs() -> u64 {
     600
 }
 
+fn default_stream_interval() -> NonZeroU32 {
+    NonZeroU32::MIN
+}
+
 fn default_cors_wildcard() -> JsonStringList {
     JsonStringList(vec!["*".to_string()])
+}
+
+fn default_cors_origins() -> JsonStringList {
+    JsonStringList(Vec::new())
 }
 
 fn default_py_bootstrap_parser_selection() -> ParserSelection {
@@ -696,14 +749,16 @@ pub struct FrontendArgs {
     /// supervisor.
     #[arg(long)]
     pub listen_fd: i32,
-    /// Frontend input ROUTER socket address that the Python engines will
-    /// connect to.
+    /// Inherited gRPC listening socket file descriptor passed by the Python
+    /// supervisor. When not set, no gRPC server is started.
     #[arg(long)]
-    pub input_address: String,
-    /// Frontend output PULL socket address that the Python engines will push
-    /// responses to.
+    pub grpc_listen_fd: Option<i32>,
+    /// Inherited frontend input ROUTER listener file descriptor.
     #[arg(long)]
-    pub output_address: String,
+    pub input_listener_fd: i32,
+    /// Inherited frontend output PULL listener file descriptor.
+    #[arg(long)]
+    pub output_listener_fd: i32,
     /// Optional Python-owned frontend-side DP coordinator socket address for
     /// external coordinator mode in the bootstrapped frontend path, i.e.,
     /// `stats_update_address`.
@@ -731,8 +786,9 @@ impl FrontendArgs {
         let data_parallel_size = self.data_parallel_size.unwrap_or(self.engine_count);
         self.runtime.into_bootstrapped_config(
             self.listen_fd,
-            self.input_address,
-            self.output_address,
+            self.grpc_listen_fd,
+            self.input_listener_fd,
+            self.output_listener_fd,
             self.coordinator_address,
             self.engine_start_index,
             self.engine_count,
@@ -760,6 +816,10 @@ pub struct ServeArgs {
     /// Unix domain socket path. If set, host and port arguments are ignored.
     #[arg(long)]
     pub uds: Option<String>,
+    /// TCP port for the gRPC Inference and Control services. When not set, no
+    /// gRPC server is started.
+    #[arg(long)]
+    pub grpc_port: Option<u16>,
 
     /// Flag to print debug information about CLI argument parsing and exit.
     #[educe(Debug(ignore))]
@@ -789,9 +849,20 @@ impl ServeArgs {
                 port: self.port,
             },
         };
+        // gRPC follows the HTTP TCP host. With a Unix socket it defaults to IPv4
+        // loopback rather than all interfaces, so the side-car is never
+        // accidentally network-exposed.
+        let grpc_listener_mode = self.grpc_port.map(|port| HttpListenerMode::BindTcp {
+            host: match self.uds {
+                Some(_) => "127.0.0.1".to_string(),
+                None => self.host.clone(),
+            },
+            port,
+        });
 
         self.runtime.clone().into_managed_config(
             listener_mode,
+            grpc_listener_mode,
             handshake_address,
             self.managed_engine.handshake_host.clone(),
             self.managed_engine.data_parallel_size,

@@ -2,9 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Hybrid W4A16 kernel: Triton for prefill, HIP skinny for decode.
 
-Routes based on batch size M:
-  M <= MAX_SKINNY_BATCH_SIZE: HIP skinny GEMM (wvSplitK_int4_g)
-  M > MAX_SKINNY_BATCH_SIZE:  Triton W4A16 fused dequant GEMM
+Routes based on the activation shape:
+  M <= MAX_SKINNY_BATCH_SIZE and K*M <= MEDIUM_SKINNY_LIMIT_ELEMENTS:
+      HIP skinny GEMM (wvSplitK_int4_g)
+  otherwise: Triton W4A16 fused dequant GEMM
 
 Stores the weights ONCE as int8 [N, K//2] (ExLlama shuffle packed). Both
 paths read this single buffer: the HIP skinny kernel uses it directly, and
@@ -56,13 +57,26 @@ def _on_gfx1151() -> bool:
     return on_gfx1151()
 
 
-# Maximum batch size M for the HIP skinny kernel path (C++ supports N_in
-# up to 5).  When M is below this AND K*M fits in LDS, the skinny kernel is
-# used; otherwise the Triton prefill path handles the GEMM.
+def _on_gfx115x() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx115x
+
+    return on_gfx115x()
+
+
+# Maximum activation rows supported by HIP skinny (Python M maps to C++ N_in).
+# When K*M exceeds regular LDS capacity, the C++ medium kernel caches the
+# prefix in LDS and reads the remaining activation elements from global memory.
+# On gfx115x the K*M term is dropped entirely: deep-K shapes stage every
+# activation row in LDS one K chunk at a time, and only when N is not a
+# multiple of the kernel's row tile does the medium kernel fall back to reading
+# the rows that do not fit from global memory.
 MAX_SKINNY_BATCH_SIZE = 5
 # 64 KiB per-workgroup LDS limit expressed in fp16 elements.
 # (AMD RDNA has 128 KiB total LDS per CU, but 64 KiB per workgroup.)
 LDS_CAPACITY_ELEMENTS = 64 * 1024 // 2  # 32768 fp16 elements
+MEDIUM_SKINNY_LIMIT_ELEMENTS = int(LDS_CAPACITY_ELEMENTS * 1.2)
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +98,9 @@ def _triton_w4a16_skinny_fmt_kernel(
     K,
     K8,  # K // 8
     num_groups,  # K // group_size
+    stride_sn,  # row stride of scales_ptr and zp_ptr, in groups
+    stride_bn,  # b_ptr row stride; >= K8, the rows may be padded
+    stride_am,  # a_ptr row stride in elements; >= K, rows may be padded
     # Quantization parameters
     group_size,
     ZP_BIAS: tl.constexpr,
@@ -127,12 +144,12 @@ def _triton_w4a16_skinny_fmt_kernel(
         offs_k = k_start * BLOCK_K + tl.arange(0, BLOCK_K)
         mask_k = offs_k < K
 
-        a_ptrs = a_ptr + offs_m[:, None] * K + offs_k[None, :]
+        a_ptrs = a_ptr + offs_m[:, None] * stride_am + offs_k[None, :]
         mask_a = (offs_m[:, None] < M) & mask_k[None, :]
         a = tl.load(a_ptrs, mask=mask_a, other=0.0)
 
         offs_k8 = k_start * (BLOCK_K // 8) + tl.arange(0, BLOCK_K // 8)
-        b_ptrs = b_ptr + offs_n[:, None] * K8 + offs_k8[None, :]
+        b_ptrs = b_ptr + offs_n[:, None] * stride_bn + offs_k8[None, :]
         mask_b = (offs_n[:, None] < N) & (offs_k8[None, :] < K8)
         b_packed = tl.load(b_ptrs, mask=mask_b, other=0)
 
@@ -142,12 +159,12 @@ def _triton_w4a16_skinny_fmt_kernel(
         b = (b >> shifts_full) & 0xF
 
         group_idx = (k_start * BLOCK_K) // group_size
-        scale_ptrs = scales_ptr + offs_n * num_groups + group_idx
+        scale_ptrs = scales_ptr + offs_n * stride_sn + group_idx
         scale_mask = offs_n < N
         scales = tl.load(scale_ptrs, mask=scale_mask, other=1.0)
 
         if HAS_ZP:
-            zp_ptrs = zp_ptr + (offs_n // 8) * num_groups + group_idx
+            zp_ptrs = zp_ptr + (offs_n // 8) * stride_sn + group_idx
             zp_word = tl.load(zp_ptrs, mask=scale_mask, other=0)
             zp_raw = (zp_word >> (4 * (offs_n % 8))) & 0xF
             b_fp = (b - zp_raw[:, None]).to(scales.dtype) * scales[:, None]
@@ -210,21 +227,27 @@ def triton_w4a16_skinny_fmt_gemm(
         Output matrix [M, N], same dtype as a.
 
     """
-    assert a.is_contiguous(), "Activation matrix must be contiguous"
-    assert b_q.is_contiguous(), "Weight matrix must be contiguous"
-    assert scales.is_contiguous(), "Scales must be contiguous"
+    assert a.stride(1) == 1, "Activation rows must be contiguous"
+    assert b_q.stride(1) == 1, "Weight rows must be contiguous"
+    assert scales.stride(1) == 1, "Scale rows must be contiguous"
+    stride_sn = scales.stride(0)
 
     M, K = a.shape
     N = b_q.shape[0]
     K8 = K // 8
     num_groups = K // group_size
+    stride_bn = b_q.stride(0)
+    stride_am = a.stride(0)
 
     assert b_q.shape == (N, K8), f"b_q shape mismatch: {b_q.shape} vs ({N}, {K8})"
     assert scales.shape == (N, num_groups), (
         f"scales shape mismatch: {scales.shape} vs ({N}, {num_groups})"
     )
     if zp is not None:
-        assert zp.is_contiguous(), "Zero-points must be contiguous"
+        assert zp.stride(1) == 1, "Zero-point rows must be contiguous"
+        assert zp.stride(0) == stride_sn, (
+            f"zp row stride {zp.stride(0)} must match scales {stride_sn}"
+        )
         assert N % 8 == 0, f"N must be divisible by 8 for packed zp, got {N}"
         assert zp.shape == (N // 8, num_groups), (
             f"zp shape mismatch: {zp.shape} vs ({N // 8}, {num_groups})"
@@ -331,6 +354,9 @@ def triton_w4a16_skinny_fmt_gemm(
         K,
         K8,
         num_groups,
+        stride_sn,
+        stride_bn,
+        stride_am,
         group_size=group_size,
         ZP_BIAS=zp_bias,
         HAS_ZP=has_zp,
@@ -368,9 +394,75 @@ def pack_int4_exllama_shuffle(w_uint4: torch.Tensor) -> torch.Tensor:
     )
 
 
+# gfx11 row strides alias in the vector caches when they land on a power-of-two
+# multiple.
+_WEIGHT_CLIFF_BYTES = 1024  # packed weight row, K/2 B
+_ACT_CLIFF_BYTES = 2048  # activation row, K*2 B
+_STRIDE_PAD_BYTES = 128  # one cache line
+
+
+def _weight_pad_bytes(row_bytes: int) -> int:
+    """Bytes to add to a packed weight row stride to move it off the cliff.
+
+    Only strides that are a multiple of ``_WEIGHT_CLIFF_BYTES`` are moved, and
+    only by one cache line; padding a stride that is already off the cliff
+    costs memory and measures slower.
+    """
+    if row_bytes % _WEIGHT_CLIFF_BYTES:
+        return 0
+    return _STRIDE_PAD_BYTES
+
+
+def _act_pad_bytes(row_bytes: int) -> int:
+    """Bytes to add to an activation row stride to move it off the cliff."""
+    if row_bytes % _ACT_CLIFF_BYTES:
+        return 0
+    return _STRIDE_PAD_BYTES
+
+
+def pack_skinny_int4(unpacked: torch.Tensor) -> torch.Tensor:
+    """Pack [N, K] uint4 into the skinny weight layout the kernels consume.
+
+    ExLlama shuffle to [N, K//8] int32, viewed as int8 [N, K//2]. On gfx1151
+    the row stride is nudged off the cliff (see ``_weight_pad_bytes``).
+    """
+    shuffled = pack_int4_exllama_shuffle(unpacked)
+    n_rows, k8 = shuffled.shape
+    pad_int32 = _weight_pad_bytes(k8 * 4) // 4
+    if not (pad_int32 and _on_gfx1151()):
+        return shuffled.contiguous().view(torch.int8)
+    padded = torch.empty(
+        (n_rows, k8 + pad_int32), dtype=torch.int32, device=shuffled.device
+    )
+    padded[:, :k8].copy_(shuffled)
+    # The int8 view keeps stride(0) = 4 * (k8 + pad_int32) bytes, and
+    # .view(torch.int32) at apply time recovers the [N, K//8] int32 view.
+    return padded.view(torch.int8)[:, : k8 * 4]
+
+
 # ---------------------------------------------------------------------------
 # Hybrid dispatch logic
 # ---------------------------------------------------------------------------
+
+
+def _pad_activation_rows(x_2d: torch.Tensor) -> torch.Tensor:
+    """Copy ``x_2d`` into a row-padded buffer when its row stride is on the cliff.
+
+    The packed weight is padded once at load time, but activations are produced
+    fresh every step, so this materialises a padded copy.
+    """
+    pad_bytes = _act_pad_bytes(x_2d.shape[1] * x_2d.element_size())
+    if not (pad_bytes and _on_gfx1151()):
+        return x_2d
+    pad_elems = pad_bytes // x_2d.element_size()
+    buf = torch.empty(
+        (x_2d.shape[0], x_2d.shape[1] + pad_elems),
+        dtype=x_2d.dtype,
+        device=x_2d.device,
+    )
+    padded = buf[:, : x_2d.shape[1]]
+    padded.copy_(x_2d)
+    return padded
 
 
 def _rdna_hybrid_w4a16_apply_impl(
@@ -392,7 +484,9 @@ def _rdna_hybrid_w4a16_apply_impl(
     K = x_2d.shape[1]
     N = w_q.shape[0]
 
-    if M <= MAX_SKINNY_BATCH_SIZE and K * M <= LDS_CAPACITY_ELEMENTS:
+    if M <= MAX_SKINNY_BATCH_SIZE and (
+        K * M <= MEDIUM_SKINNY_LIMIT_ELEMENTS or _on_gfx115x()
+    ):
         # record_function is not torch.compile-safe; use nullcontext when
         # compiling to keep the op traceable.
         ctx = (
@@ -410,7 +504,7 @@ def _rdna_hybrid_w4a16_apply_impl(
     )
     with ctx:
         output = triton_w4a16_skinny_fmt_gemm(
-            a=x_2d,
+            a=_pad_activation_rows(x_2d),
             b_q=w_q.view(torch.int32),
             scales=w_s,
             group_size=group_size,
@@ -503,7 +597,6 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
         c = self.config
 
         w_q_raw = getattr(layer, self.w_q_name)
-        w_s_raw = getattr(layer, self.w_s_name)
 
         unpacked = unpack_quantized_values_into_int32(
             w_q_raw.data, c.weight_type, packed_dim=w_q_raw.packed_dim
@@ -513,22 +606,28 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
         if getattr(w_q_raw, "output_dim", 0) != 0:
             unpacked = unpacked.t().contiguous()
 
-        shuffled = pack_int4_exllama_shuffle(unpacked)
         # Store as int8; Triton reinterprets via .view(torch.int32) at apply time.
-        w_q_skinny = shuffled.contiguous().view(torch.int8)
+        w_q_skinny = pack_skinny_int4(unpacked)
 
-        permute_param_layout_(w_s_raw, input_dim=1, output_dim=0)
-        w_s_skinny = w_s_raw.data.contiguous()
-
+        # Permute via `_transform_param`, so the loader params keep their dims.
         if c.zero_points:
             assert self.w_zp_name is not None
-            w_zp_raw = getattr(layer, self.w_zp_name)
-            permute_param_layout_(w_zp_raw, input_dim=1, output_dim=0, packed_dim=0)
-            w_zp = w_zp_raw.data.contiguous()
-            self._transform_param(layer, self.w_zp_name, lambda x: w_zp)
+            self._transform_param(
+                layer,
+                self.w_zp_name,
+                lambda x: permute_param_layout_(
+                    x, input_dim=1, output_dim=0, packed_dim=0
+                ).data.contiguous(),
+            )
 
         self._transform_param(layer, self.w_q_name, lambda x: w_q_skinny)
-        self._transform_param(layer, self.w_s_name, lambda x: w_s_skinny)
+        self._transform_param(
+            layer,
+            self.w_s_name,
+            lambda x: permute_param_layout_(
+                x, input_dim=1, output_dim=0
+            ).data.contiguous(),
+        )
 
     def apply_weights(
         self,

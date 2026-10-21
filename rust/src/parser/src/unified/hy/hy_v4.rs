@@ -114,12 +114,14 @@ mod tests {
                     "properties": { "city": { "type": "string" } },
                 }),
                 strict: None,
+                defer_loading: None,
             },
             Tool {
                 name: "get_current_date".to_string(),
                 description: None,
                 parameters: json!({ "type": "object", "properties": {} }),
                 strict: None,
+                defer_loading: None,
             },
         ]
     }
@@ -176,6 +178,7 @@ mod tests {
                 tools: &tools,
                 tool_strict_level: Default::default(),
                 parallel_tool_calls: true,
+                answer: None,
                 tool_choice: &ToolChoice::required(),
             })
             .unwrap()

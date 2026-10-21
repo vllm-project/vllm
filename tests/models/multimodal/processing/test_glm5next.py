@@ -188,3 +188,54 @@ def test_mm_device_do_normalize():
     torch.testing.assert_close(
         output, normalized_values.to(device), rtol=1e-5, atol=1e-6
     )
+
+
+def _image_info(**kwargs):
+    ctx = build_model_context(
+        "zai-org/GLM-5.3-Flash",
+        limit_mm_per_prompt={"image": 1},
+        **kwargs,
+    )
+    return MULTIMODAL_REGISTRY.create_processor(
+        ctx.model_config,
+        tokenizer=ctx.tokenizer,
+    ).info
+
+
+def test_image_encoder_cache_covers_full_token_budget():
+    """The most-features probe must reach the processor's token ceiling.
+
+    The inherited square probe refits to 89x89 = 7921 tokens under the
+    max_image_tokens=8000 budget, so the encoder cache came up short and
+    ordinary non-square images in 7922-8000 tokens were refused with
+    HTTP 400 (#59539).
+    """
+    info = _image_info()
+    assert info.get_max_image_tokens() == 8000
+
+    # The shapes from the issue, with the token counts the processor
+    # actually produces; every one must fit the cache.
+    for width, height, expected_tokens in [
+        (4032, 3024, 7931),  # phone photo, 4:3
+        (3840, 2160, 7973),  # 4K frame, 16:9
+        (3508, 2480, 7950),  # A4 at 300 dpi
+        (2600, 2400, 7998),  # 13:12
+        (3000, 3000, 7921),  # square worst case before the fix
+    ]:
+        num_tokens = info.get_num_image_tokens(image_width=width, image_height=height)
+        assert num_tokens == expected_tokens
+        assert num_tokens <= info.get_max_image_tokens()
+
+    # The profiling dummy covers the real worst case, not the square one.
+    size = info.get_image_size_with_most_features()
+    assert size.width * size.height == 2240 * 2800
+
+
+def test_image_encoder_cache_follows_max_pixels_override():
+    info = _image_info(mm_processor_kwargs={"max_pixels": 1568 * 100})
+    assert info.get_max_image_tokens() == 100
+    size = info.get_image_size_with_most_features()
+    assert (
+        info.get_num_image_tokens(image_width=size.width, image_height=size.height)
+        == 100
+    )

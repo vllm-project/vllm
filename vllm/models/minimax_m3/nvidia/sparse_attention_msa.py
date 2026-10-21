@@ -8,6 +8,7 @@ path for regular decode and speculative verification. NVFP4 KV caches read the
 vLLM packed pages directly in both prefill and CUTLASS decode.
 """
 
+import os
 from dataclasses import dataclass, replace
 from typing import ClassVar
 
@@ -47,6 +48,11 @@ from vllm.v1.attention.backend import (
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
 
 logger = init_logger(__name__)
+
+
+def _get_msa_cutlass_min_batch_size() -> int | None:
+    value = os.getenv("VLLM_MINIMAX_M3_MSA_CUTLASS_MIN_BATCH")
+    return int(value) if value is not None else None
 
 
 def _dequantize_query(
@@ -133,6 +139,7 @@ class MiniMaxM3SparseMSAMetadataBuilder(MiniMaxM3SparseMetadataBuilder):
         self.kv_cache_dtype = vllm_config.cache_config.cache_dtype
         self.decode_backend = vllm_config.attention_config.minimax_m3_msa_decode_backend
         self.msa_cutlass_plan_cache = MSACutlassDecodePlanCache()
+        self.msa_cutlass_min_batch_size = _get_msa_cutlass_min_batch_size()
 
     def build(
         self,
@@ -159,6 +166,7 @@ class MiniMaxM3SparseMSAMetadataBuilder(MiniMaxM3SparseMetadataBuilder):
             kv_cache_dtype=self.kv_cache_dtype,
             page_size=SPARSE_BLOCK_SIZE,
             topk_blocks=self.topk_blocks,
+            min_batch_size=self.msa_cutlass_min_batch_size,
         ):
             seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
             assert seq_lens_cpu is not None
@@ -266,7 +274,7 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
         q = query[:num_tokens].view(-1, self.num_heads, hd)
         out = output[:num_tokens].view(-1, self.num_heads, hd)
         # Given query_fp8, it is the only q the fused insert wrote: CUTLASS
-        # decode reads it directly, and the bf16-query kernels read it
+        # decode and prefill read it directly, and Triton decode reads it
         # dequantized into ``query``.
         q_fp8 = (
             None
@@ -339,11 +347,11 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
             # [H, prefill, MK] transposed view; build_k2q_csr consumes the
             # strided view directly (topK stays innermost-contiguous).
             prefill_topk = topk[nd:num_tokens].transpose(0, 1)
-            qp = (
-                q[nd:]
-                if q_fp8 is None
-                else _dequantize_query(q_fp8[nd:], q_scale_float, q[nd:])
-            )
+            # An E4M3 query attends as is, its scale folded into softmax_scale.
+            if q_fp8 is None:
+                qp, softmax_scale = q[nd:], self.scale
+            else:
+                qp, softmax_scale = q_fp8[nd:], self.scale * q_scale_float
             k2q_row_ptr, k2q_q_indices, schedule = build_k2q_csr(
                 prefill_topk,
                 p.cu_seqlens_q,
@@ -375,7 +383,7 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
                     max_seqlen_k=p.max_seq_len,
                     blk_kv=SPARSE_BLOCK_SIZE,
                     causal=True,
-                    softmax_scale=self.scale,
+                    softmax_scale=softmax_scale,
                     page_table=p.block_table,
                     seqused_k=p.seq_lens,
                     schedule=schedule,
@@ -393,7 +401,7 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
                 topK=self.topk_blocks,
                 blk_kv=SPARSE_BLOCK_SIZE,
                 causal=True,
-                softmax_scale=self.scale,
+                softmax_scale=softmax_scale,
                 cu_seqlens_q=p.cu_seqlens_q,
                 cu_seqlens_k=p.cu_seqlens_k,
                 max_seqlen_q=p.max_query_len,
