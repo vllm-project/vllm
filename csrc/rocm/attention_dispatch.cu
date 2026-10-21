@@ -32,8 +32,8 @@
 #include "attention_paged_attn_entries.inc"
 
 // gfx11/gfx12 (RDNA) need a different kernel set than gfx9 (CDNA). Keep this
-// predicate in sync with HAS_NAVI in csrc/rocm/generate_paged_attn.py, which
-// decides at configure time whether the Navi set is instantiated at all.
+// predicate in sync with the arch filter in CMakeLists.txt, which defines
+// VLLM_ROCM_ATTN_NO_NAVI when no Navi arch is targeted.
 bool is_navi_gpu() {
   static bool is_cached = false;
   static bool result;
