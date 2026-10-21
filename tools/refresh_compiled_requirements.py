@@ -6,6 +6,8 @@ Reads each ``pip-compile`` hook in ``.pre-commit-config.yaml`` and reruns it
 with ``--upgrade``, then once more without ``--upgrade``. The second pass
 keeps the upgraded pins and rewrites the header to the pre-commit command, so
 CI's compile hooks do not touch the files again.
+Handwritten requirements, build pins, and connector pins are unchanged;
+Dependabot security updates cover those source manifests separately.
 
 ``--upgrade`` stays off the pre-commit hooks. Those run on every commit and
 must not float transitive pins.

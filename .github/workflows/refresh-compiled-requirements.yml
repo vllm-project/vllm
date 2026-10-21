@@ -57,6 +57,9 @@ jobs:
         run: |
           {
             echo 'Publishing is disabled. Review the patch and open a PR manually.'
+            echo 'This artifact refreshes five compiled locks within their source constraints.'
+            echo 'Handwritten requirements, build pins, and connector pins are not upgraded here.'
+            echo 'Dependabot security updates cover source manifests; incompatible or unpatched alerts still need manual fixes.'
             printf '\n[Download patch and base SHA](%s)\n' "${ARTIFACT_URL}"
             printf '\nBase commit: `%s`\n' "${BASE_SHA}"
             echo 'Apply requirements.patch to that commit with git apply --index.'
