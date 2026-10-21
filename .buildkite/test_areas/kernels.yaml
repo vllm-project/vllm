@@ -100,6 +100,18 @@ steps:
       - tests/kernels/core/test_minimax_reduce_rms.py
       - tests/utils.py
 
+- label: ":nvidia: (H100) DSpark Markov Walk Kernel"
+  key: dspark-markov-walk-kernel-test-h100
+  timeout_in_minutes: 20
+  device: h100
+  source_file_dependencies:
+  - csrc/dspark_markov_walk.cu
+  - csrc/torch_bindings.cpp
+  - vllm/v1/worker/gpu/spec_decode/dspark/markov_walk.py
+  - tests/kernels/test_dspark_markov_walk.py
+  commands:
+    - pytest -v -s kernels/test_dspark_markov_walk.py
+
 - label: ":nvidia: (H100) DeepSeek V4 Kernels"
   key: deepseek-v4-kernel-test-h100
   timeout_in_minutes: 30
