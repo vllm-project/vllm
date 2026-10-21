@@ -11,6 +11,12 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.experts.trtllm_moe_base import (
+    TrtLlmExpertsBase,
+)
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    activation_to_flashinfer_int,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kInt4Static32,
@@ -18,7 +24,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 
 
-class TrtLlmMxint4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
+class TrtLlmMxint4ExpertsMonolithic(TrtLlmExpertsBase, mk.FusedMoEExpertsMonolithic):
     """FlashInfer TRT-LLM MxInt4 MoE kernel. Monolithic interface
     (fused router + experts).
 
@@ -40,6 +46,8 @@ class TrtLlmMxint4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         self.local_num_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.ep_rank
         self.routing_method = moe_config.routing_method
+
+        self._init_trtllm_moe_workspace()
 
     @staticmethod
     def _supports_current_device() -> bool:
@@ -165,5 +173,14 @@ class TrtLlmMxint4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             e_score_correction_bias=e_score_correction_bias,
             routing_method_type=self.routing_method,
             routing_replay_out=routing_replay_out,
+            workspace_buffer=self._get_workspace(
+                hidden_states,
+                quant_mode="mxint4",
+                hidden_size=self.moe_config.hidden_dim,
+                intermediate_size=self.intermediate_size_per_partition,
+                num_experts=global_num_experts,
+                top_k=self.topk,
+                activation_type=activation_to_flashinfer_int(activation),
+            ),
         )
         return result

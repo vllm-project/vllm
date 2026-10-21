@@ -39,6 +39,7 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.worker.workspace import current_workspace_manager
 
 if pytest and (
     not has_flashinfer_trtllm_fused_moe()
@@ -56,6 +57,13 @@ MNK_FACTORS = [
     (64, 2048, 1536),
     (64, 1024, 4096),
 ]
+
+
+def _has_trtllm_moe_workspace() -> bool:
+    """The sizer and the ``workspace_buffer`` kwarg ship together in FlashInfer."""
+    import flashinfer.fused_moe as fused_moe
+
+    return hasattr(fused_moe, "trtllm_fused_moe_workspace_size")
 
 
 @pytest.mark.parametrize("m,n,k", MNK_FACTORS)
@@ -154,6 +162,96 @@ def test_trtllm_bf16_moe_modular_no_graph(
             atol=1e-1,
             rtol=2e-1,
         )
+
+
+@pytest.mark.skipif(
+    not _has_trtllm_moe_workspace(),
+    reason="Requires caller-owned trtllm-gen MoE workspace support",
+)
+@pytest.mark.parametrize("activation", [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL])
+@torch.inference_mode()
+def test_trtllm_bf16_moe_reuses_workspace(activation, workspace_init, monkeypatch):
+    """A small-first warmup must cover a larger batch and be reused per layer."""
+    import flashinfer
+
+    max_rows, hidden_dim, inter_dim, num_experts, topk = 32, 256, 256, 8, 2
+    config = FusedMoEConfig(
+        num_experts=num_experts,
+        experts_per_token=topk,
+        hidden_dim=hidden_dim,
+        intermediate_size=inter_dim,
+        num_local_experts=num_experts,
+        num_logical_experts=num_experts,
+        activation=activation,
+        device="cuda",
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        in_dtype=torch.bfloat16,
+        routing_method=RoutingMethodType.TopK,
+        max_num_tokens=max_rows,
+    )
+    layers = [
+        TrtLlmBf16ExpertsModular(config, FUSED_MOE_UNQUANTIZED_CONFIG) for _ in range(2)
+    ]
+    fc1_dim = inter_dim * (2 if activation.is_gated else 1)
+    x = torch.randn(max_rows, hidden_dim, device="cuda", dtype=torch.bfloat16) / 10
+    w1 = (
+        torch.randn(
+            num_experts, fc1_dim, hidden_dim, device="cuda", dtype=torch.bfloat16
+        )
+        / 10
+    )
+    w2 = (
+        torch.randn(
+            num_experts, hidden_dim, inter_dim, device="cuda", dtype=torch.bfloat16
+        )
+        / 10
+    )
+    w1, w2 = convert_to_unquantized_kernel_format(
+        UnquantizedMoeBackend.FLASHINFER_TRTLLM, config, w1, w2
+    )
+    ids = (
+        torch.arange(topk, device="cuda", dtype=torch.int32)
+        .repeat(max_rows, 1)
+        .contiguous()
+    )
+    weights = torch.full((max_rows, topk), 0.5, device="cuda")
+    buffers = []
+    kernel = flashinfer.fused_moe.trtllm_bf16_routed_moe
+
+    def compare_with_unbuffered(**kwargs):
+        # Assert the new path really ran, then check it matches the per-call
+        # allocation for the same inputs.
+        buffers.append(kwargs.get("workspace_buffer"))
+        result = kernel(**kwargs)
+        reference = kernel(**{**kwargs, "workspace_buffer": None})
+        for actual, expected in zip(result, reference):
+            torch.testing.assert_close(actual, expected)
+        return result
+
+    monkeypatch.setattr(
+        flashinfer.fused_moe, "trtllm_bf16_routed_moe", compare_with_unbuffered
+    )
+    for layer, rows in [(layers[0], 1), (layers[1], max_rows), (layers[0], 16)]:
+        layer.apply(
+            output=torch.empty(rows, hidden_dim, device="cuda", dtype=torch.bfloat16),
+            hidden_states=x[:rows],
+            w1=w1,
+            w2=w2,
+            topk_weights=weights[:rows],
+            topk_ids=ids[:rows],
+            activation=activation,
+            global_num_experts=num_experts,
+            expert_map=None,
+            a1q_scale=None,
+            a2_scale=None,
+            workspace13=None,
+            workspace2=None,
+            expert_tokens_meta=None,
+            apply_router_weight_on_input=False,
+        )
+        current_workspace_manager().lock()
+    assert buffers[0] is not None
+    assert all(buffer is buffers[0] for buffer in buffers)
 
 
 @pytest.mark.parametrize("has_lora_delta", [False, True])

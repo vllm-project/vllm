@@ -11,6 +11,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.experts.trtllm_moe_base import (
+    TrtLlmExpertsBase,
+)
 from vllm.model_executor.layers.fused_moe.moe_output import (
     UnfinalizedMoEOutput,
     convert_flashinfer_moe_output,
@@ -34,7 +37,7 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 
 
-class TrtLlmMxfp4ExpertsBase:
+class TrtLlmMxfp4ExpertsBase(TrtLlmExpertsBase):
     """MXFP4 TRTLLM-Gen MoE kernels. Shared base for modular and monolithic."""
 
     def __init__(
@@ -57,6 +60,8 @@ class TrtLlmMxfp4ExpertsBase:
         )
         self.local_num_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
+
+        self._init_trtllm_moe_workspace()
 
         # MXFP4-specific TRTLLM parameters from quant_config
         device = torch.accelerator.current_device_index()
@@ -231,6 +236,24 @@ class TrtLlmMxfp4ExpertsMonolithic(
             x_scale = None
         num_tokens = hidden_states.shape[0]
         defer = self.moe_config.should_defer_moe_finalize(num_tokens)
+        # A caller-owned workspace requires do_finalize=True.
+        workspace = (
+            None
+            if defer
+            else self._get_workspace(
+                hidden_states,
+                quant_mode="mxfp4_mxfp8" if a1q_scale is not None else "mxfp4_bf16",
+                hidden_size=self.hidden_dim,
+                intermediate_size=self.intermediate_size_per_partition,
+                num_experts=global_num_experts,
+                top_k=self.topk,
+                activation_type=self._flashinfer_activation_type(activation),
+                valid_hidden_size=self.hidden_dim_unpadded,
+                valid_intermediate_size=(
+                    self.moe_config.intermediate_size_per_partition_unpadded
+                ),
+            )
+        )
         finalized_output = None
         if not defer:
             finalized_output = torch.empty(
@@ -271,6 +294,7 @@ class TrtLlmMxfp4ExpertsMonolithic(
             tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
             output=finalized_output,
             routing_replay_out=routing_replay_out,
+            workspace_buffer=workspace,
         )
         routed_output = convert_flashinfer_moe_output(
             flashinfer_output,
@@ -370,6 +394,25 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
         """Finalize into ``output``, or stop after GEMM2 when it is None."""
         from flashinfer import trtllm_fp4_block_scale_routed_moe
 
+        # A caller-owned workspace requires do_finalize=True.
+        workspace = (
+            None
+            if output is None
+            else self._get_workspace(
+                x_quant,
+                quant_mode="mxfp4_mxfp8" if x_scale is not None else "mxfp4_bf16",
+                hidden_size=self.hidden_dim,
+                intermediate_size=self.intermediate_size_per_partition,
+                num_experts=global_num_experts,
+                top_k=topk,
+                activation_type=self._flashinfer_activation_type(activation),
+                valid_hidden_size=self.hidden_dim_unpadded,
+                valid_intermediate_size=(
+                    self.moe_config.intermediate_size_per_partition_unpadded
+                ),
+            )
+        )
+
         flashinfer_output = trtllm_fp4_block_scale_routed_moe(
             topk_ids=(topk_ids, topk_weights),
             routing_bias=None,
@@ -403,6 +446,7 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
             activation_type=self._flashinfer_activation_type(activation),
             output=output,
             tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
+            workspace_buffer=workspace,
         )
         if output is not None:
             return None

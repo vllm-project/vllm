@@ -1,0 +1,159 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Caller-owned workspace shared by the trtllm-gen fused-MoE backends."""
+
+from typing import TYPE_CHECKING
+
+import torch
+
+from vllm.logger import init_logger
+from vllm.utils.flashinfer import (
+    flashinfer_trtllm_fused_moe_workspace_size,
+)
+from vllm.v1.worker.workspace import (
+    current_workspace_manager,
+    is_workspace_manager_initialized,
+)
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+
+logger = init_logger(__name__)
+
+# Workspace size per (problem, quant mode) configuration. The trtllm-gen size
+# query walks the launcher's allocation code for every tile size, so it is
+# cached process-wide instead of once per MoE layer.
+_workspace_nbytes: dict[tuple, int] = {}
+
+
+class TrtLlmExpertsBase:
+    """Reserve one trtllm-gen MoE workspace and share it across MoE layers.
+
+    Without a caller-owned workspace, FlashInfer's trtllm-gen launchers
+    allocate and free their routing maps, intermediate GEMM outputs and
+    batched-GEMM workspaces through the PyTorch caching allocator on every MoE
+    layer call, which fragments the allocator during large prefills. Size one
+    buffer for the largest batch once, during memory profiling, and share it
+    across all MoE layers that run sequentially in the current ubatch and lane.
+
+    Subclasses must set ``moe_config``, ``local_num_experts`` and call
+    ``_init_trtllm_moe_workspace()`` from their constructor.
+    """
+
+    moe_config: "FusedMoEConfig"
+    local_num_experts: int
+
+    def _init_trtllm_moe_workspace(self) -> None:
+        # Upper bound on the rows a launch sees. Every DP rank may contribute
+        # its `max_num_tokens` to one gathered invocation.
+        dp_size = self.moe_config.elastic_ep_max_dp_size or self.moe_config.dp_size
+        self._workspace_rows = self.moe_config.max_num_tokens * max(1, dp_size)
+
+    def _get_workspace(
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        quant_mode: str,
+        hidden_size: int,
+        intermediate_size: int,
+        num_experts: int,
+        top_k: int,
+        activation_type: int,
+        use_shuffled_weight: bool = True,
+        weight_layout: int | None = None,
+        use_routing_scales_on_input: bool = False,
+        use_per_token_scale: bool = False,
+        valid_hidden_size: int | None = None,
+        valid_intermediate_size: int | None = None,
+        num_fused_shared_experts: int = 0,
+    ) -> torch.Tensor | None:
+        """Return the persistent trtllm-gen MoE workspace, or ``None``.
+
+        The buffer is sized for the largest batch, so smaller batches reuse it
+        without another reservation. A FlashInfer without the workspace API
+        makes the sizing call fail, which disables the path; ``None`` keeps
+        FlashInfer's per-call workspace allocation.
+        """
+        if (
+            not is_workspace_manager_initialized()
+            # Unexpectedly large batches keep the per-call allocation rather
+            # than pinning one more persistent buffer per distinct size.
+            or hidden_states.size(0) > self._workspace_rows
+        ):
+            return None
+
+        rows = self._workspace_rows
+        device = hidden_states.device
+        size_key = (
+            rows,
+            quant_mode,
+            hidden_size,
+            intermediate_size,
+            num_experts,
+            top_k,
+            self.local_num_experts,
+            num_fused_shared_experts,
+            activation_type,
+            use_shuffled_weight,
+            weight_layout,
+            use_routing_scales_on_input,
+            use_per_token_scale,
+            valid_hidden_size,
+            valid_intermediate_size,
+            device,
+        )
+        nbytes = _workspace_nbytes.get(size_key)
+        if nbytes is None:
+            try:
+                nbytes = int(
+                    flashinfer_trtllm_fused_moe_workspace_size(
+                        rows,
+                        hidden_size,
+                        intermediate_size,
+                        num_experts,
+                        top_k,
+                        quant_mode=quant_mode,
+                        local_num_experts=self.local_num_experts,
+                        num_fused_shared_experts=num_fused_shared_experts,
+                        activation_type=activation_type,
+                        use_shuffled_weight=use_shuffled_weight,
+                        weight_layout=weight_layout,
+                        use_routing_scales_on_input=use_routing_scales_on_input,
+                        use_per_token_scale=use_per_token_scale,
+                        valid_hidden_size=valid_hidden_size,
+                        valid_intermediate_size=valid_intermediate_size,
+                        device=device,
+                    )
+                )
+            except (RuntimeError, ValueError) as e:
+                logger.warning_once(
+                    "FlashInfer trtllm-gen MoE workspace sizing failed (%s); "
+                    "falling back to per-call workspace allocation.",
+                    e,
+                )
+                nbytes = 0
+            _workspace_nbytes[size_key] = nbytes
+        if nbytes <= 0:
+            return None
+
+        key = ("trtllm_gen_moe_workspace", device, nbytes)
+
+        def _allocate() -> torch.Tensor:
+            logger.info_once(
+                "Reserving a persistent %.2f GiB trtllm-gen MoE workspace "
+                "for up to %d tokens.",
+                nbytes / (1 << 30),
+                rows,
+            )
+            return torch.empty((nbytes,), dtype=torch.uint8, device=device)
+
+        try:
+            return current_workspace_manager().get_persistent_resource(key, _allocate)
+        except AssertionError:
+            # The workspace is locked and this size was not reserved in warmup.
+            logger.warning_once(
+                "trtllm-gen MoE workspace of %d bytes was not reserved during "
+                "warmup; falling back to per-call allocation.",
+                nbytes,
+            )
+            return None
