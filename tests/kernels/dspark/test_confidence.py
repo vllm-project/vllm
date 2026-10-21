@@ -120,23 +120,22 @@ def test_dispatch_dispatch() -> None:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_fallback_when_fp32_hidden():
-    """If the caller passes fp32 hidden, we must fall back silently."""
+    """If the caller passes fp32 hidden, dispatcher must decline (return None).
+    The model caller is responsible for falling back to PyTorch."""
     n, H, r = 32, 1024, 8
     hidden, markov, weight = _make_inputs(n, H, r)
-    hidden = hidden.float()  # force fallback
+    hidden = hidden.float()  # force dispatch decline
     out = dspark_confidence_fused(hidden, markov, weight)
-    ref = dspark_confidence_torch(hidden, markov, weight, 1.0)
-    torch.testing.assert_close(out, ref, rtol=0, atol=0, equal_nan=True)
+    assert out is None, "fused dispatch should decline fp32 hidden"
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_fallback_when_huge_batch():
-    """Over max_fused_batch, dispatcher must use fallback."""
+    """Over max_fused_batch, dispatcher must decline."""
     n, H, r = 4096, 1024, 8
     hidden, markov, weight = _make_inputs(n, H, r)
     out = dspark_confidence_fused(hidden, markov, weight, max_fused_batch=1024)
-    ref = dspark_confidence_torch(hidden, markov, weight, 1.0)
-    torch.testing.assert_close(out, ref, rtol=1e-3, atol=1e-5)
+    assert out is None, "fused dispatch should decline when n > max_fused_batch"
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
