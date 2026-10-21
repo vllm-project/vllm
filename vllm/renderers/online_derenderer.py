@@ -840,7 +840,7 @@ class OnlineDerenderer:
                 delta_message, finish_reason = processor.step(
                     text, delta_tids, choice.finish_reason, prompt_token_ids
                 )
-            
+
             if delta_tids:
                 output_token_ids.extend(delta_tids)
                 output_chunk_lens.append(len(delta_tids))

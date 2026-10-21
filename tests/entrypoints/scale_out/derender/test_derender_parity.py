@@ -1056,4 +1056,3 @@ async def test_inline_derender_logprobs(client, include_reasoning, extra):
         assert [sorted(_top_tokens(e)) for e in i_content] == [
             sorted(_top_tokens(e)) for e in c_content
         ]
-
