@@ -32,10 +32,11 @@ from vllm.parser.engine.parser_engine_config import (
 from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
 from vllm.renderers.chat_utils import get_tool_call_id_type, make_tool_call_id
 from vllm.tool_parsers.utils import (
-    coerce_to_schema_type,
+    coerce_typed_value,
     extract_types_from_schema,
     find_tool_name,
     find_tool_properties,
+    sanitize_non_finite,
 )
 
 if TYPE_CHECKING:
@@ -295,13 +296,6 @@ class ParserEngine(Parser):
 
         Returns ``(coerced_value, changed)``.
         """
-        if isinstance(value, str):
-            types = extract_types_from_schema(schema)
-            coerced = coerce_to_schema_type(value, types)
-            if coerced is not value:
-                return coerced, True
-            return value, False
-
         if isinstance(value, dict):
             nested_props = schema.get("properties")
             if isinstance(nested_props, dict):
@@ -323,12 +317,7 @@ class ParserEngine(Parser):
                 return value, changed
             return value, False
 
-        types = extract_types_from_schema(schema)
-        as_str = json.dumps(value, ensure_ascii=False)
-        coerced = coerce_to_schema_type(as_str, types)
-        if type(coerced) is not type(value) or coerced != value:
-            return coerced, True
-        return value, False
+        return coerce_typed_value(value, schema)
 
     @staticmethod
     def _coerce_dict(args: dict, properties: dict) -> tuple[dict, bool]:
@@ -437,13 +426,12 @@ class ParserEngine(Parser):
     def _fix_arg_types(self, args_json: str, func_name: str) -> str:
         """Correct parameter types using the tool schema.
 
-        String values are coerced via :func:`coerce_to_schema_type`.
-        Nested objects and arrays are recursed into when the schema
-        defines ``properties`` or ``items``.  Without a schema, values
-        stay as strings.
+        Values are coerced via :func:`coerce_typed_value`. Nested objects and
+        arrays are recursed into when the schema defines ``properties`` or
+        ``items``. Without a schema, values keep their emitted type. Non-finite
+        floats are replaced by their string form so the re-serialized arguments
+        stay valid JSON, whether or not a schema is available.
         """
-        if not self._tools or not func_name:
-            return args_json
         try:
             args = json.loads(args_json)
         except (json.JSONDecodeError, ValueError):
@@ -451,13 +439,13 @@ class ParserEngine(Parser):
         if not isinstance(args, dict):
             return args_json
 
+        args, sanitized = sanitize_non_finite(args)
         properties = find_tool_properties(self._tools, func_name)
-        if not properties:
-            return args_json
+        changed = False
+        if properties:
+            _, changed = self._coerce_dict(args, properties)
 
-        _, changed = self._coerce_dict(args, properties)
-
-        if changed:
+        if changed or sanitized:
             return json.dumps(args, ensure_ascii=False)
         return args_json
 

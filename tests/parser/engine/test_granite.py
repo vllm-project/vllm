@@ -15,6 +15,10 @@ import pytest
 
 from tests.parser.engine.conftest import make_mock_tokenizer
 from tests.parser.engine.trace_builder import _GRANITE_SCENARIOS, _build_granite
+from vllm.entrypoints.generate.base.protocol import FunctionDefinition
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionToolsParam,
+)
 from vllm.parser.granite import GraniteParser, _granite_arg_converter
 
 TOOL_TOKEN = "<|tool_call|>"
@@ -187,6 +191,37 @@ class TestNonStreaming:
         _, _, tools = parser.parse(text, mock_request)
         assert [t.name for t in tools] == ["get_weather"]
         assert json.loads(tools[0].arguments) == {"city": "SF"}
+
+    def test_untyped_param_keeps_emitted_type(self, parser, mock_request):
+        # Granite emits JSON arguments, so values arrive typed; a property
+        # without ``type`` must not stringify them.
+        mock_request.tools = [
+            ChatCompletionToolsParam(
+                type="function",
+                function=FunctionDefinition(
+                    name="submit",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "count": {"description": "Any JSON value."},
+                            "flag": {"description": "Any JSON value."},
+                            "note": {"description": "Any JSON value."},
+                        },
+                    },
+                ),
+            )
+        ]
+        text = (
+            f'{TOOL_TOKEN} [{{"name": "submit", "arguments": '
+            f'{{"count": 5, "flag": true, "note": null}}}}]'
+        )
+        _, _, tools = parser.parse(text, mock_request)
+        assert [t.name for t in tools] == ["submit"]
+        assert json.loads(tools[0].arguments) == {
+            "count": 5,
+            "flag": True,
+            "note": None,
+        }
 
     def test_marker_without_array_is_not_a_tool_call(self, parser, mock_request):
         # A non-array body after the marker (malformed) yields no tool call.

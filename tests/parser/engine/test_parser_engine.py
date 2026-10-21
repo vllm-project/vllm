@@ -690,6 +690,10 @@ def _make_tool(name: str, properties: dict) -> ChatCompletionToolsParam:
     )
 
 
+def _reject_json_constant(name: str):
+    raise ValueError(f"invalid JSON constant: {name}")
+
+
 class TestFixArgTypes:
     """Tests for ParserEngine._fix_arg_types()."""
 
@@ -836,6 +840,135 @@ class TestFixArgTypes:
         result = engine._fix_arg_types('{"vals": ["42", "3.14"]}', "f")
         parsed = json.loads(result)
         assert parsed["vals"] == [42, 3.14]
+
+    def test_untyped_param_string_value_unchanged(self):
+        """A schema without ``type`` extracts as string-only, so a string
+        argument passes through untouched.
+        """
+        tool = _make_tool("f", {"value": {"description": "Any JSON value."}})
+        engine = _make_engine(tools=[tool])
+        original = '{"value": "5"}'
+        assert engine._fix_arg_types(original, "f") == original
+
+    @pytest.mark.parametrize(
+        ("input_json", "expected"),
+        [
+            ('{"value": 5}', {"value": 5}),
+            ('{"value": true}', {"value": True}),
+            ('{"value": null}', {"value": None}),
+        ],
+        ids=["int", "bool", "null"],
+    )
+    def test_untyped_param_keeps_emitted_type(self, input_json, expected):
+        """A non-string argument for an untyped property keeps its emitted
+        type instead of being re-encoded as text and stringified.
+        """
+        tool = _make_tool("f", {"value": {"description": "Any JSON value."}})
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types(input_json, "f")
+        assert json.loads(result) == expected
+
+    def test_param_absent_from_schema_keeps_typed_value(self):
+        """Properties missing from the schema are not coerced at all, so
+        their emitted types survive — the contrast that shows the untyped
+        fallback, not JSON parsing, causes the type loss above.
+        """
+        tool = _make_tool("f", {"count": {"type": "integer"}})
+        engine = _make_engine(tools=[tool])
+        original = '{"count": 7, "extra": 5}'
+        assert engine._fix_arg_types(original, "f") == original
+
+    def test_untyped_union_param_keeps_emitted_type(self):
+        """An untyped branch of a union must not inject a string type that
+        stringifies the model's typed value.
+        """
+        tool = _make_tool("f", {"value": {"anyOf": [{"type": "null"}, {}]}})
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types('{"value": 5}', "f")
+        assert json.loads(result) == {"value": 5}
+
+    def test_untyped_union_param_keeps_emitted_string(self):
+        """A union admitting any value must not coerce a string argument to
+        a type named by a sibling branch.
+        """
+        tool = _make_tool("f", {"value": {"anyOf": [{"type": "null"}, {}]}})
+        engine = _make_engine(tools=[tool])
+        original = '{"value": "5"}'
+        assert engine._fix_arg_types(original, "f") == original
+
+    def test_ref_param_keeps_string_repair(self):
+        """An unresolved ``$ref`` is unknown, not untyped, so non-string
+        values keep the historical repair toward string.
+        """
+        tool = _make_tool("f", {"zipcode": {"$ref": "#/$defs/Zip"}})
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types('{"zipcode": 12345}', "f")
+        assert json.loads(result) == {"zipcode": "12345"}
+
+    def test_ref_with_type_sibling_keeps_declared_type(self):
+        """An explicit ``type`` sibling of a ``$ref`` applies (JSON Schema
+        2020-12), so the declared repair wins over the unknown-ref default.
+        """
+        tool = _make_tool("f", {"count": {"$ref": "#/$defs/Count", "type": "integer"}})
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types('{"count": 5}', "f")
+        assert json.loads(result) == {"count": 5}
+
+    def test_untyped_param_nonfinite_float_becomes_string(self):
+        """Non-finite floats cannot be serialized as valid JSON, so they
+        keep the historical string form even for untyped properties.
+        """
+        tool = _make_tool("f", {"count": {"type": "integer"}, "x": {}})
+        engine = _make_engine(tools=[tool])
+        # The sibling repair forces re-serialization of the whole object.
+        result = engine._fix_arg_types('{"count": "5", "x": NaN}', "f")
+        parsed = json.loads(result, parse_constant=_reject_json_constant)
+        assert parsed == {"count": 5, "x": "NaN"}
+
+    def test_nonfinite_float_in_untyped_array_becomes_string(self):
+        """An array without ``items`` is not recursed into for coercion, but
+        its non-finite elements still cannot stay in valid JSON.
+        """
+        tool = _make_tool("f", {"count": {"type": "integer"}, "x": {"type": "array"}})
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types('{"count": "5", "x": [NaN, 1]}', "f")
+        parsed = json.loads(result, parse_constant=_reject_json_constant)
+        assert parsed == {"count": 5, "x": ["NaN", 1]}
+
+    def test_nonfinite_float_in_untyped_object_becomes_string(self):
+        tool = _make_tool("f", {"count": {"type": "integer"}, "x": {"type": "object"}})
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types('{"count": "5", "x": {"a": NaN}}', "f")
+        parsed = json.loads(result, parse_constant=_reject_json_constant)
+        assert parsed == {"count": 5, "x": {"a": "NaN"}}
+
+    def test_nonfinite_float_alone_forces_reserialization(self):
+        """Sanitizing a non-finite float is itself a change, even when no
+        value is coerced.
+        """
+        tool = _make_tool("f", {"x": {}})
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types('{"x": NaN}', "f")
+        parsed = json.loads(result, parse_constant=_reject_json_constant)
+        assert parsed == {"x": "NaN"}
+
+    @pytest.mark.parametrize(
+        "tools,func_name",
+        [
+            ([_make_tool("f", {})], "f"),
+            ([_make_tool("known", {"x": {"type": "string"}})], "unknown"),
+            (None, "f"),
+        ],
+        ids=["no_properties", "unknown_function", "no_tools"],
+    )
+    def test_nonfinite_float_sanitized_without_schema(self, tools, func_name):
+        """Sanitization must not depend on a resolvable property schema, or
+        invalid JSON reaches the client.
+        """
+        engine = _make_engine(tools=tools)
+        result = engine._fix_arg_types('{"x": NaN}', func_name)
+        parsed = json.loads(result, parse_constant=_reject_json_constant)
+        assert parsed == {"x": "NaN"}
 
 
 # ── TestBuildExtractedResult ─────────────────────────────────────────

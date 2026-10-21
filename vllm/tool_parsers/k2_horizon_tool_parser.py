@@ -26,10 +26,12 @@ from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 from vllm.tool_parsers.utils import (
     coerce_to_schema_type,
+    coerce_typed_value,
     extract_types_from_schema,
     find_tool_name,
     find_tool_properties,
     partial_tag_overlap,
+    sanitize_non_finite,
 )
 
 logger = init_logger(__name__)
@@ -150,14 +152,9 @@ class K2HorizonToolParser(ToolParser):
 
     @staticmethod
     def _coerce_json_value(value: Any, schema: Any) -> Any:
-        if not isinstance(schema, dict):
-            return value
-        raw_value = (
-            value
-            if isinstance(value, str)
-            else json.dumps(value, ensure_ascii=False, allow_nan=False)
-        )
-        return coerce_to_schema_type(raw_value, extract_types_from_schema(schema))
+        value, _ = sanitize_non_finite(value)
+        coerced, _ = coerce_typed_value(value, schema)
+        return coerced
 
     @classmethod
     def _coerce_xml_value(

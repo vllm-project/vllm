@@ -197,6 +197,127 @@ def test_number_schema_preserves_large_integer(tokenizer, tool_format, streaming
         assert json.loads(result.tool_calls[0].function.arguments) == {"limit": value}
 
 
+def test_json_untyped_param_keeps_emitted_type(tokenizer):
+    # A property without ``type`` permits any value, so the model's typed
+    # JSON value must not be stringified by schema coercion.
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "count": {"description": "Any JSON value."},
+                    },
+                },
+            },
+        }
+    ]
+    request = ChatCompletionRequest(
+        model="k2-horizon",
+        messages=[{"role": "user", "content": "test"}],
+        tools=tools,
+        chat_template_kwargs={"tool_call_format": "json"},
+    )
+    parser = K2HorizonToolParser(tokenizer, tools)
+
+    result = parser.extract_tool_calls(
+        _group(_json_call("lookup", {"query": "x", "count": 5})), request
+    )
+
+    assert result.tools_called
+    assert json.loads(result.tool_calls[0].function.arguments) == {
+        "query": "x",
+        "count": 5,
+    }
+
+
+def test_json_untyped_param_keeps_containers_structured(tokenizer):
+    # Dict/list values for an untyped property stay structured JSON, not
+    # double-encoded JSON text a client would have to re-parse.
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "payload": {"description": "Any JSON value."},
+                    },
+                },
+            },
+        }
+    ]
+    request = ChatCompletionRequest(
+        model="k2-horizon",
+        messages=[{"role": "user", "content": "test"}],
+        tools=tools,
+        chat_template_kwargs={"tool_call_format": "json"},
+    )
+    parser = K2HorizonToolParser(tokenizer, tools)
+
+    result = parser.extract_tool_calls(
+        _group(_json_call("lookup", {"query": "x", "payload": {"a": [1, 2]}})),
+        request,
+    )
+
+    assert result.tools_called
+    assert json.loads(result.tool_calls[0].function.arguments) == {
+        "query": "x",
+        "payload": {"a": [1, 2]},
+    }
+
+
+def test_json_untyped_nonfinite_param_keeps_calls(tokenizer):
+    # NaN has no valid JSON form. Stringify it rather than letting
+    # ``json.dumps(allow_nan=False)`` raise and drop the whole call group.
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "count": {"description": "Any JSON value."},
+                    },
+                },
+            },
+        }
+    ]
+    request = ChatCompletionRequest(
+        model="k2-horizon",
+        messages=[{"role": "user", "content": "test"}],
+        tools=tools,
+        chat_template_kwargs={"tool_call_format": "json"},
+    )
+    parser = K2HorizonToolParser(tokenizer, tools)
+
+    result = parser.extract_tool_calls(
+        _group(
+            _json_call("lookup", {"query": "x", "count": float("nan")}),
+            _json_call("lookup", {"query": "y", "count": 5}),
+        ),
+        request,
+    )
+
+    assert result.tools_called
+    assert len(result.tool_calls) == 2
+    assert json.loads(result.tool_calls[0].function.arguments) == {
+        "query": "x",
+        "count": "NaN",
+    }
+    assert json.loads(result.tool_calls[1].function.arguments) == {
+        "query": "y",
+        "count": 5,
+    }
+
+
 @pytest.mark.parametrize(
     "tool_format",
     ["yaml", "python", "xml_untyped", "", None, 1],
