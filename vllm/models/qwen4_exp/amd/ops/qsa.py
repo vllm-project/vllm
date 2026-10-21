@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import functools
 import math
 
 import torch
@@ -14,6 +15,9 @@ from vllm.triton_utils import HAS_TRITON, tl, triton
 
 _LOGITS_WORKSPACE_BYTES = 128 * 1024 * 1024
 _TOPK_WORKSPACE_BYTES = 1024 * 1024
+# Up to this many single-row decode requests, scoring row by row beats the
+# tiled kernel on gfx942. Measured against the tiled kernel on MI325X.
+_QSA_ROWS_KERNEL_MAX_ROWS = 32
 
 
 @triton.jit
@@ -137,6 +141,103 @@ def _qsa_mqa_paged_kernel(
         logits_ptr + rows[:, None] * stride_logits_row + columns[None, :],
         tl.where(valid, score, -float("inf")),
         mask=row_valid[:, None] & (columns[None, :] < num_columns),
+    )
+
+
+@triton.jit
+def _qsa_mqa_paged_rows_kernel(
+    q_ptr,
+    k_cache_ptr,
+    page_table_ptr,
+    token_to_req_ptr,
+    query_positions_ptr,
+    sequence_lengths_ptr,
+    visible_blocks_ptr,
+    logits_ptr,
+    stride_q_row,
+    stride_q_head,
+    stride_q_dim,
+    stride_cache_block,
+    stride_cache_token,
+    stride_cache_dim,
+    stride_table_req,
+    stride_table_page,
+    stride_logits_row,
+    num_columns,
+    num_pages,
+    num_requests,
+    score_divisor,
+    PAGE_SIZE: tl.constexpr,
+    PAGE_TABLE_WIDTH: tl.constexpr,
+    NUM_HEADS: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+) -> None:
+    row = tl.program_id(0)
+    columns = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
+    dims = tl.arange(0, BLOCK_D)
+    request = tl.load(token_to_req_ptr + row)
+    safe_request = tl.minimum(tl.maximum(request, 0), num_requests - 1)
+    query_position = tl.load(query_positions_ptr + row)
+    sequence_length = tl.load(
+        sequence_lengths_ptr + safe_request,
+        mask=(request >= 0) & (request < num_requests),
+        other=0,
+    )
+    visible = tl.minimum(
+        (query_position + 1) // COMPRESS_RATIO,
+        sequence_length // COMPRESS_RATIO,
+    )
+    if tl.program_id(1) == 0:
+        tl.store(visible_blocks_ptr + row, visible)
+    if tl.program_id(1) * BLOCK_N >= visible:
+        return
+    logical_page = columns // PAGE_SIZE
+    page_offset = columns % PAGE_SIZE
+    valid = (
+        (columns < num_columns)
+        & (columns < visible)
+        & (request >= 0)
+        & (request < num_requests)
+        & (logical_page < PAGE_TABLE_WIDTH)
+    )
+    safe_logical_page = tl.minimum(logical_page, PAGE_TABLE_WIDTH - 1)
+    physical_page = tl.load(
+        page_table_ptr
+        + safe_request * stride_table_req
+        + safe_logical_page * stride_table_page,
+        mask=valid,
+        other=-1,
+    )
+    valid &= (physical_page >= 0) & (physical_page < num_pages)
+    # physical_page * block stride can overflow int32 for large caches.
+    safe_physical_page = tl.maximum(physical_page, 0).to(tl.int64)
+    score = tl.zeros((BLOCK_N,), dtype=tl.float32)
+
+    for head in tl.static_range(0, NUM_HEADS):
+        query = tl.load(
+            q_ptr + row * stride_q_row + head * stride_q_head + dims * stride_q_dim,
+            mask=dims < HEAD_DIM,
+            other=0.0,
+        ).to(tl.float32)
+        keys = tl.load(
+            k_cache_ptr
+            + safe_physical_page[:, None] * stride_cache_block
+            + page_offset[:, None] * stride_cache_token
+            + dims[None, :] * stride_cache_dim,
+            mask=valid[:, None] & (dims[None, :] < HEAD_DIM),
+            other=0.0,
+        ).to(tl.float32)
+        dot = tl.sum(keys * query[None, :], axis=1)
+        score += tl.maximum(dot, 0.0)
+
+    score /= score_divisor
+    tl.store(
+        logits_ptr + row * stride_logits_row + columns,
+        tl.where(valid, score, -float("inf")),
+        mask=columns < num_columns,
     )
 
 
@@ -610,6 +711,15 @@ def _compress_qsa_groups_kernel(
     )
 
 
+@functools.cache
+def _on_gfx942() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx942
+
+    return on_gfx942()
+
+
 def _validate_mqa(q: torch.Tensor) -> None:
     if q.ndim != 3 or q.shape[1] <= 0 or q.shape[2] <= 0:
         raise ValueError("QSA query must be [rows, heads, head_dim]")
@@ -625,8 +735,12 @@ def qsa_mqa_paged(
     compress_ratio: int,
     num_columns: int | None = None,
     score_scale: float | None = None,
+    single_row_decode: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute QSA scores directly from a paged compressed-key cache.
+
+    ``single_row_decode`` marks a batch of decode requests with one query row
+    each and no prefill. Small ones are scored row by row on gfx942.
 
     Returns:
         ``logits`` [rows, columns] fp32 and ``visible_blocks`` [rows] int32.
@@ -663,6 +777,42 @@ def qsa_mqa_paged(
     logits = torch.empty((q.shape[0], columns), dtype=torch.float32, device=q.device)
     visible_blocks = torch.empty(q.shape[0], dtype=torch.int32, device=q.device)
     if not q.shape[0] or not columns:
+        return logits, visible_blocks
+    if single_row_decode and q.shape[0] <= _QSA_ROWS_KERNEL_MAX_ROWS and _on_gfx942():
+        # Rows from different requests share no keys, so a 16-row tl.dot tile is
+        # mostly padding.
+        block_n = 32
+        _qsa_mqa_paged_rows_kernel[(q.shape[0], triton.cdiv(columns, block_n))](
+            q,
+            k_cache,
+            page_table,
+            token_to_req,
+            query_positions,
+            sequence_lengths,
+            visible_blocks,
+            logits,
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            k_cache.stride(0),
+            k_cache.stride(1),
+            k_cache.stride(3),
+            page_table.stride(0),
+            page_table.stride(1),
+            logits.stride(0),
+            columns,
+            k_cache.shape[0],
+            page_table.shape[0],
+            float(score_divisor),
+            PAGE_SIZE=k_cache.shape[1],
+            PAGE_TABLE_WIDTH=page_table.shape[1],
+            NUM_HEADS=q.shape[1],
+            HEAD_DIM=q.shape[2],
+            BLOCK_N=block_n,
+            BLOCK_D=triton.next_power_of_2(q.shape[2]),
+            COMPRESS_RATIO=compress_ratio,
+            num_warps=4,
+        )
         return logits, visible_blocks
     block_m, block_n = 16, 64
     grid = (triton.cdiv(q.shape[0], block_m), triton.cdiv(columns, block_n))
@@ -771,6 +921,7 @@ def qsa_select_paged_tokens(
     token_topk: int,
     compress_ratio: int,
     out: torch.Tensor | None = None,
+    single_row_decode: bool = False,
 ) -> torch.Tensor:
     """Score, select, and expand QSA indices without host synchronization."""
     rows = q.shape[0]
@@ -803,6 +954,7 @@ def qsa_select_paged_tokens(
             query_positions[row_slice],
             sequence_lengths,
             compress_ratio,
+            single_row_decode=single_row_decode,
         )
         blocks = blocks_buffer[: row_end - row_start]
         use_cooperative_topk = (

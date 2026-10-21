@@ -450,6 +450,207 @@ def test_qsa_mqa_paged_matches_reference_on_visible_columns(
 
 
 @requires_qsa_kernels
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16], ids=["bf16", "fp16"])
+@pytest.mark.parametrize("num_requests", [1, 5, 32, 33])
+def test_qsa_mqa_paged_decode_rows_match_reference(
+    monkeypatch: pytest.MonkeyPatch, dtype: torch.dtype, num_requests: int
+) -> None:
+    # One decode row per request, with lengths that end mid-page. Up to 32 rows
+    # are scored row by row on gfx942, 33 use the tiled kernel.
+    spy = _force_rows_kernel(monkeypatch)
+    torch.manual_seed(num_requests)
+    page_size, compress_ratio, table_width = 16, 4, 24
+    num_pages = num_requests * table_width + 8
+    lengths = torch.randint(1, 1500, (num_requests,), device="cuda", dtype=torch.int32)
+    token_to_req = torch.arange(num_requests, device="cuda", dtype=torch.int32)
+    query_positions = (lengths - 1).to(torch.int64)
+    q = torch.randn(num_requests, 2, 32, device="cuda", dtype=dtype)
+    k_cache = torch.randn(num_pages, page_size, 1, 32, device="cuda", dtype=dtype)
+    page_table = torch.randperm(num_pages, device="cuda", dtype=torch.int32)[
+        : num_requests * table_width
+    ].view(num_requests, table_width)
+
+    logits, visible_blocks = qsa_ops.qsa_mqa_paged(
+        q,
+        k_cache,
+        page_table,
+        token_to_req,
+        query_positions,
+        lengths,
+        compress_ratio,
+        single_row_decode=True,
+    )
+
+    assert spy.launches == (num_requests <= 32)
+    expected_visible = (lengths // compress_ratio).to(torch.int32)
+    torch.testing.assert_close(visible_blocks, expected_visible, rtol=0, atol=0)
+    columns = torch.arange(logits.shape[1], device="cuda")
+    logits = logits.masked_fill(columns >= expected_visible[:, None], -torch.inf)
+    expected = _qsa_mqa_paged_reference(
+        q, k_cache, page_table, token_to_req, expected_visible
+    )
+    torch.testing.assert_close(logits, expected, rtol=1e-4, atol=1e-5)
+
+
+class _KernelSpy:
+    """Counts launches of a Triton kernel."""
+
+    def __init__(self, kernel) -> None:
+        self.kernel = kernel
+        self.launches = 0
+
+    def __getitem__(self, grid):
+        self.launches += 1
+        return self.kernel[grid]
+
+
+def _force_rows_kernel(monkeypatch: pytest.MonkeyPatch) -> _KernelSpy:
+    # The per-row path is gfx942 only, but the kernel runs on any ROCm arch.
+    monkeypatch.setattr(qsa_ops, "_on_gfx942", lambda: True)
+    spy = _KernelSpy(qsa_ops._qsa_mqa_paged_rows_kernel)
+    monkeypatch.setattr(qsa_ops, "_qsa_mqa_paged_rows_kernel", spy)
+    return spy
+
+
+def _decode_select_case(num_requests: int, dtype: torch.dtype):
+    torch.manual_seed(num_requests)
+    page_size, compress_ratio, table_width = 16, 4, 24
+    num_pages = num_requests * table_width + 8
+    lengths = torch.randint(8, 1500, (num_requests,), device="cuda", dtype=torch.int32)
+    return (
+        torch.randn(num_requests, 2, 32, device="cuda", dtype=dtype),
+        torch.randn(num_pages, page_size, 1, 32, device="cuda", dtype=dtype),
+        torch.randperm(num_pages, device="cuda", dtype=torch.int32)[
+            : num_requests * table_width
+        ].view(num_requests, table_width),
+        torch.arange(num_requests, device="cuda", dtype=torch.int32),
+        (lengths - 1).to(torch.int64),
+        lengths,
+        compress_ratio,
+    )
+
+
+@requires_qsa_kernels
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16], ids=["bf16", "fp16"])
+def test_qsa_select_decode_rows_ignores_unwritten_logits(
+    monkeypatch: pytest.MonkeyPatch, dtype: torch.dtype
+) -> None:
+    # Neither kernel writes logits past visible_blocks, so top-k must not read
+    # them: fill every fresh logits buffer with NaN and compare both paths.
+    spy = _force_rows_kernel(monkeypatch)
+    *case, compress_ratio = _decode_select_case(7, dtype)
+    token_topk = 16
+    expected = qsa_ops.qsa_select_paged_tokens(
+        *case, token_topk, compress_ratio, single_row_decode=False
+    )
+
+    real_empty = torch.empty
+
+    def empty_nan(*args, **kwargs):
+        out = real_empty(*args, **kwargs)
+        if out.dtype == torch.float32 and out.dim() == 2 and out.is_cuda:
+            out.fill_(float("nan"))
+        return out
+
+    monkeypatch.setattr(torch, "empty", empty_nan)
+    spy.launches = 0
+    actual = qsa_ops.qsa_select_paged_tokens(
+        *case, token_topk, compress_ratio, single_row_decode=True
+    )
+    assert spy.launches == 1
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@requires_qsa_kernels
+def test_qsa_select_decode_rows_replays_in_cuda_graph(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spy = _force_rows_kernel(monkeypatch)
+    *case, compress_ratio = _decode_select_case(8, torch.bfloat16)
+    q, k_cache, page_table, token_to_req, positions, lengths = case
+    token_topk = 16
+
+    def select():
+        return qsa_ops.qsa_select_paged_tokens(
+            q,
+            k_cache,
+            page_table,
+            token_to_req,
+            positions,
+            lengths,
+            token_topk,
+            compress_ratio,
+            single_row_decode=True,
+        )
+
+    select()
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = select()
+
+    # Replay on new inputs written in place, as the runner does between steps.
+    torch.manual_seed(1)
+    q.copy_(torch.randn_like(q))
+    new_lengths = torch.randint(
+        8, 1500, lengths.shape, device="cuda", dtype=lengths.dtype
+    )
+    lengths.copy_(new_lengths)
+    positions.copy_((new_lengths - 1).to(torch.int64))
+    graph.replay()
+    torch.cuda.synchronize()
+    expected = qsa_ops.qsa_select_paged_tokens(
+        q,
+        k_cache,
+        page_table,
+        token_to_req,
+        positions,
+        lengths,
+        token_topk,
+        compress_ratio,
+        single_row_decode=False,
+    )
+    # Warmup and capture launched it; the replay does not go through Python.
+    assert spy.launches == 2
+    torch.testing.assert_close(captured, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    ("num_prefills", "decode_query_len", "expected"),
+    [(0, 1, True), (1, 1, False), (0, 4, False), (0, 0, False)],
+    ids=["decode", "mixed", "spec-decode", "empty"],
+)
+def test_qsa_indexer_flags_single_row_decode(
+    monkeypatch: pytest.MonkeyPatch,
+    num_prefills: int,
+    decode_query_len: int,
+    expected: bool,
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def select(*args, **kwargs):
+        seen.update(kwargs)
+        return args[-1]
+
+    monkeypatch.setattr(qsa_ops, "qsa_select_paged_tokens", select)
+    indexer = SimpleNamespace(
+        compressed_key_cache=SimpleNamespace(kv_cache=None),
+        token_topk=8,
+        compress_ratio=4,
+    )
+    metadata = SimpleNamespace(
+        block_table=None,
+        token_to_req=None,
+        logical_positions=None,
+        seq_lens=None,
+        num_prefills=num_prefills,
+        decode_query_len=decode_query_len,
+    )
+    QSAIndexer._select(indexer, None, metadata, None)  # type: ignore[arg-type]
+    assert seen["single_row_decode"] is expected
+
+
+@requires_qsa_kernels
 @pytest.mark.parametrize(
     ("num_rows", "num_query_heads", "num_kv_heads", "page_size"),
     [
