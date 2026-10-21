@@ -88,6 +88,7 @@ __global__ void compute_expert_blockscale_offsets(
 __global__ void compute_arg_sorts(const int32_t* __restrict__ topk_ids,
                                   int32_t* input_permutation,
                                   int32_t* output_permutation,
+                                  int32_t* sorted_expert_ids,
                                   int32_t* atomic_buffer, const int topk_length,
                                   const int topk) {
   int const blk_expert_id = blockIdx.x;
@@ -108,6 +109,9 @@ __global__ void compute_arg_sorts(const int32_t* __restrict__ topk_ids,
       int start = atomicAdd(&atomic_buffer[expert_id], 1);
       input_permutation[start] = i / topk;
       output_permutation[i] = start;
+      if (sorted_expert_ids != nullptr) {
+        sorted_expert_ids[start] = expert_id;
+      }
     }
   }
 }
@@ -242,7 +246,20 @@ void get_cutlass_moe_mm_data_caller(
     torch::stable::Tensor& output_permutation, const int64_t num_experts,
     const int64_t n, const int64_t k,
     const std::optional<torch::stable::Tensor>& blockscale_offsets,
-    const bool is_gated) {
+    const bool is_gated,
+    const std::optional<torch::stable::Tensor>& sorted_expert_ids) {
+  if (sorted_expert_ids.has_value()) {
+    auto const& ids = sorted_expert_ids.value();
+    STD_TORCH_CHECK(ids.is_cuda() && ids.is_contiguous(),
+                    "sorted_expert_ids must be a contiguous CUDA tensor");
+    STD_TORCH_CHECK(
+        ids.scalar_type() == torch::headeronly::ScalarType::Int &&
+            ids.dim() == 1 && ids.numel() == topk_ids.numel(),
+        "sorted_expert_ids must be int32 with one entry per routed row");
+    STD_TORCH_CHECK(ids.get_device_index() == topk_ids.get_device_index(),
+                    "sorted_expert_ids must be on the topk_ids device");
+  }
+
   auto device = topk_ids.device();
   const torch::stable::accelerator::DeviceGuard device_guard(device.index());
   auto stream = get_current_cuda_stream(device.index());
@@ -278,6 +295,9 @@ void get_cutlass_moe_mm_data_caller(
       static_cast<const int32_t*>(topk_ids.data_ptr()),
       static_cast<int32_t*>(input_permutation.data_ptr()),
       static_cast<int32_t*>(output_permutation.data_ptr()),
+      sorted_expert_ids.has_value()
+          ? static_cast<int32_t*>(sorted_expert_ids->data_ptr())
+          : nullptr,
       static_cast<int32_t*>(atomic_buffer.data_ptr()), topk_ids.numel(),
       topk_ids.size(1));
 }

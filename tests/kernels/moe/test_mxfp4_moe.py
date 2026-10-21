@@ -458,5 +458,159 @@ def test_mxfp4_experts_quant_no_saturation():
     )
 
 
+@pytest.mark.skipif(
+    not is_sm100_supported(),
+    reason="get_cutlass_moe_mm_data sorted expert IDs require CUDA SM100 MoE",
+)
+def test_get_cutlass_moe_mm_data_populates_sorted_expert_ids():
+    num_experts = 32
+    m, topk = 8, 4
+    topk_ids = torch.randint(
+        0, num_experts, (m, topk), device="cuda", dtype=torch.int32
+    )
+    expert_offsets = torch.empty(num_experts + 1, device="cuda", dtype=torch.int32)
+    blockscale_offsets = torch.empty_like(expert_offsets)
+    problem_sizes1 = torch.empty(num_experts, 3, device="cuda", dtype=torch.int32)
+    problem_sizes2 = torch.empty_like(problem_sizes1)
+    input_permutation = torch.empty(m * topk, device="cuda", dtype=torch.int32)
+    output_permutation = torch.empty_like(input_permutation)
+    sorted_expert_ids = torch.empty_like(input_permutation)
+
+    ops.get_cutlass_moe_mm_data(
+        topk_ids,
+        expert_offsets,
+        problem_sizes1,
+        problem_sizes2,
+        input_permutation,
+        output_permutation,
+        num_experts,
+        128,
+        512,
+        blockscale_offsets,
+        is_gated=True,
+        sorted_expert_ids=sorted_expert_ids,
+    )
+
+    expected = torch.sort(topk_ids.flatten(), stable=True).values
+    torch.testing.assert_close(sorted_expert_ids, expected)
+
+
+@pytest.mark.skipif(
+    not is_sm100_supported(),
+    reason="mxfp4_experts_quant requires CUDA SM100",
+)
+@pytest.mark.parametrize("num_experts", [16, 64, 256])
+def test_mxfp4_experts_quant_sorted_expert_ids_matches_offset_search(
+    num_experts: int,
+):
+    """Sorted expert IDs must match the offset-search quantization path."""
+    set_random_seed(0)
+    m, topk, k, n = 32, 1, 512, 128
+    topk_ids = torch.randint(
+        0, num_experts, (m, topk), device="cuda", dtype=torch.int32
+    )
+    expert_offsets = torch.empty(num_experts + 1, device="cuda", dtype=torch.int32)
+    blockscale_offsets = torch.empty_like(expert_offsets)
+    problem_sizes1 = torch.empty(num_experts, 3, device="cuda", dtype=torch.int32)
+    problem_sizes2 = torch.empty_like(problem_sizes1)
+    input_permutation = torch.empty(m * topk, device="cuda", dtype=torch.int32)
+    output_permutation = torch.empty_like(input_permutation)
+    sorted_expert_ids = torch.empty_like(input_permutation)
+
+    ops.get_cutlass_moe_mm_data(
+        topk_ids,
+        expert_offsets,
+        problem_sizes1,
+        problem_sizes2,
+        input_permutation,
+        output_permutation,
+        num_experts,
+        n,
+        k,
+        blockscale_offsets,
+        is_gated=True,
+        sorted_expert_ids=sorted_expert_ids,
+    )
+
+    activations = torch.randn(m, k, device="cuda", dtype=torch.bfloat16) / 5
+    sorted_activations = ops.shuffle_rows(activations, input_permutation)
+
+    baseline_out, baseline_sf = ops.mxfp4_experts_quant(
+        sorted_activations,
+        expert_offsets,
+        blockscale_offsets,
+        num_experts,
+        topk=topk,
+    )
+    direct_out, direct_sf = ops.mxfp4_experts_quant(
+        sorted_activations,
+        expert_offsets,
+        blockscale_offsets,
+        num_experts,
+        topk=topk,
+        sorted_expert_ids=sorted_expert_ids,
+    )
+
+    assert torch.equal(baseline_out, direct_out)
+    assert torch.equal(baseline_sf, direct_sf)
+
+
+@pytest.mark.skipif(
+    not is_sm100_supported(),
+    reason="silu_and_mul_mxfp4_experts_quant requires CUDA SM100",
+)
+def test_silu_and_mul_mxfp4_sorted_expert_ids_matches_offset_search():
+    set_random_seed(1)
+    num_experts = 64
+    m, topk, k, n = 32, 1, 256, 128
+    topk_ids = torch.randint(
+        0, num_experts, (m, topk), device="cuda", dtype=torch.int32
+    )
+    expert_offsets = torch.empty(num_experts + 1, device="cuda", dtype=torch.int32)
+    blockscale_offsets = torch.empty_like(expert_offsets)
+    problem_sizes1 = torch.empty(num_experts, 3, device="cuda", dtype=torch.int32)
+    problem_sizes2 = torch.empty_like(problem_sizes1)
+    input_permutation = torch.empty(m * topk, device="cuda", dtype=torch.int32)
+    output_permutation = torch.empty_like(input_permutation)
+    sorted_expert_ids = torch.empty_like(input_permutation)
+
+    ops.get_cutlass_moe_mm_data(
+        topk_ids,
+        expert_offsets,
+        problem_sizes1,
+        problem_sizes2,
+        input_permutation,
+        output_permutation,
+        num_experts,
+        n,
+        k,
+        blockscale_offsets,
+        is_gated=True,
+        sorted_expert_ids=sorted_expert_ids,
+    )
+
+    gate_up = torch.randn(m, 2 * k, device="cuda", dtype=torch.bfloat16) / 5
+    sorted_gate_up = ops.shuffle_rows(gate_up, input_permutation)
+
+    baseline_out, baseline_sf = ops.silu_and_mul_mxfp4_experts_quant(
+        sorted_gate_up,
+        expert_offsets,
+        blockscale_offsets,
+        num_experts,
+        topk=topk,
+    )
+    direct_out, direct_sf = ops.silu_and_mul_mxfp4_experts_quant(
+        sorted_gate_up,
+        expert_offsets,
+        blockscale_offsets,
+        num_experts,
+        topk=topk,
+        sorted_expert_ids=sorted_expert_ids,
+    )
+
+    assert torch.equal(baseline_out, direct_out)
+    assert torch.equal(baseline_sf, direct_sf)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
