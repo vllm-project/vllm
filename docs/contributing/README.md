@@ -278,13 +278,13 @@ by users or their agents.
 | Hardware support | That hardware's installation page and the feature x hardware matrix |
 | Default change, deprecation, removal | The item's page, per the [deprecation policy](deprecation_policy.md) |
 
-Start with what it is, how to enable it (exact flag or variable), the default, and
-`Available in vLLM vX.Y.0 and later.` Use the exact names users search for, and
+Lead with what it is, how to enable it (exact flag or variable), the default,
+and `Available in vLLM vX.Y.0 and later.` Use the names users search for and
 link the page from its index.
 
-To check, ask a fresh agent one user question (e.g. "What does `VLLM_FOO` do?")
-three times, limited to web search, GitHub, and a local checkout in turn. Before
-merge, use the docs preview and the PR branch. If it cannot find and quote the
+To check, ask a fresh agent a user question (e.g. "What does `VLLM_FOO` do?")
+three times, limited in turn to web search, GitHub, and a local checkout (before
+merge: the docs preview and the PR branch). If it cannot find and quote the
 docs, fix the docs.
 
 ### Adding or Changing Kernels
