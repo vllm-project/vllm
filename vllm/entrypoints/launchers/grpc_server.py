@@ -23,6 +23,7 @@ import asyncio
 import signal
 import sys
 import time
+from functools import partial
 
 try:
     import grpc
@@ -166,9 +167,25 @@ async def serve_grpc(args: argparse.Namespace):
             health_servicer.set_not_serving()
         except Exception:  # broad: must not prevent server.stop() / shutdown()
             logger.warning("Failed to set health status to NOT_SERVING", exc_info=True)
-        await server.stop(grace=5.0)
-        logger.info("gRPC server stopped")
-        async_llm.shutdown()
+        shutdown_timeout = vllm_config.shutdown_timeout
+        if shutdown_timeout > 0:
+            # One budget for both phases: stop() refuses new RPCs and waits for
+            # in-flight ones, then EngineCore drains work that outlives its RPC,
+            # e.g. NIXL prefill blocks the decode side has not read yet.
+            deadline = time.monotonic() + shutdown_timeout
+            logger.info(
+                "Draining in-flight RPCs (shutdown_timeout=%ds)", shutdown_timeout
+            )
+            await server.stop(grace=shutdown_timeout)
+            logger.info("gRPC server stopped")
+            remaining = max(deadline - time.monotonic(), 0.0)
+            await asyncio.get_running_loop().run_in_executor(
+                None, partial(async_llm.shutdown, timeout=remaining)
+            )
+        else:
+            await server.stop(grace=5.0)
+            logger.info("gRPC server stopped")
+            async_llm.shutdown()
         logger.info("AsyncLLM engine stopped")
         logger.info("Shutdown complete")
 
