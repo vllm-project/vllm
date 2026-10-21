@@ -23,6 +23,7 @@ from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
+from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.utils import get_draft_load_config
@@ -1433,6 +1434,9 @@ class SpecDecodeBaseProposer:
                 raise AttributeError(
                     "Target model does not have 'embed_tokens' or 'embedding' attribute"
                 )
+            # The drafter does not use the target's LoRA adapter.
+            if isinstance(target_embed_tokens, BaseLayerWithLoRA):
+                target_embed_tokens = target_embed_tokens.base_layer
 
             share_embeddings = False
             if hasattr(self.model, "has_own_embed_tokens"):
