@@ -1033,6 +1033,22 @@ def test_aiter_moe_padding_matrix(mode: str, quant_config: TestMoEQuantConfig | 
             "scheme."
         )
 
+    if (
+        quant_config is not None
+        and quant_config.block_shape is None
+        and not pad_intermediate
+    ):
+        pytest.skip(
+            "AITER v0.1.26's ck_moe_stage2 kernel doesn't support the raw "
+            f"(unpadded) intermediate_size={_PADDING_N_UNPADDED} for fp8 "
+            "per-channel/per-tensor schemes -- 'wrong! device_gemm ... "
+            "does not support this GEMM problem'. Regressed vs v0.1.25 "
+            "(https://github.com/vllm-project/vllm/pull/62486); unrelated "
+            "to this test file. Only intermediate_pad-forcing modes "
+            f"(intermediate_size={_PADDING_N_PADDED}) are exercised here "
+            "until AITER fixes it upstream."
+        )
+
     k = _PADDING_K_PADDED if pad_hidden else _PADDING_K_UNPADDED
     n = _PADDING_N_PADDED if pad_intermediate else _PADDING_N_UNPADDED
 
