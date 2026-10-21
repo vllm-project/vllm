@@ -91,7 +91,12 @@ class RoutedExpertsCapturer:
                 f"layer count {self.device_buffer.shape[1]}"
             )
 
-        local_topk_ids = self._restore_local_topk_ids(topk_ids, get_forward_context())
+        ctx = get_forward_context()
+        local_topk_ids = current_platform.get_routed_experts_local_rows(
+            topk_ids, ctx, self.dp_rank, self.tp_size
+        )
+        if local_topk_ids is None:
+            local_topk_ids = self._restore_local_topk_ids(topk_ids, ctx)
         self.device_buffer[: len(local_topk_ids), layer_id] = local_topk_ids
 
     def _restore_local_topk_ids(
