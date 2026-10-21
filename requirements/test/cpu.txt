@@ -157,8 +157,6 @@ cryptography==50.0.1
     #   azure-storage-blob
     #   msal
     #   pyjwt
-cupy-cuda12x==13.6.0
-    # via ray
 cycler==0.12.1
     # via matplotlib
 datamodel-code-generator==0.79.0
@@ -239,8 +237,6 @@ fastavro==1.12.2
     # via cohere
 fastparquet==2024.11.0
     # via genai-perf
-fastrlock==0.8.2
-    # via cupy-cuda12x
 fastsafetensors==0.3.3
     # via -r requirements/test/cuda.in
 filelock==4.0.7
@@ -406,7 +402,7 @@ inflect==5.6.2
     # via datamodel-code-generator
 iniconfig==2.0.0
     # via pytest
-instanttensor==0.1.9
+instanttensor==0.2.2
     # via -r requirements/test/cuda.in
 interegular==0.3.3
     # via lm-format-enforcer
@@ -569,7 +565,6 @@ numpy==2.2.6
     #   albumentations
     #   bm25s
     #   contourpy
-    #   cupy-cuda12x
     #   datasets
     #   decord
     #   einx
@@ -713,7 +708,7 @@ pathvalidate==3.2.1
     # via pytablewriter
 patsy==1.0.1
     # via statsmodels
-peft==0.19.1
+peft==0.21.1
     # via -r requirements/test/cuda.in
 perceptron==0.1.4
     # via -r requirements/test/cuda.in
@@ -1170,7 +1165,7 @@ tokenizers==0.23.2
     #   -r requirements/test/../common.txt
     #   cohere
     #   transformers
-torch==2.13.0+cpu
+torch==2.14.0+cpu
     # via
     #   -r requirements/test/cuda.in
     #   accelerate
@@ -1198,7 +1193,7 @@ torchaudio==2.11.0+cpu
     #   vocos
 torchcodec==0.14.0+cpu
     # via -r requirements/test/cuda.in
-torchvision==0.28.0+cpu
+torchvision==0.29.0+cpu
     # via
     #   -r requirements/test/cuda.in
     #   open-clip-torch
@@ -1228,7 +1223,7 @@ traitlets==5.16.1
     # via
     #   jupyter-client
     #   jupyter-core
-transformers==5.17.0
+transformers==5.20.2
     # via
     #   -r requirements/test/../common.txt
     #   -r requirements/test/cuda.in
@@ -1240,7 +1235,7 @@ transformers==5.17.0
     #   xgrammar
 transformers-stream-generator==0.0.5
     # via -r requirements/test/cuda.in
-triton==3.6.0
+triton==3.8.0
     # via xgrammar
 tritonclient==2.64.0
     # via -r requirements/test/cuda.in

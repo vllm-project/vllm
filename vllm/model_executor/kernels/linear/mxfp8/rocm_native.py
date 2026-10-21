@@ -10,14 +10,15 @@ instead, since ``can_implement`` does not filter on K.
 """
 
 import torch
-from torch.nn.parameter import Parameter
 
+import vllm.envs as envs
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     MXFP8_SCALE_DTYPE,
     dequant_mxfp8_to_bf16,
     mxfp8_e4m3_quantize,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
@@ -246,7 +247,10 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
         N, K = weight.shape
         scale_k = K // MXFP8_BLOCK_SIZE
         weight_scale = layer.weight_scale.data[:N, :scale_k].contiguous()
-        block_scale = _as_block32_scale(weight_scale)
+        # rocm_mxfp8_block32_gemm's split-K varies with M.
+        block_scale = (
+            None if envs.VLLM_BATCH_INVARIANT else _as_block32_scale(weight_scale)
+        )
         if block_scale is not None:
             # Checkpoints with 32x32 scale blocks (DeepSeek V4/V4.1) get them
             # back from the loader expanded per row; keep the blocks and use
@@ -254,8 +258,8 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
             weight_scale = block_scale
         elif K % _DOT_SCALED_K_ALIGN != 0:
             weight = dequant_mxfp8_to_bf16(weight.contiguous(), weight_scale)
-        layer.weight = Parameter(weight.contiguous(), requires_grad=False)
-        layer.weight_scale = Parameter(weight_scale, requires_grad=False)
+        replace_parameter(layer, "weight", weight.contiguous())
+        replace_parameter(layer, "weight_scale", weight_scale)
 
     def apply_weights(
         self,

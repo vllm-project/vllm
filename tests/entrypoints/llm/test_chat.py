@@ -65,6 +65,25 @@ def test_multi_chat(text_llm):
     assert len(outputs) == 2
 
 
+def test_chat_priority(text_llm):
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant"},
+        {"role": "user", "content": "Explain the concept of entropy."},
+    ]
+
+    # A single value is applied to every conversation.
+    outputs = text_llm.chat(messages, priority=1)
+    assert len(outputs) == 1
+
+    outputs = text_llm.chat([messages, messages], priority=[0, 1])
+    assert len(outputs) == 2
+
+    # Exception raised, if the length of priority does not match the length of
+    # conversations
+    with pytest.raises(VLLMValidationError):
+        text_llm.chat([messages, messages], priority=[0])
+
+
 def test_llm_chat_tokenization_no_double_bos(text_llm):
     """LLM.chat() should not add special tokens when using chat templates.
     Check we get a single BOS token for llama chat.

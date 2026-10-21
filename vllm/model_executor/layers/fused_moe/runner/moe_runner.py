@@ -301,7 +301,10 @@ class MoERunner(MoERunnerInterface):
     def load_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[str]:
-        return self.routed_experts.load_weights(weights)
+        # routed_experts reports names relative to itself, but callers such as
+        # AutoWeightsLoader qualify what this returns with the runner's prefix.
+        for name in self.routed_experts.load_weights(weights):
+            yield f"routed_experts.{name}"
 
     def _select_forward(self) -> Callable:
         if current_platform.is_tpu():
@@ -616,6 +619,7 @@ class MoERunner(MoERunnerInterface):
 
         if self.routed_experts.quant_method.is_monolithic:
             # Monolithic kernels: pass router_logits to routed_experts
+            router_logits = self.router.prepare_monolithic_logits(router_logits)
             fused_out = self.routed_experts.forward_monolithic(
                 x=hidden_states,
                 router_logits=router_logits,

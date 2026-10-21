@@ -426,6 +426,8 @@ jupyter-client==8.10.0
     # via gpt-oss
 jupyter-core==5.9.1
     # via jupyter-client
+kaldi-native-fbank==1.22.3
+    # via -r requirements/test/xpu.in
 kiwisolver==1.5.1
     # via matplotlib
 lark==1.2.2
@@ -1134,7 +1136,7 @@ traitlets==5.16.1
     # via
     #   jupyter-client
     #   jupyter-core
-transformers==5.17.0
+transformers==5.20.2
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
