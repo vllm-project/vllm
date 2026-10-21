@@ -45,9 +45,6 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.utils.config_utils import (
-    get_fused_shared_expert_layers,
-)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -77,6 +74,7 @@ from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     extract_layer_index,
+    get_fused_shared_expert_layers,
     get_spec_layer_idx_from_weight_name,
     is_pp_missing_parameter,
     make_layers,
@@ -278,9 +276,8 @@ class Glm4MoeLiteModel(nn.Module):
         )
 
         self.fused_shared_expert_layers = get_fused_shared_expert_layers(
-            self.layers,
+            self,
             Glm4MoeLite,
-            "mlp",
             enable_eplb=vllm_config.parallel_config.enable_eplb,
         )
 

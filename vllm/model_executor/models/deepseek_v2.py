@@ -73,9 +73,6 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.utils.config_utils import (
-    get_fused_shared_expert_layers,
-)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
@@ -99,6 +96,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     extract_layer_index,
+    get_fused_shared_expert_layers,
     sequence_parallel_chunk,
 )
 from vllm.platforms import current_platform
@@ -1479,9 +1477,8 @@ class DeepseekV2Model(nn.Module):
         )
 
         self.fused_shared_expert_layers = get_fused_shared_expert_layers(
-            self.layers,
+            self,
             DeepseekV2MoE,
-            "mlp",
             enable_eplb=vllm_config.parallel_config.enable_eplb,
         )
 

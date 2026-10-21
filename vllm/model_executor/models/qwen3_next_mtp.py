@@ -14,9 +14,6 @@ from vllm.distributed import get_pp_group, tensor_model_parallel_all_gather
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.utils.config_utils import (
-    get_fused_shared_expert_layers,
-)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -33,7 +30,7 @@ from vllm.sequence import IntermediateTensors
 
 from .utils import (
     AutoWeightsLoader,
-    get_fused_shared_expert_layer_map,
+    get_fused_shared_expert_layers,
     make_empty_intermediate_tensors_factory,
     maybe_fuse_shared_experts,
     maybe_prefix,
@@ -97,9 +94,8 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
         )
 
         self.fused_shared_expert_layers = get_fused_shared_expert_layers(
-            self.layers,
+            self,
             Qwen3NextSparseMoeBlock,
-            "mlp",
             enable_eplb=vllm_config.parallel_config.enable_eplb,
         )
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
@@ -166,9 +162,7 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         weights = maybe_fuse_shared_experts(
             weights,
-            fuse_by_layer=get_fused_shared_expert_layer_map(
-                self, Qwen3NextSparseMoeBlock
-            ),
+            fused_shared_expert_layers=self.fused_shared_expert_layers,
             n_routed_experts=self.config.num_experts,
             n_shared_experts=1,
             ckpt_prefix="mlp.shared_expert",

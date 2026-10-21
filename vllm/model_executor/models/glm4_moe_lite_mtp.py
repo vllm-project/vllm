@@ -38,9 +38,6 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.utils.config_utils import (
-    get_fused_shared_expert_layers,
-)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -64,7 +61,7 @@ from .glm4_moe_lite import (
 from .interfaces import SupportsPP
 from .utils import (
     extract_layer_index,
-    get_fused_shared_expert_layer_map,
+    get_fused_shared_expert_layers,
     get_spec_layer_idx_from_weight_name,
     maybe_prefix,
 )
@@ -246,15 +243,11 @@ class Glm4MoeLiteMTP(nn.Module, SupportsPP, Glm4MixtureOfExperts):
                 self.moe_mlp_layers.append(layer.mlp)
                 self.moe_layers.append(layer.mlp.experts)
         self.extract_moe_parameters(example_moe)
-        self.fused_shared_expert_layers = [
-            self.model.mtp_start_layer_idx + idx
-            for idx in get_fused_shared_expert_layers(
-                list(self.model.layers.values()),
-                Glm4MoeLite,
-                "mtp_block.mlp",
-                enable_eplb=vllm_config.parallel_config.enable_eplb,
-            )
-        ]
+        self.fused_shared_expert_layers = get_fused_shared_expert_layers(
+            self,
+            Glm4MoeLite,
+            enable_eplb=vllm_config.parallel_config.enable_eplb,
+        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
@@ -288,14 +281,14 @@ class Glm4MoeLiteMTP(nn.Module, SupportsPP, Glm4MixtureOfExperts):
             ("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
         ]
 
-        fuse_by_layer = get_fused_shared_expert_layer_map(self, Glm4MoeLite)
+        fused_shared_expert_layers = self.fused_shared_expert_layers
         expert_params_mapping = fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
             num_experts=self.config.n_routed_experts
-            + (self.config.n_shared_experts if any(fuse_by_layer.values()) else 0),
+            + (self.config.n_shared_experts if fused_shared_expert_layers else 0),
         )
 
         params_dict = dict(self.named_parameters())
@@ -308,7 +301,7 @@ class Glm4MoeLiteMTP(nn.Module, SupportsPP, Glm4MixtureOfExperts):
                 continue
             is_fusion_moe_shared_experts_layer = (
                 "mlp.shared_experts" in name
-                and fuse_by_layer.get(extract_layer_index(name), False)
+                and extract_layer_index(name) in fused_shared_expert_layers
             )
             name = self._rewrite_spec_layer_name(spec_layer, name)
             for param_name, weight_name, shard_id in stacked_params_mapping:

@@ -66,6 +66,7 @@ def resolve_layer_fused_shared_expert(
     prefix: str,
     shared_expert_name: str = "shared_experts",
     moe_backend: str | None = None,
+    disable_under_ep: bool = False,
 ) -> bool:
     """Resolve whether AITER fused shared-expert execution is enabled.
 
@@ -74,6 +75,9 @@ def resolve_layer_fused_shared_expert(
         prefix: MoE module prefix.
         shared_expert_name: Shared-expert module name under ``prefix``.
         moe_backend: MoE backend that runs the fused shared expert.
+        disable_under_ep: Whether this model family does not support FSE under
+            expert parallelism. Kept as an explicit call-site policy instead of
+            branching on model type here.
 
     Returns:
         Whether AITER fused shared experts are enabled.
@@ -85,41 +89,18 @@ def resolve_layer_fused_shared_expert(
     # NOTE: is_fusion_moe_shared_experts_enabled is decorated with @if_aiter_supported
     # that returns None if AITER is not available.
     fse_requested = bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())
-    if fse_requested:
+
+    # TODO: should it be disabled for all models?
+    if fse_requested and disable_under_ep:
         from vllm.config import get_current_vllm_config_or_none
 
         vllm_config = get_current_vllm_config_or_none()
-        if vllm_config is not None:
-            parallel_config = vllm_config.parallel_config
-            hf_text_config = getattr(vllm_config.model_config, "hf_text_config", None)
-            hf_config = getattr(vllm_config.model_config, "hf_config", None)
-            model_type = getattr(hf_text_config, "model_type", None) or getattr(
-                hf_config, "model_type", None
-            )
-            # Multimodal/text sub-configs use suffixed model types (e.g.
-            # ``minimax_m3_text``/``minimax_m3_vl``, ``deepseek_v4_text``).
-            is_minimax_m3 = isinstance(model_type, str) and model_type.startswith(
-                "minimax_m3"
-            )
-            is_deepseek_v4 = isinstance(model_type, str) and model_type.startswith(
-                "deepseek_v4"
-            )
-            # Only MiniMax-M3 and DeepSeek-V4 gate FSE on expert parallelism
-            # today (the fused shared-expert slot is appended to the routed
-            # top-k, which the EP expert-mapping path does not handle).
-            # TODO: should it be disabled for all models?
-            if is_minimax_m3 or is_deepseek_v4:
-                if parallel_config.enable_expert_parallel:
-                    fse_requested = False
-                elif is_deepseek_v4 and parallel_config.data_parallel_size > 1:
-                    raise ValueError(
-                        "DeepSeek-V4 fused shared experts "
-                        "(VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1) are not "
-                        "supported with data parallelism "
-                        "(data_parallel_size > 1). Set "
-                        "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0 to run the "
-                        "shared expert as an unfused FP8 MLP."
-                    )
+        parallel_config = (
+            vllm_config.parallel_config if vllm_config is not None else None
+        )
+        if parallel_config is not None and parallel_config.enable_expert_parallel:
+            fse_requested = False
+
     fse_compatible, fse_reason = (
         is_shared_expert_quant_fse_compatible(
             quant_config,
@@ -166,9 +147,9 @@ def resolve_layer_fused_shared_expert(
                     target_pattern,
                 )
     if fse_requested and not is_fused_shared_expert_enabled:
-        # Different layers share the same cause; report each cause once and
-        # leave the per-layer breakdown to the model-level summary. The reason
-        # is normalized so `warning_once` dedupes by cause, not by layer name.
+        # Keep the full per-layer reason at debug level; the warning below is
+        # deduplicated by cause so a long model logs it once.
+        logger.debug("Skipping shared-expert fusion at %s: %s", prefix, fse_reason)
         logger.warning_once(
             "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled but "
             "cannot be enabled - skipping shared-expert fusion: %s.",

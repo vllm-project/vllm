@@ -54,9 +54,6 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
-from vllm.model_executor.layers.quantization.utils.config_utils import (
-    get_fused_shared_expert_layers,
-)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -99,7 +96,7 @@ from .utils import (
     WeightsMapper,
     _merge_multimodal_embeddings,
     extract_layer_index,
-    get_fused_shared_expert_layer_map,
+    get_fused_shared_expert_layers,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_fuse_shared_experts,
@@ -265,9 +262,8 @@ class Qwen3_5Model(Qwen3NextModel):
             config.num_hidden_layers, get_layer, prefix=f"{prefix}.layers"
         )
         self.fused_shared_expert_layers = get_fused_shared_expert_layers(
-            self.layers,
+            self,
             Qwen3NextSparseMoeBlock,
-            "mlp",
             enable_eplb=vllm_config.parallel_config.enable_eplb,
         )
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
@@ -288,9 +284,7 @@ class Qwen3_5Model(Qwen3NextModel):
         if "moe" in self.config.model_type:
             weights = maybe_fuse_shared_experts(
                 weights,
-                fuse_by_layer=get_fused_shared_expert_layer_map(
-                    self, Qwen3NextSparseMoeBlock
-                ),
+                fused_shared_expert_layers=self.fused_shared_expert_layers,
                 n_routed_experts=self.config.num_experts,
                 n_shared_experts=1,
                 ckpt_prefix="mlp.shared_expert",

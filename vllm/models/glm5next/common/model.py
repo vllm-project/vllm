@@ -47,9 +47,6 @@ from vllm.model_executor.layers.mhc import (
     hc_expand,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.utils.config_utils import (
-    get_fused_shared_expert_layers,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     scaled_dequantize,
@@ -79,6 +76,7 @@ from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     extract_layer_index,
+    get_fused_shared_expert_layers,
     init_vllm_registered_model,
     is_pp_missing_parameter,
     make_layers,
@@ -753,9 +751,8 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
         # doesn't rebuild the slice (a fresh list) every step.
         self._active_layers = self.layers[self.start_layer : self.end_layer]
         self.fused_shared_expert_layers = get_fused_shared_expert_layers(
-            self.layers,
+            self,
             Glm5NextMoE,
-            "mlp",
             enable_eplb=vllm_config.parallel_config.enable_eplb,
         )
 

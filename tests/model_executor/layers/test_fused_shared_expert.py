@@ -26,7 +26,6 @@ from vllm.model_executor.layers.quantization.modelopt import ModelOptMxFp8Config
 from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
 from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 from vllm.model_executor.layers.quantization.utils.config_utils import (
-    get_fused_shared_expert_layers,
     get_quark_ocp_mx_group_size,
     is_shared_expert_quant_fse_compatible,
 )
@@ -34,7 +33,7 @@ from vllm.model_executor.models.qwen3_next import (
     _should_replicate_misaligned_shared_expert,
 )
 from vllm.model_executor.models.utils import (
-    get_fused_shared_expert_layer_map,
+    get_fused_shared_expert_layers,
     maybe_fuse_shared_experts,
 )
 from vllm.models.deepseek_v4 import quant_config as deepseek_v4_quant_config
@@ -958,7 +957,7 @@ def test_deepseek_v4_shared_expert_mapper_fallback() -> None:
     )
 
     tensor = torch.empty(0)
-    fuse_by_layer = {5: False, 6: True}
+    fuse_by_layer = frozenset({6})
     # Mixed: any fused layer puts the mapper in fused mode, which leaves the
     # checkpoint .w2 names untouched; the loader redirects per layer.
     mapper = _make_deepseek_v4_weights_mapper("fp8", fuse_shared_experts=True)
@@ -983,8 +982,8 @@ def test_deepseek_v4_shared_expert_mapper_fallback() -> None:
         [(mapped, _)] = list(mapper.apply([(raw, tensor)]))
         assert _redirect_shared_expert_name(mapped, fuse_by_layer, 4) == expected
 
-    # All layers excluded (fused_shared_expert_layers == []) selects the
-    # unfused mapper, which renames .w2 -> .down_proj itself.
+    # All layers excluded (fused_shared_expert_layers == frozenset()) selects
+    # the unfused mapper, which renames .w2 -> .down_proj itself.
     mapper = _make_deepseek_v4_weights_mapper("fp8", fuse_shared_experts=False)
     for raw, expected in [
         (
@@ -997,11 +996,11 @@ def test_deepseek_v4_shared_expert_mapper_fallback() -> None:
         ),
     ]:
         [(mapped, _)] = list(mapper.apply([(raw, tensor)]))
-        assert _redirect_shared_expert_name(mapped, {}, 4) == expected
+        assert _redirect_shared_expert_name(mapped, frozenset(), 4) == expected
 
 
-def test_fused_shared_expert_layer_map_matches_container_index_space() -> None:
-    """The layer map follows the module tree, not a hard-coded offset.
+def test_fused_shared_expert_layers_matches_container_index_space() -> None:
+    """The fused-layer set follows the module tree, not a hard-coded offset.
 
     ``nn.ModuleList`` MTP layers (Qwen3 Next/3.5, Qwen4 Exp) are 0-based,
     while ``nn.ModuleDict`` MTP layers (GLM4, DeepSeek) are keyed by absolute
@@ -1028,20 +1027,20 @@ def test_fused_shared_expert_layer_map_matches_container_index_space() -> None:
             super().__init__()
             self.layers = nn.ModuleDict({"28": Layer(False), "29": Layer(True)})
 
-    list_map = get_fused_shared_expert_layer_map(ListModel(), MoE)
-    dict_map = get_fused_shared_expert_layer_map(DictModel(), MoE)
-    assert list_map == {0: True, 1: False}
-    assert dict_map == {28: False, 29: True}
+    list_layers = get_fused_shared_expert_layers(ListModel(), MoE)
+    dict_layers = get_fused_shared_expert_layers(DictModel(), MoE)
+    assert list_layers == frozenset({0})
+    assert dict_layers == frozenset({29})
 
     weight = torch.arange(8.0).reshape(4, 2)
 
-    def redirected(name: str, fuse_by_layer: dict[int, bool]) -> bool:
+    def redirected(name: str, fused_shared_expert_layers: frozenset[int]) -> bool:
         [(out_name, _)] = list(
             maybe_fuse_shared_experts(
                 [(name, weight)],
                 n_routed_experts=4,
                 n_shared_experts=1,
-                fuse_by_layer=fuse_by_layer,
+                fused_shared_expert_layers=fused_shared_expert_layers,
                 ckpt_prefix="mlp.shared_expert",
             )
         )
@@ -1049,11 +1048,11 @@ def test_fused_shared_expert_layer_map_matches_container_index_space() -> None:
 
     # ModuleList: 0-based names, including the Qwen4 Exp MTP case where the
     # quant-config prefix uses an absolute index but the weight names do not.
-    assert redirected("layers.0.mlp.shared_expert.down_proj.weight", list_map)
-    assert not redirected("layers.1.mlp.shared_expert.down_proj.weight", list_map)
+    assert redirected("layers.0.mlp.shared_expert.down_proj.weight", list_layers)
+    assert not redirected("layers.1.mlp.shared_expert.down_proj.weight", list_layers)
     # ModuleDict: absolute names, including the MTP layer offset.
-    assert redirected("layers.29.mlp.shared_expert.down_proj.weight", dict_map)
-    assert not redirected("layers.28.mlp.shared_expert.down_proj.weight", dict_map)
+    assert redirected("layers.29.mlp.shared_expert.down_proj.weight", dict_layers)
+    assert not redirected("layers.28.mlp.shared_expert.down_proj.weight", dict_layers)
 
 
 def _assert_mtp_fused_shared_expert_redirect(
@@ -1393,13 +1392,13 @@ def test_models_fse_init(
                     and shared_expert_precision == "all_mxfp4"
                 ),
             }
-            assert model.fused_shared_expert_layers == [
+            assert model.fused_shared_expert_layers == frozenset(
                 idx for idx in range(2) if expected_policy[f"layers.{idx}.mlp"]
-            ]
+            )
             if any(expected_policy.values()) and not all(expected_policy.values()):
                 with pytest.raises(NotImplementedError, match="EPLB"):
                     get_fused_shared_expert_layers(
-                        model.layers, type(model.layers[0].mlp), "mlp", enable_eplb=True
+                        model, type(model.layers[0].mlp), enable_eplb=True
                     )
             for idx, layer in enumerate(model.layers):
                 fused = expected_policy[f"layers.{idx}.mlp"]
@@ -1562,23 +1561,23 @@ def test_models_fse_init(
             assert "different quantization configurations" in warning.call_args.args[1]
         if glm4_mtp is not None:
             assert glm4_mtp.fused_shared_expert_layers == (
-                [config.num_hidden_layers] if fse_enabled else []
+                frozenset({config.num_hidden_layers}) if fse_enabled else frozenset()
             )
         if ds_mtp is not None:
             assert ds_mtp.fused_shared_expert_layers == (
-                [config.num_hidden_layers] if fse_enabled else []
+                frozenset({config.num_hidden_layers}) if fse_enabled else frozenset()
             )
         if glm4_lite_mtp is not None:
             assert glm4_lite_mtp.fused_shared_expert_layers == (
-                [config.num_hidden_layers] if fse_enabled else []
+                frozenset({config.num_hidden_layers}) if fse_enabled else frozenset()
             )
         if ds_v32_mtp is not None:
             assert ds_v32_mtp.fused_shared_expert_layers == (
-                [config.num_hidden_layers] if fse_enabled else []
+                frozenset({config.num_hidden_layers}) if fse_enabled else frozenset()
             )
         if glm5_mtp is not None:
             assert glm5_mtp.fused_shared_expert_layers == (
-                [config.num_hidden_layers] if fse_enabled else []
+                frozenset({config.num_hidden_layers}) if fse_enabled else frozenset()
             )
         if aiter_fse_enabled and exclude:
             if model_type == "deepseek_v4_cpu":

@@ -56,9 +56,6 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.utils.config_utils import (
-    get_fused_shared_expert_layers,
-)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -80,6 +77,7 @@ from vllm.model_executor.models.utils import (
     PPMissingLayer,
     WeightsMapper,
     extract_layer_index,
+    get_fused_shared_expert_layers,
     init_vllm_registered_model,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
@@ -389,7 +387,7 @@ class MiniMaxM3MoE(nn.Module):
         self.is_fused_shared_expert_enabled = False
         if bool(getattr(config, "n_shared_experts", None)):
             self.is_fused_shared_expert_enabled = resolve_layer_fused_shared_expert(
-                quant_config, prefix
+                quant_config, prefix, disable_under_ep=True
             )
 
         # When additionally on gfx950 with an active aiter MoE backend, the shared
@@ -1429,9 +1427,8 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             prefix=f"{prefix}.layers",
         )
         self.fused_shared_expert_layers = get_fused_shared_expert_layers(
-            self.layers,
+            self,
             MiniMaxM3MoE,
-            "block_sparse_moe",
             enable_eplb=vllm_config.parallel_config.enable_eplb,
         )
 

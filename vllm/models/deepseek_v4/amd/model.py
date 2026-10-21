@@ -53,9 +53,6 @@ from vllm.model_executor.layers.mhc import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
-from vllm.model_executor.layers.quantization.utils.config_utils import (
-    get_fused_shared_expert_layers,
-)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -71,7 +68,7 @@ from vllm.model_executor.models.utils import (
     PPMissingLayer,
     WeightsMapper,
     extract_layer_index,
-    get_fused_shared_expert_layer_map,
+    get_fused_shared_expert_layers,
     is_pp_missing_parameter,
     make_layers,
     maybe_prefix,
@@ -637,8 +634,24 @@ class DeepseekV4MoE(nn.Module):
             getattr(config, "n_shared_experts", None)
             and not self.fuse_heterogeneous_shared_expert
         ):
+            # Fused shared experts are not supported under data parallelism:
+            # the fused path cannot load the FP8 shared expert into the MXFP4
+            # routed slot. Fail fast with an actionable message.
+            if (
+                not vllm_config.parallel_config.enable_expert_parallel
+                and vllm_config.parallel_config.data_parallel_size > 1
+                and rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+            ):
+                raise ValueError(
+                    "DeepSeek-V4 fused shared experts "
+                    "(VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1) are not "
+                    "supported with data parallelism "
+                    "(data_parallel_size > 1). Set "
+                    "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0 to run the "
+                    "shared expert as an unfused FP8 MLP."
+                )
             self.is_fused_shared_expert_enabled = resolve_layer_fused_shared_expert(
-                quant_config, prefix
+                quant_config, prefix, disable_under_ep=True
             )
 
         self.use_mega_moe = vllm_config.kernel_config.moe_backend == "aiter_mega_moe"
@@ -1115,9 +1128,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             prefix=f"{prefix}.layers",
         )
         self.fused_shared_expert_layers = get_fused_shared_expert_layers(
-            self.layers,
+            self,
             DeepseekV4MoE,
-            "ffn",
             enable_eplb=vllm_config.parallel_config.enable_eplb,
         )
 
@@ -1302,12 +1314,12 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # at init) as the single source of truth, so the redirect below cannot
         # diverge from how the module was built if per-layer quantization ever
         # mixes fused and non-fused layers.
-        fuse_by_layer = get_fused_shared_expert_layer_map(self, DeepseekV4MoE)
+        fuse_by_layer = self.fused_shared_expert_layers
         n_routed = self.config.n_routed_experts
         # The redirect below maps the single shared-expert tensor group to one
         # appended slot; multiple shared experts would need per-expert slicing
         # (see deepseek_v2.py). DeepSeek-V4 has n_shared_experts == 1.
-        if any(fuse_by_layer.values()) and self.config.n_shared_experts != 1:
+        if fuse_by_layer and self.config.n_shared_experts != 1:
             raise NotImplementedError(
                 "deepseek-v4 fused shared-expert loading supports only "
                 f"n_shared_experts == 1, got {self.config.n_shared_experts}"
@@ -1409,7 +1421,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
 
 
 def _redirect_shared_expert_name(
-    name: str, fuse_by_layer: dict[int, bool], n_routed_experts: int
+    name: str, fuse_by_layer: frozenset[int], n_routed_experts: int
 ) -> str:
     """Route a DSV4 shared-expert checkpoint name to its final parameter name.
 
@@ -1419,7 +1431,7 @@ def _redirect_shared_expert_name(
     """
     if ".ffn.shared_experts.w" not in name:
         return name
-    if fuse_by_layer.get(extract_layer_index(name), False):
+    if extract_layer_index(name) in fuse_by_layer:
         return name.replace(
             ".ffn.shared_experts.w", f".ffn.experts.{n_routed_experts}.w"
         )

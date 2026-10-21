@@ -13,9 +13,6 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.quantization.utils.config_utils import (
-    get_fused_shared_expert_layers,
-)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
@@ -33,6 +30,7 @@ from vllm.model_executor.models.deepseek_v2 import (
 from vllm.model_executor.models.utils import (
     PPMissingLayer,
     extract_layer_index,
+    get_fused_shared_expert_layers,
     get_pp_missing_layer_names,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
@@ -174,9 +172,8 @@ class DeepseekV32Model(torch.nn.Module):
         )
 
         self.fused_shared_expert_layers = get_fused_shared_expert_layers(
-            self.layers,
+            self,
             DeepseekV2MoE,
-            "mlp",
             enable_eplb=vllm_config.parallel_config.enable_eplb,
         )
 

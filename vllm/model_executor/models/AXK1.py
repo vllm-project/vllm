@@ -61,9 +61,6 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.utils.config_utils import (
-    get_fused_shared_expert_layers,
-)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -87,6 +84,7 @@ from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     extract_layer_index,
+    get_fused_shared_expert_layers,
     get_spec_layer_idx_from_weight_name,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
@@ -746,9 +744,8 @@ class AXK1Model(nn.Module):
         )
 
         self.fused_shared_expert_layers = get_fused_shared_expert_layers(
-            self.layers,
+            self,
             AXK1MoE,
-            "mlp",
             enable_eplb=vllm_config.parallel_config.enable_eplb,
         )
 
