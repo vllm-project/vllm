@@ -79,6 +79,8 @@ async fn main() -> Result<()> {
         language_model_only: false,
         chat_template: None,
         default_chat_template_kwargs: None,
+        trust_request_chat_template: false,
+        exclude_tools_when_tool_choice_none: false,
         limit_mm_per_prompt: HashMap::new(),
         lora_modules: Vec::new(),
         chat_template_content_format: ChatTemplateContentFormatOption::Auto,

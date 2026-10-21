@@ -85,6 +85,8 @@ pub struct LoadModelBackendsOptions {
     /// Optional server-default chat template override, provided either as an
     /// inline template or as a path to a template file.
     pub chat_template: Option<String>,
+    /// Whether requests may override the chat template.
+    pub trust_request_chat_template: bool,
     /// Server-default keyword arguments. HF merges these before request kwargs;
     /// native renderers inherit supported reasoning controls below request controls.
     pub default_chat_template_kwargs: HashMap<String, Value>,

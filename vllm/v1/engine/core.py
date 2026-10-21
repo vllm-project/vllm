@@ -31,6 +31,7 @@ from vllm.distributed.ec_transfer.ec_connector.encoder_output_width import (
     measure_encoder_output_widths,
 )
 from vllm.envs import enable_envs_cache
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import configure_logging, init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
@@ -193,26 +194,8 @@ class EngineCore:
 
         self.mm_receiver_cache = engine_receiver_cache_from_config(vllm_config)
 
-        # If a KV connector is initialized for scheduler, we want to collect
-        # handshake metadata from all workers so the connector in the scheduler
-        # will have the full context
         kv_connector = self.scheduler.get_kv_connector()
-        if kv_connector is not None:
-            # Collect and store KV connector xfer metadata from workers
-            # (after KV cache registration)
-            xfer_handshake_metadata = (
-                self.model_executor.get_kv_connector_handshake_metadata()
-            )
-
-            if xfer_handshake_metadata:
-                # xfer_handshake_metadata is list of dicts from workers
-                # Each dict already has structure {(pp_rank, tp_rank): metadata}
-                # Merge all worker dicts into a single dict
-                content: dict[tuple[int, int], Any] = {}
-                for worker_dict in xfer_handshake_metadata:
-                    if worker_dict is not None:
-                        content.update(worker_dict)
-                kv_connector.set_xfer_handshake_metadata_pp_aware(content)
+        self._set_kv_connector_handshake_metadata()
 
         # Setup batch queue for pipeline parallelism.
         # Batch queue for scheduled batches. This enables us to asynchronously
@@ -896,6 +879,28 @@ class EngineCore:
         # Reset the GPU model runner's encoder cache (physical storage)
         self.model_executor.reset_encoder_cache()
 
+    def _set_kv_connector_handshake_metadata(self) -> None:
+        # If a KV connector is initialized for scheduler, we want to collect
+        # handshake metadata from all workers so the connector in the scheduler
+        # will have the full context
+        kv_connector = self.scheduler.get_kv_connector()
+        if kv_connector is not None:
+            # Collect and store KV connector xfer metadata from workers
+            # (after KV cache registration)
+            xfer_handshake_metadata = (
+                self.model_executor.get_kv_connector_handshake_metadata()
+            )
+
+            if xfer_handshake_metadata:
+                # xfer_handshake_metadata is list of dicts from workers
+                # Each dict already has structure {(pp_rank, tp_rank): metadata}
+                # Merge all worker dicts into a single dict
+                content: dict[tuple[int, int], Any] = {}
+                for worker_dict in xfer_handshake_metadata:
+                    if worker_dict is not None:
+                        content.update(worker_dict)
+                kv_connector.set_xfer_handshake_metadata_pp_aware(content)
+
     def _reset_caches(
         self,
         reset_running_requests: bool = True,
@@ -1011,6 +1016,9 @@ class EngineCore:
 
         if tags is None or tags:
             self.model_executor.wake_up(tags)
+            if tags is None or "kv_cache" in tags:
+                # Peers must load the re-registered KV cache.
+                self._set_kv_connector_handshake_metadata()
 
         # Partial wakes intentionally keep the remaining allocations asleep.
         # Resume scheduling only once all executor memory is resident again.
@@ -1966,6 +1974,13 @@ class EngineCoreProc(EngineCore):
                             # drops the stale entry, client resends with data).
                             self._handle_mm_cache_miss(req, e)
                             continue
+                        except VLLMValidationError as e:
+                            # Note(arpera):
+                            # Currently we validate in engine core
+                            # only if request uses the same structured output backend
+                            # as engine core latched
+                            self._handle_request_validation_error(req, e)
+                            continue
                         except Exception:
                             self._handle_request_preproc_error(req)
                             continue
@@ -2117,6 +2132,17 @@ class EngineCoreProc(EngineCore):
             "Unexpected error pre-processing request %s", request.request_id
         )
         self._send_error_outputs_to_client([request.request_id], request.client_index)
+
+    def _handle_request_validation_error(
+        self, request: EngineCoreRequest, error: VLLMValidationError
+    ) -> None:
+        logger.info("Request %s failed validation: %s", request.request_id, error)
+        self._send_finish_outputs_to_client(
+            [request.request_id],
+            request.client_index,
+            FinishReason.ERROR,
+            RequestError(code="validation_error", message=str(error)),
+        )
 
     def pause_scheduler(
         self, mode: PauseMode = "abort", clear_cache: bool = True

@@ -94,6 +94,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
             renderer: config.renderer,
             language_model_only: config.language_model_only,
             chat_template: config.chat_template.clone(),
+            trust_request_chat_template: config.trust_request_chat_template,
             chat_template_content_format: config.chat_template_content_format,
             default_chat_template_kwargs: config
                 .default_chat_template_kwargs
@@ -133,7 +134,8 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     let chat = ChatLlm::new(text, chat_backend)
         .with_tool_call_parser(config.tool_call_parser.clone())
         .with_reasoning_parser(config.reasoning_parser.clone())
-        .with_tool_strict_level(config.tool_strict_level);
+        .with_tool_strict_level(config.tool_strict_level)
+        .with_exclude_tools_when_tool_choice_none(config.exclude_tools_when_tool_choice_none);
 
     let state = Arc::new(
         AppState::new(served_model_names, chat)
