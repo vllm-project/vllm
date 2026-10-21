@@ -2,3 +2,6 @@
 attention_paged_attn_*.cu
 attention_paged_attn_entries.inc
 attention_paged_attn_dispatch.inc
+# Record of what is on disk (script hash + arch list), so a second build directory
+# with a different arch list regenerates instead of silently reusing the units.
+.paged_attn_generated
