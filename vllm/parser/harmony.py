@@ -559,7 +559,7 @@ class HarmonyParser(DelegatingParser):
             payload = tokens[channel_index + 1 : -1]
             if constrain_token in payload:
                 index = payload.index(constrain_token)
-                header = encoding.decode_utf8(payload[:index])
+                header = encoding.decode_utf8(payload[:index]).rstrip(" \t")
                 if (
                     re.fullmatch(
                         r"(?:analysis|commentary) to=functions\.[A-Za-z0-9_-]+", header
@@ -567,7 +567,10 @@ class HarmonyParser(DelegatingParser):
                     is None
                 ):
                     return False
-                payload = payload[:index] + payload[index + 1 :]
+                payload = (
+                    encoding.encode(header, disallowed_special=())
+                    + payload[index + 1 :]
+                )
             if any(encoding.is_special_token(token) for token in payload):
                 return False
             text = encoding.decode_utf8(payload)

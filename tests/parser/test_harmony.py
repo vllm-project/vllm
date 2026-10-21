@@ -1430,6 +1430,7 @@ class TestUnterminatedToolHeader:
             ("commentary", ""),
             ("commentary", " "),
             ("commentary", "<|constrain|>"),
+            ("commentary", " <|constrain|>"),
         ],
     )
     @pytest.mark.parametrize("chunk_size", [None, 1, 4, 11])
