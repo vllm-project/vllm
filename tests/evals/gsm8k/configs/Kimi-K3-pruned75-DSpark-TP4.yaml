@@ -9,7 +9,7 @@ server_args: >-
   --gpu-memory-utilization 0.90
   --tensor-parallel-size 4
   --load-format fastsafetensors
-  --no-enable-flashinfer-autotune
+  --disable-flashinfer-autotune
   --max-model-len 1048576
   --max-num-batched-tokens 16384
   --max-num-seqs 128
