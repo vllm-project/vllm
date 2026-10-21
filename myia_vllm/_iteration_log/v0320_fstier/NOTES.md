@@ -128,3 +128,25 @@ est prouvée de bout en bout sur ce host :
 
 **Teardown** : profil d'éval `down` à 10:26Z, prod `up -d` (profil prod inchangé),
 blocs fs nettoyés (dir conservé). Le profil d'éval reste dans le dépôt pour rejouer.
+
+## Pruneur externe (2026-10-21, PR #137 + #138) — le prérequis d'adoption est écrit
+
+`myia_vllm/scripts/monitoring/fstier_pruner.py` (+ wrapper `fstier_prune.ps1` qui
+l'exécute dans WSL — l'énumération 9p depuis Windows est lente et le mangling de
+chemin Git Bash s'est encore reproduit au premier essai, `MSYS_NO_PATHCONV=1`).
+
+- **Dry-run par défaut**, `--apply` requis pour supprimer ; états écrits
+  atomiquement dans `myia_vllm/logs/fstier_state.json` (gitignored, lisible des
+  deux côtés) ; ne supprime que `<root>/*_r<rang>/<hex>/<bloc>` ; **jamais un bloc
+  de moins de 30 min** (fraîchement écrit = peut être en cours de promotion,
+  `kv_load_failure_policy='fail'`).
+- **Politique de plafond corrigée le 21/10 après mesure de la chaîne physique**
+  (clé registre `Lxss`) : le VHDX Ubuntu qui porte le tier est
+  `C:\Users\MYIA\AppData\Local\wsl\{35b80e90-…}\ext4.vhdx` (850 GB) — **sur C:**,
+  pas sur D: (le plancher « 12 % de D: » du 20/10 visait le mauvais volume et
+  donnait un plafond de 0). Deux leviers explicites : **plancher absolu de 40 GiB
+  sur le système invité** (il héberge le cache HF) + **réserve de 12 % sur les
+  volumes hôtes gardés** (`/mnt/c`). Mesure du jour : invité 140,6 GiB libres,
+  C: 826 GiB libres ⇒ **plafond 48 GiB**, la cible nominale.
+- Reste à valider en fenêtre réelle : **la sémantique d'une suppression sous
+  moteur vivant** (miss propre vs ENOENT sur le chemin lookup→load).
