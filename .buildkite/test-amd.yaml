@@ -3078,6 +3078,22 @@ steps:
   - pytest -v -s v1/e2e/general/test_sharded_sampling.py
   - pytest -v -s v1/e2e/spec_decode/test_sharded_sampling.py
 
+- label: ":amd: (MI355) Distributed Preload" # TBD
+  timeout_in_minutes: 30
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_2
+  optional: true
+  num_gpus: 2
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/model_executor/model_loader/weight_cache/
+  - vllm/model_executor/layers/fused_moe/expert_map_manager.py
+  - tests/model_executor/model_loader/test_weight_cache.py
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -v -s model_executor/model_loader/test_weight_cache.py -m 'distributed(num_gpus=2)'
+
 - label: ":amd: (MI355) MoRI EP Healthy Baseline"
   timeout_in_minutes: 10
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
