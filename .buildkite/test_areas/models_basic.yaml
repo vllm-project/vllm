@@ -153,6 +153,16 @@ steps:
       commands:
       - pytest -v -s models/inkling/rocm
 
+- label: ":nvidia: (B200) Flint"
+  key: flint-unit-tests-b200
+  timeout_in_minutes: 30
+  device: b200-k8s
+  source_file_dependencies:
+  - vllm/models/flint/
+  - tests/models/flint/
+  commands:
+    - pytest -v -s models/flint/test_qk_norm_rope.py models/flint/test_flint_moe.py models/flint/test_flint_ops.py models/flint/test_decode_attention.py models/flint/test_qkv_fused.py
+
 - label: ":nvidia: (B200) Kimi K3"
   key: kimi-k3-unit-tests-b200
   timeout_in_minutes: 40
@@ -277,6 +287,19 @@ steps:
   - tests/models/qwen4_exp/
   commands:
     - pytest -v -s models/qwen4_exp/test_config.py models/qwen4_exp/test_ple.py
+
+- label: ":computer: (CPU) Flint"
+  key: flint-unit-tests-cpu
+  depends_on:
+  - image-build-cpu
+  timeout_in_minutes: 20
+  device: cpu-small
+  source_file_dependencies:
+  - vllm/models/flint/
+  - tests/models/flint/
+  commands:
+    - uv pip install --system 'gguf>=0.19.0'
+    - pytest -v -s models/flint/test_gguf_nvfp4.py
 
 - label: ":computer: (CPU) Basic Models Other"
   key: basic-models-test-other-cpu

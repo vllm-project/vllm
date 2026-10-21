@@ -296,6 +296,31 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         mixed_batch_attention_warmup(worker)
 
 
+def _warmup_cute_dsl_w4a16_tactics(runner: "GPUModelRunner") -> None:
+    """Compile the tuned CuTe-DSL W4A16 GEMM tactic of every token bucket.
+
+    Tactics JIT-compile on first use, and on an autotune cache hit no bucket
+    is profiled, so each would otherwise compile while serving (~1 s each).
+    """
+    from vllm.model_executor.kernels.linear import (
+        FlashInferCuteDslNvFp4W4A16LinearKernel,
+    )
+    from vllm.utils.flashinfer import flashinfer_get_hybrid_num_tokens_buckets
+
+    if not any(
+        isinstance(
+            getattr(getattr(module, "quant_method", None), "kernel", None),
+            FlashInferCuteDslNvFp4W4A16LinearKernel,
+        )
+        for module in runner.get_model().modules()
+    ):
+        return
+    max_tokens = runner.scheduler_config.max_num_batched_tokens
+    with torch.inference_mode():
+        for num_tokens in flashinfer_get_hybrid_num_tokens_buckets(max_tokens):
+            runner._dummy_run(num_tokens=num_tokens, skip_eplb=True, is_profile=True)
+
+
 def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:
     if envs.VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS is not None:
         return set(envs.VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS) or None
@@ -521,3 +546,4 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
             world.barrier()
     elif tuner._dirty:
         tuner.save_configs(str(cache_path))
+    _warmup_cute_dsl_w4a16_tactics(runner)
