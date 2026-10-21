@@ -386,6 +386,11 @@ _DRAFT_VLLM_CONFIG_OVERRIDES = (
 class SpeculativeConfig:
     """Configuration for speculative decoding."""
 
+    prefill_context_kv_only: bool = False
+    """Load only DSpark context-KV weights on a dedicated KV producer.
+    Requires draft TP1; the KV consumer must retain the complete draft model.
+    """
+
     enforce_eager: bool | None = None
     """Override the default enforce_eager from model_config"""
     # General speculative decoding control
@@ -647,6 +652,8 @@ class SpeculativeConfig:
             "dspark",
         )
         factors.append(uses_aux_hidden_states)
+        if self.prefill_context_kv_only:
+            factors.append("prefill_context_kv_only")
         if self.method == "dspark":
             factors.append(self.enable_adaptive_verification)
 
@@ -1829,6 +1836,8 @@ class SpeculativeConfig:
 
     @model_validator(mode="after")
     def _verify_args(self) -> Self:
+        if self.prefill_context_kv_only and self.method != "dspark":
+            raise ValueError("prefill_context_kv_only requires method='dspark'")
         if self.tensor_parallel_size is not None:
             raise ValueError(
                 "'tensor_parallel_size' is not a valid argument in the "
