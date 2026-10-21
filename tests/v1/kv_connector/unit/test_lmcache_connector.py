@@ -1,17 +1,75 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterator
+from threading import Event, Thread
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
 from vllm.distributed.kv_events import BlockStored
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorMetadata,
+    KVConnectorRole,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector import (
     LMCacheConnectorV1,
     LMCacheKVEvents,
 )
 from vllm.v1.outputs import KVConnectorOutput
+
+
+class TestShutdown:
+    @pytest.mark.parametrize("role", list(KVConnectorRole))
+    def test_stops_adapter_thread_once(self, role):
+        """Both connector roles must release adapter resources before exit."""
+        stop = Event()
+        thread = Thread(target=stop.wait)
+
+        class Adapter:
+            def shutdown(self):
+                assert not stop.is_set(), "Adapter was shut down twice"
+                stop.set()
+                thread.join(timeout=5)
+
+        connector = object.__new__(LMCacheConnectorV1)
+        connector._role = role
+        connector._shutdown = False
+        connector._lmcache_engine = Adapter()
+        thread.start()
+        try:
+            connector.shutdown()
+            assert not thread.is_alive()
+            connector.shutdown()
+        finally:
+            stop.set()
+            thread.join(timeout=5)
+
+    @pytest.mark.parametrize("adapter", [object(), SimpleNamespace(shutdown=None)])
+    def test_adapter_without_shutdown(self, adapter):
+        """Retain the no-op for native and older adapters without the hook."""
+        connector = object.__new__(LMCacheConnectorV1)
+        connector._shutdown = False
+        connector._lmcache_engine = adapter
+        connector.shutdown()
+        connector.shutdown()
+
+    def test_cleanup_error_propagates_and_allows_retry(self):
+        class Adapter:
+            attempts = 0
+
+            def shutdown(self):
+                self.attempts += 1
+                if self.attempts == 1:
+                    raise RuntimeError("cleanup failed")
+
+        connector = object.__new__(LMCacheConnectorV1)
+        connector._shutdown = False
+        connector._lmcache_engine = Adapter()
+        with pytest.raises(RuntimeError, match="cleanup failed"):
+            connector.shutdown()
+        connector.shutdown()
+        assert connector._lmcache_engine.attempts == 2
 
 
 @pytest.fixture
