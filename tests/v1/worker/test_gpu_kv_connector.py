@@ -82,7 +82,9 @@ def test_load_start_phase(
     connector.post_forward(set())
     assert events == ["handle", "bind", "start", "wait", "results", "clear"]
 
-    kwargs = connector.kv_connector.start_load_kv.call_args.kwargs
+    start_load_kv = connector.kv_connector.start_load_kv
+    assert isinstance(start_load_kv, Mock)
+    kwargs = start_load_kv.call_args.kwargs
     assert kwargs["request_state_indices"] is request_indices
     assert kwargs["request_ids"] is request_ids
     assert kwargs["num_tokens"] == 5
@@ -91,8 +93,8 @@ def test_load_start_phase(
 
     # A subsequent step without a forward must not reuse the prior batch.
     connector.no_forward(_scheduler_output(False))
-    assert connector.kv_connector.start_load_kv.call_count == 2
-    assert connector.kv_connector.start_load_kv.call_args.kwargs == {}
+    assert start_load_kv.call_count == 2
+    assert start_load_kv.call_args.kwargs == {}
 
 
 def test_no_forward_starts_deferred_load_once(monkeypatch: pytest.MonkeyPatch):

@@ -1418,7 +1418,10 @@ class BailingMoeV3Model(nn.Module):
 
 
 class BailingMoeV3ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
-    hf_to_vllm_mapper = WeightsMapper(orig_to_new_substr={".attention.": ".self_attn."})
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={".attention.": ".self_attn."},
+        orig_to_new_prefix={"attention.": "self_attn."},
+    )
 
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],

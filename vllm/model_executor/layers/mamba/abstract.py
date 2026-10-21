@@ -116,3 +116,19 @@ def get_mamba_prefill_checkpoint_alignment(vllm_config: VllmConfig) -> int | Non
             return None
         alignment = lcm(alignment, layer_alignment)
     return alignment
+
+
+def get_mamba_prefill_checkpoint_grid(vllm_config: VllmConfig) -> int:
+    """Token grid every Mamba layer keeps its prefill checkpoint offsets on.
+
+    Prefix-cache boundaries, made multiples of the layers' checkpoint alignment
+    (the platform already keeps blocks on it). The scheduler checks offsets
+    against one alignment, so every Mamba spec must use this one.
+    """
+    alignment = get_mamba_prefill_checkpoint_alignment(vllm_config)
+    assert alignment is not None
+    cache_config = vllm_config.cache_config
+    if cache_config.prefix_match_unit is not None:
+        return lcm(cache_config.prefix_match_unit, alignment)
+    assert cache_config.mamba_block_size is not None
+    return cache_config.mamba_block_size

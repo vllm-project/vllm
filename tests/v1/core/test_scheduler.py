@@ -153,7 +153,9 @@ def test_routed_experts_prompt_start_at_prompt_end(max_tokens):
     scheduler = create_scheduler()
     (request,) = create_requests(num_requests=1, max_tokens=max_tokens)
     request.sampling_params.routed_experts_prompt_start = request.num_prompt_tokens
-    scheduler.aux_output_connector = AuxOutputSchedulerConnector()
+    scheduler.aux_output_connector = AuxOutputSchedulerConnector(
+        scheduler.hash_block_size
+    )
     scheduler.add_request(request)
     scheduler_output = scheduler.schedule()
     assert scheduler_output.aux_output_connector_metadata.requests == {
@@ -181,6 +183,49 @@ def test_routed_experts_prompt_start_at_prompt_end(max_tokens):
     output = outputs[request.client_index].outputs[0]
     assert output.new_token_ids == [0]
     assert output.routed_experts.shape == (0, 1, 1)
+
+
+def test_routed_experts_hashes_follow_scheduled_tokens():
+    scheduler = create_scheduler(enable_prefix_caching=True, max_num_batched_tokens=64)
+    scheduler.aux_output_connector = AuxOutputSchedulerConnector(
+        scheduler.hash_block_size
+    )
+    (request,) = create_requests(
+        num_requests=1, num_tokens=160, max_tokens=20, ignore_eos=True
+    )
+    scheduler.add_request(request)
+
+    sent: list[bytes] = []
+    num_sent_per_step = []
+    while not request.is_finished():
+        num_computed = request.num_computed_tokens
+        scheduler_output = scheduler.schedule()
+        num_scheduled = scheduler_output.num_scheduled_tokens[request.request_id]
+        metadata = scheduler_output.aux_output_connector_metadata
+        sent.extend(metadata.block_hashes.get(request.request_id, ()))
+        num_sent_per_step.append(len(sent))
+
+        sampled = num_computed + num_scheduled >= request.num_tokens
+        scheduler.update_from_output(
+            scheduler_output,
+            ModelRunnerOutput(
+                req_ids=[request.request_id],
+                req_id_to_index={request.request_id: 0},
+                sampled_token_ids=[[0]] if sampled else [[]],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+                aux_output_connector_output={
+                    request.request_id: AuxRequestOutput(
+                        0,
+                        np.zeros((num_computed + num_scheduled, 1, 1), np.uint8),
+                    )
+                },
+            ),
+        )
+
+    assert num_sent_per_step == [4, 8, 10] + [10] * 15 + [11] * 4
+    assert sent == request.block_hashes[:11]
 
 
 def test_finish_request():
@@ -4454,14 +4499,16 @@ def test_grammar_compile_error_finishes_only_request(async_grammar: bool):
     scheduler = create_scheduler()
     manager = scheduler.structured_output_manager
     manager.backend = Mock()
+    manager.backend_name = "xgrammar"
     manager.backend.compile_grammar.side_effect = RuntimeError(
         "forced FSM compilation error"
     )
     manager._use_async_grammar_compilation = async_grammar
 
+    structured_outputs = StructuredOutputsParams(json='{"type": "object"}')
+    structured_outputs._backend = "xgrammar"
     sampling_params = SamplingParams(
-        max_tokens=16,
-        structured_outputs=StructuredOutputsParams(json='{"type": "object"}'),
+        max_tokens=16, structured_outputs=structured_outputs
     )
     sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
     request = Request(
