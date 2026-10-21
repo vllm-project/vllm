@@ -74,7 +74,7 @@ struct TopkSoftplusSqrtParams {
   int64_t image_sentinel_lo = 0;
   const void* input_ids = nullptr;
   const void* tid2eid = nullptr;
-  bool hash_ind_type_is_int64 = false;
+  bool ids_are_int64 = false;
   cudaStream_t stream = nullptr;
 };
 
@@ -765,24 +765,10 @@ void topkGatingSoftplusSqrtLauncherHelper(
   // only the arm that can actually run is instantiated - compiling both used
   // to double the number of device kernels emitted for this file.
   #if defined(VLLM_TOPK_SOFTPLUS_SQRT_WAVE64_ONLY)
-    // Only the wave64 arm is instantiated, so a device whose wavefront size is
-    // not 64 would run a kernel built for the wrong width: check it here rather
-    // than launching silently (the previous code only had an assert, which
-    // -DNDEBUG compiles out).
-    #define LAUNCH_SOFTPLUS_SQRT(NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES)         \
-      STD_TORCH_CHECK(WARP_SIZE == 64,                                         \
-                      "This build only instantiates wave64 kernels but the "   \
-                      "device reports a wavefront size of ",                   \
-                      WARP_SIZE, "; rebuild with the device's arch in "       \
-                      "PYTORCH_ROCM_ARCH");                                    \
+    #define LAUNCH_SOFTPLUS_SQRT(NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES) \
       LAUNCH_SOFTPLUS_SQRT_WARP(64, NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES)
   #elif defined(VLLM_TOPK_SOFTPLUS_SQRT_WAVE32_ONLY)
-    #define LAUNCH_SOFTPLUS_SQRT(NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES)         \
-      STD_TORCH_CHECK(WARP_SIZE == 32,                                         \
-                      "This build only instantiates wave32 kernels but the "   \
-                      "device reports a wavefront size of ",                   \
-                      WARP_SIZE, "; rebuild with the device's arch in "       \
-                      "PYTORCH_ROCM_ARCH");                                    \
+    #define LAUNCH_SOFTPLUS_SQRT(NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES) \
       LAUNCH_SOFTPLUS_SQRT_WARP(32, NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES)
   #else
     #define LAUNCH_SOFTPLUS_SQRT(NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES)         \
@@ -791,9 +777,10 @@ void topkGatingSoftplusSqrtLauncherHelper(
       } else if (WARP_SIZE == 32) {                                            \
         LAUNCH_SOFTPLUS_SQRT_WARP(32, NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES);   \
       } else {                                                                 \
-        assert(false &&                                                        \
-               "Unsupported warp size. Only 32 and 64 are supported for "      \
-               "ROCm");                                                        \
+        STD_TORCH_CHECK(false,                                                 \
+                        "Unsupported warp size. Only 32 and 64 are "          \
+                        "supported for ROCm, got ",                          \
+                        WARP_SIZE);                                            \
       }
   #endif
 #endif
@@ -818,6 +805,22 @@ void topkGatingSoftplusSqrtKernelLauncher(
       return;
     }
   }
+#endif
+  // When only one wavefront arm is instantiated, a device reporting the other
+  // width would run a kernel built for the wrong wave: fail here rather than
+  // launch it (the assert this replaces was compiled out by -DNDEBUG).
+#if defined(VLLM_TOPK_SOFTPLUS_SQRT_WAVE64_ONLY)
+  STD_TORCH_CHECK(WARP_SIZE == 64,
+                  "This build only instantiates wave64 kernels but the device "
+                  "reports a wavefront size of ",
+                  WARP_SIZE, "; rebuild with the device's arch in "
+                  "PYTORCH_ROCM_ARCH");
+#elif defined(VLLM_TOPK_SOFTPLUS_SQRT_WAVE32_ONLY)
+  STD_TORCH_CHECK(WARP_SIZE == 32,
+                  "This build only instantiates wave32 kernels but the device "
+                  "reports a wavefront size of ",
+                  WARP_SIZE, "; rebuild with the device's arch in "
+                  "PYTORCH_ROCM_ARCH");
 #endif
   static constexpr int WARPS_PER_TB = 4;
   static constexpr int BYTES_PER_LDG_POWER_OF_2 = 16;

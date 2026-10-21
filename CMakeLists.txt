@@ -1293,36 +1293,46 @@ endif()
 #
 # The softplus-sqrt topk kernels are instantiated per (gating dtype,
 # topk_indices dtype) in their own translation unit, generated from the single
-# variant list in generate_topk_softplus_sqrt.py. Instantiating the full cross
-# product in one file serializes ~100 s of device code generation onto a single
-# core, which made it the critical path of a whole-ROCm build.
+# variant list in generate_topk_softplus_sqrt.py.
 #
 set(TOPK_SOFTPLUS_SQRT_GEN_SCRIPT
   ${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/generate_topk_softplus_sqrt.py)
+# Editing the script has to re-run configure, otherwise the units on disk stay
+# stale until something else triggers a reconfigure.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+  ${TOPK_SOFTPLUS_SQRT_GEN_SCRIPT})
 file(MD5 ${TOPK_SOFTPLUS_SQRT_GEN_SCRIPT} TOPK_SOFTPLUS_SQRT_GEN_SCRIPT_HASH)
-# The generated units live in the source tree (hipify produces the compiled
-# copies from there), so the record of what is on disk has to live next to them:
-# a cache entry is per build directory, and two build directories would then
-# overwrite each other's units without noticing.
+# The script records the hash it generated for plus the exact list of files it
+# wrote, in a stamp next to the outputs. That list is what tells a missing unit
+# apart from an up-to-date tree, and the stamp lives in the source tree (not in
+# a per-build-directory cache) because the outputs do.
 set(TOPK_SOFTPLUS_SQRT_GEN_STAMP
   ${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/.topk_softplus_sqrt_generated)
 set(TOPK_SOFTPLUS_SQRT_GENERATED "")
+set(TOPK_SOFTPLUS_SQRT_RECORDED "")
 if (EXISTS ${TOPK_SOFTPLUS_SQRT_GEN_STAMP})
-  file(READ ${TOPK_SOFTPLUS_SQRT_GEN_STAMP} TOPK_SOFTPLUS_SQRT_GENERATED)
+  file(STRINGS ${TOPK_SOFTPLUS_SQRT_GEN_STAMP} _topk_stamp)
+  if (_topk_stamp)
+    list(GET _topk_stamp 0 TOPK_SOFTPLUS_SQRT_GENERATED)
+    list(REMOVE_AT _topk_stamp 0)
+    set(TOPK_SOFTPLUS_SQRT_RECORDED ${_topk_stamp})
+  endif()
 endif()
+set(_topk_missing FALSE)
+foreach (_topk_f ${TOPK_SOFTPLUS_SQRT_RECORDED})
+  if (NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/${_topk_f})
+    set(_topk_missing TRUE)
+  endif()
+endforeach()
 message(STATUS "softplus-sqrt topk generation script hash: ${TOPK_SOFTPLUS_SQRT_GEN_SCRIPT_HASH}")
 
 file(GLOB TOPK_SOFTPLUS_SQRT_GEN_SRC RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
   "csrc/moe/topk_softplus_sqrt_launch_*.cu")
-file(GLOB TOPK_SOFTPLUS_SQRT_GEN_INC RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
-  "csrc/moe/topk_softplus_sqrt_*.inc")
 if (NOT TOPK_SOFTPLUS_SQRT_GEN_SRC
-    OR NOT TOPK_SOFTPLUS_SQRT_GEN_INC
+    OR _topk_missing
     OR NOT TOPK_SOFTPLUS_SQRT_GENERATED STREQUAL ${TOPK_SOFTPLUS_SQRT_GEN_SCRIPT_HASH})
   execute_process(
-    COMMAND ${CMAKE_COMMAND} -E env
-    PYTHONPATH=$ENV{PYTHONPATH}
-      ${Python_EXECUTABLE} ${TOPK_SOFTPLUS_SQRT_GEN_SCRIPT}
+    COMMAND ${Python_EXECUTABLE} ${TOPK_SOFTPLUS_SQRT_GEN_SCRIPT}
     RESULT_VARIABLE topk_softplus_sqrt_generation_result
     OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/topk_softplus_sqrt_generation.log
     ERROR_FILE ${CMAKE_CURRENT_BINARY_DIR}/topk_softplus_sqrt_generation.log
@@ -1334,15 +1344,12 @@ if (NOT TOPK_SOFTPLUS_SQRT_GEN_SRC
                         "\nCheck the log for details: "
                         "${CMAKE_CURRENT_BINARY_DIR}/topk_softplus_sqrt_generation.log")
   else()
-    file(WRITE ${TOPK_SOFTPLUS_SQRT_GEN_STAMP} ${TOPK_SOFTPLUS_SQRT_GEN_SCRIPT_HASH})
     message(STATUS "softplus-sqrt topk generation completed successfully.")
   endif()
   file(GLOB TOPK_SOFTPLUS_SQRT_GEN_SRC RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
     "csrc/moe/topk_softplus_sqrt_launch_*.cu")
-  file(GLOB TOPK_SOFTPLUS_SQRT_GEN_INC RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
-    "csrc/moe/topk_softplus_sqrt_*.inc")
 else()
-  message(STATUS "softplus-sqrt topk generation script has not changed, skipping generation.")
+  message(STATUS "softplus-sqrt topk generation is up to date.")
 endif()
 
 set(VLLM_MOE_EXT_SRC

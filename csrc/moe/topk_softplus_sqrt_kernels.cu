@@ -102,7 +102,7 @@ void topk_softplus_sqrt(
                         hash_scalar_type == torch::headeronly::ScalarType::Int,
                     "Unsupported input_ids/tid2eid data type: ",
                     hash_scalar_type);
-    params.hash_ind_type_is_int64 =
+    params.ids_are_int64 =
         hash_scalar_type == torch::headeronly::ScalarType::Long;
     params.input_ids = input_ids.value().const_data_ptr();
     params.tid2eid = tid2eid.value().const_data_ptr();
@@ -114,7 +114,7 @@ void topk_softplus_sqrt(
     STD_TORCH_CHECK(hash_scalar_type == torch::headeronly::ScalarType::Long ||
                         hash_scalar_type == torch::headeronly::ScalarType::Int,
                     "Unsupported input_ids data type: ", hash_scalar_type);
-    params.hash_ind_type_is_int64 =
+    params.ids_are_int64 =
         hash_scalar_type == torch::headeronly::ScalarType::Long;
     params.input_ids = input_ids.value().const_data_ptr();
   }

@@ -9,7 +9,7 @@ hash index dtype) the launcher emits one kernel per expert count (15), per warp
 size (2), per compile-time `use_hash` value (2), i.e. ~1900 device kernels for
 the full cross product. In a single translation unit they serialize ~100 s of
 AMDGPU code generation onto one core, which makes that file the critical path of
-a whole-ROCm build (measured: 99.7 s out of a 102 s build with MAX_JOBS=64).
+a whole-ROCm build.
 
 This script emits from the single VARIANTS list below:
 
@@ -31,8 +31,15 @@ csrc/quantization/marlin/generate_kernels.py, and are gitignored.
 """
 
 import glob
+import hashlib
 import os
 import sys
+
+# MD5 of this script, recorded in the stamp so CMake can tell whether the files
+# on disk were produced by the current version (same value as `file(MD5 ...)`).
+with open(__file__, "rb") as _self:
+    SCRIPT_HASH = hashlib.md5(_self.read()).hexdigest()
+STAMP_NAME = ".topk_softplus_sqrt_generated"
 
 # One entry per generated translation unit.
 #   name:                 suffix of the generated file / entry point
@@ -137,7 +144,7 @@ void topk_softplus_sqrt_launch_{name}(const {gating_type}* gating_output,
                                       {indices_type}* topk_indices,
                                       const TopkSoftplusSqrtParams& p) {{
   if (p.tid2eid != nullptr) {{
-    if (p.hash_ind_type_is_int64) {{
+    if (p.ids_are_int64) {{
       topkGatingSoftplusSqrtKernelLauncher<{indices_type}, {gating_type},
                                            int64_t>(
           gating_output, p.topk_weights, topk_indices, p.token_expert_indices,
@@ -159,7 +166,7 @@ void topk_softplus_sqrt_launch_{name}(const {gating_type}* gating_output,
     // Non-hash rows with bias_vl: image tokens select experts by score +
     // bias_vl, so input_ids drives the per-row branch and its dtype drives the
     // hash-index instantiation.
-    if (p.hash_ind_type_is_int64) {{
+    if (p.ids_are_int64) {{
       topkGatingSoftplusSqrtKernelLauncher<{indices_type}, {gating_type},
                                            int64_t>(
           gating_output, p.topk_weights, topk_indices, p.token_expert_indices,
@@ -292,12 +299,22 @@ def write(name, content):
 
 def main():
     remove_old_files()
+    outputs = []
     for variant in VARIANTS:
-        write(f"topk_softplus_sqrt_launch_{variant['name']}.cu",
-              generate_tu(variant))
-    write("topk_softplus_sqrt_launch_entries.inc", generate_entries())
-    write("topk_softplus_sqrt_dispatch.inc", generate_dispatch())
-    print(f"Generated {len(VARIANTS)} softplus-sqrt topk translation units.")
+        name = f"topk_softplus_sqrt_launch_{variant['name']}.cu"
+        write(name, generate_tu(variant))
+        outputs.append(name)
+    for name, content in (("topk_softplus_sqrt_launch_entries.inc",
+                           generate_entries()),
+                          ("topk_softplus_sqrt_dispatch.inc",
+                           generate_dispatch())):
+        write(name, content)
+        outputs.append(name)
+    # Record what is on disk next to the outputs: CMake checks this list instead
+    # of trusting a glob, so a deleted unit is noticed, and the stamp lives in the
+    # source tree (not in a per-build-directory cache) because the outputs do.
+    write(STAMP_NAME, SCRIPT_HASH + "\n" + "\n".join(outputs) + "\n")
+    print(f"Generated {len(outputs)} softplus-sqrt topk files.")
 
 
 if __name__ == "__main__":
