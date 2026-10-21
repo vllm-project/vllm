@@ -15,7 +15,7 @@ use vllm_text::backend::hf::{
 use self::format::{
     ChatTemplateContentFormat, ChatTemplateContentFormatOption as ContentFormatOption,
 };
-use self::template::{CompiledChatTemplate, TemplateContext};
+use self::template::{CompiledChatTemplate, TemplateContext, request_template_fuel};
 use super::{ChatRenderer, RenderedPrompt};
 use crate::error::Result;
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest};
@@ -79,6 +79,8 @@ pub struct HfChatRenderer {
     multimodal: Option<MultimodalRenderInfo>,
     /// Whether a request may override the chat template.
     trust_request_chat_template: bool,
+    /// Fuel budget for request-supplied templates; `None` disables it.
+    request_template_fuel: Option<u64>,
 }
 
 impl HfChatRenderer {
@@ -100,6 +102,10 @@ impl HfChatRenderer {
             special_tokens: None,
             multimodal: None,
             trust_request_chat_template: false,
+            request_template_fuel: request_template_fuel(
+                std::env::var_os("VLLM_CHAT_TEMPLATE_FUEL").as_deref(),
+            )
+            .map_err(|error| Error::ChatTemplate(error.to_report_string()))?,
         })
     }
 
@@ -176,7 +182,8 @@ impl HfChatRenderer {
     /// If the request carries a per-request `chat_template` override, a
     /// temporary template is compiled from that string and used instead of
     /// the model's default. Overrides are refused unless request templates
-    /// are trusted.
+    /// are trusted, and render under a fuel budget; the model's default
+    /// template has none, as in the Python frontend.
     fn apply_chat_template(&self, request: &ChatRequest) -> Result<RenderedPrompt> {
         if request.chat_options.chat_template.is_some() && !self.trust_request_chat_template {
             return Err(Error::UntrustedRequestChatTemplate);
@@ -187,6 +194,7 @@ impl HfChatRenderer {
             .as_ref()
             .map(|template| {
                 CompiledChatTemplate::new(template.clone(), self.content_format)
+                    .map(|template| template.with_fuel(self.request_template_fuel))
                     .map_err(|error| Error::ChatTemplate(error.to_report_string()))
             })
             .transpose()?;
@@ -1140,6 +1148,21 @@ mod tests {
             renderer.render(&request).unwrap().prompt.into_text().unwrap(),
             "hello"
         );
+    }
+
+    #[test]
+    fn only_request_templates_have_a_fuel_budget() {
+        // Each message costs a fixed number of instructions, like a chat template's message loop.
+        let template = "{% for m in messages %}{% for _ in range(10) %}{{ m.content }}{% endfor %}{% endfor %}";
+        let mut request =
+            sample_request((0..20_000).map(|_| ChatMessage::text(ChatRole::User, "x")).collect());
+        assert!(render(Some(template), &request).is_ok());
+
+        request.chat_options.chat_template = Some(template.to_string());
+        let Err(Error::ChatTemplate(message)) = render(None, &request) else {
+            panic!("expected the request template to run out of fuel");
+        };
+        expect!["chat template exceeded its fuel budget; adjust VLLM_CHAT_TEMPLATE_FUEL to override: engine ran out of fuel (in chat:1)"].assert_eq(&message);
     }
 
     #[test]
