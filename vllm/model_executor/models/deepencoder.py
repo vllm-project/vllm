@@ -28,6 +28,9 @@ from vllm.triton_utils import LOG2E, tl, triton
 from .clip import CLIPEncoder, CLIPVisionEmbeddings
 from .utils import AutoWeightsLoader
 
+# Triton kernels can only read globals that are constexpr.
+_LOG2E = tl.constexpr(LOG2E)
+
 
 @triton.jit
 def _deepencoder_rel_pos_attention_kernel(
@@ -90,7 +93,7 @@ def _deepencoder_rel_pos_attention_kernel(
     row_max = tl.full([BLOCK_M], -float("inf"), tl.float32)
     row_sum = tl.zeros([BLOCK_M], tl.float32)
     accumulator = tl.zeros([BLOCK_M, BLOCK_D], tl.float32)
-    qk_scale = scale * LOG2E
+    qk_scale = scale * _LOG2E
 
     for start_n in range(0, num_tokens, BLOCK_N):
         key_indices = start_n + offs_n
@@ -121,7 +124,7 @@ def _deepencoder_rel_pos_attention_kernel(
         score_mask = mask_m[:, None] & mask_n[None, :]
         rel_h = tl.load(rel_h_ptr + rel_h_offsets, mask=score_mask, other=0.0)
         rel_w = tl.load(rel_w_ptr + rel_w_offsets, mask=score_mask, other=0.0)
-        scores += (rel_h + rel_w) * LOG2E
+        scores += (rel_h + rel_w) * _LOG2E
         scores = tl.where(score_mask, scores, -float("inf"))
 
         next_max = tl.maximum(row_max, tl.max(scores, axis=1))
