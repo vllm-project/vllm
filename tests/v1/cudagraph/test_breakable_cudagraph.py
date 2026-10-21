@@ -144,6 +144,31 @@ def test_decorator_passthrough_outside_capture():
     assert calls == [3]
 
 
+def test_capturable_call_runs_inline_inside_capture():
+    """Inside a capture, a call that ``capturable`` accepts runs inline (it is
+    captured into the current segment); any other call breaks the graph."""
+    from vllm.compilation.breakable_cudagraph import (
+        BreakableCUDAGraphCapture,
+        eager_break_during_capture,
+    )
+
+    calls = []
+
+    @eager_break_during_capture(capturable=lambda x: x > 0)
+    def f(x):
+        calls.append(x)
+        return x * 2
+
+    capture = MagicMock(_capturing=True)
+    capture.add_eager.side_effect = lambda fn: fn()
+    BreakableCUDAGraphCapture._tls.active = capture
+    assert f(3) == 6
+    capture.add_eager.assert_not_called()
+    assert f(-3) == -6
+    capture.add_eager.assert_called_once()
+    assert calls == [3, -3]
+
+
 # ---------------------------------------------------------------------------
 # BreakableCUDAGraphCapture: thread-local + nested rejection
 # ---------------------------------------------------------------------------
@@ -252,6 +277,27 @@ def test_add_eager_creates_alternating_graph_eager_graph(cuda_capture_stream):
 # ---------------------------------------------------------------------------
 # Capture vs eager numerical equivalence
 # ---------------------------------------------------------------------------
+
+
+def test_run_uncaptured_runs_once_and_is_not_replayed(cuda_capture_stream):
+    from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+
+    x = torch.zeros(4, device=DEVICE_TYPE)
+    cap = BreakableCUDAGraphCapture()
+    with cap:
+        x.add_(1.0)  # recorded
+        cap.run_uncaptured(lambda: x.add_(10.0))  # runs now only
+        x.add_(2.0)  # recorded
+    torch.accelerator.synchronize()
+    assert torch.equal(x, torch.full((4,), 10.0, device=DEVICE_TYPE))
+    assert cap.num_graphs == 2
+    assert cap.num_eager_breaks == 0
+    assert len(cap.segments) == 2
+
+    x.fill_(0.0)
+    cap.replay()
+    torch.accelerator.synchronize()
+    assert torch.equal(x, torch.full((4,), 3.0, device=DEVICE_TYPE))
 
 
 def test_capture_replay_matches_eager_simple(cuda_capture_stream):
