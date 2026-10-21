@@ -117,9 +117,35 @@ def test_segmented_mm_prefix_metadata():
     assert metadata.seq_lens is common.seq_lens
     assert metadata.block_table is common.block_table_tensor
     assert metadata.slot_mapping is common.slot_mapping
+    assert metadata.mm_prefix_max_span == 6
     for empty in (None, {}, {0: [], 1: [(0, 0)]}):
         common.mm_req_doc_ranges = empty
         assert builder.build(0, common).mm_prefix_range_tensor is None
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm backend metadata")
+def test_segmented_mm_metadata_drops_finished_images_without_device_reads():
+    """Decode and text-only prefill resume text tuning; active image chunks stay."""
+    from types import SimpleNamespace
+
+    from vllm.v1.attention.backends.rocm_segmented_attn import _query_mm_prefix_ranges
+
+    common = SimpleNamespace(
+        num_reqs=3,
+        is_prefilling=torch.tensor([True, False, True]),
+        query_start_loc_cpu=torch.tensor([0, 64, 66, 98]),
+        seq_lens_cpu_upper_bound=torch.tensor([192, 8194, 4096]),
+        mm_req_doc_ranges={0: [(0, 31), (128, 255)], 1: [(16, 1104)], 2: [(16, 1104)]},
+    )
+    assert _query_mm_prefix_ranges(common) == {0: [(128, 255)]}
+    # Without exact CPU prefill positions, conservatively keep its islands.
+    common.seq_lens_cpu_upper_bound = None
+    assert _query_mm_prefix_ranges(common) == {
+        0: [(0, 31), (128, 255)],
+        2: [(16, 1104)],
+    }
+    common.is_prefilling = None
+    assert _query_mm_prefix_ranges(common) is common.mm_req_doc_ranges
 
 
 def _query_ranges(mm_ranges, query_lens, seq_lens):

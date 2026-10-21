@@ -31,6 +31,10 @@ from .segmented_attention_config import (
     MAX_SPLITS as MAX_SPLITS,
 )
 from .segmented_attention_config import (
+    MMPrefixMode,
+    segmented_attention_span,
+)
+from .segmented_attention_config import (
     SegmentedAttentionConfig as SegmentedAttentionConfig,
 )
 from .segmented_attention_config import (
@@ -221,6 +225,9 @@ def _segmented_attention_stage(
         # before partitioning; changing just the score mask would miss them.
         first_query = prefix + (mb * BM) // G
         last_query = prefix + (tile_rows - 1) // G
+        if MAX_MM_RANGES > 1:
+            image_first = tl.full((BM,), 2147483647, tl.int32)
+            image_last = tl.full((BM,), -1, tl.int32)
         for ri in range(MAX_MM_RANGES):
             range_start = tl.load(MM_PREFIX + seq * MAX_MM_RANGES * 2 + ri * 2)
             range_stop = tl.load(MM_PREFIX + seq * MAX_MM_RANGES * 2 + ri * 2 + 1)
@@ -229,6 +236,16 @@ def _segmented_attention_stage(
                 & (first_query <= range_stop)
                 & (last_query >= range_start)
             )
+            if MAX_MM_RANGES > 1:
+                in_image = (
+                    (range_start < range_stop)
+                    & (prefix + qpos >= range_start)
+                    & (prefix + qpos <= range_stop)
+                )
+                image_first = tl.minimum(
+                    image_first, tl.where(in_image, range_start, 2147483647)
+                )
+                image_last = tl.maximum(image_last, tl.where(in_image, range_stop, -1))
             range_end = tl.where(
                 intersects,
                 tl.maximum(range_end, tl.minimum(sequence, range_stop + 1)),
@@ -315,7 +332,24 @@ def _segmented_attention_stage(
                 and mb * BM + BM <= nq * G
             ):
                 score_mask = valid[None, :] & (m[:, None] < nq * G)
-                if HAS_MM_PREFIX:
+                if HAS_MM_PREFIX and MAX_MM_RANGES > 1:
+                    # Ranges sharing a query form a connected union. Resolve
+                    # its bounds once per row, outside the KV traversal loop.
+                    base = tl.full((BM, BN), True, tl.int1)
+                    if CAUSAL:
+                        base &= ns[None, :] <= prefix + qpos[:, None]
+                    image = (ns[None, :] >= image_first[:, None]) & (
+                        ns[None, :] <= image_last[:, None]
+                    )
+                    if WINDOW >= 0:
+                        past = ns[None, :] >= prefix + qpos[:, None] - WINDOW
+                        base &= past
+                        if not CAUSAL:
+                            base &= ns[None, :] - prefix - qpos[:, None] <= WINDOW
+                        if MM_PREFIX_CLAMP_SW:
+                            image &= past
+                    score_mask &= base | image
+                elif HAS_MM_PREFIX:
                     score_mask &= compute_kv_seq_mask(
                         (prefix + qpos)[:, None],
                         ns,
@@ -508,6 +542,8 @@ def segmented_attention_workspace_size(
     max_tokens=None,
     fp8=False,
     autotune=False,
+    mm_prefix=False,
+    sliding_window=-1,
 ):
     """Size the largest selected attention workspace before graph capture.
 
@@ -527,10 +563,36 @@ def segmented_attention_workspace_size(
             if max_tokens is not None:
                 batch_limit = min(batch_limit, max_tokens - query_len + 1)
             for batch in range(1, batch_limit + 1):
-                cfg = select_segmented_config(
-                    batch, query_len, max_seq_len, hq, hk, dim, fp8
-                )
-                splits = cfg["splits"]
+                configs: list[SegmentedLaunchConfig] = [
+                    select_segmented_config(
+                        batch, query_len, max_seq_len, hq, hk, dim, fp8
+                    )
+                ]
+                if mm_prefix:
+                    configs.extend(
+                        select_segmented_config(
+                            batch,
+                            query_len,
+                            max_seq_len,
+                            hq,
+                            hk,
+                            dim,
+                            fp8,
+                            sliding_window=sliding_window,
+                            native_fp8=native,
+                            mm_prefix_mode="clamped",
+                            mm_prefix_max_span=max_seq_len,
+                            mm_prefix_max_ranges=1,
+                        )
+                        for native in (False, True)
+                    )
+                    if autotune:
+                        configs.append(
+                            _select_segmented_launch_config(
+                                batch, query_len, max_seq_len, hq, hk, dim, fp8
+                            )
+                        )
+                splits = max(cfg["splits"] for cfg in configs)
                 if dim == 64 and query_len <= 512 and max_seq_len >= 4096 and autotune:
                     split_limit = (
                         512
@@ -640,6 +702,7 @@ def run_segmented_attention(
     sinks=None,
     mm_prefix_range: torch.Tensor | None = None,
     mm_prefix_clamp_sliding_window: bool = False,
+    mm_prefix_max_span: int = 0,
     config: SegmentedLaunchConfig | None = None,
     workspace=None,
 ) -> torch.Tensor:
@@ -651,9 +714,16 @@ def run_segmented_attention(
     qcap = segmented_query_capacity(query_len)
     fp8 = kc.element_size() == 1
     hk = kc.shape[2]
-    attention_span = max_seq_len
-    if sliding_window >= 0 and mm_prefix_range is None:
-        attention_span = min(max_seq_len, sliding_window + max_query_len)
+    mm_mode: MMPrefixMode = (
+        "none"
+        if mm_prefix_range is None
+        else "clamped"
+        if mm_prefix_clamp_sliding_window
+        else "unclamped"
+    )
+    attention_span = segmented_attention_span(
+        max_seq_len, max_query_len, sliding_window, mm_mode, mm_prefix_max_span
+    )
     cfg = config or select_segmented_config(
         batch,
         query_len,
@@ -664,6 +734,11 @@ def run_segmented_attention(
         fp8,
         sliding_window=sliding_window,
         native_fp8=supports_segmented_native_fp8(q.dtype, kc.dtype),
+        mm_prefix_mode=mm_mode,
+        mm_prefix_max_span=mm_prefix_max_span,
+        mm_prefix_max_ranges=(
+            mm_prefix_range.shape[1] if mm_prefix_range is not None else 0
+        ),
     )
     splits = cfg["splits"]
     shapes = segmented_workspace_shapes(batch, qcap, hq, hk, dim, splits)
@@ -797,6 +872,7 @@ def _launch_segmented_attention(
         triton.cdiv(qcap * (hq // hk), cfg["bm"]),
         splits,
     )
+    # Query capacity only indexes split scratch; single-pass kernels share it.
     stage_args = (
         q,
         kc,
@@ -822,7 +898,7 @@ def _launch_segmented_attention(
         hq,
         hk,
         dim,
-        qcap,
+        qcap if splits > 1 else 1,
         MAX_QUERY_LEN,
         scale,
         fp8,
@@ -834,12 +910,16 @@ def _launch_segmented_attention(
         causal,
         mm_prefix_range is not None,
         mm_prefix_range.shape[1] if mm_prefix_range is not None else 0,
-        mm_prefix_clamp_sliding_window,
+        mm_prefix_range is not None and mm_prefix_clamp_sliding_window,
         sinks is not None,
-        cfg.get("prefix_fast", False),
+        cfg.get("prefix_fast", False) and sliding_window < 0,
         cfg.get("pv_split", False),
-        cfg.get("qk_pipeline"),
-        cfg.get("qk_unroll"),
+        None
+        if mm_prefix_range is not None and cfg["bk"] == dim
+        else cfg.get("qk_pipeline"),
+        None
+        if mm_prefix_range is not None and cfg["bk"] == dim
+        else cfg.get("qk_unroll"),
         bool(native_fp8_upcast),
         4 if native_fp8_upcast and mode == "native4" else 1,
     )
@@ -916,6 +996,7 @@ def segmented_attention(
     softcap: float = 0.0,
     mm_prefix_range: torch.Tensor | None = None,
     mm_prefix_clamp_sliding_window: bool = False,
+    mm_prefix_max_span: int = 0,
     workspace=None,
     use_tuned_config: bool = True,
 ) -> None:
@@ -935,6 +1016,13 @@ def segmented_attention(
         mm_prefix_range = (
             mm_prefix_range.contiguous() if mm_prefix_range.shape[1] else None
         )
+    if mm_prefix_clamp_sliding_window and max_query_len == 1:
+        # A single query is the last cached token. Its image has no future
+        # cached keys, and clamping prevents reopening past-window keys.
+        mm_prefix_range = None
+        mm_prefix_max_span = 0
+    if mm_prefix_range is None:
+        mm_prefix_max_span = 0
     if kv_cache_dtype in ("fp8", "fp8_e4m3"):
         fp8_dtype = current_platform.fp8_dtype()
         if key_cache.dtype == torch.uint8:
@@ -977,12 +1065,18 @@ def segmented_attention(
             )
         )
     ):
-        attention_span = max_seq_len
-        if sliding_window >= 0 and mm_prefix_range is None:
-            attention_span = min(max_seq_len, sliding_window + max_query_len)
+        mm_mode: MMPrefixMode = (
+            "none"
+            if mm_prefix_range is None
+            else "clamped"
+            if mm_prefix_clamp_sliding_window
+            else "unclamped"
+        )
+        attention_span = segmented_attention_span(
+            max_seq_len, max_query_len, sliding_window, mm_mode, mm_prefix_max_span
+        )
         config = None
-        # Existing profiles measure causal text traversal, not image ranges.
-        if use_tuned_config and mm_prefix_range is None:
+        if use_tuned_config:
             config = get_segmented_config(
                 query.device,
                 query.dtype,
@@ -998,6 +1092,12 @@ def segmented_attention(
                 sliding_window,
                 causal,
                 has_sinks=sinks is not None,
+                num_query_tokens=query.shape[0],
+                mm_prefix_mode=mm_mode,
+                mm_prefix_max_span=mm_prefix_max_span,
+                mm_prefix_max_ranges=(
+                    mm_prefix_range.shape[1] if mm_prefix_range is not None else 0
+                ),
             )
         if config is None:
             config = select_segmented_config(
@@ -1010,6 +1110,11 @@ def segmented_attention(
                 key_cache.element_size() == 1,
                 sliding_window=sliding_window,
                 native_fp8=supports_segmented_native_fp8(query.dtype, key_cache.dtype),
+                mm_prefix_mode=mm_mode,
+                mm_prefix_max_span=mm_prefix_max_span,
+                mm_prefix_max_ranges=(
+                    mm_prefix_range.shape[1] if mm_prefix_range is not None else 0
+                ),
             )
         run_segmented_attention(
             query,
@@ -1029,6 +1134,7 @@ def segmented_attention(
             sinks=sinks,
             mm_prefix_range=mm_prefix_range,
             mm_prefix_clamp_sliding_window=mm_prefix_clamp_sliding_window,
+            mm_prefix_max_span=mm_prefix_max_span,
             config=config,
             workspace=workspace,
         )

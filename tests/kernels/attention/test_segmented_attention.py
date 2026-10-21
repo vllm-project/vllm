@@ -1177,196 +1177,6 @@ def test_rocm_segmented_attn_cache_only_reader(
     torch.testing.assert_close(cache, original_cache, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("fp8", [False, True])
-@pytest.mark.parametrize("head_size", [64, 128, 256, 512])
-@pytest.mark.parametrize("gqa", [2, 8])
-@pytest.mark.parametrize("window,clamp", [(0, False), (8, False), (8, True)])
-@pytest.mark.parametrize("splits", [1, 4])
-@pytest.mark.parametrize("causal", [True, False])
-@torch.inference_mode()
-def test_rocm_segmented_mm_prefix(
-    monkeypatch, fp8, head_size, gqa, window, clamp, splits, causal
-):
-    """Image islands cross query tiles/pages; padding and cache readers stay safe."""
-    if fp8 and not on_gfx12x():
-        pytest.skip("FP8 segmented attention requires gfx12")
-    from types import SimpleNamespace
-
-    from vllm.v1.attention.backends.rocm_segmented_attn import (
-        RocmSegmentedAttentionImpl,
-    )
-    from vllm.v1.attention.backends.utils import compute_mm_prefix_range_tensor
-    from vllm.v1.attention.ops import segmented_attention as dispatcher
-
-    ranges = {0: [(0, 70), (72, 76)], 1: [], 2: [(1000, 2000)], 3: [(123, 137)]}
-    case_args = dict(
-        num_heads=8,
-        num_kv_heads=8 // gqa,
-        head_size=head_size,
-        block_size=16,
-        fp8=fp8,
-        causal=causal,
-        sliding_window=window,
-        mm_prefix_clamp_sliding_window=clamp,
-    )
-    case = _make_paged_attention_case(
-        [16, 3, 0, 5], [61, 37, 29, 124], mm_ranges=ranges, **case_args
-    )
-    impl = RocmSegmentedAttentionImpl(
-        8,
-        head_size,
-        head_size**-0.5,
-        8 // gqa,
-        None,
-        window or None,
-        "fp8" if fp8 else "auto",
-    )
-    monkeypatch.setattr(impl, "_get_workspace", lambda device: None)
-    monkeypatch.setattr(impl, "_autotune_enabled", lambda: True)
-    selector = dispatcher.select_segmented_config
-
-    def select(*args, **kwargs):
-        return dict(
-            selector(*args, **kwargs),
-            bm=16,
-            bn=32,
-            bk=64,
-            splits=splits,
-            prefix_fast=True,
-        )
-
-    def forbidden(*args, **kwargs):
-        pytest.fail("MM attention used text tuning profiles or the fallback")
-
-    monkeypatch.setattr(dispatcher, "select_segmented_config", select)
-    monkeypatch.setattr(dispatcher, "get_segmented_config", forbidden)
-    monkeypatch.setattr(dispatcher, "unified_attention", forbidden)
-    k_cache, v_cache = case["key_cache"], case["value_cache"]
-    if fp8:
-        k_cache, v_cache = k_cache.view(torch.uint8), v_cache.view(torch.uint8)
-    cache = torch.stack((k_cache.flatten(2), v_cache.flatten(2)), dim=1)
-    original_cache = cache.clone()
-    mm_tensor = compute_mm_prefix_range_tensor(ranges, 4, case["query"].device)
-    assert mm_tensor is not None
-    # The public dispatcher also accepts non-contiguous range views.
-    mm_storage = torch.zeros(
-        (*mm_tensor.shape, 2), device=mm_tensor.device, dtype=mm_tensor.dtype
-    )
-    mm_storage[..., 0].copy_(mm_tensor)
-    metadata = SimpleNamespace(
-        num_actual_tokens=case["query"].shape[0],
-        block_table=case["block_table"],
-        query_start_loc=case["starts"],
-        seq_lens=case["seq_lens"],
-        max_seq_len=case["max_seq_len"],
-        max_query_len=16,
-        causal=causal,
-        mm_prefix_range_tensor=mm_storage[..., 0],
-    )
-    layer = SimpleNamespace(
-        _k_scale=case["k_scale"],
-        _v_scale=case["v_scale"],
-        _q_scale_float=1.0,
-        mm_prefix_clamp_sliding_window=clamp,
-    )
-    output = torch.empty_like(case["query"])
-
-    def run():
-        impl.forward(layer, case["query"], None, None, cache, metadata, output)
-
-    def check(reference):
-        relative = (output.float() - reference).norm(dim=-1) / reference.norm(
-            dim=-1
-        ).clamp_min(1e-6)
-        assert torch.isfinite(output).all() and relative.max().item() < 0.01
-
-    run()
-    check(case["reference"])
-    if head_size == 512 and gqa == 8 and fp8:
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            run()
-        # Ranges change on replay, including future traversal limits.
-        changed = {0: [(0, 65), (69, 74)], 3: [(125, 128)]}
-        metadata.mm_prefix_range_tensor.copy_(
-            compute_mm_prefix_range_tensor(changed, 4, case["query"].device)
-        )
-        output.zero_()
-        graph.replay()
-        torch.accelerator.synchronize()
-        reference = _make_paged_attention_case(
-            [16, 3, 0, 5], [61, 37, 29, 124], mm_ranges=changed, **case_args
-        )["reference"]
-        check(reference)
-    torch.testing.assert_close(cache, original_cache, rtol=0, atol=0)
-
-
-@pytest.mark.parametrize("fp8", [False, True])
-@pytest.mark.parametrize("window,clamp", [(0, False), (8, False), (8, True)])
-@pytest.mark.parametrize("causal", [True, False])
-@torch.inference_mode()
-def test_segmented_mm_prefix_fallback(monkeypatch, fp8, window, clamp, causal):
-    """Features handled by unified attention retain identical MM masking."""
-    if fp8 and not on_gfx12x():
-        pytest.skip("FP8 segmented attention requires gfx12")
-    from vllm.v1.attention.backends.utils import compute_mm_prefix_range_tensor
-    from vllm.v1.attention.ops import segmented_attention as dispatcher
-
-    ranges = {0: [(0, 70), (72, 76)], 1: []}
-    case = _make_paged_attention_case(
-        [16, 3],
-        [61, 37],
-        num_heads=8,
-        num_kv_heads=1,
-        head_size=512,
-        block_size=16,
-        fp8=fp8,
-        causal=causal,
-        sliding_window=window,
-        softcap=1.0,
-        mm_ranges=ranges,
-        mm_prefix_clamp_sliding_window=clamp,
-    )
-    unified = dispatcher.unified_attention
-    calls = []
-
-    def fallback(**kwargs):
-        calls.append(kwargs)
-        unified(**kwargs)
-
-    monkeypatch.setattr(dispatcher, "unified_attention", fallback)
-    output = torch.empty_like(case["query"])
-    mm_tensor = compute_mm_prefix_range_tensor(ranges, 2, output.device)
-    dispatcher.segmented_attention(
-        query=case["query"],
-        key=None,
-        value=None,
-        output=output,
-        kv_cache_dtype="fp8" if fp8 else "auto",
-        key_cache=case["key_cache"],
-        value_cache=case["value_cache"],
-        block_table=case["block_table"],
-        query_start_loc=case["starts"],
-        seq_lens=case["seq_lens"],
-        max_seq_len=case["max_seq_len"],
-        max_query_len=16,
-        k_scale=case["k_scale"],
-        v_scale=case["v_scale"],
-        sm_scale=512**-0.5,
-        softcap=1.0,
-        sliding_window=window - 1,
-        causal=causal,
-        mm_prefix_range=mm_tensor,
-        mm_prefix_clamp_sliding_window=clamp,
-    )
-    assert len(calls) == 1 and calls[0]["mm_prefix_range"] is mm_tensor
-    assert calls[0]["mm_prefix_clamp_sliding_window"] is clamp
-    relative = (output.float() - case["reference"]).norm(dim=-1) / case[
-        "reference"
-    ].norm(dim=-1).clamp_min(1e-6)
-    assert torch.isfinite(output).all() and relative.max().item() < 0.01
-
-
 @torch.inference_mode()
 def test_segmented_mixed_causality_matches_dense_reference():
     from vllm.platforms.rocm import on_rdna
@@ -1805,3 +1615,320 @@ def test_segmented_scratch_is_stable_and_isolated_across_runtime_lanes(monkeypat
                 not in pointers
             )
     assert len(pointers) == 8
+
+
+@pytest.mark.parametrize("fp8", [False, True])
+@pytest.mark.parametrize("head_size", [64, 128, 256, 512])
+@pytest.mark.parametrize("gqa", [2, 3, 8])
+@pytest.mark.parametrize("window,clamp", [(0, False), (8, False), (8, True)])
+@pytest.mark.parametrize("splits", [1, 4])
+@pytest.mark.parametrize("causal", [True, False])
+@torch.inference_mode()
+def test_rocm_segmented_mm_prefix(
+    monkeypatch, fp8, head_size, gqa, window, clamp, splits, causal
+):
+    """Image islands cross query tiles/pages; padding and cache readers stay safe."""
+    if fp8 and not on_gfx12x():
+        pytest.skip("FP8 segmented attention requires gfx12")
+    from types import SimpleNamespace
+
+    from vllm.v1.attention.backends.rocm_segmented_attn import (
+        RocmSegmentedAttentionImpl,
+    )
+    from vllm.v1.attention.backends.utils import compute_mm_prefix_range_tensor
+    from vllm.v1.attention.ops import segmented_attention as dispatcher
+
+    ranges = {0: [(0, 70), (72, 76)], 1: [], 2: [(1000, 2000)], 3: [(123, 137)]}
+    case_args = dict(
+        num_heads=8,
+        num_kv_heads=8 // gqa,
+        head_size=head_size,
+        block_size=16,
+        fp8=fp8,
+        causal=causal,
+        sliding_window=window,
+        mm_prefix_clamp_sliding_window=clamp,
+    )
+    case = _make_paged_attention_case(
+        [16, 3, 0, 5], [61, 37, 29, 124], mm_ranges=ranges, **case_args
+    )
+    impl = RocmSegmentedAttentionImpl(
+        8,
+        head_size,
+        head_size**-0.5,
+        8 // gqa,
+        None,
+        window or None,
+        "fp8" if fp8 else "auto",
+    )
+    monkeypatch.setattr(impl, "_get_workspace", lambda device: None)
+    monkeypatch.setattr(impl, "_autotune_enabled", lambda: True)
+    selector = dispatcher.select_segmented_config
+
+    def select(*args, **kwargs):
+        return dict(
+            selector(*args, **kwargs),
+            bm=16,
+            bn=32,
+            bk=64,
+            splits=splits,
+            prefix_fast=True,
+        )
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("MM attention used text tuning profiles or the fallback")
+
+    def mm_lookup(*args, **kwargs):
+        assert kwargs["mm_prefix_mode"] == ("clamped" if clamp else "unclamped")
+        assert kwargs["mm_prefix_max_ranges"] == 2
+        return None
+
+    monkeypatch.setattr(dispatcher, "select_segmented_config", select)
+    monkeypatch.setattr(dispatcher, "get_segmented_config", mm_lookup)
+    monkeypatch.setattr(dispatcher, "unified_attention", forbidden)
+    k_cache, v_cache = case["key_cache"], case["value_cache"]
+    if fp8:
+        k_cache, v_cache = k_cache.view(torch.uint8), v_cache.view(torch.uint8)
+    cache = torch.stack((k_cache.flatten(2), v_cache.flatten(2)), dim=1)
+    original_cache = cache.clone()
+    mm_tensor = compute_mm_prefix_range_tensor(ranges, 4, case["query"].device)
+    assert mm_tensor is not None
+    # The public dispatcher also accepts non-contiguous range views.
+    mm_storage = torch.zeros(
+        (*mm_tensor.shape, 2), device=mm_tensor.device, dtype=mm_tensor.dtype
+    )
+    mm_storage[..., 0].copy_(mm_tensor)
+    metadata = SimpleNamespace(
+        num_actual_tokens=case["query"].shape[0],
+        block_table=case["block_table"],
+        query_start_loc=case["starts"],
+        seq_lens=case["seq_lens"],
+        max_seq_len=case["max_seq_len"],
+        max_query_len=16,
+        causal=causal,
+        mm_prefix_range_tensor=mm_storage[..., 0],
+    )
+    layer = SimpleNamespace(
+        _k_scale=case["k_scale"],
+        _v_scale=case["v_scale"],
+        _q_scale_float=1.0,
+        mm_prefix_clamp_sliding_window=clamp,
+    )
+    output = torch.empty_like(case["query"])
+
+    def run():
+        impl.forward(layer, case["query"], None, None, cache, metadata, output)
+
+    def check(reference):
+        relative = (output.float() - reference).norm(dim=-1) / reference.norm(
+            dim=-1
+        ).clamp_min(1e-6)
+        assert torch.isfinite(output).all() and relative.max().item() < 0.01
+
+    run()
+    check(case["reference"])
+    if head_size == 512 and gqa == 8 and fp8:
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            run()
+        # Ranges change on replay, including future traversal limits.
+        changed = {0: [(0, 65), (69, 74)], 3: [(125, 128)]}
+        metadata.mm_prefix_range_tensor.copy_(
+            compute_mm_prefix_range_tensor(changed, 4, case["query"].device)
+        )
+        output.zero_()
+        graph.replay()
+        torch.accelerator.synchronize()
+        reference = _make_paged_attention_case(
+            [16, 3, 0, 5], [61, 37, 29, 124], mm_ranges=changed, **case_args
+        )["reference"]
+        check(reference)
+    torch.testing.assert_close(cache, original_cache, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("fp8", [False, True])
+@pytest.mark.parametrize("clamp", [False, True])
+@pytest.mark.parametrize("causal", [False, True])
+@torch.inference_mode()
+def test_single_query_mm_clamping_reuses_text_dispatch(monkeypatch, fp8, clamp, causal):
+    """Clamped Q1 cannot open extra keys; unclamped Q1 can reopen old image keys."""
+    if fp8 and not on_gfx12x():
+        pytest.skip("FP8 segmented attention requires gfx12")
+    from vllm.v1.attention.backends.utils import compute_mm_prefix_range_tensor
+    from vllm.v1.attention.ops import segmented_attention as dispatcher
+
+    ranges = {0: [(0, 70)], 1: [(40, 80)]}
+    case = _make_paged_attention_case(
+        [1, 1],
+        [47, 71],
+        num_heads=8,
+        num_kv_heads=4,
+        head_size=256,
+        block_size=16,
+        fp8=fp8,
+        causal=causal,
+        sliding_window=8,
+        mm_ranges=ranges,
+        mm_prefix_clamp_sliding_window=clamp,
+    )
+    mm = compute_mm_prefix_range_tensor(ranges, 2, case["query"].device)
+
+    def lookup(*args, **kwargs):
+        assert kwargs["mm_prefix_mode"] == ("none" if clamp else "unclamped")
+        return None
+
+    monkeypatch.setattr(dispatcher, "get_segmented_config", lookup)
+    output = torch.empty_like(case["query"])
+    dispatcher.segmented_attention(
+        query=case["query"],
+        key=None,
+        value=None,
+        output=output,
+        kv_cache_dtype="fp8" if fp8 else "auto",
+        key_cache=case["key_cache"],
+        value_cache=case["value_cache"],
+        block_table=case["block_table"],
+        query_start_loc=case["starts"],
+        seq_lens=case["seq_lens"],
+        max_seq_len=case["max_seq_len"],
+        max_query_len=1,
+        k_scale=case["k_scale"],
+        v_scale=case["v_scale"],
+        sm_scale=256**-0.5,
+        sliding_window=7,
+        causal=causal,
+        mm_prefix_range=mm,
+        mm_prefix_clamp_sliding_window=clamp,
+        mm_prefix_max_span=71,
+    )
+    relative = (output.float() - case["reference"]).norm(dim=-1) / case[
+        "reference"
+    ].norm(dim=-1).clamp_min(1e-6)
+    assert torch.isfinite(output).all() and relative.max().item() < 0.01
+
+
+@pytest.mark.parametrize("fp8", [False, True])
+@pytest.mark.parametrize("clamp", [False, True])
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize(
+    "count,overlap", [(1, False), (4, False), (4, True), (16, False), (16, True)]
+)
+@torch.inference_mode()
+def test_segmented_mm_query_bounds_preserve_separate_and_overlapping_islands(
+    fp8, clamp, causal, count, overlap
+):
+    """Hoisted per-query bounds keep gaps, unions, windows, and cache clipping."""
+    if fp8 and not on_gfx12x():
+        pytest.skip("FP8 segmented attention requires gfx12")
+    from vllm.v1.attention.backends.utils import compute_mm_prefix_range_tensor
+    from vllm.v1.attention.ops import segmented_attention as dispatcher
+
+    stride = 12 if overlap else 24
+    ranges = {0: [(2030 + ri * stride, 2049 + ri * stride) for ri in range(count)]}
+    case = _make_paged_attention_case(
+        [256],
+        [2000],
+        num_heads=8,
+        num_kv_heads=4,
+        head_size=256,
+        block_size=16,
+        fp8=fp8,
+        causal=causal,
+        sliding_window=8,
+        mm_ranges=ranges,
+        mm_prefix_clamp_sliding_window=clamp,
+    )
+    output = torch.empty_like(case["query"])
+    dispatcher.segmented_attention(
+        query=case["query"],
+        key=None,
+        value=None,
+        output=output,
+        kv_cache_dtype="fp8" if fp8 else "auto",
+        key_cache=case["key_cache"],
+        value_cache=case["value_cache"],
+        block_table=case["block_table"],
+        query_start_loc=case["starts"],
+        seq_lens=case["seq_lens"],
+        max_seq_len=case["max_seq_len"],
+        max_query_len=256,
+        k_scale=case["k_scale"],
+        v_scale=case["v_scale"],
+        sm_scale=256**-0.5,
+        sliding_window=7,
+        causal=causal,
+        mm_prefix_range=compute_mm_prefix_range_tensor(ranges, 1, output.device),
+        mm_prefix_clamp_sliding_window=clamp,
+        mm_prefix_max_span=20,
+        use_tuned_config=False,
+    )
+    relative = (output.float() - case["reference"]).norm(dim=-1) / case[
+        "reference"
+    ].norm(dim=-1).clamp_min(1e-6)
+    assert torch.isfinite(output).all() and relative.max().item() < 0.01
+
+
+@pytest.mark.parametrize("fp8", [False, True])
+@pytest.mark.parametrize("window,clamp", [(0, False), (8, False), (8, True)])
+@pytest.mark.parametrize("causal", [True, False])
+@torch.inference_mode()
+def test_segmented_mm_prefix_fallback(monkeypatch, fp8, window, clamp, causal):
+    """Features handled by unified attention retain identical MM masking."""
+    if fp8 and not on_gfx12x():
+        pytest.skip("FP8 segmented attention requires gfx12")
+    from vllm.v1.attention.backends.utils import compute_mm_prefix_range_tensor
+    from vllm.v1.attention.ops import segmented_attention as dispatcher
+
+    ranges = {0: [(0, 70), (72, 76)], 1: []}
+    case = _make_paged_attention_case(
+        [16, 3],
+        [61, 37],
+        num_heads=8,
+        num_kv_heads=1,
+        head_size=512,
+        block_size=16,
+        fp8=fp8,
+        causal=causal,
+        sliding_window=window,
+        softcap=1.0,
+        mm_ranges=ranges,
+        mm_prefix_clamp_sliding_window=clamp,
+    )
+    unified = dispatcher.unified_attention
+    calls = []
+
+    def fallback(**kwargs):
+        calls.append(kwargs)
+        unified(**kwargs)
+
+    monkeypatch.setattr(dispatcher, "unified_attention", fallback)
+    output = torch.empty_like(case["query"])
+    mm_tensor = compute_mm_prefix_range_tensor(ranges, 2, output.device)
+    dispatcher.segmented_attention(
+        query=case["query"],
+        key=None,
+        value=None,
+        output=output,
+        kv_cache_dtype="fp8" if fp8 else "auto",
+        key_cache=case["key_cache"],
+        value_cache=case["value_cache"],
+        block_table=case["block_table"],
+        query_start_loc=case["starts"],
+        seq_lens=case["seq_lens"],
+        max_seq_len=case["max_seq_len"],
+        max_query_len=16,
+        k_scale=case["k_scale"],
+        v_scale=case["v_scale"],
+        sm_scale=512**-0.5,
+        softcap=1.0,
+        sliding_window=window - 1,
+        causal=causal,
+        mm_prefix_range=mm_tensor,
+        mm_prefix_clamp_sliding_window=clamp,
+    )
+    assert len(calls) == 1 and calls[0]["mm_prefix_range"] is mm_tensor
+    assert calls[0]["mm_prefix_clamp_sliding_window"] is clamp
+    relative = (output.float() - case["reference"]).norm(dim=-1) / case[
+        "reference"
+    ].norm(dim=-1).clamp_min(1e-6)
+    assert torch.isfinite(output).all() and relative.max().item() < 0.01

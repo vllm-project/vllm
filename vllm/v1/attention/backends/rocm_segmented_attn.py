@@ -57,6 +57,42 @@ def is_rdna() -> bool:
 @dataclass
 class RocmSegmentedAttentionMetadata(RocmAttentionMetadata):
     mm_prefix_range_tensor: torch.Tensor | None = None
+    mm_prefix_max_span: int = 0
+
+
+def _query_mm_prefix_ranges(
+    common: CommonAttentionMetadata,
+) -> dict[int, list[tuple[int, int]]] | None:
+    """Keep image islands intersecting prefill queries using existing CPU data."""
+    ranges = common.mm_req_doc_ranges
+    prefilling = getattr(common, "is_prefilling", None)
+    if ranges is None or prefilling is None or prefilling.device.type != "cpu":
+        return ranges
+    starts = common.query_start_loc_cpu
+    lengths = common.seq_lens_cpu_upper_bound
+    exact_prefill = (
+        lengths is not None
+        and lengths.device.type == "cpu"
+        and starts.device.type == "cpu"
+    )
+    selected = {}
+    for seq, is_prefill in enumerate(prefilling.tolist()[: common.num_reqs]):
+        if not is_prefill:
+            continue
+        images = ranges.get(seq, [])
+        if exact_prefill:
+            assert lengths is not None
+            query_len = int(starts[seq + 1] - starts[seq])
+            end = int(lengths[seq])
+            begin = end - query_len
+            images = [
+                (first, last)
+                for first, last in images
+                if query_len > 0 and first < last and last >= begin and first < end
+            ]
+        if images:
+            selected[seq] = images
+    return selected or None
 
 
 class RocmSegmentedAttentionMetadataBuilder(RocmAttentionMetadataBuilder):
@@ -82,6 +118,9 @@ class RocmSegmentedAttentionMetadataBuilder(RocmAttentionMetadataBuilder):
         fast_build: bool = False,
     ) -> RocmSegmentedAttentionMetadata:
         common = common_attn_metadata
+        # Async speculative lengths are optimistic only for decode rows. Their
+        # image queries have already finished; prefill CPU lengths are exact.
+        ranges = _query_mm_prefix_ranges(common)
         return RocmSegmentedAttentionMetadata(
             num_actual_tokens=common.num_actual_tokens,
             max_query_len=common.max_query_len,
@@ -92,7 +131,16 @@ class RocmSegmentedAttentionMetadataBuilder(RocmAttentionMetadataBuilder):
             slot_mapping=common.slot_mapping,
             causal=common.causal,
             mm_prefix_range_tensor=compute_mm_prefix_range_tensor(
-                common.mm_req_doc_ranges, common.num_reqs, common.seq_lens.device
+                ranges, common.num_reqs, common.seq_lens.device
+            ),
+            mm_prefix_max_span=max(
+                (
+                    last - first + 1
+                    for images in (ranges or {}).values()
+                    for first, last in images
+                    if first < last
+                ),
+                default=0,
             ),
         )
 
@@ -268,6 +316,8 @@ class RocmSegmentedAttentionImpl(RocmAttentionImpl):
             max_tokens=config.scheduler_config.max_num_batched_tokens,
             fp8=self.kv_cache_dtype in ("fp8", "fp8_e4m3"),
             autotune=self._autotune_enabled(),
+            mm_prefix=getattr(config.model_config, "is_mm_prefix_lm", False),
+            sliding_window=self.sliding_window[0],
         )
         return get_segmented_attention_workspace(device, sizes)
 
@@ -340,6 +390,7 @@ class RocmSegmentedAttentionImpl(RocmAttentionImpl):
             mm_prefix_clamp_sliding_window=getattr(
                 layer, "mm_prefix_clamp_sliding_window", False
             ),
+            mm_prefix_max_span=getattr(attn_metadata, "mm_prefix_max_span", 0),
             workspace=workspace,
             use_tuned_config=self._autotune_enabled(),
         )
