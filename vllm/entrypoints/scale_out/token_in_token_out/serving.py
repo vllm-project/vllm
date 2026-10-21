@@ -3,7 +3,6 @@
 
 
 import asyncio
-import math
 import time
 from collections.abc import AsyncGenerator
 from collections.abc import Sequence as GenericSequence
@@ -58,9 +57,7 @@ from .mm_features import (
     placeholder_ranges_from_engine_input,
 )
 from .protocol import (
-    GenerateLogProb,
     GenerateLogProbs,
-    GenerateLogProbsContent,
     GenerateRequest,
     GenerateResponse,
     GenerateTextChoice,
@@ -79,10 +76,9 @@ logger = init_logger(__name__)
 def _clamp_logprob(logprob: float) -> float:
     """The OpenAI shapes' floor for a logprob: ``-inf`` and NaN become ``-9999.0``.
 
-    ``max(nan, -9999.0)`` is NaN in Python, so NaN needs its own check; NaN
-    would otherwise fail ``JSONResponse`` or reach the client as ``null``.
+    NaN compares False, so it takes the floor too; ``max(nan, -9999.0)`` is NaN.
     """
-    return -9999.0 if math.isnan(logprob) else max(logprob, -9999.0)
+    return logprob if logprob >= -9999.0 else -9999.0
 
 
 def _logprob_token(
@@ -778,33 +774,31 @@ class ServingTokens(GenerateBaseServing):
         The engine reports rank 0 for a sampled token whose logprob is NaN; that
         is not a rank, so it is sent as ``None`` (the logprob is clamped).
         """
-        logprobs_content: list[GenerateLogProbsContent] = []
+        content: list[dict[str, Any]] = []
 
         for i, token_id in enumerate(token_ids):
             step_top_logprobs = top_logprobs[i]
             if step_top_logprobs is None or step_top_logprobs.get(token_id) is None:
                 # Same sentinel the OpenAI shapes use when the sampled token
                 # has no entry in the engine's top-k map.
-                logprobs_content.append(
-                    GenerateLogProbsContent(token_id=token_id, logprob=-9999.0)
-                )
+                content.append({"token_id": token_id, "logprob": -9999.0})
             else:
                 step_token = step_top_logprobs[token_id]
 
-                logprobs_content.append(
-                    GenerateLogProbsContent(
-                        token_id=token_id,
-                        logprob=_clamp_logprob(step_token.logprob),
-                        rank=step_token.rank or None,
-                        top_logprobs=[
-                            GenerateLogProb(
-                                token_id=top_token_id,
-                                logprob=_clamp_logprob(top_logprob.logprob),
-                                rank=top_logprob.rank or None,
-                            )
+                content.append(
+                    {
+                        "token_id": token_id,
+                        "logprob": _clamp_logprob(step_token.logprob),
+                        "rank": step_token.rank or None,
+                        "top_logprobs": [
+                            {
+                                "token_id": top_token_id,
+                                "logprob": _clamp_logprob(top_logprob.logprob),
+                                "rank": top_logprob.rank or None,
+                            }
                             for top_token_id, top_logprob in step_top_logprobs.items()
                         ],
-                    )
+                    }
                 )
 
-        return GenerateLogProbs(content=logprobs_content)
+        return GenerateLogProbs.model_validate({"content": content})

@@ -4,13 +4,15 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
-from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from openai.types.chat.chat_completion_audio import (
     ChatCompletionAudio as OpenAIChatCompletionAudio,
 )
 from openai.types.chat.chat_completion_message import Annotation as OpenAIAnnotation
 from pydantic import (
+    BaseModel,
+    ConfigDict,
     Field,
     PrivateAttr,
     SerializeAsAny,
@@ -87,20 +89,21 @@ class ChatMessage(OpenAIBaseModel):
         return data
 
 
-class ChatCompletionLogProb(OpenAIBaseModel):
+class ChatCompletionLogProb(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     token: str
     logprob: float = -9999.0
     bytes: list[int] | None = None
 
 
 class ChatCompletionLogProbsContent(ChatCompletionLogProb):
-    # Workaround: redefine fields name cache so that it's not
-    # shared with the super class.
-    field_names: ClassVar[set[str] | None] = None
     top_logprobs: list[ChatCompletionLogProb] = Field(default_factory=list)
 
 
-class ChatCompletionLogProbs(OpenAIBaseModel):
+class ChatCompletionLogProbs(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     content: list[ChatCompletionLogProbsContent] | None = None
 
 
