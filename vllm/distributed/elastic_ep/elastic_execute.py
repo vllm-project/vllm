@@ -162,9 +162,6 @@ class ElasticEPScalingExecutor:
         self._prepared_eplb_communicator: EplbCommunicator | None = None
         # Groups held back because a shrunk communicator still runs on them.
         self._deferred_parent_groups: list[GroupCoordinator] = []
-        # The communicator the previous configuration used, kept alive on
-        # purpose while the new one transfers, see `_hold_previous_communicator`.
-        self._previous_eplb_communicator: EplbCommunicator | None = None
         self._async_executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="ElasticEPAsync"
         )
@@ -871,58 +868,24 @@ class ElasticEPScalingExecutor:
                     module._replace_quant_method(module._quant_method.old_quant_method)
 
         assert self._prepared_eplb_communicator is not None
-        self._hold_previous_communicator(eplb_model_state.communicator)
         eplb_state.update_communicator(model_config, self._prepared_eplb_communicator)
         self._prepared_eplb_communicator = None
 
         return retired_groups
-
-    def _hold_previous_communicator(self, communicator) -> None:
-        """Keep the replaced EPLB communicator alive until the reshuffle is done.
-
-        The new communicator is built in `prepare_reconfiguration` and registers
-        the same expert weight tensors the old one already registered, so for a
-        while two NIXL registrations cover the same memory. The assignment below
-        drops the only reference to the old one, and its `__del__` deregisters
-        that memory. Nothing says when that runs: a reference the async worker
-        captured can delay it, which would put the deregistration inside the
-        window where peers are reading, and that is where the memory faults
-        land. It would also explain why only the ranks that were already there
-        fault, since only they have an old communicator to collect.
-
-        Holding a reference across the reshuffle makes the teardown happen at a
-        time this code chooses instead of a time the garbage collector chooses.
-        Diagnostic for now, because the mechanism is not proven.
-        """
-        if os.getenv("VLLM_EEP_HOLD_OLD_EPLB_COMM") != "1":
-            return
-        self._previous_eplb_communicator = communicator
-        logger.warning(
-            "[EEP-DEBUG] holding the previous eplb communicator %s across the "
-            "reshuffle instead of letting the collector decide",
-            type(communicator).__name__ if communicator is not None else None,
-        )
-
-    def _release_previous_communicator(self) -> None:
-        """Drop the held communicator once no peer is reading any more."""
-        if self._previous_eplb_communicator is None:
-            return
-        self._previous_eplb_communicator = None
-        logger.warning(
-            "[EEP-DEBUG] released the previous eplb communicator after the reshuffle"
-        )
 
     def _perform_eplb_reshuffle(
         self,
         rank_mapping: dict[int, int] | None = None,
         async_op: bool = False,
     ) -> None:
-        if async_op and os.getenv("VLLM_EEP_DEBUG_SYNC_RESHUFFLE") == "1":
-            # Diagnostic only: the scheduled copies are the one thing left that
-            # can explain the fault during the traffic right after scale up,
-            # and nothing cheaper isolates them.
+        if async_op and os.getenv("VLLM_EEP_ASYNC_RESHUFFLE") != "1":
+            # A reconfiguration reshuffle cannot be scheduled. The copies land
+            # on a stream the caller does not wait for, so the engine resumes
+            # serving against expert weights that are still being moved, and
+            # answers come back wrong for as long as the copies run. Opting
+            # back in exists only to measure that difference.
             async_op = False
-            logger.warning("[EEP-DEBUG] expert resharding forced to sync mode")
+            logger.info("[Elastic EP] Expert resharding runs synchronously")
 
         if get_ep_group().rank == 0:
             logger.info("[Elastic EP] Starting expert resharding...")
@@ -941,7 +904,6 @@ class ElasticEPScalingExecutor:
         # reset expert_rearrangement_step to ensure all ranks are synchronized
         eplb_state.expert_rearrangement_step = 0
         eplb_state.is_async = is_async_enabled
-        self._release_previous_communicator()
         # Start the async worker thread if it doesn't exist yet (idempotent).
         # This is needed for new workers after scale-up: they create EplbState
         # in setup_eplb_from_mapping() but don't start the thread there because
