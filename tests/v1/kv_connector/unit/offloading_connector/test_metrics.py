@@ -802,7 +802,7 @@ def _prom_metrics(
     spec_cls = _spec_cls_with_metric_definitions(metric_definitions or {}, info_keys)
     with patch.object(OffloadingSpecFactory, "get_spec_cls", return_value=spec_cls):
         return OffloadPromMetrics(
-            vllm_config=_FakeVllmConfig(store_threshold=0),  # type: ignore[arg-type]
+            vllm_config=_FakeVllmConfig(store_threshold=0),
             metric_types={
                 Gauge: _FakeMetric,
                 Counter: _FakeMetric,
