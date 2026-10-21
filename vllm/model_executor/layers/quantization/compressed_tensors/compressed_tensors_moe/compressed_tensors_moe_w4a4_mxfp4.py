@@ -207,12 +207,8 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
                 s2 = layer.w2_weight_scale[e_idx]
                 sw2 = swizzle_mxfp4_scales(s2, w2_M, w2_N)
                 swizzled_w2.append(sw2.reshape(w2_M, w2_scale_N))
-            layer.w13_weight_scale = torch.nn.Parameter(
-                torch.stack(swizzled_w13), requires_grad=False
-            )
-            layer.w2_weight_scale = torch.nn.Parameter(
-                torch.stack(swizzled_w2), requires_grad=False
-            )
+            replace_parameter(layer, "w13_weight_scale", torch.stack(swizzled_w13))
+            replace_parameter(layer, "w2_weight_scale", torch.stack(swizzled_w2))
         elif self.mxfp4_backend in FLASHINFER_MOE_EP_MXFP4_BACKENDS:
             w13, w2, w13_scale, w2_scale, _, _ = (
                 convert_weight_to_mxfp4_moe_kernel_format(

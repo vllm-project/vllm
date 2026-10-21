@@ -253,6 +253,8 @@ def test_philox_mixed_draft_sampling_caches_unprocessed_logits():
         positions,
         apply_temperature=True,
         is_drafting=True,
+        logits_cache=cache,
+        logits_cache_col=cols,
     )
     watermarked = philox_gumbel_sample(processed_logits, contexts, 42)
     expected = torch.where(skip_mask, ordinary, watermarked)

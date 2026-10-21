@@ -163,6 +163,8 @@ async def init_generate_state(
             return_tokens_as_token_ids=args.return_tokens_as_token_ids,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
             enable_force_include_usage=args.enable_force_include_usage,
+            enable_log_outputs=args.enable_log_outputs,
+            enable_log_deltas=args.enable_log_deltas,
             enable_per_request_metrics=args.enable_per_request_metrics,
         )
         if "generate" in supported_tasks
@@ -208,6 +210,8 @@ async def init_generate_state(
             reasoning_parser=args.structured_outputs_config.reasoning_parser,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
             enable_force_include_usage=args.enable_force_include_usage,
+            enable_log_outputs=args.enable_log_outputs,
+            enable_log_deltas=args.enable_log_deltas,
             default_chat_template_kwargs=default_chat_template_kwargs,
             is_reasoning_model=args.cohere_is_reasoning_model,
         )

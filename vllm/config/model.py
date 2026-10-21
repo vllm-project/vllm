@@ -310,12 +310,8 @@ class ModelConfig:
     window functionality of the model, capping to sliding window size. If the
     model does not support sliding window, this argument is ignored."""
     disable_cascade_attn: bool = True
-    """Disable cascade attention for V1. While cascade attention does not
-    change the mathematical correctness, disabling it could be useful for
-    preventing potential numerical issues. This defaults to True, so users
-    must opt in to cascade attention by setting this to False. Even when this
-    is set to False, cascade attention will only be used when the heuristic
-    tells that it's beneficial."""
+    """Deprecated: cascade attention has been removed, so this has no effect.
+    It will be removed in v0.33.0."""
     skip_tokenizer_init: bool = False
     """Skip initialization of tokenizer and detokenizer. Expects valid
     `prompt_token_ids` and `None` for prompt from the input. The generated
@@ -1538,8 +1534,8 @@ class ModelConfig:
         parallel_config: ParallelConfig,
     ) -> None:
         if parallel_config.enable_hc_sp and parallel_config.tensor_parallel_size > 1:
-            if not current_platform.is_cuda():
-                raise ValueError("--enable-hc-sp currently requires CUDA")
+            if not current_platform.is_cuda_alike():
+                raise ValueError("--enable-hc-sp currently requires CUDA or ROCm")
             if not self.registry.is_hc_sp_supported_model(self.architectures, self):
                 raise ValueError("--enable-hc-sp is not supported for this model")
             if parallel_config.pipeline_parallel_size != 1:
@@ -1626,8 +1622,8 @@ class ModelConfig:
     def get_inputs_embeds_size(self) -> int:
         # The size of inputs_embeds is usually identical to the size
         # of the hidden states, however there are exceptions, such as
-        # embedding models like CLIP and SigLIP
-        names = ("projection_dim", "projection_size")
+        # OPT's projected token embeddings and embedding models like CLIP/SigLIP.
+        names = ("word_embed_proj_dim", "projection_dim", "projection_size")
         return getattr_iter(
             self.hf_text_config, names, default_factory=self.get_hidden_size
         )
@@ -2020,6 +2016,10 @@ class ModelConfig:
         return self._model_info.supports_pp
 
     @property
+    def is_lora_supported(self) -> bool:
+        return self._model_info.supports_lora
+
+    @property
     def is_attention_free(self) -> bool:
         return self._model_info.is_attention_free
 
@@ -2039,12 +2039,12 @@ class ModelConfig:
         return self._model_info.has_noops
 
     @property
-    def has_inner_state(self):
-        return self._model_info.has_inner_state
+    def supports_kv_cache_grouping(self) -> bool:
+        return self._model_info.supports_kv_cache_grouping
 
     @property
-    def supports_mamba_prefix_caching(self) -> bool:
-        return self._model_info.supports_mamba_prefix_caching
+    def has_inner_state(self):
+        return self._model_info.has_inner_state
 
     @property
     def supports_replayssm(self) -> bool:
@@ -2282,7 +2282,7 @@ class ModelConfig:
 
     @property
     def is_quantized(self) -> bool:
-        return getattr(self.hf_config, "quantization_config", None) is not None
+        return self.model_arch_config.quantization_config is not None
 
     def is_nvfp4_quantized(self) -> bool:
         quant_config = self.model_arch_config.quantization_config

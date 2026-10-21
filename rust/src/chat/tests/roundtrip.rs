@@ -475,6 +475,20 @@ impl RoundtripCase {
         }
     }
 
+    /// Step-5's bare reasoning tags and adjacent XML tool calls.
+    fn step5() -> Self {
+        Self {
+            model_id: "stepfun-ai/Step-5-Preview",
+            assistant_stop_suffix: "<|im_end|>\n",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Always { value: true },
+            json_fmt: compact_json_fmt(),
+            sort_json_keys: false,
+            with_schema: ToolCallMixVariant::WITH_SCHEMA,
+        }
+    }
+
     /// Nemotron V3 with `<think>` / `</think>` reasoning tags.
     fn nemotron_v3() -> Self {
         Self {
@@ -552,6 +566,7 @@ roundtrip_tests! {
     glm52 => [reasoning_and_content, tool_call_mix],
     seed_oss => [reasoning_and_content, tool_call_mix],
     step3p5 => [reasoning_and_content],
+    step5 => [reasoning_and_content, tool_call_mix],
     nemotron_v3 => [reasoning_and_content],
     gemma4 => [tool_call_mix], // Gemma4 strips reasoning in history if there's no tool call
     gemma4_hf => [tool_call_mix],
@@ -958,7 +973,7 @@ async fn parse_completion(
         NewChatOutputProcessorOptions {
             // Pin every tool schema so that builder-backed parsers build an
             // output grammar for replay. The strict level does not affect parsing.
-            tool_strict_level: ToolStrictLevel::Parameter,
+            tool_strict_level: Some(ToolStrictLevel::Parameter),
             tool_call_parser: &case.tool_call_parser,
             reasoning_parser: &case.reasoning_parser,
         },
@@ -1051,6 +1066,7 @@ fn decoded_completion_stream(
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     sampling_mask: None,
+                    timestamps: Default::default(),
                 })),
             }
         });
@@ -1063,6 +1079,7 @@ fn decoded_completion_stream(
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 sampling_mask: None,
+                timestamps: Default::default(),
             });
             events.push(DecodedTextEvent::TextDelta {
                 decoded: chunk.delta,

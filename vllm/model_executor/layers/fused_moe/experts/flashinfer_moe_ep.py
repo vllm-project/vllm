@@ -37,7 +37,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Static,
     require_finite_positive_scales,
 )
-from vllm.model_executor.utils import replace_parameter
 
 if TYPE_CHECKING:
     pass
@@ -154,7 +153,8 @@ class FlashInferMoeEpExperts(mk.FusedMoEExpertsModular):
         )
         adapter.warmup()
         for name, tensor in zip(KERNEL_WEIGHT_NAMES, adapter.kernel_weights()):
-            replace_parameter(layer, name, tensor)
+            # Rebind, never copy: the params must alias the megakernel buffers (EPLB).
+            getattr(layer, name).data = tensor
         self._adapter = adapter
 
     def apply(
