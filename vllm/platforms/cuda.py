@@ -91,7 +91,7 @@ def _get_backend_priorities(
     use_mm_prefix: bool = False,
 ) -> list[AttentionBackendEnum]:
     """Get backend priorities with lazy import to avoid circular dependency."""
-    from vllm.utils.torch_utils import is_quantized_kv_cache
+    from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
     if use_mla:
         if device_capability.major == 10:
@@ -734,6 +734,7 @@ class CudaPlatformBase(Platform):
         )
 
     @classmethod
+    @cache
     def is_arch_support_pdl(cls) -> bool:
         try:
             device = torch.cuda.current_device()
