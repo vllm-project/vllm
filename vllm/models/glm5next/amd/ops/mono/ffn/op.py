@@ -101,14 +101,16 @@ class FlashDsaWeights:
 
 @dataclass
 class FlashDsaCaches:
-    """One sparse-attention layer's caches: the bf16 MLA latent cache
-    [blocks, block_tokens, 512] (block stride may be padded), the uint8 index
-    cache [blocks, block_tokens / 4, 132] (pool FP8 values, then f32 scales) and
-    the bf16 kpool tail ring [blocks, 2, 4, 128] (k, gate)."""
+    """One sparse-attention layer's caches: the MLA latent cache
+    [blocks, block_tokens, 512] (block stride may be padded), bf16 or e4m3
+    bytes over the f32 scalar ``k_scale``; the uint8 index cache
+    [blocks, block_tokens / 4, 132] (pool FP8 values, then f32 scales) and the
+    bf16 kpool tail ring [blocks, 2, 4, 128] (k, gate)."""
 
     kv_cache: torch.Tensor
     idx_cache: torch.Tensor
     tail_cache: torch.Tensor
+    k_scale: torch.Tensor | None = None
 
 
 @dataclass
@@ -149,8 +151,10 @@ class FlashFfnRuntime:
         dsa: bool = False,
         max_pools: int = 0,
         dsa_fp8: tuple[bool, bool, bool] = (True, True, True),
+        kv_fp8: bool = False,
     ) -> None:
         self.width, self.rank, self.npes = width, rank, npes
+        self.kv_fp8 = kv_fp8
         self.kda, self.dsa, self.max_pools = kda, dsa, max_pools
         self.dsa_fp8 = dsa_fp8
         self.launch, self.sc, self.sy = build_flash_ffn_kernel(
@@ -166,6 +170,7 @@ class FlashFfnRuntime:
             dsa=dsa,
             max_pools=max_pools,
             dsa_fp8=dsa_fp8,
+            kv_fp8=kv_fp8,
         )
         dev = torch.device("cuda", torch.cuda.current_device())
         self.peer = PeerBuffers(self.sy["_bytes"], rank, npes, group)
@@ -279,6 +284,7 @@ class FlashFfnOp:
             "idx_block_pools": idx.shape[1],
             "tail_block_elems": tail.stride(0),
             "tail_gate_elems": tail.stride(1),
+            "k_scale": 0 if c.k_scale is None else c.k_scale.data_ptr(),
         }
         host = [values[name] for name in DSA_TAB]
         if host != self._tab_host:
@@ -327,6 +333,12 @@ class FlashFfnOp:
                     "a sparse-attention launch needs caches, rows and a block table"
                 )
             _check("rows", rows, (S, ROW_WORDS), torch.int32)
+            kv8 = caches.kv_cache.element_size() == 1
+            if kv8 != rt.kv_fp8 or (kv8 and caches.k_scale is None):
+                raise ValueError(
+                    f"{caches.kv_cache.dtype} MLA cache on a kv_fp8={rt.kv_fp8} "
+                    "runtime (an fp8 cache needs its k_scale)"
+                )
             if idx_block_table is None:
                 idx_block_table = block_table
             for bt in (block_table, idx_block_table):

@@ -159,6 +159,7 @@ def build_flash_ffn_kernel(
     dsa: bool = False,
     max_pools: int = 0,
     dsa_fp8: tuple[bool, bool, bool] = (True, True, True),
+    kv_fp8: bool = False,
 ):
     """Return the ``@flyc.jit`` launcher of one rank's FFN layer for S rows; with
     ``kda`` the whole KDA decoder layer (attention-side mHC, projections, short conv,
@@ -167,6 +168,9 @@ def build_flash_ffn_kernel(
     LoRA projections and norms, KV cache write, kpool indexer, sparse MLA, o_proj)
     for rows of at most ``max_pools`` kpool pools. ``dsa_fp8`` says which of q_a | kv_a,
     q_b and o_proj are FP8 with 128 x 128 block scales (else row-major bf16).
+    ``kv_fp8``: the MLA latent cache holds e4m3 bytes over vLLM's per-tensor
+    ``k_scale`` (written as vLLM's ``concat_and_cache_mla`` does, read back
+    dequantized to bf16 for the attention).
 
     ``poll_limit`` bounds the re-polls of every mailbox wait. An expired wait
     stores 1 into its stage's error word (``poll_err_addr``) and, with TP peers,
@@ -225,6 +229,9 @@ def build_flash_ffn_kernel(
         SEL_BINS + 2 * 2048 if dsa else 0,
     )
     SEL_CAP = (X_WORDS - SEL_BINS) // 2
+    # fp8 KV write: a row's 512 normed values, past the kpool compress's words
+    KVX = 2 * INDEX_DIM
+    assert not kv_fp8 or (dsa and KVX + KV_LORA <= X_WORDS)
     MISC_OFF = X_WORDS
     MISC_WORDS = max(8 + S * XQ_GROUPS, S * MOE_SLOTS * (expert_inter // 32))
     KEYS_OFF = MISC_OFF + MISC_WORDS
@@ -1650,13 +1657,31 @@ def build_flash_ffn_kernel(
                     ]
                 )
                 rstd = _rsq(block_sum(kv * kv) * (1.0 / KV_LORA) + EPS)
-                if slot >= 0:
-                    row_addr = tv["kv_cache"] + (
-                        fx.Int64(slot // KVB) * KVE + fx.Int64((slot % KVB) * KV_LORA)
-                    ) * fx.Int64(2)
-                    bo.buffer_store(
-                        fx.Float32(kv * rstd * g).to(fx.BFloat16), _rsrc(row_addr), tid
-                    )
+                row_off = fx.Int64(slot // KVB) * KVE + fx.Int64((slot % KVB) * KV_LORA)
+                if const_expr(kv_fp8):
+                    # vLLM's write: the bf16 normed row / k_scale, to e4m3 (round
+                    # to nearest even, saturating at 448), four values a thread
+                    lds_st(xs, KVX + tid, bf16_round(kv * rstd * g))
+                    gpu.barrier()
+                    ks = ld_f32(_rsrc(tv["k_scale"]), 0)
+                    e4 = [
+                        fx.min(
+                            fx.max(div(lds_ld(xs, KVX + tid * 4 + i), ks), -FP8_MAX),
+                            FP8_MAX,
+                        )
+                        for i in range(4)
+                    ]
+                    if (slot >= 0) & (tid < KV_LORA // 4):
+                        bo.buffer_store(
+                            fp8_pack4(*e4), _rsrc(tv["kv_cache"] + row_off), tid
+                        )
+                else:
+                    if slot >= 0:
+                        bo.buffer_store(
+                            fx.Float32(kv * rstd * g).to(fx.BFloat16),
+                            _rsrc(tv["kv_cache"] + row_off * fx.Int64(2)),
+                            tid,
+                        )
                 mean = block_sum(lk.select(kraw, fx.Float32(0.0))) * (1.0 / INDEX_DIM)
                 cen = lk.select(kraw - mean, fx.Float32(0.0))
                 var = block_sum(cen * cen) * (1.0 / INDEX_DIM)
@@ -2402,6 +2427,7 @@ def build_flash_ffn_kernel(
             r_bt = _rsrc(tv["block_table"])
             KPW = SPLIT_KEYS // WAVES
             ktile = xs + KT_OFF
+            kscale = ld_f32(_rsrc(tv["k_scale"]), 0) if kv_fp8 else None
             pl = xs  # q is dead once the scores are in ``red``
             for tt in range(start("split"), S * HG * N_SPLIT, G):
                 tt = fx.Int32(tt)
@@ -2450,17 +2476,33 @@ def build_flash_ffn_kernel(
                         j = wave * KPW + jj
                         blk = _uniform(lds_ld(keys, j))
                         off = _uniform(lds_ld(keys, SPLIT_KEYS + j))
-                        r_row = _rsrc(
-                            tv["kv_cache"]
-                            + (fx.Int64(blk) * KVE + fx.Int64(off * KV_LORA))
-                            * fx.Int64(2)
-                        )
-                        raw = fx.Vector(
-                            bo.buffer_load(r_row, lane * 4, vec_width=4, dtype=T.i32)
-                        )
-                        fx.ptr_store(
-                            raw.bitcast(fx.Float32), ktile + (j * QS + lane * 4)
-                        )
+                        row_off = fx.Int64(blk) * KVE + fx.Int64(off * KV_LORA)
+                        if const_expr(kv_fp8):
+                            # 8 e4m3 a lane, dequantized into the bf16 tile
+                            raw8 = fx.Vector(
+                                bo.buffer_load(
+                                    _rsrc(tv["kv_cache"] + row_off),
+                                    lane * 2,
+                                    vec_width=2,
+                                    dtype=T.i32,
+                                )
+                            )
+                            row8 = _fp8_to_bf16x8(raw8[0], raw8[1], kscale)
+                            fx.ptr_store(
+                                row8.bitcast(fx.Float32), ktile + (j * QS + lane * 4)
+                            )
+                        else:
+                            raw = fx.Vector(
+                                bo.buffer_load(
+                                    _rsrc(tv["kv_cache"] + row_off * fx.Int64(2)),
+                                    lane * 4,
+                                    vec_width=4,
+                                    dtype=T.i32,
+                                )
+                            )
+                            fx.ptr_store(
+                                raw.bitcast(fx.Float32), ktile + (j * QS + lane * 4)
+                            )
                     # q_lat of the task's 8 heads -> Q[h] (words h * QS ..)
                     NQ = WAVES * KV_LORA // 4 // THREADS
                     qv = poll(

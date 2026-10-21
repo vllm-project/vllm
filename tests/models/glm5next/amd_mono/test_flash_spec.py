@@ -48,7 +48,7 @@ def test_refusals_are_reported_at_once():
     reasons = spec.refuse_config(
         _flash_config(
             tp=16,
-            cache="fp8",
+            cache="fp8_e5m2",
             ssm="bfloat16",
             spec=object(),
             hf={"hidden_size": 2048, "hc_mult": 2},
@@ -58,7 +58,7 @@ def test_refusals_are_reported_at_once():
         "needs hidden_size 4096",
         "needs hc_mult 4",
         "tensor parallel size",
-        "fp8 KV cache",
+        "fp8_e5m2 KV cache",
         "bfloat16 KDA recurrent state",
         "speculative decoding",
     )
@@ -179,3 +179,9 @@ def test_dsa_row_table_pads_and_follows_the_step():
     # computed once a step, shared by every sparse-attention layer
     md["mla"].slot_mapping[0] = 5
     assert w.dsa_rows(step, ("mla", "ic", "tail"))[0, ROW_SLOT] == 70
+
+
+@pytest.mark.parametrize("cache", ["auto", "bfloat16", "fp8", "fp8_e4m3"])
+def test_bf16_and_e4m3_kv_caches_pass(cache):
+    reasons = spec.refuse_config(_flash_config(cache=cache))
+    assert not [r for r in reasons if "KV cache" in r], reasons
