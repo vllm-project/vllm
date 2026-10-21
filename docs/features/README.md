@@ -3,6 +3,7 @@
 ## KV Cache Offloading
 
 - [UMBPStoreConnector](umbp_store_connector_usage.md)
+- [MORI-UMBP standalone DRAM](umbp_standalone.md)
 
 ## Compatibility Matrix
 
