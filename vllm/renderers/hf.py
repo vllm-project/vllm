@@ -1088,13 +1088,13 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
 
         chat_template_kwargs = params.get_apply_chat_template_kwargs()
         if prompt_embeds_tensors:
-            visibility_kwargs = chat_template_kwargs.copy()
-            visibility_kwargs["tokenize"] = False
+            visibility_check_kwargs = chat_template_kwargs.copy()
+            visibility_check_kwargs["tokenize"] = False
             rendered = safe_apply_chat_template(
                 model_config,
                 tokenizer,
                 conversation,
-                **visibility_kwargs,
+                **visibility_check_kwargs,
             )
             assert isinstance(rendered, str)
             prompt_embeds_tensors, conversation = _filter_prompt_embeds_by_template(
@@ -1208,14 +1208,14 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
 
         chat_template_kwargs = params.get_apply_chat_template_kwargs()
         if prompt_embeds_tensors:
-            visibility_kwargs = chat_template_kwargs.copy()
-            visibility_kwargs["tokenize"] = False
+            visibility_check_kwargs = chat_template_kwargs.copy()
+            visibility_check_kwargs["tokenize"] = False
             rendered = await self._render_with_timeout(
                 self._apply_chat_template_async(
                     model_config,
                     tokenizer,
                     conversation,
-                    **visibility_kwargs,
+                    **visibility_check_kwargs,
                 )
             )
             assert isinstance(rendered, str)
