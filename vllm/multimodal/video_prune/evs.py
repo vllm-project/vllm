@@ -194,7 +194,8 @@ def recompute_mrope_positions(
             of e.g. Qwen3 VL, where each video inputs are comprised of individual
             frames' embeddings, interleaved with embeddings for timestamp tokens,
             and vision start / end tokens. The expected channels are
-            [t, h, w, is_vision_start, is_vision].
+            [t, h, w, is_vision_start, is_vision]. The prompt may keep an outer
+            vision start token before the first frame's timestamp tokens.
         mrope_positions: Existing mrope positions (4, N) for entire sequence.
         num_computed_tokens: A number of computed tokens so far.
         vision_start_token_id: Token indicating start of vision media.
@@ -315,12 +316,17 @@ def recompute_mrope_positions(
         # the sequence actually begins (before timestamp tokens).
         adjusted_for_timestamps = False
         if mm_pos.shape[0] == 5 and mm_embeddings_seen == 0 and has_video_tokens:
-            # NOTE: -1 is because there is a vision start token right after
-            # timestamp tokens before any video embeddings appear.
-
-            # Adjust global_mm_start to point to the first timestamp token
-            # instead of the vision_start token.
-            global_mm_start -= num_timestamp_tokens
+            # The prompt puts all retained video tokens on the first frame, so
+            # that frame's vision_start is followed by one. If it isn't, the one
+            # found above is the outer vision_start that transformers>=5.10 keeps
+            # before the placeholder, and it precedes the timestamp tokens.
+            next_token = global_mm_start + 1
+            if next_token < N and int(input_ids[next_token]) != video_token_id:
+                global_mm_start += 1
+            else:
+                # Adjust global_mm_start to point to the first timestamp token
+                # instead of the vision_start token.
+                global_mm_start -= num_timestamp_tokens
             adjusted_for_timestamps = True
 
         # Offset calculation depends on whether we adjusted for timestamp tokens
