@@ -403,20 +403,6 @@ class Cohere2MoeModel(nn.Module, EagleModelMixin):
             config.vocab_size, config.hidden_size
         )
 
-        # Decoder layers read per-layer MLP layout from config.mlp_layer_types
-        # (dense MLP vs MoE) and use it for weight loading. Transformers >=5.10
-        # populates this field; older versions only expose first_k_dense_replace.
-        # Normalize here so layer construction below sees a consistent layout.
-        if getattr(config, "mlp_layer_types", None) is None:
-            first_k_dense_replace = getattr(config, "first_k_dense_replace", None)
-            n = config.num_hidden_layers
-            if first_k_dense_replace is not None:
-                config.mlp_layer_types = ["dense"] * first_k_dense_replace + [
-                    "sparse"
-                ] * (n - first_k_dense_replace)
-            else:
-                config.mlp_layer_types = ["sparse"] * n
-
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: Cohere2MoeDecoderLayer(

@@ -13,7 +13,7 @@ import torch.nn as nn
 
 from vllm.config import ParallelConfig, VllmConfig, get_current_vllm_config
 from vllm.lora.layers import BaseLayerWithLoRA
-from vllm.v1.worker.gpu_model_runner import _get_parameter_for_reload
+from vllm.model_executor.model_loader.reload.inplace import get_parameter_for_reload
 from vllm.v1.worker.gpu_worker import Worker
 
 
@@ -24,6 +24,7 @@ class _RecordingEngine:
         self.raise_on_update = raise_on_update
         self.started = False
         self.finished = False
+        self.closed = False
         self.reset_count = 0
         self.supports_draft_weight_update = False
         self.update_calls: list[dict] = []
@@ -49,6 +50,9 @@ class _RecordingEngine:
     def reset_weight_update_target(self) -> None:
         self.reset_count += 1
 
+    def shutdown(self) -> None:
+        self.closed = True
+
 
 class _RecordingModelRunner:
     def __init__(self) -> None:
@@ -60,6 +64,9 @@ class _RecordingModelRunner:
 
     def reset_lora_state(self) -> None:
         self.reset_lora_calls += 1
+
+    def get_draft_model(self) -> nn.Module | None:
+        return None
 
 
 def _make_worker(engine: _RecordingEngine | None) -> Worker:
@@ -82,6 +89,25 @@ def test_reload_weights_sets_current_config():
     assert model_runner.seen_config is worker.vllm_config
 
 
+@pytest.mark.parametrize(
+    "enabled,active", [(True, False), (True, True), (False, False)]
+)
+def test_shutdown_weight_transfer_engine_preserves_inference(enabled, active):
+    engine = _RecordingEngine() if enabled else None
+    worker = _make_worker(engine)
+    worker._weight_update_active = active
+    model_runner = worker.model_runner
+    if active:
+        with pytest.raises(RuntimeError, match="during a weight update"):
+            worker.shutdown_weight_transfer_engine()
+    else:
+        worker.shutdown_weight_transfer_engine()
+    if engine is not None:
+        assert engine.closed is not active
+    assert worker.weight_transfer_engine is engine
+    assert worker.model_runner is model_runner
+
+
 def test_reload_parameter_lookup_preserves_lora_module_names():
     base_layer = nn.Module()
     qweight = nn.Parameter(torch.ones(1))
@@ -95,7 +121,7 @@ def test_reload_parameter_lookup_preserves_lora_module_names():
     assert set(named_parameters) == {"proj.base_layer.qweight"}
     assert named_parameters["proj.base_layer.qweight"] is qweight
     assert model.get_parameter("proj.base_layer.qweight") is qweight
-    assert _get_parameter_for_reload(model, "proj.qweight") is qweight
+    assert get_parameter_for_reload(model, "proj.qweight") is qweight
 
 
 def test_start_update_finish_delegates_to_engine():
@@ -168,15 +194,17 @@ def test_rank_local_update_uses_data_parallel_index_after_reconfigure():
     assert worker._weight_update_active is True
 
 
-def test_finish_draft_session_keeps_lora_state():
+def test_finish_draft_session_keeps_lora_state(monkeypatch):
     engine = _RecordingEngine()
     engine.supports_draft_weight_update = True
     worker = _make_worker(engine)
-    worker._set_draft_weight_update_target = lambda: None
+    # Stub the bound method on a hand-built worker: retargeting needs a real model.
+    monkeypatch.setattr(worker, "_set_draft_weight_update_target", lambda: None)
 
     Worker.start_draft_weight_update(worker)
     Worker.finish_weight_update(worker)
 
+    assert isinstance(worker.model_runner, _RecordingModelRunner)
     assert worker.model_runner.reset_lora_calls == 0
 
 

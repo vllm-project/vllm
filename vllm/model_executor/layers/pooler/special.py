@@ -198,6 +198,11 @@ class BOSEOSFilter(Pooler):
         for i, (prompt_len, token_ids) in enumerate(
             zip(pooling_metadata.prompt_lens, prompt_token_ids)
         ):
+            # Late chunking returns one row per chunk, with special tokens
+            # already included in the means. Skip BOS/EOS row removal for these
+            # requests; ordinary token outputs still use the filtering below.
+            if pooling_metadata.pooling_params[i].late_chunking_params is not None:
+                continue
             pooled_data = pooled_outputs[i]
             assert (
                 isinstance(pooled_data, torch.Tensor)
