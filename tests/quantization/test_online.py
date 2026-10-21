@@ -174,7 +174,7 @@ MODELOPT_NVFP4_MOE_MODEL_NAME = "nvidia/Qwen3-30B-A3B-NVFP4"
     ids=["defaults", "ignore", "linear-and-ignore"],
 )
 def test_legacy_fp8_online_quantization_uses_per_tensor_shorthand(
-    tmp_path, caplog, disable_log_dedup, overrides
+    tmp_path, caplog_vllm, disable_log_dedup, overrides
 ) -> None:
     """The legacy alias preserves overrides and fills in per-tensor defaults."""
     _write_minimal_llama_config(tmp_path)
@@ -186,8 +186,8 @@ def test_legacy_fp8_online_quantization_uses_per_tensor_shorthand(
 
     assert isinstance(result, OnlineQuantizationConfig)
     assert result.args == resolve_quantization_config("fp8_per_tensor", overrides)
-    assert "--quantization fp8 is deprecated for online quantization" in caplog.text
-    assert "--quantization fp8_per_tensor instead" in caplog.text
+    assert "--quantization fp8 is deprecated for online quantization" in caplog_vllm.text
+    assert "--quantization fp8_per_tensor instead" in caplog_vllm.text
 
 
 @pytest.mark.parametrize(
