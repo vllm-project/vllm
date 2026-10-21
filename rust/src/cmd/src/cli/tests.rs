@@ -11,9 +11,7 @@ use vllm_server::{
     RendererSelection,
 };
 
-use super::{
-    BenchCommand, Cli, Command, SharedRuntimeArgs, parse_int_flag, parse_log_stats_interval,
-};
+use super::{BenchCommand, Cli, Command, LogStatsInterval, SharedRuntimeArgs, parse_int_flag};
 
 #[test]
 fn bench_serve_args_parse_without_managed_engine_repartition() {
@@ -481,12 +479,12 @@ fn log_stats_interval_falls_back_to_default_like_python() {
     let parsed = [
         "10", " 2.5 ", "1e-10", "0", "-1", "nan", "1e30", "inf", "ten",
     ]
-    .map(|value| format!("{value:?} -> {:?}", parse_log_stats_interval(value)))
+    .map(|value| format!("{value:?} -> {:?}", value.parse::<LogStatsInterval>()))
     .join("\n");
     expect![[r#"
         "10" -> Ok(Every(10s))
         " 2.5 " -> Ok(Every(2.5s))
-        "1e-10" -> Ok(Every(1ns))
+        "1e-10" -> Ok(Every(0ns))
         "0" -> Ok(Every(10s))
         "-1" -> Ok(Every(10s))
         "nan" -> Ok(Every(10s))

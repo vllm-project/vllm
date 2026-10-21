@@ -58,7 +58,7 @@ impl Llm {
     }
 
     /// Enable periodic stats logging at the given interval, or disable it with
-    /// `None`.
+    /// `None`. A zero interval logs as often as the timer allows.
     pub fn with_log_stats(mut self, interval: Option<Duration>) -> Self {
         self.stats_logger = interval.map(|interval| {
             StatsLogger::start(

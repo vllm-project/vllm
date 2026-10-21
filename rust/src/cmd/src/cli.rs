@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::time::Duration;
 
 use clap::{ArgAction, Args, Parser, Subcommand};
@@ -426,7 +427,7 @@ pub struct SharedRuntimeArgs {
 
     /// Seconds between periodic engine statistics logs (default 10). Like
     /// Python, it is set only through `VLLM_LOG_STATS_INTERVAL`.
-    #[arg(long, hide = true, env = "VLLM_LOG_STATS_INTERVAL", value_parser = parse_log_stats_interval)]
+    #[arg(long, hide = true, env = "VLLM_LOG_STATS_INTERVAL")]
     #[serde(skip)]
     pub log_stats_interval: Option<LogStatsInterval>,
 
@@ -568,7 +569,8 @@ impl SharedRuntimeArgs {
             self.api_key.push(api_key);
         }
         if let Some(value) = lookup("VLLM_LOG_STATS_INTERVAL") {
-            let interval = parse_log_stats_interval(&value)
+            let interval = value
+                .parse()
                 .map_err(|error| format!("invalid VLLM_LOG_STATS_INTERVAL: {error}"))?;
             self.log_stats_interval = Some(interval);
         }
@@ -788,21 +790,19 @@ pub enum LogStatsInterval {
 
 /// Parse `VLLM_LOG_STATS_INTERVAL` seconds like Python: a non-positive value
 /// falls back to the default, and any positive one is slept on as is.
-fn parse_log_stats_interval(value: &str) -> Result<LogStatsInterval, String> {
-    let seconds: f64 = value
-        .trim()
-        .parse()
-        .map_err(|_| format!("`{value}` is not a number of seconds"))?;
-    if seconds.is_nan() || seconds <= 0.0 {
-        return Ok(LogStatsInterval::Every(DEFAULT_LOG_STATS_INTERVAL));
+impl FromStr for LogStatsInterval {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let seconds: f64 = value
+            .trim()
+            .parse()
+            .map_err(|_| format!("`{value}` is not a number of seconds"))?;
+        if seconds.is_nan() || seconds <= 0.0 {
+            return Ok(Self::Every(DEFAULT_LOG_STATS_INTERVAL));
+        }
+        Ok(Duration::try_from_secs_f64(seconds).map_or(Self::Never, Self::Every))
     }
-    // Round a positive interval below the timer's resolution up to it, since
-    // a zero period panics.
-    Ok(
-        Duration::try_from_secs_f64(seconds).map_or(LogStatsInterval::Never, |interval| {
-            LogStatsInterval::Every(interval.max(Duration::from_nanos(1)))
-        }),
-    )
 }
 
 /// Parse an integer flag environment variable as Python's `bool(int(value))`,
