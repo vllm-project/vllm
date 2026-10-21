@@ -540,6 +540,11 @@ class DFlash2BeamModel(nn.Module):
 
 
 class DFlash2BeamForCausalLM(nn.Module):
+    # The speculator this is a draft model of (see SpeculativeDraftModel).
+    speculator_config_class = (
+        "vllm.v1.worker.gpu.spec_decode.dflash2.config.DFlash2SpeculatorConfig"
+    )
+
     # The checkpoint ships neither, so the speculator always aliases the target's.
     has_own_embed_tokens = False
     has_own_lm_head = False

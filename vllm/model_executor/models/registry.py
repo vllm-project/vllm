@@ -945,6 +945,8 @@ class _ModelInfo:
     supports_kv_cache_grouping: bool
     supported_video_pruning_methods: tuple[str, ...]
     supports_mm_device_do_normalize: bool
+    # See `SpeculativeDraftModel`.
+    speculator_config_class: str | None
 
     @staticmethod
     def from_model_cls(model: type[nn.Module]) -> "_ModelInfo":
@@ -983,6 +985,7 @@ class _ModelInfo:
             supports_mm_device_do_normalize=getattr(
                 model, "supports_mm_device_do_normalize", False
             ),
+            speculator_config_class=getattr(model, "speculator_config_class", None),
         )
 
 

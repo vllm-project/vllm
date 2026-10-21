@@ -431,6 +431,11 @@ class K3DSparkModel(nn.Module):
 
 
 class K3DSparkForCausalLM(nn.Module):
+    # The speculator this is a draft model of (see SpeculativeDraftModel).
+    speculator_config_class = (
+        "vllm.v1.worker.gpu.spec_decode.dspark.config.DSparkSpeculatorConfig"
+    )
+
     has_own_embed_tokens = False
     has_own_lm_head = False
     draft_id_to_target_id = None

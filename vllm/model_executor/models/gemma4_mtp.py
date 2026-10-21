@@ -446,6 +446,11 @@ class Gemma4MTP(nn.Module):
     hidden-state feedback buffer.
     """
 
+    # The speculator this is a draft model of (see SpeculativeDraftModel).
+    speculator_config_class = (
+        "vllm.v1.worker.gpu.spec_decode.gemma4.config.Gemma4MTPSpeculatorConfig"
+    )
+
     has_own_lm_head = True
 
     hf_to_vllm_mapper = WeightsMapper(

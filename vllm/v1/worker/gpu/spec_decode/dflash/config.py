@@ -1,17 +1,37 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from vllm.v1.worker.gpu.spec_decode.speculator_config import SpeculatorConfig
+from typing import TYPE_CHECKING, ClassVar
+
+from vllm.v1.worker.gpu.spec_decode.eagle.config import wrap_eagle_hf_config
+from vllm.v1.worker.gpu.spec_decode.speculator_config import (
+    CheckpointSpeculatorConfig,
+    TargetEmbedSharing,
+)
+
+if TYPE_CHECKING:
+    from vllm.config import SpeculativeConfig
 
 
-class DFlashSpeculatorConfig(SpeculatorConfig):
+class DFlashSpeculatorConfig(CheckpointSpeculatorConfig):
+    builtin_method = "dflash"
     speculator_class = (
         "vllm.v1.worker.gpu.spec_decode.dflash.speculator.DFlashSpeculator"
     )
     uses_target_hidden_states = True
     uses_separate_draft_pass = True
-    target_embed_sharing = "always"
+    target_embed_sharing: ClassVar[TargetEmbedSharing] = "always"
     supports_watermarking = True
     supports_parallel_drafting = True
+
+    @classmethod
+    def matches(cls, spec: "SpeculativeConfig") -> bool:
+        return "dflash" in spec.draft_model_config.model.lower()
+
+    @classmethod
+    def adapt_draft_model_config(cls, spec: "SpeculativeConfig") -> None:
+        assert cls.builtin_method is not None
+        wrap_eagle_hf_config(spec, cls.builtin_method)
+        spec.parallel_drafting = True
 
     @property
     def uses_aux_hidden_states(self) -> bool:

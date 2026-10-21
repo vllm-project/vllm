@@ -1538,6 +1538,22 @@ def supports_transcription(
 
 
 @runtime_checkable
+class SpeculativeDraftModel(Protocol):
+    """The interface of a speculative decoding draft model which declares the
+    speculator it's for. This is read through the model registry, so that it's
+    available without importing the model.
+    """
+
+    speculator_config_class: ClassVar[str]
+    """Fully-qualified name of the config class of the speculator that this is
+    a draft model of (a subclass of
+    `vllm.v1.worker.gpu.spec_decode.speculator_config.SpeculatorConfig`).
+    Unless a speculative method is configured that the checkpoint can't
+    override, a draft checkpoint with this model's architecture uses this
+    speculator."""
+
+
+@runtime_checkable
 class SupportsEagleBase(Protocol):
     """Base interface for models that support EAGLE-based speculative decoding."""
 

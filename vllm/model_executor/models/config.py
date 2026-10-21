@@ -119,7 +119,7 @@ class GlmMoeDsaForCausalLM(VerifyAndUpdateConfig):
             spec_config = vllm_config.speculative_config
             if (
                 spec_config is not None
-                and spec_config.method not in ("mtp", "dspark")
+                and spec_config.builtin_method not in ("mtp", "dspark")
                 and spec_config.kv_cache_dtype is None
             ):
                 spec_config.kv_cache_dtype = "auto"
@@ -151,7 +151,7 @@ class Glm5NextModelConfig(VerifyAndUpdateConfig):
         spec_config = vllm_config.speculative_config
         if (
             spec_config is not None
-            and spec_config.method != "mtp"
+            and spec_config.builtin_method != "mtp"
             and spec_config.kv_cache_dtype is None
         ):
             spec_config.kv_cache_dtype = "auto"
@@ -1115,7 +1115,7 @@ class Qwen4ExpForConditionalGenerationConfig(Qwen3_5ForConditionalGenerationConf
         if multimodal_config is not None and multimodal_config.language_model_only:
             _strip_qwen4_exp_mrope(vllm_config.model_config)
         spec_config = vllm_config.speculative_config
-        if spec_config is not None and spec_config.method not in {
+        if spec_config is not None and spec_config.builtin_method not in {
             "mtp",
             "ngram",
             "ngram_gpu",
