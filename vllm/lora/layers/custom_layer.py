@@ -1,5 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+"""LoRA implementations for specialized, model-specific layers.
+
+Add LoRA support for custom layers that require specialized handling here.
+"""
+
 from .base_linear import BaseLinearLayerWithLoRA
 from .column_parallel_linear import (
     ColumnParallelLinearWithLoRA,
@@ -51,8 +57,13 @@ class Step5FusedQKVIndexerWithLoRA(MergedColumnParallelLinearWithLoRA):
 
     @classmethod
     def can_replace_layer(
-        cls, source_layer, lora_config, packed_modules_list, model_config=None
-    ):
+        cls,
+        source_layer,
+        lora_config,
+        packed_modules_list,
+        model_config=None,
+        decorate: bool = True,
+    ) -> bool:
         return (
             type(source_layer).__name__ == "Step5FusedQKVIndexerLinear"
             and len(packed_modules_list) == 7
