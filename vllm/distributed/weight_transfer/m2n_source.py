@@ -5,7 +5,9 @@
 M2N plans a transfer from both sides' layouts, so the trainer has to say how it
 holds each parameter — which the base `WeightSource` / `ParamMeta` pair does not
 express. Each parameter owns its source mesh and placements because dense and
-expert weights can use different factorizations over the same trainer ranks.
+expert weights can use different factorizations over the same source-group
+ranks. A source topology separately routes each parameter to its owning rank
+group, including pipeline-parallel producers.
 """
 
 from collections.abc import Callable, Iterator, Sequence
@@ -21,11 +23,13 @@ from vllm.distributed.weight_transfer.m2n_common import (
     M2NLayout,
     M2NMesh,
     M2NParamMeta,
+    M2NSourceTopology,
     Placements,
 )
 
 __all__ = [
     "M2NWeightSource",
+    "M2NSourceTopology",
     "M2NManifestEntry",
     "ManifestM2NWeightSource",
     "DTensorModuleSource",
@@ -56,6 +60,36 @@ class M2NWeightSource(WeightSource):
         allocation lifetime, dtype, and shape correctness.
         """
         raise NotImplementedError
+
+    def source_topology(self) -> M2NSourceTopology | None:
+        """Return explicit source groups, or ``None`` for the legacy single group.
+
+        Group ranks use global trainer-rank ids in source-mesh coordinate order.
+        The trainer engine converts ``None`` into one group containing every
+        trainer rank and assigning every parameter to it. Pipeline-parallel or
+        otherwise partitioned producers override this together with
+        :meth:`iter_group`; vLLM never infers trainer ownership from parameter
+        names or inference topology.
+        """
+        return None
+
+    def iter_group(self, group_index: int) -> Iterator[tuple[str, Any]]:
+        """Iterate one source group in its global manifest subsequence order.
+
+        Legacy sources expose one group and keep their existing ``__iter__``
+        implementation. Explicit multi-group sources must override this method
+        so ranks materialize only parameters belonging to the requested group.
+        """
+        if (
+            not isinstance(group_index, int)
+            or isinstance(group_index, bool)
+            or group_index != 0
+        ):
+            raise ValueError(
+                "legacy M2N source only supports source group 0; explicit "
+                "multi-group sources must override iter_group()"
+            )
+        return iter(self)
 
 
 @dataclass(frozen=True)

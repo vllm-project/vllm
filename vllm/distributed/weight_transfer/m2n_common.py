@@ -3,14 +3,18 @@
 """Shared helpers for the NCCL M2N (`nccl_m2n`) weight transfer backend.
 
 M2N reshards a tensor between two disjoint meshes of ranks that live in one
-communicator: the trainer occupies ranks `[0, T)` and the inference workers
-`[T, T + N)`. This module holds everything both sides need — the optional
-runtime import, layout descriptors, and the conversion to `nccl.m2n` types —
-so the engine module stays about the transfer itself.
+communicator. Each transfer route places one ordered trainer source group at
+`[0, T)` and an ordered destination group at `[T, T + N)`. This module holds
+everything both sides need — the optional runtime import, topology/layout
+descriptors, and conversion to `nccl.m2n` types — so engine modules stay about
+transfer execution.
 """
 
 import hashlib
 import json
+import math
+import os
+from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
@@ -49,6 +53,8 @@ MAX_DEST_SHARDS = 64
 # agree on this before any rank constructs a NCCL communicator.
 M2N_WIRE_SCHEMA_VERSION = 3
 
+_MULTI_COMM_LAUNCH_ENV = "NCCL_LAUNCH_ORDER_IMPLICIT"
+
 
 class M2NDestinationMode(str, Enum):
     """How one logical checkpoint tensor is installed on a worker."""
@@ -56,6 +62,21 @@ class M2NDestinationMode(str, Enum):
     IN_PLACE = "in_place"
     SHARDED_STAGING = "sharded_staging"
     FULL_FALLBACK = "full_fallback"
+
+
+def m2n_load_group(
+    mode: M2NDestinationMode | str, staging_group: int | None
+) -> int | None:
+    """Return the ordered model-load group, or ``None`` for in-place loads."""
+    resolved = M2NDestinationMode(mode)
+    if resolved is M2NDestinationMode.IN_PLACE:
+        return None
+    if resolved is M2NDestinationMode.FULL_FALLBACK:
+        # The model's fallback loader has no out-of-order input contract.
+        return -1
+    if not isinstance(staging_group, int) or isinstance(staging_group, bool):
+        raise ValueError("a staged destination needs an integer staging group")
+    return staging_group
 
 
 SUPPORTED_DTYPES: frozenset[torch.dtype] = frozenset(
@@ -99,15 +120,66 @@ def prepare_m2n_local_runtime(m2n: Any, max_cta: int | None) -> tuple[Any, int, 
     return nccl, device, handle
 
 
+def check_multi_communicator_launch_order(num_routes: int) -> None:
+    """Require NCCL's ordered multi-communicator launch mode when needed.
+
+    Pipeline transfers use one NCCL communicator and CUDA stream per route.
+    NCCL requires implicit launch ordering for overlapping
+    operations on independent communicators. This is process-global NCCL
+    configuration, so callers must set it before starting the process rather
+    than mutating the environment after NCCL may already have initialized.
+    """
+    if (
+        not isinstance(num_routes, int)
+        or isinstance(num_routes, bool)
+        or num_routes <= 0
+    ):
+        raise ValueError("nccl_m2n needs at least one transfer route")
+    if num_routes > 1 and os.environ.get(_MULTI_COMM_LAUNCH_ENV) != "1":
+        value = os.environ.get(_MULTI_COMM_LAUNCH_ENV)
+        raise RuntimeError(
+            f"{num_routes} nccl_m2n transfer routes use independent NCCL "
+            "communicators and streams; set NCCL_LAUNCH_ORDER_IMPLICIT=1 "
+            f"before starting every process (current value: {value!r})"
+        )
+
+
 def create_m2n_communicator(
     nccl: Any,
     group: "StatelessProcessGroup",
     unique_id_bytes: bytes | None,
-) -> Any:
-    """Create the M2N data-plane communicator through NCCL4Py."""
+    *,
+    members: Sequence[int] | None = None,
+) -> Any | None:
+    """Create one M2N data-plane communicator through NCCL4Py.
+
+    ``members`` uses metadata-group ranks in communicator-local order. Every
+    metadata rank must call this helper for each route, including nonmembers, so
+    automatic UID bootstrap advances the shared control plane identically.
+    Nonmembers return ``None`` after that bootstrap.
+    """
+    ordered_members = (
+        tuple(range(group.world_size)) if members is None else tuple(members)
+    )
+    if not ordered_members:
+        raise ValueError("M2N communicator members must not be empty")
+    if any(
+        not isinstance(rank, int)
+        or isinstance(rank, bool)
+        or not 0 <= rank < group.world_size
+        for rank in ordered_members
+    ):
+        raise ValueError(
+            "M2N communicator members must be metadata ranks in "
+            f"[0, {group.world_size})"
+        )
+    if len(set(ordered_members)) != len(ordered_members):
+        raise ValueError("M2N communicator members must be unique")
+
     if unique_id_bytes is None:
         envelope: dict[str, bytes | str | None] | None = None
-        if group.rank == 0:
+        uid_root = ordered_members[0]
+        if group.rank == uid_root:
             try:
                 envelope = {
                     "unique_id": bytes(nccl.get_unique_id().as_bytes),
@@ -118,7 +190,7 @@ def create_m2n_communicator(
                     "unique_id": None,
                     "error": f"{type(exc).__name__}: {exc}",
                 }
-        envelope = group.broadcast_obj(envelope, src=0)
+        envelope = group.broadcast_obj(envelope, src=uid_root)
         if not isinstance(envelope, Mapping) or set(envelope) != {"unique_id", "error"}:
             raise RuntimeError("invalid NCCL4Py unique-id envelope")
         error = envelope["error"]
@@ -130,12 +202,17 @@ def create_m2n_communicator(
         if not isinstance(received_unique_id, bytes):
             raise RuntimeError("NCCL4Py unique-id broadcast did not return bytes")
         unique_id_bytes = received_unique_id
+    elif not isinstance(unique_id_bytes, bytes):
+        raise TypeError("NCCL unique id must be bytes or None")
+
+    if group.rank not in ordered_members:
+        return None
 
     unique_id = nccl.UniqueId.from_bytes(unique_id_bytes)
     with unpinned_nccl_env():
         return nccl.Communicator.init(
-            nranks=group.world_size,
-            rank=group.rank,
+            nranks=len(ordered_members),
+            rank=ordered_members.index(group.rank),
             unique_id=unique_id,
         )
 
@@ -492,12 +569,459 @@ class M2NWireParam:
         }
 
 
-def source_plan_digest(params: Sequence[M2NWireParam]) -> str:
+@dataclass(frozen=True)
+class M2NSourceTopology:
+    """Ordered source rank groups and each parameter's owning group.
+
+    Rank ids live in the global metadata-group namespace. Rank order within a
+    group defines route-local source-mesh coordinates, so callers must not sort
+    it. ``param_groups[i]`` selects the group that exports ``params[i]``.
+    Transfer-route identity is derived separately from this source ownership.
+
+    An empty topology represents an empty manifest and is also used as a
+    lifecycle sentinel. A usable non-empty plan must pass :meth:`validate`.
+    Source groups are non-empty and pairwise disjoint, so a trainer rank belongs
+    to at most one group. Each parameter selects exactly one canonical group.
+    """
+
+    groups: tuple[tuple[int, ...], ...]
+    param_groups: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        groups = tuple(tuple(ranks) for ranks in self.groups)
+        param_groups = tuple(self.param_groups)
+        object.__setattr__(self, "groups", groups)
+        object.__setattr__(self, "param_groups", param_groups)
+
+        seen_ranks: set[int] = set()
+        for group_index, ranks in enumerate(groups):
+            if not ranks:
+                raise ValueError(f"source group {group_index} must not be empty")
+            if any(
+                not isinstance(rank, int) or isinstance(rank, bool) or rank < 0
+                for rank in ranks
+            ):
+                raise ValueError(
+                    f"source group {group_index} ranks must be non-negative integers"
+                )
+            if len(set(ranks)) != len(ranks):
+                raise ValueError(
+                    f"source group {group_index} contains duplicate trainer ranks"
+                )
+            overlap = seen_ranks.intersection(ranks)
+            if overlap:
+                raise ValueError(
+                    f"source group {group_index} overlaps an earlier group at "
+                    f"trainer rank {min(overlap)}"
+                )
+            seen_ranks.update(ranks)
+
+        for param_index, group_index in enumerate(param_groups):
+            if not isinstance(group_index, int) or isinstance(group_index, bool):
+                raise TypeError(
+                    f"parameter {param_index} source group must be an integer"
+                )
+            if not 0 <= group_index < len(groups):
+                raise ValueError(
+                    f"parameter {param_index} references source group "
+                    f"{group_index}, but there are {len(groups)} groups"
+                )
+
+    @classmethod
+    def single_group(
+        cls, num_trainer_ranks: int, num_params: int
+    ) -> "M2NSourceTopology":
+        """Build the legacy topology: every trainer exports every parameter."""
+        if (
+            not isinstance(num_trainer_ranks, int)
+            or isinstance(num_trainer_ranks, bool)
+            or num_trainer_ranks <= 0
+        ):
+            raise ValueError("num_trainer_ranks must be a positive integer")
+        if (
+            not isinstance(num_params, int)
+            or isinstance(num_params, bool)
+            or num_params < 0
+        ):
+            raise ValueError("num_params must be a non-negative integer")
+        if num_params == 0:
+            return cls((), ())
+        return cls(
+            (tuple(range(num_trainer_ranks)),),
+            (0,) * num_params,
+        )
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "M2NSourceTopology":
+        """Parse one strict JSON-decoded topology record."""
+        fields = {"groups", "param_groups"}
+        missing = fields - value.keys()
+        extra = value.keys() - fields
+        if missing or extra:
+            details = []
+            if missing:
+                details.append(f"missing {sorted(missing)}")
+            if extra:
+                details.append(f"unexpected {sorted(extra)}")
+            raise ValueError(f"invalid M2N source topology: {', '.join(details)}")
+        raw_groups = value["groups"]
+        raw_param_groups = value["param_groups"]
+        if not isinstance(raw_groups, list):
+            raise TypeError("source topology groups must be a list")
+        if not isinstance(raw_param_groups, list):
+            raise TypeError("source topology param_groups must be a list")
+        if any(not isinstance(ranks, list) for ranks in raw_groups):
+            raise TypeError("each source topology group must be a list")
+        return cls(
+            tuple(tuple(ranks) for ranks in raw_groups),
+            tuple(raw_param_groups),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize this topology using JSON-compatible values."""
+        return {
+            "groups": [list(ranks) for ranks in self.groups],
+            "param_groups": list(self.param_groups),
+        }
+
+    def validate(self, *, num_trainer_ranks: int, num_params: int) -> None:
+        """Validate this topology against one concrete source manifest."""
+        if (
+            not isinstance(num_trainer_ranks, int)
+            or isinstance(num_trainer_ranks, bool)
+            or num_trainer_ranks <= 0
+        ):
+            raise ValueError("num_trainer_ranks must be a positive integer")
+        if (
+            not isinstance(num_params, int)
+            or isinstance(num_params, bool)
+            or num_params < 0
+        ):
+            raise ValueError("num_params must be a non-negative integer")
+        if len(self.param_groups) != num_params:
+            raise ValueError(
+                f"source topology maps {len(self.param_groups)} parameters, "
+                f"expected {num_params}"
+            )
+        if num_params == 0:
+            if self.groups:
+                raise ValueError("an empty source manifest must not declare groups")
+            return
+        if not self.groups:
+            raise ValueError("a non-empty source manifest needs a source group")
+        for group_index, ranks in enumerate(self.groups):
+            invalid = [rank for rank in ranks if rank >= num_trainer_ranks]
+            if invalid:
+                raise ValueError(
+                    f"source group {group_index} rank {invalid[0]} is outside "
+                    f"trainer ranks [0, {num_trainer_ranks})"
+                )
+        used = set(self.param_groups)
+        unused = sorted(set(range(len(self.groups))) - used)
+        if unused:
+            raise ValueError(f"source topology contains unused groups {unused}")
+
+
+@dataclass(frozen=True)
+class M2NTransferRoute:
+    """One source and destination group in route-local communicator order."""
+
+    source_group_index: int
+    members: tuple[int, ...]
+    param_indices: tuple[int, ...]
+    dst_mesh: M2NMesh
+
+    def __post_init__(self) -> None:
+        members = tuple(self.members)
+        param_indices = tuple(self.param_indices)
+        object.__setattr__(self, "members", members)
+        object.__setattr__(self, "param_indices", param_indices)
+        if (
+            not isinstance(self.source_group_index, int)
+            or isinstance(self.source_group_index, bool)
+            or self.source_group_index < 0
+        ):
+            raise ValueError("transfer route source_group_index must be non-negative")
+        if not members or any(
+            not isinstance(rank, int) or isinstance(rank, bool) or rank < 0
+            for rank in members
+        ):
+            raise ValueError(
+                "transfer route members must be non-empty non-negative integers"
+            )
+        if len(set(members)) != len(members):
+            raise ValueError("transfer route contains duplicate members")
+        if not param_indices or any(
+            not isinstance(index, int) or isinstance(index, bool) or index < 0
+            for index in param_indices
+        ):
+            raise ValueError(
+                "transfer route param_indices must be non-empty non-negative integers"
+            )
+        if tuple(sorted(set(param_indices))) != param_indices:
+            raise ValueError(
+                "transfer route param_indices must be unique and increasing"
+            )
+        if not isinstance(self.dst_mesh, M2NMesh):
+            raise TypeError("transfer route dst_mesh must be an M2NMesh")
+        if not 0 < self.dst_mesh.start_rank < len(members):
+            raise ValueError(
+                "transfer route destination must follow at least one source rank"
+            )
+        if self.dst_mesh.start_rank + self.dst_mesh.size != len(members):
+            raise ValueError(
+                "transfer route destination mesh must cover the communicator tail"
+            )
+
+    @property
+    def source_ranks(self) -> tuple[int, ...]:
+        """Global metadata ranks forming the ordered source mesh."""
+        return self.members[: self.dst_mesh.start_rank]
+
+    @property
+    def worker_ranks(self) -> tuple[int, ...]:
+        """Global metadata ranks forming the ordered destination mesh."""
+        return self.members[self.dst_mesh.start_rank :]
+
+
+@dataclass(frozen=True)
+class M2NTransferWave:
+    """One deterministic bounded issue wave shared by senders and receivers."""
+
+    issue_indices: tuple[int, ...]
+    consume_index: int | None
+
+
+def build_m2n_transfer_waves(
+    routes: Sequence[M2NTransferRoute],
+    load_groups: Sequence[int | None],
+    *,
+    active_indices: Sequence[int] | None = None,
+) -> tuple[M2NTransferWave, ...]:
+    """Plan bounded launches while preserving model-loader dependencies.
+
+    ``None`` identifies an in-place destination. Equal integer values identify
+    callbacks that must run in manifest order. A wave launches at most one new
+    parameter on every unblocked route before consuming one ready result. Ready
+    results are drained before the next launch wave, so independent PP groups
+    advance together without reordering fused or fallback loader inputs.
+    """
+    groups = tuple(load_groups)
+    if any(
+        group is not None and (not isinstance(group, int) or isinstance(group, bool))
+        for group in groups
+    ):
+        raise TypeError("load_groups must contain integers or None")
+    if active_indices is None:
+        active = tuple(range(len(groups)))
+    else:
+        active = tuple(active_indices)
+    if any(
+        not isinstance(index, int)
+        or isinstance(index, bool)
+        or not 0 <= index < len(groups)
+        for index in active
+    ):
+        raise ValueError("active parameter index is outside load_groups")
+    if len(set(active)) != len(active):
+        raise ValueError("active parameter indices must be unique")
+    if tuple(sorted(active)) != active:
+        raise ValueError("active parameter indices must be increasing")
+
+    param_routes = build_m2n_param_routes(routes, len(groups))
+
+    active_set = set(active)
+    queues = {
+        route_index: deque(
+            index for index in route.param_indices if index in active_set
+        )
+        for route_index, route in enumerate(routes)
+    }
+    predecessors: dict[int, int | None] = {}
+    last_by_group: dict[int, int] = {}
+    for index in active:
+        group = groups[index]
+        if group is None:
+            continue
+        predecessors[index] = last_by_group.get(group)
+        last_by_group[group] = index
+
+    pending: dict[int, int] = {}
+    consumed: set[int] = set()
+    waves: list[M2NTransferWave] = []
+
+    while any(queues.values()) or pending:
+        issued: list[int] = []
+        ready = sorted(
+            index
+            for index in pending.values()
+            if predecessors[index] is None or predecessors[index] in consumed
+        )
+        if not ready:
+            for route_index in range(len(routes)):
+                queue = queues[route_index]
+                if not queue or route_index in pending:
+                    continue
+                index = queue.popleft()
+                issued.append(index)
+                if groups[index] is not None:
+                    pending[route_index] = index
+            ready = sorted(
+                index
+                for index in pending.values()
+                if predecessors[index] is None or predecessors[index] in consumed
+            )
+
+        consume_index = ready[0] if ready else None
+        if consume_index is not None:
+            del pending[param_routes[consume_index]]
+            consumed.add(consume_index)
+        if not issued and consume_index is None:
+            blocked = sorted(pending.values())
+            raise ValueError(
+                "cannot build bounded M2N transfer schedule; blocked callbacks "
+                f"are {blocked!r}"
+            )
+        waves.append(M2NTransferWave(tuple(issued), consume_index))
+
+    if consumed != set(predecessors):
+        raise ValueError("M2N transfer schedule left callbacks unconsumed")
+    return tuple(waves)
+
+
+def build_m2n_param_routes(
+    routes: Sequence[M2NTransferRoute], num_params: int
+) -> tuple[int, ...]:
+    """Map each manifest parameter to its canonical transfer-route index."""
+    if (
+        not isinstance(num_params, int)
+        or isinstance(num_params, bool)
+        or num_params < 0
+    ):
+        raise ValueError("num_params must be a non-negative integer")
+    param_routes = [-1] * num_params
+    for route_index, route in enumerate(routes):
+        for param_index in route.param_indices:
+            if param_index >= num_params:
+                raise ValueError(
+                    f"transfer route {route_index} parameter {param_index} is outside "
+                    f"the {num_params}-parameter manifest"
+                )
+            if param_routes[param_index] != -1:
+                raise ValueError(
+                    f"parameter {param_index} belongs to multiple transfer routes"
+                )
+            param_routes[param_index] = route_index
+    try:
+        missing = param_routes.index(-1)
+    except ValueError:
+        return tuple(param_routes)
+    raise ValueError(f"parameter {missing} has no transfer route")
+
+
+def build_m2n_transfer_routes(
+    topology: M2NSourceTopology,
+    *,
+    num_trainer_ranks: int,
+    world_size: int,
+    dst_mesh_dims: tuple[int, int],
+) -> tuple[M2NTransferRoute, ...]:
+    """Build canonical source-group-to-all-workers transfer routes."""
+    if not isinstance(topology, M2NSourceTopology):
+        raise TypeError("topology must be an M2NSourceTopology")
+    if (
+        not isinstance(num_trainer_ranks, int)
+        or isinstance(num_trainer_ranks, bool)
+        or num_trainer_ranks <= 0
+    ):
+        raise ValueError("num_trainer_ranks must be a positive integer")
+    if (
+        not isinstance(world_size, int)
+        or isinstance(world_size, bool)
+        or world_size <= num_trainer_ranks
+    ):
+        raise ValueError(
+            f"world_size {world_size!r} must exceed num_trainer_ranks "
+            f"{num_trainer_ranks!r}"
+        )
+    topology.validate(
+        num_trainer_ranks=num_trainer_ranks,
+        num_params=len(topology.param_groups),
+    )
+    if not topology.groups:
+        raise ValueError("source topology has no transfer routes")
+    dims = tuple(dst_mesh_dims)
+    worker_mesh = M2NMesh(cast(tuple[int, int], dims), 0)
+    num_workers = world_size - num_trainer_ranks
+    if worker_mesh.size != num_workers:
+        raise ValueError(
+            f"destination mesh dims {dims} cover {worker_mesh.size} ranks, "
+            f"expected {num_workers} workers"
+        )
+    workers = tuple(range(num_trainer_ranks, world_size))
+    routes: list[M2NTransferRoute] = []
+    for group_index, source_ranks in enumerate(topology.groups):
+        # Keep manifest order: route members must issue matching NCCL
+        # collective sequences.
+        param_indices = tuple(
+            index
+            for index, owner in enumerate(topology.param_groups)
+            if owner == group_index
+        )
+        routes.append(
+            M2NTransferRoute(
+                source_group_index=group_index,
+                members=source_ranks + workers,
+                param_indices=param_indices,
+                dst_mesh=M2NMesh(
+                    cast(tuple[int, int], dims),
+                    len(source_ranks),
+                ),
+            )
+        )
+    return tuple(routes)
+
+
+def _legacy_source_topology(
+    params: Sequence[M2NWireParam],
+) -> M2NSourceTopology:
+    """Infer the pre-PP single source group for compatibility callers."""
+    if not params:
+        return M2NSourceTopology((), ())
+    num_trainer_ranks = math.prod(params[0].src_mesh_dims)
+    for param in params[1:]:
+        if math.prod(param.src_mesh_dims) != num_trainer_ranks:
+            raise ValueError(
+                "mixed source mesh sizes require an explicit M2NSourceTopology"
+            )
+    return M2NSourceTopology.single_group(num_trainer_ranks, len(params))
+
+
+def source_plan_digest(
+    params: Sequence[M2NWireParam],
+    topology: M2NSourceTopology | None = None,
+) -> str:
     """Return a rank-independent digest of the ordered source wire plan."""
+    resolved_topology = topology or _legacy_source_topology(params)
+    if params:
+        inferred_num_trainers = (
+            max(
+                (rank for ranks in resolved_topology.groups for rank in ranks),
+                default=0,
+            )
+            + 1
+        )
+        resolved_topology.validate(
+            num_trainer_ranks=inferred_num_trainers,
+            num_params=len(params),
+        )
+    elif resolved_topology.groups or resolved_topology.param_groups:
+        raise ValueError("an empty source plan must use an empty topology")
     payload = json.dumps(
         {
             "schema_version": M2N_WIRE_SCHEMA_VERSION,
             "params": [param.to_dict() for param in params],
+            "source_topology": resolved_topology.to_dict(),
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -510,6 +1034,8 @@ def check_source_plan_agreement(
     params: Sequence[M2NWireParam],
     expected_digest: str | None = None,
     local_error: str | None = None,
+    *,
+    topology: M2NSourceTopology | None = None,
 ) -> str:
     """Verify every participant entered with the same source plan."""
     prepared_error = local_error
@@ -517,7 +1043,7 @@ def check_source_plan_agreement(
     declared: str | None = expected_digest
     if prepared_error is None:
         try:
-            digest = source_plan_digest(params)
+            digest = source_plan_digest(params, topology)
             declared = digest if expected_digest is None else expected_digest
             if not isinstance(declared, str) or not declared:
                 raise ValueError("declared source digest must be a non-empty string")

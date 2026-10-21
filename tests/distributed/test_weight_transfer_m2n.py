@@ -32,11 +32,18 @@ from vllm.distributed.weight_transfer.m2n_common import (
     M2NLayout,
     M2NMesh,
     M2NParamMeta,
+    M2NSourceTopology,
+    M2NTransferRoute,
     M2NWireParam,
+    build_m2n_param_routes,
+    build_m2n_transfer_routes,
+    build_m2n_transfer_waves,
     check_data_plane_agreement,
+    check_multi_communicator_launch_order,
     check_runtime_ready_agreement,
     check_source_plan_agreement,
     create_m2n_communicator,
+    m2n_load_group,
     resolve_layout,
     source_plan_digest,
     validate_local_buffer,
@@ -85,6 +92,24 @@ from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 
 VALID_UID_B64 = base64.b64encode(b"\x00" * 128).decode()
+SECOND_VALID_UID_B64 = base64.b64encode(b"\x01" * 128).decode()
+
+
+def test_multi_communicator_launch_order_preflight(monkeypatch):
+    monkeypatch.delenv("NCCL_LAUNCH_ORDER_IMPLICIT", raising=False)
+    check_multi_communicator_launch_order(1)
+
+    with pytest.raises(RuntimeError, match="NCCL_LAUNCH_ORDER_IMPLICIT=1"):
+        check_multi_communicator_launch_order(2)
+
+    monkeypatch.setenv("NCCL_LAUNCH_ORDER_IMPLICIT", "1")
+    check_multi_communicator_launch_order(2)
+
+
+@pytest.mark.parametrize("num_routes", [0, -1, True, 1.5])
+def test_multi_communicator_launch_order_rejects_invalid_route_count(num_routes):
+    with pytest.raises(ValueError, match="at least one transfer route"):
+        check_multi_communicator_launch_order(num_routes)
 
 
 @pytest.mark.parametrize(
@@ -214,6 +239,272 @@ def _fake_m2n():
         Shard=lambda dim: dim,
         reshard=Mock(),
     )
+
+
+@contextmanager
+def _fake_cuda_stream_context(_stream):
+    yield
+
+
+def _set_pp1_worker_transport(
+    engine,
+    num_params,
+    *,
+    dst_mesh_dims=(1, 1),
+    group=None,
+    stream=None,
+):
+    topology = M2NSourceTopology.single_group(1, num_params)
+    routes = build_m2n_transfer_routes(
+        topology,
+        num_trainer_ranks=1,
+        world_size=1 + dst_mesh_dims[0] * dst_mesh_dims[1],
+        dst_mesh_dims=dst_mesh_dims,
+    )
+    group = Mock() if group is None else group
+    stream = Mock() if stream is None else stream
+    engine._source_topology = topology
+    engine._routes = routes
+    engine._param_routes = build_m2n_param_routes(routes, num_params)
+    engine._model_update_groups = {0: group}
+    engine.model_update_group = group
+    engine._route_streams = {0: stream}
+    return group, stream
+
+
+class TestSourceTopology:
+    @staticmethod
+    def _params() -> list[M2NWireParam]:
+        return [
+            M2NWireParam(name, "float32", (4,), (1, 2), (REPLICATE, 0))
+            for name in ("first", "second", "third")
+        ]
+
+    def test_round_trip_and_digest_preserve_rank_order_and_parameter_ownership(self):
+        params = self._params()
+        topology = M2NSourceTopology(
+            groups=((2, 0), (1, 3)),
+            param_groups=(0, 1, 0),
+        )
+
+        topology.validate(num_trainer_ranks=4, num_params=3)
+
+        assert M2NSourceTopology.from_dict(topology.to_dict()) == topology
+        assert source_plan_digest(params, topology) != source_plan_digest(
+            params,
+            M2NSourceTopology(
+                groups=((0, 2), (1, 3)),
+                param_groups=(0, 1, 0),
+            ),
+        )
+        assert source_plan_digest(params, topology) != source_plan_digest(
+            params,
+            M2NSourceTopology(
+                groups=((2, 0), (1, 3)),
+                param_groups=(1, 0, 1),
+            ),
+        )
+
+    def test_routes_use_group_rank_order_and_global_parameter_order(self):
+        topology = M2NSourceTopology(
+            groups=((2, 0), (1, 3)),
+            param_groups=(0, 1, 0),
+        )
+
+        routes = build_m2n_transfer_routes(
+            topology,
+            num_trainer_ranks=4,
+            world_size=6,
+            dst_mesh_dims=(1, 2),
+        )
+
+        assert routes == (
+            M2NTransferRoute(
+                source_group_index=0,
+                members=(2, 0, 4, 5),
+                param_indices=(0, 2),
+                dst_mesh=M2NMesh((1, 2), 2),
+            ),
+            M2NTransferRoute(
+                source_group_index=1,
+                members=(1, 3, 4, 5),
+                param_indices=(1,),
+                dst_mesh=M2NMesh((1, 2), 2),
+            ),
+        )
+
+    def test_disjoint_groups_are_valid(self):
+        topology = M2NSourceTopology(
+            groups=((0, 1), (2, 3)),
+            param_groups=(0, 1),
+        )
+
+        topology.validate(num_trainer_ranks=4, num_params=2)
+        routes = build_m2n_transfer_routes(
+            topology,
+            num_trainer_ranks=4,
+            world_size=5,
+            dst_mesh_dims=(1, 1),
+        )
+
+        assert [route.members for route in routes] == [
+            (0, 1, 4),
+            (2, 3, 4),
+        ]
+
+    @pytest.mark.parametrize(
+        ("groups", "param_groups", "num_params"),
+        [
+            (((),), (0,), 1),
+            (((0, 0),), (0,), 1),
+            (((0, 4),), (0,), 1),
+            (((0, 1), (0, 1)), (0, 1), 2),
+            (((0, 1), (1, 2)), (0, 1), 2),
+            (((0,), (1,)), (0, 0), 2),
+            (((0,),), (0,), 2),
+            (((0,),), (1, 0), 2),
+        ],
+    )
+    def test_invalid_topology_is_rejected(self, groups, param_groups, num_params):
+        with pytest.raises(ValueError):
+            topology = M2NSourceTopology(
+                groups=groups,
+                param_groups=param_groups,
+            )
+            topology.validate(num_trainer_ranks=4, num_params=num_params)
+
+    def test_pp1_normalizes_to_one_route(self):
+        topology = M2NSourceTopology.single_group(
+            num_trainer_ranks=2,
+            num_params=3,
+        )
+
+        assert topology == M2NSourceTopology(
+            groups=((0, 1),),
+            param_groups=(0, 0, 0),
+        )
+        assert build_m2n_transfer_routes(
+            topology,
+            num_trainer_ranks=2,
+            world_size=4,
+            dst_mesh_dims=(1, 2),
+        ) == (
+            M2NTransferRoute(
+                source_group_index=0,
+                members=(0, 1, 2, 3),
+                param_indices=(0, 1, 2),
+                dst_mesh=M2NMesh((1, 2), 2),
+            ),
+        )
+
+    def test_transfer_waves_advance_stage_major_groups_together(self):
+        topology = M2NSourceTopology(
+            groups=((0, 1), (2, 3)),
+            param_groups=(1, 1, 0, 0),
+        )
+        routes = build_m2n_transfer_routes(
+            topology,
+            num_trainer_ranks=4,
+            world_size=5,
+            dst_mesh_dims=(1, 1),
+        )
+
+        waves = build_m2n_transfer_waves(
+            routes,
+            load_groups=(0, 1, 2, 3),
+        )
+
+        assert set(routes[0].source_ranks).isdisjoint(routes[1].source_ranks)
+        assert [(wave.issue_indices, wave.consume_index) for wave in waves] == [
+            ((2, 0), 0),
+            ((), 2),
+            ((3, 1), 1),
+            ((), 3),
+        ]
+        owner = {
+            index: route_index
+            for route_index, route in enumerate(routes)
+            for index in route.param_indices
+        }
+        pending: set[int] = set()
+        for wave in waves:
+            for index in wave.issue_indices:
+                assert owner[index] not in pending
+                pending.add(owner[index])
+            if wave.consume_index is not None:
+                pending.remove(owner[wave.consume_index])
+        assert not pending
+
+    def test_load_groups_preserve_only_required_model_load_order(self):
+        assert m2n_load_group(M2NDestinationMode.IN_PLACE, None) is None
+        assert m2n_load_group(M2NDestinationMode.FULL_FALLBACK, None) == -1
+        assert m2n_load_group(M2NDestinationMode.SHARDED_STAGING, 3) == 3
+        with pytest.raises(ValueError, match="integer staging group"):
+            m2n_load_group(M2NDestinationMode.SHARDED_STAGING, None)
+
+    def test_transfer_waves_preserve_cross_route_load_dependencies(self):
+        topology = M2NSourceTopology(
+            groups=((0, 1), (2, 3)),
+            param_groups=(1, 1, 0, 0),
+        )
+        routes = build_m2n_transfer_routes(
+            topology,
+            num_trainer_ranks=4,
+            world_size=5,
+            dst_mesh_dims=(1, 1),
+        )
+
+        waves = build_m2n_transfer_waves(routes, (-1, 0, 0, -1))
+
+        assert [(wave.issue_indices, wave.consume_index) for wave in waves] == [
+            ((2, 0), 0),
+            ((1,), 1),
+            ((), 2),
+            ((3,), 3),
+        ]
+
+    def test_transfer_waves_require_increasing_active_indices(self):
+        topology = M2NSourceTopology.single_group(1, 3)
+        routes = build_m2n_transfer_routes(
+            topology,
+            num_trainer_ranks=1,
+            world_size=2,
+            dst_mesh_dims=(1, 1),
+        )
+
+        with pytest.raises(
+            ValueError, match="active parameter indices must be increasing"
+        ):
+            build_m2n_transfer_waves(
+                routes,
+                load_groups=(0, 0, 0),
+                active_indices=(2, 1),
+            )
+
+    def test_route_mapping_and_schedule_do_not_use_source_group_as_route_id(self):
+        routes = (
+            M2NTransferRoute(
+                source_group_index=7,
+                members=(0, 2),
+                param_indices=(1, 3),
+                dst_mesh=M2NMesh((1, 1), 1),
+            ),
+            M2NTransferRoute(
+                source_group_index=3,
+                members=(1, 2),
+                param_indices=(0, 2),
+                dst_mesh=M2NMesh((1, 1), 1),
+            ),
+        )
+
+        assert build_m2n_param_routes(routes, 4) == (1, 0, 1, 0)
+        waves = build_m2n_transfer_waves(routes, (0, 1, 2, 3))
+        assert [(wave.issue_indices, wave.consume_index) for wave in waves] == [
+            ((1, 0), 0),
+            ((), 1),
+            ((3, 2), 2),
+            ((), 3),
+        ]
 
 
 class TestLayout:
