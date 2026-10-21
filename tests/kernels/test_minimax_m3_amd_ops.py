@@ -35,15 +35,23 @@ if not current_platform.is_rocm():
 if not torch.cuda.is_available():
     pytest.skip("Requires a GPU.", allow_module_level=True)
 
+from vllm.model_executor.layers.quantization.input_quant_fp8 import (  # noqa: E402
+    QuantFP8,
+)
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (  # noqa: E402
     _mxfp8_e4m3_quantize_torch,
     _mxfp8_e4m3_quantize_triton,
     dequant_mxfp8_to_bf16,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (  # noqa: E402
+    GroupShape,
+)
 from vllm.models.minimax_m3.amd.model import _kv_insert_operand  # noqa: E402
 from vllm.models.minimax_m3.amd.ops import (  # noqa: E402
     gemma_fused_add_rmsnorm,
+    gemma_fused_add_rmsnorm_fp8,
     gemma_rmsnorm,
+    gemma_rmsnorm_fp8,
     swiglu_oai_quantize_mxfp8,
     swiglu_oai_split,
 )
@@ -138,6 +146,36 @@ def test_gemma_rmsnorm_per_head_strided():
     ref = _ref_gemma_rmsnorm(q_by_head, w, EPS)
     assert got.shape == q_by_head.shape
     assert _relerr(got, ref) < 5e-3
+
+
+@pytest.mark.parametrize("m", [1, 12, 333])
+@pytest.mark.parametrize("with_residual", [False, True])
+@torch.inference_mode()
+def test_gemma_rmsnorm_fp8_matches_unfused_quant(m, with_residual, default_vllm_config):
+    """The FP8 norm must match the bf16 norm followed by per-token FP8 quant."""
+    torch.manual_seed(0)
+    n = 6144
+    x = torch.randn(m, n, device=DEVICE, dtype=torch.bfloat16)
+    x[0] = 0  # all-zero row
+    w = torch.randn(n, device=DEVICE, dtype=torch.bfloat16) * 0.1
+    fp8_dtype = current_platform.fp8_dtype()
+    quant = QuantFP8(static=False, group_shape=GroupShape.PER_TOKEN)
+    if with_residual:
+        res = torch.randn(m, n, device=DEVICE, dtype=torch.bfloat16)
+        res[0] = -x[0]
+        q, scale, got_res = gemma_fused_add_rmsnorm_fp8(x, res, w, EPS, fp8_dtype)
+        normed, ref_res = gemma_fused_add_rmsnorm(x, res, w, EPS)
+        assert torch.equal(got_res, ref_res)
+    else:
+        q, scale = gemma_rmsnorm_fp8(x, w, EPS, fp8_dtype)
+        normed = gemma_rmsnorm(x, w, EPS)
+    ref_q, ref_scale = quant(normed)
+    assert q.dtype == fp8_dtype and q.shape == (m, n)
+    assert scale.shape == (m, 1) and scale.dtype == torch.float32
+    torch.testing.assert_close(scale[1:], ref_scale[1:].view(m - 1, 1))
+    got = q.float() * scale
+    assert torch.isfinite(got).all() and (got[0] == 0).all()
+    assert _relerr(got, ref_q.float() * ref_scale.view(m, 1)) < 1e-2
 
 
 def test_num_warps_monotonic():
