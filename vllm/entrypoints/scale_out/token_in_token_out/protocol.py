@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import dataclass
 from typing import Annotated, Any, Literal, TypeAlias
 
 from pydantic import (
@@ -241,6 +242,11 @@ class GenerateRequest(BaseModel):
             "In streaming mode, this metadata is included only in the first chunk."
         ),
     )
+    packed_top_k_logprobs: bool | None = None
+    """Return the top-k candidates of every generated position as the packed
+    block ``logprobs.top_k`` (see ``PackedTopK``) instead of per-token
+    ``logprobs.content`` entries (``content`` is ``None``). Non-streaming,
+    ``output_mode="tokens"`` and ``sampling_params.logprobs >= 1`` only."""
 
     output_mode: OutputMode = Field(
         default="tokens",
@@ -329,6 +335,22 @@ class GenerateRequest(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _check_packed_top_k_logprobs(self) -> "GenerateRequest":
+        if not self.packed_top_k_logprobs:
+            return self
+        if self.stream:
+            raise ValueError("packed_top_k_logprobs is not supported with stream=true")
+        if self.output_mode != "tokens":
+            raise ValueError("packed_top_k_logprobs requires output_mode='tokens'")
+        logprobs = self.sampling_params.logprobs
+        if logprobs is None or logprobs < 1:
+            raise ValueError(
+                "packed_top_k_logprobs requires sampling_params.logprobs >= 1, "
+                f"got {logprobs}"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _validate_multimodal_feature_bounds(self) -> "GenerateRequest":
         if self.features is None:
             return self
@@ -385,6 +407,21 @@ class GenerateLogProbsContent(GenerateLogProb):
     top_logprobs: list[GenerateLogProb] = []
 
 
+class PackedTopK(BaseModel):
+    """The top-k candidates of every generated position, packed.
+
+    ``token_ids`` is base64 of little-endian int32 and ``logprobs`` base64 of
+    little-endian float32 (raw engine values, not clamped), each
+    ``num_positions x k`` in row-major order, candidates in the engine's rank
+    order (the sampled token is not included).
+    """
+
+    num_positions: int
+    k: int
+    token_ids: str
+    logprobs: str
+
+
 class GenerateLogProbs(BaseModel):
     """Output logprobs for one choice.
 
@@ -392,6 +429,10 @@ class GenerateLogProbs(BaseModel):
     """
 
     content: list[GenerateLogProbsContent] | None = None
+    top_k: PackedTopK | None = Field(default=None, exclude_if=lambda v: v is None)
+    """The packed top-k candidates, set only for ``packed_top_k_logprobs``
+    requests (where ``content`` is ``None``), and omitted from the output
+    otherwise."""
 
 
 class GenerateChoiceBase(BaseModel):
@@ -530,6 +571,14 @@ class GenerateTokensResponse(GenerateResponseBase):
 class GenerateTextResponse(GenerateResponseBase):
     output_mode: Literal["text"] = "text"
     choices: list[GenerateTextChoice]
+
+
+@dataclass
+class RenderedGenerateResponse:
+    """A non-streaming generate response already rendered to its JSON body:
+    the bytes ``JSONResponse`` gives for the equivalent ``GenerateResponse``."""
+
+    body: bytes
 
 
 def output_mode_or_tokens(value: Any) -> Any:
