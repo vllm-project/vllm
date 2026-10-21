@@ -224,6 +224,8 @@ DISPATCH_TAIL = """  else {
 
 
 def group_by_gating_type():
+    # Insertion order is the order of the generated if/else-if chain, i.e. the
+    # VARIANTS order is the dispatch priority.
     groups = {}
     for variant in VARIANTS:
         groups.setdefault(

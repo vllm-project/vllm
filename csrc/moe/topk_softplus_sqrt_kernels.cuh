@@ -19,11 +19,9 @@
  */
 
 // Kernels and launchers of the fused softplus-sqrt topk. The instantiations
-// themselves are spread over the generated thin translation units
+// themselves are spread over the generated thin units
 // topk_softplus_sqrt_launch_*.cu (one per gating dtype x topk_indices dtype),
-// emitted from the variant list in generate_topk_softplus_sqrt.py: building
-// every combination in a single translation unit serialized ~100 s of device
-// code generation onto one core.
+// emitted from the variant list in generate_topk_softplus_sqrt.py.
 #pragma once
 
 #include <type_traits>
@@ -276,8 +274,8 @@ void launchDsv4HashTopk(const float* input, float* output, OutIndType* indices,
 */
 
 template <int VPT, int NUM_EXPERTS, int WARPS_PER_CTA, int BYTES_PER_LDG,
-          int WARP_SIZE_PARAM, typename IndType, typename HashIndType,
-          typename InputType = float>
+          int WARP_SIZE_PARAM, bool USE_HASH, typename IndType,
+          typename HashIndType, typename InputType = float>
 __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
     void topkGatingSoftplusSqrt(
         const InputType* input, const bool* finished, float* output,
@@ -450,11 +448,7 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
 
   // Hash MoE path: indices are predetermined from lookup table. Image rows
   // (sentinel ids) fall through to the score-based top-k path with bias_vl.
-  // The hash path is selected at runtime from tid2eid being set rather than
-  // from a compile-time flag: forking the kernel on a compile-time `use_hash`
-  // doubled the number of device kernels emitted for this file for a branch
-  // that is uniform over the launch anyways.
-  const bool hash_row = tid2eid != nullptr && !use_vl_bias;
+  const bool hash_row = USE_HASH && !use_vl_bias;
   if (hash_row) {
     const int64_t token_expert_offset = token_id * static_cast<int64_t>(k);
     if (!is_pad_row) {
@@ -685,6 +679,18 @@ struct TopkConstants {
 };
 }  // namespace detail
 
+#define DISPATCH_HASH(use_hash, USE_HASH, ...)                                 \
+  if (use_hash) {                                                              \
+    const bool USE_HASH = true;                                                \
+    static_assert(USE_HASH == true, "USE_HASH must be compile-time constant"); \
+    __VA_ARGS__                                                                \
+  } else {                                                                     \
+    const bool USE_HASH = false;                                               \
+    static_assert(USE_HASH == false,                                           \
+                  "USE_HASH must be compile-time constant");                   \
+    __VA_ARGS__                                                                \
+  }
+
 template <int EXPERTS, int WARPS_PER_TB, int WARP_SIZE_PARAM,
           int MAX_BYTES_PER_LDG, typename IndType, typename HashIndType,
           typename InputType>
@@ -693,9 +699,9 @@ void topkGatingSoftplusSqrtLauncherHelper(
     IndType* indices, int* source_row, const int num_rows, const int k,
     const int start_expert, const int end_expert, const bool renormalize,
     double routed_scaling_factor, const float* correction_bias,
-    const HashIndType* input_ids, const HashIndType* tid2eid,
-    cudaStream_t stream, const bool* is_padding, const float* bias_vl,
-    int64_t image_sentinel_lo) {
+    const bool use_hash, const HashIndType* input_ids,
+    const HashIndType* tid2eid, cudaStream_t stream, const bool* is_padding,
+    const float* bias_vl, int64_t image_sentinel_lo) {
   static constexpr int BYTES_PER_LDG =
       MIN(MAX_BYTES_PER_LDG, sizeof(InputType) * EXPERTS);
   using Constants =
@@ -705,31 +711,34 @@ void topkGatingSoftplusSqrtLauncherHelper(
   const int num_warps = (num_rows + ROWS_PER_WARP - 1) / ROWS_PER_WARP;
   const int num_blocks = (num_warps + WARPS_PER_TB - 1) / WARPS_PER_TB;
   dim3 block_dim(WARP_SIZE_PARAM, WARPS_PER_TB);
-  auto* kernel =
-      &topkGatingSoftplusSqrt<VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG,
-                              WARP_SIZE_PARAM, IndType, HashIndType, InputType>;
+  DISPATCH_HASH(use_hash, USE_HASH, {
+    auto* kernel =
+        &topkGatingSoftplusSqrt<VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG,
+                                WARP_SIZE_PARAM, USE_HASH, IndType, HashIndType,
+                                InputType>;
 #ifndef USE_ROCM
-  cudaLaunchConfig_t config = {};
-  config.gridDim = num_blocks;
-  config.blockDim = block_dim;
-  config.dynamicSmemBytes = 0;
-  config.stream = stream;
-  cudaLaunchAttribute attrs[1];
-  attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
-  attrs[0].val.programmaticStreamSerializationAllowed = 1;
-  config.numAttrs = 1;
-  config.attrs = attrs;
-  cudaLaunchKernelEx(&config, kernel, input, finished, output, num_rows,
-                     indices, source_row, k, start_expert, end_expert,
-                     renormalize, routed_scaling_factor, correction_bias,
-                     input_ids, tid2eid, is_padding, bias_vl,
-                     image_sentinel_lo);
+    cudaLaunchConfig_t config = {};
+    config.gridDim = num_blocks;
+    config.blockDim = block_dim;
+    config.dynamicSmemBytes = 0;
+    config.stream = stream;
+    cudaLaunchAttribute attrs[1];
+    attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+    attrs[0].val.programmaticStreamSerializationAllowed = 1;
+    config.numAttrs = 1;
+    config.attrs = attrs;
+    cudaLaunchKernelEx(&config, kernel, input, finished, output, num_rows,
+                       indices, source_row, k, start_expert, end_expert,
+                       renormalize, routed_scaling_factor, correction_bias,
+                       input_ids, tid2eid, is_padding, bias_vl,
+                       image_sentinel_lo);
 #else
-  kernel<<<num_blocks, block_dim, 0, stream>>>(
-      input, finished, output, num_rows, indices, source_row, k, start_expert,
-      end_expert, renormalize, routed_scaling_factor, correction_bias,
-      input_ids, tid2eid, is_padding, bias_vl, image_sentinel_lo);
+    kernel<<<num_blocks, block_dim, 0, stream>>>(
+        input, finished, output, num_rows, indices, source_row, k, start_expert,
+        end_expert, renormalize, routed_scaling_factor, correction_bias,
+        input_ids, tid2eid, is_padding, bias_vl, image_sentinel_lo);
 #endif
+  })
 }
 
 // Launches the kernel for one explicit wavefront size. WARP_SIZE (see
@@ -741,8 +750,8 @@ void topkGatingSoftplusSqrtLauncherHelper(
                                        WARP_SIZE_PARAM, MAX_BYTES>(           \
       gating_output, nullptr, topk_weights, topk_indices,                    \
       token_expert_indices, num_tokens, topk, 0, num_experts, renormalize,   \
-      routed_scaling_factor, correction_bias, input_ids, tid2eid, stream,    \
-      is_padding, bias_vl, image_sentinel_lo);
+      routed_scaling_factor, correction_bias, use_hash, input_ids, tid2eid,  \
+      stream, is_padding, bias_vl, image_sentinel_lo);
 
 #ifndef USE_ROCM
   #define LAUNCH_SOFTPLUS_SQRT(NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES)           \
