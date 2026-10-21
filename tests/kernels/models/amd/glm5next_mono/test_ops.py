@@ -73,41 +73,54 @@ def test_sparse_attention_selects_through_tied_scores(
 
 
 @pytest.mark.parametrize(
-    "tp, dim_first, saturate",
+    "tp, dim_first, saturate, tpr",
     [
-        (2, False, False),
-        (4, False, False),
-        (4, True, False),
-        (8, False, False),
-        (4, False, True),
+        (2, False, False, 1),
+        (4, False, False, 1),
+        (4, True, False, 1),
+        (8, False, False, 1),
+        (4, False, True, 1),
+        (4, False, False, 2),
+        (4, True, False, 4),
+        (8, False, False, 6),
     ],
 )
 def test_kda_layer_matches_vllm_ops(
-    monkeypatch: pytest.MonkeyPatch, tp: int, dim_first: bool, saturate: bool
+    monkeypatch: pytest.MonkeyPatch,
+    tp: int,
+    dim_first: bool,
+    saturate: bool,
+    tpr: int,
 ):
+    """``tpr`` > 1: an MTP verify step, ``tpr`` tokens a request."""
     _ready(tp)
     multi_process_parallel(
-        monkeypatch, tp, 1, _ffn._worker(_kda._check, dim_first, saturate)
+        monkeypatch, tp, 1, _ffn._worker(_kda._check, dim_first, saturate, tpr)
     )
 
 
 @pytest.mark.parametrize(
-    "tp, fmt, kv_fp8",
+    "tp, fmt, tpr, kv_fp8",
     [
-        (2, "mixed", False),
-        (4, "fp8", False),
-        (4, "bf16", False),
-        (8, "mixed", False),
-        (4, "mixed", True),
-        (8, "mixed", True),
+        (2, "mixed", 1, False),
+        (4, "fp8", 1, False),
+        (4, "bf16", 1, False),
+        (8, "mixed", 1, False),
+        (4, "mixed", 1, True),
+        (8, "mixed", 1, True),
+        (4, "fp8", 2, False),
+        (4, "mixed", 4, False),
+        (8, "mixed", 6, False),
+        (8, "mixed", 6, True),
     ],
 )
 def test_dsa_layer_matches_vllm_ops(
-    monkeypatch: pytest.MonkeyPatch, tp: int, fmt: str, kv_fp8: bool
+    monkeypatch: pytest.MonkeyPatch, tp: int, fmt: str, tpr: int, kv_fp8: bool
 ):
-    """`kv_fp8`: an e4m3 MLA cache, as `--kv-cache-dtype fp8_e4m3` gives."""
+    """`tpr` > 1: an MTP verify step, `tpr` tokens a request. `kv_fp8`: an
+    e4m3 MLA cache, as `--kv-cache-dtype fp8_e4m3` gives."""
     _ready(tp)
-    check = _ffn._worker(_dsa._check, _dsa.FORMATS[fmt], kv_fp8)
+    check = _ffn._worker(_dsa._check, _dsa.FORMATS[fmt], tpr, kv_fp8)
     multi_process_parallel(monkeypatch, tp, 1, check)
 
 

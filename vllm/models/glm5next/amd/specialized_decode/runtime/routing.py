@@ -32,10 +32,14 @@ def step_reason(
         return "micro-batched step"
     if not isinstance(md, dict) or any(name not in md for name in metadata_names):
         return "no attention metadata"
+    # a speculative verify step: every request its token and its drafts
+    tpr = cfg.tpr
+    if tokens % tpr:
+        return f"{tokens} tokens for {tpr} a request"
     for name in metadata_names:
         m = md[name]
         if getattr(m, "num_prefills", 0):
             return f"prefill rows ({type(m).__name__})"
-        if getattr(m, "max_query_len", 1) > 1:
-            return "query longer than one token"
+        if getattr(m, "max_query_len", 1) > tpr:
+            return f"query longer than {tpr} tokens"
     return None
