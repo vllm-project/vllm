@@ -1,34 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import importlib.metadata
-from importlib.util import find_spec
 
 import pytest
-import torch
-from packaging import version
 
 import vllm
 from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
 
 from ..utils import multi_gpu_test
-
-# Require amd-quark >= 0.12 on torch >= 2.11.
-# Earlier torch releases work with older quark versions. See
-# https://github.com/amd/Quark/issues/34
-# TODO: Remove once amd-quark>=0.12.0
-QUARK_TORCH_COMPATIBLE = find_spec("quark") is not None and (
-    version.parse(importlib.metadata.version("amd-quark")) >= version.parse("0.12.0")
-    if version.parse(torch.__version__.split("+")[0]) >= version.parse("2.11")
-    else True
-)
-
-if current_platform.is_rocm() and not QUARK_TORCH_COMPATIBLE:
-    pytest.skip(
-        "This test requires amd-quark >= 0.12 on torch >= 2.11.",
-        allow_module_level=True,
-    )
 
 MODEL_PATH = "openai/gpt-oss-20b"
 
@@ -62,7 +42,35 @@ EXPECTED_LORA_OUTPUT = [
 ]
 
 
-def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
+def reformat(text: str) -> str:
+    # Remove all spaces immediately before or after comma
+    text = ",".join(map(str.strip, text.split(",")))
+    # Remove duplicated blank spaces
+    text = " ".join(map(str.strip, text.split()))
+    return text
+
+
+def _enable_deterministic_lora_shrink(monkeypatch: pytest.MonkeyPatch) -> None:
+    if not current_platform.is_rocm():
+        return
+
+    # These tests assert exact greedy outputs. Force the Triton LoRA shrink
+    # kernel to use SPLIT_K=1 so it stores the complete reduction directly
+    # instead of accumulating split-K partial results with atomic_add.
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    # The kernel configuration reads VLLM_BATCH_INVARIANT at import time.
+    # Spawn the engine process so it observes this setting even if the LoRA
+    # Triton utilities were already imported during test collection.
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+
+
+def generate_and_test(
+    llm: vllm.LLM,
+    lora_path: str,
+    lora_id: int,
+    *,
+    is_3d_lora_weight: bool = False,
+) -> None:
     prompts = [
         PROMPT_TEMPLATE.format(
             context="Give the average number of working horses on farms with more than 5000 total horses."  # noqa: E501
@@ -78,7 +86,11 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
     outputs = llm.generate(
         prompts,
         sampling_params,
-        lora_request=LoRARequest(str(lora_id), lora_id, lora_path) if lora_id else None,
+        lora_request=LoRARequest(
+            str(lora_id), lora_id, lora_path, is_3d_lora_weight=is_3d_lora_weight
+        )
+        if lora_id
+        else None,
     )
     # Print the outputs.
     generated_texts: list[str] = []
@@ -88,11 +100,18 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
         generated_texts.append(generated_text)
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
     for i in range(len(EXPECTED_LORA_OUTPUT)):
-        assert generated_texts[i].startswith(EXPECTED_LORA_OUTPUT[i])
+        # The generated text may have different numbers of blank space,
+        # so reformat to compare.
+        compactGeneratedStr = reformat(generated_texts[i])
+        compactExpectedStr = reformat(EXPECTED_LORA_OUTPUT[i])
+        if not generated_texts[i].startswith(
+            EXPECTED_LORA_OUTPUT[i]
+        ) and not compactGeneratedStr.startswith(compactExpectedStr):
+            raise AssertionError(
+                f"Generated: {generated_texts[i]}, Expected: {EXPECTED_LORA_OUTPUT[i]}"
+            )
 
 
-# TODO: make the Mxfp4MoeBackend.TRITON spawn-safe.
-# For now just use TRITON_UNFUSED kernel
 @pytest.mark.parametrize(
     "mxfp4_use_marlin",
     [
@@ -100,7 +119,8 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
         pytest.param(
             True,
             marks=pytest.mark.skipif(
-                current_platform.is_rocm(), reason="marlin not supported"
+                current_platform.is_rocm() or current_platform.is_xpu(),
+                reason="marlin not supported",
             ),
         ),
     ],
@@ -110,7 +130,10 @@ def test_gpt_oss_lora(
     gptoss20b_lora_files,
     mxfp4_use_marlin,
     specialize_active_lora,
+    monkeypatch: pytest.MonkeyPatch,
 ):
+    _enable_deterministic_lora_shrink(monkeypatch)
+
     llm = vllm.LLM(
         MODEL_PATH,
         max_model_len=1024,
@@ -140,7 +163,8 @@ def test_gpt_oss_lora(
         pytest.param(
             True,
             marks=pytest.mark.skipif(
-                current_platform.is_rocm(), reason="marlin not supported"
+                current_platform.is_rocm() or current_platform.is_xpu(),
+                reason="marlin not supported",
             ),
         ),
     ],
@@ -149,7 +173,10 @@ def test_gpt_oss_lora_tp2(
     gptoss20b_lora_files,
     fully_sharded_loras,
     mxfp4_use_marlin,
+    monkeypatch: pytest.MonkeyPatch,
 ):
+    _enable_deterministic_lora_shrink(monkeypatch)
+
     llm = vllm.LLM(
         MODEL_PATH,
         max_model_len=1024,
@@ -170,3 +197,27 @@ def test_gpt_oss_lora_tp2(
 
     generate_and_test(llm, gptoss20b_lora_files, lora_id=1)
     generate_and_test(llm, gptoss20b_lora_files, lora_id=2)
+
+
+def test_gpt_oss_lora_mixed_moe_format(
+    gptoss20b_lora_files,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _enable_deterministic_lora_shrink(monkeypatch)
+
+    llm = vllm.LLM(
+        MODEL_PATH,
+        max_model_len=1024,
+        enable_lora=True,
+        enable_mixed_moe_lora_format=True,
+        max_loras=2,
+        max_lora_rank=8,
+        max_num_seqs=2,
+        max_num_batched_tokens=2048,
+        compilation_config=vllm.config.CompilationConfig(
+            cudagraph_specialize_lora=False,
+        ),
+    )
+
+    generate_and_test(llm, gptoss20b_lora_files, lora_id=1, is_3d_lora_weight=True)
+    generate_and_test(llm, gptoss20b_lora_files, lora_id=2, is_3d_lora_weight=True)

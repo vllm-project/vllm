@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-WARNING: This test runs in both single-node (4 GPUs) and multi-node
- (2 node with 2 GPUs each) modes. If the test only uses 2 GPUs, it is
- important to set the distributed backend to "mp" to avoid Ray scheduling
- all workers in a node other than the head node, which can cause the test
- to fail.
+"""WARNING: This test runs in both single-node (4 GPUs) and multi-node
+(2 node with 2 GPUs each) modes. If the test only uses 2 GPUs, it is
+important to set the distributed backend to "mp" to avoid Ray scheduling
+all workers in a node other than the head node, which can cause the test
+to fail.
 """
 
 import json
@@ -102,7 +101,6 @@ class PPTestSettings:
 
 TEXT_GENERATION_MODELS = {
     # [Decoder-only]
-    "Snowflake/snowflake-arctic-instruct": PPTestSettings.fast(load_format="dummy"),
     "bigscience/bloomz-1b1": PPTestSettings.fast(),
     "zai-org/chatglm3-6b": PPTestSettings.fast(),
     "CohereLabs/c4ai-command-r-v01": PPTestSettings.fast(load_format="dummy"),
@@ -121,7 +119,6 @@ TEXT_GENERATION_MODELS = {
     "ibm/PowerMoE-3b": PPTestSettings.fast(),
     "internlm/internlm2-chat-7b": PPTestSettings.fast(),
     "ai21labs/Jamba-tiny-dev": PPTestSettings.fast(),
-    "pfnet/plamo-2-1b": PPTestSettings.fast(),
     "pfnet/plamo-3-nict-2b-base": PPTestSettings.fast(),
     "meta-llama/Llama-3.2-1B-Instruct": PPTestSettings.detailed(),
     # Tests TransformersForCausalLM
@@ -132,7 +129,6 @@ TEXT_GENERATION_MODELS = {
     # "mistralai/Mistral-7B-Instruct-v0.1": PPTestSettings.fast(),
     "state-spaces/mamba-130m-hf": PPTestSettings.fast(),
     "mistralai/Mixtral-8x7B-Instruct-v0.1": PPTestSettings.fast(load_format="dummy"),
-    "mosaicml/mpt-7b": PPTestSettings.fast(),
     "nvidia/Minitron-8B-Base": PPTestSettings.fast(),
     "allenai/OLMo-1B-hf": PPTestSettings.fast(),
     "allenai/OLMo-2-0425-1B": PPTestSettings.fast(),
@@ -166,7 +162,6 @@ EMBEDDING_MODELS = {  # type: ignore[var-annotated]
 MULTIMODAL_MODELS = {
     # [Decoder-only]
     "Salesforce/blip2-opt-6.7b": PPTestSettings.fast(),
-    "facebook/chameleon-7b": PPTestSettings.fast(),
     "zai-org/glm-4v-9b": PPTestSettings.fast(),
     "OpenGVLab/InternVL3-1B": PPTestSettings.fast(),
     "llava-hf/llava-1.5-7b-hf": PPTestSettings.fast(),
@@ -299,16 +294,7 @@ def _compare_tp(
     if max_num_seqs:
         common_args.extend(["--max-num-seqs", f"{max_num_seqs}"])
 
-    if distributed_backend == "ray":
-        # Test Ray Compiled Graph for all the tests
-        pp_env = {
-            "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL": "1",
-        }
-    elif distributed_backend == "mp":
-        pp_env = None
-    else:
-        pp_env = None
-
+    pp_env = None
     tp_env = None
 
     pp_args = [

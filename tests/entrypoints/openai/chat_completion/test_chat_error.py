@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from pydantic import ValidationError
 
 from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -14,10 +15,11 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-from vllm.entrypoints.openai.engine.protocol import GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.scale_out.render.serving import ServingRender
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers.hf import HfRenderer
 from vllm.renderers.online_renderer import OnlineRenderer
@@ -46,6 +48,8 @@ class MockModelConfig:
     trust_remote_code = False
     tokenizer_mode = "auto"
     max_model_len = 100
+    revision = None
+    code_revision = None
     tokenizer_revision = None
     multimodal_config = MultiModalConfig()
     hf_config = MockHFConfig()
@@ -57,9 +61,10 @@ class MockModelConfig:
     encoder_config = None
     generation_config: str = "auto"
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
-    skip_tokenizer_init = False
+    skip_tokenizer_init: bool = False
     is_encoder_decoder: bool = False
     is_multimodal_model: bool = False
+    supports_multimodal_inputs: bool = False
     renderer_num_workers: int = 1
 
     def get_diff_sampling_param(self):
@@ -84,7 +89,9 @@ def _build_renderer(model_config: MockModelConfig):
     )
 
 
-def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
+def _build_serving_chat(
+    engine: AsyncLLM, monkeypatch: pytest.MonkeyPatch
+) -> OpenAIServingChat:
     models = OpenAIServingModels(
         engine_client=engine,
         base_model_paths=BASE_MODEL_PATHS,
@@ -114,22 +121,24 @@ def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
             [{"prompt_token_ids": [1, 2, 3]}],
         )
 
-    serving_chat.online_renderer.preprocess_chat = AsyncMock(
-        side_effect=_fake_preprocess_chat
+    monkeypatch.setattr(
+        serving_chat.online_renderer,
+        "preprocess_chat",
+        AsyncMock(side_effect=_fake_preprocess_chat),
     )
     return serving_chat
 
 
 @pytest.mark.asyncio
-async def test_chat_error_non_stream():
-    """test finish_reason='error' returns 500 InternalServerError (non-streaming)"""
+async def test_chat_error_non_stream(monkeypatch: pytest.MonkeyPatch):
+    """Test finish_reason='error' returns 500 InternalServerError (non-streaming)."""
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
     mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
-    serving_chat = _build_serving_chat(mock_engine)
+    serving_chat = _build_serving_chat(mock_engine, monkeypatch)
 
     completion_output = CompletionOutput(
         index=0,
@@ -170,14 +179,16 @@ async def test_chat_error_non_stream():
 
 
 @pytest.mark.asyncio
-async def test_openai_chat_keeps_mm_cache_for_engine_execution():
+async def test_openai_chat_keeps_mm_cache_for_engine_execution(
+    monkeypatch: pytest.MonkeyPatch,
+):
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
     mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
-    serving_chat = _build_serving_chat(mock_engine)
+    serving_chat = _build_serving_chat(mock_engine, monkeypatch)
 
     request = ChatCompletionRequest(
         model=MODEL_NAME,
@@ -187,13 +198,14 @@ async def test_openai_chat_keeps_mm_cache_for_engine_execution():
     result = await serving_chat.render_chat_request(request)
 
     assert isinstance(result, tuple)
-    assert (
-        serving_chat.online_renderer.preprocess_chat.call_args.kwargs["skip_mm_cache"]
-        is False
-    )
+    preprocess_chat = serving_chat.online_renderer.preprocess_chat
+    assert isinstance(preprocess_chat, AsyncMock)
+    assert preprocess_chat.call_args.kwargs["skip_mm_cache"] is False
 
 
-def _build_serving_render(engine: AsyncLLM) -> ServingRender:
+def _build_serving_render(
+    engine: AsyncLLM, monkeypatch: pytest.MonkeyPatch
+) -> ServingRender:
     models = OpenAIServingModels(
         engine_client=engine,
         base_model_paths=BASE_MODEL_PATHS,
@@ -215,21 +227,25 @@ def _build_serving_render(engine: AsyncLLM) -> ServingRender:
             [{"prompt_token_ids": [1, 2, 3]}],
         )
 
-    serving_render.online_renderer.preprocess_chat = AsyncMock(
-        side_effect=_fake_preprocess_chat
+    monkeypatch.setattr(
+        serving_render.online_renderer,
+        "preprocess_chat",
+        AsyncMock(side_effect=_fake_preprocess_chat),
     )
     return serving_render
 
 
 @pytest.mark.asyncio
-async def test_renderer_only_chat_request_skips_mm_cache():
+async def test_renderer_only_chat_request_skips_mm_cache(
+    monkeypatch: pytest.MonkeyPatch,
+):
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
     mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
-    serving_render = _build_serving_render(mock_engine)
+    serving_render = _build_serving_render(mock_engine, monkeypatch)
 
     request = ChatCompletionRequest(
         model=MODEL_NAME,
@@ -238,23 +254,24 @@ async def test_renderer_only_chat_request_skips_mm_cache():
 
     result = await serving_render.render_chat_request(request)
 
+    assert not isinstance(result, ErrorResponse)
     assert result.token_ids == [1, 2, 3]
-    assert (
-        serving_render.online_renderer.preprocess_chat.call_args.kwargs["skip_mm_cache"]
-        is True
-    )
+    preprocess_chat = serving_render.online_renderer.preprocess_chat
+    assert isinstance(preprocess_chat, AsyncMock)
+    assert preprocess_chat.call_args.kwargs["skip_mm_cache"] is True
 
 
 @pytest.mark.asyncio
-async def test_chat_error_stream():
-    """test finish_reason='error' returns 500 InternalServerError (streaming)"""
+@pytest.mark.parametrize("include_usage", [False, True])
+async def test_chat_error_stream(include_usage: bool, monkeypatch: pytest.MonkeyPatch):
+    """Test finish_reason='error' returns 500 InternalServerError (streaming)."""
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
     mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
-    serving_chat = _build_serving_chat(mock_engine)
+    serving_chat = _build_serving_chat(mock_engine, monkeypatch)
 
     completion_output_1 = CompletionOutput(
         index=0,
@@ -311,10 +328,75 @@ async def test_chat_error_stream():
         messages=[{"role": "user", "content": "Test prompt"}],
         max_tokens=10,
         stream=True,
+        stream_options={"include_usage": include_usage},
     )
 
     response = await serving_chat.create_chat_completion(request)
 
+    assert isinstance(response, AsyncGenerator)
+    chunks = []
+    async for chunk in response:
+        chunks.append(chunk)
+
+    assert len(chunks) >= 2
+    assert any("Internal server error" in chunk for chunk in chunks), (
+        f"Expected error message in chunks: {chunks}"
+    )
+    assert chunks[-1] == "data: [DONE]\n\n"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_usage", [False, True])
+async def test_chat_error_stream_first_chunk(
+    include_usage: bool, monkeypatch: pytest.MonkeyPatch
+):
+    """An error before the first token must reach the streaming client."""
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    serving_chat = _build_serving_chat(mock_engine, monkeypatch)
+
+    completion_output = CompletionOutput(
+        index=0,
+        text="",
+        token_ids=[],
+        cumulative_logprob=None,
+        logprobs=None,
+        finish_reason="error",
+    )
+
+    request_output = RequestOutput(
+        request_id="test-id",
+        prompt="Test prompt",
+        prompt_token_ids=[1, 2, 3],
+        prompt_logprobs=None,
+        outputs=[completion_output],
+        finished=True,
+        metrics=None,
+        lora_request=None,
+        encoder_prompt=None,
+        encoder_prompt_token_ids=None,
+    )
+
+    async def mock_generate(*args, **kwargs):
+        yield request_output
+
+    mock_engine.generate = MagicMock(side_effect=mock_generate)
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "Test prompt"}],
+        max_tokens=10,
+        stream=True,
+        stream_options={"include_usage": include_usage},
+    )
+
+    response = await serving_chat.create_chat_completion(request)
+
+    assert isinstance(response, AsyncGenerator)
     chunks = []
     async for chunk in response:
         chunks.append(chunk)
@@ -475,11 +557,86 @@ def test_json_schema_response_format_missing_schema():
         )
 
 
+@pytest.mark.asyncio
+async def test_online_renderer_rejects_mm_processor_kwargs_by_default():
+    model_config = MockModelConfig()
+    model_config.multimodal_config = MultiModalConfig()
+    online_renderer = OnlineRenderer(
+        model_config=model_config,
+        renderer=MagicMock(),
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+    )
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "hello"}],
+        mm_processor_kwargs={
+            "patch_size": 1,
+            "vision_min_num_patches": 3_000_000_000,
+        },
+    )
+
+    with pytest.raises(
+        VLLMValidationError,
+        match="Per-request mm_processor_kwargs are disabled",
+    ):
+        await online_renderer.preprocess_chat(
+            request,
+            request.messages,
+            default_template=None,
+            default_template_content_format="auto",
+            default_template_kwargs=None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_online_renderer_rejects_media_io_kwargs_by_default():
+    model_config = MockModelConfig()
+    model_config.multimodal_config = MultiModalConfig()
+    online_renderer = OnlineRenderer(
+        model_config=model_config,
+        renderer=MagicMock(),
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+    )
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "hello"}],
+        media_io_kwargs={"video": {"num_frames": 1_000_000}},
+    )
+
+    with pytest.raises(
+        VLLMValidationError,
+        match="Per-request media_io_kwargs are disabled",
+    ):
+        await online_renderer.preprocess_chat(
+            request,
+            request.messages,
+            default_template=None,
+            default_template_content_format="auto",
+            default_template_kwargs=None,
+        )
+
+
+def test_trust_request_mm_kwargs_opt_in_allows_overrides():
+    from vllm.entrypoints.generate.base.protocol import validate_request_mm_kwargs
+
+    validate_request_mm_kwargs(
+        mm_processor_kwargs={"use_audio_in_video": True},
+        media_io_kwargs={"video": {"num_frames": 4}},
+        trust_request_mm_kwargs=True,
+    )
+
+
 @pytest.mark.parametrize("format_value", [None, {}])
 def test_structural_tag_response_format_invalid(format_value):
     """Malformed structural tags should be rejected during request validation."""
     with pytest.raises(
-        ValidationError,
+        VLLMValidationError,
         match="Invalid response_format structural_tag",
     ):
         ChatCompletionRequest(
@@ -493,7 +650,7 @@ def test_structural_tag_response_format_invalid(format_value):
 def test_batch_structural_tag_response_format_invalid(format_value):
     """Batch chat should reject malformed structural tags at request parsing."""
     with pytest.raises(
-        ValidationError,
+        VLLMValidationError,
         match="Invalid response_format structural_tag",
     ):
         BatchChatCompletionRequest(
@@ -503,15 +660,54 @@ def test_batch_structural_tag_response_format_invalid(format_value):
         )
 
 
-@pytest.mark.parametrize("structural_tag", ["not json", ""])
+@pytest.mark.parametrize(
+    "structural_tag",
+    [
+        "not json",
+        "",
+        # json.loads raises a plain ValueError, not JSONDecodeError
+        '{"type": "structural_tag", "x": ' + "1" * 5000 + "}",
+    ],
+)
 def test_structured_outputs_structural_tag_invalid(structural_tag):
     """Malformed direct structured_outputs structural tags should be rejected."""
     with pytest.raises(
-        ValidationError,
+        VLLMValidationError,
         match="Invalid structured_outputs structural_tag",
     ):
         ChatCompletionRequest(
             model=MODEL_NAME,
             messages=[{"role": "user", "content": "hello"}],
             structured_outputs={"structural_tag": structural_tag},
+        )
+
+
+@pytest.mark.parametrize("field", ["response_format", "structured_outputs"])
+def test_deeply_nested_structural_tag_rejected(field):
+    """Structural tags are compiled during request parsing, so a deeply nested
+    one must be rejected there instead of blocking the server while converting,
+    and reported as too deep rather than malformed."""
+    schema = '{"type": "array", "items": ' * 200 + "{}" + "}" * 200
+    tag = (
+        '{"type": "structural_tag", "format": {"type": "json_schema", '
+        f'"json_schema": {schema}}}}}'
+    )
+    value = json.loads(tag) if field == "response_format" else {"structural_tag": tag}
+    with pytest.raises(VLLMValidationError, match="nested too deeply"):
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": "hello"}],
+            **{field: value},
+        )
+
+
+@pytest.mark.parametrize("field_name", ["prompt_logprobs", "top_logprobs"])
+def test_non_numeric_logprobs_rejected(field_name):
+    """A non-numeric logprobs value must be a clean 400 validation error, not a
+    TypeError from the mode='before' comparison (which surfaces as HTTP 500)."""
+    with pytest.raises(VLLMValidationError, match=f"`{field_name}` must be an integer"):
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": "hello"}],
+            **{field_name: "2"},
         )

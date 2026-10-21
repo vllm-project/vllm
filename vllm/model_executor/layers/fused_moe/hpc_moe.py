@@ -62,11 +62,7 @@ class HPCExperts(mk.FusedMoEExpertsModular):
     @staticmethod
     def _supports_current_device() -> bool:
         p = current_platform
-        return (
-            p.is_cuda()
-            and (p.is_device_capability(90) or p.is_device_capability_family(100))
-            and has_hpc()
-        )
+        return p.is_cuda() and p.is_device_capability(90) and has_hpc()
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
@@ -126,8 +122,7 @@ class HPCExperts(mk.FusedMoEExpertsModular):
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # We use global_num_experts due to how moe_align_block_size handles
         # expert_maps.
-        """
-        Compute the shapes for the temporary and final outputs of the two gemms
+        """Compute the shapes for the temporary and final outputs of the two gemms
         and activation in the fused expert function.  Since the gemms are
         independent, the workspace for the first gemm can be shared with the
         workspace for the last gemm.

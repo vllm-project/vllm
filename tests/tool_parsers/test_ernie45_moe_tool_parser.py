@@ -7,12 +7,12 @@ from collections.abc import Generator
 
 import pytest
 
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     FunctionCall,
     ToolCall,
 )
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
 from vllm.tool_parsers.ernie45_tool_parser import Ernie45ToolParser
@@ -54,7 +54,7 @@ def test_extract_tool_calls_no_tools(ernie45_tool_parser):
     model_output = "This is a test"
     extracted_tool_calls = ernie45_tool_parser.extract_tool_calls(
         model_output, request=None
-    )  # type: ignore[arg-type]
+    )
     assert not extracted_tool_calls.tools_called
     assert extracted_tool_calls.tool_calls == []
     assert extracted_tool_calls.content == model_output
@@ -163,7 +163,7 @@ def test_extract_tool_calls(
 ):
     extracted_tool_calls = ernie45_tool_parser.extract_tool_calls(
         model_output, request=None
-    )  # type: ignore[arg-type]
+    )
     assert extracted_tool_calls.tools_called
 
     assert_tool_calls(extracted_tool_calls.tool_calls, expected_tool_calls)
@@ -344,14 +344,17 @@ def test_extract_tool_calls_streaming_incremental(
         tool_calls = delta_message.tool_calls
         for tool_call_chunk in tool_calls:
             index = tool_call_chunk.index
+            assert tool_call_chunk.function is not None
             if index not in tool_calls_dict:
                 if tool_call_chunk.function.arguments is None:
                     tool_call_chunk.function.arguments = ""
                 tool_calls_dict[index] = tool_call_chunk
             else:
-                tool_calls_dict[
-                    index
-                ].function.arguments += tool_call_chunk.function.arguments
+                accumulated = tool_calls_dict[index].function
+                assert accumulated is not None
+                assert accumulated.arguments is not None
+                assert tool_call_chunk.function.arguments is not None
+                accumulated.arguments += tool_call_chunk.function.arguments
     actual_tool_calls = list(tool_calls_dict.values())
 
     assert len(actual_tool_calls) > 0
