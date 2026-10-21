@@ -6,7 +6,6 @@ from collections.abc import Iterable
 
 import regex as re
 import torch
-import torch.nn.functional as F
 from torch import nn
 from transformers import Qwen3Config
 
@@ -28,6 +27,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -611,8 +611,8 @@ class DFlashQwen3Model(nn.Module):
             self._rms_norm_eps,
         )
         if self._fused_kv_weight is not None:
-            all_kv_flat = F.linear(
-                normed_context_states, self._fused_kv_weight, self._fused_kv_bias
+            all_kv_flat = dispatch_unquantized_gemm()(
+                self, normed_context_states, self._fused_kv_weight, self._fused_kv_bias
             )
             all_kv = all_kv_flat.view(num_ctx, num_layers, 2, num_kv_heads, head_dim)
         else:
