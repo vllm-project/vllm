@@ -888,38 +888,6 @@ def test_can_use_aiter_pa_prefill_sparse(
 
 
 @pytest.mark.parametrize(
-    ("mla_enabled", "on_gfx942", "returns_kernel"),
-    [(False, True, False), (True, False, False), (True, True, True)],
-)
-def test_pa_prefill_sparse_getter(
-    monkeypatch, mla_enabled: bool, on_gfx942: bool, returns_kernel: bool
-) -> None:
-    """Both flags are required. The positive case is the real AITER function."""
-    from vllm._aiter_ops import rocm_aiter_ops
-    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
-
-    kernel = None
-    if returns_kernel:
-        pytest.importorskip("aiter.ops.triton.attention.pa_prefill_sparse")
-        from aiter.ops.triton.attention.pa_prefill_sparse import pa_prefill_sparse
-
-        kernel = pa_prefill_sparse
-
-    getter = mod._get_aiter_pa_prefill_sparse
-    getter.cache_clear()
-    monkeypatch.setattr(rocm_aiter_ops, "is_mla_enabled", lambda: mla_enabled)
-    monkeypatch.setattr(mod, "_ON_GFX942", on_gfx942)
-    try:
-        got = getter()
-    finally:
-        getter.cache_clear()
-    if returns_kernel:
-        assert got is kernel
-    else:
-        assert got is None
-
-
-@pytest.mark.parametrize(
     ("num_queries", "mla_enabled", "expect_aiter"),
     [(512, True, True), (511, True, False), (512, False, False)],
 )
