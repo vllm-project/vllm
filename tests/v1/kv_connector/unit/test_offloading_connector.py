@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import socket
+import threading
 import time
 
 import msgspec
@@ -13,7 +14,11 @@ from tqdm import tqdm
 from vllm import LLM, SamplingParams, TokensPrompt
 from vllm.config import KVEventsConfig, KVTransferConfig
 from vllm.distributed.kv_events import BlockStored, KVEventBatch
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
+    OffloadingConnectorWorker,
+)
 from vllm.platforms import current_platform
+from vllm.v1.kv_offload.tiering.manager import TieringOffloadingManager
 
 # The offloaded block size must stay a whole number of GPU blocks.
 CPU_BLOCK_SIZES: int
@@ -647,5 +652,113 @@ def test_mamba_cpu_offload_boundary(model: str, block_size: int, tp_size: int):
 
         assert not failures, "\n\n".join(failures)
 
+    finally:
+        del llm
+
+
+def _poll_until(condition, timeout_s: float, what: str) -> None:
+    deadline = time.monotonic() + timeout_s
+    while not condition():
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"timed out after {timeout_s} s waiting for {what}")
+        time.sleep(0.05)
+
+
+def _num_fs_tier_files(root_dir) -> int:
+    """Chunks the fs tier has finished writing."""
+    return sum(1 for _ in root_dir.rglob("*.bin"))
+
+
+def test_tiering_cache_reset_resumes_promotions_on_idle_engine(
+    tmp_path, monkeypatch
+) -> None:
+    """A cache reset that flushes in-flight stores holds promotions until the
+    workers report those stores. The engine must keep stepping to collect the
+    reports even with no request left, or secondary-tier hits stay misses."""
+    # The engine core and its worker run in this process, so the test can
+    # withhold the worker's reports and step the engine itself.
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    reports_open = threading.Event()
+    reports_open.set()
+    build_worker_meta = OffloadingConnectorWorker.build_connector_worker_meta
+
+    def gated_worker_meta(self):
+        # Withheld reports accumulate until the gate opens.
+        return build_worker_meta(self) if reports_open.is_set() else None
+
+    monkeypatch.setattr(
+        OffloadingConnectorWorker, "build_connector_worker_meta", gated_worker_meta
+    )
+    held = threading.Event()
+    released = threading.Event()
+    hold_promotions = TieringOffloadingManager.hold_promotions
+
+    def record_hold(self, hold: bool) -> bool:
+        (held if hold else released).set()
+        return hold_promotions(self, hold)
+
+    monkeypatch.setattr(TieringOffloadingManager, "hold_promotions", record_hold)
+
+    fs_root = tmp_path / "fs_tier"
+    kv_transfer_config = KVTransferConfig(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "cpu_bytes_to_use": 256 << 20,
+            "block_size": CPU_BLOCK_SIZES,
+            "spec_name": "TieringOffloadingSpec",
+            "secondary_tiers": [{"type": "fs", "root_dir": str(fs_root)}],
+        },
+    )
+    sampling_params = SamplingParams(max_tokens=1)
+    # A prefix of whole offloaded blocks, plus the token to recompute.
+    num_prefix_chunks = 4
+    prefix = [100 + i for i in range(num_prefix_chunks * CPU_BLOCK_SIZES)]
+    prompt = TokensPrompt(prompt_token_ids=prefix + [7])
+
+    llm = LLM(
+        model="facebook/opt-125m",
+        max_model_len=2048,
+        gpu_memory_utilization=0.2,
+        # One step must schedule, run and collect its worker reports.
+        async_scheduling=False,
+        kv_transfer_config=kv_transfer_config,
+    )
+    engine = llm.llm_engine
+
+    def step_until(condition, what: str) -> None:
+        def stepped() -> bool:
+            engine.step()
+            return condition()
+
+        _poll_until(stepped, timeout_s=60, what=what)
+
+    try:
+        llm.generate(prompt, sampling_params, use_tqdm=False)
+        step_until(
+            lambda: _num_fs_tier_files(fs_root) >= num_prefix_chunks,
+            "the prompt to reach the fs tier",
+        )
+
+        # The workers keep the filler's stores unreported, so the reset
+        # flushes them in flight.
+        reports_open.clear()
+        filler = [5000 + i for i in range(num_prefix_chunks * CPU_BLOCK_SIZES)]
+        llm.generate(TokensPrompt(prompt_token_ids=filler + [7]), sampling_params)
+        # Steps that issue the finished filler's stores.
+        for _ in range(3):
+            engine.step()
+        assert not held.is_set()
+        llm.reset_prefix_cache(reset_connector=True)
+        assert held.is_set() and not released.is_set()
+
+        # No request is left, yet the engine must step until the workers'
+        # reports arrive.
+        reports_open.set()
+        step_until(released.is_set, "promotions to resume")
+        output = llm.generate(prompt, sampling_params, use_tqdm=False)[0]
+        # The reset emptied the GPU and CPU tiers: the prefix is promoted
+        # from the fs tier.
+        assert output.num_cached_tokens == len(prefix)
     finally:
         del llm

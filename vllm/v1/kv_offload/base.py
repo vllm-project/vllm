@@ -484,6 +484,23 @@ class OffloadingManager(ABC):
         """Evict all tracked blocks and reset internal state."""
         return
 
+    def hold_promotions(self, held: bool) -> bool:
+        """Hold or release promotions into the blocks that loads read.
+
+        While held, lookup() starts no copy into them from another tier: a
+        block found only there is a MISS. The scheduler holds promotions after
+        reset_cache() while a worker may still write a released block.
+        reset_cache() leaves the hold as it is.
+
+        Args:
+            held: whether promotions are held from now on.
+
+        Returns:
+            Whether the manager promotes at all. If False, the call does nothing.
+
+        """
+        return False
+
     def get_stats(self) -> "OffloadingConnectorStats | None":
         """Return collected metrics since last call, or None if disabled."""
         return None

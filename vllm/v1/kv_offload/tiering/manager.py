@@ -248,6 +248,8 @@ class TieringOffloadingManager(OffloadingManager):
         #   True:  secondary → primary (promotion)
         #   False: primary → secondary (cascade)
         self._jobs: dict[JobId, JobMetadata] = {}
+        # See hold_promotions().
+        self._promotions_held = False
         primary_view = self.primary_tier.get_kv_memoryview()
         assert primary_view.strides is not None
         self._metrics = TieringMetricsTracker(
@@ -606,8 +608,9 @@ class TieringOffloadingManager(OffloadingManager):
             HIT_PENDING — chunk found but not yet readable (write
                         in-flight on the primary tier).
             RETRY     — promotion started or a secondary tier is busy.
-            MISS      — chunk not found in any tier, or primary is full
-                        and cannot accept a promotion.
+            MISS      — chunk not found in any tier, primary is full
+                        and cannot accept a promotion, or promotions are
+                        held (see hold_promotions()).
 
         """
         # Poll first so a promotion that finished since the last call is
@@ -630,6 +633,8 @@ class TieringOffloadingManager(OffloadingManager):
             return LookupResult.HIT
         if primary_hit is LookupResult.HIT_PENDING:
             return LookupResult.HIT_PENDING
+        if self._promotions_held:
+            return LookupResult.MISS
 
         any_retry = False
         for i, tier in enumerate(self.secondary_tiers):
@@ -1177,6 +1182,20 @@ class TieringOffloadingManager(OffloadingManager):
         for tier in self.secondary_tiers:
             if tier.bp_detector is not None:
                 tier.bp_detector.reset()
+
+    @override
+    def hold_promotions(self, held: bool) -> bool:
+        """Hold or release promotions from the secondary tiers.
+
+        The hold sits here rather than in the caller because lookup() is also
+        reached from serve_external_requests() through each tier's
+        ParentManager. While held, lookup() does not query the secondary tiers
+        and reports a chunk missing from the primary tier as a MISS, so the
+        request recomputes it and a peer is told it is absent. RETRY would
+        instead stall both until the hold is released.
+        """
+        self._promotions_held = held
+        return bool(self.secondary_tiers)
 
     @override
     def get_stats(self) -> OffloadingConnectorStats | None:
