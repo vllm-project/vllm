@@ -48,6 +48,11 @@ pub async fn reset_mm_cache(State(state): State<Arc<AppState>>) -> Result<Status
         .await
         .map_err(|error| utility_call_error("reset_mm_cache", error))?;
 
+    // Also clear the frontend-side (P0) shm cache so both sides stay in sync.
+    if let Some(cache) = state.mm_processor_cache() {
+        cache.clear();
+    }
+
     Ok(StatusCode::OK)
 }
 

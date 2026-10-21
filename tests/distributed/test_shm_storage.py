@@ -291,6 +291,33 @@ class TestSingleWriterShmObjectStorage(unittest.TestCase):
             reader.touch("key", address, monotonic_id, signature)
 
 
+class TestMsgpackSerdeMarkerFormat(unittest.TestCase):
+    """Format-marker payloads written by the Rust frontend's shm cache."""
+
+    def test_deserialize_marker_prefixed_msgpack_body(self):
+        """A payload starting with 0x01 decodes as a raw msgpack body."""
+        serde = MsgpackSerde()
+        value = _dummy_item({"field1": 10, "field2": 20})
+
+        # All tensors are small, so they stay inline as ext type 3 raw views.
+        (body,) = serde.encoder.encode(value)
+        payload = b"\x01" + bytes(body)
+
+        result = serde.deserialize(memoryview(payload))
+        self.assertEqual(result, value)
+
+    def test_deserialize_legacy_pickle_format_unchanged(self):
+        """Legacy payloads start with \\x80 (pickle PROTO), not the marker."""
+        serde = MsgpackSerde()
+        value = _dummy_item({"field1": 10})
+        frames, _, metadata, _ = serde.serialize(value)
+        payload = metadata + b"".join(bytes(frame) for frame in frames)
+        self.assertEqual(payload[0], 0x80)
+
+        result = serde.deserialize(memoryview(payload))
+        self.assertEqual(result, value)
+
+
 class TestShmObjectStorageReferenceCounting(unittest.TestCase):
     """One writer and four readers, as with tensor-parallel workers."""
 

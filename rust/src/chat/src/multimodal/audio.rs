@@ -5,11 +5,12 @@
 
 use std::sync::Arc;
 
-use llm_multimodal::{AudioClip, Modality, PreprocessedEncoderInputs};
+use llm_multimodal::{AudioClip, Modality, PreprocessedEncoderInputs, PromptReplacement};
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 
+use super::cache::{CacheSlot, OptionalMmProcessorCache};
 use super::timing::MM_STAGE_TARGET;
-use super::{AudioModalitySupport, MultimodalModelInfo, PreparedMedia, item};
+use super::{AudioModalitySupport, MultimodalModelInfo, PreparedItem, PreparedMedia, item};
 use crate::error::{Error, Result, bail_multimodal, multimodal};
 
 /// Forward-kwargs name of the primary audio encoder input.
@@ -17,6 +18,10 @@ pub(super) const AUDIO_PRIMARY_KEY: &str = "input_audio_features";
 
 impl MultimodalModelInfo {
     /// Preprocess fetched audio clips as one batch and build per-item features.
+    ///
+    /// Cache control flow lives in [`cache::prepare_cached`]: `Ready` slots
+    /// (UUID references and content-hash hits) skip preprocessing entirely;
+    /// misses are preprocessed here as one batch.
     #[tracing::instrument(
         name = "mm_stage",
         target = MM_STAGE_TARGET,
@@ -25,12 +30,35 @@ impl MultimodalModelInfo {
     )]
     pub(super) async fn prepare_audios(
         &self,
-        clips: Vec<Arc<AudioClip>>,
-        uuids: Vec<Option<String>>,
+        sources: Vec<CacheSlot<Arc<AudioClip>>>,
     ) -> Result<PreparedMedia> {
         let support = self.audio.as_ref().ok_or_else(|| Error::UnsupportedModality {
             modality: Modality::Audio.to_string(),
         })?;
+
+        let (replacements, items) = self
+            .mm_cache_for(Modality::Audio)
+            .prepare_cached(sources, async |misses| {
+                self.preprocess_audio_batch(support, misses).await
+            })
+            .await?;
+
+        Ok(PreparedMedia {
+            modality: Modality::Audio,
+            placeholder: support.placeholder.clone(),
+            replacements,
+            items,
+        })
+    }
+
+    /// Preprocess fetched audio clips as one batch and build per-item
+    /// replacements and engine kwargs.
+    async fn preprocess_audio_batch(
+        &self,
+        support: &AudioModalitySupport,
+        misses: Vec<(Arc<AudioClip>, Option<String>)>,
+    ) -> Result<(Vec<PromptReplacement>, Vec<PreparedItem>)> {
+        let (clips, uuids): (Vec<_>, Vec<_>) = misses.into_iter().unzip();
         let preprocessed = self.preprocess_audios(support, &clips).await?;
         let replacements = support.spec.prompt_replacements_for(&self.context, &preprocessed)?;
         if replacements.len() != clips.len() {
@@ -49,13 +77,7 @@ impl MultimodalModelInfo {
             uuids,
             ModelDtype::Float32,
         )?;
-
-        Ok(PreparedMedia {
-            modality: Modality::Audio,
-            placeholder: support.placeholder.clone(),
-            replacements,
-            items,
-        })
+        Ok((replacements, items))
     }
 
     /// Run CPU-heavy audio preprocessing in a blocking task.
@@ -82,6 +104,7 @@ mod tests {
     use vllm_engine_core_client::protocol::multimodal::{MmField, MmKwargValue};
     use vllm_tokenizer::test_utils::TestTokenizer;
 
+    use super::super::cache::CacheSlot;
     use super::super::{MultimodalModelContext, TokenizerResolver};
     use super::*;
 
@@ -251,6 +274,11 @@ mod tests {
 
         use crate::{mm_request_span, mm_timing_layer};
 
+        // Other tests exercise the same instrumented callsites under
+        // NoSubscriber, which caches `Interest::never` globally; rebuild the
+        // callsite cache so this test's thread-local subscriber sees them.
+        tracing::callsite::rebuild_interest_cache();
+
         let info = qwen3_asr_info();
         let (layer, timings) = mm_timing_layer();
         let parts = vec![MediaContentPart::AudioData {
@@ -283,6 +311,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cache_hit_skips_audio_preprocessing() {
+        use super::super::cache::tests::{address_of, is_address_item, test_shm_cache};
+
+        let info = qwen3_asr_info().with_mm_processor_cache(Some(test_shm_cache()));
+        let media_part = || MediaContentPart::AudioData {
+            data: wav_i16_mono(16_000, &[0; 1_600]),
+            mime_type: Some("audio/wav".to_string()),
+            uuid: Some("audio-1".to_string()),
+        };
+
+        let mut tokens_first = vec![1, AUDIO_PAD_ID, 2];
+        let first = info
+            .prepare_multimodal(
+                vec![media_part()],
+                &mut tokens_first,
+                ModelDtype::Float32,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.len(), 1);
+        let data_first = first[0].data.as_ref().expect("feature data");
+        assert!(
+            is_address_item(data_first),
+            "first prepare should put the item into shm and send the address item"
+        );
+
+        let mut tokens_second = vec![1, AUDIO_PAD_ID, 2];
+        let second = info
+            .prepare_multimodal(
+                vec![media_part()],
+                &mut tokens_second,
+                ModelDtype::Float32,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.len(), 1);
+        let data_second = second[0].data.as_ref().expect("feature data");
+        // A cache hit reuses the same shm slot; a re-put of the same hash
+        // would hit the duplicate-key inline fallback instead.
+        assert!(is_address_item(data_second));
+        assert_eq!(address_of(data_second), address_of(data_first));
+
+        // The shadowed prompt replacement reproduces the expansion exactly.
+        assert_eq!(tokens_second, tokens_first);
+        assert_eq!(first[0].mm_hash, second[0].mm_hash);
+        assert_eq!(first[0].mm_position.offset, second[0].mm_position.offset);
+        assert_eq!(first[0].mm_position.length, second[0].mm_position.length);
+    }
+
+    /// A UUID-keyed audio clip resolves on the second request without any
+    /// fetch or decode: the empty URL would fail in the connector otherwise.
+    #[tokio::test]
+    async fn uuid_hit_skips_audio_fetch_and_preprocessing() {
+        use super::super::cache::tests::{address_of, is_address_item, test_shm_cache};
+
+        let info = qwen3_asr_info().with_mm_processor_cache(Some(test_shm_cache()));
+
+        let mut tokens_first = vec![1, AUDIO_PAD_ID, 2];
+        let first = info
+            .prepare_multimodal(
+                vec![MediaContentPart::AudioData {
+                    data: wav_i16_mono(16_000, &[0; 1_600]),
+                    mime_type: Some("audio/wav".to_string()),
+                    uuid: Some("audio-uuid-1".to_string()),
+                }],
+                &mut tokens_first,
+                ModelDtype::Float32,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(first[0].mm_hash.as_deref(), Some("audio-uuid-1"));
+        assert_eq!(first[0].identifier, "audio-uuid-1");
+        let data_first = first[0].data.as_ref().expect("feature data");
+        assert!(is_address_item(data_first));
+
+        let mut tokens_second = vec![1, AUDIO_PAD_ID, 2];
+        let second = info
+            .prepare_multimodal(
+                vec![MediaContentPart::AudioUrl {
+                    url: String::new(),
+                    uuid: Some("audio-uuid-1".to_string()),
+                }],
+                &mut tokens_second,
+                ModelDtype::Float32,
+                None,
+            )
+            .await
+            .expect("a UUID cache reference should resolve without fetching");
+        let data_second = second[0].data.as_ref().expect("feature data");
+        assert!(is_address_item(data_second));
+        assert_eq!(address_of(data_second), address_of(data_first));
+        assert_eq!(tokens_second, tokens_first);
+        assert_eq!(first[0].mm_hash, second[0].mm_hash);
+    }
+
+    #[tokio::test]
     async fn tracker_processor_and_lowering_preserve_audio_contract() {
         let info = qwen3_asr_info();
         let wav = wav_i16_mono(16_000, &[0; 1_600]);
@@ -296,7 +423,13 @@ mod tests {
             .await
             .unwrap();
 
-        let prepared = info.prepare_audios(fetched.audios, fetched.audio_uuids).await.unwrap();
+        let sources = fetched
+            .audios
+            .into_iter()
+            .zip(fetched.audio_uuids)
+            .map(|(clip, uuid)| CacheSlot::Pending(clip, uuid))
+            .collect();
+        let prepared = info.prepare_audios(sources).await.unwrap();
 
         assert_eq!(prepared.replacements.len(), 1);
         assert!(
@@ -339,7 +472,13 @@ mod tests {
             .await
             .unwrap();
 
-        let prepared = info.prepare_audios(fetched.audios, fetched.audio_uuids).await.unwrap();
+        let sources = fetched
+            .audios
+            .into_iter()
+            .zip(fetched.audio_uuids)
+            .map(|(clip, uuid)| CacheSlot::Pending(clip, uuid))
+            .collect();
+        let prepared = info.prepare_audios(sources).await.unwrap();
 
         assert_eq!(prepared.replacements.len(), 1);
         assert_eq!(

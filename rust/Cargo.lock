@@ -2553,6 +2553,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
+name = "memmap2"
+version = "0.9.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1219ed1b7f229ee7104d281dd01d6802fe28bb6e95d292942c4daacdeb798c0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "memo-map"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5743,6 +5752,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "asynk-strim-attr",
+ "base64 0.22.1",
  "bytes",
  "clap",
  "easy-ext",
@@ -5756,6 +5766,7 @@ dependencies = [
  "minijinja-contrib",
  "ndarray",
  "oss-harmony",
+ "parking_lot",
  "paste",
  "reqwest 0.13.4",
  "rmp-serde",
@@ -5777,6 +5788,7 @@ dependencies = [
  "uuid",
  "vllm-engine-core-client",
  "vllm-llm",
+ "vllm-mm-cache",
  "vllm-parser",
  "vllm-text",
  "vllm-tokenizer",
@@ -5809,6 +5821,7 @@ dependencies = [
  "vllm-chat",
  "vllm-engine-core-client",
  "vllm-managed-engine",
+ "vllm-mm-cache",
  "vllm-server",
  "vllm-text",
  "vllm-tracing",
@@ -5899,6 +5912,22 @@ dependencies = [
  "expect-test",
  "itertools 0.14.0",
  "prometheus-client",
+]
+
+[[package]]
+name = "vllm-mm-cache"
+version = "0.1.0"
+dependencies = [
+ "expect-test",
+ "parking_lot",
+ "rmp-serde",
+ "rmpv",
+ "thiserror 2.0.18",
+ "thiserror-ext",
+ "tracing",
+ "uuid",
+ "vllm-engine-core-client",
+ "vllm-shm-object-storage",
 ]
 
 [[package]]
@@ -6014,10 +6043,24 @@ dependencies = [
  "vllm-engine-core-client",
  "vllm-llm",
  "vllm-metrics",
+ "vllm-mm-cache",
  "vllm-proto",
  "vllm-text",
  "vllm-tokenizer",
  "zeromq",
+]
+
+[[package]]
+name = "vllm-shm-object-storage"
+version = "0.1.0"
+dependencies = [
+ "hmac",
+ "memmap2",
+ "rand 0.9.5",
+ "sha2",
+ "thiserror 2.0.18",
+ "thiserror-ext",
+ "tracing",
 ]
 
 [[package]]

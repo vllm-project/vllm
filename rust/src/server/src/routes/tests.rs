@@ -33,7 +33,9 @@ use vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse;
 use vllm_engine_core_client::protocol::logprobs::{
     Logprobs, MaybeWireLogprobs, PositionLogprobs, TokenLogprob,
 };
-use vllm_engine_core_client::protocol::multimodal::{MmField, MmKwargValue, MmModality};
+use vllm_engine_core_client::protocol::multimodal::{
+    MmBatchedField, MmField, MmFieldElem, MmKwargValue, MmKwargsItem, MmModality,
+};
 use vllm_engine_core_client::protocol::output::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs, RequestError,
     StopReason, UtilityCallOutput,
@@ -48,6 +50,7 @@ use vllm_engine_core_client::{
 };
 use vllm_llm::Llm;
 use vllm_metrics::METRICS;
+use vllm_mm_cache::{MmProcessorShmCache, MmShmCacheConfig};
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{Prompt, TextBackend, TextRequestProcessor};
 use vllm_tokenizer::test_utils::TestTokenizer;
@@ -1183,6 +1186,19 @@ async fn test_admin_state_with_ready_and_engine_script<F>(
 where
     F: for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static,
 {
+    test_admin_state_with_ready_engine_script_and(ready, script, |state| state).await
+}
+
+/// Like [`test_admin_state_with_ready_and_engine_script`], but allows
+/// customizing the [`AppState`] before it is shared with the router.
+async fn test_admin_state_with_ready_engine_script_and<F>(
+    ready: EngineCoreReadyResponse,
+    script: F,
+    customize: impl FnOnce(AppState) -> AppState,
+) -> (Arc<AppState>, MockEngineTask)
+where
+    F: for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static,
+{
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
     let engine_id = b"engine-openai-admin".to_vec();
@@ -1207,10 +1223,10 @@ where
 
     let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
     (
-        Arc::new(AppState::new(
+        Arc::new(customize(AppState::new(
             vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
             chat,
-        )),
+        ))),
         engine_task,
     )
 }
@@ -6427,6 +6443,81 @@ async fn reset_mm_cache_route_sends_expected_utility_call() {
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
     assert!(body.is_empty());
+    engine_task.await.expect("mock engine task");
+}
+
+/// `/reset_mm_cache` must also clear the frontend-side (P0) shm cache, so
+/// both sides of the cache stay in sync.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn reset_mm_cache_route_clears_shm_processor_cache() {
+    let cache = Arc::new(
+        MmProcessorShmCache::create(MmShmCacheConfig {
+            shm_name: MmShmCacheConfig::unique_shm_name(),
+            data_buffer_size: 1 << 20,
+            max_object_size: 1 << 17,
+        })
+        .expect("create shm cache"),
+    );
+    cache.set_n_readers(1);
+    let item: MmKwargsItem = [(
+        "image_grid_thw".to_string(),
+        MmFieldElem {
+            data: Some(MmKwargValue::List(vec![
+                MmKwargValue::Int(1),
+                MmKwargValue::Int(2),
+                MmKwargValue::Int(3),
+            ])),
+            field: MmField::Batched(MmBatchedField { keep_on_cpu: false }),
+        },
+    )]
+    .into_iter()
+    .collect();
+    let stored = cache.put_or_inline("mm-hash-0", item);
+    assert!(
+        stored.contains_key("address"),
+        "item should be stored in shm"
+    );
+    assert!(cache.is_cached("mm-hash-0"));
+
+    let state_cache = cache.clone();
+    let (state, engine_task) = test_admin_state_with_ready_engine_script_and(
+        default_ready_response(),
+        |dealer, push| {
+            boxed_test_future(async move {
+                let utility = recv_engine_message(dealer).await;
+                assert_eq!(utility[0].as_ref(), &[0x03]);
+
+                let payload = decode_value(&utility[1]).expect("decode utility payload");
+                let array = payload.as_array().expect("utility payload array");
+                let call_id = array[1].as_u64().expect("call id");
+
+                assert_eq!(array[2], Value::from("reset_mm_cache"));
+                assert_eq!(array[3], Value::Array(Vec::new()));
+
+                send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+            })
+        },
+        move |state| state.with_mm_processor_cache(Some(state_cache)),
+    )
+    .await;
+    let mut app = build_router_with_dev_mode_and_lora(state, true, false);
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/reset_mm_cache")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert!(!cache.is_cached("mm-hash-0"), "shm cache should be cleared");
     engine_task.await.expect("mock engine task");
 }
 

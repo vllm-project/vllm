@@ -9,9 +9,11 @@ members = [
     "src/llm",
     "src/managed-engine",
     "src/metrics",
+    "src/mm-cache",
     "src/mock-engine",
     "src/parser",
     "src/server",
+    "src/shm-object-storage",
     "src/text",
     "src/tokenizer",
     "src/tracing",
@@ -49,6 +51,7 @@ futures = "0.3.31"
 half = { version = "2.7.1", features = ["bytemuck"] }
 hex = "0.4.3"
 hf-hub = { version = "0.5.0", default-features = false, features = ["tokio"] }
+hmac = "0.12"
 http-body = "1.0.1"
 hyper = { version = "1.10.1", features = ["http1", "server"] }
 hyper-util = { version = "0.1.20", features = [
@@ -62,6 +65,7 @@ indicatif = "0.18.4"
 itertools = "0.14.0"
 libc = "0.2.177"
 llm-multimodal = { git = "https://github.com/smg-project/llm-multimodal", rev = "f0985ef65967615db2c79279aa07818499301bfd", default-features = false, features = ["native-tls"] }
+memmap2 = "0.9"
 mimalloc = "0.1.52"
 minijinja = { version = "2.24", features = ["unstable_machinery", "json", "builtins", "loader", "loop_controls", "preserve_order", "fuel"] }
 minijinja-contrib = { version = "2.24", features = ["pycompat"] }
@@ -147,9 +151,11 @@ vllm-engine-core-client = { path = "src/engine-core-client" }
 vllm-llm = { path = "src/llm" }
 vllm-managed-engine = { path = "src/managed-engine" }
 vllm-metrics = { path = "src/metrics" }
+vllm-mm-cache = { path = "src/mm-cache" }
 vllm-parser = { path = "src/parser" }
 vllm-proto = { path = "proto" }
 vllm-server = { path = "src/server" }
+vllm-shm-object-storage = { path = "src/shm-object-storage" }
 vllm-text = { path = "src/text" }
 vllm-tokenizer = { path = "src/tokenizer" }
 vllm-tracing = { path = "src/tracing" }

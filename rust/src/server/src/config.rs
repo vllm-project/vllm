@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::num::NonZeroU32;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
@@ -18,6 +19,7 @@ use vllm_chat::{
     ToolStrictLevel,
 };
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
+use vllm_mm_cache::MmProcessorShmCache;
 use vllm_text::backend::hf::HfOverrides;
 
 /// Default keep-alive idle timeout (seconds); also the head-read bound
@@ -213,8 +215,8 @@ impl FromStr for LoraModulePath {
 }
 
 /// Normalized runtime configuration for the minimal OpenAI-compatible server.
-#[derive(Educe, Clone, PartialEq, Eq, Serialize)]
-#[educe(Debug)]
+#[derive(Educe, Clone, Serialize)]
+#[educe(Debug, PartialEq, Eq)]
 pub struct Config {
     /// Frontend-to-engine transport setup.
     pub transport_mode: TransportMode,
@@ -297,6 +299,14 @@ pub struct Config {
     /// Profiler mode that registers `/start_profile` and `/stop_profile`
     /// routes when present.
     pub profiler: Option<String>,
+    /// Frontend-side (P0 writer) shared-memory multi-modal processor cache,
+    /// enabled by `--mm-processor-cache-type shm` in managed `serve` mode.
+    ///
+    /// Created before the managed Python engine starts; `None` disables the
+    /// shm cache and media is always sent to the engine inline.
+    #[serde(skip_serializing)]
+    #[educe(Debug(ignore), PartialEq(ignore))]
+    pub mm_processor_cache: Option<Arc<MmProcessorShmCache>>,
 }
 
 impl Config {

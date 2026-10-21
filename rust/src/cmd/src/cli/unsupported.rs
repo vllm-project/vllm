@@ -337,14 +337,6 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub mm_processor_kwargs: Option<Unsupported>,
 
-    /// The size (in GiB) of the multi-modal processor cache.
-    #[arg(long)]
-    pub mm_processor_cache_gb: Option<Unsupported>,
-
-    /// Type of cache to use for the multi-modal preprocessor/mapper.
-    #[arg(long)]
-    pub mm_processor_cache_type: Option<Unsupported>,
-
     /// Hash algorithm to use for multi-modal input caching. Use `"sha256"` or
     /// `"sha512"` for FIPS-compliant deployments.
     #[arg(long)]

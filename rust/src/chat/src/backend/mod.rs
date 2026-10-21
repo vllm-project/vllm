@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::Value;
+use vllm_mm_cache::MmProcessorShmCache;
 use vllm_text::backend::hf::HfOverrides;
 use vllm_text::{DynTextBackend, GenerationConfigMode, TextBackend};
 
@@ -63,7 +64,10 @@ impl<T> ChatTextBackend for T where T: ChatBackend + TextBackend + ?Sized {}
 pub type DynChatTextBackend = Arc<dyn ChatTextBackend>;
 
 /// Frontend-side chat backend loading options.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+///
+/// `Debug`/`PartialEq` are intentionally not derived: the shm cache handle is
+/// a process resource without meaningful value semantics.
+#[derive(Clone, Default)]
 pub struct LoadModelBackendsOptions {
     /// Model revision on the Hugging Face Hub (branch, tag, or commit SHA).
     pub revision: Option<String>,
@@ -89,6 +93,9 @@ pub struct LoadModelBackendsOptions {
     /// Maximum number of input items allowed per prompt for each modality.
     /// Unspecified modalities are unlimited.
     pub limit_mm_per_prompt: MmLimitPerPrompt,
+    /// Frontend-side (P0 writer) shm multi-modal processor cache shared with
+    /// the engine workers, from `--mm-processor-cache-type shm`.
+    pub mm_processor_cache: Option<Arc<MmProcessorShmCache>>,
 }
 
 /// Shared backends loaded from a model id.

@@ -158,6 +158,7 @@ pub async fn run_mm_processor(args: MmProcessorArgs, timing: RequestTimingStats)
         handshake_port,
         data_parallel_size: args.engine.data_parallel_size,
         python_args,
+        envs: ManagedEngineConfig::rust_frontend_envs(),
     };
     eprintln!(
         "Spawning managed headless engine: python={} model={} data_parallel_size={}",

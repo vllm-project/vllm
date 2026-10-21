@@ -13,6 +13,7 @@ use vllm_chat::ChatLlm;
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::runtime::BackgroundShutdownRuntime;
+use vllm_mm_cache::MmProcessorShmCache;
 
 use crate::config::{ApiServerOptions, CorsConfig, LoraModulePath};
 use crate::lora::{
@@ -55,6 +56,9 @@ pub struct AppState {
     /// Profiler mode that registers `/start_profile` and `/stop_profile`
     /// routes when present.
     pub profiler: Option<String>,
+    /// Frontend-side (P0 writer) shm multi-modal processor cache, cleared by
+    /// `/reset_mm_cache` alongside the engine-side cache.
+    mm_processor_cache: Option<Arc<MmProcessorShmCache>>,
 }
 
 impl AppState {
@@ -83,6 +87,7 @@ impl AppState {
             model_path: None,
             request_runtime: OnceLock::new(),
             profiler: None,
+            mm_processor_cache: None,
         }
     }
 
@@ -108,6 +113,17 @@ impl AppState {
     pub fn with_profiler(mut self, profiler: Option<String>) -> Self {
         self.profiler = profiler;
         self
+    }
+
+    /// Attach the shm multi-modal processor cache (P0 writer), when enabled.
+    pub fn with_mm_processor_cache(mut self, cache: Option<Arc<MmProcessorShmCache>>) -> Self {
+        self.mm_processor_cache = cache;
+        self
+    }
+
+    /// The shm multi-modal processor cache, when enabled.
+    pub(crate) fn mm_processor_cache(&self) -> Option<&Arc<MmProcessorShmCache>> {
+        self.mm_processor_cache.as_ref()
     }
 
     /// Attach the runtime server information snapshot used by `/server_info`.
