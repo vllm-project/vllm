@@ -18,6 +18,7 @@ from vllm.model_executor.layers.attention import (
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
+    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.pooler import (
@@ -857,13 +858,15 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQu
 
 @attn_type("encoder_only")
 @default_pooling_type(tok_pooling_type="ALL")
-class BertForTokenClassification(nn.Module):
+class BertForTokenClassification(nn.Module, SupportsLoRA):
     is_pooling_model = True
     embedding_class: type[nn.Module] = BertEmbedding
+    packed_modules_mapping = BertModel.packed_modules_mapping
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
+        self.config = config
         self.head_dtype = vllm_config.model_config.head_dtype
         self.num_labels = config.num_labels
         self.bert = BertModel(
@@ -871,8 +874,12 @@ class BertForTokenClassification(nn.Module):
             prefix=maybe_prefix(prefix, "bert"),
             embedding_class=self.embedding_class,
         )
-        self.classifier = nn.Linear(
-            config.hidden_size, config.num_labels, dtype=self.head_dtype
+        self.classifier = ReplicatedLinear(
+            config.hidden_size,
+            config.num_labels,
+            params_dtype=self.head_dtype,
+            prefix=maybe_prefix(prefix, "classifier"),
+            return_bias=False,
         )
 
         pooler_config = vllm_config.model_config.pooler_config

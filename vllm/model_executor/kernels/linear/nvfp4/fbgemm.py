@@ -8,6 +8,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     slice_nvfp4_output,
     swizzle_blockscale,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.utils.import_utils import has_fbgemm_gpu
 
 from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
@@ -30,9 +31,7 @@ class FbgemmNvFp4LinearKernel(NvFp4LinearKernel):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         swizzled = swizzle_blockscale(layer.weight_scale.data)
-        layer.weight_scale = torch.nn.Parameter(
-            swizzled.view(-1).view(torch.uint8), requires_grad=False
-        )
+        replace_parameter(layer, "weight_scale", swizzled.view(-1).view(torch.uint8))
 
     def apply_weights(
         self,
