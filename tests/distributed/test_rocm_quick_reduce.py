@@ -57,6 +57,7 @@ def _make_quick_allreduce(
     )
 
     qar = QuickAllReduce.__new__(QuickAllReduce)
+    qar._flydsl_int4 = None
     qar.disabled = disabled
     qar.world_size = world_size
     qar.use_fp16_kernels = use_fp16_kernels
@@ -705,6 +706,7 @@ def test_quick_allreduce_rocm_arch_available(gcn_arch_name, expected):
     from vllm.distributed.device_communicators.quick_all_reduce import QuickAllReduce
 
     qar = QuickAllReduce.__new__(QuickAllReduce)
+    qar._flydsl_int4 = None
     qar.disabled = True
 
     with (
@@ -725,6 +727,7 @@ def test_quick_allreduce_rocm_arch_available_handles_probe_failure():
     from vllm.distributed.device_communicators.quick_all_reduce import QuickAllReduce
 
     qar = QuickAllReduce.__new__(QuickAllReduce)
+    qar._flydsl_int4 = None
     qar.disabled = True
 
     with (

@@ -44,7 +44,6 @@ MB = 1024 * KB
 
 
 class QuickAllReduce:
-    _flydsl_int4: Any = None
     _SUPPORTED_WORLD_SIZES = [2, 4, 8]
     _SUPPORTED_DTYPES = [torch.float16, torch.bfloat16]
     # The following data is based on kernel tests.
@@ -91,6 +90,7 @@ class QuickAllReduce:
 
         """
         self.disabled = True
+        self._flydsl_int4: Any = None
         if not self._rocm_arch_available():
             logger.debug(
                 "Custom quick allreduce is only supported on ROCm MI300 series."
@@ -259,16 +259,16 @@ class QuickAllReduce:
                 self.qr_quantization_min_size // KB,
             )
         self.create_shared_buffer()
-        self._init_flydsl_int4(vllm_config)
+        self._flydsl_int4 = self._init_flydsl_int4(vllm_config)
         self.disabled = False
 
-    def _init_flydsl_int4(self, vllm_config):
+    def _init_flydsl_int4(self, vllm_config) -> Any:
         if (
             self.qr_quant_level != QuickReduceRegime.INT4
             or not rocm_aiter_ops.is_flydsl_quick_reduce_available()
         ):
-            return
-        self._flydsl_int4 = rocm_aiter_ops.create_flydsl_quick_all_reduce_int4(
+            return None
+        flydsl_int4 = rocm_aiter_ops.create_flydsl_quick_all_reduce_int4(
             group=self.group,
             device=self.device,
             rank=self.rank,
@@ -277,7 +277,7 @@ class QuickAllReduce:
         # compile() runs a real all-reduce on every rank. It moves the JIT
         # out of the first prefill and out of CUDA graph capture.
         warmup = torch.empty(MB, dtype=torch.bfloat16, device=self.device)
-        self._flydsl_int4.compile(warmup, torch.empty_like(warmup))
+        flydsl_int4.compile(warmup, torch.empty_like(warmup))
         torch.accelerator.synchronize(self.device)
         logger.info(
             "Using AITER FlyDSL INT4 QuickReduce for BF16 payloads; other "
@@ -292,6 +292,7 @@ class QuickAllReduce:
                 "kernels yet: the payloads it takes run all-reduce plus a "
                 "separate RMSNorm, so the fusion does nothing for them."
             )
+        return flydsl_int4
 
     @staticmethod
     def _get_qr_min_size(qr_max_size: int | None) -> int | None:

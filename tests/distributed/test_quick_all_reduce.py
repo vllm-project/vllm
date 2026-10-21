@@ -79,6 +79,7 @@ def _make_quick_allreduce_for_test(
     quantization_min_size: int | None = None,
 ) -> QuickAllReduce:
     quick_reduce = QuickAllReduce.__new__(QuickAllReduce)
+    quick_reduce._flydsl_int4 = None
     quick_reduce.disabled = False
     quick_reduce.qr_max_size = 16 * MB
     quick_reduce.qr_min_size = min_size_mb * MB if min_size_mb is not None else None
