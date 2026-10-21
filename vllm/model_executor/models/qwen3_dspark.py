@@ -249,7 +249,19 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
     ) -> torch.Tensor:
         """Per-position acceptance probability for each drafted token."""
         assert self.model.confidence_head is not None
-        return torch.sigmoid(self.model.confidence_head(head_hidden, markov_embed))
+        head = self.model.confidence_head
+
+        # Fused TileLang path (single kernel: cat + fp32 cast + GEMV + sigmoid).
+        # The kernel handles dtype/shape/stride gating internally; fall back to
+        # PyTorch composed ops when it declines.
+        if head.with_markov:
+            from vllm.model_executor.kernels.dspark import dspark_confidence_fused
+
+            fused = dspark_confidence_fused(head_hidden, markov_embed, head.proj.weight)
+            if fused is not None:
+                return fused
+
+        return torch.sigmoid(head(head_hidden, markov_embed))
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         model_weights = {}
