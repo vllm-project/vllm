@@ -24,6 +24,9 @@ from vllm.model_executor.layers.fused_moe.oracle.int8 import (
     backend_to_kernel_cls,
 )
 from vllm.model_executor.layers.fused_moe.router.cpu_router import _softmax_topk
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_int8 import (  # noqa: E501
+    maybe_pad_zen_moe_weights,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8DynamicTokenSym,
     kInt8StaticChannelSym,
@@ -130,6 +133,67 @@ def _make_int8_moe_weights(use_bias: bool, dtype: torch.dtype = torch.bfloat16):
             0.5 * HIDDEN_SIZE**0.5
         )
     return w13, w2, w13_scale, w2_scale, w13_bias, w2_bias
+
+
+@pytest.fixture
+def mock_zentorch_preprocess_weights():
+    """Reference zentorch_preprocess_weights, registered when zentorch is absent."""
+    if hasattr(torch.ops.zentorch, "zentorch_preprocess_weights"):
+        yield None
+        return
+
+    def _preprocess_weights(weight, zentorch_op_name=""):
+        if weight.dim() != 3 or weight.dtype is not torch.int8:
+            return weight
+        e, n, k = weight.shape
+        pad = ((n * 4 + 63) // 64) * 64 + 64
+        storage = weight.new_empty((e, 1, n * k + pad))
+        out = storage.as_strided((e, n, k), (n * k + pad, k, 1))
+        out.copy_(weight)
+        return out
+
+    lib_def = torch.library.Library("zentorch", "DEF")
+    lib_def.define(
+        "zentorch_preprocess_weights(Tensor weight, str "
+        "zentorch_op_name='zentorch::zentorch_preprocess_weights') -> Tensor"
+    )
+    lib_impl = torch.library.Library("zentorch", "IMPL", "CPU")
+    lib_impl.impl("zentorch_preprocess_weights", _preprocess_weights)
+
+    yield True
+
+    lib_impl._destroy()
+    lib_def._destroy()
+
+
+def test_zen_int8_moe_weights_get_per_expert_slack(
+    mock_zentorch_preprocess_weights, monkeypatch
+):
+    """Both projections reach the op, and only the Zen experts opt in."""
+    monkeypatch.setattr(current_platform, "is_zen_cpu", lambda: True)
+    w13, w2, *_ = _make_int8_moe_weights(use_bias=False)
+
+    def _layer():
+        layer = torch.nn.Module()
+        for name, w in (("w13_weight", w13), ("w2_weight", w2)):
+            layer.register_parameter(
+                name, torch.nn.Parameter(w.clone(), requires_grad=False)
+            )
+        return layer
+
+    layer = _layer()
+    maybe_pad_zen_moe_weights(layer, ZenCPUExpertsInt8)
+    for name, original in (("w13_weight", w13), ("w2_weight", w2)):
+        padded = getattr(layer, name).data
+        n, k = original.shape[1:]
+        assert padded.stride(0) > n * k
+        assert torch.equal(padded, original)
+
+    # Any other experts class reaches the same ZenDNN reorder only by accident,
+    # so the slack is not worth re-allocating the weights for.
+    other = _layer()
+    maybe_pad_zen_moe_weights(other, None)
+    assert other.w13_weight.data.stride(0) == w13.shape[1] * w13.shape[2]
 
 
 def test_zen_int8_first_in_cpu_backend_priority():
