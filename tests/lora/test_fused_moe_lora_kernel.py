@@ -149,6 +149,8 @@ def use_fused_moe_lora_kernel(
     add_inputs=True,
     shrink_split_k=1,
     expert_map=None,
+    mul_routed_weight=False,
+    row_map=None,
 ):
     max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
     max_num_tokens_padded = round_up(max_num_tokens_padded, block_size)
@@ -190,7 +192,6 @@ def use_fused_moe_lora_kernel(
         "SPLIT_K": 1,
     }
 
-    mul_routed_weight = False
     expert_ids = expert_ids.view(max_loras, -1)
     sorted_token_ids = sorted_token_ids.view(max_loras, -1)
 
@@ -232,6 +233,7 @@ def use_fused_moe_lora_kernel(
         fully_sharded=fully_sharded,
         offset=offset,
         add_inputs=add_inputs,
+        row_map=row_map,
     )
 
 
@@ -476,6 +478,8 @@ def use_fused_moe_lora_kernel_naive(
     offset=0,
     add_inputs=True,
     shrink_split_k=1,
+    mul_routed_weight=False,
+    row_map=None,
 ):
     """Test helper for naive_block_assignment path.
     Skips moe_lora_align_block_size and uses flattened topk_ids as expert_ids.
@@ -489,8 +493,6 @@ def use_fused_moe_lora_kernel_naive(
         "NUM_STAGES": 3,
         "SPLIT_K": 1,
     }
-
-    mul_routed_weight = False
 
     # In naive mode:
     # - expert_ids = topk_ids.view(-1), shape: (num_tokens * top_k,)
@@ -540,6 +542,7 @@ def use_fused_moe_lora_kernel_naive(
         fully_sharded=fully_sharded,
         offset=offset,
         add_inputs=add_inputs,
+        row_map=row_map,
     )
 
 
@@ -653,6 +656,87 @@ def test_fused_moe_lora_kernel_naive_block_assignment(
     )
 
     torch.testing.assert_close(output, output_ref, atol=1e-2, rtol=1e-2)
+
+
+# (num_tokens, top_k_num, max_lora_rank, naive) cover the two-kernel path,
+# the one-shot kernel, and the small-batch kernel.
+@pytest.mark.parametrize(
+    "num_tokens,top_k_num,max_lora_rank,naive",
+    [(8, 4, 16, False), (8, 4, 16, True), (100, 4, 16, False), (80, 1, 8, True)],
+)
+@pytest.mark.parametrize("mul_routed_weight", [False, True])
+@pytest.mark.parametrize("device", DEVICES)
+def test_fused_moe_lora_kernel_row_map(
+    num_tokens, top_k_num, max_lora_rank, naive, mul_routed_weight, device
+):
+    """With `row_map`, every (token, topk) pair must read its per-pair input
+    from and accumulate into row `row_map[pair]` exactly as the unmapped call
+    does at row `pair`; pairs mapped to -1 must leave the output untouched."""
+    torch.set_default_device(device)
+    set_random_seed(0)
+    num_experts, max_loras, N, K, num_slices = 64, 4, 512, 256, 2
+    dtype = torch.bfloat16
+    num_pairs = num_tokens * top_k_num
+    topk_ids, topk_weights, token_lora_mapping, lora_ids = sample_data(
+        num_tokens, min(num_tokens, 4), max_loras, num_experts, top_k_num
+    )
+    lora_a = [
+        torch.rand((max_loras, num_experts, max_lora_rank, K), dtype=dtype) - 0.5
+        for _ in range(num_slices)
+    ]
+    lora_b = [
+        torch.rand(
+            (max_loras, num_experts, N // num_slices, max_lora_rank), dtype=dtype
+        )
+        - 0.5
+        for _ in range(num_slices)
+    ]
+    row_map = torch.randperm(num_pairs).to(torch.int32)
+    invalid = torch.randperm(num_pairs)[: num_pairs // 4]
+    row_map[invalid] = -1
+    valid = row_map >= 0
+
+    x_rows = num_pairs if mul_routed_weight else num_tokens
+    x = torch.rand((x_rows, K), dtype=dtype) - 0.5
+    out = torch.rand((num_pairs, N), dtype=dtype)
+    grouped_x = x.clone()
+    grouped_out = out.clone()
+    if mul_routed_weight:
+        grouped_x[row_map[valid].long()] = x[valid]
+    grouped_out[row_map[valid].long()] = out[valid]
+    expected = grouped_out.clone()
+
+    def run(hidden_states, output, rmap):
+        args = (
+            topk_ids,
+            topk_weights,
+            token_lora_mapping,
+            max_lora_rank,
+            top_k_num,
+            lora_ids,
+            lora_a,
+            lora_b,
+            hidden_states,
+            output.view(num_tokens, top_k_num, N),
+            max_loras,
+        )
+        if naive:
+            use_fused_moe_lora_kernel_naive(
+                *args, 16, mul_routed_weight=mul_routed_weight, row_map=rmap
+            )
+        else:
+            use_fused_moe_lora_kernel(
+                *args,
+                num_experts,
+                16,
+                mul_routed_weight=mul_routed_weight,
+                row_map=rmap,
+            )
+
+    run(x, out, None)
+    run(grouped_x, grouped_out, row_map)
+    expected[row_map[valid].long()] = out[valid]
+    torch.testing.assert_close(grouped_out, expected, atol=0, rtol=0)
 
 
 @multi_gpu_test(num_gpus=2)
