@@ -917,6 +917,13 @@ async def _inline_derender(
 def _assert_inline_parity(coupled: dict, inline: dict) -> None:
     assert len(inline["choices"]) == len(coupled["choices"])
     for c, i in zip(coupled["choices"], inline["choices"]):
+        if c["token_ids"] is None:
+            # Hidden reasoning suppresses token ids on both paths, so the two
+            # generations can't be shown to match and their text may differ.
+            assert i["token_ids"] is None
+            assert i["message"].get("reasoning") is None
+            assert c["message"].get("reasoning") is None
+            continue
         assert i["token_ids"] == c["token_ids"], (
             "greedy or seeded generation was expected to be deterministic "
             "across the coupled and inline calls"
