@@ -1505,35 +1505,47 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   #
   set(ROCM_ATTN_GEN_SCRIPT
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/rocm/generate_paged_attn.py)
+  # Editing the script has to re-run configure, otherwise the units on disk stay
+  # stale until something else triggers a reconfigure.
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    ${ROCM_ATTN_GEN_SCRIPT})
   file(MD5 ${ROCM_ATTN_GEN_SCRIPT} ROCM_ATTN_GEN_SCRIPT_HASH)
   # The generated code depends on the arch list: it drops the Navi (gfx11/gfx12)
   # kernel set when no Navi arch is targeted.
   list(JOIN VLLM_GPU_ARCHES "," ROCM_ATTN_ARCHS)
-  set(ROCM_ATTN_GEN_HASH_ARCH
+  set(ROCM_ATTN_GEN_KEY
     "${ROCM_ATTN_GEN_SCRIPT_HASH}(ARCH:${ROCM_ATTN_ARCHS})")
-  # The generated units live in the source tree, and hipify makes the compiled
-  # copies from there, so the record of what is on disk has to live next to them:
-  # a cache entry is per build directory, and two build directories would then
-  # overwrite each other's units without noticing.
+  # The script records that key plus the exact list of files it wrote, in a stamp
+  # next to the outputs. That list is what tells a missing unit apart from an
+  # up-to-date tree, and the stamp lives in the source tree (not in a
+  # per-build-directory cache) because the outputs do.
   set(ROCM_ATTN_GEN_STAMP
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/rocm/.paged_attn_generated)
   set(ROCM_ATTN_GENERATED "")
+  set(ROCM_ATTN_RECORDED "")
   if (EXISTS ${ROCM_ATTN_GEN_STAMP})
-    file(READ ${ROCM_ATTN_GEN_STAMP} ROCM_ATTN_GENERATED)
+    file(STRINGS ${ROCM_ATTN_GEN_STAMP} _rocm_attn_stamp)
+    if (_rocm_attn_stamp)
+      list(GET _rocm_attn_stamp 0 ROCM_ATTN_GENERATED)
+      list(REMOVE_AT _rocm_attn_stamp 0)
+      set(ROCM_ATTN_RECORDED ${_rocm_attn_stamp})
+    endif()
   endif()
-  message(STATUS "paged attention generation script hash: ${ROCM_ATTN_GEN_HASH_ARCH}")
+  set(_rocm_attn_missing FALSE)
+  foreach (_rocm_attn_f ${ROCM_ATTN_RECORDED})
+    if (NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/csrc/rocm/${_rocm_attn_f})
+      set(_rocm_attn_missing TRUE)
+    endif()
+  endforeach()
+  message(STATUS "paged attention generation key: ${ROCM_ATTN_GEN_KEY}")
 
   file(GLOB VLLM_ATTENTION_PAGED_ATTN_SRC RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
     "csrc/rocm/attention_paged_attn_*.cu")
-  file(GLOB VLLM_ATTENTION_PAGED_ATTN_INC RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
-    "csrc/rocm/attention_paged_attn_*.inc")
   if (NOT VLLM_ATTENTION_PAGED_ATTN_SRC
-      OR NOT VLLM_ATTENTION_PAGED_ATTN_INC
-      OR NOT ROCM_ATTN_GENERATED STREQUAL ${ROCM_ATTN_GEN_HASH_ARCH})
+      OR _rocm_attn_missing
+      OR NOT ROCM_ATTN_GENERATED STREQUAL "${ROCM_ATTN_GEN_KEY}")
     execute_process(
-      COMMAND ${CMAKE_COMMAND} -E env
-      PYTHONPATH=$ENV{PYTHONPATH}
-        ${Python_EXECUTABLE} ${ROCM_ATTN_GEN_SCRIPT} ${ROCM_ATTN_ARCHS}
+      COMMAND ${Python_EXECUTABLE} ${ROCM_ATTN_GEN_SCRIPT} ${ROCM_ATTN_ARCHS}
       RESULT_VARIABLE rocm_attn_generation_result
       OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/rocm_attn_generation.log
       ERROR_FILE ${CMAKE_CURRENT_BINARY_DIR}/rocm_attn_generation.log
@@ -1545,15 +1557,12 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
                           "\nCheck the log for details: "
                           "${CMAKE_CURRENT_BINARY_DIR}/rocm_attn_generation.log")
     else()
-      file(WRITE ${ROCM_ATTN_GEN_STAMP} ${ROCM_ATTN_GEN_HASH_ARCH})
       message(STATUS "Paged attention generation completed successfully.")
     endif()
     file(GLOB VLLM_ATTENTION_PAGED_ATTN_SRC RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
       "csrc/rocm/attention_paged_attn_*.cu")
-    file(GLOB VLLM_ATTENTION_PAGED_ATTN_INC RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
-      "csrc/rocm/attention_paged_attn_*.inc")
   else()
-    message(STATUS "Paged attention generation script has not changed, skipping generation.")
+    message(STATUS "Paged attention generation is up to date.")
   endif()
 
   set(VLLM_ROCM_EXT_SRC

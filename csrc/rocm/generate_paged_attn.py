@@ -30,6 +30,7 @@ csrc/quantization/marlin/generate_kernels.py, and are gitignored.
 """
 
 import glob
+import hashlib
 import os
 import sys
 
@@ -207,8 +208,14 @@ KV_CACHE_DTYPE_PREDICATES = {
     "fp8": 'kv_cache_dtype == "fp8" || kv_cache_dtype == "fp8_e4m3"',
 }
 
-OUTPUT_DIR = sys.argv[2] if len(sys.argv) > 2 else os.path.dirname(
-    os.path.abspath(__file__))
+OUTPUT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# MD5 of this script plus the arch list, recorded in the stamp so CMake can tell
+# whether the files on disk were produced by the current version for the current
+# arch list (same MD5 as `file(MD5 ...)`).
+with open(__file__, "rb") as _self:
+    SCRIPT_HASH = hashlib.md5(_self.read()).hexdigest()
+STAMP_NAME = ".paged_attn_generated"
 
 # Target archs, e.g. "gfx950" or "gfx942,gfx1100" (passed by CMake from
 # VLLM_GPU_ARCHES). is_navi_gpu() only selects the Navi launcher on gfx11/gfx12,
@@ -368,8 +375,13 @@ def generate_tu(variant, block_size):
 
 
 def remove_old_files():
+    # Only remove files this script produced: a name match alone would delete a
+    # developer's scratch copy in the same directory.
     for path in glob.glob(
             os.path.join(OUTPUT_DIR, "attention_paged_attn_*.cu")):
+        with open(path) as fd:
+            if fd.readline() != FILE_HEAD.splitlines()[0] + "\n":
+                continue
         os.remove(path)
     for name in ("attention_paged_attn_entries.inc",
                  "attention_paged_attn_dispatch.inc"):
@@ -383,16 +395,41 @@ def write(name, content):
         fd.write(content)
 
 
+def check_dispatch_covers_entries(entries, dispatch):
+    # Cheap replacement for the configure-time guard that used to regex
+    # attention_dispatch.cu: every instantiated entry point must be named by the
+    # generated dispatch, otherwise its unit is compiled and linked for nothing.
+    for name in entries:
+        if name not in dispatch:
+            raise SystemExit(
+                f"{name} is instantiated but never dispatched: add it to "
+                "VARIANTS ordering/generate_dispatch(), or drop it.")
+
+
 def main():
     remove_old_files()
+    outputs = []
+    entries = []
     for variant in VARIANTS:
         for block_size in BLOCK_SIZES:
-            write(f"attention_paged_attn_{variant['name']}_bs{block_size}.cu",
-                  generate_tu(variant, block_size))
-    write("attention_paged_attn_entries.inc", generate_entries())
-    write("attention_paged_attn_dispatch.inc", generate_dispatch())
-    print(f"Generated {len(VARIANTS) * len(BLOCK_SIZES)} paged attention "
-          f"translation units for archs {','.join(ARCHS) or 'unknown'}"
+            name = f"attention_paged_attn_{variant['name']}_bs{block_size}.cu"
+            write(name, generate_tu(variant, block_size))
+            outputs.append(name)
+            entries.append(entry_point(variant, block_size))
+    entries_inc = generate_entries()
+    dispatch_inc = generate_dispatch()
+    check_dispatch_covers_entries(entries, dispatch_inc)
+    for name, content in (("attention_paged_attn_entries.inc", entries_inc),
+                          ("attention_paged_attn_dispatch.inc", dispatch_inc)):
+        write(name, content)
+        outputs.append(name)
+    # Record what is on disk next to the outputs: CMake checks this list instead
+    # of trusting a glob, and compares the key (script hash + arch list) so that
+    # a build directory with a different arch list cannot reuse these units.
+    key = f"{SCRIPT_HASH}(ARCH:{','.join(ARCHS)})"
+    write(STAMP_NAME, key + "\n" + "\n".join(outputs) + "\n")
+    print(f"Generated {len(outputs)} paged attention files for archs "
+          f"{','.join(ARCHS) or 'unknown'}"
           f" (navi kernels: {'yes' if HAS_NAVI else 'no'}).")
 
 
