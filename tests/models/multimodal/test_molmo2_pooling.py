@@ -48,7 +48,6 @@ def _reference_pooling_preparation(
 @pytest.mark.parametrize("masked_average", [False, True])
 @pytest.mark.parametrize("index_dtype", [torch.int32, torch.int64])
 def test_molmo2_pooling_native_contract(
-    default_vllm_config,
     masked_average: bool,
     index_dtype: torch.dtype,
 ) -> None:
@@ -76,9 +75,7 @@ def test_molmo2_pooling_native_contract(
         torch.testing.assert_close(actual_tensor, expected_tensor)
 
 
-def test_molmo2_pooling_preserves_non_finite_mask_semantics(
-    default_vllm_config,
-) -> None:
+def test_molmo2_pooling_preserves_non_finite_mask_semantics() -> None:
     image_features = torch.zeros(1, 1, 4, 8)
     image_features[0, 0, 0, 0] = torch.nan
     token_pooling = torch.full((1, 1, 4), -1, dtype=torch.int32)
@@ -105,7 +102,6 @@ def test_molmo2_pooling_preserves_non_finite_mask_semantics(
     ],
 )
 def test_molmo2_pooling_cuda_matches_reference(
-    default_vllm_config,
     masked_average: bool,
     dtype: torch.dtype,
     index_dtype: torch.dtype,
@@ -153,7 +149,7 @@ def test_molmo2_pooling_cuda_matches_reference(
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("masked_average", [False, True])
 def test_molmo2_pooling_cuda_supports_strided_features(
-    default_vllm_config, masked_average: bool
+    masked_average: bool,
 ) -> None:
     padded_features = torch.randn(2, 3, 18, 128, device="cuda", dtype=torch.float16)
     image_features = padded_features[:, :, 1:17, :]
@@ -178,9 +174,7 @@ def test_molmo2_pooling_cuda_supports_strided_features(
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_molmo2_pooling_cuda_preserves_non_finite_mask_semantics(
-    default_vllm_config,
-) -> None:
+def test_molmo2_pooling_cuda_preserves_non_finite_mask_semantics() -> None:
     image_features = torch.zeros(1, 1, 4, 8, device="cuda", dtype=torch.float16)
     image_features[0, 0, 0, 0] = torch.nan
     token_pooling = torch.full((1, 1, 4), -1, device="cuda")
@@ -194,9 +188,7 @@ def test_molmo2_pooling_cuda_preserves_non_finite_mask_semantics(
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_molmo2_pooling_cuda_supports_fullgraph_compile(
-    default_vllm_config,
-) -> None:
+def test_molmo2_pooling_cuda_supports_fullgraph_compile() -> None:
     image_features = torch.randn(1, 2, 16, 128, device="cuda", dtype=torch.bfloat16)
     token_pooling = torch.randint(0, 32, (1, 8, 4), device="cuda")
     token_pooling[:, 0] = -1
@@ -211,9 +203,7 @@ def test_molmo2_pooling_cuda_supports_fullgraph_compile(
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_molmo2_pooling_cuda_supports_graph_replay(
-    default_vllm_config,
-) -> None:
+def test_molmo2_pooling_cuda_supports_graph_replay() -> None:
     image_features = torch.randn(1, 3, 27, 128, device="cuda", dtype=torch.bfloat16)
     token_pooling = torch.randint(0, 81, (1, 16, 9), device="cuda")
     for _ in range(3):
