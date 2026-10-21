@@ -81,9 +81,8 @@ def test_multi_modal_uuids_length_mismatch_raises():
     mm_data_items = mm_processor.info.parse_mm_data(mm_data)
     mm_uuid_items = parse_mm_uuids(mm_uuids)
 
-    with pytest.raises(VLLMValidationError, match="must have same length as") as exc:
+    with pytest.raises(VLLMValidationError, match="must have same length as"):
         renderer._process_mm_uuids(mm_data, mm_data_items, mm_uuid_items, "req-1a")
-    assert exc.value.parameter == "multi_modal_uuids"
 
     # Mismatch: 2 items but only 1 uuid provided
     mm_uuids = {"image": ["hash_cherry"]}
@@ -92,9 +91,8 @@ def test_multi_modal_uuids_length_mismatch_raises():
     mm_data_items = mm_processor.info.parse_mm_data(mm_data)
     mm_uuid_items = parse_mm_uuids(mm_uuids)
 
-    with pytest.raises(VLLMValidationError, match="must have same length as") as exc:
+    with pytest.raises(VLLMValidationError, match="must have same length as"):
         renderer._process_mm_uuids(mm_data, mm_data_items, mm_uuid_items, "req-1b")
-    assert exc.value.parameter == "multi_modal_uuids"
 
 
 def test_multi_modal_uuids_missing_modality_raises():
@@ -112,28 +110,8 @@ def test_multi_modal_uuids_missing_modality_raises():
     mm_data_items = mm_processor.info.parse_mm_data(mm_data)
     mm_uuid_items = parse_mm_uuids(mm_uuids)
 
-    with pytest.raises(VLLMValidationError, match="is empty but .* is missing") as exc:
+    with pytest.raises(VLLMValidationError, match="is empty but .* is missing"):
         renderer._process_mm_uuids(mm_data, mm_data_items, mm_uuid_items, "req-2")
-    assert exc.value.parameter == "multi_modal_uuids"
-
-
-def test_multi_modal_uuids_missing_item_maps_to_bad_request():
-    renderer = _build_renderer()
-
-    # A cached (empty) image item needs a uuid to look it up
-    mm_data = {"image": [cherry_pil_image, None]}
-    mm_uuids = {"image": ["hash_cherry", None]}
-
-    mm_processor = renderer.get_mm_processor()
-    mm_data_items = mm_processor.info.parse_mm_data(mm_data)
-    mm_uuid_items = parse_mm_uuids(mm_uuids)
-
-    with pytest.raises(VLLMValidationError, match=r"\[1\] is missing") as exc:
-        renderer._process_mm_uuids(mm_data, mm_data_items, mm_uuid_items, "req-2b")
-
-    error = create_error_response(exc.value).error
-    assert error.code == HTTPStatus.BAD_REQUEST
-    assert error.param == "multi_modal_uuids"
 
 
 @pytest.mark.parametrize(

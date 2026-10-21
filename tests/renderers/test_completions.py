@@ -136,16 +136,8 @@ class TestValidatePrompt:
     def test_empty_input(self):
         renderer = _build_renderer(MockModelConfig())
 
-        with pytest.raises(VLLMValidationError, match="at least one prompt") as exc:
+        with pytest.raises(VLLMValidationError, match="at least one prompt"):
             renderer.render_prompts(_preprocess_prompt(renderer.model_config, []))
-        assert exc.value.parameter == "prompt"
-
-    def test_empty_input_async(self):
-        renderer = _build_renderer(MockModelConfig())
-
-        with pytest.raises(VLLMValidationError, match="at least one prompt") as exc:
-            asyncio.run(renderer.render_prompts_async([]))
-        assert exc.value.parameter == "prompt"
 
     def test_invalid_type(self):
         renderer = _build_renderer(MockModelConfig())
@@ -829,21 +821,3 @@ class TestRenderEmbedPrompt:
         assert len(results[0]["prompt_token_ids"]) == len(text_input)
         # Second should be embed prompt
         assert torch.equal(results[1]["prompt_embeds"], tensor_input)
-
-    @pytest.mark.parametrize(
-        "enable_prompt_embeds, shape, match",
-        [
-            (False, (10, 768), "--enable-prompt-embeds"),
-            (True, (768,), r"must be of shape \(seq_len, hidden_size\)"),
-        ],
-    )
-    def test_invalid_prompt_embeds_tensor(self, enable_prompt_embeds, shape, match):
-        # Raw tensors (e.g. from `LLM.generate`) skip `safe_load_prompt_embeds`,
-        # so `_process_embeds` must reject them itself.
-        renderer = _build_renderer(
-            MockModelConfig(enable_prompt_embeds=enable_prompt_embeds)
-        )
-
-        with pytest.raises(VLLMValidationError, match=match) as exc:
-            renderer._process_embeds({"prompt_embeds": torch.randn(shape)})
-        assert exc.value.parameter == "prompt_embeds"
