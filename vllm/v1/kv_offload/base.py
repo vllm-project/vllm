@@ -721,6 +721,12 @@ class OffloadingSpec(ABC):
         self.tokens_per_hash = config.cache.tokens_per_hash
         self.blocks_per_chunk = config.cache.blocks_per_chunk
 
+    @property
+    def staged_load_chunks(self) -> int | None:
+        """Primary-tier chunks available to stage one load promoted from
+        secondary tiers, or None when loads are not staged."""
+        return None
+
     @abstractmethod
     def get_manager(self) -> OffloadingManager:
         """Get an OffloadingManager that will be used

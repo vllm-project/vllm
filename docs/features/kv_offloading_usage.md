@@ -95,6 +95,8 @@ vllm serve <model> \
   }'
 ```
 
+Secondary-tier hits are promoted into the CPU tier before they are loaded to GPU, and a load needs all of its chunks there at once. One load therefore covers at most the tokens whose chunks, over all offloaded groups, fit in the CPU tier (logged at startup); a longer hit loads that prefix and recomputes the rest. The bound applies to every load, including hits already in the CPU tier. It needs a full-attention group, and with sliding-window or Mamba groups a `prefix_cache_retention_interval` other than `0` (the default), since with `0` those groups keep their state only at semantic checkpoints such as the replay boundary; without it, a hit larger than the CPU tier loads nothing. A bounded lookup that waits longer than `staged_load_timeout_s` for its promotions recomputes instead.
+
 ## `kv_connector_extra_config` Reference
 
 | Key | Required | Default | Scope | Notes |
@@ -109,6 +111,7 @@ vllm serve <model> \
 | `max_tracker_size` | no | `64000` | single-tier | Max entries in the lookup tracker. |
 | `secondary_tiers` | no | `[]` | multi-tier | List of secondary tier configs (see below). |
 | `tier_poll_interval_s` | no | `0.001` | multi-tier | Pause between tier-poll rounds for tiers that must be serviced between engine steps (currently `p2p`). See [Threading model](#threading-model). Set to `0` to disable the thread and service those tiers once per engine step instead. |
+| `staged_load_timeout_s` | no | `300` | multi-tier | Seconds a lookup shortened by the CPU tier capacity may wait for its promotions before the request recomputes (see [Multi-Tier Setup](#multi-tier-setup)). |
 | `offload_prompt_only` | no | `true` | both | If `true`, only prompt (prefill) blocks are offloaded; decode blocks are skipped. |
 | `self_describing_kv_events` | no | `false` | both | Opt-in. When `true` *and* KV cache events are enabled (`--kv-events-config` with `enable_kv_cache_events`), the connector emits self-describing block-granular `BlockStored`/`BlockRemoved` payloads (constituent block hashes, whole-chunk `token_ids`, per-block `block_size`, parent hash, LoRA + group/cache-spec metadata) instead of the placeholder fallback, so external KV-event consumers can index offloaded blocks. Inert unless events are enabled. With `TieringOffloadingSpec`, a CPU promotion is self-describing when a local request observes its primary-tier `HIT` before event translation; otherwise its stored event may retain the placeholder, while a later `HIT` can backfill metadata for removal. Pending-removal/re-promotion races and externally initiated promotions may also produce placeholders, and consumers must ignore removals for unknown hashes. Partial recurrent tails emit the hash-aligned portion from the physical block start through the tail boundary. Other sliding-window/SSM chunks keep the placeholder fallback. In chunk mode (`block_size` > GPU block size, or `blocks_per_chunk` > 1), overlapping chunks re-announce shared per-block hashes, so consumers must reference-count (deduplicate) repeated store/remove announcements. |
 | `spec_module_path` | no | — | both | Python import path for a custom `OffloadingSpec` not in the built-in registry. Required only when `spec_name` is not built-in (advanced). |

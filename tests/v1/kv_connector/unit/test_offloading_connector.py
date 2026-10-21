@@ -12,6 +12,7 @@ from tqdm import tqdm
 
 from vllm import LLM, SamplingParams, TokensPrompt
 from vllm.config import KVEventsConfig, KVTransferConfig
+from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.distributed.kv_events import BlockStored, KVEventBatch
 from vllm.platforms import current_platform
 
@@ -649,3 +650,70 @@ def test_mamba_cpu_offload_boundary(model: str, block_size: int, tp_size: int):
 
     finally:
         del llm
+
+
+_TIERING_MAX_MODEL_LEN = 2048
+
+
+def _tiering_llm(fs_root, cpu_bytes_to_use: int) -> LLM:
+    return LLM(
+        model="facebook/opt-125m",
+        max_model_len=_TIERING_MAX_MODEL_LEN,
+        gpu_memory_utilization=0.2,
+        enforce_eager=True,
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="OffloadingConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "cpu_bytes_to_use": cpu_bytes_to_use,
+                "block_size": CPU_BLOCK_SIZES,
+                "spec_name": "TieringOffloadingSpec",
+                "secondary_tiers": [{"type": "fs", "root_dir": str(fs_root)}],
+            },
+        ),
+    )
+
+
+def test_tiering_hit_larger_than_primary_tier_loads_a_prefix(tmp_path) -> None:
+    """A secondary-tier hit larger than the primary tier is promoted through
+    it in a load that fits, instead of loading nothing."""
+    fs_root = tmp_path / "fs_tier"
+    sampling_params = SamplingParams(max_tokens=1)
+    # opt-125m keeps 36 KiB of KV per token.
+    chunk_bytes = CPU_BLOCK_SIZES * 36 * 1024
+    # Three times the primary tier, in whole chunks, plus the token to
+    # recompute and the one to generate must fit in max_model_len on every
+    # platform's block size.
+    primary_chunks = min(9, (_TIERING_MAX_MODEL_LEN - 2) // (3 * CPU_BLOCK_SIZES))
+    assert primary_chunks >= 2
+    num_chunks = 3 * primary_chunks
+    prefix = [100 + i for i in range(num_chunks * CPU_BLOCK_SIZES)]
+    prompt = TokensPrompt(prompt_token_ids=prefix + [7])
+
+    # An engine with a larger primary tier stores the prompt in the fs tier.
+    llm = _tiering_llm(fs_root, cpu_bytes_to_use=4 * num_chunks * chunk_bytes)
+    try:
+        llm.generate(prompt, sampling_params, use_tqdm=False)
+        deadline = time.monotonic() + 60
+        while (stored := _num_fs_tier_files(fs_root)) < num_chunks:
+            assert time.monotonic() < deadline, (
+                f"the fs tier holds {stored} of {num_chunks} chunks"
+            )
+            time.sleep(0.05)
+    finally:
+        del llm
+        cleanup_dist_env_and_memory()
+
+    llm = _tiering_llm(fs_root, cpu_bytes_to_use=primary_chunks * chunk_bytes)
+    try:
+        output = llm.generate(prompt, sampling_params, use_tqdm=False)[0]
+
+        # The load is bounded by the primary tier.
+        assert output.num_cached_tokens == primary_chunks * CPU_BLOCK_SIZES
+    finally:
+        del llm
+
+
+def _num_fs_tier_files(root_dir) -> int:
+    """Chunks the fs tier has finished writing."""
+    return sum(1 for _ in root_dir.rglob("*.bin"))
