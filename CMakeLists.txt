@@ -1549,13 +1549,11 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/rocm/skinny_gemms_wvsplitkq.cu"
     "csrc/rocm/skinny_gemms_int4.cu")
 
-  # The paged attention *instantiations* are split over one generated
-  # translation unit per (dtype, kv-cache dtype, head size, block size)
-  # combination, emitted from the single variant list in
-  # csrc/rocm/generate_paged_attn.py: compiling them all in a single file
-  # serializes ~10 min of device code generation onto one core. The same script
-  # emits the entry point prototypes and the dispatch arms of paged_attention(),
-  # so a translation unit can no longer be compiled without being dispatched.
+  # The paged attention instantiations are split over one generated translation
+  # unit per (dtype, kv-cache dtype, head size, block size); compiling them in a
+  # single file serialized ~10 min of device code generation onto one core. The
+  # same script emits the entry point prototypes and paged_attention()'s dispatch
+  # arms, so a unit cannot be compiled without being dispatched.
   # attention_dispatch.cu only holds argument validation and is_navi detection,
   # attention_kernels.cuh the kernels and launchers.
   #
