@@ -60,6 +60,9 @@ _MEDIUM_TO_EVENT_STR: dict[Medium, str] = {
     Medium.STORAGE: MEDIUM_STORAGE,
 }
 
+# The tracker is CPU-primary by construction: the primary tier's residency key.
+_PRIMARY_RESIDENCY: tuple[Medium, str | None] = (Medium.CPU, None)
+
 
 class OffloadingEventGroupSpec(NamedTuple):
     kv_cache_spec_kind: str | None
@@ -100,10 +103,9 @@ class OffloadingEventsTracker:
     """Tracks offloaded chunks' KV event payloads from store to eviction.
 
     The scheduler calls :meth:`record_store` from ``_build_store_jobs`` and
-    :meth:`record_lookup` for ready primary-tier hits while the ``Request`` is
-    available. Deferred and missing lookups add no state. Under the connector's
-    supported success-only transfer model, entries remain until the final
-    observed residency removal or :meth:`reset`.
+    :meth:`record_lookup` for allocated primary-tier hits while the ``Request`` is
+    available. Unallocated and missing lookups add no state. Entries remain until
+    the final observed residency removal or :meth:`reset`.
     """
 
     def __init__(
@@ -149,7 +151,7 @@ class OffloadingEventsTracker:
         chunk_idx: int,
         offload_key: OffloadKey,
     ) -> None:
-        """Snapshot metadata for a ready primary-tier lookup hit."""
+        """Snapshot metadata for a ready or write-pending primary-tier hit."""
         if not self.self_describing_enabled:
             return
         if group_config.sliding_window_size_in_chunks is not None:
@@ -158,6 +160,13 @@ class OffloadingEventsTracker:
             self._pending_event_metadata[offload_key] = self._build_event_metadata(
                 req, group_config, chunk_idx
             )
+        # Primary residency is registered here rather than by the manager's
+        # prepare_write(): the payload needs the Request, which only the
+        # scheduler holds at lookup time, and the manager reaches this tracker
+        # only through OffloadingEvents.
+        self._pending_event_metadata[offload_key].active_residencies.add(
+            _PRIMARY_RESIDENCY
+        )
 
     def record_partial_store(
         self,
@@ -236,7 +245,7 @@ class OffloadingEventsTracker:
             extra_keys=None,
             group_idx=group_config.group_idx,
             kv_cache_spec=group_config.kv_event_group_spec,
-            active_residencies={(Medium.CPU, None)},
+            active_residencies={_PRIMARY_RESIDENCY},
         )
         if existing := self._pending_event_metadata.get(offload_key):
             meta.active_residencies.update(existing.active_residencies)
@@ -337,7 +346,7 @@ class OffloadingEventsTracker:
             extra_keys=None,
             group_idx=group_config.group_idx,
             kv_cache_spec=group_config.kv_event_group_spec,
-            active_residencies={(Medium.CPU, None)},
+            active_residencies={_PRIMARY_RESIDENCY},
         )
 
     def _placeholder_stored(
@@ -426,6 +435,10 @@ class OffloadingEventsTracker:
         by_group: dict[int, list] = {}
         for key in event.keys:
             meta = self._pending_event_metadata.get(key)
+            if event.metadata_only:
+                if meta is not None:
+                    meta.active_residencies.discard((event.medium, event.ownership))
+                continue
             if meta is not None:
                 group_idx = meta.group_idx
                 by_group.setdefault(group_idx, []).extend(
