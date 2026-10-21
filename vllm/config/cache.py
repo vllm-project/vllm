@@ -4,13 +4,18 @@
 from collections.abc import Callable
 from dataclasses import field
 from functools import cache
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar, Literal, Protocol, get_args, runtime_checkable
 
+import torch
 from pydantic import Field, field_validator, model_validator
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import (
+    STR_DTYPE_TO_TORCH_DTYPE,
+)
+from vllm.v1.kv_cache_interface import (
+    KVQuantMode,
     is_quantized_kv_cache,
     kv_cache_uses_per_token_head_scales,
 )
@@ -57,6 +62,111 @@ CacheDType = Literal[
     "nvfp4",
     "nvfp4_4over6",
 ]
+
+# Mutable mirror of the CacheDType Literal. Custom dtypes registered by
+# platform backends are appended here at registration time. Never snapshot
+# this list (no list(...), tuple(...), or import-time key capture) —
+# later-registered entries must stay visible to all consumers.
+KV_CACHE_DTYPES: list[str] = list(get_args(CacheDType))
+
+
+@runtime_checkable
+class KVCacheDTypeHandler(Protocol):
+    """Contract for a custom ``--kv-cache-dtype`` value.
+
+    A platform backend implements this protocol to answer the questions vLLM
+    currently answers with closed tables (``STR_DTYPE_TO_TORCH_DTYPE`` /
+    ``get_kv_quant_mode`` / ``is_quantized_kv_cache``). A single handler may
+    be device-aware (e.g., resolving different torch dtypes per device
+    generation).
+    """
+
+    name: str
+
+    def torch_dtype(self) -> torch.dtype:
+        """Storage dtype for KV cache tensors.
+
+        Called once at registration time; the result is injected into the
+        shared ``STR_DTYPE_TO_TORCH_DTYPE`` dict so existing consumers need no
+        changes. The device must already be resolvable (registration runs at
+        platform activation time).
+        """
+        ...
+
+    def quant_mode(self) -> KVQuantMode:
+        """The :class:`KVQuantMode` used by generic kernels.
+
+        Return an existing mode to reuse generic kernel paths, or
+        ``KVQuantMode.CUSTOM`` when the backend fully self-manages kernel
+        dispatch.
+        """
+        ...
+
+
+# Custom dtype handlers: name -> handler instance. Defined after
+# KVCacheDTypeHandler so the annotation resolves at module load time.
+_KV_CACHE_DTYPE_HANDLERS: dict[str, KVCacheDTypeHandler] = {}
+
+
+def register_kv_cache_dtype(name: str):
+    """Register a custom ``--kv-cache-dtype`` value (eager decorator).
+
+    Runs at platform activation time (first ``current_platform`` access),
+    which is after ``--help`` exits and before any KV cache tensor is
+    allocated. During decoration the handler will:
+
+    - append ``name`` to the mutable ``KV_CACHE_DTYPES`` list (driving
+      Pydantic + CLI validation);
+    - resolve ``torch_dtype()`` once and inject it into
+      ``STR_DTYPE_TO_TORCH_DTYPE``, so all existing ``dict[name]`` /
+      ``name in dict`` sites need zero changes;
+    - be stored for later ``quant_mode()`` queries.
+
+    Examples:
+        >>> @register_kv_cache_dtype("int8")
+        ... class Int8Handler:
+        ...     name = "int8"
+        ...
+        ...     def torch_dtype(self):
+        ...         return torch.int8
+        ...
+        ...     def quant_mode(self):
+        ...         return KVQuantMode.CUSTOM
+
+    """
+
+    def _decorate(cls):
+        if name in KV_CACHE_DTYPES:
+            logger.warning(
+                "The kv-cache-dtype '%s' already exists and will be "
+                "overwritten by handler %s.",
+                name,
+                cls,
+            )
+        else:
+            KV_CACHE_DTYPES.append(name)
+        inst = cls()
+        # Inject into the shared dtype dict in-place so every existing
+        # direct [] / `in` access site sees the new entry.
+        STR_DTYPE_TO_TORCH_DTYPE[name] = inst.torch_dtype()
+        _KV_CACHE_DTYPE_HANDLERS[name] = inst
+        return cls
+
+    return _decorate
+
+
+def get_kv_cache_dtype_handler(name: str) -> KVCacheDTypeHandler | None:
+    """Return the handler for ``name``.
+
+    Returns None for upstream dtypes that have no handler (the dtype table
+    already covers these).
+    """
+    return _KV_CACHE_DTYPE_HANDLERS.get(name)
+
+
+def is_known_kv_cache_dtype(name: str) -> bool:
+    """Whether ``name`` is a valid ``--kv-cache-dtype`` value."""
+    return name in KV_CACHE_DTYPES
 
 
 MambaDType = Literal["auto", "float32", "float16", "bfloat16"]
@@ -119,8 +229,11 @@ class CacheConfig:
     def device_memory_utilization(self, value: float) -> None:
         self.gpu_memory_utilization = value
 
-    cache_dtype: CacheDType = "auto"
+    cache_dtype: CacheDType | str = "auto"
     """Data type for kv cache storage. If "auto", will use model data type.
+    An explicit float16 or bfloat16 must match the model data type.
+    Custom dtypes can registered by platform backends via
+    ``register_kv_cache_dtype`` are accepted (see vllm.config.cache).
     CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. ROCm (AMD GPU) supports
     fp8 (=fp8_e4m3). Intel Gaudi (HPU) supports fp8 (using fp8_inc).
     Some models (namely DeepSeekV3.2) default to fp8, set to bfloat16 to use
@@ -176,8 +289,7 @@ class CacheConfig:
     page."""
     mamba_block_size: int | None = Field(default=None, gt=0)
     """Size of a contiguous cache block in number of tokens for mamba cache.
-    Can be set only when prefix caching is enabled.
-    Value must be a multiple of 8 to align with causal_conv1d kernel."""
+    Can be set only when prefix caching is enabled."""
     mamba_cache_dtype: MambaDType = "auto"
     """The data type to use for the Mamba cache (both the conv as well as the
     ssm state). If set to 'auto', the data type will be inferred from the model
@@ -187,19 +299,19 @@ class CacheConfig:
     still be controlled by mamba_cache_dtype). If set to 'auto', the data type
     for the ssm state will be determined by mamba_cache_dtype."""
     mamba_cache_mode: MambaCacheMode = "none"
-    """The cache strategy for Mamba layers:
+    """The cache strategy for Mamba layers, derived from `enable_prefix_caching`:
 
-    - "none": set when prefix caching is disabled.
-    - "align": only cache the mamba state of the last token of each scheduler step and
-      when the token is at position i * block_size. This is the default when prefix
-      caching is enabled.
+    - "none": prefix caching is disabled.
+    - "align": prefix caching is enabled. Only cache the mamba state of the last
+      token of each scheduler step and when the token is at position
+      i * block_size.
     """
     enable_mamba_shared_prefix_checkpoint: bool = False
     """Also register a Mamba "align" checkpoint at the shared-prefix junction --
     where an EAGLE/MTP sibling was observed to resume -- instead of only at the
-    prompt tail. Off by default; only takes effect with `mamba_cache_mode`
-    "align", EAGLE on the Mamba group, and a prefix match unit smaller than the
-    Mamba block size."""
+    prompt tail. Off by default; only takes effect with prefix caching enabled,
+    EAGLE on the Mamba group, and a prefix match unit smaller than the Mamba
+    block size."""
     replayssm_buffer_len: int = Field(default=16, gt=0)
     """ReplaySSM logical history length B for Mamba2. Triton uses B physical
     rows and FlashInfer uses B+T, where T is the target verification length.
@@ -207,11 +319,10 @@ class CacheConfig:
     use_replayssm: bool = False
     """Use the ReplaySSM Mamba2 decode kernel: cache recent SSM inputs and skip
     the per-step full-state store, writing the checkpoint back only on flush.
-    Requires mamba_cache_mode 'none' or 'align' (prefix caching) and the Triton
-    or FlashInfer mamba backend. Mamba2 speculative decode requires FlashInfer
-    and mamba_cache_mode 'none'. In align mode flushes are most efficient when
-    mamba_block_size is a multiple of replayssm_buffer_len, but this is not
-    required."""
+    Requires the Triton or FlashInfer mamba backend; FlashInfer does not support
+    prefix caching yet. Mamba2 speculative decode requires FlashInfer. With
+    prefix caching, flushes are most efficient when mamba_block_size is a
+    multiple of replayssm_buffer_len, but this is not required."""
     use_kda_recoverssm: bool = field(default=False, init=False)
     """Whether Kimi-K3 KDA uses RecoverSSM speculative decode."""
 
@@ -230,6 +341,15 @@ class CacheConfig:
     for hybrid models where requests occupy multiple KV cache groups."""
     kv_cache_max_concurrency: float | None = field(default=None, init=False)
     """Per-DP-engine maximum concurrency at max_model_len tokens."""
+    # The two differ when hashes are finer than the scheduler block but partial
+    # hash hits are off (e.g. a sliding-window group cannot look up sub-block
+    # hits), so hits only land on the scheduler block.
+    # TODO(zjy0516): Merge into one value
+    hash_block_size: int | None = field(default=None, init=False)
+    """Tokens per prefix-cache block hash."""
+    cache_hit_alignment_tokens: int | None = field(default=None, init=False)
+    """Token granularity at which prefix-cache hits land: `hash_block_size`
+    with partial hash hits, otherwise the scheduler block size."""
 
     kv_sharing_fast_prefill: bool = False
     """In some KV sharing setups, e.g. YOCO (https://arxiv.org/abs/2405.05254),
@@ -308,6 +428,8 @@ class CacheConfig:
             "effective_attention_block_size",
             "kv_cache_size_tokens",
             "kv_cache_max_concurrency",
+            "hash_block_size",
+            "cache_hit_alignment_tokens",
             # Feature toggles not impacting compiled graph shape
             "kv_sharing_fast_prefill",
             "swa_bounded_replay",
@@ -348,7 +470,12 @@ class CacheConfig:
 
     @field_validator("cache_dtype", mode="after")
     @classmethod
-    def _validate_cache_dtype(cls, cache_dtype: CacheDType) -> CacheDType:
+    def _validate_cache_dtype(cls, cache_dtype: CacheDType | str) -> CacheDType | str:
+        if not is_known_kv_cache_dtype(cache_dtype):
+            raise ValueError(
+                f"Invalid kv_cache_dtype: {cache_dtype!r}. "
+                f"Valid values are: {KV_CACHE_DTYPES}"
+            )
         if kv_cache_uses_per_token_head_scales(cache_dtype):
             logger.info(
                 "Using %s data type to store kv cache. It reduces the GPU "

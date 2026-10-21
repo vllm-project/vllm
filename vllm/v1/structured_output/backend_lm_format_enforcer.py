@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import ast
 import json
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -117,7 +116,7 @@ class LMFormatEnforcerBackend(StructuredOutputBackend):
                 grammar_spec,
             )
         elif request_type == StructuredOutputOptions.CHOICE:
-            choices = ast.literal_eval(grammar_spec)
+            choices = json.loads(grammar_spec)
             character_level_parser = lmformatenforcer.UnionParser(
                 [lmformatenforcer.StringParser(choice) for choice in choices]
             )
@@ -160,7 +159,7 @@ def validate_structured_output_request_lm_format_enforcer(params: SamplingParams
 
     so_params = params.structured_outputs
 
-    if so_params.regex:
+    if so_params.regex is not None:
         try:
             compile_regex_with_timeout(
                 lmformatenforcer.RegexParser,
@@ -171,7 +170,7 @@ def validate_structured_output_request_lm_format_enforcer(params: SamplingParams
                 f"Failed to compile regex for lm-format-enforcer: {err}"
             ) from err
         return
-    elif so_params.json:
+    elif so_params.json is not None:
         if isinstance(so_params.json, str):
             try:
                 # make sure schema is valid json
@@ -186,10 +185,20 @@ def validate_structured_output_request_lm_format_enforcer(params: SamplingParams
                     f"Error serializing structured outputs jsonschema: {e}"
                 ) from e
         return
-    elif so_params.choice:
+    elif so_params.choice or so_params.json_object:
         return
     elif so_params.grammar:
         raise VLLMValidationError(
             "LM Format Enforcer structured outputs backend "
             "does not support grammar specifications"
+        )
+    elif so_params.structural_tag:
+        raise VLLMValidationError(
+            "LM Format Enforcer structured outputs backend "
+            "does not support structural_tag specifications"
+        )
+    else:
+        raise VLLMValidationError(
+            "LM Format Enforcer structured outputs backend "
+            "does not support this structured outputs specification"
         )

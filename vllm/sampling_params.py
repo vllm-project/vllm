@@ -8,7 +8,7 @@ import math
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 import msgspec
 import numpy as np
@@ -23,6 +23,9 @@ from vllm.tokenizers import TokenizerLike
 from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.utils.torch_utils import make_ndarray_with_pad
 from vllm.v1.serial_utils import PydanticMsgspecMixin
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
@@ -1317,6 +1320,7 @@ class SamplingParams(
             )
 
         from vllm.v1.structured_output.backend_guidance import (
+            GuidanceBackend,
             has_guidance_unsupported_json_features,
             validate_guidance_grammar,
         )
@@ -1339,6 +1343,13 @@ class SamplingParams(
                     " structured output backend. Please either use a more recent "
                     "Mistral model, the ['xgrammar', 'outlines'] "
                     "backends or tokenizer_mode='hf' instead."
+                )
+            if not GuidanceBackend.is_tokenizer_supported(tokenizer):
+                raise VLLMValidationError(
+                    "The 'guidance' structured output backend only supports fast "
+                    "Hugging Face tokenizers and Tekken-based Mistral tokenizers. "
+                    "Please use the 'xgrammar' backend or configure a fast "
+                    "tokenizer instead."
                 )
             # TODO: ideally we would have the LLTokenizer here as Lark syntax
             # allows <|special_token|> and similar, see
@@ -1408,12 +1419,19 @@ class SamplingParams(
                     skip_guidance = has_guidance_unsupported_json_features(schema)
 
                 if skip_guidance:
-                    # Fall back to outlines if the tokenizer is non-tekken Mistral or
-                    # the schema contains features unsupported by guidance
+                    # Fall back to outlines for non-Tekken Mistral tokenizers or
+                    # schemas containing features unsupported by guidance.
                     validate_structured_output_request_outlines(self)
                     self.structured_outputs._backend = "outlines"
                 else:
                     # Fall back to guidance by default.
+                    if not GuidanceBackend.is_tokenizer_supported(tokenizer):
+                        raise VLLMValidationError(
+                            "No compatible structured output backend was found for "
+                            "this request. XGrammar rejected the constraint, and "
+                            "Guidance does not support this tokenizer. Configure a "
+                            "fast tokenizer or select a compatible backend explicitly."
+                        ) from None
                     validate_guidance_grammar(
                         self,
                         tokenizer=_get_llg_tokenizer(tokenizer),
@@ -1492,6 +1510,35 @@ class BeamSearchParams(
     structured_outputs: StructuredOutputsParams | None = None
     skip_special_tokens: bool = True
     watermarking: bool | None = None
+    allowed_token_ids: list[int] | None = None
 
     def __post_init__(self) -> None:
         _verify_num_sequences(self.beam_width, "beam_width")
+
+    def configure_logprobs(
+        self, sampling_params: SamplingParams, config: "VllmConfig"
+    ) -> None:
+        ids = self.allowed_token_ids
+        if ids is None:
+            return
+        if not ids:
+            raise ValueError("Beam search allowed_token_ids must not be empty")
+        if self.structured_outputs is not None:
+            # Grammar candidates can exceed the exact-ID limit of 128 tokens.
+            raise ValueError(
+                "Beam allowlists with structured outputs are not supported"
+            )
+        if config.speculative_config is not None:
+            # Rejection sampling does not yet fully support exact-ID logprobs.
+            raise ValueError(
+                "Beam allowlists with speculative decoding are not supported"
+            )
+        if config.model_config.is_diffusion:
+            # The diffusion sampler does not consume logprob_token_ids.
+            raise ValueError("Beam allowlists with diffusion models are not supported")
+        if not config.use_v2_model_runner:
+            # V1 exact-ID logprobs overwrite other rows in a mixed batch.
+            raise ValueError("Beam allowlists require the V2 model runner")
+        # Score the original distribution without applying a sampling mask.
+        sampling_params.logprobs = None
+        sampling_params.logprob_token_ids = ids

@@ -21,6 +21,9 @@ DEVICES = [
 @pytest.mark.parametrize("device", DEVICES)
 def test_cpu_write(device):
     torch.set_default_device(device)
+    # Initializes the device; otherwise torch.accelerator.synchronize() is a no-op,
+    # as the UVA view's ops never trigger lazy init.
+    torch.accelerator.set_device_index(device)
     cpu_tensor = torch.zeros(10, 10, device="cpu", pin_memory=True, dtype=torch.int32)
     gpu_view = get_accelerator_view_from_cpu_tensor(cpu_tensor)
     assert gpu_view.device.type == DEVICE_TYPE
@@ -44,6 +47,9 @@ def test_cpu_write(device):
 @pytest.mark.parametrize("device", DEVICES)
 def test_gpu_write(device):
     torch.set_default_device(device)
+    # Initializes the device; otherwise torch.accelerator.synchronize() is a no-op,
+    # as the UVA view's ops never trigger lazy init.
+    torch.accelerator.set_device_index(device)
     cpu_tensor = torch.zeros(10, 10, device="cpu", pin_memory=True, dtype=torch.int32)
     gpu_view = get_accelerator_view_from_cpu_tensor(cpu_tensor)
     assert gpu_view.device.type == DEVICE_TYPE
