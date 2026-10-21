@@ -4,7 +4,9 @@
 # d'évaluation du tier secondaire filesystem, cf. NOTES v0320_fstier) :
 #   1. --kv-offloading-size défaut 8 GiB (CPU primaire VOLONTAIREMENT petit :
 #      l'éviction vers le tier fs doit se produire en quelques centaines de K
-#      tokens de fillers, pas en 1,5M)
+#      tokens de fillers, pas en 1,5M). VAR DÉDIÉE KV_OFFLOAD_GB_FSTIER (21/10) :
+#      ne lit PLUS KV_OFFLOAD_GB_SWIFT15 — le .env de prod porte 32, un boot de
+#      fenêtre via --env-file aurait pris RAM 32 + fs au lieu du 8 validé.
 #   2. --kv-transfer-config : spec_name=TieringOffloadingSpec + secondary_tiers
 #      fs root=/kv-tier-fs — la synthèse _post_init_kv_transfer_config fait un
 #      .update() de kv_connector_extra_config (config/vllm.py:1097) : nos clés
@@ -123,7 +125,7 @@ services:
           --speculative-config '${VLLM_SPEC_CONFIG_SWIFT15:-null}' \
           --performance-mode interactivity \
           --enable-chunked-prefill \
-          --kv-offloading-size ${KV_OFFLOAD_GB_SWIFT15:-8} \
+          --kv-offloading-size ${KV_OFFLOAD_GB_FSTIER:-8} \
           --kv-offloading-backend ${KV_OFFLOAD_BACKEND_SWIFT15:-native} \
           --kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"spec_name":"TieringOffloadingSpec","secondary_tiers":[{"type":"fs","root_dir":"/kv-tier-fs","n_read_threads":16,"n_write_threads":16}]}}' \
           --enable-prefix-caching \
