@@ -3,6 +3,7 @@
 
 import threading
 from collections import defaultdict
+from collections.abc import Callable
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -501,12 +502,13 @@ def test_step_barrier_awaits_every_read_before_forward():
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker._has_mamba = False
     worker._reads_issued_this_step = [attn, indexer, mtp_attn]
-    worker.moriio_wrapper = RecordingWrapper()
+    wrapper = RecordingWrapper()
+    worker.moriio_wrapper = wrapper
 
     worker._await_reads_issued_this_step()
     worker._await_reads_issued_this_step()
 
-    assert worker.moriio_wrapper.awaited == [[attn, indexer, mtp_attn]]
+    assert wrapper.awaited == [[attn, indexer, mtp_attn]]
     assert worker._reads_issued_this_step == []
 
 
@@ -518,7 +520,8 @@ def test_wait_for_layer_load_is_noop():
     connector = MoRIIOConnector.__new__(MoRIIOConnector)
     connector.connector_worker = _Boom()
 
-    assert connector.wait_for_layer_load("layer") is None
+    wait_for_layer_load: Callable[[str], object] = connector.wait_for_layer_load
+    assert wait_for_layer_load("layer") is None
 
 
 def test_step_barrier_without_mamba_does_not_raise_on_failure():
@@ -684,11 +687,12 @@ def test_step_barrier_noop_when_no_reads_posted():
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker._has_mamba = False
     worker._reads_issued_this_step = []
-    worker.moriio_wrapper = RecordingWrapper()
+    wrapper = RecordingWrapper()
+    worker.moriio_wrapper = wrapper
 
     worker._await_reads_issued_this_step()
 
-    assert worker.moriio_wrapper.called is False
+    assert wrapper.called is False
 
 
 def test_write_mode_read_blocks_posts_no_read():
@@ -705,10 +709,11 @@ def test_write_mode_read_blocks_posts_no_read():
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker.mode = MoRIIOMode.WRITE
     worker._reads_issued_this_step = []
-    worker.moriio_wrapper = RecordingWrapper()
+    wrapper = RecordingWrapper()
+    worker.moriio_wrapper = wrapper
 
     worker._read_blocks(
-        local_block_ids=[1, 2],
+        local_block_ids=[[1, 2]],
         remote_block_ids=[[10, 11], [90]],
         dst_engine_id="prefill",
         request_id="req-write",
@@ -719,7 +724,7 @@ def test_write_mode_read_blocks_posts_no_read():
     )
 
     assert worker._reads_issued_this_step == []
-    assert worker.moriio_wrapper.sent == []
+    assert wrapper.sent == []
 
 
 def test_producer_start_load_kv_posts_no_read():
@@ -742,13 +747,14 @@ def test_producer_start_load_kv_posts_no_read():
     worker._reads_issued_this_step = []
     worker._consumer_notification_counts = {}
     worker._completed_consumer_notifications = set()
-    worker.moriio_wrapper = RecordingWrapper()
+    wrapper = RecordingWrapper()
+    worker.moriio_wrapper = wrapper
 
     worker.start_load_kv(SimpleNamespace(transfer_id_to_request_id={}))
 
     assert worker._reads_issued_this_step == []
-    assert worker.moriio_wrapper.async_waited is True
-    assert worker.moriio_wrapper.waited is False
+    assert wrapper.async_waited is True
+    assert wrapper.waited is False
 
 
 def test_requested_cudagraph_mode_is_never_overridden():
