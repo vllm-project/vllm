@@ -224,7 +224,7 @@ class _TestAttentionBackend:
         return "TEST"
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
         return [16]
 
 
