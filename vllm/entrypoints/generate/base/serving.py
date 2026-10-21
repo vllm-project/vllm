@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import Any, ClassVar, Generic, TypeVar
 
+import pybase64 as base64
 from fastapi import Request
 from pydantic import ConfigDict
 
@@ -45,9 +46,16 @@ PRIORITY_HEADER = "X-Vllm-Priority"
 
 
 def indexer_response_fields(output: CompletionOutput) -> dict[str, Any]:
-    if output.indexer_topk is None:
+    if output.indexer_profile is None:
         return {}
-    return {"indexer_topk": numpy2base64(output.indexer_topk)}
+    fields: dict[str, Any] = {"indexer_profile": output.indexer_profile}
+    if output.indexer_topk is not None:
+        fields["indexer_topk"] = numpy2base64(output.indexer_topk)
+    if output.indexer_payload is not None:
+        fields["indexer_payload"] = base64.b64encode(output.indexer_payload).decode(
+            "ascii"
+        )
+    return fields
 
 
 def build_per_request_timing_metrics(

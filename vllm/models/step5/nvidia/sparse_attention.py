@@ -411,6 +411,7 @@ class Step5DSAAttentionImpl(Step5SplitKVFlashAttentionImpl):
             if kv_cache.dtype in (torch.uint8, torch.float8_e4m3fn)
             else (None, None)
         )
+        capture = getattr(layer, "indexer_capture", None)
         groups = kv_cache.shape[1]
         if not is_decode and attn_metadata.step5_runtime is None:
             # Fallback when the builder could not plan ahead: one host sync.
@@ -447,6 +448,7 @@ class Step5DSAAttentionImpl(Step5SplitKVFlashAttentionImpl):
                 kv_scales=kv_scales,
                 query_len=query_len,
                 gate=dsa_gate,
+                capture=capture,
             )
             return output
         if groups > 1:
@@ -471,7 +473,11 @@ class Step5DSAAttentionImpl(Step5SplitKVFlashAttentionImpl):
                     dsa_proxy_z[:n],
                 )
                 self._forward_prefill(
-                    *args, summary_updated=group > 0, kv_scales=kv_scales
+                    *args,
+                    summary_updated=group > 0,
+                    kv_scales=kv_scales,
+                    capture=capture,
+                    capture_group=group,
                 )
             output[:n].view(n, groups, heads, query.shape[2]).copy_(
                 grouped_output.transpose(0, 1)
@@ -492,6 +498,7 @@ class Step5DSAAttentionImpl(Step5SplitKVFlashAttentionImpl):
                 kv_scales=kv_scales,
                 query_len=query_len,
                 gate=dsa_gate,
+                capture=capture,
             )
         return self._forward_prefill(
             query[:n],
@@ -503,6 +510,7 @@ class Step5DSAAttentionImpl(Step5SplitKVFlashAttentionImpl):
             dsa_proxy_weights[:n],
             dsa_proxy_z[:n],
             kv_scales=kv_scales,
+            capture=capture,
         )
 
     def plan_prefill_step(self, attn_metadata, n, lengths, layout, positions=None):
@@ -617,6 +625,8 @@ class Step5DSAAttentionImpl(Step5SplitKVFlashAttentionImpl):
         *,
         summary_updated=False,
         kv_scales=(None, None),
+        capture=None,
+        capture_group=None,
     ):
         assert self.summary_cache is not None and self.adapter is not None
         n = query.shape[0]
@@ -689,6 +699,8 @@ class Step5DSAAttentionImpl(Step5SplitKVFlashAttentionImpl):
                     # makes selection ~2x cheaper.
                     sort=False,
                 )
+            if capture is not None:
+                capture.capture_regions(selected, start, capture_group)
             if paged_plan is not None:
                 if paged_plan.query_buffer is not None:
                     paged_plan.prepare_chunk(
@@ -735,6 +747,7 @@ class Step5DSAAttentionImpl(Step5SplitKVFlashAttentionImpl):
         kv_scales=(None, None),
         query_len=1,
         gate=None,
+        capture=None,
     ):
         assert self.summary_cache is not None and self.adapter is not None
         n = proxy_key.shape[0]
@@ -788,6 +801,7 @@ class Step5DSAAttentionImpl(Step5SplitKVFlashAttentionImpl):
             v_scale=kv_scales[1],
             query_len=query_len,
             gate=gate,
+            capture=capture,
         )
         return output
 

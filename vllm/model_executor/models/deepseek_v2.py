@@ -1240,12 +1240,36 @@ class DeepseekV2MLAAttention(nn.Module):
             vllm_config.aux_output_config.enable_return_indexer_topk
             and self.indexer is not None
         ):
+            from vllm.distributed.aux_output_connector.profile import IndexerSource
             from vllm.model_executor.layers.indexer_capture import (
                 configure_indexer_capture,
             )
 
+            consumers = []
+            for consumer in range(layer_id, config.num_hidden_layers):
+                if _index_topk_pattern is None:
+                    shared = (
+                        max(consumer - _index_skip_topk_offset + 1, 0)
+                        % _index_topk_freq
+                        != 0
+                    )
+                else:
+                    shared = (
+                        consumer < len(_index_topk_pattern)
+                        and _index_topk_pattern[consumer] == "S"
+                    )
+                if consumer > layer_id and not shared:
+                    break
+                consumers.append(consumer)
             configure_indexer_capture(
-                self.mla_attn, vllm_config, layer_id, config.index_topk
+                self.mla_attn,
+                vllm_config,
+                IndexerSource(
+                    layer_id,
+                    (config.index_topk,),
+                    "logical_token_id",
+                    consumer_layer_ids=tuple(consumers),
+                ),
             )
             self.indexer.indexer_op.dense_mha_metadata_layer_name = ""
 

@@ -2922,6 +2922,8 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                             },
                         ),
                         indexer_rows: None,
+                        indexer_profile: None,
+                        indexer_output_format: "raw",
                     },
                 ],
                 scheduler_stats: None,

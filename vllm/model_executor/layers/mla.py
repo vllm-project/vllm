@@ -237,7 +237,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         if capture is not None:
             assert self.topk_indices_buffer is not None
             capture.capture(
-                self.topk_indices_buffer[: len(hidden_states), : capture.rows.shape[1]]
+                self.topk_indices_buffer[: len(hidden_states), : capture.source.width]
             )
         if self.is_sparse:
             self.mla_attn.impl.record_logical_topk_ready()  # type: ignore[attr-defined]

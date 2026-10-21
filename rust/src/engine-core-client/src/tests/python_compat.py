@@ -126,6 +126,8 @@ class EngineCoreOutput(
     prompt_token_id_logprobs: object | None = None
     error: RequestError | None = None
     indexer_rows: object | None = None
+    indexer_profile: object | None = None
+    indexer_output_format: str = "raw"
 
 
 class ExtendedEngineCoreOutput(EngineCoreOutput):

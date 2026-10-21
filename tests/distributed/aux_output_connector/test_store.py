@@ -17,6 +17,10 @@ from vllm.distributed.aux_output_connector.connector import (
     AuxRequestOutput,
     PackedBlockHashes,
 )
+from vllm.distributed.aux_output_connector.profile import (
+    AuxOutputProfile,
+    IndexerSource,
+)
 from vllm.distributed.aux_output_connector.routed_experts import (
     RoutedExpertsBuffer,
     materialize_routed_experts,
@@ -165,11 +169,15 @@ def _make_worker(
     max_num_batched_tokens: int | None = None,
     max_concurrent_batches: int = 2,
     max_store_blocks: int | None = None,
-    indexer_shape: tuple[int, int] | None = None,
+    indexer_profile: AuxOutputProfile | None = None,
     enable_r3: bool = True,
 ) -> AuxOutputWorkerConnector:
     r3_nbytes = int(np.prod(_SHAPE)) if enable_r3 else 0
-    shape = (r3_nbytes + int(np.prod(indexer_shape)) * 4,) if indexer_shape else _SHAPE
+    shape = (
+        (r3_nbytes + indexer_profile.fixed_bytes_per_token,)
+        if indexer_profile
+        else _SHAPE
+    )
     object_nbytes = _BLOCK_SIZE * int(np.prod(shape))
     store = _make_store(
         max_bytes=(
@@ -180,14 +188,13 @@ def _make_worker(
     worker = object.__new__(AuxOutputWorkerConnector)
     worker._indexer = (
         SimpleNamespace(
-            shape_per_token=indexer_shape,
-            fixed_bytes_per_token=int(np.prod(indexer_shape)) * 4,
-            namespace="synthetic-indexer",
+            profile=indexer_profile,
+            profile_metadata=indexer_profile.to_dict(),
             begin_step=lambda: None,
             release_snapshot=lambda slot: None,
             close=lambda: None,
         )
-        if indexer_shape
+        if indexer_profile
         else None
     )
     worker._r3_nbytes = r3_nbytes
@@ -2004,8 +2011,9 @@ def test_scheduler_connector_reset_derives_emit_start_from_request():
 
 @pytest.mark.parametrize("enable_r3", [False, True])
 def test_indexer_shares_spec_acceptance_and_shm_prefix_lifecycle(enable_r3):
-    worker = _make_worker(2, indexer_shape=(1, 2), enable_r3=enable_r3)
-    indexer = np.arange(12, dtype=np.int32).reshape(6, 1, 2)
+    profile = AuxOutputProfile("model", (IndexerSource(2, (2,), "logical_token_id"),))
+    worker = _make_worker(2, indexer_profile=profile, enable_r3=enable_r3)
+    indexer = np.arange(12, dtype=np.int32).reshape(6, 2)
     routing = np.arange(36, dtype=np.uint8).reshape(6, *_SHAPE)
     first = _metadata(0, [_request_metadata("producer", 0, 6, 0, [b"a" * 32])], {})
     output = _process_output(
@@ -2033,6 +2041,7 @@ def test_indexer_shares_spec_acceptance_and_shm_prefix_lifecycle(enable_r3):
         indexer_rows=indexer[4:5],
     )["cached"]
     np.testing.assert_array_equal(output.indexer_rows, indexer[:5])
+    assert output.indexer_profile == profile.to_dict()
     if enable_r3:
         np.testing.assert_array_equal(output.routed_experts_rows, routing[:5])
     worker.close()
@@ -2064,10 +2073,10 @@ def test_indexer_and_routing_prompt_offsets_are_independent():
     )
     assert metadata.requests["request"] == 1
     routing = np.arange(24, dtype=np.uint8).reshape(4, *_SHAPE)
-    indexer = np.arange(8, dtype=np.int32).reshape(4, 1, 2)
-    outputs = {"request": AuxRequestOutput(1, routing, indexer)}
+    indexer = np.arange(8, dtype=np.int32).reshape(4, 2)
+    outputs = {"request": AuxRequestOutput(1, routing, indexer, {"codec_version": 1})}
     np.testing.assert_array_equal(connector.take_output(request, outputs), routing[2:])
-    selections = connector.take_indexer_output(request, outputs)
+    selections, _ = connector.take_indexer_output(request, outputs)
     np.testing.assert_array_equal(selections, indexer)
 
 

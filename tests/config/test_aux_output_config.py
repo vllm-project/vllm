@@ -180,3 +180,12 @@ def test_indexer_only_does_not_require_moe_routing():
     config = _config(is_moe=False)
     config.aux_output_config = AuxOutputConfig(enable_return_indexer_topk=True)
     VllmConfig._verify_aux_output_compatibility(config)
+
+
+def test_indexer_codec_changes_graph_hash_but_wire_format_does_not():
+    config = AuxOutputConfig(enable_return_indexer_topk=True)
+    original = config.compute_hash()
+    config.indexer_output_format = "packed"
+    assert config.compute_hash() == original
+    config.indexer_encoding = "raw"
+    assert config.compute_hash() != original

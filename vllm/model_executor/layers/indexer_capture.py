@@ -11,6 +11,10 @@ from typing import TYPE_CHECKING, Protocol, cast
 
 import torch
 
+from vllm.distributed.aux_output_connector.profile import (
+    AuxOutputProfile,
+    IndexerSource,
+)
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
@@ -18,26 +22,95 @@ if TYPE_CHECKING:
 
 
 class IndexerCaptureSink:
-    def __init__(self, rows: torch.Tensor, valid: torch.Tensor) -> None:
+    def __init__(
+        self, source: IndexerSource, rows: torch.Tensor, valid: torch.Tensor
+    ) -> None:
+        self.source = source
         self.rows = rows
         self.valid = valid
+        self.region_local: torch.Tensor
+        self.region_replicas: int
 
     def capture(self, indices: torch.Tensor, token_start: int = 0) -> None:
-        if indices.ndim != 2 or indices.shape[1] != self.rows.shape[1]:
-            raise ValueError("Indexer selection width changed")
+        shape = self.source.shape
+        if indices.ndim != len(shape) + 1 or tuple(indices.shape[1:]) != shape:
+            raise ValueError(
+                f"Indexer selection shape changed: {indices.shape}, {shape}"
+            )
         end = token_start + len(indices)
         if token_start < 0 or end > len(self.rows):
             raise ValueError("Indexer selection exceeds capture token capacity")
         if not len(indices):
             return
-        self.rows[token_start:end].copy_(indices)
+        self.rows[token_start:end].copy_(indices.reshape(len(indices), -1))
         self.valid[token_start:end].fill_(True)
+
+    def capture_pools(self, tokens: torch.Tensor) -> None:
+        """Encode expanded pools, including a short causal pool's validity mask."""
+        r, topk = self.source.ratio, self.source.topk
+        history = tokens[:, :topk].reshape(len(tokens), topk // r, r)
+        base = torch.div(history[:, :, 0].to(torch.int64), r, rounding_mode="floor")
+        mask = (history >= 0).to(torch.int64)
+        bits = 1 << torch.arange(r, device=tokens.device, dtype=torch.int64)
+        packed = ((base + 1) << r) | (mask * bits).sum(dim=-1)
+        self.rows[: len(tokens), : topk // r].copy_(packed)
+        self.rows[: len(tokens), topk // r :].copy_(tokens[:, topk : topk + r - 1])
+        self.valid[: len(tokens)].fill_(True)
+
+    def capture_qsa(
+        self,
+        blocks: torch.Tensor,
+        positions: torch.Tensor,
+        visible: torch.Tensor,
+    ) -> None:
+        n, k = blocks.shape
+        if k + 2 != self.source.width or n > len(self.rows):
+            raise ValueError("QSA capture does not match its profile/capacity")
+        self.rows[:n, :k].copy_(blocks)
+        self.rows[:n, k].copy_(positions)
+        self.rows[:n, k + 1].copy_(visible)
+        self.valid[:n].fill_(True)
+
+    def capture_regions(
+        self,
+        regions: torch.Tensor,
+        token_start: int = 0,
+        group: int | None = None,
+    ) -> None:
+        groups, width = self.source.shape
+        if not len(regions):
+            return
+        local_groups = self.region_local.shape[1]
+        if group is None:
+            n = regions.shape[0] // local_groups
+            values = regions.reshape(n, local_groups, -1)
+            target = self.region_local[token_start : token_start + n]
+        else:
+            n = len(regions)
+            values = regions
+            target = self.region_local[token_start : token_start + n, group]
+        target.fill_(-1)
+        target[..., : values.shape[-1]].copy_(values)
+        target[..., -1].fill_(values.shape[-1])
+        if group is not None and group != local_groups - 1:
+            return
+        values = self.region_local[token_start : token_start + n]
+        if groups != local_groups or self.region_replicas > 1:
+            from vllm.distributed.parallel_state import get_tp_group
+
+            values = get_tp_group().all_gather(values.contiguous(), dim=1)
+            values = values[:, :: self.region_replicas]
+        self.rows[token_start : token_start + n].copy_(
+            values.reshape(n, groups * width)
+        )
+        self.valid[token_start : token_start + n].fill_(True)
 
 
 class IndexerCaptureSource(Protocol):
-    indexer_capture_layer_id: int
-    indexer_capture_topk: int
+    indexer_capture_spec: IndexerSource
     indexer_capture: IndexerCaptureSink | None
+    indexer_capture_local_groups: int
+    indexer_capture_group_replicas: int
 
 
 @dataclass
@@ -55,31 +128,20 @@ class IndexerCapturer:
         *,
         output_rank: bool = True,
     ) -> None:
-        sources: list[IndexerCaptureSource] = []
+        sources: list[tuple[IndexerCaptureSource, IndexerSource]] = []
         for module in model.modules():
-            if hasattr(module, "indexer_capture_layer_id"):
-                sources.append(cast(IndexerCaptureSource, module))
-        sources.sort(key=lambda source: source.indexer_capture_layer_id)
+            source = getattr(module, "indexer_capture_spec", None)
+            if isinstance(source, IndexerSource):
+                sources.append((cast(IndexerCaptureSource, module), source))
+        sources.sort(key=lambda entry: entry[1].layer_id)
         if not sources:
             raise ValueError(
                 "No backbone indexer capture sources: this model/backend "
-                "does not support ordinary indexer replay"
+                "does not support indexer replay"
             )
-        layer_ids = tuple(source.indexer_capture_layer_id for source in sources)
-        topks = {source.indexer_capture_topk for source in sources}
-        if len(set(layer_ids)) != len(layer_ids) or len(topks) != 1 or min(topks) <= 0:
-            raise ValueError(
-                "Ordinary indexer replay requires unique layers and uniform topk"
-            )
-        topk = topks.pop()
-        self.shape_per_token = (len(sources), topk)
-        self.fixed_bytes_per_token = len(sources) * topk * 4
         model_config = config.model_config
         identity = json.dumps(
             {
-                "format": "indexer-int32-v1",
-                "layer_ids": layer_ids,
-                "topk": topk,
                 "model": model_config.model,
                 "revision": model_config.revision,
                 "commit": getattr(model_config.hf_config, "_commit_hash", None),
@@ -91,11 +153,15 @@ class IndexerCapturer:
             sort_keys=True,
             default=str,
         )
-        self.namespace = hashlib.sha256(identity.encode()).hexdigest()
+        self.profile = AuxOutputProfile(
+            hashlib.sha256(identity.encode()).hexdigest(),
+            tuple(source for _, source in sources),
+        )
+        self.profile_metadata = self.profile.to_dict()
         self.device_buffer = torch.empty(
             (
                 config.scheduler_config.max_num_batched_tokens,
-                *self.shape_per_token,
+                *self.profile.shape_per_token,
             ),
             dtype=torch.int32,
             device=current_platform.device_type,
@@ -112,10 +178,23 @@ class IndexerCapturer:
         self._snapshot_valid = [torch.empty_like(self.valid) for _ in range(num_slots)]
         self._free_snapshot_slots = list(range(num_slots))
         self._sources = sources
-        for column, source in enumerate(sources):
-            source.indexer_capture = IndexerCaptureSink(
-                self.device_buffer[:, column], self.valid[:, column]
+        offset = 0
+        for column, (capture_source, source) in enumerate(sources):
+            sink = IndexerCaptureSink(
+                source,
+                self.device_buffer[:, offset : offset + source.width],
+                self.valid[:, column],
             )
+            if source.semantic == "region_id":
+                local_groups = capture_source.indexer_capture_local_groups
+                sink.region_local = torch.empty(
+                    (len(self.device_buffer), local_groups, source.shape[-1]),
+                    device=self.device_buffer.device,
+                    dtype=torch.int32,
+                )
+                sink.region_replicas = capture_source.indexer_capture_group_replicas
+            capture_source.indexer_capture = sink
+            offset += source.width
 
     def begin_step(self) -> None:
         self.valid.zero_()
@@ -140,7 +219,7 @@ class IndexerCapturer:
     def close(self) -> None:
         if not hasattr(self, "device_buffer"):
             return
-        for source in self._sources:
+        for source, _ in self._sources:
             source.indexer_capture = None
         self._sources.clear()
         self._snapshot_rows.clear()
@@ -153,14 +232,18 @@ class IndexerCapturer:
 def configure_indexer_capture(
     module: torch.nn.Module,
     config: VllmConfig,
-    layer_id: int,
-    topk: int,
+    source: IndexerSource | None,
+    *,
+    local_groups: int = 0,
+    group_replicas: int = 1,
 ) -> None:
     capture_source = cast(IndexerCaptureSource, module)
     capture_source.indexer_capture = None
     if (
         config.aux_output_config.enable_return_indexer_topk
-        and layer_id < config.model_config.get_total_num_hidden_layers()
+        and source is not None
+        and source.layer_id < config.model_config.get_total_num_hidden_layers()
     ):
-        capture_source.indexer_capture_layer_id = layer_id
-        capture_source.indexer_capture_topk = topk
+        capture_source.indexer_capture_spec = source
+        capture_source.indexer_capture_local_groups = local_groups
+        capture_source.indexer_capture_group_replicas = group_replicas

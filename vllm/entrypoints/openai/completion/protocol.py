@@ -698,6 +698,12 @@ class CompletionResponseChoice(OpenAIBaseModel):
     indexer_topk: str | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+    indexer_payload: str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    indexer_profile: dict[str, Any] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     # Contiguous weight version spans over output-token indexes.
     weight_versions: list[WeightVersionSpan] | None = None
@@ -726,6 +732,12 @@ class CompletionResponse(OpenAIBaseModel):
 class CompletionResponseStreamChoice(OpenAIBaseModel):
     # vLLM extension; populated only on the terminal response/chunk.
     indexer_topk: str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    indexer_payload: str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    indexer_profile: dict[str, Any] | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
     index: int

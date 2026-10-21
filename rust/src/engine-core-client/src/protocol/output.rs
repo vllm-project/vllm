@@ -149,9 +149,17 @@ pub struct EngineCoreOutput {
     /// when a paused engine rejects a request.
     #[serde(default)]
     pub error: Option<Box<RequestError>>,
-    /// Token TopK IDs per indexer source layer.
+    /// Compact indexer rows, described by the versioned artifact profile.
     #[serde(default)]
     pub indexer_rows: Option<Box<WireNdArray>>,
+    #[serde(default)]
+    pub indexer_profile: Option<OpaqueValue>,
+    #[serde(default = "default_indexer_output_format")]
+    pub indexer_output_format: String,
+}
+
+fn default_indexer_output_format() -> String {
+    "raw".to_owned()
 }
 
 /// A request-level error that does not mark the engine as unhealthy.
@@ -591,6 +599,8 @@ mod tests {
                             prompt_token_id_logprobs: None,
                             error: None,
                             indexer_rows: None,
+                            indexer_profile: None,
+                            indexer_output_format: "raw",
                         },
                     ],
                     scheduler_stats: None,

@@ -268,7 +268,7 @@ def test_tokens_response_echoes_output_mode_without_text():
 
 @pytest.mark.parametrize("surface", ["chat", "completion", "tito"])
 @pytest.mark.parametrize("stream", [False, True])
-@pytest.mark.parametrize("output_format", ["disabled", "raw"])
+@pytest.mark.parametrize("output_format", ["disabled", "raw", "packed"])
 def test_indexer_wire_extensions_preserve_payload_and_omit_disabled_fields(
     surface,
     stream,
@@ -301,6 +301,8 @@ def test_indexer_wire_extensions_preserve_payload_and_omit_disabled_fields(
         cumulative_logprob=None,
         logprobs=None,
         indexer_topk=rows if output_format == "raw" else None,
+        indexer_payload=rows.tobytes() if output_format == "packed" else None,
+        indexer_profile={"codec_version": 1} if output_format != "disabled" else None,
     )
     kwargs = dict(index=0, finish_reason="length", **indexer_response_fields(output))
     if surface == "chat":
@@ -318,7 +320,11 @@ def test_indexer_wire_extensions_preserve_payload_and_omit_disabled_fields(
         choice = cls(token_ids=[1], **kwargs)
     wire = choice.model_dump(mode="json")
     if output_format == "disabled":
-        assert "indexer_topk" not in wire
-    else:
+        assert not {"indexer_topk", "indexer_payload", "indexer_profile"} & wire.keys()
+    elif output_format == "raw":
         restored = np.load(io.BytesIO(base64.b64decode(wire["indexer_topk"])))
         np.testing.assert_array_equal(restored, rows)
+        assert "indexer_payload" not in wire
+    else:
+        assert base64.b64decode(wire["indexer_payload"]) == rows.tobytes()
+        assert "indexer_topk" not in wire

@@ -226,9 +226,11 @@ def test_prompt_logprobs_requests_keep_their_rows(state):
 
 
 @pytest.mark.parametrize("cg_mode", [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE])
-def test_aux_output_requests_keep_every_routing_row(state, cg_mode):
-    """R3 needs every prefill row even when final logits only need the window."""
-    state.vllm_config.aux_output_config.enable_return_routed_experts = True
+@pytest.mark.parametrize("routed,indexer", [(True, False), (False, True), (True, True)])
+def test_aux_output_requests_keep_every_capture_row(state, cg_mode, routed, indexer):
+    """AuxOutput needs every row even when logits only need the replay window."""
+    state.vllm_config.aux_output_config.enable_return_routed_experts = routed
+    state.vllm_config.aux_output_config.enable_return_indexer_topk = indexer
     for index in range(3):
         state.add_request(
             index,
