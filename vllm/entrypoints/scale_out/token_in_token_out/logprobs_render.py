@@ -6,13 +6,14 @@
 :class:`~vllm.logprobs.FlatLogprobs` and produces exactly the JSON that
 ``ServingTokens._create_tokens_logprobs`` + ``model_dump`` + Starlette's
 ``JSONResponse.render`` produce for the same rows, without a Python object
-per entry. :func:`render_json_with_fragments` splices such pre-rendered values
-into the JSON of the remaining (small) response.
+per entry, yielding to the event loop between blocks of rows.
+:func:`render_json_with_fragments` splices such pre-rendered values into the
+JSON of the remaining (small) response.
 """
 
+import asyncio
 import json
 import secrets
-import threading
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -21,8 +22,9 @@ import numpy as np
 
 from vllm.logprobs import FlatLogprobs
 
-# Rows rendered per batch; bounds the per-entry lists and index arrays.
-_RENDER_BLOCK_ROWS = 1024
+# Logprob entries (rows x slots) rendered between yields to the event loop,
+# about 2 ms of work; also bounds the per-block arrays.
+RENDER_BLOCK_ENTRIES = 1 << 13
 
 
 class _LeadTable:
@@ -38,14 +40,8 @@ class _LeadTable:
     def __init__(self, prefix: bytes, suffix: bytes):
         self.prefix = prefix
         self.suffix = suffix
-        # (values, filled), replaced as one tuple so a lock-free reader always
-        # sees a consistent pair.
-        self._table: tuple[np.ndarray, np.ndarray] = (
-            np.empty(0, dtype=object),
-            np.zeros(0, dtype=bool),
-        )
-        # Renders run on the event loop and in the build threads.
-        self._lock = threading.Lock()
+        self._values = np.empty(0, dtype=object)
+        self._filled = np.zeros(0, dtype=bool)
 
     def _formatted(self, ids: np.ndarray) -> np.ndarray:
         result = np.empty(ids.size, dtype=object)
@@ -57,29 +53,18 @@ class _LeadTable:
         lo, hi = int(ids.min()), int(ids.max())
         if lo < 0 or hi >= self.max_ids:
             return self._formatted(ids.ravel()).reshape(ids.shape)
-        values, filled = self._table
-        if hi < len(values):
-            missing = np.unique(ids[~filled[ids]])
-            if not missing.size:
-                return values[ids]
-        else:
-            missing = np.unique(ids)
-        # Format outside the lock, publish under it.
-        formatted = self._formatted(missing)
-        with self._lock:
-            values, filled = self._table
-            if hi >= len(values):
-                size = min(self.max_ids, max(hi + 1, 2 * len(values)))
-                grown = np.empty(size, dtype=object)
-                grown[: len(values)] = values
-                grown_filled = np.zeros(size, dtype=bool)
-                grown_filled[: len(filled)] = filled
-                values, filled = grown, grown_filled
-            # Values before flags: a reader that sees a flag sees its value.
-            values[missing] = formatted
-            filled[missing] = True
-            self._table = (values, filled)
-            return values[ids]
+        if hi >= len(self._values):
+            size = min(self.max_ids, max(hi + 1, 2 * len(self._values)))
+            values = np.empty(size, dtype=object)
+            values[: len(self._values)] = self._values
+            filled = np.zeros(size, dtype=bool)
+            filled[: len(self._filled)] = self._filled
+            self._values, self._filled = values, filled
+        missing = np.unique(ids[~self._filled[ids]])
+        if missing.size:
+            self._values[missing] = self._formatted(missing)
+            self._filled[missing] = True
+        return self._values[ids]
 
 
 # Pieces before each logprob value: the content entry, the first top-k entry
@@ -150,7 +135,7 @@ def _msgspec_floats_match_repr() -> bool:
 _MSGSPEC_FLOATS_MATCH_REPR = _msgspec_floats_match_repr()
 
 
-def render_tokens_logprobs(
+async def render_tokens_logprobs(
     sampled_token_ids: Sequence[int],
     container: FlatLogprobs,
 ) -> list[bytes] | None:
@@ -183,9 +168,12 @@ def render_tokens_logprobs(
     num_slots = token_ids.shape[1]
     cols = np.arange(num_slots)
     rank_pieces = np.array(_rank_pieces(list(range(num_slots + 1))), dtype=object)
+    block_rows = max(1, RENDER_BLOCK_ENTRIES // num_slots)
     parts: list[bytes] = [b'{"content":[']
-    for start in range(0, n, _RENDER_BLOCK_ROWS):
-        ids = token_ids[start : start + _RENDER_BLOCK_ROWS]
+    for start in range(0, n, block_rows):
+        if start:
+            await asyncio.sleep(0)
+        ids = token_ids[start : start + block_rows]
         rows = len(ids)
         if num_slots > 2:
             # Repeated top-k ids: logprob_token_ids may repeat an id, and a

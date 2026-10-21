@@ -3,15 +3,12 @@
 
 
 import asyncio
-import concurrent.futures
-import contextvars
-import functools
 import itertools
 import math
 import time
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator
 from collections.abc import Sequence as GenericSequence
-from typing import Any, TypeVar
+from typing import Any
 
 import msgspec
 from fastapi import Request
@@ -85,37 +82,6 @@ from .protocol import (
 )
 
 logger = init_logger(__name__)
-
-T = TypeVar("T")
-
-# Logprob entries (positions x slots) from which a response is built in a
-# worker thread rather than on the event loop (about 0.2 us per entry).
-OFFLOAD_MIN_LOGPROB_ENTRIES = 1 << 15
-# Two threads: a build is mostly GIL-bound and a second thread overlaps its
-# GIL-free part; more threads only add memory.
-_RESPONSE_BUILDER = concurrent.futures.ThreadPoolExecutor(
-    max_workers=2, thread_name_prefix="generate-response"
-)
-
-
-async def build_response_off_loop(entries: int, build: Callable[[], T]) -> T:
-    """Run ``build`` (CPU only, no shared-state side effects) inline for
-    fewer than ``OFFLOAD_MIN_LOGPROB_ENTRIES`` logprob entries, else in a
-    worker thread, so the event loop keeps serving other requests."""
-    if entries < OFFLOAD_MIN_LOGPROB_ENTRIES:
-        return build()
-    return await asyncio.get_running_loop().run_in_executor(
-        _RESPONSE_BUILDER, functools.partial(contextvars.copy_context().run, build)
-    )
-
-
-def _flat_logprob_entries(final_res: RequestOutput) -> int:
-    """Logprob entries (positions x candidates) kept as FlatLogprobs."""
-    return sum(
-        output.logprobs.num_entries
-        for output in final_res.outputs
-        if isinstance(output.logprobs, FlatLogprobs)
-    )
 
 
 def _clamp_logprob(logprob: float) -> float:
@@ -482,78 +448,6 @@ class ServingTokens(GenerateBaseServing):
     ) -> ErrorResponse | GenerateResponse | RenderedGenerateResponse:
         created_time = int(time.time())
         final_res: RequestOutput | None = None
-
-        try:
-            async for res in result_generator:
-                final_res = res
-        except asyncio.CancelledError:
-            return self.create_error_response("Client disconnected")
-
-        assert final_res is not None
-
-        response: GenerateResponse | RenderedGenerateResponse
-        if request.output_mode == "derender":
-            derendered = await self._build_derender_response(
-                request,
-                final_res,
-                request_id,
-                model_name,
-                created_time,
-                request_metadata,
-                derender_request,
-            )
-            if isinstance(derendered, ErrorResponse):
-                return derendered
-            response = derendered
-            choice_meta = [
-                (choice.index, choice.finish_reason) for choice in derendered.choices
-            ]
-        else:
-            response, choice_meta = await build_response_off_loop(
-                _flat_logprob_entries(final_res),
-                functools.partial(
-                    self._build_full_response,
-                    request,
-                    final_res,
-                    request_id,
-                    model_name,
-                    created_time,
-                    request_metadata,
-                ),
-            )
-
-        # Log complete response if output logging is enabled
-        if self.enable_log_outputs and self.request_logger:
-            for index, finish_reason in choice_meta:
-                # Get the corresponding output token IDs
-                output_token_ids = None
-                if index < len(final_res.outputs):
-                    output_token_ids = final_res.outputs[index].token_ids
-
-                if output_token_ids:
-                    # Log token_ids only.
-                    self.request_logger.log_outputs(
-                        request_id=request_id,
-                        outputs="",
-                        output_token_ids=output_token_ids,
-                        finish_reason=finish_reason,
-                        is_streaming=False,
-                        delta=False,
-                    )
-
-        return response
-
-    def _build_choice_fields(
-        self,
-        request: GenerateRequest,
-        final_res: RequestOutput,
-        request_id: str,
-        fragments: dict[int, list[bytes]] | None,
-    ) -> tuple[list[dict[str, Any]], int]:
-        """The fields of each choice, one per output, and the generated token
-        count. With ``fragments``, tokens-mode logprobs rendered from
-        FlatLogprobs rows go there by choice position instead.
-        """
         sampling_params: SamplingParams = request.sampling_params
         derender_mode = request.output_mode == "derender"
         text_mode = request.output_mode == "text" or derender_mode
@@ -569,7 +463,19 @@ class ServingTokens(GenerateBaseServing):
             num_logprobs = sampling_params.logprobs
             top_limit = None
 
-        choice_fields: list[dict[str, Any]] = []
+        try:
+            async for res in result_generator:
+                final_res = res
+        except asyncio.CancelledError:
+            return self.create_error_response("Client disconnected")
+
+        assert final_res is not None
+
+        # choice position -> pre-rendered JSON of its logprobs
+        fragments: dict[int, list[bytes]] = {}
+        tokens_choices: list[GenerateTokensChoice] = []
+        text_choices: list[GenerateTextChoice] = []
+        derender_choice_fields: list[dict[str, Any]] = []
         num_generated_tokens = 0
         for output in final_res.outputs:
             self._raise_if_error(output.finish_reason, request_id)
@@ -583,19 +489,14 @@ class ServingTokens(GenerateBaseServing):
                 assert out_logprobs is not None, "Did not output logprobs"
                 rendered = None
                 top_logprobs: GenericSequence[dict[int, Logprob] | None] = out_logprobs
-                if (
-                    fragments is not None
-                    and isinstance(out_logprobs, FlatLogprobs)
-                    and not text_mode
-                ):
-                    rendered = render_tokens_logprobs(token_ids, out_logprobs)
+                if isinstance(out_logprobs, FlatLogprobs) and not text_mode:
+                    rendered = await render_tokens_logprobs(token_ids, out_logprobs)
                     if rendered is None:
                         # Irregular rows: the per-entry path. Iterating once
                         # is cheaper than indexing each position.
                         top_logprobs = list(out_logprobs)
                 if rendered is not None:
-                    assert fragments is not None
-                    fragments[len(choice_fields)] = rendered
+                    fragments[len(tokens_choices)] = rendered
                 elif text_mode:
                     logprobs = self._create_text_logprobs(
                         token_ids=token_ids,
@@ -619,44 +520,59 @@ class ServingTokens(GenerateBaseServing):
             if output.sampling_mask is not None:
                 sampling_mask = output.sampling_mask.token_ids
 
-            choice_fields.append(
-                dict(
-                    index=output.index,
-                    logprobs=logprobs,
-                    finish_reason=(
-                        output.finish_reason if output.finish_reason else "stop"
-                    ),
-                    stop_reason=output.stop_reason,
-                    token_ids=as_list(output.token_ids),
-                    routed_experts=routed_experts_b64,
-                    sampling_mask=sampling_mask,
-                    weight_versions=output.weight_versions,
-                )
+            choice_fields: dict[str, Any] = dict(
+                index=output.index,
+                logprobs=logprobs,
+                finish_reason=output.finish_reason if output.finish_reason else "stop",
+                stop_reason=output.stop_reason,
+                token_ids=as_list(output.token_ids),
+                routed_experts=routed_experts_b64,
+                sampling_mask=sampling_mask,
+                weight_versions=output.weight_versions,
             )
+            if derender_mode:
+                derender_choice_fields.append(choice_fields)
+            elif text_mode:
+                text_choices.append(
+                    GenerateTextChoice(text=output.text, **choice_fields)
+                )
+            else:
+                tokens_choices.append(GenerateTokensChoice(**choice_fields))
             num_generated_tokens += len(output.token_ids)
-        return choice_fields, num_generated_tokens
 
-    def _build_full_response(
-        self,
-        request: GenerateRequest,
-        final_res: RequestOutput,
-        request_id: str,
-        model_name: str,
-        created_time: int,
-        request_metadata: RequestResponseMetadata,
-    ) -> tuple[
-        GenerateResponse | RenderedGenerateResponse, list[tuple[int, str | None]]
-    ]:
-        """The tokens or text response and (index, finish_reason) per choice.
+        derender_choices: list[GenerateDerenderChoice] = []
+        if derender_mode:
+            history_tool_call_cnt = (
+                request.parse_context.history_tool_call_cnt
+                if request.parse_context is not None
+                else 0
+            )
+            try:
+                parsed = await self.online_derenderer.derender_text_choices(
+                    final_res.outputs,
+                    derender_request,
+                    history_tool_call_cnt,
+                    final_res.prompt_token_ids,
+                )
+            except (ValueError, VLLMValidationError) as e:
+                return self.create_error_response(e)
+            # Like coupled chat, hide per-token metadata when a parser hides
+            # the reasoning: logprobs, token IDs or sampling masks would leak it.
+            hide_metadata = (
+                derender_request is not None and not derender_request.include_reasoning
+            )
+            for (message, finish_reason), fields in zip(
+                parsed, derender_choice_fields, strict=True
+            ):
+                fields["finish_reason"] = finish_reason
+                if hide_metadata:
+                    fields["logprobs"] = None
+                    fields["token_ids"] = None
+                    fields["sampling_mask"] = None
+                derender_choices.append(
+                    GenerateDerenderChoice(message=message, **fields)
+                )
 
-        CPU only, touching no state beyond this request: may run in a worker
-        thread.
-        """
-        # choice position -> pre-rendered JSON of its logprobs
-        fragments: dict[int, list[bytes]] = {}
-        choice_fields, num_generated_tokens = self._build_choice_fields(
-            request, final_res, request_id, fragments
-        )
         response_fields = self._build_response_fields(
             request,
             final_res,
@@ -666,85 +582,43 @@ class ServingTokens(GenerateBaseServing):
             num_generated_tokens,
             request_metadata,
         )
-        response: GenerateTokensResponse | GenerateTextResponse
-        if request.output_mode == "text":
-            response = GenerateTextResponse(
-                choices=[
-                    GenerateTextChoice(text=output.text, **fields)
-                    for output, fields in zip(
-                        final_res.outputs, choice_fields, strict=True
-                    )
-                ],
-                **response_fields,
+        response: (
+            GenerateTokensResponse | GenerateTextResponse | GenerateDerenderResponse
+        )
+        if derender_mode:
+            response = GenerateDerenderResponse(
+                choices=derender_choices, **response_fields
             )
+        elif text_mode:
+            response = GenerateTextResponse(choices=text_choices, **response_fields)
         else:
-            response = GenerateTokensResponse(
-                choices=[GenerateTokensChoice(**fields) for fields in choice_fields],
-                **response_fields,
-            )
+            response = GenerateTokensResponse(choices=tokens_choices, **response_fields)
 
-        choice_meta = [
-            (choice.index, choice.finish_reason) for choice in response.choices
-        ]
+        # Log complete response if output logging is enabled
+        if self.enable_log_outputs and self.request_logger:
+            for choice in response.choices:
+                # Get the corresponding output token IDs
+                output_token_ids = None
+                if choice.index < len(final_res.outputs):
+                    output_token_ids = final_res.outputs[choice.index].token_ids
+
+                if output_token_ids:
+                    # Log token_ids only.
+                    self.request_logger.log_outputs(
+                        request_id=request_id,
+                        outputs="",
+                        output_token_ids=output_token_ids,
+                        finish_reason=choice.finish_reason,
+                        is_streaming=False,
+                        delta=False,
+                    )
+
         if fragments:
             parts = render_json_with_fragments(
                 response.model_dump(), "logprobs", fragments
             )
-            # Joined here, so a large body is never copied on the event loop.
-            return RenderedGenerateResponse(b"".join(parts)), choice_meta
-        return response, choice_meta
-
-    async def _build_derender_response(
-        self,
-        request: GenerateRequest,
-        final_res: RequestOutput,
-        request_id: str,
-        model_name: str,
-        created_time: int,
-        request_metadata: RequestResponseMetadata,
-        derender_request: ChatCompletionRequest | None,
-    ) -> ErrorResponse | GenerateDerenderResponse:
-        choice_fields, num_generated_tokens = self._build_choice_fields(
-            request, final_res, request_id, fragments=None
-        )
-        history_tool_call_cnt = (
-            request.parse_context.history_tool_call_cnt
-            if request.parse_context is not None
-            else 0
-        )
-        try:
-            parsed = await self.online_derenderer.derender_text_choices(
-                final_res.outputs,
-                derender_request,
-                history_tool_call_cnt,
-                final_res.prompt_token_ids,
-            )
-        except (ValueError, VLLMValidationError) as e:
-            return self.create_error_response(e)
-        # Like coupled chat, hide per-token metadata when a parser hides
-        # the reasoning: logprobs, token IDs or sampling masks would leak it.
-        hide_metadata = (
-            derender_request is not None and not derender_request.include_reasoning
-        )
-        derender_choices: list[GenerateDerenderChoice] = []
-        for (message, finish_reason), fields in zip(parsed, choice_fields, strict=True):
-            fields["finish_reason"] = finish_reason
-            if hide_metadata:
-                fields["logprobs"] = None
-                fields["token_ids"] = None
-                fields["sampling_mask"] = None
-            derender_choices.append(GenerateDerenderChoice(message=message, **fields))
-
-        response_fields = self._build_response_fields(
-            request,
-            final_res,
-            request_id,
-            model_name,
-            created_time,
-            num_generated_tokens,
-            request_metadata,
-        )
-        return GenerateDerenderResponse(choices=derender_choices, **response_fields)
+            return RenderedGenerateResponse(b"".join(parts))
+        return response
 
     def _build_response_fields(
         self,

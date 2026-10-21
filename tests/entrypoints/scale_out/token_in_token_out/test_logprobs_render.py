@@ -6,7 +6,6 @@ path, which every other case still uses."""
 
 import asyncio
 import json
-import threading
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -20,6 +19,7 @@ from tests.entrypoints.scale_out.token_in_token_out.test_generate_stream import 
     _mock_engine,
 )
 from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
+from vllm.entrypoints.scale_out.token_in_token_out import logprobs_render
 from vllm.entrypoints.scale_out.token_in_token_out import serving as serving_mod
 from vllm.entrypoints.scale_out.token_in_token_out.api_router import (
     _RenderedJSONResponse,
@@ -89,14 +89,19 @@ def _body(serving, k, outputs, finish_reason="length"):
         sampling_params=SamplingParams(max_tokens=10, logprobs=k),
         model=MODEL_NAME,
     )
-    response = serving._build_full_response(
-        request,
-        _final(outputs, finish_reason),
-        "r",
-        MODEL_NAME,
-        1700000000,
-        RequestResponseMetadata(request_id="r"),
-    )[0]
+
+    async def results():
+        yield _final(outputs, finish_reason)
+
+    response = asyncio.run(
+        serving.serve_tokens_full_generator(
+            request,
+            results(),
+            "r",
+            MODEL_NAME,
+            RequestResponseMetadata(request_id="r"),
+        )
+    )
     if isinstance(response, RenderedGenerateResponse):
         return response.body, True
     assert isinstance(response, GenerateResponseBase)
@@ -118,7 +123,8 @@ def _outcome(serving, k, choices, finish_reason="length"):
 
 @pytest.mark.parametrize("k", [0, 1, 3, 8])
 @pytest.mark.parametrize("n", [1, 37, 1500])  # 1500: across render blocks
-def test_rendered_bytes_equal_the_per_entry_path(k, n):
+def test_rendered_bytes_equal_the_per_entry_path(monkeypatch, k, n):
+    monkeypatch.setattr(logprobs_render, "RENDER_BLOCK_ENTRIES", 1000)
     serving = _build_serving_tokens(_mock_engine())
     rows = _rows(n, k + 1, seed=k * 7 + n)
     token_ids = rows[0][:, 0].tolist()
@@ -320,46 +326,27 @@ async def _serve_full(serving, rows):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("offload,offloaded", [(160, True), (161, False)])
-async def test_large_builds_run_off_the_event_loop(monkeypatch, offload, offloaded):
-    """40 rows x 4 slots = 160 entries: built in a worker thread from the
-    threshold on, with the same bytes as inline."""
+async def test_large_render_yields_to_the_event_loop(monkeypatch):
+    """40 rows x 4 slots in blocks of 4 rows: other tasks run between the 10
+    blocks, and the bytes match a single-block render."""
     serving = _build_serving_tokens(_mock_engine())
     rows = _rows(40, 4)
-    threads, real = [], serving_mod.ServingTokens._build_full_response
-
-    def recording(self, *args, **kwargs):
-        threads.append(threading.current_thread())
-        return real(self, *args, **kwargs)
-
     monkeypatch.setattr(serving_mod.time, "time", lambda: 1700000000.0)
-    inline = await asyncio.wait_for(_serve_full(serving, rows), 30)
-    monkeypatch.setattr(serving_mod.ServingTokens, "_build_full_response", recording)
-    monkeypatch.setattr(serving_mod, "OFFLOAD_MIN_LOGPROB_ENTRIES", offload)
-    response = await asyncio.wait_for(_serve_full(serving, rows), 30)
-    on_loop = threads == [threading.current_thread()]
-    assert on_loop != offloaded
-    if offloaded:
-        assert threads[0].name.startswith("generate-response")
-    assert response.body == inline.body
+    whole = await _serve_full(serving, rows)
+    monkeypatch.setattr(logprobs_render, "RENDER_BLOCK_ENTRIES", 16)
 
+    ticks = 0
 
-@pytest.mark.asyncio
-async def test_two_builds_run_at_once(monkeypatch):
-    serving = _build_serving_tokens(_mock_engine())
-    rows = _rows(40, 4)
-    monkeypatch.setattr(serving_mod, "OFFLOAD_MIN_LOGPROB_ENTRIES", 1)
-    both, names = threading.Barrier(2, timeout=10), []
-    real = serving_mod.ServingTokens._build_full_response
+    async def tick():
+        nonlocal ticks
+        while True:
+            ticks += 1
+            await asyncio.sleep(0)
 
-    def build(self, *args):
-        names.append(threading.current_thread().name)
-        both.wait()  # both builds are running at the same time
-        return real(self, *args)
-
-    monkeypatch.setattr(serving_mod.ServingTokens, "_build_full_response", build)
-    first, second = await asyncio.wait_for(
-        asyncio.gather(_serve_full(serving, rows), _serve_full(serving, rows)), 30
-    )
-    assert first.body == second.body
-    assert len(set(names)) == 2
+    ticker = asyncio.create_task(tick())
+    await asyncio.sleep(0)
+    before = ticks
+    blocked = await _serve_full(serving, rows)
+    ticker.cancel()
+    assert ticks - before >= 9
+    assert blocked.body == whole.body
