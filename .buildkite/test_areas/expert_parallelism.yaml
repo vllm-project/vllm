@@ -30,8 +30,10 @@ steps:
       - tests/distributed/test_eplb_utils.py
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (L4) EPLB Execution"
+- label: ":nvidia: (L4) [Nightly] EPLB Execution"
   key: eplb-execution
+  # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
+  optional: true
   timeout_in_minutes: 25
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -44,6 +46,8 @@ steps:
   - pytest -v -s distributed/test_eplb_spec_decode.py
   mirror:
     amd:
+      # Run on PRs even when the L4 step is optional (nightly only).
+      optional: false
       label: ":amd: (MI355) EPLB Execution"
       dind: false
       device: mi355_4
