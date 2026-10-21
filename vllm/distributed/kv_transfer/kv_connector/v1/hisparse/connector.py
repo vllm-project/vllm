@@ -387,6 +387,8 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> None:
         assert self.connector_scheduler is not None
         self.connector_scheduler.requests[request.request_id] = request
+        assert self.connector_scheduler.coordinator is not None
+        self.connector_scheduler.coordinator.reserve_import(request)
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput

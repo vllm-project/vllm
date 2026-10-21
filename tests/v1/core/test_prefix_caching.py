@@ -913,6 +913,23 @@ def test_hisparse_inflight_host_import_reserves_remaining_gpu_pages():
     assert required == 4
 
 
+def _use_hisparse_scheduler(scheduler: Scheduler, manager: KVCacheManager) -> None:
+    """Swap in a HiSparse manager and forward allocations to its connector
+    beside the mock one, as MultiConnector does."""
+    scheduler.kv_cache_manager = manager
+    scheduler.kv_cache_config = manager.kv_cache_config
+    hisparse = object.__new__(HiSparseConnector)
+    hisparse.connector_scheduler = HiSparseConnectorScheduler(async_speculative=False)
+    hisparse.connector_scheduler.bind_coordinator(get_hisparse_coordinator(manager))
+    mock_update = scheduler.connector.update_state_after_alloc
+
+    def update_state_after_alloc(request, blocks, num_external_tokens):
+        mock_update(request, blocks, num_external_tokens)
+        hisparse.update_state_after_alloc(request, blocks, 0)
+
+    scheduler.connector.update_state_after_alloc = update_state_after_alloc
+
+
 @pytest.mark.parametrize("host_num_blocks,admitted", [(7, False), (8, True)])
 def test_hisparse_async_admission_requires_full_prompt_host_pages(
     host_num_blocks, admitted, tmp_path
@@ -934,8 +951,7 @@ def test_hisparse_async_admission_requires_full_prompt_host_pages(
         use_kv_connector=mock_kv(matched_tokens=HISPARSE_BLOCK_SIZE, is_async=True),
     )
     manager = make_hisparse_kv_cache_manager(32, host_num_blocks)
-    scheduler.kv_cache_manager = manager
-    scheduler.kv_cache_config = manager.kv_cache_config
+    _use_hisparse_scheduler(scheduler, manager)
     assert scheduler.scheduler_reserve_full_isl
     inflight = make_request(
         "inflight", list(range(3 * HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
@@ -976,8 +992,7 @@ def test_hisparse_admitted_async_loads_can_finish_with_nothing_running(tmp_path)
     # One null block plus four usable host blocks: once first imports one page,
     # three are free, enough for second's prompt but not beside first's rest.
     manager = make_hisparse_kv_cache_manager(32, 5)
-    scheduler.kv_cache_manager = manager
-    scheduler.kv_cache_config = manager.kv_cache_config
+    _use_hisparse_scheduler(scheduler, manager)
     assert scheduler.scheduler_reserve_full_isl
     first = make_request(
         "first", list(range(4 * HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
