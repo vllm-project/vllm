@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use super::types::GenerateRequest;
+use super::types::{GenerateOutputMode, GenerateRequest};
 use crate::error::{ApiError, bail_invalid_request};
 
 /// Enforce the minimal compatibility contract for the Rust token generate
@@ -16,10 +16,38 @@ pub(crate) fn validate_request_compat(
         return Err(ApiError::model_not_found(model.clone()));
     }
 
-    if request.stream_options.is_some() && !request.stream {
+    if request.sampling_params.n.unwrap_or(1) != 1 {
+        bail_invalid_request!(param = "n", "Only n=1 is supported.");
+    }
+
+    // TODO: support `output_mode: "text"`.
+    if request.output_mode == Some(GenerateOutputMode::Text) {
         bail_invalid_request!(
-            param = "stream_options",
-            "stream_options are only supported when stream=true."
+            param = "output_mode",
+            "Only output_mode=\"tokens\" is supported."
+        );
+    }
+
+    // TODO: support stop strings, which need incremental detokenization.
+    if request
+        .sampling_params
+        .stop
+        .as_ref()
+        .is_some_and(|stop| !stop.as_slice().is_empty())
+    {
+        bail_invalid_request!(param = "stop", "stop is not supported.");
+    }
+    if request.sampling_params.include_stop_str_in_output == Some(true) {
+        bail_invalid_request!(
+            param = "include_stop_str_in_output",
+            "include_stop_str_in_output is not supported."
+        );
+    }
+
+    if request.sampling_params.trace_decode_token_ids.is_some() {
+        bail_invalid_request!(
+            param = "trace_decode_token_ids",
+            "trace_decode_token_ids is not supported."
         );
     }
 
@@ -38,10 +66,6 @@ pub(crate) fn validate_request_compat(
                 logprobs.map_or("None".to_string(), |k| k.to_string())
             );
         }
-    }
-
-    if request.sampling_params.n.unwrap_or(1) != 1 {
-        bail_invalid_request!(param = "n", "Only n=1 is supported.");
     }
 
     if request.token_ids.is_empty() {
@@ -113,8 +137,10 @@ mod tests {
         assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok());
     }
 
+    /// Python's generate route has no `stream_options` check and ignores the
+    /// options when not streaming.
     #[test]
-    fn validate_request_compat_rejects_stream_options_without_streaming() {
+    fn validate_request_compat_accepts_stream_options_without_streaming() {
         let request: GenerateRequest = serde_json::from_value(json!({
             "model": "Qwen/Qwen1.5-0.5B-Chat",
             "token_ids": [11, 22],
@@ -123,7 +149,8 @@ mod tests {
             "sampling_params": {}
         }))
         .expect("parse request");
-        assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
+        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
+            .expect("stream_options without streaming should be ignored");
     }
 
     #[test]
@@ -135,6 +162,68 @@ mod tests {
         }))
         .expect("parse request");
         assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_text_output_mode() {
+        for (output_mode, accepted) in [
+            (json!(null), true),
+            (json!("tokens"), true),
+            (json!("text"), false),
+        ] {
+            let request: GenerateRequest = serde_json::from_value(json!({
+                "token_ids": [11, 22],
+                "sampling_params": {},
+                "output_mode": output_mode,
+            }))
+            .expect("parse request");
+            assert_eq!(
+                validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok(),
+                accepted,
+                "{output_mode}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_stop_strings() {
+        for (sampling_params, accepted) in [
+            (
+                json!({"stop": null, "include_stop_str_in_output": false}),
+                true,
+            ),
+            (json!({"stop": []}), true),
+            (json!({"stop": "\n"}), false),
+            (json!({"stop": ["\n"]}), false),
+            (json!({"include_stop_str_in_output": true}), false),
+        ] {
+            let request: GenerateRequest = serde_json::from_value(json!({
+                "token_ids": [11, 22],
+                "sampling_params": sampling_params,
+            }))
+            .expect("parse request");
+            assert_eq!(
+                validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok(),
+                accepted,
+                "{sampling_params}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_trace_decode_token_ids() {
+        for (trace_decode_token_ids, accepted) in [(json!(null), true), (json!([7, 8]), false)] {
+            let request: GenerateRequest = serde_json::from_value(json!({
+                "token_ids": [11, 22],
+                "sampling_params": {"trace_decode_token_ids": trace_decode_token_ids},
+            }))
+            .expect("parse request");
+            assert_eq!(
+                validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok(),
+                accepted,
+                "{trace_decode_token_ids}"
+            );
+        }
     }
 
     #[test]
