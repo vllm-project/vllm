@@ -11,20 +11,18 @@ are FP32 (not BF16), matching vLLM's ``ReplicatedLinear(params_dtype=float32)``
 for the confidence head in
 ``vllm/model_executor/models/qwen3_dspark.py:112-137``.
 
-Layout follows ``vllm/model_executor/kernels/mhc/tilelang_kernels.py``: we
-use TileLang's "implicit signature" style (top-level ``T.Kernel`` + variable
-annotations) rather than ``@T.prim_func`` on a nested function.
+Layout follows ``vllm/model_executor/kernels/mhc/tilelang_kernels.py``:
+"implicit signature" style (top-level ``T.Kernel`` + variable annotations).
 """
 
 from __future__ import annotations
 
 from math import gcd
 
-import tilelang
-import tilelang.language as T
 import torch
 
 from vllm.platforms import current_platform
+from vllm.tilelang_utils import T, tilelang_jit
 
 
 def _enable_pdl() -> bool:
@@ -40,13 +38,7 @@ def _enable_pdl() -> bool:
         return False
 
 
-_PASS_CONFIGS: dict = {
-    tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-    tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-}
-
-
-@tilelang.jit(out_idx=None, target="cuda", pass_configs=_PASS_CONFIGS)
+@tilelang_jit
 def confidence_head_fused_tilelang(
     x0,
     x1,
@@ -59,9 +51,7 @@ def confidence_head_fused_tilelang(
     """Fused confidence head kernel.
 
     ``n_embed`` and ``markov_rank`` are static specialization parameters.
-    Tensor parameters are declared without annotations in the signature
-    (TileLang's "implicit signature" style — see mhc/tilelang_kernels.py);
-    their types are re-declared inside below.
+    Tensor parameters are redeclared in the body (implicit-signature style).
     """
     n = T.dynamic("n")
     threads = 128
