@@ -147,6 +147,7 @@ class ParserEngine(Parser):
             or parser_engine_config.initial_state == ParserState.REASONING
         )
         self._reasoning_ended: bool = not self._has_reasoning
+        self._prompt_closes_reasoning: bool = False
         self._streaming_initialized: bool = False
         self._prompt_streaming_prepared: bool = False
 
@@ -231,6 +232,18 @@ class ParserEngine(Parser):
             self._streaming_initialized = True
             self._reset(initial_state=initial_state)
 
+    def set_prompt_token_ids(self, prompt_token_ids: Sequence[int]) -> None:
+        """Start parsing in content when the prompt already closes reasoning,
+        as with continue_final_message or a template that switches thinking
+        off. Only configs with turn boundaries can tell a closed block in
+        this turn from one in an earlier turn, so others are left as is.
+        """
+        self._prompt_closes_reasoning = (
+            self.parser_engine_config.initial_state is ParserState.REASONING
+            and bool(self._turn_boundary_token_ids)
+            and self.is_reasoning_end(list(prompt_token_ids))
+        )
+
     def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:
         """See :meth:`ReasoningParser.adjust_initial_state_from_prompt`."""
         return
@@ -242,8 +255,11 @@ class ParserEngine(Parser):
         return None
 
     def _reset(self, initial_state: ParserState | None = None) -> None:
-        self._engine.reset(initial_state=initial_state)
-        self._reasoning_ended = not self._has_reasoning
+        prompt_closed = initial_state is None and self._prompt_closes_reasoning
+        self._engine.reset(
+            initial_state=ParserState.CONTENT if prompt_closed else initial_state
+        )
+        self._reasoning_ended = not self._has_reasoning or prompt_closed
         self._tool_slots.clear()
         self._deferred_content = ""
         self._deferred_reasoning = ""

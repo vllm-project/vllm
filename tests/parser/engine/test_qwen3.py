@@ -6,6 +6,7 @@ These validate that the engine-driven parser correctly handles
 Qwen3 XML-style tool calls.
 """
 
+import dataclasses
 import json
 from unittest.mock import MagicMock
 
@@ -819,6 +820,136 @@ class TestArgConverter:
         raw = "<parameter=city>Tokyo</parameter>\n<parameter=expr>x<5"
         result = json.loads(_qwen3_arg_converter(raw, partial=True))
         assert result == {"city": "Tokyo", "expr": "x<5"}
+
+
+WRITE_CALL_HEAD = (
+    "<tool_call>\n<function=write_file>\n"
+    "<parameter=path>\n/repo/app.py\n</parameter>\n"
+    "<parameter=mode>\n644\n</parameter>\n"
+    "<parameter=content>\n"
+)
+WRITE_CALL_TAIL = "\n</parameter>\n</function>\n</tool_call>"
+# Escapes, non-ASCII, blank lines and tag-like text that must stay inside
+# the value, including prefixes of the closing and next-parameter tags.
+CONTENT_LINE = 'if a < b > c: print("x\\y")  # </p> </param <parameter\té\n\n'
+
+
+class TestArgValueExtender:
+    """The open parameter value streams without re-running the converter."""
+
+    @pytest.fixture
+    def write_tool(self):
+        from vllm.entrypoints.openai.chat_completion.protocol import (
+            ChatCompletionToolsParam,
+        )
+
+        return ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "write_file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "mode": {"type": "integer"},
+                        "content": {"type": "string"},
+                    },
+                },
+            },
+        )
+
+    @pytest.mark.parametrize("use_schema", [False, True], ids=["no_schema", "schema"])
+    @pytest.mark.parametrize("parser_name", ["qwen3", "mimo"])
+    def test_long_call_streams_non_streaming_arguments(
+        self, mock_tokenizer, mock_request, write_tool, use_schema, parser_name
+    ):
+        from vllm.parser.mimo import MiMoParser
+        from vllm.parser.qwen3 import Qwen3Parser
+
+        cls = MiMoParser if parser_name == "mimo" else Qwen3Parser
+        mock_request.tools = [write_tool] if use_schema else []
+        text = WRITE_CALL_HEAD + CONTENT_LINE * 200 + WRITE_CALL_TAIL
+
+        def make_parser():
+            return cls(mock_tokenizer, chat_template_kwargs={"enable_thinking": False})
+
+        results = simulate_tool_streaming(
+            make_parser(),
+            mock_request,
+            [text[i : i + 7] for i in range(0, len(text), 7)],
+        )
+        result = make_parser().extract_tool_calls(text, mock_request)
+
+        assert collect_tool_arguments(results) == (
+            result.tool_calls[0].function.arguments
+        )
+        # MiMo keeps the newlines around the value; the schema coerces both.
+        mode = '"\\n644\\n"' if parser_name == "mimo" else '"644"'
+        if use_schema:
+            mode = "644"
+        assert f'"mode": {mode},' in collect_tool_arguments(results)
+
+    def test_conversions_do_not_grow_with_argument_length(
+        self, mock_tokenizer, mock_request, write_tool
+    ):
+        mock_request.tools = [write_tool]
+        base = qwen3_config(thinking=False)
+        converter = base.arg_converter
+        assert converter is not None
+
+        def streaming_conversions(lines: int) -> int:
+            calls = 0
+
+            def counting_converter(raw_args: str, partial: bool) -> str:
+                nonlocal calls
+                calls += partial
+                return converter(raw_args, partial)
+
+            parser = ParserEngine(
+                mock_tokenizer,
+                parser_engine_config=dataclasses.replace(
+                    base, arg_converter=counting_converter
+                ),
+            )
+            text = WRITE_CALL_HEAD + CONTENT_LINE * lines + WRITE_CALL_TAIL
+            simulate_tool_streaming(
+                parser,
+                mock_request,
+                [text[i : i + 4] for i in range(0, len(text), 4)],
+            )
+            return calls
+
+        assert streaming_conversions(lines=20) == streaming_conversions(lines=200)
+
+    def test_extender_follows_newline_trimming_and_split_end(self):
+        from vllm.parser.qwen3 import _qwen3_arg_value_extender
+
+        extend = _qwen3_arg_value_extender("<parameter=k>")
+        assert extend is not None
+        deltas = ["\n", 'a"\n', "b", "\n", "</param", "eter>"]
+        expected = ["", 'a\\"', "\\nb", "", "\\n</param", None]
+        assert [extend(d) for d in deltas] == expected
+
+    def test_extender_stops_at_split_next_parameter(self):
+        from vllm.parser.qwen3 import _qwen3_arg_value_extender
+
+        extend = _qwen3_arg_value_extender("<parameter=k>x")
+        assert extend is not None
+        assert [extend(d) for d in ["< para", "meter ="]] == ["< para", None]
+
+    @pytest.mark.parametrize(
+        "raw_args",
+        [
+            "<parameter=k>x</parameter>",
+            "<parameter=k",
+            "<parameter=k>1</parameter><parameter=j>2</parameter><parameter=k>3",
+        ],
+        ids=["closed_value", "open_name", "repeated_key_not_last"],
+    )
+    def test_no_extender_unless_open_value_is_last(self, raw_args):
+        from vllm.parser.qwen3 import _qwen3_arg_value_extender
+
+        assert _qwen3_arg_value_extender(raw_args) is None
 
 
 class TestSchemaAwareTypeCoercion:
