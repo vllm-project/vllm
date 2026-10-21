@@ -58,6 +58,7 @@ MTPModelTypes = Literal[
     "kimi_k3_mtp",
     "pangu_ultra_moe_mtp",
     "step3p5_mtp",
+    "step5_mtp",
     "hy_v3_mtp",
     "hy_v4_mtp",
     "gemma4_mtp",
@@ -79,7 +80,7 @@ SpeculativeMethod = Literal[
     NgramGPUTypes,
     DSparkModelTypes,
 ]
-RejectionSampleMethod = Literal["standard", "synthetic", "block"]
+RejectionSampleMethod = Literal["standard", "synthetic", "block", "fly"]
 DraftSampleMethod = Literal["greedy", "probabilistic"]
 
 _QWEN3_OMNI_TARGET_ARCHITECTURES = frozenset(
@@ -423,9 +424,10 @@ class SpeculativeConfig:
     """Attention backend to use for the draft model. When `None`, the backend is
     automatically selected. Useful when the drafter requires a different attention
     backend (e.g. DFlash needs a backend that supports non-causal attention)."""
-    kv_cache_dtype: CacheDType | None = None
+    kv_cache_dtype: CacheDType | str | None = None
     """KV cache dtype for the draft model. When `None`, the draft inherits the
-    target model's `--kv-cache-dtype`."""
+    target model's `--kv-cache-dtype`. Custom dtypes registered by platform
+    backends are accepted."""
     max_model_len: int | None = Field(default=None, ge=1)
     """The maximum model length of the draft model. Used when testing the
     ability to skip speculation for some sequences."""
@@ -536,7 +538,8 @@ class SpeculativeConfig:
     draft_sample_method). 'synthetic' accepts draft tokens with a decaying
     probability calibrated to synthetic_acceptance_rate. 'block' uses block
     verification (Sun et al.), which jointly verifies the draft tokens as a
-    block instead of one at a time."""
+    block instead of one at a time. 'fly' applies FLy's lossy, entropy-gated
+    deferred window to the native per-token acceptance decisions."""
 
     synthetic_acceptance_rates: list[float] | None = None
     """Per-position *unconditional* acceptance rates for synthetic rejection
@@ -613,6 +616,16 @@ class SpeculativeConfig:
     """For Qwen3 DSpark drafting, evaluate the Markov projection only for the
     top-k base-logit candidates. Requires draft tensor parallel size 1."""
 
+    fly_window_size: int | None = Field(default=None, ge=1)
+    """Number of subsequent native acceptance decisions checked by FLy.
+    If unset, defaults to ``min(6, num_speculative_tokens - 1)``."""
+
+    fly_entropy_threshold: float = Field(default=0.3, ge=0)
+    """Target top-k entropy lower bound for FLy loose acceptance."""
+
+    fly_entropy_top_k: int = Field(default=3, ge=1)
+    """Number of largest target probabilities used by FLy's entropy gate."""
+
     def compute_hash(self) -> str:
         """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
@@ -664,6 +677,18 @@ class SpeculativeConfig:
     @staticmethod
     def hf_config_override(hf_config: PreTrainedConfig) -> PreTrainedConfig:
         initial_architecture = hf_config.architectures[0]
+        if initial_architecture == "RadioMBartPrefixForCausalLM" and getattr(
+            getattr(hf_config, "decoder", None), "causal_vision_prefix", False
+        ):
+            hf_config.model_type = "mtp"
+            hf_config.update(
+                {
+                    "architectures": ["ParseAuxMTPModel"],
+                    "n_predict": 1,
+                    "num_nextn_predict_layers": 1,
+                }
+            )
+            return hf_config
         use_v32_mtp = hf_config.model_type in ("deepseek_v32", "glm_moe_dsa")
         if hf_config.model_type == "dots3_note":
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
@@ -984,6 +1009,23 @@ class SpeculativeConfig:
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
             hf_config.update({"n_predict": n_predict, "architectures": ["Step3p5MTP"]})
 
+        # Step5 has its own draft module because its model and weight-loading
+        # contracts differ from Step3.5.
+        if hf_config.model_type in ("step5", "step5_vl") or {
+            "Step5ForCausalLM",
+            "Step5ForConditionalGeneration",
+        }.intersection(getattr(hf_config, "architectures", None) or []):
+            quantization_config = getattr(hf_config, "quantization_config", None)
+            hf_config = getattr(hf_config, "text_config", hf_config)
+            if (
+                quantization_config is not None
+                and getattr(hf_config, "quantization_config", None) is None
+            ):
+                hf_config.update({"quantization_config": quantization_config})
+            hf_config.model_type = "step5_mtp"
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
+            hf_config.update({"n_predict": n_predict, "architectures": ["Step5MTP"]})
+
         if initial_architecture == "MistralLarge3ForCausalLM":
             hf_config.update({"architectures": ["EagleMistralLarge3ForCausalLM"]})
 
@@ -1071,6 +1113,15 @@ class SpeculativeConfig:
                     "n_predict": text_config.num_nextn_predict_layers,
                     "architectures": ["Glm5NextMTPModel"],
                     "index_share_for_mtp_iteration": share_mtp_indices,
+                }
+            )
+        if hf_config.model_type == "muse_glimmer_assistant":
+            # Non-causal DFlash drafter sharing Muse Glimmer's vocabulary
+            hf_config.update(
+                {
+                    "dflash_config": {"causal": False}
+                    | (getattr(hf_config, "dflash_config", None) or {}),
+                    "vocab_size": getattr(hf_config, "vocab_size", 202048),
                 }
             )
 
@@ -1357,7 +1408,7 @@ class SpeculativeConfig:
                     if (
                         self.num_speculative_tokens > 1
                         and self.draft_model_config.hf_config.model_type
-                        not in ("step3p5_mtp", "inkling_mtp")
+                        not in ("step3p5_mtp", "step5_mtp", "inkling_mtp")
                     ):
                         logger.warning(
                             "Enabling num_speculative_tokens > 1 will run "
@@ -1452,6 +1503,11 @@ class SpeculativeConfig:
                 n_predict = getattr(
                     self.draft_model_config.hf_config, "n_predict", None
                 )
+                if (
+                    "ParseAuxMTPModel" in self.draft_model_config.architectures
+                    and self.num_speculative_tokens not in (None, 1)
+                ):
+                    raise ValueError("Parse 3.5 has only one trained MTP step")
                 if self.use_dspark():
                     if self.num_speculative_tokens is None:
                         # DSpark's parallel width is independent of MTP stages.
@@ -1838,6 +1894,35 @@ class SpeculativeConfig:
                 "use_heterogeneous_vocab currently only supports greedy draft "
                 "sampling. Set draft_sample_method='greedy' (the default) or "
                 "omit it."
+            )
+
+        if self.use_heterogeneous_vocab and self.use_local_argmax_reduction:
+            raise ValueError(
+                "use_heterogeneous_vocab is not compatible with "
+                "use_local_argmax_reduction because token-level intersection "
+                "requires the full draft logits."
+            )
+
+        if self.rejection_sample_method == "fly":
+            if self.uses_extract_hidden_states():
+                raise ValueError(
+                    "FLy is not compatible with method='extract_hidden_states', "
+                    "which does not perform speculative decoding."
+                )
+            if self.num_speculative_tokens < 2:
+                raise ValueError(
+                    "FLy requires num_speculative_tokens to be at least 2."
+                )
+            if self.fly_window_size is None:
+                self.fly_window_size = min(6, self.num_speculative_tokens - 1)
+            elif self.fly_window_size >= self.num_speculative_tokens:
+                raise ValueError(
+                    "FLy requires fly_window_size to be smaller than "
+                    "num_speculative_tokens."
+                )
+            logger.warning_once(
+                "FLy verification is a lossy speculative decoding method and "
+                "may degrade model outputs."
             )
 
         if not self.use_heterogeneous_vocab:
