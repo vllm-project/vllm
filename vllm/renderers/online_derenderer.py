@@ -1050,7 +1050,7 @@ def _decode_params(
     skip_special = (
         False
         if preserve_special
-        else (request.skip_special_tokens if request is not None else True)
+        else (request is None or request.skip_special_tokens is not False)
     )
     spaces_between = (
         request.spaces_between_special_tokens if request is not None else True

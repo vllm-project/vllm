@@ -439,8 +439,10 @@ def test_runner_reduces_only_expert_parallel_partials(
     validate_bf16_deployment(config)
     validate_fp8_deployment(config)
     validate_mxfp4_deployment(config)
-    runner = SimpleNamespace(moe_config=config)
-    assert MuseMoERunner._fused_output_is_reduced.fget(runner) is reduced
+    runner = MuseMoERunner.__new__(MuseMoERunner)
+    torch.nn.Module.__init__(runner)
+    runner.moe_config = config
+    assert runner._fused_output_is_reduced is reduced
 
 
 ROCM_AVAILABLE = current_platform.is_rocm()
@@ -832,6 +834,7 @@ def test_rocm_ep_ranks_sum_to_the_unsharded_output(
             expert_map=None if kernel_map is None else kernel_map.cuda(),
         )
         launch()
+        assert experts._route_output is not None
         routes = experts._route_output.clone()
         out = torch.empty(num_tokens, hidden_size, device="cuda", dtype=dtype)
         reducer = experts.finalize_weight_and_reduce_impl()
@@ -892,6 +895,7 @@ def test_fused_finalize_matches_eager_tail(routed_dtype: torch.dtype) -> None:
     )
 
     fused = MuseSparkTopKWeightAndReduce(norm.forward, pre_norm_all_reduce=False)
+    assert fused.fused_norm is not None
     assert fused.fused_norm is norm
     eager = MuseSparkTopKWeightAndReduce(norm.forward, pre_norm_all_reduce=False)
     eager.fused_norm = None

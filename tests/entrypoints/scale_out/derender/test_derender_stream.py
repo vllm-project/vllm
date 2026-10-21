@@ -556,6 +556,9 @@ class TestDetokenizeDelta:
             (False, False, True, True, (False, False)),
             (True, False, True, True, (False, False)),
             (True, True, True, True, (False, True)),
+            (None, False, False, True, (True, True)),
+            (None, False, False, False, (True, False)),
+            (None, False, True, True, (False, False)),
         ],
     )
     def test_decode_params_mirror_engine(
