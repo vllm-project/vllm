@@ -363,8 +363,10 @@ Merge **only if all four hold**:
 Implementation landed in `vllm/model_executor/kernels/dspark/` together with
 `tests/kernels/dspark/test_confidence.py` and
 `benchmarks/kernels/dspark/bench_confidence.py`. All numbers below were
-measured against vLLM 0.19.1 release PyPI (the version installed in the dev
-container), TileLang 0.1.12, PyTorch 2.10.0+cu129, CUDA 12.9, driver 575.
+measured against vLLM 0.32.0 release, TileLang 0.1.12, PyTorch 2.13.0+cu130,
+CUDA 13.0, driver 575. (An earlier sweep on vLLM 0.19.1 / PyTorch 2.10 /
+CUDA 12.9 also passed 29/29 unit tests; that stack is *not* what we ship
+in the PR, see Appendix E.)
 
 **Unit tests**: 29 / 29 passed (`pytest tests/kernels/dspark/test_confidence.py -v`).
 
@@ -374,27 +376,35 @@ operating points:
 
 | Metric | vs `torch.compile` (the real current baseline) |
 |---|---|
-| **Median latency speedup** | **2.20×** |
-| **Min / max speedup** | **0.87× / 3.96×** |
+| **Median latency speedup** | **1.89×** |
+| **Min / max speedup** | **0.71× / 3.66×** |
 | **Peak-memory delta** | **0 bytes** (vs 0.26 MB–355 MB for compiled) |
 | **Median max_rel_err ratio** | **0.616** (fused is more accurate) |
 
-The single <1.0× speedup point is `n=32, H=7168, r=0`, where fused is
-0.148 ms vs compiled 0.129 ms. This appears to be TileLang launch overhead
-on a shape where cuBLAS has a dedicated skinny-GEMV path; not a regression,
-just a parity point. Mitigation: `_FUSED_MAX_BATCH` already caps fallback,
-and if reviewers want, we can add a `_FUSED_MIN_BATCH` floor too.
+The single <1.0× speedup point is `n=32, H=7168, r=0` (0.71×). On this
+shape the total runtime is < 100 µs and TileLang launch cost is comparable
+to cuBLAS's specialized skinny-GEMV path — not a regression, just fusion
+no longer helps at this scale. Mitigation: the existing `_FUSED_MAX_BATCH`
+covers large-batch blowup; reviewers may want a `_FUSED_MIN_BATCH` floor
+(e.g. 64) to skip fused on tiny batches.
 
 **DSpark production shape** (n ∈ [128, 512], H ∈ [2048, 7168], r ∈ [8, 32])
-median speedup: **2.20×**, all shapes in this band ≥ 2.12×.
+median speedup: **1.94×**, all shapes in this band ≥ 1.86×.
 
-**Large batch** (n=8192): up to **3.96×**, and per-call memory traffic drops
+**Large batch** (n=8192): up to **3.66×**, and per-call memory traffic drops
 from ~350 MB (compiled) to ~0 (fused). At higher spec-decode batch sizes
 this becomes the dominant saving.
 
+**Note on PyTorch version**: this sweep is on PyTorch 2.13; PyTorch 2.10
+gave a *larger* speedup (median 2.20×) because `torch.compile` was slower
+there. The fused kernel's absolute latency is roughly constant across
+PyTorch versions; what changes is the baseline. We should therefore not
+promise a single number in the PR description — claim the mechanism (one
+launch instead of four, no ACL traffic) and report a *range*.
+
 **Full data**: `benchmarks/kernels/dspark/bench_confidence.py --out
-/tmp/bench_results.json` in the dev pod. TODO: re-run on H200 for the
-production-representative numbers.
+/tmp/bench_results_v0_32_0.json` in the dev pod. TODO: re-run on H200 for
+the production-representative numbers.
 
 ---
 
@@ -618,17 +628,45 @@ RFC body is intentionally left as the "as-proposed" snapshot.
 
 | RFC section | Proposal | Landed in PR | Reason |
 |---|---|---|---|
-| §4.4.1 | Subclass `VllmJitKernel` and `CompileKey` | Plain dict-cache keyed by `(n_embed, markov_rank)`, exposed via `direct_register_custom_op` | `VllmJitKernel` and `vllm.tilelang_utils` only exist on `main` after 0.19.x; the released container (0.19.1) does not ship them. Maintainers can refactor to `VllmJitKernel` post-merge with a trivial NFC patch — the `CompileKey` maps 1:1 onto the dict key. |
+| §4.4.1 | Subclass `VllmJitKernel` and `CompileKey` | **Yes, as proposed** — module singleton `DSPARK_CONFIDENCE_TILELANG_KERNEL` | Final target is vLLM 0.32.x, which ships `VllmJitKernel` in `vllm.model_executor.warmup.jit_warmup`. Compile/dispatch logic delegates to the base class; TileLang holds the per-shape JIT cache internally. |
 | §4.4.1 | Kernel in `vllm/model_executor/kernels/dspark/tilelang.py` | Two files: `tilelang_kernels.py` (raw TileLang) + `tilelang.py` (custom op registration) | Mirrors `kernels/mhc/` two-file pattern; keeps the build surface testable independently of dispatch. |
-| §4.5 | Use `vllm.tilelang_utils.tilelang_jit` and `._get_pass_configs()` | Import `tilelang` directly, hardcode `{TL_DISABLE_WARP_SPECIALIZED, TL_DISABLE_TMA_LOWER}` | Same root cause: `tilelang_utils` not shipped in 0.19.1. |
-| §4.1 / App A | `@T.macro GEMV(x, B, offset, ...)` shared between two GEMVs | Unrolled two×: explicit GEMV #1 (`hidden`) and GEMV #2 (`markov`) | mhc-style "implicit signature" (no `@T.prim_func` wrapper) does not support `T.macro` reuse inside `T.Kernel` — unrolling is simpler and the kernels are short. |
+| §4.5 | Use `vllm.tilelang_utils.tilelang_jit` and `._get_pass_configs()` | **Yes, as proposed** — `from vllm.tilelang_utils import T, tilelang_jit` | `tilelang_utils` is shipped in vLLM 0.32.0. |
+| §4.1 / App A | `@T.macro GEMV(x, B, offset, ...)` shared between two GEMVs | Unrolled two×: explicit GEMV #1 (`hidden`) and GEMV #2 (`markov`) | Implicit-signature TileLang does not support `T.macro` reuse inside `T.Kernel` — unrolling is simpler and the kernels are short. |
 | §4.1 | `hidden: T.StridedTensor((n, H), (S, 1), "bfloat16")` | Plain `T.Tensor[[n, H]]` | StridedTensor + forward reference inside `T.Kernel` is fragile on TileLang 0.1.12. The upstream caller already produces contiguous row-major output from `head_hidden[sample_indices]`, so non-contiguous inputs fall back to PyTorch (still correct, just slower). |
-| §4.4 | `_FUSED_MAX_BATCH=2048` fallback threshold | Same value, but benchmark shows fused wins up to n=8192 | Conservative default; reviewers can raise after H200 numbers land. |
-| §5 | "Benchmark plan" forward-looking | "Benchmark results" — landed with numbers from 5090 dev box | A PR that lands the kernel should land its numbers. H200 cross-check remains in rollout plan. |
+| §4.4 | `_FUSED_MAX_BATCH=2048` fallback threshold | Same value; benchmark shows fused wins up to n=8192 | Conservative default; reviewers can raise after H200 numbers land. |
+| §5 | "Benchmark plan" forward-looking | "Benchmark results" — landed with numbers from 5090 dev box (vLLM 0.32.0) | A PR that lands the kernel should land its numbers. H200 cross-check remains in rollout plan. |
 
 These deltas shouldn't change the **decision question** (fused vs. compiled,
 FP32 weights preserved, single-file integration), only the **implementation
 surface**.
+
+---
+
+## Appendix E: Cross-PyTorch-version speedup sensitivity
+
+Early development was done on vLLM 0.19.1 / PyTorch 2.10 / CUDA 12.9 (the
+then-current production container). The same code was then re-tested on
+vLLM 0.32.0 / PyTorch 2.13 / CUDA 13.0 (the tag used in this PR). Headline
+speedup numbers diverge — this is expected and informative:
+
+| Statistic | v0.19.1 / PT 2.10 | v0.32.0 / PT 2.13 |
+|---|---|---|
+| Min speedup vs compiled | 0.87× | 0.71× |
+| **Median speedup vs compiled** | **2.20×** | **1.89×** |
+| Max speedup vs compiled | 3.96× | 3.66× |
+
+The fused kernel's absolute latency is roughly constant across PyTorch
+versions; what changes is the `torch.compile` baseline (PyTorch 2.13 is
+measurably better at this small-GEMV pattern than 2.10). Two consequences:
+
+1. We do **not** cherry-pick the largest number in the PR description.
+   The mechanism claim ("one launch instead of four, no ACL traffic") is
+   the primary value; the latency number is secondary and version-dependent.
+2. **Memory savings are invariant** across PyTorch versions: the compiled
+   path's `(n, H+r)` fp32 temporary is recreated on every call in both
+   versions; ours is eliminated.
+
+H200 numbers (production-representative) remain TODO before final PR merge.
 
 ---
 
