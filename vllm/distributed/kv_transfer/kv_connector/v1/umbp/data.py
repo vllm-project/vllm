@@ -15,7 +15,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from dataclasses import fields as dataclass_fields
 from enum import Enum
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, overload
 
 import torch
 
@@ -28,6 +28,8 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
+    MLAAttentionSpec,
+    SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
 )
 
@@ -38,6 +40,28 @@ def _layer_specs(group: KVCacheGroupSpec) -> dict[str, KVCacheSpec]:
     if isinstance(spec, UniformTypeKVCacheSpecs):
         return {name: spec.kv_cache_specs[name] for name in group.layer_names}
     return dict.fromkeys(group.layer_names, spec)
+
+
+def tp_replicated_group_ids(
+    config: KVCacheConfig, topology: RankTopology
+) -> frozenset[int]:
+    """Groups whose blocks are byte-identical on every TP rank.
+
+    MLA-style latents (incl. sparse indexers and compressor states) are
+    replicated across TP; context parallelism shards them, so it opts out.
+    """
+    if topology.tp_size == 1 or topology.pcp_size > 1 or topology.dcp_size > 1:
+        return frozenset()
+    return frozenset(
+        group_id
+        for group_id, group in enumerate(config.kv_cache_groups)
+        if group.enable_kv_transfer
+        and group.layer_names
+        and all(
+            isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+            for spec in _layer_specs(group).values()
+        )
+    )
 
 
 def _spec_fingerprint(spec: KVCacheSpec) -> dict[str, str]:
@@ -206,17 +230,26 @@ class UMBPHandshakeMetadata(KVConnectorHandshakeMetadata):
     """Namespace a worker derived, reported to the scheduler at startup."""
 
     namespace: str
+    replicated_groups: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
 class BlockIdentityCodec:
-    """Build stable rank-local keys from vLLM block hashes."""
+    """Build stable rank-local keys from vLLM block hashes.
+
+    Groups in ``replicated_groups`` get one TP-agnostic key (``tp*``) that
+    every TP rank loads and only TP rank 0 stores.
+    """
 
     namespace: UMBPNamespace
     tp_rank: int = 0
     pp_rank: int = 0
     pcp_rank: int = 0
     dcp_rank: int = 0
+    replicated_groups: frozenset[int] = frozenset()
+
+    def stores_group(self, group_id: int) -> bool:
+        return self.tp_rank == 0 or group_id not in self.replicated_groups
 
     def key(self, block_hash: bytes, group_id: int = 0) -> str:
         return self.key_for_namespace(
@@ -236,9 +269,10 @@ class BlockIdentityCodec:
         if group_id < 0:
             raise ValueError("group_id must be non-negative")
         tp_rank, pcp_rank, dcp_rank, pp_rank = namespace
+        tp = "*" if group_id in self.replicated_groups else tp_rank
         return (
             f"umbp:vllm:v1:{self.namespace.value}:"
-            f"tp{tp_rank}:pcp{pcp_rank}:dcp{dcp_rank}:"
+            f"tp{tp}:pcp{pcp_rank}:dcp{dcp_rank}:"
             f"pp{pp_rank}:g{group_id}:"
             f"{block_hash.hex()}"
         )
@@ -253,7 +287,14 @@ class BlockIdentityCodec:
             self.key_for_namespace(block_hash, group_id, namespace)
             for namespace in topology.all_namespaces()
             for group_id in group_ids
+            if group_id not in self.replicated_groups or namespace[0] == 0
         )
+
+    def keys_per_object(self, topology: RankTopology, group_id: int) -> int:
+        """Number of rank keys that together hold one logical block."""
+        if group_id in self.replicated_groups:
+            return topology.rank_count // topology.tp_size
+        return topology.rank_count
 
 
 @dataclass(frozen=True)
@@ -521,6 +562,103 @@ class BlockTransferPlan:
     ranges: tuple[KVRange, ...] = ()
     request_id: str | None = None
     group_id: int | None = None
+    block_hash: bytes | None = None
+    parent_block_hash: bytes | None = None
+    token_ids: tuple[int, ...] = ()
+    block_size: int = 0
+    medium: str = "CPU"
+
+
+@dataclass(frozen=True)
+class BlockLoadBatch(Sequence[BlockTransferPlan]):
+    """Whole-block loads with request metadata shared across the batch."""
+
+    keys: list[str]
+    block_ids: list[int]
+    group_ids: list[int]
+    request_id: str
+
+    def __post_init__(self) -> None:
+        if len(self.keys) != len(self.block_ids) or len(self.keys) != len(
+            self.group_ids
+        ):
+            raise ValueError("load batch columns must have equal lengths")
+
+    def __len__(self) -> int:
+        return len(self.keys)
+
+    @overload
+    def __getitem__(self, index: int) -> BlockTransferPlan: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> list[BlockTransferPlan]: ...
+
+    def __getitem__(
+        self, index: int | slice
+    ) -> BlockTransferPlan | list[BlockTransferPlan]:
+        if isinstance(index, slice):
+            return [self[i] for i in range(*index.indices(len(self)))]
+        return BlockTransferPlan(
+            key=self.keys[index],
+            block_id=self.block_ids[index],
+            group_id=self.group_ids[index],
+            request_id=self.request_id,
+        )
+
+
+@dataclass(frozen=True)
+class BlockStoreBatch(Sequence[BlockTransferPlan]):
+    """Columnar whole-block stores with request metadata shared by the batch."""
+
+    keys: list[str]
+    block_ids: list[int]
+    group_ids: list[int]
+    block_hashes: list[bytes]
+    parent_block_hashes: list[bytes | None]
+    token_ids: list[tuple[int, ...]]
+    block_sizes: list[int]
+    request_id: str
+
+    def __post_init__(self) -> None:
+        length = len(self.keys)
+        columns = (
+            self.block_ids,
+            self.group_ids,
+            self.block_hashes,
+            self.parent_block_hashes,
+            self.token_ids,
+            self.block_sizes,
+        )
+        if any(len(column) != length for column in columns):
+            raise ValueError("store batch columns must have equal lengths")
+
+    def __len__(self) -> int:
+        return len(self.keys)
+
+    @overload
+    def __getitem__(self, index: int) -> BlockTransferPlan: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> list[BlockTransferPlan]: ...
+
+    def __getitem__(
+        self, index: int | slice
+    ) -> BlockTransferPlan | list[BlockTransferPlan]:
+        if isinstance(index, slice):
+            return [self[i] for i in range(*index.indices(len(self)))]
+        return BlockTransferPlan(
+            key=self.keys[index],
+            block_id=self.block_ids[index],
+            request_id=self.request_id,
+            group_id=self.group_ids[index],
+            block_hash=self.block_hashes[index],
+            parent_block_hash=self.parent_block_hashes[index],
+            token_ids=self.token_ids[index],
+            block_size=self.block_sizes[index],
+        )
+
+    def localized(self, keys: list[str]) -> BlockStoreBatch:
+        return replace(self, keys=keys)
 
 
 @dataclass
@@ -529,6 +667,7 @@ class LoadSpec:
 
     local_tokens: int
     external_tokens: int
+    block_hashes_by_group: tuple[tuple[bytes | None, ...], ...] = ()
 
     @property
     def num_tokens_to_load(self) -> int:
@@ -576,26 +715,49 @@ class RequestTracker:
         return complete_tokens
 
 
+# Error prefix of a transfer a runtime refused without touching the pool.
+TRANSFER_NOT_ATTEMPTED = "transfer not attempted"
+
+
 class TransferJobStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 @dataclass
 class TransferJobState:
     """Per-key completion state; one failed key does not fail its siblings."""
 
-    plans: tuple[BlockTransferPlan, ...]
+    plans: tuple[BlockTransferPlan, ...] | BlockLoadBatch | BlockStoreBatch
     status: TransferJobStatus = TransferJobStatus.PENDING
     completed_keys: set[str] = field(default_factory=set)
     failed_keys: set[str] = field(default_factory=set)
     error: str | None = None
+    plan_bytes: tuple[int, ...] | None = None
 
     @property
     def keys(self) -> Sequence[str]:
+        if isinstance(self.plans, (BlockLoadBatch, BlockStoreBatch)):
+            return self.plans.keys
         return tuple(plan.key for plan in self.plans)
+
+    @property
+    def completed_bytes(self) -> int:
+        if self.plan_bytes is not None:
+            return sum(
+                size
+                for key, size in zip(self.keys, self.plan_bytes, strict=True)
+                if key in self.completed_keys
+            )
+        return sum(
+            item.length
+            for plan in self.plans
+            if plan.key in self.completed_keys
+            for item in plan.ranges
+        )
 
     def start(self) -> None:
         if self.status != TransferJobStatus.PENDING:
@@ -611,8 +773,20 @@ class TransferJobState:
         self.error = error
         self._finish_if_done()
 
+    def cancel(self, error: str = "cancelled") -> None:
+        self.error = error
+        self.status = TransferJobStatus.CANCELLED
+
     @property
     def failed_block_ids(self) -> set[int]:
+        if isinstance(self.plans, (BlockLoadBatch, BlockStoreBatch)):
+            return {
+                block_id
+                for key, block_id in zip(
+                    self.plans.keys, self.plans.block_ids, strict=True
+                )
+                if key in self.failed_keys
+            }
         return {plan.block_id for plan in self.plans if plan.key in self.failed_keys}
 
     def _finish_if_done(self) -> None:
@@ -631,10 +805,24 @@ class UMBPConnectorMetadata(KVConnectorMetadata):
 
     async_load: bool = False
     store_plans: list[BlockTransferPlan] = field(default_factory=list)
-    load_requests: dict[str, list[BlockTransferPlan]] = field(default_factory=dict)
-    store_requests: dict[str, list[BlockTransferPlan]] = field(default_factory=dict)
+    load_requests: dict[str, list[BlockTransferPlan] | BlockLoadBatch] = field(
+        default_factory=dict
+    )
+    store_requests: dict[str, list[BlockTransferPlan] | BlockStoreBatch] = field(
+        default_factory=dict
+    )
     preempted_request_ids: set[str] = field(default_factory=set)
     store_event: int = -1
+
+    def iter_store_plans(self):
+        yield from self.store_plans
+        for plans in self.store_requests.values():
+            yield from plans
+
+    def store_plan_groups(self):
+        if self.store_plans:
+            yield self.store_plans
+        yield from self.store_requests.values()
 
 
 @dataclass
@@ -642,9 +830,11 @@ class StoreEventResult:
     """Number of workers that finished one store event."""
 
     completed_workers: int = 0
+    failed_objects: set[tuple[int, bytes]] = field(default_factory=set)
 
     def merge(self, other: StoreEventResult) -> None:
         self.completed_workers += other.completed_workers
+        self.failed_objects.update(other.failed_objects)
 
 
 @dataclass

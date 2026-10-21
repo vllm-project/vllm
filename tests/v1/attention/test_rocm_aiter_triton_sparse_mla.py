@@ -329,3 +329,56 @@ def test_aiter_sparse_mla_stays_off_with_kv_connector(monkeypatch, model) -> Non
     monkeypatch.setattr(rocm_aiter_ops, "is_triton_sparse_mla_enabled", lambda: True)
     assert rocm._aiter_sparse_mla_enabled(has_kv_transfer=False)
     assert not rocm._aiter_sparse_mla_enabled(has_kv_transfer=True)
+
+
+def test_only_non_canonical_kv_connectors_disable_aiter_sparse_mla() -> None:
+    from vllm.config.kv_transfer import KVTransferConfig
+    from vllm.models.deepseek_v4.amd import rocm
+
+    def config(connector, connectors=None):
+        if connector is None:
+            return SimpleNamespace(kv_transfer_config=None)
+        extra = {"connectors": connectors} if connectors else {}
+        return SimpleNamespace(
+            kv_transfer_config=KVTransferConfig(
+                kv_connector=connector,
+                kv_role="kv_both",
+                kv_connector_extra_config=extra,
+            )
+        )
+
+    umbp = {"kv_connector": "UMBPStoreConnector", "kv_role": "kv_both"}
+    example = {"kv_connector": "ExampleConnector", "kv_role": "kv_both"}
+    assert not rocm._has_foreign_kv_writer(config(None))
+    # UMBP only restores whole blocks this cache layout stored.
+    assert not rocm._has_foreign_kv_writer(config("UMBPStoreConnector"))
+    assert rocm._has_foreign_kv_writer(config("ExampleConnector"))
+    assert not rocm._has_foreign_kv_writer(config("MultiConnector", [umbp]))
+    assert rocm._has_foreign_kv_writer(config("MultiConnector", [umbp, example]))
+
+
+def test_dsv4_swa_replay_only_with_a_connector_that_asks() -> None:
+    from vllm.config.kv_transfer import KVTransferConfig
+    from vllm.models.deepseek_v4.compressor import dsv4_swa_replay_enabled
+
+    def config(connector="UMBPStoreConnector", extra=None, v2=True, pcp=1):
+        return SimpleNamespace(
+            kv_transfer_config=None
+            if connector is None
+            else KVTransferConfig(
+                kv_connector=connector,
+                kv_role="kv_both",
+                kv_connector_extra_config=extra or {},
+            ),
+            cache_config=SimpleNamespace(swa_bounded_replay=True),
+            use_v2_model_runner=v2,
+            parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp),
+        )
+
+    assert dsv4_swa_replay_enabled(config())
+    assert not dsv4_swa_replay_enabled(config(None))
+    assert not dsv4_swa_replay_enabled(config("ExampleConnector"))
+    assert not dsv4_swa_replay_enabled(config(extra={"rebuild_sliding_window": False}))
+    # The replay model state is a model runner V2 feature.
+    assert not dsv4_swa_replay_enabled(config(v2=False))
+    assert not dsv4_swa_replay_enabled(config(pcp=2))

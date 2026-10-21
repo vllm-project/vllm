@@ -9,6 +9,7 @@ from torch import nn
 
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import MergedColumnParallelLinear
@@ -34,6 +35,52 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowMLASpec,
 )
+
+logger = init_logger(__name__)
+
+
+def dsv4_swa_replay_enabled(vllm_config: VllmConfig) -> bool:
+    """Whether DeepSeek-V4 rebuilds its sliding-window state by replay.
+
+    ROCm only, and only when the KV connector asks for it (UMBP): the SWA cache
+    and compressor states then stay out of prefix caching, so the connector
+    stores just the compressed KV and the scheduler recomputes the last window
+    of every hit. The ROCm sparse SWA metadata clamps the window at
+    ``replay_start``; the replay model state needs model runner V2.
+    """
+    kv_transfer_config = vllm_config.kv_transfer_config
+    if not current_platform.is_rocm() or kv_transfer_config is None:
+        return False
+    from vllm.distributed.kv_transfer.kv_connector.factory import (
+        KVConnectorFactory,
+    )
+
+    connector_cls = KVConnectorFactory.get_connector_class(kv_transfer_config)
+    if not connector_cls.requests_sliding_window_replay(kv_transfer_config):
+        return False
+    blockers = []
+    if not vllm_config.cache_config.swa_bounded_replay:
+        blockers.append("--no-swa-bounded-replay")
+    if not vllm_config.use_v2_model_runner:
+        blockers.append("model runner V1 (replay needs V2)")
+    if vllm_config.parallel_config.prefill_context_parallel_size > 1:
+        blockers.append("prefill context parallelism")
+    if blockers:
+        logger.warning_once(
+            "DeepSeek-V4 SWA bounded replay: disabled (%s); %s stores every "
+            "KV cache group, including the sliding-window cache and "
+            "compressor states.",
+            ", ".join(blockers),
+            kv_transfer_config.kv_connector,
+        )
+        return False
+    logger.info_once(
+        "DeepSeek-V4 SWA bounded replay: enabled; %s stores the compressed KV "
+        "only, and the sliding-window cache and compressor states stay out of "
+        "prefix caching and are rebuilt by recomputing each hit's last window.",
+        kv_transfer_config.kv_connector,
+    )
+    return True
 
 
 def _prefer_two_stage_compressor() -> bool:
@@ -189,6 +236,9 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
             dtype=self.dtype,
             sliding_window=self.sliding_window,
             alignment=576 if uses_fp8_ds_mla_layout else 512,
+            # The SWA replay (>= 128 tokens from a 256-aligned hit) rewrites
+            # the C4 overlap and any partial C128 group before they are read.
+            rebuilt_by_replay=dsv4_swa_replay_enabled(vllm_config),
         )
 
     def forward(self): ...
