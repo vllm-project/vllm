@@ -21,9 +21,7 @@
 // Argument marshalling and dtype dispatch of the fused softplus-sqrt topk. The
 // kernels, the launchers and the per-(gating dtype, topk_indices dtype)
 // instantiations live in topk_softplus_sqrt_kernels.cuh and in the generated
-// topk_softplus_sqrt_launch_*.cu translation units: instantiating the whole
-// kernel set here serialized ~100 s of device code generation onto one core,
-// which made this file the critical path of a ROCm build.
+// topk_softplus_sqrt_launch_*.cu units, see generate_topk_softplus_sqrt.py.
 #include "topk_softplus_sqrt_kernels.cuh"
 
 // Prototypes of the generated entry points. Regenerate them - together with
