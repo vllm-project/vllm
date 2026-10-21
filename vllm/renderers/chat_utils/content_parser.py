@@ -44,6 +44,11 @@ PROMPT_EMBEDS_PLACEHOLDER_ID_PREFIX: Final[str] = (
     f"{PROMPT_EMBEDS_PLACEHOLDER_TOKEN}__vllm_prompt_embed_"
 )
 
+
+def make_prompt_embeds_placeholder(index: int) -> str:
+    return f"{PROMPT_EMBEDS_PLACEHOLDER_ID_PREFIX}{index}__"
+
+
 _ENABLE_PROMPT_EMBEDS_ERROR: Final[str] = (
     "You must set `--enable-prompt-embeds` to input `prompt_embeds`"
 )
@@ -112,7 +117,7 @@ class BaseMultiModalContentParser(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def parse_prompt_embeds(self, data: str) -> str:
+    def parse_prompt_embeds(self, data: str) -> None:
         raise NotImplementedError
 
     @abstractmethod
@@ -158,7 +163,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         return self._tracker.model_config
 
     @override
-    def parse_prompt_embeds(self, data: str) -> str:
+    def parse_prompt_embeds(self, data: str) -> None:
         """Decode a base64 prompt embeds tensor and store it in the tracker.
 
         Emits a single `PROMPT_EMBEDS_PLACEHOLDER_TOKEN` sentinel per
@@ -170,11 +175,9 @@ class MultiModalContentParser(BaseMultiModalContentParser):
                 _ENABLE_PROMPT_EMBEDS_ERROR, parameter="prompt_embeds"
             )
 
-        index = self._tracker.num_items("prompt_embeds")
         tensor = safe_load_prompt_embeds(self.model_config, data.encode())
         self._tracker.add("prompt_embeds", (tensor, None))
         self._add_placeholder("prompt_embeds", PROMPT_EMBEDS_PLACEHOLDER_TOKEN)
-        return f"{PROMPT_EMBEDS_PLACEHOLDER_ID_PREFIX}{index}__"
 
     def parse_image(self, image_url: str | None, uuid: str | None = None) -> None:
         image = self._connector.fetch_image(image_url) if image_url else None
@@ -353,7 +356,7 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         return item, uuid
 
     @override
-    def parse_prompt_embeds(self, data: str) -> str:
+    def parse_prompt_embeds(self, data: str) -> None:
         """Schedule async prompt embeds decode and store the coroutine in the tracker.
 
         Like the sync variant, emits a single sentinel `PROMPT_EMBEDS_PLACEHOLDER_TOKEN`
@@ -365,12 +368,10 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
                 _ENABLE_PROMPT_EMBEDS_ERROR, parameter="prompt_embeds"
             )
 
-        index = self._tracker.num_items("prompt_embeds")
         self._tracker.add(
             "prompt_embeds", partial(self._load_prompt_embeds_async, data.encode())
         )
         self._add_placeholder("prompt_embeds", PROMPT_EMBEDS_PLACEHOLDER_TOKEN)
-        return f"{PROMPT_EMBEDS_PLACEHOLDER_ID_PREFIX}{index}__"
 
     async def _load_prompt_embeds_async(
         self, data_bytes: bytes
