@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     CUDA_VISIBLE_DEVICES: str | None = None
     VLLM_ENGINE_READY_TIMEOUT_S: int = 600
     VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT: float = 30.0
+    VLLM_CHAT_TEMPLATE_FUEL: int = 500000
     VLLM_API_KEY: str | None = None
     VLLM_DEBUG_LOG_API_SERVER_RESPONSE: bool = False
     S3_ACCESS_KEY_ID: str | None = None
@@ -60,11 +61,7 @@ if TYPE_CHECKING:
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: int = 512
     VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN: int = 8192
-    VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: Literal["auto", "nccl", "shm"] = "auto"
-    VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
-    VLLM_USE_RAY_WRAPPED_PP_COMM: bool = True
     VLLM_XPU_PP_MICROBATCH: bool = True
-    VLLM_USE_RAY_V2_EXECUTOR_BACKEND: bool = False
     VLLM_DISTRIBUTED_USE_SPLIT_GROUP: bool = False
     VLLM_XLA_USE_SPMD: bool = False
     VLLM_WORKER_MULTIPROC_METHOD: Literal["fork", "spawn"] = "fork"
@@ -150,14 +147,12 @@ if TYPE_CHECKING:
     VLLM_ROCM_AITER_MLA_ASM_PADDING: Literal["auto", "gluon", "asm"] = "auto"
     VLLM_ROCM_AITER_MLA_DCP_VERIFY: Literal["auto", "asm", "segmented"] = "auto"
     VLLM_ROCM_USE_AITER_MHA: bool = True
-    VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
     VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: bool = False
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
-    VLLM_ROCM_USE_AITER_FP8BMM: bool = True
-    VLLM_ROCM_USE_AITER_FP4BMM: bool = True
+    VLLM_ROCM_USE_AITER_FP8BMM: bool = False
+    VLLM_ROCM_USE_AITER_FP4BMM: bool = False
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
-    VLLM_ROCM_AITER_MEGA_MOE_FUSE_SHARED_EXPERTS: bool = False
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
@@ -215,6 +210,7 @@ if TYPE_CHECKING:
     ] = "relax"
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
     VLLM_MOE_SKIP_PADDING: bool = True
+    VLLM_STEP5_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
     VLLM_KIMI_K3_GEMM_AR: bool = True
@@ -249,6 +245,7 @@ if TYPE_CHECKING:
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_ENFORCE_STRICT_TOOL_CALLING: bool = True
+    VLLM_BEAM_ALWAYS_CONSTRAIN_OUTPUT: bool = True
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: int = 300
     VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS: int = 5
@@ -334,6 +331,7 @@ if TYPE_CHECKING:
     VLLM_GPU_NIC_PCIE_MAPPING: str = ""
     VLLM_NIC_SELECTION_VARS: str = ""
     VLLM_ENABLE_HPC_OPS: bool = False
+    VLLM_REQUEST_BODY_LOG_LEVEL: str = "DEBUG"
 
 
 def get_default_cache_root():
@@ -817,6 +815,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT": lambda: float(
         os.environ.get("VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT", "30")
     ),
+    # Maximum template instructions (MiniJinja fuel) for rendering a
+    # request-supplied chat template (--trust-request-chat-template) in the
+    # Rust frontend; the server's own template has no limit. Set to 0 to
+    # disable the limit.
+    "VLLM_CHAT_TEMPLATE_FUEL": lambda: int(
+        os.environ.get("VLLM_CHAT_TEMPLATE_FUEL", "500000")
+    ),
     # API key for vLLM API server
     "VLLM_API_KEY": lambda: os.environ.get("VLLM_API_KEY", None),
     # Whether to log responses from API Server for debugging
@@ -914,36 +919,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # (CPU backend only) whether to use SGLang INT4 W4A8 kernels for AWQ, and
     # on Zen CPUs whether to serve int4 checkpoints as DA8W4 rather than W4A16.
     "VLLM_CPU_INT4_W4A8": lambda: bool(int(os.getenv("VLLM_CPU_INT4_W4A8", "1"))),
-    # If the env var is set, Ray Compiled Graph uses the specified
-    # channel type to communicate between workers belonging to
-    # different pipeline-parallel stages.
-    # Available options:
-    # - "auto": use the default channel type
-    # - "nccl": use NCCL for communication
-    # - "shm": use shared memory and gRPC for communication
-    "VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE": env_with_choices(
-        "VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE", "auto", ["auto", "nccl", "shm"]
-    ),
-    # If the env var is set, it enables GPU communication overlap
-    # (experimental feature) in Ray's Compiled Graph.
-    "VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM": lambda: bool(
-        int(os.getenv("VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM", "0"))
-    ),
-    # If the env var is set, it uses a Ray Communicator wrapping
-    # vLLM's pipeline parallelism communicator to interact with Ray's
-    # Compiled Graph. Otherwise, it uses Ray's NCCL communicator.
-    "VLLM_USE_RAY_WRAPPED_PP_COMM": lambda: bool(
-        int(os.getenv("VLLM_USE_RAY_WRAPPED_PP_COMM", "1"))
-    ),
     # Using a flag to control microbatch on XPU device, users on XPU device can
     # decide to disable it when they needed.
     "VLLM_XPU_PP_MICROBATCH": lambda: bool(
         int(os.getenv("VLLM_XPU_PP_MICROBATCH", "1"))
-    ),
-    # When True and distributed_executor_backend="ray", use RayExecutorV2
-    # (MQ-based) instead of RayDistributedExecutor (compiled-graph backend).
-    "VLLM_USE_RAY_V2_EXECUTOR_BACKEND": lambda: bool(
-        int(os.getenv("VLLM_USE_RAY_V2_EXECUTOR_BACKEND", "1"))
     ),
     # When True, GroupCoordinator constructs its CPU/device subgroups via
     # ``torch.distributed.split_group(backend=...)``
@@ -1363,11 +1342,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_MHA": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MHA", "True").lower() in ("true", "1")
     ),
-    # Whether to use aiter fp4 gemm asm.
-    # By default is disabled.
-    "VLLM_ROCM_USE_AITER_FP4_ASM_GEMM": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER_FP4_ASM_GEMM", "False").lower() in ("true", "1")
-    ),
     # Whether sparse MLA prefill and decode run on aiter's Triton kernel, which
     # reads the KV cache as stored (bf16 or fp8, paged or flat). Used by the
     # ROCM_AITER_MLA_SPARSE backend (DeepSeek V3.2, GLM-5.x) and DeepSeek
@@ -1381,15 +1355,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_TRITON_ROPE": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_TRITON_ROPE", "False").lower() in ("true", "1")
     ),
-    # Whether to use aiter triton fp8 bmm kernel
-    # By default is enabled.
+    # Whether to use aiter triton fp8 bmm kernel for MLA kv_b_proj.
+    # By default is disabled: it re-quantizes the projection weights online,
+    # regardless of the precision the checkpoint asked for.
     "VLLM_ROCM_USE_AITER_FP8BMM": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER_FP8BMM", "True").lower() in ("true", "1")
+        os.getenv("VLLM_ROCM_USE_AITER_FP8BMM", "False").lower() in ("true", "1")
     ),
-    # Whether to use aiter triton fp4 bmm kernel
-    # By default is enabled.
+    # Whether to use aiter triton fp4 bmm kernel for MLA kv_b_proj.
+    # By default is disabled, for the same reason as the fp8 variant above.
     "VLLM_ROCM_USE_AITER_FP4BMM": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER_FP4BMM", "True").lower() in ("true", "1")
+        os.getenv("VLLM_ROCM_USE_AITER_FP4BMM", "False").lower() in ("true", "1")
     ),
     # Use AITER triton unified attention for V1 attention
     "VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION": lambda: (
@@ -1400,12 +1375,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is disabled.
     "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "False").lower()
-        in ("true", "1")
-    ),
-    # Fuse DeepSeek-V4's shared expert into AITER MegaMoE (requantized to
-    # MXFP4). By default is disabled.
-    "VLLM_ROCM_AITER_MEGA_MOE_FUSE_SHARED_EXPERTS": lambda: (
-        os.getenv("VLLM_ROCM_AITER_MEGA_MOE_FUSE_SHARED_EXPERTS", "False").lower()
         in ("true", "1")
     ),
     # Whether to use aiter triton kernels for gemm ops.
@@ -1663,6 +1632,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # ids to -1 so the dispatch and experts drop them. Requires a MoE kernel that
     # treats topk_id == -1 as a skip sentinel
     "VLLM_MOE_SKIP_PADDING": lambda: bool(int(os.getenv("VLLM_MOE_SKIP_PADDING", "1"))),
+    # Step5 SP dense/shared MLPs: opt into TP-sharded weights with AG/RS
+    # instead of replicated weights and local-token computation.
+    "VLLM_STEP5_SHARD_SP_SHARED_EXPERT": lambda: bool(
+        int(os.getenv("VLLM_STEP5_SHARD_SP_SHARED_EXPERT", "0"))
+    ),
     # Kimi-K3 only. Under sequence-parallel MoE the dense and shared-expert MLPs
     # are replicated on every rank, so each rank streams the whole weight to
     # serve its own token shard. Shard them across TP instead: the MLP then
@@ -1864,6 +1838,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enforce function parameter schemas in structural-tag based tool calling.
     "VLLM_ENFORCE_STRICT_TOOL_CALLING": lambda: (
         os.getenv("VLLM_ENFORCE_STRICT_TOOL_CALLING", "True").lower() in ("true", "1")
+    ),
+    # Constrain every `beam` output to its response template's format, also
+    # without tool or structured output constraints.
+    "VLLM_BEAM_ALWAYS_CONSTRAIN_OUTPUT": lambda: (
+        os.getenv("VLLM_BEAM_ALWAYS_CONSTRAIN_OUTPUT", "True").lower() in ("true", "1")
     ),
     # Control the max chunk bytes (in MB) for the rpc message queue.
     # Object larger than this threshold will be broadcast to worker
@@ -2286,6 +2265,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_SKIP_VERSION_SUFFIX": lambda: bool(
         int(os.getenv("VLLM_SKIP_VERSION_SUFFIX", "0"))
     ),
+    # Logging level for request JSON body.
+    "VLLM_REQUEST_BODY_LOG_LEVEL": lambda: os.getenv(
+        "VLLM_REQUEST_BODY_LOG_LEVEL", "DEBUG"
+    ).upper(),
 }
 
 
@@ -2383,6 +2366,8 @@ def compile_factors() -> dict[str, object]:
         "VLLM_RANDOMIZE_DP_DUMMY_INPUTS",
         "VLLM_MODEL_REDIRECT_PATH",
         "VLLM_HOST_IP",
+        "VLLM_RAY_BUNDLE_INDICES",
+        "VLLM_CHAT_TEMPLATE_FUEL",
         "VLLM_ELASTIC_EP_SCALE_UP_LAUNCH",
         "VLLM_FORCE_AOT_LOAD",
         "S3_ACCESS_KEY_ID",
@@ -2445,6 +2430,7 @@ def compile_factors() -> dict[str, object]:
         "NO_COLOR",
         "VLLM_SKIP_VERSION_SUFFIX",
         "FORCE_COLOR",
+        "VLLM_REQUEST_BODY_LOG_LEVEL",
     }
 
     from vllm.config.utils import normalize_value
