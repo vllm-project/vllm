@@ -832,15 +832,6 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
 
-    def get_finished_count(self) -> int | None:
-        if self._kv_transfer_config.kv_role != "kv_producer":
-            return None
-
-        parallel_config = self._vllm_config.parallel_config
-        return (
-            parallel_config.world_size // parallel_config.prefill_context_parallel_size
-        )
-
     ############################################################
     # Worker Side Methods
     ############################################################
@@ -1331,6 +1322,7 @@ class MooncakeConnectorWorker:
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
         self.pp_rank = get_pp_group().rank_in_group
         self.pcp_rank = get_pcp_group().rank_in_group
+        self._replicated_pcp_done_sending: set[ReqId] = set()
 
         self.kv_caches_base_addr: list[int] = []
         self.device_kv_caches: dict[str, torch.Tensor] = {}
@@ -2371,6 +2363,11 @@ class MooncakeConnectorWorker:
         The scheduler process (via the MultiprocExecutor) will use this output
         to track which workers are done.
         """
+        if self.is_kv_producer and self.pcp_rank != 0:
+            done = self._replicated_pcp_done_sending
+            self._replicated_pcp_done_sending = set()
+            return done or None, None
+
         recv_fut = None
         send_fut = None
         if not self.is_kv_producer:
@@ -2730,6 +2727,17 @@ class MooncakeConnectorWorker:
                 assert not send_meta.ready.is_set()
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
+        if self.is_kv_producer and self.pcp_rank != 0:
+            # Empty blocks only announce allocation, before request_finished().
+            # Acknowledge only the final delayed-free metadata, just once per
+            # request lifecycle, so MultiConnector can wait for every child.
+            self._replicated_pcp_done_sending.update(
+                req_id
+                for req_id, (_, block_ids) in metadata.reqs_to_send.items()
+                if any(block_ids)
+            )
+            return
+
         if not self.is_kv_producer and metadata.reqs_to_recv:
             asyncio.run_coroutine_threadsafe(
                 self._start_load_kv(metadata.reqs_to_recv), self.receiver_loop

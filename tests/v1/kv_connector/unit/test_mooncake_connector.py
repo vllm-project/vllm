@@ -4,6 +4,7 @@
 import asyncio
 import contextlib
 import errno
+import queue
 import socket
 import threading
 import time
@@ -19,11 +20,12 @@ import zmq.asyncio
 from tests.v1.attention.utils import dense_kv_cache_views
 from vllm import envs
 from vllm.config import KVTransferConfig, set_current_vllm_config
+from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorTransferResults
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import (
     mooncake_connector,
     mooncake_utils,
 )
-from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
     _SHARED_REGION_GROUP_ID,
     KVConnectorRole,
@@ -50,6 +52,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import
     MooncakeBootstrapServer,
     RegisterWorkerPayload,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -1281,6 +1284,7 @@ def test_prefill_worker_tracks_send_requests_only_on_canonical_pcp_rank(
     worker.is_kv_producer = True
     worker.is_kv_consumer = False
     worker.pcp_rank = pcp_rank
+    worker._replicated_pcp_done_sending = set()
     worker.receiver_loop = MagicMock()
     worker.sender_loop = MagicMock()
     worker.record_send_reqs = MagicMock(return_value="record-send-requests")
@@ -1321,30 +1325,71 @@ def _make_scheduler_vllm_config(
 
 
 @pytest.mark.skip_global_cleanup
-def test_pcp_finished_count_drives_output_aggregation():
-    vllm_config = _make_scheduler_vllm_config(
-        kv_role="kv_producer", tp_size=2, pcp_size=2
-    )
+@pytest.mark.parametrize("with_sibling", [False, True])
+def test_pcp_completion_waits_for_final_metadata_and_canonical_sender(with_sibling):
+    """Allocation is not completion; each worker must finish every async save."""
+    worker = object.__new__(MooncakeConnectorWorker)
+    worker.is_kv_producer = True
+    worker.is_kv_consumer = False
+    worker.pcp_rank = 1
+    worker._replicated_pcp_done_sending = set()
+    worker._failed_recv_reqs = queue.Queue()
+    worker.shutdown = MagicMock()
+    metadata = MooncakeConnectorMetadata()
+    metadata.reqs_to_send["req-1"] = ("xfer-1", [])
+    worker.start_load_kv(metadata)
+    assert worker.get_finished() == (None, None)
+
+    # Aborted requests never ask the scheduler to delay block release.
+    aborted = MooncakeConnectorMetadata()
+    aborted.reqs_not_processed.add("xfer-1")
+    worker.start_load_kv(aborted)
+    assert worker.get_finished() == (None, None)
+
+    metadata.reqs_to_send["req-2"] = ("xfer-2", [[0]])
+    worker.start_load_kv(metadata)
+    noncanonical = worker.get_transfer_results()
+    assert noncanonical.finished_sending == {"req-2"}
+    assert not worker.get_transfer_results().finished_sending
+
+    config = _make_scheduler_vllm_config(kv_role="kv_producer", tp_size=1, pcp_size=2)
     connector = MooncakeConnector(
-        vllm_config,
-        KVConnectorRole.SCHEDULER,
-        _make_test_kv_cache_config(),
+        config, KVConnectorRole.SCHEDULER, _make_test_kv_cache_config()
     )
-    aggregator = KVOutputAggregator.from_connector(connector, world_size=4)
+    if with_sibling:
+        multi = object.__new__(MultiConnector)
+        mooncake = MagicMock()
+        mooncake.get_finished_count.return_value = connector.get_finished_count()
+        mooncake.get_transfer_results.side_effect = [
+            noncanonical,
+            KVConnectorTransferResults(),
+        ]
+        sibling = MagicMock()
+        sibling.get_finished_count.return_value = None
+        sibling.get_transfer_results.side_effect = [
+            KVConnectorTransferResults(),
+            KVConnectorTransferResults(finished_sending={"req-2"}),
+        ]
+        multi._connectors = [mooncake, sibling]
+        multi._extra_async_saves = {"req-2": 1}
+        assert not multi.get_transfer_results(set()).finished_sending
+        noncanonical = multi.get_transfer_results(set())
+        assert noncanonical.finished_sending == {"req-2"}
+        assert not multi._extra_async_saves
+        connector = multi
 
-    first = SimpleNamespace(
-        kv_connector_output=KVConnectorOutput(finished_sending={"req-1"})
-    )
-    aggregated = aggregator.aggregate([first])
-    assert aggregated is not None
-    assert not aggregated.kv_connector_output.finished_sending
+    aggregator = KVOutputAggregator.from_connector(connector, world_size=2)
 
-    second = SimpleNamespace(
-        kv_connector_output=KVConnectorOutput(finished_sending={"req-1"})
-    )
-    aggregated = aggregator.aggregate([second])
-    assert aggregated is not None
-    assert aggregated.kv_connector_output.finished_sending == {"req-1"}
+    def aggregate(finished):
+        output = SimpleNamespace(
+            kv_connector_output=KVConnectorOutput(finished_sending=finished)
+        )
+        return aggregator.aggregate([output]).kv_connector_output.finished_sending
+
+    assert not aggregate(noncanonical.finished_sending)
+    # Canonical sender is still holding the real transfer's blocks.
+    assert not aggregate(set())
+    assert aggregate({"req-2"}) == {"req-2"}
 
 
 @pytest.mark.parametrize(
@@ -1411,12 +1456,7 @@ def test_connector_validates_supported_pcp_topologies(
         KVConnectorRole.SCHEDULER,
         _make_test_kv_cache_config(),
     )
-    expected_count = (
-        vllm_config.parallel_config.world_size // pcp_size
-        if kv_role == "kv_producer"
-        else None
-    )
-    assert connector.get_finished_count() == expected_count
+    assert connector.get_finished_count() is None
 
 
 @pytest.mark.asyncio
