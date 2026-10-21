@@ -6,6 +6,7 @@ import itertools
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
+from contextlib import aclosing
 from http import HTTPStatus
 from typing import Any, Final, cast
 
@@ -59,6 +60,7 @@ from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
 from vllm.parser import ParserManager
 from vllm.parser.abstract_parser import Parser
+from vllm.parser.metrics import record_request_tools, record_tool_call_response
 from vllm.renderers.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
@@ -292,6 +294,7 @@ class OpenAIServingChat(GenerateBaseServing):
         for the API specification. This API mimics the OpenAI
         Chat Completion API.
         """
+        record_request_tools(request)
         return await self._with_kv_transfer_rejection_cleanup(
             self._create_chat_completion(request, raw_request), request, raw_request
         )
@@ -480,24 +483,27 @@ class OpenAIServingChat(GenerateBaseServing):
         mm_token_counts: dict[str, int] | None = None,
     ) -> AsyncGenerator[str, None]:
         try:
-            async for chunk in self.chat_completion_stream_generator_raw(
-                request,
-                result_generator,
-                request_id,
-                model_name,
-                conversation,
-                tokenizer,
-                request_metadata,
-                chat_template_kwargs=chat_template_kwargs,
-                mm_token_counts=mm_token_counts,
-            ):
-                if isinstance(chunk, ErrorResponse):
-                    data = chunk.model_dump_json()
-                else:
-                    data = chunk.model_dump_json(
-                        exclude_unset=True, exclude_none=not chunk.choices
-                    )
-                yield f"data: {data}\n\n"
+            async with aclosing(
+                self.chat_completion_stream_generator_raw(
+                    request,
+                    result_generator,
+                    request_id,
+                    model_name,
+                    conversation,
+                    tokenizer,
+                    request_metadata,
+                    chat_template_kwargs=chat_template_kwargs,
+                    mm_token_counts=mm_token_counts,
+                )
+            ) as stream:
+                async for chunk in stream:
+                    if isinstance(chunk, ErrorResponse):
+                        data = chunk.model_dump_json()
+                    else:
+                        data = chunk.model_dump_json(
+                            exclude_unset=True, exclude_none=not chunk.choices
+                        )
+                    yield f"data: {data}\n\n"
         except Exception as e:
             logger.exception("Error serializing chat completion stream.")
             data = self.create_streaming_error_response(e)
@@ -532,6 +538,11 @@ class OpenAIServingChat(GenerateBaseServing):
         num_cached_tokens = None
         num_cache_creation_tokens = None
         tools_streamed = [False] * num_choices
+        emitted_tool_calls: set[tuple[int, int]] | None = (
+            set() if request.tools and request._api_surface != "messages" else None
+        )
+        parse_failed = False
+        stream_completed = False
 
         previous_texts = [""] * num_choices
 
@@ -701,13 +712,17 @@ class OpenAIServingChat(GenerateBaseServing):
                         # Finished without output: send the final chunk unparsed.
                         delta_message = DeltaMessage()
                     elif parser is not None:
-                        delta_message = parser.parse_delta(
-                            delta_text=delta_text,
-                            delta_token_ids=as_list(output.token_ids),
-                            request=request,
-                            prompt_token_ids=res.prompt_token_ids,
-                            finished=output.finish_reason is not None,
-                        )
+                        try:
+                            delta_message = parser.parse_delta(
+                                delta_text=delta_text,
+                                delta_token_ids=as_list(output.token_ids),
+                                request=request,
+                                prompt_token_ids=res.prompt_token_ids,
+                                finished=output.finish_reason is not None,
+                            )
+                        except Exception:
+                            parse_failed = True
+                            raise
                         if delta_message is not None and delta_message.tool_calls:
                             tools_streamed[i] = True
 
@@ -856,6 +871,12 @@ class OpenAIServingChat(GenerateBaseServing):
                             ),
                         )
 
+                    if emitted_tool_calls is not None:
+                        # Argument fragments reuse the same call index per choice.
+                        emitted_tool_calls.update(
+                            (i, tool_call.index)
+                            for tool_call in choice_data.delta.tool_calls or ()
+                        )
                     yield chunk
 
             if self._include_reasoning_tokens_details and not include_continuous_usage:
@@ -949,6 +970,7 @@ class OpenAIServingChat(GenerateBaseServing):
                         delta=False,
                     )
 
+            stream_completed = True
         except GenerationError as e:
             yield self.create_error_response(
                 str(e), err_type="InternalServerError", status_code=e.status_code
@@ -956,6 +978,16 @@ class OpenAIServingChat(GenerateBaseServing):
         except Exception as e:
             logger.exception("Error in chat completion stream generator.")
             yield self.create_error_response(e)
+        finally:
+            if emitted_tool_calls is not None:
+                record_tool_call_response(
+                    tool_calls_count=len(emitted_tool_calls),
+                    parse_failed=parse_failed,
+                    completed=stream_completed,
+                )
+            elif request.tools and parse_failed:
+                # Messages counts emitted blocks after its own conversion.
+                record_tool_call_response(parse_failed=True, completed=False)
 
     async def chat_completion_full_generator(
         self,
@@ -1020,12 +1052,17 @@ class OpenAIServingChat(GenerateBaseServing):
                 logprobs = None
 
             if parser is not None:
-                reasoning, content, tool_calls = parser.parse(
-                    output.text,
-                    request,
-                    enable_auto_tools=self.enable_auto_tools,
-                    model_output_token_ids=token_ids,
-                )
+                try:
+                    reasoning, content, tool_calls = parser.parse(
+                        output.text,
+                        request,
+                        enable_auto_tools=self.enable_auto_tools,
+                        model_output_token_ids=token_ids,
+                    )
+                except Exception:
+                    if request.tools:
+                        record_tool_call_response(parse_failed=True)
+                    raise
                 suppress_metadata = not request.include_reasoning and parser is not None
                 if not request.include_reasoning:
                     reasoning = None
@@ -1252,6 +1289,9 @@ class OpenAIServingChat(GenerateBaseServing):
                         delta=False,
                     )
 
+        if request.tools and request._api_surface != "messages":
+            tool_calls_count = sum(len(choice.message.tool_calls) for choice in choices)
+            record_tool_call_response(tool_calls_count=tool_calls_count)
         return response
 
     def _get_top_logprobs(
