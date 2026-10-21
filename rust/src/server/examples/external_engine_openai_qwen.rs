@@ -91,6 +91,7 @@ async fn main() -> Result<()> {
         tls: None,
         api_keys: Vec::new(),
         disable_log_stats: false,
+        custom_histogram_buckets: Default::default(),
         log_stats_interval: Some(Duration::from_secs(10)),
         disable_request_id_randomization: false,
         shutdown_timeout: Duration::ZERO,

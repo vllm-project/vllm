@@ -226,6 +226,9 @@ fn serve_args_forward_python_flags_with_separator() {
                         enable_tokenizer_info_endpoint: false,
                         sse_keep_alive_interval: 0,
                         disable_log_stats: false,
+                        custom_histogram_buckets: CustomHistogramBuckets(
+                            {},
+                        ),
                         log_stats_interval: None,
                         disable_request_id_randomization: false,
                         served_model_name: [],
@@ -1240,6 +1243,9 @@ fn frontend_args_accept_json() {
                         enable_tokenizer_info_endpoint: false,
                         sse_keep_alive_interval: 0,
                         disable_log_stats: false,
+                        custom_histogram_buckets: CustomHistogramBuckets(
+                            {},
+                        ),
                         log_stats_interval: None,
                         disable_request_id_randomization: false,
                         served_model_name: [],
@@ -1766,16 +1772,76 @@ fn noop_args_are_accepted() {
     .expect("disable_fastapi_docs is accepted");
 }
 
+/// `--custom-histogram-buckets` reaches the frontend config on both the
+/// `vllm-rs serve` and the `--args-json` paths, and invalid bounds fail startup.
+#[test]
+fn custom_histogram_buckets_reach_frontend_config() {
+    let buckets = r#"{"time_to_first_token":[0.5,1.0]}"#;
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--custom-histogram-buckets",
+        buckets,
+    ])
+    .unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let serve_config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+
+    let args_json =
+        format!(r#"{{"model_tag":"Qwen/Qwen3-0.6B","custom_histogram_buckets":{buckets}}}"#);
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--args-json",
+        &args_json,
+    ])
+    .unwrap();
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    let frontend_config = args.into_config();
+
+    assert_eq!(
+        serve_config.custom_histogram_buckets,
+        frontend_config.custom_histogram_buckets
+    );
+    expect![[r#"
+        CustomHistogramBuckets(
+            {
+                TimeToFirstToken: [
+                    0.5,
+                    1.0,
+                ],
+            },
+        )
+    "#]]
+    .assert_debug_eq(&serve_config.custom_histogram_buckets);
+
+    let error = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--custom-histogram-buckets",
+        r#"{"time_to_first_token":[1.0,0.5]}"#,
+    ])
+    .unwrap_err();
+    assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+}
+
 /// Frontend-read Python args that Rust recognizes but does not support yet must
 /// fail startup on both the `vllm-rs serve` and the `--args-json` paths.
 #[test]
 fn unsupported_args_fail_startup() {
     let cases = [
-        (
-            "--custom-histogram-buckets",
-            r#"{"request_latency":[0.1,1.0]}"#,
-            "custom_histogram_buckets",
-        ),
         (
             "--enable-tower-connector-lora",
             "true",
@@ -2092,6 +2158,9 @@ fn serve_args_accept_handshake_aliases() {
                         enable_tokenizer_info_endpoint: false,
                         sse_keep_alive_interval: 0,
                         disable_log_stats: false,
+                        custom_histogram_buckets: CustomHistogramBuckets(
+                            {},
+                        ),
                         log_stats_interval: None,
                         disable_request_id_randomization: false,
                         served_model_name: [],
@@ -2270,6 +2339,9 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             tls: None,
             api_keys: [],
             disable_log_stats: false,
+            custom_histogram_buckets: CustomHistogramBuckets(
+                {},
+            ),
             log_stats_interval: Some(
                 10s,
             ),
@@ -2374,6 +2446,9 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             tls: None,
             api_keys: [],
             disable_log_stats: false,
+            custom_histogram_buckets: CustomHistogramBuckets(
+                {},
+            ),
             log_stats_interval: Some(
                 10s,
             ),
@@ -2566,6 +2641,9 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             tls: None,
             api_keys: [],
             disable_log_stats: false,
+            custom_histogram_buckets: CustomHistogramBuckets(
+                {},
+            ),
             log_stats_interval: Some(
                 10s,
             ),
