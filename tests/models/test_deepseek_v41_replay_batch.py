@@ -175,7 +175,7 @@ def test_replay_batch_keeps_each_request_window(state):
         "swa_first": first.attn_metadata,
     }
     assert torch.equal(context.slot_mapping["mla"], _slot_mappings(401)[1, rows])
-    assert context.dp_metadata is None and context.is_padding is None
+    assert context.dp_metadata is None and not context.is_padding.any()
 
 
 def test_replay_context_restores_tp_routing_rows(state):
@@ -183,7 +183,7 @@ def test_replay_context_restores_tp_routing_rows(state):
     batch = _input_batch(QUERY_LENS, SEQ_LENS, PREFILLING)
     replay, _ = _prepare(state, batch, CUDAGraphMode.NONE)
     context = replay.forward_context
-    assert context.is_padding is None and context.dp_metadata is None
+    assert context.dp_metadata is None
     count = len(REPLAY_ROWS)
     assert context.batch_descriptor.num_tokens == count
     capturer = RoutedExpertsCapturer.__new__(RoutedExpertsCapturer)
@@ -396,6 +396,7 @@ def test_idle_dp_rank_dummy_trims_with_its_peers(dp_state):
     assert replay is not None and replay.rows.shape[0] == 1
     dp_metadata = replay.forward_context.dp_metadata
     assert dp_metadata.num_tokens_across_dp_cpu.tolist() == [1, 129]
+    assert replay.forward_context.is_padding.tolist() == [True]
 
 
 def test_zero_prefix_window_warms_gather_and_skips_pad(monkeypatch):
@@ -485,5 +486,9 @@ def test_dp_ranks_pad_to_one_replay_graph(dp_state):
     replay, _ = _prepare(dp_state, batch, CUDAGraphMode.NONE)
     assert dp_state.replay_cudagraphs.dispatch.call_args.args[:2] == (3, 300)
     assert replay.forward_context.batch_descriptor.num_tokens == 512
+    is_padding = replay.forward_context.is_padding
+    assert is_padding.shape == (512,)
+    assert not is_padding[: len(REPLAY_ROWS)].any()
+    assert is_padding[len(REPLAY_ROWS) :].all()
     dp_metadata = replay.forward_context.dp_metadata
     assert dp_metadata.num_tokens_across_dp_cpu.tolist() == [512, 512]
