@@ -1823,6 +1823,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MOE_ROUTING_SIMULATION_STRATEGY": lambda: os.environ.get(
         "VLLM_MOE_ROUTING_SIMULATION_STRATEGY", ""
     ).lower(),
+    # Active expert pool size for uniform_subset routing simulation.
+    "VLLM_MOE_ROUTING_SIMULATION_SUBSET_SIZE": lambda: (
+        int(os.environ["VLLM_MOE_ROUTING_SIMULATION_SUBSET_SIZE"])
+        if os.getenv("VLLM_MOE_ROUTING_SIMULATION_SUBSET_SIZE") is not None
+        else None
+    ),
     # Regex timeout for use by the vLLM tool parsing plugins.
     "VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS": lambda: int(
         os.getenv("VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS", "1")

@@ -44,8 +44,9 @@ class DistributionBasedRouting(RoutingStrategy):
     """Distribution-based random routing strategy with configurable distributions.
 
     This routing strategy randomly selects experts for each token based on
-    different probability distributions. Currently supports uniform and normal
-    distributions for testing different routing patterns.
+    different probability distributions. Currently supports uniform,
+    uniform_subset, and normal distributions for testing different routing
+    patterns.
     """
 
     def __init__(self, distribution: str = "uniform", **distribution_params: Any):
@@ -54,10 +55,12 @@ class DistributionBasedRouting(RoutingStrategy):
         Args:
             distribution: Type of distribution to use for sampling
                 - "uniform": Uniform distribution (default)
+                - "uniform_subset": Uniform over a prefix of experts
                 - "normal": Normal/Gaussian distribution
             **distribution_params: Parameters specific to the
                 chosen distribution
                 For "uniform": No additional parameters needed
+                For "uniform_subset": subset_size (required)
                 For "normal": mean (default: 0.0), std (default: 1.0)
 
         """
@@ -69,7 +72,7 @@ class DistributionBasedRouting(RoutingStrategy):
 
     def _validate_distribution_params(self):
         """Validate distribution type and parameters."""
-        valid_distributions = ["uniform", "normal"]
+        valid_distributions = ["uniform", "uniform_subset", "normal"]
 
         if self.distribution not in valid_distributions:
             raise ValueError(
@@ -77,10 +80,33 @@ class DistributionBasedRouting(RoutingStrategy):
                 f"Supported distributions: {valid_distributions}"
             )
 
+        if self.distribution == "uniform_subset":
+            subset_size = self.distribution_params.get("subset_size")
+            if subset_size is None:
+                raise ValueError(
+                    "uniform_subset routing requires subset_size to be set"
+                )
+            if subset_size < 1:
+                raise ValueError(f"subset_size must be >= 1, got {subset_size}")
+
         # Set default parameters if not provided
         if self.distribution == "normal":
             self.distribution_params.setdefault("mean", 0.0)
             self.distribution_params.setdefault("std", 1.0)
+
+    def _resolve_pool_size(self, num_experts: int, top_k: int) -> int:
+        if self.distribution == "uniform_subset":
+            subset_size = self.distribution_params["subset_size"]
+            if subset_size > num_experts:
+                raise ValueError(
+                    f"subset_size ({subset_size}) exceeds num_experts ({num_experts})"
+                )
+            if top_k > subset_size:
+                raise ValueError(f"top_k ({top_k}) exceeds subset_size ({subset_size})")
+            return subset_size
+        if top_k > num_experts:
+            raise ValueError(f"top_k ({top_k}) exceeds num_experts ({num_experts})")
+        return num_experts
 
     def route_tokens(
         self,
@@ -109,9 +135,15 @@ class DistributionBasedRouting(RoutingStrategy):
         if indices_type is None:
             indices_type = torch.long
 
+        pool_size = self._resolve_pool_size(num_experts, top_k)
+
         # Generate expert IDs based on the specified distribution
         topk_ids = self._sample_expert_ids(
-            num_tokens, num_experts, top_k, hidden_states.device, indices_type
+            num_tokens,
+            pool_size,
+            top_k,
+            hidden_states.device,
+            indices_type,
         )
 
         # Generate weights based on the distribution
@@ -128,8 +160,8 @@ class DistributionBasedRouting(RoutingStrategy):
         indices_type: torch.dtype,
     ) -> torch.Tensor:
         """Sample expert IDs based on the specified distribution."""
-        if self.distribution == "uniform":
-            # Generate random scores, and take the top-k to avoid duplicate topk_ids
+        if self.distribution in ("uniform", "uniform_subset"):
+            # Random scores + top-k avoids duplicate expert ids.
             scores = torch.rand(num_tokens, num_experts, device=device)
             _, topk_ids = torch.topk(scores, top_k, dim=-1)
             return topk_ids.to(indices_type)
@@ -183,7 +215,7 @@ class DistributionBasedRouting(RoutingStrategy):
         self, num_tokens: int, top_k: int, device: torch.device
     ) -> torch.Tensor:
         """Generate weights based on the distribution."""
-        if self.distribution == "uniform":
+        if self.distribution in ("uniform", "uniform_subset"):
             # All-ones weights for uniform distribution
             return torch.ones(
                 (num_tokens, top_k),
@@ -246,6 +278,27 @@ class RoutingSimulator:
         cls._routing_strategies[name] = strategy
 
     @classmethod
+    def _resolve_strategy(cls, strategy_name: str) -> RoutingStrategy:
+        if strategy_name == "uniform_subset":
+            subset_size = envs.VLLM_MOE_ROUTING_SIMULATION_SUBSET_SIZE
+            if subset_size is None:
+                raise ValueError(
+                    "uniform_subset routing requires "
+                    "VLLM_MOE_ROUTING_SIMULATION_SUBSET_SIZE to be set"
+                )
+            return DistributionBasedRouting(
+                distribution="uniform_subset",
+                subset_size=subset_size,
+            )
+
+        if strategy_name not in cls._routing_strategies:
+            raise ValueError(
+                f"Unknown routing strategy: {strategy_name}. "
+                f"Available strategies: {cls.get_available_strategies()}"
+            )
+        return cls._routing_strategies[strategy_name]
+
+    @classmethod
     def get_available_strategies(cls) -> list[str]:
         """Get list of available routing strategy names.
 
@@ -253,7 +306,9 @@ class RoutingSimulator:
             List of available strategy names
 
         """
-        return list(cls._routing_strategies.keys())
+        strategies = list(cls._routing_strategies.keys())
+        strategies.append("uniform_subset")
+        return strategies
 
     @staticmethod
     def simulate_routing(
@@ -276,11 +331,14 @@ class RoutingSimulator:
             tuple of (topk_weights, topk_ids)
 
         """
-        if strategy_name not in RoutingSimulator._routing_strategies:
+        if (
+            strategy_name not in RoutingSimulator._routing_strategies
+            and strategy_name != "uniform_subset"
+        ):
             raise ValueError(
                 f"Unknown routing strategy: {strategy_name}. "
                 f"Available strategies: "
-                f"{list(RoutingSimulator._routing_strategies.keys())}"
+                f"{RoutingSimulator.get_available_strategies()}"
             )
         logger.warning_once(
             "Simulating MoE routing using a %s strategy. "
@@ -289,7 +347,7 @@ class RoutingSimulator:
             strategy_name,
         )
 
-        strategy = RoutingSimulator._routing_strategies[strategy_name]
+        strategy = RoutingSimulator._resolve_strategy(strategy_name)
         return strategy.route_tokens(
             hidden_states=hidden_states,
             router_logits=router_logits,
