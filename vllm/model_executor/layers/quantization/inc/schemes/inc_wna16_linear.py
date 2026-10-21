@@ -417,12 +417,12 @@ class INCARKLinearMethod(INCXPULinearBase):
             if self.is_awq_packed:
                 # ARK consumes GPTQ-style packed nibbles; convert AWQ losslessly.
                 qweight_src = self._convert_awq_qweight_to_gptq(qweight_src)
-            ark_linear.qweight.copy_(qweight_src)
+            ark_linear.qweight = qweight_src.contiguous()
             if hasattr(layer, "qzeros") and layer.qzeros is not None:
-                ark_linear.qzeros.copy_(layer.qzeros.detach())
+                ark_linear.qzeros = layer.qzeros.detach()
             else:
                 ark_linear.qzeros = None
-            ark_linear.scales.copy_(layer.scales.detach())
+            ark_linear.scales = layer.scales.detach().to(layer.params_dtype)
             if hasattr(layer, "bias") and layer.bias is not None:
                 ark_linear.bias.copy_(layer.bias.detach())
 
