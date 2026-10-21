@@ -9,8 +9,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
+import orjson
 import pytest
 import pytest_asyncio
+from fastapi.responses import JSONResponse
 
 from tests.utils import RemoteLaunchRenderServer
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -33,12 +35,11 @@ MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 
 @pytest.mark.parametrize("multiple", [False, True])
 @pytest.mark.skip_global_cleanup
-def test_render_response_serializes_multimodal_data_without_model_dict(
-    monkeypatch, multiple
-):
+def test_render_response_serializes_multimodal_data_with_orjson(monkeypatch, multiple):
     request = GenerateRequest(
         token_ids=[1, 2, 3],
-        sampling_params=SamplingParams(max_tokens=1),
+        token_offsets=[(0, 1), (1, 2), (2, 3)],
+        sampling_params=SamplingParams(max_tokens=1, logit_bias={1: -1.0}),
         model="测试模型",
         features=MultiModalFeatures(
             mm_hashes={"image": ["hash"]},
@@ -47,21 +48,48 @@ def test_render_response_serializes_multimodal_data_without_model_dict(
         ),
     )
     result = [request, request] if multiple else request
-    expected = (
+    content = (
         [request.model_dump(), request.model_dump()]
         if multiple
         else request.model_dump()
     )
 
-    def reject_model_dict(*args, **kwargs):
-        raise AssertionError("render responses must not materialize model dicts")
-
-    monkeypatch.setattr(GenerateRequest, "model_dump", reject_model_dict)
+    expected = json.loads(JSONResponse(content=content).body)
+    encode_json = MagicMock(wraps=orjson.dumps)
+    monkeypatch.setattr(orjson, "dumps", encode_json)
     response = api_router._render_response(result)
 
+    encode_json.assert_called_once()
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/json"
+    assert int(response.headers["content-length"]) == len(response.body)
     assert json.loads(response.body) == expected
+
+
+@pytest.mark.skip_global_cleanup
+def test_render_response_serializes_empty_list():
+    response = api_router._render_response([])
+
+    assert response.status_code == 200
+    assert response.body == b"[]"
+
+
+@pytest.mark.parametrize("multiple", [False, True])
+@pytest.mark.skip_global_cleanup
+def test_render_response_preserves_large_integer_transfer_params(multiple):
+    request = GenerateRequest(
+        token_ids=[1],
+        sampling_params=SamplingParams(max_tokens=1),
+        kv_transfer_params={"opaque_id": 2**80},
+    )
+    result = [request] if multiple else request
+
+    response = api_router._render_response(result)
+
+    data = json.loads(response.body)
+    item = data[0] if multiple else data
+    assert response.status_code == 200
+    assert item["kv_transfer_params"]["opaque_id"] == 2**80
 
 
 @pytest.mark.skip_global_cleanup

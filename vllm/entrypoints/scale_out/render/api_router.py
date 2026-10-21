@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from http import HTTPStatus
 
+import orjson
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response
-from pydantic import TypeAdapter
 
 from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -20,7 +20,6 @@ from .serving import ServingRender
 logger = init_logger(__name__)
 
 router = APIRouter()
-_generate_requests_adapter = TypeAdapter(list[GenerateRequest])
 
 
 def render(request: Request) -> ServingRender | None:
@@ -34,11 +33,16 @@ def _render_response(
         return JSONResponse(content=result.model_dump(), status_code=result.error.code)
 
     content = (
-        _generate_requests_adapter.dump_json(result)
+        [item.model_dump() for item in result]
         if isinstance(result, list)
-        else result.model_dump_json()
+        else result.model_dump()
     )
-    return Response(content=content, media_type="application/json")
+    try:
+        body = orjson.dumps(content, option=orjson.OPT_NON_STR_KEYS)
+    except TypeError:
+        # Preserve JSONResponse support for integers outside the 64-bit range.
+        return JSONResponse(content=content)
+    return Response(content=body, media_type="application/json")
 
 
 @router.post(
