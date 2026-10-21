@@ -127,6 +127,7 @@ class Scheduler(SchedulerInterface):
 
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
+        self.max_num_scheduled_decodes = vllm_config.max_num_scheduled_decodes
         # Admission into RUNNING. Separate from max_num_running_reqs, which
         # is the model-runner slot count.
         self.max_num_active_reqs = (
@@ -639,7 +640,7 @@ class Scheduler(SchedulerInterface):
 
         # Balance established decodes without limiting prefill admission or
         # chunks that finish a prompt in this step.
-        max_num_scheduled_decodes = self._get_max_num_scheduled_decodes()
+        max_num_scheduled_decodes = self.max_num_scheduled_decodes
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
@@ -1661,9 +1662,6 @@ class Scheduler(SchedulerInterface):
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
         return scheduler_output
-
-    def _get_max_num_scheduled_decodes(self) -> int:
-        return self.max_num_running_reqs
 
     def _build_kv_connector_meta(
         self, connector: KVConnectorBase_V1, scheduler_output: SchedulerOutput

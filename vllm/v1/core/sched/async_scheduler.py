@@ -22,13 +22,6 @@ class AsyncScheduler(Scheduler):
         if current_platform.is_xpu() and not envs.VLLM_XPU_PP_MICROBATCH:
             self.decode_stagger = 1
 
-    def _get_max_num_scheduled_decodes(self) -> int:
-        if not self.use_v2_model_runner or self.decode_stagger <= 1:
-            return self.max_num_running_reqs
-        return (
-            self.max_num_running_reqs + self.decode_stagger - 1
-        ) // self.decode_stagger
-
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         super()._update_after_schedule(scheduler_output)
         spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens

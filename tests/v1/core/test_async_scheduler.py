@@ -50,6 +50,7 @@ def test_pp_balances_decodes_without_limiting_prefill(
     # Exercise PP scheduling on CPU without distributed/model validation.
     scheduler.use_pp = True
     scheduler.decode_stagger = pp_size
+    scheduler.max_num_scheduled_decodes = (max_num_seqs + pp_size - 1) // pp_size
     requests = create_requests(num_requests=max_num_seqs)
     for request in requests:
         scheduler.add_request(request)
@@ -81,6 +82,7 @@ def test_pp_decode_limit_does_not_block_prefill_chunks(prefill_tokens):
     )
     scheduler.use_pp = True
     scheduler.decode_stagger = 2
+    scheduler.max_num_scheduled_decodes = 2
     for request in create_requests(num_requests=3, num_tokens=2):
         scheduler.add_request(request)
     prefill = scheduler.schedule()
@@ -108,6 +110,7 @@ def test_pp_decode_limit_skips_waiting_decodes_but_admits_prefill():
     )
     scheduler.use_pp = True
     scheduler.decode_stagger = 2
+    scheduler.max_num_scheduled_decodes = 3
     (running,) = create_requests(num_requests=1, req_ids=["running"])
     scheduler.add_request(running)
     output = scheduler.schedule()
@@ -142,6 +145,7 @@ def test_pp_priority_preemption_releases_decode_slot(monkeypatch):
     )
     scheduler.use_pp = True
     scheduler.decode_stagger = 3
+    scheduler.max_num_scheduled_decodes = 1
     low, high = create_requests(num_requests=2, num_tokens=2)
     (prefill,) = create_requests(num_requests=1, num_tokens=6, req_ids=["prefill"])
     for request in [low, prefill, high]:
