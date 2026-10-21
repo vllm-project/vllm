@@ -277,11 +277,23 @@ repos:
     files: ^docker/(Dockerfile|versions\.json)$
     pass_filenames: false
     additional_dependencies: [dockerfile-parse]
+  - id: check-dockerignore-tracked
+    name: Check .dockerignore does not exclude tracked files
+    entry: python tools/pre_commit/check_dockerignore_tracked.py
+    language: python
+    always_run: true
+    pass_filenames: false
   - id: check-boolean-context-manager
     name: Check for boolean ops in with-statements
     entry: python tools/pre_commit/check_boolean_context_manager.py
     language: python
     types: [python]
+  - id: check-trust-remote-code
+    name: Check for hardcoded trust_remote_code=True
+    entry: python tools/pre_commit/check_trust_remote_code.py
+    language: python
+    types: [python]
+    files: ^vllm/
   # Rust hooks. These shell out to `cargo`; tools/pre_commit/rust-check.sh
   # skips with a warning when cargo is not installed.
   - id: rust-cargo-autoinherit
