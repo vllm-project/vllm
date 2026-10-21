@@ -374,8 +374,8 @@ async def test_parsed_derender_leaves_out_stop_token_like_engine(
 
     parser = MagicMock()
     parser.parse.side_effect = lambda text, *args, **kwargs: (None, text, [])
-    parser.parse_delta.side_effect = lambda text, *args, **kwargs: DeltaMessage(
-        content=text
+    parser.parse_delta.side_effect = lambda delta_text, *args, **kwargs: DeltaMessage(
+        content=delta_text
     )
     request = _chat_request(include_stop_str_in_output=include_stop_str_in_output)
 
