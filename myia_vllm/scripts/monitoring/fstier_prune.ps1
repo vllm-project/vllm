@@ -10,7 +10,10 @@
     via /mnt/d.
 
     DRY-RUN PAR DEFAUT. `-Apply` est requis pour supprimer quoi que ce soit.
-    Plafond : min(MaxGiB, libre D: - ReservePct% de la taille totale de D:).
+    Plafond : min(MaxGiB, libre invité − GuestFloorGiB, libre guard-mount − ReservePct%).
+    Tourne en root WSL (-u root) : les blocs sont ecrits par le conteneur (root)
+    dans des sous-repertoires 755 — l'utilisateur par defaut ne peut pas supprimer
+    (mesure 21/10 : Permission denied sur la sonde de suppression).
 
 .EXAMPLE
     .\fstier_prune.ps1                 # dry-run, etat ecrit dans logs/fstier_state.json
@@ -37,7 +40,7 @@ if (-not (Test-Path $script)) {
     }
 }
 
-$wslArgs = @('-d', $Distro, '--exec', 'python3', $script,
+$wslArgs = @('-d', $Distro, '-u', 'root', '--exec', 'python3', $script,
              '--state-file', $state,
              '--max-gib', "$MaxGiB",
              '--reserve-pct', "$ReservePct",

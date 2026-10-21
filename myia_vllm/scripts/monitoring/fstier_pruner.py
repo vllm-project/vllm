@@ -49,8 +49,9 @@ import time
 from datetime import datetime, timezone
 
 GIB = 1024 ** 3
-BLOCK_RE = re.compile(r"^_r\d+$")  # parent-of-parent dir name: <model>_<hash>_r<rank>
-HEX_RE = re.compile(r"^[0-9a-fA-F]{1,3}$")  # intermediate shard dir
+BLOCK_RE = re.compile(r"_r\d+$")  # namespace dir name suffix: <model>_<hash>_r<rank>
+HEX_RE = re.compile(r"^[0-9a-fA-F]{1,3}$")  # shard dir (first hash hex chars)
+MID_RE = re.compile(r"^[0-9a-fA-F]{1,2}_g\d+$")  # v0.32.0 mid dir: <2hex>_g<generation>
 
 
 def utcnow() -> str:
@@ -117,19 +118,31 @@ def collect(root: str, min_age_min: int) -> tuple[list[dict], list[str], int, in
         for shard in os.scandir(ns.path):
             if not shard.is_dir(follow_symlinks=False) or not HEX_RE.match(shard.name):
                 continue
-            for entry in os.scandir(shard.path):
-                try:
-                    if not entry.is_file(follow_symlinks=False):
+            for mid in os.scandir(shard.path):
+                # Layouts seen on v0.32.0: <ns>/<3hex>/<2hex>_g<gen>/<hash>.bin
+                # (mid = dir); keep support for a block file directly under
+                # <3hex> in case the mid level disappears on a future release.
+                if mid.is_dir(follow_symlinks=False):
+                    if not MID_RE.match(mid.name):
                         continue
-                    st = entry.stat(follow_symlinks=False)
-                except OSError as exc:  # vanished between scandir and stat
-                    errors.append(f"{entry.path}: {exc}")
+                    entries = os.scandir(mid.path)
+                elif mid.is_file(follow_symlinks=False):
+                    entries = [mid]
+                else:
                     continue
-                files_total += 1
-                bytes_total += st.st_size
-                if now - st.st_mtime <= min_age_s:
-                    continue  # too fresh: possibly in-flight
-                candidates.append({"path": entry.path, "size": st.st_size, "mtime": st.st_mtime})
+                for entry in entries:
+                    try:
+                        if not entry.is_file(follow_symlinks=False):
+                            continue
+                        st = entry.stat(follow_symlinks=False)
+                    except OSError as exc:  # vanished between scandir and stat
+                        errors.append(f"{entry.path}: {exc}")
+                        continue
+                    files_total += 1
+                    bytes_total += st.st_size
+                    if now - st.st_mtime <= min_age_s:
+                        continue  # too fresh: possibly in-flight
+                    candidates.append({"path": entry.path, "size": st.st_size, "mtime": st.st_mtime})
 
     candidates.sort(key=lambda c: c["mtime"])
     return candidates, errors, files_total, bytes_total
