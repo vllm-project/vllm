@@ -883,32 +883,29 @@ void topkGatingSoftplusSqrtKernelLauncher(
 // unit per (gating dtype, topk_indices dtype) pair, so that ninja generates the
 // device code for each pair in parallel. Declaring the instantiations extern
 // here keeps this file (the dispatch) from instantiating them a second time.
-#define VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(IndType, InputType, HashIndType)  \
-  extern template void                                                   \
-  topkGatingSoftplusSqrtKernelLauncher<IndType, InputType, HashIndType>( \
-      const InputType*, float*, IndType*, int*, const int, const int,    \
-      const int, const bool, double, const float*, const bool,           \
-      const HashIndType*, const HashIndType*, cudaStream_t, const bool*, \
+#define VLLM_TOPK_SOFTPLUS_SQRT_DECLARE(EXT, IndType, InputType, HashIndType) \
+  EXT template void                                                           \
+  topkGatingSoftplusSqrtKernelLauncher<IndType, InputType, HashIndType>(      \
+      const InputType*, float*, IndType*, int*, const int, const int,         \
+      const int, const bool, double, const float*, const bool,                \
+      const HashIndType*, const HashIndType*, cudaStream_t, const bool*,      \
       const float*, int64_t);
+
+#define VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(IndType, InputType, HashIndType) \
+  VLLM_TOPK_SOFTPLUS_SQRT_DECLARE(extern, IndType, InputType, HashIndType)
 
 // Same signature, for the units that provide the definition.
 #define VLLM_TOPK_SOFTPLUS_SQRT_INSTANTIATE(IndType, InputType, HashIndType) \
-  template void                                                              \
-  topkGatingSoftplusSqrtKernelLauncher<IndType, InputType, HashIndType>(     \
-      const InputType*, float*, IndType*, int*, const int, const int,        \
-      const int, const bool, double, const float*, const bool,               \
-      const HashIndType*, const HashIndType*, cudaStream_t, const bool*,     \
-      const float*, int64_t);
+  VLLM_TOPK_SOFTPLUS_SQRT_DECLARE(, IndType, InputType, HashIndType)
 
 #define VLLM_TOPK_SOFTPLUS_SQRT_EXTERN_PAIR(IndType, InputType) \
   VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(IndType, InputType, int64_t)   \
   VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(IndType, InputType, int)       \
   VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(IndType, InputType, IndType)
 
-// The hash index types the dispatch uses: int64_t, int, and the
-// `HashIndType = IndType` default. The int variants are declared twice by the
-// macro, which is fine for a declaration (the instantiating units list the two
-// distinct types explicitly, since a repeated explicit instantiation is not).
+// The hash index types the dispatch uses: int64_t, int and `HashIndType =
+// IndType`. A repeated declaration is fine, a repeated explicit instantiation
+// is not, so the units list the distinct types explicitly.
 VLLM_TOPK_SOFTPLUS_SQRT_EXTERN_PAIR(int, float)
 VLLM_TOPK_SOFTPLUS_SQRT_EXTERN_PAIR(uint32_t, float)
 VLLM_TOPK_SOFTPLUS_SQRT_EXTERN_PAIR(int64_t, float)
