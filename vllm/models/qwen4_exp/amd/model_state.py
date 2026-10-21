@@ -1,21 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Model-runner state for Qwen4Exp PLE inputs."""
+"""Model-runner state for Qwen4Exp PLE inputs, and the lifecycle of the
+specialized decode when ``--monokernel`` selects it."""
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig
+from vllm.models.qwen4_exp.amd.specialized_decode.hooks import SpecializedDecodeMixin
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.gpu.states import RequestState
 
+if TYPE_CHECKING:
+    from vllm.models.qwen4_exp.amd.specialized_decode.runtime.decode import (
+        SpecializedDecode,
+    )
+
 
 class Qwen4ExpModelState(MambaHybridModelState):
-    """Add rollback-safe PLE n-gram context to the model inputs."""
+    """Add rollback-safe PLE n-gram context to the model inputs. With
+    ``--monokernel``, build the specialized decode once the weights are loaded,
+    and check it against every bound KV cache (the CUDA-graph memory-profiling
+    cache, then the real one)."""
 
     def __init__(
         self,
@@ -25,6 +35,14 @@ class Qwen4ExpModelState(MambaHybridModelState):
         device: torch.device,
     ) -> None:
         super().__init__(vllm_config, model, encoder_cache, device)
+        language_model = getattr(model, "language_model", model)
+        self.specialized_decode: SpecializedDecode | None = None
+        if (
+            isinstance(language_model, SpecializedDecodeMixin)
+            and language_model.specialized_decode_config is not None
+        ):
+            language_model.build_specialized_decode()
+            self.specialized_decode = language_model.specialized_decode
         config = self.model_config.hf_text_config
         self.uses_ngram_embedding = bool(config.ple_layer_ids)
         if not self.uses_ngram_embedding:
@@ -61,6 +79,11 @@ class Qwen4ExpModelState(MambaHybridModelState):
             dtype=torch.int32,
             device=self.device,
         )
+
+    def initialize_kv_cache(self, kv_cache_config, block_tables):
+        super().initialize_kv_cache(kv_cache_config, block_tables)
+        if self.specialized_decode is not None:
+            self.specialized_decode.bind_caches()
 
     def _prepare_ngram_context(
         self,
