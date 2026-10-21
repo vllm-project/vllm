@@ -570,6 +570,7 @@ class EngineArgs:
     all2all_backend: All2AllBackend = ParallelConfig.all2all_backend
     enable_elastic_ep: bool = ParallelConfig.enable_elastic_ep
     elastic_ep_max_dp_size: int = ParallelConfig.elastic_ep_max_dp_size
+    elastic_ep_auto_bootstrap: bool = False
     enable_dbo: bool = ParallelConfig.enable_dbo
     ubatch_size: int = ParallelConfig.ubatch_size
     dbo_decode_token_threshold: int = ParallelConfig.dbo_decode_token_threshold
@@ -1322,6 +1323,14 @@ class EngineArgs:
         parallel_group.add_argument(
             "--elastic-ep-max-dp-size",
             **parallel_kwargs["elastic_ep_max_dp_size"],
+        )
+        parallel_group.add_argument(
+            "--elastic-ep-auto-bootstrap",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help="Resolve initial or joining external EP startup from the DP rank "
+            "and rank zero's handshake. --data-parallel-size declares the initial "
+            "world size and need not change for append joiners.",
         )
         parallel_group.add_argument(
             "--dbo-decode-token-threshold",
@@ -2249,6 +2258,21 @@ class EngineArgs:
 
         current_platform.validate_environ(self.fail_on_environ_validation)
 
+        bootstrap_identity = None
+        if self.elastic_ep_auto_bootstrap:
+            if headless:
+                raise ValueError(
+                    "Automatic Elastic EP bootstrap requires an API server"
+                )
+            from vllm.distributed.elastic_ep.bootstrap import (
+                prepare_external_elastic_ep_launch,
+            )
+
+            launch = prepare_external_elastic_ep_launch(self)
+            self.data_parallel_size = launch.data_parallel_size
+            bootstrap_identity = launch.identity
+            os.environ["VLLM_ELASTIC_EP_SCALE_UP_LAUNCH"] = str(int(launch.scale_up))
+
         # Check if the model is a speculator and override model/tokenizer/config
         # BEFORE creating ModelConfig, so the config is created with the target model
         # Skip speculator detection for cloud storage models (eg: S3, GCS) since
@@ -2581,6 +2605,7 @@ class EngineArgs:
             all2all_backend=self.all2all_backend,
             enable_elastic_ep=self.enable_elastic_ep,
             elastic_ep_max_dp_size=self.elastic_ep_max_dp_size,
+            _external_elastic_ep_bootstrap=bootstrap_identity,
             enable_dbo=self.enable_dbo,
             enable_shm_tensor_arena=self.enable_shm_tensor_arena,
             ubatch_size=self.ubatch_size,
