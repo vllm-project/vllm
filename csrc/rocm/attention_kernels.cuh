@@ -3776,21 +3776,21 @@ void paged_attention_custom_launcher_navi(
 // into the generated entry points (see generate_paged_attn.py) so that each
 // translation unit only instantiates one slice of the kernel set;
 // use_interleaved_v_cache and is_navi remain runtime branches.
-#define CALL_CUSTOM_LAUNCHER(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, OUTT,    \
-                             PSIZE, ALIBI_ENABLED, MFMA_TYPE)                \
-  if (use_interleaved_v_cache) {                                             \
-    TORCH_CHECK(!is_navi,                                                    \
-                "Reading interleaved V-cache layout from paged decode "      \
-                "attention not supported on NAVI GPUs");                     \
-    paged_attention_custom_launcher<T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,   \
-                                    OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE,   \
-                                    true>(                                   \
-        out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,   \
-        num_kv_heads, scale, block_tables, seq_lens, query_start_loc,        \
-        max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale);         \
-  } else {                                                                   \
-    ATTN_CALL_NON_INTERLEAVED(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, OUTT,   \
-                              PSIZE, ALIBI_ENABLED, MFMA_TYPE)               \
+#define CALL_CUSTOM_LAUNCHER(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, OUTT,  \
+                             PSIZE, ALIBI_ENABLED, MFMA_TYPE)              \
+  if (use_interleaved_v_cache) {                                           \
+    TORCH_CHECK(!is_navi,                                                  \
+                "Reading interleaved V-cache layout from paged decode "    \
+                "attention not supported on NAVI GPUs");                   \
+    paged_attention_custom_launcher<T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, \
+                                    OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE, \
+                                    true>(                                 \
+        out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache, \
+        num_kv_heads, scale, block_tables, seq_lens, query_start_loc,      \
+        max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale);       \
+  } else {                                                                 \
+    ATTN_CALL_NON_INTERLEAVED(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, OUTT, \
+                              PSIZE, ALIBI_ENABLED, MFMA_TYPE)             \
   }
 
 // The non-interleaved path picks the CDNA or the Navi launcher at runtime.
@@ -3799,34 +3799,34 @@ void paged_attention_custom_launcher_navi(
 // is_navi_gpu() can never be true, so the Navi kernel set is dead weight and is
 // not instantiated.
 #ifdef VLLM_ROCM_ATTN_NO_NAVI
-  #define ATTN_CALL_NON_INTERLEAVED(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,    \
-                                    OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE)    \
-    TORCH_CHECK(!is_navi,                                                     \
-                "Navi (gfx11/gfx12) GPUs are not supported by this build: "   \
-                "its arch list has no Navi code objects");                    \
-    paged_attention_custom_launcher<T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,    \
-                                    OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE,    \
-                                    false>(                                   \
-        out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,    \
-        num_kv_heads, scale, block_tables, seq_lens, query_start_loc,         \
+  #define ATTN_CALL_NON_INTERLEAVED(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,  \
+                                    OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE)  \
+    TORCH_CHECK(!is_navi,                                                   \
+                "Navi (gfx11/gfx12) GPUs are not supported by this build: " \
+                "its arch list has no Navi code objects");                  \
+    paged_attention_custom_launcher<T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,  \
+                                    OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE,  \
+                                    false>(                                 \
+        out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,  \
+        num_kv_heads, scale, block_tables, seq_lens, query_start_loc,       \
         max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale);
 #else
-  #define ATTN_CALL_NON_INTERLEAVED(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,    \
-                                    OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE)    \
-    if (!is_navi) {                                                           \
-      paged_attention_custom_launcher<T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,  \
-                                      OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE,  \
-                                      false>(                                 \
-          out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,  \
-          num_kv_heads, scale, block_tables, seq_lens, query_start_loc,       \
-          max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale);        \
-    } else {                                                                  \
-      paged_attention_custom_launcher_navi<T, KVT, KV_DTYPE, BLK_SIZE,        \
-                                           HEAD_SIZE, OUTT, PSIZE,            \
-                                           ALIBI_ENABLED, MFMA_TYPE, false>(  \
-          out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,  \
-          num_kv_heads, scale, block_tables, seq_lens, query_start_loc,       \
-          max_seq_len, alibi_slopes, k_scale, v_scale);                       \
+  #define ATTN_CALL_NON_INTERLEAVED(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,   \
+                                    OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE)   \
+    if (!is_navi) {                                                          \
+      paged_attention_custom_launcher<T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, \
+                                      OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE, \
+                                      false>(                                \
+          out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache, \
+          num_kv_heads, scale, block_tables, seq_lens, query_start_loc,      \
+          max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale);       \
+    } else {                                                                 \
+      paged_attention_custom_launcher_navi<T, KVT, KV_DTYPE, BLK_SIZE,       \
+                                           HEAD_SIZE, OUTT, PSIZE,           \
+                                           ALIBI_ENABLED, MFMA_TYPE, false>( \
+          out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache, \
+          num_kv_heads, scale, block_tables, seq_lens, query_start_loc,      \
+          max_seq_len, alibi_slopes, k_scale, v_scale);                      \
     }
 #endif
 
@@ -3888,20 +3888,20 @@ void paged_attention_custom_launcher_navi(
 // it is part of the entry point name, so that each translation unit only
 // instantiates the kernels of one block size and paged_attention() switches on
 // it.
-#define ATTN_PARAMS                                                            \
-  at::Tensor &out, at::Tensor &exp_sums, at::Tensor &max_logits,               \
-      at::Tensor &tmp_out, at::Tensor &query, at::Tensor &key_cache,           \
-      at::Tensor &value_cache, int64_t num_kv_heads, double scale,             \
-      at::Tensor &block_tables, at::Tensor &seq_lens,                          \
-      const std::optional<at::Tensor>&query_start_loc, int64_t max_seq_len,    \
-      const std::optional<at::Tensor>&alibi_slopes, at::Tensor &k_scale,       \
-      at::Tensor &v_scale, const std::optional<at::Tensor>&fp8_out_scale,      \
+#define ATTN_PARAMS                                                         \
+  at::Tensor &out, at::Tensor &exp_sums, at::Tensor &max_logits,            \
+      at::Tensor &tmp_out, at::Tensor &query, at::Tensor &key_cache,        \
+      at::Tensor &value_cache, int64_t num_kv_heads, double scale,          \
+      at::Tensor &block_tables, at::Tensor &seq_lens,                       \
+      const std::optional<at::Tensor>&query_start_loc, int64_t max_seq_len, \
+      const std::optional<at::Tensor>&alibi_slopes, at::Tensor &k_scale,    \
+      at::Tensor &v_scale, const std::optional<at::Tensor>&fp8_out_scale,   \
       bool is_navi, bool use_interleaved_v_cache
 
-#define ATTN_FWD                                                              \
-  out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,          \
-      num_kv_heads, scale, block_tables, seq_lens, query_start_loc,           \
-      max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale, is_navi,    \
+#define ATTN_FWD                                                           \
+  out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,       \
+      num_kv_heads, scale, block_tables, seq_lens, query_start_loc,        \
+      max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale, is_navi, \
       use_interleaved_v_cache
 
 // Declare/define one entry point. The generated attention_paged_attn_*.cu files
