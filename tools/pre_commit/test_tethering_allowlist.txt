@@ -31,6 +31,7 @@ tests/distributed/test_flashinfer_pcie_ipc_all_reduce.py  # multi-GPU PCIe IPC a
 tests/distributed/test_kimi_linear_context_parallel.py  # multi-GPU context parallel; no dir-level pytest job
 tests/distributed/test_kv_cache_events.py  # needs multi-proc KV-events setup; no job
 tests/distributed/test_kvlayout.py  # no distributed.yaml job collects this path
+tests/distributed/test_minimax_m3_indexer_sharding.py  # manual 4-GPU SM100/NVLink validation; no dedicated CI job
 tests/distributed/test_mq_connect_ip.py  # no distributed.yaml job collects this path
 tests/distributed/test_pipeline_partition.py  # no distributed.yaml job collects this path
 tests/distributed/test_split_group.py  # no distributed.yaml job collects this path
