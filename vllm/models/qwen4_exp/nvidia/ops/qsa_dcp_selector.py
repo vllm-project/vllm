@@ -7,6 +7,10 @@ scores only the compressed states it owns and takes a local top-k. A state in
 the global top-k is also in its owner's local top-k, so one all-gather of the
 local ``(score, global state)`` candidates and one stable sort per row give
 the global top-k of the replicated selector.
+
+With 2 or 4 DCP ranks and a power-of-two k, each rank sorts its candidates
+as int64 keys before the all-gather, and a bitonic merge tree replaces the
+full sort of all ``world * k`` keys. Both paths give the same output.
 """
 
 import torch
@@ -161,6 +165,187 @@ def select_qsa_dcp_topk(rank_major: torch.Tensor, out: torch.Tensor) -> torch.Te
     return out
 
 
+@triton.jit
+def _candidate_keys(score, global_ids, valid):
+    """int64 key of each candidate: the fp32 score bits, flipped so that
+    integer order is float order, then the inverted global id; padding gets
+    int64 min. The same key as ``_select_qsa_dcp_topk_kernel``."""
+    score_bits = score.to(tl.int32, bitcast=True).to(tl.int64)
+    score_key = tl.where(score_bits < 0, score_bits ^ 0x7FFFFFFF, score_bits)
+    key = score_key * 4294967296 + (4294967295 - global_ids)
+    return tl.where(valid, key, -9223372036854775808)
+
+
+@triton.jit(do_not_specialize=["dcp_rank"])
+def _pack_sorted_qsa_dcp_keys_kernel(
+    logits_ptr,
+    local_indices_ptr,
+    keys_ptr,
+    stride_logits_row,
+    stride_indices_row,
+    dcp_rank,
+    TOPK: tl.constexpr,
+    DCP_WORLD: tl.constexpr,
+    DCP_INTERLEAVE: tl.constexpr,
+) -> None:
+    """Write one row of local top-k candidates as int64 keys, descending."""
+    row = tl.program_id(0).to(tl.int64)
+    columns = tl.arange(0, TOPK)
+    local = tl.load(local_indices_ptr + row * stride_indices_row + columns)
+    valid = local >= 0
+    safe = tl.maximum(local, 0).to(tl.int64)
+    score = tl.load(
+        logits_ptr + row * stride_logits_row + safe, mask=valid, other=-float("inf")
+    )
+    rounds = safe // DCP_INTERLEAVE
+    global_ids = (
+        rounds * DCP_WORLD + dcp_rank
+    ) * DCP_INTERLEAVE + safe % DCP_INTERLEAVE
+    keys = tl.sort(_candidate_keys(score, global_ids, valid), 0, descending=True)
+    tl.store(keys_ptr + row * TOPK + columns, keys)
+
+
+@triton.jit
+def _invert_odd_rows(keys, SEGMENTS: tl.constexpr):
+    """Bitwise NOT on the odd rows of ``[SEGMENTS, N]`` int64 keys. NOT
+    reverses int64 order and is its own inverse."""
+    odd = (tl.arange(0, SEGMENTS) % 2 == 1)[:, None]
+    return tl.where(odd, ~keys, keys)
+
+
+@triton.jit
+def _compare_exchange(
+    keys, SEGMENTS: tl.constexpr, N: tl.constexpr, DISTANCE: tl.constexpr
+):
+    """One bitonic stage on ``[SEGMENTS, N]`` keys: in each block of
+    ``2 * DISTANCE`` the max of pair (i, i + DISTANCE) goes to i."""
+    pairs = tl.reshape(keys, [SEGMENTS * N // (2 * DISTANCE), 2, DISTANCE])
+    upper_half = (tl.arange(0, 2) == 1)[None, :, None]
+    high = tl.max(pairs, axis=1)[:, None, :]
+    low = tl.min(pairs, axis=1)[:, None, :]
+    return tl.reshape(tl.where(upper_half, low, high), [SEGMENTS, N])
+
+
+@triton.jit
+def _bitonic_merge_descending(keys, SEGMENTS: tl.constexpr, LOG2_N: tl.constexpr):
+    """Sort each bitonic row of ``[SEGMENTS, 2**LOG2_N]`` keys descending."""
+    for stage in tl.static_range(LOG2_N):
+        keys = _compare_exchange(keys, SEGMENTS, 1 << LOG2_N, 1 << (LOG2_N - 1 - stage))
+    return keys
+
+
+@triton.jit
+def _merge_level(keys, SEGMENTS: tl.constexpr, LOG2_N: tl.constexpr):
+    """``[SEGMENTS, N]`` rows, even rows descending and odd rows ascending ->
+    ``[SEGMENTS // 2, N]``: the top N of each row pair, in the same
+    alternating order (one descending row when one is left).
+
+    The elementwise max of a descending and an ascending row holds exactly
+    the top N of their union as a bitonic row, so a bitonic merge sorts it.
+    """
+    N: tl.constexpr = 1 << LOG2_N
+    HALF: tl.constexpr = SEGMENTS // 2
+    tops = tl.max(tl.reshape(keys, [HALF, 2, N]), axis=1)
+    if HALF > 1:
+        tops = _invert_odd_rows(
+            _bitonic_merge_descending(_invert_odd_rows(tops, HALF), HALF, LOG2_N),
+            HALF,
+        )
+    else:
+        tops = _bitonic_merge_descending(tops, 1, LOG2_N)
+    return tops
+
+
+@triton.jit(do_not_specialize=["rows"])
+def _merge_sorted_qsa_dcp_keys_kernel(
+    keys_ptr,
+    output_ptr,
+    rows,
+    stride_output_row,
+    TOPK: tl.constexpr,
+    LOG2_TOPK: tl.constexpr,
+    DCP_WORLD: tl.constexpr,
+) -> None:
+    """Select one row's global top-k from ``[world, rows, TOPK]`` int64 keys,
+    each rank block descending. Odd ranks are read in reverse, so that their
+    rows are ascending, as ``_merge_level`` needs."""
+    row = tl.program_id(0).to(tl.int64)
+    rank = tl.arange(0, DCP_WORLD)[:, None].to(tl.int64)
+    column = tl.arange(0, TOPK)[None, :].to(tl.int64)
+    source_column = tl.where(rank % 2 == 1, TOPK - 1 - column, column)
+    keys = tl.load(keys_ptr + (rank * rows + row) * TOPK + source_column)
+    keys = _merge_level(keys, DCP_WORLD, LOG2_TOPK)
+    if DCP_WORLD == 4:
+        keys = _merge_level(keys, 2, LOG2_TOPK)
+    top = tl.reshape(keys, [TOPK])
+    selected = tl.where(
+        top == -9223372036854775808, -1, 4294967295 - (top & 0xFFFFFFFF)
+    )
+    tl.store(
+        output_ptr + row * stride_output_row + tl.arange(0, TOPK),
+        selected.to(tl.int32),
+    )
+
+
+_SORTED_MERGE_WORLDS = (2, 4)
+
+
+def uses_sorted_merge(world_size: int, topk: int) -> bool:
+    """Whether ``merge_qsa_dcp_topk`` takes the sorted-key merge path."""
+    return world_size in _SORTED_MERGE_WORLDS and topk & (topk - 1) == 0
+
+
+def pack_sorted_qsa_dcp_keys(
+    logits: torch.Tensor, local_indices: torch.Tensor, shard: QSADCPShard
+) -> torch.Tensor:
+    """Pack local top-k rows as ``[rows, k]`` int64 keys, each row descending."""
+    rows, topk = local_indices.shape
+    assert logits.shape[0] == rows and logits.stride(1) == 1
+    assert local_indices.stride(1) == 1
+    keys = torch.empty((rows, topk), dtype=torch.int64, device=logits.device)
+    if rows:
+        _pack_sorted_qsa_dcp_keys_kernel[(rows,)](
+            logits,
+            local_indices,
+            keys,
+            logits.stride(0),
+            local_indices.stride(0),
+            shard.rank,
+            TOPK=topk,
+            DCP_WORLD=shard.world_size,
+            DCP_INTERLEAVE=shard.interleave,
+            num_warps=8,
+        )
+    return keys
+
+
+def merge_sorted_qsa_dcp_keys(
+    rank_major: torch.Tensor, out: torch.Tensor
+) -> torch.Tensor:
+    """Write the global top-k of a rank-major key gather to ``out``.
+
+    ``rank_major`` is ``[world, rows, topk]`` int64 (a dim-0 all-gather of
+    ``pack_sorted_qsa_dcp_keys`` rows); ``out`` is ``[rows, topk]`` int32 and
+    receives what ``select_qsa_dcp_topk`` gives for the same candidates.
+    """
+    world, rows, topk = rank_major.shape
+    assert uses_sorted_merge(world, topk)
+    assert rank_major.is_contiguous() and rank_major.dtype == torch.int64
+    assert out.shape == (rows, topk) and out.stride(1) == 1
+    if rows:
+        _merge_sorted_qsa_dcp_keys_kernel[(rows,)](
+            rank_major,
+            out,
+            rows,
+            out.stride(0),
+            TOPK=topk,
+            LOG2_TOPK=topk.bit_length() - 1,
+            DCP_WORLD=world,
+            num_warps=4,
+        )
+    return out
+
+
 def merge_qsa_dcp_topk(
     logits: torch.Tensor, block_indices: torch.Tensor, shard: QSADCPShard
 ) -> None:
@@ -174,6 +359,13 @@ def merge_qsa_dcp_topk(
     rank must call this with the same number of rows (one all-gather).
     """
     if shard.world_size == 1:
+        return
+    if uses_sorted_merge(shard.world_size, block_indices.shape[1]):
+        keys = pack_sorted_qsa_dcp_keys(logits, block_indices, shard)
+        gathered = get_dcp_group().all_gather(keys, dim=0)
+        merge_sorted_qsa_dcp_keys(
+            gathered.view(shard.world_size, *keys.shape), block_indices
+        )
         return
     packed = pack_qsa_dcp_candidates(logits, block_indices, shard)
     gathered = get_dcp_group().all_gather(packed, dim=0)
@@ -308,7 +500,8 @@ def warmup_qsa_dcp_selector(
     selector_shard: QSADCPShard,
     token_shard: QSADCPShard,
 ) -> None:
-    """Warm the pack, select and fused expand+localize kernels.
+    """Warm the pack and select kernels of the merge path in use and the fused
+    expand+localize kernel.
 
     ``logits_width`` is the decode logits row stride (selector block-table
     width times its page size). Row counts and the rank are not
@@ -319,34 +512,62 @@ def warmup_qsa_dcp_selector(
     rows = 16
     block_topk = token_topk // compress_ratio
     output_width = token_topk + compress_ratio - 1
-    _pack_qsa_dcp_candidates_kernel.warmup(
-        TritonWarmupTensor(torch.float32, shape=(rows, logits_width)),
-        TritonWarmupTensor(torch.int32, shape=(rows, block_topk)),
-        TritonWarmupTensor(torch.float32, shape=(rows, block_topk, 2)),
-        logits_width,
-        block_topk,
-        selector_shard.rank,
-        TOPK=block_topk,
-        BLOCK_K=triton.next_power_of_2(block_topk),
-        DCP_WORLD=selector_shard.world_size,
-        DCP_INTERLEAVE=selector_shard.interleave,
-        num_warps=4,
-        grid=(rows,),
-    )
-    block_n = triton.next_power_of_2(selector_shard.world_size * block_topk)
-    _select_qsa_dcp_topk_kernel.warmup(
-        TritonWarmupTensor(
-            torch.int32, shape=(selector_shard.world_size, rows, block_topk, 2)
-        ),
-        TritonWarmupTensor(torch.int32, shape=(rows, block_topk)),
-        rows * block_topk * 2,
-        block_topk,
-        TOPK=block_topk,
-        DCP_WORLD=selector_shard.world_size,
-        BLOCK_N=block_n,
-        num_warps=_select_topk_num_warps(block_n),
-        grid=(rows,),
-    )
+    if uses_sorted_merge(selector_shard.world_size, block_topk):
+        _pack_sorted_qsa_dcp_keys_kernel.warmup(
+            TritonWarmupTensor(torch.float32, shape=(rows, logits_width)),
+            TritonWarmupTensor(torch.int32, shape=(rows, block_topk)),
+            TritonWarmupTensor(torch.int64, shape=(rows, block_topk)),
+            logits_width,
+            block_topk,
+            selector_shard.rank,
+            TOPK=block_topk,
+            DCP_WORLD=selector_shard.world_size,
+            DCP_INTERLEAVE=selector_shard.interleave,
+            num_warps=8,
+            grid=(rows,),
+        )
+        _merge_sorted_qsa_dcp_keys_kernel.warmup(
+            TritonWarmupTensor(
+                torch.int64, shape=(selector_shard.world_size, rows, block_topk)
+            ),
+            TritonWarmupTensor(torch.int32, shape=(rows, block_topk)),
+            rows,
+            block_topk,
+            TOPK=block_topk,
+            LOG2_TOPK=block_topk.bit_length() - 1,
+            DCP_WORLD=selector_shard.world_size,
+            num_warps=4,
+            grid=(rows,),
+        )
+    else:
+        _pack_qsa_dcp_candidates_kernel.warmup(
+            TritonWarmupTensor(torch.float32, shape=(rows, logits_width)),
+            TritonWarmupTensor(torch.int32, shape=(rows, block_topk)),
+            TritonWarmupTensor(torch.float32, shape=(rows, block_topk, 2)),
+            logits_width,
+            block_topk,
+            selector_shard.rank,
+            TOPK=block_topk,
+            BLOCK_K=triton.next_power_of_2(block_topk),
+            DCP_WORLD=selector_shard.world_size,
+            DCP_INTERLEAVE=selector_shard.interleave,
+            num_warps=4,
+            grid=(rows,),
+        )
+        block_n = triton.next_power_of_2(selector_shard.world_size * block_topk)
+        _select_qsa_dcp_topk_kernel.warmup(
+            TritonWarmupTensor(
+                torch.int32, shape=(selector_shard.world_size, rows, block_topk, 2)
+            ),
+            TritonWarmupTensor(torch.int32, shape=(rows, block_topk)),
+            rows * block_topk * 2,
+            block_topk,
+            TOPK=block_topk,
+            DCP_WORLD=selector_shard.world_size,
+            BLOCK_N=block_n,
+            num_warps=_select_topk_num_warps(block_n),
+            grid=(rows,),
+        )
     _expand_localize_qsa_indices_kernel.warmup(
         TritonWarmupTensor(torch.int32, shape=(rows, block_topk)),
         TritonWarmupTensor(torch.int64, shape=(rows,)),
@@ -370,7 +591,10 @@ def warmup_qsa_dcp_selector(
 __all__ = [
     "expand_localize_qsa_block_indices",
     "merge_qsa_dcp_topk",
+    "merge_sorted_qsa_dcp_keys",
     "pack_qsa_dcp_candidates",
+    "pack_sorted_qsa_dcp_keys",
     "select_qsa_dcp_topk",
+    "uses_sorted_merge",
     "warmup_qsa_dcp_selector",
 ]

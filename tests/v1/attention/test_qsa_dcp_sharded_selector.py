@@ -349,20 +349,60 @@ def test_triton_select_matches_torch_select(rows, topk, world):
 
 
 @requires_cuda_triton
+@pytest.mark.parametrize("rows", [1, 80, 1920])
+@pytest.mark.parametrize("case", ["plain", "ties", "padded"])
+@pytest.mark.parametrize("interleave", [1, 4])
+@pytest.mark.parametrize("world", [2, 4])
+def test_sorted_key_merge_matches_select(world, interleave, case, rows):
+    """The sorted-key pack and bitonic merge give the ids, order and -1
+    padding of the candidate pack and full select: on a 1/256 score grid
+    (ties), and with padded local top-k rows (one row all padding on ranks
+    other than 0)."""
+    topk, width = 512, 4096
+    assert qsa_dcp_selector.uses_sorted_merge(world, topk)
+    assert not qsa_dcp_selector.uses_sorted_merge(3, topk)
+    assert not qsa_dcp_selector.uses_sorted_merge(4, 500)
+    generator = torch.Generator().manual_seed(rows * 31 + world * 7 + interleave)
+    candidates, keys = [], []
+    for rank in range(world):
+        logits = torch.randn(rows, width, generator=generator)
+        if case == "ties":
+            logits = (logits * 256).round() / 256
+        shuffle = torch.randperm(topk, generator=generator)
+        local = logits.topk(topk, dim=1).indices[:, shuffle].int()
+        if case == "padded":
+            local[torch.rand(rows, topk, generator=generator) < 0.25] = -1
+            if rank > 0:
+                local[0] = -1
+        shard = qsa_cache.QSADCPShard(rank, world, interleave)
+        logits, local = logits.cuda(), local.cuda()
+        candidates.append(
+            qsa_dcp_selector.pack_qsa_dcp_candidates(logits, local, shard)
+        )
+        keys.append(qsa_dcp_selector.pack_sorted_qsa_dcp_keys(logits, local, shard))
+    expected = torch.full((rows, topk), 7, dtype=torch.int32, device="cuda")
+    actual = torch.full_like(expected, 7)
+
+    qsa_dcp_selector.select_qsa_dcp_topk(torch.stack(candidates), expected)
+    qsa_dcp_selector.merge_sorted_qsa_dcp_keys(torch.stack(keys), actual)
+
+    assert torch.equal(actual, expected)
+
+
+@requires_cuda_triton
+@pytest.mark.parametrize("topk", [24, 32])
 @pytest.mark.parametrize("dcp_size", [2, 4])
-def test_merge_gives_every_rank_the_dcp1_topk(dcp_size, monkeypatch):
-    """merge_qsa_dcp_topk (Triton pack, dim-0 all-gather, Triton select)
-    turns each rank's local top-k into the DCP=1 top-k. The all-gather is
-    simulated on one GPU from the packs of all ranks."""
-    topk = 32
+def test_merge_gives_every_rank_the_dcp1_topk(dcp_size, topk, monkeypatch):
+    """merge_qsa_dcp_topk (Triton pack, dim-0 all-gather, Triton select or
+    sorted-key merge) turns each rank's local top-k into the DCP=1 top-k.
+    The all-gather is simulated on one GPU from the packs of all ranks."""
     expected, ranks = _sharded_topk_case(dcp_size, topk)
     ranks = [(shard, logits.cuda(), local.cuda()) for shard, logits, local in ranks]
-    gathered = torch.cat(
-        [
-            qsa_dcp_selector.pack_qsa_dcp_candidates(logits, local, shard)
-            for shard, logits, local in ranks
-        ]
-    )
+    if qsa_dcp_selector.uses_sorted_merge(dcp_size, topk):
+        pack = qsa_dcp_selector.pack_sorted_qsa_dcp_keys
+    else:
+        pack = qsa_dcp_selector.pack_qsa_dcp_candidates
+    gathered = torch.cat([pack(logits, local, shard) for shard, logits, local in ranks])
     group = SimpleNamespace(all_gather=lambda packed, dim: gathered)
     monkeypatch.setattr(qsa_dcp_selector, "get_dcp_group", lambda: group)
     for shard, logits, local in ranks:
@@ -428,8 +468,8 @@ def test_fused_expand_localize_matches_expand_then_localize(
 @requires_cuda_triton
 @pytest.mark.parametrize(("world", "token_interleave"), [(2, 4), (4, 16)])
 def test_sharded_selector_warmup_compiles(world, token_interleave):
-    """The warmup compiles the pack, select and fused expand+localize
-    kernels for a sharded deployment; the world-1 shard warms nothing."""
+    """The warmup compiles the merge and fused expand+localize kernels for a
+    sharded deployment; the world-1 shard warms nothing."""
     token_topk, compress_ratio = 2048, 4
     token_shard = qsa_cache.QSADCPShard(world - 1, world, token_interleave)
     selector_shard = qsa_cache.QSADCPShard(
@@ -465,7 +505,8 @@ E2E_NUM_DECODES, E2E_DECODE_QUERY_LEN = 3, 4
 
 
 class _TwoPassDCPGroup:
-    """Simulated dim-0 all-gather of the ranks' candidate packs in one process.
+    """Simulated dim-0 all-gather of the ranks' candidate or key packs in one
+    process.
 
     Pass 1 runs every rank and records its packs (the merge result is thrown
     away). Pass 2 runs every rank again, checks that each pack holds the
@@ -505,7 +546,10 @@ class _TwoPassDCPGroup:
 
 
 def _by_state(packed):
-    """A ``[rows, k, 2]`` candidate pack with each row ordered by state id."""
+    """A ``[rows, k, 2]`` candidate pack with each row ordered by state id. A
+    ``[rows, k]`` sorted-key pack is already in a fixed order."""
+    if packed.dim() == 2:
+        return packed
     order = packed[..., 1].argsort(dim=1, stable=True)
     return packed.gather(1, order.unsqueeze(-1).expand_as(packed))
 
