@@ -11,6 +11,7 @@ from vllm.config import CompilationConfig, VllmConfig, replace
 from vllm.config.kernel import MoEBackend
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
+from vllm.v1.spec_decode.draft_model import DraftModelProposer
 
 from ..utils import (
     Messages,
@@ -149,6 +150,21 @@ def test_draft_model_quantization(
     assert_draft_model_correctness(sd_case, vllm_runner)
 
 
+@single_gpu_only
+def test_draft_model_transformers_backend(vllm_runner):
+    """Ensure that Attention prefixes don't collide between the target and
+    draft models when both models use the Transformers modelling backend."""
+    sd_case = ArgsTest(
+        target_model="allenai/OLMo-2-0425-1B-Instruct",
+        draft_model="allenai/OLMo-2-0425-1B-Instruct",
+        sampling_config=greedy_sampling(),
+        num_speculative_tokens=3,
+        expected_acceptance_len=0.98 * (3 + 1),  # epsilon discount of K + 1
+        expected_acceptance_rate=0.98,  # slight epsilon
+    )
+    assert_draft_model_correctness(sd_case, vllm_runner)
+
+
 @multi_gpu_only(num_gpus=2)
 def test_draft_model_tensor_parallelism(vllm_runner):
     """Ensure spec decode works when running with TP > 1."""
@@ -180,9 +196,11 @@ def test_draft_model_engine_args_tensor_parallelism():
     )
     target_config: VllmConfig = engine_args.create_engine_config()
     assert target_config.parallel_config.tensor_parallel_size == 2
+    assert target_config.quant_config is not None
     assert target_config.quant_config.get_name() == "fp8"
 
     speculative_config = target_config.speculative_config
+    assert speculative_config is not None
     draft_config: VllmConfig = replace(
         target_config,
         quant_config=None,
@@ -196,10 +214,43 @@ def test_draft_model_engine_args_tensor_parallelism():
     assert draft_config.quant_config is None
 
 
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("dcp_size", [1, 2])
+def test_draft_model_inherits_target_dcp_config(monkeypatch, dcp_size):
+    monkeypatch.setattr(current_platform, "device_count", lambda: 16)
+    target_config = EngineArgs(
+        model="Qwen/Qwen3-1.7B",
+        tensor_parallel_size=16,
+        decode_context_parallel_size=dcp_size,
+        cp_kv_cache_interleave_size=16,
+        dcp_comm_backend="ag_rs",
+        distributed_executor_backend="mp",
+        speculative_config={
+            "model": "Qwen/Qwen3-0.6B",
+            "method": "draft_model",
+            "num_speculative_tokens": 3,
+        },
+    ).create_engine_config()
+    proposer = object.__new__(DraftModelProposer)
+    proposer.vllm_config = target_config
+    proposer.speculative_config = target_config.speculative_config
+    draft_config = proposer._create_draft_vllm_config()
+    draft_parallel = draft_config.parallel_config
+    assert draft_parallel.decode_context_parallel_size == dcp_size
+    assert draft_parallel.cp_kv_cache_interleave_size == 16
+    assert draft_parallel.dcp_comm_backend == "ag_rs"
+    assert (
+        draft_parallel.dcp_q_replicate == target_config.parallel_config.dcp_q_replicate
+    )
+    assert draft_parallel is not target_config.parallel_config
+    assert target_config.parallel_config.decode_context_parallel_size == dcp_size
+
+
 def _apply_draft_moe_backend(vllm_config: VllmConfig) -> VllmConfig:
     """Replicate SpecDecodeBaseProposer._create_draft_vllm_config logic
     so we can test it without instantiating a full proposer."""
     spec_cfg = vllm_config.speculative_config
+    assert spec_cfg is not None
     if spec_cfg.moe_backend is not None:
         return replace(
             vllm_config,
@@ -238,6 +289,7 @@ def test_draft_model_moe_backend_override(monkeypatch: pytest.MonkeyPatch):
     )
     tgt_config: VllmConfig = engine_args.create_engine_config()
     assert tgt_config.kernel_config.moe_backend == target_moe_backend
+    assert tgt_config.speculative_config is not None
     assert tgt_config.speculative_config.moe_backend == "triton"
 
     draft_config = _apply_draft_moe_backend(tgt_config)
@@ -262,6 +314,7 @@ def test_draft_model_moe_backend_inherits_target(monkeypatch: pytest.MonkeyPatch
     )
     tgt_config: VllmConfig = engine_args.create_engine_config()
     assert tgt_config.kernel_config.moe_backend == target_moe_backend
+    assert tgt_config.speculative_config is not None
     assert tgt_config.speculative_config.moe_backend is None
 
     draft_config = _apply_draft_moe_backend(tgt_config)
@@ -283,6 +336,7 @@ def test_draft_model_moe_backend_default_auto():
     )
     tgt_config: VllmConfig = engine_args.create_engine_config()
     assert tgt_config.kernel_config.moe_backend == "auto"
+    assert tgt_config.speculative_config is not None
     assert tgt_config.speculative_config.moe_backend is None
 
     draft_config = _apply_draft_moe_backend(tgt_config)
@@ -293,7 +347,6 @@ def test_draft_model_moe_backend_default_auto():
 def test_draft_model_engine_args_rejects_invalid_tp_argname():
     """The user should pass "draft_tensor_parallel_size" rather than
     "tensor_parallel_size". We enforce this with validation."""
-
     engine_args = EngineArgs(
         model="Qwen/Qwen3-1.7B",
         tensor_parallel_size=1,

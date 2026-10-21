@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Sequence
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import torch
@@ -10,6 +13,10 @@ if not torch.cuda.is_available():
     pytest.skip("CUDA required for sampler flag tests", allow_module_level=True)
 
 from vllm.sampling_params import SamplingParams
+from vllm.v1.worker.gpu.sample.logits_processor import (
+    LogitsContext,
+    LogitsProcessor,
+)
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.states import RequestState
 
@@ -23,7 +30,7 @@ class MockReasoningConfig:
     natural_reasoning_end_token_ids = [91]
 
 
-def _make_sampler() -> Sampler:
+def _make_sampler(custom_logits_processors: Sequence[LogitsProcessor] = ()) -> Sampler:
     req_states = RequestState(
         max_num_reqs=4,
         max_model_len=64,
@@ -33,11 +40,12 @@ def _make_sampler() -> Sampler:
         device=DEVICE,
     )
     return Sampler(
+        vllm_config=SimpleNamespace(reasoning_config=MockReasoningConfig()),
         max_num_reqs=4,
         vocab_size=VOCAB_SIZE,
         device=DEVICE,
         req_states=req_states,
-        reasoning_config=MockReasoningConfig(),
+        custom_logits_processors=custom_logits_processors,
     )
 
 
@@ -65,23 +73,70 @@ def test_logits_processing_cache_matches_request_features(
     sampling_params: SamplingParams, expected: bool
 ):
     sampler = _make_sampler()
-    sampler.add_request(3, prompt_len=1, sampling_params=sampling_params)
+    sampler.add_request(3, sampling_params=sampling_params)
 
     assert sampler.needs_logits_processing[3] == expected
 
 
 def test_logits_processing_cache_is_overwritten_when_slot_is_reused():
     sampler = _make_sampler()
-    sampler.add_request(3, 1, SamplingParams.for_sampler_warmup())
-    sampler.add_request(3, 1, SamplingParams())
+    sampler.add_request(3, SamplingParams.for_sampler_warmup())
+    sampler.add_request(3, SamplingParams())
 
     assert not sampler.needs_logits_processing[3]
 
 
+class _GateProcessor(LogitsProcessor):
+    """Reports a fixed admission decision from add_request()."""
+
+    def __init__(self, admitted: bool):
+        self.admitted = admitted
+
+    def add_request(self, req_idx: int, sampling_params: SamplingParams) -> bool:
+        return self.admitted
+
+    def apply(self, logits: torch.Tensor, ctx: LogitsContext) -> torch.Tensor:
+        raise AssertionError("the pipeline never runs in this test")
+
+
+@pytest.mark.parametrize("admitted", [True, False])
+def test_custom_processor_add_request_gates_pipeline_flag(admitted: bool):
+    """A custom processor's add_request() return value is OR-ed into the
+    per-request needs_logits_processing flag."""
+    sampler = _make_sampler(custom_logits_processors=[_GateProcessor(admitted)])
+    sampler.add_request(3, SamplingParams())
+
+    assert sampler.needs_logits_processing[3] == admitted
+
+
+def test_has_topp_only_rows():
+    """A row is top-p-only when it has top-p and no effective top-k; top_k
+    of 0 (the default) or at least the logits width disables top-k."""
+    sampler = _make_sampler()
+    sampler.add_request(0, SamplingParams(top_k=10, top_p=0.9))
+    sampler.add_request(1, SamplingParams(top_k=10))
+    sampler.add_request(2, SamplingParams(top_p=0.9))
+    sampler.add_request(3, SamplingParams(top_k=VOCAB_SIZE + 1, top_p=0.9))
+    states = sampler.sampling_states
+    states.apply_staged_writes()
+
+    def has_topp_only_rows(idx: list[int], vocab_size: int = VOCAB_SIZE) -> bool:
+        idx_np = np.array(idx, dtype=np.int32)
+        idx_gpu = torch.from_numpy(idx_np).to(DEVICE)
+        return states.get_top_k_top_p(idx_gpu, idx_np, vocab_size)[2]
+
+    assert not has_topp_only_rows([0, 1])
+    assert has_topp_only_rows([0, 2])
+    assert has_topp_only_rows([3])
+    # The kernel compares top_k against the logits width, so a top_k at or
+    # above a narrower logits width counts as no top-k.
+    assert has_topp_only_rows([0], vocab_size=10)
+
+
 def test_logits_processing_cache_only_checks_active_requests():
     sampler = _make_sampler()
-    sampler.add_request(0, 1, SamplingParams(temperature=0.0))
-    sampler.add_request(2, 1, SamplingParams.for_sampler_warmup())
+    sampler.add_request(0, SamplingParams(temperature=0.0))
+    sampler.add_request(2, SamplingParams.for_sampler_warmup())
 
     sampling_only = np.array([0], dtype=np.int32)
     with_processing = np.array([0, 2], dtype=np.int32)

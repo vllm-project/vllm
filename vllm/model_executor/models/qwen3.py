@@ -79,6 +79,7 @@ class Qwen3Attention(nn.Module):
         attn_type: str = AttentionType.DECODER,
         dual_chunk_attention_config: dict[str, Any] | None = None,
         per_layer_sliding_window: int | None = None,
+        mrope_positions_factor: int = 4,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -124,12 +125,19 @@ class Qwen3Attention(nn.Module):
             max_position=max_position,
             rope_parameters=rope_parameters,
             dual_chunk_attention_config=dual_chunk_attention_config,
+            mrope_positions_factor=mrope_positions_factor,
         )
         attn_cls = (
             EncoderOnlyAttention
             if attn_type == AttentionType.ENCODER_ONLY
             else Attention
         )
+        attention_kwargs: dict[str, Any] = {}
+        if dual_chunk_attention_config:
+            attention_kwargs = {
+                "layer_idx": extract_layer_index(prefix),
+                "dual_chunk_attention_config": dual_chunk_attention_config,
+            }
         self.attn = attn_cls(
             self.num_heads,
             self.head_dim,
@@ -140,12 +148,7 @@ class Qwen3Attention(nn.Module):
             per_layer_sliding_window=per_layer_sliding_window,
             prefix=f"{prefix}.attn",
             attn_type=attn_type,
-            **{
-                "layer_idx": extract_layer_index(prefix),
-                "dual_chunk_attention_config": dual_chunk_attention_config,
-            }
-            if dual_chunk_attention_config
-            else {},
+            **attention_kwargs,
         )
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
@@ -178,6 +181,7 @@ class Qwen3DecoderLayer(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         per_layer_sliding_window: int | None = None,
+        mrope_positions_factor: int = 4,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -210,6 +214,7 @@ class Qwen3DecoderLayer(nn.Module):
             attn_type=attn_type,
             dual_chunk_attention_config=dual_chunk_attention_config,
             per_layer_sliding_window=per_layer_sliding_window,
+            mrope_positions_factor=mrope_positions_factor,
         )
         self.mlp = Qwen3MLP(
             hidden_size=self.hidden_size,
@@ -262,9 +267,13 @@ ALL_DECODER_LAYER_TYPES = {
     }
 )
 class Qwen3Model(Qwen2Model):
+    decoder_layer_type: type[nn.Module] = Qwen3DecoderLayer
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(
-            vllm_config=vllm_config, prefix=prefix, decoder_layer_type=Qwen3DecoderLayer
+            vllm_config=vllm_config,
+            prefix=prefix,
+            decoder_layer_type=self.decoder_layer_type,
         )
 
 
@@ -335,8 +344,5 @@ class Qwen3ForCausalLM(
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

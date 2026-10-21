@@ -73,6 +73,7 @@ mod tests {
 
     use super::DeepSeekV4ToolParser;
     use crate::tool::test_utils::{collect_stream, test_tools};
+    use crate::tool::tests::assert_tool_framing_preserves_body_whitespace;
     use crate::tool::{ToolParser, ToolParserTestExt as _};
 
     fn build_tool_call(function_name: &str, params: &[(&str, &str)]) -> String {
@@ -143,6 +144,37 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
             json!({ "location": "Beijing" })
+        );
+    }
+
+    #[test]
+    fn deepseek_v4_streaming_keeps_parameter_without_string_attr() {
+        let mut parser = DeepSeekV4ToolParser::new(&test_tools());
+        let output = collect_stream(
+            &mut parser,
+            &[
+                "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"get_weather\">\n",
+                "<｜DSML｜parameter name=\"loc",
+                "ation\">Par",
+                "is</｜DSML｜parameter>\n",
+                "<｜DSML｜parameter name=\"date\" string=\"true\">tomorrow</｜DSML｜parameter>\n",
+                "</｜DSML｜invoke>\n</｜DSML｜tool_calls>",
+            ],
+        );
+
+        assert!(output.normal_text().is_empty());
+        assert_eq!(output.calls().len(), 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
+            json!({ "location": "Paris", "date": "tomorrow" })
+        );
+    }
+
+    #[test]
+    fn tool_framing_preserves_body_whitespace_across_chunk_boundaries() {
+        assert_tool_framing_preserves_body_whitespace::<DeepSeekV4ToolParser>(
+            "\n\n",
+            "<｜DSML｜tool_calls><｜DSML｜invoke name=\"get_weather\"></｜DSML｜invoke></｜DSML｜tool_calls>",
         );
     }
 }

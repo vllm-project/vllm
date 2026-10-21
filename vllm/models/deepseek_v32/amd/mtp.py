@@ -8,11 +8,13 @@ from collections.abc import Callable, Iterable
 import torch
 import torch.nn as nn
 
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
+)
+from vllm.model_executor.layers.fused_moe.utils import (
+    is_model_fused_shared_expert_compatible,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -30,8 +32,10 @@ from vllm.model_executor.models.deepseek_v2 import (
     _try_load_fp8_indexer_wk,
     get_spec_layer_idx_from_weight_name,
 )
+from vllm.model_executor.models.interfaces import SupportsPP
 from vllm.model_executor.models.utils import (
     get_pp_missing_layer_names,
+    make_empty_intermediate_tensors_factory,
     maybe_prefix,
 )
 from vllm.models.deepseek_v32.common.kernels import fused_eh_norm
@@ -126,6 +130,15 @@ class DeepseekV32MultiTokenPredictor(nn.Module):
             if self_attn is not None and hasattr(self_attn, "skip_topk"):
                 self_attn.skip_topk = skip
 
+    def compact_topk_indices(self, slot_ids: torch.Tensor):
+        """Gather the top-k index rows at ``slot_ids`` to the front of the buffer."""
+        num_slots = slot_ids.numel()
+        for layer in self.layers.values():
+            self_attn = getattr(layer.mtp_block, "self_attn", None)
+            if self_attn is not None and hasattr(self_attn, "topk_indices_buffer"):
+                topk_indices_buffer = self_attn.topk_indices_buffer
+                topk_indices_buffer[:num_slots] = topk_indices_buffer[slot_ids]
+
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
@@ -158,7 +171,7 @@ class DeepseekV32MultiTokenPredictor(nn.Module):
         return self.logits_processor(mtp_layer.shared_head.head, hidden_states)
 
 
-class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
+class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
@@ -167,6 +180,14 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         self.set_moe_parameters()
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], self.config.hidden_size
+        )
+        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
+            self.model.layers.values(),
+            DeepseekV2MoE,
+            "mtp_block.mlp",
+        )
 
     def set_moe_parameters(self):
         self.num_moe_layers = self.config.num_nextn_predict_layers
@@ -185,7 +206,7 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
-    def forward(
+    def forward(  # type: ignore[override]
         self,
         input_ids: torch.Tensor | None,
         positions: torch.Tensor,
@@ -230,10 +251,13 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
             name = name.replace(f"model.layers.{spec_layer}.", "model.")
         return name
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        rocm_aiter_moe_shared_expert_enabled = (
-            rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+    def is_unused_checkpoint_weight(self, name: str) -> bool:
+        return (
+            get_spec_layer_idx_from_weight_name(self.config, name) is None
+            and "embed_tokens" not in name
         )
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
@@ -250,7 +274,7 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
             num_experts=self.config.n_routed_experts
             + (
                 self.config.n_shared_experts
-                if rocm_aiter_moe_shared_expert_enabled
+                if self.is_fused_shared_expert_enabled
                 else 0
             ),
         )
@@ -260,13 +284,22 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
         loaded_params: set[str] = set()
         _pending_wk_fp8: dict = {}
         for name, loaded_weight in weights:
-            if "rotary_emb.inv_freq" in name:
+            if "rotary_emb.inv_freq" in name or self.is_unused_checkpoint_weight(name):
                 continue
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is None:
+                # A tied top-level embed_tokens has no spec layer to rewrite
+                # from; the draft needs its own copy under PP.
+                param = params_dict.get(name) if "embed_tokens" in name else None
+                if param is not None:
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
+                    weight_loader(param, loaded_weight)
+                    loaded_params.add(name)
                 continue
             is_fusion_moe_shared_experts_layer = (
-                rocm_aiter_moe_shared_expert_enabled and ("mlp.shared_experts" in name)
+                self.is_fused_shared_expert_enabled and ("mlp.shared_experts" in name)
             )
             name = self._rewrite_spec_layer_name(spec_layer, name)
 

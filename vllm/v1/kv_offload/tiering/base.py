@@ -1,17 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Abstract interfaces and data types for the secondary tiering layer.
-"""
+"""Abstract interfaces and data types for the secondary tiering layer."""
 
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 
 from vllm.v1.kv_offload.base import (
+    ConfigInfoMapping,
     Locality,
     LookupResult,
     Medium,
@@ -22,6 +22,10 @@ from vllm.v1.kv_offload.base import (
     RequestOffloadingContext,
     ScheduleEndContext,
 )
+from vllm.v1.kv_offload.tiering.backpressure import (
+    BackpressureDetector,
+)
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
@@ -32,6 +36,8 @@ if TYPE_CHECKING:
 
 # Type alias for job IDs used in async transfer tracking
 JobId = int
+
+TIER_LABEL = "tier"
 
 
 class TieringOffloadingMetrics:
@@ -45,8 +51,8 @@ class TieringOffloadingMetrics:
     WRITE_TIME = "vllm:kv_offload_tiering_write_time"
     PROMOTION_JOB_FAILURES = "vllm:kv_offload_tiering_promotion_job_failures"
     CASCADE_JOB_FAILURES = "vllm:kv_offload_tiering_cascade_job_failures"
-    BLOCK_QUERIES = "vllm:kv_offload_tiering_block_queries"
-    BLOCK_HITS = "vllm:kv_offload_tiering_block_hits"
+    CHUNK_QUERIES = "vllm:kv_offload_tiering_chunk_queries"
+    CHUNK_HITS = "vllm:kv_offload_tiering_chunk_hits"
     PRIMARY_WRITE_USAGE_PERC = "vllm:kv_offload_tiering_primary_write_usage_perc"
     PRIMARY_READ_USAGE_PERC = "vllm:kv_offload_tiering_primary_read_usage_perc"
     PROMOTION_ALLOCATION_FAILURES = (
@@ -54,6 +60,12 @@ class TieringOffloadingMetrics:
     )
     ACTIVE_PROMOTION_JOBS = "vllm:kv_offload_tiering_active_promotion_jobs"
     ACTIVE_CASCADE_JOBS = "vllm:kv_offload_tiering_active_cascade_jobs"
+    BACKPRESSURE_STORE_LATENCY_EMA = (
+        "vllm:kv_offload_tiering_backpressure_store_latency_ema"
+    )
+    BACKPRESSURE_STORES_DROPPED = "vllm:kv_offload_tiering_backpressure_stores_dropped"
+    BACKPRESSURE_BLOCKS_DROPPED = "vllm:kv_offload_tiering_backpressure_blocks_dropped"
+    PROMOTION_LATENCY = "vllm:kv_offload_tiering_promotion_latency_seconds"
 
 
 @dataclass
@@ -62,9 +74,10 @@ class TransferJob:
 
     job_id: JobId
     keys: Collection[OffloadKey]
-    block_ids: np.ndarray
+    chunk_ids: np.ndarray
     is_promotion: bool
     req_context: ReqContext
+    submit_time: float = field(default_factory=time.monotonic)
 
 
 @dataclass
@@ -79,6 +92,7 @@ class JobResult:
     # indicated by `success`. Must be a subset of the job's original keys.
     successful_keys: Collection[OffloadKey] | None = None
     transfer_time: float | None = None
+    transfer_bytes: int | None = None
 
 
 class ParentManager(ABC):
@@ -90,14 +104,14 @@ class ParentManager(ABC):
 
     Required call sequence for each remote request:
         1. on_new_request(req_context)  — set up per-request state
-        2. lookup(key, req_context)     — check block availability
-           (repeat per block)
-        3. create_store_job(keys, req_context) — pin blocks and get a
+        2. lookup(key, req_context)     — check chunk availability
+           (repeat per chunk)
+        3. create_store_job(keys, req_context) — pin chunks and get a
            job handle
         4. on_request_finished(req_context) — clean up per-request state
 
     Steps 2-3 may be interleaved. Step 4 must be called even if no
-    blocks were found, to avoid leaking async lookup state (e.g. in
+    chunks were found, to avoid leaking async lookup state (e.g. in
     the fs tier's AsyncLookupManager).
     """
 
@@ -119,8 +133,7 @@ class ParentManager(ABC):
 
 
 class SecondaryTierManager(ABC):
-    """
-    Abstract interface for managing a single non-primary offloading tier.
+    """Abstract interface for managing a single non-primary offloading tier.
 
     Secondary tiers cannot directly access GPU memory. All data transfers
     must go through the CPU (primary) tier:
@@ -130,48 +143,89 @@ class SecondaryTierManager(ABC):
     IMPORTANT: All methods run in the Scheduler process and must be
     lightweight and non-blocking. submit_load() and submit_store() submit
     async jobs; get_finished_jobs() polls for completion.
+
+    Methods are called under the tiering manager's lock, so they are never
+    entered concurrently -- but not always from the same thread. A tier that
+    sets tolerates_off_thread_polling is also serviced from the manager's
+    tier-poll thread, and any tier can be reached from there via
+    ParentManager fan-out. Keep per-thread assumptions out of tier state.
     """
 
     medium: ClassVar[Medium | None] = None
+    # Cache tier reported for hits served from this tier. Derived from
+    # ``medium`` unless a subclass sets it; ``None`` medium means unknown.
+    cache_hit_source: ClassVar[CacheHitSource] = CacheHitSource.EXTERNAL_UNSPECIFIED
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        if "cache_hit_source" not in cls.__dict__ and cls.medium is not None:
+            cls.cache_hit_source = {
+                Medium.CPU: CacheHitSource.HOST,
+                Medium.STORAGE: CacheHitSource.DISK,
+            }[cls.medium]
+
+    # Whether the tiering manager may also service this tier from its
+    # tier-poll thread, between engine steps, rather than only from
+    # on_schedule_end(). That thread calls both get_finished_jobs() and
+    # serve_external_requests(); see poll_tiers(). Set it on a tier that
+    # answers a counterpart the engine does not drive -- a remote peer, say --
+    # whose requests would otherwise wait for a step boundary. Overriding
+    # serve_external_requests() alone does not opt in: setting this asserts
+    # the tier tolerates those calls off the scheduler thread.
+    tolerates_off_thread_polling: ClassVar[bool] = False
 
     def __init__(
         self,
         offloading_spec: "OffloadingSpec",
         primary_kv_view: memoryview,
         tier_type: str,
+        backpressure_detector: BackpressureDetector | None = None,
     ) -> None:
-        """
-        Args:
-            offloading_spec: Offloading configuration.
-            primary_kv_view: Memoryview of the primary tier's CPU KV cache.
-            tier_type: Tier type identifier, set by SecondaryTierFactory
-                from the registered tier type.
+        """Args:
+        offloading_spec: Offloading configuration.
+        primary_kv_view: Memoryview of the primary tier's CPU KV cache.
+        tier_type: Tier type identifier, set by SecondaryTierFactory
+            from the registered tier type.
+        backpressure_detector: Optional `BackpressureDetector`.
+
         """
         self._offloading_spec = offloading_spec
         self._primary_kv_view: memoryview = primary_kv_view
+        assert primary_kv_view.strides is not None, (
+            "primary_kv_view.strides cannot be None"
+        )
+        self._block_size_bytes: int = primary_kv_view.strides[0]
         self.tier_type = tier_type
         self.locality: Locality | None = None
+        self._bp_detector = backpressure_detector
+
+    @property
+    def block_size_bytes(self) -> int:
+        return self._block_size_bytes
+
+    @property
+    def bp_detector(self) -> BackpressureDetector | None:
+        return self._bp_detector
 
     @abstractmethod
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
-        """
-        Check whether a block exists in this secondary tier.
+        """Check whether a chunk exists in this secondary tier.
 
         Args:
             key: Offload key to look up.
             req_context: per-request context (e.g. kv_transfer_params).
 
         Returns:
-            HIT if the block is present and ready,
+            HIT if the chunk is present and ready,
             MISS if not found,
-            or RETRY if the block is being transferred (retry later).
+            or RETRY if the chunk is being transferred (retry later).
+
         """
         pass
 
     @abstractmethod
     def submit_store(self, job_metadata: TransferJob) -> None:
-        """
-        Submit an async job to store blocks from the primary tier to this
+        """Submit an async job to store chunks from the primary tier to this
         secondary tier.
 
         This method must be lightweight and non-blocking: allocate metadata
@@ -179,52 +233,52 @@ class SecondaryTierManager(ABC):
         calling thread.
 
         Preconditions (guaranteed by the framework):
-          - ``job_metadata.block_ids`` are valid primary-tier slots, pinned
+          - ``job_metadata.chunk_ids`` are valid primary-tier slots, pinned
             (ref-counted) for the duration of the transfer.
 
         The implementation is responsible for:
-          1. Filtering out blocks already present in this tier
-          2. Evicting blocks if capacity is needed
+          1. Filtering out chunks already present in this tier
+          2. Evicting chunks if capacity is needed
           3. Allocating space in this tier
-          4. Submitting the async transfer (read from primary via block_ids)
+          4. Submitting the async transfer (read from primary via chunk_ids)
 
         Report completion via ``get_finished_jobs()``.
 
         Args:
-            job_metadata: Job metadata including job_id, keys, and block_ids
+            job_metadata: Job metadata including job_id, keys, and chunk_ids
                           identifying the primary-tier slots to read from.
+
         """
         pass
 
     @abstractmethod
     def submit_load(self, job_metadata: TransferJob) -> None:
-        """
-        Submit an async job to load blocks from this secondary tier to the
+        """Submit an async job to load chunks from this secondary tier to the
         primary tier.
 
-        This method must be lightweight and non-blocking: mark blocks as
+        This method must be lightweight and non-blocking: mark chunks as
         in-flight and submit the transfer, but do NOT perform the data copy
         on the calling thread.
 
         Preconditions (guaranteed by the framework):
-          - ``job_metadata.block_ids`` are allocated primary-tier slots
+          - ``job_metadata.chunk_ids`` are allocated primary-tier slots
             ready to receive data.
 
         The implementation must copy data from this tier into the
-        primary-tier slots identified by ``block_ids``.
+        primary-tier slots identified by ``chunk_ids``.
 
         Report completion via ``get_finished_jobs()``.
 
         Args:
-            job_metadata: Job metadata including job_id, keys, and block_ids
+            job_metadata: Job metadata including job_id, keys, and chunk_ids
                           identifying the primary-tier slots to write into.
+
         """
         pass
 
     @abstractmethod
     def get_finished_jobs(self) -> Iterable[JobResult]:
-        """
-        Return all jobs (loads and stores) that completed since the last call.
+        """Return all jobs (loads and stores) that completed since the last call.
 
         The framework uses these results to release resources and finalize
         transfers.
@@ -232,6 +286,7 @@ class SecondaryTierManager(ABC):
         Returns:
             Iterable of JobResult objects for jobs finished since the
             last call.
+
         """
         pass
 
@@ -248,31 +303,30 @@ class SecondaryTierManager(ABC):
         return ()
 
     def touch(self, keys: Collection[OffloadKey], req_context: ReqContext):
-        """
-        Mark blocks as recently used for eviction policy.
+        """Mark chunks as recently used for eviction policy.
 
         Args:
             keys: Offload keys to mark as recently used.
             req_context: Per-request context.
+
         """
         return
 
     @abstractmethod
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
-        """
-        Called when a new request is first seen by the scheduler.
+        """Called when a new request is first seen by the scheduler.
 
         Returns a RequestOffloadingContext expressing this tier's preference
-        for how blocks should be offloaded for this request.
+        for how chunks should be offloaded for this request.
 
         Args:
             req_context: Per-request context.
+
         """
         pass
 
     def on_request_finished(self, req_context: ReqContext) -> None:
-        """
-        Called when a request has finished.
+        """Called when a request has finished.
 
         By the time this is called, all per-request calls for this request
         (submit_store, submit_load, touch) have already been issued, and none
@@ -283,15 +337,27 @@ class SecondaryTierManager(ABC):
 
         Args:
             req_context: per-request context.
+
         """
         return
 
     def serve_external_requests(self, parent: ParentManager) -> None:
         """Process remotely-originated requests using the parent manager.
 
-        Called once per scheduler step, BEFORE _flush_pending_promotions().
-        The parent handle is valid only for the duration of this call.
-        Tiers that don't serve external requests leave this as a no-op.
+        Called once per scheduler step, BEFORE _flush_pending_promotions(), and
+        additionally once per tier-poll round for tiers that set
+        tolerates_off_thread_polling. The _flush_pending_promotions() ordering
+        holds only for the per-step call: a promotion this method initiates from
+        a tier-poll round is submitted at the next on_schedule_end().
+
+        The parent handle is valid only for the duration of this call, and the
+        caller holds the manager lock throughout it -- so a lookup() HIT taken
+        here stays valid until this call pins it. An implementation must not
+        release that lock partway through.
+
+        Tiers that don't serve external requests leave this as a no-op. A tier
+        that overrides it without setting tolerates_off_thread_polling is served
+        once per step only.
         """
         return
 
@@ -300,6 +366,7 @@ class SecondaryTierManager(ABC):
 
         Args:
             context: Per-step context from the scheduler.
+
         """
         return
 
@@ -334,3 +401,23 @@ class SecondaryTierManager(ABC):
     def get_stats(self) -> "OffloadingConnectorStats | None":
         """Return and reset metric observations collected by this tier."""
         return None
+
+    @classmethod
+    def config_info_keys(cls, tier_config: dict[str, Any]) -> tuple[str, ...]:
+        """Return the info metric label names of this tier.
+
+        TieringOffloadingSpec merges the names of all tiers and adds
+        TIER_LABEL, so a tier must not declare it. See ConfigInfo.
+
+        Args:
+            tier_config: Configuration dict of this tier.
+
+        """
+        return ()
+
+    def config_info(self) -> ConfigInfoMapping:
+        """Return the info metric labels of this tier, for its one series.
+
+        TieringOffloadingManager adds TIER_LABEL. See ConfigInfo.
+        """
+        return {}

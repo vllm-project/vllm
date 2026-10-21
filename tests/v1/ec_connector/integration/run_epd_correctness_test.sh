@@ -183,6 +183,7 @@ run_epd_1e_1pd() {
         --port "$PREFILL_DECODE_PORT" \
         --max-model-len "$MAX_MODEL_LEN" \
         --enforce-eager \
+        --enable-mm-embeds \
         --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
         --enable-request-id-headers \
         --max-num-seqs "$MAX_NUM_SEQS" \
@@ -389,6 +390,7 @@ run_epd_1e_1p_1d() {
         --port "$PREFILL_PORT" \
         --max-model-len "$MAX_MODEL_LEN" \
         --enforce-eager \
+        --enable-mm-embeds \
         --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
         --enable-request-id-headers \
         --max-num-seqs "$MAX_NUM_SEQS" \
@@ -415,6 +417,7 @@ run_epd_1e_1p_1d() {
         --port "$DECODE_PORT" \
         --max-model-len "$MAX_MODEL_LEN" \
         --enforce-eager \
+        --enable-mm-embeds \
         --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
         --enable-request-id-headers \
         --max-num-seqs "$MAX_NUM_SEQS" \

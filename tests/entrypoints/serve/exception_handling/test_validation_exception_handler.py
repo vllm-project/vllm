@@ -151,3 +151,121 @@ class TestValidationErrorDoesNotLeakServerPaths:
 
         assert "missing" in message
         assert "Field required" in message
+
+
+class TestValidationErrorBodyIsBounded:
+    """A malformed request must not produce an unbounded 400 body.
+
+    Pydantic repeats the whole offending value under `input` in every
+    error entry, so an input that fails per-element echoes itself once
+    per error. On `/v1/responses` a 4,475-byte body produced 12,001
+    errors and a 23.6 MB response before this was bounded. See #49239.
+    """
+
+    @pytest.mark.asyncio
+    async def test_many_errors_are_capped(self):
+        big_input = [{"type": "input_text", "text": 1} for _ in range(500)]
+        errors = [
+            {
+                "type": "string_type",
+                "loc": ("body", "input", i),
+                "msg": "Input should be a valid string",
+                "input": big_input,
+            }
+            for i in range(5000)
+        ]
+        exc = RequestValidationError(errors)
+
+        response = await validation_exception_handler(_fake_request(), exc)
+        body = json.loads(response.body)
+        message = body["error"]["message"]
+
+        assert len(response.body) < 32_000, f"body was {len(response.body)} bytes"
+        # The true count is still reported, and the remainder acknowledged.
+        assert message.startswith("5000 validation errors:")
+        assert "more errors" in message
+
+    @pytest.mark.asyncio
+    async def test_container_input_is_described_not_echoed(self):
+        errors = [
+            {
+                "type": "string_type",
+                "loc": ("body", "input"),
+                "msg": "Input should be a valid string",
+                "input": [{"text": "payload"} for _ in range(300)],
+            }
+        ]
+        exc = RequestValidationError(errors)
+
+        response = await validation_exception_handler(_fake_request(), exc)
+        message = json.loads(response.body)["error"]["message"]
+
+        assert "<list of 300 items>" in message
+        assert "payload" not in message
+
+    @pytest.mark.asyncio
+    async def test_long_string_input_is_truncated(self):
+        errors = [
+            {
+                "type": "int_type",
+                "loc": ("body", "max_tokens"),
+                "msg": "Input should be a valid integer",
+                "input": "A" * 100_000,
+            }
+        ]
+        exc = RequestValidationError(errors)
+
+        response = await validation_exception_handler(_fake_request(), exc)
+        message = json.loads(response.body)["error"]["message"]
+
+        assert "[truncated]" in message
+        assert len(message) < 4_000
+
+    @pytest.mark.asyncio
+    async def test_small_input_is_still_reported_verbatim(self):
+        """Bounding must not cost legitimate clients their diagnostics."""
+        errors = [
+            {
+                "type": "list_type",
+                "loc": ("body", "messages"),
+                "msg": "Input should be a valid list",
+                "input": "not-a-list",
+            }
+        ]
+        exc = RequestValidationError(errors)
+
+        response = await validation_exception_handler(_fake_request(), exc)
+        message = json.loads(response.body)["error"]["message"]
+
+        assert "not-a-list" in message
+        assert "[truncated]" not in message
+
+    @pytest.mark.asyncio
+    async def test_union_loc_is_cleaned_in_the_message(self):
+        """A union-typed field spells every branch out in `loc`.
+
+        Left raw, that is ~800 characters of type names per entry and it
+        dominates the bounded message. `param` is already cleaned this way.
+        """
+        loc = (
+            "body",
+            "input",
+            "list[union[EasyInputMessageParam,Message,ResponseOutputMessageParam]]",
+            0,
+            "content",
+        )
+        errors = [
+            {
+                "type": "string_type",
+                "loc": loc,
+                "msg": "Input should be a valid string",
+                "input": 12345,
+            }
+        ]
+        exc = RequestValidationError(errors)
+
+        response = await validation_exception_handler(_fake_request(), exc)
+        message = json.loads(response.body)["error"]["message"]
+
+        assert "'loc': 'body.input.0.content'" in message
+        assert "EasyInputMessageParam" not in message

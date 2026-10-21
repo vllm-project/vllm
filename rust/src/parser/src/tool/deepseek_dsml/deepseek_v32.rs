@@ -71,6 +71,7 @@ mod tests {
 
     use super::DeepSeekV32ToolParser;
     use crate::tool::test_utils::{collect_stream, split_by_chars, test_tools};
+    use crate::tool::tests::assert_tool_framing_preserves_body_whitespace;
     use crate::tool::{ToolParser, ToolParserTestExt as _};
 
     fn build_tool_call(function_name: &str, params: &[(&str, &str)]) -> String {
@@ -188,6 +189,34 @@ mod tests {
                 "payload": "{\"nested\":true}",
                 "items": "[1,2]",
                 "empty": "null",
+            })
+        );
+    }
+
+    #[test]
+    fn deepseek_v32_parse_complete_keeps_parameter_without_string_attr() {
+        // The model sometimes omits `string="..."`; the parameter must still
+        // be kept and converted through the schema, like `string="false"`.
+        let mut parser = DeepSeekV32ToolParser::new(&test_tools());
+        let output = parser
+            .parse_complete(
+                "<｜DSML｜function_calls>\n\
+                 <｜DSML｜invoke name=\"convert\">\n\
+                 <｜DSML｜parameter name=\"whole\">5.0</｜DSML｜parameter>\n\
+                 <｜DSML｜parameter name=\"flag\" >true</｜DSML｜parameter>\n\
+                 <｜DSML｜parameter name=\"payload\" string=\"true\">{\"nested\":true}</｜DSML｜parameter>\n\
+                 </｜DSML｜invoke>\n\
+                 </｜DSML｜function_calls>",
+            )
+            .unwrap();
+
+        assert_eq!(output.calls().len(), 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
+            json!({
+                "whole": 5.0,
+                "flag": true,
+                "payload": "{\"nested\":true}",
             })
         );
     }
@@ -444,5 +473,13 @@ mod tests {
 
         assert_eq!(streamed.normal_text(), complete.normal_text());
         assert_eq!(streamed.calls(), complete.calls());
+    }
+
+    #[test]
+    fn tool_framing_preserves_body_whitespace_across_chunk_boundaries() {
+        assert_tool_framing_preserves_body_whitespace::<DeepSeekV32ToolParser>(
+            "\n\n",
+            "<｜DSML｜function_calls><｜DSML｜invoke name=\"get_weather\"></｜DSML｜invoke></｜DSML｜function_calls>",
+        );
     }
 }
