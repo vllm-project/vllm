@@ -2,12 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import itertools
 from collections.abc import Sequence
+from dataclasses import replace
 
 import torch
 from torch import nn
 
-from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.config.mamba import MambaBackendEnum
 from vllm.distributed import (
     divide,
@@ -39,6 +42,7 @@ from vllm.model_executor.layers.mamba.ops.layernorm_gated import rms_norm_gated
 from vllm.model_executor.layers.mamba.ops.selective_state_update_replayssm_output_only import (  # noqa: E501
     selective_state_update_replayssm_output_only,
 )
+from vllm.model_executor.layers.mamba.ops.ssd_checkpoint import store_prefill_checkpoint
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined_varlen,
 )
@@ -66,7 +70,7 @@ from vllm.utils.torch_utils import (
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec, MambaSpec
 
 logger = init_logger(__name__)
 
@@ -655,12 +659,18 @@ class MambaMixer2(MambaBase, PluggableLayer):
         )
         seq_idx = torch.zeros(nchunks, device=device, dtype=torch.int32)
         out = torch.empty(seqlen, nheads, headdim, device=device, dtype=dtype)
+        final_states = torch.empty(
+            batch, nheads, headdim, dstate, device=device, dtype=ssm_state_dtype
+        )
+        final_state_indices = torch.zeros(batch, device=device, dtype=torch.int32)
 
         # Two kernels (_state_passing_fwd, _chunk_scan_fwd) use
-        # HAS_INITSTATES as a constexpr, producing separate compiled
-        # binaries. Warm up both code paths so neither triggers
-        # JIT compilation during inference.
-        for use_initial_states in (False, True):
+        # HAS_INITSTATES as a constexpr, and _state_passing_fwd also
+        # HAS_FINAL_STATES, producing separate compiled binaries. Warm up
+        # all code paths so none triggers JIT compilation during inference.
+        for use_initial_states, write_final_states in itertools.product(
+            (False, True), repeat=2
+        ):
             initial_states = (
                 torch.randn(
                     batch,
@@ -693,14 +703,19 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     dt_softplus=True,
                     dt_limit=(0.0, float("inf")),
                     state_dtype=ssm_state_dtype,
+                    final_states_out=final_states if write_final_states else None,
+                    final_state_indices=(
+                        final_state_indices if write_final_states else None
+                    ),
                 )
             except Exception:
                 logger.warning(
                     "Mamba2 SSD kernel warmup failed for layer %s "
-                    "(initial_states=%s). First inference may experience "
-                    "latency spike or OOM due to autotuner.",
+                    "(initial_states=%s, final_states=%s). First inference may "
+                    "experience latency spike or OOM due to autotuner.",
                     self.prefix,
                     use_initial_states,
+                    write_final_states,
                     exc_info=True,
                 )
 
@@ -766,6 +781,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
             query_start_loc_d = attn_metadata.query_start_loc_d
             num_decodes = attn_metadata.num_decodes
             num_decode_tokens = attn_metadata.num_decode_tokens
+            checkpoint_chunk_idx = attn_metadata.checkpoint_chunk_idx
+            checkpoint_meta = attn_metadata.checkpoint_meta
 
         if attn_metadata is None:
             # V1 profile run -- warm up SSD kernels so that autotuning
@@ -807,10 +824,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
             # - It will read the initial states for every sequence,
             #   that has "has_initial_states_p" == True,
             #   from "cache_indices", using "state_indices_tensor_p".
-            # - It updates the "conv_state" cache in positions pointed
-            #   to by "state_indices_tensor_p".
-            #   In particular, it will always write the state at the
-            #   sequence end.
+            # - It writes the state at the sequence end to the "conv_state"
+            #   cache in positions pointed to by "state_indices_tensor_p".
             x = hidden_states_B_C_p.transpose(
                 0, 1
             )  # this is the form that causal-conv see
@@ -842,6 +857,10 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
             # NOTE: final output is an in-place update of out tensor
             assert preallocated_ssm_out_p is not None
+            assert state_indices_tensor_p is not None
+            has_checkpoints = checkpoint_chunk_idx is not None
+            # Without checkpoints, the SSD scan writes each sequence's final
+            # state straight into its ssm_state slot.
             varlen_states = mamba_chunk_scan_combined_varlen(
                 hidden_states_p.view(
                     num_prefill_tokens, self.num_heads // self.tp_size, self.head_dim
@@ -859,17 +878,33 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 cu_chunk_seqlens=cu_chunk_seqlen_p,
                 last_chunk_indices=last_chunk_indices_p,
                 initial_states=initial_states,
+                return_intermediate_states=has_checkpoints,
                 dt_softplus=True,
                 dt_limit=(0.0, float("inf")),
                 out=preallocated_ssm_out_p.view(num_prefill_tokens, -1, self.head_dim),
                 state_dtype=ssm_state.dtype,
+                final_states_out=None if has_checkpoints else ssm_state,
+                final_state_indices=None if has_checkpoints else state_indices_tensor_p,
             )
 
-            # update ssm states
-            # - varlen state is a (num_prefills, nheads, headdim, dstate)
-            #   tensor
-            assert state_indices_tensor_p is not None
-            ssm_state[state_indices_tensor_p] = varlen_states
+            if has_checkpoints:
+                # update ssm states
+                # - varlen state is a (num_chunks, nheads, headdim, dstate)
+                #   tensor
+                final_states = varlen_states[last_chunk_indices_p]
+                assert checkpoint_meta is not None
+                assert query_start_loc_p is not None
+                store_prefill_checkpoint(
+                    checkpoint_meta,
+                    checkpoint_chunk_idx,
+                    x,
+                    conv_state,
+                    varlen_states,
+                    ssm_state,
+                    query_start_loc_p,
+                    state_len=self.conv_kernel_size - 1,
+                )
+                ssm_state[state_indices_tensor_p] = final_states
             if ring_start is not None and self._updates_replayssm_trackers:
                 assert prev_num_accepted is not None
                 reset_replayssm_ring_trackers(
@@ -1070,6 +1105,18 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     is_blackwell=self.is_blackwell,
                 )
 
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
+        spec = super().get_kv_cache_spec(vllm_config)
+        if not isinstance(spec, MambaSpec):
+            return spec
+        # The block-boundary state can be exported from inside one forward
+        # pass, so the scheduler need not split the prefill; every reader
+        # acts on this only in align mode. The metadata builder puts a chunk
+        # end exactly on the checkpoint, so any token position works.
+        return replace(
+            spec, num_prefill_checkpoint_blocks=1, prefill_checkpoint_alignment=1
+        )
+
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         assert self.model_config is not None
         assert self.cache_config is not None
@@ -1179,6 +1226,7 @@ def share_replayssm_ring_trackers(
         replayssm_mixers[last_layer_name]._updates_replayssm_trackers = True
 
 
+@eager_break_during_capture
 def mamba_mixer2(
     projected_states: torch.Tensor,
     output: torch.Tensor,

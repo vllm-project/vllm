@@ -8,7 +8,6 @@ from http import HTTPStatus
 
 from fastapi import Request
 
-from vllm.entrypoints.chat_utils import ConversationMessage
 from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
@@ -24,6 +23,7 @@ from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.parser.abstract_parser import Parser
+from vllm.renderers.chat_utils import ConversationMessage
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.collection_utils import as_list
@@ -169,6 +169,12 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                 else await self._get_trace_headers(raw_request.headers)
             )
             session_id = self._get_session_id(single_request, raw_request)
+            chat_template_kwargs = self._effective_chat_template_kwargs(single_request)
+            parser = (
+                self._make_parser(single_request, tokenizer, chat_template_kwargs)
+                if self.parser_cls is not None
+                else None
+            )
             generators.append(
                 self.engine_client.generate(
                     engine_prompt,
@@ -179,7 +185,12 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                     priority=request.priority,
                     data_parallel_rank=data_parallel_rank,
                     session_id=session_id,
-                    reasoning_ended=None,
+                    **self._engine_reasoning_kwargs(
+                        single_request,
+                        parser,
+                        chat_template_kwargs,
+                        self._extract_prompt_components(engine_prompt).token_ids,
+                    ),
                 )
             )
 
@@ -247,9 +258,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
             for output in final_res.outputs:
                 self._raise_if_error(output.finish_reason, request_id)
 
-                if request.logprobs and (
-                    request.top_logprobs is not None or request.logprob_token_ids
-                ):
+                if request.logprobs:
                     assert output.logprobs is not None, "Did not output logprobs"
                     logprobs = self._create_chat_logprobs(
                         token_ids=output.token_ids,
