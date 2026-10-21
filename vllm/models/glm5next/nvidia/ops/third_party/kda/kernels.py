@@ -911,6 +911,7 @@ def _chunk_kda_fwd_with_cumulative_g(
     output_final_state: bool,
     cu_seqlens: torch.Tensor | None = None,
     chunk_indices: torch.Tensor | None = None,
+    chunk_offsets: torch.Tensor | None = None,
     chunk_size: int = FLA_CHUNK_SIZE,
 ):
     # `g` must already be chunk-local cumulatively-summed AND scaled by
@@ -930,7 +931,9 @@ def _chunk_kda_fwd_with_cumulative_g(
         chunk_size=chunk_size,
         output_dtype=torch.float32,
     )
-    A = solve_tril(A=A, cu_seqlens=cu_seqlens, output_dtype=k.dtype)
+    A = solve_tril(
+        A=A, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices, output_dtype=k.dtype
+    )
     w, u, _, kg = recompute_w_u_fwd(
         k=k,
         v=v,
@@ -950,6 +953,7 @@ def _chunk_kda_fwd_with_cumulative_g(
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        chunk_offsets=chunk_offsets,
         use_exp2=True,
     )
     del w, u, kg
@@ -1024,13 +1028,14 @@ def chunk_kda_with_fused_gate_fwd(
     cu_seqlens: torch.Tensor | None = None,
     safe_gate: bool = False,
     lower_bound: float = -5.0,
+    chunk_indices: torch.Tensor | None = None,
+    chunk_offsets: torch.Tensor | None = None,
 ):
     chunk_size = FLA_CHUNK_SIZE
-    chunk_indices = (
-        prepare_chunk_indices(cu_seqlens, chunk_size)
-        if cu_seqlens is not None
-        else None
-    )
+    # prepare_chunk_indices syncs with the GPU (.tolist()); callers with
+    # metadata built on the host (GDNAttentionMetadata) pass it in instead.
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
     g = fused_kda_gate_chunk_cumsum(
         raw_g,
         A_log=A_log,
@@ -1052,6 +1057,7 @@ def chunk_kda_with_fused_gate_fwd(
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        chunk_offsets=chunk_offsets,
         chunk_size=chunk_size,
     )
 
@@ -1105,9 +1111,16 @@ def chunk_kda_with_fused_gate(
     cu_seqlens: torch.Tensor | None = None,
     safe_gate: bool = False,
     lower_bound: float = -5.0,
+    chunk_indices: torch.Tensor | None = None,
+    chunk_offsets: torch.Tensor | None = None,
     **kwargs,
 ):
-    """Run chunk KDA from raw gate projection using fused gate+cumsum."""
+    """Run chunk KDA from raw gate projection using fused gate+cumsum.
+
+    ``chunk_indices``/``chunk_offsets`` are optional FLA chunk metadata for
+    ``cu_seqlens`` with chunk size ``FLA_CHUNK_SIZE``; computed here (with a
+    GPU->CPU sync) when not given.
+    """
     if scale is None:
         scale = k.shape[-1] ** -0.5
 
@@ -1129,6 +1142,8 @@ def chunk_kda_with_fused_gate(
         cu_seqlens=cu_seqlens,
         safe_gate=safe_gate,
         lower_bound=lower_bound,
+        chunk_indices=chunk_indices,
+        chunk_offsets=chunk_offsets,
     )
     return o, final_state
 
