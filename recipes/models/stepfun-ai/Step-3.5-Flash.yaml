@@ -1,0 +1,192 @@
+meta:
+  title: "Step-3.5-Flash"
+  slug: "step-3.5-flash"
+  provider: "StepFun"
+  description: "Production-grade reasoning MoE (~196B total / 11B active parameters) with hybrid attention schedules, SWA compensation, and multi-token prediction for low-latency long-context inference"
+  date_added: 2026-02-01
+  date_updated: 2026-04-17
+  tasks:
+    - text
+  performance_headline: "Sparse MoE reasoning model with hybrid attention and step3p5 MTP speculative decoding"
+  related_recipes: []
+  hardware:
+    h200: verified
+    b200: verified
+
+model:
+  model_id: "stepfun-ai/Step-3.5-Flash"
+  min_vllm_version: "0.15.1"
+  architecture: moe
+  parameter_count: "196B"
+  active_parameters: "11B"
+  context_length: 262144
+  base_args:
+    - "--trust-remote-code"
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "Step-3.5 tool call parser with automatic tool choice"
+    args:
+      - "--tool-call-parser"
+      - "step3p5"
+      - "--enable-auto-tool-choice"
+  reasoning:
+    description: "Step-3.5 reasoning parser for chain-of-thought extraction"
+    args:
+      - "--reasoning-parser"
+      - "step3p5"
+  spec_decoding:
+    description: "Multi-Token Prediction speculative decoding with the step3p5_mtp method"
+    args:
+      - "--hf-overrides"
+      - '{"num_nextn_predict_layers": 1}'
+      - "--speculative-config"
+      - '{"method": "step3p5_mtp", "num_speculative_tokens": 1}'
+
+opt_in_features:
+  - spec_decoding
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 470
+    description: "Full precision BF16 — runs on 4xH200/H20/B200"
+  fp8:
+    model_id: "stepfun-ai/Step-3.5-Flash-FP8"
+    precision: fp8
+    vram_minimum_gb: 235
+    # FP8 block_n=128 + moe_intermediate_size=1280 → TP must divide 10; TP∈{1,2}.
+    # TP=4 fails (1280/4=320, 320%128≠0). Author recommends DP4 — use single_node_dep
+    # for full 8-GPU utilization; this tp:2 just keeps single_node_tp from crashing.
+    tp: 2
+    description: "Native FP8 checkpoint (TP not supported beyond 2 — use DP4)"
+  int4:
+    model_id: "stepfun-ai/Step-3.5-Flash-INT4"
+    precision: int4
+    vram_minimum_gb: 118
+    description: "INT4 quantized weights"
+  int8:
+    model_id: "stepfun-ai/Step-3.5-Flash-INT8"
+    precision: int8
+    vram_minimum_gb: 235
+    description: "INT8 quantized weights"
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+  - multi_node_tp
+  - multi_node_tp_pp
+  - multi_node_tep
+  - multi_node_dep
+  - pd_cluster
+
+hardware_overrides:
+  amd:
+    # Step-3.5 uses a custom SWIGLUSTEP activation that AITER MoE doesn't
+    # support in vLLM 0.17.1 — keep AITER on for attention, MoE off.
+    extra_args: []
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+      VLLM_ROCM_USE_AITER_MOE: "0"
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  [Step-3.5-Flash](https://huggingface.co/stepfun-ai/Step-3.5-Flash) is an advanced
+  reasoning engine from [StepFun](https://www.stepfun.com/company). Highlights:
+
+  - Hybrid attention schedules with compensation for sliding-window attention (SWA)
+  - Sparse MoE structure (196B total parameters, 11B active)
+  - Multi-token prediction mechanism for faster inference
+
+  Available precisions:
+
+  - [stepfun-ai/Step-3.5-Flash](https://huggingface.co/stepfun-ai/Step-3.5-Flash) (BF16)
+  - [stepfun-ai/Step-3.5-Flash-FP8](https://huggingface.co/stepfun-ai/Step-3.5-Flash-FP8)
+  - [stepfun-ai/Step-3.5-Flash-Int4](https://huggingface.co/stepfun-ai/Step-3.5-Flash-Int4) (not yet supported by vLLM)
+
+  ## Prerequisites
+
+  - **vLLM version:** latest stable
+  - **Hardware:** 4x H200/H20/B200
+
+  ### Install vLLM
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install vllm --torch-backend auto
+  ```
+
+  ## Launching the Server
+
+  ### Tensor Parallel
+
+  ```bash
+  vllm serve stepfun-ai/Step-3.5-Flash \
+      --tensor-parallel-size 4 \
+      --reasoning-parser step3p5 \
+      --tool-call-parser step3p5 \
+      --enable-auto-tool-choice \
+      --trust-remote-code
+  ```
+
+  Note: The FP8 version cannot use TP4 — use DP4 instead.
+
+  ### Data Parallel + Expert Parallel (recommended for FP8)
+
+  ```bash
+  vllm serve stepfun-ai/Step-3.5-Flash \
+      --data-parallel-size 4 \
+      --enable-expert-parallel \
+      --reasoning-parser step3p5 \
+      --tool-call-parser step3p5 \
+      --enable-auto-tool-choice \
+      --trust-remote-code
+  ```
+
+  ### Enabling MTP Speculative Decoding
+
+  ```bash
+  vllm serve stepfun-ai/Step-3.5-Flash \
+      --tensor-parallel-size 4 \
+      --reasoning-parser step3p5 \
+      --tool-call-parser step3p5 \
+      --enable-auto-tool-choice \
+      --trust-remote-code \
+      --hf-overrides '{"num_nextn_predict_layers": 1}' \
+      --speculative-config '{"method": "step3p5_mtp", "num_speculative_tokens": 1}'
+  ```
+
+  ## Benchmarking
+
+  ```bash
+  vllm bench serve \
+    --backend vllm \
+    --model stepfun-ai/Step-3.5-Flash \
+    --endpoint /v1/completions \
+    --dataset-name random \
+    --random-input 2048 \
+    --random-output 1024 \
+    --max-concurrency 10 \
+    --num-prompt 100
+  ```
+
+  ## Troubleshooting
+
+  - **MoE kernel tuning:** See [tune-moe-kernel](https://github.com/vllm-project/recipes/blob/main/Qwen/Qwen3-Next.md#tune-moe-kernel)
+    to tune Triton kernels for your hardware.
+  - **FP8 DeepGEMM:** For FP8, install DeepGEMM via [install_deepgemm.sh](https://github.com/vllm-project/vllm/blob/v0.16.0rc0/tools/install_deepgemm.sh).
+  - **B200 FlashInfer FP8 MoE error:** The `routing_logits must be bfloat16`
+    error on B200 was fixed in vLLM v0.28.0 — no workaround is needed.
+  - **FP8 + TP4 incompatibility:** Use DP4+EP instead.
+
+  ## References
+
+  - [Model card](https://huggingface.co/stepfun-ai/Step-3.5-Flash)
+  - [FP8 checkpoint](https://huggingface.co/stepfun-ai/Step-3.5-Flash-FP8)
+  - [StepFun](https://www.stepfun.com/company)
