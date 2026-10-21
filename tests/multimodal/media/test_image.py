@@ -11,9 +11,9 @@ from vllm.multimodal.image import (
     ALLOWED_IMAGE_FORMATS,
     open_image,
 )
-from vllm.multimodal.media import ImageMediaIO
+from vllm.multimodal.media import ImageMediaIO, MediaConnector, MediaDecodedBudget
 
-pytestmark = pytest.mark.cpu_test
+pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
 ASSETS_DIR = Path(__file__).parent.parent / "assets"
 assert ASSETS_DIR.exists()
@@ -83,6 +83,24 @@ def test_image_media_io_rgba_custom_background(tmp_path):
     assert green_numpy[0][0][0] == 0  # R
     assert green_numpy[0][0][1] == 255  # G
     assert green_numpy[0][0][2] == 0  # B
+
+
+@pytest.mark.parametrize("background_color", [(255, 255, 255), (12, 34, 56)])
+def test_image_media_io_rgb_png_transparency(tmp_path, background_color):
+    image = Image.new("RGB", (2, 1), (255, 0, 0))
+    image.putpixel((1, 0), (0, 0, 255))
+    path = tmp_path / "rgb_transparency.png"
+    image.save(path, transparency=(255, 0, 0))
+
+    with Image.open(path) as source:
+        reference = Image.alpha_composite(
+            Image.new("RGBA", source.size, (*background_color, 255)),
+            source.convert("RGBA"),
+        ).convert("RGB")
+
+    image_io = ImageMediaIO(rgba_background_color=background_color)
+    converted = image_io.load_file(path)
+    np.testing.assert_array_equal(np.asarray(converted), np.asarray(reference))
 
 
 def test_image_media_io_no_mode_conversion(tmp_path):
@@ -304,6 +322,68 @@ def test_image_pixel_limit_disabled(monkeypatch):
     image_io = ImageMediaIO()
     result = image_io.load_bytes(data)
     assert result.media.size == (1000, 1000)
+
+
+def _png_bytes(width: int, height: int) -> bytes:
+    from io import BytesIO
+
+    buf = BytesIO()
+    Image.new("RGB", (width, height), (1, 2, 3)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_request_decoded_budget_rejects_aggregate(monkeypatch):
+    import vllm.envs as envs
+
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", 600)
+    budget = MediaDecodedBudget()
+    image_io = ImageMediaIO(decoded_budget=budget)
+    data = _png_bytes(10, 10)
+
+    image_io.load_bytes(data)
+    with pytest.raises(ValueError, match="VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES"):
+        image_io.load_bytes(data)
+
+
+def test_request_decoded_budget_accepts_images_within_limit(monkeypatch):
+    import vllm.envs as envs
+
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", 800)
+    budget = MediaDecodedBudget()
+    image_io = ImageMediaIO(decoded_budget=budget)
+    data = _png_bytes(10, 10)
+
+    image_io.load_bytes(data)
+    image_io.load_bytes(data)
+    assert budget.used == 800
+
+
+def test_request_decoded_budget_disabled(monkeypatch):
+    import vllm.envs as envs
+
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", 0)
+    budget = MediaDecodedBudget()
+    image_io = ImageMediaIO(decoded_budget=budget)
+    data = _png_bytes(100, 100)
+
+    image_io.load_bytes(data)
+    image_io.load_bytes(data)
+    assert budget.used == 0
+
+
+def test_media_connector_enforces_request_decoded_budget(monkeypatch):
+    import pybase64
+
+    import vllm.envs as envs
+
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", 600)
+    b64 = pybase64.b64encode(_png_bytes(10, 10)).decode()
+    url = f"data:image/png;base64,{b64}"
+    connector = MediaConnector(decoded_budget=MediaDecodedBudget())
+
+    connector.fetch_image(url)
+    with pytest.raises(ValueError, match="VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES"):
+        connector.fetch_image(url)
 
 
 def test_image_media_io_rejects_postscript_payload():

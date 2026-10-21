@@ -5,6 +5,7 @@ import weakref
 from collections import deque
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -45,7 +46,6 @@ def test_worker_rpc_payload_released_before_next_dequeue():
     worker_proc.rank = 0
     worker_proc.worker = SimpleNamespace(consume=lambda payload: payload)
     worker_proc.handle_output = lambda output: None
-
     with pytest.raises(_ExitWorkerLoop):
         worker_proc.worker_busy_loop()
 
@@ -61,7 +61,6 @@ def test_execute_worker_rpc_returns_worker_exception():
     worker_proc.worker = SimpleNamespace(fail=fail)
     outputs: list[Any] = []
     worker_proc.handle_output = outputs.append
-
     worker_proc._execute_worker_rpc(("fail", (), {}, None))
 
     assert len(outputs) == 1
@@ -70,16 +69,24 @@ def test_execute_worker_rpc_returns_worker_exception():
 
 
 @pytest.mark.parametrize("stalled", [False, True])
-def test_take_draft_token_ids_uses_execute_model_timeout(monkeypatch, stalled):
-    """A wedged draft-token readback must not block EngineCore forever."""
+@pytest.mark.parametrize(
+    "method,result",
+    [
+        ("take_draft_token_ids", DraftTokenIds(["req"], [[1, 2, 3]])),
+        ("execute_dummy_batch", None),
+    ],
+)
+def test_model_rpc_uses_execute_model_timeout(monkeypatch, method, result, stalled):
+    """A wedged model RPC must not block EngineCore forever. For
+    execute_dummy_batch this is an idle DP rank stuck in a collective with a
+    hung peer."""
     monkeypatch.setenv("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS", "7")
-    draft = DraftTokenIds(["req"], [[1, 2, 3]])
 
     def dequeue(*, timeout=None):
         assert timeout is not None and 0 < timeout <= 7
         if stalled:
             raise TimeoutError
-        return WorkerProc.ResponseStatus.SUCCESS, draft
+        return WorkerProc.ResponseStatus.SUCCESS, result
 
     executor: Any = MultiprocExecutor.__new__(MultiprocExecutor)
     executor.is_failed = False
@@ -89,7 +96,30 @@ def test_take_draft_token_ids_uses_execute_model_timeout(monkeypatch, stalled):
     executor.response_mqs = [None, SimpleNamespace(dequeue=dequeue)]
 
     if stalled:
-        with pytest.raises(TimeoutError, match="take_draft_token_ids timed out"):
-            executor.take_draft_token_ids()
+        with pytest.raises(TimeoutError, match=f"{method} timed out"):
+            getattr(executor, method)()
     else:
-        assert executor.take_draft_token_ids() is draft
+        assert getattr(executor, method)() is result
+
+
+def test_execute_worker_rpc_feeds_watchdog():
+    """Verify the watchdog is fed immediately before and after each RPC."""
+
+    def ok():
+        calls.append("rpc")
+
+    worker_proc: Any = WorkerProc.__new__(WorkerProc)
+    worker_proc.rank = 0
+    worker_proc.worker = SimpleNamespace(ok=ok)
+    worker_proc.handle_output = lambda output: None
+    calls: list[str] = []
+    watchdog = MagicMock()
+    watchdog.feed.side_effect = lambda: calls.append("feed")
+
+    with patch(
+        "vllm.v1.executor.multiproc_executor.get_watch_dog",
+        return_value=watchdog,
+    ):
+        worker_proc._execute_worker_rpc(("ok", (), {}, None))
+
+    assert calls == ["feed", "rpc", "feed"]
