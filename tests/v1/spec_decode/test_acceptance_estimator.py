@@ -12,13 +12,16 @@ metrics to hint at.
 import pytest
 import torch
 
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
     OnlineAcceptanceEstimator,
 )
 
 pytest.importorskip("triton")
-if not torch.cuda.is_available():
-    pytest.skip("CUDA required for acceptance estimator tests", allow_module_level=True)
+if not current_platform.is_cuda_alike() and not current_platform.is_xpu():
+    pytest.skip(
+        "CUDA/XPU required for acceptance estimator tests", allow_module_level=True
+    )
 
 MAX_NUM_REQS = 16
 NUM_STEPS = 4
@@ -61,7 +64,7 @@ def test_predict_agrees_across_slot_and_batch_order(tokens_per_req: int):
     Which one it is is inferred from whether the draft step is per-row, so the
     two cases differ only in how ``draft_step`` is shaped.
     """
-    device = torch.device("cuda")
+    device = current_platform.device_type
     torch.manual_seed(0)
     estimator = _make_estimator(device)
     num_reqs = 5
@@ -101,7 +104,7 @@ def test_predict_agrees_across_slot_and_batch_order(tokens_per_req: int):
 
 def test_predict_skips_cudagraph_padded_rows():
     """Padded rows carry slot -1 and must not land on a live request."""
-    device = torch.device("cuda")
+    device = current_platform.device_type
     torch.manual_seed(0)
     estimator = _make_estimator(device)
     num_reqs, num_padded = 3, 6
@@ -157,7 +160,7 @@ def test_refit_recovers_a_shared_slope_and_per_position_intercepts():
     so the arrowhead solve is only correct if it recovers both from data whose
     positions differ in level but not in slope.
     """
-    device = torch.device("cuda")
+    device = current_platform.device_type
     torch.manual_seed(0)
     true_slope = 0.6
     true_bias = torch.tensor([1.4, 0.9, 0.4, -0.1], device=device)
@@ -189,7 +192,7 @@ def test_refit_survives_a_position_with_no_observations():
     Its statistics stay zero while the others accumulate, which is the degenerate
     case the arrowhead denominator has to tolerate.
     """
-    device = torch.device("cuda")
+    device = current_platform.device_type
     torch.manual_seed(0)
     estimator = OnlineAcceptanceEstimator(REFIT_NUM_REQS, NUM_STEPS, device)
     estimator.REFIT_INTERVAL = 5
@@ -220,7 +223,7 @@ def test_step_damping_scales_with_the_evidence():
     isolates the damping factor n / (n + DAMPING_OBSERVATIONS). The slope/
     intercept coupling is zeroed so the two parameters can be checked apart.
     """
-    device = torch.device("cuda")
+    device = current_platform.device_type
     damping = OnlineAcceptanceEstimator.DAMPING_OBSERVATIONS
     per_position_n = 20.0
 
@@ -268,7 +271,7 @@ def test_feature_ignores_which_token_was_drawn():
     takes no token argument, and this pins that -- two rows with identical
     logits must score identically no matter what was sampled from them.
     """
-    device = torch.device("cuda")
+    device = current_platform.device_type
     torch.manual_seed(0)
     estimator = _make_estimator(device)
 
