@@ -1268,6 +1268,22 @@ def _device_tensor_ptrs(worker) -> dict[str, int]:
     return ptrs
 
 
+def _state_digest(worker) -> dict[str, int]:
+    """Exact per-tensor digest of every parameter and buffer, so two loads of
+    the same checkpoint can be compared byte for byte."""
+    digest = {}
+    model = worker.get_model()
+    named = [*model.named_parameters(), *model.named_buffers()]
+    for name, tensor in named:
+        flat = tensor.detach().contiguous().view(-1).view(torch.uint8)
+        total = 0
+        for chunk in flat.split(1 << 24):
+            weights = torch.arange(1, chunk.numel() + 1, device=chunk.device)
+            total += int((chunk.long() * (weights % 65521)).sum())
+        digest[name] = total
+    return digest
+
+
 def _moved_tensors(llm, ptrs: list[dict[str, int]]) -> list[list[str]]:
     after = llm.collective_rpc(_device_tensor_ptrs)
     return [
@@ -1356,6 +1372,7 @@ def test_reload_weights(
         ptrs = llm.collective_rpc(_device_tensor_ptrs)
         llm.collective_rpc("reload_weights", kwargs={"weights_path": mul_model})
         assert _moved_tensors(llm, ptrs) == [[]] * len(ptrs)
+        mul_state = llm.collective_rpc(_state_digest)
         mul_perp = llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0]
         add_perp = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
         assert mul_perp < add_perp
@@ -1365,6 +1382,16 @@ def test_reload_weights(
         mul_perp = llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0]
         add_perp = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
         assert add_perp < mul_perp
+
+        # Idempotent: reloading a checkpoint again reproduces the same state.
+        llm.collective_rpc("reload_weights", kwargs={"weights_path": mul_model})
+        assert _moved_tensors(llm, ptrs) == [[]] * len(ptrs)
+        for rank, (old, new) in enumerate(
+            zip(mul_state, llm.collective_rpc(_state_digest))
+        ):
+            assert old == new, (
+                f"rank {rank}: {sorted(n for n in old if new.get(n) != old[n])}"
+            )
 
 
 def test_kv_scale_reload(vllm_runner):
