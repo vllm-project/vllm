@@ -1369,6 +1369,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         max_model_len=4096,
         hf_overrides={"architectures": ["Qwen3ASRForcedAlignerForTokenClassification"]},
     ),
+    "RadioMBartPrefixForCausalLM": _HfExamplesInfo(
+        "nvidia/Nemotron-3.5-Parse",
+        trust_remote_code=True,
+    ),
     "RForConditionalGeneration": _HfExamplesInfo("YannQi/R-4B", trust_remote_code=True),
     "SkyworkR1VChatModel": _HfExamplesInfo(
         "Skywork/Skywork-R1V-38B",
@@ -1383,7 +1387,12 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         },
     ),
     "SmolVLMForConditionalGeneration": _HfExamplesInfo(
-        "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
+        "HuggingFaceTB/SmolVLM2-2.2B-Instruct",
+        max_transformers_version="5.19",
+        transformers_version_reason={
+            "hf": "HF SmolVLM inputs_merger splits image features by patch_size in "
+            "5.20, fixed by https://github.com/huggingface/transformers/pull/49725"
+        },
     ),
     "Step3VLForConditionalGeneration": _HfExamplesInfo(
         "stepfun-ai/step3",
@@ -1803,6 +1812,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "FreedomIntelligence/openPangu-Ultra-MoE-718B-V1.1",
         trust_remote_code=True,
         is_available_online=False,
+    ),
+    "ParseAuxMTPModel": _HfExamplesInfo(
+        "nvidia/Nemotron-3.5-Parse",
+        speculative_model="nvidia/Nemotron-3.5-Parse",
+        speculative_method="mtp",
+        trust_remote_code=True,
     ),
     "Qwen3NextMTP": _HfExamplesInfo("Qwen/Qwen3-Next-80B-A3B-Instruct"),
     "Qwen3_5MTP": _HfExamplesInfo(
