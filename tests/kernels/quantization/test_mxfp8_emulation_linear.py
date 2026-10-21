@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MXFP8 emulation after load-time dequantization runs the platform GEMM (on
-ROCm, the skinny wvSplitK/LLMM1 kernels at decode batch sizes)."""
+"""MXFP8 emulation after load-time dequantization runs the platform GEMM. On
+ROCm the cases below reach wvSplitK (1-5 tokens), LLMM1 (the N=8 shape at one
+token) and hipBLASLt (the rest)."""
 
 import pytest
 import torch
@@ -27,10 +28,13 @@ V41_SHAPES = [
     (1152, 5120),
     (5120, 576),
 ]
+# Not a model shape: N <= 8 fails the wvSplitK predicate (N == 1 or N > 8), so
+# on ROCm one token takes LLMM1 instead.
+LLMM1_SHAPE = (8, 1024)
 
 
 @pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="needs a GPU")
-@pytest.mark.parametrize("n,k", V41_SHAPES)
+@pytest.mark.parametrize("n,k", V41_SHAPES + [LLMM1_SHAPE])
 @pytest.mark.parametrize("num_tokens", [1, 2, 4, 7, 32, 256])
 @torch.inference_mode()
 def test_mxfp8_emulation_matches_bf16_linear(monkeypatch, n, k, num_tokens):
