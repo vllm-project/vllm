@@ -186,6 +186,7 @@ def test_engram_cache_follows_kv_cache_binding(num_blocks):
     state.swa_cache_module.kv_cache = torch.empty(4, 64, 1)
     assert state.ensure_cache()
     profiling_cache = state._cache
+    assert profiling_cache is not None
     profiling_cache.fill_(7)
     assert state.ensure_cache()
     assert state._cache is profiling_cache
@@ -194,6 +195,7 @@ def test_engram_cache_follows_kv_cache_binding(num_blocks):
     state.swa_cache_module.kv_cache = torch.empty(num_blocks, 64, 1)
     assert state.ensure_cache()
     assert state._cache is not profiling_cache
+    assert state._cache is not None
     assert state._cache.shape == (num_blocks * 64,)
     assert torch.count_nonzero(state._cache) == 0
 
@@ -543,6 +545,7 @@ def test_v2_model_state_gathers_lookback_window(pcp):
         positions=torch.tensor([8, 0, 6, 5] if pcp else [8, 0, 6], device="cuda"),
     )
     window = state.prepare_inputs(input_batch, req_states)["lookback_token_ids"]
+    assert window is not None
     expected = [
         [22, 21, 16],
         [-1, -1, -1],
@@ -821,6 +824,7 @@ def test_engram_shared_prefetch_stream_waits_per_layer():
     modules[1].prepare_embeddings(hashes[:, 1])
     rows = modules[0].embed(hashes[:, 0])
     torch.cuda.current_stream().synchronize()
+    assert modules[1]._prefetch_done is not None
     assert not modules[1]._prefetch_done.query(), "waited for the second lookup"
     layer = modules[0].embed_tokens
     expected = _reference_lookup(
@@ -882,7 +886,7 @@ def test_engram_constructor_honors_offload(monkeypatch, cpu_offload):
         streams.append(torch.cuda.current_stream())
         lookup(ids, out, background=background)
 
-    layer.lookup = track_lookup
+    monkeypatch.setattr(layer, "lookup", track_lookup)
     main = torch.cuda.current_stream()
     ids = torch.randint(
         layer.vocab_start_idx,

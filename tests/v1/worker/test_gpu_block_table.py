@@ -307,6 +307,64 @@ def test_dummy_request_slot_mapping_is_pad():
     assert dummy[0].tolist() == [PAD_SLOT_ID] * 3
 
 
+def test_gather_block_tables_nulls_blocks_below_sliding_window():
+    """Entries wholly below the window of a request's first scheduled token
+    may point at blocks the sliding-window manager already freed and reused;
+    the forward-pass table must not hand them to attention."""
+    device = torch.device("cuda")
+    # Group 0 is full attention; group 1 is a 32-token sliding window
+    # (reach = sliding_window - 1 = 31).
+    block_tables = BlockTables(
+        block_sizes=[16, 16],
+        max_num_reqs=4,
+        max_num_batched_tokens=64,
+        max_num_blocks_per_group=[16, 16],
+        device=device,
+        sliding_window_reach=[0, 31],
+    )
+    full_ids = [list(range(1, 13)), list(range(41, 53))]
+    swa_ids = [list(range(21, 33)), list(range(61, 73))]
+    # Request slots 0 and 2: num_computed_tokens is indexed by slot, like the
+    # block tables, not by batch position.
+    req_slots = [0, 2]
+    for req, slot in enumerate(req_slots):
+        block_tables.append_block_ids(
+            req_index=slot,
+            new_block_ids=(full_ids[req], swa_ids[req]),
+            overwrite=True,
+        )
+    block_tables.apply_staged_writes()
+
+    idx_mapping = torch.tensor(req_slots, dtype=torch.int32, device=device)
+    # Slot 0 has 145 computed tokens, so its first scheduled position is 145;
+    # slot 2 has 120.
+    num_computed_tokens = torch.tensor(
+        [145, 0, 120, 0], dtype=torch.int32, device=device
+    )
+    full, swa = block_tables.gather_block_tables(
+        idx_mapping,
+        num_reqs_padded=3,
+        num_computed_tokens=num_computed_tokens,
+    )
+    torch.accelerator.synchronize()
+
+    assert full[0, :12].tolist() == full_ids[0]
+    assert full[1, :12].tolist() == full_ids[1]
+    # Request 0 reads back to 145 - 31 = 114: blocks 0..6 (tokens 0..111) are
+    # never read, block 7 (tokens 112..127) is.
+    assert swa[0, :12].tolist() == [0] * 7 + swa_ids[0][7:]
+    # Request 1 reads back to 120 - 31 = 89: blocks 0..4 are nulled.
+    assert swa[1, :12].tolist() == [0] * 5 + swa_ids[1][5:]
+    assert swa[2].count_nonzero().item() == 0
+    # Only the forward-pass copy changes.
+    assert block_tables.block_tables[1].gpu[0, :12].tolist() == swa_ids[0]
+
+    # Without num_computed_tokens the rows are copied verbatim.
+    _, swa = block_tables.gather_block_tables(idx_mapping, num_reqs_padded=2)
+    torch.accelerator.synchronize()
+    assert swa[0, :12].tolist() == swa_ids[0]
+
+
 @pytest.fixture
 def populated_block_tables():
     tables = BlockTables([16, 32], 8, 64, [3, 5], torch.device("cuda"))

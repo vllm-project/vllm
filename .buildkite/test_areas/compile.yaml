@@ -171,7 +171,7 @@ steps:
       - rocm-smi
       - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "llama-3"
 
-- label: ":nvidia: (B200) Fusion E2E Config Sweep"
+- label: ":nvidia: (B200) [Nightly] Fusion E2E Config Sweep"
   key: fusion-e2e-config-sweep-b200
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"

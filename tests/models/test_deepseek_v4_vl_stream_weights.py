@@ -44,26 +44,12 @@ def _v4_wrapper():
 
 
 def _v41_wrapper():
-    from vllm.models.deepseek_v41.nvidia.vl_model import DeepseekV41ForCausalLM
+    from vllm.models.deepseek_v41 import DeepseekV41ForCausalLM
 
     return DeepseekV41ForCausalLM
 
 
-@pytest.mark.parametrize(
-    "wrapper",
-    [
-        _v4_wrapper,
-        pytest.param(
-            _v41_wrapper,
-            marks=pytest.mark.skipif(
-                current_platform.is_rocm(),
-                reason="the ROCm V4.1 wrapper sorts the weights instead of "
-                "streaming them",
-            ),
-        ),
-    ],
-    ids=["v4", "v41"],
-)
+@pytest.mark.parametrize("wrapper", [_v4_wrapper, _v41_wrapper], ids=["v4", "v41"])
 def test_load_weights_streams_language_model_group(wrapper) -> None:
     model = object.__new__(wrapper())
     nn.Module.__init__(model)

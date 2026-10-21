@@ -44,7 +44,8 @@ from vllm.utils.import_utils import has_deep_gemm
 
 dg_available = has_deep_gemm()
 
-if current_platform.get_device_capability() < (9, 0):
+device_capability = current_platform.get_device_capability()
+if device_capability is None or device_capability < (9, 0):
     pytest.skip("FP8 Triton requires CUDA 9.0 or higher", allow_module_level=True)
 
 vllm_config = VllmConfig()
@@ -328,6 +329,8 @@ def test_w8a8_block_fp8_fused_moe_expert_map(M, N, K, topk, ep_size, workspace_i
     e_map = torch.full((E,), -1, dtype=torch.int32)
     e_map[e_ids] = torch.arange(local_e, dtype=torch.int32)
     w1, w2 = w1[e_ids].contiguous(), w2[e_ids].contiguous()
+    assert quant_config.w1_scale is not None
+    assert quant_config.w2_scale is not None
     w1_s = quant_config.w1_scale[e_ids].contiguous()
     w2_s = quant_config.w2_scale[e_ids].contiguous()
     quant_config = fp8_w8a8_moe_quant_config(
