@@ -269,6 +269,14 @@ def test_base_charges_actual_context_and_slots_their_own_price():
     assert longer[0] == pytest.approx(0.02 + 4000e-4)
     assert np.diff(longer) == pytest.approx(np.diff(costs))
 
+    # Past the capture limit the step loses its cudagraph, a jump the token
+    # table prices and a linear slot price cannot.
+    manager._cudagraph_limit = 4
+    token_cost_ms[5:] += 1.0
+    crossed = manager._budget_costs_ms(2, 2, slots, 4)
+    assert crossed[:3] == pytest.approx(longer[:3])
+    assert crossed[3:] == pytest.approx(4000e-4 + 1.0 + 0.01 * np.arange(5, 7))
+
 
 def test_compact_batch_preserves_totals_and_bounds():
     # The CPU placeholder layout must keep the batch total equal to the GPU

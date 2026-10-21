@@ -145,30 +145,6 @@ def _per_request_price_table(
     return np.maximum(np.interp(np.arange(max_num_reqs + 1), xs, ys), 0.0)
 
 
-def build_base_tables_from_curves(
-    token_curve: list[tuple[int, float]],
-    kv_curve: list[tuple[int, float]],
-    max_num_reqs: int,
-    max_batch_tokens: int,
-    cudagraph_limit: int = 0,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Tables that price a batch with no drafts from its actual shape.
-
-    Returns the step cost by token count with no KV context behind any request
-    (weights, matmuls, launch overhead, and the loss of cudagraphs past the
-    capture limit) and the price of one context token of KV read by request
-    count. A batch then costs token_table[tokens] plus kv_table[requests] times
-    the context its requests have already computed, so chunked-prefill tokens
-    are not charged as extra sequences and short contexts are not charged as
-    long ones.
-    """
-    token_table = np.maximum(
-        _step_cost_table(max_batch_tokens, token_curve, cudagraph_limit), 1e-6
-    )
-    kv_table = _per_request_price_table(kv_curve, max_num_reqs)
-    return token_table, kv_table
-
-
 class AdaptiveVerificationManager:
     def __init__(
         self,
@@ -190,8 +166,9 @@ class AdaptiveVerificationManager:
         self.query_start_loc = query_start_loc
         self.cost_tables: tuple[np.ndarray, np.ndarray] | None = None
         # Price of one draft slot by request count, and the no-draft base split
-        # into token-count cost with no KV context and KV-read price per context
-        # token by request count.
+        # into step cost by token count with no KV context and KV-read price per
+        # context token by request count. A batch's base is then
+        # token_table[tokens] + kv_table[requests] * its computed context.
         self.slot_cost_table: np.ndarray | None = None
         self.base_cost_tables: tuple[np.ndarray, np.ndarray] | None = None
         self._profile_context_len = 0
@@ -266,11 +243,9 @@ class AdaptiveVerificationManager:
             for num_tokens in request_axis:
                 for _ in range(_PROFILE_REPLAYS):
                     yield {"num_tokens": num_tokens, "context_len": 0}
-        # The request axis prices each extra token as another sequence with a
-        # full context behind it. Draft tokens are the opposite: they extend
-        # sequences already in the batch and read no new KV, so the draft axis
-        # is profiled on its own, at the same request count and full query
-        # length.
+        # Draft tokens extend sequences already in the batch and read no new KV,
+        # so the draft axis is profiled at a fixed request count with the full
+        # query length.
         query_len = self.num_speculative_steps + self.num_bonus_tokens
         self._slope_shapes = {}
         for num_reqs in capture_sizes:
@@ -402,31 +377,30 @@ class AdaptiveVerificationManager:
             max_num_tokens,
             self._cudagraph_limit,
         )
-        logger.debug("DSpark cost tables: %s", self.cost_tables)
-        if not slope_curve:
-            # The memory-profiling capture samples only the largest graphs, so
-            # no draft-axis shape fits; the real capture reprofiles.
+        # The memory-profiling capture samples only the largest graphs, which
+        # leaves no draft-axis shape to probe; the real capture reprofiles.
+        if not slope_curve and self._slope_shapes:
             logger.warning(
                 "Adaptive verification could not profile the draft-slot price; "
-                "pricing draft slots as free until the next profile."
+                "pricing draft slots as free."
             )
         self.slot_cost_table = _per_request_price_table(slope_curve, max_num_reqs)
         self.base_cost_tables = None
         if token_curve and kv_curve:
-            self.base_cost_tables = build_base_tables_from_curves(
-                token_curve,
-                kv_curve,
-                max_num_reqs,
-                max_num_tokens,
-                self._cudagraph_limit,
+            self.base_cost_tables = (
+                np.maximum(
+                    _step_cost_table(
+                        max_num_tokens, token_curve, self._cudagraph_limit
+                    ),
+                    1e-6,
+                ),
+                _per_request_price_table(kv_curve, max_num_reqs),
             )
-        probe_reqs = [n for n in (1, 16, 64, 128, 256) if n <= max_num_reqs]
-        logger.info(
-            "Adaptive verification: draft-slot price %s us at %s requests; "
-            "base tables %s",
-            [round(1e3 * float(self.slot_cost_table[n]), 2) for n in probe_reqs],
-            probe_reqs,
-            "built" if self.base_cost_tables is not None else "missing",
+        logger.debug(
+            "DSpark cost tables: %s, slot: %s, base: %s",
+            self.cost_tables,
+            self.slot_cost_table,
+            self.base_cost_tables,
         )
 
     def record_confidences(
@@ -455,24 +429,6 @@ class AdaptiveVerificationManager:
             write_slot.copy_to_cpu()
             self._copy_events[write_idx].record()
 
-    def _base_cost_ms(
-        self, num_reqs: int, num_non_draft_tokens: int, slots: np.ndarray
-    ) -> float:
-        """Target forward cost of this batch with no drafts admitted.
-
-        Weights and matmuls scale with the tokens the batch runs; attention
-        scales with the KV context its requests read. Both are known on the host
-        before launch, so this needs no device read.
-        """
-        assert self.cost_tables is not None
-        if self.base_cost_tables is None:
-            return float(self.cost_tables[1][num_non_draft_tokens])
-        token_cost_ms, kv_cost_ms = self.base_cost_tables
-        context_tokens = int(self.req_states.num_computed_tokens_np[slots].sum())
-        return float(
-            token_cost_ms[num_non_draft_tokens] + kv_cost_ms[num_reqs] * context_tokens
-        )
-
     def _budget_costs_ms(
         self,
         num_reqs: int,
@@ -482,21 +438,27 @@ class AdaptiveVerificationManager:
     ) -> np.ndarray:
         """Step cost of each draft budget from 0 to max_draft_budget."""
         assert self.cost_tables is not None and self.slot_cost_table is not None
-        draft_cost_ms = self.cost_tables[0][num_reqs]
-        base_ms = self._base_cost_ms(num_reqs, num_non_draft_tokens, slots)
+        draft_cost_ms, verify_cost_ms = self.cost_tables
         budgets = np.arange(max_draft_budget + 1)
-        costs = draft_cost_ms + base_ms + self.slot_cost_table[num_reqs] * budgets
+        slot_costs_ms = self.slot_cost_table[num_reqs] * budgets
         if self.base_cost_tables is None:
-            return costs
+            return (
+                draft_cost_ms[num_reqs]
+                + verify_cost_ms[num_non_draft_tokens]
+                + slot_costs_ms
+            )
+        token_cost_ms, kv_cost_ms = self.base_cost_tables
+        # The drafter and the KV read of the computed context, which drafts
+        # do not change. The context is host-side, so this needs no device read.
+        context_tokens = int(self.req_states.num_computed_tokens_np[slots].sum())
+        fixed_ms = draft_cost_ms[num_reqs] + kv_cost_ms[num_reqs] * context_tokens
+        costs = fixed_ms + token_cost_ms[num_non_draft_tokens] + slot_costs_ms
         # A linear slot price cannot express the jump from losing cudagraphs when
         # the step crosses the capture limit, so past it the step is priced from
-        # the token table directly. The base minus its token term is the KV read,
-        # which drafts do not change.
-        token_cost_ms, _ = self.base_cost_tables
+        # the token table at its full size.
         step_tokens = num_non_draft_tokens + budgets
         ungraphed = step_tokens > self._cudagraph_limit
         if ungraphed.any():
-            fixed_ms = draft_cost_ms + base_ms - token_cost_ms[num_non_draft_tokens]
             sized = token_cost_ms[
                 np.minimum(step_tokens[ungraphed], len(token_cost_ms) - 1)
             ]
