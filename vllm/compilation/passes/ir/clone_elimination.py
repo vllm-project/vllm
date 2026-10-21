@@ -71,20 +71,18 @@ def user_writes_to_node(user: fx.Node, node: fx.Node) -> bool:
 
 
 def would_alias_graph_io(clone: fx.Node, original: fx.Node) -> bool:
-    """Whether folding clone into original makes a graph output share storage with
-    a graph input or another output, whose uses outside this graph are unknown."""
-    # The fx graph output node is the return, so grab the buffer ids of its args
-    outputs = {get_node_storage(n) for n in clone.graph.output_node().all_input_nodes}
-    # If the clone node isn't returned, it's safe to potentially fold the clone
-    clone_buffer_id = get_node_storage(clone)
-    if clone_buffer_id not in outputs:
-        return False
+    """Whether replacing clone with original makes a graph output share storage
+    with a graph input or another output, which callers may mutate in place.
+    Unknown storage is treated as aliasing."""
+    clone_storage = get_node_storage(clone)
+    original_storage = get_node_storage(original)
+    if clone_storage is None or original_storage is None:
+        return True
 
-    # Otherwise get the buffer ids of all inputs to the graph
-    inputs = {get_node_storage(n) for n in clone.graph.find_nodes(op="placeholder")}
-    orig_buffer_id = get_node_storage(original)
-
-    return orig_buffer_id in inputs or orig_buffer_id in outputs
+    graph = clone.graph
+    outputs = {get_node_storage(n) for n in graph.output_node().all_input_nodes}
+    inputs = {get_node_storage(n) for n in graph.find_nodes(op="placeholder")}
+    return clone_storage in outputs and original_storage in inputs | outputs
 
 
 class UnsafeCloneEliminationPass(VllmInductorPass):
@@ -92,7 +90,7 @@ class UnsafeCloneEliminationPass(VllmInductorPass):
     It uses donated_input_ids to eliminate clones of donated graph inputs, preserving
     contents of non-donated graph inputs.
 
-    It is "unsafe" because it does not (yet) take aliasing into account. Solving
+    It is "unsafe" because it only handles aliasing of graph outputs. Solving
     aliasing is an open problem, so this pass intends to support known vLLM cases
     and not guarantee soundness on general graphs. In the future, this pass will likely
     support basic forms of aliasing to handle simple views (e.g. qkv -> q,k,v).
@@ -134,9 +132,6 @@ class UnsafeCloneEliminationPass(VllmInductorPass):
                 node_to_idx[u] for u in node.users if user_writes_to_node(u, node)
             ]
             assert len(write_idxs) in (0, 1)
-            if not write_idxs and would_alias_graph_io(node, original_node):
-                logger.debug("skipped a clone removal to avoid aliasing a graph IO")
-                continue
             if write_idxs:
                 # Check if a user of original_node occurs after a write
                 write_idx = write_idxs[0]
@@ -162,6 +157,14 @@ class UnsafeCloneEliminationPass(VllmInductorPass):
                         original_node,
                     )
                     continue
+            elif would_alias_graph_io(node, original_node):
+                logger.debug(
+                    "Clone removal not possible, returned clone %s would alias "
+                    "graph input or output %s",
+                    node,
+                    original_node,
+                )
+                continue
 
             logger.debug(
                 "Node %s is a redundant clone node of %s, removing it",

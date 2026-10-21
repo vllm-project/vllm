@@ -20,12 +20,10 @@ from .. import silly_attention  # noqa: F401
 
 @support_torch_compile
 class SnapshotModel(nn.Module):
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """A model that returns a snapshot of its input.
+    """Returns a snapshot of its input, then mutates the input in place, like a
+    model that forwards its input embeddings past the compile boundary."""
 
-        This type of flow can happen if we forward embeddings to a later
-        component, depending on where the compile boundary lives.
-        """
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         snapshot = x.clone()
         out = torch.empty_like(x)
         torch.ops.silly.attention(x, x, x, out)
@@ -51,7 +49,7 @@ def test_snapshot_clone_survives_input_mutation(
     with set_current_vllm_config(vllm_config):
         model = SnapshotModel()
 
-    x = torch.randn(16, 8).cuda()
+    x = torch.randn(16, 8, device="cuda")
     expected = x.clone()
     snapshot = model(x)
 
