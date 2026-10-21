@@ -188,6 +188,48 @@ def test_thinking_is_refused(server):
     assert "thinking must be off" in response.json()["error"]["message"]
 
 
+def test_noul_and_score(server):
+    response = post(
+        server,
+        {
+            "model": MODEL_NAME,
+            "state": {"ticket": "My card was charged twice for one order."},
+            "questions": {
+                "urgent": {"type": "noul", "instructions": "Is money moving?"},
+                "tone": {
+                    "type": "score",
+                    "instructions": "How upset is the customer?",
+                    "criteria": ["calm", "annoyed", "furious"],
+                },
+            },
+            "chat_template_kwargs": {"enable_thinking": False},
+        },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    urgent = body["answers"]["urgent"]
+    assert urgent["type"] == "noul"
+    assert set(urgent["probabilities"]) == {"yes", "no"}
+    assert urgent["probabilities"]["yes"] + urgent["probabilities"]["no"] == (
+        pytest.approx(1.0, abs=1e-4)
+    )
+    assert urgent["noul"] == urgent["probabilities"]["yes"]
+    assert urgent["confidence"] == pytest.approx(
+        max(urgent["probabilities"].values())
+        * body["diagnostics"]["urgent"]["label_mass"]
+    )
+    tone = body["answers"]["tone"]
+    assert tone["type"] == "score"
+    assert tone["legend"] == {"0": "calm", "1": "annoyed", "2": "furious"}
+    assert set(tone["probabilities"]) == {"0", "1", "2"}
+    assert sum(tone["probabilities"].values()) == pytest.approx(1.0, abs=1e-4)
+    assert tone["score"] == pytest.approx(
+        sum(i * p for i, p in enumerate(tone["probabilities"].values()))
+    )
+    assert 0 <= tone["score"] <= 2
+    assert body["usage"]["output_tokens"] == 2
+
+
 @pytest.mark.parametrize(
     "questions,match",
     [
@@ -208,6 +250,8 @@ def test_thinking_is_refused(server):
             },
             "at most 64",
         ),
+        ({"q": {"type": "noul", "criteria": ["yes", "no"]}}, "must be an object"),
+        ({"q": {"type": "score", "criteria": ["calm"]}}, "ordered list of levels"),
     ],
 )
 def test_validation_errors(server, questions, match):

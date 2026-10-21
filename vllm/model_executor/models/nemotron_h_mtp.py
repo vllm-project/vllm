@@ -7,6 +7,7 @@ from collections.abc import Callable, Iterable
 
 import torch
 import torch.nn as nn
+from transformers import NemotronHConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
@@ -33,7 +34,6 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
 
 from .interfaces import SupportsPP, SupportsQuant
 from .nemotron_h import (
