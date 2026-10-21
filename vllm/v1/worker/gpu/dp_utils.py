@@ -63,7 +63,7 @@ def sync_cudagraph_and_dp_padding(
     """
     assert dp_size > 1, "DP size must be greater than 1"
     tensor = torch.zeros(
-        7 if profiler_sync is not None else 6,
+        8 if profiler_sync is not None else 6,
         dp_size,
         dtype=torch.int32,
         device="cpu",
@@ -75,14 +75,16 @@ def sync_cudagraph_and_dp_padding(
     tensor[4][dp_rank] = int(allow_ubatching)
     tensor[5][dp_rank] = num_reqs
     if profiler_sync is not None:
-        tensor[6][dp_rank] = int(profiler_sync._pending)
-    if should_skip_dp_coordination():
+        tensor[6][dp_rank] = int(profiler_sync.pending_start)
+        tensor[7][dp_rank] = int(profiler_sync.pending_stop)
+    skip_coordination = should_skip_dp_coordination()
+    if skip_coordination:
         tensor[:] = tensor[:, dp_rank, None].clone()
     else:
         get_dp_group().cpu_all_reduce_(tensor)
 
-    if profiler_sync is not None:
-        profiler_sync.observe(bool(tensor[6].any().item()))
+    if profiler_sync is not None and not skip_coordination:
+        profiler_sync.observe(tensor[6].tolist(), tensor[7].tolist(), get_dp_group())
 
     num_tokens_across_dp = tensor[0]
     cg_mode_across_dp = tensor[1]

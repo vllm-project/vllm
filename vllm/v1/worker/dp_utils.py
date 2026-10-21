@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Sequence
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 
@@ -8,7 +9,7 @@ import torch
 import torch.distributed as dist
 
 from vllm.config import ParallelConfig
-from vllm.distributed.parallel_state import get_dp_group
+from vllm.distributed.parallel_state import GroupCoordinator, get_dp_group
 from vllm.logger import init_logger
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import PIN_MEMORY
@@ -36,35 +37,73 @@ def should_skip_dp_coordination() -> bool:
     return _skip_dp_coordination.get()
 
 
+ProfileSettings = tuple[str | None, int | None, int | None]
+
+
 class DPProfilerSync:
-    """Starts the torch profiler on the same step across all DP ranks."""
+    """Synchronize profiler lifecycle requests across a DP group."""
 
     def __init__(self) -> None:
-        # start_profile received, capture not yet begun.
-        self._pending = False
-        # Latched consensus, cleared when the worker consumes it.
-        self.start_now = False
+        self._pending_start: ProfileSettings | None = None
+        self._pending_stop = False
+        self._start_now: ProfileSettings | None = None
+        self._stop_now = False
 
-    def request_start(self) -> None:
-        self._pending = True
+    @property
+    def pending_start(self) -> bool:
+        return self._pending_start is not None
 
-    def cancel(self) -> None:
-        """Drop a pending request (e.g. stop_profile before capture began)."""
-        self._pending = False
-        self.start_now = False
+    @property
+    def pending_stop(self) -> bool:
+        return self._pending_stop
 
-    def observe(self, consensus: bool) -> None:
-        """Record the OR-reduced request flag from a DP coordination reduce."""
-        if consensus:
-            self.start_now = True
+    def request_start(
+        self,
+        profile_prefix: str | None = None,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
+    ) -> None:
+        self._pending_start = (profile_prefix, delay_iterations, max_iterations)
 
-    def consume_start(self) -> bool:
-        """Return True once, on the step every rank agreed to start capture."""
-        if self.start_now:
-            self.start_now = False
-            self._pending = False
-            return True
-        return False
+    def request_stop(self) -> None:
+        self._pending_start = None
+        self._start_now = None
+        self._pending_stop = True
+
+    def observe(
+        self,
+        start_flags: Sequence[int],
+        stop_flags: Sequence[int],
+        group: GroupCoordinator,
+    ) -> None:
+        """Latch the agreed transition and share the selected start settings."""
+        if any(stop_flags):
+            self._stop_now = True
+            self._start_now = None
+            self._pending_start = None
+            return
+
+        source = next((rank for rank, flag in enumerate(start_flags) if flag), None)
+        if source is None:
+            return
+        local_settings = self._pending_start if group.rank_in_group == source else None
+        settings = group.broadcast_object(local_settings, src=source)
+        assert isinstance(settings, tuple) and len(settings) == 3
+        self._start_now = settings
+
+    def consume_stop(self) -> bool:
+        if not self._stop_now:
+            return False
+        self._stop_now = False
+        self._pending_stop = False
+        return True
+
+    def consume_start(self) -> ProfileSettings | None:
+        settings = self._start_now
+        if settings is not None:
+            self._start_now = None
+            self._pending_start = None
+        return settings
 
 
 def _get_device_and_group(parallel_config: ParallelConfig):
@@ -97,11 +136,11 @@ def _run_ar(
     dp_rank = parallel_config.data_parallel_rank
     device, group = _get_device_and_group(parallel_config)
     # Populate this rank's contribution on CPU to reduce GPU syncs.
-    # Row 4 (profiler start request) is only added under
+    # Rows 4 and 5 (profiler lifecycle requests) are only added under
     # VLLM_ENABLE_MULTINODE_PROFILING.
     pin_memory = PIN_MEMORY and torch.device(device).type == "cuda"
     tensor_cpu = torch.zeros(
-        5 if profiler_sync is not None else 4,
+        6 if profiler_sync is not None else 4,
         dp_size,
         dtype=torch.int32,
         pin_memory=pin_memory,
@@ -111,7 +150,8 @@ def _run_ar(
     tensor_cpu[2][dp_rank] = 1 if should_ubatch else 0
     tensor_cpu[3][dp_rank] = cudagraph_mode
     if profiler_sync is not None:
-        tensor_cpu[4][dp_rank] = 1 if profiler_sync._pending else 0
+        tensor_cpu[4][dp_rank] = int(profiler_sync.pending_start)
+        tensor_cpu[5][dp_rank] = int(profiler_sync.pending_stop)
     tensor = tensor_cpu.to(device, non_blocking=True)
     dist.all_reduce(tensor, group=group)
     return tensor
@@ -207,9 +247,11 @@ def _synchronize_dp_ranks(
         if parallel_config.disable_nccl_for_dp_synchronization
         else gpu_sync_allowed()
     ):
-        # Latch the OR-reduced profiler start request across ranks.
+        # Latch the agreed profiler transition across ranks.
         if profiler_sync is not None:
-            profiler_sync.observe(bool(tensor[4].any().item()))
+            profiler_sync.observe(
+                tensor[4].tolist(), tensor[5].tolist(), get_dp_group()
+            )
 
         # Synchronize cudagraph_mode across ranks first (take min).
         # This is needed before DP padding decision since we use the synced

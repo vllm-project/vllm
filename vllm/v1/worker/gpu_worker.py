@@ -23,7 +23,10 @@ from vllm.config import (
     update_config,
 )
 from vllm.config.compilation import CompilationMode
-from vllm.config.profiler import validate_profile_prefix
+from vllm.config.profiler import (
+    validate_profile_iteration_bounds,
+    validate_profile_prefix,
+)
 from vllm.device_allocator import get_mem_allocator_instance
 from vllm.distributed import (
     ensure_model_parallel_initialized,
@@ -1339,8 +1342,7 @@ class Worker(WorkerBase):
             output = self.model_runner.execute_model(
                 scheduler_output, intermediate_tensors
             )
-            # Start capture in lockstep once the DP ranks agreed this step.
-            self._maybe_start_synced_profile()
+            self._maybe_apply_synced_profile()
             if (
                 self.use_v2_model_runner
                 and self.model_runner.is_pooling_model
@@ -1394,39 +1396,43 @@ class Worker(WorkerBase):
 
         if is_start:
             validate_profile_prefix(profile_prefix)
-            self._create_profiler(profile_prefix)
-            assert self.profiler is not None
+            validate_profile_iteration_bounds(delay_iterations, max_iterations)
             dp_profiler_sync = getattr(
                 getattr(self, "model_runner", None), "dp_profiler_sync", None
             )
             if dp_profiler_sync is not None:
-                self._synced_profile_bounds = (delay_iterations, max_iterations)
-                dp_profiler_sync.request_start()
+                dp_profiler_sync.request_start(
+                    profile_prefix, delay_iterations, max_iterations
+                )
             else:
+                self._create_profiler(profile_prefix)
+                assert self.profiler is not None
                 self.profiler.start(
                     delay_iterations=delay_iterations,
                     max_iterations=max_iterations,
                 )
         else:
-            vars(self).pop("_synced_profile_bounds", None)
             dp_profiler_sync = getattr(
                 getattr(self, "model_runner", None), "dp_profiler_sync", None
             )
             if dp_profiler_sync is not None:
-                # Drop a request that never reached consensus yet.
-                dp_profiler_sync.cancel()
-            if self.profiler is None:
-                logger.warning("Profiler was not started, nothing to stop.")
-                return
-            try:
-                self.profiler.stop()
-            finally:
-                if self.profiler_config.profiler == "proton" and not (
-                    self.profiler.has_cuda_graph_session
-                ):
-                    # Proton output names are fixed when the wrapper is constructed.
-                    # Recreate it so the next profile_prefix is honored.
-                    self.profiler = None
+                dp_profiler_sync.request_stop()
+            else:
+                self._stop_profiler()
+
+    def _stop_profiler(self) -> None:
+        if self.profiler is None:
+            logger.warning("Profiler was not started, nothing to stop.")
+            return
+        try:
+            self.profiler.stop()
+        finally:
+            if self.profiler_config.profiler == "proton" and not (
+                self.profiler.has_cuda_graph_session
+            ):
+                # Proton output names are fixed when the wrapper is constructed.
+                # Recreate it so the next profile_prefix is honored.
+                self.profiler = None
 
     @property
     def randomize_dummy_inputs(self) -> bool:
@@ -1445,7 +1451,7 @@ class Worker(WorkerBase):
             uniform_decode=True,
             randomize_inputs=self.randomize_dummy_inputs,
         )
-        self._maybe_start_synced_profile()
+        self._maybe_apply_synced_profile()
 
     def _create_profiler(self, profile_prefix: str | None = None) -> None:
         """Create a profiler on ranks reached only by DP start consensus."""
@@ -1465,34 +1471,34 @@ class Worker(WorkerBase):
             )
         self.profiler.set_output_name(trace_name)
 
-    def _maybe_start_synced_profile(self) -> None:
-        """Start capture once all DP ranks agree on the start step; builds
-        the profiler lazily for ranks that never got /start_profile."""
+    def _maybe_apply_synced_profile(self) -> None:
+        """Apply the profiler transition agreed by the DP coordination step."""
         dp_profiler_sync = getattr(
             getattr(self, "model_runner", None), "dp_profiler_sync", None
         )
         if dp_profiler_sync is None:
             return
-        if dp_profiler_sync.consume_start():
-            if self.profiler is None:
-                if (
-                    self.profiler_config is None
-                    or self.profiler_config.profiler is None
-                ):
-                    logger.warning(
-                        "Synced profile start requested but profiling is not "
-                        "configured on this rank; skipping."
-                    )
-                    return
-                self._create_profiler()
-            assert self.profiler is not None
-            delay_iterations, max_iterations = vars(self).pop(
-                "_synced_profile_bounds", (None, None)
+        if dp_profiler_sync.consume_stop():
+            if self.profiler is not None:
+                self._stop_profiler()
+            return
+
+        settings = dp_profiler_sync.consume_start()
+        if settings is None:
+            return
+        if self.profiler_config is None or self.profiler_config.profiler is None:
+            logger.warning(
+                "Synced profile start requested but profiling is not "
+                "configured on this rank; skipping."
             )
-            self.profiler.start(
-                delay_iterations=delay_iterations,
-                max_iterations=max_iterations,
-            )
+            return
+        profile_prefix, delay_iterations, max_iterations = settings
+        self._create_profiler(profile_prefix)
+        assert self.profiler is not None
+        self.profiler.start(
+            delay_iterations=delay_iterations,
+            max_iterations=max_iterations,
+        )
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)

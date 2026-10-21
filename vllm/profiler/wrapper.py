@@ -239,6 +239,8 @@ class TorchProfilerWrapper(WorkerProfiler):
         self._torch_profiler_use_gzip = profiler_config.torch_profiler_use_gzip
         self._worker_name = worker_name
         self._custom_trace_handler = on_trace_ready is not None
+        self._trace_export_threads: set[threading.Thread] = set()
+        self._trace_export_lock = threading.Lock()
         if local_rank in (None, 0):
             logger.info_once(
                 "Torch profiling enabled. Traces will be saved to: %s",
@@ -329,8 +331,8 @@ class TorchProfilerWrapper(WorkerProfiler):
             trace_handler
         )
 
-    @staticmethod
     def _async_trace_handler(
+        self,
         trace_handler: Callable[[torch.profiler.profile], None],
     ) -> Callable[[torch.profiler.profile], None]:
         def on_trace_ready(prof: torch.profiler.profile) -> None:
@@ -339,12 +341,27 @@ class TorchProfilerWrapper(WorkerProfiler):
                     trace_handler(prof)
                 except Exception as e:
                     logger.warning("Failed to export profiler trace: %s", e)
+                finally:
+                    with self._trace_export_lock:
+                        self._trace_export_threads.discard(threading.current_thread())
 
-            threading.Thread(
-                target=export, name="vllm-profiler-trace-export", daemon=True
-            ).start()
+            thread = threading.Thread(target=export, name="vllm-profiler-trace-export")
+            with self._trace_export_lock:
+                self._trace_export_threads.add(thread)
+                thread.start()
 
         return on_trace_ready
+
+    @override
+    def shutdown(self) -> None:
+        super().shutdown()
+        while True:
+            with self._trace_export_lock:
+                threads = tuple(self._trace_export_threads)
+            if not threads:
+                break
+            for thread in threads:
+                thread.join()
 
     def _build_profiler_table(
         self,
