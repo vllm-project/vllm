@@ -48,6 +48,8 @@ PRUNED_METADATA_FIELDS = {
     "prefill_query_start_loc",
     "prefill_state_indices",
     "prefill_has_initial_state",
+    "prefill_state_indices_i64",
+    "prefill_no_initial_state",
     "spec_sequence_masks",
     "spec_sequence_masks_cpu",
     "uniform_spec_sequence_length",

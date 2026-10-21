@@ -1818,11 +1818,15 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             # when decodes are peeled off, else the full non-spec batch), so they
             # don't need to be re-derived per layer.
             prefill_state_indices = attn_metadata.prefill_state_indices
-            prefill_has_initial_state = attn_metadata.prefill_has_initial_state
+            prefill_no_initial_state = attn_metadata.prefill_no_initial_state
+            if attn_metadata.prefill_state_indices_i64 is not None:
+                prefill_state_indices = attn_metadata.prefill_state_indices_i64
+            if prefill_no_initial_state is None:
+                assert attn_metadata.prefill_has_initial_state is not None
+                prefill_no_initial_state = ~attn_metadata.prefill_has_initial_state
             assert prefill_state_indices is not None
-            assert prefill_has_initial_state is not None
             initial_state = ssm_state[prefill_state_indices]
-            initial_state[~prefill_has_initial_state, ...] = 0
+            initial_state[prefill_no_initial_state, ...] = 0
             non_spec_out = (
                 None if non_spec_slice is None else core_attn_out[non_spec_slice]
             )

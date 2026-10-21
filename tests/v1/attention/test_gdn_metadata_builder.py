@@ -246,6 +246,7 @@ def test_update_block_table_matches_build(
         "spec_state_indices_tensor",
         "non_spec_state_indices_tensor",
         "prefill_state_indices",
+        "prefill_state_indices_i64",
     )
     source_indices = [getattr(source, f) for f in fields]
     source_indices = [t if t is None else t.clone() for t in source_indices]
@@ -320,7 +321,8 @@ def test_mixed_batch_token_slices(
 ):
     """The forward slices the spec/non-spec tokens only when the builder
     reports two contiguous blocks, and the slices must then select exactly the
-    tokens the gather indices select."""
+    tokens the gather indices select. The per-step int64/inverted copies of the
+    prefill inputs must match the tensors they stand in for."""
     builder = _create_gdn_builder(num_speculative_tokens=2)
     batch = BatchSpec(seq_lens=[q + 20 for q in query_lens], query_lens=query_lens)
     meta = _build(builder, batch, num_decode_draft_tokens)
@@ -343,6 +345,19 @@ def test_mixed_batch_token_slices(
         )
         assert torch.equal(meta.spec_token_indx.cpu(), spec_rows)
         assert torch.equal(meta.non_spec_token_indx.cpu(), non_spec_rows)
+
+    if meta.num_prefills > 0:
+        assert meta.prefill_state_indices is not None
+        assert meta.prefill_has_initial_state is not None
+        assert meta.prefill_state_indices_i64 is not None
+        assert meta.prefill_no_initial_state is not None
+        assert meta.prefill_state_indices_i64.dtype == torch.int64
+        assert torch.equal(
+            meta.prefill_state_indices_i64, meta.prefill_state_indices.long()
+        )
+        assert torch.equal(
+            meta.prefill_no_initial_state, ~meta.prefill_has_initial_state
+        )
 
 
 def _build_non_spec(
