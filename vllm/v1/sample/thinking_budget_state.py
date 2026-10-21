@@ -546,9 +546,15 @@ class ThinkingBudgetStateHolder:
                         row = self.cu_num_tokens[seq_idx]
                     else:
                         continue
-                    if row < self._mask_capacity and row < logits.shape[0]:
-                        active_indices_cpu.append(row)
-                        force_tokens_cpu.append(token)
+                    # Skipping a row here would drop a forced end token and
+                    # corrupt the end sequence, so fail loudly instead.
+                    assert row < min(self._mask_capacity, logits.shape[0]), (
+                        f"thinking-budget forced end row {row} is outside the "
+                        f"logits ({logits.shape[0]} rows, capacity "
+                        f"{self._mask_capacity})"
+                    )
+                    active_indices_cpu.append(row)
+                    force_tokens_cpu.append(token)
                 continue
             if state.get("in_end", False):
                 # logits processor in spec mode are called twice
