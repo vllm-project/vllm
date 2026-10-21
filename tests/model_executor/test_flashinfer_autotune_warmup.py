@@ -113,6 +113,10 @@ def test_flashinfer_autotune_uses_token_buckets_for_each_dummy_run(skip_attn):
             "vllm.utils.flashinfer.flashinfer_get_hybrid_num_tokens_buckets",
             side_effect=(max_buckets, deferred_buckets),
         ) as get_buckets,
+        patch(
+            "vllm.utils.flashinfer.flashinfer_map_to_hybrid_bucket_uncapped",
+            side_effect=lambda num_tokens: num_tokens,
+        ),
         patch("vllm.utils.flashinfer.autotune") as autotune,
     ):
         _run_flashinfer_autotune_dummy_runs(runner, skip_attn=skip_attn)
@@ -408,6 +412,10 @@ def test_flashinfer_autotune_buckets_cover_drafter_tokens():
         patch(
             "vllm.utils.flashinfer.flashinfer_get_hybrid_num_tokens_buckets"
         ) as get_buckets,
+        patch(
+            "vllm.utils.flashinfer.flashinfer_map_to_hybrid_bucket_uncapped",
+            side_effect=lambda num_tokens: num_tokens,
+        ),
         patch("vllm.utils.flashinfer.autotune"),
     ):
         _run_flashinfer_autotune_dummy_runs(runner)
@@ -415,6 +423,40 @@ def test_flashinfer_autotune_buckets_cover_drafter_tokens():
     assert get_buckets.call_args_list == [call(8192), call(128 * 6)]
     assert [c.kwargs["num_tokens"] for c in runner._dummy_run.call_args_list] == [
         8192,
+        128,
+    ]
+
+
+def test_flashinfer_autotune_off_grid_max_tokens_uses_op_buckets():
+    """Ops map an off-grid max M up (21504 -> 32768) when serving, so a
+    bucket override would store the full-size profile under an unused key."""
+    runner = _make_runner([], max_tokens=21504)
+    deferred_buckets = (1, 2, 4, 8, 16, 32, 64, 128)
+
+    with (
+        patch(
+            "vllm.model_executor.warmup.kernel_warmup."
+            "_flashinfer_autotune_token_counts",
+            return_value=(21504, 128),
+        ),
+        patch(
+            "vllm.utils.flashinfer.flashinfer_get_hybrid_num_tokens_buckets",
+            return_value=deferred_buckets,
+        ) as get_buckets,
+        patch(
+            "vllm.utils.flashinfer.flashinfer_map_to_hybrid_bucket_uncapped",
+            side_effect=lambda num_tokens: 32768 if num_tokens > 16384 else num_tokens,
+        ),
+        patch("vllm.utils.flashinfer.autotune") as autotune,
+    ):
+        _run_flashinfer_autotune_dummy_runs(runner)
+
+    assert get_buckets.call_args_list == [call(128)]
+    assert autotune.call_args_list == [
+        call(tuning_buckets=deferred_buckets, round_up=True)
+    ]
+    assert [c.kwargs["num_tokens"] for c in runner._dummy_run.call_args_list] == [
+        21504,
         128,
     ]
 
