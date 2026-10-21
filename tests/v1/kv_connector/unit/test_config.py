@@ -170,6 +170,8 @@ def test_kv_connector_allows_expandable_segments_with_cumem_allocator(
         ("NixlPushConnector", {}, None),
         ("MooncakeConnector", {"mooncake_protocol": "tcp"}, None),
         ("MooncakeConnector", {}, "MC_USE_TENT"),
+        ("MoRIIOConnector", {"read_mode": True}, None),
+        ("MoRIIOConnector", {"backend": "xgmi"}, None),
     ],
 )
 def test_sleep_mode_refuses_unsupported_kv_connector(

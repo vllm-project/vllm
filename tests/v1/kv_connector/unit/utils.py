@@ -683,6 +683,8 @@ def make_moriio_writer(fake_worker: Any) -> Any:
     writer._sealed_writes = {}
     writer._deferred_tasks = []
     writer._defer_timeout = 60.0
+    writer._execution_lock = threading.Lock()
+    writer._released_at = float("-inf")
     writer.ensure_worker_started = lambda: None
     return writer
 

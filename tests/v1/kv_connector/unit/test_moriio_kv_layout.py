@@ -456,6 +456,7 @@ def test_hybrid_write_posts_both_regions_before_layer_completion():
         moriio_wrapper=wrapper,
         tp_rank=0,
         get_engine_name_with_dp=lambda name, rank: name,
+        _refresh_remote_registration=lambda engine_id, epoch: None,
         _get_built_session=lambda name: (["conv-session", "ssm-session"], None),
         _is_mamba_layer=lambda name: True,
         _mamba_payload_index_by_layer={"kda": 2},
