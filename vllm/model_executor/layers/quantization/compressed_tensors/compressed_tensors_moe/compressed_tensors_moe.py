@@ -41,6 +41,26 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                 layer.ckpt_down_proj_name,
             )
         ]
+        # Checkpoints with stacked expert tensors (e.g. MoNE compact exports)
+        # target the fused module names without a per-expert index.
+        if layer.ckpt_up_proj_name is None:
+            fused_names = [f"{layer_name}.{layer.ckpt_gate_proj_name}"]
+        else:
+            gate_up = (
+                "gate_up_proj"
+                if (
+                    layer.ckpt_gate_proj_name == "gate_proj"
+                    and layer.ckpt_up_proj_name == "up_proj"
+                )
+                else "w13"
+                if (
+                    layer.ckpt_gate_proj_name == "w1"
+                    and layer.ckpt_up_proj_name == "w3"
+                )
+                else None
+            )
+            fused_names = [f"{layer_name}.{gate_up}"] if gate_up is not None else []
+        fused_names.append(f"{layer_name}.{layer.ckpt_down_proj_name}")
         # TODO: refactor this to use expert_mapping and check all layer numbers
         all_scheme_dicts = [
             quant_config.get_scheme_dict(layer, name) for name in unfused_names
@@ -53,6 +73,19 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                 "All MoE projections need to have same "
                 "quantization scheme but found multiple"
             )
+
+        if scheme_dict is None:  # ignored layer or stacked-only targets
+            fused_scheme_dicts = [
+                quant_config.get_scheme_dict(layer, name) for name in fused_names
+            ]
+            matched = [d for d in fused_scheme_dicts if d is not None]
+            if matched:
+                scheme_dict = matched[0]
+                if any(d != scheme_dict for d in matched):
+                    raise ValueError(
+                        "All MoE projections need to have same "
+                        "quantization scheme but found multiple"
+                    )
 
         if scheme_dict is None:  # ignored layer
             return UnquantizedFusedMoEMethod(layer.moe_config)

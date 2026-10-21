@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import re
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, ClassVar, Literal
 
@@ -134,6 +135,9 @@ def get_sparse_topk_buffer_width(config: Glm5NextTextConfig) -> int:
     assert kpool is not None
     return round_up(topk + kpool - 1, 128)
 
+_EXPERTS_WEIGHT_RE = re.compile(r"^layers\.(\d+)\.mlp\.experts\.(.+)$")
+"""Matches a decoder-layer expert tensor, e.g. ``layers.3.mlp.experts.
+gate_up_proj.weight_packed``; group 2 is the name relative to the MoE."""
 
 _MHC_TAU = 0.05
 """mHC routing temperature. A GLM-5.3-Flash trained value that neither the
@@ -1073,7 +1077,7 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
             (".conv1d", ".k_conv1d", 1),
             (".conv1d", ".v_conv1d", 2),
         ]
-        if _is_moe(self.config):
+        if self.use_mega_moe:
             # Params for weights, fp8 weight scales, fp8 activation scales
             # (param_name, weight_name, expert_id, shard_id)
             # EPLB: the mapping enumerates physical experts, so it must cover
@@ -1105,6 +1109,10 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
             expert_params_mapping = []
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        # Expert weights load through each MoE's runner so both per-expert
+        # and stacked (fused) checkpoint layouts are handled, including the
+        # compact rows of MoNE-pruned checkpoints.
+        expert_weights: dict[int, list[tuple[str, torch.Tensor]]] = {}
 
         # GLM-5.3-Flash NoPE checkpoints omit the RoPE rows from
         # ``kv_a_proj_with_mqa``; pad them with zeros for the model shape.
@@ -1140,6 +1148,20 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                 and extract_layer_index(name) in self.fused_shared_expert_layers
             ):
                 name = _fused_shared_expert_name(name, self.config.n_routed_experts)
+
+            experts_match = _EXPERTS_WEIGHT_RE.match(name)
+            if experts_match is not None and not self.use_mega_moe:
+                layer_idx = int(experts_match.group(1))
+                layer = self.layers[layer_idx] if layer_idx < len(self.layers) else None
+                if isinstance(layer, Glm5NextDecoderLayer) and isinstance(
+                    layer.mlp, Glm5NextMoE
+                ):
+                    expert_weights.setdefault(layer_idx, []).append(
+                        (experts_match.group(2), loaded_weight)
+                    )
+                    continue
+                if isinstance(layer, PPMissingLayer):
+                    continue
 
             # Handle FP8 indexer WK: dequantize to BF16 for fusion with
             # weights_proj into wk_weights_proj.
@@ -1177,12 +1199,6 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
-                # We have mlp.experts[0].gate_proj in the checkpoint.
-                # Since we handle the experts below in expert_params_mapping,
-                # we need to skip here BEFORE we update the name, otherwise
-                # name will be updated to mlp.experts[0].gate_up_proj, which
-                # will then be updated below in expert_params_mapping
-                # for mlp.experts[0].gate_gate_up_proj, which breaks load.
                 if ("mlp.experts." in name) and name not in params_dict:
                     continue
                 name_mapped = name.replace(weight_name, param_name)
@@ -1201,6 +1217,7 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                 break
             else:
                 is_expert_weight = False
+                success = False
                 for (
                     param_name,
                     weight_name,
@@ -1209,16 +1226,13 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                 ) in expert_params_mapping:
                     if weight_name not in name:
                         continue
-                    # A checkpoint expert may map to several physical replicas
-                    # under EPLB; keep `name` intact and try the next entry
-                    # when this physical expert is not local to the rank.
+                    # EPLB may map one checkpoint expert to several replicas.
                     is_expert_weight = True
                     name_mapped = name.replace(weight_name, param_name)
                     if is_pp_missing_parameter(name_mapped, self):
                         continue
                     param = params_dict[name_mapped]
-                    weight_loader = param.weight_loader
-                    success = weight_loader(
+                    success = param.weight_loader(
                         param,
                         loaded_weight,
                         name_mapped,
@@ -1229,30 +1243,34 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                     if success:
                         name = name_mapped
                         break
-                else:
-                    if is_expert_weight:
-                        continue
-                    # Skip loading extra bias for GPTQ models.
-                    if (
-                        name.endswith(".bias")
-                        and name not in params_dict
-                        and not _is_linear_attn(self.config)
-                    ):  # noqa: E501
-                        continue
-                    # Remapping the name of FP8 kv-scale.
-                    remapped_name = maybe_remap_kv_scale_name(name, params_dict)
-                    if remapped_name is None:
-                        continue
-                    name = remapped_name
-                    if is_pp_missing_parameter(name, self):
-                        continue
+                if is_expert_weight:
+                    if success:
+                        loaded_params.add(name)
+                    continue
+                # Skip loading extra bias for GPTQ models.
+                if (
+                    name.endswith(".bias")
+                    and name not in params_dict
+                    and not _is_linear_attn(self.config)
+                ):  # noqa: E501
+                    continue
+                # Remapping the name of FP8 kv-scale.
+                remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                if remapped_name is None:
+                    continue
+                name = remapped_name
+                if is_pp_missing_parameter(name, self):
+                    continue
 
-                    param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight, **kwargs)
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight, **kwargs)
             loaded_params.add(name)
+
+        for layer_idx, layer_expert_weights in expert_weights.items():
+            runner = self.layers[layer_idx].mlp.experts
+            for loaded in runner.load_weights(layer_expert_weights):
+                loaded_params.add(f"layers.{layer_idx}.mlp.experts.{loaded}")
         return loaded_params
 
 
