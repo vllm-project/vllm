@@ -42,8 +42,9 @@ same optional `watermarking` request field. The Rust token API accepts it in
 `sampling_params`, and the Rust gRPC `GenerateRequest` accepts it directly.
 Omitting the field requests watermarking by default.
 
-Deployments that require watermarking must restrict explicit opt-out to trusted
-callers, or strip and validate the field at the ingress boundary.
+Deployments that require watermarking can set `"enforce": true` in
+`--watermark-config` so the engine ignores request-level opt-outs, or restrict
+explicit opt-out to trusted callers at the ingress boundary.
 
 `context_width` controls how many prior tokens seed each watermark decision
 and defaults to 4. Larger values make the watermark less robust to

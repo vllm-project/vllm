@@ -50,6 +50,8 @@ class WatermarkConfig:
     """Pseudorandom function used by the watermarking algorithm."""
     allow_target_only_watermarking: bool = False
     """Allow speculative decoding without watermarking draft tokens."""
+    enforce: bool = False
+    """Watermark every generation request, ignoring request-level opt-outs."""
 
     @property
     def supports_speculative_decoding(self) -> bool:

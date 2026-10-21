@@ -56,3 +56,27 @@ def test_llm_generated_sequence_is_watermarked(vllm_runner):
     assert result_use_wm.p_value < recorded_p_value * 10  # tolerance
 
     assert not result_no_wm.is_watermarked, result_no_wm
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
+)
+def test_enforce_watermarks_opted_out_request(vllm_runner):
+    watermark_config = {"key": 42, "context_width": 4}
+    detector = GumbelWatermarkDetector(**watermark_config)
+
+    with vllm_runner(
+        "facebook/opt-125m",
+        watermark_config={**watermark_config, "enforce": True},
+        seed=0,
+        enforce_eager=True,
+        max_model_len=512,
+        gpu_memory_utilization=0.2,
+    ) as runner:
+        output = runner.llm.generate(
+            "Tell me a story about an explorer who discovers a mysterious island.",
+            SamplingParams(temperature=1.0, max_tokens=256, watermarking=False),
+        )
+
+    result = detector.detect(list(output[0].outputs[0].token_ids))
+    assert result.is_watermarked, result
