@@ -456,9 +456,7 @@ class MMEncoderAttention(CustomOp):
             _fp8_scale_save_path = mm_cfg.mm_encoder_fp8_scale_save_path
             _fp8_scale_save_margin = mm_cfg.mm_encoder_fp8_scale_save_margin
 
-    def process_weights_after_loading(
-        self, act_dtype: torch.dtype | None = None
-    ) -> None:
+    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
         """Populate FP8 scale buffers after weights are loaded.
 
         ``act_dtype`` matches the signature used by :class:`Attention` and
