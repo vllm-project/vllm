@@ -55,11 +55,7 @@ pub(super) fn render_request(
         request.messages.last().map(ChatMessage::role),
         Some(ChatRole::User | ChatRole::Developer)
     );
-    let initial_tools = if request.tool_parsing_enabled() {
-        request.initial_tools()
-    } else {
-        &[]
-    };
+    let initial_tools = request.initial_tools();
     let render_offset = isize::from(!initial_tools.is_empty());
     let last_user_render_index =
         find_last_user_render_index(request.messages.as_slice(), render_offset);
