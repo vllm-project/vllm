@@ -183,6 +183,17 @@ def maybe_roundup_layer_hidden_size(
 # AITER's per_1x32 MXFP8 activation quant groups 32 elements per E8M0 exponent.
 MXFP8_GROUP_SIZE = 32
 
+# The AITER activation each MoEActivation is handed to fused_moe() as, mirroring
+# rocm_aiter_fused_moe_impl() in experts/rocm_aiter_moe.py. Anything absent is an
+# activation AITER rejects outright there.
+_AITER_MOE_ACTIVATION_NAMES = {
+    MoEActivation.SILU: "silu",
+    MoEActivation.GELU: "gelu",
+    MoEActivation.SWIGLUOAI: "swiglu",
+    MoEActivation.SWIGLUOAI_UNINTERLEAVE: "swiglu",
+    MoEActivation.SITU: "situ",
+}
+
 
 def mori_use_mxfp8_dispatch(
     moe: FusedMoEConfig, quant_config: FusedMoEQuantConfig
@@ -196,25 +207,47 @@ def mori_use_mxfp8_dispatch(
     FP4-activation kernel would hand the FP8 payload to an MXFP4 quant that
     only accepts BF16/FP16.
 
-    The query below fixes Silu + INTERLEAVE, so restrict this to the expert
-    configurations that resolve the same way in AiterExperts (see
-    experts/rocm_aiter_moe.py): SiTU picks its activation dtype from
-    AITER_SITUV2_*, and the DeepSeek-V4.1 a4w4 opt-in passes q_dtype_a=fp4x2
-    with SEPARATED, both while the quant config is still w4a16.
+    The activation and gate mode must therefore be the ones AiterExperts will
+    pass (experts/rocm_aiter_moe.py), not stand-ins: they select which input
+    decides the dtype, and the branches read different ones. SiTUv2 reads
+    AITER_SITUV2_*, while Silu/Swiglu on INTERLEAVE reads
+    AITER_BF16_FP8_MOE_BOUND, which vLLM pins to 0 on paths that never consult
+    it -- so asking about the wrong activation reads a knob that says nothing
+    about this model.
     """
     if not current_platform.is_rocm() or not quant_config.use_mxfp4_w4a16:
         return False
-    if moe.use_mxfp4_w4a4_dsv4 or moe.activation != MoEActivation.SILU:
+    # The DeepSeek-V4.1 a4w4 opt-in overrides q_dtype_a on the fused_moe call
+    # itself, so no query of the resolver can see that decision.
+    if moe.use_mxfp4_w4a4_dsv4:
         return False
     if moe.hidden_dim % MXFP8_GROUP_SIZE != 0:
         return False
 
     try:
-        from aiter import ActivationType, QuantType, dtypes
+        from aiter import QuantType, dtypes
         from aiter.fused_moe import resolve_activation_dtype
         from aiter.ops.flydsl.moe_common import GateMode
     except ImportError:
         return False
+
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    activation_name = _AITER_MOE_ACTIVATION_NAMES.get(moe.activation)
+    if activation_name is None:
+        return False
+    activation = rocm_aiter_ops.get_aiter_activation_type(activation_name)
+    if activation is None:
+        return False
+
+    if moe.activation == MoEActivation.SITU:
+        gate_mode = (
+            GateMode.INTERLEAVE
+            if rocm_aiter_ops.is_fused_moe_situv2_gate_up_interleaved()
+            else GateMode.SEPARATED
+        )
+    else:
+        gate_mode = GateMode.INTERLEAVE
 
     # M is unknown this early; resolve_activation_dtype returns None rather
     # than guessing when the answer would have depended on the token count.
@@ -222,8 +255,8 @@ def mori_use_mxfp8_dispatch(
         resolve_activation_dtype(
             QuantType.per_1x32,
             dtypes.fp4x2,
-            activation=ActivationType.Silu,
-            gate_mode=GateMode.INTERLEAVE,
+            activation=activation,
+            gate_mode=gate_mode,
             M=None,
         )
         == dtypes.fp8
