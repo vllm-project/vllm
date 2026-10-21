@@ -22,7 +22,6 @@ These tests pin the configuration and the lifecycle:
 They run on the scheduler alone, with no GPU and no RDMA.
 """
 
-import importlib
 import math
 import time
 from types import SimpleNamespace
@@ -30,6 +29,19 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
+
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio import (
+    moriio_common,
+    moriio_connector,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
+    MoRIIOConnectorMetadata,
+    MoRIIOMode,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
+    MoRIIOConnectorScheduler,
+    MoRIIOConnectorWorker,
+)
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -47,18 +59,6 @@ from .utils import create_model_runner_output, create_request, create_scheduler
 # Scheduler-side logic only: no GPU, no RDMA, no ``mori`` package needed, so
 # (unlike test_moriio_connector.py) this runs in the CPU CI job.
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
-
-moriio_common = importlib.import_module(
-    "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common"
-)
-moriio_connector = importlib.import_module(
-    "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector"
-)
-
-MoRIIOMode = moriio_common.MoRIIOMode
-MoRIIOConnectorMetadata = moriio_common.MoRIIOConnectorMetadata
-MoRIIOConnectorScheduler = moriio_connector.MoRIIOConnectorScheduler
-MoRIIOConnectorWorker = moriio_connector.MoRIIOConnectorWorker
 
 TIMEOUT_S = 60.0
 REQ_ID = "decode-req-0"

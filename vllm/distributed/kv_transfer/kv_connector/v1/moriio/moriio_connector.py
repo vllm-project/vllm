@@ -3424,11 +3424,6 @@ class MoRIIOConnectorWorker:
         """Start loading by triggering non-blocking moriio_xfer.
         We check for these trnxs to complete in each step().
         """
-        # WRITE-consumer blocks the scheduler watchdog timed out. Feed them into
-        # the existing invalid-block set rather than a parallel one, so they
-        # drain through get_block_ids_with_load_errors like READ failures do.
-        if metadata.write_load_failed_block_ids:
-            self._invalid_block_ids.update(metadata.write_load_failed_block_ids)
         self.transfer_id_to_request_id = metadata.transfer_id_to_request_id
         if self.is_producer:
             live_transfer_ids = set(self.transfer_id_to_request_id)
@@ -3442,6 +3437,12 @@ class MoRIIOConnectorWorker:
             )
             self.moriio_wrapper.async_wait_reqid()
             return
+        # WRITE-consumer blocks the scheduler's receive timer expired on. Feed
+        # them into the existing invalid-block set rather than a parallel one, so
+        # they drain through get_block_ids_with_load_errors like READ failures do.
+        # Only consumers get any, so this stays off the producer path.
+        if metadata.write_load_failed_block_ids:
+            self._invalid_block_ids.update(metadata.write_load_failed_block_ids)
         if self.mode == MoRIIOMode.WRITE:
             return
 
