@@ -271,7 +271,7 @@ def lookup_and_wait(
     keys: list[OffloadKey],
     ctx: ReqContext = _CTX,
     timeout: float = 1.0,
-) -> list[bool]:
+) -> list[LookupResult]:
     """Perform a full async lookup cycle and return resolved results."""
     for k in keys:
         tier.lookup(k, ctx)
