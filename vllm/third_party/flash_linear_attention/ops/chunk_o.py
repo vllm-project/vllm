@@ -12,6 +12,7 @@
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices
@@ -20,6 +21,65 @@ from .utils import FLA_CHUNK_SIZE, check_shared_mem, is_nvidia_hopper
 
 BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
+
+# Three things keep the fastest configuration out of this space on gfx942, in
+# descending order of what they are worth.
+#
+# 1. The space never sets matrix_instr_nonkdim, so the backend emits
+#    v_mfma_f32_32x32x8_bf16 and the 16x16 form is never tried. Adding it to the tiles
+#    already here, changing nothing else, is worth 1.427x -- 60% of the total. This
+#    kernel is bound by LDS traffic rather than MFMA throughput, so the trade is a win:
+#    v_mfma_f32_16x16x16_bf16 needs more instructions (72 vs 40) but its fragment layout
+#    matches the LDS tile, cutting ds_read 80 -> 36 and ds_write 36 -> 22.
+#
+# 2. num_stages=1 is not in the space. Dropping the pipeline frees the second LDS
+#    buffer, 24576 B -> 8192 B, which moves the kernel off the LDS occupancy ceiling
+#    onto the register ceiling: 2.0 -> 4.0 waves/SIMD. Worth 1.137x alone, and 1.580x
+#    together with the MFMA width.
+#
+# 3. check_shared_mem() compares the device's LDS against Backend.DEFAULT = 102400 B,
+#    a threshold taken from a table with only NVIDIA entries, so it is False on gfx942
+#    and BK/BV=128 is dropped. BV=128 is restored here; BK=128 is not. BK is the K-loop
+#    tile, so BK=128 reduces K in one block where the stock space uses two or four,
+#    re-associating an fp32 sum: the final recurrent state is unchanged but the output
+#    differs in the last bits of a few elements (at T=30720, 657 of 188743680, by at most
+#    2.4e-4 absolute). It wins an isolated long-sequence microbenchmark and loses at this
+#    model's chunked-prefill size, where 32768 B of LDS halves occupancy, so it is not
+#    worth a change in numerics and is left out.
+#
+# Medians of 5 runs on MI325X at the Qwen3-Next GDN shapes, T=30720; stock arm stable
+# to 0.3%, full patch to 3.3%. Every config added here is bit-identical to the stock
+# result, output and final state alike.
+#
+# The space below is deliberately narrower than the stock one: num_warps stops at 4 where
+# NUM_WARPS carries 8 off-Hopper, and num_stages at 2. A wider sweep over
+# BK in {32,64,128} x BV in {64,128} x warps in {1,2,4} x stages in {1,2,3} finds the same
+# winner at the same speed and costs 77.8 s of cold autotune against 49.9 s, so the
+# candidates that never won were dropped.
+#
+# Add the configs behind on_gfx942() rather than moving the threshold, which would
+# change every other backend too, and let the existing autotuner pick between them.
+#
+# ``matrix_instr_nonkdim`` is an option of Triton's AMD backend rather than a kernel
+# argument: the backend lifts it out of the config kwargs at compile time. A Triton that
+# does not recognize it raises instead of being skipped, because the autotuner only
+# swallows ``OutOfResources``. That is the one way these configs can break a build that
+# works today, so it is pinned by the tests rather than left implicit.
+_GFX942_CONFIGS: list[triton.Config] = []
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx942
+
+    if on_gfx942():
+        _GFX942_CONFIGS = [
+            triton.Config(
+                {"BK": 64, "BV": BV, "matrix_instr_nonkdim": 16},
+                num_warps=num_warps,
+                num_stages=num_stages,
+            )
+            for BV in [64, 128]
+            for num_warps in [2, 4]
+            for num_stages in [1, 2]
+        ]
 
 
 @triton.heuristics(
@@ -35,7 +95,8 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
         for BV in BKV_LIST
         for num_warps in NUM_WARPS
         for num_stages in [2, 3, 4]
-    ],
+    ]
+    + _GFX942_CONFIGS,
     key=["H", "K", "V", "BT"],
 )
 @triton.jit(do_not_specialize=["T"])
