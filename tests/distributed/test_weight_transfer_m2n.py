@@ -7,8 +7,11 @@ source contract, and collective-safe whole-plan validation. The transfer itself
 needs the M2N runtime and multiple GPUs, so it is exercised separately.
 """
 
+import gc
+import json
 import logging
 import socket
+import weakref
 from contextlib import contextmanager
 from functools import wraps
 from types import MethodType, SimpleNamespace
@@ -21,6 +24,7 @@ import torch
 
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer import (
+    RetryableWeightUpdateError,
     WeightTransferEngineFactory,
     WeightTransferTrainerFactory,
 )
@@ -38,6 +42,7 @@ from vllm.distributed.weight_transfer.m2n_common import (
     build_m2n_param_routes,
     build_m2n_transfer_routes,
     build_m2n_transfer_waves,
+    check_communicator_init_agreement,
     check_data_plane_agreement,
     check_multi_communicator_launch_order,
     check_runtime_ready_agreement,
@@ -113,57 +118,25 @@ def test_multi_communicator_launch_order_rejects_invalid_route_count(num_routes)
 
 
 @pytest.mark.parametrize(
-    "engine_type,group_attribute",
+    "engine_type,groups_attribute,legacy_attribute",
     [
-        (M2NWeightTransferEngine, "model_update_group"),
-        (M2NTrainerWeightTransferEngine, "group"),
+        (
+            M2NWeightTransferEngine,
+            "_model_update_groups",
+            "model_update_group",
+        ),
+        (
+            M2NTrainerWeightTransferEngine,
+            "_route_communicators",
+            "group",
+        ),
     ],
 )
-def test_shutdown_releases_resources_once(monkeypatch, engine_type, group_attribute):
-    if engine_type is M2NWeightTransferEngine:
-        vllm_config = SimpleNamespace(parallel_config=Mock(), model_config=Mock())
-        engine = engine_type(
-            WeightTransferConfig(backend="nccl_m2n"),
-            vllm_config,
-            torch.device("cuda:0"),
-            Mock(),
-        )
-    else:
-        engine = engine_type(client=Mock(), source=Mock(), is_sender=True)
-    handle = Mock()
-    engine._handle = handle
-    group = Mock()
-    setattr(engine, group_attribute, group)
-    synchronize = Mock()
-    monkeypatch.setattr(torch.accelerator, "synchronize", synchronize)
-
-    engine.shutdown()
-    engine.shutdown()
-
-    synchronize.assert_called_once_with()
-    handle.destroy.assert_called_once_with()
-    group.abort.assert_called_once_with()
-    group.destroy.assert_not_called()
-    assert engine._handle is None
-    assert getattr(engine, group_attribute) is None
-    if engine_type is M2NWeightTransferEngine:
-        assert engine._parameter_destinations == []
-        assert engine._staged_targets == {}
-    else:
-        assert engine._destination_plan == []
-        assert engine._metadata_group is None
-
-
-@pytest.mark.parametrize(
-    "engine_type,group_attribute",
-    [
-        (M2NWeightTransferEngine, "model_update_group"),
-        (M2NTrainerWeightTransferEngine, "group"),
-    ],
-)
-@pytest.mark.parametrize("failure", ["synchronize", "handle"])
-def test_shutdown_attempts_all_cleanup_after_failure(
-    monkeypatch, engine_type, group_attribute, failure
+def test_shutdown_releases_resources_once(
+    monkeypatch,
+    engine_type,
+    groups_attribute,
+    legacy_attribute,
 ):
     if engine_type is M2NWeightTransferEngine:
         vllm_config = SimpleNamespace(parallel_config=Mock(), model_config=Mock())
@@ -176,15 +149,104 @@ def test_shutdown_attempts_all_cleanup_after_failure(
     else:
         engine = engine_type(client=Mock(), source=Mock(), is_sender=True)
     handle = Mock()
-    group = Mock()
     engine._handle = handle
-    setattr(engine, group_attribute, group)
+    groups = {0: Mock(), 1: Mock()}
+    setattr(engine, groups_attribute, groups)
+    setattr(engine, legacy_attribute, groups[0])
+    stream = Mock()
+    stream_ref = weakref.ref(stream)
+    engine._route_streams = {0: stream}
+    del stream
+    engine._routes = (Mock(),)
+    engine._param_routes = (0,)
+    if engine_type is M2NTrainerWeightTransferEngine:
+        engine._transfer_waves = (Mock(),)
+
+    def assert_stream_alive():
+        assert stream_ref() is not None
+
+    synchronize = Mock(side_effect=assert_stream_alive)
+    handle.destroy.side_effect = assert_stream_alive
+    for group in groups.values():
+        group.abort.side_effect = assert_stream_alive
+    monkeypatch.setattr(torch.accelerator, "synchronize", synchronize)
+
+    engine.shutdown()
+    engine.shutdown()
+
+    synchronize.assert_called_once_with()
+    handle.destroy.assert_called_once_with()
+    for group in groups.values():
+        group.abort.assert_called_once_with()
+        group.destroy.assert_not_called()
+    assert engine._handle is None
+    assert getattr(engine, groups_attribute) == {}
+    assert getattr(engine, legacy_attribute) is None
+    assert engine._route_streams == {}
+    assert engine._routes == ()
+    assert engine._param_routes == ()
+    if engine_type is M2NWeightTransferEngine:
+        assert engine._source_topology == M2NSourceTopology((), ())
+        assert engine._parameter_destinations == []
+        assert engine._staged_targets == {}
+    else:
+        assert engine._source_topology is None
+        assert engine._destination_plan == []
+        assert engine._transfer_waves == ()
+        assert engine._metadata_group is None
+
+
+@pytest.mark.parametrize(
+    "engine_type,groups_attribute,legacy_attribute",
+    [
+        (
+            M2NWeightTransferEngine,
+            "_model_update_groups",
+            "model_update_group",
+        ),
+        (
+            M2NTrainerWeightTransferEngine,
+            "_route_communicators",
+            "group",
+        ),
+    ],
+)
+@pytest.mark.parametrize("failure", ["synchronize", "handle", "communicator"])
+def test_shutdown_attempts_all_cleanup_after_failure(
+    monkeypatch,
+    engine_type,
+    groups_attribute,
+    legacy_attribute,
+    failure,
+):
+    if engine_type is M2NWeightTransferEngine:
+        vllm_config = SimpleNamespace(parallel_config=Mock(), model_config=Mock())
+        engine = engine_type(
+            WeightTransferConfig(backend="nccl_m2n"),
+            vllm_config,
+            torch.device("cuda:0"),
+            Mock(),
+        )
+    else:
+        engine = engine_type(client=Mock(), source=Mock(), is_sender=True)
+    handle = Mock()
+    groups = {0: Mock(), 1: Mock()}
+    engine._handle = handle
+    setattr(engine, groups_attribute, groups)
+    setattr(engine, legacy_attribute, groups[0])
+    engine._route_streams = {0: Mock()}
+    engine._routes = (Mock(),)
+    engine._param_routes = (0,)
+    if engine_type is M2NTrainerWeightTransferEngine:
+        engine._transfer_waves = (Mock(),)
 
     synchronize = Mock()
     if failure == "synchronize":
         synchronize.side_effect = RuntimeError("synchronize failed")
-    else:
+    elif failure == "handle":
         handle.destroy.side_effect = RuntimeError("handle destroy failed")
+    else:
+        groups[0].abort.side_effect = RuntimeError("communicator abort failed")
     monkeypatch.setattr(torch.accelerator, "synchronize", synchronize)
 
     with pytest.raises(RuntimeError, match=failure):
@@ -192,17 +254,27 @@ def test_shutdown_attempts_all_cleanup_after_failure(
 
     synchronize.assert_called_once_with()
     handle.destroy.assert_called_once_with()
-    group.abort.assert_called_once_with()
-    group.destroy.assert_not_called()
+    for group in groups.values():
+        group.abort.assert_called_once_with()
+        group.destroy.assert_not_called()
     assert engine._handle is None
-    assert getattr(engine, group_attribute) is None
+    assert getattr(engine, groups_attribute) == {}
+    assert getattr(engine, legacy_attribute) is None
+    assert engine._route_streams == {}
+    assert engine._routes == ()
+    assert engine._param_routes == ()
     if engine_type is M2NTrainerWeightTransferEngine:
+        assert engine._transfer_waves == ()
+        assert engine._source_topology is None
         assert engine._metadata_group is None
+    else:
+        assert engine._source_topology == M2NSourceTopology((), ())
 
     engine.shutdown()
     synchronize.assert_called_once_with()
     handle.destroy.assert_called_once_with()
-    group.abort.assert_called_once_with()
+    for group in groups.values():
+        group.abort.assert_called_once_with()
 
 
 class _BufferLike:
@@ -707,13 +779,12 @@ class TestPreflightAgreement:
 
         def gather(envelope):
             peer = dict(envelope)
-            peer["mode"] = "uid"
-            peer["uid_digest"] = "different"
+            peer["routes"] = list(reversed(envelope["routes"]))
             return [envelope, peer]
 
         group.all_gather_obj.side_effect = gather
         with pytest.raises(RuntimeError, match="data-plane identity disagrees"):
-            check_data_plane_agreement(group, None)
+            check_data_plane_agreement(group, (b"first", b"second"))
 
     def test_runtime_error_is_shared_before_nccl4py(self):
         group = Mock(world_size=2)
@@ -724,6 +795,58 @@ class TestPreflightAgreement:
 
         with pytest.raises(RuntimeError, match="no nccl_m2n"):
             check_runtime_ready_agreement(group, None)
+
+    def test_source_topology_disagreement_is_reported_before_nccl4py(self):
+        params = [
+            M2NWireParam("first", "float32", (4,), (1, 2), (REPLICATE, 0)),
+            M2NWireParam("second", "float32", (4,), (1, 2), (REPLICATE, 0)),
+        ]
+        topology = M2NSourceTopology(
+            groups=((0, 1), (2, 3)),
+            param_groups=(0, 1),
+        )
+        peer_topology = M2NSourceTopology(
+            groups=((1, 0), (2, 3)),
+            param_groups=(0, 1),
+        )
+        peer_digest = source_plan_digest(params, peer_topology)
+        group = Mock(world_size=2)
+
+        def gather(envelope):
+            peer = dict(envelope)
+            peer["digest"] = peer_digest
+            peer["declared_digest"] = peer_digest
+            return [envelope, peer]
+
+        group.all_gather_obj.side_effect = gather
+
+        with pytest.raises(RuntimeError, match="source digest disagrees"):
+            check_source_plan_agreement(group, params, topology=topology)
+
+    @pytest.mark.parametrize(
+        ("peer_errors", "match"),
+        [
+            ([None, "NCCL failed"], "communicator 1.*NCCL failed"),
+            ([None], "reported 1 communicator results, expected 2"),
+        ],
+    )
+    def test_one_shot_communicator_init_agreement_reaches_every_rank(
+        self, peer_errors, match
+    ):
+        group = Mock(world_size=2)
+        group.all_gather_obj.side_effect = lambda envelope: [
+            envelope,
+            {
+                "phase": "communicator_init",
+                "errors": peer_errors,
+                "error": None,
+            },
+        ]
+
+        with pytest.raises(RuntimeError, match=match):
+            check_communicator_init_agreement(group, [None, None])
+
+        group.all_gather_obj.assert_called_once()
 
 
 class TestWireTypes:
@@ -756,15 +879,40 @@ class TestWireTypes:
             params=[param.to_dict()],
         )
         fields.update(overrides)
-        if "params" in overrides and "source_digest" not in overrides:
+        if {
+            "params",
+            "source_topology",
+        } & overrides.keys() and "source_digest" not in overrides:
             wire_params = [M2NWireParam.from_dict(value) for value in fields["params"]]
-            fields["source_digest"] = source_plan_digest(wire_params)
+            topology = fields.get("source_topology")
+            fields["source_digest"] = source_plan_digest(
+                wire_params,
+                None if topology is None else M2NSourceTopology.from_dict(topology),
+            )
         return M2NWeightTransferInitInfo(**fields)
 
     def test_accepts_a_consistent_plan(self):
         assert [param.name for param in self._init_info().parse_wire_params()] == ["w"]
 
-    def test_destination_policy_uses_wire_schema_v3(self):
+    def test_parse_source_plan_preserves_per_parameter_groups(self):
+        params = [
+            self._param("first"),
+            self._param("second"),
+        ]
+        topology = M2NSourceTopology(
+            groups=((1,), (0,)),
+            param_groups=(1, 0),
+        )
+        info = self._init_info(
+            rank_offset=2,
+            world_size=4,
+            params=[param.to_dict() for param in params],
+            source_topology=topology.to_dict(),
+        )
+
+        assert info.parse_source_plan() == (tuple(params), topology)
+
+    def test_destination_and_schedule_policy_use_current_wire_schema(self):
         param = M2NWireParam(
             "w",
             "bfloat16",
@@ -774,7 +922,7 @@ class TestWireTypes:
             allow_full_fallback=False,
         )
 
-        assert M2N_WIRE_SCHEMA_VERSION == 3
+        assert M2N_WIRE_SCHEMA_VERSION == 5
         assert param.to_dict()["allow_full_fallback"] is False
         assert self._init_info(
             params=[param.to_dict()],
@@ -788,6 +936,63 @@ class TestWireTypes:
         assert info.master_port == 1234
         assert info.nccl_unique_id_bytes == b"\x00" * 128
         assert VALID_UID_B64 not in repr(info)
+
+    def test_plural_uids_preserve_transfer_route_order(self):
+        encoded = [VALID_UID_B64, SECOND_VALID_UID_B64]
+        expected = (b"\x00" * 128, b"\x01" * 128)
+        worker_info = self._init_info(nccl_unique_ids_b64=encoded)
+        trainer_info = M2NTrainerInitInfo(
+            master_address="127.0.0.1",
+            master_port=1234,
+            world_size=3,
+            num_trainer_ranks=2,
+            rank=0,
+            nccl_unique_ids_b64=encoded,
+        )
+
+        assert worker_info.nccl_unique_id_bytes_by_route(2) == expected
+        assert trainer_info.data_plane_unique_ids(2) == expected
+
+    def test_plural_uid_count_must_match_transfer_routes(self):
+        worker_info = self._init_info(nccl_unique_ids_b64=[VALID_UID_B64])
+        trainer_info = M2NTrainerInitInfo(
+            master_address="127.0.0.1",
+            master_port=1234,
+            world_size=3,
+            num_trainer_ranks=2,
+            rank=0,
+            nccl_unique_ids_b64=[VALID_UID_B64],
+        )
+
+        with pytest.raises(ValueError, match="exactly one UID per transfer"):
+            worker_info.nccl_unique_id_bytes_by_route(2)
+        with pytest.raises(ValueError, match="1 entries, expected 2"):
+            trainer_info.data_plane_unique_ids(2)
+
+    def test_singular_uid_is_rejected_for_multiple_transfer_routes(self):
+        worker_info = self._init_info(nccl_unique_id_b64=VALID_UID_B64)
+        trainer_info = M2NTrainerInitInfo(
+            master_address="127.0.0.1",
+            master_port=1234,
+            world_size=3,
+            num_trainer_ranks=2,
+            rank=0,
+            nccl_unique_id_b64=VALID_UID_B64,
+        )
+
+        with pytest.raises(ValueError, match="single transfer"):
+            worker_info.nccl_unique_id_bytes_by_route(2)
+        with pytest.raises(ValueError, match="only for one transfer"):
+            trainer_info.data_plane_unique_ids(2)
+
+    def test_data_plane_preflight_rejects_duplicate_pre_shared_uids(self):
+        group = Mock(world_size=2)
+        group.all_gather_obj.side_effect = lambda envelope: [envelope, envelope]
+
+        with pytest.raises(RuntimeError, match="distinct"):
+            check_data_plane_agreement(group, [b"same", b"same"])
+
+        group.all_gather_obj.assert_called_once()
 
     def test_m2n_communicator_uses_nccl4py_uid(self, monkeypatch):
         nccl = Mock()
@@ -841,6 +1046,61 @@ class TestWireTypes:
             {"unique_id": b"generated-id", "error": None}, src=0
         )
         nccl.UniqueId.from_bytes.assert_called_once_with(b"generated-id")
+
+    def test_m2n_communicator_maps_global_rank_to_ordered_route_rank(self, monkeypatch):
+        nccl = Mock()
+        metadata_group = Mock(rank=0, world_size=6)
+        unique_id = object()
+        communicator = object()
+        nccl.UniqueId.from_bytes.return_value = unique_id
+        nccl.Communicator.init.return_value = communicator
+
+        @contextmanager
+        def unpinned():
+            yield
+
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_common.unpinned_nccl_env",
+            unpinned,
+        )
+
+        result = create_m2n_communicator(
+            nccl,
+            metadata_group,
+            b"shared-id",
+            members=(2, 0, 4, 5),
+        )
+
+        assert result is communicator
+        nccl.Communicator.init.assert_called_once_with(
+            nranks=4,
+            rank=1,
+            unique_id=unique_id,
+        )
+
+    def test_route_nonmember_joins_uid_broadcast_without_nccl_init(self):
+        nccl = Mock()
+        metadata_group = Mock(rank=0, world_size=6)
+        metadata_group.broadcast_obj.return_value = {
+            "unique_id": b"generated-id",
+            "error": None,
+        }
+
+        result = create_m2n_communicator(
+            nccl,
+            metadata_group,
+            None,
+            members=(2, 3, 4, 5),
+        )
+
+        assert result is None
+        metadata_group.broadcast_obj.assert_called_once_with(
+            None,
+            src=2,
+        )
+        nccl.get_unique_id.assert_not_called()
+        nccl.Communicator.init.assert_not_called()
+        nccl.UniqueId.from_bytes.assert_not_called()
 
     def test_metadata_rendezvous_is_required_with_uid(self):
         with pytest.raises(ValueError, match="master_address"):
@@ -971,7 +1231,7 @@ class TestWireTypes:
             torch.nn.Module(),
         )
         engine._handle = object()
-        engine.model_update_group = object()
+        engine._model_update_groups = {0: object()}
 
         with pytest.raises(RuntimeError, match="already initialized"):
             engine.init_transfer_engine(self._init_info(params=[]))
@@ -1038,13 +1298,18 @@ class TestWireTypes:
             torch.device("cuda:0"),
             torch.nn.Module(),
         )
-        info = self._init_info(params=[], worker_rank_offset=2)
+        info = self._init_info(worker_rank_offset=2)
 
         engine.init_transfer_engine(info)
 
         assert init_metadata.call_args.args[0].rank_offset == 2
         assert info.rank_offset == 1
-        make_communicator.assert_called_once_with(nccl, group, None)
+        make_communicator.assert_called_once_with(
+            nccl,
+            group,
+            None,
+            members=(0, 1, 2),
+        )
 
     def test_uid_data_plane_still_uses_tcp_metadata(self, monkeypatch):
         group = Mock(rank=1, world_size=3)
@@ -1102,7 +1367,12 @@ class TestWireTypes:
         engine.init_transfer_engine(info)
 
         init_metadata.assert_called_once()
-        make_communicator.assert_called_once_with(nccl, group, b"\x00" * 128)
+        make_communicator.assert_called_once_with(
+            nccl,
+            group,
+            b"\x00" * 128,
+            members=(0, 1, 2),
+        )
 
     def test_destination_mesh_must_cover_the_workers(self):
         """The trainer declares the inference mesh, so one that does not cover
@@ -1115,12 +1385,13 @@ class TestWireTypes:
                 num_workers=2,
             )
 
-    def test_source_mesh_must_cover_the_trainers_on_worker(self):
+    def test_source_mesh_must_cover_its_group_on_worker(self):
         engine = object.__new__(M2NWeightTransferEngine)
         param = self._param(src_mesh_dims=(2, 1))
+        topology = M2NSourceTopology.single_group(1, 1)
 
-        with pytest.raises(ValueError, match="covers 2 ranks, but there are 1"):
-            engine._prepare_source_plan((param,), num_trainer_ranks=1)
+        with pytest.raises(ValueError, match="covers 2 ranks.*group 0 contains 1"):
+            engine._prepare_source_plan((param,), topology)
 
     def test_destination_planning_failure_precedes_nccl4py(self, monkeypatch):
         group = Mock(rank=1)
@@ -1236,7 +1507,7 @@ class TestWireTypes:
     def test_partial_worker_initialization_releases_transport_resources(
         self, monkeypatch
     ):
-        metadata_group = Mock(rank=1, world_size=3)
+        metadata_group = Mock(rank=2, world_size=3)
         monkeypatch.setattr(
             "vllm.distributed.weight_transfer.m2n_engine.worker_init_metadata_group",
             Mock(return_value=metadata_group),
@@ -1245,13 +1516,28 @@ class TestWireTypes:
             "vllm.distributed.weight_transfer.m2n_engine.import_m2n",
             Mock(return_value=Mock()),
         )
+        params = [self._param("first"), self._param("second")]
+        topology = M2NSourceTopology(
+            groups=((0,), (1,)),
+            param_groups=(0, 1),
+        )
+        digest = source_plan_digest(params, topology)
         monkeypatch.setattr(
             "vllm.distributed.weight_transfer.m2n_engine.check_source_plan_agreement",
-            Mock(return_value=source_plan_digest([])),
+            Mock(return_value=digest),
         )
 
         def prepare_destination_plan(engine, **_kwargs):
-            engine._parameter_destinations = []
+            engine._parameter_destinations = [
+                M2NDestination(
+                    param.name,
+                    M2NDestinationMode.FULL_FALLBACK,
+                    REPLICATED,
+                    param.shape,
+                    None,
+                )
+                for param in params
+            ]
             engine._destination_shard_index = 0
             engine._staging_pool = Mock()
             engine._uses_load_weights = True
@@ -1273,16 +1559,35 @@ class TestWireTypes:
             "vllm.distributed.weight_transfer.m2n_engine.check_runtime_ready_agreement",
             Mock(),
         )
+
+        def check_communicator_init(_group, local_errors):
+            assert local_errors[0] is None
+            assert "communicator init failed" in local_errors[1]
+            raise RuntimeError(local_errors[1])
+
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_engine."
+            "check_communicator_init_agreement",
+            check_communicator_init,
+        )
         handle = Mock()
         nccl = Mock()
         monkeypatch.setattr(
             "vllm.distributed.weight_transfer.m2n_engine.prepare_m2n_local_runtime",
             Mock(return_value=(nccl, 0, handle)),
         )
+        first_communicator = Mock()
+        make_communicator = Mock(
+            side_effect=[
+                first_communicator,
+                RuntimeError("communicator init failed"),
+            ]
+        )
         monkeypatch.setattr(
             "vllm.distributed.weight_transfer.m2n_engine.create_m2n_communicator",
-            Mock(side_effect=RuntimeError("communicator init failed")),
+            make_communicator,
         )
+        monkeypatch.setattr(torch.cuda, "Stream", Mock(return_value=Mock()))
         vllm_config = SimpleNamespace(
             parallel_config=Mock(), model_config=SimpleNamespace(quantization=None)
         )
@@ -1294,10 +1599,26 @@ class TestWireTypes:
         )
 
         with pytest.raises(RuntimeError, match="communicator init failed"):
-            engine.init_transfer_engine(self._init_info(params=[]))
+            engine.init_transfer_engine(
+                self._init_info(
+                    rank_offset=2,
+                    world_size=3,
+                    dst_mesh_dims=[1, 1],
+                    params=[param.to_dict() for param in params],
+                    source_topology=topology.to_dict(),
+                )
+            )
 
+        assert make_communicator.call_args_list == [
+            call(nccl, metadata_group, None, members=(0, 2)),
+            call(nccl, metadata_group, None, members=(1, 2)),
+        ]
+        first_communicator.abort.assert_called_once_with()
         handle.destroy.assert_called_once_with()
         assert engine.model_update_group is None
+        assert engine._model_update_groups == {}
+        assert engine._route_streams == {}
+        assert engine._routes == ()
         assert engine._handle is None
         assert engine._dst_mesh is None
         assert engine._parameter_destinations == []
@@ -1322,7 +1643,10 @@ class TestWireTypes:
         param = self._param(dtype_name=dtype_name)
 
         with pytest.raises(ValueError, match=r"parameter 'w'.*dtype"):
-            engine._prepare_source_plan((param,), num_trainer_ranks=1)
+            engine._prepare_source_plan(
+                (param,),
+                M2NSourceTopology.single_group(1, 1),
+            )
 
     def _init_32_to_4_plan(self, monkeypatch, destination):
         monkeypatch.setattr(
@@ -1340,7 +1664,10 @@ class TestWireTypes:
             src_mesh_dims=(1, 32),
             src_placements=(REPLICATE, 0),
         )
-        engine._prepare_source_plan((param,), num_trainer_ranks=32)
+        engine._prepare_source_plan(
+            (param,),
+            M2NSourceTopology.single_group(32, 1),
+        )
         engine._dst_mesh = M2NMesh((1, 4), 32)
         engine._prepare_destination_plan(metadata_rank=32, num_workers=4)
 
@@ -1368,7 +1695,7 @@ class TestWireTypes:
             Mock(),
         )
         engine._handle = Mock()
-        engine.model_update_group = Mock()
+        _set_pp1_worker_transport(engine, 1)
         engine._staging_pool = None
         engine._staged_targets = {}
         engine._next_parameter_index = 0
@@ -1381,6 +1708,8 @@ class TestWireTypes:
             )
         ]
         engine._reshard = Mock()
+        group = engine.model_update_group
+        handle = engine._handle
 
         with pytest.raises(ValueError, match=r"update order mismatch.*unknown"):
             engine.receive_weights(
@@ -1388,6 +1717,10 @@ class TestWireTypes:
             )
 
         engine._reshard.assert_not_called()
+        group.abort.assert_not_called()
+        handle.destroy.assert_not_called()
+        assert engine.model_update_group is group
+        assert engine._handle is handle
 
     def test_fallback_tensors_share_one_load_weights_invocation(self, monkeypatch):
         class CoupledModel:
@@ -1405,7 +1738,6 @@ class TestWireTypes:
         direct = torch.zeros(1)
         engine = object.__new__(M2NWeightTransferEngine)
         engine._handle = object()
-        engine.model_update_group = object()
         engine.device = torch.device("cpu")
         engine.model = model
         engine._staging_pool = None
@@ -1444,15 +1776,15 @@ class TestWireTypes:
                 None,
             ),
         ]
+        stream = Mock()
+        _set_pp1_worker_transport(engine, len(names), stream=stream)
         reshard_order = []
 
-        def reshard(comm, stream, meta, placements, buffer):
+        def reshard(comm, stream, route_dst_mesh, meta, placements, buffer):
             reshard_order.append(meta.name)
             buffer.fill_(len(reshard_order))
 
         engine._reshard = reshard
-        stream = Mock()
-        monkeypatch.setattr(torch.cuda, "current_stream", lambda: stream)
 
         engine.receive_weights(M2NWeightTransferUpdateInfo(names=names))
 
@@ -1461,12 +1793,11 @@ class TestWireTypes:
         assert [tensor.item() for _, tensor in model.loaded] == [1, 3]
         assert direct.item() == 2
         assert reshard_order == ["pair.weight", "direct", "pair.scale"]
-        assert stream.synchronize.call_count == 2
+        assert stream.synchronize.call_count == 3
 
     def test_contiguous_chunks_follow_the_initialization_plan(self, monkeypatch):
         engine = object.__new__(M2NWeightTransferEngine)
         engine._handle = object()
-        engine.model_update_group = object()
         engine.device = torch.device("cpu")
         engine.model = Mock()
         engine._staging_pool = None
@@ -1493,14 +1824,14 @@ class TestWireTypes:
                 torch.zeros(1),
             ),
         ]
+        _set_pp1_worker_transport(engine, 2)
         engine._reshard = Mock()
-        monkeypatch.setattr(torch.cuda, "current_stream", Mock())
 
         engine.receive_weights(M2NWeightTransferUpdateInfo(names=["a"]))
         engine.receive_weights(M2NWeightTransferUpdateInfo(names=["b"]))
 
         assert engine._reshard.call_count == 2
-        assert [call.args[2].name for call in engine._reshard.call_args_list] == [
+        assert [call.args[3].name for call in engine._reshard.call_args_list] == [
             "a",
             "b",
         ]
@@ -1612,22 +1943,186 @@ class TestWorkerStagingLifecycle:
         )
         engine._m2n = Mock()
         engine._handle = Mock()
-        engine.model_update_group = Mock()
+        _set_pp1_worker_transport(engine, 1)
         return engine
 
-    def test_parse_failure_discards_only_update_staging(self):
+    def test_parse_failure_preserves_transport(self, monkeypatch):
         engine = self._engine()
+        engine._uses_load_weights = True
+        pool = Mock()
+        engine._staging_pool = pool
+        groups = {0: engine.model_update_group, 1: Mock()}
+        engine._model_update_groups = groups
+        engine._route_streams[1] = Mock()
+        handle = engine._handle
+        initialize = Mock()
+        abort_reload = Mock()
+        synchronize = Mock()
+        monkeypatch.setattr(
+            "vllm.model_executor.model_loader.reload.initialize_layerwise_reload",
+            initialize,
+        )
+        monkeypatch.setattr(
+            "vllm.model_executor.model_loader.reload.abort_layerwise_reload",
+            abort_reload,
+        )
+        monkeypatch.setattr(torch.accelerator, "synchronize", synchronize)
+
+        engine.start_weight_update()
+        with pytest.raises(ValueError, match="Invalid update_info"):
+            engine.update_weights({})
+        engine.start_weight_update()
+
+        assert initialize.call_count == 2
+        abort_reload.assert_called_once_with(engine.model)
+        assert pool.start_update.call_count == 2
+        pool.discard_update.assert_called_once_with()
+        for group in groups.values():
+            group.abort.assert_not_called()
+        handle.destroy.assert_not_called()
+        synchronize.assert_called_once_with()
+        assert engine.model_update_group is groups[0]
+        assert engine._model_update_groups == groups
+        assert engine._handle is handle
+
+    def test_start_failure_resets_update_but_preserves_transport(self, monkeypatch):
+        engine = self._engine()
+        engine._uses_load_weights = True
         pool = Mock()
         engine._staging_pool = pool
         group = engine.model_update_group
         handle = engine._handle
+        initialize = Mock()
+        abort_reload = Mock()
+        synchronize = Mock()
+        bind = Mock(side_effect=[RuntimeError("start failed"), None])
+        monkeypatch.setattr(
+            "vllm.model_executor.model_loader.reload.initialize_layerwise_reload",
+            initialize,
+        )
+        monkeypatch.setattr(
+            "vllm.model_executor.model_loader.reload.abort_layerwise_reload",
+            abort_reload,
+        )
+        monkeypatch.setattr(torch.accelerator, "synchronize", synchronize)
+        monkeypatch.setattr(engine, "_bind_staged_targets", bind)
 
-        with pytest.raises(ValueError, match="Invalid update_info"):
-            engine.update_weights({})
+        with pytest.raises(RuntimeError, match="start failed"):
+            engine.start_weight_update()
+        engine.start_weight_update()
 
+        assert initialize.call_count == 2
+        abort_reload.assert_called_once_with(engine.model)
+        synchronize.assert_called_once_with()
+        assert pool.start_update.call_count == 2
         pool.discard_update.assert_called_once_with()
+        group.abort.assert_not_called()
+        handle.destroy.assert_not_called()
         assert engine.model_update_group is group
         assert engine._handle is handle
+
+    def test_finish_failure_resets_update_for_full_retry(self):
+        engine = self._engine()
+        pool = Mock()
+        pool.release_retained_after_finalize.side_effect = [
+            RuntimeError("finish failed"),
+            None,
+        ]
+        engine._staging_pool = pool
+        group = engine.model_update_group
+        handle = engine._handle
+
+        with pytest.raises(RetryableWeightUpdateError, match="complete update"):
+            engine.finish_weight_update()
+        engine.start_weight_update()
+        engine.finish_weight_update()
+
+        assert pool.release_retained_after_finalize.call_count == 2
+        pool.discard_update.assert_called_once_with()
+        pool.start_update.assert_called_once_with()
+        pool.finish_update.assert_called_once_with()
+        group.abort.assert_not_called()
+        handle.destroy.assert_not_called()
+        assert engine.model_update_group is group
+        assert engine._handle is handle
+
+    def test_finalize_failure_resets_loader_without_aborting_transport(
+        self, monkeypatch
+    ):
+        engine = self._engine()
+        engine._uses_load_weights = True
+        pool = Mock()
+        engine._staging_pool = pool
+        group = engine.model_update_group
+        handle = engine._handle
+        finalize = Mock(side_effect=RuntimeError("finalize failed"))
+        abort_reload = Mock()
+        synchronize = Mock()
+        monkeypatch.setattr(
+            "vllm.model_executor.model_loader.reload.finalize_layerwise_reload",
+            finalize,
+        )
+        monkeypatch.setattr(
+            "vllm.model_executor.model_loader.reload.abort_layerwise_reload",
+            abort_reload,
+        )
+        monkeypatch.setattr(torch.accelerator, "synchronize", synchronize)
+
+        with pytest.raises(RetryableWeightUpdateError, match="complete update"):
+            engine.finish_weight_update()
+
+        finalize.assert_called_once_with(engine.model, engine.model_config)
+        synchronize.assert_called_once_with()
+        abort_reload.assert_called_once_with(engine.model)
+        pool.discard_update.assert_called_once_with()
+        group.abort.assert_not_called()
+        handle.destroy.assert_not_called()
+        assert engine.model_update_group is group
+        assert engine._handle is handle
+
+    def test_abort_precedes_release_of_worker_fallback_buffer(self, monkeypatch):
+        events = []
+
+        class FallbackBuffer:
+            def __del__(self):
+                events.append("released")
+
+        engine = self._engine()
+        layout = M2NLayout(M2NMesh((1, 1), 0), REPLICATED)
+        engine._metas = [M2NParamMeta("weight", torch.float32, (4,), layout)]
+        engine._parameter_destinations = [
+            M2NDestination(
+                "weight",
+                M2NDestinationMode.FULL_FALLBACK,
+                REPLICATED,
+                (4,),
+                None,
+            )
+        ]
+        engine.model = SimpleNamespace(load_weights=lambda weights: list(weights))
+        group = engine.model_update_group
+        group.abort.side_effect = lambda: events.append("abort")
+        handle = engine._handle
+        handle.destroy.side_effect = lambda: events.append("destroy")
+
+        def fail_reshard(*_args):
+            events.append("reshard")
+            raise RuntimeError("reshard failed")
+
+        engine._reshard = fail_reshard
+        monkeypatch.setattr(torch, "empty", lambda *_args, **_kwargs: FallbackBuffer())
+        synchronize = Mock()
+        monkeypatch.setattr(torch.accelerator, "synchronize", synchronize)
+
+        with pytest.raises(RuntimeError, match="reshard failed"):
+            engine.receive_weights(M2NWeightTransferUpdateInfo(names=["weight"]))
+        gc.collect()
+
+        assert events[0] == "reshard"
+        assert events.index("abort") < events.index("released")
+        synchronize.assert_not_called()
+        group.abort.assert_called_once_with()
+        handle.destroy.assert_called_once_with()
 
     def test_finish_allows_consecutive_updates(self):
         engine = self._engine()
@@ -1639,8 +2134,72 @@ class TestWorkerStagingLifecycle:
         assert engine._next_parameter_index == 0
         assert engine._staged_targets == {}
 
+    def test_worker_execution_keys_transport_by_route_index(self):
+        engine = self._engine()
+        layout = M2NLayout(M2NMesh((1, 1), 0), REPLICATED)
+        engine._metas = [
+            M2NParamMeta(name, torch.float32, (1,), layout)
+            for name in ("first", "second")
+        ]
+        engine._parameter_destinations = [
+            M2NDestination(
+                meta.name,
+                M2NDestinationMode.IN_PLACE,
+                REPLICATED,
+                (1,),
+                torch.zeros(1, device=engine.device),
+            )
+            for meta in engine._metas
+        ]
+        # Route order deliberately differs from source-group order. Parameter
+        # zero belongs to route one, while parameter one belongs to route zero.
+        engine._routes = (
+            M2NTransferRoute(
+                source_group_index=1,
+                members=(1, 2),
+                param_indices=(1,),
+                dst_mesh=M2NMesh((1, 1), 1),
+            ),
+            M2NTransferRoute(
+                source_group_index=0,
+                members=(0, 2),
+                param_indices=(0,),
+                dst_mesh=M2NMesh((1, 1), 1),
+            ),
+        )
+        engine._param_routes = build_m2n_param_routes(engine._routes, 2)
+        communicators = {0: object(), 1: object()}
+        events = []
+        streams = {
+            index: Mock(
+                synchronize=Mock(
+                    side_effect=lambda index=index: events.append(f"sync:{index}")
+                )
+            )
+            for index in range(2)
+        }
+        engine._model_update_groups = communicators
+        engine.model_update_group = communicators[0]
+        engine._route_streams = streams
+        engine._reshard = Mock(
+            side_effect=lambda _comm, _stream, _mesh, meta, *_: events.append(
+                f"reshard:{meta.name}"
+            )
+        )
+
+        engine.receive_weights(M2NWeightTransferUpdateInfo(names=["first", "second"]))
+
+        assert engine._param_routes == (1, 0)
+        calls = engine._reshard.call_args_list
+        assert [reshard.args[3].name for reshard in calls] == ["second", "first"]
+        assert calls[0].args[0] is communicators[0]
+        assert calls[1].args[0] is communicators[1]
+        streams[0].synchronize.assert_called_once_with()
+        streams[1].synchronize.assert_called_once_with()
+        assert events == ["reshard:second", "reshard:first", "sync:0", "sync:1"]
+
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-    def test_staged_pair_rebinds_for_each_update(self, monkeypatch):
+    def test_staged_pair_rebinds_and_orders_all_reuse_streams(self, monkeypatch):
         model = _AtomicSemanticModel()
         engine = self._engine()
         engine.model = model
@@ -1654,10 +2213,43 @@ class TestWorkerStagingLifecycle:
             M2NParamMeta(name, torch.float32, shape, layout)
             for name, shape in zip(names, shapes)
         ]
+        _set_pp1_worker_transport(engine, len(names), dst_mesh_dims=(1, 2))
         engine._prepare_destination_plan(metadata_rank=1, num_workers=2)
+        engine._routes = (
+            M2NTransferRoute(
+                source_group_index=0,
+                members=(0, 2, 3),
+                param_indices=(0,),
+                dst_mesh=M2NMesh((1, 2), 1),
+            ),
+            M2NTransferRoute(
+                source_group_index=1,
+                members=(1, 2, 3),
+                param_indices=(1,),
+                dst_mesh=M2NMesh((1, 2), 1),
+            ),
+        )
+        engine._param_routes = build_m2n_param_routes(engine._routes, len(names))
+        transfer_streams = {0: Mock(), 1: Mock()}
+        engine._route_streams = transfer_streams
+        engine._model_update_groups = {0: Mock(), 1: Mock()}
+        engine.model_update_group = engine._model_update_groups[0]
         pool = engine._staging_pool
         assert pool is not None
-        release_group = Mock(wraps=pool.release_group)
+        lifetime_events = []
+        for route_index, transfer_stream in transfer_streams.items():
+            transfer_stream.wait_stream.side_effect = (
+                lambda _consumer, route_index=route_index: lifetime_events.append(
+                    f"wait:{route_index}"
+                )
+            )
+        real_release_group = pool.release_group
+
+        def release_group_and_record(group):
+            lifetime_events.append("release")
+            real_release_group(group)
+
+        release_group = Mock(side_effect=release_group_and_record)
         monkeypatch.setattr(pool, "release_group", release_group)
 
         events = []
@@ -1674,8 +2266,16 @@ class TestWorkerStagingLifecycle:
             "synchronize",
             lambda: events.append("synchronize"),
         )
-        engine._reshard = lambda _comm, _stream, _meta, _placements, buffer: (
-            buffer.fill_(len(model.loaded) + 1)
+        consumer_stream = Mock()
+        monkeypatch.setattr(
+            torch.cuda,
+            "current_stream",
+            lambda *_args, **_kwargs: consumer_stream,
+        )
+        engine._reshard = (
+            lambda _comm, _stream, _mesh, _meta, _placements, buffer: buffer.fill_(
+                len(model.loaded) + 1
+            )
         )
 
         update_bindings = []
@@ -1688,6 +2288,19 @@ class TestWorkerStagingLifecycle:
 
         assert [name for name, _ in model.loaded] == names * 2
         assert release_group.call_args_list == [call(0), call(0)]
+        for transfer_stream in transfer_streams.values():
+            assert transfer_stream.wait_stream.call_args_list == [
+                call(consumer_stream),
+                call(consumer_stream),
+            ]
+        assert lifetime_events == [
+            "wait:0",
+            "wait:1",
+            "release",
+            "wait:0",
+            "wait:1",
+            "release",
+        ]
         assert all(
             first is not second for first, second in zip(*update_bindings, strict=True)
         )
@@ -1702,7 +2315,7 @@ class TestWorkerStagingLifecycle:
         ]
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-    def test_staged_consumer_failure_discards_update_only(self, monkeypatch):
+    def test_staged_consumer_failure_aborts_transport(self, monkeypatch):
         model = _AtomicSemanticModel()
         model.fail_consumers = True
         engine = self._engine()
@@ -1716,26 +2329,32 @@ class TestWorkerStagingLifecycle:
             M2NParamMeta(name, torch.float32, shape, layout)
             for name, shape in zip(names, [(4, 6, 4), (4, 4, 3)])
         ]
+        _set_pp1_worker_transport(engine, len(names), dst_mesh_dims=(1, 2))
         engine._prepare_destination_plan(metadata_rank=1, num_workers=2)
         monkeypatch.setattr(
             "vllm.model_executor.model_loader.reload.initialize_layerwise_reload",
             lambda _: None,
         )
-        engine._reshard = lambda _comm, _stream, _meta, _placements, buffer: (
-            buffer.fill_(1)
+        engine._reshard = (
+            lambda _comm, _stream, _mesh, _meta, _placements, buffer: buffer.fill_(1)
         )
         group = engine.model_update_group
         handle = engine._handle
+        pool = engine._staging_pool
+        assert pool is not None
 
         engine.start_weight_update()
         with pytest.raises(RuntimeError, match="semantic consumer failed"):
             engine.receive_weights(M2NWeightTransferUpdateInfo(names=names))
+        with pytest.raises(RuntimeError, match="not initialized"):
+            engine.start_weight_update()
 
         assert engine._staged_targets == {}
-        assert engine._staging_pool is not None
-        assert not engine._staging_pool._updating
-        assert engine.model_update_group is group
-        assert engine._handle is handle
+        assert not pool._updating
+        group.abort.assert_called_once_with()
+        handle.destroy.assert_called_once_with()
+        assert engine.model_update_group is None
+        assert engine._handle is None
 
 
 class TestDestinationPlan:
@@ -1830,6 +2449,60 @@ class TestDestinationPlan:
         assert reference == [self._sharded(0)]
         assert token.startswith("m2n-plan:")
         assert group.all_gather_obj.call_count == 2
+
+    def test_commit_token_hashes_source_topology_and_transfer_routes(self, monkeypatch):
+        param = self._param()
+        topology = M2NSourceTopology.single_group(1, 1)
+        source_digest = source_plan_digest([param], topology)
+        group = self._successful_group(
+            self._envelopes(
+                self._sharded(0), self._sharded(1), source_digest=source_digest
+            )
+        )
+        hashed_payloads = []
+
+        class CapturedDigest:
+            @staticmethod
+            def hexdigest():
+                return "captured"
+
+        def capture_digest(payload):
+            hashed_payloads.append(json.loads(payload))
+            return CapturedDigest()
+
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_plan.hashlib.sha256",
+            capture_digest,
+        )
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_plan.source_plan_digest",
+            lambda *_args, **_kwargs: source_digest,
+        )
+
+        _, token = agree_destination_plan(
+            group,
+            source_digest=source_digest,
+            params=[param],
+            source_topology=topology,
+            metas=[self._meta(param)],
+            dst_mesh=M2NMesh((1, 2), 1),
+            local_plan=None,
+            local_error=None,
+        )
+
+        assert token == "m2n-plan:captured"
+        assert len(hashed_payloads) == 1
+        payload = hashed_payloads[0]
+        assert payload["source_topology"] == topology.to_dict()
+        assert payload["transfer_routes"] == [
+            {
+                "source_group_index": 0,
+                "members": [0, 1, 2],
+                "param_indices": [0],
+                "dst_mesh_dims": [1, 2],
+                "dst_mesh_start_rank": 1,
+            }
+        ]
 
     def test_destination_commit_digest_must_match(self):
         param = self._param()
@@ -2151,14 +2824,27 @@ class _StaticM2NSource(M2NWeightSource):
         return iter(self._values)
 
 
+class _GroupedM2NSource(_StaticM2NSource):
+    def __init__(self, metadata, values, topology, group_values):
+        super().__init__(metadata, values)
+        self._topology = topology
+        self._group_values = group_values
+
+    def source_topology(self):
+        return self._topology
+
+    def iter_group(self, group_index):
+        return iter(self._group_values[group_index])
+
+
 class TestTrainerSourceContract:
     @staticmethod
-    def _meta(name="weight"):
+    def _meta(name="weight", mesh_dims=(1, 1)):
         return M2NParamMeta(
             name,
             torch.float32,
             (4,),
-            M2NLayout(M2NMesh((1, 1), 0), REPLICATED),
+            M2NLayout(M2NMesh(mesh_dims, 0), REPLICATED),
         )
 
     @staticmethod
@@ -2167,17 +2853,187 @@ class TestTrainerSourceContract:
             client=Mock(), source=source, is_sender=False
         )
         engine._m2n = _fake_m2n()
-        engine._handle = object()
+        engine._handle = Mock()
         engine._metas = source.metadata()
         engine._dst_mesh = M2NMesh((1, 1), 1)
         engine._dst_placements = [REPLICATED] * len(engine._metas)
-        engine.group = Mock(comm=1)
+        engine._trainer_rank = 0
+        if engine._metas:
+            engine._source_topology = M2NSourceTopology.single_group(
+                1, len(engine._metas)
+            )
+            engine._routes = build_m2n_transfer_routes(
+                engine._source_topology,
+                num_trainer_ranks=1,
+                world_size=2,
+                dst_mesh_dims=(1, 1),
+            )
+            engine._param_routes = build_m2n_param_routes(
+                engine._routes, len(engine._metas)
+            )
+            engine._transfer_waves = build_m2n_transfer_waves(
+                engine._routes,
+                [None] * len(engine._metas),
+            )
+            communicator = Mock(comm=1)
+            engine._route_communicators = {0: communicator}
+            engine._route_streams = {0: Mock()}
+            engine.group = communicator
+        else:
+            engine._source_topology = M2NSourceTopology((), ())
+            engine._routes = ()
+            engine._param_routes = ()
+            engine._transfer_waves = ()
+            engine._route_communicators = {}
+            engine._route_streams = {}
+            engine.group = None
         return engine
+
+    def test_legacy_source_defaults_to_one_group(self):
+        values = [("weight", _BufferLike())]
+        source = _StaticM2NSource(
+            [self._meta(mesh_dims=(1, 2))],
+            values,
+        )
+        engine = M2NTrainerWeightTransferEngine(
+            client=Mock(), source=source, is_sender=False
+        )
+        engine._trainer_rank = 0
+
+        assert source.source_topology() is None
+        assert list(source.iter_group(0)) == values
+        with pytest.raises(ValueError, match="only supports source group 0"):
+            list(source.iter_group(1))
+        engine._prepare_source_plan(source, num_trainer_ranks=2)
+        assert engine._source_topology == M2NSourceTopology.single_group(2, 1)
+
+    def test_source_mesh_is_validated_against_its_group_size(self):
+        metas = [
+            self._meta("first", (1, 2)),
+            self._meta("second", (2, 1)),
+        ]
+        topology = M2NSourceTopology(
+            groups=((0, 2), (1, 3)),
+            param_groups=(0, 1),
+        )
+        source = _GroupedM2NSource(
+            metas,
+            [],
+            topology,
+            {0: [], 1: []},
+        )
+        engine = M2NTrainerWeightTransferEngine(
+            client=Mock(),
+            source=source,
+            is_sender=False,
+        )
+
+        engine._prepare_source_plan(source, num_trainer_ranks=4)
+
+        assert engine._source_topology == topology
+
+    def test_source_mesh_cannot_cover_more_ranks_than_its_group(self):
+        topology = M2NSourceTopology(
+            groups=((0, 2),),
+            param_groups=(0,),
+        )
+        source = _GroupedM2NSource(
+            [self._meta(mesh_dims=(1, 4))],
+            [],
+            topology,
+            {0: []},
+        )
+        engine = M2NTrainerWeightTransferEngine(
+            client=Mock(),
+            source=source,
+            is_sender=False,
+        )
+
+        with pytest.raises(ValueError, match="source mesh covers 4 ranks"):
+            engine._prepare_source_plan(source, num_trainer_ranks=4)
+
+    def test_held_names_must_cover_groups_joined_by_this_rank(self):
+        topology = M2NSourceTopology(
+            groups=((0,), (1,)),
+            param_groups=(0, 1),
+        )
+        source = _GroupedM2NSource(
+            [self._meta("first"), self._meta("second")],
+            [],
+            topology,
+            {0: [], 1: []},
+        )
+        source.held_names = Mock(return_value=("second",))
+        engine = M2NTrainerWeightTransferEngine(
+            client=Mock(),
+            source=source,
+            is_sender=False,
+        )
+        engine._trainer_rank = 0
+
+        with pytest.raises(ValueError, match="held_names.*omits.*'first'"):
+            engine._prepare_source_plan(source, num_trainer_ranks=3)
+
+    def test_trainer_sends_only_canonical_group_for_tied_copy(self, monkeypatch):
+        first = _BufferLike()
+        second = _BufferLike()
+        metas = [
+            self._meta("first", (1, 2)),
+            self._meta("second", (1, 2)),
+        ]
+        topology = M2NSourceTopology(
+            groups=((0, 2), (1, 3)),
+            param_groups=(0, 1),
+        )
+        source = _GroupedM2NSource(
+            metas,
+            [],
+            topology,
+            {0: [("first", first)], 1: [("second", second)]},
+        )
+        source.held_names = Mock(return_value=("first", "second"))
+        engine = M2NTrainerWeightTransferEngine(
+            client=Mock(),
+            source=source,
+            is_sender=False,
+        )
+        engine._m2n = _fake_m2n()
+        engine._handle = object()
+        engine._trainer_rank = 1
+        engine._round_id = 1
+        engine._prepare_source_plan(source, num_trainer_ranks=4)
+        engine._routes = build_m2n_transfer_routes(
+            topology,
+            num_trainer_ranks=4,
+            world_size=5,
+            dst_mesh_dims=(1, 1),
+        )
+        engine._param_routes = build_m2n_param_routes(engine._routes, len(metas))
+        engine._transfer_waves = build_m2n_transfer_waves(
+            engine._routes,
+            [None] * len(metas),
+        )
+        communicator = Mock(comm=1)
+        stream = Mock()
+        engine._route_communicators = {1: communicator}
+        engine._route_streams = {1: stream}
+        engine._dst_placements = [REPLICATED, REPLICATED]
+        monkeypatch.setattr(torch.cuda, "stream", _fake_cuda_stream_context)
+        monkeypatch.setattr(torch.accelerator, "synchronize", Mock())
+        monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
+
+        engine._send()
+
+        engine._m2n.reshard.assert_called_once()
+        reshard_call = engine._m2n.reshard.call_args
+        assert reshard_call.args[0] is second
+        assert reshard_call.args[2] is communicator
+        stream.synchronize.assert_called_once_with()
 
     def test_partial_trainer_initialization_releases_transport_resources(
         self, monkeypatch
     ):
-        metadata_group = Mock(rank=0, world_size=2)
+        metadata_group = Mock(rank=0, world_size=3)
         monkeypatch.setattr(
             "vllm.distributed.weight_transfer.m2n_trainer."
             "stateless_init_metadata_group",
@@ -2187,13 +3043,54 @@ class TestTrainerSourceContract:
             "vllm.distributed.weight_transfer.m2n_trainer.import_m2n",
             Mock(return_value=Mock()),
         )
+        metas = [
+            self._meta("first"),
+            self._meta("second"),
+        ]
+        topology = M2NSourceTopology(
+            groups=((0,), (1,)),
+            param_groups=(0, 1),
+        )
+        source = _GroupedM2NSource(
+            metas,
+            [],
+            topology,
+            {0: [], 1: []},
+        )
+        digest = source_plan_digest(
+            [
+                M2NWireParam(
+                    meta.name,
+                    "float32",
+                    meta.shape,
+                    meta.source_layout.mesh.dims,
+                    meta.source_layout.placements,
+                )
+                for meta in metas
+            ],
+            topology,
+        )
         monkeypatch.setattr(
             "vllm.distributed.weight_transfer.m2n_trainer.check_source_plan_agreement",
-            Mock(return_value=source_plan_digest([])),
+            Mock(return_value=digest),
         )
         monkeypatch.setattr(
             "vllm.distributed.weight_transfer.m2n_trainer.agree_destination_plan",
-            Mock(return_value=([], "m2n-plan:test")),
+            Mock(
+                return_value=(
+                    [
+                        M2NDestination(
+                            meta.name,
+                            M2NDestinationMode.FULL_FALLBACK,
+                            REPLICATED,
+                            meta.shape,
+                            None,
+                        )
+                        for meta in metas
+                    ],
+                    "m2n-plan:test",
+                )
+            ),
         )
         monkeypatch.setattr(
             "vllm.distributed.weight_transfer.m2n_trainer.check_data_plane_agreement",
@@ -2204,22 +3101,36 @@ class TestTrainerSourceContract:
             "check_runtime_ready_agreement",
             Mock(),
         )
+
+        def check_communicator_init(_group, local_errors):
+            assert local_errors[0] is None
+            assert "route 1 init failed" in local_errors[1]
+            raise RuntimeError(local_errors[1])
+
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_trainer."
+            "check_communicator_init_agreement",
+            check_communicator_init,
+        )
         handle = Mock()
         nccl = Mock()
         monkeypatch.setattr(
             "vllm.distributed.weight_transfer.m2n_trainer.prepare_m2n_local_runtime",
             Mock(return_value=(nccl, 0, handle)),
         )
-        communicator = Mock()
+        first_communicator = Mock()
+        make_communicator = Mock(
+            side_effect=[
+                first_communicator,
+                RuntimeError("route 1 init failed"),
+            ]
+        )
         monkeypatch.setattr(
             "vllm.distributed.weight_transfer.m2n_trainer.create_m2n_communicator",
-            Mock(return_value=communicator),
+            make_communicator,
         )
-        source = _StaticM2NSource([], [])
+        monkeypatch.setattr(torch.cuda, "Stream", Mock(return_value=Mock()))
         client = Mock()
-        client.init_weight_transfer_engine.side_effect = RuntimeError(
-            "worker init failed"
-        )
         engine = M2NTrainerWeightTransferEngine(
             client=client, source=source, is_sender=True
         )
@@ -2227,101 +3138,464 @@ class TestTrainerSourceContract:
             rank=0,
             master_address="127.0.0.1",
             master_port=1234,
-            world_size=2,
+            world_size=3,
+            num_trainer_ranks=2,
         )
 
-        with pytest.raises(RuntimeError, match="worker init failed"):
+        with pytest.raises(RuntimeError, match="route 1 init failed"):
             engine._initialize(init_info, source)
 
-        communicator.abort.assert_called_once_with()
-        communicator.destroy.assert_not_called()
+        assert make_communicator.call_args_list == [
+            call(nccl, metadata_group, None, members=(0, 2)),
+            call(nccl, metadata_group, None, members=(1, 2)),
+        ]
+        first_communicator.abort.assert_called_once_with()
+        first_communicator.destroy.assert_not_called()
         handle.destroy.assert_called_once_with()
         assert engine.group is None
+        assert engine._route_communicators == {}
+        assert engine._route_streams == {}
+        assert engine._routes == ()
+        assert engine._transfer_waves == ()
         assert engine._handle is None
         assert engine._destination_plan == []
         assert engine._destination_commit_token == ""
         assert engine._dst_placements == []
         assert engine._dst_mesh is None
 
-    def test_non_sender_observes_rank_zero_finish_failure(self):
-        outcomes: dict[int, dict[str, object]] = {}
-        sender_group = Mock()
-        sender_group.send_obj.side_effect = lambda outcome, rank: outcomes.__setitem__(
-            rank, outcome
+    @pytest.mark.parametrize(
+        "rpc_failure",
+        [None, RuntimeError("late worker init failed")],
+        ids=["success", "failure"],
+    )
+    def test_trainer_init_outcome_fanout_reaches_non_sender(self, rpc_failure):
+        source = _StaticM2NSource(
+            [self._meta()],
+            [("weight", _BufferLike())],
         )
-        sender_group.recv_obj.return_value = {"phase": "round_outcome_consumed"}
+        token = "m2n-plan:test"
+        expected = {
+            "phase": "trainer_init_outcome",
+            "plan_token": token,
+            "ok": rpc_failure is None,
+            "error": (
+                None if rpc_failure is None else "RuntimeError: late worker init failed"
+            ),
+        }
 
-        source = _StaticM2NSource([], [])
+        sender = self._engine(source)
+        sender.is_sender = True
+        sender._num_trainer_ranks = 2
+        sender._destination_commit_token = token
+        sender_group = Mock()
+        init_future = Mock()
+        init_future.result.side_effect = rpc_failure
+        if rpc_failure is None:
+            sender._sync_trainer_init_outcome(sender_group, init_future)
+        else:
+            with pytest.raises(RuntimeError, match="late worker init failed"):
+                sender._sync_trainer_init_outcome(sender_group, init_future)
+        sender_group.send_obj.assert_called_once_with(expected, 1)
+
+        receiver = self._engine(source)
+        receiver._destination_commit_token = token
+        receiver_group = Mock()
+        receiver_group.recv_obj.return_value = expected
+        if rpc_failure is None:
+            receiver._sync_trainer_init_outcome(receiver_group, None)
+        else:
+            with pytest.raises(
+                RuntimeError,
+                match="worker initialization failed on trainer rank zero",
+            ):
+                receiver._sync_trainer_init_outcome(receiver_group, None)
+        receiver_group.recv_obj.assert_called_once_with(0)
+
+    def test_finish_failure_replays_the_full_round_on_every_trainer(self):
+        controls: list[dict[str, object]] = []
+        sender_group = Mock()
+        sender_group.send_obj.side_effect = lambda message, _rank: controls.append(
+            message
+        )
+        sender_group.recv_obj.side_effect = [
+            {
+                "phase": "round_dispatch_consumed",
+                "round_id": 0,
+                "rank": 1,
+                "error": None,
+            },
+            {
+                "phase": "round_outcome_consumed",
+                "round_id": 0,
+                "rank": 1,
+                "error": None,
+            },
+            {
+                "phase": "round_dispatch_consumed",
+                "round_id": 1,
+                "rank": 1,
+                "error": None,
+            },
+            {
+                "phase": "round_outcome_consumed",
+                "round_id": 1,
+                "rank": 1,
+                "error": None,
+            },
+        ]
+
+        source = _StaticM2NSource(
+            [self._meta()],
+            [("weight", _BufferLike())],
+        )
         sender = self._engine(source)
         sender.is_sender = True
         sender._metadata_group = sender_group
         sender._num_trainer_ranks = 2
         sender._send = Mock()
         sender.client = Mock()
-        sender.client.finish_weight_update.side_effect = RuntimeError("finish failed")
+        sender.client.finish_weight_update.side_effect = [
+            RuntimeError("finish failed"),
+            None,
+        ]
+        sender_communicator = sender.group
+        sender_handle = sender._handle
 
-        with pytest.raises(RuntimeError, match="finish failed"):
-            sender.send_weights()
+        sender.send_weights()
 
-        sender._send.assert_called_once_with()
-        sender_group.recv_obj.assert_called_once_with(1)
+        assert sender._send.call_count == 2
+        assert sender.client.start_weight_update.call_count == 2
+        assert sender.client.update_weights.call_count == 2
+        assert sender.client.finish_weight_update.call_count == 2
+        assert sender_group.recv_obj.call_args_list == [call(1)] * 4
+        assert controls == [
+            {
+                "phase": "round_dispatch",
+                "round_id": 0,
+                "ok": True,
+                "error": None,
+                "requires_reinit": False,
+                "retry_update": False,
+            },
+            {
+                "phase": "round_outcome",
+                "round_id": 0,
+                "ok": False,
+                "error": "RuntimeError: finish failed",
+                "requires_reinit": False,
+                "retry_update": True,
+            },
+            {
+                "phase": "round_dispatch",
+                "round_id": 1,
+                "ok": True,
+                "error": None,
+                "requires_reinit": False,
+                "retry_update": False,
+            },
+            {
+                "phase": "round_outcome",
+                "round_id": 1,
+                "ok": True,
+                "error": None,
+                "requires_reinit": False,
+                "retry_update": False,
+            },
+        ]
+        sender_communicator.abort.assert_not_called()
+        sender_handle.destroy.assert_not_called()
         receiver_group = Mock()
-        receiver_group.recv_obj.side_effect = lambda _source_rank: outcomes.pop(1)
+        receiver_group.recv_obj.side_effect = lambda _source_rank: controls.pop(0)
         receiver = self._engine(source)
         receiver._metadata_group = receiver_group
         receiver._num_trainer_ranks = 2
+        receiver._trainer_rank = 1
         receiver._send = Mock()
+        receiver_communicator = receiver.group
+        receiver_handle = receiver._handle
+
+        receiver.send_weights()
+
+        assert receiver._send.call_count == 2
+        assert receiver_group.recv_obj.call_args_list == [call(0)] * 4
+        assert receiver_group.send_obj.call_args_list == [
+            call(
+                {
+                    "phase": "round_dispatch_consumed",
+                    "round_id": 0,
+                    "rank": 1,
+                    "error": None,
+                },
+                0,
+            ),
+            call(
+                {
+                    "phase": "round_outcome_consumed",
+                    "round_id": 0,
+                    "rank": 1,
+                    "error": None,
+                },
+                0,
+            ),
+            call(
+                {
+                    "phase": "round_dispatch_consumed",
+                    "round_id": 1,
+                    "rank": 1,
+                    "error": None,
+                },
+                0,
+            ),
+            call(
+                {
+                    "phase": "round_outcome_consumed",
+                    "round_id": 1,
+                    "rank": 1,
+                    "error": None,
+                },
+                0,
+            ),
+        ]
+        receiver_communicator.abort.assert_not_called()
+        receiver_handle.destroy.assert_not_called()
+        assert not controls
+
+    def test_non_sender_observes_start_failure_without_reinitializing(self):
+        controls: list[dict[str, object]] = []
+        sender_group = Mock()
+        sender_group.send_obj.side_effect = lambda message, _rank: controls.append(
+            message
+        )
+        sender_group.recv_obj.side_effect = [
+            {
+                "phase": "round_dispatch_consumed",
+                "round_id": 0,
+                "rank": 1,
+                "error": None,
+            },
+            {
+                "phase": "round_outcome_consumed",
+                "round_id": 0,
+                "rank": 1,
+                "error": None,
+            },
+        ]
+        source = _StaticM2NSource(
+            [self._meta()],
+            [("weight", _BufferLike())],
+        )
+        sender = self._engine(source)
+        sender.is_sender = True
+        sender._metadata_group = sender_group
+        sender._num_trainer_ranks = 2
+        sender.client.start_weight_update.side_effect = RuntimeError("start failed")
+        sender_communicator = sender.group
+        sender_handle = sender._handle
+
+        with pytest.raises(RuntimeError, match="start failed"):
+            sender.send_weights()
+
+        assert controls == [
+            {
+                "phase": "round_dispatch",
+                "round_id": 0,
+                "ok": False,
+                "error": "RuntimeError: start failed",
+                "requires_reinit": False,
+                "retry_update": False,
+            },
+            {
+                "phase": "round_outcome",
+                "round_id": 0,
+                "ok": False,
+                "error": "RuntimeError: start failed",
+                "requires_reinit": False,
+                "retry_update": False,
+            },
+        ]
+        sender_communicator.abort.assert_not_called()
+        sender_handle.destroy.assert_not_called()
+
+        receiver_group = Mock()
+        receiver_group.recv_obj.side_effect = lambda _source_rank: controls.pop(0)
+        receiver = self._engine(source)
+        receiver._metadata_group = receiver_group
+        receiver._num_trainer_ranks = 2
+        receiver._trainer_rank = 1
+        receiver._send = Mock()
+        receiver_communicator = receiver.group
+        receiver_handle = receiver._handle
 
         with pytest.raises(
             RuntimeError,
-            match=(
-                "worker update failed on trainer rank zero: RuntimeError: finish failed"
-            ),
+            match="worker update was not dispatched: RuntimeError: start failed",
         ):
             receiver.send_weights()
 
-        receiver._send.assert_called_once_with()
-        receiver_group.recv_obj.assert_called_once_with(0)
-        receiver_group.send_obj.assert_called_once_with(
-            {"phase": "round_outcome_consumed"}, 0
+        receiver._send.assert_not_called()
+        receiver_communicator.abort.assert_not_called()
+        receiver_handle.destroy.assert_not_called()
+        assert not controls
+
+    def test_sender_transfer_failure_requires_reinitialization(self):
+        controls: list[dict[str, object]] = []
+        source = _StaticM2NSource(
+            [self._meta()],
+            [("weight", _BufferLike())],
         )
-        assert not outcomes
+        sender = self._engine(source)
+        sender.is_sender = True
+        sender._num_trainer_ranks = 2
+        sender._metadata_group = Mock()
+        sender._metadata_group.send_obj.side_effect = (
+            lambda message, _rank: controls.append(message)
+        )
+        sender._metadata_group.recv_obj.side_effect = [
+            {
+                "phase": "round_dispatch_consumed",
+                "round_id": 0,
+                "rank": 1,
+                "error": None,
+            },
+            {
+                "phase": "round_outcome_consumed",
+                "round_id": 0,
+                "rank": 1,
+                "error": None,
+            },
+        ]
+        sender._send = Mock(side_effect=RuntimeError("transfer failed"))
+        communicator = sender.group
+        handle = sender._handle
+
+        with pytest.raises(RuntimeError, match="transfer failed"):
+            sender.send_weights()
+
+        assert controls[-1] == {
+            "phase": "round_outcome",
+            "round_id": 0,
+            "ok": False,
+            "error": "RuntimeError: transfer failed",
+            "requires_reinit": True,
+            "retry_update": False,
+        }
+        communicator.abort.assert_called_once_with()
+        handle.destroy.assert_called_once_with()
 
     def test_sender_rejects_invalid_round_outcome_acknowledgement(self):
-        source = _StaticM2NSource([], [])
+        source = _StaticM2NSource(
+            [self._meta()],
+            [("weight", _BufferLike())],
+        )
         sender = self._engine(source)
         sender.is_sender = True
         sender._metadata_group = Mock()
-        sender._metadata_group.recv_obj.return_value = {"phase": "wrong"}
+        sender._metadata_group.recv_obj.side_effect = [
+            {
+                "phase": "round_dispatch_consumed",
+                "round_id": 0,
+                "rank": 1,
+                "error": None,
+            },
+            {"phase": "wrong"},
+        ]
         sender._num_trainer_ranks = 2
         sender._send = Mock()
         sender.client = Mock()
 
-        with pytest.raises(RuntimeError, match="invalid round-outcome acknowledgement"):
+        with pytest.raises(RuntimeError, match="invalid round_outcome acknowledgement"):
             sender.send_weights()
 
-    def test_non_sender_consumes_outcome_after_local_failure(self):
-        source = _StaticM2NSource([], [])
-        receiver = self._engine(source)
-        receiver._send = Mock(side_effect=[ValueError("local send failed"), None])
+    def test_non_sender_reports_invalid_control_before_acknowledging_it(self):
+        receiver = self._engine(
+            _StaticM2NSource([self._meta()], [("weight", _BufferLike())])
+        )
+        receiver._trainer_rank = 1
         receiver._metadata_group = Mock()
+        receiver._metadata_group.recv_obj.return_value = {
+            "phase": "round_outcome",
+            "round_id": 0,
+            "ok": True,
+            "error": None,
+            "requires_reinit": False,
+            "retry_update": False,
+        }
+
+        with pytest.raises(RuntimeError, match="out-of-order round_dispatch"):
+            receiver._receive_round_dispatch()
+
+        receiver._metadata_group.send_obj.assert_called_once_with(
+            {
+                "phase": "round_dispatch_consumed",
+                "round_id": 0,
+                "rank": 1,
+                "error": ("trainer rank zero sent an out-of-order round_dispatch"),
+            },
+            0,
+        )
+
+    def test_non_sender_consumes_outcome_then_aborts_after_local_failure(self):
+        source = _StaticM2NSource(
+            [self._meta()],
+            [("weight", _BufferLike())],
+        )
+        receiver = self._engine(source)
+        receiver._send = Mock(side_effect=ValueError("local send failed"))
+        receiver._metadata_group = Mock()
+        receiver._trainer_rank = 1
+        handle = Mock()
+        receiver._handle = handle
+        communicator = receiver.group
         receiver._metadata_group.recv_obj.side_effect = [
-            {"ok": False, "error": "RuntimeError: first round failed"},
-            {"ok": True, "error": None},
+            {
+                "phase": "round_dispatch",
+                "round_id": 0,
+                "ok": True,
+                "error": None,
+                "requires_reinit": False,
+                "retry_update": False,
+            },
+            {
+                "phase": "round_outcome",
+                "round_id": 0,
+                "ok": False,
+                "error": "RuntimeError: first round failed",
+                "requires_reinit": True,
+                "retry_update": False,
+            },
         ]
 
         with pytest.raises(ValueError, match="local send failed"):
             receiver.send_weights()
-        receiver.send_weights()
+        with pytest.raises(RuntimeError, match="not initialized"):
+            receiver.send_weights()
 
-        assert receiver._send.call_count == 2
+        receiver._send.assert_called_once_with()
         assert receiver._metadata_group.recv_obj.call_count == 2
         assert receiver._metadata_group.send_obj.call_args_list == [
-            call({"phase": "round_outcome_consumed"}, 0),
-            call({"phase": "round_outcome_consumed"}, 0),
+            call(
+                {
+                    "phase": "round_dispatch_consumed",
+                    "round_id": 0,
+                    "rank": 1,
+                    "error": None,
+                },
+                0,
+            ),
+            call(
+                {
+                    "phase": "round_outcome_consumed",
+                    "round_id": 0,
+                    "rank": 1,
+                    "error": None,
+                },
+                0,
+            ),
         ]
+        communicator.abort.assert_called_once_with()
+        handle.destroy.assert_called_once_with()
 
-    def test_plan_summary_reports_bytes_by_destination_mode(self):
+    def test_plan_summary_reports_static_transfer_plan(self):
         engine = self._engine(_StaticM2NSource([], []))
         engine._metas = [
             M2NParamMeta(
@@ -2337,7 +3611,17 @@ class TestTrainerSourceContract:
                 M2NLayout(M2NMesh((1, 1), 0), REPLICATED),
             ),
         ]
-        engine._dst_mesh = M2NMesh((1, 2), 1)
+        engine._dst_mesh = M2NMesh((1, 2), 2)
+        engine._source_topology = M2NSourceTopology(
+            groups=((0,), (1,)), param_groups=(0, 1)
+        )
+        engine._routes = build_m2n_transfer_routes(
+            engine._source_topology,
+            num_trainer_ranks=2,
+            world_size=4,
+            dst_mesh_dims=(1, 2),
+        )
+        engine._transfer_waves = build_m2n_transfer_waves(engine._routes, (-1, None))
         engine._source_digest = "source-digest"
         engine._destination_commit_token = "m2n-plan:destination-digest"
         engine._destination_plan = [
@@ -2375,13 +3659,30 @@ class TestTrainerSourceContract:
             "full_fallback": 1,
             "in_place": 1,
         }
+        assert summary["transfer_communicators"] == [
+            {
+                "source_group_index": 0,
+                "source_ranks": [0],
+                "destination_ranks": [2, 3],
+                "param_indices": [0],
+            },
+            {
+                "source_group_index": 1,
+                "source_ranks": [1],
+                "destination_ranks": [2, 3],
+                "param_indices": [1],
+            },
+        ]
+        assert summary["transfer_waves"] == [
+            {"issue_indices": [0, 1], "consume_index": 0},
+        ]
 
     @pytest.mark.parametrize(
         ("case", "match"),
         [
-            ("missing", "first missing: 'weight'"),
-            ("extra", "first extra"),
-            ("reordered", "yielded 'other'.*declared 'weight'"),
+            ("missing", "group 0 ended before parameter 'weight'"),
+            ("extra", "group 0 yielded extra parameter 'extra'"),
+            ("reordered", "group 0 yielded 'other'.*expected 'weight'"),
         ],
     )
     def test_source_cardinality_and_order(self, monkeypatch, case, match):
@@ -2393,7 +3694,7 @@ class TestTrainerSourceContract:
         }[case]
         source = _StaticM2NSource([self._meta()], values)
         engine = self._engine(source)
-        monkeypatch.setattr(torch.cuda, "current_stream", Mock())
+        monkeypatch.setattr(torch.cuda, "stream", _fake_cuda_stream_context)
         monkeypatch.setattr(torch.accelerator, "synchronize", Mock())
         monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
 
@@ -2414,21 +3715,22 @@ class TestTrainerSourceContract:
 
         source = _StaticM2NSource([self._meta()], [("weight", buffer)])
         engine = self._engine(source)
-        monkeypatch.setattr(torch.cuda, "current_stream", Mock())
+        m2n = engine._m2n
+        monkeypatch.setattr(torch.cuda, "stream", _fake_cuda_stream_context)
         monkeypatch.setattr(torch.accelerator, "synchronize", Mock())
         monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
 
         with pytest.raises(ValueError, match=match):
             engine._send()
 
-        engine._m2n.reshard.assert_not_called()
+        m2n.reshard.assert_not_called()
 
     def test_m2n_compatible_buffer_needs_no_torch_methods(self, monkeypatch):
         buffer = _BufferLike()
         source = _StaticM2NSource([self._meta()], [("weight", buffer)])
         engine = self._engine(source)
-        stream = Mock()
-        monkeypatch.setattr(torch.cuda, "current_stream", lambda: stream)
+        stream = engine._route_streams[0]
+        monkeypatch.setattr(torch.cuda, "stream", _fake_cuda_stream_context)
         monkeypatch.setattr(torch.accelerator, "synchronize", Mock())
         monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
 
@@ -2437,12 +3739,61 @@ class TestTrainerSourceContract:
         assert engine._m2n.reshard.call_args.args[0] is buffer
         stream.synchronize.assert_called_once_with()
 
+    def test_abort_precedes_release_of_non_torch_source_buffer(self, monkeypatch):
+        events = []
+
+        class SourceBuffer(_BufferLike):
+            def __del__(self):
+                events.append("released")
+
+        class OneShot:
+            done = False
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                if self.done:
+                    raise StopIteration
+                self.done = True
+                return "weight", SourceBuffer()
+
+        class EphemeralSource(_StaticM2NSource):
+            def __iter__(self):
+                return OneShot()
+
+        source = EphemeralSource([self._meta()], [])
+        engine = self._engine(source)
+        group = engine.group
+        group.abort.side_effect = lambda: events.append("abort")
+        handle = Mock()
+        handle.destroy.side_effect = lambda: events.append("destroy")
+        engine._handle = handle
+
+        def fail_reshard(*_args, **_kwargs):
+            events.append("reshard")
+            raise RuntimeError("reshard failed")
+
+        engine._m2n.reshard = fail_reshard
+        monkeypatch.setattr(torch.cuda, "stream", _fake_cuda_stream_context)
+        monkeypatch.setattr(torch.accelerator, "synchronize", Mock())
+        monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
+
+        with pytest.raises(RuntimeError, match="reshard failed"):
+            engine._send()
+        gc.collect()
+
+        assert events[0] == "reshard"
+        assert events.index("abort") < events.index("released")
+        group.abort.assert_called_once_with()
+        handle.destroy.assert_called_once_with()
+
     def test_allocator_aware_buffer_records_send_stream(self, monkeypatch):
         buffer = _AllocatorAwareBuffer()
         source = _StaticM2NSource([self._meta()], [("weight", buffer)])
         engine = self._engine(source)
-        stream = Mock()
-        monkeypatch.setattr(torch.cuda, "current_stream", lambda: stream)
+        stream = engine._route_streams[0]
+        monkeypatch.setattr(torch.cuda, "stream", _fake_cuda_stream_context)
         monkeypatch.setattr(torch.accelerator, "synchronize", Mock())
         monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
 
@@ -2454,7 +3805,7 @@ class TestTrainerSourceContract:
         pointer = 1234
         source = _StaticM2NSource([self._meta()], [("weight", pointer)])
         engine = self._engine(source)
-        monkeypatch.setattr(torch.cuda, "current_stream", Mock())
+        monkeypatch.setattr(torch.cuda, "stream", _fake_cuda_stream_context)
         monkeypatch.setattr(torch.accelerator, "synchronize", Mock())
         monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
 
@@ -2507,6 +3858,31 @@ def _init_ray() -> None:
             }
         },
     )
+
+
+@pytest.fixture
+def _isolated_multi_route_ray(monkeypatch):
+    """Start every multi-route participant with NCCL launch ordering enabled."""
+    if ray.is_initialized():
+        ray.shutdown()
+
+    monkeypatch.setenv("NCCL_LAUNCH_ORDER_IMPLICIT", "1")
+    pytest.importorskip("nccl.m2n", reason="nccl_m2n backend needs the m2n runtime")
+    env_vars = {
+        "NCCL_LAUNCH_ORDER_IMPLICIT": "1",
+        **{name: "1" for name in current_platform.ray_noset_device_env_vars},
+    }
+    ray.init(
+        include_dashboard=False,
+        num_cpus=4,
+        num_gpus=torch.accelerator.device_count(),
+        runtime_env={"env_vars": env_vars},
+    )
+    try:
+        yield
+    finally:
+        if ray.is_initialized():
+            ray.shutdown()
 
 
 def _assigned_device() -> "torch.device":
@@ -2957,6 +4333,310 @@ def _semantic_worker_receive(
     return result
 
 
+_MULTI_ROUTE_NAMES = ("param_0", "param_1", "param_2", "param_3")
+_MULTI_ROUTE_SHAPE = (8, 4)
+_MULTI_ROUTE_TOPOLOGY = M2NSourceTopology(
+    groups=((0,), (1, 2)),
+    param_groups=(1, 1, 0, 0),
+)
+_MULTI_ROUTE_ROUNDS = 2
+
+
+def _multi_route_source_layout(param_index: int) -> M2NLayout:
+    group_index = _MULTI_ROUTE_TOPOLOGY.param_groups[param_index]
+    group_size = len(_MULTI_ROUTE_TOPOLOGY.groups[group_index])
+    placements = REPLICATED if group_size == 1 else (REPLICATE, 0)
+    return M2NLayout(M2NMesh((1, group_size), 0), placements)
+
+
+def _multi_route_tensor(
+    param_index: int,
+    round_index: int,
+    device: torch.device | str,
+) -> torch.Tensor:
+    return (
+        torch.arange(
+            _MULTI_ROUTE_SHAPE[0] * _MULTI_ROUTE_SHAPE[1],
+            dtype=torch.float32,
+            device=device,
+        ).reshape(_MULTI_ROUTE_SHAPE)
+        + param_index * 100
+        + round_index * 1000
+    )
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def _multi_route_trainer_send(
+    master_address: str,
+    master_port: int,
+    trainer_rank: int,
+) -> dict:
+    """Run one rank of two disjoint source groups for two updates."""
+    device = _assigned_device()
+
+    class NoopClient:
+        def init_weight_transfer_engine(self, init_info):
+            pass
+
+        def start_weight_update(self):
+            pass
+
+        def update_weights(self, update_info):
+            pass
+
+        def finish_weight_update(self, weight_version=None):
+            pass
+
+    class MultiRouteSource(M2NWeightSource):
+        def __init__(self):
+            self._metadata = [
+                M2NParamMeta(
+                    name,
+                    torch.float32,
+                    _MULTI_ROUTE_SHAPE,
+                    _multi_route_source_layout(index),
+                    allow_full_fallback=index not in (1, 2),
+                )
+                for index, name in enumerate(_MULTI_ROUTE_NAMES)
+            ]
+            self.group_rounds = {0: 0, 1: 0}
+
+        def metadata(self):
+            return list(self._metadata)
+
+        def source_topology(self):
+            return _MULTI_ROUTE_TOPOLOGY
+
+        def held_names(self):
+            return tuple(
+                name
+                for index, name in enumerate(_MULTI_ROUTE_NAMES)
+                if trainer_rank
+                in _MULTI_ROUTE_TOPOLOGY.groups[
+                    _MULTI_ROUTE_TOPOLOGY.param_groups[index]
+                ]
+            )
+
+        def __iter__(self):
+            raise AssertionError("multi-route sources must be iterated by group")
+
+        def iter_group(self, group_index):
+            members = _MULTI_ROUTE_TOPOLOGY.groups[group_index]
+            if trainer_rank not in members:
+                raise AssertionError(
+                    f"trainer rank {trainer_rank} does not own source group "
+                    f"{group_index}"
+                )
+            round_index = self.group_rounds[group_index]
+            self.group_rounds[group_index] += 1
+            local_rank = members.index(trainer_rank)
+            for param_index, name in enumerate(_MULTI_ROUTE_NAMES):
+                if _MULTI_ROUTE_TOPOLOGY.param_groups[param_index] != group_index:
+                    continue
+                full = _multi_route_tensor(param_index, round_index, device)
+                yield name, full.chunk(len(members), dim=0)[local_rank].contiguous()
+
+    source = MultiRouteSource()
+    engine = None
+    try:
+        engine = WeightTransferTrainerFactory.trainer_init(
+            init_info=M2NTrainerInitInfo(
+                master_address=master_address,
+                master_port=master_port,
+                world_size=4,
+                num_trainer_ranks=3,
+                dst_mesh_dims=(1, 1),
+                rank=trainer_rank,
+            ),
+            client=NoopClient(),
+            source=source,
+        )
+        diagnostics: dict = {
+            "joined_routes": sorted(engine._route_communicators),
+            "routes": [
+                {
+                    "members": list(route.members),
+                    "param_indices": list(route.param_indices),
+                }
+                for route in engine._routes
+            ],
+            "waves": [
+                {
+                    "issue": list(wave.issue_indices),
+                    "consume": wave.consume_index,
+                }
+                for wave in engine._transfer_waves
+            ],
+        }
+        for _ in range(_MULTI_ROUTE_ROUNDS):
+            engine.send_weights()
+        torch.accelerator.synchronize()
+        diagnostics["group_rounds"] = dict(source.group_rounds)
+        return diagnostics
+    finally:
+        if engine is not None:
+            engine.shutdown()
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def _multi_route_worker_receive(
+    master_address: str,
+    master_port: int,
+) -> dict:
+    """Receive two real routes through fallback and cross-route staging."""
+    from unittest.mock import MagicMock, patch
+
+    from vllm.config.parallel import ParallelConfig
+
+    device = _assigned_device()
+
+    class Recorder(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.values = {
+                name: torch.full(
+                    _MULTI_ROUTE_SHAPE,
+                    float("nan"),
+                    dtype=torch.float32,
+                    device=device,
+                )
+                for name in _MULTI_ROUTE_NAMES
+            }
+            self.events = []
+            self._staging_owner = object()
+            self._staged_count = 0
+
+        def reset(self):
+            for value in self.values.values():
+                value.fill_(float("nan"))
+            self.events = []
+            self._staged_count = 0
+
+        def resolve_sharded_weight_target(self, relative_name, request):
+            if relative_name not in {"param_1", "param_2"}:
+                return None
+
+            def consume(weight, name=relative_name):
+                self.values[name].copy_(weight)
+                self.events.append((name, "sharded_staging"))
+                self._staged_count += 1
+                return self._staged_count == 2
+
+            return ShardedWeightTarget(
+                spec=ShardedWeightSpec(
+                    semantic_id=f"test.{relative_name}.v1",
+                    dtype=request.dtype,
+                    shard_dim=0,
+                    local_shape=request.global_shape,
+                    shard_index=0,
+                    num_shards=1,
+                ),
+                retention_key=self._staging_owner,
+                retention_group_size=2,
+                consume=consume,
+            )
+
+        def load_weights(self, weights):
+            for name, weight in weights:
+                if name not in {"param_0", "param_3"}:
+                    raise AssertionError(f"unexpected fallback for {name!r}")
+                self.values[name].copy_(weight)
+                self.events.append((name, "full_fallback"))
+
+    parallel_config = MagicMock(spec=ParallelConfig)
+    parallel_config.rank = 0
+    parallel_config.world_size = 1
+    parallel_config.data_parallel_rank = 0
+    parallel_config.data_parallel_index = 0
+    parallel_config.tensor_parallel_size = 1
+    parallel_config.pipeline_parallel_size = 1
+    vllm_config = MagicMock()
+    vllm_config.parallel_config = parallel_config
+    vllm_config.model_config = SimpleNamespace(quantization=None)
+    recorder = Recorder()
+    engine = M2NWeightTransferEngine(
+        WeightTransferConfig(backend="nccl_m2n"),
+        vllm_config,
+        device,
+        recorder,
+    )
+    params = []
+    for index, name in enumerate(_MULTI_ROUTE_NAMES):
+        source_layout = _multi_route_source_layout(index)
+        params.append(
+            M2NWireParam(
+                name,
+                DTYPE,
+                _MULTI_ROUTE_SHAPE,
+                source_layout.mesh.dims,
+                source_layout.placements,
+                allow_full_fallback=index not in (1, 2),
+            )
+        )
+    try:
+        engine.init_transfer_engine(
+            M2NWeightTransferInitInfo(
+                schema_version=M2N_WIRE_SCHEMA_VERSION,
+                master_address=master_address,
+                master_port=master_port,
+                rank_offset=3,
+                world_size=4,
+                dst_mesh_dims=[1, 1],
+                source_digest=source_plan_digest(params, _MULTI_ROUTE_TOPOLOGY),
+                params=[param.to_dict() for param in params],
+                source_topology=_MULTI_ROUTE_TOPOLOGY.to_dict(),
+            )
+        )
+        diagnostics: dict = {
+            "communicators": sorted(engine._model_update_groups),
+            "streams": sorted(engine._route_streams),
+            "routes": [
+                {
+                    "members": list(route.members),
+                    "param_indices": list(route.param_indices),
+                }
+                for route in engine._routes
+            ],
+            "modes": [
+                destination.mode.value for destination in engine._parameter_destinations
+            ],
+            "rounds": [],
+        }
+        with (
+            patch(
+                "vllm.model_executor.model_loader.reload.initialize_layerwise_reload"
+            ),
+            patch("vllm.model_executor.model_loader.reload.finalize_layerwise_reload"),
+        ):
+            for round_index in range(_MULTI_ROUTE_ROUNDS):
+                recorder.reset()
+                engine.start_weight_update()
+                engine.receive_weights(
+                    M2NWeightTransferUpdateInfo(names=list(_MULTI_ROUTE_NAMES))
+                )
+                engine.finish_weight_update()
+                torch.accelerator.synchronize()
+                diagnostics["rounds"].append(
+                    {
+                        "events": list(recorder.events),
+                        "exact": {
+                            name: bool(
+                                torch.equal(
+                                    recorder.values[name],
+                                    _multi_route_tensor(
+                                        param_index, round_index, device
+                                    ),
+                                )
+                            )
+                            for param_index, name in enumerate(_MULTI_ROUTE_NAMES)
+                        },
+                    }
+                )
+        return diagnostics
+    finally:
+        engine.shutdown()
+
+
 @pytest.mark.skipif(
     torch.accelerator.device_count() < 2,
     reason="Need at least 2 GPUs: one trainer rank and one inference worker.",
@@ -3070,6 +4750,67 @@ def test_m2n_transfer_with_per_parameter_source_meshes():
         }
 
 
+@pytest.mark.distributed(num_gpus=4)
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 4,
+    reason="Need 4 GPUs: three trainer ranks and one inference worker.",
+)
+def test_m2n_transfer_with_disjoint_source_groups(_isolated_multi_route_ray):
+    """Disjoint groups transfer their owned parameters for two updates."""
+    master_address = "127.0.0.1"
+    master_port = get_open_port()
+    trainers = [
+        _multi_route_trainer_send.remote(master_address, master_port, rank)
+        for rank in range(3)
+    ]
+    worker = _multi_route_worker_receive.remote(master_address, master_port)
+    *trainer_results, worker_result = ray.get(trainers + [worker], timeout=300)
+
+    expected_routes = [
+        {"members": [0, 3], "param_indices": [2, 3]},
+        {"members": [1, 2, 3], "param_indices": [0, 1]},
+    ]
+    expected_waves = [
+        {"issue": [2, 0], "consume": 0},
+        {"issue": [1], "consume": 1},
+        {"issue": [], "consume": 2},
+        {"issue": [3], "consume": 3},
+    ]
+    assert [result["joined_routes"] for result in trainer_results] == [
+        [0],
+        [1],
+        [1],
+    ]
+    assert [result["group_rounds"] for result in trainer_results] == [
+        {0: 2, 1: 0},
+        {0: 0, 1: 2},
+        {0: 0, 1: 2},
+    ]
+    for result in trainer_results:
+        assert result["routes"] == expected_routes
+        assert result["waves"] == expected_waves
+
+    assert worker_result["communicators"] == [0, 1]
+    assert worker_result["streams"] == [0, 1]
+    assert worker_result["routes"] == expected_routes
+    assert worker_result["modes"] == [
+        "full_fallback",
+        "sharded_staging",
+        "sharded_staging",
+        "full_fallback",
+    ]
+    expected_events = [
+        ("param_0", "full_fallback"),
+        ("param_1", "sharded_staging"),
+        ("param_2", "sharded_staging"),
+        ("param_3", "full_fallback"),
+    ]
+    assert len(worker_result["rounds"]) == _MULTI_ROUTE_ROUNDS
+    for round_result in worker_result["rounds"]:
+        assert round_result["events"] == expected_events
+        assert round_result["exact"] == dict.fromkeys(_MULTI_ROUTE_NAMES, True)
+
+
 @pytest.mark.skipif(
     torch.accelerator.device_count() < 3,
     reason="Need 3 GPUs: one trainer rank and two inference workers.",
@@ -3089,7 +4830,7 @@ def test_m2n_transfer_to_generic_rank_local_semantic_targets():
     summary, *results = ray.get([trainer, *workers], timeout=300)
 
     logical_bytes = SHAPE[0] * SHAPE[1] * 4
-    assert summary["wire_schema_version"] == 3
+    assert summary["wire_schema_version"] == 5
     assert summary["destination_mode_counts"] == {"sharded_staging": 1}
     assert summary["logical_global_bytes"] == logical_bytes
     assert summary["planned_receiver_payload_bytes"] == logical_bytes

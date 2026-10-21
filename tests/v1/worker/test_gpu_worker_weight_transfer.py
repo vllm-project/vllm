@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config import ParallelConfig, VllmConfig, get_current_vllm_config
+from vllm.distributed.weight_transfer import RetryableWeightUpdateError
 from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.model_executor.model_loader.reload.inplace import get_parameter_for_reload
 from vllm.v1.worker.gpu_worker import Worker
@@ -220,6 +221,25 @@ def test_finish_without_start_raises():
     worker = _make_worker(_RecordingEngine())
     with pytest.raises(RuntimeError, match="without a matching"):
         Worker.finish_weight_update(worker)
+
+
+def test_retryable_finish_failure_ends_worker_session(monkeypatch):
+    engine = _RecordingEngine()
+    worker = _make_worker(engine)
+    Worker.start_weight_update(worker)
+
+    def fail_finish() -> None:
+        raise RetryableWeightUpdateError("retry the complete update")
+
+    monkeypatch.setattr(engine, "finish_weight_update", fail_finish)
+
+    with pytest.raises(RetryableWeightUpdateError, match="complete update"):
+        Worker.finish_weight_update(worker)
+
+    assert worker._weight_update_active is False
+    assert engine.reset_count == 1
+    Worker.start_weight_update(worker)
+    assert worker._weight_update_active is True
 
 
 def test_update_resets_active_on_error():
