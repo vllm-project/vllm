@@ -5,7 +5,7 @@ meta:
   provider: "DeepSeek"
   description: "DeepSeek V4.1 Flash vision-language MoE (552B backbone; 8B active per prompt token, 16B per output token) combining sliding-window plus compressed sparse attention with a two-level indexer, engram n-gram memory, hyper-connections, and a DSpark multi-token draft head."
   date_added: 2026-09-09
-  date_updated: 2026-10-19
+  date_updated: 2026-10-21
   tasks:
     - text
     - multimodal
@@ -26,6 +26,7 @@ meta:
     mi350x: verified
     mi355x: verified
     dgx_station_gb300: verified
+    ascend_910c: verified
 
 model:
   model_id: "deepseek-ai/DeepSeek-V4.1-Flash"
@@ -96,6 +97,10 @@ features:
         args:
           - "--speculative-config"
           - '{"method":"dspark","num_speculative_tokens":5,"num_speculative_tokens_per_batch_size":[[1,4,5],[5,24,1]]}'
+      npu:
+        args:
+          - "--speculative-config"
+          - '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}'
   text_only:
     description: "Skip loading the vision encoder for text-only workloads — frees VRAM for KV cache. Mutually exclusive with encoder_parallel."
     args:
@@ -187,6 +192,67 @@ variants:
     description: "Launch checkpoint (2026-09-09), superseded by 1017 — kept for reproducing earlier results. Same mixed MXFP4/MXFP8 format."
     hardware_overrides: *v41_flash_hw_overrides
 
+  ascend_w8a8:
+    model_id: "Eco-Tech/DeepSeek-V4.1-Flash-w8a8"
+    label: "W8A8 (Ascend A3)"
+    precision: int8
+    vram_minimum_gb: 663
+    description: "ModelSlim W8A8 with Engram host offload on one Atlas 800 A3: DP4/TP4/EP16 across 16 logical devices."
+    supported_hardware: [ascend_910c]
+    min_vllm_version: "0.30.0"
+    tp:
+      ascend_910c: 4
+    extra_args:
+      - "--quantization"
+      - "ascend"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8900"
+      - "--max-model-len"
+      - "150000"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--max-num-seqs"
+      - "32"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--safetensors-load-strategy"
+      - "lazy"
+      - "--model-loader-extra-config"
+      - '{"enable_multithread_load":true,"num_threads":128}'
+      - "--block-size"
+      - "128"
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--async-scheduling"
+      - "--engram-config"
+      - '{"cpu_offload":true,"dp_shared_memory":true}'
+      - "--additional-config"
+      - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"enable_fused_mc2":1,"enable_dsa_cp":true,"enable_flashcomm1":true,"enable_shared_expert_dp":true}'
+    extra_env:
+      VLLM_USE_V2_MODEL_RUNNER: "0"
+      VLLM_ENGINE_READY_TIMEOUT_S: "36000"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      HCCL_BUFFSIZE: "1024"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      VLLM_USE_MODELSCOPE: "True"
+      ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15"
+    hardware_overrides:
+      npu:
+        # Applied after strategy sizing: both single-node TP and TEP use DP4/TP4.
+        extra_args:
+          - "--data-parallel-size"
+          - "4"
+          - "--tensor-parallel-size"
+          - "4"
+          - "--enable-expert-parallel"
+      ascend_910c:
+        docker_image: "quay.io/ascend/vllm-ascend:deepseek-v4.1-flash-a3"
+        docker_serve_command: "vllm serve"
+        install:
+          pip: false
+
 compatible_strategies:
   - single_node_tp
   - single_node_tep
@@ -206,6 +272,17 @@ strategy_hardware:
     dgx_station_gb300: unsupported
   single_node_dep:
     dgx_station_gb300: unsupported
+    # The generic DEP router assumes DP16, rather than this recipe's DP4/TP4.
+    npu: unsupported
+  multi_node_tp:
+    npu: unsupported
+  multi_node_tep:
+    npu: unsupported
+  multi_node_dep:
+    npu: unsupported
+  pd_cluster:
+    # Ascend needs MooncakeHybridConnector and asymmetric DP4/TP4 + DP8/TP2.
+    npu: unsupported
 
 hardware_overrides:
   amd:
@@ -490,6 +567,34 @@ hardware_notes:
     body: "Single GB300 with both Engram tables and 60 GiB of routed experts in pinned Grace memory (UVA offload). Measured on a nightly image; vLLM 0.31.0 carries every flag this row uses. The first boot on a new flag set runs a 75-90 min FlashInfer autotune; keep /root/.cache/vllm on a persistent volume."
 
 guide: |
+  ## Ascend NPU (Atlas 800 A3)
+
+  Select **W8A8 (Ascend A3)** and **Ascend 910C**, then use **Tensor Parallel**
+  or **Tensor + Expert Parallel**. Both generate the tutorial's single-node
+  DP4/TP4/EP16 layout across all 16 logical devices (8 physical NPUs).
+  Select the **Python** frontend to match the Ascend tutorial.
+
+  Download [Eco-Tech/DeepSeek-V4.1-Flash-w8a8](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-w8a8)
+  from ModelScope, or prepare a compatible checkpoint with
+  [ModelSlim](https://github.com/Ascend/msmodelslim). Use the tutorial's W8A8
+  checkpoint with INT8 Engram storage; other conversions are not covered by
+  this configuration. Engram tables are offloaded to host memory and shared
+  by local DP ranks, so retain `--ipc=host` and provide sufficient host RAM.
+
+  The image is `quay.io/ascend/vllm-ascend:deepseek-v4.1-flash-a3`.
+  Keep `VLLM_USE_V2_MODEL_RUNNER=0`, lazy multithreaded weight loading,
+  `FULL_DECODE_ONLY` ACL Graph, and the 150,000-token serving limit. The model's
+  advertised 1M context is not the single-node limit used here. Speculative
+  decoding remains opt-in; the Ascend override uses five-token DSpark with
+  eager draft execution, as documented for PD Decode.
+
+  See the [vLLM Ascend deployment guide](https://github.com/vllm-project/vllm-ascend/blob/ff62595360a069343ecdc3b2cd3a0daf45b4f1f0/docs/source/tutorials/models/DeepSeek-V4.1-Flash.md)
+  for installation, verification, A2 multi-node deployment, and the A3 1P1D
+  example (Prefill DP4/TP4, Decode DP8/TP2 with MooncakeHybridConnector).
+  The generic DEP and PD builder templates do not reproduce those Ascend
+  launchers; use the guide for these deployments. Its PD example is a
+  reference design, not a production recommendation.
+
   ## Overview
 
   DeepSeek-V4.1 is a vision-language Mixture-of-Experts model: **552B backbone parameters
