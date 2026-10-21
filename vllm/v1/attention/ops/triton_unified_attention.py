@@ -1262,8 +1262,6 @@ def unified_attention(
             BLOCK_Q=BLOCK_Q,
             NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
             WINDOW_SEGMENTS=window_segments,
-            # Only read with WINDOW_SEGMENTS; pass 0 otherwise to avoid
-            # compiling a reduce variant per window size.
             SLIDING_WINDOW=sliding_window_val if window_segments else 0,
             USE_FP8=output_scale is not None,
         )
