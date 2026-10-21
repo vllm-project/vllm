@@ -6,7 +6,6 @@ from functools import partial
 
 import torch
 import torch.nn.functional as F
-from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -24,6 +23,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp6E2M3Dynamic,
     kMxfp6E3M2Dynamic,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_quark
 
@@ -108,16 +108,12 @@ class EmulationMxfp4LinearKernel(MxFp4LinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        weight_scale = Parameter(layer.weight_scale.data, requires_grad=False)
-
         # Match the MXFP8 emulation path when explicitly enabled: dequantize
         # once at load time so inference uses a plain high-precision linear.
         # Otherwise retain packed weights and dequantize per invocation.
         if envs.VLLM_MXFP4_EMULATION_DEQUANT_AT_LOAD:
-            weight = dequant_mxfp4(layer.weight, weight_scale, torch.bfloat16)
-            layer.weight = Parameter(weight.contiguous(), requires_grad=False)
-
-        layer.weight_scale = weight_scale
+            weight = dequant_mxfp4(layer.weight, layer.weight_scale, torch.bfloat16)
+            replace_parameter(layer, "weight", weight.contiguous())
 
     def apply_weights(
         self,
