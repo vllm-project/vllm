@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     CUDA_VISIBLE_DEVICES: str | None = None
     VLLM_ENGINE_READY_TIMEOUT_S: int = 600
     VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT: float = 30.0
+    VLLM_CHAT_TEMPLATE_FUEL: int = 500000
     VLLM_API_KEY: str | None = None
     VLLM_DEBUG_LOG_API_SERVER_RESPONSE: bool = False
     S3_ACCESS_KEY_ID: str | None = None
@@ -813,6 +814,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Set to 0 to disable the timeout.
     "VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT": lambda: float(
         os.environ.get("VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT", "30")
+    ),
+    # Maximum template instructions (MiniJinja fuel) for rendering a
+    # request-supplied chat template (--trust-request-chat-template) in the
+    # Rust frontend; the server's own template has no limit. Set to 0 to
+    # disable the limit.
+    "VLLM_CHAT_TEMPLATE_FUEL": lambda: int(
+        os.environ.get("VLLM_CHAT_TEMPLATE_FUEL", "500000")
     ),
     # API key for vLLM API server
     "VLLM_API_KEY": lambda: os.environ.get("VLLM_API_KEY", None),
@@ -2359,6 +2367,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_MODEL_REDIRECT_PATH",
         "VLLM_HOST_IP",
         "VLLM_RAY_BUNDLE_INDICES",
+        "VLLM_CHAT_TEMPLATE_FUEL",
         "VLLM_ELASTIC_EP_SCALE_UP_LAUNCH",
         "VLLM_FORCE_AOT_LOAD",
         "S3_ACCESS_KEY_ID",
