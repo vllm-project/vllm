@@ -1807,9 +1807,16 @@ def _parallel_worker(
             if test_config.backend == "flashinfer_nvlink_one_sided":
                 from flashinfer.comm.trtllm_moe_alltoall import MoeAlltoAll
 
+                from vllm.distributed.device_communicators.all2all import (
+                    FlashInferNVLinkOneSidedManager,
+                )
+
                 torch.accelerator.synchronize()
-                manager = get_ep_group().device_communicator.all2all_manager
+                communicator = get_ep_group().device_communicator
+                assert communicator is not None
+                manager = communicator.all2all_manager
                 if manager is not None:
+                    assert isinstance(manager, FlashInferNVLinkOneSidedManager)
                     manager.cleanup()
                 # Run cached tensor deleters before their JIT library unloads.
                 MoeAlltoAll._WORKSPACE_CACHE.clear()
