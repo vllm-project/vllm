@@ -42,7 +42,7 @@ class AuxRequestOutput:
     routed_experts_rows: np.ndarray
     """Routed expert IDs per token, or zero-width rows when disabled."""
     indexer_rows: np.ndarray | None = None
-    """Encoded indexer selections per token, or None when disabled."""
+    """Raw or encoded indexer selections per token, or None when disabled."""
     indexer_profile: dict[str, Any] | None = None
     """Metadata describing indexer sources and decoding, if enabled."""
 

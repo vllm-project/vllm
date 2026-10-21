@@ -1,5 +1,11 @@
 # Indexer selection return
 
+DeepSeek V4's ordinary raw C4A Replay is provided by the foundation in
+[PR #49555](https://github.com/vllm-project/vllm/pull/49555). Its fixed-width
+int32 indices address compressed KV cache rows and are returned unchanged;
+that capture path requires no Profile or codec. The Profile extension adds
+optional semantic metadata to the existing V4 adapter.
+
 Indexer Replay returns the sparse selections made during a rollout, so a
 trainer can reuse them. Selection semantics depend on the model: token IDs,
 compressed-cache coordinates, Blocks, Pools or Regions. Always retain the

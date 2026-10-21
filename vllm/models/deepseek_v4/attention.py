@@ -777,7 +777,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             assert self.topk_indices_buffer is not None
             self.indexer_capture.capture(
                 self.topk_indices_buffer[
-                    : len(hidden_states), : self.indexer.topk_tokens
+                    : len(hidden_states), : self.indexer_capture.rows.shape[1]
                 ]
             )
 
