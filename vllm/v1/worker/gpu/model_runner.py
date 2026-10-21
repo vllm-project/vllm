@@ -1803,6 +1803,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # cross-attention cache with dynamic encoder outputs.
             skip_compiled = True
 
+        need_eager = is_profile or skip_compiled
+        if batch_req_state is not None and not need_eager:
+            need_eager = self.model_state.needs_eager_forward(
+                num_tokens=num_toks,
+                idx_mapping=batch_req_state.idx_mapping_np,
+                is_prefilling=batch_req_state.is_prefilling_np,
+                num_computed_prefill_tokens=batch_req_state.num_computed_prefill_tokens_np,
+                num_scheduled_tokens=batch_req_state.num_scheduled_tokens,
+                prefill_len=batch_req_state.prefill_len_np,
+            )
+
         batch_desc, dp_sync_state = dispatch_cg_and_sync_dp(
             self.cudagraph_manager,
             num_reqs,
@@ -1811,7 +1822,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.dp_size,
             self.dp_rank,
             max_query_len=max_query_len,
-            need_eager=is_profile or skip_compiled,
+            need_eager=need_eager,
             num_active_loras=num_active_loras,
             parallel_config=self.parallel_config,
             allow_ubatching=(

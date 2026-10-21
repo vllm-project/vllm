@@ -3,6 +3,7 @@
 from abc import ABC, abstractmethod
 from typing import Any, ClassVar, cast
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -151,6 +152,20 @@ class ModelState(ABC):
         ``ALWAYS`` imposes no extra constraint on the runner's cudagraph mode.
         """
         return AttentionCGSupport.ALWAYS, None
+
+    def needs_eager_forward(
+        self,
+        *,
+        num_tokens: int,
+        idx_mapping: np.ndarray,
+        is_prefilling: np.ndarray,
+        num_computed_prefill_tokens: np.ndarray,
+        num_scheduled_tokens: np.ndarray,
+        prefill_len: np.ndarray,
+    ) -> bool:
+        """Whether this batch must run without CUDA graphs. Checked on real
+        batches before graph dispatch. False by default."""
+        return False
 
     def preprocess_state(
         self,

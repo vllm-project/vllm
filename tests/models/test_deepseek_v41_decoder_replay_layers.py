@@ -145,6 +145,24 @@ def test_piecewise_graphs_break_out_by_size():
     write_batch_kv.assert_called_once_with(*states)
 
 
+def test_default_replay_capture_sizes_reach_one_row(monkeypatch):
+    """Prefill chunks far from their prompt's end replay one row each, so the
+    default sizes start at 1 rather than at the window."""
+    monkeypatch.setattr(cudagraph_utils, "get_pp_group", MagicMock)
+    compilation = CompilationConfig(max_cudagraph_capture_size=512)
+    cfg = MagicMock(compilation_config=compilation, speculative_config=None)
+    cfg.use_cumem_cudagraph_pool = False
+    cfg.scheduler_config = MagicMock(max_num_seqs=8, max_num_batched_tokens=1024)
+    cfg.cache_config.use_kda_recoverssm = False
+    cfg.model_config.hf_config = MagicMock(hc_mult=HC, hidden_size=HIDDEN)
+    cfg.model_config.dtype = torch.float32
+    cfg.kernel_config.moe_backend = "auto"
+    layers = DecoderReplayLayers(128, MagicMock(), MagicMock(), set(), "swa")
+    manager = DecoderReplayCudaGraphManager(cfg, DEVICE, layers)
+    sizes = manager.compilation_config.cudagraph_capture_sizes
+    assert sizes == [1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512]
+
+
 @pytest.mark.parametrize(
     ("moe_backend", "ids_dtype"),
     [

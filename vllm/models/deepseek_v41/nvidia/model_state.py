@@ -105,7 +105,7 @@ def _pad_replayed_slots_kernel(
 def _gather_replay_batch_kernel(
     query_start_loc_ptr,  # [num_reqs + 1]
     dropped_before_ptr,  # [num_reqs + 1] rows trimmed before each boundary
-    seq_lens_ptr,  # [num_reqs]
+    kv_floor_ptr,  # [num_reqs] lowest replay-layer window KV position to read
     replay_start_ptr,  # [num_reqs] the encoder-side replay start
     positions_ptr,
     slot_mappings_ptr,  # [num_groups, num_tokens]
@@ -116,7 +116,6 @@ def _gather_replay_batch_kernel(
     kept_slot_mappings_ptr,  # out: [num_groups, num_kept]
     kept_slot_mappings_stride,
     kept_kv_start_ptr,  # out: [num_reqs]
-    window,
     NUM_GROUPS: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
@@ -131,10 +130,7 @@ def _gather_replay_batch_kernel(
         tl.store(kept_query_start_loc_ptr, kept_begin)
     tl.store(kept_query_start_loc_ptr + req + 1, kept_end)
 
-    # A trimmed request holds no replay-layer window KV below its kept rows.
-    kv_start = tl.load(replay_start_ptr + req)
-    if kept_end - kept_begin < end - begin:
-        kv_start = tl.maximum(kv_start, tl.load(seq_lens_ptr + req) - window)
+    kv_start = tl.maximum(tl.load(replay_start_ptr + req), tl.load(kv_floor_ptr + req))
     tl.store(kept_kv_start_ptr + req, kv_start)
 
     first_row = end - (kept_end - kept_begin)
@@ -188,8 +184,9 @@ class DeepseekV41ModelState(DefaultModelState):
     starts to the sliding-window metadata builders, whose kernels read no
     window KV below them. With the decoder side on
     (``model.decoder_replay_layers``) it also prepares the replay layers'
-    batch in eager steps: each prefill's last ``window`` rows as a sub-batch
-    with metadata and a forward context of its own, like a microbatch.
+    batch in eager steps: each prefill's last ``window`` rows (one row for a
+    chunk far from its prompt's end) as a sub-batch with metadata and a forward
+    context of its own, like a microbatch.
     """
 
     def __init__(
@@ -227,6 +224,9 @@ class DeepseekV41ModelState(DefaultModelState):
             # Requests whose every prompt row is read (prompt logprobs) never trim.
             self._keeps_rows_np = np.zeros(self.max_num_reqs, dtype=np.bool_)
             self._dropped_before = UvaBufferPool(self.max_num_reqs + 1, torch.int32)
+            self._kv_floor = UvaBufferPool(self.max_num_reqs, torch.int32)
+            # Whether each request's last prefill chunk replayed one row only.
+            self._skipped_tail_np = np.zeros(self.max_num_reqs, dtype=np.bool_)
             # The replay batch's inputs: its rows of the batch, query offsets,
             # positions, slot mappings (sized with the KV cache groups on first
             # use) and the position from which each request holds replay-layer
@@ -271,11 +271,20 @@ class DeepseekV41ModelState(DefaultModelState):
                 vllm_config, device, layers
             )
             layers.trim_threshold = threshold
+        # A prefill chunk ending at least this many tokens before its prompt's
+        # end replays one row: the finish runs untrimmed (no replay batch) only
+        # below the trim threshold, and reads at most window - 1 rows back.
+        self._tail_reach: int | None = None
+        if layers is not None:
+            self._tail_reach = (
+                layers.trim_threshold or self.max_num_tokens
+            ) + layers.window
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         super().add_request(req_index, new_req_data)
         self._replay_start_np[req_index] = new_req_data.replay_start
         if self.decoder_replay_layers is not None:
+            self._skipped_tail_np[req_index] = False
             params = new_req_data.sampling_params
             self._keeps_rows_np[req_index] = (
                 params is not None and params.prompt_logprobs is not None
@@ -436,7 +445,7 @@ class DeepseekV41ModelState(DefaultModelState):
         _gather_replay_batch_kernel.warmup(
             input_batch.query_start_loc,
             self._dropped_before.copy_to_uva(np.zeros(1, dtype=np.int32)),
-            input_batch.seq_lens,
+            self._kv_floor.copy_to_uva(np.zeros(1, dtype=np.int32)),
             self._replay_start,
             input_batch.positions,
             slot_mappings,
@@ -447,11 +456,62 @@ class DeepseekV41ModelState(DefaultModelState):
             self._kept_slot_mappings,
             self._kept_slot_mappings.stride(0),
             self._kept_kv_start,
-            self.decoder_replay_layers.window,
             NUM_GROUPS=slot_mappings.shape[0],
             BLOCK=1024,
             grid=(1,),
         )
+
+    def needs_eager_forward(
+        self,
+        *,
+        num_tokens: int,
+        idx_mapping: np.ndarray,
+        is_prefilling: np.ndarray,
+        num_computed_prefill_tokens: np.ndarray,
+        num_scheduled_tokens: np.ndarray,
+        prefill_len: np.ndarray,
+    ) -> bool:
+        """A chunk after a one-row chunk must not read the window that chunk
+        skipped, which only the replay batch's metadata prevents: run eager
+        unless the step breaks out to a replay batch anyway (a PIECEWISE graph
+        at the trim threshold or above; a uniform batch may take a FULL graph)."""
+        if self.decoder_replay_layers is None:
+            return False
+        _, follows = self._skipped_tails(
+            idx_mapping,
+            is_prefilling,
+            num_computed_prefill_tokens,
+            num_scheduled_tokens,
+            prefill_len,
+        )
+        if not follows.any():
+            return False
+        threshold = self.decoder_replay_layers.trim_threshold
+        return (
+            threshold is None
+            or num_tokens < threshold
+            or bool((num_scheduled_tokens == num_scheduled_tokens[0]).all())
+        )
+
+    def _skipped_tails(
+        self,
+        idx_mapping: np.ndarray,
+        is_prefilling: np.ndarray,
+        computed: np.ndarray,
+        query_lens: np.ndarray,
+        prefill_len: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Prefill chunks that replay one row instead of their last window, and
+        chunks whose previous chunk did. A chunk replays one row when it ends at
+        least ``_tail_reach`` tokens before its prompt's end; the chunks within
+        reach keep their window, so the prompt's last window is computed as
+        before."""
+        prefill = is_prefilling & ~self._keeps_rows_np[idx_mapping]
+        follows = prefill & self._skipped_tail_np[idx_mapping]
+        if self._tail_reach is None:
+            return np.zeros_like(prefill), follows
+        one_row = prefill & (prefill_len - computed - query_lens >= self._tail_reach)
+        return one_row, follows
 
     def _prepare_replay_batch(
         self,
@@ -475,29 +535,49 @@ class DeepseekV41ModelState(DefaultModelState):
             cudagraph_mode == CUDAGraphMode.PIECEWISE
             and layers.graph_uses_replay_batch(input_batch.num_tokens_after_padding)
         )
+        num_reqs = input_batch.num_reqs
+        prefilling = input_batch.is_prefilling_np[:num_reqs]
+        idx_mapping = input_batch.idx_mapping_np[:num_reqs]
         if cudagraph_mode != CUDAGraphMode.NONE and not force_replay_batch:
+            # The layers run on every row, so every prefill writes its window.
+            self._skipped_tail_np[idx_mapping[prefilling]] = False
             return
 
-        num_reqs = input_batch.num_reqs
         query_lens = np.diff(input_batch.query_start_loc_np[: num_reqs + 1])
-        kept_lens = np.where(
-            self._keeps_rows_np[input_batch.idx_mapping_np[:num_reqs]],
+        seq_lens = input_batch.seq_lens_cpu_upper_bound[:num_reqs].numpy()
+        computed = input_batch.num_computed_prefill_tokens_np[:num_reqs]
+        one_row, follows = self._skipped_tails(
+            idx_mapping,
+            prefilling,
+            computed,
             query_lens,
-            np.minimum(query_lens, layers.window),
+            input_batch.prefill_len_np[:num_reqs],
         )
+        kept_lens = np.where(
+            self._keeps_rows_np[idx_mapping],
+            query_lens,
+            np.minimum(query_lens, np.where(one_row, 1, layers.window)),
+        )
+        # A trimmed request holds no replay-layer window KV below its kept rows.
+        # A lone kept row reads only itself; a chunk after one reads nothing
+        # from before its first row.
+        kv_floor = np.where(kept_lens < query_lens, seq_lens - layers.window, 0)
+        kv_floor = np.where(one_row, seq_lens - 1, kv_floor)
+        kv_floor = np.where(follows, np.maximum(kv_floor, computed), kv_floor)
         # A batch of context-free non-prefill rows is a dummy (an idle DP rank's):
         # nothing reads it and its idx_mapping hits stale slots, so keep one row.
-        seq_lens = input_batch.seq_lens_cpu_upper_bound[:num_reqs].numpy()
         is_dummy = not input_batch.is_prefilling_np[:num_reqs].any() and bool(
             (seq_lens == query_lens).all()
         )
         if is_dummy and capture_desc is None:
             kept_lens = np.zeros_like(kept_lens)
             kept_lens[0] = 1
+        elif capture_desc is None:
+            self._skipped_tail_np[idx_mapping[prefilling]] = one_row[prefilling]
         # Dummy batches (captures, an idle DP rank's) are not prefills: they
         # keep their rows unless a rank trims.
         needs_replay_batch = force_replay_batch or bool(
-            (kept_lens < query_lens)[input_batch.is_prefilling_np[:num_reqs]].any()
+            ((kept_lens < query_lens) | follows)[prefilling].any()
         )
         num_tokens = int(kept_lens.sum())
         dp_tokens = None
@@ -525,7 +605,12 @@ class DeepseekV41ModelState(DefaultModelState):
                 self.vllm_config.parallel_config, num_padded, dp_tokens
             )
         kept_batch, kept_slot_mappings = self._kept_input_batch(
-            input_batch, slot_mappings, replay_start, kept_lens, num_padded
+            input_batch,
+            slot_mappings,
+            replay_start,
+            kept_lens,
+            kv_floor.astype(np.int32),
+            num_padded,
         )
         if self._replay_attn_groups is None:
             self._replay_attn_groups = (
@@ -604,6 +689,7 @@ class DeepseekV41ModelState(DefaultModelState):
         slot_mappings: torch.Tensor,
         replay_start: torch.Tensor,
         kept_lens: np.ndarray,
+        kv_floor: np.ndarray,
         num_padded: int,
     ) -> tuple[InputBatch, torch.Tensor]:
         """Build the sub-``InputBatch`` of each request's last ``kept_lens``
@@ -627,7 +713,7 @@ class DeepseekV41ModelState(DefaultModelState):
         _gather_replay_batch_kernel[(num_reqs,)](
             input_batch.query_start_loc,
             dropped_before,
-            input_batch.seq_lens,
+            self._kv_floor.copy_to_uva(kv_floor),
             replay_start,
             input_batch.positions,
             slot_mappings,
@@ -638,7 +724,6 @@ class DeepseekV41ModelState(DefaultModelState):
             kept_slot_mappings,
             kept_slot_mappings.stride(0),
             self._kept_kv_start,
-            self.decoder_replay_layers.window,  # type: ignore[union-attr]
             NUM_GROUPS=slot_mappings.shape[0],
             BLOCK=1024,
         )
