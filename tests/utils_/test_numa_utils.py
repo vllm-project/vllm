@@ -566,12 +566,16 @@ def test_parallel_config_validates_numa_bind_nodes():
         ParallelConfig(numa_bind_nodes=[0, -1])
 
 
-def test_parallel_config_numa_lists_imply_numa_bind():
+@pytest.mark.parametrize(
+    ("nodes", "cpus"), [([0, 1], None), (None, ["0-3"])], ids=["nodes", "cpus"]
+)
+def test_parallel_config_numa_lists_imply_numa_bind(nodes, cpus):
     assert ParallelConfig().numa_bind is None
-    assert ParallelConfig(numa_bind_nodes=[0, 1]).numa_bind is True
-    assert ParallelConfig(numa_bind_cpus=["0-3"]).numa_bind is True
-    with pytest.raises(ValueError, match="require numa_bind"):
-        ParallelConfig(numa_bind=False, numa_bind_nodes=[0, 1])
+    config = ParallelConfig(numa_bind_nodes=nodes, numa_bind_cpus=cpus)
+    assert config.numa_bind is True
+    assert config._numa_bind_auto is False
+    with pytest.raises(ValueError, match="cannot be combined with numa_bind=False"):
+        ParallelConfig(numa_bind=False, numa_bind_nodes=nodes, numa_bind_cpus=cpus)
 
 
 @pytest.mark.parametrize("cpuset", ["", "abc", "1-", "4-1", "1,,2", "1:2"])
@@ -1014,6 +1018,6 @@ def test_auto_numa_checks_cpu_affinity(monkeypatch, affinity):
         lambda: [0, 1],
         raising=False,
     )
-    assert numa_utils._is_auto_numa_available(verbose=False, strict=True) is (
-        affinity == [3, 2, 1, 0]
-    )
+    assert numa_utils._is_auto_numa_available(
+        verbose=False, require_unbound_process=True
+    ) is (affinity == [3, 2, 1, 0])

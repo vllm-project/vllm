@@ -347,6 +347,10 @@ class ParallelConfig:
     numa_bind_nodes: list[int] | None = None
     """NUMA node to bind each GPU worker to.
 
+    Setting this list implies explicit `numa_bind=True` and requests strict
+    `--membind`, not automatic soft memory preference. It cannot be combined
+    with `numa_bind=False`.
+
     Specify one NUMA node per visible GPU, for example `[0, 0, 1, 1]`
     for a 4-GPU system with GPUs 0-1 on NUMA node 0 and GPUs 2-3 on
     NUMA node 1. If unset and `numa_bind=True`, vLLM auto-detects the
@@ -355,6 +359,10 @@ class ParallelConfig:
     """
     numa_bind_cpus: list[str] | None = None
     """Optional CPU lists to bind each GPU worker to.
+
+    Setting this list implies explicit `numa_bind=True` and requests strict
+    `--membind`, not CPU-only binding or automatic soft memory preference.
+    It cannot be combined with `numa_bind=False`.
 
     Specify one CPU list per visible GPU, for example
     `["0-3", "4-7", "8-11", "12-15"]`. When set, vLLM uses
@@ -567,7 +575,7 @@ class ParallelConfig:
         if self.numa_bind_nodes is not None or self.numa_bind_cpus is not None:
             if self.numa_bind is False:
                 raise ValueError(
-                    "numa_bind_nodes and numa_bind_cpus require numa_bind=True."
+                    "NUMA binding lists cannot be combined with numa_bind=False."
                 )
             self.numa_bind = True
 

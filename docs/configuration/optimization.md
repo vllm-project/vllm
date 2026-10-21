@@ -165,7 +165,9 @@ remapping, and prefill context parallelism (PCP) are excluded from automatic bin
 Otherwise vLLM starts unbound. Use
 `--numa-bind` to make a missing `numactl` or undetectable GPU-to-NUMA topology a
 startup error, or `--no-numa-bind` to disable binding. Passing
-`--numa-bind-nodes` or `--numa-bind-cpus` implies `--numa-bind`.
+`--numa-bind-nodes` or `--numa-bind-cpus` explicitly enables binding even without
+`--numa-bind`: either list requests strict `--membind`, not automatic soft memory
+preference or CPU-only binding. Neither can be combined with `--no-numa-bind`.
 Automatic binding preserves an existing non-default memory policy, such as
 interleave, preferred-node, or bind. Explicit enablement may override it.
 
