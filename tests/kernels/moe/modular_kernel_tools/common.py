@@ -106,6 +106,11 @@ class Config:
     hidden_dim_unpadded: int | None = None
     intermediate_size_per_partition_unpadded: int | None = None
 
+    # Opt into AITER's DeepSeek-V4.1 a4w4 (DSV4) kernel path (SEPARATED
+    # gate/up layout instead of INTERLEAVE); see
+    # VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4 in config.py.
+    use_mxfp4_w4a4_dsv4: bool = False
+
     def __post_init__(self):
         if self.quant_config is None:
             self.quant_config = TestMoEQuantConfig(None, False, False, None)
@@ -196,6 +201,12 @@ class Config:
         env_dict = {
             "VLLM_USE_DEEP_GEMM": str(int(self.needs_deep_gemm())),
         }
+
+        if self.use_mxfp4_w4a4_dsv4:
+            vllm_config.model_config.hf_config = SimpleNamespace(
+                model_type="deepseek_v41"
+            )
+            env_dict["VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4"] = "1"
 
         vllm_config.parallel_config.all2all_backend = self.all2all_backend()
 
@@ -679,13 +690,14 @@ def reference_moe_impl(
         dtype = config.dtype
         a = rank_tensors.hidden_states
         w1_q, w1_scale_q = weights.w1, weights.w1_scale
-        if config.is_w4a16_mxfp4:
+        if config.is_w4a16_mxfp4 and not config.use_mxfp4_w4a4_dsv4:
             assert config.activation == MoEActivation.SWIGLUOAI
             # SwigluOAIAndMul expects gate/up interleaved row order
             # (x[..., ::2], x[..., 1::2]), not the contiguous [gate; up]
             # halves that `weights.w1` is generated in. Mirror the same
             # reorder `_maybe_convert_weights_for_experts()` applies before
-            # the real MK-path AITER kernel call.
+            # the real MK-path AITER kernel call. DSV4's SEPARATED layout
+            # keeps the contiguous halves as-is (default SiluAndMul).
             w1_q = _interleave_gate_up_rows(w1_q)
             w1_scale_q = _interleave_gate_up_rows(w1_scale_q)
         w1 = upcast_from_mxfp(w1_q, w1_scale_q, dtype, axis=-1)
@@ -833,6 +845,28 @@ def _maybe_convert_weights_for_experts(
         # The converter mutates its w13/w2 weight and scale args in place, and
         # rank_weights is a view into the shared master WeightTensors, so
         # everything passed in must be a fresh tensor.
+        if config.use_mxfp4_w4a4_dsv4:
+            # DSV4's SEPARATED layout needs the real production converter
+            # (not the gpt-oss one below), on un-interleaved weights.
+            from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+                Mxfp4MoeBackend,
+                convert_weight_to_mxfp4_moe_kernel_format,
+            )
+
+            w1, w2, w1_scale, w2_scale, _, _ = (
+                convert_weight_to_mxfp4_moe_kernel_format(
+                    mxfp4_backend=Mxfp4MoeBackend.AITER_MXFP4_BF16,
+                    layer=torch.nn.Module(),
+                    w13_weight=rank_weights.w1.clone(),
+                    w2_weight=rank_weights.w2.clone(),
+                    w13_weight_scale=rank_weights.w1_scale.clone(),
+                    w2_weight_scale=rank_weights.w2_scale.clone(),
+                    activation=config.activation,
+                    use_separated_a4w4=True,
+                )
+            )
+            return WeightTensors(w1=w1, w2=w2, w1_scale=w1_scale, w2_scale=w2_scale)
+
         if config.is_w4a16_mxfp4:
             w1 = _interleave_gate_up_rows(rank_weights.w1)
             w1_scale = _interleave_gate_up_rows(rank_weights.w1_scale)

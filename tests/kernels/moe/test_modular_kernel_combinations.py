@@ -21,6 +21,7 @@ from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
     AiterFp8BlockExperts,
     AiterFp8ChannelExperts,
     AiterFp8TensorExperts,
+    AiterMxfp4Experts,
     AiterUnquantizedExperts,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -491,8 +492,8 @@ def test_modular_kernel_combinations_singlegpu(
 # read once at import time, so each combo needs a fresh child process (see
 # parallel_launch_with_config) rather than in-process monkeypatching.
 #
-# AITER_MOE_SORT_BACKEND is not covered: it only matters when output_aux=True,
-# which vLLM only sets on the MXFP4 path -- not yet wired into AiterExperts.
+# AITER_MOE_SORT_BACKEND is covered separately below (3b): it only matters
+# when output_aux=True, which vLLM only sets on the MXFP4 DSV4 path.
 
 
 def _aiter_sort_backend_hooks_available() -> bool:
@@ -744,6 +745,174 @@ def test_aiter_moe_dispatch_policy_forwarded_through_apply(dispatch_policy: int)
         weights,
         False,
         dispatch_policy,
+    )
+
+
+# --- 3b: AITER_MOE_SORT_BACKEND (MXFP4 adaptive-vs-Opus aux sort) ------------
+#
+# AITER_MOE_SORT_BACKEND is read once at aiter import time, same as the
+# CK/FlyDSL flags above, but only matters when aiter's internal `output_aux`
+# flag is set. The only path that sets it is MXFP4 W4A16 DeepSeek-V4.1 (DSV4)
+# a4w4, opted into via VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4=1 (see
+# FusedMoEConfig.__post_init__ / rocm_aiter_fused_experts()'s
+# use_mxfp4_w4a4_dsv4 branch) -- this is why PR #58393 deferred it.
+#
+# Shape (E=384, K=5120, N=640, topk=6, M=16) is a real DeepSeek-V4.1-tuned
+# shape (dsv41_fp4_tuned_fmoe.csv) that selects block_m=16, the only block_m
+# where aiter's _aux_uses_opus() crossover ever prefers adaptive over Opus.
+
+MXFP4_SORT_BACKEND_ENV_CASES = ["opus", "ck", "adaptive", "auto"]
+
+
+def _aiter_mxfp4_sort_backend_worker(
+    pgi: ProcessGroupInfo,
+    vllm_config: VllmConfig,
+    cpu_group,
+    config: Config,
+    weights: WeightTensors,
+    verbose: bool,
+    backend: str,
+):
+    import aiter.fused_moe as aiter_fused_moe
+
+    original_moe_sorting_impl = aiter_fused_moe._moe_sorting_impl
+    original_adaptive_sort = aiter_fused_moe._adaptive_moe_sort
+
+    with (
+        mock.patch.object(
+            aiter_fused_moe,
+            "_moe_sorting_impl",
+            wraps=original_moe_sorting_impl,
+        ) as sorting_impl_mock,
+        mock.patch.object(
+            aiter_fused_moe,
+            "_adaptive_moe_sort",
+            wraps=original_adaptive_sort,
+        ) as adaptive_mock,
+    ):
+        # Reuses the real correctness/accuracy checking rank_worker already
+        # does for every other AiterExperts combo, instead of duplicating it.
+        rank_worker(pgi, vllm_config, cpu_group, config, weights, verbose)
+
+    assert sorting_impl_mock.call_count > 0, (
+        "Expected AiterMxfp4Experts.apply() to reach aiter's _moe_sorting_impl."
+    )
+    call = sorting_impl_mock.call_args_list[0]
+    bound = inspect.signature(original_moe_sorting_impl).bind(*call.args, **call.kwargs)
+    bound.apply_defaults()
+    output_aux = bound.arguments["output_aux"]
+    assert output_aux, (
+        "Expected this MXFP4 DSV4 shape to set aiter's internal output_aux "
+        "flag (set automatically by aiter's _make_mxfp4_metadata for the "
+        "DSV4 kernel config) -- without it, AITER_MOE_SORT_BACKEND has no "
+        "effect, and this test can no longer exercise its target branch."
+    )
+
+    backend_forces_opus = backend in ("opus", "ck")
+    block_size = bound.arguments["block_size"]
+    num_experts = bound.arguments["num_experts"]
+    routed_rows = bound.arguments["topk_ids"].numel()
+    # The same predicate aiter itself uses to choose between the fused
+    # (adaptive) sort and Opus, so the expectation tracks aiter's real
+    # dispatch logic even if the installed build picks a different block_m
+    # for this shape than the one observed when this test was written.
+    aux_uses_opus = aiter_fused_moe._aux_uses_opus(
+        output_aux, block_size, routed_rows, num_experts
+    )
+    expect_adaptive = not backend_forces_opus and not aux_uses_opus
+
+    if expect_adaptive:
+        assert adaptive_mock.call_count > 0, (
+            f"AITER_MOE_SORT_BACKEND={backend!r} was requested and "
+            f"block_size={block_size}/routed_rows={routed_rows}/"
+            f"num_experts={num_experts} is adaptive-eligible, but the "
+            "adaptive sort never fired -- a silent fallback to Opus."
+        )
+    else:
+        assert adaptive_mock.call_count == 0, (
+            f"AITER_MOE_SORT_BACKEND={backend!r} "
+            + (
+                "unconditionally disables the adaptive sort"
+                if backend_forces_opus
+                else f"with block_size={block_size}/routed_rows={routed_rows}/"
+                f"num_experts={num_experts} falls on the Opus side of aiter's "
+                "own crossover heuristic"
+            )
+            + ", but the adaptive sort fired anyway."
+        )
+
+
+@require_aiter_moe
+@pytest.mark.parametrize("backend", MXFP4_SORT_BACKEND_ENV_CASES)
+def test_aiter_moe_sort_backend_dispatch_env_matrix_mxfp4(backend: str):
+    """See https://github.com/vllm-project/vllm/issues/54966 ("Test AITER
+    backend and dispatch settings"): the MXFP4 DSV4 follow-up to
+    test_aiter_moe_sorting_backend_dispatch_env_matrix, covering
+    AITER_MOE_SORT_BACKEND (left uncovered by PR #58393 since it only fires
+    on the MXFP4 DSV4 path, which could not yet be driven through this
+    harness).
+    """
+    if not _aiter_sort_backend_hooks_available():
+        pytest.skip(
+            "Installed aiter build predates the sort-backend hooks "
+            "(_moe_sorting_impl, _flydsl_moe_sorting, _USE_CK_MOE_SORTING, "
+            "_USE_FLYDSL_MOE_SORTING)."
+        )
+    import aiter.fused_moe as aiter_fused_moe
+
+    if not hasattr(aiter_fused_moe, "_adaptive_moe_sort") or not hasattr(
+        aiter_fused_moe, "_aux_uses_opus"
+    ):
+        pytest.skip(
+            "Installed aiter build lacks the MXFP4 adaptive-sort hooks "
+            "(_adaptive_moe_sort, _aux_uses_opus)."
+        )
+
+    from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+        MoEPrepareAndFinalizeNoDPEPModular,
+    )
+
+    # W4A16: weights are mxfp4, activations are unquantized -- the DSV4 gate
+    # in rocm_aiter_fused_experts() only fires for this quant scheme.
+    quant_config = TestMoEQuantConfig(
+        quant_dtype=None,
+        weight_dtype="mxfp4",
+        per_out_ch_quant=False,
+        per_act_token_quant=False,
+        block_shape=None,
+    )
+    config = Config(
+        Ms=[16],
+        K=5120,
+        N=640,
+        E=384,
+        topks=[6],
+        dtype=torch.bfloat16,
+        quant_config=quant_config,
+        prepare_finalize_type=MoEPrepareAndFinalizeNoDPEPModular,
+        fused_experts_type=AiterMxfp4Experts,
+        world_size=1,
+        use_mxfp4_w4a4_dsv4=True,
+    )
+    assert config.is_valid()[0]
+    assert config.fe_supports_quant_scheme(), (
+        f"AiterMxfp4Experts does not support quant scheme {quant_config} "
+        "(this also gates the test to MI350/gfx950 hardware)."
+    )
+
+    weights = WeightTensors.make(config)
+    vllm_config, env_dict = config.make_env_data()
+    env_dict = {**env_dict, "AITER_MOE_SORT_BACKEND": backend}
+
+    parallel_launch_with_config(
+        config.world_size,
+        _aiter_mxfp4_sort_backend_worker,
+        vllm_config,
+        env_dict,
+        config,
+        weights,
+        False,
+        backend,
     )
 
 
