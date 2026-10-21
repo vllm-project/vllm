@@ -12,6 +12,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 IndexerKVDType = Literal["auto", "bf16", "fp8", "mxfp4", "nvfp4"]
 MiniMaxM3MSADecodeBackend = Literal["triton", "cutlass"]
+IndexerCacheSharding = Literal["off", "on"]
 
 
 @config
@@ -111,6 +112,11 @@ class AttentionConfig:
     needs `indexer_kv_dtype="nvfp4"` and TP 4 (one index head per rank); it is
     ignored with a warning where it does not apply. It pays off from about 4
     concurrent decodes at 128K context and grows with batch and context."""
+
+    indexer_cache_sharding: IndexerCacheSharding = "off"
+    """Shard the indexer cache across TP ranks on supported backends.
+    Set "on" to request sharding; defaults to "off". The cache layout is
+    selected at startup and stays fixed for the engine."""
 
     indexer_sparse_logits: bool | None = None
     """DeepSeek V4.1 two-level indexer: score only the candidate blocks with
