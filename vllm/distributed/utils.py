@@ -38,9 +38,7 @@ logger = init_logger(__name__)
 # We prefer to use os.sched_yield as it results in tighter polling loops,
 # measured to be around 3e-7 seconds. However on earlier versions of Python
 # os.sched_yield() does not release the GIL, so we fall back to time.sleep(0)
-USE_SCHED_YIELD = (sys.version_info[:3] >= (3, 11, 1)) or (
-    sys.version_info[:2] == (3, 10) and sys.version_info[2] >= 8
-)
+USE_SCHED_YIELD = sys.version_info[:3] >= (3, 11, 1)
 
 
 def sched_yield():
@@ -52,9 +50,73 @@ def sched_yield():
 
 def ensure_divisibility(numerator, denominator):
     """Ensure that numerator is divisible by the denominator."""
-    assert numerator % denominator == 0, "{} is not divisible by {}".format(
-        numerator, denominator
+    assert numerator % denominator == 0, (
+        f"{numerator} is not divisible by {denominator}"
     )
+
+
+# P2P tags [base, base + log2(group size) + 1] are reserved for cpu_all_reduce_.
+_CPU_ALL_REDUCE_TAG_BASE = 27100
+
+
+def cpu_all_reduce_(tensor: torch.Tensor, group: ProcessGroup) -> torch.Tensor:
+    """Low-latency in-place SUM all-reduce of a small CPU tensor over a gloo group.
+
+    Recursive doubling within power-of-two blocks, then one concurrent exchange
+    between blocks. Results are bitwise identical across ranks. Works with
+    stateless (unregistered) process groups.
+    """
+    world_size = group.size()
+    if world_size == 1:
+        return tensor
+    block_size = world_size & -world_size
+    num_blocks = world_size // block_size
+    if tensor.device.type != "cpu" or not tensor.is_contiguous():
+        torch.distributed.all_reduce(tensor, group=group)
+        return tensor
+
+    rank = group.rank()
+    tag = _CPU_ALL_REDUCE_TAG_BASE
+
+    # Recursive doubling within the block (peers stay in the aligned block).
+    if block_size > 1:
+        # This branch applies only to even world sizes.
+        scratch = torch.empty_like(tensor)
+        mask = 1
+        while mask < block_size:
+            peer = rank ^ mask
+            # Wait for both ops before touching either buffer.
+            recv_work = group.recv([scratch], peer, tag)
+            send_work = group.send([tensor], peer, tag)
+            recv_work.wait()
+            send_work.wait()
+            tensor.add_(scratch)
+            mask <<= 1
+            tag += 1
+
+    # Exchange block sums with the same lane in every other block at once.
+    if num_blocks > 1:
+        # This branch applies only when world_size is not a power of two.
+        lane, my_block = rank % block_size, rank // block_size
+        block_sums = [
+            tensor if b == my_block else torch.empty_like(tensor)
+            for b in range(num_blocks)
+        ]
+        works = []
+        for b, buf in enumerate(block_sums):
+            if b != my_block:
+                works.append(group.recv([buf], b * block_size + lane, tag))
+        for b in range(num_blocks):
+            if b != my_block:
+                works.append(group.send([tensor], b * block_size + lane, tag))
+        for work in works:
+            work.wait()
+        # Sum in block order so every rank computes the identical result.
+        total = block_sums[0]
+        for buf in block_sums[1:]:
+            total.add_(buf)
+        tensor.copy_(total)
+    return tensor
 
 
 def divide(numerator, denominator):
@@ -62,6 +124,24 @@ def divide(numerator, denominator):
     the division value."""
     ensure_divisibility(numerator, denominator)
     return numerator // denominator
+
+
+def verify_group_size_divides_partition(
+    input_size_per_partition: int,
+    group_size: int,
+    layer_name: str | None = None,
+    extra_suggestion: str = "",
+) -> None:
+    """Validate that a TP-sharded layer holds a whole number of quant groups."""
+    if input_size_per_partition % group_size == 0:
+        return
+    location = f" for layer '{layer_name}'" if layer_name else ""
+    raise ValueError(
+        f"Weight {input_size_per_partition=}{location} is not divisible by "
+        f"{group_size=}. This happens when tensor_parallel_size splits the layer input "
+        "into shards that are not a whole number of quant groups. Consider reducing "
+        f"tensor_parallel_size{extra_suggestion}."
+    )
 
 
 def is_weak_contiguous(inp: torch.Tensor) -> bool:
@@ -93,6 +173,7 @@ def split_tensor_along_last_dim(
 
     Returns:
         A list of Tensors
+
     """
     # Get the size and dimension.
     last_dim = tensor.dim() - 1
@@ -127,9 +208,7 @@ def get_pp_indices(
         try:
             partitions = [int(layer) for layer in partition_list_str.split(",")]
         except ValueError as err:
-            raise ValueError(
-                "Invalid partition string: {}".format(partition_list_str)
-            ) from err
+            raise ValueError(f"Invalid partition string: {partition_list_str}") from err
         if len(partitions) != pp_size:
             raise ValueError(f"{len(partitions)=} does not match {pp_size=}.")
         if sum(partitions) != num_hidden_layers:
@@ -315,7 +394,6 @@ class StatelessProcessGroup:
     def barrier(self, timeout: float = 30.0):
         """A robust barrier to synchronize all ranks.
 
-
         Uses a multi-phase approach to ensure all processes reach the barrier
         before proceeding:
 
@@ -333,6 +411,7 @@ class StatelessProcessGroup:
 
         Raises:
             RuntimeError: If coordination fails or times out
+
         """
         # Generate a barrier ID that is globally unique
         try:
@@ -511,7 +590,16 @@ def get_cpu_distributed_timeout_or_none() -> timedelta | None:
     vllm_config = get_current_vllm_config_or_none()
     if vllm_config is None:
         return None
-    timeout_seconds = vllm_config.parallel_config.cpu_distributed_timeout_seconds
+    return vllm_config.parallel_config.cpu_distributed_timeout
+
+
+def get_distributed_timeout_or_none() -> timedelta | None:
+    from vllm.config import get_current_vllm_config_or_none
+
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is None:
+        return None
+    timeout_seconds = vllm_config.parallel_config.distributed_timeout_seconds
     return timedelta(seconds=timeout_seconds) if timeout_seconds is not None else None
 
 
@@ -521,8 +609,7 @@ def init_gloo_process_group(
     group_size: int,
     timeout: timedelta,
 ) -> ProcessGroup:
-    """
-    Stateless init ProcessGroup with gloo backend compatible with
+    """Stateless init ProcessGroup with gloo backend compatible with
     different torch versions.
     """
     with suppress_stdout():
@@ -554,9 +641,9 @@ def stateless_init_torch_distributed_process_group(
     group_name: str | None = None,
     return_store: bool = False,
     listen_socket: socket.socket | None = None,
+    timeout: timedelta | None = None,
 ) -> ProcessGroup | tuple[ProcessGroup, Store]:
-    """
-    A replacement for `torch.distributed.init_process_group` that does not
+    """A replacement for `torch.distributed.init_process_group` that does not
     pollute the global state. The created ProcessGroup object can be used for
     some operations such as `allreduce`, because it does not depend on the
     global rank. However, some operations such as `broadcast` cannot be used
@@ -590,14 +677,13 @@ def stateless_init_torch_distributed_process_group(
     is skipped and a ``TCPStore`` server is created directly using the
     pre-bound socket.  This is useful for eliminating TOCTOU races
     between port allocation and binding.
+
+    If *timeout* is None, use PyTorch's default for the backend.
     """
     init_method = get_tcp_uri(host, port)
     backend = Backend(backend)  # it is basically string
-    timeout = _get_default_timeout(backend)
-    if backend == "gloo":
-        gloo_timeout = get_cpu_distributed_timeout_or_none()
-        if gloo_timeout is not None:
-            timeout = gloo_timeout
+    if timeout is None:
+        timeout = _get_default_timeout(backend)
 
     if listen_socket is not None:
         store = create_tcp_store(
@@ -653,9 +739,8 @@ def stateless_init_torch_distributed_process_group(
 
 
 def stateless_destroy_torch_distributed_process_group(pg: ProcessGroup) -> None:
-    """
-    Destroy ProcessGroup returned by
-        stateless_init_torch_distributed_process_group().
+    """Destroy ProcessGroup returned by
+    stateless_init_torch_distributed_process_group().
     """
     pg.shutdown()
     _unregister_process_group(pg.group_name)
@@ -674,6 +759,7 @@ def get_worker_rank_suffix(global_rank: int | None = None) -> str:
     Returns:
         A string suffix identifying the worker's position in the
         distributed topology.
+
     """
     from vllm.distributed.parallel_state import (
         get_dcp_group,

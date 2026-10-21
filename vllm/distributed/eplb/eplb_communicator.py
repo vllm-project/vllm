@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-EPLB communicator implementations and factory.
-"""
+"""EPLB communicator implementations and factory."""
 
 import contextlib
 import time
@@ -24,6 +22,7 @@ from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.distributed.device_communicators.pynccl_wrapper import (
     ncclDataTypeEnum,
 )
+from vllm.distributed.eplb.eplb_utils import device_stream
 from vllm.distributed.parallel_state import (
     GroupCoordinator,
     get_pp_group,
@@ -33,12 +32,14 @@ from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 from vllm.distributed.utils import is_weak_contiguous
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.torch_utils import PIN_MEMORY
 
 logger = init_logger(__name__)
 
 
 def has_nixl() -> bool:
-    """Whether the optional NIXL / RIXL package is available."""
+    """Whether the optional NIXL package is available."""
     return nixl_utils.NixlWrapper is not None
 
 
@@ -87,8 +88,8 @@ class EplbCommunicator(ABC):
         communication buffers."""
         return True
 
-    def set_stream(self, cuda_stream: torch.cuda.Stream | None) -> None:
-        self._cuda_stream = cuda_stream
+    def set_stream(self, stream: torch.Stream | None) -> None:
+        self._stream = stream
 
     def _log_initialized(self) -> None:
         if is_local_first_rank():
@@ -101,10 +102,10 @@ class TorchDistNcclEplbCommunicator(EplbCommunicator):
     def __init__(
         self,
         ep_group: ProcessGroup,
-        cuda_stream: torch.cuda.Stream | None = None,
+        stream: torch.Stream | None = None,
     ) -> None:
         self._ep_group = ep_group
-        self._cuda_stream = cuda_stream
+        self._stream = stream
         self._p2p_ops: list[P2POp] = []
         self._log_initialized()
 
@@ -119,8 +120,8 @@ class TorchDistNcclEplbCommunicator(EplbCommunicator):
                 P2POp(
                     torch.distributed.isend,
                     tensor,
-                    dst_rank,
-                    self._ep_group,
+                    group=self._ep_group,
+                    group_peer=dst_rank,
                 )
             )
 
@@ -135,8 +136,8 @@ class TorchDistNcclEplbCommunicator(EplbCommunicator):
                 P2POp(
                     torch.distributed.irecv,
                     tensor,
-                    src_rank,
-                    self._ep_group,
+                    group=self._ep_group,
+                    group_peer=src_rank,
                 )
             )
 
@@ -144,7 +145,7 @@ class TorchDistNcclEplbCommunicator(EplbCommunicator):
         if not self._p2p_ops:
             return
         try:
-            with torch.cuda.stream(self._cuda_stream):
+            with device_stream(self._stream):
                 reqs = batch_isend_irecv(self._p2p_ops)
                 for req in reqs:
                     req.wait()
@@ -158,10 +159,10 @@ class TorchDistGlooStagedEplbCommunicator(EplbCommunicator):
     def __init__(
         self,
         cpu_group: ProcessGroup,
-        cuda_stream: torch.cuda.Stream | None = None,
+        stream: torch.Stream | None = None,
     ) -> None:
         self._cpu_group = cpu_group
-        self._cuda_stream = cuda_stream
+        self._stream = stream
         self._ops: list[tuple[str, torch.Tensor, int]] = []
         self._log_initialized()
 
@@ -198,34 +199,37 @@ class TorchDistGlooStagedEplbCommunicator(EplbCommunicator):
                         P2POp(
                             torch.distributed.isend,
                             cpu_tensor,
-                            peer_rank,
-                            self._cpu_group,
+                            group=self._cpu_group,
+                            group_peer=peer_rank,
                         )
                     )
                     continue
-                cpu_tensor = torch.empty_like(tensor, device="cpu")
+                cpu_tensor = torch.empty_like(
+                    tensor, device="cpu", pin_memory=PIN_MEMORY
+                )
                 p2p_ops.append(
                     P2POp(
                         torch.distributed.irecv,
                         cpu_tensor,
-                        peer_rank,
-                        self._cpu_group,
+                        group=self._cpu_group,
+                        group_peer=peer_rank,
                     )
                 )
                 recv_staging.append((tensor, cpu_tensor))
 
         try:
-            with torch.cuda.stream(self._cuda_stream):
+            with device_stream(self._stream):
                 build_ops()
         finally:
             self._ops.clear()
 
         # Wait for all D2H copies to finish
         # before issuing gloo batch_isend_irecv operations.
-        if self._cuda_stream is not None:
-            self._cuda_stream.synchronize()
-        else:
-            torch.cuda.current_stream().synchronize()
+        with gpu_sync_allowed():
+            if self._stream is not None:
+                self._stream.synchronize()
+            else:
+                torch.accelerator.current_stream().synchronize()
 
         reqs = batch_isend_irecv(p2p_ops)
         for req in reqs:
@@ -233,9 +237,67 @@ class TorchDistGlooStagedEplbCommunicator(EplbCommunicator):
 
         if not recv_staging:
             return
-        with torch.cuda.stream(self._cuda_stream):
+        with device_stream(self._stream):
             for dst_tensor, cpu_tensor in recv_staging:
                 dst_tensor.copy_(cpu_tensor, non_blocking=True)
+
+
+class TorchDistXCCLStagedEplbCommunicator(EplbCommunicator):
+    """EPLB communicator using XCCL device-to-device P2P on XPU."""
+
+    def __init__(
+        self,
+        ep_group: ProcessGroup,
+        stream: torch.Stream | None = None,
+    ) -> None:
+        self._ep_group = ep_group
+        self._stream = stream
+        self._ops: list[tuple[str, torch.Tensor, int]] = []
+        self._log_initialized()
+
+    def add_send(
+        self,
+        tensors: list[torch.Tensor],
+        dst_rank: int,
+        expert_id: int,  # unused by this backend
+    ) -> None:
+        for tensor in tensors:
+            self._ops.append(("send", tensor, dst_rank))
+
+    def add_recv(
+        self,
+        tensors: list[torch.Tensor],
+        src_rank: int,
+        expert_id: int,  # unused by this backend
+    ) -> None:
+        for tensor in tensors:
+            self._ops.append(("recv", tensor, src_rank))
+
+    def execute(self) -> None:
+        if not self._ops:
+            return
+
+        p2p_ops: list[P2POp] = []
+        try:
+            for op, tensor, peer_rank in self._ops:
+                send_or_recv = (
+                    torch.distributed.isend if op == "send" else torch.distributed.irecv
+                )
+                p2p_ops.append(
+                    P2POp(
+                        send_or_recv,
+                        tensor,
+                        peer_rank,
+                        self._ep_group,
+                    )
+                )
+        finally:
+            self._ops.clear()
+
+        with device_stream(self._stream):
+            reqs = batch_isend_irecv(p2p_ops)
+            for req in reqs:
+                req.wait()
 
 
 class NixlEplbCommunicator(EplbCommunicator):
@@ -247,13 +309,21 @@ class NixlEplbCommunicator(EplbCommunicator):
         all_expert_weights: Sequence[Sequence[torch.Tensor]],
         expert_buffer: Sequence[torch.Tensor],
     ) -> None:
+        """Create a NIXL-backed EPLB communicator.
+
+        Args:
+            cpu_group: CPU process group for metadata exchange.
+            all_expert_weights: Expert weight tensors for all MoE layers.
+            expert_buffer: Pre-allocated receive buffer tensors.
+
+        """
         assert all_expert_weights, (
             "NixlEplbCommunicator requires non-empty all_expert_weights."
         )
         assert expert_buffer, "NixlEplbCommunicator requires non-empty expert_buffer."
         nixl_wrapper_cls = nixl_utils.NixlWrapper
         if nixl_wrapper_cls is None:
-            raise RuntimeError("NIXL/ RIXL is unavailable.")
+            raise RuntimeError("NIXL is unavailable.")
 
         self._cpu_group = cpu_group
         self._world_size = cpu_group.size()
@@ -284,6 +354,7 @@ class NixlEplbCommunicator(EplbCommunicator):
         # Per-rank expert_id -> physical row; set by set_transfer_context.
         self._expert_to_src_row: list[dict[int, int]] | None = None
         self._layer_idx: int | None = None
+        self.set_stream(None)
 
         nixl_agent_config = nixl_utils.nixl_agent_config
         config = (
@@ -303,9 +374,16 @@ class NixlEplbCommunicator(EplbCommunicator):
 
         self._cuda_device_id = int(self._device.index or 0)
         self._init_step("buffers", self._init_registered_buffers)
+        self._init_remote_state()
+        self._log_initialized()
+
+    def _init_remote_state(self) -> None:
+        """Exchange NIXL agent metadata and RDMA pointer info with all peers.
+
+        This is a collective operation (uses ``all_gather_object`` twice).
+        """
         self._init_step("agents", self._init_remote_agents)
         self._init_step("send meta", self._exchange_remote_send_meta)
-        self._log_initialized()
 
     @property
     def needs_profile_buffer_reservation(self) -> bool:
@@ -325,8 +403,8 @@ class NixlEplbCommunicator(EplbCommunicator):
         uid = uuid.uuid4().hex[:8]
         return f"eplb-{self._rank}{pp_suffix}-{uid}"
 
-    def set_stream(self, cuda_stream: torch.cuda.Stream | None) -> None:
-        pass
+    def set_stream(self, stream: torch.Stream | None) -> None:
+        self._stream = stream
 
     def add_send(
         self,
@@ -339,13 +417,18 @@ class NixlEplbCommunicator(EplbCommunicator):
         pass
 
     def set_transfer_context(self, old_indices: np.ndarray, layer_idx: int) -> None:
-        # Pre-compute expert_id -> src_row mapping for every rank so that
-        # add_recv can immediately issue NIXL READs.
         assert not self._xfer_entries, (
             f"set_transfer_context() called with {len(self._xfer_entries)} "
             f"pending transfers from layer {self._layer_idx}; "
             f"execute() was not called after previous add_recv() calls"
         )
+        # NIXL READs bypass device streams; wait for pending copies out of
+        # the receive buffer before add_recv overwrites it.
+        if current_platform.is_rocm():
+            with gpu_sync_allowed():
+                torch.accelerator.current_stream().synchronize()
+                if self._stream is not None:
+                    self._stream.synchronize()
         self._layer_idx = layer_idx
         n = self._num_local_experts
         rank_experts = old_indices[: self._world_size * n].reshape(self._world_size, n)
@@ -513,7 +596,7 @@ class NixlEplbCommunicator(EplbCommunicator):
             remote_desc,
         )
 
-        indices = list(range(len(local_descs)))
+        indices = np.arange(len(local_descs), dtype=np.int32)
         xfer_handle = self._nixl_wrapper.make_prepped_xfer(
             "READ",
             local_handle,
@@ -523,6 +606,21 @@ class NixlEplbCommunicator(EplbCommunicator):
         )
         return (local_handle, remote_handle, xfer_handle)
 
+    def _post_read_barrier(self) -> None:
+        """Correctness fence: prevents overwrite-while-remote-read race.
+
+        We avoid ``torch.distributed.monitored_barrier`` because it
+        calls ``get_backend(group)`` which fails for stateless groups
+        (elastic EP).  An async ``all_reduce`` + ``wait(timeout)``
+        works with both regular and stateless groups and provides
+        equivalent timeout detection.
+        """
+        _dummy = torch.zeros(1, dtype=torch.int32)
+        work = torch.distributed.all_reduce(
+            _dummy, group=self._cpu_group, async_op=True
+        )
+        work.wait(timeout=timedelta(minutes=5))
+
     def execute(self) -> None:
         assert self._layer_idx is not None or not self._xfer_entries, (
             "set_transfer_context() must be called before execute() "
@@ -531,13 +629,7 @@ class NixlEplbCommunicator(EplbCommunicator):
         try:
             self._wait_for_all_transfers([x[2] for x in self._xfer_entries])
 
-            # Post-READ barrier.
-            # Correctness fence for zero-copy: prevents overwrite-while-
-            # remote-read race.
-            torch.distributed.monitored_barrier(
-                group=self._cpu_group,
-                timeout=timedelta(minutes=5),
-            )
+            self._post_read_barrier()
         finally:
             for local_h, remote_h, xfer_h in self._xfer_entries:
                 with contextlib.suppress(Exception):
@@ -577,10 +669,10 @@ class PyNcclEplbCommunicator(EplbCommunicator):
     def __init__(
         self,
         pynccl_comm: PyNcclCommunicator,
-        cuda_stream: torch.cuda.Stream | None = None,
+        stream: torch.Stream | None = None,
     ) -> None:
         self._pynccl_comm = pynccl_comm
-        self._cuda_stream = cuda_stream
+        self._stream = stream
         self._group_started = False
         self._log_initialized()
 
@@ -597,7 +689,7 @@ class PyNcclEplbCommunicator(EplbCommunicator):
     ) -> None:
         self._ensure_group_started()
         for tensor in tensors:
-            self._pynccl_comm.send(tensor, dst_rank, stream=self._cuda_stream)
+            self._pynccl_comm.send(tensor, dst_rank, stream=self._stream)
 
     def add_recv(
         self,
@@ -607,7 +699,7 @@ class PyNcclEplbCommunicator(EplbCommunicator):
     ) -> None:
         self._ensure_group_started()
         for tensor in tensors:
-            self._pynccl_comm.recv(tensor, src_rank, stream=self._cuda_stream)
+            self._pynccl_comm.recv(tensor, src_rank, stream=self._stream)
 
     def execute(self) -> None:
         if self._group_started:
@@ -628,17 +720,19 @@ def create_eplb_communicator(
             device and CPU communication groups.
         backend: Communicator backend name (``"torch_nccl"``,
             ``"torch_gloo"``, ``"pynccl"``, or ``"nixl"``).
-            Stateless (elastic EP) groups only support ``"torch_nccl"``
-            and ``"pynccl"``; ``"torch_nccl"`` is silently promoted to
-            ``"pynccl"`` in that case.  When tensors reside on CPU,
-            ``"torch_gloo"`` or ``"torch_nccl"`` are used via the CPU
-            process group.
+            Falls back to ``"torch_nccl"`` when *None*.
+            Stateless (elastic EP) groups support ``"torch_nccl"``,
+            ``"pynccl"``, and ``"nixl"``; ``"torch_nccl"`` is silently
+            promoted to ``"pynccl"``.  When tensors reside on CPU,
+            ``"torch_gloo"`` or
+            ``"torch_nccl"`` are used via the CPU process group.
         expert_weights: Expert weight tensors for *all* MoE layers.
             Shape ``(num_layers)(num_tensors_per_layer)``.
             NixlEplbCommunicator registers all layers with NIXL for
             zero-copy RDMA reads.
         expert_buffer: Pre-allocated receive buffer tensors (one per
             weight tensor in a single layer).
+
     """
     first_layer = expert_weights[0] if expert_weights else []
     tensor_device_type = first_layer[0].device.type if first_layer else "cpu"
@@ -685,11 +779,11 @@ def create_eplb_communicator(
             ) from exc
 
     is_stateless = isinstance(group_coordinator, StatelessGroupCoordinator)
-    if is_stateless:
+    if is_stateless and backend != "nixl":
         if backend not in ("torch_nccl", "pynccl"):
             raise ValueError(
-                f"Elastic EP requires 'torch_nccl' or 'pynccl' EPLB communicator "
-                f"(got '{backend}')."
+                f"Elastic EP requires 'torch_nccl', 'pynccl', or 'nixl' "
+                f"EPLB communicator (got '{backend}')."
             )
         if backend == "torch_nccl":
             logger.warning(
@@ -723,6 +817,8 @@ def create_eplb_communicator(
         return TorchDistGlooStagedEplbCommunicator(
             cpu_group=group_coordinator.cpu_group,
         )
+    elif backend == "torch_xccl":
+        return TorchDistXCCLStagedEplbCommunicator(ep_group=torch_group)
     elif backend == "torch_nccl":
         return TorchDistNcclEplbCommunicator(ep_group=torch_group)
     elif backend == "pynccl":

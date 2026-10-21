@@ -15,6 +15,8 @@ class RequestState:
         num_speculative_steps: int,
         vocab_size: int,
         device: torch.device,
+        num_prefill_lookahead: int = 1,
+        use_dense_all_token_ids: bool = False,
     ):
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
@@ -29,12 +31,14 @@ class RequestState:
 
         # NOTE(woosuk): This tensor can be extremely large (e.g., several GBs)
         # depending on the configured max_num_reqs and max_model_len.
-        # To save GPU memory, we use UVA instead of GPU for this tensor.
+        # To save GPU memory, we use UVA instead of GPU by default, but
+        # ngram_gpu benefits from dense device residency because it scans
+        # active rows repeatedly during proposal.
         self.all_token_ids = StagedWriteTensor(
             (self.max_num_reqs, self.max_model_len),
             dtype=torch.int32,
             device=device,
-            uva_instead_of_gpu=True,
+            uva_instead_of_gpu=not use_dense_all_token_ids,
         )
         # NOTE(woosuk): Distinguish clearly between prompt_len and prefill_len:
         # - prompt_len: Number of tokens in the user-provided prompt.
@@ -77,7 +81,7 @@ class RequestState:
         )
 
         self.next_prefill_tokens = torch.zeros(
-            self.max_num_reqs, dtype=torch.int32, device=device
+            num_prefill_lookahead, self.max_num_reqs, dtype=torch.int32, device=device
         )
 
     @property
@@ -110,17 +114,8 @@ class RequestState:
         self.num_computed_tokens_np[req_idx] = num_computed_tokens
         self.num_computed_tokens.stage_write_elem(req_idx, num_computed_tokens)
 
-        if 0 < num_computed_tokens <= prefill_len:
-            # For PD disagg or resumed requests: set last_sampled to the last
-            # computed token so the first decode step gets the right input_id.
-            # For fresh prefill requests (num_computed_tokens == 0) the tensor
-            # is not read by combine_sampled_and_draft_tokens so we skip the
-            # write. Use a slice assignment rather than scalar indexing so the
-            # write is dispatched through fill_ without a host/device sync.
-            self.last_sampled_tokens[req_idx : req_idx + 1] = all_token_ids[
-                num_computed_tokens - 1
-            ]
-        self.draft_tokens[req_idx].zero_()
+        if self.num_speculative_steps > 0:
+            self.draft_tokens[req_idx].zero_()
 
     def apply_staged_writes(self) -> None:
         self.prompt_len.copy_to_uva()

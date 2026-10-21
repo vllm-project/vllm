@@ -1,25 +1,35 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from functools import cached_property
 from typing import TYPE_CHECKING
+
+from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
+from vllm.multimodal.utils import strip_covered_mm_data
 
 if TYPE_CHECKING:
     import numpy as np
     import numpy.typing as npt
     import torch
 
+    from vllm.distributed.aux_output_connector.connector import (
+        AuxOutputConnectorMetadata,
+    )
     from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
     from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
     from vllm.lora.request import LoRARequest
     from vllm.multimodal.inputs import MultiModalFeatureSpec
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
+    from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
     from vllm.v1.request import Request
 else:
+    AuxOutputConnectorMetadata = object
     ECConnectorMetadata = object
     KVConnectorMetadata = object
+    KVCacheBlockCopy = object
     LoRARequest = object
     MultiModalFeatureSpec = object
     PoolingParams = object
@@ -42,6 +52,8 @@ class NewRequestData:
 
     # Only used for v2 model runner.
     prefill_token_ids: list[int] | None = None
+    # DeepSeek-V4.1 only: SWA bounded replay; see Request.replay_start.
+    replay_start: int = 0
 
     @classmethod
     def from_request(
@@ -49,11 +61,16 @@ class NewRequestData:
         request: Request,
         block_ids: tuple[list[int], ...],
         prefill_token_ids: list[int] | None = None,
+        uses_mrope: bool = False,
     ) -> "NewRequestData":
         return cls(
             req_id=request.request_id,
             prompt_token_ids=request.prompt_token_ids,
-            mm_features=request.mm_features,
+            mm_features=strip_covered_mm_data(
+                request.mm_features,
+                request.num_computed_tokens,
+                uses_mrope=uses_mrope,
+            ),
             sampling_params=request.sampling_params,
             pooling_params=request.pooling_params,
             block_ids=block_ids,
@@ -62,7 +79,16 @@ class NewRequestData:
             prompt_embeds=request.prompt_embeds,
             prompt_is_token_ids=request.prompt_is_token_ids,
             prefill_token_ids=prefill_token_ids,
+            replay_start=request.replay_start,
         )
+
+    @property
+    def prompt_len(self) -> int:
+        if self.prompt_token_ids is not None:
+            return len(self.prompt_token_ids)
+        if self.prompt_embeds is not None:
+            return self.prompt_embeds.shape[0]
+        return 0
 
     def __repr__(self) -> str:
         prompt_embeds_shape = (
@@ -118,8 +144,8 @@ class CachedRequestData:
     # NOTE(woosuk): new_token_ids is only used for pipeline parallelism.
     # When PP is not used, new_token_ids will be empty.
     new_token_ids: list[list[int]]
-    # For requests not scheduled in the last step, propagate the token ids to the
-    # connector. Won't contain requests that were scheduled in the prior step.
+    # MRV1-only: For requests not scheduled in the last step, propagate the token ids
+    # to the connector. Won't contain requests scheduled in the prior step.
     all_token_ids: dict[str, list[int]]
     new_block_ids: list[tuple[list[int], ...] | None]
     num_computed_tokens: list[int]
@@ -178,6 +204,31 @@ class CachedRequestData:
 
 
 @dataclass
+class ScheduledEncoderInputStats:
+    """Stats for encoder inputs scheduled in one iteration."""
+
+    num_inputs: int = 0
+    output_tokens: int = 0
+
+
+@dataclass
+class KVConnectorBlockState:
+    """Scheduler-local block state offered to a producer-side KV connector."""
+
+    # Requests scheduled this step and requests with a boundary-state hand-off.
+    req_ids: set[str]
+    # Resolve on access to avoid copying tables the connector never reads.
+    resolve_block_ids: Callable[[str], tuple[list[int], ...]]
+    # Exact Mamba "align" boundary-state hand-offs.
+    boundary_state_offloads: dict[str, list[tuple[int, int, int]]]
+
+    def get_block_ids(self, req_id: str) -> tuple[list[int], ...] | None:
+        if req_id not in self.req_ids:
+            return None
+        return self.resolve_block_ids(req_id)
+
+
+@dataclass
 class SchedulerOutput:
     # list of the requests that are scheduled for the first time.
     # We cache the request's data in each worker process, so that we don't
@@ -202,9 +253,6 @@ class SchedulerOutput:
     # E.g., if a request has [0, 1], it could mean the vision encoder needs
     # to process that the request's 0-th and 1-th images in the current step.
     scheduled_encoder_inputs: dict[str, list[int]]
-    # Number of common prefix blocks for all requests in each KV cache group.
-    # This can be used for cascade attention.
-    num_common_prefix_blocks: list[int]
 
     # Request IDs that are finished in between the previous and the current
     # steps. This is used to notify the workers about the finished requests
@@ -213,6 +261,8 @@ class SchedulerOutput:
     # list of mm_hash strings associated with the encoder outputs to be
     # freed from the encoder cache.
     free_encoder_mm_hashes: list[str]
+
+    scheduled_encoder_input_stats: ScheduledEncoderInputStats | None = None
 
     # Request IDs that are preempted in this step.
     # Only used for v2 model runner.
@@ -232,17 +282,35 @@ class SchedulerOutput:
     # KV Cache Connector metadata.
     kv_connector_metadata: KVConnectorMetadata | None = None
 
+    # Whether any scheduled request consumes KV that the connector loads
+    # synchronously during this step (load_async=False).
+    has_sync_kv_loads: bool = False
+
+    # Execution-auxiliary output control metadata consumed by the worker connector.
+    aux_output_connector_metadata: AuxOutputConnectorMetadata | None = None
+
     # EC Cache Connector metadata
     ec_connector_metadata: ECConnectorMetadata | None = None
-
+    # EC Cache Manager metadata
+    ec_manager_metadata: EncoderCacheManagerMetadata | None = None
     # Block IDs freshly allocated from the pool during this scheduling step.
     # The worker zeros the corresponding GPU memory before the blocks are used,
     # preventing stale NaN/data from corrupting attention or SSM computation.
     new_block_ids_to_zero: list[int] | None = None
 
+    # CoW copies to apply after zeroing new blocks and before forward.
+    kv_cache_block_copies: list[KVCacheBlockCopy] | None = None
+
+    # Scheduler-local; always None by the time this reaches a worker.
+    kv_connector_block_state: KVConnectorBlockState | None = None
+
     # Dynamic speculative decoding: optimal K chosen by scheduler.
     # Number of spec tokens to schedule for the next step.
     num_spec_tokens_to_schedule: int = 0
+
+    # Deprecated: cascade attention has been removed, so this is always empty.
+    # Kept for out-of-tree schedulers and workers.
+    num_common_prefix_blocks: list[int] = field(default_factory=list)
 
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
@@ -253,7 +321,6 @@ class SchedulerOutput:
             total_num_scheduled_tokens=0,
             scheduled_spec_decode_tokens={},
             scheduled_encoder_inputs={},
-            num_common_prefix_blocks=[],
             finished_req_ids=set(),
             free_encoder_mm_hashes=[],
         )
@@ -265,3 +332,8 @@ class GrammarOutput:
     structured_output_request_ids: list[str]
     # Bitmask ordered as structured_output_request_ids.
     grammar_bitmask: "npt.NDArray[np.int32]"
+    # Per request, ordered as structured_output_request_ids: how many leading
+    # drafts the bitmask constrained. `grammar_bitmask` fills every row after
+    # the first -1 placeholder with the all-permissive `_full_mask`, so drafts
+    # from this index on must not be accepted. None invalidates every draft.
+    num_acceptable_drafts: list[int] | None = None

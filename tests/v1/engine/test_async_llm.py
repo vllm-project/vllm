@@ -2,15 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import threading
 import time
 from contextlib import ExitStack
-from unittest.mock import MagicMock
+from http import HTTPStatus
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 
-from vllm import SamplingParams
+import vllm.v1.engine.async_llm as async_llm_module
+from vllm import PoolingParams, SamplingParams
 from vllm.assets.image import ImageAsset
-from vllm.config import VllmConfig
+from vllm.config import LoggingConfig, ProfilerConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -19,9 +22,15 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.exceptions import (
+    ProfilerAlreadyActiveError,
+    RetryableRequestError,
+    VLLMValidationError,
+)
 from vllm.inputs import PromptType
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
+from vllm.profiler.wrapper import WorkerProfiler
 from vllm.sampling_params import RequestOutputKind
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -56,6 +65,383 @@ VISION_PROMPT = {
     "prompt": VISION_PROMPT_TEMPLATE,
     "multi_modal_data": {"image": ImageAsset("stop_sign").pil_image},
 }
+
+
+async def _generate(engine: AsyncLLM, request_id: str, n: int = 1) -> RequestOutput:
+    async def run() -> RequestOutput:
+        async for out in engine.generate(
+            request_id=request_id,
+            prompt=TEXT_PROMPT,
+            sampling_params=SamplingParams(max_tokens=5, n=n),
+        ):
+            pass
+        return out
+
+    return await asyncio.wait_for(run(), timeout=60)
+
+
+def _mock_async_llm_dependencies(monkeypatch: pytest.MonkeyPatch):
+    renderer = MagicMock()
+    engine_core = MagicMock()
+    engine_core.profile_async = AsyncMock()
+    monkeypatch.setattr(
+        async_llm_module, "maybe_register_config_serialize_by_value", MagicMock()
+    )
+    monkeypatch.setattr(
+        async_llm_module,
+        "load_stat_logger_plugin_factories",
+        MagicMock(return_value=[]),
+    )
+    monkeypatch.setattr(
+        async_llm_module,
+        "renderer_from_config",
+        MagicMock(return_value=renderer),
+    )
+    monkeypatch.setattr(async_llm_module, "InputProcessor", MagicMock())
+    monkeypatch.setattr(async_llm_module, "OutputProcessor", MagicMock())
+    monkeypatch.setattr(
+        async_llm_module.EngineCoreClient,
+        "make_async_mp_client",
+        MagicMock(return_value=engine_core),
+    )
+    return engine_core
+
+
+def _mock_vllm_config() -> MagicMock:
+    vllm_config = MagicMock()
+    vllm_config.logging_config = LoggingConfig()
+    vllm_config.observability_config.otlp_traces_endpoint = None
+    vllm_config.scheduler_config.stream_interval = 1
+    return vllm_config
+
+
+@pytest.mark.parametrize("method", ["generate", "encode"])
+def test_retryable_request_error_reaches_caller(
+    monkeypatch: pytest.MonkeyPatch, method: str
+):
+    """A retryable engine rejection (e.g. while paused) reaches the caller as
+    is, not wrapped as an engine failure."""
+    vllm_config = _mock_vllm_config()
+    vllm_config.profiler_config.should_profile_frontend = False
+    engine_core = _mock_async_llm_dependencies(monkeypatch)
+    engine_core.abort_requests_async = AsyncMock()
+    engine = AsyncLLM(vllm_config, MagicMock(), log_stats=False)
+    collector = MagicMock(request_id="r")
+    collector.get_nowait.return_value = None
+    collector.get = AsyncMock(side_effect=RetryableRequestError("paused"))
+    monkeypatch.setattr(engine, "add_request", AsyncMock(return_value=collector))
+    params = SamplingParams() if method == "generate" else PoolingParams(task="embed")
+
+    async def run():
+        async for _ in getattr(engine, method)(TEXT_PROMPT, params, "r"):
+            pass
+
+    with pytest.raises(RetryableRequestError):
+        asyncio.run(run())
+
+
+def test_cuda_profiler_requests_reach_engine_core(monkeypatch: pytest.MonkeyPatch):
+    vllm_config = _mock_vllm_config()
+    vllm_config.profiler_config.profiler = "cuda"
+    vllm_config.profiler_config.ignore_frontend = False
+    vllm_config.profiler_config.should_profile_frontend = False
+    engine_core = _mock_async_llm_dependencies(monkeypatch)
+
+    engine = AsyncLLM(vllm_config, MagicMock(), log_stats=False)
+
+    async def profile():
+        await engine.start_profile()
+        await engine.stop_profile()
+
+    asyncio.run(profile())
+
+    assert engine.profiler is None
+    engine_core.profile_async.assert_has_awaits(
+        [call(True, None, None, None), call(False)]
+    )
+
+
+def test_cuda_only_torch_profiler_skips_frontend_cpu_trace(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    vllm_config = _mock_vllm_config()
+    vllm_config.profiler_config.profiler = "torch"
+    vllm_config.profiler_config.ignore_frontend = False
+    vllm_config.profiler_config.torch_profiler_activities = ["CUDA"]
+    vllm_config.profiler_config.should_profile_frontend = False
+    _mock_async_llm_dependencies(monkeypatch)
+    profiler = MagicMock()
+    monkeypatch.setattr(async_llm_module, "create_frontend_profiler", profiler)
+
+    engine = AsyncLLM(vllm_config, MagicMock(), log_stats=False)
+
+    assert engine.profiler is None
+    profiler.assert_not_called()
+
+
+def test_profile_forwards_overrides_rejects_duplicate_and_allows_restart(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    vllm_config = _mock_vllm_config()
+    vllm_config.profiler_config.should_profile_frontend = False
+    engine_core = _mock_async_llm_dependencies(monkeypatch)
+
+    engine = AsyncLLM(vllm_config, MagicMock(), log_stats=False)
+
+    async def profile():
+        for kwargs in (
+            {"profile_prefix": "../trace"},
+            {"delay_iterations": -1},
+            {"max_iterations": -1},
+        ):
+            with pytest.raises(ValueError):
+                await engine.start_profile(**kwargs)
+        await engine.start_profile(
+            "session",
+            delay_iterations=5,
+            max_iterations=2,
+        )
+        with pytest.raises(ProfilerAlreadyActiveError) as exc_info:
+            await engine.start_profile("duplicate")
+        assert exc_info.value.http_status == HTTPStatus.CONFLICT
+        await engine.stop_profile()
+        await engine.start_profile("next-session")
+        await engine.stop_profile()
+
+    asyncio.run(profile())
+
+    engine_core.profile_async.assert_has_awaits(
+        [
+            call(True, "session", 5, 2),
+            call(False),
+            call(True, "next-session", None, None),
+            call(False),
+        ]
+    )
+
+
+def test_stop_profile_waits_for_inflight_start(monkeypatch: pytest.MonkeyPatch):
+    vllm_config = _mock_vllm_config()
+    engine_core = _mock_async_llm_dependencies(monkeypatch)
+    events: list[str] = []
+    frontend_profiler = MagicMock()
+    frontend_profiler.start.side_effect = lambda: events.append("frontend_start")
+    frontend_profiler.stop.side_effect = lambda: events.append("frontend_stop")
+
+    engine = AsyncLLM(
+        vllm_config,
+        MagicMock(),
+        log_stats=False,
+        profiler=frontend_profiler,
+    )
+
+    async def profile():
+        start_rpc_entered = asyncio.Event()
+        release_start_rpc = asyncio.Event()
+
+        async def profile_async(is_start, *args):
+            if is_start:
+                start_rpc_entered.set()
+                await release_start_rpc.wait()
+                events.append("engine_start_done")
+            else:
+                events.append("engine_stop")
+
+        engine_core.profile_async.side_effect = profile_async
+
+        start_task = asyncio.create_task(engine.start_profile())
+        await start_rpc_entered.wait()
+
+        stop_task = asyncio.create_task(engine.stop_profile())
+        await asyncio.sleep(0)
+        release_start_rpc.set()
+        await asyncio.wait_for(asyncio.gather(start_task, stop_task), timeout=5)
+
+    asyncio.run(profile())
+
+    assert events[:2] == ["engine_start_done", "frontend_start"]
+    assert sorted(events[2:]) == ["engine_stop", "frontend_stop"]
+    assert engine._profile_session_active is False
+
+
+@pytest.mark.parametrize("failure", ["error", "cancel"])
+def test_interrupted_engine_profile_start_skips_frontend_profiler(
+    monkeypatch: pytest.MonkeyPatch, failure: str
+):
+    """The frontend trace starts only after the engine start succeeds. A
+    cancelled start may still reach the engine, so it keeps the session active
+    until /stop_profile."""
+    vllm_config = _mock_vllm_config()
+    engine_core = _mock_async_llm_dependencies(monkeypatch)
+    frontend_profiler = MagicMock()
+    engine = AsyncLLM(
+        vllm_config,
+        MagicMock(),
+        log_stats=False,
+        profiler=frontend_profiler,
+    )
+
+    async def profile():
+        start_rpc_entered = asyncio.Event()
+
+        async def profile_async(is_start, *args):
+            if not is_start:
+                return
+            start_rpc_entered.set()
+            if failure == "error":
+                raise RuntimeError("engine profiler failed to start")
+            await asyncio.Event().wait()
+
+        engine_core.profile_async.side_effect = profile_async
+
+        start_task = asyncio.create_task(engine.start_profile())
+        await start_rpc_entered.wait()
+        if failure == "cancel":
+            start_task.cancel()
+        expected = RuntimeError if failure == "error" else asyncio.CancelledError
+        with pytest.raises(expected):
+            await start_task
+
+        assert engine._profile_session_active is (failure == "cancel")
+        await engine.stop_profile()
+        assert engine._profile_session_active is False
+
+    asyncio.run(profile())
+
+    frontend_profiler.start.assert_not_called()
+
+
+class _BlockingStartProfiler(WorkerProfiler):
+    def __init__(self) -> None:
+        self.in_start = threading.Event()
+        self.release_start = threading.Event()
+        self.stop_call_count = 0
+        super().__init__(
+            ProfilerConfig(profiler="torch", torch_profiler_dir="/tmp/mock")
+        )
+
+    def _start(self) -> None:
+        self.in_start.set()
+        if not self.release_start.wait(timeout=5):
+            raise TimeoutError("start was never released")
+
+    def _stop(self) -> None:
+        self.stop_call_count += 1
+
+
+def test_stop_after_cancelled_frontend_start_stops_frontend_profiler(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Cancelling start_profile while the frontend profiler is starting keeps
+    the session active, and the next stop_profile still stops the backend."""
+    vllm_config = _mock_vllm_config()
+    engine_core = _mock_async_llm_dependencies(monkeypatch)
+    frontend_profiler = _BlockingStartProfiler()
+    engine = AsyncLLM(
+        vllm_config,
+        MagicMock(),
+        log_stats=False,
+        profiler=frontend_profiler,
+    )
+
+    async def profile():
+        try:
+            start_task = asyncio.create_task(engine.start_profile())
+            assert await asyncio.to_thread(frontend_profiler.in_start.wait, 5)
+            start_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await start_task
+            assert engine._profile_session_active is True
+
+            stop_task = asyncio.create_task(engine.stop_profile())
+            done, _ = await asyncio.wait({stop_task}, timeout=0.1)
+            assert not done, "stop_profile did not wait for the in-flight start"
+            frontend_profiler.release_start.set()
+            await asyncio.wait_for(stop_task, timeout=5)
+        finally:
+            frontend_profiler.release_start.set()
+
+    asyncio.run(profile())
+
+    assert frontend_profiler.stop_call_count == 1
+    assert frontend_profiler._active is False
+    assert frontend_profiler._running is False
+    assert engine._profile_session_active is False
+    assert engine_core.profile_async.await_args_list == [
+        call(True, None, None, None),
+        call(False),
+    ]
+
+
+def test_multi_client_profile_uses_idempotent_engine_requests(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    vllm_config = _mock_vllm_config()
+    vllm_config.profiler_config = ProfilerConfig(
+        profiler="torch",
+        torch_profiler_dir=str(tmp_path),
+        torch_profiler_activities=["CPU"],
+    )
+    engine_core = _mock_async_llm_dependencies(monkeypatch)
+    profiler = MagicMock()
+    monkeypatch.setattr(async_llm_module, "create_frontend_profiler", profiler)
+    engines = [
+        AsyncLLM(
+            vllm_config,
+            MagicMock(),
+            log_stats=False,
+            client_count=2,
+            client_index=client_index,
+        )
+        for client_index in range(2)
+    ]
+
+    assert all(engine.profiler is None for engine in engines)
+    profiler.assert_not_called()
+
+    async def profile():
+        await engines[0].start_profile()
+        await engines[1].start_profile()
+        await engines[1].stop_profile()
+        await engines[0].start_profile()
+
+    asyncio.run(profile())
+
+    engine_core.profile_async.assert_has_awaits(
+        [
+            call(True, None, None, None),
+            call(True, None, None, None),
+            call(False),
+            call(True, None, None, None),
+        ]
+    )
+
+
+def test_frontend_profiler_ignores_worker_iteration_bounds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    vllm_config = _mock_vllm_config()
+    vllm_config.profiler_config = ProfilerConfig(
+        profiler="torch",
+        torch_profiler_dir=str(tmp_path),
+        torch_profiler_activities=["CPU", "CUDA"],
+        delay_iterations=5,
+        max_iterations=2,
+        wait_iterations=3,
+        warmup_iterations=1,
+    )
+    _mock_async_llm_dependencies(monkeypatch)
+    profiler = MagicMock()
+    monkeypatch.setattr("vllm.profiler.wrapper.TorchProfilerWrapper", profiler)
+
+    engine = AsyncLLM(vllm_config, MagicMock(), log_stats=False)
+
+    frontend_config = profiler.call_args.args[0]
+    assert frontend_config.delay_iterations == 0
+    assert frontend_config.max_iterations == 0
+    assert frontend_config.wait_iterations == 0
+    assert frontend_config.warmup_iterations == 0
+    assert engine.profiler is profiler.return_value
 
 
 async def generate(
@@ -412,7 +798,6 @@ async def test_customize_loggers(monkeypatch):
     If a customized logger is provided at the init, it should
     be added to the default loggers.
     """
-
     with ExitStack() as after:
         with set_default_torch_num_threads(1):
             engine = AsyncLLM.from_engine_args(
@@ -485,7 +870,7 @@ async def test_dp_rank_argument():
             pass
 
         # Test with out-of-range DP rank.
-        with pytest.raises(ValueError):
+        with pytest.raises(VLLMValidationError):
             async for _ in engine.generate(
                 request_id="request-35",
                 prompt=TEXT_PROMPT,
@@ -512,12 +897,11 @@ async def test_header_dp_rank_argument():
         )
 
         # Create render serving instance (required by OpenAIServingChat)
-        from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+        from vllm.renderers.online_renderer import OnlineRenderer
 
-        serving_render = OpenAIServingRender(
+        online_renderer = OnlineRenderer(
             model_config=engine.model_config,
             renderer=engine.renderer,
-            model_registry=models.registry,
             request_logger=None,
             chat_template=None,
             chat_template_content_format="auto",
@@ -528,7 +912,7 @@ async def test_header_dp_rank_argument():
             engine_client=engine,
             models=models,
             response_role="assistant",
-            openai_serving_render=serving_render,
+            online_renderer=online_renderer,
             chat_template=None,
             chat_template_content_format="auto",
             request_logger=None,
@@ -555,8 +939,8 @@ async def test_header_dp_rank_argument():
         # Test 2: Out-of-range DP rank (1)
         mock_raw_request.headers = {"X-data-parallel-rank": "1"}
 
-        # should raise ValueError for out-of-range rank
-        with pytest.raises(ValueError):
+        # should raise VLLMValidationError for out-of-range rank
+        with pytest.raises(VLLMValidationError):
             await serving_chat.create_chat_completion(req, mock_raw_request)
 
 
@@ -598,7 +982,6 @@ async def test_check_health():
 @pytest.mark.asyncio
 async def test_abort_final_output(output_kind: RequestOutputKind):
     """Test that abort() returns a final output with correct information."""
-
     with ExitStack() as after:
         with set_default_torch_num_threads(1):
             engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
@@ -784,37 +1167,6 @@ async def test_pause_abort():
         assert final_output is not None
         assert final_output.finished
         assert final_output.outputs[0].finish_reason == "abort"
-
-        # Also test that new requests are blocked while paused, then resume
-        assert await engine.is_paused()
-
-        request_completed = False
-
-        async def gen_blocked():
-            nonlocal request_completed
-            async for out in engine.generate(
-                request_id="test-blocked",
-                prompt=TEXT_PROMPT,
-                sampling_params=SamplingParams(max_tokens=5),
-            ):
-                pass
-            request_completed = True
-            return out
-
-        # Start a request (should block)
-        gen_task2 = asyncio.create_task(gen_blocked())
-
-        # Wait a bit - request should not have completed
-        await asyncio.sleep(0.3)
-        assert not request_completed, "Request should be blocked while paused"
-
-        # Resume
-        await engine.resume_generation()
-
-        # Now request should complete
-        final_output2 = await asyncio.wait_for(gen_task2, timeout=10.0)
-        assert request_completed
-        assert final_output2.finished
 
 
 @pytest.mark.asyncio
@@ -1016,3 +1368,87 @@ async def test_pause_keep_multi_request():
         for result in results:
             assert result.finished
             assert len(result.outputs[0].token_ids) == 10
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["abort", "wait", "keep"])
+async def test_pause_admission_policy_per_mode(mode: str):
+    """`abort` and `wait` make the pause a generation boundary: a request
+    submitted while paused is rejected, leaving no residue even for a caller
+    that reads the collector directly. `keep` carries it across the pause."""
+    with ExitStack() as after:
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
+        after.callback(engine.shutdown)
+
+        await engine.pause_generation(mode=mode)
+        collector = await engine.add_request(
+            request_id="during-pause",
+            prompt=TEXT_PROMPT,
+            params=SamplingParams(
+                max_tokens=5, n=2, output_kind=RequestOutputKind.FINAL_ONLY
+            ),
+        )
+        # A utility call is handled after the add, so the paused engine saw it.
+        assert await asyncio.wait_for(engine.is_paused(), timeout=60)
+        if mode != "keep":
+            with pytest.raises(RetryableRequestError):
+                await asyncio.wait_for(collector.get(), timeout=60)
+
+            # The other child's rejection may still be in flight.
+            async def drained():
+                while engine.output_processor.has_unfinished_requests():
+                    await asyncio.sleep(0.01)
+
+            await asyncio.wait_for(drained(), timeout=10)
+            assert not engine.output_processor.parent_requests
+
+        await engine.resume_generation()
+        if mode == "keep":
+            assert (await asyncio.wait_for(collector.get(), timeout=60)).finished
+        assert (await _generate(engine, "during-pause")).finished
+
+
+@pytest.mark.asyncio
+async def test_pause_mid_fanout_rejects_the_whole_request(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A pause landing between n>1 child submissions fails the whole request
+    and reclaims a sibling the pause left queued, so the id is reusable."""
+    with ExitStack() as after:
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
+        after.callback(engine.shutdown)
+
+        original_add = engine.engine_core.add_request_async
+        original_abort = engine.engine_core.abort_requests_async
+        submitted: list[str] = []
+        aborted: list[str] = []
+
+        async def pause_after_first_child(request):
+            if not submitted:
+                # Keep the first child queued, where a wait pause leaves it.
+                await engine.pause_generation(mode="keep")
+            await original_add(request)
+            submitted.append(request.request_id)
+            if len(submitted) == 1:
+                await engine.pause_generation(mode="wait")
+
+        async def record_abort(request_ids):
+            aborted.extend(request_ids)
+            await original_abort(request_ids)
+
+        monkeypatch.setattr(
+            engine.engine_core, "add_request_async", pause_after_first_child
+        )
+        monkeypatch.setattr(engine.engine_core, "abort_requests_async", record_abort)
+        with pytest.raises(RetryableRequestError):
+            await _generate(engine, "fanout", n=3)
+        monkeypatch.undo()
+
+        # The queued child is reclaimed in the engine, not just the frontend.
+        assert submitted[0] in aborted
+        assert not engine.output_processor.has_unfinished_requests()
+        assert not engine.output_processor.parent_requests
+        await engine.resume_generation()
+        assert (await _generate(engine, "fanout", n=3)).finished

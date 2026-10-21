@@ -9,7 +9,7 @@ vllm --help
 Available Commands:
 
 ```bash
-vllm {chat,complete,serve,launch,bench,collect-env,run-batch}
+vllm {chat,complete,serve,launch,bench,collect-env,download-kernels,run-batch,preload}
 ```
 
 ## serve
@@ -50,6 +50,21 @@ vllm serve --help=max-num-seqs
 vllm serve --help=max
 ```
 
+!!! tip "Human-readable integer arguments"
+    Many integer arguments accept human-readable suffixes for convenience. For example:
+
+    - `1k` = 1,000 (decimal kilo)
+    - `1K` = 1,024 (binary kibibyte)
+    - `1m` = 1,000,000 (decimal mega)
+    - `1M` = 1,048,576 (binary mebibyte)
+    - `1g` / `1G` = 1 billion / 1 gibibyte
+    - `1t` / `1T` = 1 trillion / 1 tebibyte
+    
+    Decimal suffixes (`k`, `m`, `g`, `t`) also accept floating point: `25.6k` = 25,600.
+    Binary suffixes (`K`, `M`, `G`, `T`) require integers: `32K` = 32,768.
+    
+    Supported arguments include: `--max-model-len`, `--max-num-batched-tokens`, `--max-num-scheduled-tokens`, `--kv-cache-memory-bytes`, `--safetensors-prefetch-block-size`.
+
 See [vllm serve](./serve.md) for the full reference of all available arguments.
 
 ## launch
@@ -80,6 +95,9 @@ vllm chat --url http://{vllm-serve-host}:{vllm-serve-port}/v1
 
 # Quick chat with a single prompt
 vllm chat --quick "hi"
+
+# Print TTFT and throughput statistics after each response
+vllm chat --stats
 ```
 
 See [vllm chat](./chat.md) for the full reference of all available arguments.
@@ -97,6 +115,9 @@ vllm complete --url http://{vllm-serve-host}:{vllm-serve-port}/v1
 
 # Quick complete with a single prompt
 vllm complete --quick "The future of AI is"
+
+# Print TTFT and throughput statistics after each response
+vllm complete --stats
 ```
 
 See [vllm complete](./complete.md) for the full reference of all available arguments.
@@ -110,8 +131,21 @@ To use benchmark commands, please install with extra dependencies using `pip ins
 Available Commands:
 
 ```bash
-vllm bench {latency, serve, throughput}
+vllm bench {forward, latency, serve, throughput}
 ```
+
+### forward
+
+Benchmark the model forward of exact batches: each case lists its requests as `[N*]Q[@K][c][:D]` (query length Q, KV length K including the query, D draft tokens). A prefill's prefix is a prefix-cache hit unless `c` marks a chunked prefill; they differ only on models with SWA bounded replay, which recompute the last window of a hit. Each request's prefix length varies by ±50% by default (`--kv-len-jitter`), identically on every DP rank. Each forward is captured as a one-shot CUDA graph; sampling and CPU overhead aren't measured. Use `torchrun`, one process per GPU, for DP/TP/EP. CUDA only for now. Add `--profile-dir DIR` to write a Perfetto trace and a per-kernel GPU time summary of each case; `python -m vllm.benchmarks.forward.profile A.kernels.json [B.kernels.json]` prints a summary or compares two. Under Nsight Systems, `nsys profile --capture-range=cudaProfilerApi --capture-range-end=repeat --cuda-graph-trace=node` records just those replays, one report per case.
+
+```bash
+vllm bench forward \
+    --model meta-llama/Llama-3.2-1B-Instruct \
+    --case decode=32*1@4096 \
+    --case mix=2048,32*1@4096
+```
+
+See [vllm bench forward](./bench/forward.md) for the full reference of all available arguments.
 
 ### latency
 
@@ -167,6 +201,21 @@ Start collecting environment information.
 vllm collect-env
 ```
 
+## download-kernels
+
+Install the precompiled kernels that vLLM's dependencies would otherwise download
+or compile at startup. Run it after installing or upgrading vLLM. It currently
+installs FlashInfer's kernels and does nothing when FlashInfer is not installed.
+
+```bash
+vllm download-kernels
+
+# Print the install commands without running them
+vllm download-kernels --dry-run
+```
+
+See [vllm download-kernels](./download-kernels.md) for the full reference of all available arguments.
+
 ## run-batch
 
 Run batch prompts and write results to file.
@@ -175,7 +224,7 @@ Running with a local file:
 
 ```bash
 vllm run-batch \
-    -i features/openai_batch/openai_example_batch.jsonl \
+    -i examples/features/openai_batch/openai_example_batch.jsonl \
     -o results.jsonl \
     --model meta-llama/Meta-Llama-3-8B-Instruct
 ```
@@ -190,6 +239,33 @@ vllm run-batch \
 ```
 
 See [vllm run-batch](./run-batch.md) for the full reference of all available arguments.
+
+## preload
+
+Launch weight cache daemons (one per GPU) that hold the post-quantized,
+TP-sharded weights in GPU memory and serve CUDA IPC handles to vLLM engines
+over a Unix domain socket. Restarting engines then map the weights via
+zero-copy IPC instead of reloading from disk, enabling fast engine restarts.
+
+```bash
+# Launch one daemon per GPU
+vllm preload --model meta-llama/Llama-3.2-1B-Instruct --tensor-parallel-size 4
+
+# Engines then load from the daemons
+vllm serve meta-llama/Llama-3.2-1B-Instruct --tensor-parallel-size 4 \
+    --load-format ipc_cache
+```
+
+The daemon accepts the standard engine arguments (model, dtype, quantization,
+tensor-parallel-size, ...) plus `--weight-cache-socket-dir` to override the
+directory holding the per-GPU Unix sockets, and `--weight-cache-master-port` /
+`--weight-cache-draft-master-port` to pin the daemon rendezvous ports for
+multi-node and speculative-decoding setups. Tensor, expert and data
+parallelism are supported; pipeline parallelism is rejected at launch.
+
+See [Preload](../features/preload.md) for how it works, cache modes, and
+limitations, and [vllm preload](./preload.md) for the full reference of all
+available arguments.
 
 ## More Help
 

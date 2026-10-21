@@ -1,16 +1,21 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::ops::Deref;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use futures::Stream;
 use futures::stream::FusedStream;
+use futures::{Stream, StreamExt as _};
+use itertools::Either;
 use thiserror_ext::AsReport as _;
 use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
 
 use crate::client::AbortRequest;
 use crate::client::state::OutputReceiver;
-use crate::protocol::{EngineCoreFinishReason, EngineCoreOutput};
+use crate::protocol::output::{EngineCoreFinishReason, EngineCoreOutput};
 use crate::{AbortCause, Error, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,6 +31,7 @@ enum State {
 pub struct EngineCoreStreamOutput {
     pub engine_index: u32,
     pub timestamp: f64,
+    pub weight_version: Option<Arc<str>>,
     pub output: EngineCoreOutput,
 }
 
@@ -37,6 +43,68 @@ impl Deref for EngineCoreStreamOutput {
     }
 }
 
+/// Consecutive outputs of one request, delivered to its stream together and in
+/// order. Outputs are grouped by the request's `stream_interval` (see
+/// [`EngineCoreClient::call`]) but not merged; consumers merge them after
+/// observing each raw output.
+///
+/// [`EngineCoreClient::call`]: crate::EngineCoreClient::call
+#[derive(Debug)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "single outputs stay inline, avoiding an allocation per engine step"
+)]
+pub enum EngineCoreStreamDelivery {
+    /// A single output, sent without being held back.
+    One(EngineCoreStreamOutput),
+    /// Outputs held back by the stream interval, in order. Never empty.
+    Many(Vec<EngineCoreStreamOutput>),
+}
+
+impl EngineCoreStreamDelivery {
+    /// Return the first output.
+    pub fn first(&self) -> &EngineCoreStreamOutput {
+        match self {
+            Self::One(output) => output,
+            Self::Many(outputs) => outputs.first().expect("deliveries are never empty"),
+        }
+    }
+
+    /// Return the last output, the only one that can be terminal.
+    pub fn last(&self) -> &EngineCoreStreamOutput {
+        match self {
+            Self::One(output) => output,
+            Self::Many(outputs) => outputs.last().expect("deliveries are never empty"),
+        }
+    }
+
+    /// Iterate over the outputs in order.
+    pub fn iter(
+        &self,
+    ) -> Either<
+        std::iter::Once<&EngineCoreStreamOutput>,
+        std::slice::Iter<'_, EngineCoreStreamOutput>,
+    > {
+        match self {
+            Self::One(output) => Either::Left(std::iter::once(output)),
+            Self::Many(outputs) => Either::Right(outputs.iter()),
+        }
+    }
+}
+
+impl IntoIterator for EngineCoreStreamDelivery {
+    type Item = EngineCoreStreamOutput;
+    type IntoIter =
+        Either<std::iter::Once<EngineCoreStreamOutput>, std::vec::IntoIter<EngineCoreStreamOutput>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        match self {
+            Self::One(output) => Either::Left(std::iter::once(output)),
+            Self::Many(outputs) => Either::Right(outputs.into_iter()),
+        }
+    }
+}
+
 /// Stream of raw engine-core outputs for one request.
 ///
 /// The stream yields only [`EngineCoreStreamOutput`] values whose embedded
@@ -45,6 +113,7 @@ impl Deref for EngineCoreStreamOutput {
 /// `finish_reason` is non-`None`.
 pub struct EngineCoreOutputStream {
     request_id: String,
+    engine_index: u32,
     abort_tx: mpsc::UnboundedSender<AbortRequest>,
     state: State,
     rx: OutputReceiver,
@@ -53,11 +122,13 @@ pub struct EngineCoreOutputStream {
 impl EngineCoreOutputStream {
     pub(crate) fn new(
         request_id: String,
+        engine_index: u32,
         abort_tx: mpsc::UnboundedSender<AbortRequest>,
         rx: OutputReceiver,
     ) -> Self {
         Self {
             request_id,
+            engine_index,
             abort_tx,
             state: State::Running,
             rx,
@@ -68,10 +139,26 @@ impl EngineCoreOutputStream {
     pub fn request_id(&self) -> &str {
         &self.request_id
     }
+
+    /// Return the index of the engine that owns this request.
+    pub fn engine_index(&self) -> u32 {
+        self.engine_index
+    }
+
+    /// Flatten the stream into one item per raw output, for consumers that do
+    /// not care how outputs are grouped into deliveries.
+    pub fn into_outputs(self) -> impl Stream<Item = Result<EngineCoreStreamOutput>> + Send + Unpin {
+        self.flat_map(|item| {
+            futures::stream::iter(match item {
+                Ok(delivery) => Either::Left(delivery.into_iter().map(Ok)),
+                Err(error) => Either::Right(std::iter::once(Err(error))),
+            })
+        })
+    }
 }
 
 impl Stream for EngineCoreOutputStream {
-    type Item = Result<EngineCoreStreamOutput>;
+    type Item = Result<EngineCoreStreamDelivery>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if self.is_terminated() {
@@ -82,12 +169,16 @@ impl Stream for EngineCoreOutputStream {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Some(item)) => {
                 match &item {
-                    Ok(output) => {
+                    Ok(delivery) => {
                         // If the output indicates the request is finished, mark the stream as
                         // terminated with cleanly-finished state and expect no more outputs to
-                        // come.
+                        // come. Only the last output of a delivery can be terminal.
+                        let output = delivery.last();
                         if output.finished() {
-                            if output.finish_reason == Some(EngineCoreFinishReason::Error) {
+                            // A retryable error (e.g. a paused engine's rejection) is expected.
+                            if output.finish_reason == Some(EngineCoreFinishReason::Error)
+                                && !output.error.as_ref().is_some_and(|error| error.retryable)
+                            {
                                 error!(
                                     self.request_id,
                                     "request failed with an internal error during generation"

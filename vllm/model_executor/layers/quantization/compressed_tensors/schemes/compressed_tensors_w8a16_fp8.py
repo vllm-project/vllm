@@ -137,8 +137,15 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
                     "weight_scale",
                     convert_to_channelwise(layer.weight_scale, layer.logical_widths),
                 )
+                self.weight_quant_key = STRATEGY_TO_WEIGHT_QUANT_KEY[
+                    QuantizationStrategy.CHANNEL
+                ]
+                self.linear_kernel.config.weight_quant_key = self.weight_quant_key
+
             # Canonicalize to (K, N) for the kernel.
             replace_parameter(layer, "weight", layer.weight.t())
+            # The param keeps its checkpoint dims; layout-aware kernels read this.
+            layer.processed_weight_dims = (0, 1)
 
         self.linear_kernel.process_weights_after_loading(layer)
 

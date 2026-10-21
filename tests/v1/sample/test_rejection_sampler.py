@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
 
@@ -131,7 +132,7 @@ def create_sampling_metadata(
 
 ########################### Tests for Greedy Sampling ###################
 def test_perfect_match(rejection_sampler):
-    """Test when output tokens perfectly match speculated tokens"""
+    """Test when output tokens perfectly match speculated tokens."""
     spec_tokens = [[1, 2, 3]]
     output_tokens = [[1, 2, 3, 4]]  # 4 is the bonus token
 
@@ -152,7 +153,7 @@ def test_perfect_match(rejection_sampler):
 
 
 def test_early_mismatch(rejection_sampler):
-    """Test when there's an early mismatch in tokens"""
+    """Test when there's an early mismatch in tokens."""
     spec_tokens = [[1, 2, 3]]
     output_tokens = [[1, 5, 3, 4]]  # Mismatch at position 1
 
@@ -177,7 +178,7 @@ def test_early_mismatch(rejection_sampler):
 
 
 def test_multiple_sequences(rejection_sampler):
-    """Test handling multiple sequences of speculated tokens"""
+    """Test handling multiple sequences of speculated tokens."""
     spec_tokens = [[1, 2], [3]]
     output_tokens = [[1, 2, 5], [3, 4]]  # Two sequences with bonus tokens 5 and 4
 
@@ -202,7 +203,7 @@ def test_multiple_sequences(rejection_sampler):
 
 
 def test_single_token_sequence(rejection_sampler):
-    """Test handling sequences with single token"""
+    """Test handling sequences with single token."""
     spec_tokens = [[1]]
     output_tokens = [[1, 2]]  # Single token with bonus token 2
 
@@ -223,7 +224,7 @@ def test_single_token_sequence(rejection_sampler):
 
 
 def test_empty_sequence(rejection_sampler):
-    """Test handling empty sequence of speculated tokens"""
+    """Test handling empty sequence of speculated tokens."""
     spec_tokens: list[list[int]] = [[]]
     output_tokens = [[5]]  # Just the bonus token
 
@@ -244,7 +245,7 @@ def test_empty_sequence(rejection_sampler):
 
 
 def test_multiple_mismatches(rejection_sampler):
-    """Test handling multiple sequences with mismatches"""
+    """Test handling multiple sequences with mismatches."""
     spec_tokens = [[1, 2, 3], [4, 5, 6]]
     output_tokens = [[1, 2, 7, 6], [4, 8, 6, 9]]  # Mismatches in both sequences
 
@@ -286,7 +287,7 @@ def test_multiple_mismatches(rejection_sampler):
     ],
 )
 def test_parametrized_cases(rejection_sampler, spec_tokens, output_tokens, expected):
-    """Parametrized test for various matching scenarios"""
+    """Parametrized test for various matching scenarios."""
     metadata = create_sampling_metadata(all_greedy=True)
     logits = create_logits_tensor(output_tokens)
     bonus_token_tensor = torch.tensor(
@@ -486,6 +487,7 @@ def estimate_rejection_sampling_pdf(
 
     Returns:
         Estimated probability distribution of the output tokens.
+
     """
     mock_sampler = Mock(spec=Sampler)
     mock_sampler.logprobs_mode = "raw_logprobs"
@@ -656,7 +658,7 @@ def _test_masked_logits(
 
 @pytest.mark.parametrize("top_k", [1, 5, 99])
 def test_top_k(rejection_sampler, top_k):
-    """Test rejection sampling with top-k sampling"""
+    """Test rejection sampling with top-k sampling."""
     vocab_size = 100
     batch_size = 100
     num_draft_tokens = 3
@@ -699,7 +701,7 @@ def test_top_k(rejection_sampler, top_k):
 
 @pytest.mark.parametrize("top_p", [0.5, 0.9, 0.99])
 def test_top_p(rejection_sampler, top_p):
-    """Test rejection sampling with top-p sampling"""
+    """Test rejection sampling with top-p sampling."""
     vocab_size = 100
     batch_size = 100
     num_draft_tokens = 3
@@ -746,7 +748,7 @@ def test_top_p(rejection_sampler, top_p):
 
 ########################### Tests for Logit Processors ###################
 def test_frequency_penalties(rejection_sampler):
-    """Test rejection sampling with frequency penalties"""
+    """Test rejection sampling with frequency penalties."""
     spec_tokens = [[1, 1, 1], [], [1, 1, 1]]
     output_tokens = [[1, 1, 1, 1], [7], [1, 1, 1, 1]]  # 1, 7 and 1 are the bonus tokens
 
@@ -829,7 +831,7 @@ def test_bad_words(rejection_sampler):
 
 
 def test_allowed_token_ids(rejection_sampler):
-    """Test rejection sampling with allowed token ids"""
+    """Test rejection sampling with allowed token ids."""
     spec_tokens = [[1, 2, 10], [10, 5, 3], [7, 10, 12]]
     output_tokens = [[1, 2, 10, 5], [10, 5, 10, 5], [7, 10, 12, 5]]
     # Not allowed tokens:
@@ -1091,6 +1093,193 @@ def test_sample_recovered_tokens_vocab_boundary(vocab_size: int, no_draft_probs:
     )
 
 
+########################### Tests for FLy Verification ##################
+
+
+def _make_fly_sampler(
+    window_size: int = 2, entropy_threshold: float = 0.0, entropy_top_k: int = 3
+) -> RejectionSampler:
+    mock_sampler = Mock(spec=Sampler)
+    mock_sampler.logprobs_mode = "raw_logprobs"
+    spec_config = SimpleNamespace(
+        rejection_sample_method="fly",
+        fly_window_size=window_size,
+        fly_entropy_threshold=entropy_threshold,
+        fly_entropy_top_k=entropy_top_k,
+    )
+    return RejectionSampler(mock_sampler, spec_config)
+
+
+def _patch_uniform_probs(monkeypatch: pytest.MonkeyPatch, values: list[float]) -> None:
+    def fixed_uniform_probs(num_tokens, num_draft_tokens, generators, device):
+        assert num_tokens == len(values)
+        return torch.tensor(values, dtype=torch.float64, device=device)
+
+    monkeypatch.setattr(
+        "vllm.v1.sample.rejection_sampler.generate_uniform_probs",
+        fixed_uniform_probs,
+    )
+
+
+def test_fly_greedy_rescues_mismatch_after_native_acceptance_window(
+    rejection_sampler,
+):
+    spec_tokens = [[1, 2, 3, 4]]
+    target_tokens = [[9, 2, 3, 4, 5]]
+    logits = create_logits_tensor(target_tokens)
+    metadata = create_sampling_metadata(all_greedy=True)
+    spec_metadata = create_spec_decode_metadata(spec_tokens, logits)
+    bonus = torch.tensor([5], device=logits.device)
+
+    mock_sampler_output(rejection_sampler, bonus)
+    standard_output = rejection_sampler(spec_metadata, None, logits, metadata)
+    assert torch.equal(
+        standard_output.sampled_token_ids,
+        torch.tensor([[9, -1, -1, -1, -1]], dtype=torch.int, device=logits.device),
+    )
+
+    fly_sampler = _make_fly_sampler(window_size=2)
+    mock_sampler_output(fly_sampler, bonus)
+    fly_output = fly_sampler(spec_metadata, None, logits, metadata)
+    assert torch.equal(
+        fly_output.sampled_token_ids,
+        torch.tensor([[1, 2, 3, 4, 5]], dtype=torch.int, device=logits.device),
+    )
+
+
+@pytest.mark.parametrize("top_k", [1, 3])
+def test_fly_requires_full_lookahead_and_passes_entropy_gate(top_k: int):
+    spec_tokens = [[1, 2, 3, 4, 5]]
+    target_tokens = [[9, 2, 3, 8, 5, 6]]
+    logits = create_logits_tensor(target_tokens, vocab_size=10)
+    metadata = create_sampling_metadata(all_greedy=True)
+    spec_metadata = create_spec_decode_metadata(spec_tokens, logits)
+    bonus = torch.tensor([6], device=logits.device)
+
+    fly_sampler = _make_fly_sampler(
+        window_size=2, entropy_threshold=0.5, entropy_top_k=top_k
+    )
+    mock_sampler_output(fly_sampler, bonus)
+    low_entropy_output = fly_sampler(spec_metadata, None, logits, metadata)
+    assert low_entropy_output.sampled_token_ids[0, 0].item() == 9
+
+    logits[0].fill_(-100.0)
+    logits[0, 9] = 1.0
+    logits[0, 1] = 0.9
+    logits[0, 0] = 0.8
+    high_entropy_output = fly_sampler(spec_metadata, None, logits, metadata)
+    assert high_entropy_output.sampled_token_ids[0, 0].item() == (
+        1 if top_k == 3 else 9
+    )
+    if top_k == 3:
+        assert high_entropy_output.sampled_token_ids[0, 3].item() == 8
+
+
+def test_fly_does_not_override_target_constraint():
+    spec_tokens = [[1, 2, 3]]
+    target_tokens = [[9, 2, 3, 4]]
+    logits = create_logits_tensor(target_tokens, vocab_size=10)
+    logits[0].fill_(-100.0)
+    logits[0, 9] = 1.0
+    logits[0, 0] = 0.9
+    logits[0, 8] = 0.8
+    logits[0, 1] = float("-inf")
+    metadata = create_sampling_metadata(all_greedy=True)
+    spec_metadata = create_spec_decode_metadata(spec_tokens, logits)
+    bonus = torch.tensor([4], device=logits.device)
+
+    fly_sampler = _make_fly_sampler(window_size=1, entropy_threshold=0.3)
+    mock_sampler_output(fly_sampler, bonus)
+    output = fly_sampler(spec_metadata, None, logits, metadata)
+    assert output.sampled_token_ids[0, 0].item() == 9
+
+
+def test_fly_target_only_sampling_uses_mapped_target_ids(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _patch_uniform_probs(monkeypatch, [0.5, 0.5, 0.5, 0.5])
+    draft_tokens = [[7, 2, 3, 4]]
+    target_probs = torch.zeros((4, 10), dtype=torch.float32, device=DEVICE_TYPE)
+    target_probs[0, 9], target_probs[0, 7] = 0.6, 0.4
+    for row, token_id in enumerate(draft_tokens[0][1:], start=1):
+        target_probs[row, 0] = 0.2
+        target_probs[row, token_id] = 0.8
+    logits = target_probs.log()
+    metadata = create_sampling_metadata(
+        all_greedy=False,
+        temperature=torch.ones(1, dtype=torch.float32, device=DEVICE_TYPE),
+    )
+    spec_metadata = create_spec_decode_metadata(draft_tokens, logits)
+    bonus = torch.tensor([8], device=logits.device)
+
+    fly_sampler = _make_fly_sampler(window_size=2)
+    mock_sampler_output(fly_sampler, bonus)
+    output = fly_sampler(spec_metadata, None, logits, metadata)
+    assert torch.equal(
+        output.sampled_token_ids,
+        torch.tensor([[7, 2, 3, 4, 8]], dtype=torch.int, device=logits.device),
+    )
+
+
+def test_fly_probabilistic_draft_sampling_uses_probability_ratio(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _patch_uniform_probs(monkeypatch, [0.9, 0.9, 0.9, 0.9])
+    draft_tokens = [[1, 2, 3, 4]]
+    target_probs = torch.zeros((4, 8), dtype=torch.float32, device=DEVICE_TYPE)
+    draft_probs = torch.zeros_like(target_probs)
+    target_probs[0, 0], target_probs[0, 1] = 0.6, 0.4
+    draft_probs[0, 0], draft_probs[0, 1] = 0.5, 0.5
+    for row, token_id in enumerate(draft_tokens[0][1:], start=1):
+        target_probs[row, 0], target_probs[row, token_id] = 0.4, 0.6
+        draft_probs[row, 0], draft_probs[row, token_id] = 0.5, 0.5
+    logits = target_probs.log()
+    metadata = create_sampling_metadata(
+        all_greedy=False,
+        temperature=torch.ones(1, dtype=torch.float32, device=DEVICE_TYPE),
+    )
+    spec_metadata = create_spec_decode_metadata(draft_tokens, logits)
+    bonus = torch.tensor([7], device=logits.device)
+
+    fly_sampler = _make_fly_sampler(window_size=2)
+    mock_sampler_output(fly_sampler, bonus)
+    output = fly_sampler(spec_metadata, draft_probs, logits, metadata)
+    assert torch.equal(
+        output.sampled_token_ids,
+        torch.tensor([[1, 2, 3, 4, 7]], dtype=torch.int, device=logits.device),
+    )
+
+
+def test_fly_mixed_greedy_and_random_batch(monkeypatch: pytest.MonkeyPatch):
+    _patch_uniform_probs(monkeypatch, [0.5] * 6)
+    draft_tokens = [[1, 2, 3], [4, 5, 6]]
+    target_probs = torch.zeros((6, 10), dtype=torch.float32, device=DEVICE_TYPE)
+    target_probs[0, 9], target_probs[0, 1] = 0.6, 0.4
+    target_probs[1, 2] = target_probs[2, 3] = 1.0
+    target_probs[3, 0], target_probs[3, 4] = 0.6, 0.4
+    target_probs[4, 5] = target_probs[5, 6] = 1.0
+    logits = target_probs.log()
+    metadata = create_sampling_metadata(
+        all_greedy=False,
+        temperature=torch.tensor([0.0, 1.0], device=DEVICE_TYPE),
+    )
+    metadata.all_random = False
+    spec_metadata = create_spec_decode_metadata(draft_tokens, logits)
+    bonus = torch.tensor([7, 8], device=logits.device)
+
+    fly_sampler = _make_fly_sampler(window_size=1)
+    mock_sampler_output(fly_sampler, bonus)
+    output = fly_sampler(spec_metadata, None, logits, metadata)
+    assert torch.equal(
+        output.sampled_token_ids,
+        torch.tensor(
+            [[1, 2, 3, 7], [4, 5, 6, 8]],
+            dtype=torch.int,
+            device=logits.device,
+        ),
+    )
+
+
 ########################### Tests for Synthetic Rejection Sampling #########
 
 
@@ -1150,3 +1339,36 @@ def test_synthetic_all_rejected(all_greedy: bool):
     for row in result:
         assert row[0] != PLACEHOLDER_TOKEN_ID
         assert (row[1:] == PLACEHOLDER_TOKEN_ID).all()
+
+
+def test_placeholder_draft_token_rejected_random(rejection_sampler):
+    """A placeholder draft id (-1) must be rejected in non-greedy sampling
+    without indexing the probability tensors by the invalid id.
+    """
+    vocab_size = 100
+    spec_tokens = [[1, vocab_size - 1, PLACEHOLDER_TOKEN_ID]]
+    output_tokens = [[1, vocab_size - 1, 7, 9]]
+
+    temperature = torch.ones(1, dtype=torch.float32, device=DEVICE_TYPE)
+    metadata = create_sampling_metadata(
+        all_greedy=False,
+        temperature=temperature,
+        generators={0: torch.Generator(device=DEVICE_TYPE).manual_seed(0)},
+    )
+    logits = create_logits_tensor(output_tokens, vocab_size=vocab_size)
+    bonus_token_tensor = torch.tensor([output_tokens[0][-1]], device=logits.device)
+    spec_decode_metadata = create_spec_decode_metadata(spec_tokens, logits)
+
+    mock_sampler_output(rejection_sampler, bonus_token_tensor)
+    output = rejection_sampler(
+        spec_decode_metadata,
+        draft_probs=None,
+        logits=logits,
+        sampling_metadata=metadata,
+    )
+    sampled = output.sampled_token_ids
+
+    assert sampled[0, 0].item() == 1
+    assert sampled[0, 1].item() == vocab_size - 1
+    recovered = sampled[0, 2].item()
+    assert 0 <= recovered < vocab_size

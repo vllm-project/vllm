@@ -33,6 +33,8 @@ from vllm.v1.kv_cache_interface import KVQuantMode
 logger = init_logger(__name__)
 is_batch_invariant = envs.VLLM_BATCH_INVARIANT
 float8_info = torch.finfo(current_platform.fp8_dtype())
+# Longest per-request query (e.g. 1 + num_speculative_tokens) run by split-K.
+MAX_3D_QUERY_LEN = 8
 
 
 @triton.jit
@@ -217,10 +219,13 @@ def kernel_unified_attention(
     SLIDING_WINDOW: tl.constexpr,  # int
     USE_CAUSAL: tl.constexpr,  # bool
     USE_PER_SEQ_CAUSAL: tl.constexpr,  # bool
-    per_seq_causal_ptr,  # [num_seqs] bool, or None
+    per_seq_causal_ptr,  # [num_seqs] int32, or None
     USE_MM_PREFIX: tl.constexpr,  # bool
     MAX_MM_RANGES: tl.constexpr,  # int
     mm_prefix_range_ptr,
+    rswa_prefix_lens_ptr,
+    R_SWA_WINDOW: tl.constexpr,  # int
+    USE_R_SWA: tl.constexpr,  # bool
     stride_k_cache_0: tl.int64,  # int
     stride_k_cache_1: tl.int64,  # int
     stride_k_cache_2: tl.int64,  # int
@@ -251,15 +256,23 @@ def kernel_unified_attention(
     # Per-(token, head) scale caches: used iff KV_QUANT_MODE in {2, 3}.
     k_scale_cache_ptr=None,
     v_scale_cache_ptr=None,
-    stride_ks_blk: tl.int64 = None,
-    stride_ks_slot: tl.int64 = None,
-    stride_ks_head: tl.int64 = None,
-    stride_vs_blk: tl.int64 = None,
-    stride_vs_slot: tl.int64 = None,
-    stride_vs_head: tl.int64 = None,
+    # ``tl.int64`` cannot be combined with a ``None`` default — Triton's JIT
+    # rejects ``Optional[tl.int64]`` / ``tl.int64 | None`` at trace time, and
+    # plain ``tl.int64 = None`` raises ``TypeError: 'NoneType' object cannot
+    # be interpreted as an integer`` when callers omit these arguments.
+    # ``int | None`` is the only annotation that lets the wrapper pass
+    # ``None`` here so Triton can skip materialising the strides when the
+    # ``USE_PER_TOKEN_HEAD_SCALES`` branch is dead.
+    stride_ks_blk: int | None = None,
+    stride_ks_slot: int | None = None,
+    stride_ks_head: int | None = None,
+    stride_vs_blk: int | None = None,
+    stride_vs_slot: int | None = None,
+    stride_vs_head: int | None = None,
     # KV cache quantization mode handled inside this kernel via constexpr
     # branches: NONE (0), FP8_PER_TENSOR (1), INT8_PER_TOKEN_HEAD (2),
-    # FP8_PER_TOKEN_HEAD (3).
+    # FP8_PER_TOKEN_HEAD (3). Sub-byte INT4 (4) uses its own
+    # int4_per_token_head kernel, not this one.
     KV_QUANT_MODE: tl.constexpr = 0,
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
@@ -274,8 +287,15 @@ def kernel_unified_attention(
     USE_TD: tl.constexpr = False,
     USE_TD_QO: tl.constexpr = False,
     Q_IS_FP8: tl.constexpr = False,
+    # Gemma4: clamp mm_prefix bidirectional ranges by the sliding window
+    # instead of letting them override it. Default False preserves the
+    # original (causal AND SW) OR mm_prefix behavior for all other models.
+    MM_PREFIX_CLAMP_SW: tl.constexpr = False,
 ):
-    USE_PER_TOKEN_HEAD_SCALES: tl.constexpr = KV_QUANT_MODE >= 2
+    # Per-(token, head) scale caches: used iff KV_QUANT_MODE in {2, 3}.
+    USE_PER_TOKEN_HEAD_SCALES: tl.constexpr = (KV_QUANT_MODE >= 2) and (
+        KV_QUANT_MODE <= 3
+    )
     USE_FP8_Q_DESCALE: tl.constexpr = KV_QUANT_MODE == 1 and Q_IS_FP8
 
     if USE_TD:
@@ -396,6 +416,11 @@ def kernel_unified_attention(
         USE_PER_SEQ_CAUSAL,
         CHUNK_LOOKBACK,
         CHUNK_SIZE,
+        USE_R_SWA,
+        MM_PREFIX_CLAMP_SW,
+        MAX_MM_RANGES,
+        mm_prefix_range_ptr,
+        seq_idx,
     )
 
     # iterate through tiles (now limited to the sliding window range)
@@ -506,8 +531,12 @@ def kernel_unified_attention(
             USE_CAUSAL,
             USE_PER_SEQ_CAUSAL,
             per_seq_causal_ptr,
+            rswa_prefix_lens_ptr,
+            R_SWA_WINDOW,
+            USE_R_SWA,
             CHUNK_LOOKBACK,
             CHUNK_SIZE,
+            MM_PREFIX_CLAMP_SW,
         )
 
         # S : (BLOCK_M, TILE_SIZE)
@@ -559,7 +588,15 @@ def kernel_unified_attention(
             P_v = (P * v_token_head_scales[None, :]).to(V.dtype)
             acc += tl.dot(P_v, V)
         else:
-            acc += tl.dot(P.to(V.dtype), V)
+            # Keep softmax weights representable when the P @ V dot uses FP8
+            # tensor cores. Undo the power-of-two scale after the dot.
+            if V.dtype == tl.float8e4nv:
+                p_scale = 256.0
+            elif V.dtype.is_fp8():
+                p_scale = 128.0
+            else:
+                p_scale = 1.0
+            acc += tl.dot((P * p_scale).to(V.dtype), V) / p_scale
 
     # ---- Epilogue ---------------------------------------------------------
     if IS_3D:
@@ -686,12 +723,18 @@ def reduce_segments(
     query_token_idx = tl.program_id(0)
     query_head_idx = tl.program_id(1)
 
+    # Graph padding must be rejected before sequence lookup or scratch access.
+    if query_token_idx >= tl.load(query_start_len_ptr + num_seqs):
+        return
+
     seq_idx = find_seq_idx(
         query_start_len_ptr, query_token_idx, num_seqs, BLOCK_Q, False
     )
 
     # sequence len for this particular sequence
     seq_len = tl.load(seq_lens_ptr + seq_idx)
+    if seq_len <= 0:
+        return
 
     # number of segments for this particular sequence
     num_segments = NUM_SEGMENTS_PER_SEQ
@@ -711,11 +754,16 @@ def reduce_segments(
         + tl.arange(0, NUM_SEGMENTS_PER_SEQ)
     )
     segm_max = tl.load(segm_max_ptr + segm_offset, mask=segm_mask, other=float("-inf"))
+    segm_expsum = tl.load(segm_expsum_ptr + segm_offset, mask=segm_mask, other=0.0)
+    # Empty segments must not set the maximum. Unvisited segments retain
+    # the M=-inf,L=1 initial state.
+    valid_segment = segm_mask & (segm_expsum > 0) & (segm_max != float("-inf"))
+    segm_max = tl.where(valid_segment, segm_max, float("-inf"))
     overall_max = tl.max(segm_max)
 
     # load and rescale segment exp sums
-    segm_expsum = tl.load(segm_expsum_ptr + segm_offset, mask=segm_mask, other=0.0)
-    segm_expsum = segm_expsum * tl.exp(segm_max - overall_max)
+    segment_scale = tl.where(valid_segment, tl.exp(segm_max - overall_max), 0.0)
+    segm_expsum = segm_expsum * segment_scale
     overall_expsum = tl.sum(segm_expsum)
 
     # load, rescale, and add segment attention outputs
@@ -731,7 +779,7 @@ def reduce_segments(
         mask=segm_mask[:, None] & dim_mask[None, :],
         other=0.0,
     )
-    segm_output *= tl.exp(segm_max - overall_max)[:, None]
+    segm_output *= segment_scale[:, None]
     acc_sum = tl.sum(segm_output, axis=0)
     # safely divide by overall_expsum, returning 0.0 if overall_expsum is 0
     acc = tl.where(overall_expsum == 0.0, 0.0, acc_sum / overall_expsum)
@@ -806,6 +854,10 @@ def unified_attention(
     sinks=None,
     # Optional tensor for prefix lengths (PrefixLM support)
     mm_prefix_range=None,
+    # R-SWA support: prefix tokens stay globally visible, generated tokens use
+    # a fixed sliding window.
+    rswa_prefix_lens=None,
+    rswa_window: int | None = None,
     use_alibi_sqrt=False,
     # KV cache quantization mode and per-token-head scale caches.
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE,
@@ -818,11 +870,55 @@ def unified_attention(
     # The non-TD branch is dead-code-eliminated at Triton compile time so
     # disabling this flag costs nothing.
     use_td: bool = False,
+    # Gemma4: clamp mm_prefix bidirectional ranges by the sliding window.
+    # Default False keeps the original behavior for every other model.
+    mm_prefix_clamp_sliding_window: bool = False,
 ):
     # Resolve causal: bool or per-seq tensor.
     use_per_seq_causal = isinstance(causal, torch.Tensor)
     use_causal = bool(causal) if not use_per_seq_causal else True
     per_seq_causal_ptr = causal if use_per_seq_causal else None
+
+    # Sub-byte packed mode (INT4) needs a bespoke kernel (split-dot +
+    # sub-byte unpack); everything else goes through the core kernel below.
+    if kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+        assert use_causal and not use_per_seq_causal, (
+            "INT4_PER_TOKEN_HEAD only supports causal attention"
+        )
+        from vllm.v1.attention.ops.int4_per_token_head import (
+            unified_attention_int4,
+        )
+
+        if sinks is not None:
+            assert sinks.shape[0] == q.shape[1], "Sinks must be num_query_heads size"
+        unified_attention_int4(
+            q=q,
+            k_cache=k,
+            v_cache=v,
+            out=out,
+            cu_seqlens_q=cu_seqlens_q,
+            max_seqlen_q=max_seqlen_q,
+            seqused_k=seqused_k,
+            max_seqlen_k=max_seqlen_k,
+            softmax_scale=softmax_scale,
+            window_size=window_size,
+            block_table=block_table,
+            softcap=softcap,
+            sinks=sinks,
+            alibi_slopes=alibi_slopes,
+            use_alibi_sqrt=use_alibi_sqrt,
+            qq_bias=qq_bias,
+            output_scale=output_scale,
+            mm_prefix_range=mm_prefix_range,
+            k_scale_cache=k_scale_cache,
+            v_scale_cache=v_scale_cache,
+            seq_threshold_3D=seq_threshold_3D,
+            num_par_softmax_segments=num_par_softmax_segments,
+            softmax_segm_output=softmax_segm_output,
+            softmax_segm_max=softmax_segm_max,
+            softmax_segm_expsum=softmax_segm_expsum,
+        )
+        return
 
     if sinks is not None:
         assert sinks.shape[0] == q.shape[1], "Sinks must be num_query_heads size"
@@ -846,6 +942,8 @@ def unified_attention(
             raise ValueError(
                 f"Unsupported mm_prefix_range shape: {mm_prefix_range.shape}"
             )
+
+    use_rswa = rswa_window is not None and rswa_prefix_lens is not None
 
     use_alibi_slopes = alibi_slopes is not None
     use_qq_bias = qq_bias is not None
@@ -954,7 +1052,7 @@ def unified_attention(
         assert q.stride(1) == head_size, (
             f"USE_TD_QO requires contiguous query heads "
             f"(q.stride(1) = {q.stride(1)} != head_size = {head_size}); "
-            f"set VLLM_TRITON_ATTN_USE_TD=0 or pad the query layout."
+            f"set VLLM_TRITON_USE_TD=0 or pad the query layout."
         )
         assert out.stride(1) == head_size, (
             f"USE_TD_QO requires contiguous output heads "
@@ -962,9 +1060,12 @@ def unified_attention(
         )
 
     # Launch the 2D kernel if
-    # 1. No intermediate tiled softmax buffers for the 3D kernel have been allocated, or
-    # 2. The batch includes at least one prefill request, or
-    # 3. The number of sequences exceeds the configured threshold, or
+    # 1. No split-K threshold or scratch buffers, or the scratch has fewer
+    #    rows than query tokens, or
+    # 2. max_seqlen_q > 1 and either it exceeds MAX_3D_QUERY_LEN, masking is
+    #    non-causal, per-sequence causal, or mm-prefix, or the tuned
+    #    large-head path applies, or
+    # 3. The number of Q blocks exceeds seq_threshold_3D, or
     # 4. Batch invariance is enabled
     use_3d = not (
         seq_threshold_3D is None
@@ -972,16 +1073,28 @@ def unified_attention(
         or softmax_segm_output is None
         or softmax_segm_max is None
         or softmax_segm_expsum is None
-        or max_seqlen_q > 1
-        or num_seqs > seq_threshold_3D
+        or (
+            max_seqlen_q > 1
+            and (
+                max_seqlen_q > MAX_3D_QUERY_LEN
+                or not use_causal
+                or use_per_seq_causal
+                or use_mm_prefix
+                or tuned_large_head
+            )
+        )
+        or num_seqs * triton.cdiv(max_seqlen_q, BLOCK_Q) > seq_threshold_3D
         or is_batch_invariant
     )
+    if use_3d and softmax_segm_max.shape[0] < q.shape[0]:
+        logger.debug_once("Split-K scratch rows < query tokens; using 2D.")
+        use_3d = False
 
     # The kernel signature is the same for 2D and 3D — only the launch
     # grid + a handful of constexpr toggles differ.  Per-token-head scale
-    # caches and their strides are required arguments; non-per-token-head
-    # modes pass dummy zeros (the code path is dead-code eliminated by
-    # the ``USE_PER_TOKEN_HEAD_SCALES`` constexpr branch in the kernel).
+    # caches and their strides are passed as ``None`` when the
+    # ``USE_PER_TOKEN_HEAD_SCALES`` branch is dead so Triton can skip
+    # materialising those arguments and the associated registers.
     if use_per_token_head_scales:
         ks_strides = k_scale_cache.stride()
         vs_strides = v_scale_cache.stride()
@@ -990,16 +1103,15 @@ def unified_attention(
         k_scale_ptr = k_scale_cache
         v_scale_ptr = v_scale_cache
     else:
-        ks_blk = ks_slot = ks_head = 0
-        vs_blk = vs_slot = vs_head = 0
-        # Pass the K cache as a stand-in pointer; never dereferenced.
-        k_scale_ptr = k
-        v_scale_ptr = v
-    # 3D needs real segm tensors; 2D never touches them but Triton wants
-    # a non-null pointer.  Reuse ``out`` as the placeholder.
-    segm_output_ptr = softmax_segm_output if use_3d else out
-    segm_max_ptr = softmax_segm_max if use_3d else out
-    segm_expsum_ptr = softmax_segm_expsum if use_3d else out
+        ks_blk = ks_slot = ks_head = None
+        vs_blk = vs_slot = vs_head = None
+        k_scale_ptr = None
+        v_scale_ptr = None
+    # 3D needs real segm tensors; 2D never touches them.  Pass ``None`` in
+    # 2D mode so Triton can skip materialising these pointer arguments.
+    segm_output_ptr = softmax_segm_output if use_3d else None
+    segm_max_ptr = softmax_segm_max if use_3d else None
+    segm_expsum_ptr = softmax_segm_expsum if use_3d else None
     num_segments = num_par_softmax_segments if use_3d else 1
 
     grid: tuple[Any, ...]
@@ -1061,6 +1173,9 @@ def unified_attention(
         USE_MM_PREFIX=use_mm_prefix,
         MAX_MM_RANGES=max_mm_ranges,
         mm_prefix_range_ptr=mm_prefix_range,
+        rswa_prefix_lens_ptr=rswa_prefix_lens if use_rswa else seqused_k,
+        R_SWA_WINDOW=rswa_window or 0,
+        USE_R_SWA=use_rswa,
         stride_k_cache_0=k.stride(0),
         stride_k_cache_1=k.stride(1),
         stride_k_cache_2=k.stride(2),
@@ -1088,6 +1203,7 @@ def unified_attention(
         CHUNK_SIZE=chunk_size,
         USE_TD=use_td,
         USE_TD_QO=use_td_qo,
+        MM_PREFIX_CLAMP_SW=mm_prefix_clamp_sliding_window,
         **launch_kwargs,
     )
 

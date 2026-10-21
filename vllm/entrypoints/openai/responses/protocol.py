@@ -4,7 +4,7 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
-from typing import Any, Literal, TypeAlias
+from typing import Annotated, Any, Literal, TypeAlias
 
 from openai.types.responses import (
     ResponseCodeInterpreterCallCodeDeltaEvent,
@@ -14,6 +14,8 @@ from openai.types.responses import (
     ResponseCodeInterpreterCallInterpretingEvent,
     ResponseContentPartAddedEvent,
     ResponseContentPartDoneEvent,
+    ResponseCustomToolCallInputDeltaEvent,
+    ResponseCustomToolCallInputDoneEvent,
     ResponseFunctionToolCall,
     ResponseInputItemParam,
     ResponseMcpCallArgumentsDeltaEvent,
@@ -39,31 +41,41 @@ from openai.types.responses import (
 )
 from openai.types.responses import ResponseCreatedEvent as OpenAIResponseCreatedEvent
 from openai.types.responses import (
+    ResponseIncompleteEvent as OpenAIResponseIncompleteEvent,
+)
+from openai.types.responses import (
     ResponseInProgressEvent as OpenAIResponseInProgressEvent,
 )
 from openai.types.responses.response import IncompleteDetails, ToolChoice
-from openai.types.responses.response_reasoning_item import (
-    Content as ResponseReasoningTextContent,
-)
 from openai.types.responses.tool import Tool
 from openai.types.shared import Metadata, Reasoning
 from openai_harmony import Message as OpenAIHarmonyMessage
 from pydantic import (
+    BeforeValidator,
     Field,
+    PrivateAttr,
     ValidationError,
     field_serializer,
     model_validator,
 )
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import (
-    ChatCompletionMessageParam,
-    ChatTemplateContentFormatOption,
+from vllm.entrypoints.generate.base.protocol import (
+    MMPayload,
+    PerRequestMetrics,
+    StopParam,
+    TopLogprobsParam,
+    resolve_return_mm_kwargs_alias,
+    validate_cache_salt,
 )
-from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel
+from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
+from vllm.renderers.chat_utils import (
+    ChatCompletionMessageParam,
+    ChatTemplateContentFormatOption,
+)
 from vllm.sampling_params import (
     RequestOutputKind,
     SamplingParams,
@@ -79,6 +91,7 @@ _INT64_MAX = 2**63 - 1
 
 class InputTokensDetails(OpenAIBaseModel):
     cached_tokens: int
+    cache_write_tokens: int
     input_tokens_per_turn: list[int] = Field(default_factory=list)
     cached_tokens_per_turn: list[int] = Field(default_factory=list)
 
@@ -99,9 +112,7 @@ class ResponseUsage(OpenAIBaseModel):
 
 
 def serialize_message(msg):
-    """
-    Serializes a single message
-    """
+    """Serializes a single message."""
     if isinstance(msg, dict):
         return msg
     elif hasattr(msg, "to_dict"):
@@ -112,9 +123,7 @@ def serialize_message(msg):
 
 
 def serialize_messages(msgs):
-    """
-    Serializes multiple messages
-    """
+    """Serializes multiple messages."""
     return [serialize_message(msg) for msg in msgs] if msgs else None
 
 
@@ -131,6 +140,76 @@ ResponseInputOutputMessage: TypeAlias = (
     list[ChatCompletionMessageParam] | list[ResponseRawMessageAndToken]
 )
 ResponseInputOutputItem: TypeAlias = ResponseInputItemParam | ResponseOutputItem
+
+
+def _default_input_image_details(value: Any) -> Any:
+    """Set the API default for input images before SDK type validation."""
+    if not isinstance(value, dict):
+        return value
+
+    content = value.get("content")
+    if not isinstance(content, list):
+        return value
+
+    new_content = []
+    changed = False
+    for part in content:
+        new_part = part
+        if (
+            isinstance(part, dict)
+            and part.get("type") == "input_image"
+            and "detail" not in part
+        ):
+            new_part = {**part, "detail": "auto"}
+            changed = True
+        new_content.append(new_part)
+
+    return {**value, "content": new_content} if changed else value
+
+
+def _tool_field(tool: Any, field: str) -> Any:
+    return tool.get(field) if isinstance(tool, dict) else getattr(tool, field, None)
+
+
+def _resolve_named_tool_choice(tool_name: str, tools: list[Any]) -> str:
+    """Resolve a named tool choice to the flat ``<namespace>__<name>`` form."""
+    from vllm.tool_parsers.utils import flat_namespace_tool_name
+
+    exact_names: set[str] = set()
+    local_names: dict[str, list[str]] = {}
+    for tool in tools:
+        if _tool_field(tool, "type") == "namespace":
+            namespace = _tool_field(tool, "name")
+            namespaced_tools = _tool_field(tool, "tools")
+            if not isinstance(namespaced_tools, list) or not isinstance(namespace, str):
+                return tool_name
+            for namespaced_tool in namespaced_tools:
+                local_name = _tool_field(namespaced_tool, "name")
+                if not isinstance(local_name, str):
+                    continue
+                flat_name = flat_namespace_tool_name(namespace, local_name)
+                exact_names.add(flat_name)
+                local_names.setdefault(local_name, []).append(flat_name)
+        else:
+            name = _tool_field(tool, "name")
+            if isinstance(name, str):
+                exact_names.add(name)
+    if tool_name in exact_names:
+        return tool_name
+    candidates = local_names.get(tool_name, [])
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        raise VLLMValidationError(
+            f"Tool choice '{tool_name}' is ambiguous: it is defined in more "
+            f"than one namespace ({', '.join(candidates)}). Select it by its "
+            "full '<namespace>__<name>' name.",
+            parameter="tool_choice",
+        )
+    raise VLLMValidationError(
+        "Tool choice 'function' not found in 'tools' parameter.",
+        parameter="tool_choice",
+    )
 
 
 class ResponsesRequest(OpenAIBaseModel):
@@ -150,7 +229,15 @@ class ResponsesRequest(OpenAIBaseModel):
         ]
         | None
     ) = None
-    input: str | list[ResponseInputOutputItem]
+    input: (
+        str
+        | list[
+            Annotated[
+                ResponseInputOutputItem,
+                BeforeValidator(_default_input_image_details),
+            ]
+        ]
+    )
     instructions: str | None = None
     max_output_tokens: int | None = None
     max_tool_calls: int | None = None
@@ -161,6 +248,15 @@ class ResponsesRequest(OpenAIBaseModel):
     previous_response_id: str | None = None
     prompt: ResponsePrompt | None = None
     reasoning: Reasoning | None = None
+    include_reasoning: bool = Field(
+        default=True,
+        description=(
+            "Whether to include reasoning content in the response. "
+            "When false, reasoning tokens are still generated but "
+            "excluded from the output. This reduces network traffic "
+            "without affecting model inference."
+        ),
+    )
     service_tier: Literal["auto", "default", "flex", "scale", "priority"] = "auto"
     store: bool | None = True
     stream: bool | None = False
@@ -168,9 +264,10 @@ class ResponsesRequest(OpenAIBaseModel):
     text: ResponseTextConfig | None = None
     tool_choice: ToolChoice = "auto"
     tools: list[Tool] = Field(default_factory=list)
-    top_logprobs: int | None = 0
+    top_logprobs: TopLogprobsParam = 0
     top_p: float | None = None
     top_k: int | None = None
+    min_p: float | None = None
     truncation: Literal["auto", "disabled"] | None = "disabled"
     user: str | None = None
     skip_special_tokens: bool = True
@@ -203,12 +300,21 @@ class ResponsesRequest(OpenAIBaseModel):
     )
 
     # --8<-- [start:responses-extra-params]
+    watermarking: bool | None = None
     request_id: str = Field(
         default_factory=lambda: f"resp_{random_uuid()}",
         description=(
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
             "through out the inference process and return in response."
+        ),
+    )
+    session_id: str | None = Field(
+        default=None,
+        description=(
+            "Stable session identity shared by related requests. Unlike "
+            "request_id, this value is expected to remain stable across "
+            "multiple requests in the same conversation or agent session."
         ),
     )
     media_io_kwargs: dict[str, dict[str, Any]] | None = Field(
@@ -232,8 +338,31 @@ class ResponsesRequest(OpenAIBaseModel):
             "if the served model does not use priority scheduling."
         ),
     )
+    mm_payload: MMPayload = Field(
+        default="tensors",
+        description=(
+            "What the render response's `features` carry for multimodal "
+            "items. 'tensors' serializes the processed tensors into "
+            "`kwargs_data` and `mm_metadata`. 'none' sets both to null for "
+            "callers that need only the token layout and item hashes, such as "
+            "cache-aware routers. Do not send a 'none' response to "
+            "`/inference/v1/generate` which reads a null `kwargs_data` as "
+            "every item being cached. Only supported on the render endpoints. "
+            "Ignored on regular generation endpoints."
+        ),
+    )
+    return_mm_kwargs: bool | None = Field(
+        default=None,
+        deprecated="return_mm_kwargs is deprecated in favor of the mm_payload field",
+        description=(
+            "Deprecated alias: false is the same as `mm_payload='none'`. "
+            "Ignored when `mm_payload` is set."
+        ),
+    )
     cache_salt: str | None = Field(
         default=None,
+        min_length=1,
+        max_length=1024,
         description=(
             "If specified, the prefix cache will be salted with the provided "
             "string to prevent an attacker to guess prompts in multi-user "
@@ -263,7 +392,8 @@ class ResponsesRequest(OpenAIBaseModel):
 
     repetition_penalty: float | None = None
     seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
-    stop: str | list[str] | None = []
+    stop: StopParam = []
+    stop_token_ids: list[int] | None = []
     ignore_eos: bool = False
     vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
         default=None,
@@ -275,6 +405,12 @@ class ResponsesRequest(OpenAIBaseModel):
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
+    )
+    ec_transfer_params: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "ECTransfer parameters used for encoder-cache disaggregated serving."
+        ),
     )
     chat_template_kwargs: dict[str, Any] | None = Field(
         default=None,
@@ -322,22 +458,59 @@ class ResponsesRequest(OpenAIBaseModel):
                 extra_kwargs,
             ),
             media_io_kwargs=self.media_io_kwargs,
+            tool_choice=self.tool_choice if self.tools else None,
         )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         return TokenizeParams(
             max_total_tokens=model_config.max_model_len,
-            max_output_tokens=self.max_output_tokens or 0,
+            max_output_tokens=self.max_output_tokens,
             truncate_prompt_tokens=-1 if self.truncation != "disabled" else None,
             max_total_tokens_param="max_model_len",
             max_output_tokens_param="max_output_tokens",
         )
 
+    _grammar_from_parser: bool = PrivateAttr(default=False)
+    """CAUTION: Should only be set by the parser's adjust_request."""
+
+    _parser_structured_outputs: StructuredOutputsParams | None = PrivateAttr(
+        default=None
+    )
+    """Parser-derived constraints that preserve the public request's text metadata."""
+
     _DEFAULT_SAMPLING_PARAMS = {
         "temperature": 1.0,
         "top_p": 1.0,
         "top_k": 0,
+        "min_p": 0.0,
     }
+
+    def extract_structured_outputs(self) -> StructuredOutputsParams | None:
+        """Normalize request constraints into ``StructuredOutputsParams``."""
+        if self._parser_structured_outputs is not None:
+            return self._parser_structured_outputs
+        if self.text is None or self.text.format is None:
+            return self.structured_outputs
+
+        if self.structured_outputs is not None:
+            raise VLLMValidationError(
+                "Cannot specify both structured_outputs and text.format",
+                parameter="structured_outputs",
+            )
+
+        response_format = self.text.format
+        if response_format.type == "json_object":
+            return StructuredOutputsParams(json_object=True)
+        if (
+            response_format.type == "json_schema"
+            and response_format.schema_ is not None
+        ):
+            return StructuredOutputsParams(
+                json=response_format.schema_  # type: ignore[call-arg]
+                # --follow-imports skip hides the class definition but also hides
+                # multiple third party conflicts, so best of both evils
+            )
+        return None
 
     def to_sampling_params(
         self,
@@ -362,6 +535,10 @@ class ResponsesRequest(OpenAIBaseModel):
             top_k = default_sampling_params.get(
                 "top_k", self._DEFAULT_SAMPLING_PARAMS["top_k"]
             )
+        if (min_p := self.min_p) is None:
+            min_p = default_sampling_params.get(
+                "min_p", self._DEFAULT_SAMPLING_PARAMS["min_p"]
+            )
 
         if (repetition_penalty := self.repetition_penalty) is None:
             repetition_penalty = default_sampling_params.get("repetition_penalty", 1.0)
@@ -372,27 +549,6 @@ class ResponsesRequest(OpenAIBaseModel):
         if (frequency_penalty := self.frequency_penalty) is None:
             frequency_penalty = default_sampling_params.get("frequency_penalty", 0.0)
 
-        # Structured output
-        structured_outputs = self.structured_outputs
-
-        # Also check text.format for OpenAI-style json_schema
-        if self.text is not None and self.text.format is not None:
-            if structured_outputs is not None:
-                raise VLLMValidationError(
-                    "Cannot specify both structured_outputs and text.format",
-                    parameter="structured_outputs",
-                )
-            response_format = self.text.format
-            if (
-                response_format.type == "json_schema"
-                and response_format.schema_ is not None
-            ):
-                structured_outputs = StructuredOutputsParams(
-                    json=response_format.schema_  # type: ignore[call-arg]
-                    # --follow-imports skip hides the class definition but also hides
-                    # multiple third party conflicts, so best of both evils
-                )
-
         stop = self.stop if self.stop else []
         if isinstance(stop, str):
             stop = [stop]
@@ -400,14 +556,19 @@ class ResponsesRequest(OpenAIBaseModel):
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
             extra_args["kv_transfer_params"] = self.kv_transfer_params
+        if self.ec_transfer_params:
+            extra_args["ec_transfer_params"] = self.ec_transfer_params
 
         return SamplingParams.from_optional(
             temperature=temperature,
+            watermarking=self.watermarking,
             top_p=top_p,
             top_k=top_k,
+            min_p=min_p,
             max_tokens=max_tokens,
             logprobs=self.top_logprobs if self.is_include_output_logprobs() else None,
             stop=stop,
+            stop_token_ids=self.stop_token_ids,
             frequency_penalty=frequency_penalty,
             presence_penalty=presence_penalty,
             repetition_penalty=repetition_penalty,
@@ -416,7 +577,7 @@ class ResponsesRequest(OpenAIBaseModel):
             output_kind=(
                 RequestOutputKind.DELTA if self.stream else RequestOutputKind.FINAL_ONLY
             ),
-            structured_outputs=structured_outputs,
+            structured_outputs=self.extract_structured_outputs(),
             logit_bias=self.logit_bias,
             extra_args=extra_args,
             skip_clone=True,  # Created fresh per request, safe to skip clone
@@ -435,7 +596,22 @@ class ResponsesRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
+    def apply_return_mm_kwargs_alias(cls, data: Any) -> Any:
+        return resolve_return_mm_kwargs_alias(data)
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_cache_salt_support(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        validate_cache_salt(data.get("cache_salt"))
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
     def validate_background(cls, data):
+        if not isinstance(data, dict):
+            return data
         if not data.get("background"):
             return data
         if not data.get("store", True):
@@ -448,21 +624,11 @@ class ResponsesRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def validate_prompt(cls, data):
+        if not isinstance(data, dict):
+            return data
         if data.get("prompt") is not None:
             raise VLLMValidationError(
                 "prompt template is not supported", parameter="prompt"
-            )
-        return data
-
-    @model_validator(mode="before")
-    @classmethod
-    def check_cache_salt_support(cls, data):
-        if data.get("cache_salt") is not None and (
-            not isinstance(data["cache_salt"], str) or not data["cache_salt"]
-        ):
-            raise VLLMValidationError(
-                "Parameter 'cache_salt' must be a non-empty string if provided.",
-                parameter="cache_salt",
             )
         return data
 
@@ -480,6 +646,8 @@ class ResponsesRequest(OpenAIBaseModel):
 
         Invalid structures are left for Pydantic to reject.
         """
+        if not isinstance(data, dict):
+            return data
         input_data = data.get("input")
 
         # Early return for None, strings, or bytes
@@ -525,23 +693,30 @@ class ResponsesRequest(OpenAIBaseModel):
                     processed_input.append(item)
 
             elif item_type == "message" and item.get("role") == "assistant":
+                content = item.get("content")
+                if not isinstance(content, list):
+                    # String content is a valid EasyInputMessageParam,
+                    # do not coerce it to ResponseOutputMessage
+                    processed_input.append(item)
+                    continue
+
+                original_item = item
                 item = dict(item)
                 if "id" not in item:
                     item["id"] = f"msg_{random_uuid()}"
                 if "status" not in item:
                     item["status"] = "completed"
                 # ResponseOutputText requires annotations
-                if isinstance(item.get("content"), list):
-                    new_content = []
-                    for c in item["content"]:
-                        if (
-                            isinstance(c, dict)
-                            and c.get("type") == "output_text"
-                            and "annotations" not in c
-                        ):
-                            c = {**c, "annotations": []}
-                        new_content.append(c)
-                    item["content"] = new_content
+                new_content = []
+                for c in content:
+                    if (
+                        isinstance(c, dict)
+                        and c.get("type") == "output_text"
+                        and "annotations" not in c
+                    ):
+                        c = {**c, "annotations": []}
+                    new_content.append(c)
+                item["content"] = new_content
                 try:
                     processed_input.append(ResponseOutputMessage(**item))
                 except ValidationError:
@@ -549,12 +724,40 @@ class ResponsesRequest(OpenAIBaseModel):
                         "Failed to parse assistant message to ResponseOutputMessage, "
                         "leaving for Pydantic validation"
                     )
-                    processed_input.append(item)
+                    processed_input.append(original_item)
 
             else:
                 processed_input.append(item)
 
         data["input"] = processed_input
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_custom_tool_format(cls, data):
+        if not isinstance(data, dict):
+            return data
+        tools = data.get("tools")
+        if not isinstance(tools, list):
+            return data
+        for tool in tools:
+            if isinstance(tool, dict):
+                tool_dict = tool
+            elif hasattr(tool, "model_dump"):
+                tool_dict = tool.model_dump()
+            else:
+                continue
+            tool_format = tool_dict.get("format")
+            if (
+                tool_dict.get("type") == "custom"
+                and isinstance(tool_format, dict)
+                and tool_format.get("type") == "grammar"
+            ):
+                raise VLLMValidationError(
+                    "Custom tools with a grammar format are not supported; "
+                    "only free-form text custom tools are accepted.",
+                    parameter="tools",
+                )
         return data
 
     @model_validator(mode="before")
@@ -566,9 +769,9 @@ class ResponsesRequest(OpenAIBaseModel):
         tools = data.get("tools")
         tool_choice = data.get("tool_choice", "auto")
         has_tools = tools is not None and len(tools) > 0
-        is_named_tool_choice = (
-            isinstance(tool_choice, dict) and tool_choice.get("type") == "function"
-        )
+        is_named_tool_choice = isinstance(tool_choice, dict) and tool_choice.get(
+            "type"
+        ) in ("function", "custom")
 
         if not has_tools:
             if tool_choice in ("auto", "none"):
@@ -585,15 +788,14 @@ class ResponsesRequest(OpenAIBaseModel):
                 )
         elif is_named_tool_choice and tools is not None:
             tool_name = tool_choice.get("name")
-            tool_names = {
-                t.get("name") if isinstance(t, dict) else getattr(t, "name", None)
-                for t in tools
-            }
-            if not tool_name or tool_name not in tool_names:
+            if not tool_name:
                 raise VLLMValidationError(
                     "Tool choice 'function' not found in 'tools' parameter.",
                     parameter="tool_choice",
                 )
+            resolved = _resolve_named_tool_choice(tool_name, tools)
+            if resolved != tool_name:
+                data["tool_choice"] = {**tool_choice, "name": resolved}
 
         return data
 
@@ -627,6 +829,11 @@ class ResponsesResponse(OpenAIBaseModel):
     usage: ResponseUsage | None = None
     user: str | None = None
 
+    # vLLM-specific per-request metrics. Omitted unless enabled server-side.
+    metrics: PerRequestMetrics | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
     presence_penalty: float | None = Field(
         default=None,
         ge=-2.0,
@@ -649,6 +856,9 @@ class ResponsesResponse(OpenAIBaseModel):
     # vLLM-specific fields that are not in OpenAI spec
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None, description="KVTransfer parameters."
+    )
+    ec_transfer_params: dict[str, Any] | None = Field(
+        default=None, description="ECTransfer parameters."
     )
 
     # --8<-- [start:responses-response-extra-params]
@@ -692,9 +902,11 @@ class ResponsesResponse(OpenAIBaseModel):
         output: list[ResponseOutputItem],
         status: ResponseStatus,
         usage: ResponseUsage | None = None,
+        metrics: PerRequestMetrics | None = None,
         input_messages: ResponseInputOutputMessage | None = None,
         output_messages: ResponseInputOutputMessage | None = None,
         kv_transfer_params: dict[str, Any] | None = None,
+        ec_transfer_params: dict[str, Any] | None = None,
     ) -> "ResponsesResponse":
         incomplete_details: IncompleteDetails | None = None
         if status == "incomplete":
@@ -712,7 +924,9 @@ class ResponsesResponse(OpenAIBaseModel):
             output=output,
             input_messages=input_messages,
             output_messages=output_messages,
-            parallel_tool_calls=request.parallel_tool_calls,
+            parallel_tool_calls=request.parallel_tool_calls
+            if request.parallel_tool_calls is not None
+            else ResponsesRequest.model_fields["parallel_tool_calls"].default,
             temperature=sampling_params.temperature,
             tool_choice=request.tool_choice,
             tools=request.tools,
@@ -732,57 +946,19 @@ class ResponsesResponse(OpenAIBaseModel):
             truncation=request.truncation,
             user=request.user,
             usage=usage,
+            metrics=metrics,
             kv_transfer_params=kv_transfer_params,
+            ec_transfer_params=ec_transfer_params,
         )
-
-
-# TODO: this code can be removed once
-# https://github.com/openai/openai-python/issues/2634 has been resolved
-class ResponseReasoningPartDoneEvent(OpenAIBaseModel):
-    content_index: int
-    """The index of the content part that is done."""
-
-    item_id: str
-    """The ID of the output item that the content part was added to."""
-
-    output_index: int
-    """The index of the output item that the content part was added to."""
-
-    part: ResponseReasoningTextContent
-    """The content part that is done."""
-
-    sequence_number: int
-    """The sequence number of this event."""
-
-    type: Literal["response.reasoning_part.done"]
-    """The type of the event. Always `response.reasoning_part.done`."""
-
-
-# TODO: this code can be removed once
-# https://github.com/openai/openai-python/issues/2634 has been resolved
-class ResponseReasoningPartAddedEvent(OpenAIBaseModel):
-    content_index: int
-    """The index of the content part that is done."""
-
-    item_id: str
-    """The ID of the output item that the content part was added to."""
-
-    output_index: int
-    """The index of the output item that the content part was added to."""
-
-    part: ResponseReasoningTextContent
-    """The content part that is done."""
-
-    sequence_number: int
-    """The sequence number of this event."""
-
-    type: Literal["response.reasoning_part.added"]
-    """The type of the event. Always `response.reasoning_part.added`."""
 
 
 # vLLM Streaming Events
 # Note: we override the response type with the vLLM ResponsesResponse type
 class ResponseCompletedEvent(OpenAIResponseCompletedEvent):
+    response: ResponsesResponse  # type: ignore[override]
+
+
+class ResponseIncompleteEvent(OpenAIResponseIncompleteEvent):
     response: ResponsesResponse  # type: ignore[override]
 
 
@@ -798,14 +974,15 @@ StreamingResponsesResponse: TypeAlias = (
     ResponseCreatedEvent
     | ResponseInProgressEvent
     | ResponseCompletedEvent
+    | ResponseIncompleteEvent
     | ResponseOutputItemAddedEvent
     | ResponseOutputItemDoneEvent
     | ResponseContentPartAddedEvent
     | ResponseContentPartDoneEvent
+    | ResponseCustomToolCallInputDeltaEvent
+    | ResponseCustomToolCallInputDoneEvent
     | ResponseReasoningTextDeltaEvent
     | ResponseReasoningTextDoneEvent
-    | ResponseReasoningPartAddedEvent
-    | ResponseReasoningPartDoneEvent
     | ResponseCodeInterpreterCallInProgressEvent
     | ResponseCodeInterpreterCallCodeDeltaEvent
     | ResponseWebSearchCallInProgressEvent

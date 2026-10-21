@@ -9,10 +9,10 @@ import torch
 import torch.nn as nn
 
 from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
+from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
-from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backend import AttentionMetadataBuilder, CommonAttentionMetadata
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.utils import CpuGpuBuffer
@@ -43,6 +43,8 @@ class ExtractHiddenStatesProposer:
         self.dtype = vllm_config.model_config.dtype
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
 
+        self.eplb_state: EplbState | None = None
+
         # Model and attention layer tracking (initialized in load_model)
         self.model: nn.Module | None = None
         self.attn_layer_names: list[str] = []
@@ -56,11 +58,7 @@ class ExtractHiddenStatesProposer:
         )
 
         self.backup_next_token_ids = CpuGpuBuffer(
-            max_batch_size,
-            dtype=torch.int32,
-            pin_memory=is_pin_memory_available(),
-            device=device,
-            with_numpy=True,
+            max_batch_size, dtype=torch.int32, device=device
         )
 
         self.hf_config = vllm_config.speculative_config.draft_model_config.hf_config
@@ -83,6 +81,10 @@ class ExtractHiddenStatesProposer:
             self.max_num_tokens, dtype=torch.int64, device=device
         )
 
+    def set_eplb_state(self, eplb_state: EplbState) -> None:
+        """Inject EPLB state after construction."""
+        self.eplb_state = eplb_state
+
     def propose(
         self,
         num_speculative_tokens: int,
@@ -104,6 +106,7 @@ class ExtractHiddenStatesProposer:
         The main purpose is to cache hidden states, not to speculate.
 
         Args:
+            num_speculative_tokens: Number of draft tokens to return per request
             sampled_token_ids: Sampled token IDs from the target model
             target_hidden_states: List of hidden state tensors from target model
                                 (one per aux hidden state layer)
@@ -115,6 +118,7 @@ class ExtractHiddenStatesProposer:
             Tuple of:
                 - Draft tokens matching sampled tokens, shape [batch_size, 1]
                 - KV connector output (if KV transfer is active), else None
+
         """
         assert num_speculative_tokens == self.num_speculative_tokens
         assert self.model is not None and isinstance(target_hidden_states, list)
@@ -145,6 +149,12 @@ class ExtractHiddenStatesProposer:
         if num_tokens_across_dp is not None:
             num_tokens_across_dp[self.dp_rank] = num_input_tokens
 
+        if self.eplb_state is not None:
+            assert self.vllm_config.speculative_config is not None
+            self.eplb_state.prepare_forward(
+                self.vllm_config.speculative_config.draft_model_config,
+                num_tokens,
+            )
         with set_forward_context(
             per_layer_attn_metadata,
             self.vllm_config,
@@ -310,15 +320,12 @@ class ExtractHiddenStatesProposer:
         gpu_input_batch: InputBatch,
         discard_request_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Prepare next token IDs for speculative decoding.
+        """Prepare next token IDs for speculative decoding.
 
         Since num_speculative_tokens == 1, sampled_token_ids has shape
         (batch_size, 1). For each request we either use the sampled token
         (if valid and not discarded) or a backup token from the request state.
         """
-        num_reqs = gpu_input_batch.num_reqs
-
         # Precompute backup token IDs for discarded requests.
         num_reqs = gpu_input_batch.num_reqs
         for i in range(num_reqs):
@@ -352,6 +359,7 @@ class ExtractHiddenStatesProposer:
         Args:
             target_model: The target model (passed for compatibility with
                          EagleProposer interface, but not used here)
+
         """
         # Get the target model's attention layers before loading draft model
         target_attn_layer_names = set(

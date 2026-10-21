@@ -1,10 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copyreg
 import functools
+import io
+import os
 import pickle
+import shutil
 import sys
 import threading
 import time
+import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from multiprocessing import shared_memory
@@ -30,9 +35,9 @@ import vllm.envs as envs
 from vllm.distributed.utils import StatelessProcessGroup, sched_yield
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.cpu_resource_utils import check_cgroup_memory_available
 from vllm.utils.network_utils import (
     get_ip,
-    get_open_port,
     get_open_zmq_inproc_path,
     get_open_zmq_ipc_path,
     is_valid_ipv6_address,
@@ -56,7 +61,16 @@ SPINLOOP_TIMEOUT_SECONDS = 0.1
 if TYPE_CHECKING:
     from _typeshed import SizedBuffer
 
+    from vllm.distributed.device_communicators.shm_tensor_arena import (
+        ShmTensorArena,
+    )
+
 VLLM_RINGBUFFER_WARNING_INTERVAL = envs.VLLM_RINGBUFFER_WARNING_INTERVAL
+# Cap on how long an idle reader parks before re-reading the authoritative SHM
+# written-flag. Bounds lost-notify recovery latency to ~5s while the periodic
+# wakeup stays negligible (one flag check per reader every 5s).
+SHM_READER_RECHECK_INTERVAL_MS = 5000
+
 
 from_bytes_big = functools.partial(int.from_bytes, byteorder="big")
 
@@ -68,8 +82,7 @@ _memory_fence_lock = threading.Lock()
 
 
 def memory_fence():
-    """
-    Full memory barrier for shared memory synchronization.
+    """Full memory barrier for shared memory synchronization.
 
     Ensures all prior memory writes are visible to other processes before
     any subsequent reads. This is critical for lock-free producer-consumer
@@ -102,8 +115,7 @@ LONG_WAIT_TIME_LOG_MSG = (
 
 
 class SpinCondition:
-    """
-    This class implements an interface similar to a threading.Condition. It
+    """This class implements an interface similar to a threading.Condition. It
     allows a writer to notify readers to wake up and read from the shared memory
     buffer. This notification is done over a zmq socket.
 
@@ -213,6 +225,44 @@ class SpinCondition:
         self.local_notify_socket.send(b"\x00")
 
 
+SHM_PATH = "/dev/shm"
+
+
+def check_shm_free_space(
+    required_bytes: int,
+    shm_path: str = SHM_PATH,
+    *,
+    allocation_name: str = "shared-memory allocation",
+) -> None:
+    """Raise if SHM cannot fit a shared segment and log cgroup headroom.
+
+    Args:
+        required_bytes: Size of the shared-memory segment to be created.
+        shm_path: Mount point backing POSIX shared memory; its filesystem
+            check is skipped if absent.
+        allocation_name: Human-readable name used in errors and logs.
+
+    Raises:
+        RuntimeError: If the SHM filesystem has insufficient space.
+
+    """
+    if os.path.isdir(shm_path):
+        free_bytes = shutil.disk_usage(shm_path).free
+        if required_bytes > free_bytes:
+            mib = 1 << 20
+            raise RuntimeError(
+                f"Insufficient space in {shm_path} for {allocation_name}: "
+                f"{required_bytes / mib:.0f} MiB required, "
+                f"{free_bytes / mib:.0f} MiB free. Increase {shm_path} "
+                "(e.g. --shm-size or --ipc=host)."
+            )
+
+    check_cgroup_memory_available(
+        required_bytes,
+        allocation_name,
+    )
+
+
 class ShmRingBuffer:
     def __init__(
         self,
@@ -283,6 +333,7 @@ class ShmRingBuffer:
         if name is None:
             # we are creating a buffer
             self.is_creator = True
+            check_shm_free_space(self.total_bytes_of_buffer)
             self.shared_memory = shared_memory.SharedMemory(
                 create=True, size=self.total_bytes_of_buffer
             )
@@ -351,6 +402,67 @@ class ShmRingBuffer:
             yield buf
 
 
+def _rebuild_tensor(buf: Any, shape: tuple[int, ...], dtype_str: str) -> torch.Tensor:
+    """Rebuild a tensor from an out-of-band pickle buffer.
+
+    Counterpart of `_reduce_tensor`. Note that pickle passes the original
+    buffer-providing object from `loads(buffers=...)` straight to this
+    function (no `PickleBuffer` wrapper on the receiving side), so `buf` is
+    a `zmq.Frame`, an owned `bytearray` from the shared-memory ring, or
+    `bytes`/`bytearray` if the buffer was serialized in-band.
+    """
+    dtype = getattr(torch, dtype_str)
+    assert isinstance(dtype, torch.dtype)
+    if isinstance(buf, zmq.Frame):
+        # ZMQ frames own their message memory independently of any context,
+        # so the tensor can safely alias it with zero copies. The tensor's
+        # storage keeps the frame (and thus its bytes) alive via a strong
+        # reference for as long as the tensor is.
+        try:
+            return torch.frombuffer(buf, dtype=torch.uint8).view(dtype).view(shape)
+        except ValueError:
+            # Empty or read-only frame buffer; fall through to the copy path.
+            pass
+    # dequeue already owns SHM buffers. Copy other buffers to keep them writable.
+    raw = buf if isinstance(buf, bytearray) else bytearray(buf)
+    if not raw:
+        assert 0 in shape
+        return torch.empty(shape, dtype=dtype)
+    return torch.frombuffer(raw, dtype=torch.uint8).view(dtype).view(shape)
+
+
+def _reduce_tensor(tensor: torch.Tensor):
+    """Reduce a CPU tensor to a `PickleBuffer` for out-of-band pickling.
+
+    `torch.Tensor.__reduce_ex__` copies the tensor bytes into the pickle
+    byte stream via `torch.serialization` and never emits a `PickleBuffer`,
+    which defeats the out-of-band buffer handling in `MessageQueue.enqueue`.
+    This reducer instead exposes the tensor's memory directly, so large
+    tensors (e.g. `prompt_embeds` in `SchedulerOutput`) traverse the queue
+    without being copied into and back out of the pickled message.
+    """
+    if (
+        tensor.device.type == "cpu"
+        and tensor.layout == torch.strided
+        and not tensor.requires_grad
+    ):
+        try:
+            # The uint8 view exposes the raw bytes via the buffer protocol,
+            # including for dtypes numpy doesn't recognize (bfloat16, fp8, ...).
+            # reshape(-1) first so that 0-dim tensors can be viewed as well.
+            raw = tensor.contiguous().reshape(-1).view(torch.uint8).numpy()
+        except RuntimeError:
+            # Exotic tensors (e.g. with the conjugate bit set) that don't
+            # support aliasing views; let torch handle them.
+            pass
+        else:
+            dtype_str = str(tensor.dtype).removeprefix("torch.")
+            return _rebuild_tensor, (PickleBuffer(raw), tuple(tensor.shape), dtype_str)
+
+    # Fall back to torch's default (copying) reduction.
+    return tensor.__reduce_ex__(pickle.HIGHEST_PROTOCOL)
+
+
 @dataclass
 class Handle:
     local_reader_ranks: list[int] = field(default_factory=list)
@@ -360,6 +472,13 @@ class Handle:
     local_notify_addr: str | None = None
     remote_subscribe_addr: str | None = None
     remote_addr_ipv6: bool = False
+    tensor_arena_handle: tuple[int, int, int, str] | None = None
+
+
+def _close_zmq(context: zmq.Context, sockets: list[zmq.Socket]) -> None:
+    for socket in sockets:
+        socket.close(linger=0)
+    context.term()
 
 
 class MessageQueue:
@@ -373,6 +492,7 @@ class MessageQueue:
         max_chunk_bytes: int = 1024 * 1024 * 24,
         max_chunks: int = 10,
         connect_ip: str | None = None,
+        enable_shm_tensor_arena: bool = False,
     ):
         if local_reader_ranks is None:
             local_reader_ranks = list(range(n_local_reader))
@@ -384,11 +504,21 @@ class MessageQueue:
         self.shutting_down = False
         context = Context()
 
+        self.tensor_arena: ShmTensorArena | None = None
         if n_local_reader > 0:
             # for local readers, we will:
             # 1. create a shared memory ring buffer to communicate small data
             # 2. create a publish-subscribe socket to communicate large data
             self.buffer = ShmRingBuffer(n_local_reader, max_chunk_bytes, max_chunks)
+
+            # Zero-copy arena for large CPU tensors (see ShmTensorArena).
+            # Local readers only: remote readers receive the pickled bytes
+            # over a socket and cannot map the arena, so the substitution
+            # would break them.
+            if enable_shm_tensor_arena and n_remote_reader == 0:
+                from vllm.distributed.device_communicators import shm_tensor_arena
+
+                self.tensor_arena = shm_tensor_arena.ShmTensorArena(n_local_reader)
 
             # XPUB is very similar to PUB,
             # except that it can receive subscription messages
@@ -425,13 +555,13 @@ class MessageQueue:
                 connect_ip = get_ip()
             self.remote_socket = context.socket(XPUB)
             self.remote_socket.setsockopt(XPUB_VERBOSE, True)
-            remote_subscribe_port = get_open_port()
             if is_valid_ipv6_address(connect_ip):
                 self.remote_socket.setsockopt(IPV6, 1)
                 remote_addr_ipv6 = True
                 connect_ip = f"[{connect_ip}]"
-            socket_addr = f"tcp://{connect_ip}:{remote_subscribe_port}"
-            self.remote_socket.bind(socket_addr)
+            self.remote_socket.bind(f"tcp://{connect_ip}:0")
+            last_endpoint = self.remote_socket.getsockopt(zmq.LAST_ENDPOINT)
+            remote_subscribe_port = last_endpoint.decode().rsplit(":", 1)[1]
             remote_subscribe_addr = f"tcp://{connect_ip}:{remote_subscribe_port}"
         else:
             remote_subscribe_addr = None
@@ -450,9 +580,29 @@ class MessageQueue:
             local_notify_addr=local_notify_addr,
             remote_subscribe_addr=remote_subscribe_addr,
             remote_addr_ipv6=remote_addr_ipv6,
+            tensor_arena_handle=(
+                self.tensor_arena.handle() if self.tensor_arena is not None else None
+            ),
         )
+        self._close_zmq_on_collect(context)
 
         logger.debug("vLLM message queue communication handle: %s", self.handle)
+
+    def _close_zmq_on_collect(self, context: zmq.Context) -> None:
+        # pyzmq's Context.__del__ can block forever in term() when the context
+        # and its sockets are collected in the same GC cycle, so the finalizer
+        # keeps them alive and closes the sockets before terminating.
+        sockets = [self.local_socket, self.remote_socket]
+        if self._spin_condition is not None:
+            sockets += [
+                self._spin_condition.local_notify_socket,
+                self._spin_condition.read_cancel_socket,
+                self._spin_condition.write_cancel_socket,
+            ]
+        finalizer = weakref.finalize(
+            self, _close_zmq, context, [s for s in sockets if s is not None]
+        )
+        finalizer.atexit = False  # type: ignore[misc]
 
     def export_handle(self) -> Handle:
         return self.handle
@@ -465,6 +615,7 @@ class MessageQueue:
 
         context = Context()
 
+        self.tensor_arena = None
         if rank in handle.local_reader_ranks:
             assert handle.buffer_handle is not None
             self.buffer = ShmRingBuffer(*handle.buffer_handle)
@@ -472,6 +623,23 @@ class MessageQueue:
             self.local_reader_rank = handle.local_reader_ranks.index(rank)
             self._is_local_reader = True
             self._is_remote_reader = False
+
+            arena_handle = handle.tensor_arena_handle
+            if arena_handle is not None:
+                from vllm.distributed.device_communicators import shm_tensor_arena
+
+                self.tensor_arena = shm_tensor_arena.ShmTensorArena(
+                    *arena_handle, reader_rank=self.local_reader_rank
+                )
+                # `shared_memory` is unset (not just None) if attaching to
+                # the writer's segment raised FileNotFoundError -- see
+                # ShmTensorArena.__init__'s reader branch. Registering a
+                # broken arena is a no-op deferred failure (same convention
+                # ShmRingBuffer uses above), not a crash here.
+                if hasattr(self.tensor_arena, "shared_memory"):
+                    shm_tensor_arena._TENSOR_ARENAS[
+                        self.tensor_arena.shared_memory.name
+                    ] = self.tensor_arena
 
             self.local_socket = context.socket(SUB)
             self.local_socket.setsockopt_string(SUBSCRIBE, "")
@@ -503,6 +671,7 @@ class MessageQueue:
             self._spin_condition = None  # type: ignore
 
         self.shutting_down = False
+        self._close_zmq_on_collect(context)
         return self
 
     def wait_until_ready(self):
@@ -631,25 +800,22 @@ class MessageQueue:
             self.n_warning = 1
             self.timeout = timeout
 
-        def timeout_ms(self) -> int | None:
-            """Returns a timeout that is:
+        def timeout_ms(self) -> int:
+            """Returns a timeout, capped at the recheck interval, that is:
             - min(time to deadline, time to next warning) if we're logging warnings
             - time to deadline, if we're not logging warnings
-            - None if the timeout is None and we're not logging warnings
+            - recheck interval if the timeout is None and we're not logging warnings
             - raise TimeoutError if we are past the deadline
             """
-            warning_wait_time = self.warning_wait_time_ms
+            wait_ms = SHM_READER_RECHECK_INTERVAL_MS
+            if self.warning_wait_time_ms is not None:
+                wait_ms = min(wait_ms, self.warning_wait_time_ms)
             if self.timeout is None:
-                return warning_wait_time
-
+                return wait_ms
             time_left_ms = int((self.deadline - time.monotonic()) * 1000)
             if time_left_ms <= 0:
                 raise TimeoutError
-
-            if warning_wait_time and warning_wait_time < time_left_ms:
-                return warning_wait_time
-
-            return time_left_ms
+            return min(wait_ms, time_left_ms)
 
         def should_warn(self) -> bool:
             """Returns true if it's time to log a warning for a timeout that is not
@@ -710,18 +876,18 @@ class MessageQueue:
                 # found a block that is not read by this reader
                 # let caller read from the buffer
                 with self.buffer.get_data(self.current_idx) as buf:
-                    yield buf
-
-                # caller has read from the buffer
-                # set the read flag
-                metadata_buffer[self.local_reader_rank + 1] = 1
-                # Memory fence ensures the read flag is visible to the writer.
-                # Without this, writer may not see our read completion and
-                # could wait indefinitely for all readers to finish.
-                memory_fence()
-                self.current_idx = (self.current_idx + 1) % self.buffer.max_chunks
-
-                self._spin_condition.record_read()
+                    try:
+                        yield buf
+                    finally:
+                        # caller has read from the buffer; set the read flag.
+                        metadata_buffer[self.local_reader_rank + 1] = 1
+                        # Memory fence ensures the read flag is visible to the writer.
+                        # Without this, writer may not see our read completion and
+                        # could wait indefinitely for all readers to finish.
+                        memory_fence()
+                        next_idx = self.current_idx + 1
+                        self.current_idx = next_idx % self.buffer.max_chunks
+                        self._spin_condition.record_read()
                 break
 
     def enqueue(self, obj, timeout: float | None = None):
@@ -740,9 +906,32 @@ class MessageQueue:
             total_bytes += len(raw_buf) + 4
             return False
 
-        all_buffers[0] = pickle.dumps(
-            obj, protocol=pickle.HIGHEST_PROTOCOL, buffer_callback=oob_callback
-        )
+        # CPU tensors are routed through `_reduce_tensor` so that their
+        # bytes are emitted as out-of-band buffers instead of being
+        # copied into the pickle stream by torch's default reducer.
+        # Start from `copyreg.dispatch_table` to preserve globally
+        # registered reducers (e.g. `re.Pattern`); the per-pickler
+        # dispatch table would otherwise shadow them.
+        dispatch_table = dict(copyreg.dispatch_table)
+        dispatch_table[torch.Tensor] = _reduce_tensor
+        arena = self.tensor_arena
+        with io.BytesIO() as bio:
+            pickler: pickle.Pickler
+            if arena is not None:
+                from vllm.distributed.device_communicators.shm_tensor_arena import (
+                    _ArenaPickler,
+                )
+
+                pickler = _ArenaPickler(bio, arena, buffer_callback=oob_callback)
+            else:
+                pickler = pickle.Pickler(
+                    bio,
+                    protocol=pickle.HIGHEST_PROTOCOL,
+                    buffer_callback=oob_callback,
+                )
+            pickler.dispatch_table = dispatch_table
+            pickler.dump(obj)
+            all_buffers[0] = bio.getvalue()
         if self.n_local_reader > 0:
             if total_bytes + len(all_buffers[0]) >= self.buffer.max_chunk_bytes:
                 with self.acquire_write(timeout) as buf:
@@ -776,6 +965,9 @@ class MessageQueue:
     ):
         """Read from message queue with optional timeout (in seconds)"""
         if self._is_local_reader:
+            # See ShmTensorArena.flush_releases for what this retires and why.
+            if self.tensor_arena is not None:
+                self.tensor_arena.flush_releases()
             with self.acquire_read(timeout, indefinite) as buf:
                 overflow = buf[0] == 1
                 if not overflow:
@@ -786,7 +978,9 @@ class MessageQueue:
                         buf_offset = offset + 4
                         buf_len = from_bytes_big(buf[offset:buf_offset])
                         offset = buf_offset + buf_len
-                        all_buffers.append(buf[buf_offset:offset])
+                        buffer = buf[buf_offset:offset]
+                        # Out-of-band arrays may outlive this reusable ring slot.
+                        all_buffers.append(buffer if i == 0 else bytearray(buffer))
                     obj = pickle.loads(all_buffers[0], buffers=all_buffers[1:])
             if overflow:
                 obj = MessageQueue.recv(self.local_socket, timeout)
@@ -798,7 +992,8 @@ class MessageQueue:
 
     @staticmethod
     def recv(socket: zmq.Socket, timeout: float | None) -> Any:
-        timeout_ms = None if timeout is None else int(timeout * 1000)
+        # Ensure non-negative timeout passed to zmq poll.
+        timeout_ms = None if timeout is None else max(0, int(timeout * 1000))
         if not socket.poll(timeout=timeout_ms):
             raise TimeoutError
         recv, *recv_oob = socket.recv_multipart(copy=False)
@@ -818,8 +1013,7 @@ class MessageQueue:
         reader_rank: int = 0,
         blocking: bool = False,
     ) -> tuple["MessageQueue", list[Handle]]:
-        """
-        Creates a MessageQueue for a process group with a single reader.
+        """Creates a MessageQueue for a process group with a single reader.
 
         This method is designed for scenarios where only one process (the reader)
         will consume messages, and all other processes are writers. It sets up
@@ -839,8 +1033,15 @@ class MessageQueue:
             tuple[MessageQueue, list[Handle]]:
             The MessageQueue instance for the calling process,
             and a list of handles (only non-empty for the reader process).
+
         """
-        local_size = current_platform.device_count()
+        from vllm.platforms.interface import get_assigned_physical_gpu_ids
+
+        assigned_physical_gpu_ids = get_assigned_physical_gpu_ids()
+        if assigned_physical_gpu_ids is not None:
+            local_size = len(assigned_physical_gpu_ids)
+        else:
+            local_size = current_platform.device_count()
         rank = dist.get_rank()
         same_node = rank // local_size == reader_rank // local_size
         buffer_io = MessageQueue(
@@ -865,8 +1066,7 @@ class MessageQueue:
         external_writer_handle=None,
         blocking: bool = True,
     ) -> "MessageQueue":
-        """
-        Creates a MessageQueue for a distributed process group with one writer and
+        """Creates a MessageQueue for a distributed process group with one writer and
         multiple readers.
 
         This method is designed for scenarios where one process (the writer) sends

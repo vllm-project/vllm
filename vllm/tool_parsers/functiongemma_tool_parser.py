@@ -6,11 +6,7 @@ from collections.abc import Sequence
 
 import regex as re
 
-from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
@@ -18,8 +14,12 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     ToolCall,
 )
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+)
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
+from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 
@@ -27,8 +27,7 @@ logger = init_logger(__name__)
 
 
 class FunctionGemmaToolParser(ToolParser):
-    """
-    Tool parser for Google's FunctionGemma model (google/functiongemma-270m-it).
+    """Tool parser for Google's FunctionGemma model (google/functiongemma-270m-it).
 
     Handles the FunctionGemma function call format:
     <start_function_call>call:func_name{param:<escape>value<escape>}<end_function_call>
