@@ -4,7 +4,6 @@ psutil
 sentencepiece  # Required for LLaMA tokenizer.
 numpy
 requests >= 2.33.0
-certifi >= 2026.10.19
 tqdm
 blake3
 py-cpuinfo
