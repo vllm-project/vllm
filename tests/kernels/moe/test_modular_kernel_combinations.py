@@ -231,12 +231,10 @@ def rank_worker(
             # bias-free SwiGLU-OAI (~55% sign agreement, ~5x-small magnitude
             # on hardware), instead of raising. Only smoke-test until the
             # fix in https://github.com/vllm-project/vllm/pull/59766 lands.
-            # SWIGLUOAI_UNINTERLEAVE hits the same W4A16 mxfp4 kernel call
-            # (see is_nyi_config) so it shares the same caveat.
-            if config.is_w4a16_mxfp4 and config.activation in (
-                MoEActivation.SWIGLUOAI,
-                MoEActivation.SWIGLUOAI_UNINTERLEAVE,
-            ):
+            # SWIGLUOAI_UNINTERLEAVE isn't exempted here: its kernel math is
+            # identical to SWIGLUOAI's on this path (see reference_moe_impl),
+            # and it passes the full numerical check below.
+            if config.is_w4a16_mxfp4 and config.activation == MoEActivation.SWIGLUOAI:
                 assert mk_out.shape == ref_out.shape, (
                     f"AiterMxfp4Experts output shape {mk_out.shape} != "
                     f"reference shape {ref_out.shape}."

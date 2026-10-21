@@ -639,6 +639,7 @@ class RankTensors:
 def reference_moe_impl(
     config: Config, weights: WeightTensors, rank_tensors: RankTensors
 ) -> torch.Tensor:
+    reference_activation = config.activation
     if config.quant_dtype == "nvfp4":
         quant_blocksize = 16
         dtype = config.dtype
@@ -720,17 +721,15 @@ def reference_moe_impl(
                 MoEActivation.SWIGLUOAI,
                 MoEActivation.SWIGLUOAI_UNINTERLEAVE,
             )
-            # SwigluOAIAndMul expects gate/up interleaved row order
-            # (x[..., ::2], x[..., 1::2]), not the contiguous [gate; up]
-            # halves that `weights.w1` is generated in. AITER forces the
-            # same interleaved gate_mode for both SWIGLUOAI and
-            # SWIGLUOAI_UNINTERLEAVE on this path (see is_nyi_config in
-            # test_modular_kernel_combinations.py), so the reference must
-            # match regardless of which of the two is under test. Mirror
-            # the same reorder `_maybe_convert_weights_for_experts()`
-            # applies before the real MK-path AITER kernel call.
+            # rocm_aiter_moe.py forces gate_mode=INTERLEAVE and the same
+            # "swiglu" activation_method for any W4A16 mxfp4 call regardless
+            # of activation, so SWIGLUOAI_UNINTERLEAVE's kernel math here is
+            # identical to SWIGLUOAI's. Reference must use the matching
+            # interleaved-reading op (SwigluOAIAndMul), not
+            # SiluAndMulWithClamp's packed-halves reading.
             w1_q = _interleave_gate_up_rows(w1_q)
             w1_scale_q = _interleave_gate_up_rows(w1_scale_q)
+            reference_activation = MoEActivation.SWIGLUOAI
         w1 = upcast_from_mxfp(w1_q, w1_scale_q, dtype, axis=-1)
         w2 = upcast_from_mxfp(weights.w2, weights.w2_scale, dtype, axis=-1)
         a_scale = None
@@ -758,7 +757,7 @@ def reference_moe_impl(
         topk_ids=rank_tensors.topk_ids,
         global_num_experts=config.E,
         expert_map=None,
-        activation=config.activation,
+        activation=reference_activation,
         w1_scale=w1_scale,
         w2_scale=w2_scale,
         a1_scale=a_scale,
