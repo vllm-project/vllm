@@ -36,6 +36,9 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.config.cache import CacheDType
     from vllm.config.kernel import IrOpPriorityConfig
+    from vllm.model_executor.models.transformers.tpsp_runtime import (
+        TPSPBackend,
+    )
     from vllm.v1.attention.backend import AttentionBackend
     from vllm.v1.attention.selector import AttentionSelectorConfig
 else:
@@ -234,6 +237,12 @@ class CudaPlatformBase(Platform):
     ray_noset_device_env_vars: list[str] = [
         "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
     ]
+
+    @classmethod
+    def get_tpsp_backend_cls(cls) -> type[TPSPBackend]:
+        from .tpsp_cuda import CudaTPSPBackend
+
+        return CudaTPSPBackend
 
     @classmethod
     def import_kernels(cls) -> None:

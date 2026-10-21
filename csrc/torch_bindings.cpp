@@ -30,6 +30,20 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   ops.def("get_cuda_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor");
 
 #ifndef USE_ROCM
+  ops.def(
+      "init_tpsp_p2p(int device_index, int tp_size, int rank, "
+      "int max_microchunk_tokens_per_rank, int hidden_size, int max_tokens) -> "
+      "int");
+  ops.def("get_tpsp_p2p_handles(int handle) -> Tensor");
+  ops.def("map_tpsp_p2p(int handle, Tensor peer_handles) -> bool");
+  ops.def("destroy_tpsp_p2p(int handle) -> ()");
+  ops.def(
+      "tpsp_matmul_reduce_scatter_norm_all_gather("
+      "Tensor a, Tensor b, Tensor weight, Tensor(a!) residual, "
+      "Tensor? projection_bias, Tensor? norm_bias, float eps, int norm_kind, "
+      "int microchunk_tokens_per_rank, int tp_size, int p2p_handle, "
+      "int sm_count_target=0) "
+      "-> (Tensor(a!), Tensor)");
 
   // Note about marlin kernel 'workspace' arguments:
   // Technically these should be mutable since they are modified by the kernel.
@@ -775,6 +789,8 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
            TORCH_BOX(&per_token_group_quant_int8));
 
 #ifndef USE_ROCM
+  ops.impl("tpsp_matmul_reduce_scatter_norm_all_gather",
+           TORCH_BOX(&tpsp_matmul_reduce_scatter_norm_all_gather));
   // CUTLASS scaled_mm ops
   ops.impl("cutlass_scaled_mm", TORCH_BOX(&cutlass_scaled_mm));
   ops.impl("cutlass_scaled_mm_azp", TORCH_BOX(&cutlass_scaled_mm_azp));
@@ -1120,6 +1136,15 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "cp_gather_indexer_k_quant_cache(Tensor kv_cache, Tensor! dst_k, Tensor! "
       "dst_scale, Tensor block_table, Tensor cu_seq_lens) -> ()");
 }
+
+#ifndef USE_ROCM
+STABLE_TORCH_LIBRARY_IMPL(_C, CompositeExplicitAutograd, tpsp_context) {
+  tpsp_context.impl("init_tpsp_p2p", TORCH_BOX(&init_tpsp_p2p));
+  tpsp_context.impl("get_tpsp_p2p_handles", TORCH_BOX(&get_tpsp_p2p_handles));
+  tpsp_context.impl("map_tpsp_p2p", TORCH_BOX(&map_tpsp_p2p));
+  tpsp_context.impl("destroy_tpsp_p2p", TORCH_BOX(&destroy_tpsp_p2p));
+}
+#endif
 
 STABLE_TORCH_LIBRARY_FRAGMENT(_C_custom_ar, custom_ar) {
   custom_ar.def(

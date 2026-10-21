@@ -23,6 +23,9 @@ if TYPE_CHECKING:
     from vllm.config.kernel import IrOpPriorityConfig
     from vllm.forward_context import ForwardContext
     from vllm.inputs import EngineInput
+    from vllm.model_executor.models.transformers.tpsp_runtime import (
+        TPSPBackend,
+    )
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -255,6 +258,11 @@ class Platform:
     def get_compile_backend(cls) -> str:
         """Get the custom compile backend for current platform."""
         return cls.simple_compile_backend
+
+    @classmethod
+    def get_tpsp_backend_cls(cls) -> "type[TPSPBackend] | None":
+        """Return the TPSP backend class, or None if unsupported."""
+        return None
 
     @classmethod
     def import_ir_kernels(cls) -> None:
