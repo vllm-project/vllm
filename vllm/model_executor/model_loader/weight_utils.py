@@ -1356,12 +1356,20 @@ def fastsafetensors_weights_iterator(
             pl.close()
 
 
+_ENGRAM_WEIGHT_RE = re.compile(
+    r"(?:^|\.)(?:engram\.embed\.(?:weight|scale)|"
+    r"ple\.ple_embedding\.ngram_embedding\.shard_[0-9]+\.weight)$"
+)
+
+
 def instanttensor_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
     local_expert_ids: set[int] | None = None,
+    *,
+    load_engram_on_cpu: bool = False,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
-    """Load with InstantTensor, memory-mapping Engram embedding tables on CPU."""
+    """Load with InstantTensor, optionally mapping Engram tables on CPU."""
     try:
         import instanttensor
     except ImportError as e:
@@ -1386,7 +1394,7 @@ def instanttensor_weights_iterator(
         with safe_open(path, framework="pt") as metadata:
             for name in metadata.keys():  # noqa: SIM118
                 # Engram tables can exceed device memory before TP sharding.
-                if name.endswith((".engram.embed.weight", ".engram.embed.scale")):
+                if load_engram_on_cpu and _ENGRAM_WEIGHT_RE.search(name) is not None:
                     cpu_weights.setdefault(path, []).append(name)
                 else:
                     gpu_weight_names.append(name)
