@@ -100,6 +100,11 @@ from .multimodal import (
     Glm5NextVisionTransformer,
 )
 
+if current_platform.is_cuda():
+    from vllm.models.glm5next.nvidia.low_latency_gemm import (
+        enable_glm5next_low_latency_gemm,
+    )
+
 logger = init_logger(__name__)
 
 
@@ -1069,6 +1074,8 @@ class Glm5NextForCausalLM(
         self.logits_processor = LogitsProcessor(
             self.config.vocab_size, scale=_LOGIT_SCALE
         )
+        if current_platform.is_cuda():
+            enable_glm5next_low_latency_gemm(self, self.model_config.dtype)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
