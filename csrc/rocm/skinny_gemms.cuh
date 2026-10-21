@@ -7,8 +7,8 @@
 
 #pragma once
 
-// <torch/all.h> is not needed here: it also pulls in autograd, nn and jit, which
-// is several seconds of frontend for every skinny GEMM translation unit.
+// <torch/all.h> is not needed here: it also pulls in autograd, nn and jit,
+// which is several seconds of frontend for every skinny GEMM translation unit.
 #include <torch/types.h>            // torch::Tensor, torch::empty, AT_DISPATCH
 #include <ATen/cuda/CUDAContext.h>  // at::cuda::getCurrentCUDAStream
 #include <c10/cuda/CUDAGuard.h>     // at::cuda::OptionalCUDAGuard
@@ -61,9 +61,15 @@
 
 // Traps unconditionally, so it does not depend on NDEBUG or on <assert.h> being
 // included with a particular state (this used to #undef/#define NDEBUG around
-// the include, which is order-dependent now that the file is a header).
-#define UNREACHABLE_CODE __builtin_trap();
+// the include, which is order-dependent now that the file is a header). Note
+// this trades the device-assert message (file/line) for a bare trap: these
+// stubs are never launched, they only exist so the arch-specific #if in the
+// launchers has something to call.
+#define UNREACHABLE_CODE __builtin_trap()
 
+// The helpers below keep function-local statics (device properties); because
+// they are inline, the C++ rules make that one object for the whole program
+// instead of one per translation unit, which is what the callers want.
 inline int get_lds_size() {
   static const int result = [] {
     const auto* dprops = at::cuda::getCurrentDeviceProperties();
@@ -93,7 +99,7 @@ inline bool on_gfx12() {
   return result;
 }
 
-inline inline bool on_gfx1151() {
+inline bool on_gfx1151() {
   static const bool result = [] {
     const auto* dprops = at::cuda::getCurrentDeviceProperties();
     const std::string device_arch = dprops->gcnArchName;
@@ -275,7 +281,6 @@ __global__ void LLGemm1_kernel(const scalar_t* in_a, const scalar_t* in_b,
     }
   }
 }
-
 
 #if defined(__HIP__GFX9__) && !defined(__HIP__GFX1X__)
   #define DOT2C(V0, V2, V3)                                          \
@@ -537,7 +542,7 @@ __global__ void wvSplitK_hf_sml_(const int K, const int Kbp, const int Kap,
                                  const scalar_t* __restrict__ A,
                                  const scalar_t* __restrict__ BIAS, scalar_t* C,
                                  const int _WvPrGrp, const int CuCount) {
-  UNREACHABLE_CODE
+  UNREACHABLE_CODE;
 }
 #endif
 
@@ -771,7 +776,7 @@ __global__ void wvSplitK_hf_(const int K, const int Kbp, const int Kap,
                              const scalar_t* B, const scalar_t* __restrict__ A,
                              const scalar_t* __restrict__ BIAS, scalar_t* C,
                              const int _WvPrGrp, const int CuCount) {
-  UNREACHABLE_CODE
+  UNREACHABLE_CODE;
 }
 #endif
 
@@ -1122,7 +1127,7 @@ __global__ void wvSplitK_hf_big_(const int K, const int Kbp, const int Kap,
                                  const scalar_t* __restrict__ A,
                                  const scalar_t* __restrict__ BIAS, scalar_t* C,
                                  const int _WvPrGrp, const int CuCount) {
-  UNREACHABLE_CODE
+  UNREACHABLE_CODE;
 }
 #endif
 
@@ -1138,7 +1143,6 @@ inline int mindiv(int N, int div1, int div2) {
     if (rnds[0] == rnds[i]) return (div2 - i);
   return 0;
 }
-
 
 // This version targets cases skinny where CUs are not filled
 // Wave-SplitK is used with reduction done via atomics.
@@ -1625,10 +1629,10 @@ __global__ void wvSplitKrc_(const int actlN, const int K, const int Kap,
                             const int M, const int Bx, const int By,
                             const scalar_t* B, const scalar_t* __restrict__ A,
                             const scalar_t* __restrict__ BIAS, float* glbl,
-                            int* cntr, scalar_t* C,
-                            const int CuCount){UNREACHABLE_CODE}
+                            int* cntr, scalar_t* C, const int CuCount) {
+  UNREACHABLE_CODE;
+}
 #endif  // defined(__HIP__GFX9__) TODO: Add NAVI support
-
 
 #if defined(__HIP__MI3XX__) || defined(__GFX12__)
 template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
@@ -1822,7 +1826,7 @@ __global__ void wvSplitKQ_hf_sml_(const int K, const int Kap, const int Kbp,
                                   scalar_t* C, const float* __restrict__ s_A,
                                   const float* __restrict__ s_B,
                                   const int _WvPrGrp, const int CuCount) {
-  UNREACHABLE_CODE
+  UNREACHABLE_CODE;
 }
 #endif  // defined(__HIP__MI3XX__) || defined(__GFX12__)
 
@@ -2019,7 +2023,11 @@ __global__ void wvSplitKQ_hf_(const int K, const int Kap, const int Kbp,
                               const float* __restrict__ s_A,
                               const float* __restrict__ s_B, const int _WvPrGrp,
                               const int CuCount) {
-  UNREACHABLE_CODE
+  UNREACHABLE_CODE;
 }
 #endif  // defined(__HIP__MI3XX__) || defined(__GFX12__)
 
+// Do not leak this into the including translation units: skinny_gemms_int4.cu
+// defines its own LDS_SIZE (64 KiB, no gfx950 case), so a shared TU must
+// never pick up one definition from the other by accident.
+#undef LDS_SIZE

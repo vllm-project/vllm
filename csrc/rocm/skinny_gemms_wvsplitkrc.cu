@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 //
-// Host-side launcher of the wvSplitKrc skinny GEMM; kernels in skinny_gemms.cuh.
+// Host-side launcher of the wvSplitKrc skinny GEMM; kernels in
+// skinny_gemms.cuh.
 #include "skinny_gemms.cuh"
 
 // Pre-allocated split-K workspace pool (see WvSplitKrcPool below):

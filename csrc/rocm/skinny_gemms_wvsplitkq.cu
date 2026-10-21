@@ -4,7 +4,7 @@
 // Host-side launcher of the wvSplitKQ skinny GEMM; kernels in skinny_gemms.cuh.
 #include "skinny_gemms.cuh"
 
-#include "dispatch_utils.h"                 // VLLM_DISPATCH_FP8_TYPES
+#include "dispatch_utils.h"                  // VLLM_DISPATCH_FP8_TYPES
 #include "quantization/w8a8/fp8/common.cuh"  // is_fp8_ocp()
 
 void wvSplitKQ(const at::Tensor& in_b, const at::Tensor& in_a,
