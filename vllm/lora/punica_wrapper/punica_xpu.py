@@ -503,7 +503,8 @@ class PunicaWrapperXPU(PunicaWrapperBase):
             num_active_loras,
             adapter_enabled,
             shrink_config.get("BLOCK_SIZE_M", 64),
-            shrink_config.get("BLOCK_SIZE_N", 64),
+            # XPU tl.dot requires N >= 16, including rank-sharded adapters.
+            max(shrink_config.get("BLOCK_SIZE_N", 64), 16),
             shrink_config.get("BLOCK_SIZE_K", 32),
             shrink_config.get("GROUP_SIZE_M", 8),
             shrink_config.get("NUM_WARPS", 4),
