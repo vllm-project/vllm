@@ -87,6 +87,8 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
         &config.model,
         LoadModelBackendsOptions {
             revision: config.revision.clone(),
+            tokenizer: config.tokenizer.clone(),
+            hf_config: config.hf_config.clone(),
             hf_overrides: config.hf_overrides.clone(),
             generation_config: config.generation_config,
             renderer: config.renderer,
