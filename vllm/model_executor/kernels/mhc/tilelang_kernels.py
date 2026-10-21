@@ -427,8 +427,9 @@ def mhc_pre_big_fuse_with_norm_tilelang(
 
             # A NaN input row (e.g. CUDA-graph padding) has a NaN RMS, so every
             # logit and the whole result is NaN already. Skip the remaining
-            # iterations: IEEE division takes a slow path on NaN.
-            if T.isfinite(rms[0]):
+            # iterations: IEEE division takes a slow path on NaN. rms is an
+            # rsqrt, so it is >= 0 unless NaN (T.isfinite does not lower on HIP).
+            if rms[0] >= 0.0:
                 for _ in T.serial(sinkhorn_repeat - 1):
                     T.reduce_sum(cm, row_sum, dim=1)
                     for j, k in T.Parallel(hc_mult, hc_mult):
