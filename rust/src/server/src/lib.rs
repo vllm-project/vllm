@@ -92,6 +92,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
             renderer: config.renderer,
             language_model_only: config.language_model_only,
             chat_template: config.chat_template.clone(),
+            trust_request_chat_template: config.trust_request_chat_template,
             chat_template_content_format: config.chat_template_content_format,
             default_chat_template_kwargs: config
                 .default_chat_template_kwargs
@@ -123,7 +124,9 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     .await
     .context("failed to connect to engine core")?;
 
-    let llm = Llm::new(client).with_log_stats(!config.disable_log_stats);
+    let llm = Llm::new(client)
+        .with_log_stats(!config.disable_log_stats)
+        .with_stream_interval(config.stream_interval);
     let text = TextLlm::new(llm, text_backend).with_max_logprobs(config.max_logprobs);
 
     let chat = ChatLlm::new(text, chat_backend)

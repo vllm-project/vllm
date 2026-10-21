@@ -13,8 +13,10 @@ from typing import Any, TypeAlias
 
 import partial_json_parser
 from openai.types.responses import (
+    CustomTool,
     FunctionTool,
     NamespaceTool,
+    ToolChoiceCustom,
     ToolChoiceFunction,
 )
 from openai.types.responses.tool import Tool as ResponsesTool
@@ -36,6 +38,32 @@ from vllm.logger import init_logger
 Tool: TypeAlias = ChatCompletionToolsParam | ResponsesTool
 
 logger = init_logger(__name__)
+
+CUSTOM_TOOL_INPUT_KEY = "input"
+
+
+def custom_tool_parameters() -> dict[str, Any]:
+    """Schema of the single-string function shim a ``custom`` tool is shown as."""
+    return {
+        "type": "object",
+        "properties": {
+            CUSTOM_TOOL_INPUT_KEY: {
+                "type": "string",
+                "description": "The freeform text payload for this tool.",
+            }
+        },
+        "required": [CUSTOM_TOOL_INPUT_KEY],
+        "additionalProperties": False,
+    }
+
+
+def custom_tool_as_function_dict(tool: CustomTool) -> dict[str, Any]:
+    return {
+        "type": "function",
+        "name": tool.name,
+        "description": tool.description,
+        "parameters": custom_tool_parameters(),
+    }
 
 
 def safe_literal_eval(text: str):
@@ -188,8 +216,9 @@ def get_function_tools(
 
     This is the single source for both the chat template's tool list and the
     tools a tool-call grammar constrains, so the two cannot drift apart.
-    Namespace functions are flattened to ``<namespace>__<name>``; other
-    Responses tool types are never rendered for the model and are dropped.
+    Namespace functions are flattened to ``<namespace>__<name>``; custom tools
+    become a single-string function shim. Other Responses tool types are never
+    rendered for the model and are dropped.
     """
     function_tools: list[ChatCompletionToolsParam | FunctionTool] = []
     for tool in tools:
@@ -205,6 +234,10 @@ def get_function_tools(
                 )
                 for namespaced_tool in tool.tools
                 if namespaced_tool.type == "function"
+            )
+        elif isinstance(tool, CustomTool):
+            function_tools.append(
+                FunctionTool.model_validate(custom_tool_as_function_dict(tool))
             )
         elif isinstance(tool, (FunctionTool, ChatCompletionToolsParam)):
             function_tools.append(tool)
@@ -307,7 +340,7 @@ def find_tool_properties(
     if not tools:
         return {}
     for tool in tools:
-        if isinstance(tool, (FunctionTool, NamespaceTool)):
+        if isinstance(tool, (FunctionTool, NamespaceTool, CustomTool)):
             for name, params in iter_response_function_tool_info(tool):
                 if name == tool_name:
                     return (params or {}).get("properties", {})
@@ -328,7 +361,7 @@ def find_tool_name(
     if not tools:
         return False
     for tool in tools:
-        if isinstance(tool, (FunctionTool, NamespaceTool)):
+        if isinstance(tool, (FunctionTool, NamespaceTool, CustomTool)):
             for name, _ in iter_response_function_tool_info(tool):
                 if name == tool_name:
                     return True
@@ -414,7 +447,9 @@ def _get_json_schema_from_tools(
 
 
 def get_json_schema_from_tools(
-    tool_choice: str | ToolChoiceFunction | ChatCompletionNamedToolChoiceParam,
+    tool_choice: (
+        str | ToolChoiceFunction | ToolChoiceCustom | ChatCompletionNamedToolChoiceParam
+    ),
     tools: list[Tool] | None,
     parallel_tool_calls: bool | None = None,
 ) -> str | dict | None:
@@ -423,12 +458,12 @@ def get_json_schema_from_tools(
         return None
     # tool_choice: Forced Function (Responses)
     if (not isinstance(tool_choice, str)) and isinstance(
-        tool_choice, ToolChoiceFunction
+        tool_choice, (ToolChoiceFunction, ToolChoiceCustom)
     ):
         tool_name = tool_choice.name
         responses_tool_map: dict[str, dict[str, Any] | None] = {}
         for tool in tools:
-            if not isinstance(tool, (FunctionTool, NamespaceTool)):
+            if not isinstance(tool, (FunctionTool, NamespaceTool, CustomTool)):
                 continue
             for name, params in iter_response_function_tool_info(tool):
                 responses_tool_map[name] = params

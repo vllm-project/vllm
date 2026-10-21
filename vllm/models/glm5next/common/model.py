@@ -90,6 +90,7 @@ from vllm.models.common.ops.sequence_parallel import (
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.math_utils import round_up
 
 from .attention import Glm5NextMLAAttention
 from .kda import Glm5NextLinearAttention
@@ -100,6 +101,16 @@ from .multimodal import (
 )
 
 logger = init_logger(__name__)
+
+
+def get_sparse_topk_buffer_width(config: Glm5NextTextConfig) -> int:
+    """Reserve the incomplete pool tail and align sparse MLA tiles."""
+    topk = config.index_topk
+    assert topk is not None
+    kpool = config.index_kpool
+    assert kpool is not None
+    return round_up(topk + kpool - 1, 128)
+
 
 _MHC_TAU = 0.05
 """mHC routing temperature. A GLM-5.3-Flash trained value that neither the
@@ -700,20 +711,9 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
 
         self.is_v32 = config.index_topk is not None
         if self.is_v32:
-            topk_tokens = config.index_topk
-            assert topk_tokens is not None
-            # Reserve room for the incomplete pool tail.
-            kpool = config.index_kpool
-            assert kpool is not None
-            buffer_width = topk_tokens + (kpool - 1 if kpool > 1 else 0)
-            # Sparse MLA tiles top-k in 128 columns; padded slots remain masked.
-            sparse_topk_block_n = 128
-            buffer_width = (
-                (buffer_width + sparse_topk_block_n - 1) // sparse_topk_block_n
-            ) * sparse_topk_block_n
             topk_indices_buffer = torch.empty(
                 vllm_config.scheduler_config.max_num_batched_tokens,
-                buffer_width,
+                get_sparse_topk_buffer_width(config),
                 dtype=torch.int32,
                 device=self.device,
             )
@@ -788,7 +788,7 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
             return hidden_states
         assert residual is not None and comb is not None
         completed = self._aux_post_op(hidden_states, residual, post, comb)
-        return hc_contract(completed, self.config.mhc_num_residual_streams)
+        return hc_contract(completed, self.config.hc_mult)
 
     def forward(
         self,
@@ -1092,7 +1092,9 @@ class Glm5NextForCausalLM(
         vllm_config: "VllmConfig",
     ) -> tuple[torch.dtype, torch.dtype]:
         return MambaStateDtypeCalculator.kda_state_dtype(
-            vllm_config.model_config.dtype, vllm_config.cache_config.mamba_cache_dtype
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.mamba_cache_dtype,
+            vllm_config.cache_config.mamba_ssm_cache_dtype,
         )
 
     @classmethod
