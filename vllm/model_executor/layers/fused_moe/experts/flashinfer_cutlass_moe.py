@@ -362,6 +362,13 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             fc1_expert_weights = w1
             fc2_expert_weights = w2
 
+        if activation == MoEActivation.GELU_TANH:
+            from flashinfer.fused_moe.core import ActivationType
+
+            activation_type = ActivationType.GegluTanh
+        else:
+            activation_type = activation_to_flashinfer_type(activation)
+
         _ = flashinfer_cutlass_fused_moe(
             input=hidden_states,
             token_selected_experts=topk_ids.to(torch.int),
@@ -381,7 +388,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             tp_rank=self.tp_rank,
             ep_size=self.ep_size,
             ep_rank=self.ep_rank,
-            activation_type=activation_to_flashinfer_type(activation),
+            activation_type=activation_type,
             # Informs FlashInfer to use the block-scale decoding path when True
             use_deepseek_fp8_block_scale=self.use_deepseek_fp8_block_scale,
             use_mxfp8_act_scaling=use_mxfp8_act_scaling,
