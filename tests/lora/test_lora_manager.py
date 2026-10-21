@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -26,10 +27,12 @@ from vllm.lora.model_manager import (
     LoRAMapping,
     LoRAModelManager,
     LRUCacheLoRAModelManager,
+    _has_mla_attention,
 )
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager, WorkerLoRAManager
+from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.fused_moe import GateLinear
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.platforms import current_platform
@@ -111,6 +114,84 @@ def test_moe_format_validation_allows_supported_layouts(
     adapter.is_3d_lora_weight = declared_3d
 
     manager._validate_moe_lora_format(adapter)
+
+
+KV_B_PROJ = "model.layers.0.self_attn.kv_b_proj"
+Q_PROJ = "model.layers.0.self_attn.q_proj"
+
+
+def _make_mla_guard_fixtures(
+    is_mla: bool, module_names: list[str]
+) -> tuple[LoRAModelManager, LoRAModel]:
+    manager = LoRAModelManager.__new__(LoRAModelManager)
+    manager._is_mla = is_mla
+    loras = {
+        name: LoRALayerWeights(name, 8, 16, torch.zeros(8, 4), torch.zeros(4, 8))
+        for name in module_names
+    }
+    return manager, LoRAModel(1, 8, loras)
+
+
+def test_mla_lora_guard_rejects_kv_b_proj_only_adapter():
+    """A kv_b_proj-only adapter is a complete no-op on MLA models (#48974)."""
+    manager, adapter = _make_mla_guard_fixtures(True, [KV_B_PROJ])
+    with pytest.raises(ValueError, match="48974") as exc:
+        manager._validate_mla_lora(adapter)
+    assert "not applied on MLA models" in str(exc.value)
+
+
+def test_mla_lora_guard_warns_on_mixed_adapter(caplog_vllm):
+    """kv_b_proj among working targets loads, with a loud warning."""
+    manager, adapter = _make_mla_guard_fixtures(True, [KV_B_PROJ, Q_PROJ])
+    manager._validate_mla_lora(adapter)
+    assert "kv_b_proj" in caplog_vllm.text
+    assert "48974" in caplog_vllm.text
+
+
+@pytest.mark.parametrize(
+    "is_mla,module_names",
+    [
+        (True, [Q_PROJ]),
+        (False, [KV_B_PROJ]),
+        (False, [KV_B_PROJ, Q_PROJ]),
+    ],
+)
+def test_mla_lora_guard_ignores_unaffected_adapters(is_mla, module_names, caplog_vllm):
+    """No guard for non-MLA models or MLA adapters without kv_b_proj."""
+    manager, adapter = _make_mla_guard_fixtures(is_mla, module_names)
+    manager._validate_mla_lora(adapter)
+    assert "48974" not in caplog_vllm.text
+
+
+def test_mla_detection_is_structural():
+    """Config-based `use_mla` misses some MLA model types (e.g. sarvam_mla)."""
+
+    class _FakeMLAAttention(MLAAttention):
+        def __init__(self):
+            nn.Module.__init__(self)
+
+    assert _has_mla_attention(nn.Sequential(nn.Linear(4, 4), _FakeMLAAttention()))
+    assert not _has_mla_attention(nn.Sequential(nn.Linear(4, 4)))
+
+
+def test_load_adapter_invokes_mla_guard(monkeypatch):
+    """The worker load path must run the MLA guard on every loaded adapter."""
+    monkeypatch.setattr(
+        "vllm.lora.worker_manager.get_adapter_absolute_path", lambda path: path
+    )
+    monkeypatch.setattr("vllm.lora.worker_manager.PEFTHelper", MagicMock())
+    worker = WorkerLoRAManager.__new__(WorkerLoRAManager)
+    worker._lora_model_cls = MagicMock()
+    worker.max_position_embeddings = 16
+    worker.lora_config = LoRAConfig(max_lora_rank=8)
+    worker.vocab_size = 32
+    worker._adapter_manager = MagicMock(
+        supported_lora_modules=["q_proj"], packed_modules_mapping={}
+    )
+
+    lora = worker._load_adapter(LoRARequest("1", 1, "some/path"))
+
+    worker._adapter_manager._validate_mla_lora.assert_called_once_with(lora)
 
 
 @pytest.mark.parametrize("device", DEVICES)
