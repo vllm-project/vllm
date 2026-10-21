@@ -43,8 +43,10 @@ from vllm.model_executor.utils import (
     maybe_disable_graph_partition,
     set_weight_attrs,
 )
+from vllm.models.glm5next.common.kda_metadata import Glm5NextKDAAttentionBackend
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
+from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -164,6 +166,11 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
     head_dim: int
     num_heads: int
     conv_size: int
+
+    def get_attn_backend(self) -> type[AttentionBackend]:
+        if current_platform.is_cuda():
+            return Glm5NextKDAAttentionBackend
+        return super().get_attn_backend()
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MambaSpec:
         spec = super().get_kv_cache_spec(vllm_config)

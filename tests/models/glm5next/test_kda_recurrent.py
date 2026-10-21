@@ -164,6 +164,67 @@ def test_fused_recurrent_kda_strided_inputs_bit_identical_to_contiguous(
     torch.testing.assert_close(state, state_ref, rtol=0, atol=0)
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA graph replay")
+@torch.inference_mode()
+def test_fused_recurrent_kda_graph_replays_ragged_verification():
+    """AV redistributes queries after capture, with zero-draft and padding rows."""
+    torch.manual_seed(0)
+    inputs, state = make_inputs(4, 4, torch.device("cuda"))
+    indices = inputs["ssm_state_indices"]
+    indices[-1].zero_()
+    inputs["num_accepted_tokens"].copy_(
+        torch.tensor([4, 2, 1, 1], dtype=torch.int32, device="cuda")
+    )
+    inputs["cu_seqlens"].copy_(
+        torch.tensor([0, 3, 6, 9, 9], dtype=torch.int32, device="cuda")
+    )
+    initial = state.clone()
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        run_kernel(inputs, state)
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        out = run_kernel(inputs, state)
+
+    for lengths in ([1, 4, 4, 0], [4, 1, 4, 0], [1, 1, 1, 0]):
+        offsets = [0]
+        for length in lengths:
+            offsets.append(offsets[-1] + length)
+        inputs["cu_seqlens"].copy_(
+            torch.tensor(offsets, dtype=torch.int32, device="cuda")
+        )
+        inputs["q"].mul_(0.75)
+        inputs["g"].add_(0.1)
+        state.copy_(initial)
+        expected_state = initial.clone()
+        expected = torch.empty(offsets[-1], H, D, dtype=torch.float32, device="cuda")
+        for n, length in enumerate(lengths):
+            if length == 0:
+                continue
+            accepted = int(inputs["num_accepted_tokens"][n])
+            s = initial[indices[n, accepted - 1]]
+            for t in range(length):
+                token = slice(offsets[n] + t, offsets[n] + t + 1)
+                expected[token], s = naive_recurrent_kda(
+                    inputs["q"][0, token],
+                    inputs["k"][0, token],
+                    inputs["v"][0, token],
+                    inputs["g"][0, token],
+                    inputs["beta"][0, token],
+                    inputs["a_log"],
+                    inputs["g_bias"].view(H, D),
+                    s,
+                )
+                expected_state[indices[n, t]] = s
+        graph.replay()
+        torch.testing.assert_close(
+            out[0, : offsets[-1]].float(), expected, rtol=1e-2, atol=1e-3
+        )
+        torch.testing.assert_close(state, expected_state, rtol=1e-5, atol=1e-5)
+
+
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(),
     reason="Both implementations require zero-copy token-strided layouts",

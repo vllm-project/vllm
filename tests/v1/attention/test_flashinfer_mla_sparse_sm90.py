@@ -339,6 +339,32 @@ def test_kv_lens_host_empty():
     assert num_rows == 0 and lens.numel() == 0
 
 
+def test_adaptive_decode_graph_accepts_only_decode_window():
+    """AV can replay ragged decode graphs within the allocated MTP window."""
+    from vllm.v1.worker.gpu.attn_utils import (
+        get_varlen_cudagraph_unsupported_backend,
+    )
+    from vllm.v1.worker.utils import AttentionGroup
+
+    config = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            num_speculative_tokens=3, parallel_drafting=False
+        ),
+        use_v2_model_runner=True,
+    )
+    group = AttentionGroup(
+        backend=FlashInferMLASparseSM90Backend,
+        layer_names=["attn"],
+        kv_cache_spec=MLAAttentionSpec(
+            block_size=BLOCK_SIZE, num_kv_heads=1, head_size=HEAD, dtype=torch.bfloat16
+        ),
+        kv_cache_group_id=0,
+        metadata_builders=[object.__new__(FlashInferMLASparseSM90Builder)],
+    )
+    assert get_varlen_cudagraph_unsupported_backend([[group]], config, 4) is None
+    assert get_varlen_cudagraph_unsupported_backend([[group]], config, 5) is not None
+
+
 _NO_KPOOL = object()
 
 
@@ -534,6 +560,74 @@ def test_upper_bound_plan_reused_across_steps(monkeypatch):
             state.pack_indices(slots)
             outs.append(state.wrapper.run(q, q[..., :0], kv, kv[..., :0]))
         torch.testing.assert_close(outs[0], outs[1], atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(
+    not _sm90_flashinfer_available(), reason="Requires SM90 FlashInfer MLA"
+)
+def test_upper_bound_graph_replays_ragged_verification(monkeypatch):
+    """AV redistributes tokens on device while host boundaries stay uniform."""
+    from vllm.utils import gpu_sync_debug
+
+    monkeypatch.setattr(gpu_sync_debug, "_SYNC_CHECK_MODE", "error")
+    monkeypatch.setattr(gpu_sync_debug, "_sync_check_enabled", False)
+    gpu_sync_debug.enable_gpu_sync_check()
+    torch.manual_seed(0)
+    rows = 9
+    ub, exact = _real_state(rows), _real_state(rows)
+    checked_plan = gpu_sync_debug.with_gpu_sync_check(ub.plan)
+    builder = object.__new__(FlashInferMLASparseSM90Builder)
+    builder.state = ub
+    builder._adaptive_verification = True
+    cam = SimpleNamespace(
+        num_reqs=3,
+        query_start_loc_cpu=torch.tensor([0, 3, 6, 9], dtype=torch.int32),
+        query_start_loc=torch.zeros(4, dtype=torch.int32, device="cuda"),
+        seq_lens=torch.tensor([64, 2049, 3000], dtype=torch.int32, device="cuda"),
+        seq_lens_cpu_upper_bound=torch.tensor([64, 2049, 3000], dtype=torch.int32),
+    )
+    req_id = torch.empty(rows, dtype=torch.int32, device="cuda")
+    slots = torch.empty(rows, SM90_WIDTH, dtype=torch.int32, device="cuda")
+    q = torch.randn(rows, SM90_HEADS, HEAD, device="cuda", dtype=torch.bfloat16)
+    kv = torch.randn(4096, 1, HEAD, device="cuda", dtype=torch.bfloat16)
+
+    def prepare(lengths):
+        lengths = torch.tensor(lengths, dtype=torch.int32)
+        offsets = torch.cat([torch.zeros(1, dtype=torch.int32), lengths.cumsum(0)])
+        cam.query_start_loc.copy_(offsets)
+        req = torch.arange(3).repeat_interleave(lengths)
+        req_id.copy_(req)
+        ctx = (
+            cam.seq_lens_cpu_upper_bound[req]
+            - offsets[req + 1]
+            + torch.arange(rows)
+            + 1
+        )
+        valid = torch.where(ctx <= SM90_TOPK, ctx, SM90_TOPK + ctx % SM90_KPOOL)
+        values = torch.randint(0, 4096, (rows, SM90_WIDTH), dtype=torch.int32)
+        values[torch.arange(SM90_WIDTH) >= valid[:, None]] = -1
+        slots.copy_(values)
+        num_rows, bounds, is_exact = builder._kv_lens_host(cam)
+        assert not is_exact
+        checked_plan(num_rows, bounds, cam, req_id)
+        return valid.to(torch.int32)
+
+    def run(state):
+        state.pack_indices(slots)
+        return state.wrapper.run(q, q[..., :0], kv, kv[..., :0])
+
+    prepare([3, 3, 3])
+    run(ub)
+    torch.accelerator.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        out = run(ub)
+    for lengths in ([1, 4, 4], [4, 1, 4], [4, 4, 1]):
+        valid = prepare(lengths)
+        q.add_(0.125)
+        graph.replay()
+        exact.plan(rows, valid, None, None)
+        torch.testing.assert_close(out, run(exact), atol=1e-2, rtol=1e-2)
 
 
 def test_supports_combination_gates(monkeypatch, default_vllm_config):

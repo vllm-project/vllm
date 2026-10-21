@@ -45,12 +45,14 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import has_flashinfer_sm90_nope_mla
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionLayer,
     CommonAttentionMetadata,
     MLAAttentionImpl,
     MultipleOf,
+    max_decode_query_len,
 )
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseMetadata,
@@ -61,7 +63,7 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     flat_kv_row_view,
     triton_convert_req_index_to_global_index,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
 _FP8_KV_DTYPES = ("fp8", "fp8_e4m3")
 _WORKSPACE_BYTES = 128 * 1024 * 1024
@@ -360,11 +362,18 @@ class _SM90State:
         # Only the live prefix of kv_indices: the wrapper snapshots and
         # copies whatever is passed.
         num_indices = max(int(self._kv_cpu[-1]), 1)
+        qo_indptr, kv_indptr, kv_lens = self._qo_cpu, self._kv_cpu, self._lens_cpu
+        if is_pin_memory_available():
+            # Immutable pinned snapshots keep H2D async while the next plan
+            # can safely overwrite the reusable CPU staging buffers.
+            qo_indptr = qo_indptr.pin_memory()
+            kv_indptr = kv_indptr.pin_memory()
+            kv_lens = kv_lens.pin_memory()
         self.wrapper.plan(
-            self._qo_cpu,
-            self._kv_cpu,
+            qo_indptr,
+            kv_indptr,
             self.kv_indices[:num_indices],
-            self._lens_cpu,
+            kv_lens,
             self.num_heads,
             self.kv_lora_rank,  # head_dim_ckv
             self.qk_rope_head_dim,  # 0 (NoPE) or 64 (rope MLA)
@@ -427,6 +436,13 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
     """Reuse the common sparse metadata (req ids, topk buffer access)."""
 
     metadata_cls = FlashInferMLASparseSM90Metadata
+
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls, vllm_config: VllmConfig, kv_cache_spec: KVCacheSpec
+    ) -> int:
+        # Decode planning clamps host upper bounds using device request boundaries.
+        return max_decode_query_len(vllm_config)
 
     def __init__(
         self,
