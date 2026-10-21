@@ -89,6 +89,24 @@ def test_mtp_style_drafter_is_left_alone_under_pp(monkeypatch):
     assert draft_inner.embed_tokens is draft_embed
 
 
+def test_inkling_mtp_gets_the_target_embedding_under_pp(monkeypatch):
+    """InklingMTP builds no embedding of its own (embed_tokens is None until
+    the target's is attached), so it must be shared under PP as well."""
+    if not current_platform.is_cuda_alike():
+        pytest.skip("Inkling model imports require CUDA or ROCm dependencies")
+    backend = "amd" if current_platform.is_rocm() else "nvidia"
+    mtp = importlib.import_module(f"vllm.models.inkling.{backend}.mtp")
+    monkeypatch.setattr(eagle_utils, "get_pp_group", _fake_pp(2))
+    draft = mtp.InklingMTP.__new__(mtp.InklingMTP)
+    draft_inner = _inner(None)
+    draft_inner.embed_tokens = None
+    target_embed = _embed()
+
+    eagle_utils.maybe_share_target_embed(draft, draft_inner, _inner(target_embed))
+
+    assert draft_inner.embed_tokens is target_embed
+
+
 @pytest.mark.parametrize(
     "method,pp_size,is_last_rank,expected",
     [
