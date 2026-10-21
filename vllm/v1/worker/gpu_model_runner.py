@@ -5914,6 +5914,14 @@ class GPUModelRunner(
                         },
                     ),
                 )
+            # Compile the token-rank op of logprobs now (one compile covers
+            # all batch sizes) instead of on the first request with logprobs.
+            # It also counts the logprobs buffer in the memory profile.
+            raw_logprobs = self.sampler.compute_logprobs(logits)
+            self.sampler.gather_logprobs(
+                raw_logprobs, 1, token_ids=raw_logprobs.argmax(dim=-1)
+            )
+            del raw_logprobs
         except RuntimeError as e:
             if "out of memory" in str(e):
                 raise RuntimeError(

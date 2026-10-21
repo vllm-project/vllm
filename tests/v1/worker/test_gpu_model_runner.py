@@ -1241,6 +1241,59 @@ def test_dummy_sampler_run_warms_all_greedy_rejection_sampler(monkeypatch):
     synchronize.assert_called_once_with()
 
 
+def test_dummy_sampler_run_compiles_logprobs_rank_op(monkeypatch):
+    """The first request with logprobs must not compile the rank op."""
+    import vllm.v1.sample.sampler as sampler_module
+    from vllm.v1.sample.ops.logprobs import batched_count_greater_than
+    from vllm.v1.sample.sampler import Sampler
+
+    num_compiles = 0
+
+    def counting_backend(gm, example_inputs):
+        nonlocal num_compiles
+        num_compiles += 1
+        return gm
+
+    torch._dynamo.reset()
+    monkeypatch.setattr(
+        sampler_module,
+        "batched_count_greater_than",
+        torch.compile(
+            batched_count_greater_than._torchdynamo_orig_callable,
+            backend=counting_backend,
+        ),
+    )
+    vocab_size = 32
+    runner = object.__new__(GPUModelRunner)
+    runner.device = torch.device("cpu")
+    runner.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(multimodal_config=None)
+    )
+    runner.model = SimpleNamespace(
+        compute_logits=lambda h: torch.randn(h.shape[0], vocab_size)
+    )
+    runner.sampler = Mock(return_value="sampler_output")
+    runner.sampler.logprobs_mode = "raw_logprobs"
+    runner.sampler.compute_logprobs = Sampler.compute_logprobs
+    runner.sampler.gather_logprobs = Sampler.gather_logprobs
+    runner.speculative_config = None
+    monkeypatch.setattr(torch.accelerator, "synchronize", Mock())
+
+    try:
+        GPUModelRunner._dummy_sampler_run(runner, torch.randn(4, 8))
+        assert num_compiles == 1
+
+        # Requests are sampled in inference mode, like the warm-up.
+        with torch.inference_mode():
+            for num_reqs in (1, 3):
+                logits = torch.randn(num_reqs, vocab_size)
+                logprobs = Sampler.compute_logprobs(logits)
+                Sampler.gather_logprobs(logprobs, 2, logprobs.argmax(dim=-1))
+        assert num_compiles == 1
+    finally:
+        torch._dynamo.reset()
+
+
 def test_invalid_draft_suffixes_remain_rejected_in_metadata():
     runner = object.__new__(GPUModelRunner)
     runner.device = torch.device("cpu")
