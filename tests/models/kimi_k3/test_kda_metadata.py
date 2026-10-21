@@ -54,6 +54,8 @@ PRUNED_METADATA_FIELDS = {
     "spec_sequence_masks_cpu",
     "uniform_spec_sequence_length",
     "flashinfer_prefill_query_start_loc",
+    "spec_rows",
+    "non_spec_rows",
     "flashinfer_prefill_seq_order",
 }
 

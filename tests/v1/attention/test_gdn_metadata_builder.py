@@ -144,6 +144,28 @@ GDN_BUILD_TEST_CASES = {
         expected_num_prefill_tokens=1,
         expected_num_spec_decodes=1,
     ),
+    # Spec decodes lead two chunked prefills (the V2 runner's order)
+    "chunked_prefills_after_spec_decodes": GDNBuildTestCase(
+        seq_lens=[90, 40, 200, 64],
+        query_lens=[3, 3, 7, 5],
+        num_decode_draft_tokens=[2, 2, -1, -1],
+        num_speculative_tokens=2,
+        expected_num_decodes=0,
+        expected_num_prefills=2,
+        expected_num_prefill_tokens=12,
+        expected_num_spec_decodes=2,
+    ),
+    # A prefill ahead of the spec decodes takes the row-index path
+    "prefill_ahead_of_spec_decodes": GDNBuildTestCase(
+        seq_lens=[120, 70, 71],
+        query_lens=[6, 3, 3],
+        num_decode_draft_tokens=[-1, 2, 2],
+        num_speculative_tokens=2,
+        expected_num_decodes=0,
+        expected_num_prefills=1,
+        expected_num_prefill_tokens=6,
+        expected_num_spec_decodes=2,
+    ),
 }
 
 
@@ -345,6 +367,19 @@ def test_mixed_batch_token_slices(
         )
         assert torch.equal(meta.spec_token_indx.cpu(), spec_rows)
         assert torch.equal(meta.non_spec_token_indx.cpu(), non_spec_rows)
+        # Both layouts (slices when the spec rows lead, row indices otherwise)
+        # give each group's cumulative query lengths.
+        assert num_decode_draft_tokens is not None
+        lens = torch.tensor(query_lens, dtype=torch.int32)
+        spec_mask = torch.tensor(num_decode_draft_tokens) >= 0
+        for loc, group_lens in (
+            (meta.spec_query_start_loc, lens[spec_mask]),
+            (meta.non_spec_query_start_loc, lens[~spec_mask]),
+        ):
+            assert loc is not None
+            expected = torch.zeros(len(group_lens) + 1, dtype=torch.int32)
+            torch.cumsum(group_lens, dim=0, out=expected[1:])
+            assert torch.equal(loc.cpu(), expected)
 
     if meta.num_prefills > 0:
         assert meta.prefill_state_indices is not None

@@ -138,6 +138,11 @@ class GDNAttentionMetadata:
     # blocks in a mixed batch; the forward then slices instead of gathering.
     spec_token_start: int | None = None
     non_spec_token_start: int | None = None
+    # Batch rows of the spec and non-spec requests of a mixed spec batch: a
+    # slice when the spec rows lead the batch, else device indices. Shared by
+    # the KV cache groups of the step to gather their state indices.
+    spec_rows: torch.Tensor | slice | None = None
+    non_spec_rows: torch.Tensor | slice | None = None
 
 
 class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]):
@@ -346,6 +351,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         uniform_spec_sequence_length = None
         spec_token_start: int | None = None
         non_spec_token_start: int | None = None
+        spec_rows: torch.Tensor | slice | None = None
+        non_spec_rows: torch.Tensor | slice | None = None
         spec_sequence_masks_cpu: torch.Tensor | None = None
         if not self.use_spec_decode or num_decode_draft_tokens_cpu is None:
             spec_sequence_masks = None
@@ -404,7 +411,6 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             non_spec_query_start_loc_cpu = query_start_loc_cpu
             num_accepted_tokens = None
         else:
-            query_lens = query_start_loc[1:] - query_start_loc[:-1]
             assert spec_sequence_masks_cpu is not None
             non_spec_sequence_masks_cpu = ~spec_sequence_masks_cpu
             query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
@@ -466,52 +472,92 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 non_spec_query_start_loc = None
                 non_spec_query_start_loc_cpu = None
             else:
-                spec_token_masks = torch.repeat_interleave(
-                    spec_sequence_masks,
-                    query_lens,
-                    output_size=query_start_loc_cpu[-1].item(),
-                )
-                index = torch.argsort(spec_token_masks, stable=True)
                 num_non_spec_tokens = num_prefill_tokens + num_decode_tokens
-                non_spec_token_indx = index[:num_non_spec_tokens]
-                spec_token_indx = index[num_non_spec_tokens:]
+                # Rows of the spec and non-spec requests: slices when the spec
+                # rows lead the batch (the V2 runner puts the requests with
+                # drafts first), else one upload of row indices. No device
+                # tensor is indexed with the host mask (a host nonzero and an
+                # H2D copy each), here or in update_block_table().
+                if bool(spec_sequence_masks_cpu[:num_spec_decodes].all()):
+                    spec_rows = slice(0, num_spec_decodes)
+                    non_spec_rows = slice(num_spec_decodes, m.num_reqs)
+                    # Spec tokens first, then the others: what the stable
+                    # argsort below returns for this layout, without the sort.
+                    index = torch.arange(
+                        num_spec_decode_tokens + num_non_spec_tokens,
+                        dtype=torch.int64,
+                        device=query_start_loc.device,
+                    )
+                    spec_token_indx = index[:num_spec_decode_tokens]
+                    non_spec_token_indx = index[num_spec_decode_tokens:]
+                    spec_token_start = 0
+                    non_spec_token_start = num_spec_decode_tokens
+                    spec_query_start_loc = query_start_loc[: num_spec_decodes + 1]
+                    non_spec_query_start_loc = (
+                        query_start_loc[num_spec_decodes:]
+                        - query_start_loc[num_spec_decodes]
+                    )
+                else:
+                    rows = async_tensor_h2d(
+                        torch.cat(
+                            [
+                                spec_sequence_masks_cpu.nonzero().squeeze(1),
+                                non_spec_sequence_masks_cpu.nonzero().squeeze(1),
+                            ]
+                        ),
+                        device=query_start_loc.device,
+                    )
+                    spec_rows = rows[:num_spec_decodes]
+                    non_spec_rows = rows[num_spec_decodes:]
 
-                # The tokens form two contiguous blocks iff the spec mask of
-                # the non-empty requests flips exactly once. The V2 runner puts
-                # the requests with drafts first, so this normally holds.
-                active_spec_mask = spec_sequence_masks_cpu[query_lens_cpu > 0]
-                if (active_spec_mask[1:] != active_spec_mask[:-1]).sum() == 1:
-                    spec_first = bool(active_spec_mask[0])
-                    spec_token_start = 0 if spec_first else num_non_spec_tokens
-                    non_spec_token_start = num_spec_decode_tokens if spec_first else 0
+                    query_lens = query_start_loc[1:] - query_start_loc[:-1]
+                    spec_token_masks = torch.repeat_interleave(
+                        spec_sequence_masks,
+                        query_lens,
+                        output_size=query_start_loc_cpu[-1].item(),
+                    )
+                    index = torch.argsort(spec_token_masks, stable=True)
+                    non_spec_token_indx = index[:num_non_spec_tokens]
+                    spec_token_indx = index[num_non_spec_tokens:]
 
+                    # The tokens form two contiguous blocks iff the spec mask
+                    # of the non-empty requests flips exactly once.
+                    active_spec_mask = spec_sequence_masks_cpu[query_lens_cpu > 0]
+                    if (active_spec_mask[1:] != active_spec_mask[:-1]).sum() == 1:
+                        spec_first = bool(active_spec_mask[0])
+                        spec_token_start = 0 if spec_first else num_non_spec_tokens
+                        non_spec_token_start = (
+                            num_spec_decode_tokens if spec_first else 0
+                        )
+
+                    spec_query_start_loc = torch.zeros(
+                        num_spec_decodes + 1,
+                        dtype=torch.int32,
+                        device=query_start_loc.device,
+                    )
+                    torch.cumsum(
+                        query_lens[spec_rows],
+                        dim=0,
+                        out=spec_query_start_loc[1:],
+                    )
+                    non_spec_query_start_loc = torch.zeros(
+                        query_lens.size(0) - num_spec_decodes + 1,
+                        dtype=torch.int32,
+                        device=query_start_loc.device,
+                    )
+                    torch.cumsum(
+                        query_lens[non_spec_rows],
+                        dim=0,
+                        out=non_spec_query_start_loc[1:],
+                    )
+
+                # contiguous() makes the slices match the gathered rows.
                 spec_state_indices_tensor = block_table_tensor[
-                    spec_sequence_masks_cpu, : self.num_spec + 1
-                ]
+                    spec_rows, : self.num_spec + 1
+                ].contiguous()
                 non_spec_state_indices_tensor = block_table_tensor[
-                    non_spec_sequence_masks_cpu, 0
-                ]
-
-                spec_query_start_loc = torch.zeros(
-                    num_spec_decodes + 1,
-                    dtype=torch.int32,
-                    device=query_start_loc.device,
-                )
-                torch.cumsum(
-                    query_lens[spec_sequence_masks_cpu],
-                    dim=0,
-                    out=spec_query_start_loc[1:],
-                )
-                non_spec_query_start_loc = torch.zeros(
-                    query_lens.size(0) - num_spec_decodes + 1,
-                    dtype=torch.int32,
-                    device=query_start_loc.device,
-                )
-                torch.cumsum(
-                    query_lens[non_spec_sequence_masks_cpu],
-                    dim=0,
-                    out=non_spec_query_start_loc[1:],
-                )
+                    non_spec_rows, 0
+                ].contiguous()
                 non_spec_query_start_loc_cpu = torch.zeros(
                     query_lens_cpu.size(0) - num_spec_decodes + 1,
                     dtype=torch.int32,
@@ -526,7 +572,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             if num_prefills == 0 and num_decodes == 0:
                 num_accepted_tokens = num_accepted_tokens[:num_spec_decodes]
             else:
-                num_accepted_tokens = num_accepted_tokens[spec_sequence_masks_cpu]
+                assert spec_rows is not None
+                num_accepted_tokens = num_accepted_tokens[spec_rows]
 
         chunk_indices: torch.Tensor | None = None
         chunk_offsets: torch.Tensor | None = None
@@ -582,7 +629,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             context_lens_tensor = m.compute_num_computed_tokens()
             has_initial_state = context_lens_tensor > 0
             if spec_sequence_masks_cpu is not None:
-                has_initial_state = has_initial_state[~spec_sequence_masks_cpu]
+                assert non_spec_rows is not None
+                has_initial_state = has_initial_state[non_spec_rows]
                 assert non_spec_query_start_loc_cpu is not None
             nums_dict, batch_ptr, token_chunk_offset_ptr = (
                 compute_causal_conv1d_metadata(
@@ -729,6 +777,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             token_chunk_offset_ptr=token_chunk_offset_ptr,
             spec_token_start=spec_token_start,
             non_spec_token_start=non_spec_token_start,
+            spec_rows=spec_rows,
+            non_spec_rows=non_spec_rows,
         )
         return attn_metadata
 
@@ -786,8 +836,11 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             # Same as build(): padded sequences trail the spec decodes.
             spec_indices = blk_table[: m.num_spec_decodes, : self.num_spec + 1]
         else:
-            spec_indices = blk_table[masks, : self.num_spec + 1]
-            non_spec_indices = prefill_indices = blk_table[~masks, 0]
+            assert m.spec_rows is not None and m.non_spec_rows is not None
+            spec_indices = blk_table[m.spec_rows, : self.num_spec + 1].contiguous()
+            non_spec_indices = prefill_indices = blk_table[
+                m.non_spec_rows, 0
+            ].contiguous()
 
         if self._stage_spec_decode(
             m.num_prefills, m.num_decodes, m.num_spec_decodes, m.num_spec_decode_tokens
