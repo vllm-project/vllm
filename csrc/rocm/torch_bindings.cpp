@@ -75,6 +75,29 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.impl("moe_gptq_gemm_rdna3", torch::kCUDA, &moe_gptq_gemm_rdna3);
 #endif
 
+#ifdef VLLM_ROCM_RDNA_SINGLESEQ_ATTN
+  // RDNA3.5 decode attention (gfx1151).
+  rocm_ops.def("rdna_singleseq_decode_configs() -> int[]",
+               &rdna_singleseq_decode_configs);
+  rocm_ops.def(
+      "rdna_singleseq_decode_attn(int config, Tensor q, Tensor kv_cache, "
+      "Tensor block_table, Tensor! out, Tensor! acc, Tensor! m, Tensor! l, "
+      "Tensor! cnt, Tensor seq_lens, float scale, Tensor? mm_ranges=None) -> "
+      "()");
+  rocm_ops.impl("rdna_singleseq_decode_attn", torch::kCUDA,
+                &rdna_singleseq_decode_attn);
+  // RDNA3.5 prefill attention (gfx1151).
+  rocm_ops.def("rdna_singleseq_prefill_configs() -> int[]",
+               &rdna_singleseq_prefill_configs);
+  rocm_ops.def(
+      "rdna_singleseq_prefill_attn(int config, Tensor q, Tensor kv_cache, "
+      "Tensor block_table, Tensor! out, Tensor! partial_o, "
+      "Tensor! partial_ml, Tensor! counters, Tensor seq_lens, "
+      "int max_seq_len, float scale, Tensor? mm_ranges=None) -> ()");
+  rocm_ops.impl("rdna_singleseq_prefill_attn", torch::kCUDA,
+                &rdna_singleseq_prefill_attn);
+#endif
+
   // Custom attention op
   // Compute the attention between an input query and the cached
   // keys/values using PagedAttention.
