@@ -31,6 +31,9 @@ class StepTimingSample:
     num_target_tokens: int
     num_reqs: int
     full_cudagraph: bool
+    # KV context each request had already computed. Profiling fabricates it,
+    # and cost curves profiled at different contexts must not be pooled.
+    context_len: int = 0
 
 
 def _timing_event() -> torch.cuda.Event:
@@ -55,8 +58,8 @@ class StepTimingCollector:
     def __init__(self):
         self._collecting = False
         self._step: StepTimingEvents | None = None
-        self._batch = (False, 0, 0)
-        self._timed: list[tuple[StepTimingEvents, tuple[bool, int, int]]] = []
+        self._batch = (False, 0, 0, 0)
+        self._timed: list[tuple[StepTimingEvents, tuple[bool, int, int, int]]] = []
 
     @contextlib.contextmanager
     def collect(self) -> Iterator[list[StepTimingSample]]:
@@ -83,13 +86,23 @@ class StepTimingCollector:
                 num_target_tokens,
                 num_reqs,
                 full_cudagraph,
+                context_len,
             )
-            for events, (full_cudagraph, num_target_tokens, num_reqs) in timed
+            for events, (
+                full_cudagraph,
+                num_target_tokens,
+                num_reqs,
+                context_len,
+            ) in timed
         )
 
     def record_batch(self, input_batch: "InputBatch", full_cudagraph: bool) -> None:
         """Costs from different execution modes must not share a cost curve."""
-        self._batch = (full_cudagraph, input_batch.num_tokens, input_batch.num_reqs)
+        context_len = 0
+        num_reqs = input_batch.num_reqs
+        if self._collecting and num_reqs:
+            context_len = int(input_batch.num_computed_tokens_np[:num_reqs].max())
+        self._batch = (full_cudagraph, input_batch.num_tokens, num_reqs, context_len)
 
     def forward_start(self) -> None:
         if self._collecting:
