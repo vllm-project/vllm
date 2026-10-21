@@ -1020,6 +1020,9 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
                     layer.head_size,
                 )
                 continue
+            # Every layer the fused writer may serve must read and write the
+            # interleaved V cache, including layers whose patterns are not
+            # registered separately below.
             layer.impl.set_interleaved_v_cache()
             shape_key = (
                 layer.num_heads,

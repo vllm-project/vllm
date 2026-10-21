@@ -988,3 +988,54 @@ def test_mrope_attention_context_failure_propagates(
 
     with pytest.raises(RuntimeError, match="missing attention context"):
         _call_fused_mrope_impl(torch.empty(2, 8, device="cpu"))
+
+
+@pytest.mark.skipif(
+    not Version(version("amd_aiter")) >= Version("0.1.20"),
+    reason="Requires AITER >= 0.1.20",
+)
+def test_qk_norm_rope_kvcache_fusion_interleaves_every_layer(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The fused writer stores V interleaved in every layer it serves, so every
+    eligible ROCM_ATTN layer must read V interleaved. With layer_name hoisted,
+    only one layer registers the patterns, but all of them must switch."""
+    torch.set_default_device(os.environ.get("VLLM_TEST_CUDA_DEVICE", "cuda"))
+    torch.set_default_dtype(torch.bfloat16)
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    rocm_aiter_ops.refresh_env_variables()
+
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(dtype=torch.bfloat16),
+        cache_config=CacheConfig(block_size=16),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            custom_ops=["+rotary_embedding"],
+            pass_config=PassConfig(fuse_qk_norm_rope_kvcache=True),
+        ),
+    )
+    with vllm.config.set_current_vllm_config(vllm_config):
+        models = [
+            QKNormRoPEKVCacheTestModel(
+                vllm_config=vllm_config,
+                attn_backend=AttentionBackendEnum.ROCM_ATTN,
+                num_heads=8,
+                num_kv_heads=2,
+                head_size=128,
+                is_neox=True,
+                rms_norm_eps=1e-6,
+                dtype=torch.bfloat16,
+                device=torch.get_default_device(),
+                prefix=f"model.layers.{i}.self_attn.attn",
+            )
+            for i in range(3)
+        ]
+        QkNormRopeKvCacheFusionPass(vllm_config)
+
+    from vllm.v1.attention.backends.rocm_attn import RocmAttentionImpl
+
+    impls = [model.attn.impl for model in models]
+    assert all(
+        isinstance(impl, RocmAttentionImpl) and impl._use_interleaved_v_cache
+        for impl in impls
+    )

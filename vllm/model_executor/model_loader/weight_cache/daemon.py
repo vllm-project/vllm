@@ -107,6 +107,7 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     ensure_private_socket_dir,
     get_current_device_uuid,
     get_socket_path,
+    hash_rope_parameters,
     recv_msg,
     send_msg,
     verify_peer_is_owner,
@@ -231,8 +232,9 @@ class WeightCacheDaemon:
         key_dp_size, key_dp_rank = get_engine_dp_placement(vllm_config, dp_rank)
         # Fingerprint before loading: process_weights_after_loading may
         # mutate hf_config.quantization_config.
-        self.cache_config = WeightCacheKey.from_model_config(
+        self.cache_key = WeightCacheKey.from_model_config(
             self.model_config,
+            cache_config=vllm_config.cache_config,
             tp_size=self.tp_size,
             tp_rank=self.tp_rank,
             pp_size=self.pp_size,
@@ -294,6 +296,8 @@ class WeightCacheDaemon:
         with set_current_vllm_config(self.vllm_config):
             ensure_model_parallel_initialized(self.tp_size, self.pp_size)
             self.model = self.get_model()
+        # In-place reloads use configs already normalized by model construction.
+        self.loaded_rope_parameters_hash = hash_rope_parameters(self.model_config)
         # Loading and post-processing leave freed transients in the caching
         # allocator; return them so engines sharing the GPU can use them.
         gc.collect()
@@ -435,11 +439,17 @@ class WeightCacheDaemon:
             send_msg(conn, {"status": "error", "message": f"Unknown command {cmd!r}"})
 
     def _handle_get_state(self, conn: socket.socket, request: dict) -> None:
-        client_config = request.get("cache_config")
-        if not isinstance(client_config, WeightCacheKey):
-            send_msg(conn, {"status": "error", "message": "Missing cache_config"})
+        client_key = request.get("cache_key")
+        if not isinstance(client_key, WeightCacheKey):
+            send_msg(conn, {"status": "error", "message": "Missing cache_key"})
             return
-        mismatched = self.cache_config.mismatched_fields(client_config)
+        mismatched = self.cache_key.mismatched_fields(client_key)
+        if (
+            request.get("is_reload", False)
+            and "rope_parameters_hash" in mismatched
+            and client_key.rope_parameters_hash == self.loaded_rope_parameters_hash
+        ):
+            mismatched.remove("rope_parameters_hash")
         if mismatched:
             logger.warning("WeightCacheKey mismatch on fields: %s", mismatched)
             send_msg(conn, {"status": "mismatch", "fields": mismatched})
