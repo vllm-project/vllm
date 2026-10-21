@@ -302,10 +302,8 @@ def _sync_dp(
     reduced[4] = int(allow_ubatching)
     reduced[5] = 8  # num_reqs
 
-    with (
-        patch.object(dp_utils.dist, "all_reduce", lambda t, group: t.copy_(reduced)),
-        patch.object(dp_utils, "get_dp_group", lambda: SimpleNamespace(cpu_group=None)),
-    ):
+    dp_group = SimpleNamespace(cpu_all_reduce_=lambda t: t.copy_(reduced))
+    with patch.object(dp_utils, "get_dp_group", lambda: dp_group):
         return dp_utils.sync_cudagraph_and_dp_padding(
             cudagraph_manager=cudagraph_manager,
             desired_batch_desc=BatchExecutionDescriptor(
@@ -765,6 +763,7 @@ def test_microbatches_recompute_dcp_lens_from_truncated_seq_lens(dcp_rank: int):
         CP_INTERLEAVE,
         num_reqs_padded=input_batch.num_reqs_after_padding,
     )
+    assert input_batch.dcp_local_seq_lens is not None
     parent_lens = input_batch.dcp_local_seq_lens.clone()
 
     ubatches, _ = _slice_with_dcp(input_batch, dcp_rank)
@@ -785,6 +784,7 @@ def test_microbatches_recompute_dcp_lens_from_truncated_seq_lens(dcp_rank: int):
     # the parent's row would ship the stale value.
     assert ubatches[0].num_reqs == 3
     assert ubatches[0].seq_lens[2].item() == 507
+    assert ubatches[0].dcp_local_seq_lens is not None
     assert ubatches[0].dcp_local_seq_lens[2].item() != parent_lens[2].item()
 
 

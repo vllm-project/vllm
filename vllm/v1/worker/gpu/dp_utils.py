@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 import torch
-import torch.distributed as dist
 
 from vllm.config import ParallelConfig
 from vllm.config.compilation import CUDAGraphMode
@@ -36,8 +35,7 @@ class DPSyncState:
     # Whether the ranks agreed to run eager. A dispatch reusing this must run
     # eager too; no shape was agreed, so picking a graph per rank would diverge.
     eager: bool
-    # Agreed upper bound on any rank's request count. Holds the padded count when
-    # a FULL descriptor imposed one, else the most any rank scheduled.
+    # Largest real request count scheduled on any rank before graph padding.
     num_reqs: int
 
 
@@ -63,7 +61,6 @@ def sync_cudagraph_and_dp_padding(
     Returns (synced_batch_desc, sync). `sync` is None when no rank has work.
     """
     assert dp_size > 1, "DP size must be greater than 1"
-    group = get_dp_group().cpu_group
     tensor = torch.zeros(6, dp_size, dtype=torch.int32, device="cpu")
     tensor[0][dp_rank] = num_tokens
     tensor[1][dp_rank] = desired_batch_desc.cg_mode.value
@@ -74,7 +71,7 @@ def sync_cudagraph_and_dp_padding(
     if should_skip_dp_coordination():
         tensor[:] = tensor[:, dp_rank, None].clone()
     else:
-        dist.all_reduce(tensor, group=group)
+        get_dp_group().cpu_all_reduce_(tensor)
 
     num_tokens_across_dp = tensor[0]
     cg_mode_across_dp = tensor[1]
@@ -139,17 +136,13 @@ def sync_cudagraph_and_dp_padding(
                 )
             # Refresh the token count to include CUDA graph padding.
             ubatch_num_tokens = ubatch_desc.num_tokens
-            num_reqs = int(num_reqs_across_dp.max())
-            if ubatch_desc.cg_mode == CUDAGraphMode.FULL:
-                assert ubatch_desc.num_reqs is not None
-                num_reqs = ubatch_desc.num_reqs
             return ubatch_desc, DPSyncState(
                 num_tokens_across_dp=torch.full_like(
                     num_tokens_across_dp, ubatch_num_tokens
                 ),
                 uniform_token_count=synced_uniform_token_count,
                 eager=ubatch_desc.cg_mode == CUDAGraphMode.NONE,
-                num_reqs=num_reqs,
+                num_reqs=int(num_reqs_across_dp.max()),
             )
 
     synced_cg_mode = CUDAGraphMode(int(cg_mode_across_dp.min()))
@@ -201,12 +194,7 @@ def sync_cudagraph_and_dp_padding(
         num_tokens_across_dp=num_tokens_across_dp,
         uniform_token_count=synced_uniform_token_count,
         eager=False,
-        num_reqs=(
-            synced_desc.num_reqs
-            if synced_desc.cg_mode == CUDAGraphMode.FULL
-            and synced_desc.num_reqs is not None
-            else int(num_reqs_across_dp.max())
-        ),
+        num_reqs=int(num_reqs_across_dp.max()),
     )
 
 

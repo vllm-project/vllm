@@ -164,6 +164,12 @@ class XgrammarBackend(StructuredOutputBackend):
                 self.compiler.compile_regex,
                 grammar_spec,
             )
+        elif request_type == StructuredOutputOptions.CHOICE:
+            # xgrammar has no choice type. Python request validation rewrites
+            # `choice` into this grammar, but other frontends send it as is.
+            ctx = self.compiler.compile_grammar(
+                choice_as_grammar(json.loads(grammar_spec))
+            )
         elif request_type == StructuredOutputOptions.STRUCTURAL_TAG:
             s_tag = json.loads(grammar_spec)
             if "structures" in s_tag:
