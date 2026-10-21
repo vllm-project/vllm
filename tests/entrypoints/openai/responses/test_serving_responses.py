@@ -265,6 +265,7 @@ def test_prompt_cache_options_request_accepts_prewarm() -> None:
         prompt_cache_options={"mode": "explicit", "prewarm": True},
     )
 
+    assert request.prompt_cache_options is not None
     assert request.prompt_cache_options.prewarm is True
 
 
