@@ -35,7 +35,7 @@ use crate::protocol::output::{
 use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::sampling::EngineCoreSamplingParams;
 use crate::protocol::stats::{KvConnectorStats, MooncakeOperation, SchedulerStats};
-use crate::protocol::tensor::{WireArrayData, WireNdArray, WireTensor};
+use crate::protocol::tensor::{WireArrayData, WireTensor};
 use crate::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
 use crate::test_utils::{
     IpcNamespace, setup_bootstrapped_mock_engine, setup_mock_engine_sockets,
@@ -2861,7 +2861,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
         vec![vec![2, 12, 16, 17, 18]]
     );
 
-    let decoded_outputs: EngineCoreOutputs = rmp_serde::from_slice(&outputs_bytes).unwrap();
+    let decoded_outputs = decode_engine_core_outputs(&[bytes::Bytes::from(outputs_bytes)]).unwrap();
     // Match msgspec's base-schema result for the same extended Python message.
     let extended_frames = [bytes::Bytes::from(
         hex::decode(extended_outputs_hex).unwrap(),
@@ -2953,10 +2953,10 @@ fn python_msgpack_fixtures_match_rust_encoding() {
             .outputs
             .iter()
             .map(|output| {
-                output.routed_experts.clone().map(|value| {
-                    let array: WireNdArray = rmpv::ext::from_value(*value).unwrap();
-                    (array.shape, array.data.into_raw_view().unwrap().to_vec())
-                })
+                output
+                    .routed_experts
+                    .clone()
+                    .map(|array| (array.shape, array.data.into_raw_view().unwrap().to_vec()))
             })
             .collect::<Vec<_>>();
         expect_test::expect![[r#"

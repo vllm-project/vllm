@@ -6,12 +6,11 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use enum_as_inner::EnumAsInner;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer};
 use serde_default::DefaultFromSerde;
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 use serde_with::serde_as;
-use thiserror_ext::AsReport;
 
 use super::serde_utils::AllowTrailingFields;
 use super::utility::UtilityOutput;
@@ -265,6 +264,18 @@ struct WireEngineCoreOutputs {
 }
 
 impl WireEngineCoreOutputs {
+    /// Resolve all wire-format fields in-place by looking up aux frames and
+    /// decoding raw-view payloads as needed.
+    fn resolve(&mut self, frames: &[Bytes]) -> Result<()> {
+        for output in &mut self.outputs {
+            output.resolve_in_place(frames)?;
+        }
+        self.resolve_routed_experts(frames)
+    }
+
+    /// Split the batched routed-expert rows back onto their outputs. Each
+    /// output's rows are a view into the shared batch frame, so consumers that
+    /// keep rows across engine steps copy them out.
     fn resolve_routed_experts(&mut self, frames: &[Bytes]) -> Result<()> {
         let Some((mut rows, lengths)) = self.routed_experts.take() else {
             return Ok(());
@@ -309,15 +320,11 @@ impl WireEngineCoreOutputs {
             }
             let mut shape = rows.shape.clone();
             shape[0] = length;
-            let slice = WireNdArray::from_raw_bytes(
+            output.routed_experts = Some(Box::new(WireNdArray::from_raw_bytes(
                 rows.dtype,
                 shape,
                 data.slice(cursor * row_bytes..end * row_bytes),
-            );
-            output.routed_experts =
-                Some(Box::new(rmpv::ext::to_value(slice).map_err(|error| {
-                    ext_value_decode!("routed_experts: {}", error.as_report())
-                })?));
+            )));
             cursor = end;
         }
         if cursor != num_rows {
@@ -390,29 +397,11 @@ impl From<DpControlOutput> for EngineCoreOutputs {
     }
 }
 
-impl EngineCoreOutputs {
-    /// Resolve all wire-format fields in-place by looking up aux frames and
-    /// decoding raw-view payloads as needed.
-    fn resolve_in_place(&mut self, frames: &[Bytes]) -> Result<()> {
-        if let Self::RequestBatch(batch) = self {
-            for output in &mut batch.outputs {
-                output.resolve_in_place(frames)?;
-            }
-        }
-        Ok(())
-    }
-}
-
 /// Classify the raw wire message into a more semantic Rust enum.
 impl TryFrom<WireEngineCoreOutputs> for EngineCoreOutputs {
     type Error = Error;
 
     fn try_from(value: WireEngineCoreOutputs) -> Result<Self> {
-        if value.routed_experts.is_some() {
-            return Err(ext_value_decode!(
-                "routed_experts: use decode_engine_core_outputs"
-            ));
-        }
         let has_request_payload = !value.outputs.is_empty()
             || value.scheduler_stats.is_some()
             || value.finished_requests.is_some();
@@ -503,27 +492,14 @@ impl Serialize for EngineCoreOutputs {
     }
 }
 
-impl<'de> Deserialize<'de> for EngineCoreOutputs {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        WireEngineCoreOutputs::deserialize(deserializer)?
-            .try_into()
-            .map_err(serde::de::Error::custom)
-    }
-}
-
 /// Decode one ordinary or multipart engine-core output message into the strong
 /// typed public protocol shape.
 pub fn decode_engine_core_outputs(frames: &[Bytes]) -> Result<EngineCoreOutputs> {
     let first_frame = frames.first().ok_or_else(|| ext_value_decode!("missing output frame"))?;
 
     let mut wire: WireEngineCoreOutputs = decode_msgpack(first_frame.as_ref())?;
-    wire.resolve_routed_experts(frames)?;
-    let mut outputs: EngineCoreOutputs = wire.try_into()?;
-    outputs.resolve_in_place(frames)?;
-    Ok(outputs)
+    wire.resolve(frames)?;
+    wire.try_into()
 }
 
 #[cfg(test)]
@@ -533,21 +509,6 @@ mod tests {
     use super::*;
     use crate::protocol::output::EngineCoreOutput;
     use crate::protocol::{decode_msgpack, encode_msgpack};
-
-    #[test]
-    fn batched_routed_experts_cannot_be_silently_ignored_by_plain_deserialize() {
-        use crate::protocol::dtype::TensorDtype;
-
-        let wire = WireEngineCoreOutputs {
-            outputs: vec![EngineCoreOutput::default()],
-            routed_experts: Some((
-                WireNdArray::from_raw(TensorDtype::U8, vec![1, 1, 1], vec![42]),
-                vec![1],
-            )),
-            ..Default::default()
-        };
-        assert!(decode_msgpack::<EngineCoreOutputs>(&encode_msgpack(&wire).unwrap()).is_err());
-    }
 
     #[test]
     fn engine_core_outputs_roundtrip_finished_fields() {
