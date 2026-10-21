@@ -44,6 +44,7 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_shard,
 )
 
+from .dspark_markov_fused_gemv import fused_markov_bias_add
 from .model import (
     DeepseekV4DecoderLayer,
     DeepseekV4Model,
@@ -377,6 +378,24 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
 
     def markov_bias(self, markov_embed: torch.Tensor) -> torch.Tensor:
         return self.model.markov_head.bias(markov_embed, self.logits_processor)
+
+    def markov_bias_add_fused(
+        self, prev_ids: torch.Tensor, base_logits_slice: torch.Tensor
+    ) -> torch.Tensor | None:
+        """One Triton kernel for embed-gather + markov_w2 GEMV +
+        base-logits add. Returns the biased logits, or None (fall back to the
+        stock markov_embed/markov_bias/add chain) when the head is not the
+        plain unquantized replicated DSparkMarkovHead shape the kernel
+        supports, or the draft batch exceeds the fusion gate. The env kill
+        switch (VLLM_DISABLE_MARKOV_FUSED_GEMV) and the draft-batch gate
+        (VLLM_DRAFT_SAMPLING_FUSION_MAX_TOKENS) are read inside the
+        helper, per call."""
+        head = self.model.markov_head
+        if not isinstance(head, DSparkMarkovHead):
+            return None
+        w1 = head.markov_w1.weight
+        w2 = head.markov_w2.weight
+        return fused_markov_bias_add(prev_ids, w1, w2, base_logits_slice)
 
     def compute_confidence(
         self, head_hidden: torch.Tensor, markov_embed: torch.Tensor
