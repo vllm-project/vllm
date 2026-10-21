@@ -51,7 +51,7 @@ MAX_DEST_SHARDS = 64
 
 # Increment when the JSON init payload changes incompatibly. M2N peers must
 # agree on this before any rank constructs a NCCL communicator.
-M2N_WIRE_SCHEMA_VERSION = 3
+M2N_WIRE_SCHEMA_VERSION = 5
 
 _MULTI_COMM_LAUNCH_ENV = "NCCL_LAUNCH_ORDER_IMPLICIT"
 
@@ -1153,18 +1153,55 @@ def check_runtime_ready_agreement(
 
 def check_data_plane_agreement(
     group: "StatelessProcessGroup",
-    unique_id_bytes: bytes | None,
+    unique_id_bytes: bytes | Sequence[bytes | None] | None,
     local_error: str | None = None,
 ) -> None:
-    """Agree on the NCCL rendezvous identity before NCCL init."""
+    """Agree on ordered NCCL route rendezvous identities before NCCL init.
+
+    A scalar preserves the single-communicator API. Multi-route callers pass one
+    bytes-or-None entry per canonical transfer route.
+    """
     prepared_error = local_error
-    uid_digest: str | None = None
+    identities: list[dict[str, str | None]] | None = None
     if prepared_error is None:
         try:
-            if unique_id_bytes is not None:
-                if not isinstance(unique_id_bytes, bytes):
-                    raise TypeError("NCCL unique id must decode to bytes")
-                uid_digest = hashlib.sha256(unique_id_bytes).hexdigest()
+            unique_ids: tuple[bytes | None, ...]
+            if unique_id_bytes is None or isinstance(unique_id_bytes, bytes):
+                unique_ids = (unique_id_bytes,)
+            elif isinstance(unique_id_bytes, Sequence) and not isinstance(
+                unique_id_bytes, (str, bytearray)
+            ):
+                unique_ids = cast(tuple[bytes | None, ...], tuple(unique_id_bytes))
+            else:
+                raise TypeError(
+                    "NCCL unique ids must be bytes, None, or a sequence of them"
+                )
+            if not unique_ids:
+                raise ValueError("NCCL data plane needs at least one transfer route")
+            explicit_unique_ids = tuple(
+                unique_id for unique_id in unique_ids if unique_id is not None
+            )
+            if len(set(explicit_unique_ids)) != len(explicit_unique_ids):
+                raise ValueError(
+                    "each nccl_m2n transfer communicator needs a distinct "
+                    "pre-shared NCCL unique id"
+                )
+            identities = []
+            for route_index, unique_id in enumerate(unique_ids):
+                if unique_id is not None and not isinstance(unique_id, bytes):
+                    raise TypeError(
+                        f"NCCL unique id for route {route_index} must decode to bytes"
+                    )
+                identities.append(
+                    {
+                        "mode": "uid" if unique_id is not None else "tcp",
+                        "uid_digest": (
+                            None
+                            if unique_id is None
+                            else hashlib.sha256(unique_id).hexdigest()
+                        ),
+                    }
+                )
         except Exception as exc:
             prepared_error = f"{type(exc).__name__}: {exc}"
     elif not isinstance(prepared_error, str) or not prepared_error:
@@ -1173,19 +1210,17 @@ def check_data_plane_agreement(
     gathered = group.all_gather_obj(
         {
             "phase": "data_plane",
-            "mode": "uid" if unique_id_bytes is not None else "tcp",
-            "uid_digest": uid_digest,
+            "routes": identities,
             "error": prepared_error,
         }
     )
     expected_fields = {
         "phase",
-        "mode",
-        "uid_digest",
+        "routes",
         "error",
     }
     errors: list[str] = []
-    valid: list[tuple[int, str, str | None]] = []
+    valid: list[tuple[int, tuple[tuple[str, str | None], ...]]] = []
     if len(gathered) != group.world_size:
         errors.append(
             "control-plane all-gather returned "
@@ -1206,21 +1241,124 @@ def check_data_plane_agreement(
             else:
                 errors.append(f"rank {rank}: {error}")
             continue
-        mode = item["mode"]
-        uid = item["uid_digest"]
-        if mode not in {"tcp", "uid"} or (mode == "uid") != isinstance(uid, str):
-            errors.append(f"rank {rank}: invalid data-plane identity")
+        route_identities = item["routes"]
+        if not isinstance(route_identities, list) or not route_identities:
+            errors.append(f"rank {rank}: invalid data-plane route identities")
             continue
-        valid.append((rank, mode, uid))
+        parsed_identities: list[tuple[str, str | None]] = []
+        malformed = False
+        for route_index, identity in enumerate(route_identities):
+            if not isinstance(identity, Mapping) or set(identity) != {
+                "mode",
+                "uid_digest",
+            }:
+                errors.append(
+                    f"rank {rank}: invalid data-plane identity for route {route_index}"
+                )
+                malformed = True
+                break
+            mode = identity["mode"]
+            uid = identity["uid_digest"]
+            if mode not in {"tcp", "uid"} or (mode == "uid") != isinstance(uid, str):
+                errors.append(
+                    f"rank {rank}: invalid data-plane identity for route {route_index}"
+                )
+                malformed = True
+                break
+            parsed_identities.append((mode, uid))
+        if not malformed:
+            valid.append((rank, tuple(parsed_identities)))
     if not errors:
-        _, mode, uid = valid[0]
-        for rank, other_mode, other_uid in valid[1:]:
-            if (other_mode, other_uid) != (mode, uid):
+        _, canonical_identities = valid[0]
+        for rank, other_identities in valid[1:]:
+            if other_identities != canonical_identities:
                 errors.append(f"rank {rank}: NCCL data-plane identity disagrees")
     if errors:
         raise RuntimeError(
             "nccl_m2n data-plane preflight rejected before NCCL init: "
             + "; ".join(errors)
+        )
+
+
+def check_communicator_init_agreement(
+    group: "StatelessProcessGroup",
+    local_errors: Sequence[str | None],
+) -> None:
+    """Agree once on the complete ordered communicator-init result."""
+    prepared_errors: tuple[str | None, ...] | None = None
+    prepared_error: str | None = None
+    try:
+        prepared_errors = tuple(local_errors)
+        if not prepared_errors:
+            raise ValueError("communicator initialization needs at least one group")
+        if any(
+            error is not None and (not isinstance(error, str) or not error)
+            for error in prepared_errors
+        ):
+            raise TypeError(
+                "communicator initialization errors must be null or non-empty strings"
+            )
+    except Exception as exc:
+        prepared_error = f"{type(exc).__name__}: {exc}"
+
+    gathered = group.all_gather_obj(
+        {
+            "phase": "communicator_init",
+            "errors": (None if prepared_errors is None else list(prepared_errors)),
+            "error": prepared_error,
+        }
+    )
+    errors: list[str] = []
+    valid: list[tuple[int, tuple[str | None, ...]]] = []
+    expected_fields = {"phase", "errors", "error"}
+    if len(gathered) != group.world_size:
+        errors.append(
+            "control-plane all-gather returned "
+            f"{len(gathered)} records for world size {group.world_size}"
+        )
+    for rank, item in enumerate(gathered):
+        if (
+            not isinstance(item, Mapping)
+            or set(item) != expected_fields
+            or item.get("phase") != "communicator_init"
+        ):
+            errors.append(f"rank {rank}: invalid communicator-init envelope")
+            continue
+        error = item["error"]
+        if error is not None:
+            if not isinstance(error, str) or not error:
+                errors.append(f"rank {rank}: invalid communicator-init error")
+            else:
+                errors.append(f"rank {rank}: {error}")
+            continue
+        rank_errors = item["errors"]
+        if not isinstance(rank_errors, list) or not rank_errors:
+            errors.append(f"rank {rank}: invalid communicator-init results")
+            continue
+        if any(
+            value is not None and (not isinstance(value, str) or not value)
+            for value in rank_errors
+        ):
+            errors.append(f"rank {rank}: invalid communicator-init result")
+            continue
+        valid.append((rank, tuple(rank_errors)))
+    if not errors:
+        expected_count = len(valid[0][1])
+        for rank, rank_errors in valid:
+            if len(rank_errors) != expected_count:
+                errors.append(
+                    f"rank {rank}: reported {len(rank_errors)} communicator "
+                    f"results, expected {expected_count}"
+                )
+                continue
+            for communicator_index, error in enumerate(rank_errors):
+                if error is not None:
+                    errors.append(
+                        f"rank {rank}, communicator {communicator_index}: {error}"
+                    )
+    if errors:
+        raise RuntimeError(
+            "nccl_m2n communicator initialization failed: " + "; ".join(errors)
         )
 
 

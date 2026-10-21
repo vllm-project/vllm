@@ -34,6 +34,7 @@ logger = init_logger(__name__)
 
 __all__ = [
     "get_layerwise_info",
+    "abort_layerwise_reload",
     "record_metadata_for_reloading",
     "initialize_layerwise_reload",
     "finalize_layerwise_processing",
@@ -115,6 +116,31 @@ def initialize_layerwise_reload(model: torch.nn.Module):
 
         # Wrap weight loaders to buffer loading
         initialize_online_processing(layer)
+
+
+@torch.no_grad()
+def abort_layerwise_reload(model: torch.nn.Module) -> None:
+    """Restore live tensors and discard an incomplete layerwise reload.
+
+    Already-finalized layers keep their new values. A subsequent complete
+    update overwrites them before the model is served again.
+    """
+    if hasattr(model, "_original_do_torchao_reload"):
+        model._do_torchao_reload = model._original_do_torchao_reload
+
+    try:
+        for layer in model.modules():
+            info = get_layerwise_info(layer)
+            if not info.can_load():
+                continue
+            if info.kernel_tensors is None:
+                raise RuntimeError(
+                    "cannot abort a layerwise reload without saved kernel tensors"
+                )
+            _place_kernel_tensors(layer, info)
+            info.reset()
+    finally:
+        LOADING_LAYERS.clear()
 
 
 def initialize_online_processing(layer: torch.nn.Module):

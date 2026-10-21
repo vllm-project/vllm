@@ -17,8 +17,10 @@ from vllm.distributed.weight_transfer.m2n_common import (
     M2NDestinationMode,
     M2NMesh,
     M2NParamMeta,
+    M2NSourceTopology,
     M2NWireParam,
     Placements,
+    build_m2n_transfer_routes,
     source_plan_digest,
     validate_transfer_plan,
 )
@@ -417,12 +419,13 @@ def agree_destination_plan(
     *,
     source_digest: str,
     params: Sequence[M2NWireParam],
+    source_topology: M2NSourceTopology | None = None,
     metas: Sequence[M2NParamMeta],
     dst_mesh: M2NMesh,
     local_plan: Sequence[M2NWireDestination] | None,
     local_error: str | None,
 ) -> tuple[list[M2NWireDestination], str]:
-    """All-gather worker plans and issue a unanimous pre-NCCL commit token."""
+    """Agree one complete source-to-destination plan before NCCL init."""
     prepared_error = local_error
     serialized_plan: list[dict[str, Any]] | None = None
     if prepared_error is None:
@@ -431,7 +434,7 @@ def agree_destination_plan(
                 raise ValueError("source_digest must be a non-empty string")
             if not params:
                 raise ValueError("source parameter manifest must not be empty")
-            if source_plan_digest(params) != source_digest:
+            if source_plan_digest(params, source_topology) != source_digest:
                 raise ValueError("source_digest does not match local parameters")
             if group.world_size != dst_mesh.start_rank + dst_mesh.size:
                 raise ValueError(
@@ -547,11 +550,32 @@ def agree_destination_plan(
             canonical_mesh,
             [destination.placements for destination in canonical_plan],
         )
+        resolved_topology = source_topology or M2NSourceTopology.single_group(
+            canonical_mesh.start_rank,
+            len(params),
+        )
+        transfer_routes = build_m2n_transfer_routes(
+            resolved_topology,
+            num_trainer_ranks=canonical_mesh.start_rank,
+            world_size=group.world_size,
+            dst_mesh_dims=canonical_mesh.dims,
+        )
         payload = {
             "schema_version": M2N_WIRE_SCHEMA_VERSION,
             "source_digest": canonical_digest,
+            "source_topology": resolved_topology.to_dict(),
             "dst_mesh_dims": list(canonical_mesh.dims),
             "dst_mesh_start_rank": canonical_mesh.start_rank,
+            "transfer_routes": [
+                {
+                    "source_group_index": transfer_route.source_group_index,
+                    "members": list(transfer_route.members),
+                    "param_indices": list(transfer_route.param_indices),
+                    "dst_mesh_dims": list(transfer_route.dst_mesh.dims),
+                    "dst_mesh_start_rank": transfer_route.dst_mesh.start_rank,
+                }
+                for transfer_route in transfer_routes
+            ],
             "workers": [
                 {
                     "rank": rank,

@@ -2,22 +2,23 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-side weight transfer engine built on NCCL M2N (`nccl_m2n`).
 
-The trainer and the inference workers share one NCCL communicator: trainer ranks
-occupy `[0, T)`, workers `[T, T + N)`. Each parameter is moved with a single
-`nccl.m2n.reshard`, which redistributes it from the trainer's layout (FSDP / EP
-/ arbitrary DTensor sharding) to the inference layout — so the trainer sends its
-local shards and never all-gathers a full tensor, which is what the broadcast
-NCCL backend forces it to do.
+Each ordered trainer source group shares one NCCL communicator with the
+inference workers. A parameter is routed to exactly one of those routes and
+moved with one `nccl.m2n.reshard`, which redistributes it from the trainer's
+layout (FSDP / TP / EP / arbitrary DTensor sharding) to the inference layout.
+The trainer sends local shards and never all-gathers a full tensor, which is
+what the broadcast NCCL backend forces it to do.
 
 The destination is planned per parameter. A plan is either entirely direct
 (M2N writes live model storage), or it uses the model's layerwise reload
 lifecycle, with bounded EP-local staging for semantic fused-MoE consumers and
 full checkpoint-format fallback for everything else.
 
-Both meshes participate in every reshard, in the same order, so this backend has
-the same concurrency shape as the broadcast NCCL backend: the worker must be
-inside `receive_weights` while the trainer is sending. Driving that from the
-trainer is the trainer engine's job.
+Members of each route participate in its reshards in the same authenticated
+order. A bounded wave schedule keeps launch order identical across routes
+while separate CUDA streams permit independent routes to overlap. The
+worker must be inside `receive_weights` while the trainer is sending; driving
+that from the trainer is the trainer engine's job.
 """
 
 from collections.abc import Iterator, Mapping
@@ -28,6 +29,7 @@ import torch
 
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
+    RetryableWeightUpdateError,
     WeightTransferEngine,
     WeightTransferInitInfo,
     WeightTransferUpdateInfo,
@@ -40,15 +42,23 @@ from vllm.distributed.weight_transfer.m2n_common import (
     M2NLayout,
     M2NMesh,
     M2NParamMeta,
+    M2NSourceTopology,
+    M2NTransferRoute,
     M2NWireParam,
     Placements,
+    build_m2n_param_routes,
+    build_m2n_transfer_routes,
+    build_m2n_transfer_waves,
+    check_communicator_init_agreement,
     check_data_plane_agreement,
+    check_multi_communicator_launch_order,
     check_runtime_ready_agreement,
     check_source_plan_agreement,
     check_transferable,
     create_m2n_communicator,
     expected_local_shape,
     import_m2n,
+    m2n_load_group,
     prepare_m2n_local_runtime,
     resolve_layout,
     source_plan_digest,
@@ -119,6 +129,12 @@ class M2NWeightTransferInitInfo(WeightTransferInitInfo):
     """SHA-256 of the ordered, versioned source parameter plan."""
     params: list[dict[str, Any]]
     """Ordered per-parameter source metadata and layouts."""
+    source_topology: dict[str, Any] | None = None
+    """Ordered source rank groups and one owning group per parameter.
+
+    Omitted payloads retain the legacy single-source-group topology: all
+    trainer ranks own the complete ordered manifest.
+    """
     worker_rank_offset: int | None = None
     """Deployment-local worker-rank offset.
 
@@ -128,7 +144,9 @@ class M2NWeightTransferInitInfo(WeightTransferInitInfo):
     single deployment may leave it unset.
     """
     nccl_unique_id_b64: str | None = field(default=None, repr=False)
-    """Optional UID for the NCCL data plane; TCP remains the metadata plane."""
+    """Optional single-communicator UID retained for compatibility."""
+    nccl_unique_ids_b64: list[str] | None = field(default=None, repr=False)
+    """Optional UIDs in canonical transfer-route order."""
     max_cta: int | None = None
 
     def __post_init__(self) -> None:
@@ -185,8 +203,76 @@ class M2NWeightTransferInitInfo(WeightTransferInitInfo):
             ctx="M2NWeightTransferInitInfo data plane",
         )
 
+    def nccl_unique_id_bytes_by_route(
+        self, num_routes: int
+    ) -> tuple[bytes | None, ...]:
+        """Decode the optional pre-shared UID table for canonical routes."""
+        if (
+            not isinstance(num_routes, int)
+            or isinstance(num_routes, bool)
+            or num_routes <= 0
+        ):
+            raise ValueError("num_routes must be a positive integer")
+        if self.nccl_unique_id_b64 is not None and self.nccl_unique_ids_b64 is not None:
+            raise ValueError(
+                "set only one of `nccl_unique_id_b64` and `nccl_unique_ids_b64`"
+            )
+        if self.nccl_unique_ids_b64 is not None:
+            if (
+                not isinstance(self.nccl_unique_ids_b64, list)
+                or len(self.nccl_unique_ids_b64) != num_routes
+            ):
+                raise ValueError(
+                    "`nccl_unique_ids_b64` must contain exactly one UID per "
+                    f"transfer route ({num_routes})"
+                )
+            return tuple(
+                decode_nccl_unique_id(
+                    master_address=None,
+                    master_port=None,
+                    nccl_unique_id_b64=value,
+                    ctx=f"M2NWeightTransferInitInfo route {route_index} data plane",
+                )
+                for route_index, value in enumerate(self.nccl_unique_ids_b64)
+            )
+        if self.nccl_unique_id_b64 is not None:
+            if num_routes != 1:
+                raise ValueError(
+                    "`nccl_unique_id_b64` is valid only for a single transfer route; "
+                    "use `nccl_unique_ids_b64` for pipeline groups"
+                )
+            return (self.nccl_unique_id_bytes,)
+        return (None,) * num_routes
+
+    def parse_source_plan(
+        self,
+    ) -> tuple[tuple[M2NWireParam, ...], M2NSourceTopology]:
+        """Parse and authenticate parameters together with source routing."""
+        params = self._parse_wire_params_unchecked()
+        if self.source_topology is None:
+            topology = M2NSourceTopology.single_group(self.rank_offset, len(params))
+        else:
+            if not isinstance(self.source_topology, Mapping):
+                raise TypeError("`source_topology` must be a mapping")
+            topology = M2NSourceTopology.from_dict(self.source_topology)
+        topology.validate(
+            num_trainer_ranks=self.rank_offset,
+            num_params=len(params),
+        )
+        computed_digest = source_plan_digest(params, topology)
+        if self.source_digest != computed_digest:
+            raise ValueError(
+                "nccl_m2n init source digest does not match params/topology: "
+                f"computed {computed_digest}, declared {self.source_digest}"
+            )
+        return params, topology
+
     def parse_wire_params(self) -> tuple[M2NWireParam, ...]:
-        """Parse and authenticate the ordered source plan for preflight."""
+        """Compatibility view of :meth:`parse_source_plan`."""
+        return self.parse_source_plan()[0]
+
+    def _parse_wire_params_unchecked(self) -> tuple[M2NWireParam, ...]:
+        """Parse the ordered parameter records before topology authentication."""
         if self.schema_version != M2N_WIRE_SCHEMA_VERSION:
             raise ValueError(
                 "unsupported nccl_m2n init schema version "
@@ -211,12 +297,6 @@ class M2NWeightTransferInitInfo(WeightTransferInitInfo):
             names.add(param.name)
             wire_params.append(param)
         parsed = tuple(wire_params)
-        computed_digest = source_plan_digest(parsed)
-        if self.source_digest != computed_digest:
-            raise ValueError(
-                "nccl_m2n init source digest does not match params: "
-                f"computed {computed_digest}, declared {self.source_digest}"
-            )
         return parsed
 
 
@@ -257,6 +337,11 @@ class M2NWeightTransferEngine(
     ) -> None:
         super().__init__(config, vllm_config, device, model)
         self.model_update_group: Any = None
+        self._model_update_groups: dict[int, Any] = {}
+        self._route_streams: dict[int, torch.cuda.Stream] = {}
+        self._routes: tuple[M2NTransferRoute, ...] = ()
+        self._param_routes: tuple[int, ...] = ()
+        self._source_topology = M2NSourceTopology((), ())
         self._m2n: Any = None
         self._handle: Any = None
         self._metas: list[M2NParamMeta] = []
@@ -270,7 +355,7 @@ class M2NWeightTransferEngine(
 
     def init_transfer_engine(self, init_info: M2NWeightTransferInitInfo) -> None:
         """Agree on source and local readiness before constructing NCCL."""
-        if self._handle is not None or self.model_update_group is not None:
+        if self._handle is not None or self._model_update_groups:
             raise RuntimeError(
                 "nccl_m2n weight transfer is already initialized; call "
                 "shutdown_weight_transfer_engine() before initializing again"
@@ -290,19 +375,31 @@ class M2NWeightTransferEngine(
         )
 
         wire_params: tuple[M2NWireParam, ...] = ()
+        source_topology = M2NSourceTopology((), ())
         source_error: str | None = None
         try:
             self._m2n = import_m2n()
-            wire_params = init_info.parse_wire_params()
-            self._prepare_source_plan(wire_params, init_info.rank_offset)
+            wire_params, source_topology = init_info.parse_source_plan()
+            self._source_topology = source_topology
+            self._prepare_source_plan(wire_params, source_topology)
+            self._routes = build_m2n_transfer_routes(
+                source_topology,
+                num_trainer_ranks=init_info.rank_offset,
+                world_size=init_info.world_size,
+                dst_mesh_dims=cast(tuple[int, int], tuple(init_info.dst_mesh_dims)),
+            )
+            self._param_routes = build_m2n_param_routes(self._routes, len(wire_params))
         except Exception as exc:
             source_error = f"{type(exc).__name__}: {exc}"
             self._metas = []
+            self._routes = ()
+            self._param_routes = ()
         plan_digest = check_source_plan_agreement(
             metadata_group,
             wire_params,
             expected_digest=init_info.source_digest,
             local_error=source_error,
+            topology=source_topology,
         )
 
         num_workers = init_info.world_size - init_info.rank_offset
@@ -345,15 +442,19 @@ class M2NWeightTransferEngine(
                 metadata_group,
                 source_digest=plan_digest,
                 params=wire_params,
+                source_topology=source_topology,
                 metas=self._metas,
                 dst_mesh=agreement_mesh,
                 local_plan=local_wire_plan,
                 local_error=destination_error,
             )
-            unique_id_bytes: bytes | None = None
+            unique_id_bytes: tuple[bytes | None, ...] = ()
             data_plane_error: str | None = None
             try:
-                unique_id_bytes = init_info.nccl_unique_id_bytes
+                unique_id_bytes = init_info.nccl_unique_id_bytes_by_route(
+                    len(self._routes)
+                )
+                check_multi_communicator_launch_order(len(self._routes))
             except Exception as exc:
                 data_plane_error = f"{type(exc).__name__}: {exc}"
             check_data_plane_agreement(
@@ -365,7 +466,8 @@ class M2NWeightTransferEngine(
             self._clear_destination_plan()
             raise
         handle = None
-        group = None
+        groups: dict[int, Any] = {}
+        route_streams: dict[int, torch.cuda.Stream] = {}
         try:
             runtime_error = destination_error
             nccl = None
@@ -379,11 +481,36 @@ class M2NWeightTransferEngine(
                     runtime_error = f"{type(exc).__name__}: {exc}"
             check_runtime_ready_agreement(metadata_group, runtime_error)
             assert nccl is not None and device is not None and handle is not None
-            group = create_m2n_communicator(nccl, metadata_group, unique_id_bytes)
-        except BaseException:
-            if group is not None:
+            communicator_errors: list[str | None] = []
+            for route_index, (route, route_uid) in enumerate(
+                zip(self._routes, unique_id_bytes, strict=True)
+            ):
+                route_error: str | None = None
                 try:
-                    group.abort()
+                    group = create_m2n_communicator(
+                        nccl,
+                        metadata_group,
+                        route_uid,
+                        members=route.members,
+                    )
+                    if group is None:
+                        raise RuntimeError(
+                            "inference worker is missing from transfer route "
+                            f"{route_index}"
+                        )
+                    groups[route_index] = group
+                    route_streams[route_index] = torch.cuda.Stream(device=device)
+                except Exception as exc:
+                    route_error = f"{type(exc).__name__}: {exc}"
+                communicator_errors.append(route_error)
+            check_communicator_init_agreement(
+                metadata_group,
+                communicator_errors,
+            )
+        except BaseException:
+            for route_group in groups.values():
+                try:
+                    route_group.abort()
                 except BaseException:
                     logger.exception(
                         "failed to abort partially initialized nccl_m2n communicator"
@@ -396,10 +523,16 @@ class M2NWeightTransferEngine(
                         "failed to destroy partially initialized nccl_m2n handle"
                     )
             self._clear_destination_plan()
+            self._routes = ()
+            self._param_routes = ()
+            self._source_topology = M2NSourceTopology((), ())
             raise
 
         self._handle = handle
-        self.model_update_group = group
+        self._model_update_groups = groups
+        self._route_streams = route_streams
+        # Retain the scalar alias for single-communicator callers and diagnostics.
+        self.model_update_group = groups.get(0)
 
     def _clear_destination_plan(self) -> None:
         self._clear_update_bindings()
@@ -412,11 +545,11 @@ class M2NWeightTransferEngine(
     def _prepare_source_plan(
         self,
         wire_params: tuple[M2NWireParam, ...],
-        num_trainer_ranks: int,
+        source_topology: M2NSourceTopology,
     ) -> None:
         """Validate worker-visible source metadata without constructing NCCL."""
         self._metas = []
-        for param in wire_params:
+        for param_index, param in enumerate(wire_params):
             dtype = getattr(torch, param.dtype_name, None)
             if not isinstance(dtype, torch.dtype):
                 raise ValueError(
@@ -425,11 +558,13 @@ class M2NWeightTransferEngine(
                 )
             check_transferable(param.name, dtype, param.shape)
             layout = M2NLayout(M2NMesh(param.src_mesh_dims, 0), param.src_placements)
-            if layout.mesh.size != num_trainer_ranks:
+            group_index = source_topology.param_groups[param_index]
+            source_group = source_topology.groups[group_index]
+            if layout.mesh.size != len(source_group):
                 raise ValueError(
                     f"parameter '{param.name}' source mesh covers "
-                    f"{layout.mesh.size} ranks, but there are "
-                    f"{num_trainer_ranks} trainer ranks"
+                    f"{layout.mesh.size} ranks, but source group {group_index} "
+                    f"contains {len(source_group)} ranks"
                 )
             meta = M2NParamMeta(
                 param.name,
@@ -506,6 +641,7 @@ class M2NWeightTransferEngine(
 
     def start_weight_update(self) -> None:
         """Enter one update and bind semantic callbacks to this generation."""
+        self._require_initialized()
         try:
             if self._staging_pool is not None:
                 self._staging_pool.start_update()
@@ -517,11 +653,15 @@ class M2NWeightTransferEngine(
                 initialize_layerwise_reload(self.model)
             self._bind_staged_targets()
         except BaseException:
-            self._discard_update()
+            try:
+                self._reset_failed_update()
+            except BaseException:
+                logger.exception("failed to reset nccl_m2n update state")
             raise
 
     def finish_weight_update(self) -> None:
-        """Require a complete update, finalize consumers, then release staging."""
+        """Finalize one update, or reset it so the trainer can replay it."""
+        self._require_initialized()
         try:
             if self._next_parameter_index != len(self._metas):
                 missing = self._metas[self._next_parameter_index].name
@@ -544,9 +684,30 @@ class M2NWeightTransferEngine(
                 self._staging_pool.finish_update()
 
             self._clear_update_bindings()
-        except BaseException:
-            self._discard_update()
-            raise
+        except BaseException as exc:
+            try:
+                self._reset_failed_update()
+            except BaseException as reset_exc:
+                raise RuntimeError(
+                    "nccl_m2n failed to reset vLLM after a finish failure"
+                ) from reset_exc
+            raise RetryableWeightUpdateError(
+                "vLLM failed to finalize the weight update; worker state was "
+                "reset so the complete update can be retried"
+            ) from exc
+
+    def _reset_failed_update(self) -> None:
+        """Reset loader and staging state without touching M2N transport."""
+        if self._uses_load_weights:
+            from vllm.model_executor.model_loader.reload import (
+                abort_layerwise_reload,
+            )
+
+            # Loader callbacks can enqueue reads from retained staging buffers.
+            # Finish them before restoring tensors and releasing those buffers.
+            torch.accelerator.synchronize()
+            abort_layerwise_reload(self.model)
+        self._discard_update()
 
     def _bind_staged_targets(self) -> None:
         """Re-resolve update-scoped consumers after layerwise initialization."""
@@ -591,29 +752,27 @@ class M2NWeightTransferEngine(
             self._staged_targets[index] = target
 
     def update_weights(self, update_info: dict[str, Any]) -> None:
-        """Discard update-local staging after parse or receive failures."""
+        """Preserve pre-transfer failures; abort failures after transfer starts."""
+        self._require_initialized()
         try:
-            super().update_weights(update_info)
+            typed_update_info = self.parse_update_info(update_info)
+            self.receive_weights(typed_update_info)
         except BaseException:
-            self._discard_update()
+            if self._handle is not None:
+                self._reset_failed_update()
+            raise
+        try:
+            torch.accelerator.synchronize()
+        except BaseException:
+            self._abort_data_plane()
             raise
 
     def receive_weights(self, update_info: M2NWeightTransferUpdateInfo) -> None:
         """Receive one exact contiguous slice of the immutable transfer plan."""
-        if self._handle is None or self.model_update_group is None:
-            raise RuntimeError(
-                "nccl_m2n weight transfer not initialized. "
-                "Call init_transfer_engine() first."
-            )
-        try:
-            self._receive_weights(update_info)
-        except BaseException:
-            self._discard_update()
-            raise
+        self._require_initialized()
+        self._receive_weights(update_info)
 
     def _receive_weights(self, update_info: M2NWeightTransferUpdateInfo) -> None:
-        assert self.model_update_group is not None
-        comm = self.model_update_group
         if not isinstance(update_info.names, list) or any(
             not isinstance(name, str) for name in update_info.names
         ):
@@ -632,26 +791,87 @@ class M2NWeightTransferEngine(
             disable_mtp_completeness_check,
         )
 
-        stream = torch.cuda.current_stream()
         processed = 0
+        transfer_started = False
+        pending_buffers: dict[int, torch.Tensor] = {}
+        waves = build_m2n_transfer_waves(
+            self._routes,
+            [
+                m2n_load_group(destination.mode, destination.staging_group)
+                for destination in self._parameter_destinations
+            ],
+            active_indices=range(start, end),
+        )
 
         def receive_requested_weights() -> Iterator[tuple[str, torch.Tensor]]:
-            nonlocal processed
-            for index in range(start, end):
+            nonlocal processed, transfer_started
+            for wave in waves:
+                # One host dispatcher replays the agreed bounded wave. Distinct
+                # streams may overlap, while every participant observes the
+                # same cross-communicator launch order.
+                for index in wave.issue_indices:
+                    route_index = self._param_routes[index]
+                    route = self._routes[route_index]
+                    comm = self._model_update_groups[route_index]
+                    stream = self._route_streams[route_index]
+                    meta = self._metas[index]
+                    destination = self._parameter_destinations[index]
+
+                    if destination.mode is M2NDestinationMode.IN_PLACE:
+                        buffer = self._resolve_direct_buffer(meta, destination)
+                        transfer_started = True
+                        self._reshard(
+                            comm,
+                            stream,
+                            route.dst_mesh,
+                            meta,
+                            destination.placements,
+                            buffer,
+                        )
+                        processed += 1
+                        continue
+
+                    if destination.mode is M2NDestinationMode.FULL_FALLBACK:
+                        buffer = torch.empty(
+                            meta.shape, dtype=meta.dtype, device=self.device
+                        )
+                    else:
+                        assert self._staging_pool is not None
+                        buffer = self._staging_pool.acquire(
+                            group=cast(int, destination.staging_group),
+                            slot=cast(int, destination.staging_slot),
+                            dtype=meta.dtype,
+                            shape=destination.local_shape,
+                        )
+                    # Retain ownership before launching. If reshard raises,
+                    # abort must complete before this buffer can be released.
+                    pending_buffers[index] = buffer
+                    transfer_started = True
+                    self._reshard(
+                        comm,
+                        stream,
+                        route.dst_mesh,
+                        meta,
+                        destination.placements,
+                        buffer,
+                    )
+
+                if wave.consume_index is None:
+                    continue
+                index = wave.consume_index
                 meta = self._metas[index]
                 destination = self._parameter_destinations[index]
-                if destination.mode is M2NDestinationMode.IN_PLACE:
-                    buffer = self._resolve_direct_buffer(meta, destination)
-                    self._reshard(comm, stream, meta, destination.placements, buffer)
-                    processed += 1
-                    continue
-
+                route_index = self._param_routes[index]
+                stream = self._route_streams[route_index]
+                stream.synchronize()
+                try:
+                    buffer = pending_buffers.pop(index)
+                except KeyError as exc:
+                    raise RuntimeError(
+                        "nccl_m2n transfer schedule consumed parameter "
+                        f"{meta.name!r} before issuing it"
+                    ) from exc
                 if destination.mode is M2NDestinationMode.FULL_FALLBACK:
-                    buffer = torch.empty(
-                        meta.shape, dtype=meta.dtype, device=self.device
-                    )
-                    self._reshard(comm, stream, meta, destination.placements, buffer)
-                    stream.synchronize()
                     processed += 1
                     yield meta.name, buffer
                     continue
@@ -661,14 +881,6 @@ class M2NWeightTransferEngine(
                 group = cast(int, destination.staging_group)
                 slot = cast(int, destination.staging_slot)
                 group_size = cast(int, destination.staging_group_size)
-                buffer = self._staging_pool.acquire(
-                    group=group,
-                    slot=slot,
-                    dtype=meta.dtype,
-                    shape=destination.local_shape,
-                )
-                self._reshard(comm, stream, meta, destination.placements, buffer)
-                stream.synchronize()
                 if target.load(buffer):
                     if slot != group_size - 1:
                         raise RuntimeError(
@@ -676,29 +888,47 @@ class M2NWeightTransferEngine(
                             f"{group} at slot {slot}, before planned final slot "
                             f"{group_size - 1}"
                         )
+                    # Model loaders may enqueue reads of the staging inputs.
+                    # Order every possible reuse stream after those reads.
+                    consumer_stream = torch.cuda.current_stream(self.device)
+                    for transfer_stream in self._route_streams.values():
+                        transfer_stream.wait_stream(consumer_stream)
                     self._staging_pool.release_group(group)
                 processed += 1
+
+            if pending_buffers:
+                raise RuntimeError(
+                    "nccl_m2n route scheduler ended with pending buffers"
+                )
+            self._synchronize_route_streams()
 
         has_fallback = any(
             self._parameter_destinations[index].mode is M2NDestinationMode.FULL_FALLBACK
             for index in range(start, end)
         )
-        with disable_mtp_completeness_check():
-            received_weights = receive_requested_weights()
-            if has_fallback:
-                loaded = self.model.load_weights(received_weights)
-                if loaded is not None:
-                    for _ in loaded:
+        try:
+            with disable_mtp_completeness_check():
+                received_weights = receive_requested_weights()
+                if has_fallback:
+                    loaded = self.model.load_weights(received_weights)
+                    if loaded is not None:
+                        for _ in loaded:
+                            pass
+                else:
+                    for _ in received_weights:
                         pass
-            else:
-                for _ in received_weights:
-                    pass
-        if processed != end - start:
-            raise RuntimeError(
-                "model.load_weights did not consume the complete nccl_m2n "
-                f"fallback sequence: processed {processed}/{end - start}"
-            )
-        self._next_parameter_index = end
+            if processed != end - start:
+                raise RuntimeError(
+                    "model.load_weights did not consume the complete nccl_m2n "
+                    f"fallback sequence: processed {processed}/{end - start}"
+                )
+            self._next_parameter_index = end
+        except BaseException:
+            if transfer_started:
+                # pending buffers and a suspended fallback iterator remain alive
+                # until every local communicator has been aborted.
+                self._abort_data_plane()
+            raise
 
     def _resolve_direct_buffer(
         self, meta: M2NParamMeta, destination: M2NDestination
@@ -733,6 +963,7 @@ class M2NWeightTransferEngine(
         self,
         comm: Any,
         stream: torch.cuda.Stream,
+        route_dst_mesh: M2NMesh,
         src_meta: M2NParamMeta,
         dst_placements: Placements | None,
         dst_buffer: torch.Tensor,
@@ -742,13 +973,12 @@ class M2NWeightTransferEngine(
         `dst_placements` describes the buffer's logical placement over the
         worker mesh; `dst_buffer` is this rank's physical storage.
         """
-        assert self._dst_mesh is not None
         m2n = self._m2n
         src_mesh, resolved_src_placements = resolve_layout(
             src_meta.source_layout.mesh, src_meta.source_layout.placements
         )
         dst_mesh, resolved_dst_placements = resolve_layout(
-            self._dst_mesh, dst_placements
+            route_dst_mesh, dst_placements
         )
         m2n.reshard(
             None,
@@ -762,6 +992,13 @@ class M2NWeightTransferEngine(
             handle=self._handle,
         )
 
+    def _synchronize_route_streams(self) -> None:
+        """Wait for every joined route without assuming a default stream."""
+        for route_index in range(len(self._routes)):
+            stream = self._route_streams.get(route_index)
+            if stream is not None:
+                stream.synchronize()
+
     def _clear_update_bindings(self) -> None:
         self._staged_targets.clear()
         self._next_parameter_index = 0
@@ -772,10 +1009,57 @@ class M2NWeightTransferEngine(
         if self._staging_pool is not None:
             self._staging_pool.discard_update()
 
+    def _require_initialized(self) -> None:
+        if self._handle is None or not self._model_update_groups:
+            raise RuntimeError(
+                "nccl_m2n weight transfer not initialized. "
+                "Call init_transfer_engine() first."
+            )
+
+    def _abort_data_plane(self) -> None:
+        """Abort every communicator without waiting on CUDA streams."""
+        groups, self._model_update_groups = self._model_update_groups, {}
+        handle, self._handle = self._handle, None
+        streams, self._route_streams = self._route_streams, {}
+        self.model_update_group = None
+
+        for group_index, group in groups.items():
+            try:
+                group.abort()
+            except BaseException:
+                logger.exception(
+                    "failed to abort nccl_m2n transfer communicator %d",
+                    group_index,
+                )
+        if handle is not None:
+            try:
+                handle.destroy()
+            except BaseException:
+                logger.exception("failed to destroy nccl_m2n handle")
+        try:
+            self._discard_update()
+        except BaseException:
+            logger.exception("failed to discard nccl_m2n update state")
+
+        self._routes = ()
+        self._param_routes = ()
+        self._source_topology = M2NSourceTopology((), ())
+        self._m2n = None
+        self._metas = []
+        self._clear_destination_plan()
+        # Keep the stream wrappers alive until communicator abort and handle
+        # destruction have completed.
+        del streams
+
     def shutdown(self) -> None:
         """Finish pending GPU work and release M2N communication state."""
         handle, self._handle = self._handle, None
-        group, self.model_update_group = self.model_update_group, None
+        groups, self._model_update_groups = self._model_update_groups, {}
+        self.model_update_group = None
+        streams, self._route_streams = self._route_streams, {}
+        self._routes = ()
+        self._param_routes = ()
+        self._source_topology = M2NSourceTopology((), ())
         self._m2n = None
         self._metas = []
         self._clear_destination_plan()
@@ -791,12 +1075,17 @@ class M2NWeightTransferEngine(
                     first_error = exc
                 logger.exception(message)
 
-        if handle is not None or group is not None:
+        if handle is not None or groups:
             # M2N does not synchronize caller streams on finalize.
             attempt(torch.accelerator.synchronize, "failed to synchronize nccl_m2n")
         if handle is not None:
             attempt(handle.destroy, "failed to destroy nccl_m2n handle")
-        if group is not None:
-            attempt(group.abort, "failed to abort nccl_m2n communicator")
+        for group_index, group in groups.items():
+            attempt(
+                group.abort,
+                f"failed to abort nccl_m2n route {group_index} communicator",
+            )
+        # Keep stream wrappers alive through communicator cleanup.
+        del streams
         if first_error is not None:
             raise first_error
