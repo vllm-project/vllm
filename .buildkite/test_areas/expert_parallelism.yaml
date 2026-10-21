@@ -85,8 +85,9 @@ steps:
       device: mi355_4
       # This asks for 180 but does not get it. The run on 20 October was sent
       # SIGTERM at 90.5 minutes with no teardown line, so something outside the
-      # step caps it there. Three passes at about 30 minutes each do not fit,
-      # which is why the most valuable one runs first.
+      # step caps it there. Since the registration fix landed a pass costs 3 to
+      # 5 minutes rather than half an hour, so the cap is no longer binding, but
+      # the passes are still ordered so the cheapest case comes first.
       timeout_in_minutes: 180
       working_dir: /vllm-workspace/tests
       depends_on:
@@ -101,62 +102,71 @@ steps:
       - requirements/kv_connectors_rocm.txt
       commands:
       - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-      # Pass 28. Build 96369 settled failure 2, so this run moves on to the
-      # cases that were never reached. Six passes, one case each, all
-      # enforce_eager_heavy, which is the first case that drives traffic while
-      # the scale happens.
+      # Pass 29. Build 96404 took enforce_eager_heavy through six passes and all six
+      # completed, so this run widens the matrix and cuts the instrumentation.
       #
-      # What build 96369 settled, from eight passes of enforce_eager_none.
-      # Six of six with the shared arena registration passed end to end, climb
-      # and descent, with no traceback, no fault, no refused export and no
-      # stalled read. Both controls, identical except for that one variable,
-      # died in the layer 0 reads with a memory access fault and then failed the
-      # scale request. Fisher gives p = 0.036 inside the run, and p around 0.006
-      # against the history for a caching allocator that is on.
+      # What build 96404 settled, from six passes of enforce_eager_heavy.
+      # All six carried traffic through both the climb and the descent and all six
+      # completed. Of 11104 requests posted during the scale, 6406 answered 200 and
+      # 4698 answered 503, with nothing outside those two, which matters because the
+      # test records a dropped connection as a status the assertion rejects. Zero
+      # memory access faults, zero refused exports and zero tracebacks in 136150
+      # lines. All 24 communicator teardowns reported one user left on the arena
+      # agent, so the registration was never released mid run.
       #
-      # Three things came out of it and are already applied here.
-      # One, the registration now belongs to the worker rather than to a
-      # communicator: one NIXL agent per expert arena per process, registered
-      # once, with only the topology dependent parts rebuilt. The flag is gone
-      # because there is nothing left to switch.
-      # Two, the reshuffle is synchronous by default. It was behind a debug flag
-      # and it is the fix for wrong answers after a scale, which is exactly what
-      # the traffic cases exercise, so it cannot stay opt in. VLLM_EEP_ASYNC_RESHUFFLE
-      # opts back in for measurement.
-      # Three, VLLM_EEP_HOLD_OLD_EPLB_COMM is deleted. It was unset in all eight
-      # passes and six of six still climbed, so it was a workaround for the same
-      # cause: it delayed the teardown instead of removing it.
+      # It also reached failure 7 for the first time. A routine EPLB rearrange fired
+      # 11 to 12 seconds after every descent, six for six, with no refusal. Traffic
+      # is what made it reachable: the step counter needs 300 steps and without
+      # traffic the final accuracy check ends first.
       #
-      # Also dropped: PYTORCH_NO_HIP_MEMORY_CACHING and its CUDA twin, since the
-      # allocator no longer changes the outcome and leaving it on is about 1.4
-      # times faster, and UCX_RCACHE_ENABLE=n, which was a probe that measured
-      # negative on its own and has no business shipping in every pass.
+      # The shrink trio turned out to be the opposite of what I expected. Correctness
+      # does not need it, three of three pass without it, but it is a real
+      # optimisation: the descent is 4.50 to 4.86 s with it and 6.42 to 7.32 s
+      # without, with downtime 3.52 to 3.95 s against 5.31 to 6.08 s, every value in
+      # one arm better than every value in the other. Retiring the stale groups after
+      # the descent costs 1.65 to 1.72 s with it and 3.38 to 3.57 s without, because
+      # a live four rank communicator is shrunk rather than rebuilt. So it stays, and
+      # this run keeps measuring it in every case rather than only in the heavy one.
       #
-      # What this run asks. First, whether the fix holds once traffic runs
-      # through the scale, which is where failures 3 and 5 used to live. Second,
-      # whether the shrink is still needed at all: there was not one refused
-      # export in 110868 lines of the last run, so the shrink trio may now be
-      # carrying nothing. Three passes keep it and three drop it, interleaved so
-      # that both cells have samples even if the run is cut at 90 minutes.
+      # What this run asks. First, whether the two lighter cases pass as well, since
+      # neither has been run since the registration fix. Second, whether the shrink
+      # gap holds in cases other than heavy. Third, whether all of that still holds
+      # with most of the instrumentation gone.
       #
-      # Timing. enforce_eager_none took 3.1 to 4.6 minutes a pass; heavy should
-      # be nearer 10, so six passes sit around an hour. The pytest timeout is
-      # 840 s rather than 780 for the same reason.
+      # Dropped, with the measured cost of each in build 96404.
+      # AMD_LOG_LEVEL=1, 60600 lines and 35 per cent of the log, every one of them
+      # Cannot get amd_mem_obj noise, and not one refused export in 247018 lines
+      # across two runs. NCCL_DEBUG=WARN still names the refusal if it returns.
+      # VLLM_EEP_DEBUG_MAPPINGS=1, 52998 lines and 47 per cent of the log, for a
+      # hypothesis ruled out 20 of 20: the fault address was outside every mapping
+      # that changed during the window.
+      # VLLM_EEP_DEBUG_XFER_DESCS=1, 5506 lines, for a hypothesis ruled out 3345 of
+      # 3345. VLLM_EPLB_NIXL_XFER_REPORT_S already names a stalled layer.
+      # VLLM_EEP_DEBUG_GROUP_PRESSURE=1, only 48 lines but it walks every object in
+      # the process through gc.get_objects(), and the question it answered is closed.
+      # NCCL_DEBUG_SUBSYS and NCCL_DEBUG_FILE with the six dump commands, which found
+      # nothing in any of the six passes.
+      # VLLM_EEP_WARM_NIXL_TRANSFERS=1, the only one of these that changed behaviour
+      # rather than output. Dropping it moves the test nearer to how this ships.
       #
-      # Coverage is still one case per pass on purpose. The failures here are
-      # coin flips and two samples of a full group answer nothing, so the step
-      # buys repetitions instead of breadth until a case is settled.
-      - EEP_PASS=1of6 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_XFER_DESCS=1 VLLM_EEP_DEBUG_MAPPINGS=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_WARM_NIXL_TRANSFERS=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,ALLOC NCCL_DEBUG_FILE=/tmp/nccl-eep-%h-%p.log VLLM_EEP_USE_COMM_SHRINK=1 NCCL_COMM_SHRINK_SHARE_RESOURCES=1 VLLM_EEP_SHRINK_KEEP_PARENT=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_XFER_DESCS,VLLM_EEP_DEBUG_MAPPINGS,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_WARM_NIXL_TRANSFERS,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,AMD_LOG_LEVEL,PYTHONFAULTHANDLER,NCCL_DEBUG,NCCL_DEBUG_SUBSYS,NCCL_DEBUG_FILE,VLLM_EEP_USE_COMM_SHRINK,NCCL_COMM_SHRINK_SHARE_RESOURCES,VLLM_EEP_SHRINK_KEEP_PARENT pytest -v -s --timeout=840 --timeout-method=thread distributed/test_elastic_ep.py -k enforce_eager_heavy || true
-      - for f in /tmp/nccl-eep-*.log; do [ -e "$$f" ] || continue; echo "=== $$f ==="; echo "lines $$(wc -l < "$$f")"; grep -iE "shrink|ipc|cuMem|hsa_status|Error" "$$f" | tail -40; done; rm -f /tmp/nccl-eep-*.log || true
-      - EEP_PASS=2of6 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_XFER_DESCS=1 VLLM_EEP_DEBUG_MAPPINGS=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_WARM_NIXL_TRANSFERS=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,ALLOC NCCL_DEBUG_FILE=/tmp/nccl-eep-%h-%p.log VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_XFER_DESCS,VLLM_EEP_DEBUG_MAPPINGS,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_WARM_NIXL_TRANSFERS,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,AMD_LOG_LEVEL,PYTHONFAULTHANDLER,NCCL_DEBUG,NCCL_DEBUG_SUBSYS,NCCL_DEBUG_FILE pytest -v -s --timeout=840 --timeout-method=thread distributed/test_elastic_ep.py -k enforce_eager_heavy || true
-      - for f in /tmp/nccl-eep-*.log; do [ -e "$$f" ] || continue; echo "=== $$f ==="; echo "lines $$(wc -l < "$$f")"; grep -iE "shrink|ipc|cuMem|hsa_status|Error" "$$f" | tail -40; done; rm -f /tmp/nccl-eep-*.log || true
-      - EEP_PASS=3of6 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_XFER_DESCS=1 VLLM_EEP_DEBUG_MAPPINGS=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_WARM_NIXL_TRANSFERS=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,ALLOC NCCL_DEBUG_FILE=/tmp/nccl-eep-%h-%p.log VLLM_EEP_USE_COMM_SHRINK=1 NCCL_COMM_SHRINK_SHARE_RESOURCES=1 VLLM_EEP_SHRINK_KEEP_PARENT=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_XFER_DESCS,VLLM_EEP_DEBUG_MAPPINGS,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_WARM_NIXL_TRANSFERS,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,AMD_LOG_LEVEL,PYTHONFAULTHANDLER,NCCL_DEBUG,NCCL_DEBUG_SUBSYS,NCCL_DEBUG_FILE,VLLM_EEP_USE_COMM_SHRINK,NCCL_COMM_SHRINK_SHARE_RESOURCES,VLLM_EEP_SHRINK_KEEP_PARENT pytest -v -s --timeout=840 --timeout-method=thread distributed/test_elastic_ep.py -k enforce_eager_heavy || true
-      - for f in /tmp/nccl-eep-*.log; do [ -e "$$f" ] || continue; echo "=== $$f ==="; echo "lines $$(wc -l < "$$f")"; grep -iE "shrink|ipc|cuMem|hsa_status|Error" "$$f" | tail -40; done; rm -f /tmp/nccl-eep-*.log || true
-      - EEP_PASS=4of6 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_XFER_DESCS=1 VLLM_EEP_DEBUG_MAPPINGS=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_WARM_NIXL_TRANSFERS=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,ALLOC NCCL_DEBUG_FILE=/tmp/nccl-eep-%h-%p.log VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_XFER_DESCS,VLLM_EEP_DEBUG_MAPPINGS,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_WARM_NIXL_TRANSFERS,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,AMD_LOG_LEVEL,PYTHONFAULTHANDLER,NCCL_DEBUG,NCCL_DEBUG_SUBSYS,NCCL_DEBUG_FILE pytest -v -s --timeout=840 --timeout-method=thread distributed/test_elastic_ep.py -k enforce_eager_heavy || true
-      - for f in /tmp/nccl-eep-*.log; do [ -e "$$f" ] || continue; echo "=== $$f ==="; echo "lines $$(wc -l < "$$f")"; grep -iE "shrink|ipc|cuMem|hsa_status|Error" "$$f" | tail -40; done; rm -f /tmp/nccl-eep-*.log || true
-      - EEP_PASS=5of6 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_XFER_DESCS=1 VLLM_EEP_DEBUG_MAPPINGS=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_WARM_NIXL_TRANSFERS=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,ALLOC NCCL_DEBUG_FILE=/tmp/nccl-eep-%h-%p.log VLLM_EEP_USE_COMM_SHRINK=1 NCCL_COMM_SHRINK_SHARE_RESOURCES=1 VLLM_EEP_SHRINK_KEEP_PARENT=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_XFER_DESCS,VLLM_EEP_DEBUG_MAPPINGS,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_WARM_NIXL_TRANSFERS,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,AMD_LOG_LEVEL,PYTHONFAULTHANDLER,NCCL_DEBUG,NCCL_DEBUG_SUBSYS,NCCL_DEBUG_FILE,VLLM_EEP_USE_COMM_SHRINK,NCCL_COMM_SHRINK_SHARE_RESOURCES,VLLM_EEP_SHRINK_KEEP_PARENT pytest -v -s --timeout=840 --timeout-method=thread distributed/test_elastic_ep.py -k enforce_eager_heavy || true
-      - for f in /tmp/nccl-eep-*.log; do [ -e "$$f" ] || continue; echo "=== $$f ==="; echo "lines $$(wc -l < "$$f")"; grep -iE "shrink|ipc|cuMem|hsa_status|Error" "$$f" | tail -40; done; rm -f /tmp/nccl-eep-*.log || true
-      - EEP_PASS=6of6 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_XFER_DESCS=1 VLLM_EEP_DEBUG_MAPPINGS=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_WARM_NIXL_TRANSFERS=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,ALLOC NCCL_DEBUG_FILE=/tmp/nccl-eep-%h-%p.log VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_XFER_DESCS,VLLM_EEP_DEBUG_MAPPINGS,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_WARM_NIXL_TRANSFERS,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,AMD_LOG_LEVEL,PYTHONFAULTHANDLER,NCCL_DEBUG,NCCL_DEBUG_SUBSYS,NCCL_DEBUG_FILE pytest -v -s --timeout=840 --timeout-method=thread distributed/test_elastic_ep.py -k enforce_eager_heavy || true
-      - for f in /tmp/nccl-eep-*.log; do [ -e "$$f" ] || continue; echo "=== $$f ==="; echo "lines $$(wc -l < "$$f")"; grep -iE "shrink|ipc|cuMem|hsa_status|Error" "$$f" | tail -40; done; rm -f /tmp/nccl-eep-*.log || true
-      # Every command ends in || true, so the step stays green and the log is the
-      # deliverable rather than the result.
+      # VLLM_EEP_DEBUG_OFF=1 stays and must not be read as something to clean up. It
+      # silences the rocm_debug probes, which export IPC handles themselves, and an
+      # earlier pass looked like a product failure when only those probes had failed.
+      #
+      # Expect roughly 1.5 MB and 12000 lines instead of 20 MB and 136150, and seven
+      # commands instead of thirteen.
+      #
+      # Timing. Heavy ran 2:57 to 3:29 a pass and none ran 3.1 to 4.6, so six passes
+      # should land near 25 minutes against the 90 minute wall the step actually
+      # gets. The 840 s pytest timeout stays as a per pass guard.
+      #
+      # Coverage is deliberately one case per pass here and not a reduction: the
+      # whole point is one variable moving at a time, which a single pytest run over
+      # all five cases cannot give.
+      - EEP_PASS=1of6 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 PYTHONFAULTHANDLER=1 NCCL_DEBUG=WARN VLLM_EEP_USE_COMM_SHRINK=1 NCCL_COMM_SHRINK_SHARE_RESOURCES=1 VLLM_EEP_SHRINK_KEEP_PARENT=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,PYTHONFAULTHANDLER,NCCL_DEBUG,VLLM_EEP_USE_COMM_SHRINK,NCCL_COMM_SHRINK_SHARE_RESOURCES,VLLM_EEP_SHRINK_KEEP_PARENT pytest -v -s --timeout=840 --timeout-method=thread distributed/test_elastic_ep.py -k enforce_eager_none || true
+      - EEP_PASS=2of6 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 PYTHONFAULTHANDLER=1 NCCL_DEBUG=WARN VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,PYTHONFAULTHANDLER,NCCL_DEBUG pytest -v -s --timeout=840 --timeout-method=thread distributed/test_elastic_ep.py -k enforce_eager_none || true
+      - EEP_PASS=3of6 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 PYTHONFAULTHANDLER=1 NCCL_DEBUG=WARN VLLM_EEP_USE_COMM_SHRINK=1 NCCL_COMM_SHRINK_SHARE_RESOURCES=1 VLLM_EEP_SHRINK_KEEP_PARENT=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,PYTHONFAULTHANDLER,NCCL_DEBUG,VLLM_EEP_USE_COMM_SHRINK,NCCL_COMM_SHRINK_SHARE_RESOURCES,VLLM_EEP_SHRINK_KEEP_PARENT pytest -v -s --timeout=840 --timeout-method=thread distributed/test_elastic_ep.py -k enforce_eager_light || true
+      - EEP_PASS=4of6 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 PYTHONFAULTHANDLER=1 NCCL_DEBUG=WARN VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,PYTHONFAULTHANDLER,NCCL_DEBUG pytest -v -s --timeout=840 --timeout-method=thread distributed/test_elastic_ep.py -k enforce_eager_light || true
+      - EEP_PASS=5of6 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 PYTHONFAULTHANDLER=1 NCCL_DEBUG=WARN VLLM_EEP_USE_COMM_SHRINK=1 NCCL_COMM_SHRINK_SHARE_RESOURCES=1 VLLM_EEP_SHRINK_KEEP_PARENT=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,PYTHONFAULTHANDLER,NCCL_DEBUG,VLLM_EEP_USE_COMM_SHRINK,NCCL_COMM_SHRINK_SHARE_RESOURCES,VLLM_EEP_SHRINK_KEEP_PARENT pytest -v -s --timeout=840 --timeout-method=thread distributed/test_elastic_ep.py -k enforce_eager_heavy || true
+      - EEP_PASS=6of6 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 PYTHONFAULTHANDLER=1 NCCL_DEBUG=WARN VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,PYTHONFAULTHANDLER,NCCL_DEBUG pytest -v -s --timeout=840 --timeout-method=thread distributed/test_elastic_ep.py -k enforce_eager_heavy || true
+      # Every pass ends in || true so one failure does not hide the rest.
