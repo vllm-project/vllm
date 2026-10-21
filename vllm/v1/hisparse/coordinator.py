@@ -107,6 +107,8 @@ class HiSparseCoordinator:
     ) -> None:
         self.managers = managers
         self.max_model_len = max_model_len
+        # Spec decode step tokens an import needs beyond its sequence.
+        self.import_step_tokens = 0
         self.num_reprefillable_tokens = num_reprefillable_tokens
         groups = kv_cache_config.kv_cache_groups
 
@@ -550,7 +552,8 @@ class HiSparseCoordinator:
         if request.request_id in self._pending_imports:
             assert self.host_manager is not None
             self._import_pages[request.request_id] = cdiv(
-                request.num_tokens, self.host_manager.block_size
+                min(request.num_tokens, self.max_model_len) + self.import_step_tokens,
+                self.host_manager.block_size,
             )
 
     def reserved_import_pages(self, request_id: str) -> int:

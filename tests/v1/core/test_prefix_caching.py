@@ -21,6 +21,7 @@ from vllm.distributed.kv_events import (
     BlockRemoved,
     BlockStored,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
     HiSparseConnector,
     HiSparseConnectorScheduler,
@@ -918,9 +919,10 @@ def _use_hisparse_scheduler(scheduler: Scheduler, manager: KVCacheManager) -> No
     beside the mock one, as MultiConnector does."""
     scheduler.kv_cache_manager = manager
     scheduler.kv_cache_config = manager.kv_cache_config
-    hisparse = object.__new__(HiSparseConnector)
-    hisparse.connector_scheduler = HiSparseConnectorScheduler(async_speculative=False)
-    hisparse.connector_scheduler.bind_coordinator(get_hisparse_coordinator(manager))
+    hisparse = HiSparseConnector(
+        scheduler.vllm_config, KVConnectorRole.SCHEDULER, manager.kv_cache_config
+    )
+    hisparse.bind_kv_cache_manager(manager)
     mock_update = scheduler.connector.update_state_after_alloc
 
     def update_state_after_alloc(request, blocks, num_external_tokens):
@@ -1012,6 +1014,89 @@ def test_hisparse_admitted_async_loads_can_finish_with_nothing_running(tmp_path)
     scheduler.finished_recving_kv_req_ids.update(admitted)
     output = scheduler.schedule()
     assert output.num_scheduled_tokens.get("first", 0) > 0
+
+
+def test_hisparse_import_reserves_spec_decode_step(tmp_path):
+    """An import's reservation covers the spec decode step it takes on resume.
+
+    Both prompts are fully imported, so without the step page both are
+    admitted and the first to resume finds no host page for its draft tokens.
+    """
+    from .utils import create_scheduler, mock_kv
+
+    (tmp_path / "config.json").write_text(
+        '{"architectures": ["OPTForCausalLM"], "model_type": "opt"}'
+    )
+    scheduler = create_scheduler(
+        model=str(tmp_path),
+        skip_tokenizer_init=True,
+        max_model_len=128,
+        num_speculative_tokens=4,
+        use_kv_connector=mock_kv(
+            matched_tokens=3 * HISPARSE_BLOCK_SIZE - 1, is_async=True
+        ),
+    )
+    # One null block plus six usable host blocks: two three-page prompts.
+    manager = make_hisparse_kv_cache_manager(32, 7)
+    _use_hisparse_scheduler(scheduler, manager)
+    for request_id, offset in (("first", 0), ("second", 1000)):
+        scheduler.add_request(
+            make_request(
+                request_id,
+                list(range(offset, offset + 3 * HISPARSE_BLOCK_SIZE)),
+                HISPARSE_BLOCK_SIZE,
+                sha256,
+            )
+        )
+        scheduler.schedule()
+    admitted = {r.request_id for r in scheduler._inflight_prefills}
+    assert admitted == {"first"}
+
+    scheduler.finished_recving_kv_req_ids.update(admitted)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens.get("first", 0) > 0
+
+
+def test_hisparse_import_reservation_does_not_gate_local_admissions(tmp_path):
+    """Like the GPU pool's, the host reservation only gates async loads; a
+    local admission runs and can be preempted, so it cannot strand an import."""
+    from .utils import create_scheduler, mock_kv
+
+    (tmp_path / "config.json").write_text(
+        '{"architectures": ["OPTForCausalLM"], "model_type": "opt"}'
+    )
+    scheduler = create_scheduler(
+        model=str(tmp_path),
+        skip_tokenizer_init=True,
+        max_model_len=128,
+        use_kv_connector=mock_kv(matched_tokens=HISPARSE_BLOCK_SIZE, is_async=True),
+    )
+    # One null block plus seven usable host blocks; the import holds one and
+    # reserves five more, leaving one page beyond its reservation.
+    manager = make_hisparse_kv_cache_manager(32, 8)
+    _use_hisparse_scheduler(scheduler, manager)
+    scheduler.add_request(
+        make_request(
+            "import", list(range(6 * HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
+        )
+    )
+    scheduler.schedule()
+    match_external = scheduler.connector.get_num_new_matched_tokens
+    scheduler.connector.get_num_new_matched_tokens = lambda request, num_computed: (
+        (0, False)
+        if request.request_id == "local"
+        else match_external(request, num_computed)
+    )
+    scheduler.add_request(
+        make_request(
+            "local",
+            list(range(1000, 1000 + 2 * HISPARSE_BLOCK_SIZE)),
+            HISPARSE_BLOCK_SIZE,
+            sha256,
+        )
+    )
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens.get("local", 0) > 0
 
 
 @pytest.mark.parametrize(
