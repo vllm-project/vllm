@@ -395,7 +395,9 @@ def test_drain_pending_updates_semantics():
     tracker.drain_pending_updates()
     assert tracker._tier_states[0].primary_write_chunk_count == 0
     assert tracker._tier_states[1].primary_write_chunk_count == 2
-    values = tracker.take_stats().data["data"]
+    stats = tracker.take_stats()
+    assert stats is not None
+    values = stats.data["data"]
     assert values[TieringOffloadingMetrics.PROMOTION_ALLOCATION_FAILURES][()] == 1
 
     tracker.safe_counter_update(

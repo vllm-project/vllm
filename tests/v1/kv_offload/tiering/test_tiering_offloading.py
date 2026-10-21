@@ -2331,7 +2331,7 @@ class TestTieringOffloadingManagerWithFsTier:
         for k in keys:
             r = manager.lookup(k, req_ctx)
             assert r == LookupResult.HIT, (
-                f"key {k} expected HIT after promotion, got {r!r}"
+                f"key {k!r} expected HIT after promotion, got {r!r}"
             )
 
     def test_two_fs_tier_promotions_different_keys(self, tmp_path):
