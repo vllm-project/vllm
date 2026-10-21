@@ -51,6 +51,7 @@ _VLLM_TOKENIZERS = {
     "deepseek_v4": ("deepseek_v4", "DeepseekV4Tokenizer"),
     "deepseek_v41": ("deepseek_v41", "DeepseekV41Tokenizer"),
     "hf": ("hf", "CachedHfTokenizer"),
+    "glm5_next": ("hf", "CachedHfTokenizer"),
     "kimi_audio": ("kimi_audio", "KimiAudioTokenizer"),
     "kimi_k3": ("hf", "CachedHfTokenizer"),
     "mistral": ("mistral", "MistralTokenizer"),

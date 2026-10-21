@@ -15,16 +15,16 @@ use crate::backend::{
     ChatBackend, DynChatBackend, LoadModelBackendsOptions, LoadedModelBackends,
     NewChatOutputProcessorOptions,
 };
-use crate::error::Result;
+use crate::error::{Result, bail_chat_template_thrown};
 use crate::multimodal::{MultimodalConfigFiles, MultimodalModelInfo};
 use crate::output::{
     DefaultChatOutputProcessor, HarmonyChatOutputProcessor, validate_harmony_parser_overrides,
 };
 use crate::parser::unified::{HfTemplateError, ResponseTemplate};
-use crate::renderer::hf::{HfChatRenderer, MultimodalRenderInfo};
+use crate::renderer::hf::{HfChatRenderer, MultimodalRenderInfo, load_checkpoint_chat_template};
 use crate::renderer::{
     DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DeepSeekV41ChatRenderer, DynChatRenderer,
-    HarmonyChatRenderer, InklingChatRenderer, KimiK3ChatRenderer,
+    Glm5NextChatRenderer, HarmonyChatRenderer, InklingChatRenderer, KimiK3ChatRenderer,
 };
 use crate::request::ChatRequest;
 use crate::{DynChatOutputProcessor, RendererSelection};
@@ -70,7 +70,7 @@ impl HfChatBackend {
         let multimodal_render_info = resolve_multimodal_render_info(multimodal_model_info.as_ref());
         let response_template = load_response_template(&files)?;
 
-        let renderer = options.renderer.resolve(model_type);
+        let renderer = resolve_renderer(&options, model_type, &files)?;
         let chat_renderer: DynChatRenderer = match renderer {
             RendererSelection::Auto => unreachable!("renderer auto should be resolved above"),
             RendererSelection::Hf => Arc::new(HfChatRenderer::load(
@@ -98,6 +98,18 @@ impl HfChatBackend {
                 tokenizer.clone(),
                 options.default_chat_template_kwargs,
             )),
+            RendererSelection::Glm5Next => {
+                if options.chat_template.is_some() {
+                    bail_chat_template_thrown!(
+                        "glm5_next does not accept --chat-template; use --tokenizer-mode hf for Jinja"
+                    );
+                }
+                Arc::new(
+                    Glm5NextChatRenderer::new(options.default_chat_template_kwargs)
+                        .with_multimodal(model_type == "glm5_next")
+                        .with_tokenizer(tokenizer.clone())?,
+                )
+            }
         };
 
         info!(
@@ -116,6 +128,30 @@ impl HfChatBackend {
             response_template,
         })
     }
+}
+
+/// Resolve the renderer selection for the model files.
+///
+/// `auto` selects the native GLM-5.3 renderer only when the checkpoint ships a
+/// template it reproduces, since GLM-5 through GLM-5.3 share a model type.
+fn resolve_renderer(
+    options: &LoadModelBackendsOptions,
+    model_type: &str,
+    files: &ResolvedModelFiles,
+) -> Result<RendererSelection> {
+    Ok(match options.renderer.resolve(model_type) {
+        RendererSelection::Hf
+            if options.renderer == RendererSelection::Auto
+                && options.chat_template.is_none()
+                && Glm5NextChatRenderer::AUTO_MODEL_TYPES.contains(&model_type)
+                && Glm5NextChatRenderer::is_shipped_template(
+                    load_checkpoint_chat_template(files)?.as_deref(),
+                ) =>
+        {
+            RendererSelection::Glm5Next
+        }
+        renderer => renderer,
+    })
 }
 
 /// Load and compile the checkpoint's `response_template`, if any.
@@ -226,7 +262,7 @@ mod tests {
     use vllm_text::tokenizer::DynTokenizer;
     use vllm_tokenizer::test_utils::TestTokenizer;
 
-    use super::HfChatBackend;
+    use super::{HfChatBackend, resolve_renderer};
     use crate::backend::{ChatBackend, LoadModelBackendsOptions, NewChatOutputProcessorOptions};
     use crate::request::{ChatContent, ChatMessage, ChatRequest};
     use crate::{ParserSelection, RendererSelection};
@@ -249,12 +285,23 @@ mod tests {
         config_json: &str,
         tokenizer_config_json: &str,
     ) -> vllm_text::backend::hf::ResolvedModelFiles {
+        resolved_files_with_template(config_json, tokenizer_config_json, None)
+    }
+
+    fn resolved_files_with_template(
+        config_json: &str,
+        tokenizer_config_json: &str,
+        chat_template: Option<&str>,
+    ) -> vllm_text::backend::hf::ResolvedModelFiles {
         let dir = tempdir().unwrap();
         let root = dir.keep();
         let config_path = root.join("config.json");
         let tokenizer_config_path = root.join("tokenizer_config.json");
         write_json(&config_path, config_json);
         write_json(&tokenizer_config_path, tokenizer_config_json);
+        if let Some(chat_template) = chat_template {
+            std::fs::write(root.join("chat_template.jinja"), chat_template).unwrap();
+        }
 
         write_json(&root.join("tokenizer.json"), "{}");
         futures::executor::block_on(vllm_text::backend::hf::ResolvedModelFiles::new(
@@ -268,6 +315,21 @@ mod tests {
         Arc::new(TestTokenizer::new())
     }
 
+    fn test_options(renderer: RendererSelection) -> LoadModelBackendsOptions {
+        LoadModelBackendsOptions {
+            revision: None,
+            hf_overrides: Default::default(),
+            generation_config: Default::default(),
+            renderer,
+            language_model_only: false,
+            chat_template_content_format: Default::default(),
+            chat_template: None,
+            trust_request_chat_template: false,
+            default_chat_template_kwargs: HashMap::new(),
+            limit_mm_per_prompt: HashMap::new(),
+        }
+    }
+
     fn backend_for_selection(
         renderer: RendererSelection,
         config_json: &str,
@@ -276,18 +338,7 @@ mod tests {
         HfChatBackend::from_resolved_model_files(
             resolved_files(config_json, tokenizer_config_json),
             "test-model".to_string(),
-            LoadModelBackendsOptions {
-                revision: None,
-                hf_overrides: Default::default(),
-                generation_config: Default::default(),
-                renderer,
-                language_model_only: false,
-                chat_template_content_format: Default::default(),
-                chat_template: None,
-                trust_request_chat_template: false,
-                default_chat_template_kwargs: HashMap::new(),
-                limit_mm_per_prompt: HashMap::new(),
-            },
+            test_options(renderer),
             test_tokenizer(),
         )
         .unwrap()
@@ -483,5 +534,35 @@ mod tests {
             prompt,
             "<｜begin▁of▁sentence｜><｜User｜>hello<｜Assistant｜></think>"
         );
+    }
+
+    #[test]
+    fn auto_uses_glm5_next_renderer_only_for_shipped_glm_5_3_templates() {
+        const GLM_5_3: &str = include_str!("../renderer/glm5_next/fixtures/glm_5_3.jinja");
+        const GLM_5_3_FLASH: &str =
+            include_str!("../renderer/glm5_next/fixtures/glm_5_3_flash.jinja");
+        // GLM-5 through GLM-5.2 share `glm_moe_dsa` with their own templates.
+        const OTHER: &str = "{{ messages[0].content }}";
+
+        let resolve = |renderer, model_type, template, custom_template: Option<&str>| {
+            let files = resolved_files_with_template(
+                &format!(r#"{{"model_type":"{model_type}"}}"#),
+                "{}",
+                Some(template),
+            );
+            let options = LoadModelBackendsOptions {
+                chat_template: custom_template.map(str::to_string),
+                ..test_options(renderer)
+            };
+            resolve_renderer(&options, model_type, &files).unwrap()
+        };
+
+        use RendererSelection::{Auto, Glm5Next, Hf};
+        assert_eq!(resolve(Auto, "glm_moe_dsa", GLM_5_3, None), Glm5Next);
+        assert_eq!(resolve(Auto, "glm5_next", GLM_5_3_FLASH, None), Glm5Next);
+        assert_eq!(resolve(Auto, "glm_moe_dsa", OTHER, None), Hf);
+        assert_eq!(resolve(Auto, "glm4_moe", GLM_5_3, None), Hf);
+        assert_eq!(resolve(Auto, "glm_moe_dsa", GLM_5_3, Some(OTHER)), Hf);
+        assert_eq!(resolve(Glm5Next, "glm_moe_dsa", OTHER, None), Glm5Next);
     }
 }

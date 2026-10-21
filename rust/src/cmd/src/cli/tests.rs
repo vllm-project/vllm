@@ -82,6 +82,22 @@ fn render_args_allow_omitted_max_model_len() {
 }
 
 #[test]
+fn render_args_select_native_glm5_next() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "render",
+        "local-glm5_next",
+        "--tokenizer-mode",
+        "glm5_next",
+    ])
+    .unwrap();
+    let Command::Render(args) = cli.command else {
+        panic!("expected render args");
+    };
+    assert_eq!(args.into_config().renderer, RendererSelection::Glm5Next);
+}
+
+#[test]
 fn render_args_build_config_with_tls() {
     let cli = Cli::try_parse_from([
         "vllm-rs",
@@ -943,7 +959,7 @@ fn serve_args_reject_unknown_renderer_value() {
     .unwrap_err();
 
     expect![[r#"
-        error: invalid value 'definitely_missing' for '--tokenizer-mode <RENDERER>': unknown renderer `definitely_missing` (expected one of: auto, hf, deepseek_v32, deepseek_v4, deepseek_v41, harmony, inkling, kimi_k3)
+        error: invalid value 'definitely_missing' for '--tokenizer-mode <RENDERER>': unknown renderer `definitely_missing` (expected one of: auto, hf, deepseek_v32, deepseek_v4, deepseek_v41, harmony, inkling, kimi_k3, glm5_next)
 
         For more information, try '--help'.
     "#]]
