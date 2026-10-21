@@ -38,6 +38,9 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
+from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
+    _gather_initial_states_kernel,
+)
 from vllm.model_executor.layers.mamba.ops.layernorm_gated import rms_norm_gated
 from vllm.model_executor.layers.mamba.ops.selective_state_update_replayssm_output_only import (  # noqa: E501
     selective_state_update_replayssm_output_only,
@@ -539,6 +542,18 @@ class MambaMixer2(MambaBase, PluggableLayer):
             else None
         )
         self.mamba_config = vllm_config.mamba_config
+        if (
+            current_platform.is_cuda()
+            and vllm_config.kernel_config.enable_jit_warmup
+            and model_config is not None
+            and cache_config is not None
+        ):
+            _gather_initial_states_kernel.register_warmup(
+                row_size=(self.num_heads // self.tp_size)
+                * self.head_dim
+                * self.ssm_state_size,
+                state_dtype=self.get_state_dtype()[1],
+            )
         if self.use_replayssm and self.num_heads % self.tp_size != 0:
             raise ValueError(
                 "--use-replayssm requires tensor-parallel heads to divide evenly"
@@ -668,9 +683,13 @@ class MambaMixer2(MambaBase, PluggableLayer):
         # HAS_INITSTATES as a constexpr, and _state_passing_fwd also
         # HAS_FINAL_STATES, producing separate compiled binaries. Warm up
         # all code paths so none triggers JIT compilation during inference.
-        for use_initial_states, write_final_states in itertools.product(
-            (False, True), repeat=2
-        ):
+        warmup_cases = [
+            (use_initial, write_final, False)
+            for use_initial, write_final in itertools.product((False, True), repeat=2)
+        ]
+        if current_platform.is_cuda():
+            warmup_cases.append((True, True, True))
+        for use_initial_states, write_final_states, indexed_state in warmup_cases:
             initial_states = (
                 torch.randn(
                     batch,
@@ -684,6 +703,17 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 else None
             )
             try:
+                initial_state_args = (
+                    dict(
+                        initial_state_cache=initial_states,
+                        initial_state_indices=final_state_indices,
+                        has_initial_state=torch.ones_like(
+                            final_state_indices, dtype=torch.bool
+                        ),
+                    )
+                    if indexed_state
+                    else dict(initial_states=initial_states)
+                )
                 mamba_chunk_scan_combined_varlen(
                     x=x,
                     dt=dt,
@@ -699,7 +729,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     D=self.D,
                     z=None,
                     dt_bias=self.dt_bias,
-                    initial_states=initial_states,
+                    **initial_state_args,
                     dt_softplus=True,
                     dt_limit=(0.0, float("inf")),
                     state_dtype=ssm_state_dtype,
@@ -846,14 +876,10 @@ class MambaMixer2(MambaBase, PluggableLayer):
             )
 
             # 3. State Space Model sequence transformation
-            initial_states = None
+            initial_state_cache = None
             if has_initial_states_p is not None and prep_initial_states:
                 assert state_indices_tensor_p is not None
-                initial_states = torch.where(
-                    has_initial_states_p[:, None, None, None],
-                    ssm_state[state_indices_tensor_p],
-                    0,
-                )
+                initial_state_cache = ssm_state
 
             # NOTE: final output is an in-place update of out tensor
             assert preallocated_ssm_out_p is not None
@@ -877,7 +903,9 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 cu_seqlens=query_start_loc_p,
                 cu_chunk_seqlens=cu_chunk_seqlen_p,
                 last_chunk_indices=last_chunk_indices_p,
-                initial_states=initial_states,
+                initial_state_cache=initial_state_cache,
+                initial_state_indices=state_indices_tensor_p,
+                has_initial_state=has_initial_states_p,
                 return_intermediate_states=has_checkpoints,
                 dt_softplus=True,
                 dt_limit=(0.0, float("inf")),
