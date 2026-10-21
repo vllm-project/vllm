@@ -1493,19 +1493,9 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   #
   # _rocm_C extension
   #
-  # The paged attention *instantiations* are split over one translation unit
-  # per (dtype, kv-cache dtype, head size) combination: compiling them all in a
-  # single file serializes ~10 min of device code generation onto one core.
-  # attention_dispatch.cu only holds the runtime dispatch, attention_kernels.cuh
-  # the kernels and launchers. A file listed here is dead weight unless
-  # attention_dispatch.cu also dispatches its entry point (guarded below).
-
   # The skinny GEMM launchers are split per kernel family: the kernels (and the
   # device code they instantiate) are shared through skinny_gemms.cuh, but each
   # family gets its own translation unit so ninja compiles them in parallel.
-  # skinny_gemms*.cu are built on gfx9/gfx11 ISA (MFMA, dot2/dot4, legacy
-  # s_waitcnt asm) that gfx1250 (gfx12) does not provide; they are excluded from
-  # the gfx1250 build below.
   set(VLLM_SKINNY_SRC
     "csrc/rocm/skinny_gemms_llmm1.cu"
     "csrc/rocm/skinny_gemms_wvsplitk.cu"
@@ -1513,6 +1503,12 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/rocm/skinny_gemms_wvsplitkq.cu"
     "csrc/rocm/skinny_gemms_int4.cu")
 
+  # The paged attention *instantiations* are split over one translation unit
+  # per (dtype, kv-cache dtype, head size) combination: compiling them all in a
+  # single file serializes ~10 min of device code generation onto one core.
+  # attention_dispatch.cu only holds the runtime dispatch, attention_kernels.cuh
+  # the kernels and launchers. A file listed here is dead weight unless
+  # attention_dispatch.cu also dispatches its entry point (guarded below).
   set(VLLM_ROCM_EXT_SRC
     "csrc/rocm/torch_bindings.cpp"
     ${VLLM_SKINNY_SRC}

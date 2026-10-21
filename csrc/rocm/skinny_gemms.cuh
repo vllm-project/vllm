@@ -1,10 +1,11 @@
-#pragma once
-
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+//
 // Kernels and shared helpers of the "skinny" (wave-split-K) GEMMs. The host
-// launchers live in one translation unit per kernel family
-// (skinny_gemms_{llmm1,wvsplitk,wvsplitkrc,wvsplitkq}.cu) so that ninja can
-// generate their device code in parallel: kept together they took ~58 s of
-// AMDGPU codegen on a single core.
+// launchers live in one translation unit per kernel family, see
+// skinny_gemms_{llmm1,wvsplitk,wvsplitkrc,wvsplitkq}.cu.
+
+#pragma once
 
 // <torch/all.h> is not needed here: it also pulls in autograd, nn and jit, which
 // is several seconds of frontend for every skinny GEMM translation unit.
@@ -25,11 +26,6 @@
 #include "core/cuda_compat.h"
 #include "core/utils.hpp"
 
-// Number of streams the pre-allocated split-K pool covers. ~7.5 MiB per slot.
-static constexpr int64_t kWvSlots = 8;
-// Slots held back for capturing streams, which cannot allocate one themselves.
-static constexpr int64_t kWvCaptureSlots = 8;
-
 // TODO(rasmith): The kernels in this file are susceptible to integer overflow
 // issues, do not take strides, and are unable to handle PyTorch tensors that
 // return is_contiguous() as False (the tensors may actually be contiguous
@@ -37,25 +33,36 @@ static constexpr int64_t kWvCaptureSlots = 8;
 //
 // However, it may be possible to fix these kernels to handle both issues.
 
-#if defined(__HIPCC__) && \
+// Arch macros. Guarded with #ifndef because this is now a header: a second copy
+// of any of them (e.g. from another ROCm kernel header) must not warn or
+// redefine.
+#if !defined(__HIP__GFX9__) && defined(__HIPCC__) && \
     (defined(__gfx90a__) || defined(__gfx942__) || defined(__gfx950__))
   #define __HIP__GFX9__
 #endif
 
 // Combined RDNA macro (gfx11 + gfx12) - both use 32-wide wavefronts
-#if defined(__GFX11__) || defined(__GFX12__)
+#if !defined(__HIP__GFX1X__) && (defined(__GFX11__) || defined(__GFX12__))
   #define __HIP__GFX1X__
 #endif
 
-#if defined(__HIPCC__) && (defined(__gfx942__) || defined(__gfx950__))
+#if !defined(__HIP__MI3XX__) && defined(__HIPCC__) && \
+    (defined(__gfx942__) || defined(__gfx950__))
   #define __HIP__MI3XX__
 #endif
 
-#if defined(__gfx950__)
-  #define LDS_SIZE 160 * 1024
-#else
-  #define LDS_SIZE 64 * 1024
+#ifndef LDS_SIZE
+  #if defined(__gfx950__)
+    #define LDS_SIZE 160 * 1024
+  #else
+    #define LDS_SIZE 64 * 1024
+  #endif
 #endif
+
+// Traps unconditionally, so it does not depend on NDEBUG or on <assert.h> being
+// included with a particular state (this used to #undef/#define NDEBUG around
+// the include, which is order-dependent now that the file is a header).
+#define UNREACHABLE_CODE __builtin_trap();
 
 inline int get_lds_size() {
   static const int result = [] {
@@ -86,7 +93,7 @@ inline bool on_gfx12() {
   return result;
 }
 
-inline bool on_gfx1151() {
+inline inline bool on_gfx1151() {
   static const bool result = [] {
     const auto* dprops = at::cuda::getCurrentDeviceProperties();
     const std::string device_arch = dprops->gcnArchName;
@@ -94,15 +101,6 @@ inline bool on_gfx1151() {
   }();
   return result;
 }
-
-#if defined(NDEBUG)
-  #undef NDEBUG
-  #include <assert.h>
-  #define UNREACHABLE_CODE assert(false);
-  #define NDEBUG
-#else
-  #define UNREACHABLE_CODE assert(false);
-#endif
 
 template <typename T>
 struct scalar {};
