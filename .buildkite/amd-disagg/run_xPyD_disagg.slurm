@@ -61,12 +61,6 @@ echo "$DISAGG_SCRIPTS_DIR"
 CONTAINER_SCRIPTS="${CONTAINER_SCRIPTS:-/vllm-workspace/.buildkite/amd-disagg}"
 CLUSTER_ENV_IN="${CLUSTER_ENV_IN:-${CONTAINER_SCRIPTS}/cluster.sh}"
 
-# Overlay the vLLM fixes staged by run-slurm-disagg-test.sh onto the image's
-# copies. VLLM_DIST_PACKAGES must match the image. If it doesn't, the mounts land
-# on paths nothing imports and the run silently uses the image's copies.
-VLLM_DIST_PACKAGES="${VLLM_DIST_PACKAGES:-/usr/local/lib/python3.12/dist-packages}"
-VLLM_OVERLAY_ARGS=()
-
 
 # Health endpoints (TP-mode ports from cluster.sh defaults).
 PREFILL_PORT="${PREFILL_PORT:-8100}"
@@ -467,18 +461,6 @@ run_node_container() {
         RUN_IMAGE="$ainic_tag"
     fi
 
-    # Mount only the overlays this image doesn't already ship byte-for-byte.
-    local overlay_args=() i src dst
-    for (( i = 0; i < ${#VLLM_OVERLAY_ARGS[@]}; i += 2 )); do
-        IFS=: read -r src dst _ <<< "${VLLM_OVERLAY_ARGS[i+1]}"
-        if docker run --rm --entrypoint cat "$RUN_IMAGE" "$dst" 2>/dev/null | cmp -s - "$src"; then
-            echo "Rank $rank overlay skipped, image already ships it: ${dst##*/dist-packages/}"
-        else
-            overlay_args+=("${VLLM_OVERLAY_ARGS[i]}" "${VLLM_OVERLAY_ARGS[i+1]}")
-        fi
-    done
-    echo "Rank $rank vLLM overlay mounts: ${overlay_args[*]:-<none>}"
-
     # Start the external vLLM router as a SEPARATE container on the rank-0 node.
     if [ "$ROUTER_TYPE" = "vllm-router" ] && [ "$rank" = "0" ] && [ "$DRY_RUN" = "1" ]; then
         echo "DRY_RUN: would start vllm-router on $(hostname): $VLLM_ROUTER_IMAGE (discovery :$PROXY_PING_PORT, port :$ROUTER_PORT, policy $ROUTER_POLICY, dp_local=$ROUTER_DP_LOCAL)"
@@ -505,7 +487,6 @@ run_node_container() {
 
     docker run --rm \
 	--user "$(id -u):$(id -g)" \
-        "${overlay_args[@]}" \
         --device /dev/dri \
         --device /dev/kfd \
         --device /dev/infiniband \
@@ -594,12 +575,11 @@ RC=0
 if command -v srun >/dev/null 2>&1; then
     # classic Slurm / Spur >= 0.14: fan out one task/node; ship the fns and call
     # them with the srun-supplied per-task SLURM_PROCID (escaped so the remote
-    # shell expands it). Arrays don't survive the environment, so the overlay
-    # mounts travel as a declaration alongside the functions.
+    # shell expands it).
     srun --label \
          --nodelist="$SELECTED_NODELIST_STR" \
          --nodes="$NUM_NODES" --ntasks="$NUM_NODES" --ntasks-per-node=1 \
-      bash -c "$(declare -p VLLM_OVERLAY_ARGS); $(declare -f preflight_node run_node_container); run_node_container \"\$SLURM_PROCID\"" || RC=$?
+      bash -c "$(declare -f preflight_node run_node_container); run_node_container \"\$SLURM_PROCID\"" || RC=$?
 else
     # Spur: the body already runs once per node; this node's rank is
     # SPUR_TASK_OFFSET (fall back to NODE_RANK, then 0 for a single-node run).

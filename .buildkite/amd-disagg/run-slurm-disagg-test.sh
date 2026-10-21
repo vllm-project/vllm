@@ -68,16 +68,6 @@ chmod -R u+rwX "${STAGED_DIR}" 2>/dev/null || true
 export DISAGG_SCRIPTS_DIR="${STAGED_DIR}"
 echo "[slurm-submit] staged scripts for compute nodes: ${DISAGG_SCRIPTS_DIR}" >&2
 
-# ---- vLLM source overlays --------------------------------------------------
-# The container imports vLLM from the image's dist-packages, so a repo-side fix
-# never reaches a run on its own. Stage the files we need to override next to
-# the scripts; run_xPyD_disagg.slurm bind-mounts them over the image's copies.
-# Staging from the repo (rather than keeping a second copy in this directory)
-# keeps the repo the single source of truth. Overlays replace the image's whole
-# file: keep these copies in sync with the image's version, or they roll back
-# its later upstream changes. Each node skips an overlay its image already ships
-# byte-for-byte.
-VLLM_REPO_ROOT="${VLLM_REPO_ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 export IMAGE MODEL_NAME WIDE_EP_MODE xP yD GPUS_PER_NODE RUN_AFTER_HEALTH HEALTH_TIMEOUT_S
 export SHARED_MOUNT LOG_ROOT DRY_RUN MORIIO_READ_MODE
 export ROUTER_TYPE ROUTER_PORT VLLM_ROUTER_IMAGE
