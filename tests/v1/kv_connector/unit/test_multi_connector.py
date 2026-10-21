@@ -33,6 +33,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlKVConnectorStats,
 )
+from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.engine.core_client import InprocClient
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput, KVConnectorWorkerMetadata
@@ -251,10 +253,12 @@ def test_cache_hit_sources_delegate_to_selected_connector(mc: MultiConnector):
     request = MagicMock(request_id="request")
     mc._requests_to_connector[request.request_id] = 1
     sources = {CacheHitSource.DISK: 32}
-    mc._connectors[1].get_external_cache_hit_sources.return_value = sources
+    selected_connector = mc._connectors[1]
+    assert isinstance(selected_connector, MagicMock)
+    selected_connector.get_external_cache_hit_sources.return_value = sources
 
     assert mc.get_external_cache_hit_sources(request, 32) is sources
-    mc._connectors[1].get_external_cache_hit_sources.assert_called_once_with(
+    selected_connector.get_external_cache_hit_sources.assert_called_once_with(
         request, 32
     )
 
@@ -639,6 +643,7 @@ class TestMultiConnectorStats:
 
         stats = MultiConnector.build_kv_connector_stats(data=serialized_data)
 
+        assert stats is not None
         assert "NixlConnector" in stats.data
         nixl_stats = stats.data["NixlConnector"]
         assert isinstance(nixl_stats, NixlKVConnectorStats)
@@ -1141,6 +1146,7 @@ def test_multi_connector_worker_metadata(mc):
 
     def assert_update_connector_output_called(mc: MultiConnector):
         for c in mc._connectors:
+            assert isinstance(c.update_connector_output, MagicMock)
             c.update_connector_output.assert_called_once()
             c.update_connector_output.reset_mock()
 
@@ -1288,7 +1294,10 @@ def test_multi_connector_mixed_hma_disables_hybrid_kv_cache(monkeypatch):
             )
             # The scheduler-side MultiConnector should detect the mixed
             # HMA support among its sub-connectors.
-            scheduler = llm.llm_engine.engine_core.engine_core.scheduler
+            engine_core_client = llm.llm_engine.engine_core
+            assert isinstance(engine_core_client, InprocClient)
+            scheduler = engine_core_client.engine_core.scheduler
+            assert isinstance(scheduler, Scheduler)
             mc = scheduler.connector
             assert isinstance(mc, MultiConnector)
             assert mc._all_support_hma is False
