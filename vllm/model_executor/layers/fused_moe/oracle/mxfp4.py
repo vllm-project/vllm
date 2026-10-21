@@ -54,6 +54,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import all_close_1d
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import get_triton_kernels_version
 from vllm.utils.math_utils import round_up
@@ -1495,12 +1496,12 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
                 "emulation. Using the maximum across experts for each layer."
             )
         if w13_input_scale is not None:
-            layer.w13_input_scale = torch.nn.Parameter(
-                w13_input_scale.max().to(torch.float32), requires_grad=False
+            replace_parameter(
+                layer, "w13_input_scale", w13_input_scale.max().to(torch.float32)
             )
         if w2_input_scale is not None:
-            layer.w2_input_scale = torch.nn.Parameter(
-                w2_input_scale.max().to(torch.float32), requires_grad=False
+            replace_parameter(
+                layer, "w2_input_scale", w2_input_scale.max().to(torch.float32)
             )
         return (
             w13_weight,
