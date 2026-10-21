@@ -85,6 +85,19 @@ def _widths(vllm_config) -> tuple[int, ...]:
     return served or tuple(range(1, rows + 1))
 
 
+def _draft_widths(vllm_config) -> tuple[int, ...]:
+    """A draft step's rows: one block of draft tokens a request, so multiples of
+    the block rather than the target's capture sizes.
+
+    Intuitively [block, 2*block, ..., seqs*block or max_rows]
+    """
+    speculative = vllm_config.speculative_config
+    assert speculative is not None
+    block = speculative.num_speculative_tokens
+    seqs = vllm_config.scheduler_config.max_num_seqs
+    return tuple(range(block, min(block * seqs, max_rows()) + 1, block))
+
+
 def _gpu_arch() -> str:
     """The GPU's architecture without its feature flags, for example gfx942."""
     props = torch.cuda.get_device_properties(torch.accelerator.current_device_index())
@@ -244,7 +257,8 @@ DECODE_SPEC = DecodeSpec["DSV41Kernel"](
 DRAFT_DECODE_SPEC = DecodeSpec["DSV41DraftKernel"](
     name="dsv41-dspark-cdna4",
     supports=_SUPPORTS,
-    widths=_widths,
+    widths=_draft_widths,
+    set_capture_sizes=False,
     refuse_config=_refuse_config,
     refuse_model=_refuse_model,
     refuse_caches=_refuse_caches,
