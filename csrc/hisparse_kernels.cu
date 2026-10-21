@@ -287,7 +287,8 @@ __device__ __forceinline__ void write_entry_index(
 //   s_evict_off[nbc + 1]     prefix sums for evictable compaction
 //   s_counters[5]            distinct hits, union size, per-row valid count,
 //                            misses, per-entry hits
-//   s_done[nbc]              positions phase 3 resolved, one word per chunk
+//   s_done[nbc]              hot slots holding a union row (phase 2), then
+//                            positions phase 3 resolved, one word per chunk
 //   s_lru_out[hot_size]      int16, compacted slots: [hits fwd | evict bwd]
 // Valid global ids must be unique within each row.
 __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
@@ -493,41 +494,61 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
     return;
   }
 
-  // Phase 2: walk hot slots in LRU order, classify hit / evictable, and
-  // compact them (hits forward, evictables backward) into s_lru_out. A hit
-  // records its slot on the union entry.
+  // Phase 2: scan hot slots in slot order so device_global_indices is read
+  // coalesced, recording each hit's slot on its union entry and in s_done.
+  constexpr int kSlotBatch = 4;
+  for (int base = 0; base < hot_size; base += kSlotBatch * blockDim.x) {
+    int32_t cached_g[kSlotBatch];
+#pragma unroll
+    for (int b = 0; b < kSlotBatch; ++b) {
+      const int slot = base + b * blockDim.x + tid;
+      cached_g[b] = slot < hot_size ? row_dgi[slot] : -1;
+    }
+#pragma unroll
+    for (int b = 0; b < kSlotBatch; ++b) {
+      const int slot = base + b * blockDim.x + tid;
+      bool is_hit = false;
+      if (cached_g[b] >= 0) {
+        int h = hash_slot(cached_g[b], table_size);
+        while (true) {
+          const int32_t k = s_hash_keys[h];
+          if (k == cached_g[b]) {
+            s_hash_vals[h] = kEntryHit | slot;
+            is_hit = true;
+            break;
+          }
+          if (k == kHashEmpty) break;
+          h = next_slot(h, table_size);
+        }
+      }
+      const unsigned int hit_bits = __ballot_sync(0xFFFFFFFF, is_hit);
+      if (lane_id == 0 && slot < hot_size) {
+        s_done[slot / kWarpSize] = hit_bits;
+      }
+    }
+  }
+  __syncthreads();
+
+  // Walk hot slots in LRU order, classify hit / evictable, and compact them
+  // (hits forward, evictables backward) into s_lru_out.
   const int iters_buffer = (num_buffer_chunks + NUM_WARPS - 1) / NUM_WARPS;
   int total_hit_count = 0;
   int total_evict_count = 0;
+  int16_t next_lru = tid < hot_size ? row_lru[tid] : int16_t(-1);
   for (int iter = 0; iter < iters_buffer; iter++) {
     const int chunk_idx = warp_id + iter * NUM_WARPS;
     const bool has_valid_chunk = chunk_idx < num_buffer_chunks;
 
     const int pos = chunk_idx * kWarpSize + lane_id;
     const bool has_valid_pos = has_valid_chunk && (pos < hot_size);
-    const int16_t slot = has_valid_pos ? row_lru[pos] : int16_t(-1);
-    // Corruption tripwire: lru/dgi are long-lived device state; if some
-    // external writer (e.g. stray RDMA into reused VRAM) corrupts a slot
-    // out of [0, region_stride), treat it as no-hit so it degrades to a
-    // re-miss instead of an unbounded dgi read (phase 3 bounds the write
-    // side).
-    const int32_t cached_g =
-        (slot >= 0 && slot < region_stride) ? row_dgi[slot] : -1;
-
-    bool is_hit = false;
-    if (cached_g >= 0) {
-      int h = hash_slot(cached_g, table_size);
-      while (true) {
-        const int32_t k = s_hash_keys[h];
-        if (k == cached_g) {
-          s_hash_vals[h] = kEntryHit | slot;
-          is_hit = true;
-          break;
-        }
-        if (k == kHashEmpty) break;
-        h = next_slot(h, table_size);
-      }
-    }
+    const int16_t slot = has_valid_pos ? next_lru : int16_t(-1);
+    const int next_pos = pos + NUM_WARPS * kWarpSize;
+    next_lru = next_pos < hot_size ? row_lru[next_pos] : int16_t(-1);
+    // Corruption tripwire: lru is long-lived device state; an out-of-range
+    // slot is treated as no-hit so it degrades to a re-miss (phase 3 bounds
+    // the write side).
+    const bool is_hit = slot >= 0 && slot < hot_size &&
+                        (s_done[slot / kWarpSize] >> (slot % kWarpSize)) & 1u;
     const bool is_evictable = has_valid_pos && !is_hit;
 
     int local_hit_off = 0;
