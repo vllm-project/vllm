@@ -16,9 +16,18 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
     generate_store_output,
     to_keys,
 )
-from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID
-from vllm.config import KVEventsConfig
+from tests.v1.kv_connector.unit.utils import (
+    EOS_TOKEN_ID,
+    create_model_runner_output,
+    create_request,
+    create_scheduler,
+    create_vllm_config,
+)
+from vllm.config import KVEventsConfig, KVTransferConfig
 from vllm.distributed.kv_events import MEDIUM_CPU, BlockRemoved, BlockStored
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading import (
+    scheduler as scheduler_module,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
     OffloadingWorkerMetadata,
@@ -35,6 +44,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     RequestOffloadState,
     _create_req_context,
     get_sliding_window_size_in_chunks,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
+    OffloadingConnector,
 )
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -78,6 +90,8 @@ from vllm.v1.kv_offload.base import (
     make_offload_key,
 )
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
+from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.tiering.example.manager import ExampleSecondaryTierManager
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import RequestStatus
@@ -887,6 +901,161 @@ def test_partial_lookup_requires_every_cache_group():
     _as_mock(scheduler.manager.lookup).side_effect = lookup
     assert scheduler._lookup(req_status) == 16
     assert req_status.partial_tail_boundary is None
+
+
+def _make_tiering_engine_scheduler(secondary_tiers: list[dict[str, Any]]):
+    """A real engine scheduler whose OffloadingConnector runs the real
+    TieringOffloadingSpec manager; tests play the workers' reports."""
+    vllm_config = create_vllm_config(block_size=4, max_num_batched_tokens=64)
+    vllm_config.scheduler_config.async_scheduling = False
+    vllm_config.kv_transfer_config = KVTransferConfig(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "spec_name": "TieringOffloadingSpec",
+            "cpu_bytes_to_use": 16 * SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT,
+            "secondary_tiers": secondary_tiers,
+        },
+    )
+    scheduler = create_scheduler(vllm_config, num_blocks=64)
+    connector = scheduler.connector
+    assert isinstance(connector, OffloadingConnector)
+    assert connector.connector_scheduler is not None
+    return scheduler, connector.connector_scheduler.manager
+
+
+def _store_in_flight(scheduler) -> set[int]:
+    """Finish a request whose store jobs no worker has reported yet."""
+    request = create_request(num_tokens=16, block_size=4, max_tokens=1)
+    scheduler.add_request(request)
+    store_jobs: set[int] = set()
+    for reqs in ([request], []):
+        output = scheduler.schedule()
+        meta = output.kv_connector_metadata
+        assert isinstance(meta, OffloadingConnectorMetadata)
+        store_jobs |= meta.store_jobs.keys()
+        scheduler.update_from_output(output, create_model_runner_output(reqs))
+    assert store_jobs and not scheduler.has_unfinished_requests()
+    return store_jobs
+
+
+def _report_jobs(scheduler, output, job_ids: set[int]) -> None:
+    scheduler.update_from_output(
+        output,
+        create_model_runner_output(
+            [],
+            kv_connector_worker_meta=OffloadingWorkerMetadata(
+                completed_jobs=dict.fromkeys(job_ids, 1)
+            ),
+        ),
+    )
+
+
+@pytest.mark.parametrize("promotes", [True, False])
+def test_cache_reset_holds_promotions_until_flushed_jobs_report(promotes):
+    # A flushed job may still write its released chunk until every worker
+    # reports it (a late DMA), so the manager promotes into no chunk meanwhile.
+    scheduler, manager = _make_tiering_engine_scheduler(
+        [{"type": "example"}] if promotes else []
+    )
+    try:
+        flushed = _store_in_flight(scheduler)
+        ctx = ReqContext(req_id="peer")
+        manager.on_new_request(ctx)
+        key = make_offload_key(b"secondary-only", 0)
+        if promotes:
+            secondary = manager.secondary_tiers[0]
+            assert isinstance(secondary, ExampleSecondaryTierManager)
+            secondary.chunks[key] = True
+
+        assert scheduler.reset_prefix_cache(reset_connector=True)
+
+        # The engine must keep stepping while promotions are held, even with
+        # no request left: the flush still has to reach the workers.
+        assert scheduler.has_requests() is promotes
+        assert manager.lookup(key, ctx) is LookupResult.MISS
+        output = scheduler.schedule()
+        meta = output.kv_connector_metadata
+        assert isinstance(meta, OffloadingConnectorMetadata)
+        assert meta.jobs_to_flush == flushed
+        _report_jobs(scheduler, output, flushed)
+
+        assert not scheduler.has_requests()
+        promoted = manager.lookup(key, ctx) is not LookupResult.MISS
+        assert promoted is promotes
+        manager.on_request_finished(ctx)
+    finally:
+        scheduler.shutdown()
+
+
+def test_cache_reset_fence_ignores_reports_of_other_jobs():
+    scheduler, manager = _make_tiering_engine_scheduler([{"type": "example"}])
+    try:
+        reported = _store_in_flight(scheduler)
+        output = scheduler.schedule()
+        _report_jobs(scheduler, output, reported)
+        flushed = _store_in_flight(scheduler)
+
+        assert scheduler.reset_prefix_cache(reset_connector=True)
+        output = scheduler.schedule()
+        # A late duplicate of a report from before the reset.
+        _report_jobs(scheduler, output, reported)
+        assert scheduler.has_requests()
+
+        output = scheduler.schedule()
+        _report_jobs(scheduler, output, flushed)
+        assert not scheduler.has_requests()
+    finally:
+        scheduler.shutdown()
+
+
+def test_cache_reset_without_in_flight_jobs_holds_nothing():
+    scheduler, _ = _make_tiering_engine_scheduler([{"type": "example"}])
+    try:
+        stored = _store_in_flight(scheduler)
+        output = scheduler.schedule()
+        _report_jobs(scheduler, output, stored)
+        # Step until the stored chunks have cascaded to the secondary tier.
+        for _ in range(10):
+            if not scheduler.has_requests():
+                break
+            output = scheduler.schedule()
+            scheduler.update_from_output(output, create_model_runner_output([]))
+        assert not scheduler.has_requests()
+
+        assert scheduler.reset_prefix_cache(reset_connector=True)
+
+        assert not scheduler.has_requests()
+    finally:
+        scheduler.shutdown()
+
+
+def test_cache_reset_fence_held_too_long_warns_on_idle_steps(monkeypatch):
+    """The warning must fire on the empty steps an idle engine takes while the
+    fence is held, since no lookup runs there."""
+    now = [1000.0]
+    monkeypatch.setattr(
+        scheduler_module, "time", SimpleNamespace(monotonic=lambda: now[0])
+    )
+    scheduler, _ = _make_tiering_engine_scheduler([{"type": "example"}])
+    logger = MagicMock()
+    monkeypatch.setattr(scheduler_module, "logger", logger)
+    try:
+        _store_in_flight(scheduler)
+        assert scheduler.reset_prefix_cache(reset_connector=True)
+        assert scheduler.has_requests()
+
+        now[0] += scheduler_module._RESET_FENCE_WARN_S
+        scheduler.schedule()
+        logger.warning_once.assert_not_called()
+
+        now[0] += 1
+        assert scheduler.has_requests()
+        output = scheduler.schedule()
+        assert output.total_num_scheduled_tokens == 0
+        logger.warning_once.assert_called_once()
+    finally:
+        scheduler.shutdown()
 
 
 def test_scheduler_reports_allocation_failure(request_runner):
