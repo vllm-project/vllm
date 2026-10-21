@@ -27,6 +27,7 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import (
     MoEActivation,
     fused_topk,
+    override_config,
 )
 from vllm.model_executor.layers.fused_moe.activation import (
     ApplyMoEActivationConfig,
@@ -558,7 +559,17 @@ def test_fused_experts_fp32_dot_products_are_not_tf32(workspace_init):
         torch.randn(m, e, device="cuda"), dim=-1
     ).topk(topk, dim=-1)
 
-    with set_current_vllm_config(vllm_config):
+    # The default float32 tiles can exceed SM89 shared memory (#61847); this
+    # test is about dot precision, so keep the tile small.
+    config = {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 32,
+        "BLOCK_SIZE_K": 32,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 4,
+        "num_stages": 2,
+    }
+    with set_current_vllm_config(vllm_config), override_config(config):
         out = fused_moe_module.fused_experts(x, w1, w2, topk_weights, topk_ids.int())
 
     expected = torch.zeros(m, hidden, device="cuda", dtype=torch.float64)
