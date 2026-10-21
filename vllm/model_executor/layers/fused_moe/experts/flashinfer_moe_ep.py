@@ -28,6 +28,7 @@ from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep import (
     supports_current_device,
     validate_flashinfer_moe_ep_layer,
 )
+from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -177,12 +178,14 @@ class FlashInferMoeEpExperts(mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
-    ) -> None:
+    ) -> UnfinalizedMoEOutput | None:
         if self._adapter is None:
             raise RuntimeError("FlashInfer MoE-EP weights have not been processed")
-        output.copy_(
-            self._adapter(hidden_states, topk_ids.to(torch.int32), topk_weights)
-        )
+        result = self._adapter(hidden_states, topk_ids.to(torch.int32), topk_weights)
+        if isinstance(result, UnfinalizedMoEOutput):
+            return result
+        output.copy_(result)
+        return None
 
 
 def epilogue_from_quant_config(

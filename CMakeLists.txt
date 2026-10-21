@@ -1160,7 +1160,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       "9.0a;10.0a;10.3a" "${CUDA_ARCHS}")
   endif()
   if(BEAM_KERNEL_ARCHS)
-    set(BEAM_KERNEL_SRCS "csrc/beam/allreduce_norm.cu")
+    set(BEAM_KERNEL_SRCS
+      "csrc/beam/allreduce_norm.cu"
+      "csrc/beam/moe_finalize.cu")
     set_gencode_flags_for_srcs(
       SRCS "${BEAM_KERNEL_SRCS}"
       CUDA_ARCHS "${BEAM_KERNEL_ARCHS}")

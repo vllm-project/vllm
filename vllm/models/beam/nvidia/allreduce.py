@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MNNVL all-reduce with Beam's FP32 sandwich-norm epilogue."""
 
+from collections.abc import Callable
+
 import torch
 import torch.distributed as dist
 
@@ -24,6 +26,8 @@ class BeamAllReduceWorkspace:
         hidden_size: int,
         max_tokens: int,
         dtype: torch.dtype,
+        *,
+        device_group: dist.ProcessGroup | None = None,
     ) -> "BeamAllReduceWorkspace | None":
         # The CUDA epilogue handles one packed load per thread.
         if (
@@ -46,23 +50,37 @@ class BeamAllReduceWorkspace:
         supported = supported and is_multicast_supported(device)
         if not all_ranks_agree(TorchDistBackend(group=group), supported):
             return None
-        return cls(group, hidden_size, max_tokens)
+        return cls(group, hidden_size, max_tokens, device_group=device_group)
 
     def __init__(
-        self, group: dist.ProcessGroup, hidden_size: int, max_tokens: int
+        self,
+        group: dist.ProcessGroup,
+        hidden_size: int,
+        max_tokens: int,
+        *,
+        device_group: dist.ProcessGroup | None = None,
     ) -> None:
         self.world_size = group.size()
         self.rank = dist.get_rank(group)
         self.hidden_size = hidden_size
         self.max_tokens = max_tokens
+        self.device_group = device_group
+        self.all_gather: Callable[[torch.Tensor], torch.Tensor] | None = None
         # Scale one-shot cutoffs by the BF16 payload staged across all ranks.
         token_bytes = hidden_size * 2
         rank_token_bytes = self.world_size * token_bytes
         self.oneshot_max_tokens = _ONESHOT_MAX_BYTES // rank_token_bytes
         self.small_batch_max_tokens = 3200 * 1024 // rank_token_bytes
+        self.ep_finalize_oneshot_max_tokens = 2560 * 1024 // rank_token_bytes
+        # GB300 TP2/4, H=5120, top-k=8: one-shot helps at one token;
+        # two-shot wins through 131072 tokens. Keep the unfused cutoff tunable
+        # for other geometries instead of imposing an unmeasured crossover.
+        self.moe_gather_oneshot_max_tokens = 1
+        self.moe_gather_separate_norm_min_tokens: int | None = None
         self.separate_norm_min_tokens = cdiv(
             10 * 1024**2 * self.world_size, token_bytes
         )
+        self.ep_finalize_max_tokens = 640 * 1024**2 // token_bytes
 
         # One-shot stages one row per rank; two-shot two rows per owned token.
         oneshot_tokens = min(max_tokens, self.small_batch_max_tokens)
@@ -165,6 +183,7 @@ def _cuda_allreduce_norm_residual_norm(
     workspace,
     unfinalized: UnfinalizedMoEOutput | None = None,
     routed_scale: float = 1.0,
+    oneshot_max_tokens: int = 0,
 ):
     assert x.dtype == residual.dtype == torch.bfloat16
     assert x.is_contiguous() and residual.is_contiguous()
@@ -193,7 +212,7 @@ def _cuda_allreduce_norm_residual_norm(
             post_eps is not None,
             next_eps is not None,
             scales is not None,
-            small_batch or m <= workspace.oneshot_max_tokens,
+            small_batch or m <= max(oneshot_max_tokens, workspace.oneshot_max_tokens),
             small_batch,
             unfinalized.gemm2_permuted if unfinalized is not None else None,
             unfinalized.expert_weights if unfinalized is not None else None,
@@ -215,9 +234,12 @@ def beam_finalize_allreduce_norm_residual_norm(
     scales: tuple[float, float],
     workspace: BeamAllReduceWorkspace,
     routed_scale: float,
+    *,
+    oneshot_max_tokens: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Finalize local experts before AR, retaining the local BF16 rounding."""
     m, n = residual.shape
+    assert 0 <= oneshot_max_tokens <= workspace.small_batch_max_tokens
     for weight in (post_weight, next_weight):
         if weight is not None:
             assert weight.dtype == torch.bfloat16 and weight.is_contiguous()
@@ -241,4 +263,5 @@ def beam_finalize_allreduce_norm_residual_norm(
         workspace,
         x,
         routed_scale,
+        oneshot_max_tokens,
     )
