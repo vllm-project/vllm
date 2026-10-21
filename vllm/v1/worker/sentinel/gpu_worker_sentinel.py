@@ -118,6 +118,9 @@ class WorkerSentinel:
         for group in groups:
             if group.world_size > 1:
                 set_gloo_backend_timeout(group.cpu_group, timeout)
+                # GroupCoordinator caches cpu_timeout at init (None under FT
+                # startup); its cpu_all_reduce_ forwards it, so update both.
+                group.cpu_timeout = timeout
 
     def retry(self, ft_request: FaultToleranceRequest):
         torch.accelerator.synchronize()
