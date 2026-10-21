@@ -559,9 +559,10 @@ steps:
   # =============================================================================
   # ROCm Release Pipelines (x86_64 only)
   # =============================================================================
-  # One group per ROCm stack. Each triggers the `amd-release` pipeline (.buildkite/rocm-release.yaml),
-  # which builds rocm/vllm-ci:<stack>-<commit>{,-wheels,-base} on AMD agents and GPU-smokes it;
-  # the steps here only copy those artifacts (.buildkite/scripts/rocm/publish.sh).
+  # One group per ROCm stack, on this pipeline's own agents. The build step reuses the CI-tested
+  # stack and runtime images from rocm/vllm-ci by digest, compiles csrc for all release arches and
+  # pushes <ecr>:<stack>-<commit>{,-wheels,-base} (.buildkite/scripts/rocm/build.sh release); the
+  # steps after it only copy those (.buildkite/scripts/rocm/publish.sh).
   # - ROCm 10.0 (TheRock, stack `rocm`) is the default: it owns the :nightly / :latest images and
   #   the root wheel index.
   # =============================================================================
@@ -570,30 +571,35 @@ steps:
     key: build-rocm100
     depends_on: ~
     steps:
-      - trigger: "amd-release"
-        label: ":rocm: Build, GPU-smoke or reuse ROCm 10.0 artifacts on AMD agents"
-        key: build-rocm100-amd
+      - label: ":rocm: Build ROCm 10.0 release image + wheels"
+        key: build-rocm100-release
         depends_on: ~
-        build: {commit: "$BUILDKITE_COMMIT", branch: "$BUILDKITE_BRANCH", env: {ROCM_STACK: rocm}}
-
-      - label: ":s3: Upload ROCm 10.0 wheels"
-        key: upload-rocm100-wheels
-        depends_on: build-rocm100-amd
         agents: {queue: cpu_queue_release}
-        timeout_in_minutes: 60
-        env: {S3_BUCKET: vllm-wheels}
-        command: bash .buildkite/scripts/rocm/publish.sh rocm wheels
-        plugins: &rocm_hub_login
+        timeout_in_minutes: 720   # a csrc change since the last release recompiles all release arches (~3h); a stack key CI has not built, hours more
+        env: {ROCM_CI_REPO: public.ecr.aws/q9t5s3a7/vllm-release-repo}
+        commands:
+          - aws ecr-public get-login-password --region us-east-1 | docker login -u AWS --password-stdin public.ecr.aws/q9t5s3a7
+          - bash .buildkite/scripts/rocm/build.sh rocm release
+        plugins: &rocm_hub_login   # authenticated Docker Hub pulls and pushes
           - docker-login#v3.0.0:
               username: vllmbot
               password-env: DOCKERHUB_TOKEN
 
-      - label: ":docker: ROCm 10.0 image -> ECR (+ nightly Docker Hub)"
+      - label: ":s3: Upload ROCm 10.0 wheels"
+        key: upload-rocm100-wheels
+        depends_on: build-rocm100-release
+        agents: {queue: cpu_queue_release}
+        timeout_in_minutes: 60
+        env: {S3_BUCKET: vllm-wheels}
+        command: bash .buildkite/scripts/rocm/publish.sh rocm wheels
+        plugins: *rocm_hub_login
+
+      - label: ":docker: ROCm 10.0 image: ECR tags (+ nightly Docker Hub)"
         key: build-rocm100-release-image
         depends_on:
           - step: block-build-release-images
             allow_failure: true
-          - build-rocm100-amd
+          - build-rocm100-release
         agents: {queue: small_cpu_queue_release}
         command: bash .buildkite/scripts/rocm/publish.sh rocm images
         plugins: *rocm_hub_login

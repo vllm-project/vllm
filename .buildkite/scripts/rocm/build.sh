@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
 # Build and promote ROCm images via docker/docker-bake-rocm.hcl.
-# Pushes only to $ROCM_CI_REPO (set by ci-infra) and its BuildKit cache.
+# Pushes only to $ROCM_CI_REPO and the BuildKit cache that goes with it.
 #
 # Usage: build.sh <stack> <mode>
 #
@@ -11,15 +11,15 @@
 #   keys     Print current Ks/Kr keys and whether their images exist (on-call debug).
 #   base     Ensure stack, runtime and test-deps images exist; write their refs to Buildkite metadata.
 #   ci       Build and push this build's per-commit test image.
-#   csrc     All-arch csrc compile into the BuildKit cache (release, serialized per stack).
-#   release  Full release image + wheels from the CI-tested layers.
+#   release  Release image + wheels on the CI-tested layers (release pipeline, AWS agents).
 #
 # Stack: rocm (TheRock ROCm 10). Force a stack rebuild: bump ARG REFRESH
 #        in docker/Dockerfile.rocm_base.
 #
-# Trust: ci-infra sets ROCM_CI_REPO.
+# Trust: ROCM_CI_REPO is set by ci-infra (CI) or release-pipeline.yaml (release).
 #   Trusted main builds: rocm/vllm-ci
 #   PR / fork builds:    rocm/vllm-dev    (pr<N>- tags and caches; trusted builds never read it)
+#   Release pipeline:    its ECR repo     (reads rocm/vllm-ci and its cache, writes neither; own cache in ECR)
 # ROCM_CI_TRUSTED_REPO / ROCM_CI_CACHE_REPO only point a local run at a sandbox registry.
 set -euo pipefail
 
@@ -28,7 +28,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 STACK=$1
 MODE=$2
-REPO=${ROCM_CI_REPO:?ROCM_CI_REPO must be set by ci-infra}
+REPO=${ROCM_CI_REPO:?ROCM_CI_REPO must be set (by ci-infra or release-pipeline.yaml)}
 TRUSTED=${ROCM_CI_TRUSTED_REPO:-rocm/vllm-ci}
 
 export STACK PUSH=true
@@ -36,9 +36,13 @@ export CACHE=${ROCM_CI_CACHE_REPO:-rocm/vllm-ci-cache}  # every build reads the 
 export CACHE_TO=$CACHE:                     # ref prefix trusted builds write (HCL appends <stack>-<name>)
 export BUILDKIT_PROGRESS=${BUILDKIT_PROGRESS:-plain}  # TTY progress redraws bloat CI logs
 
-# PR builds write to a per-PR cache and prefix their image tags.
+# PR builds write to a per-PR cache and prefix their image tags. The release pipeline's agents
+# cannot write rocm/vllm-ci or its cache: release writes its images and its own cache to $REPO,
+# so the next release reuses this one's all-arch compile.
 PFX=""
-if [[ $REPO != "$TRUSTED" ]]; then
+if [[ $MODE == release ]]; then
+  CACHE_TO=$REPO:cache-
+elif [[ $REPO != "$TRUSTED" ]]; then
   PFX="pr${BUILDKITE_PULL_REQUEST:-local}-"
   CACHE_TO=$REPO:cache-pr${BUILDKITE_PULL_REQUEST:-local}-
   # Only the compile stages' cache: everything else is cheap or in the trusted cache.
@@ -152,7 +156,7 @@ echo "build.sh $STACK $MODE: repo=$REPO trusted=$TRUSTED Ks=$Ks Kr=$Kr"
 # Resolve a content-keyed image without building if it already exists.
 # Resolution order:
 #   1. Trusted registry (rocm/vllm-ci:<tag>) — safe for any build to reuse.
-#   2. This repo's own tag ($REPO:$PFX<tag>) — PR builds write here.
+#   2. This repo's own tag ($REPO:$PFX<tag>) — PR builds and the release pipeline write here.
 #   3. Neither found: build via bake and push.
 # A <sibling-suffix> means the image only counts as present when the sibling
 # tag also exists (used by stack: must have both the image and -wheels).
@@ -199,7 +203,7 @@ case $MODE in
 
   base)
     # Ensure the stack and runtime images exist; record their digests in metadata
-    # so subsequent ci / release modes can pull them without re-resolving.
+    # so the ci mode can pull them without re-resolving.
     # The "base" bake group builds the stack and its -wheels sibling together.
     STACK_IMAGE=$(ensure base "stack-$STACK-$Ks" -wheels)
     export STACK_IMAGE
@@ -228,20 +232,17 @@ case $MODE in
     buildkite-agent artifact upload ".rocm-wheel/vllm-*.whl"
     ;;
 
-  csrc)
-    # Compile csrc for all 9 release arches into the BuildKit cache.
-    # Run non-blocking and serialized per stack; almost always a cache hit.
-    load
-    PUSH=false bake csrc-all
-    ;;
-
   release)
-    # Build and push the final release image + wheels from the CI-tested layers.
-    # Trusted builds only: the released image carries the rocm/vllm-ci namespace.
-    [[ $REPO == "$TRUSTED" ]] \
-      || { echo "release mode is for trusted builds only" >&2; exit 1; }
-    load
-    export TAG=$TRUSTED:$STACK-$BUILDKITE_COMMIT
+    # Build and push the release image + wheels on the CI-tested layers, reused by digest from
+    # rocm/vllm-ci; a key CI has not built yet is built here into $REPO. Only the all-arch
+    # compile and the release layers are new.
+    STACK_IMAGE=$(ensure base "stack-$STACK-$Ks" -wheels)
+    export STACK_IMAGE   # before ensure runtime: a runtime built here must use this stack
+    STACK_WHEELS=${STACK_IMAGE%@*}-wheels
+    STACK_WHEELS=$STACK_WHEELS@$(digest "$STACK_WHEELS")
+    RUNTIME=$(ensure runtime "runtime-$STACK-$Kr")
+    export STACK_WHEELS RUNTIME
+    export TAG=$REPO:$STACK-$BUILDKITE_COMMIT
 
     # Resolve the vLLM version from the commit (setuptools_scm).
     PUSH=false bake version
@@ -255,7 +256,7 @@ case $MODE in
       exit 0
     fi
 
-    # Build wheels first (csrc layer is a cache hit from rel-csrc in almost all cases).
+    # Wheels first: their all-arch csrc compile is the long part, and vllm-openai reuses it.
     bake wheels openai-smoke
     # Alias the runtime as the -base tag (the base-nightly consumer reference).
     docker buildx imagetools create -t "$TAG-base" "$RUNTIME"

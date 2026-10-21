@@ -8,7 +8,6 @@ run_all_patterns:
   - "docker/docker-bake-rocm.hcl"
   - ".buildkite/hardware_tests/amd.yaml"
   - ".buildkite/ci_config_rocm.yaml"
-  - ".buildkite/rocm-release.yaml"
   - ".buildkite/scripts/rocm/"
   - ".buildkite/scripts/hardware_ci/run-amd-test.sh"
   - "CMakeLists.txt"

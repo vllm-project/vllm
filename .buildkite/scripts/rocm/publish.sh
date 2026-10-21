@@ -3,14 +3,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
 # Promote ROCm release artifacts without rebuilding anything.
-# All source images were built and GPU-smoked by the amd-release pipeline;
-# this script only copies digests and uploads wheels.
+# The release pipeline's build step (build.sh release) pushed the source images to
+# ECR; this script only copies digests and uploads wheels.
 #
 # Usage: publish.sh <stack> <mode>
 #
 # Modes:
 #   wheels   Extract the vLLM wheel from the -wheels image and upload to S3.
-#   images   Copy the release image and its runtime base to ECR.
+#   images   Tag the release image and its runtime base for their variant in ECR.
 #            With NIGHTLY=1, also push the nightly tags to Docker Hub.
 #
 # Required environment variables:
@@ -30,8 +30,8 @@ STACK=$1
 MODE=$2
 COMMIT=${BUILDKITE_COMMIT:?BUILDKITE_COMMIT must be set}
 
-SRC=${ROCM_CI_TRUSTED_REPO:-rocm/vllm-ci}:${STACK}-${COMMIT}
 ECR=${ECR:-public.ecr.aws/q9t5s3a7/vllm-release-repo}
+SRC=$ECR:${STACK}-${COMMIT}   # build.sh release, in the same build
 HUB=${HUB:-vllm/vllm-openai-rocm}
 
 # ---------------------------------------------------------------------------
@@ -120,7 +120,7 @@ EOF
   # -------------------------------------------------------------------------
   images)
   # -------------------------------------------------------------------------
-  # Copy the release image and its runtime base to ECR.
+  # Tag the release image and its runtime base for their variant in ECR.
   # With NIGHTLY=1, also tag them on Docker Hub and prune old nightly tags.
   # -------------------------------------------------------------------------
 

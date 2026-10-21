@@ -92,7 +92,7 @@ target "_app" {
   contexts   = ctx()
   args       = { ARCH = "", AITER_SPEC = AITER_SPEC, AITER_NIGHTLY = AITER_NIGHTLY, VLLM_VERSION = VLLM_VERSION }
   output     = [out(false)]   # per-commit images: rewriting would hand them second copies of inherited layers
-  cache-from = cfrom(["runtime", "ci", "compile", "csrc", "release"])   # dev/csrc records are shared
+  cache-from = cfrom(["runtime", "ci", "compile", "release"])   # dev/csrc records are shared
 }
 target "test" {
   inherits = ["_app"]
@@ -125,7 +125,6 @@ target "vllm-openai" {
   inherits = ["_app"]
   target   = "vllm-openai"
   tags     = [TAG]
-  cache-to = cto("release")
 }
 # cacheonly checks
 target "openai-smoke" {
@@ -133,17 +132,13 @@ target "openai-smoke" {
   target   = "openai-smoke"
   output   = ["type=cacheonly"]
 }
-target "csrc-all" {       # release: the serialized all-arch compile, cache only
-  inherits = ["openai-smoke"]
-  target   = "csrc"
-  cache-to = cto("csrc")
-}
-# STACK_WHEELS must be set (a full ref@digest); build.sh release mode sets it via load() before invoking this target.
+# STACK_WHEELS must be set (a full ref@digest); build.sh release mode resolves it before invoking this target.
 target "wheels" {
   inherits = ["_app"]
   target   = "wheels"
   tags     = ["${TAG}-wheels"]
   contexts = merge(ctx(), { stack-wheels = "docker-image://${STACK_WHEELS}" })
+  cache-to = cto("release")   # the all-arch compile, for the next release
 }
 target "version" {
   inherits = ["_app"]
