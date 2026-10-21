@@ -258,6 +258,8 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
         self._sm_count = current_platform.num_compute_units()
         self._vllm_config = get_current_vllm_config()
+        # Persistent per-impl split-KV attn logits scratch (see _get_attn_logits).
+        self._attn_logits_buf: torch.Tensor | None = None
 
     def reserve_workspace(self) -> None:
         # The builder reserves after memory profiling; reserve its upper bound
@@ -326,6 +328,54 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             sliding_window=sliding_window,
         )
 
+    def _get_attn_logits(
+        self, logits_shape: tuple[int, ...], device: torch.device
+    ) -> torch.Tensor:
+        """Persistent per-impl split-KV attention logits scratch.
+
+        Sized to the worst case (max decode rows * max kv splits) at first use
+        so it never grows under CUDA-graph capture (growth would invalidate
+        already-captured slices). Each MLA layer owns its own buffer, avoiding
+        the offset-0 aliasing of the shared WorkspaceManager pool that
+        corrupted attn_logits under CUDA-graph replay (#57017).
+        """
+        vllm_config = getattr(self, "_vllm_config", None)
+        # Unit tests build this impl via object.__new__ with only a subset of
+        # attributes (no full VllmConfig / num_heads); there is no CUDA graph
+        # and no aliasing concern there, so a per-call allocation is safe.
+        if vllm_config is None or getattr(self, "num_heads", None) is None:
+            return torch.empty(
+                logits_shape, dtype=torch.float32, device=device
+            )
+        buf = getattr(self, "_attn_logits_buf", None)
+        needed = (
+            logits_shape[0] * logits_shape[1]
+            * logits_shape[2] * logits_shape[3]
+        )
+        if (
+            buf is None
+            or buf.numel() < needed
+            or buf.device != device
+            or buf.dtype != torch.float32
+        ):
+            max_rows = (
+                vllm_config.scheduler_config.max_num_seqs
+                * max_decode_query_len(vllm_config)
+            )
+            max_splits = _compute_num_kv_splits(
+                vllm_config.model_config.max_model_len, self._sm_count
+            )
+            max_needed = max(
+                needed,
+                max_rows
+                * (self.num_heads * self.dcp_world_size)
+                * max_splits
+                * (self.kv_lora_rank + 1),
+            )
+            buf = torch.empty(max_needed, dtype=torch.float32, device=device)
+            self._attn_logits_buf = buf
+        return buf[:needed].view(logits_shape)
+
     def forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
@@ -356,21 +406,15 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 max_kv_len = min(max_kv_len, self.decode_sliding_window)
             num_kv_splits = _compute_num_kv_splits(max_kv_len, self._sm_count)
 
-        # NOTE: the +1 stores the LogSumExp (LSE) that the stage2 kernel uses to
-        # merge partial attention outputs across splits. The scratch is served
-        # from the shared workspace (reserved at max in the metadata builder), so
-        # there is no per-call allocation on the decode hot path. Fall back to a
-        # direct allocation when the workspace manager is not initialized (e.g.
-        # unit tests without a GPUModelRunner).
+        # NOTE: the +1 stores the LogSumExp (LSE) that the stage2 kernel uses
+        # to merge partial attention outputs across splits. The scratch is a
+        # persistent per-impl buffer (see _get_attn_logits) so each MLA layer
+        # owns a non-aliased region. The previous shared WorkspaceManager pool
+        # returned offset-0 slices that alias across layers / other scratch
+        # users, which under CUDA-graph replay corrupted attn_logits via a
+        # read-after-write hazard -> NaN (#57017).
         logits_shape = (B, q_num_heads, num_kv_splits, self.kv_lora_rank + 1)
-        if is_workspace_manager_initialized():
-            (attn_logits,) = current_workspace_manager().get_simultaneous(
-                (logits_shape, torch.float32),
-            )
-        else:
-            attn_logits = torch.empty(
-                logits_shape, dtype=torch.float32, device=q.device
-            )
+        attn_logits = self._get_attn_logits(logits_shape, q.device)
 
         # Add a head dim of 1
         kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.unsqueeze(2)
