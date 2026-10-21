@@ -88,7 +88,7 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
   - vllm/v1/executor/
-  - vllm/worker/worker_base.py
+  - vllm/v1/worker/worker_base.py
   - vllm/v1/engine/
   - vllm/v1/worker/
   - tests/v1/distributed
@@ -120,7 +120,7 @@ steps:
       - "!vllm/distributed/kv_transfer/"
       - vllm/engine/
       - vllm/v1/executor/
-      - vllm/worker/worker_base.py
+      - vllm/v1/worker/worker_base.py
       - vllm/v1/engine/
       - vllm/v1/worker/
       - tests/v1/distributed
@@ -139,7 +139,7 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
   - vllm/v1/executor/
-  - vllm/worker/worker_base.py
+  - vllm/v1/worker/worker_base.py
   - vllm/v1/engine/
   - vllm/v1/worker/
   - tests/compile/test_wrapper.py
@@ -163,7 +163,7 @@ steps:
       - "!vllm/distributed/kv_transfer/"
       - vllm/engine/
       - vllm/v1/executor/
-      - vllm/worker/worker_base.py
+      - vllm/v1/worker/worker_base.py
       - vllm/v1/engine/
       - vllm/v1/worker/
       - tests/compile/test_wrapper.py
@@ -184,7 +184,7 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
   - vllm/v1/executor/
-  - vllm/worker/worker_base.py
+  - vllm/v1/worker/worker_base.py
   - vllm/v1/engine/
   - vllm/v1/worker/
   - tests/distributed/
@@ -517,7 +517,6 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - vllm/distributed/
-      - vllm/v1/distributed/
       - vllm/model_executor/layers/fused_moe/
       - vllm/v1/attention/backends/
       - vllm/v1/attention/selector.py
@@ -759,3 +758,17 @@ steps:
   - tests/model_executor/model_loader/test_weight_cache.py
   commands:
   - pytest -v -s model_executor/model_loader/test_weight_cache.py -m 'distributed(num_gpus=2)'
+  mirror:
+    amd:
+      label: ":amd: (MI355) Distributed Preload"
+      dind: false
+      device: mi355_2
+      num_devices: 2
+      timeout_in_minutes: 30
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/model_executor/model_loader/weight_cache/
+      - vllm/model_executor/layers/fused_moe/expert_map_manager.py
+      - tests/model_executor/model_loader/test_weight_cache.py
+      - vllm/platforms/rocm.py

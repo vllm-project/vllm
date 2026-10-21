@@ -612,7 +612,7 @@ steps:
   - vllm/device_allocator/
   - vllm/connections.py
   - vllm/engine/arg_utils.py
-  - vllm/entrypoints/chat_utils.py
+  - vllm/renderers/chat_utils/
   - vllm/entrypoints/mcp/
   - vllm/entrypoints/openai/chat_completion/protocol.py
   - vllm/entrypoints/openai/completion/protocol.py
