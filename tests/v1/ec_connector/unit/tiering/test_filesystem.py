@@ -5,6 +5,9 @@ from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
 
+from vllm.distributed.ec_transfer.ec_connector.tiering.config import (
+    ECFileSystemBackpressureConfig,
+)
 from vllm.distributed.ec_transfer.ec_connector.tiering.filesystem import (
     ECFileSystemTier,
     ECFileSystemTierManager,
@@ -67,7 +70,15 @@ class _FakeExecutor:
         )
         return job_id
 
-    def finish(self, job_id: int, *, success: bool, error: str | None = None) -> None:
+    def finish(
+        self,
+        job_id: int,
+        *,
+        success: bool,
+        error: str | None = None,
+        queue_time: float = 0.0,
+        transfer_time: float = 0.0,
+    ) -> None:
         submission = self.submissions[job_id]
         self.completions.append(
             SimpleNamespace(
@@ -76,6 +87,8 @@ class _FakeExecutor:
                 cache_key=submission.cache_key,
                 success=success,
                 file_size_bytes=submission.file_size_bytes,
+                queue_time=queue_time,
+                transfer_time=transfer_time,
                 error=error,
             )
         )
@@ -257,6 +270,43 @@ def test_failed_rewrite_keeps_existing_index_entry(tmp_path: Path) -> None:
         )
     ]
     assert manager.contains(_CACHE_KEY)
+
+
+def test_manager_skips_new_writes_under_store_pressure(tmp_path: Path) -> None:
+    executor = _FakeExecutor()
+    manager = ECFileSystemTierManager(
+        root_dir=tmp_path,
+        namespace_digest=_NAMESPACE_DIGEST,
+        n_read_threads=1,
+        n_write_threads=1,
+        backpressure=ECFileSystemBackpressureConfig(
+            enabled=True,
+            high_water_s=0.010,
+            low_water_s=0.002,
+        ),
+        executor=executor,
+    )
+    file_size_bytes = 1 << 20
+    for job_id in range(11):
+        assert manager.submit_write(
+            f"{job_id:064x}",
+            [memoryview(b"x")],
+            file_size_bytes,
+        )
+        executor.finish(job_id, success=True, transfer_time=0.04)
+        assert len(manager.poll_completed_writes()) == 1
+
+    assert not manager.submit_write(
+        _CACHE_KEY,
+        [memoryview(b"x")],
+        file_size_bytes,
+    )
+    assert len(executor.submissions) == 11
+    assert manager.submit_read(
+        f"{0:064x}",
+        [memoryview(bytearray(1))],
+    )
+    assert executor.submissions[-1].operation == "read"
 
 
 def test_manager_shutdown_drains_completions_and_rejects_submission(
