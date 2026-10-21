@@ -3,6 +3,7 @@
 
 use expect_test::expect;
 use vllm_engine_core_client::TransportMode;
+use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_server::{
     Config, GenerationConfigMode, HttpListenerMode, LoraModulePath, ParserSelection,
     RendererSelection,
@@ -186,6 +187,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         tool_call_parser: Auto,
                         reasoning_parser: Auto,
                         tool_strict_level: None,
+                        structured_outputs_config: None,
                         renderer: Auto,
                         language_model_only: false,
                         max_logprobs: None,
@@ -372,6 +374,127 @@ fn serve_args_forward_profiler_config_to_managed_engine() {
             "profiler": "torch",
             "torch_profiler_dir": "/tmp/profile",
         })
+    );
+}
+
+#[test]
+fn serve_args_select_structured_outputs_backend_and_forward_config() {
+    let serve = |extra: &[&str]| {
+        let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"].iter().chain(extra))
+            .unwrap();
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve args");
+        };
+        let frontend = args.to_frontend_config("tcp://127.0.0.1:0".into());
+        (
+            frontend.structured_outputs_backend,
+            args.to_managed_engine_config(5555).python_args,
+        )
+    };
+
+    let (backend, python_args) = serve(&[]);
+    assert_eq!(backend, StructuredOutputBackend::Xgrammar);
+    assert!(!python_args.iter().any(|arg| arg == "--structured-outputs-config"));
+
+    let (backend, _) = serve(&["--structured-outputs-config", r#"{"backend":"auto"}"#]);
+    assert_eq!(backend, StructuredOutputBackend::Xgrammar);
+
+    let (backend, python_args) = serve(&[
+        "--structured-outputs-config",
+        r#"{"backend":"guidance","disable_any_whitespace":true}"#,
+    ]);
+    assert_eq!(backend, StructuredOutputBackend::Guidance);
+    let index = python_args
+        .iter()
+        .position(|arg| arg == "--structured-outputs-config")
+        .expect("structured outputs config flag");
+    let forwarded: serde_json::Value = serde_json::from_str(&python_args[index + 1]).unwrap();
+    assert_eq!(
+        forwarded,
+        serde_json::json!({ "backend": "guidance", "disable_any_whitespace": true })
+    );
+
+    let error = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--structured-outputs-config",
+        r#"{"backend":"llguidance"}"#,
+    ])
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("unknown variant `llguidance`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn frontend_args_json_reads_python_structured_outputs_config() {
+    for (backend, expected) in [
+        ("auto", StructuredOutputBackend::Xgrammar),
+        (
+            "lm-format-enforcer",
+            StructuredOutputBackend::LmFormatEnforcer,
+        ),
+    ] {
+        // The Python supervisor sends the whole config once any field is set.
+        let args_json = serde_json::json!({
+            "model_tag": "Qwen/Qwen3-0.6B",
+            "structured_outputs_config": {
+                "backend": backend,
+                "disable_any_whitespace": true,
+                "disable_additional_properties": false,
+                "reasoning_parser": "",
+                "reasoning_parser_plugin": "",
+                "enable_in_reasoning": false,
+            },
+        });
+        let cli = Cli::try_parse_from([
+            "vllm-rs",
+            "frontend",
+            "--listen-fd",
+            "3",
+            "--input-listener-fd",
+            "999999",
+            "--output-listener-fd",
+            "999998",
+            "--args-json",
+            &args_json.to_string(),
+        ])
+        .unwrap();
+
+        let Command::Frontend(args) = cli.command else {
+            panic!("expected frontend args");
+        };
+        assert_eq!(args.into_config().structured_outputs_backend, expected);
+    }
+}
+
+#[test]
+fn serve_args_tool_strict_level_requires_xgrammar() {
+    let validate = |strict_level: &str, backend: &str| {
+        let cli = Cli::try_parse_from([
+            "vllm-rs",
+            "serve",
+            "Qwen/Qwen3-0.6B",
+            "--tool-strict-level",
+            strict_level,
+            "--structured-outputs-config",
+            &format!(r#"{{"backend":"{backend}"}}"#),
+        ])
+        .unwrap();
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve args");
+        };
+        args.to_frontend_config("tcp://127.0.0.1:0".into()).validate()
+    };
+
+    assert!(validate("function", "xgrammar").is_ok());
+    assert!(validate("auto", "guidance").is_ok());
+    let error = validate("function", "guidance").unwrap_err();
+    assert!(
+        format!("{error:#}").contains("requires the xgrammar structured outputs backend"),
+        "{error:#}"
     );
 }
 
@@ -1091,6 +1214,7 @@ fn frontend_args_accept_json() {
                         tool_call_parser: None,
                         reasoning_parser: None,
                         tool_strict_level: None,
+                        structured_outputs_config: None,
                         renderer: Auto,
                         language_model_only: false,
                         max_logprobs: None,
@@ -1838,6 +1962,7 @@ fn serve_args_accept_handshake_aliases() {
                         tool_call_parser: Auto,
                         reasoning_parser: Auto,
                         tool_strict_level: None,
+                        structured_outputs_config: None,
                         renderer: Auto,
                         language_model_only: false,
                         max_logprobs: None,
@@ -1999,6 +2124,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             tool_call_parser: Auto,
             reasoning_parser: Auto,
             tool_strict_level: None,
+            structured_outputs_backend: Xgrammar,
             renderer: Auto,
             language_model_only: false,
             chat_template: None,
@@ -2096,6 +2222,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             tool_call_parser: Auto,
             reasoning_parser: Auto,
             tool_strict_level: None,
+            structured_outputs_backend: Xgrammar,
             renderer: Auto,
             language_model_only: false,
             chat_template: None,
@@ -2259,6 +2386,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             tool_call_parser: None,
             reasoning_parser: None,
             tool_strict_level: None,
+            structured_outputs_backend: Xgrammar,
             renderer: Auto,
             language_model_only: false,
             chat_template: None,

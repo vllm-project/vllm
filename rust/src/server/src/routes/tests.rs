@@ -49,7 +49,7 @@ use vllm_engine_core_client::{
 use vllm_llm::Llm;
 use vllm_metrics::METRICS;
 use vllm_text::tokenizer::DynTokenizer;
-use vllm_text::{Prompt, TextBackend, TextRequestProcessor};
+use vllm_text::{Prompt, TextBackend, TextLlm, TextRequestProcessor};
 use vllm_tokenizer::test_utils::TestTokenizer;
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
@@ -1396,6 +1396,20 @@ async fn test_app_with_backend_and_engine_request_check<F>(
 where
     F: FnOnce(&EngineCoreRequest) + Send + 'static,
 {
+    test_app_with_chat_and_engine_request_check(
+        |llm| ChatLlm::from_shared_backend(llm, backend),
+        check_request,
+    )
+    .await
+}
+
+async fn test_app_with_chat_and_engine_request_check<F>(
+    build_chat: impl FnOnce(Llm) -> ChatLlm,
+    check_request: F,
+) -> (axum::Router, MockEngineTask)
+where
+    F: FnOnce(&EngineCoreRequest) + Send + 'static,
+{
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
     let engine_id = b"engine-openai-check-request".to_vec();
@@ -1429,7 +1443,7 @@ where
     .await
     .expect("connect client");
 
-    let chat = ChatLlm::from_shared_backend(test_llm(client), backend);
+    let chat = build_chat(test_llm(client));
     (
         build_router(Arc::new(AppState::new(
             vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
@@ -3137,6 +3151,77 @@ async fn openai_watermarking_defaults_and_opt_out_reach_engine_core() {
                 engine_task.await.expect("mock engine task");
             }
         }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_structured_outputs_use_configured_backend() {
+    use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
+
+    for backend in [
+        StructuredOutputBackend::Xgrammar,
+        StructuredOutputBackend::Guidance,
+    ] {
+        let chat_backend = Arc::new(FakeChatBackend::new());
+        let (app, engine_task) = test_app_with_chat_and_engine_request_check(
+            |llm| {
+                let text = TextLlm::new(llm, chat_backend.clone())
+                    .with_structured_outputs_backend(backend);
+                ChatLlm::new(text, chat_backend)
+                    .with_tool_call_parser(ParserSelection::Explicit("qwen3_coder".to_string()))
+            },
+            move |request| {
+                let params = request.sampling_params.as_ref().expect("sampling params");
+                let structured_outputs =
+                    params.structured_outputs.as_ref().expect("structured outputs");
+                assert_eq!(structured_outputs.backend, backend);
+                // Only xgrammar compiles the parser's grammar of the answer or a
+                // call; other backends keep the request's own constraint.
+                let constraint = &structured_outputs.params.constraint;
+                match backend {
+                    StructuredOutputBackend::Xgrammar => {
+                        assert!(constraint.as_structural_tag().is_some(), "{constraint:?}");
+                    }
+                    _ => assert!(constraint.as_json().is_some(), "{constraint:?}"),
+                }
+            },
+        )
+        .await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "Qwen/Qwen1.5-0.5B-Chat",
+                            "messages": [{"role": "user", "content": "hi"}],
+                            "max_tokens": 2,
+                            "tools": [{
+                                "type": "function",
+                                "function": {
+                                    "name": "lookup",
+                                    "parameters": {"type": "object"},
+                                    "strict": true,
+                                },
+                            }],
+                            "response_format": {
+                                "type": "json_schema",
+                                "json_schema": {"name": "answer", "schema": {"type": "object"}},
+                            },
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::OK, "{backend:?}");
+        to_bytes(response.into_body(), usize::MAX).await.expect("drain response");
+        engine_task.await.expect("mock engine task");
     }
 }
 

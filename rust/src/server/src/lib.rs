@@ -127,7 +127,9 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     let llm = Llm::new(client)
         .with_log_stats(!config.disable_log_stats)
         .with_stream_interval(config.stream_interval);
-    let text = TextLlm::new(llm, text_backend).with_max_logprobs(config.max_logprobs);
+    let text = TextLlm::new(llm, text_backend)
+        .with_max_logprobs(config.max_logprobs)
+        .with_structured_outputs_backend(config.structured_outputs_backend);
 
     let chat = ChatLlm::new(text, chat_backend)
         .with_tool_call_parser(config.tool_call_parser.clone())

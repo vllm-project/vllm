@@ -18,6 +18,7 @@ use futures::StreamExt as _;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 use vllm_engine_core_client::TransportMode;
+use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_server::{
     ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
     HttpListenerMode, ParserSelection, RendererSelection, serve,
@@ -73,6 +74,7 @@ async fn main() -> Result<()> {
         tool_call_parser: ParserSelection::Auto,
         reasoning_parser: ParserSelection::Auto,
         tool_strict_level: None,
+        structured_outputs_backend: StructuredOutputBackend::default(),
         renderer: RendererSelection::Auto,
         language_model_only: false,
         chat_template: None,

@@ -13,6 +13,9 @@ use token_ids::{validate_prompt_token_ids, validate_vocab_range};
 use vllm_engine_core_client::protocol::sampling::{
     EngineCoreSamplingParams, RepetitionDetectionParams,
 };
+use vllm_engine_core_client::protocol::structured_outputs::{
+    EngineCoreStructuredOutputsParams, StructuredOutputBackend,
+};
 use vllm_llm::GenerateRequest;
 use vllm_tokenizer::Tokenizer;
 
@@ -37,6 +40,7 @@ pub fn lower_text_request(
     prompt_token_ids: Vec<u32>,
     sampling_hints: SamplingHints,
     sampling_limits: SamplingLimits,
+    structured_outputs_backend: StructuredOutputBackend,
     tokenizer: &dyn Tokenizer,
 ) -> Result<PreparedTextRequest> {
     let prompt_len = prompt_token_ids.len() as u32;
@@ -57,6 +61,7 @@ pub fn lower_text_request(
             },
             sampling_hints,
             sampling_limits,
+            structured_outputs_backend,
             prompt_len,
             tokenizer,
         )?,
@@ -95,6 +100,7 @@ pub fn lower_sampling_params(
         default_max_tokens,
     }: SamplingHints,
     sampling_limits: SamplingLimits,
+    structured_outputs_backend: StructuredOutputBackend,
     prompt_len: u32,
     tokenizer: &dyn Tokenizer,
 ) -> Result<EngineCoreSamplingParams> {
@@ -148,11 +154,12 @@ pub fn lower_sampling_params(
         }
         .into());
     }
-    // Validate the final constraint: chat may have replaced the user's
-    // constraint with a parser-built output grammar.
-    if let Some(structured_outputs) = &structured_outputs {
-        structured_outputs.validate()?;
-    }
+    // Validate the final constraint against the backend that will compile it:
+    // chat may have replaced the user's constraint with a parser-built output
+    // grammar.
+    let structured_outputs = structured_outputs
+        .map(|params| EngineCoreStructuredOutputsParams::new(params, structured_outputs_backend))
+        .transpose()?;
 
     // Mirrors the model-generation-config inheritance used by vLLM's OpenAI chat
     // path: https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/entrypoints/openai/chat_completion/protocol.py#L424-L450
@@ -375,9 +382,7 @@ mod tests {
     use vllm_engine_core_client::protocol::multimodal::{
         MmFeatureSpec, MmModality, PlaceholderRange,
     };
-    use vllm_engine_core_client::protocol::structured_outputs::{
-        StructuredOutputBackend, StructuredOutputsParams,
-    };
+    use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
     use vllm_engine_core_client::protocol::tensor::WireNdArray;
     use vllm_tokenizer::test_utils::TestTokenizer;
 
@@ -442,6 +447,7 @@ mod tests {
                 default_max_tokens: None,
             },
             sampling_limits,
+            StructuredOutputBackend::Xgrammar,
             3,
             &stub_tokenizer(),
         )
@@ -550,25 +556,33 @@ mod tests {
     }
 
     #[test]
-    fn lower_sampling_params_rejects_schema_xgrammar_cannot_enforce() {
-        let structured_outputs = StructuredOutputsParams {
-            backend: StructuredOutputBackend::Xgrammar,
-            ..StructuredOutputsParams::json(serde_json::json!({
-                "type": "integer",
-                "multipleOf": 2,
-            }))
+    fn lower_sampling_params_validates_against_configured_backend() {
+        let lower = |backend| {
+            lower_sampling_params(
+                SamplingParams {
+                    structured_outputs: Some(StructuredOutputsParams::json(serde_json::json!({
+                        "type": "integer",
+                        "multipleOf": 2,
+                    }))),
+                    ..Default::default()
+                },
+                SamplingHints::default(),
+                sample_sampling_limits(),
+                backend,
+                3,
+                &stub_tokenizer(),
+            )
         };
-        let error = lower_sampling_params_with_limits(
-            SamplingParams {
-                structured_outputs: Some(structured_outputs),
-                ..Default::default()
-            },
-            sample_sampling_limits(),
-        )
-        .unwrap_err();
 
+        let error = lower(StructuredOutputBackend::Xgrammar).unwrap_err();
         assert!(error.is_request_validation_error());
         assert!(error.to_report_string().contains("not supported by xgrammar"));
+
+        let params = lower(StructuredOutputBackend::Guidance).unwrap();
+        assert_eq!(
+            params.structured_outputs.unwrap().backend,
+            StructuredOutputBackend::Guidance
+        );
     }
 
     #[test]
@@ -745,6 +759,7 @@ mod tests {
             vec![1, 2, 3],
             sample_sampling_hints(),
             sample_sampling_limits(),
+            StructuredOutputBackend::Xgrammar,
             &stub_tokenizer(),
         )
         .unwrap();
@@ -803,6 +818,7 @@ mod tests {
             vec![1, 2, 3],
             sample_sampling_hints(),
             sample_sampling_limits(),
+            StructuredOutputBackend::Xgrammar,
             &stub_tokenizer(),
         )
         .unwrap();
@@ -868,6 +884,7 @@ mod tests {
             vec![1, 2, 3],
             sample_sampling_hints(),
             sample_sampling_limits(),
+            StructuredOutputBackend::Xgrammar,
             &stub_tokenizer(),
         )
         .unwrap();
@@ -887,6 +904,7 @@ mod tests {
                 tokenizer_vocab_size: 1000,
                 ..sample_sampling_limits()
             },
+            StructuredOutputBackend::Xgrammar,
             &stub_tokenizer(),
         )
         .expect("model vocab extends prompt token range");
@@ -900,6 +918,7 @@ mod tests {
                 tokenizer_vocab_size: 2000,
                 ..sample_sampling_limits()
             },
+            StructuredOutputBackend::Xgrammar,
             &stub_tokenizer(),
         )
         .expect("tokenizer vocab extends prompt token range");
@@ -913,6 +932,7 @@ mod tests {
                 tokenizer_vocab_size: 2000,
                 ..sample_sampling_limits()
             },
+            StructuredOutputBackend::Xgrammar,
             &stub_tokenizer(),
         )
         .unwrap_err();
@@ -977,6 +997,7 @@ mod tests {
                 model_vocab_size: backend.model_vocab_size(),
                 tokenizer_vocab_size: backend.tokenizer_vocab_size(),
             },
+            StructuredOutputBackend::Xgrammar,
             &stub_tokenizer(),
         )
         .expect("lower request");
@@ -1047,6 +1068,7 @@ mod tests {
                 default_max_tokens: None,
             },
             sample_sampling_limits(),
+            StructuredOutputBackend::Xgrammar,
             3,
             &stub_tokenizer(),
         )
@@ -1127,6 +1149,7 @@ mod tests {
                 default_max_tokens: Some(128),
             },
             sample_sampling_limits(),
+            StructuredOutputBackend::Xgrammar,
             3,
             &stub_tokenizer(),
         )
@@ -1194,6 +1217,7 @@ mod tests {
                 max_logprobs: -1,
                 ..sample_sampling_limits()
             },
+            StructuredOutputBackend::Xgrammar,
             3,
             &stub_tokenizer(),
         )
@@ -1384,6 +1408,7 @@ mod tests {
                 sampling_params,
                 SamplingHints::default(),
                 sample_sampling_limits(),
+                StructuredOutputBackend::Xgrammar,
                 3,
                 &tokenizer,
             )
@@ -1414,6 +1439,7 @@ mod tests {
                 },
                 SamplingHints::default(),
                 sample_sampling_limits(),
+                StructuredOutputBackend::Xgrammar,
                 3,
                 &tokenizer,
             )
@@ -1453,6 +1479,7 @@ mod tests {
                 },
                 SamplingHints::default(),
                 sample_sampling_limits(),
+                StructuredOutputBackend::Xgrammar,
                 3,
                 &tokenizer,
             )
@@ -1518,6 +1545,7 @@ mod tests {
                 default_max_tokens: Some(128),
             },
             sample_sampling_limits(),
+            StructuredOutputBackend::Xgrammar,
             3,
             &stub_tokenizer(),
         )
@@ -1575,6 +1603,7 @@ mod tests {
             vec![1, 2, 3],
             sample_sampling_hints(),
             sample_sampling_limits(),
+            StructuredOutputBackend::Xgrammar,
             &stub_tokenizer(),
         )
         .unwrap();
@@ -1593,6 +1622,7 @@ mod tests {
             vec![1, 2, 3],
             sample_sampling_hints(),
             sample_sampling_limits(),
+            StructuredOutputBackend::Xgrammar,
             &stub_tokenizer(),
         )
         .unwrap();
@@ -1625,6 +1655,7 @@ mod tests {
             vec![1, 2, 3],
             sample_sampling_hints(),
             sample_sampling_limits(),
+            StructuredOutputBackend::Xgrammar,
             &stub_tokenizer(),
         )
         .unwrap();
@@ -1644,6 +1675,7 @@ mod tests {
             vec![1, 2, 3],
             sample_sampling_hints(),
             sample_sampling_limits(),
+            StructuredOutputBackend::Xgrammar,
             &stub_tokenizer(),
         )
         .unwrap();
@@ -1663,6 +1695,7 @@ mod tests {
             vec![1, 2, 3],
             sample_sampling_hints(),
             sample_sampling_limits(),
+            StructuredOutputBackend::Xgrammar,
             &stub_tokenizer(),
         )
         .unwrap();
