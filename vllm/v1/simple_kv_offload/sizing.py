@@ -47,24 +47,3 @@ def gpu_total_bytes(gpu_config: KVCacheConfig) -> int:
     # Every KVCacheTensor describes placement within the same backing allocation,
     # so its size is the total GPU KV cache size.
     return gpu_config.kv_cache_tensors[0].size
-
-
-def compute_num_offload_blocks_from_config(
-    gpu_config: KVCacheConfig,
-    capacity_bytes: int,
-) -> int:
-    """Conservative config-based estimate before live tensors are registered."""
-    gpu_total = gpu_total_bytes(gpu_config)
-    return max(1, gpu_config.num_blocks * capacity_bytes // gpu_total)
-
-
-def compute_num_offload_blocks_from_configs(
-    kv_cache_configs: list[KVCacheConfig],
-    capacity_bytes: int,
-) -> int:
-    """Return the min offload block count implied by all worker configs."""
-    assert kv_cache_configs
-    return min(
-        compute_num_offload_blocks_from_config(cfg, capacity_bytes)
-        for cfg in kv_cache_configs
-    )

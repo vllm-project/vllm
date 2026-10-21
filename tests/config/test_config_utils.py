@@ -3,7 +3,6 @@
 
 from dataclasses import dataclass
 from enum import Enum
-from fractions import Fraction
 
 import pytest
 
@@ -300,7 +299,6 @@ def test_cache_config_hash_ignores_runtime_offload_sizing():
     config = CacheConfig()
     base_hash = config.compute_hash()
 
-    config.worker_kv_cache_configs = [Fraction(1, 2)]
     config.simple_cpu_offload_num_blocks = 42
 
     assert config.compute_hash() == base_hash

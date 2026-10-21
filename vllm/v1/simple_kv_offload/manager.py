@@ -54,10 +54,7 @@ from vllm.v1.simple_kv_offload.metrics import (
     MetricName,
     SimpleCPUOffloadStats,
 )
-from vllm.v1.simple_kv_offload.sizing import (
-    compute_num_offload_blocks_from_configs,
-    gpu_total_bytes,
-)
+from vllm.v1.simple_kv_offload.sizing import gpu_total_bytes
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -156,7 +153,6 @@ class SimpleCPUOffloadScheduler:
         disk_capacity_bytes: int = 0,
         use_page_cache: bool = False,
         num_cpu_blocks: int | None = None,
-        worker_kv_cache_configs: list["KVCacheConfig"] | None = None,
         aligned_num_cpu_blocks: int | None = None,
     ):
         self.vllm_config = vllm_config
@@ -176,21 +172,6 @@ class SimpleCPUOffloadScheduler:
         assert self.block_size % self.hash_block_size == 0
         # Derive a CPU KVCacheConfig from the GPU config and build a coordinator
         assert kv_cache_config is not None
-        if (
-            num_cpu_blocks is None
-            and aligned_num_cpu_blocks is None
-            and worker_kv_cache_configs is not None
-        ):
-            aligned_num_cpu_blocks = compute_num_offload_blocks_from_configs(
-                worker_kv_cache_configs, offload_capacity
-            )
-            logger.warning(
-                "SimpleCPUOffloadScheduler: worker-aligned num_cpu_blocks is "
-                "unavailable; falling back to config-based sizing (%d blocks). "
-                "PP/spec-decode deployments should always provide the aligned "
-                "value from workers.",
-                aligned_num_cpu_blocks,
-            )
         self.cpu_kv_cache_config = self._derive_cpu_config(
             kv_cache_config, offload_capacity, num_cpu_blocks, aligned_num_cpu_blocks
         )

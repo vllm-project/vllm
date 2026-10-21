@@ -311,7 +311,6 @@ class EngineCore:
         )
         for kv_cache_config in kv_cache_configs:
             kv_cache_config.kv_cache_layout = vllm_config.cache_config.kv_cache_layout
-        vllm_config.cache_config.worker_kv_cache_configs = kv_cache_configs
 
         # If auto-fit reduced max_model_len, sync the new value to workers.
         # This is needed because workers were spawned before memory profiling
@@ -359,8 +358,18 @@ class EngineCore:
             kv_cache_config.cache_hit_alignment_tokens = cache_hit_alignment_tokens
 
         self.model_executor.initialize_from_config(kv_cache_configs)
-        aligned_num_cpu_blocks = self.model_executor.get_simple_cpu_offload_num_blocks()
-        if aligned_num_cpu_blocks is not None:
+        kv_transfer_config = vllm_config.kv_transfer_config
+        if (
+            kv_transfer_config is not None
+            and kv_transfer_config.has_connector("SimpleCPUOffloadConnector")
+            and vllm_config.cache_config.enable_prefix_caching
+        ):
+            aligned_num_cpu_blocks = (
+                self.model_executor.get_simple_cpu_offload_num_blocks()
+            )
+            assert aligned_num_cpu_blocks is not None, (
+                "SimpleCPUOffloadConnector workers must report their block count"
+            )
             vllm_config.cache_config.simple_cpu_offload_num_blocks = (
                 aligned_num_cpu_blocks
             )

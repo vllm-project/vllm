@@ -332,11 +332,6 @@ class CacheConfig:
     num_cpu_blocks: int | None = field(default=None, init=False)
     """The number of blocks to allocate for CPU memory."""
 
-    worker_kv_cache_configs: Any | None = field(default=None, init=False)
-    """Per-worker ``KVCacheConfig`` list populated during engine init.
-
-    Used by connectors such as ``SimpleCPUOffloadConnector`` to size the
-    offload pool consistently across PP stages with uneven layer counts."""
     simple_cpu_offload_num_blocks: int | None = field(default=None, init=False)
     """Worker-aligned offload block count for ``SimpleCPUOffloadConnector``."""
 
@@ -423,7 +418,6 @@ class CacheConfig:
             # Post-init/derived counters
             "num_gpu_blocks",
             "num_cpu_blocks",
-            "worker_kv_cache_configs",
             "simple_cpu_offload_num_blocks",
             "effective_attention_block_size",
             "kv_cache_size_tokens",
