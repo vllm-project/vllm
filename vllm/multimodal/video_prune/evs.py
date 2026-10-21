@@ -159,6 +159,8 @@ def recompute_mrope_positions(
     vision_start_token_id: int,
     image_token_id: int,
     video_token_id: int,
+    placeholder_offset: int | None = None,
+    start_idx: int | None = None,
 ) -> tuple[torch.LongTensor, int]:
     """Update part of input mrope positions.
     Original mrope_positions are computed incorrectly, so once we prune media
@@ -200,6 +202,10 @@ def recompute_mrope_positions(
         vision_start_token_id: Token indicating start of vision media.
         image_token_id: Image token id
         video_token_id: Video token id
+        placeholder_offset: Offset of the placeholder in the full sequence (for 5-channel placeholders).
+            If None, the function will use the original logic.
+        start_idx: Start index of the slice within the placeholder (for 5-channel placeholders).
+            If None, the function will use the original logic.
 
     Returns:
         Tuple of (mrope_positions, mrope_position_delta).
@@ -226,9 +232,11 @@ def recompute_mrope_positions(
 
     # Early exit: we've updated positions for all media tokens
     # (and consequently - for all remaining text tokens)
-    if seen_mm_tokens == total_mm_tokens:
-        delta = int((positions.max().item() + 1) - N) if positions.numel() else -N
-        return positions, delta
+    # This early exit is removed because it prevents writing positions for later frames
+    # when chunked prefill splits a video placeholder inside the placeholder.
+    # if seen_mm_tokens == total_mm_tokens:
+    #     delta = int((positions.max().item() + 1) - N) if positions.numel() else -N
+    #     return positions, delta
 
     vision_start_indices = (input_ids == vision_start_token_id).nonzero(as_tuple=True)[
         0
@@ -323,15 +331,26 @@ def recompute_mrope_positions(
             global_mm_start -= num_timestamp_tokens
             adjusted_for_timestamps = True
 
-        # Offset calculation depends on whether we adjusted for timestamp tokens
-        if adjusted_for_timestamps:
-            # Start from position before the first timestamp token
-            base = positions[-1, global_mm_start - 1] + 1
-            local_start = global_mm_start + mm_embeddings_seen
+        # Check if we're inside a 5-channel placeholder and have the offset and start_idx
+        if (
+            mm_pos.shape[0] == 5
+            and placeholder_offset is not None
+            and start_idx is not None
+        ):
+            # We're inside a 5-channel placeholder (EVS path)
+            # Use the placeholder offset and start_idx to correctly calculate anchor and write offset
+            base = positions[-1, placeholder_offset - 1] + 1
+            local_start = placeholder_offset + start_idx
         else:
-            # Original logic: start after vision_start_token
-            base = positions[-1, global_mm_start] + 1
-            local_start = global_mm_start + 1 + mm_embeddings_seen
+            # Offset calculation depends on whether we adjusted for timestamp tokens
+            if adjusted_for_timestamps:
+                # Start from position before the first timestamp token
+                base = positions[-1, global_mm_start - 1] + 1
+                local_start = global_mm_start + mm_embeddings_seen
+            else:
+                # Original logic: start after vision_start_token
+                base = positions[-1, global_mm_start] + 1
+                local_start = global_mm_start + 1 + mm_embeddings_seen
 
         local_end = local_start + mm_pos.shape[1]
         positions[:, local_start:local_end] = mm_pos[0:3] + base

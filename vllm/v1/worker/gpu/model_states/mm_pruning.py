@@ -77,16 +77,40 @@ class MultiModalPruner:
             pos += num_req_embeds
 
             req_idx = req_idx_list[batch_idx]
-            prefill_len = prefill_lens_list[batch_idx]
-            input_ids = req_states.all_token_ids.gpu[req_idx, :prefill_len]
+            prefilled_len = prefill_lens_list[batch_idx]
+            input_ids = req_states.all_token_ids.gpu[req_idx, :prefilled_len]
             mrope_positions = self.rope_state.read_prefill_positions(
-                req_idx, prefill_len
+                req_idx, prefilled_len
             ).long()
+            # Get the placeholder offset and start_idx for 5-channel placeholders
+            # This is needed to correctly calculate M-RoPE positions when chunked prefill
+            # splits a video placeholder inside the placeholder
+            placeholder_offset = None
+            start_idx = None
+            
+            # Check if this is a 5-channel placeholder (EVS path)
+            # We need to determine if we're inside a placeholder and get its offset and start_idx
+            # This logic is similar to what's in _num_window_embeds but simplified
+            for mm_feature in self.encoder_cache.mm_features[req_id]:
+                pos_info = mm_feature.mm_position
+                # Check if this media item is in the current window
+                start_idx_in_window = max(num_computed - pos_info.offset, 0)
+                end_idx_in_window = min(prefilled_len - pos_info.offset, pos_info.length)
+                if start_idx_in_window < end_idx_in_window:
+                    # This media item is in the current window
+                    # For 5-channel placeholders, we need the placeholder offset and start_idx
+                    if mm_feature.mm_position.length > 0:  # Has video tokens
+                        placeholder_offset = pos_info.offset
+                        start_idx = start_idx_in_window
+                        break
+            
             req_cleaned, new_positions, delta = self.model.recompute_mrope_positions(
                 input_ids=input_ids,
                 multimodal_embeddings=req_embeds,
                 mrope_positions=mrope_positions,
                 num_computed_tokens=num_computed,
+                placeholder_offset=placeholder_offset,
+                start_idx=start_idx,
             )
             self.rope_state.update_prefill_positions(req_idx, new_positions, delta)
             cleaned.extend(
