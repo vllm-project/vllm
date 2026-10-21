@@ -26,6 +26,9 @@ from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import (
     cudagraph_utils as spec_cudagraph_utils,
 )
+from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import (
+    speculator as spec_module,
+)
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.cudagraph_utils import (
     SpeculatorCudaGraphManager,
 )
@@ -452,6 +455,86 @@ def test_varlen_decode_graph_takes_bounded_decode_batches_only(monkeypatch):
     assert desc.max_query_len == _DECODE_QUERY_LEN
     assert dispatch(None).cg_mode == CUDAGraphMode.PIECEWISE
     assert dispatch(_DECODE_QUERY_LEN + 1).cg_mode == CUDAGraphMode.PIECEWISE
+
+
+@pytest.mark.parametrize(
+    "adaptive,num_tokens,decode_eligible",
+    [(False, 16, True), (True, 16, True), (True, 8, True), (True, 16, False)],
+)
+def test_draft_prefill_matches_shared_target_metadata_shape(
+    monkeypatch, adaptive, num_tokens, decode_eligible
+):
+    """Draft prefill must reuse the target's padded request layout, even after AV."""
+    target = _make_spec_decode_manager(
+        monkeypatch,
+        decode_query_len=4,
+        capture_sizes=[1, 2, 4, 8, 16, 32],
+        varlen_decode=adaptive,
+    )
+    target_desc = target.dispatch(
+        4,
+        num_tokens,
+        4 if num_tokens == 16 else None,
+        0,
+        max_query_len=4 if decode_eligible else None,
+    )
+    hidden_states = torch.zeros(target_desc.num_tokens, 1)
+    speculator = SimpleNamespace(
+        vllm_config=target.vllm_config,
+        device=torch.device("cpu"),
+        num_speculative_steps=3,
+        enable_adaptive_verification=adaptive,
+        max_model_len=4096,
+        max_num_reqs=8,
+        dp_size=1,
+        dp_rank=0,
+        pcp_manager=None,
+        hidden_states=torch.empty_like(hidden_states),
+        last_token_indices=None,
+        current_draft_step=None,
+        input_buffers=None,
+        _copy_request_inputs=lambda *a, **kw: None,
+    )
+    spec_module.TargetDependentARSpeculator.init_cudagraph_manager(
+        speculator, CUDAGraphMode.FULL_AND_PIECEWISE
+    )
+    speculator.prefill_cudagraph_manager._graphs_captured = True
+    batch = SimpleNamespace(
+        num_reqs=4,
+        num_tokens=num_tokens,
+        num_tokens_after_padding=target_desc.num_tokens,
+        num_scheduled_tokens=torch.full((4,), 4).numpy(),
+        seq_lens_cpu_upper_bound=torch.full((8,), 128),
+        idx_mapping=None,
+        decode_graph_eligible=decode_eligible,
+    )
+    monkeypatch.setattr(spec_module, "prepare_prefill_inputs", lambda *a: None)
+    dispatch = spec_module.dispatch_cg_and_sync_dp
+
+    class Dispatched(Exception):
+        pass
+
+    def stop_after_dispatch(*args, **kwargs):
+        raise Dispatched(dispatch(*args, **kwargs)[0])
+
+    monkeypatch.setattr(spec_module, "dispatch_cg_and_sync_dp", stop_after_dispatch)
+    with pytest.raises(Dispatched) as result:
+        spec_module.TargetDependentARSpeculator.propose(
+            speculator,
+            batch,
+            {},
+            {},
+            hidden_states,
+            None,
+            num_sampled=None,
+            num_rejected=None,
+            last_sampled=None,
+            next_prefill_tokens=None,
+            temperature=None,
+            seeds=None,
+        )
+
+    assert result.value.args[0] == target_desc
 
 
 def test_mixed_batch_at_decode_only_token_count_still_gets_a_graph(monkeypatch):
