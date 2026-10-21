@@ -12,7 +12,7 @@ from tests.utils import create_new_process_for_each_test
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.worker import gpu_worker, startup_plan
-from vllm.v1.worker.gpu_worker import maybe_rocm_profiling_fallback
+from vllm.v1.worker.gpu_worker import maybe_profiling_fallback
 from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
     maybe_save_startup_plan,
@@ -325,24 +325,14 @@ def _profile_result(consumed, reserved_before=0, reserved_after=0):
     )
 
 
-@pytest.fixture
-def rocm(request):
-    with patch.object(
-        gpu_worker, "current_platform", SimpleNamespace(is_rocm=lambda: request.param)
-    ):
-        yield request.param
-
-
-@pytest.mark.parametrize("rocm", [True, False], indirect=True)
-def test_profiling_fallback_declines_when_free_memory_dropped(rocm):
+def test_profiling_fallback_declines_when_free_memory_dropped():
     """The profiling measurement is kept as-is whenever free memory dropped."""
     result = _profile_result(consumed=MEASURED_DROP)
 
-    assert maybe_rocm_profiling_fallback(result) is None
+    assert maybe_profiling_fallback(result) is None
 
 
-@pytest.mark.parametrize("rocm", [True], indirect=True)
-def test_profiling_fallback_replaces_a_released_measurement(rocm):
+def test_profiling_fallback_replaces_a_released_measurement():
     """A negative measurement describes the rest of the device, so it is replaced
     by this process's reservation, which the rest of the device cannot move."""
     result = _profile_result(
@@ -350,11 +340,10 @@ def test_profiling_fallback_replaces_a_released_measurement(rocm):
         reserved_after=TORCH_RESERVED,
     )
 
-    assert maybe_rocm_profiling_fallback(result) == TORCH_RESERVED
+    assert maybe_profiling_fallback(result) == TORCH_RESERVED
 
 
-@pytest.mark.parametrize("rocm", [True], indirect=True)
-def test_profiling_fallback_never_returns_a_negative_amount(rocm):
+def test_profiling_fallback_never_returns_a_negative_amount():
     """A reservation that shrank across the run cannot become negative usage."""
     result = _profile_result(
         consumed=-RELEASED_BY_OTHERS,
@@ -362,16 +351,7 @@ def test_profiling_fallback_never_returns_a_negative_amount(rocm):
         reserved_after=0,
     )
 
-    assert maybe_rocm_profiling_fallback(result) == 0
-
-
-@pytest.mark.parametrize("rocm", [False], indirect=True)
-def test_profiling_fallback_declines_off_rocm(rocm):
-    """Platforms that account frees eagerly keep reporting the error, so the
-    caller's assertion stays reachable there."""
-    result = _profile_result(consumed=-RELEASED_BY_OTHERS)
-
-    assert maybe_rocm_profiling_fallback(result) is None
+    assert maybe_profiling_fallback(result) == 0
 
 
 class _OrderedHandle:

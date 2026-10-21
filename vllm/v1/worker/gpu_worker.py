@@ -127,16 +127,18 @@ def _num_workspace_lanes(vllm_config: VllmConfig, use_v2_model_runner: bool) -> 
     )
 
 
-def maybe_rocm_profiling_fallback(profile_result: MemoryProfilingResult) -> int | None:
+def maybe_profiling_fallback(profile_result: MemoryProfilingResult) -> int | None:
     """Memory in bytes to size the KV cache from when profiling measured a
-    release on ROCm, or None to keep what profiling measured.
+    release, or None to keep what profiling measured.
 
     The measurement is the drop in free device memory across startup, so it comes
-    out negative when anything else on the device released memory meanwhile. Torch
-    reserved is process local, so it stands in as a lower bound instead of refusing
-    to start. Kept to ROCm, where the AMD CI groups hit this, following #45490.
+    out negative when anything else on the device released memory meanwhile - e.g.
+    a co-tenant process, or another vLLM instance of a disaggregated deployment
+    finishing startup (the NIXL PD CI config hits this on CUDA). Torch reserved is
+    process local, so it stands in as a lower bound instead of refusing to start.
+    Added for ROCm in #53591, following #45490.
     """
-    if profile_result.total_consumed >= 0 or not current_platform.is_rocm():
+    if profile_result.total_consumed >= 0:
         return None
 
     baseline = profile_result.before_create
@@ -714,23 +716,10 @@ class Worker(WorkerBase):
             else 0
         )
 
-        init_free_memory = self.init_snapshot.free_memory
         free_gpu_memory = profile_result.after_profile.free_memory
-        rocm_fallback = maybe_rocm_profiling_fallback(profile_result)
-        if rocm_fallback is None:
-            # NOTE(woosuk): Here we assume that the other processes using the same
-            # GPU did not change their memory usage during the profiling.
-            assert init_free_memory >= free_gpu_memory, (
-                "Error in memory profiling. "
-                f"Initial free memory {format_gib(init_free_memory)} GiB, "
-                f"current free memory {format_gib(free_gpu_memory)} GiB. "
-                "This happens when other processes sharing the same container "
-                "release GPU memory while vLLM is profiling during initialization. "
-                "To fix this, ensure consistent GPU memory allocation or "
-                "isolate vLLM in its own container."
-            )
-        else:
-            profile_result.total_consumed = rocm_fallback
+        profiling_fallback = maybe_profiling_fallback(profile_result)
+        if profiling_fallback is not None:
+            profile_result.total_consumed = profiling_fallback
             profile_result.non_kv_cache_memory = (
                 profile_result.total_consumed + profile_result.transient_peak_headroom
             )
