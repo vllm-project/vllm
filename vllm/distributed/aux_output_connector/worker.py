@@ -18,7 +18,6 @@ from vllm.distributed.aux_output_connector.connector import (
     AuxOutputConnectorMetadata,
     AuxRequestOutput,
 )
-from vllm.distributed.aux_output_connector.profile import validate_shm_budget
 from vllm.distributed.aux_output_connector.routed_experts import (
     RoutedExpertsBuffer,
     materialize_routed_experts,
@@ -44,6 +43,28 @@ if TYPE_CHECKING:
 
 
 logger = init_logger(__name__)
+
+
+def validate_shm_budget(
+    *,
+    num_blocks: int,
+    scheduler_block_size: int,
+    bytes_per_token: int,
+    max_bytes: int | None,
+) -> int:
+    required = num_blocks * scheduler_block_size * bytes_per_token
+    if max_bytes is not None and max_bytes < required:
+        supported = max_bytes // (scheduler_block_size * bytes_per_token)
+        gib = 1024**3
+        raise ValueError(
+            f"Required AuxOutput SHM: {required / gib:.3f} GiB; "
+            f"Allowed AuxOutput SHM: {max_bytes / gib:.3f} GiB. "
+            f"Current KV Blocks: {num_blocks}; Maximum Supported Blocks: {supported}. "
+            "Increase aux_output_config.max_bytes "
+            "or reduce KV blocks using gpu_memory_utilization or "
+            "kv_cache_memory_bytes. Host staging and runtime memory are additional."
+        )
+    return required if max_bytes is None else max_bytes
 
 
 @dataclass
@@ -167,9 +188,7 @@ class AuxOutputWorkerConnector:
             shape_per_token = self._capturer.shape_per_token
             dtype: np.dtype[Any] = self._r3_dtype
         else:
-            shape_per_token = (
-                self._r3_nbytes + self._indexer.profile.fixed_bytes_per_token,
-            )
+            shape_per_token = (self._r3_nbytes + self._indexer.fixed_bytes_per_token,)
             dtype = np.dtype("uint8")
         scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
             kv_cache_config, vllm_config
@@ -215,7 +234,7 @@ class AuxOutputWorkerConnector:
                 "block=%d B, SHM=%d B, host staging=%d B, metadata estimate=%d B, "
                 "runtime reserve=%d B; local output workers=%d",
                 self._r3_nbytes,
-                self._indexer.profile.fixed_bytes_per_token,
+                self._indexer.fixed_bytes_per_token,
                 block_nbytes,
                 max_bytes,
                 staging_bytes,
@@ -323,7 +342,11 @@ class AuxOutputWorkerConnector:
                     .view(np.uint8)
                     .reshape(len(routed_experts), -1)
                 )
-            parts.append(np.ascontiguousarray(pending.indexer).view(np.uint8))
+            parts.append(
+                np.ascontiguousarray(pending.indexer)
+                .view(np.uint8)
+                .reshape(len(pending.indexer), -1)
+            )
             routed_experts = np.concatenate(parts, axis=1)
         num_sampled = pending.num_sampled
         num_rejected = pending.num_rejected
@@ -460,12 +483,16 @@ class AuxOutputWorkerConnector:
             routed_experts_rows = routed_experts_rows.view(self._r3_dtype).reshape(
                 n, *self._r3_shape
             )
-        indexer = rows[:, self._r3_nbytes :].copy().view(np.int32)
+        indexer = (
+            rows[:, self._r3_nbytes :]
+            .copy()
+            .view(np.int32)
+            .reshape(n, *self._indexer.shape_per_token)
+        )
         return AuxRequestOutput(
             token_start=token_start,
             routed_experts_rows=routed_experts_rows,
             indexer_rows=indexer,
-            indexer_profile=self._indexer.profile_metadata,
         )
 
     def _publish_blocks(
@@ -562,7 +589,7 @@ class AuxOutputWorkerConnector:
                 state = self._requests[request_id]
                 namespace = str(self._generation)
                 if self._indexer is not None:
-                    namespace += "/" + self._indexer.profile.profile_id
+                    namespace += "/" + self._indexer.namespace
                     if self._capturer is not None:
                         namespace += f"/r3-{self._r3_shape}-{self._r3_dtype.name}"
                 keys = routed_experts_keys(block_hashes, namespace)

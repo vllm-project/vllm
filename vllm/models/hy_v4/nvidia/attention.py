@@ -524,37 +524,6 @@ class HYV4MLAAttention(nn.Module):
             **extra_impl_args,
         )
 
-        from vllm.model_executor.layers.indexer_capture import IndexerCaptureSink
-
-        self.indexer_capture: IndexerCaptureSink | None = None
-        if (
-            vllm_config.aux_output_config.enable_return_indexer_topk
-            and self.indexer is not None
-        ):
-            from vllm.distributed.aux_output_connector.profile import IndexerSource
-            from vllm.model_executor.layers.indexer_capture import (
-                configure_indexer_capture,
-            )
-
-            shared = compute_skip_topk_layers(config)
-            consumers = []
-            for consumer in range(self.layer_id, config.num_hidden_layers):
-                if config.layer_types[consumer] not in _SPARSE_LAYER_TYPES:
-                    continue
-                if consumer > self.layer_id and consumer not in shared:
-                    break
-                consumers.append(consumer)
-            configure_indexer_capture(
-                self,
-                vllm_config,
-                IndexerSource(
-                    self.layer_id,
-                    (config.index_topk,),
-                    "logical_token_id",
-                    consumer_layer_ids=tuple(consumers),
-                ),
-            )
-
     @property
     def topk_indices_buffer(self) -> torch.Tensor | None:
         """The sparse top-k index buffer this layer reads from.
@@ -794,13 +763,6 @@ class HYV4MLAAttention(nn.Module):
         """
         if self.indexer is not None and self.is_sparse and not self.skip_topk:
             self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
-        if self.indexer_capture is not None:
-            assert self.topk_indices_buffer is not None
-            self.indexer_capture.capture(
-                self.topk_indices_buffer[
-                    : len(hidden_states), : self.indexer.topk_tokens
-                ]
-            )
         if self.is_sparse:
             self.mla_attn.impl.record_logical_topk_ready()  # type: ignore[attr-defined]
         out.copy_(

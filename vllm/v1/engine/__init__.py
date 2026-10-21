@@ -247,8 +247,6 @@ class EngineCoreOutput(
     error: RequestError | None = None
 
     indexer_rows: np.ndarray | None = None
-    indexer_profile: dict[str, Any] | None = None
-    indexer_output_format: str = "raw"
 
     @property
     def finished(self) -> bool:

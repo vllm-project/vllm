@@ -71,8 +71,6 @@ def test_delta_output_without_new_tokens_returns_empty_logprobs(
     state.sampling_mask_chunks = []
     state.routed_experts_chunks = []
     state.indexer_chunks = []
-    state.indexer_profile = None
-    state.indexer_output_format = "raw"
     state.spec_decode_metrics = None
 
     output = state._new_completion_output([], None, None)
@@ -99,8 +97,6 @@ def test_completion_output_preserves_each_sampling_mask_position() -> None:
     ]
     state.routed_experts_chunks = []
     state.indexer_chunks = []
-    state.indexer_profile = None
-    state.indexer_output_format = "raw"
     state.spec_decode_metrics = None
     state.weight_version_starts = []
 
@@ -1528,8 +1524,7 @@ async def test_request_output_collector():
     assert output.outputs[0].cumulative_logprob == cumulative_logprob_expected
 
 
-@pytest.mark.parametrize("indexer_format", ["raw", "packed"])
-def test_aux_outputs_are_accumulated_until_finish(indexer_format):
+def test_aux_outputs_are_accumulated_until_finish():
     state = RequestState(
         request_id="request-int",
         external_req_id="request",
@@ -1555,22 +1550,13 @@ def test_aux_outputs_are_accumulated_until_finish(indexer_format):
     prompt_chunk = np.arange(24, dtype=np.uint8).reshape(4, 3, 2)
     decode_chunk = np.arange(12, dtype=np.uint8).reshape(2, 3, 2) + 24
     state.routed_experts_chunks.append(prompt_chunk)
-    from vllm.distributed.aux_output_connector.profile import (
-        AuxOutputProfile,
-        IndexerSource,
-    )
-
-    profile = AuxOutputProfile("model", (IndexerSource(0, (2,), "logical_token_id"),))
-    selections = np.arange(12, dtype=np.int32).reshape(6, 2)
-    state.indexer_profile = profile.to_dict()
-    state.indexer_output_format = indexer_format
+    selections = np.arange(12, dtype=np.int32).reshape(6, 1, 2)
     state.indexer_chunks = [selections[:4]]
 
     partial = state.make_request_output([5], None, None, None)
     assert partial is not None
     assert partial.outputs[0].routed_experts is None
     assert partial.outputs[0].indexer_topk is None
-    assert partial.outputs[0].indexer_payload is None
 
     state.indexer_chunks.append(selections[4:])
     state.routed_experts_chunks.append(decode_chunk)
@@ -1581,13 +1567,7 @@ def test_aux_outputs_are_accumulated_until_finish(indexer_format):
         np.concatenate((prompt_chunk, decode_chunk)),
     )
     result = finished.outputs[0]
-    assert result.indexer_profile == profile.to_dict()
-    if indexer_format == "packed":
-        assert result.indexer_payload == selections.tobytes()
-        assert result.indexer_topk is None
-    else:
-        np.testing.assert_array_equal(result.indexer_topk, selections[:, None])
-        assert result.indexer_payload is None
+    np.testing.assert_array_equal(result.indexer_topk, selections)
 
 
 @pytest.mark.asyncio
@@ -1908,8 +1888,6 @@ def test_sampling_masks_follow_output_kind(output_kind):
     state.sampling_mask_chunks = []
     state.routed_experts_chunks = []
     state.indexer_chunks = []
-    state.indexer_profile = None
-    state.indexer_output_format = "raw"
     state.spec_decode_metrics = None
     state.weight_version_starts = []
 

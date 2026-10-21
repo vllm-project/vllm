@@ -9,7 +9,6 @@ from transformers import DeepseekV2Config, DeepseekV3Config
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, CUDAGraphMode, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.distributed.aux_output_connector.profile import IndexerSource
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention import MLAAttention
@@ -244,31 +243,7 @@ class DeepseekV32Attention(MLAAttention):
             vllm_config.aux_output_config.enable_return_indexer_topk
             and indexer is not None
         ):
-            consumers = []
-            for consumer in range(layer_id, config.num_hidden_layers):
-                if index_topk_pattern is None:
-                    shared = (
-                        max(consumer - index_skip_topk_offset + 1, 0) % index_topk_freq
-                        != 0
-                    )
-                else:
-                    shared = (
-                        consumer < len(index_topk_pattern)
-                        and index_topk_pattern[consumer] == "S"
-                    )
-                if consumer > layer_id and not shared:
-                    break
-                consumers.append(consumer)
-            configure_indexer_capture(
-                self,
-                vllm_config,
-                IndexerSource(
-                    layer_id,
-                    (indexer.topk_tokens,),
-                    "logical_token_id",
-                    consumer_layer_ids=tuple(consumers),
-                ),
-            )
+            configure_indexer_capture(self, vllm_config, layer_id, indexer.topk_tokens)
             # Replay needs the selection even on a short dense-MHA prefill.
             self._dense_mha_metadata_layer_name = ""
 
@@ -557,7 +532,7 @@ class DeepseekV32Attention(MLAAttention):
             assert self.topk_indices_buffer is not None
             self.indexer_capture.capture(
                 self.topk_indices_buffer[
-                    : len(q_c), : self.indexer_capture.source.width
+                    : len(q_c), : self.indexer_capture.rows.shape[1]
                 ]
             )
         self.impl.record_logical_topk_ready()  # type: ignore[attr-defined]

@@ -1208,27 +1208,6 @@ class Step5Attention(nn.Module):
             **sparse_impl_args,
         )
         if self.use_dsa_backend:
-            assert vllm_config is not None and sparse_config is not None
-            if vllm_config.aux_output_config.enable_return_indexer_topk:
-                from vllm.distributed.aux_output_connector.profile import IndexerSource
-                from vllm.model_executor.layers.indexer_capture import (
-                    configure_indexer_capture,
-                )
-
-                configure_indexer_capture(
-                    self.attn,
-                    vllm_config,
-                    IndexerSource(
-                        self.layer_idx,
-                        (self.total_num_kv_heads, sparse_config.topk + 2),
-                        "region_id",
-                        ratio=sparse_config.region_block_size,
-                        consumer_layer_ids=(self.layer_idx,),
-                        selection_width=True,
-                    ),
-                    local_groups=self.num_kv_heads,
-                    group_replicas=max(1, tp_size // self.total_num_kv_heads),
-                )
             from .csa_tail_ring import Step5CSATailRing
             from .sparse_summary_cache import Step5SparseSummaryCacheLayer
 

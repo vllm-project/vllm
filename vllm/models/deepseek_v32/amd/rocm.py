@@ -287,7 +287,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             assert self.topk_indices_buffer is not None
             self.indexer_capture.capture(
                 self.topk_indices_buffer[
-                    : len(q_c), : self.indexer_capture.source.width
+                    : len(q_c), : self.indexer_capture.rows.shape[1]
                 ]
             )
 
