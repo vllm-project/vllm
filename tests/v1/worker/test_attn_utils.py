@@ -8,6 +8,7 @@ never addressed by the logical view.
 """
 
 import importlib
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -261,6 +262,76 @@ def test_varlen_cudagraph_unsupported_backend_checks_scoped_bounds():
         is None
     )
     assert unsupported([[target, never]], config, 1) == ("_DraftBackend", None)
+
+
+@dataclass
+class _DraftConfig:
+    model_config: Any
+    speculative_config: Any
+    cache_config: Any
+    parallel_config: Any
+
+
+def test_draft_layers_cudagraph_support_uses_draft_model_config(monkeypatch):
+    """A draft layer in a target's KV cache group is judged on the draft model's
+    config, so its own head counts meet its own KV cache spec."""
+    target_model, draft_model = object(), object()
+    config: Any = _DraftConfig(
+        model_config=target_model,
+        speculative_config=SimpleNamespace(draft_model_config=draft_model),
+        cache_config=SimpleNamespace(kv_sharing_fast_prefill=False),
+        parallel_config=SimpleNamespace(use_ubatching=False),
+    )
+    backend = SimpleNamespace(full_cls_name=lambda: "FakeBackend")
+    layers = {
+        name: SimpleNamespace(
+            get_attn_backend=lambda: backend,
+            num_heads=num_heads,
+            is_draft_layer=name == "draft",
+            kv_sharing_target_layer_name=None,
+        )
+        for name, num_heads in (("target", 24), ("draft", 40))
+    }
+    monkeypatch.setattr(
+        attn_utils,
+        "get_layers_from_vllm_config",
+        lambda _config, _type, names=None: {n: layers[n] for n in names or layers},
+    )
+    monkeypatch.setattr(attn_utils, "prepare_kernel_block_sizes", lambda *_: [16])
+    seen: dict[str, Any] = {}
+
+    class _RecordingBuilder:
+        def __init__(self, layer_names: list[str]):
+            self.layer_names = layer_names
+
+        def get_cudagraph_support(self, vllm_config, _spec):
+            for name in self.layer_names:
+                seen[name] = vllm_config.model_config
+            return AttentionCGSupport.ALWAYS
+
+    def create_metadata_builders(self, **_):
+        self.metadata_builders = [_RecordingBuilder(self.layer_names)]
+
+    monkeypatch.setattr(
+        AttentionGroup, "create_metadata_builders", create_metadata_builders
+    )
+    spec = FullAttentionSpec(
+        block_size=16, num_kv_heads=8, head_size=128, dtype=torch.bfloat16
+    )
+    kv_cache_config: Any = SimpleNamespace(
+        kv_cache_groups=[KVCacheGroupSpec(["target", "draft"], spec)]
+    )
+
+    groups, _, _ = attn_utils.init_attn_backend(
+        kv_cache_config, config, torch.device("cpu")
+    )
+    expected = {"target": target_model, "draft": draft_model}
+    assert seen == expected
+    seen.clear()
+    assert (
+        attn_utils.get_varlen_cudagraph_unsupported_backend(groups, config, 1) is None
+    )
+    assert seen == expected
 
 
 @pytest.mark.parametrize("num_speculative_tokens", [0, 7])

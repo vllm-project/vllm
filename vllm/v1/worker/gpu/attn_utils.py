@@ -253,6 +253,9 @@ def init_attn_backend(
             # counts (e.g. a spec-decode draft head and its target) get separate
             # metadata builders.
             num_heads_q = getattr(attn_layers[layer_name], "num_heads", 0)
+            if attn_layers[layer_name].is_draft_layer:
+                # Merged group specs drop the per-layer draft tag.
+                layer_kv_cache_spec = replace(layer_kv_cache_spec, is_draft=True)
             key = (attn_backend.full_cls_name(), layer_kv_cache_spec, num_heads_q)
             if key not in group_map:
                 group_map[key] = AttentionGroup(
@@ -311,6 +314,17 @@ def init_attn_backend(
     return attn_groups, attn_cg_support_info, kernel_block_sizes
 
 
+def _cudagraph_support_config(
+    vllm_config: VllmConfig, kv_cache_spec: KVCacheSpec
+) -> VllmConfig:
+    """Judge draft layers with the draft model's config: the target's would pair
+    the target's head counts with the draft layer's KV cache spec."""
+    spec_config = vllm_config.speculative_config if kv_cache_spec.is_draft else None
+    if spec_config is None or spec_config.draft_model_config is None:
+        return vllm_config
+    return replace(vllm_config, model_config=spec_config.draft_model_config)
+
+
 def get_attn_cg_support(
     attn_groups: list[list[AttentionGroup]],
     vllm_config: VllmConfig,
@@ -327,7 +341,7 @@ def get_attn_cg_support(
                 continue
             builder = group.get_metadata_builder(0)
             cg_support = builder.get_cudagraph_support(
-                vllm_config,
+                _cudagraph_support_config(vllm_config, group.kv_cache_spec),
                 group.kv_cache_spec,
             )
             if cg_support.value < min_cg_support.value:
@@ -380,14 +394,15 @@ def get_varlen_cudagraph_unsupported_backend(
                 continue
             builder = group.get_metadata_builder(0)
             spec = group.kv_cache_spec
-            support = builder.get_cudagraph_support(vllm_config, spec)
+            config = _cudagraph_support_config(vllm_config, spec)
+            support = builder.get_cudagraph_support(config, spec)
             if support == AttentionCGSupport.ALWAYS:
                 continue
             bound = (
                 # NEVER means never, whatever an inherited override says.
                 None
                 if support == AttentionCGSupport.NEVER
-                else builder.get_varlen_cudagraph_max_query_len(vllm_config, spec)
+                else builder.get_varlen_cudagraph_max_query_len(config, spec)
             )
             if bound is None or bound < max_query_len:
                 return group.backend.__name__, bound
