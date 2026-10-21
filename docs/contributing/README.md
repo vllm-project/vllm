@@ -266,21 +266,13 @@ The PR needs to meet the following code quality standards:
 ### Documenting User-Visible Changes
 
 If a PR changes what users can run, configure, or observe, update the rendered
-docs in the same PR. Code comments, tests, and PR descriptions alone are not found
-by users or their agents.
-
-| Change | Document it in |
-| ------ | -------------- |
-| Feature or behavior change | Its page under `docs/features/` (or guide), linked from [Features](../features/README.md) |
-| CLI argument or config field | The docstring or `help=` text, which generates [Engine Arguments](../configuration/engine_args.md) and the [CLI reference](../cli/README.md) |
-| Environment variable | Its comment in `environment_variables`, which generates [Environment Variables](../configuration/env_vars.md) |
-| Model | [Supported Models](../models/supported_models.md) |
-| Hardware support | That hardware's installation page and the feature x hardware matrix |
-| Default change, deprecation, removal | The item's page, per the [deprecation policy](deprecation_policy.md) |
-
-Lead with what it is, how to enable it (exact flag or variable), the default,
-and `Available in vLLM vX.Y.0 and later.` Use the names users search for and
-link the page from its index.
+docs in the same PR; code comments, tests, and PR descriptions alone are not
+found by users or their agents. CLI arguments, config fields, and environment
+variables are documented in their docstring, `help=` text, or
+`environment_variables` comment, which generate the reference pages. Everything
+else goes on its page under `docs/` (feature, model, hardware, deprecation),
+linked from its index. Lead with what it is, how to enable it, and the default,
+using the names users search for.
 
 To check, ask a fresh agent a user question (e.g. "What does `VLLM_FOO` do?")
 three times, limited in turn to web search, GitHub, and a local checkout (before
