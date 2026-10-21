@@ -2210,6 +2210,121 @@ def test_nccl_trainer_send_weights_drives_client_in_order():
     assert "packed" not in client.last_update_info
 
 
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 1,
+    reason="Need at least 1 GPU (NCCL broadcast / CUDA stream).",
+)
+def test_nccl_trainer_sends_metadata_only_when_changed():
+    """An unchanged parameter set ships empty update info; a changed one ships
+    the full metadata again."""
+    client = RecordingClient()
+    engine = NCCLTrainerWeightTransferEngine(
+        client=client,
+        source=ModuleSource(_module_with(("w", torch.zeros(4, device="cuda")))),
+        packed=False,
+    )
+    engine.model_update_group = MagicMock()
+
+    engine.send_weights()
+    assert client.last_update_info is not None
+    assert client.last_update_info["shapes"] == [[4]]
+    engine.send_weights()
+    assert client.last_update_info == {
+        "names": [],
+        "dtype_names": [],
+        "shapes": [],
+        "src": 0,
+    }
+    engine.source = ModuleSource(_module_with(("w", torch.zeros(8, device="cuda"))))
+    engine.send_weights()
+    assert client.last_update_info["shapes"] == [[8]]
+
+
+def test_nccl_worker_reuses_metadata_per_model(monkeypatch):
+    """Empty update info reuses the previous call's metadata for the same model;
+    target and draft keep separate copies, and re-init clears them."""
+    import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
+
+    monkeypatch.setattr(
+        nccl_engine_mod, "worker_init_process_group", lambda info, pc: MagicMock()
+    )
+    target, draft = MagicMock(spec=torch.nn.Module), MagicMock(spec=torch.nn.Module)
+    received: list = []
+    for model in (target, draft):
+        model.load_weights = lambda w, m=model: received.append((m, w[0][0]))
+    engine = NCCLWeightTransferEngine(
+        WeightTransferConfig(backend="nccl"),
+        create_mock_vllm_config(),
+        torch.device("cpu"),
+        target,
+    )
+    init_info = NCCLWeightTransferInitInfo(
+        master_address="127.0.0.1", master_port=29500, rank_offset=1, world_size=2
+    )
+    engine.init_transfer_engine(init_info)
+    monkeypatch.setattr(torch.cuda, "current_stream", MagicMock())
+
+    def update(model, *names):
+        engine.set_weight_update_target(model, None)
+        engine.receive_weights(
+            NCCLWeightTransferUpdateInfo(
+                names=list(names),
+                dtype_names=["float32"] * len(names),
+                shapes=[[2]] * len(names),
+            )
+        )
+
+    update(target, "t")
+    update(draft, "d")
+    update(target)
+    update(draft)
+    engine.init_transfer_engine(init_info)
+    update(target)
+
+    assert received == [(target, "t"), (draft, "d"), (target, "t"), (draft, "d")]
+
+
+def test_nccl_worker_reuses_metadata_per_source(monkeypatch):
+    """Each source's empty update info reuses that source's own metadata."""
+    import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
+
+    monkeypatch.setattr(
+        nccl_engine_mod, "worker_init_process_group", lambda info, pc: MagicMock()
+    )
+    model = MagicMock(spec=torch.nn.Module)
+    received: list = []
+    model.load_weights = lambda w: received.append(w[0][0])
+    engine = NCCLWeightTransferEngine(
+        WeightTransferConfig(backend="nccl"),
+        create_mock_vllm_config(),
+        torch.device("cpu"),
+        model,
+    )
+    engine.init_transfer_engine(
+        NCCLWeightTransferInitInfo(
+            master_address="127.0.0.1", master_port=29500, rank_offset=2, world_size=3
+        )
+    )
+    monkeypatch.setattr(torch.cuda, "current_stream", MagicMock())
+
+    def update(src, *names):
+        engine.receive_weights(
+            NCCLWeightTransferUpdateInfo(
+                names=list(names),
+                dtype_names=["float32"] * len(names),
+                shapes=[[2]] * len(names),
+                src=src,
+            )
+        )
+
+    update(0, "a")
+    update(1, "b")
+    update(0)
+    update(1)
+
+    assert received == ["a", "b", "a", "b"]
+
+
 class _ScriptedSource(WeightSource):
     """Declares `meta` but yields whatever `pairs` says — used to drive the
     metadata/iteration agreement checks."""

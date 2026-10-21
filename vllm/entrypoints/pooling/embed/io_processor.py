@@ -136,6 +136,15 @@ class EmbedIOProcessor(PoolingIOProcessor):
         if ctx.engine_inputs is None:
             raise ValueError("Engine prompts not available")
 
+        if any(
+            engine_input["prompts"]["type"] == "multimodal"
+            for engine_input in ctx.engine_inputs
+        ):
+            raise VLLMValidationError(
+                "Chunked embedding processing does not support multimodal inputs. "
+                "Disable enable_chunked_processing to use multimodal inputs."
+            )
+
         ctx.original_engine_inputs = ctx.engine_inputs
         request_id = ctx.request_id
         max_model_len = self.model_config.max_model_len

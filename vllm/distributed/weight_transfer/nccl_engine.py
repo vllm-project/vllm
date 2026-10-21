@@ -4,7 +4,7 @@
 
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from threading import Lock
 from typing import TYPE_CHECKING, ClassVar, Self
 
@@ -132,11 +132,16 @@ class NCCLWeightTransferUpdateInfo(WeightTransferUpdateInfo):
     wire param carried on the init info (`NCCLTrainerInitInfo` /
     `NCCLWeightTransferInitInfo`), not here; this carries the per-round
     parameter metadata and source rank.
+
+    Leave all three lists empty to reuse the metadata of the previous
+    `update_weights` call on the same model from the same `src`, so a trainer
+    that sends the same parameters every round ships the names, dtypes and
+    shapes only once.
     """
 
-    names: list[str]
-    dtype_names: list[str]
-    shapes: list[list[int]]
+    names: list[str] = field(default_factory=list)
+    dtype_names: list[str] = field(default_factory=list)
+    shapes: list[list[int]] = field(default_factory=list)
     src: int = 0
 
     def __post_init__(self):
@@ -184,6 +189,10 @@ class NCCLWeightTransferEngine(
         self.packed = False
         self.packed_buffer_size_bytes = DEFAULT_PACKED_BUFFER_SIZE_BYTES
         self.packed_num_buffers = DEFAULT_PACKED_NUM_BUFFERS
+        # Metadata of the last update per (model, src), reused by empty update info.
+        self._last_update_info: dict[
+            tuple[torch.nn.Module, int], NCCLWeightTransferUpdateInfo
+        ] = {}
 
     def init_transfer_engine(self, init_info: NCCLWeightTransferInitInfo) -> None:
         """Initialize NCCL process group with the trainer and record the
@@ -199,6 +208,7 @@ class NCCLWeightTransferEngine(
         self.packed = init_info.packed
         self.packed_buffer_size_bytes = init_info.packed_buffer_size_bytes
         self.packed_num_buffers = init_info.packed_num_buffers
+        self._last_update_info.clear()
         self.model_update_group = worker_init_process_group(
             init_info, self.parallel_config
         )
@@ -229,7 +239,8 @@ class NCCLWeightTransferEngine(
 
         Args:
             update_info: NCCL update info containing parameter names, dtypes,
-                        shapes, and the source rank
+                        shapes, and the source rank; empty lists to reuse
+                        the previous call's from the same source
 
         """
         if self.model_update_group is None or self.rank_offset is None:
@@ -246,6 +257,11 @@ class NCCLWeightTransferEngine(
                 f"NCCL source rank must be an integer in [0, {self.rank_offset}), "
                 f"got {update_info.src!r}."
             )
+        key = (self.model, update_info.src)
+        if update_info.names:
+            self._last_update_info[key] = update_info
+        else:
+            update_info = self._last_update_info.get(key, update_info)
 
         from vllm.model_executor.model_loader.mtp_validation import (
             disable_mtp_completeness_check,
@@ -328,6 +344,8 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         self.update_infos: list[NCCLWeightTransferUpdateInfo] = []
         self.source_metadata_group: StatelessProcessGroup | None = None
         self._group_lock = Lock()
+        # Metadata the worker already holds; an unchanged round sends none.
+        self._sent_update_infos: list[NCCLWeightTransferUpdateInfo] | None = None
 
     @classmethod
     def trainer_init(
@@ -493,7 +511,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
 
         if self.model_update_group is None:
             raise RuntimeError("trainer_init() must be called before send_weights().")
-        if not self.update_infos:
+        if self.source_metadata_group is None:
             meta = source.metadata()
             self.update_infos = [
                 NCCLWeightTransferUpdateInfo(
@@ -514,8 +532,9 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         if start_failure is not None:
             raise start_failure
 
+        reuse_metadata = self.update_infos == self._sent_update_infos
         for update_index, update_info in enumerate(self.update_infos):
-            self._send_update(update_index, update_info)
+            self._send_update(update_index, update_info, reuse_metadata)
 
         finish_failure = None
         if self.is_sender:
@@ -526,19 +545,26 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         self._exchange_source_outcome("finish", -1, finish_failure)
         if finish_failure is not None:
             raise finish_failure
+        self._sent_update_infos = self.update_infos
 
     def _send_update(
-        self, update_index: int, update_info: NCCLWeightTransferUpdateInfo
+        self,
+        update_index: int,
+        update_info: NCCLWeightTransferUpdateInfo,
+        reuse_metadata: bool = False,
     ) -> None:
         executor = None
         future = None
         failure = None
         if self.is_sender:
+            wire_info = (
+                NCCLWeightTransferUpdateInfo(src=update_info.src)
+                if reuse_metadata
+                else update_info
+            )
             executor = ThreadPoolExecutor(max_workers=1)
             try:
-                future = executor.submit(
-                    self.client.update_weights, asdict(update_info)
-                )
+                future = executor.submit(self.client.update_weights, asdict(wire_info))
                 future.add_done_callback(self._abort_on_rpc_failure)
                 if future.done():
                     future.result()

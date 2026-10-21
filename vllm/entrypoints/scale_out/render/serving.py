@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from fastapi import Request
@@ -20,6 +21,7 @@ from vllm.entrypoints.scale_out.token_in_token_out.mm_features import (
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     GenerateRequest,
     MultiModalFeatures,
+    ParseContext,
     ReasoningParserKwargs,
 )
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
@@ -29,6 +31,7 @@ from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.multimodal.parse import MultiModalDataParser
+from vllm.parser.utils import count_history_tool_calls
 from vllm.renderers.inputs.preprocess import (
     extract_prompt_components,
     extract_prompt_len,
@@ -99,11 +102,22 @@ class ServingRender(BaseServing):
         self,
         request: ChatCompletionRequest,
         raw_request: Request | None = None,
+        engine_chat_template_kwargs: (
+            Callable[[dict[str, Any]], dict[str, Any]] | None
+        ) = None,
     ) -> GenerateRequest | ErrorResponse:
         """Validate the model and preprocess a chat completion request.
 
         This is the authoritative implementation used directly by the
         GPU-less render server and delegated to by OpenAIServingChat.
+
+        Args:
+            request: The chat completion request.
+            raw_request: The incoming HTTP request, if any.
+            engine_chat_template_kwargs: The calling handler's
+                `_engine_chat_template_kwargs`, applied to the kwargs put in
+                `parse_context` to drop API server only state.
+
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
@@ -150,7 +164,10 @@ class ServingRender(BaseServing):
 
         # Resolve here what OpenAIServingChat passes to the engine:
         # `_grammar_from_parser` (set by `adjust_request`) is not serialized.
-        reasoning_parser_kwargs = self._reasoning_parser_kwargs(request)
+        chat_template_kwargs = self.online_renderer.effective_chat_template_kwargs(
+            request
+        )
+        reasoning_parser_kwargs = self._reasoning_parser_kwargs(chat_template_kwargs)
         parser = None
         if reasoning_parser_kwargs is not None:
             assert self.online_renderer.parser is not None
@@ -180,9 +197,32 @@ class ServingRender(BaseServing):
             reasoning_parser_kwargs=reasoning_parser_kwargs,
             stream=bool(request.stream),
             stream_options=(request.stream_options if request.stream else None),
+            return_token_ids=request.return_token_ids,
             cache_salt=request.cache_salt,
             priority=request.priority,
             token_offsets=engine_input.get("prompt_token_offsets"),
+            parse_context=self._build_parse_context(
+                request,
+                engine_chat_template_kwargs(chat_template_kwargs)
+                if engine_chat_template_kwargs is not None
+                else chat_template_kwargs,
+            ),
+        )
+
+    def _build_parse_context(
+        self, request: ChatCompletionRequest, chat_template_kwargs: dict[str, Any]
+    ) -> ParseContext:
+        return ParseContext(
+            tools=request.tools,
+            tool_choice=request.tool_choice,
+            parallel_tool_calls=request.parallel_tool_calls,
+            include_reasoning=request.include_reasoning,
+            # Like the derenderer, Harmony output is parsed without template
+            # kwargs.
+            chat_template_kwargs=(
+                {} if self.online_renderer.use_harmony else chat_template_kwargs
+            ),
+            history_tool_call_cnt=count_history_tool_calls(request),
         )
 
     async def render_messages_request(
@@ -266,6 +306,7 @@ class ServingRender(BaseServing):
                     model=request.model,
                     stream=bool(request.stream),
                     stream_options=(request.stream_options if request.stream else None),
+                    return_token_ids=request.return_token_ids,
                     cache_salt=request.cache_salt,
                     priority=request.priority,
                     token_offsets=engine_input.get("prompt_token_offsets"),
@@ -327,7 +368,9 @@ class ServingRender(BaseServing):
             ),
             sampling_params=params,
             model=request.model,
-            reasoning_parser_kwargs=self._reasoning_parser_kwargs(request),
+            reasoning_parser_kwargs=self._reasoning_parser_kwargs(
+                self.online_renderer.effective_chat_template_kwargs(request)
+            ),
             stream=bool(request.stream),
             cache_salt=request.cache_salt,
             priority=request.priority,
@@ -337,16 +380,12 @@ class ServingRender(BaseServing):
         )
 
     def _reasoning_parser_kwargs(
-        self, request: ChatCompletionRequest | ResponsesRequest
+        self, chat_template_kwargs: dict[str, Any]
     ) -> ReasoningParserKwargs | None:
         parser_cls = self.online_renderer.parser
         if parser_cls is None or parser_cls.reasoning_parser_cls is None:
             return None
-        return ReasoningParserKwargs(
-            chat_template_kwargs=self.online_renderer.effective_chat_template_kwargs(
-                request
-            )
-        )
+        return ReasoningParserKwargs(chat_template_kwargs=chat_template_kwargs)
 
     def _placeholder_metadata_fields(self, modality: str) -> set[str]:
         """Fields the EC consumer still requires after embeddings transfer."""
