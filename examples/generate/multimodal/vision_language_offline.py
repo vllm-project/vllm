@@ -29,7 +29,7 @@ class ModelRequestData(NamedTuple):
     prompts: list[str]
     stop_token_ids: list[int] | None = None
     lora_requests: list[LoRARequest] | None = None
-    sampling_params: list[SamplingParams] | None = None
+    sampling_params: SamplingParams | list[SamplingParams] | None = None
 
 
 # NOTE: The default `max_num_seqs` and `max_model_len` may result in OOM on
@@ -1392,6 +1392,38 @@ def run_molmo2(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+def run_nemotron_parse_35(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    engine_args = EngineArgs(
+        model="nvidia/Nemotron-3.5-Parse",
+        dtype="bfloat16",
+        max_model_len=16384,
+        max_num_seqs=1,
+        limit_mm_per_prompt={"image": 1},
+        trust_remote_code=True,
+    )
+
+    # Direct LLM.generate needs one <pad> per image; the Parse processor expands
+    # it into image tokens. The chat renderer inserts it, so omit it from chat text.
+    prompt = (
+        "<pad></s><s><predict_bbox><predict_classes>"
+        "<output_markdown><predict_text_in_pic>"
+    )
+    sampling_params = SamplingParams(
+        temperature=0,
+        top_k=1,
+        repetition_penalty=1.1,
+        max_tokens=8744,
+        skip_special_tokens=False,
+    )
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=[prompt for _ in questions],
+        sampling_params=sampling_params,
+    )
+
+
 # Nemontron_VL
 def run_nemotron_vl(questions: list[str], modality: str) -> ModelRequestData:
     model_name = "nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1"
@@ -2219,6 +2251,7 @@ model_example_map = {
     "mistral3": run_mistral3,
     "molmo": run_molmo,
     "molmo2": run_molmo2,
+    "nemotron_parse_35": run_nemotron_parse_35,
     "nemotron_vl": run_nemotron_vl,
     "NVLM_D": run_nvlm_d,
     "openpangu_vl": run_openpangu_vl,
