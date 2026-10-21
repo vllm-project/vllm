@@ -7,8 +7,8 @@
 
 #pragma once
 
-// <torch/all.h> is not needed here: it also pulls in autograd, nn and jit, which
-// is several seconds of frontend for every skinny GEMM translation unit.
+// <torch/all.h> is not needed here: it also pulls in autograd, nn and jit,
+// which is several seconds of frontend for every skinny GEMM translation unit.
 #include <torch/types.h>            // torch::Tensor, torch::empty, AT_DISPATCH
 #include <ATen/cuda/CUDAContext.h>  // at::cuda::getCurrentCUDAStream
 #include <c10/cuda/CUDAGuard.h>     // at::cuda::OptionalCUDAGuard
@@ -281,7 +281,6 @@ __global__ void LLGemm1_kernel(const scalar_t* in_a, const scalar_t* in_b,
     }
   }
 }
-
 
 #if defined(__HIP__GFX9__) && !defined(__HIP__GFX1X__)
   #define DOT2C(V0, V2, V3)                                          \
@@ -1145,7 +1144,6 @@ inline int mindiv(int N, int div1, int div2) {
   return 0;
 }
 
-
 // This version targets cases skinny where CUs are not filled
 // Wave-SplitK is used with reduction done via atomics.
 #if defined(__gfx950__)
@@ -1631,10 +1629,10 @@ __global__ void wvSplitKrc_(const int actlN, const int K, const int Kap,
                             const int M, const int Bx, const int By,
                             const scalar_t* B, const scalar_t* __restrict__ A,
                             const scalar_t* __restrict__ BIAS, float* glbl,
-                            int* cntr, scalar_t* C,
-                            const int CuCount){UNREACHABLE_CODE;}
+                            int* cntr, scalar_t* C, const int CuCount) {
+  UNREACHABLE_CODE;
+}
 #endif  // defined(__HIP__GFX9__) TODO: Add NAVI support
-
 
 #if defined(__HIP__MI3XX__) || defined(__GFX12__)
 template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
