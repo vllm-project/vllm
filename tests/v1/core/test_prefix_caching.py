@@ -18,7 +18,7 @@ import torch
 import vllm.v1.core.kv_cache_manager as kv_cache_manager
 import vllm.v1.core.kv_cache_planning as kv_cache_planning
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import KVTransferConfig, ModelConfig, VllmConfig
 from vllm.distributed.kv_events import (
     MEDIUM_CPU,
     MEDIUM_GPU,
@@ -5148,6 +5148,7 @@ def test_eagle_swa_resend_hits_after_connector_import(packed, num_prompt_tokens)
     block_size = 16
     config = VllmConfig(model_config=ModelConfig(max_model_len=512))
     config.cache_config.kv_cache_layout = "BLHNC" if packed else "LBNHC"
+    config.kv_transfer_config = KVTransferConfig(kv_connector="NixlConnector", kv_role="kv_both")
     config.speculative_config = fake_speculative_config(
         method="eagle",
         use_eagle_block_drop=lambda: True,

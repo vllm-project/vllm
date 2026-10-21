@@ -28,6 +28,7 @@ from tests.v1.core.utils import (
 from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm.config import (
     CacheConfig,
+    KVTransferConfig,
     ModelConfig,
     SchedulerConfig,
     VllmConfig,
@@ -2271,6 +2272,7 @@ def test_dflash_drafter_sliding_window_layers_back_only_their_tail(
 def test_eagle_sliding_window_group_retains_hit_blocks_below_window():
     config = VllmConfig(model_config=ModelConfig(max_model_len=512))
     config.cache_config.kv_cache_layout = "BLHNC"
+    config.kv_transfer_config = KVTransferConfig(kv_connector="NixlConnector", kv_role="kv_both")
     config.speculative_config = fake_speculative_config(
         method="eagle",
         use_eagle_block_drop=lambda: True,
@@ -2293,6 +2295,12 @@ def test_eagle_sliding_window_group_retains_hit_blocks_below_window():
     }
     layers = {"target": target, "draft": _as_draft(draft)}
     assert retained(layers) == {"target": 0, "draft": 17}
+    connector_config = config.kv_transfer_config
+    config.kv_transfer_config = None
+    assert retained(layers) == {"target": 0, "draft": 0}
+    config.kv_transfer_config = KVTransferConfig()
+    assert retained(layers) == {"target": 0, "draft": 0}
+    config.kv_transfer_config = connector_config
     config.speculative_config = None
     assert retained(layers) == {"target": 0, "draft": 0}
 

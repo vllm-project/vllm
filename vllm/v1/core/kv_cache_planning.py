@@ -1586,7 +1586,10 @@ def get_kv_cache_configs(
 def _retain_eagle_hit_blocks_below_window(
     vllm_config: VllmConfig, kv_cache_groups: list[KVCacheGroup]
 ) -> None:
-    """Retain the full sliding-window hit span when EAGLE drops a block."""
+    """Retain the full sliding-window hit span for KV transfer with EAGLE."""
+    transfer_config = vllm_config.kv_transfer_config
+    if transfer_config is None or not transfer_config.is_kv_transfer_instance:
+        return
     spec_config = vllm_config.speculative_config
     if spec_config is None or not spec_config.use_eagle_block_drop():
         return
