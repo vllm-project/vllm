@@ -92,6 +92,25 @@ def test_models(
     )
 
 
+@pytest.mark.cpu_model
+def test_jina_embedding_batching(vllm_runner) -> None:
+    prompts = ["A small sentence.", "", "hello " * 600]
+    with vllm_runner(
+        "jinaai/jina-embeddings-v2-small-en",
+        runner="pooling",
+        trust_remote_code=False,
+        dtype="float32",
+        enforce_eager=True,
+        max_model_len=1024,
+    ) as model:
+        individual = [model.embed([prompt])[0] for prompt in prompts]
+        batched = model.embed(prompts)
+
+    torch.testing.assert_close(
+        torch.tensor(batched), torch.tensor(individual), atol=1e-4, rtol=1e-4
+    )
+
+
 @pytest.mark.parametrize(
     "model",
     [
