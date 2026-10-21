@@ -58,7 +58,11 @@ class IUMBPRuntime(Protocol):
         topology: RankTopology,
         layout: KVLayoutDescriptor,
     ) -> UMBPSchedulerHandle:
-        """Create a scheduler-side handle."""
+        """Create a scheduler-side handle.
+
+        ``layout`` carries no regions: the scheduler's KV cache config
+        flattens per-layer specs, so only worker handles receive byte ranges.
+        """
 
     def create_worker_handle(
         self,
