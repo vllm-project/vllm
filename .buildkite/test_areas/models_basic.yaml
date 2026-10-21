@@ -102,9 +102,26 @@ steps:
       - tests/models/test_deepseek_v4_rocm_compressor_gemm_fusion.py
       - tests/models/test_dsv41_mono_decode.py
       - tests/models/test_deepseek_v4_vl_stream_weights.py
+      - tests/models/hy_v4/test_triton_ihc.py
       commands:
       - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py models/test_deepseek_v4_vl_rocm.py models/transformers/test_layer_registry_e2e.py models/test_deepseek_v41_replay_start.py models/test_deepseek_v41_decoder_replay_layers.py models/test_deepseek_v41_replay_batch.py models/test_deepseek_v41_amd_replay_forward.py models/test_deepseek_v4_dspark_rocm.py models/test_deepseek_v4_rocm_wo_a.py models/test_deepseek_v4_rocm_compressor_gemm_fusion.py models/test_dsv41_mono_decode.py models/test_deepseek_v4_vl_stream_weights.py
       - VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'not distributed'
+      - pytest -v -s models/hy_v4/test_triton_ihc.py
+
+- label: ":amd: (MI355) MiniMax M3 MonoKernel"
+  key: minimax-m3-monokernel-mi355
+  dind: false
+  timeout_in_minutes: 20
+  device: mi355_4
+  num_devices: 4
+  working_dir: "/vllm-workspace/tests"
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/models/minimax_m3/amd/
+  - tests/models/minimax_m3/amd_specialized_decode/
+  commands:
+  - pytest -v -s models/minimax_m3/amd_specialized_decode
 
 - label: ":nvidia: (B200) Inkling"
   key: inkling-unit-tests-b200
@@ -166,7 +183,7 @@ steps:
       # cuda.bindings.driver), so it is deliberately left out here.
       - pytest -v -s models/kimi_k3
 
-- label: ":nvidia: (4xB200) Kimi K3 Prefix Cache"
+- label: ":nvidia: (4xB200) [Nightly] Kimi K3 Prefix Cache"
   key: kimi-k3-prefix-cache-4xb200
   # Nightly only: 4-GPU B200 pods wait hours behind smaller jobs on per-PR runs.
   optional: true
@@ -285,9 +302,10 @@ steps:
   - tests/models/test_deepseek_v4_fi_moe_ep.py
   - tests/models/test_dspark_mla.py
   - tests/models/transformers/test_layer_registry.py
+  - tests/models/test_cohere2_moe_parallel_block.py
   device: cpu-small
   commands:
-    - pytest -v -s models/test_utils.py models/test_vision.py models/test_adapters.py models/test_qwen3_5_mtp_config.py models/transformers/fusers/ models/transformers/test_dynamic_rope.py model_executor/layers/test_activation.py models/test_language_model_cache_is_weak.py models/deepseek_v32/test_sequence_parallel.py models/test_deepseek_v4_fi_moe_ep.py models/test_dspark_mla.py models/transformers/test_layer_registry.py models/test_alice_ai.py models/test_alice_ai_config.py models/test_beam_weight_mapping.py models/test_beam_numerics.py
+    - pytest -v -s models/test_utils.py models/test_vision.py models/test_adapters.py models/test_qwen3_5_mtp_config.py models/transformers/fusers/ models/transformers/test_dynamic_rope.py model_executor/layers/test_activation.py models/test_language_model_cache_is_weak.py models/deepseek_v32/test_sequence_parallel.py models/test_deepseek_v4_fi_moe_ep.py models/test_dspark_mla.py models/transformers/test_layer_registry.py models/test_alice_ai.py models/test_alice_ai_config.py models/test_beam_weight_mapping.py models/test_beam_numerics.py models/test_cohere2_moe_parallel_block.py
 
 - label: ':amd: (MI355) DeepSeek-V4.1 Mono Decode Numerics'
   key: dsv41-mono-decode-numerics-amd
@@ -325,3 +343,18 @@ steps:
   commands:
   - pytest -v -s tests/models/test_dsv41_mono_numerics.py
   - pytest -v -s tests/models/test_dsv41_mono_layers.py
+
+- label: ':amd: (MI355) Kimi-K3 Specialized Decode'
+  key: kimi-k3-specialized-decode-amd
+  dind: false
+  device: mi355_8
+  num_devices: 8
+  timeout_in_minutes: 60
+  working_dir: /vllm-workspace/
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/models/kimi_k3/amd/
+  - tests/models/kimi_k3/amd_specialized_decode/
+  commands:
+  - pytest -v -s tests/models/kimi_k3/amd_specialized_decode

@@ -59,7 +59,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.models.interfaces import MixtureOfExperts, SupportsPP
+from vllm.model_executor.models.interfaces import (
+    MixtureOfExperts,
+    SupportsLoRA,
+    SupportsPP,
+)
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -177,6 +181,12 @@ def step5_swa_attention_with_output(
         layer, query, key, value, kv_cache, metadata, output, gate
     )
 
+
+STEP5_SHARE_EXPERT_MAPPER = WeightsMapper(
+    orig_to_new_regex={
+        re.compile(r"(?<!\.moe)\.share_expert\."): ".moe.share_expert.",
+    },
+)
 
 STEP5_PACKED_MODULES_MAPPING = {
     "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -697,7 +707,7 @@ def _validate_fused_qkv_indexer_weights(module: nn.Module) -> set[str]:
     return loaded_params
 
 
-class Step5SparseIndexerIndexTPLinear(nn.Module):
+class Step5SparseIndexerIndexTPLinear(ColumnParallelLinear):
     """Sparse-indexer linear sharded by its own tensor-parallel size."""
 
     def __init__(
@@ -707,14 +717,12 @@ class Step5SparseIndexerIndexTPLinear(nn.Module):
         *,
         params_dtype: torch.dtype,
         index_tp_size: int,
+        prefix: str = "",
     ) -> None:
-        super().__init__()
-        tp_rank = get_tensor_model_parallel_rank()
-        tp_size = get_tensor_model_parallel_world_size()
-        self.index_group_start, local_groups, _ = _step5_group_partition(
+        index_group_start, local_groups, _ = _step5_group_partition(
             total_groups=index_tp_size,
-            tp_size=tp_size,
-            tp_rank=tp_rank,
+            tp_size=get_tensor_model_parallel_world_size(),
+            tp_rank=get_tensor_model_parallel_rank(),
         )
         if output_size <= 0 or output_size % index_tp_size != 0:
             raise ValueError(
@@ -722,22 +730,25 @@ class Step5SparseIndexerIndexTPLinear(nn.Module):
                 f"index_tp_size, got output_size={output_size}, "
                 f"index_tp_size={index_tp_size}."
             )
-        self.output_size_per_group = output_size // index_tp_size
-        self.output_size_per_partition = self.output_size_per_group * local_groups
-        self.weight = Parameter(
-            torch.empty(
-                self.output_size_per_partition,
-                input_size,
-                dtype=params_dtype,
-            )
+        super().__init__(
+            input_size,
+            output_size,
+            bias=False,
+            params_dtype=params_dtype,
+            prefix=prefix,
+            tp_rank=index_group_start // local_groups,
+            tp_size=index_tp_size // local_groups,
         )
-        self.weight.weight_loader = self.weight_loader
+        self.index_group_start = index_group_start
+        self.output_size_per_group = output_size // index_tp_size
         self.weight.data.zero_()
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor) -> None:
         start = self.index_group_start * self.output_size_per_group
         shard = loaded_weight.narrow(0, start, self.output_size_per_partition)
         param.data.copy_(shard)
+
+    weight_loader_v2 = weight_loader
 
     def forward(
         self,
@@ -1210,6 +1221,7 @@ class Step5Attention(nn.Module):
                 indexer_num_heads,
                 params_dtype=self.params_dtype,
                 index_tp_size=int(sparse_config.index_tp_size),
+                prefix=f"{prefix}.sparse_indexer_w",
             )
             # The sparse indexer uses weighted ReLU instead of scalable softmax,
             # so this checkpoint tensor is intentionally unused. Keep it
@@ -2340,15 +2352,17 @@ class Step5Model(nn.Module):
         return loaded_params
 
 
-class Step5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
+class Step5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
     # Required so quantization exclude lists match fused module prefixes.
     packed_modules_mapping = STEP5_PACKED_MODULES_MAPPING
 
-    hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_regex={
-            re.compile(r"^vit_large_projector\.weight$"): None,
-        },
-        orig_to_new_substr={".share_expert.": ".moe.share_expert."},
+    hf_to_vllm_mapper = (
+        WeightsMapper(
+            orig_to_new_regex={
+                re.compile(r"^vit_large_projector\.weight$"): None,
+            },
+        )
+        | STEP5_SHARE_EXPERT_MAPPER
     )
 
     def __init__(
@@ -2358,6 +2372,13 @@ class Step5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
         prefix: str = "",
     ):
         super().__init__()
+        if (
+            vllm_config.lora_config is not None
+            and vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
+        ):
+            raise ValueError(
+                "Step5 LoRA is not supported with moe_backend='deep_gemm_mega_moe'"
+            )
         self.vllm_config = vllm_config
         model_config = vllm_config.model_config
         config = model_config.hf_config
