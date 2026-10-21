@@ -1,17 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import importlib.util
 import json
 import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from functools import lru_cache, partial
+from functools import partial
 from typing import Any, Literal, cast
 
 import pybase64
 import torch
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.serve.engine.protocol import UsageInfo
@@ -215,18 +214,6 @@ def decode_pooling_output(items: list[MetadataItem], body: bytes) -> list[torch.
         )
         for item in sorted(items, key=lambda x: x.index)
     ]
-
-
-@lru_cache(maxsize=1)
-def get_json_response_cls() -> type[JSONResponse]:
-    if importlib.util.find_spec("orjson") is not None:
-        from fastapi.responses import ORJSONResponse
-
-        return ORJSONResponse
-    logger.warning_once(
-        "To make v1/embeddings API fast, please install orjson by `pip install orjson`"
-    )
-    return JSONResponse
 
 
 def enable_scoring_api(

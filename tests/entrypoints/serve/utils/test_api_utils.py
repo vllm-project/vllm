@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import json
+from typing import Any
 
+import numpy as np
 import pytest
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -22,6 +24,40 @@ pytestmark = pytest.mark.skip_global_cleanup
 class JsonPayload(BaseModel):
     text: str
     values: dict[int, int]
+
+
+class NumpyPayload(BaseModel):
+    values: Any
+
+
+@pytest.mark.parametrize("as_model", [False, True])
+def test_create_json_response_serializes_numpy(as_model):
+    values = np.array([[1.25, -2.5], [0.0, 3.0]], dtype=np.float32)
+    result = NumpyPayload(values=values) if as_model else {"values": values}
+
+    response = api_utils.create_json_response(result)
+
+    assert response.status_code == 200
+    assert json.loads(response.body) == {"values": values.tolist()}
+
+
+@pytest.mark.asyncio
+async def test_load_aware_call_tracks_json_response_until_completion():
+    app = FastAPI()
+    app.state.enable_server_load_tracking = True
+    app.state.server_load_metrics = 0
+    request = Request({"type": "http", "app": app})
+
+    @api_utils.load_aware_call
+    async def handler(raw_request: Request):
+        return api_utils.create_json_response(JsonPayload(text="ok", values={1: 2}))
+
+    response = await handler(raw_request=request)
+
+    assert app.state.server_load_metrics == 1
+    assert response.background is not None
+    await response.background()
+    assert app.state.server_load_metrics == 0
 
 
 @pytest.mark.parametrize("container", [None, list, tuple])

@@ -10,7 +10,7 @@ from typing import Any
 import orjson
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from starlette.background import BackgroundTask, BackgroundTasks
 
@@ -24,19 +24,24 @@ logger = init_logger(__name__)
 
 
 def create_json_response(
-    result: BaseModel | Sequence[BaseModel], *, status_code: int = HTTPStatus.OK
+    result: BaseModel | Sequence[BaseModel] | dict[str, Any],
+    *,
+    status_code: int = HTTPStatus.OK,
 ) -> Response:
-    """Encode models with orjson, preserving error status and JSONResponse fallback."""
+    """Encode models or JSON dictionaries, including native NumPy values."""
     if isinstance(result, ErrorResponse):
         return JSONResponse(content=result.model_dump(), status_code=result.error.code)
 
-    content = (
-        result.model_dump()
-        if isinstance(result, BaseModel)
-        else [item.model_dump() for item in result]
-    )
+    if isinstance(result, BaseModel):
+        content: Any = result.model_dump()
+    elif isinstance(result, dict):
+        content = result
+    else:
+        content = [item.model_dump() for item in result]
     try:
-        body = orjson.dumps(content, option=orjson.OPT_NON_STR_KEYS)
+        body = orjson.dumps(
+            content, option=orjson.OPT_NON_STR_KEYS | orjson.OPT_SERIALIZE_NUMPY
+        )
     except TypeError:
         # Preserve JSONResponse support for integers outside the 64-bit range.
         return JSONResponse(content=content, status_code=status_code)
@@ -202,7 +207,7 @@ def load_aware_call(func):
             raw_request.app.state.server_load_metrics -= 1
             raise
 
-        if isinstance(response, (JSONResponse, StreamingResponse)):
+        if isinstance(response, Response):
             if response.background is None:
                 response.background = BackgroundTask(decrement_server_load, raw_request)
             elif isinstance(response.background, BackgroundTasks):

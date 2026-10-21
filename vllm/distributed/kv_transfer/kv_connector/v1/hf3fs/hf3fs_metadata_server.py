@@ -8,15 +8,7 @@ import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
-try:
-    import orjson
-
-    HAS_ORJSON = True
-except ImportError:
-    import json as orjson  # type: ignore
-
-    HAS_ORJSON = False
-
+import orjson
 import requests
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import ORJSONResponse
@@ -246,23 +238,17 @@ class Hf3fsMetadataServer:
 
     def __init__(self, persistence_path: str | None = None, save_interval: int = 60):
         self.state = GlobalMetadataState()
-        if HAS_ORJSON:
-            self.app = FastAPI(default_response_class=ORJSONResponse)
-        else:
-            self.app = FastAPI()
+        self.app = FastAPI(default_response_class=ORJSONResponse)
         self._setup_routes()
 
     async def _read_json(self, request: Request) -> dict:
-        """Parse request JSON using orjson if available."""
+        """Parse request JSON using orjson."""
         body = await request.body()
         return orjson.loads(body)
 
     def _json_response(self, content: dict):
-        """Return ORJSONResponse when available to bypass jsonable_encoder."""
-        if HAS_ORJSON:
-            return ORJSONResponse(content)
-        else:
-            return content
+        """Return ORJSONResponse to bypass jsonable_encoder."""
+        return ORJSONResponse(content)
 
     def _setup_routes(self):
         """Setup FastAPI routes for new API design."""
@@ -451,21 +437,13 @@ class Hf3fsGlobalMetadataClient(Hf3fsMetadataInterface):
         try:
             url = f"{self.base_url}/{endpoint}"
             headers = {"Content-Type": "application/json"}
-            if HAS_ORJSON:
-                payload = orjson.dumps(json_data)
-            else:
-                import json
-
-                payload = json.dumps(json_data).encode("utf-8")
+            payload = orjson.dumps(json_data)
             response = self._session.post(url, data=payload, headers=headers)
             response.raise_for_status()
 
             if response.status_code == 204 or not response.content:
                 return {}
-            if HAS_ORJSON:
-                return orjson.loads(response.content)
-            else:
-                return response.json()
+            return orjson.loads(response.content)
         except requests.exceptions.RequestException as e:
             logger.error("Failed to POST to %s after retries: %s", endpoint, e)
             raise RuntimeError(f"Failed to connect to metadata server: {e}") from e
