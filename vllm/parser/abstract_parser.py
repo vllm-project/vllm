@@ -837,9 +837,14 @@ class DelegatingParser(Parser):
 
         # Legacy tool parsers that hold text back (e.g. waiting to see whether
         # a marker completes) get one chance to release it at end of stream,
-        # same opt-in shape as the reasoning fallback above.
+        # same opt-in shape as the reasoning fallback above. Engine-based
+        # parsers are skipped: their finish_streaming drains the engine flush
+        # that _flush_engine_parsers already runs, and only .content survives
+        # here, so held-back tool args would be dropped.
         tool_finish = getattr(self._tool_parser, "finish_streaming", None)
-        if tool_finish is not None:
+        if tool_finish is not None and not getattr(
+            self._tool_parser, "engine_based_streaming", False
+        ):
             released = tool_finish()
             if released is not None and released.content:
                 if delta_message is None:

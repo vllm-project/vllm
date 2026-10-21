@@ -221,12 +221,11 @@ def _stream_content(parser: Internlm2ToolParser, deltas: list[str]) -> str:
 
 
 def test_streaming_non_plugin_action_streams_as_content(
-    default_tokenizer: TokenizerLike,
+    default_tokenizer: TokenizerLike, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A non-plugin action (<|interpreter|>) must stream through as content,
     matching the non-streaming path instead of being held back forever."""
     tokenizer_vocab = default_tokenizer.get_vocab()
-    default_tokenizer.get_vocab = MagicMock()
     tokenizer_vocab.update(
         {
             "<|action_start|>": 92540,
@@ -234,7 +233,9 @@ def test_streaming_non_plugin_action_streams_as_content(
             "<|action_end|>": 92542,
         }
     )
-    default_tokenizer.get_vocab.return_value = tokenizer_vocab
+    monkeypatch.setattr(
+        default_tokenizer, "get_vocab", MagicMock(return_value=tokenizer_vocab)
+    )
     parser = Internlm2ToolParser(default_tokenizer)
 
     deltas = [
@@ -247,12 +248,11 @@ def test_streaming_non_plugin_action_streams_as_content(
 
 
 def test_streaming_releases_once_plugin_is_ruled_out(
-    default_tokenizer: TokenizerLike,
+    default_tokenizer: TokenizerLike, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Text held while it is still a prefix of <|plugin|> goes out, unaltered,
     as soon as a later delta rules the plugin call out."""
     tokenizer_vocab = default_tokenizer.get_vocab()
-    default_tokenizer.get_vocab = MagicMock()
     tokenizer_vocab.update(
         {
             "<|action_start|>": 92540,
@@ -260,7 +260,9 @@ def test_streaming_releases_once_plugin_is_ruled_out(
             "<|action_end|>": 92542,
         }
     )
-    default_tokenizer.get_vocab.return_value = tokenizer_vocab
+    monkeypatch.setattr(
+        default_tokenizer, "get_vocab", MagicMock(return_value=tokenizer_vocab)
+    )
     parser = Internlm2ToolParser(default_tokenizer)
 
     # "<|pl" is still ambiguous; "<|plugboard" rules the marker out.
@@ -269,11 +271,10 @@ def test_streaming_releases_once_plugin_is_ruled_out(
 
 
 def test_finish_streaming_releases_held_text(
-    default_tokenizer: TokenizerLike,
+    default_tokenizer: TokenizerLike, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A stream ending inside the ambiguous window flushes the held text."""
     tokenizer_vocab = default_tokenizer.get_vocab()
-    default_tokenizer.get_vocab = MagicMock()
     tokenizer_vocab.update(
         {
             "<|action_start|>": 92540,
@@ -281,7 +282,9 @@ def test_finish_streaming_releases_held_text(
             "<|action_end|>": 92542,
         }
     )
-    default_tokenizer.get_vocab.return_value = tokenizer_vocab
+    monkeypatch.setattr(
+        default_tokenizer, "get_vocab", MagicMock(return_value=tokenizer_vocab)
+    )
     parser = Internlm2ToolParser(default_tokenizer)
 
     deltas = ["Let me compute that. ", "<|action_start|><|pl"]
@@ -294,11 +297,10 @@ def test_finish_streaming_releases_held_text(
 
 
 def test_finish_streaming_keeps_tool_call_in_flight(
-    default_tokenizer: TokenizerLike,
+    default_tokenizer: TokenizerLike, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A truncated plugin call must not be re-emitted as content at flush."""
     tokenizer_vocab = default_tokenizer.get_vocab()
-    default_tokenizer.get_vocab = MagicMock()
     tokenizer_vocab.update(
         {
             "<|action_start|>": 92540,
@@ -306,7 +308,9 @@ def test_finish_streaming_keeps_tool_call_in_flight(
             "<|action_end|>": 92542,
         }
     )
-    default_tokenizer.get_vocab.return_value = tokenizer_vocab
+    monkeypatch.setattr(
+        default_tokenizer, "get_vocab", MagicMock(return_value=tokenizer_vocab)
+    )
     parser = Internlm2ToolParser(default_tokenizer)
 
     deltas = [
