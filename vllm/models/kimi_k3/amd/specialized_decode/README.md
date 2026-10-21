@@ -1,12 +1,13 @@
 # Kimi-K3 specialized decode (MI355X)
 
 An opt-in decode path for Kimi-K3 at TP8 on MI355X (gfx950), following RFC #60904.
-A pure spec-verify step of at most 8 rows runs each MoE decoder layer as persistent
-FlyDSL MonoKernels (256 CTAs, all resident), in "layer mode", inside the stock
-layer loop. The TP all-reduces run in-kernel over peer memory.
+A pure spec-verify step of at most 32 rows runs each MoE decoder layer as
+persistent FlyDSL MonoKernels (256 CTAs, all resident), in "layer mode", inside
+the stock layer loop. The TP all-reduces run in-kernel over peer memory.
 
 - **Whole layers** (KDA): K1 (AttnRes, in_proj, f_b, spec conv, KDA recurrence,
-  gated RMSNorm), then K2.
+  gated RMSNorm), then K2. From 30 rows vLLM's AttnRes and in_proj run first,
+  then K1's KDA stages (`kda_post`, one CTA a request and head).
 - **FFN layers** (MLA): vLLM's AttnRes and MLA up to o_proj's input, then K2.
 - **K2**: o_proj + all-reduce + MLP AttnRes, then the latent MoE (router,
   top-16, MXFP4 experts, shared experts, latent all-reduce + RMSNorm, up_proj,
@@ -50,8 +51,14 @@ Every TP rank agrees on each verdict before anything collective runs.
 
 `plan()` runs once per step. It picks the kernels for a pure spec-verify step of
 whole uniform requests whose width is one of the built widths: every multiple of
-`num_speculative_tokens + 1` up to 8 rows. Every other step runs vLLM's layers:
-prefill, mixed, wider and PIECEWISE steps.
+`num_speculative_tokens + 1` up to 16 rows, and those of 18, 20, 24, 28, 30 and
+32 rows (the widths past 16 measured faster than vLLM's decode). Every other step
+runs vLLM's layers: prefill, mixed, other widths and PIECEWISE steps.
+
+Past 16 rows K1 runs 16-row tiles of whole requests and K2 lists each expert's
+picks instead of a dense route table; from 28 rows K2's all-reduce and AttnRes
+run in 16-row panels that the router and the latent and shared projections
+start on as each lands.
 
 Under FULL graphs the plan is baked in at capture. vLLM's capture sizes are not
 changed. A replay with fewer requests than its graph pads whole requests. Those
@@ -100,9 +107,9 @@ runtime/
     peer.py      peer memory and TP agreement (adapted from ROCm/ATOM, MIT)
 mono/            kernel source
     layer.py     K2
-    attention/   kda.py (K1), back.py
+    attention/   kda.py (K1), local_post.py (kda_post), back.py
     stages/      moe.py, gemv.py
     common/      device ops, mailbox sync, MX helpers, plan / build keys
-                 (adapted from ROCm/ATOM atom/mono, MIT)
+                 (adapted from ROCm/ATOM atom/mono, MIT), token tiles
     abi.py       the error-word layout
 ```

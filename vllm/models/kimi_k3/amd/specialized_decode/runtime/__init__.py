@@ -19,8 +19,14 @@ logger = init_logger(__name__)
 
 AUTO, SPECIALIZED = "auto", "latency_specialized"
 TP = 8
-# a launch's x rows fit one CTA's LDS
-MAX_TOKENS = 8
+# a launch's rows: past 16 the kernels run token tiles of whole requests
+MAX_TOKENS = 32
+# a request's rows: K1's spec conv window and per-request LDS
+MAX_QLEN = 8
+# the rows past 16 a launch serves: those measured faster than vLLM's decode
+WIDE_TOKENS = (18, 20, 24, 28, 30, 32)
+# rows from which a KDA layer runs vLLM's in_proj, then K1's KDA (``kda_post``)
+KDA_POST_TOKENS = 30
 WHOLE, FFN = "whole", "ffn"
 # Kimi-K3's text shapes the kernels are written for (hidden size, routed experts,
 # KDA heads, KDA head dim, KDA short-conv width)
@@ -34,11 +40,14 @@ class DecodeConfig:
 
     @property
     def widths(self) -> tuple[int, ...]:
-        """The rows a launch serves: whole requests, at most MAX_TOKENS rows. Every
-        uniform verify step up to MAX_TOKENS rows is one of them, so an eager step
-        never pads; a FULL replay pads whole requests the way vLLM's stock decode
-        does."""
-        return tuple(range(self.q, MAX_TOKENS + 1, self.q))
+        """The rows a launch serves: whole requests, every width up to 16 rows and
+        the WIDE_TOKENS past it. A FULL replay pads whole requests the way vLLM's
+        stock decode does; other widths run vLLM's decode."""
+        return tuple(
+            w
+            for w in range(self.q, MAX_TOKENS + 1, self.q)
+            if w <= 16 or w in WIDE_TOKENS
+        )
 
 
 def decode_backend(vllm_config) -> str:
@@ -118,8 +127,8 @@ def unsupported(vllm_config) -> list[str]:
         # the kernels serve spec-verify steps of whole uniform requests only
         (spec is None, "decoding without speculative decoding"),
         (
-            spec is not None and spec.num_speculative_tokens + 1 > MAX_TOKENS,
-            f"more than {MAX_TOKENS - 1} speculative tokens",
+            spec is not None and spec.num_speculative_tokens + 1 > MAX_QLEN,
+            f"more than {MAX_QLEN - 1} speculative tokens",
         ),
         (
             spec is not None and spec.enable_adaptive_verification,
