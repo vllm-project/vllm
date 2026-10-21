@@ -166,7 +166,7 @@ steps:
       # cuda.bindings.driver), so it is deliberately left out here.
       - pytest -v -s models/kimi_k3
 
-- label: ":nvidia: (4xB200) Kimi K3 Prefix Cache"
+- label: ":nvidia: (4xB200) [Nightly] Kimi K3 Prefix Cache"
   key: kimi-k3-prefix-cache-4xb200
   # Nightly only: 4-GPU B200 pods wait hours behind smaller jobs on per-PR runs.
   optional: true

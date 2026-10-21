@@ -13,6 +13,7 @@ from vllm.model_executor.layers.fusion.quant_activation import (
     get_input_quant_key,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import KimiK3MergedQKVGateLinear
 from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import current_platform
@@ -31,6 +32,16 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         self._use_eager_qk_rmsnorm_fusion = bool(rocm_aiter_ops.is_enabled())
         self._fused_qk_prep = self._fused_qk_prep_supported()
         self._identity_rope: tuple[torch.Tensor, torch.Tensor] | None = None
+        self._qkv_gate_fused = isinstance(
+            self.fused_qkv_a_proj, KimiK3MergedQKVGateLinear
+        )
+        self._fused_q_heads = self.num_heads
+        if self._fused_qk_prep:
+            from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAHelper
+
+            self._fused_q_heads = AiterMLAHelper.get_actual_mla_num_heads(
+                self.num_heads
+            )
 
     def _fused_qk_prep_supported(self) -> bool:
         attn = self.mla_attn
@@ -161,11 +172,12 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
 
         head_size = attn.kv_lora_rank + self.qk_rope_head_dim
         num_tokens, num_heads = ql_nope.shape[:2]
-        q_out = torch.empty(
-            (num_tokens, num_heads, head_size),
+        q_out_padded = torch.empty(
+            (num_tokens, self._fused_q_heads, head_size),
             dtype=fp8_dtype,
             device=ql_nope.device,
         )
+        q_out = q_out_padded[:, :num_heads]
         fused_qk_rope_concat_and_cache_mla(
             # the W_UK bmm hands back a transposed view; the kernel reads dense
             ql_nope.contiguous(),
@@ -204,6 +216,7 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             if isinstance(hidden_states, QuantizedActivation)
             else hidden_states.shape[0]
         )
+        gate = None
 
         if self.q_lora_rank is not None:
             assert self.fused_qkv_a_proj is not None, (
@@ -217,6 +230,14 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             )
 
             qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
+            if self._qkv_gate_fused:
+                qkv_lora, gate = qkv_lora.split(
+                    [
+                        self.q_lora_rank + self.kv_lora_rank + self.qk_rope_head_dim,
+                        self.num_heads * self.v_head_dim,
+                    ],
+                    dim=-1,
+                )
             q_c, kv_lora = qkv_lora.split(
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
                 dim=-1,
@@ -305,6 +326,7 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
 
         if self.g_proj is not None:
             gate = self.g_proj(hidden_states)[0]
+        if gate is not None:
             if rocm_aiter_ops.is_enabled():
                 from aiter.ops.triton.fusions.fused_sigmoid_mul import fused_sigmoid_mul
 

@@ -18,6 +18,11 @@ pub enum Error {
     #[error("text request `{request_id}` stop strings cannot be empty")]
     EmptyStopString { request_id: String },
     #[error(
+        "Parameter 'cache_salt' must be a non-empty string of at most 128 characters \
+         and must not contain '@', '/', '\\', or NUL."
+    )]
+    InvalidCacheSalt,
+    #[error(
         "this model's maximum context length is {max_model_len} tokens, \
          but the prompt contains {prompt_len} input tokens"
     )]
@@ -36,10 +41,10 @@ pub enum Error {
     #[error("`thinking_token_budget` must be a non-negative integer or -1 for unlimited.")]
     InvalidThinkingTokenBudget,
     #[error(
-        "truncate_prompt_tokens={value} cannot be greater than max_model_len - \
-         max_tokens = {budget}. Please request a smaller truncation size."
+        "truncate_prompt_tokens={value} cannot be greater than max_model_len = \
+         {max_model_len}. Please request a smaller truncation size."
     )]
-    TruncatePromptTokensExceedsBudget { value: u64, budget: u32 },
+    TruncatePromptTokensExceedsMaxModelLen { value: u64, max_model_len: u32 },
     #[error("invalid truncate_prompt_tokens={value}; must be >= -1")]
     InvalidTruncatePromptTokens { value: i64 },
     #[error("truncate_prompt_tokens is not supported for multimodal requests")]
@@ -63,12 +68,13 @@ impl Error {
             Self::PromptTooLong { .. }
             | Self::EmptyPromptTokenIds { .. }
             | Self::EmptyStopString { .. }
+            | Self::InvalidCacheSalt
             | Self::Logprobs(_)
             | Self::TokenIds(_)
             | Self::SamplingParams(_)
             | Self::MinTokensExceedsMaxTokens { .. }
             | Self::InvalidThinkingTokenBudget
-            | Self::TruncatePromptTokensExceedsBudget { .. }
+            | Self::TruncatePromptTokensExceedsMaxModelLen { .. }
             | Self::InvalidTruncatePromptTokens { .. }
             | Self::TruncateUnsupportedWithMultimodal
             | Self::InvalidRepetitionDetection { .. }
