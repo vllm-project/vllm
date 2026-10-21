@@ -66,9 +66,14 @@ _FUSED_POST_PRE_MAX_TOKENS = 32
 # thread's serial loads, so when the hidden size allows, a twice wider block
 # over twice as many k-slices gives every thread a single pass instead of four
 # (hidden_size 4096, fused post + pre op on GB300 and SM120: 1.11-1.19x at one
-# token, 0.99-1.05x at four, no gain from five on).
+# token, 0.99-1.05x at four, no gain from five on). Tuned on SM100+ only.
 _FUSED_POST_PRE_SINGLE_PASS_MAX_TOKENS = 4
 _FUSED_POST_PRE_SINGLE_PASS = (2, 16, 256)
+
+
+@cache
+def _fused_post_pre_single_pass_supported() -> bool:
+    return current_platform.is_cuda() and current_platform.has_device_capability(100)
 
 
 def mhc_fused_post_pre_split_config(
@@ -88,6 +93,7 @@ def mhc_fused_post_pre_split_config(
         num_tokens <= _FUSED_POST_PRE_SINGLE_PASS_MAX_TOKENS
         and hidden_size == n_splits * n_thr
         and (hc_mult * (hc_mult + 2)) % tile_n == 0
+        and _fused_post_pre_single_pass_supported()
     ):
         return tile_n, n_splits, n_thr
     n_thr = _FUSED_POST_PRE_N_THR

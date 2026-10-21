@@ -114,23 +114,26 @@ def test_mhc_pre_big_fuse_dispatch_matches_legacy_runtime_config(
     )
 
 
+SM100_PLUS = current_platform.is_cuda() and current_platform.has_device_capability(100)
+
+
 @pytest.mark.parametrize(
-    ("num_tokens", "hidden_size", "expected_tile_n", "expected_n_splits"),
+    ("num_tokens", "hidden_size", "expected", "expected_sm100_plus"),
     [
-        (1, 4096, 2, 16),
-        (4, 4096, 2, 16),
-        (5, 4096, 2, 8),
-        (4, 8192, 2, 8),
-        (8, 5120, 2, 8),
-        (16, 5120, 6, 8),
-        (32, 7168, 6, 8),
+        (1, 4096, (2, 8), (2, 16)),
+        (4, 4096, (2, 8), (2, 16)),
+        (5, 4096, (2, 8), (2, 8)),
+        (4, 8192, (2, 8), (2, 8)),
+        (8, 5120, (2, 8), (2, 8)),
+        (16, 5120, (6, 8), (6, 8)),
+        (32, 7168, (6, 8), (6, 8)),
     ],
 )
 def test_mhc_fused_dispatch_matches_the_launch_config(
     num_tokens: int,
     hidden_size: int,
-    expected_tile_n: int,
-    expected_n_splits: int,
+    expected: tuple[int, int],
+    expected_sm100_plus: tuple[int, int],
 ) -> None:
     """The compile key must be the config the launch will actually use.
 
@@ -142,7 +145,7 @@ def test_mhc_fused_dispatch_matches_the_launch_config(
         num_tokens, hidden_size, hc_mult=4
     )
 
-    assert (tile_n, n_splits) == (expected_tile_n, expected_n_splits)
+    assert (tile_n, n_splits) == (expected_sm100_plus if SM100_PLUS else expected)
     assert kernel.dispatch(
         num_tokens=num_tokens,
         hidden_size=hidden_size,
@@ -278,7 +281,7 @@ def test_mhc_fused_declines_shapes_it_cannot_tile() -> None:
                 n_thr=128,
             ),
         ),
-        (
+        pytest.param(
             MhcFusedTileLangKernel(),
             MhcFusedTileLangKernel.CompileKey(
                 hidden_size=4096,
@@ -287,6 +290,7 @@ def test_mhc_fused_declines_shapes_it_cannot_tile() -> None:
                 tile_n=2,
                 n_thr=256,
             ),
+            marks=pytest.mark.skipif(not SM100_PLUS, reason="SM100+ band"),
         ),
         (
             MhcFusedTileLangKernel(),
