@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
 import logging
 import math
 import queue
 import threading
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from collections.abc import Collection
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, cast
@@ -16,7 +17,7 @@ import numpy as np
 import torch
 import zmq
 
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
     clip_ssm_state_blocks,
@@ -25,6 +26,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVConnectorTransferResults,
     SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
@@ -59,18 +61,32 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
     MoRIIOWrapper,
     MoRIIOWriter,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_heartbeat import (
+    MoRIIOHeartbeat,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_layout import (
+    HeadLayout,
     LayerTransferGeometry,
     MambaOffsetTemplate,
+    MambaStateLayout,
     apply_mamba_offset_template,
     build_layer_to_spec,
     build_mamba_offset_template,
     compute_block_transfer_offsets,
+    compute_head_slice_offsets,
     compute_mamba_conv_split_count,
+    compute_mamba_slice_offsets,
+    get_layer_head_layout,
     get_layer_transfer_geometry,
+    get_mamba_state_layout,
     is_mla_cache_layer,
     iter_layer_registration_regions,
     kda_conv_ssm,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_tp_mapping import (
+    MoRIIOWriteTPMapping,
+    WriteTarget,
+    compute_write_tp_mapping,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
     MambaConvSplitInfo,
@@ -81,7 +97,7 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
     get_world_group,
 )
-from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import (
@@ -96,6 +112,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     is_full_attention_spec,
 )
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 
@@ -112,6 +129,9 @@ logger = init_logger(__name__)
 _SQ_FULL_BACKOFF_INITIAL_S = 0.001
 _SQ_FULL_BACKOFF_MAX_S = 0.05
 _MAX_LOCAL_MAMBA_TAIL_BLOCKS = 1
+# A WRITE failure is broadcast to every decode DP rank, so ranks that never
+# see the request would otherwise keep its transfer id forever.
+_MAX_UNMATCHED_WRITE_FAILURES = 4096
 
 
 try:
@@ -130,6 +150,16 @@ except ImportError:
 
 def is_moriio_available() -> bool:
     return MoRIIO_enabled
+
+
+def _describe_memory(memory_desc: Any) -> str:
+    """Identify a MoRI memory descriptor for error messages."""
+    fields = ("engine_key", "device_id", "device_bus_id", "size")
+    return (
+        "{"
+        + ", ".join(f"{name}={getattr(memory_desc, name, '?')}" for name in fields)
+        + "}"
+    )
 
 
 def get_moriio_remote_tp_rank(
@@ -177,6 +207,12 @@ def validate_moriio_heterogeneous_tp_kv_heads(
     )
 
 
+def get_moriio_peer_tp_size(params: dict[str, Any] | None, local_tp_size: int) -> int:
+    """TP size of the peer named in ``kv_transfer_params``; unknown means equal."""
+    params = params or {}
+    return int(params.get("remote_tp_size") or params.get("tp_size") or local_tp_size)
+
+
 def get_moriio_expected_ack_count(producer_tp_size: int, consumer_tp_size: int) -> int:
     if producer_tp_size <= 0 or consumer_tp_size <= 0:
         raise ValueError("TP sizes must be positive")
@@ -219,6 +255,12 @@ def resolve_moriio_transfer_ack(
 
 
 class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
+    _cache_hit_source = CacheHitSource.P2P
+
+    @classmethod
+    def supports_sleep_mode(cls, kv_transfer_config: KVTransferConfig) -> bool:
+        return False
+
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
         # The READ path always transfers the recurrent-state slot, including
@@ -324,7 +366,10 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
         block_ids: BlockIds,
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
-        if self.connector_scheduler._has_mamba:
+        if (
+            self.connector_scheduler._has_mamba
+            and self.connector_scheduler.mode == MoRIIOMode.READ
+        ):
             attn_block_ids, mamba_block_groups = (
                 self.connector_scheduler.split_block_groups(block_ids)
             )
@@ -350,6 +395,12 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
 
+    def get_transfer_results(
+        self, finished_req_ids: set[str]
+    ) -> KVConnectorTransferResults:
+        assert self.connector_worker is not None
+        return self.connector_worker.get_transfer_results()
+
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Blocks whose MoRIIO read failed, for the scheduler to recompute."""
         if self.connector_worker is None:
@@ -365,8 +416,8 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_worker.start_load_kv(self._connector_metadata)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
-        assert self.connector_worker is not None
-        self.connector_worker.wait_for_layer_load(layer_name)
+        """READs are awaited in start_load_kv, before the forward."""
+        pass
 
     def save_kv_layer(
         self,
@@ -399,6 +450,16 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
             "Connector metadata not initialized yet"
         )
         self.connector_worker.wait_for_save(self._connector_metadata)
+
+    def has_pending_push_work(self) -> bool:
+        return (
+            self.mode == MoRIIOMode.WRITE
+            and self.connector_scheduler is not None
+            and bool(self.connector_scheduler._deferred_send_deadlines)
+        )
+
+    def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
+        return self._kv_cache_config.transfer_group_ids
 
     def shutdown(self):
         if self.connector_worker is not None:
@@ -443,11 +504,10 @@ def _validate_hybrid_speculation(vllm_config: VllmConfig) -> None:
     speculative_config = vllm_config.speculative_config
     if speculative_config is None:
         return
-    # DSpark is allowlisted because it is the only hybrid speculative method
-    # validated end to end with MoRIIO READ.
+    # Other hybrid speculative methods need their own transfer validation.
     if not speculative_config.use_dspark():
         raise MoRIIOError(
-            "MoRIIO hybrid READ supports DSpark speculative decoding only, got "
+            "MoRIIO hybrid transfer supports DSpark speculative decoding only, got "
             f"method={speculative_config.method!r}"
         )
 
@@ -460,14 +520,14 @@ def _validate_mamba_specs(specs: Collection[MambaSpec]) -> MambaSpec | None:
     for spec in specs:
         if len(spec.shapes) != 2 or len(spec.dtypes) != 2:
             raise MoRIIOError(
-                "MoRIIO hybrid READ supports exactly two Mamba states "
+                "MoRIIO hybrid transfer supports exactly two Mamba states "
                 "(conv and SSM), got "
                 f"{len(spec.shapes)} shapes and {len(spec.dtypes)} dtypes"
             )
     reference = specs[0]
     if any(spec != reference for spec in specs[1:]):
         raise MoRIIOError(
-            "MoRIIO hybrid READ requires all transferable Mamba groups "
+            "MoRIIO hybrid transfer requires all transferable Mamba groups "
             "to use the same cache spec"
         )
     return reference
@@ -495,7 +555,9 @@ class MoRIIOConnectorScheduler:
         self._has_mamba = bool(self._mamba_group_ids)
         mamba_spec = None
         if self._has_mamba:
-            if len(self._attn_group_ids) != 1:
+            if not self._attn_group_ids:
+                raise MoRIIOError("MoRIIO hybrid transfer requires an attention group")
+            if self.mode == MoRIIOMode.READ and len(self._attn_group_ids) != 1:
                 raise MoRIIOError(
                     "MoRIIO hybrid READ requires exactly one transferable "
                     "attention group, got "
@@ -509,11 +571,6 @@ class MoRIIOConnectorScheduler:
             ]
             mamba_spec = _validate_mamba_specs(mamba_specs)
             _validate_hybrid_speculation(vllm_config)
-            if self.mode != MoRIIOMode.READ:
-                raise MoRIIOError(
-                    "MoRIIO hybrid (mamba/KDA) transfer is implemented for READ "
-                    "mode only; set kv_connector_extra_config.read_mode=true"
-                )
         self._num_ssm_scratch_blocks = (
             mamba_spec.num_speculative_blocks if mamba_spec is not None else 0
         )
@@ -561,11 +618,13 @@ class MoRIIOConnectorScheduler:
                     f"cache group spec(s): {sorted(set(unsupported))}. Pass "
                     "--disable-hybrid-kv-cache-manager to run without HMA."
                 )
-            if self.mode == MoRIIOMode.WRITE:
-                # TODO(simondanielsson): support HMA in WRITE mode
+            if self.mode == MoRIIOMode.WRITE and any(
+                isinstance(g.kv_cache_spec, SlidingWindowSpec)
+                for g in kv_cache_config.transfer_groups
+            ):
                 raise NotImplementedError(
-                    "MoRIIO WRITE mode does not support hybrid KV cache groups "
-                    "(sliding-window attention). Use READ mode, or pass "
+                    "MoRIIO WRITE mode does not support sliding-window "
+                    "cache groups. Use READ mode, or pass "
                     "--disable-hybrid-kv-cache-manager."
                 )
 
@@ -575,12 +634,31 @@ class MoRIIOConnectorScheduler:
             else (0, self.block_size)
             for g in kv_cache_config.transfer_groups
         ]
-        # add 1 to conservatively account for boundary overlap eg window isn't fully
-        # aligned with blocks.
+        # +1 conservatively covers window/block boundary overlap.
         self.blocks_per_sw = [
             cdiv(n_tokens, block_size) + 1 if n_tokens else 0
             for n_tokens, block_size in sw_sizes_tokens
         ]
+        # Per-group block size over transfer_groups (matching blocks_per_sw and
+        # the connector's block payload), used to clamp each full-attention group
+        # to its prompt length on the WRITE save path.
+        self._group_block_sizes = [
+            getattr(g.kv_cache_spec, "block_size", self.block_size)
+            for g in kv_cache_config.transfer_groups
+        ]
+        # The WRITE-mode prompt-block clamp only covers full-attention groups, so
+        # MoRIIO + speculative decoding is not yet safe on sliding-window /
+        # hybrid models. TODO: lift once SWA + spec is validated end-to-end.
+        if (
+            self.mode == MoRIIOMode.WRITE
+            and vllm_config.speculative_config is not None
+            and any(bps != 0 for bps in self.blocks_per_sw)
+        ):
+            raise NotImplementedError(
+                "MoRIIO with speculative decoding is not yet supported for "
+                "sliding-window / hybrid models: the prompt-block clamp is only "
+                "validated for full-attention KV groups."
+            )
         # In WRITE mode and chunked prefill, we perform the write after the last chunk.
         # Hence we need to track once we are in the last chunk. We do this by computing
         # len(block_ids[g]) * block_size[g] for a full attn group g, as hybrid groups
@@ -642,12 +720,10 @@ class MoRIIOConnectorScheduler:
             set_role(ROLE.CONSUMER)
         # Reqs to send and their expiration time
         self._reqs_need_send: dict[ReqId, float] = {}
-        # Deadlines for requests whose block freeing was deferred.
-        # Survives across scheduler steps. If the worker never reports
-        # finished_sending before the deadline, we inject them into
-        # connector_output.finished_sending so the scheduler frees the blocks to avoid
-        # hanging indefinitely waiting for a free notification that never comes.
-        # Value: (deadline, transfer_id) for unmapping after mutation.
+        # Requests whose block freeing is deferred. READ mode uses the deadline
+        # as a missing-ACK watchdog; WRITE mode waits for the worker ACK because
+        # only the worker can mark the transfer terminal before blocks are freed.
+        # Value: (deadline, transfer_id) for unmapping after completion.
         self._deferred_send_deadlines: dict[ReqId, tuple[float, TransferId | None]] = {}
         self._defer_timeout = float(
             self.kv_transfer_config.kv_connector_extra_config.get(
@@ -743,18 +819,22 @@ class MoRIIOConnectorScheduler:
 
         num_prompt_tokens = request.num_prompt_tokens
         num_external_tokens = max(num_prompt_tokens - num_computed_tokens, 0)
+        params = request.kv_transfer_params or {}
+        if not params.get("do_remote_prefill"):
+            return 0, False
         if self.mode == MoRIIOMode.WRITE:
-            # MoriiO in write mode, no remote prefill. Hybrid models never get
-            # here: register_kv_caches refuses WRITE mode for them, so there is
-            # no recurrent-state accounting to do.
-            return num_external_tokens, True
+            if self._has_mamba:
+                # P pushes h(N-1). Do not publish it under the N-token hash
+                # when the scheduler caches a completed asynchronous load.
+                num_external_tokens = max(num_external_tokens - 1, 0)
+            return num_external_tokens, num_external_tokens > 0
 
         # READ mode always recomputes the last token locally on the decoder.
         #
         # The second element declares who waits for the KV, not whether it has
         # arrived. False keeps the wait on this side: the forward runs in the
-        # same step, and the connector blocks in wait_for_layer_load (or in
-        # start_load_kv under full-graph capture) until the KV is really there.
+        # same step, and the connector blocks in start_load_kv, before the
+        # forward, until the KV is really there.
         return max(num_external_tokens - 1, 0), False
 
     def on_new_request(self, request: "Request") -> None:
@@ -840,16 +920,17 @@ class MoRIIOConnectorScheduler:
             )
             self.paths[path] = sock
 
-        # Advertise the consumer (decode) TP size so prefill counts the right
-        # number of ACKs (get_moriio_expected_ack_count; see the upstream
-        # READ-mode release in _pop_done_transfers). Resolves to 1 for our
-        # homogeneous TP=1 configs; only matters under heterogeneous-TP fan-in.
+        # Unlike the READ-mode release in _pop_done_transfers, which every
+        # decode rank sends, this one comes from the decode scheduler once per
+        # prefill rank on behalf of all decode ranks. It is the only ACK the
+        # prefill rank gets, so advertise a single consumer
+        # (get_moriio_expected_ack_count).
         self.paths[path].send(
             msgpack.dumps(
                 {
                     "type": "release",
                     "transfer_id": transfer_id,
-                    "consumer_tp_size": self.tp_size,
+                    "consumer_tp_size": 1,
                 }
             )
         )
@@ -882,7 +963,7 @@ class MoRIIOConnectorScheduler:
                 return
 
         remote_notify_port = int(remote_notify_port)
-        for tp_index in range(self.tp_size):
+        for tp_index in range(get_moriio_peer_tp_size(params, self.tp_size)):
             target_port = remote_notify_port + get_port_offset(remote_dp_rank, tp_index)
             self._send_transfer_release(transfer_id, remote_host, target_port)
 
@@ -1103,7 +1184,14 @@ class MoRIIOConnectorScheduler:
                     _should_notify = self._global_dp_rank == remote_dp_rank
                 else:
                     _should_notify = self._is_kv_master
-                if _should_notify:
+                if _should_notify and num_external_tokens == 0:
+                    # Nothing left to fetch (full local prefix hit), so release
+                    # the producer's blocks instead of sending an empty
+                    # allocation, which it rejects.
+                    self._release_write_prefill_blocks(
+                        request.request_id, request.kv_transfer_params
+                    )
+                elif _should_notify:
                     peer_zmq = get_peer_zmq_from_request_id(
                         request.request_id, is_producer=False
                     )
@@ -1131,11 +1219,15 @@ class MoRIIOConnectorScheduler:
                                 f"remote_notify_port={remote_notify_port!r})"
                             )
 
-                    # num_external_tokens == 0: nothing to push, so don't tell
-                    # the producer to write into these blocks.
-                    block_notify_list = (
-                        blocks.get_block_ids()[0] if num_external_tokens > 0 else []
-                    )
+                    block_notify_list: list[int] | list[list[int]]
+                    if self._has_mamba:
+                        block_notify_list = list(
+                            self._clamp_to_prompt_blocks(
+                                request, blocks.get_block_ids()
+                            )
+                        )
+                    else:
+                        block_notify_list = blocks.get_block_ids()[0]
 
                     # Wide-EP multi-pod: a pod binds notify sockets only for
                     # its LOCAL ranks, so the port offset must use the per-pod
@@ -1155,7 +1247,9 @@ class MoRIIOConnectorScheduler:
                         _pod_idx = pod_index(remote_dp_rank, _dp_local)
                         if 0 <= _pod_idx < len(_remote_hosts):
                             _notify_host = _remote_hosts[_pod_idx]
-                    for tp_index in range(self.tp_size):
+                    # Every prefill TP rank needs the allocation; ports past
+                    # the prefill TP size are not bound.
+                    for tp_index in range(get_moriio_peer_tp_size(_kvp, self.tp_size)):
                         target_port = remote_notify_port + get_port_offset(
                             _remote_dp_rank_for_port, tp_index
                         )
@@ -1172,6 +1266,78 @@ class MoRIIOConnectorScheduler:
 
             params["do_remote_prefill"] = False
 
+    def _clamp_to_prompt_blocks(self, req: "Request", block_ids: BlockIds) -> BlockIds:
+        """Drop trailing speculative-lookahead blocks the consumer never
+        allocated, keeping each full-attention group's prompt blocks.
+
+        Args:
+            req: Request being saved.
+            block_ids: Per-KV-cache-group local block ids.
+
+        Returns:
+            ``block_ids`` with every full-attention group truncated to
+            ``ceil(num_prompt_tokens / block_size)`` leading blocks;
+            sliding-window groups are left unchanged.
+
+        """
+        if self._has_mamba:
+            # WRITE preserves transfer-group order, including a separate drafter
+            # attention group. READ retains its attention-first wire format.
+            transfer_blocks = self.kv_cache_config.select_transfer_block_ids(block_ids)
+            dcp_size = self.vllm_config.parallel_config.decode_context_parallel_size
+            clamped_hybrid: list[list[int]] = []
+            for group, blocks in zip(
+                self.kv_cache_config.transfer_groups, transfer_blocks, strict=True
+            ):
+                spec = group.kv_cache_spec
+                if isinstance(spec, MambaSpec):
+                    clamped_hybrid.append(
+                        clip_ssm_state_blocks(list(blocks), spec.num_speculative_blocks)
+                    )
+                else:
+                    block_size = spec.block_size * (dcp_size if spec.dcp_sharded else 1)
+                    clamped_hybrid.append(
+                        list(blocks[: cdiv(req.num_prompt_tokens, block_size)])
+                    )
+            return clamped_hybrid
+        clamped = list(block_ids)
+        changed = False
+        for g, group_blocks in enumerate(block_ids):
+            if self.blocks_per_sw[g] != 0:
+                continue
+            num_prompt_blocks = math.ceil(
+                req.num_prompt_tokens / self._group_block_sizes[g]
+            )
+            if len(group_blocks) > num_prompt_blocks:
+                clamped[g] = group_blocks[:num_prompt_blocks]
+                changed = True
+        return clamped if changed else block_ids
+
+    def _is_final_prefill_chunk(
+        self, req: "Request", scheduler_output: SchedulerOutput
+    ) -> bool:
+        """Whether this step completes the prompt.
+
+        ``build_connector_meta`` runs before ``_update_after_schedule``, so
+        ``num_computed_tokens`` excludes the current chunk; add this step's
+        scheduled tokens. Token progress is lookahead-safe unlike block counts.
+        """
+        num_scheduled = scheduler_output.num_scheduled_tokens.get(req.request_id, 0)
+        return req.num_computed_tokens + num_scheduled >= req.num_prompt_tokens
+
+    def _get_write_blocks(
+        self, req: "Request", block_ids: BlockIds, scheduler_output: SchedulerOutput
+    ) -> BlockIds:
+        if self._has_mamba:
+            # Align-mode state slots can move without appending a new block.
+            # Resolve the authoritative table at the final prefill step.
+            block_state = scheduler_output.kv_connector_block_state
+            assert block_state is not None
+            current_blocks = block_state.get_block_ids(req.request_id)
+            assert current_blocks is not None
+            block_ids = current_blocks
+        return self._clamp_to_prompt_blocks(req, block_ids)
+
     def build_connector_meta(
         self,
         scheduler_output: SchedulerOutput,
@@ -1185,38 +1351,38 @@ class MoRIIOConnectorScheduler:
             # It places the request metadata into the saving queue.
 
             for i, req_id in enumerate(scheduler_output.scheduled_cached_reqs.req_ids):
+                # Non-disagg requests aren't registered here; skip them
+                # instead of KeyError-ing.
+                if req_id not in self._reqs_need_pending_save:
+                    continue
+                req, existing_blocks = self._reqs_need_pending_save[req_id]
+                # The final chunk may allocate no new blocks (the previous chunk
+                # reserved speculative-lookahead slack), so new_block_ids is None;
+                # still fall through to the final-chunk check below.
                 new_block_ids = scheduler_output.scheduled_cached_reqs.new_block_ids[i]
-
-                if new_block_ids is not None:
-                    # A non-disagg request (no kv_transfer_params, e.g. smoke
-                    # test) is never registered in _reqs_need_pending_save;
-                    # indexing it unconditionally would KeyError and crash the
-                    # EngineCore. Skip it silently.
-                    if req_id not in self._reqs_need_pending_save:
-                        continue
-                    req, existing_blocks = self._reqs_need_pending_save[req_id]
-                    updated_blocks = [
-                        existing_blocks[g] + new_block_ids[g]
-                        for g in range(len(new_block_ids))
+                if new_block_ids is not None and not self._has_mamba:
+                    existing_blocks = [
+                        old + new
+                        for old, new in zip(existing_blocks, new_block_ids, strict=True)
                     ]
-                    self._reqs_need_pending_save[req_id] = (req, updated_blocks)
-                    saved_tokens = (
-                        len(updated_blocks[self._full_attn_group_idx])
-                        * self._full_attn_block_size
-                    )
-                    if saved_tokens >= req.num_prompt_tokens:
-                        # Final chunk: live kv_transfer_params may be cleared,
-                        # so prefer the snapshot from update_state_after_alloc.
-                        kv_params = self._req_kv_params.pop(
-                            req_id, req.kv_transfer_params or {}
-                        )
-                        meta.add_new_req(
-                            request_id=req_id,
-                            local_block_ids=self._reqs_need_pending_save[req_id][1],
-                            kv_transfer_params=kv_params,
-                            write_mode=True,
-                        )
-                        del self._reqs_need_pending_save[req_id]
+                    self._reqs_need_pending_save[req_id] = (req, existing_blocks)
+                if not self._is_final_prefill_chunk(req, scheduler_output):
+                    continue
+                # Live kv_transfer_params may be cleared; prefer the
+                # update_state_after_alloc snapshot.
+                kv_params = self._req_kv_params.pop(
+                    req_id, req.kv_transfer_params or {}
+                )
+                save_block_ids = self._get_write_blocks(
+                    req, existing_blocks, scheduler_output
+                )
+                meta.add_new_req(
+                    request_id=req_id,
+                    local_block_ids=save_block_ids,
+                    kv_transfer_params=kv_params,
+                    write_mode=True,
+                )
+                del self._reqs_need_pending_save[req_id]
 
         # Loop through scheduled reqs and convert to ReqMeta.
         for req_id, (req, block_ids) in self._reqs_need_recv.items():
@@ -1226,19 +1392,34 @@ class MoRIIOConnectorScheduler:
                 local_block_ids=block_ids,
                 kv_transfer_params=kv_params,
             )
+        if (
+            self.mode == MoRIIOMode.READ
+            and self._has_mamba
+            and scheduler_output.new_block_ids_to_zero
+        ):
+            # Hybrid models zero recycled attention pages that held Mamba state.
+            # Host-submitted READs overwrite these pages and can race zeroing.
+            # Hybrid READ metadata puts the aligned attention pages first.
+            read_dst_block_ids = {
+                b
+                for _, block_ids in self._reqs_need_recv.values()
+                for b in block_ids[0]
+            }
+            scheduler_output.new_block_ids_to_zero = [
+                b
+                for b in scheduler_output.new_block_ids_to_zero
+                if b not in read_dst_block_ids
+            ]
 
         for req_id, (req, block_ids) in self._reqs_need_save.items():
             kv_params = self._req_kv_params.get(req_id, req.kv_transfer_params or {})
-            tokens_covered = (
-                len(block_ids[self._full_attn_group_idx]) * self._full_attn_block_size
-            )
-            if req.num_prompt_tokens > tokens_covered:
-                # not last chunk prefill
+            if not self._is_final_prefill_chunk(req, scheduler_output):
                 self._reqs_need_pending_save[req_id] = (req, block_ids)
                 continue
+            save_block_ids = self._get_write_blocks(req, block_ids, scheduler_output)
             meta.add_new_req(
                 request_id=req_id,
-                local_block_ids=block_ids,
+                local_block_ids=save_block_ids,
                 kv_transfer_params=kv_params,
                 write_mode=True,
             )
@@ -1332,7 +1513,7 @@ class MoRIIOConnectorScheduler:
         """Once a request is finished, determine whether request blocks
         should be freed now or will be sent asynchronously and freed later.
 
-        ``block_ids`` normally contains all cache groups. Hybrid callers from
+        ``block_ids`` normally contains all cache groups. Hybrid READ callers from
         ``request_finished_all_groups`` pass a flat attention list and the
         recurrent-state groups separately in ``mamba_block_groups``.
         """
@@ -1401,6 +1582,10 @@ class MoRIIOConnectorScheduler:
                 list(cast(list[int], block_ids)),
                 *[list(group) for group in mamba_block_groups],
             ]
+        elif self._has_mamba and self.mode == MoRIIOMode.WRITE:
+            computed_block_ids = self._clamp_to_prompt_blocks(
+                request, cast(BlockIds, block_ids)
+            )
         elif self._has_mamba:
             raise MoRIIOError("Hybrid request completion requires all KV cache groups")
         else:
@@ -1461,8 +1646,9 @@ class MoRIIOConnectorScheduler:
         * An ACK that arrives BEFORE its request finished is parked in
           ``_pending_sent_acks`` and released on a later step once the
           request enters ``_deferred_send_deadlines``.
-        * A deferred send whose ACK never arrives is reaped after
-          ``_defer_timeout`` and surfaced, so leaked blocks are freed.
+        * In READ mode, a deferred send whose ACK never arrives is reaped
+          after ``_defer_timeout``. WRITE-mode timeouts are owned by the worker,
+          which marks the transfer terminal before ACKing the block release.
         * A parked ACK that never matches a deferral before its own
           deadline is a stale duplicate (e.g. a real ACK landing after the
           send was already reaped) and is dropped.
@@ -1495,7 +1681,7 @@ class MoRIIOConnectorScheduler:
         expired = [
             req_id
             for req_id, (deadline, _) in self._deferred_send_deadlines.items()
-            if now >= deadline
+            if self.mode == MoRIIOMode.READ and now >= deadline
         ]
         if expired:
             safe.update(expired)
@@ -1566,7 +1752,7 @@ class MoRIIOConnectorWorker:
         _, mamba_transfer_group_ids = _split_kv_cache_group_kinds(kv_cache_config)
         self._num_mamba_transfer_groups = len(mamba_transfer_group_ids)
         self._mamba_payload_index_by_layer = {
-            layer_name: payload_index
+            layer_name: group_id if self.mode == MoRIIOMode.WRITE else payload_index
             for payload_index, group_id in enumerate(mamba_transfer_group_ids, start=1)
             for layer_name in kv_cache_config.transfer_groups[group_id].layer_names
         }
@@ -1600,11 +1786,12 @@ class MoRIIOConnectorWorker:
 
         self.moriio_engine = None
         self._handle_request_thread = None
-        self._ping_thread = None
+        self._heartbeat: MoRIIOHeartbeat | None = None
         self._writer = MoRIIOWriter(self)
         # Completions that arrived before transfer_id_to_request_id was populated.
         # Retried each step until the mapping is established.
         self._unmatched_write_completions: set[str] = set()
+        self._unmatched_write_failures: OrderedDict[TransferId, None] = OrderedDict()
         # Producer-side READ-mode ACK fan-in. When decode TP is larger than
         # prefill TP, multiple decode ranks can read from one prefill rank and
         # notify the same transfer_id. Blocks are reusable only after all ACKs.
@@ -1630,10 +1817,7 @@ class MoRIIOConnectorWorker:
         )
 
         if self._rank == 0 and self.moriio_config.proxy_ip:
-            self._ping_thread = threading.Thread(
-                target=self._ping, args=(self.zmq_context,), daemon=True
-            )
-            self._ping_thread.start()
+            self._heartbeat = self._start_heartbeat()
 
         logger.info(
             "Initializing MoRIIO Engine, engine = %s, role = %s",
@@ -1723,13 +1907,8 @@ class MoRIIOConnectorWorker:
         self._recving_local_blocks: dict[ReqId, list[int]] = {}
         # Drained by get_block_ids_with_load_errors.
         self._invalid_block_ids: set[int] = set()
-        # This step's posted reads, awaited before the forward when the
-        # per-layer barrier cannot run.
+        # This step's posted reads, awaited in start_load_kv before the forward.
         self._reads_issued_this_step: list = []
-        # This step's posted recurrent-state reads. Mamba layers are not
-        # wrapped by the attention KV-transfer decorator, so wait_for_layer_load
-        # never fires for them and these must be awaited in start_load_kv.
-        self._mamba_reads_this_step: list = []
 
         # Track the expiration time of requests that are waiting to be sent.
         self._reqs_to_send: dict[ReqId, float] = {}
@@ -1792,14 +1971,17 @@ class MoRIIOConnectorWorker:
         request_id: ReqId,
         transfer_id: TransferId,
         dst_engine_id: str,
-        local_block_ids: list[int],
-        remote_block_ids: list[int] | None,
+        local_block_ids: BlockIds,
+        remote_block_ids: BlockIds | None,
         layer_name: str,
         kv_layer: torch.Tensor,
         remote_notify_port: int,
         remote_ip: str,
         multi_pod_hosts: list[str],
         remote_dp_size_local: int,
+        remote_dp_size: int,
+        remote_tp_size: int | None = None,
+        tp_mapping: MoRIIOWriteTPMapping | None = None,
     ) -> None:
         """Schedule a block write operation.
 
@@ -1815,6 +1997,9 @@ class MoRIIOConnectorWorker:
             remote_ip: IP address of remote node
             multi_pod_hosts: List of pod IPs for multi-pod Wide-EP
             remote_dp_size_local: Per-pod DP size for multi-pod
+            remote_dp_size: Global DP size of the decode instance
+            remote_tp_size: Tensor parallel size advertised by the peer
+            tp_mapping: Decode ranks this rank writes and what each receives
 
         """
         # synchronization to prevent dirty reads between
@@ -1838,6 +2023,9 @@ class MoRIIOConnectorWorker:
             remote_ip=remote_ip,
             multi_pod_hosts=multi_pod_hosts,
             remote_dp_size_local=remote_dp_size_local,
+            remote_dp_size=remote_dp_size,
+            remote_tp_size=remote_tp_size,
+            tp_mapping=tp_mapping,
         )
         self._writer.schedule_write(task)
 
@@ -1846,7 +2034,7 @@ class MoRIIOConnectorWorker:
             remote_layer_map = self.layer_name_to_remote_kv_cache_metadata[
                 remote_engine_id
             ]
-            cur_remote_engine_sessions = []
+            cur_remote_engine_sessions: list[Any] = []
             for ln, local_metas in self.layer_name_to_local_kv_cache_metadata.items():
                 remote_metas = remote_layer_map[ln]
                 if len(remote_metas) != len(local_metas):
@@ -1871,85 +2059,49 @@ class MoRIIOConnectorWorker:
                     unpacked_remote_memory_meta = (
                         self.moriio_wrapper.get_unpack_memory_metadata(remote_meta)
                     )
-                    cur_remote_engine_sessions.append(
-                        self.moriio_wrapper.build_session(
-                            unpacked_local_memory_meta, unpacked_remote_memory_meta
-                        )
+                    session = self.moriio_wrapper.build_session(
+                        unpacked_local_memory_meta, unpacked_remote_memory_meta
                     )
+                    if session is None:
+                        raise MoRIIOError(
+                            f"MoRI could not open a session from layer {ln} to "
+                            f"peer {remote_engine_id} (region "
+                            f"{len(cur_remote_engine_sessions)}, local "
+                            f"{_describe_memory(unpacked_local_memory_meta)}, "
+                            "remote "
+                            f"{_describe_memory(unpacked_remote_memory_meta)})"
+                        )
+                    cur_remote_engine_sessions.append(session)
             self.built_write_session[remote_engine_id] = cur_remote_engine_sessions
         return self.built_write_session[remote_engine_id], self.remote_moriio_metadata[
             remote_engine_id
         ]
 
-    def _ping(self, zmq_context):
-        # Use host:port format for http_address (compatible with official router)
-        http_address = f"{self.request_address}"
-        # Include host so the router embeds it in the request_id; the connector
-        # on the other side parses host/ports from there.
-        zmq_address = (
-            f"host:{self.local_ip},"
-            f"handshake:{self.handshake_port},"
-            f"notify:{self.notify_port}"
+    def _start_heartbeat(self) -> MoRIIOHeartbeat:
+        payload = {
+            "type": "P" if self.is_producer else "D",
+            "http_address": self.request_address,
+            "zmq_address": (
+                f"host:{self.local_ip},handshake:{self.handshake_port},"
+                f"notify:{self.notify_port}"
+            ),
+            "dp_size": self.moriio_config.dp_size,
+            "tp_size": self.moriio_config.tp_size,
+            "transfer_mode": self.mode.name,
+        }
+        return MoRIIOHeartbeat(
+            f"tcp://{self.proxy_ip}:{self.proxy_ping_port}",
+            payload,
+            MoRIIOConstants.PING_INTERVAL,
+            MoRIIOConstants.MAX_PING_RETRIES,
         )
-        role = "P" if self.is_producer else "D"
-
-        retry_count = 0
-        index = 1
-        with zmq_context.socket(zmq.DEALER) as sock:
-            sock.connect(f"tcp://{self.proxy_ip}:{self.proxy_ping_port}")
-
-            while True:
-                try:
-                    data = {
-                        "type": role,  # "P" or "D"
-                        "http_address": http_address,
-                        "zmq_address": zmq_address,
-                        # dp_size/tp_size are not used by the official vLLM router
-                        # (routing operates at the http_address level); they are
-                        # consumed only by the toy proxy server.
-                        "dp_size": self.moriio_config.dp_size,
-                        "tp_size": self.moriio_config.tp_size,
-                        # transfer_mode is included so the router can distinguish
-                        # READ (prefill-then-decode, sequential) from WRITE (concurrent)
-                        # scheduling.
-                        "transfer_mode": self.mode.name,
-                    }
-
-                    sock.send(msgpack.dumps(data))
-                    # logger.debug(f"Successfully sent ping message #{index}")
-                    retry_count = 0
-
-                except ConnectionRefusedError:
-                    logger.info(
-                        "Connection refused: %s:%s -> %s:%s",
-                        self.local_ip,
-                        self.local_ping_port,
-                        self.proxy_ip,
-                        self.proxy_ping_port,
-                    )
-                    retry_count += 1
-
-                except OSError as e:
-                    logger.info("OS error when sending ping: %s", e)
-                    retry_count += 1
-
-                except Exception as e:
-                    logger.info("Unexpected error when sending ping: %s", e)
-                    retry_count += 1
-                    if retry_count >= MoRIIOConstants.MAX_PING_RETRIES:
-                        logger.error(
-                            "Max retries (%s) exceeded. Stopping ping loop.",
-                            MoRIIOConstants.MAX_PING_RETRIES,
-                        )
-                        raise RuntimeError(
-                            f"Ping failed after {retry_count} retries"
-                        ) from e
-
-                finally:
-                    time.sleep(MoRIIOConstants.PING_INTERVAL)
-                    index += 1
 
     def shutdown(self):
+        heartbeat = getattr(self, "_heartbeat", None)
+        if heartbeat is not None:
+            heartbeat.shutdown()
+            self._heartbeat = None
+
         if hasattr(self, "moriio_wrapper") and self.moriio_wrapper:
             self.moriio_wrapper.shutdown()
 
@@ -2142,10 +2294,15 @@ class MoRIIOConnectorWorker:
 
         fut_list = []
 
+        write_target_tp_ranks: tuple[int, ...] = ()
+        if self.mode == MoRIIOMode.WRITE and self.is_producer:
+            targets = self._write_tp_mapping(tp_size).target_tp_ranks
+            if len(targets) > 1:
+                write_target_tp_ranks = targets
+
         # In dp(prefill)<->dp(decode) communication, we require an all-to-all handshake.
 
         for cur_dp_rank in range(remote_dp_size):
-            dp_engine_id = self.get_engine_name_with_dp(remote_engine_id, cur_dp_rank)
             _pod_idx = pod_index(cur_dp_rank, remote_dp_size_local)
             if _pod_idx >= len(pod_hosts):
                 _pod_idx = 0
@@ -2154,26 +2311,39 @@ class MoRIIOConnectorWorker:
             # each pod binds sockets only for its local ranks; dp_engine_id
             # keeps the global rank for uniqueness. Single-pod is bit-identical.
             _per_rank_local_dp = fold_local_rank(cur_dp_rank, remote_dp_size_local)
-            future = self._handshake_initiation_executor.submit(
-                self._moriio_handshake,
-                _per_rank_host,
-                port,
-                tp_size,
-                dp_engine_id,
-                _per_rank_local_dp,
+            target_tp_ranks: tuple[int | None, ...] = (
+                tuple(write_target_tp_ranks) if write_target_tp_ranks else (None,)
             )
-            fut_list.append(future)
+            for target_tp_rank in target_tp_ranks:
+                if target_tp_rank is None:
+                    target_engine_id = self.get_engine_name_with_dp(
+                        remote_engine_id, cur_dp_rank
+                    )
+                else:
+                    target_engine_id = self.get_engine_name_with_dp_tp(
+                        remote_engine_id, cur_dp_rank, target_tp_rank
+                    )
+                future = self._handshake_initiation_executor.submit(
+                    self._moriio_handshake,
+                    _per_rank_host,
+                    port,
+                    tp_size,
+                    target_engine_id,
+                    _per_rank_local_dp,
+                    target_tp_rank,
+                )
+                fut_list.append(future)
 
-            def done_callback(f: Future[set[str]], eid=dp_engine_id):
-                with self._handshake_lock:
-                    self._handshake_futures.pop(eid, None)
-                    try:
-                        self._remote_agents[eid] = f.result()
-                    except Exception:
-                        logger.exception("Handshake with %s failed", eid)
+                def done_callback(f: Future[set[str]], eid=target_engine_id):
+                    with self._handshake_lock:
+                        self._handshake_futures.pop(eid, None)
+                        try:
+                            self._remote_agents[eid] = f.result()
+                        except Exception:
+                            logger.exception("Handshake with %s failed", eid)
 
-            future.add_done_callback(done_callback)
-            self._handshake_futures[dp_engine_id] = future
+                future.add_done_callback(done_callback)
+                self._handshake_futures[target_engine_id] = future
 
         # fut = fut_list
         def wait_all_dp():
@@ -2308,15 +2478,6 @@ class MoRIIOConnectorWorker:
         self._has_mamba = any(
             self._is_mamba_layer(layer_name) for layer_name in kv_caches
         )
-        if self._has_mamba and self.mode == MoRIIOMode.WRITE:
-            # WRITE needs a distinct conv/ssm transfer plan. Reject before
-            # allocating or registering any regions rather than silently
-            # serving a zero recurrent state.
-            raise MoRIIOError(
-                "MoRIIO hybrid (mamba/KDA) transfer is implemented for READ "
-                "mode only; set kv_connector_extra_config.read_mode=true "
-                "for hybrid models"
-            )
         if self._has_mamba:
             mamba_specs = [
                 cast(MambaSpec, self.layer_to_spec[layer_name])
@@ -2402,10 +2563,15 @@ class MoRIIOConnectorWorker:
         caches_data = []
         self.layer_base_addr_index = {}
         base_addr_idx = 0
-
+        # HMA (#53721 Gemma4 SWA, GLM-5.2 DSA, MiniMax): transfers already
+        # size RDMA from per-layer geometry, so allow divergent block_len
+        # (bytes) always, and divergent block_size (tokens/page) only when
+        # the hybrid KV cache manager is enabled. Without HMA, block_size
+        # must stay uniform for the peer page handshake.
         hma_enabled = (
             not self.vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
         )
+
         for layer_name in kv_caches:
             self.layer_base_addr_index[layer_name] = base_addr_idx
             if self._is_mamba_layer(layer_name):
@@ -2420,16 +2586,31 @@ class MoRIIOConnectorWorker:
                     base_addr_idx += 1
                 continue
             geometry = self._get_layer_transfer_geometry(layer_name)
-            if hma_enabled:
-                if geometry.block_len != self.block_len:
+            if geometry.block_size != self.block_size:
+                if not hma_enabled:
                     raise ValueError(
-                        "MoRIIO KV cache block length mismatch for layer "
-                        f"{layer_name}: {geometry.block_len} != {self.block_len}"
+                        "MoRIIO KV cache block size mismatch for layer "
+                        f"{layer_name}: {geometry.block_size} != "
+                        f"{self.block_size}"
                     )
-            elif geometry.block_size != self.block_size:
-                raise ValueError(
-                    "MoRIIO KV cache block size mismatch for layer "
-                    f"{layer_name}: {geometry.block_size} != {self.block_size}"
+                logger.debug(
+                    "MoRIIO HMA per-layer block_size for %s: %d "
+                    "(page/default %d); continuing with per-layer sizes.",
+                    layer_name,
+                    geometry.block_size,
+                    self.block_size,
+                )
+            if geometry.block_len != self.block_len:
+                # Unlike block_size above, divergent block_len is allowed
+                # unconditionally (not gated on hma_enabled) -- it covers
+                # non-hybrid models too, e.g. GLM-5.2 DSA's per-layer
+                # geometry. Don't attribute it to HMA in the log.
+                logger.debug(
+                    "MoRIIO per-layer block_len for %s: %d "
+                    "(page/default %d); continuing with per-layer sizes.",
+                    layer_name,
+                    geometry.block_len,
+                    self.block_len,
                 )
             # num_blocks is advertised as a single scalar to the peer, so must it
             # be uniform
@@ -2459,6 +2640,7 @@ class MoRIIOConnectorWorker:
         # and a run that has three should not look identical in the log.
         distinct_block_lens = sorted(set(self.block_lens.values()))
         if len(distinct_block_lens) > 1:
+            self.block_len = max(distinct_block_lens)
             logger.info(
                 "MoRIIO registered %d attention layers with %d distinct block "
                 "lengths (bytes): %s; transfer sizes and strides are per layer, "
@@ -2516,6 +2698,7 @@ class MoRIIOConnectorWorker:
 
         self.kv_caches_base_addr[self.engine_id] = kv_caches_base_addr
         self.num_regions = len(caches_data)
+        self._record_slice_layouts(kv_caches)
         self.num_layers = len(self.kv_caches.keys())
 
         # Report the prevalidated KDA decomposition after registration.
@@ -2556,6 +2739,14 @@ class MoRIIOConnectorWorker:
             num_blocks=self.num_blocks,
             block_len=self.block_len,
             attn_backend_name=self.backend_name,
+            kv_head_layouts={
+                name: layout.to_wire() for name, layout in self.kv_head_layouts.items()
+            },
+            mamba_state_layouts={
+                name: layout.to_wire()
+                for name, layout in self.mamba_state_layouts.items()
+            },
+            attention_block_sizes=self.attention_block_sizes,
         )
         ready_event = threading.Event()
         self._moriio_handshake_listener_t = threading.Thread(
@@ -2575,11 +2766,43 @@ class MoRIIOConnectorWorker:
         ready_event.wait()  # Wait for listener ZMQ socket to be ready.
         self.moriio_wrapper.async_wait_reqid()
 
+    def _record_slice_layouts(self, kv_caches: dict[str, torch.Tensor]) -> None:
+        """Record how to address head and state slices of each layer.
+
+        A peer with a different TP size writes slices of these caches, so the
+        layouts are advertised in the handshake. Layers whose layout cannot be
+        sliced by head are left out; a heterogeneous-TP write to them fails.
+        """
+        self.kv_head_layouts: dict[str, HeadLayout] = {}
+        self.mamba_state_layouts: dict[str, MambaStateLayout] = {}
+        self.attention_block_sizes: dict[str, int] = {}
+        for layer_name, kv_cache in kv_caches.items():
+            if not self._is_mamba_layer(layer_name):
+                self.attention_block_sizes[layer_name] = (
+                    self._get_layer_transfer_geometry(layer_name).block_size
+                )
+            if self._is_mamba_layer(layer_name):
+                assert self._conv_decomp is not None
+                conv, ssm = kda_conv_ssm(
+                    kv_cache, cast(MambaSpec, self.layer_to_spec[layer_name])
+                )
+                self.mamba_state_layouts[layer_name] = get_mamba_state_layout(
+                    conv, ssm, self._conv_decomp
+                )
+            elif not self._is_mla_cache_layer(layer_name):
+                with contextlib.suppress(ValueError):
+                    self.kv_head_layouts[layer_name] = get_layer_head_layout(
+                        layer_name, kv_cache, self.layer_to_spec
+                    )
+
     def get_finished(self) -> tuple[set[str], set[str]]:
         """Get requests that are done sending or recving on this specific worker.
         The scheduler process (via the MultiprocExecutor) will use this output
         to track which workers are done.
         """
+        heartbeat = getattr(self, "_heartbeat", None)
+        if heartbeat is not None:
+            heartbeat.check_health()
         done_sending, done_recving = set(), set()
 
         if self.is_producer:
@@ -2650,43 +2873,27 @@ class MoRIIOConnectorWorker:
 
         return done_sending, done_recving
 
-    def wait_for_layer_load(self, layer_name: str) -> None:
-        """Block until all in-flight READs of this layer have landed.
+    def get_transfer_results(self) -> KVConnectorTransferResults:
+        done_sending, done_recving = self.get_finished()
+        failed_recving: set[ReqId] = set()
 
-        A host-side blocking wait must not run during full-graph capture.
-        """
-        if self.is_producer or self.mode != MoRIIOMode.READ:
-            return
+        if self.mode == MoRIIOMode.WRITE and not self.is_producer:
+            pending = self._unmatched_write_failures
+            mapping = self.transfer_id_to_request_id
+            for transfer_id in self.moriio_wrapper.pop_failed_write_req_ids():
+                pending[transfer_id] = None
+            for transfer_id in [t for t in pending if t in mapping]:
+                del pending[transfer_id]
+                failed_recving.add(mapping[transfer_id])
+            while len(pending) > _MAX_UNMATCHED_WRITE_FAILURES:
+                pending.popitem(last=False)
+            done_recving |= failed_recving
 
-        if get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.FULL:
-            return
-
-        with self.moriio_wrapper.lock:
-            pending = [
-                status
-                for status_by_layer in self._recving_transfers.values()
-                for status in status_by_layer.get(layer_name, ())
-            ]
-
-        if not pending:
-            return
-
-        try:
-            self.moriio_wrapper.waiting_for_transfer_complete(pending)
-        except TransferError:
-            if self._has_mamba:
-                logger.exception(
-                    "MoRIIO hybrid READ failed before layer %s; aborting the "
-                    "forward because HMA load-error recovery is unsupported.",
-                    layer_name,
-                )
-                raise
-            logger.warning(
-                "MoRIIO READ barrier did not complete for layer %s; proceeding "
-                "to transfer cleanup.",
-                layer_name,
-                exc_info=True,
-            )
+        return KVConnectorTransferResults(
+            finished_sending=done_sending,
+            finished_recving=done_recving,
+            failed_recving=failed_recving,
+        )
 
     def _pop_done_transfers(self) -> set[str]:
         done_req_ids: set[str] = set()
@@ -2770,40 +2977,37 @@ class MoRIIOConnectorWorker:
             return done_req_ids
 
     def _await_reads_issued_this_step(self) -> None:
-        """Step-level READ barrier, for the reads no per-layer barrier covers.
+        """Block until every READ posted this step has landed.
 
-        load_kv_async=False promises the KV is in place before the forward runs.
-        wait_for_layer_load keeps that promise per layer, letting early layers
-        overlap later transfers, but it only fires for layers that go through
-        the attention KV-transfer decorator. Two cases fall through it:
+        load_kv_async=False promises the KV is in place before the forward. A
+        per-layer barrier can't keep it: illegal under FULL cudagraph, and absent
+        for mamba/KDA state and indexer caches.
 
-        * mamba/KDA layers have no such hook at all, so their conv+ssm reads
-          would otherwise be consumed while still in flight;
-        * under CUDAGraphMode.FULL a host-side blocking wait is illegal
-          anywhere in the graph, so every read is awaited here instead.
-
-        start_load_kv runs outside the graph, so blocking here is safe.
-        Attention reads keep their per-layer overlap in the non-FULL case.
-
-        Attention-only failures are reported via
-        get_block_ids_with_load_errors. Hybrid failures are re-raised because
-        the scheduler's recovery path does not support multiple cache groups;
-        this fails the step closed instead of running forward with incomplete
-        recurrent state.
+        A READ still in flight when the wait gives up fails the step in both
+        modes: RDMA may still write into its blocks, so the forward must not
+        consume them. If every READ is terminal, attention-only failures are
+        reported via get_block_ids_with_load_errors. Hybrid failures are
+        re-raised because the scheduler's recovery path does not support
+        multiple cache groups.
         """
-        all_statuses = self._reads_issued_this_step
+        statuses = self._reads_issued_this_step
         self._reads_issued_this_step = []
-        mamba_statuses = self._mamba_reads_this_step
-        self._mamba_reads_this_step = []
-        if get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.FULL:
-            statuses = all_statuses
-        else:
-            statuses = mamba_statuses
         if not statuses:
             return
         try:
-            self.moriio_wrapper.waiting_for_transfer_complete(statuses)
+            self.moriio_wrapper.waiting_for_transfer_complete(
+                statuses, fail_fast=self._has_mamba
+            )
         except TransferError:
+            in_flight = sum(not (s.Succeeded() or s.Failed()) for s in statuses)
+            if in_flight:
+                logger.exception(
+                    "MoRIIO READ barrier failed with %d/%d reads still in "
+                    "flight; failing the step.",
+                    in_flight,
+                    len(statuses),
+                )
+                raise
             if self._has_mamba:
                 logger.exception(
                     "MoRIIO hybrid READ failed before the forward; aborting "
@@ -2854,8 +3058,26 @@ class MoRIIOConnectorWorker:
 
             meta.remote_engine_id = remote_engine_id
 
+            write_targets = self._write_tp_mapping(int(meta.tp_size)).target_tp_ranks
+            is_fanout = len(write_targets) > 1
             dp0_remote_engine_id = self.get_engine_name_with_dp(remote_engine_id, 0)
-            if dp0_remote_engine_id not in self._remote_agents:
+            if not write_targets:
+                # Another producer rank writes everything this one holds: no
+                # session is needed, and waiting for a handshake that never
+                # starts would stall this rank, and its TP peers, every layer.
+                self.write_ready_flags[remote_engine_id] = True
+            # A failed target handshake must be retried, so check every target
+            # session rather than write_ready_flags, which is set either way.
+            handshake_ready = (
+                all(
+                    self.get_engine_name_with_dp_tp(remote_engine_id, 0, tp_rank)
+                    in self._remote_agents
+                    for tp_rank in write_targets
+                )
+                if is_fanout
+                else not write_targets or dp0_remote_engine_id in self._remote_agents
+            )
+            if not handshake_ready:
                 # Initiate handshake with remote engine to exchange metadata.
                 with self._handshake_lock:
                     if remote_engine_id not in self._remote_agents:
@@ -3194,7 +3416,20 @@ class MoRIIOConnectorWorker:
             flexible=flexible,
         )
 
+    def _write_tp_mapping(self, remote_tp_size: int | None) -> MoRIIOWriteTPMapping:
+        """Decode ranks this prefill rank writes, and what each receives."""
+        return compute_write_tp_mapping(
+            self.tp_rank,
+            self.world_size,
+            remote_tp_size or self.world_size,
+            1 if self.use_mla else self.model_config.get_total_num_kv_heads(),
+            self.use_mla,
+            self._has_mamba,
+        )
+
     def _write_blocks_for_req(self, req_id: ReqId, meta: ReqMeta, layer_name, kv_layer):
+        # Raises before any write is queued for a TP pair the mapping rejects.
+        tp_mapping = self._write_tp_mapping(int(meta.tp_size))
         # Compute per-request values to pass through the task (no shared state).
         # This avoids race conditions when concurrent requests target different
         # decode pods - each WriteTask carries its own routing info.
@@ -3206,22 +3441,21 @@ class MoRIIOConnectorWorker:
             if meta.remote_dp_size_local
             else int(meta.remote_dp_size)
         )
-        # WRITE does not support HMA, so unwrap blocks into flat lists.
-        # remote_block_ids can itself be empty so need to be careful when unwrapping.
-        local_block_ids = meta.local_block_ids[0]
-        remote_block_ids = meta.remote_block_ids[0] if meta.remote_block_ids else []
         self.schedule_write_blocks(
             request_id=req_id,
             transfer_id=meta.transfer_id,
             dst_engine_id=meta.remote_engine_id,
-            local_block_ids=local_block_ids,
-            remote_block_ids=remote_block_ids,
+            local_block_ids=meta.local_block_ids,
+            remote_block_ids=meta.remote_block_ids,
             layer_name=layer_name,
             kv_layer=kv_layer,
             remote_notify_port=meta.remote_notify_port,
             remote_ip=meta.remote_host,
             multi_pod_hosts=hosts,
             remote_dp_size_local=dp_local,
+            remote_dp_size=int(meta.remote_dp_size),
+            remote_tp_size=int(meta.tp_size),
+            tp_mapping=tp_mapping,
         )
 
     def merge_contiguous_blocks(
@@ -3341,6 +3575,18 @@ class MoRIIOConnectorWorker:
                 local, remote, sizes, assume_sorted=False
             ),
         )
+        return self._apply_layer_mr_offsets(
+            layer_name, (local, remote, sizes), remote_moriio_meta, remote_engine_id
+        )
+
+    def _apply_layer_mr_offsets(
+        self,
+        layer_name: str,
+        offsets: tuple[list[int], list[int], list[int]],
+        remote_moriio_meta: MoRIIOAgentMetadata,
+        remote_engine_id: EngineId | None,
+    ) -> tuple[list[int], list[int], list[int]]:
+        local, remote, sizes = offsets
         if self.kv_layer_mr_offset:
             local_off = self.kv_layer_mr_offset[layer_name]
             remote_off = self._remote_layer_mr_offset(
@@ -3349,6 +3595,97 @@ class MoRIIOConnectorWorker:
             local = [x + local_off for x in local]
             remote = [x + remote_off for x in remote]
         return local, remote, sizes
+
+    def _check_peer_block_size(
+        self, layer_name: str, remote_moriio_meta: MoRIIOAgentMetadata
+    ) -> None:
+        """Blocks are copied as units, so both sides must hold as many tokens."""
+        remote = remote_moriio_meta.attention_block_sizes.get(layer_name)
+        local = self.attention_block_sizes.get(layer_name)
+        if remote is not None and local is not None and remote != local:
+            raise MoRIIOError(
+                f"Layer {layer_name} holds {local} tokens per block here and "
+                f"{remote} on the peer. Hybrid models size attention blocks to "
+                "the per-rank recurrent state, so MLA models with different "
+                "prefill and decode TP sizes get different block sizes; pass the "
+                "same --block-size to both instances"
+            )
+
+    def _block_copy_matches_peer(
+        self, layer_name: str, remote_moriio_meta: MoRIIOAgentMetadata
+    ) -> bool:
+        """A raw block copy puts every head and token where the peer reads it.
+
+        Prefill and decode can order heads and tokens differently (different
+        attention backends), and some layouts do not keep a block contiguous;
+        those need the head-slice path even when all heads are moved.
+        """
+        local = self.kv_head_layouts.get(layer_name)
+        remote_wire = remote_moriio_meta.kv_head_layouts.get(layer_name)
+        if local is None or remote_wire is None:
+            # MLA latents, or a peer that does not advertise layouts.
+            return True
+        return local.is_dense and HeadLayout.from_wire(remote_wire) == local
+
+    def _compute_head_slice_transfer_offsets(
+        self,
+        layer_name: str,
+        local_block_ids: list[int],
+        remote_block_ids: list[int],
+        remote_moriio_meta: MoRIIOAgentMetadata,
+        target: WriteTarget,
+        remote_engine_id: EngineId | None = None,
+    ) -> tuple[list[int], list[int], list[int]]:
+        """Offsets writing ``target``'s KV heads of a block into the peer."""
+        remote_wire = remote_moriio_meta.kv_head_layouts.get(layer_name)
+        local_layout = self.kv_head_layouts.get(layer_name)
+        if remote_wire is None or local_layout is None:
+            raise MoRIIOError(
+                f"Heterogeneous-TP WRITE of layer {layer_name} needs a KV head "
+                "layout on both sides; the cache layout of this layer cannot "
+                "be sliced by head, or the peer runs an older vLLM"
+            )
+        offsets = compute_head_slice_offsets(
+            local_layout,
+            HeadLayout.from_wire(remote_wire),
+            local_block_ids,
+            remote_block_ids,
+            target.local_head,
+            target.remote_head,
+            target.num_heads,
+            merge_fn=lambda local, remote, sizes: self.merge_contiguous_blocks(
+                local, remote, sizes, assume_sorted=False
+            ),
+        )
+        return self._apply_layer_mr_offsets(
+            layer_name, offsets, remote_moriio_meta, remote_engine_id
+        )
+
+    def _compute_mamba_slice_offsets(
+        self,
+        layer_name: str,
+        local_slots: list[int],
+        remote_slots: list[int],
+        remote_moriio_meta: MoRIIOAgentMetadata,
+        target: WriteTarget,
+    ) -> tuple[list[int], list[int], list[int], int]:
+        """(local, remote, sizes, n_conv) writing ``target``'s state slice."""
+        remote_wire = remote_moriio_meta.mamba_state_layouts.get(layer_name)
+        if remote_wire is None:
+            raise MoRIIOError(
+                f"Heterogeneous-TP WRITE of mamba layer {layer_name} needs the "
+                "peer's state layout; the peer runs an older vLLM"
+            )
+        return compute_mamba_slice_offsets(
+            self.mamba_state_layouts[layer_name],
+            MambaStateLayout.from_wire(remote_wire),
+            local_slots,
+            remote_slots,
+            target.local_slice,
+            target.local_slices,
+            target.remote_slice,
+            target.remote_slices,
+        )
 
     def _region_session_indices(self, layer_name: str) -> list[int]:
         """Flat session indices for a layer's registered regions.
@@ -3682,13 +4019,7 @@ class MoRIIOConnectorWorker:
                 self._recving_local_blocks.setdefault(
                     request_id, list(failed_recv_blocks)
                 )
-                # Awaited before the forward when the per-layer barrier cannot
-                # run (see _await_reads_issued_this_step).
                 self._reads_issued_this_step.extend(statuses)
-                if self._is_mamba_layer(layer_name):
-                    # No per-layer barrier exists for mamba layers, so these are
-                    # always awaited in start_load_kv.
-                    self._mamba_reads_this_step.extend(statuses)
                 self._recving_transfers_callback_addr[request_id] = (
                     remote_host,
                     str(

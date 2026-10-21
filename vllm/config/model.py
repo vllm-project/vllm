@@ -37,7 +37,7 @@ from vllm.transformers_utils.config import (
     get_pooling_config,
     get_sentence_transformer_tokenizer_config,
     is_encoder_decoder,
-    is_rope_parameters_nested,
+    iter_rope_parameters,
     mrope_num_dims,
     try_get_dense_modules,
     try_get_generation_config,
@@ -111,6 +111,8 @@ LayerBlockType = Literal["attention", "linear_attention", "mamba"]
 _ATTENTION_LAYER_TYPES = frozenset(
     {
         "full_attention",
+        "indexed_attention",
+        # TODO: Delete below once Transformers 5.18.0 is the minimum required version.
         "deepseek_sparse_attention",
         "qwen_sparse_attention",
     }
@@ -308,12 +310,8 @@ class ModelConfig:
     window functionality of the model, capping to sliding window size. If the
     model does not support sliding window, this argument is ignored."""
     disable_cascade_attn: bool = True
-    """Disable cascade attention for V1. While cascade attention does not
-    change the mathematical correctness, disabling it could be useful for
-    preventing potential numerical issues. This defaults to True, so users
-    must opt in to cascade attention by setting this to False. Even when this
-    is set to False, cascade attention will only be used when the heuristic
-    tells that it's beneficial."""
+    """Deprecated: cascade attention has been removed, so this has no effect.
+    It will be removed in v0.33.0."""
     skip_tokenizer_init: bool = False
     """Skip initialization of tokenizer and detokenizer. Expects valid
     `prompt_token_ids` and `None` for prompt from the input. The generated
@@ -370,12 +368,18 @@ class ModelConfig:
     hip platforms are supported)."""
     sleep_preserve_parameter_names: list[str] = field(default_factory=list)
     """Parameter-name globs to preserve across level-2 sleep.
+    Use target globs for frozen Engram table weights and scales omitted by the
+    trainer (e.g. ``*.engram.embed_tokens.weight*``).
+    Use ``draft.<name>`` for draft-private parameters, or ``draft.*`` for all.
     The sender must omit these parameters; loaders must preserve their storage."""
     sleep_mode_backend: str = "cumem"
     """Mechanism used to free and restore GPU state for sleep mode. ``"cumem"``
     (default) uses the built-in ``CuMemAllocator`` and is behavior-compatible
     with prior releases. Additional backends (CUDA checkpoint, CRIU, durable
     snapshot) may be registered in-tree or by plugins (RFC #34303)."""
+    sleep_mode_offload_cudagraph: bool = False
+    """Back up CUDA graph memory to CPU during sleep, restored in place on wake.
+    Takes effect with enable_sleep_mode, the cumem backend and CUDA graphs."""
     enable_nccl_comm_suspend: bool = False
     """Enable releasing NCCL communicator memory during sleep mode
     (``ncclCommSuspend``/``ncclCommResume``). Experimental; when disabled
@@ -503,6 +507,10 @@ class ModelConfig:
         # here early.
         if self.multimodal_config:
             factors["language_model_only"] = self.multimodal_config.language_model_only
+            # Sizes Qwen3.5's M-RoPE cache.
+            factors["video_pruning"] = (
+                self.multimodal_config.is_multimodal_pruning_enabled()
+            )
         return hash_factors(factors)
 
     def _update_nested(
@@ -1525,6 +1533,14 @@ class ModelConfig:
         self,
         parallel_config: ParallelConfig,
     ) -> None:
+        if parallel_config.enable_hc_sp and parallel_config.tensor_parallel_size > 1:
+            if not current_platform.is_cuda_alike():
+                raise ValueError("--enable-hc-sp currently requires CUDA or ROCm")
+            if not self.registry.is_hc_sp_supported_model(self.architectures, self):
+                raise ValueError("--enable-hc-sp is not supported for this model")
+            if parallel_config.pipeline_parallel_size != 1:
+                raise ValueError("--enable-hc-sp requires PP=1")
+
         total_num_attention_heads = self.model_arch_config.total_num_attention_heads
         tensor_parallel_size = parallel_config.tensor_parallel_size
         if total_num_attention_heads % tensor_parallel_size != 0:
@@ -1606,8 +1622,8 @@ class ModelConfig:
     def get_inputs_embeds_size(self) -> int:
         # The size of inputs_embeds is usually identical to the size
         # of the hidden states, however there are exceptions, such as
-        # embedding models like CLIP and SigLIP
-        names = ("projection_dim", "projection_size")
+        # OPT's projected token embeddings and embedding models like CLIP/SigLIP.
+        names = ("word_embed_proj_dim", "projection_dim", "projection_size")
         return getattr_iter(
             self.hf_text_config, names, default_factory=self.get_hidden_size
         )
@@ -2000,6 +2016,10 @@ class ModelConfig:
         return self._model_info.supports_pp
 
     @property
+    def is_lora_supported(self) -> bool:
+        return self._model_info.supports_lora
+
+    @property
     def is_attention_free(self) -> bool:
         return self._model_info.is_attention_free
 
@@ -2019,12 +2039,12 @@ class ModelConfig:
         return self._model_info.has_noops
 
     @property
-    def has_inner_state(self):
-        return self._model_info.has_inner_state
+    def supports_kv_cache_grouping(self) -> bool:
+        return self._model_info.supports_kv_cache_grouping
 
     @property
-    def supports_mamba_prefix_caching(self) -> bool:
-        return self._model_info.supports_mamba_prefix_caching
+    def has_inner_state(self):
+        return self._model_info.has_inner_state
 
     @property
     def supports_replayssm(self) -> bool:
@@ -2262,7 +2282,7 @@ class ModelConfig:
 
     @property
     def is_quantized(self) -> bool:
-        return getattr(self.hf_config, "quantization_config", None) is not None
+        return self.model_arch_config.quantization_config is not None
 
     def is_nvfp4_quantized(self) -> bool:
         quant_config = self.model_arch_config.quantization_config
@@ -2561,24 +2581,14 @@ def _get_and_verify_max_len(
         )
         derived_max_model_len = default_max_len
 
-    # In Transformers v5 rope_parameters could be TypedDict or dict[str, TypedDict].
-    # To simplify the verification, we convert it to dict[str, TypedDict].
-    rope_parameters = getattr(hf_config, "rope_parameters", None)
-    if rope_parameters and not is_rope_parameters_nested(rope_parameters):
-        rope_parameters = {"": rope_parameters}
-    if rope_parameters is not None:
-        # Layers without RoPE do not contribute to context length scaling.
-        rope_parameters = {
-            layer_type: rp
-            for layer_type, rp in rope_parameters.items()
-            if rp is not None
-        }
+    # Layers without RoPE do not contribute to context length scaling.
+    rope_parameters = list(iter_rope_parameters(hf_config))
 
     # NOTE(woosuk): Gemma3's max_model_len (128K) is already scaled by RoPE
     # scaling, so we skip applying the scaling factor again.
-    if rope_parameters is not None and "gemma3" not in hf_config.model_type:
+    if rope_parameters and "gemma3" not in hf_config.model_type:
         scaling_factor = 1.0
-        for rp in rope_parameters.values():
+        for rp in rope_parameters:
             # No need to consider "type" key because of patch_rope_parameters when
             # loading HF config
             rope_type = rp["rope_type"]
@@ -2618,9 +2628,7 @@ def _get_and_verify_max_len(
     if max_model_len is None or max_model_len == -1:
         # For LongRoPE, default to original_max_position_embeddings to avoid
         # performance degradation for shorter sequences
-        if rope_parameters is not None and any(
-            rp["rope_type"] == "longrope" for rp in rope_parameters.values()
-        ):
+        if any(rp["rope_type"] == "longrope" for rp in rope_parameters):
             max_model_len = int(
                 getattr(
                     hf_config, "original_max_position_embeddings", derived_max_model_len
