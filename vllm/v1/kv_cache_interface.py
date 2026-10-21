@@ -58,6 +58,12 @@ class KVQuantMode(IntEnum):
     NVFP4_DS_MLA = 10  # opaque-bytes NVFP4 DS-MLA layouts (FlashMLA sparse)
     ULTRAQUANT_4BIT = 11  # packed FP4 values + UE8M0 group scales
 
+    # Backend self-manages kernel dispatch. Reads as quantized but matches no
+    # generic kernel mode (is_per_token_head / is_nvfp4 / is_turboquant all
+    # False). Registered handlers return this when they own kernel selection
+    # rather than reusing an upstream kernel path. See KVCacheDTypeHandler.
+    CUSTOM = 12
+
     @property
     def is_per_token_head(self) -> bool:
         """True for any per-token-head quantization mode."""
@@ -87,9 +93,25 @@ class KVQuantMode(IntEnum):
         """True for the UltraQuant 4-bit KV-cache format."""
         return self == KVQuantMode.ULTRAQUANT_4BIT
 
+    @property
+    def is_custom_mode(self) -> bool:
+        """True when a platform backend fully self-manages kernel dispatch.
+
+        The attention selector should defer to the backend's own kernel
+        selection rather than a generic per-token-head / fp8 / turboquant
+        path. Distinct from NONE (which means non-quantized): CUSTOM is
+        quantized, just with no generic kernel mode.
+        """
+        return self == KVQuantMode.CUSTOM
+
 
 def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
     """Map a ``kv_cache_dtype`` string to a :class:`KVQuantMode`."""
+    from vllm.config.cache import get_kv_cache_dtype_handler
+
+    handler = get_kv_cache_dtype_handler(kv_cache_dtype)
+    if handler is not None:
+        return handler.quant_mode()
     if kv_cache_dtype == "int4_per_token_head":
         return KVQuantMode.INT4_PER_TOKEN_HEAD
     if kv_cache_dtype == "int8_per_token_head":
@@ -869,6 +891,14 @@ class SlidingWindowSpec(AttentionSpec):
     # re-prefill the last num_spec_prefill_tokens - 1 tokens from the end
     # of the sequence, and thus needs to delay freeing/caching of blocks.
     extra_retained_tokens: int = 0
+
+    @property
+    def num_retained_tokens(self) -> int:
+        """Tokens below a request's first scheduled position that must stay
+        readable. The worker nulls a step's block-table entries wholly below
+        that many tokens.
+        """
+        return self.sliding_window - 1 + self.extra_retained_tokens
 
     def max_admission_blocks_per_request(
         self, max_in_flight_tokens: int, max_model_len: int
