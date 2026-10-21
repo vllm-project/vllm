@@ -3,10 +3,11 @@
 | | |
 |---|---|
 | **Status** | Draft (for review) |
-| **Author** | peterpan |
+| **Author** | Peter Pan |
 | **Date** | 2026-10-21 |
 | **Target branch** | vLLM `main` |
-| **Scope** | DeepSeek V4 DSpark, NVIDIA path only |
+| **Scope** | DSpark confidence head on **NVIDIA path** when `enable_confidence_head=True && enable_adaptive_verification=True`. This combination is currently reachable from `DSparkDeepseekV4Model` (e.g. [`deepseek-ai/DeepSeek-V4-Pro-DSpark`](https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro-DSpark)) and opt-in from `Qwen3DSparkModel`. ROCm and XPU `DSparkDeepseekV4Model` **load** the confidence-head weights but don't currently wire it into inference, so they are out of scope here (their `enable_adaptive_verification` would fail earlier). `Gemma4DSparkModel` / `K3DSparkModel` don't have a confidence head at all. |
+| **Platforms** | NVIDIA CUDA SM90+ (Hopper, Blackwell); SM80-and-earlier NVIDIA, ROCm, XPU all keep the existing PyTorch path via the fused-availability gate |
 | **References** | `deepinfer/model_executor/layers/tilelang_ops/cuda/dflash.py:12-72` |
 
 ---
@@ -39,10 +40,12 @@ This RFC contains:
 
 ### 2.1 What this kernel does
 
-DSpark is a speculative decoding variant that predicts a block of candidate
-tokens, then lets the target model verify them. Adaptive verification requires
-an estimated acceptance probability per draft token. That estimate comes from
-a small "confidence head":
+[DSpark](https://github.com/vllm-project/vllm/pull/47419) is a speculative
+decoding variant used by several draft architectures in vLLM
+(`Qwen3DSparkModel`, `Gemma4DSparkModel`, our present target
+`DSparkDeepseekV4Model`, etc.). Adaptive verification requires an estimated
+acceptance probability per draft token. That estimate comes from a small
+"confidence head":
 
 ```
 p_accept = sigmoid( ( [hidden_state ; markov_embed] @ W ) / temperature )
@@ -58,8 +61,10 @@ where:
 
 ### 2.2 Current implementation (vLLM main)
 
-File: `vllm/model_executor/models/qwen3_dspark.py:112-137` (reused by
-`vllm/models/deepseek_v4/nvidia/dspark.py:379` via `compute_confidence`).
+The shared `DSparkConfidenceHead` lives at
+`vllm/model_executor/models/qwen3_dspark.py:112-137` and is reused by every
+DSpark draft model (`vllm/models/deepseek_v4/{nvidia,amd,xpu}/dspark.py`
+via `compute_confidence`). On the NVIDIA path we care about:
 
 ```python
 class DSparkConfidenceHead(nn.Module):
@@ -265,6 +270,20 @@ must satisfy vLLM's JIT contract (`docs/contributing/jit_kernel_warmup.md`):
 Without these the kernel will work in isolation but be incompatible with
 vLLM's startup sequence and CUDA-Graph fast paths.
 
+### 4.4.2 Platform support
+
+| Platform | Support | Note |
+|---|---|---|
+| NVIDIA Hopper (SM90) | fused TileLang kernel | Fast path; PDL required |
+| NVIDIA Blackwell (SM100/SM120) | fused TileLang kernel | Validated on SM120 (RTX 5090), pending on SM100 |
+| NVIDIA Ada / Ampere (SM80/86/89) | PyTorch fallback only | PDL unavailable; fallback keeps semantics correct |
+| ROCm | PyTorch fallback only | TileLang HIP support in vLLM is unstable as of 0.32.x; aligned with how `kernels/mhc/` defers ROCm |
+| Intel XPU | PyTorch fallback only | TileLang lacks XPU backend |
+
+The Python-level gate (`is_dspark_fused_available()`) returns `False` for any
+combination above marked "fallback only", so callers automatically pick the
+existing path.
+
 ### 4.5 Build-time / runtime discovery
 
 **TileLang is already a hard CUDA dependency of vLLM** (`requirements/cuda.txt`
@@ -338,27 +357,47 @@ Merge **only if all four hold**:
 
 ### 5.5 Hardware plan
 
-| Scenario | Card | Where |
+| Scenario | Card | Status |
 |---|---|---|
-| Development + unit test | 5090 (SM120) | `gpu-10-125-2-54` (single-card pod, tainted `peter-tanyanhong-usage=true:NoSchedule`) |
-| Benchmark full sweep | 5090 | same |
-| Cross-validation (recommended) | H200 / B300 | TBD — need SRE |
-| Production-representative | H200 + B300 | before final PR merge |
+| Development + unit test | RTX 5090 (SM120) | done — see §5.6 |
+| Benchmark full sweep | RTX 5090 (SM120) | done — see §5.6 |
+| Cross-validation | H200 (SM90) | pending; tracked separately |
+| Production-representative | H200 (SM90) and B300 (SM100) | pending; **required** before final PR merge |
 
-> **Note on 5090**: SM120 (Blackwell consumer). Same architecture family as
-> B200/B300 (SM100/103), so numbers should transfer. But consumer cards may
-> have different memory clocks / driver paths. A small cross-check on H200 is
-> strongly recommended before we claim speedup numbers in the PR description.
->
-> **Note on dev node**: `gpu-10-125-2-54` was previously unschedulable due to
-> a stuck `nvidia-container-toolkit` pod (init container never wrote the
-> `toolkit-ready` sentinel). Workaround applied: manually `touch`ed the sentinel
-> and uncordoned the node. This is a *stop-gap*; the underlying containerd /
-> toolkit issue is not root-caused. Numbers from this node should be treated
-> as "developer box", not "production reference". Track the underlying
-> node issue separately with SRE.
+> SM120 (Blackwell consumer) shares architecture features with SM100/SM103
+> (Blackwell datacenter), so the Signed-off numbers on 5090 should transfer
+> directionally. However, datacenter cards have different memory clocks,
+> kernel-launch latency, and PDL behavior than consumer cards. **A cross-
+> check on H200 is required before we report production speedups in the PR
+> description.**
 
-### 5.6 Preliminary results (5090 dev box, 2026-10-21)
+### 5.5.1 Why we do not benchmark serving end-to-end here
+
+E2E speedup attributable to this fused kernel will be **sub-1%** in any
+realistic DeepSeek-V4-Pro-DSpark workload, regardless of GPU. Reasoning:
+
+- The confidence head is invoked once per draft token batch under adaptive
+  verification. With typical `dspark_block_size=4` and per-decode TPOT in
+  the ~10 ms regime, one fused call (≤ 50 µs) is ~0.5% of that budget.
+- Even a **2× kernel-level** speedup compresses E2E by < 0.3%. Serving-level
+  bench (e.g. `vllm bench serve`) noise on RTX 5090-class hardware already
+  exceeds that.
+
+So the value claim here is **mechanism, not percentage**: one kernel launch
+instead of four, zero activation-checkpoint-library traffic per call, and
+one fewer CUDA-graph node per decode step. Kernel-level wins stack into
+measurable E2E only when combined with the other DSpark fusions — mHC,
+RMSNorm — which have their own RFCs / PRs (e.g.
+[#41536](https://github.com/vllm-project/vllm/pull/41536) for fused mHC).
+
+If maintainers still want a serving-run demonstration, we can reproduce
+`vllm serve --load-format dummy deepseek-ai/DeepSeek-V4-Pro` with
+`--speculative-config '{"method":"dspark",...}'` on request — dummy weights
+do not change dispatch behaviour, so kernel-level deltas would still be
+visible under `nsys` / `torch.profiler`. But per-workload latency claims
+should be taken from the microbenchmark, not a serving run.
+
+### 5.6 Preliminary results (RTX 5090, 2026-10-21)
 
 Implementation landed in `vllm/model_executor/kernels/dspark/` together with
 `tests/kernels/dspark/test_confidence.py` and
@@ -455,7 +494,8 @@ Each milestone is independently revertable.
 6. **TileLang version pinning** — N/A: already pinned by vLLM. We only need
    to verify our kernel compiles with the pinned version.
 7. **Should this apply to K3-DSpark / Qwen3-DSpark as well**, or strictly
-   DeepSeek V4 first? My recommendation: V4 only, others in follow-up.
+   DSparkDeepseekV4Model first? My recommendation: DSparkDeepseekV4 only,
+   others in follow-up.
 8. **ROCm handling** — TileLang works on ROCm but the GEMV shape we use may
    need different block sizes; leave ROCm fallback to the naive PyTorch path
    in this RFC.
@@ -470,8 +510,10 @@ Each milestone is independently revertable.
   `vllm/model_executor/models/qwen3_dspark.py:112-137`
 - Runtime caller:
   `vllm/v1/worker/gpu/spec_decode/dspark/speculator.py:189-196`
-- DeepSeek V4 NVIDIA path:
+- DSparkDeepseekV4Model integration (NVIDIA path):
   `vllm/models/deepseek_v4/nvidia/dspark.py:379-384`
+- Exemplar target model (where DSpark is wired end-to-end):
+  [`deepseek-ai/DeepSeek-V4-Pro-DSpark`](https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro-DSpark)
 
 ---
 
@@ -634,7 +676,7 @@ RFC body is intentionally left as the "as-proposed" snapshot.
 | §4.1 / App A | `@T.macro GEMV(x, B, offset, ...)` shared between two GEMVs | Unrolled two×: explicit GEMV #1 (`hidden`) and GEMV #2 (`markov`) | Implicit-signature TileLang does not support `T.macro` reuse inside `T.Kernel` — unrolling is simpler and the kernels are short. |
 | §4.1 | `hidden: T.StridedTensor((n, H), (S, 1), "bfloat16")` | Plain `T.Tensor[[n, H]]` | StridedTensor + forward reference inside `T.Kernel` is fragile on TileLang 0.1.12. The upstream caller already produces contiguous row-major output from `head_hidden[sample_indices]`, so non-contiguous inputs fall back to PyTorch (still correct, just slower). |
 | §4.4 | `_FUSED_MAX_BATCH=2048` fallback threshold | Same value; benchmark shows fused wins up to n=8192 | Conservative default; reviewers can raise after H200 numbers land. |
-| §5 | "Benchmark plan" forward-looking | "Benchmark results" — landed with numbers from 5090 dev box (vLLM 0.32.0) | A PR that lands the kernel should land its numbers. H200 cross-check remains in rollout plan. |
+| §5 | "Benchmark plan" forward-looking | "Benchmark results" — landed with numbers from RTX 5090 (vLLM 0.32.0) | A PR that lands the kernel should land its numbers. H200 cross-check remains in rollout plan. |
 
 These deltas shouldn't change the **decision question** (fused vs. compiled,
 FP32 weights preserved, single-file integration), only the **implementation
