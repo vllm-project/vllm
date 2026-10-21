@@ -295,6 +295,12 @@ repos:
     entry: python tools/pre_commit/check_boolean_context_manager.py
     language: python
     types: [python]
+  - id: check-trust-remote-code
+    name: Check for hardcoded trust_remote_code=True
+    entry: python tools/pre_commit/check_trust_remote_code.py
+    language: python
+    types: [python]
+    files: ^vllm/
   # Rust hooks. These shell out to `cargo`; tools/pre_commit/rust-check.sh
   # skips with a warning when cargo is not installed.
   - id: rust-cargo-autoinherit

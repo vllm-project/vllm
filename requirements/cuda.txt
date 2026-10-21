@@ -23,7 +23,9 @@ PyNvVideoCodec==2.0.4
 flashinfer-python==0.7.2
 apache-tvm-ffi==0.1.11
 tilelang==0.1.12
-nvidia-cudnn-frontend>=1.19.1
+# >=1.31.0 keeps execution plans alive for the CUDA graphs recorded from them
+# (NVIDIA/cudnn-frontend#1195); older versions can replay an unloaded kernel.
+nvidia-cudnn-frontend>=1.31.0
 # Required for LLM_NVTX_SCOPES_FOR_PROFILING=1
 nvtx==0.2.15
 # Required for faster safetensors model loading
