@@ -20,6 +20,7 @@ from vllm.benchmarks.forward.batch import BenchBatch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import get_world_group, graph_capture
 from vllm.forward_context import get_forward_context
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
@@ -157,9 +158,16 @@ class ForwardBench:
         flag = torch.zeros(1, device=self.device)
         # TODO(woosuk): Support ROCm. The bench hangs there, likely on these
         # in-graph events.
+        # `external=True` lets the event be queried outside the graph without
+        # being captured itself; CUDA-only, XPU graphs don't need it.
+        event_kwargs = (
+            {"enable_timing": True, "external": True}
+            if current_platform.is_cuda_alike()
+            else {"enable_timing": True}
+        )
         self._events = (
-            torch.cuda.Event(enable_timing=True, external=True),
-            torch.cuda.Event(enable_timing=True, external=True),
+            torch.cuda.Event(**event_kwargs),
+            torch.cuda.Event(**event_kwargs),
         )
         if world.world_size > 1:
             # Initialize the communicator outside capture.
