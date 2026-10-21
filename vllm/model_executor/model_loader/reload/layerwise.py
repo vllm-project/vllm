@@ -25,6 +25,7 @@ from .meta import (
     materialize_layer,
     restore_layer_on_meta,
 )
+from .side_state import alias_onto, collect_side_tensors, pin_side_tensors
 from .types import LayerReloadingInfo
 from .utils import (
     get_info_size,
@@ -297,6 +298,8 @@ def finalize_layerwise_reload(model: torch.nn.Module, model_config: ModelConfig)
 def _finalize_attention_layer(
     layer: torch.nn.Module, info: LayerReloadingInfo, model_config: ModelConfig
 ) -> None:
+    # Side tensors as they are before both post-load passes below
+    before = collect_side_tensors(layer) if info.kernel_tensors is not None else None
     if info.kernel_tensors is None:
         if info.load_numel > 0:
             _layerwise_process(layer, info)
@@ -307,6 +310,8 @@ def _finalize_attention_layer(
     else:
         _place_kernel_tensors(layer, info)
     layer.process_weights_after_loading(model_config.dtype)
+    if before is not None:
+        _pin_side_tensors(layer, before)
 
 
 def _reload_attention_scales(layer: torch.nn.Module, info: LayerReloadingInfo) -> None:
@@ -358,6 +363,8 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
     """
     # Materialize layer tensors onto device
     materialize_layer(layer, info)
+    # Side references (quant configs, kernels) as they are before the rerun
+    before = collect_side_tensors(layer) if info.kernel_tensors is not None else None
 
     # Reset online quantization flag so process_weights_after_loading
     # will run again during reload
@@ -401,7 +408,7 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
     # Copy processed values into original tensor storage (preserves cudagraph refs)
     # this code is a no-op if not reloading (because kernel tensors is empty)
     if info.kernel_tensors is not None:
-        _copy_and_restore_kernel_tensors(layer, info)
+        _copy_and_restore_kernel_tensors(layer, info, before)
 
     info.reset()
     logger.debug("%s: Processed", layer.__class__.__name__)
@@ -420,23 +427,53 @@ def _get_weight_loader(tensor: torch.Tensor):
     return getattr(tensor, "weight_loader", default_weight_loader)
 
 
-def _copy_and_restore_kernel_tensors(layer: torch.nn.Module, info: LayerReloadingInfo):
+def _copy_and_restore_kernel_tensors(
+    layer: torch.nn.Module,
+    info: LayerReloadingInfo,
+    before: dict | None = None,
+):
     """Copy processed values into original kernel tensor storage and restore
-    kernel tensor references on the layer. Preserves cudagraph references."""
+    kernel tensor references on the layer. Preserves cudagraph references.
+
+    Each temporary is aliased onto its kernel tensor, so references to it that
+    processing left outside the layer's parameters and buffers follow. With
+    `before` (the layer's side tensors collected before processing), freshly
+    derived side tensors are put back on startup storage too; see `side_state`."""
     assert info.kernel_tensors is not None
     parameters, buffers = info.kernel_tensors
     non_persistent = info.kernel_non_persistent_buffers
     loaded_tensor_names = {name for name, _ in info.loaded_weights}
     for name, param in parameters.items():
-        param.data.copy_(getattr(layer, name))
+        _copy_back(param, getattr(layer, name))
     for name, buffer in buffers.items():
         if name not in layer._buffers:
             continue
         if name in non_persistent and name not in loaded_tensor_names:
             continue
-        buffer.data.copy_(getattr(layer, name))
+        _copy_back(buffer, getattr(layer, name))
 
     _place_kernel_tensors(layer, info)
+    if before is not None:
+        _pin_side_tensors(layer, before)
+
+
+@torch.no_grad()
+def _copy_back(kernel: torch.Tensor, temp: torch.Tensor) -> None:
+    kernel.data.copy_(temp)
+    # References to the temporary held elsewhere now read the kernel tensor
+    meta = (temp.shape, temp.dtype, temp.device)
+    if temp is not kernel and meta == (kernel.shape, kernel.dtype, kernel.device):
+        alias_onto(temp, kernel.data)
+
+
+def _pin_side_tensors(layer: torch.nn.Module, before: dict) -> None:
+    for path in pin_side_tensors(layer, before):
+        logger.warning(
+            "%s%s moved off its startup storage on reload; CUDA graphs "
+            "captured at startup will not see the new value",
+            type(layer).__name__,
+            path,
+        )
 
 
 def _place_kernel_tensors(layer: torch.nn.Module, info: LayerReloadingInfo):

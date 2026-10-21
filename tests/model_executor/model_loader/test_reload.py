@@ -35,6 +35,7 @@ from vllm.model_executor.model_loader.reload.meta import (
     restore_layer_on_meta,
     to_meta_tensor,
 )
+from vllm.model_executor.model_loader.reload.side_state import collect_side_tensors
 from vllm.model_executor.model_loader.reload.types import LayerReloadingInfo
 from vllm.model_executor.model_loader.reload.utils import get_layer_tensors
 from vllm.model_executor.model_loader.weight_utils import (
@@ -1258,13 +1259,16 @@ def test_hpc_rope_norm_kernel_sees_refit_norm_weights(monkeypatch, hpc_rope_norm
 
 
 def _device_tensor_ptrs(worker) -> dict[str, int]:
-    """Addresses of every device tensor held by a module; graphs capture them."""
+    """Addresses of every device tensor held by a module, also through its quant
+    method and kernel objects; graphs capture them."""
     ptrs = {}
     for name, module in worker.get_model().named_modules():
-        tensors = {**vars(module), **module._parameters, **module._buffers}
+        tensors = {f".{k}": t for k, t in module._parameters.items()}
+        tensors |= {f".{k}": t for k, t in module._buffers.items()}
+        tensors |= {"".join(p): t for p, t in collect_side_tensors(module).items()}
         for attr, tensor in tensors.items():
             if isinstance(tensor, torch.Tensor) and tensor.device.type != "cpu":
-                ptrs[f"{name}.{attr}"] = tensor.data_ptr()
+                ptrs[f"{name}{attr}"] = tensor.data_ptr()
     return ptrs
 
 
