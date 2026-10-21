@@ -332,7 +332,7 @@ RUN sed -i 's/import regex as re/import re/' /tmp/therock_wheels.py \
     && pip download --no-deps --dest /app/debs \
         --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
         "torch==${TORCH_VERSION}" "triton==${TRITON_VERSION}" \
-    && python3 /tmp/therock_wheels.py patch-amdsmi "${SDK_CORE}/share/amd_smi" \
+    && python3 /tmp/therock_wheels.py package-amdsmi "${SDK_CORE}/share/amd_smi" \
         --out-dir /tmp/amd_smi \
     && pip wheel --no-deps --wheel-dir /app/debs /tmp/amd_smi \
     && rm -rf /tmp/amd_smi /tmp/therock_wheels.py \
