@@ -79,6 +79,8 @@ pub struct HfChatRenderer {
     multimodal: Option<MultimodalRenderInfo>,
     /// Whether a request may override the chat template.
     trust_request_chat_template: bool,
+    /// Fuel budget for request-supplied templates; `None` disables it.
+    request_template_fuel: Option<u64>,
 }
 
 impl HfChatRenderer {
@@ -100,6 +102,10 @@ impl HfChatRenderer {
             special_tokens: None,
             multimodal: None,
             trust_request_chat_template: false,
+            request_template_fuel: request_template_fuel(
+                std::env::var_os("VLLM_CHAT_TEMPLATE_FUEL").as_deref(),
+            )
+            .map_err(|error| Error::ChatTemplate(error.to_report_string()))?,
         })
     }
 
@@ -188,7 +194,7 @@ impl HfChatRenderer {
             .as_ref()
             .map(|template| {
                 CompiledChatTemplate::new(template.clone(), self.content_format)
-                    .map(|template| template.with_fuel(request_template_fuel()))
+                    .map(|template| template.with_fuel(self.request_template_fuel))
                     .map_err(|error| Error::ChatTemplate(error.to_report_string()))
             })
             .transpose()?;

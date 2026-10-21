@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::error::Error as _;
+use std::ffi::OsStr;
 use std::fs;
 use std::iter;
 use std::path::Path;
@@ -35,14 +36,17 @@ type Result<T> = std::result::Result<T, TemplateError>;
 /// an error.
 const DEFAULT_TEMPLATE_FUEL: u64 = 500_000;
 
-/// Fuel budget for request-supplied templates, overridable with
-/// `VLLM_CHAT_TEMPLATE_FUEL`. `0` disables the limit.
-pub(super) fn request_template_fuel() -> Option<u64> {
-    let fuel = std::env::var("VLLM_CHAT_TEMPLATE_FUEL")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(DEFAULT_TEMPLATE_FUEL);
-    (fuel > 0).then_some(fuel)
+/// Fuel budget for request-supplied templates from the value of
+/// `VLLM_CHAT_TEMPLATE_FUEL`, if set. `0` disables the limit.
+pub(super) fn request_template_fuel(value: Option<&OsStr>) -> Result<Option<u64>> {
+    let fuel = match value {
+        None => DEFAULT_TEMPLATE_FUEL,
+        Some(value) => value
+            .to_str()
+            .and_then(|value| value.parse().ok())
+            .ok_or_else(|| TemplateError::InvalidFuel(value.to_owned()))?,
+    };
+    Ok((fuel > 0).then_some(fuel))
 }
 
 /// Build a pre-configured environment with the given template string.
@@ -334,6 +338,22 @@ mod tests {
     fn test_raised_or_disabled_fuel_renders_long_conversation() {
         assert!(render_turns(20_000, Some(5_000_000)).is_ok());
         assert!(render_turns(20_000, None).is_ok());
+    }
+
+    #[test]
+    fn test_request_template_fuel_rejects_invalid_value() {
+        assert_eq!(
+            request_template_fuel(None).unwrap(),
+            Some(DEFAULT_TEMPLATE_FUEL)
+        );
+        assert_eq!(
+            request_template_fuel(Some("2000000".as_ref())).unwrap(),
+            Some(2_000_000)
+        );
+        assert_eq!(request_template_fuel(Some("0".as_ref())).unwrap(), None);
+        let error = request_template_fuel(Some("-1".as_ref())).unwrap_err();
+        expect![[r#"VLLM_CHAT_TEMPLATE_FUEL must be a non-negative integer, got "-1""#]]
+            .assert_eq(&error.to_report_string());
     }
 
     #[test]
