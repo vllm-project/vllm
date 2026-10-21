@@ -4,17 +4,70 @@
 load-time slicing
 """
 
+from contextlib import nullcontext
+from dataclasses import replace
+from types import SimpleNamespace
+
 import pytest
 import torch
 
+from vllm.lora.layers.fused_moe import FusedMoEWithLoRA
 from vllm.lora.lora_model import LoRAModel, MoEEPLoadSpec
 from vllm.lora.peft_helper import PEFTHelper
+from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
+from vllm.model_executor.layers.fused_moe.expert_map_manager import ExpertMapManager
 
 NUM_LAYERS = 48
 GLOBAL_NUM_EXPERTS = 128
 LOCAL_NUM_EXPERTS = 64  # ep_size = 2
 EXPERT_PROJECTIONS = ("down_proj", "gate_proj", "up_proj")
 NON_EXPERT_MODULES = ("q_proj", "k_proj", "v_proj", "o_proj", "gate")
+
+
+@pytest.mark.parametrize(
+    "use_ep,requested_placement,num_expert_group,resolved_placement",
+    [
+        (False, "linear", 2, "linear"),
+        (False, "round_robin", 2, "linear"),
+        (True, "linear", 2, "linear"),
+        (True, "round_robin", 1, "linear"),
+        (True, "round_robin", 2, "round_robin"),
+    ],
+)
+def test_moe_lora_ep_requires_contiguous_expert_placement(
+    use_ep, requested_placement, num_expert_group, resolved_placement
+):
+    """Reject non-contiguous ownership, but allow requests resolved to linear."""
+    parallel_config = replace(
+        FusedMoEParallelConfig.make_no_parallel(),
+        use_ep=use_ep,
+        ep_size=2 if use_ep else 1,
+    )
+    expert_map = ExpertMapManager(
+        max_num_batched_tokens=16,
+        top_k=2,
+        global_num_experts=4,
+        num_redundant_experts=0,
+        num_expert_group=num_expert_group,
+        moe_parallel_config=parallel_config,
+        placement_strategy=requested_placement,
+        enable_eplb=False,
+    )
+    assert expert_map.placement_strategy == resolved_placement
+
+    layer = FusedMoEWithLoRA.__new__(FusedMoEWithLoRA)
+    torch.nn.Module.__init__(layer)
+    layer.moe_config = SimpleNamespace(moe_parallel_config=parallel_config)
+    layer.base_layer = SimpleNamespace(
+        expert_placement_strategy=expert_map.placement_strategy
+    )
+    error = (
+        pytest.raises(ValueError, match="requires linear expert placement")
+        if use_ep and resolved_placement != "linear"
+        else nullcontext()
+    )
+    with error:
+        layer._ep_check()
 
 
 def _expected_lora_modules() -> set[str]:
