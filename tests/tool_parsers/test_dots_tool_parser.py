@@ -346,6 +346,7 @@ def test_streaming_with_function_tool_and_parser_tools() -> None:
     messages = _stream(parser, chunks, request)
     calls = [call for message in messages for call in message.tool_calls]
     assert len(calls) == 1
+    assert calls[0].function is not None
     assert calls[0].function.name == "search"
     assert json.loads(calls[0].function.arguments or "") == {"query": "table"}
 
@@ -397,5 +398,6 @@ def test_streaming_with_responses_request_function_tool() -> None:
     messages = _stream(parser, chunks, request)
     calls = [call for message in messages for call in message.tool_calls]
     assert len(calls) == 1
+    assert calls[0].function is not None
     assert calls[0].function.name == "search"
     assert json.loads(calls[0].function.arguments or "") == {"query": "table"}
