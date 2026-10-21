@@ -32,8 +32,8 @@ use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
 use vllm_server::{
     ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
-    DEFAULT_KEEP_ALIVE_TIMEOUT, HttpListenerMode, LoraModulePath, ParserSelection, RenderConfig,
-    RendererSelection,
+    CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT, HttpListenerMode, LoraModulePath,
+    ParserSelection, RenderConfig, RendererSelection,
 };
 use vllm_text::backend::hf::HfOverrides;
 
@@ -424,6 +424,18 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub disable_log_stats: bool,
 
+    /// Custom Prometheus histogram bucket boundaries, as a JSON mapping from
+    /// bucket-family key to a list of strictly increasing, positive, finite
+    /// upper bounds. When a family key is present, its list replaces the
+    /// default buckets for every histogram in that family; families not listed
+    /// keep their defaults. Known families: `request_latency`,
+    /// `time_to_first_token`, `inter_token_latency`, `iteration_tokens`,
+    /// `request_params_n`, `request_num_preemptions`, `request_tokens`,
+    /// `kv_cache_residency`.
+    #[arg(long, value_parser = parse_json::<CustomHistogramBuckets>, default_value = "{}", value_name = "JSON")]
+    #[serde(default)]
+    pub custom_histogram_buckets: CustomHistogramBuckets,
+
     /// The model name(s) used in the API. If multiple names are provided, the
     /// server will respond to any of the provided names. The model name in the
     /// model field of a response will be the first name in this list. If not
@@ -596,6 +608,7 @@ impl SharedRuntimeArgs {
             tls,
             api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
+            custom_histogram_buckets: self.custom_histogram_buckets,
             shutdown_timeout,
             // The engine is launched and supervised by another process.
             manages_engine: false,
@@ -660,6 +673,7 @@ impl SharedRuntimeArgs {
             tls,
             api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
+            custom_histogram_buckets: self.custom_histogram_buckets,
             shutdown_timeout,
             manages_engine,
             keep_alive_timeout,

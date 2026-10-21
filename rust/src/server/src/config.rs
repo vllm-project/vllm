@@ -18,6 +18,7 @@ use vllm_chat::{
     ToolStrictLevel,
 };
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
+use vllm_metrics::CustomHistogramBuckets;
 use vllm_text::backend::hf::HfOverrides;
 
 /// Default keep-alive idle timeout (seconds); also the head-read bound
@@ -286,6 +287,9 @@ pub struct Config {
     /// engine-reported scheduler stats and request lifecycle events are not
     /// exported.
     pub disable_log_stats: bool,
+    /// Replacement bucket bounds for the core histogram families
+    /// (`--custom-histogram-buckets`); empty keeps the defaults.
+    pub custom_histogram_buckets: CustomHistogramBuckets,
     /// Maximum time to wait for active HTTP/gRPC requests to drain on shutdown.
     pub shutdown_timeout: Duration,
     /// Whether the caller manages the engine process and shuts it down when

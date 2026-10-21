@@ -49,6 +49,8 @@ pub use vllm_chat::{
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::Llm;
+pub use vllm_metrics::CustomHistogramBuckets;
+use vllm_metrics::METRICS;
 use vllm_text::TextLlm;
 
 use crate::listener::{Listener, MaybeTlsListener};
@@ -76,6 +78,9 @@ fn effective_served_model_names(model: &str, served_model_name: &[String]) -> Ve
 /// Build the shared application state for one configured model and one engine
 /// client, including any static LoRA adapters from `--lora-modules`.
 async fn build_state(config: &Config) -> Result<Arc<AppState>> {
+    // Fix the histogram buckets before the engine connection records metrics.
+    METRICS.set_custom_histogram_buckets(config.custom_histogram_buckets.clone());
+
     // If no served names are specified, fall back to the backend model path so
     // that the API always has at least one valid model ID. Use the same primary
     // public name for frontend-side metrics labels.

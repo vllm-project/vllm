@@ -379,14 +379,6 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub collect_detailed_traces: Option<Unsupported>,
 
-    /// Custom Prometheus histogram bucket boundaries, as a JSON mapping from
-    /// bucket-family key to a list of strictly increasing, positive, finite
-    /// upper bounds. When a family key is present, its list replaces the
-    /// default buckets for every histogram in that family; families not listed
-    /// keep their defaults.
-    #[arg(long)]
-    pub custom_histogram_buckets: Option<Unsupported>,
-
     /// Maximum number of requests that can be in-flight (waiting or running)
     /// at the same time. When the limit is reached, new requests are rejected
     /// with HTTP 503 so the client can retry on another instance.
