@@ -20,6 +20,7 @@ This example was written for four GPUs with at least 8 GiB each.
 """
 
 import os
+import time
 
 import ray
 import torch
@@ -183,6 +184,7 @@ def main():
     master_port = get_open_port()
     coordination_port = get_open_port()
     world_size = NUM_SOURCES + num_workers
+    t0 = time.perf_counter()
     ray.get(
         [
             source.setup_engine.remote(
@@ -195,10 +197,15 @@ def main():
             for source in sources
         ]
     )
+    print(f"[sync] engine setup took {time.perf_counter() - t0:.2f}s")
 
+    t0 = time.perf_counter()
     ray.get([source.send_weights.remote() for source in sources])
+    print(f"[sync] iter 0 took {time.perf_counter() - t0:.3f}s")
     after = generate(llm, prompts)
+    t0 = time.perf_counter()
     ray.get([source.send_weights.remote() for source in sources])
+    print(f"[sync] iter 1 took {time.perf_counter() - t0:.3f}s")
     repeated = generate(llm, prompts)
 
     assert after != before, "generation did not change after weight transfer"

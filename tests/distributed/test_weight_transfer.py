@@ -740,7 +740,9 @@ def trainer_send_from_source(
                     tensor = None
                     if rank == source_rank:
                         value = source_rank * num_tensors_per_source + index + 1
-                        tensor = torch.full(tensor_shape, value, device=device)
+                        tensor = torch.full(
+                            tensor_shape, value, dtype=torch.float32, device=device
+                        )
                     yield name, tensor
 
     class Client:
@@ -2039,7 +2041,10 @@ def test_nccl_trainer_three_source_failure_uses_all_gather():
     metadata_group.recv_obj.assert_not_called()
 
 
-def test_nccl_trainer_aborts_before_reporting_source_failure(monkeypatch):
+def test_nccl_trainer_source_failure_fails_fast(monkeypatch):
+    """A failing source aborts and raises without waiting on the outcome
+    exchange, which peers blocked in the broadcast would never reach."""
+
     class InvalidSource(WeightSource):
         def metadata(self):
             return [ParamMeta("weight", torch.float32, (4,))]
@@ -2059,14 +2064,6 @@ def test_nccl_trainer_aborts_before_reporting_source_failure(monkeypatch):
     model_update_group.device = torch.device("cpu")
     engine.model_update_group = model_update_group
     metadata_group = MagicMock()
-
-    def gather(payload):
-        return [
-            {**payload, "source_rank": 0, "error": None},
-            payload,
-        ]
-
-    metadata_group.all_gather_obj.side_effect = gather
     engine.source_metadata_group = metadata_group
     monkeypatch.setattr(torch.cuda, "current_stream", MagicMock())
 
@@ -2081,9 +2078,7 @@ def test_nccl_trainer_aborts_before_reporting_source_failure(monkeypatch):
             ),
         )
 
-    payload = metadata_group.all_gather_obj.call_args.args[0]
-    assert payload["phase"] == "update"
-    assert "ValueError" in payload["error"]
+    metadata_group.all_gather_obj.assert_not_called()
     model_update_group.broadcast.assert_not_called()
     model_update_group.destroy.assert_called_once()
 

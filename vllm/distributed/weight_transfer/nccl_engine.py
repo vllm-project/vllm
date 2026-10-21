@@ -557,10 +557,11 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
                 except BaseException as exc:
                     failure = exc
             if failure is not None:
+                # Peers may be blocked in this update's broadcasts and never
+                # reach the outcome exchange, so raise instead of waiting on it.
                 self._abort_model_update_group()
-            self._exchange_source_outcome("update", update_index, failure)
-            if failure is not None:
                 raise failure
+            self._exchange_source_outcome("update", update_index, None)
         finally:
             if executor is not None:
                 executor.shutdown(wait=False, cancel_futures=True)
@@ -746,7 +747,8 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         source: WeightSource,
     ) -> Iterator[tuple[str, torch.Tensor]]:
         held = source.held_names()
-        if held is None and type(source).iter_groups is WeightSource.iter_groups:
+        iter_groups = getattr(type(source), "iter_groups", WeightSource.iter_groups)
+        if held is None and iter_groups is WeightSource.iter_groups:
             yield from source
             return
 

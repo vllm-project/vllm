@@ -103,6 +103,11 @@ metadata. Initialize and call `send_weights()` on all source roots concurrently.
 Trainer processes that only participate in source-side gathers leave
 `source_rank=None`; they do not join the transfer communicator.
 
+A source failure during an update is fatal for the transfer. The failing
+source raises immediately, but other source roots and inference workers can stay
+blocked in that update's broadcasts, so tear down the trainer job and restart or
+re-initialize the inference engine before transferring again.
+
 [`rlhf_nccl_multi_source.py`](../../../examples/rl/rlhf_nccl_multi_source.py)
 shows two disjoint trainer sources updating one tensor-parallel inference engine.
 
