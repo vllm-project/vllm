@@ -129,6 +129,10 @@ class GDNAttentionMetadata:
     nums_dict: dict | None = None
     batch_ptr: torch.Tensor | None = None
     token_chunk_offset_ptr: torch.Tensor | None = None
+    # Start rows of the spec and non-spec tokens when they form two contiguous
+    # blocks in a mixed batch; the forward then slices instead of gathering.
+    spec_token_start: int | None = None
+    non_spec_token_start: int | None = None
 
 
 class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]):
@@ -335,6 +339,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             )
 
         uniform_spec_sequence_length = None
+        spec_token_start: int | None = None
+        non_spec_token_start: int | None = None
         spec_sequence_masks_cpu: torch.Tensor | None = None
         if not self.use_spec_decode or num_decode_draft_tokens_cpu is None:
             spec_sequence_masks = None
@@ -464,6 +470,15 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 num_non_spec_tokens = num_prefill_tokens + num_decode_tokens
                 non_spec_token_indx = index[:num_non_spec_tokens]
                 spec_token_indx = index[num_non_spec_tokens:]
+
+                # The tokens form two contiguous blocks iff the spec mask of
+                # the non-empty requests flips exactly once. The V2 runner puts
+                # the requests with drafts first, so this normally holds.
+                active_spec_mask = spec_sequence_masks_cpu[query_lens_cpu > 0]
+                if (active_spec_mask[1:] != active_spec_mask[:-1]).sum() == 1:
+                    spec_first = bool(active_spec_mask[0])
+                    spec_token_start = 0 if spec_first else num_non_spec_tokens
+                    non_spec_token_start = num_spec_decode_tokens if spec_first else 0
 
                 spec_state_indices_tensor = block_table_tensor[
                     spec_sequence_masks_cpu, : self.num_spec + 1
@@ -700,6 +715,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             nums_dict=nums_dict,
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,
+            spec_token_start=spec_token_start,
+            non_spec_token_start=non_spec_token_start,
         )
         return attn_metadata
 

@@ -196,11 +196,15 @@ def fused_sigmoid_gating_delta_rule_update(
     num_accepted_tokens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
     is_kda: bool = False,
+    out: torch.Tensor | None = None,
 ):
     """
     Fused triton implementation of sigmoid gating delta rule update.
     This function uses a single fused kernel that combines both sigmoid gating
     computation and the recurrent delta rule update for better performance.
+
+    ``out``, if given, is a contiguous buffer with ``v.numel()`` elements that
+    receives the output in place of a fresh allocation.
     """
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
@@ -222,7 +226,12 @@ def fused_sigmoid_gating_delta_rule_update(
     else:
         assert scale > 0, "scale must be positive"
 
-    o = q.new_empty(NK, *v.shape)
+    if out is None:
+        o = q.new_empty(NK, *v.shape)
+    else:
+        assert out.is_contiguous() and out.numel() == v.numel()
+        assert out.dtype == q.dtype
+        o = out.view(NK, *v.shape)
     if inplace_final_state:
         final_state = initial_state
     else:

@@ -302,6 +302,49 @@ def test_full_cudagraph_spec_metadata_uses_request_count():
     assert meta.num_accepted_tokens.shape == (batch.batch_size,)
 
 
+@pytest.mark.parametrize(
+    "query_lens,num_decode_draft_tokens,expect_slices",
+    [
+        pytest.param([3, 3, 50, 1], [2, 2, -1, -1], True, id="spec_first"),
+        pytest.param([3, 3, 50, 0], [2, 2, -1, -1], True, id="spec_first_padded"),
+        pytest.param([50, 1, 3, 3], [-1, -1, 2, 2], True, id="non_spec_first"),
+        pytest.param([3, 50, 3, 1], [2, -1, 2, -1], False, id="interleaved"),
+        pytest.param([3, 3], [2, 2], False, id="pure_spec"),
+        pytest.param([1, 1, 40, 7], None, False, id="prefill_and_decode"),
+    ],
+)
+def test_mixed_batch_token_slices(
+    query_lens: list[int],
+    num_decode_draft_tokens: list[int] | None,
+    expect_slices: bool,
+):
+    """The forward slices the spec/non-spec tokens only when the builder
+    reports two contiguous blocks, and the slices must then select exactly the
+    tokens the gather indices select."""
+    builder = _create_gdn_builder(num_speculative_tokens=2)
+    batch = BatchSpec(seq_lens=[q + 20 for q in query_lens], query_lens=query_lens)
+    meta = _build(builder, batch, num_decode_draft_tokens)
+
+    assert (meta.spec_token_start is not None) == expect_slices
+    assert (meta.non_spec_token_start is not None) == expect_slices
+    if expect_slices:
+        assert meta.spec_token_start is not None
+        assert meta.non_spec_token_start is not None
+        assert meta.spec_token_indx is not None
+        assert meta.non_spec_token_indx is not None
+        num_non_spec_tokens = meta.num_prefill_tokens + meta.num_decode_tokens
+        spec_rows = torch.arange(
+            meta.spec_token_start,
+            meta.spec_token_start + meta.num_spec_decode_tokens,
+        )
+        non_spec_rows = torch.arange(
+            meta.non_spec_token_start,
+            meta.non_spec_token_start + num_non_spec_tokens,
+        )
+        assert torch.equal(meta.spec_token_indx.cpu(), spec_rows)
+        assert torch.equal(meta.non_spec_token_indx.cpu(), non_spec_rows)
+
+
 def _build_non_spec(
     batch: BatchSpec,
     is_prefilling: list[bool] | None,
