@@ -178,16 +178,6 @@ pub struct TopLevelUnsupportedArgs {
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Eq, Default, Args, Serialize, Deserialize)]
 pub struct EngineUnsupportedArgs {
-    /// Name or path of the Hugging Face tokenizer to use. If unspecified, model
-    /// name or path will be used.
-    #[arg(long)]
-    pub tokenizer: Option<Unsupported>,
-
-    /// Name or path of the Hugging Face config to use. If unspecified, model
-    /// name or path will be used.
-    #[arg(long)]
-    pub hf_config_path: Option<Unsupported>,
-
     /// Allowing API requests to read local images or videos from directories
     /// specified by the server file system. This is a security risk. Should
     /// only be enabled in trusted environments.
@@ -198,12 +188,6 @@ pub struct EngineUnsupportedArgs {
     /// multi-modal inputs.
     #[arg(long)]
     pub allowed_media_domains: Option<Unsupported>,
-
-    /// The specific revision to use for the tokenizer on the Hugging Face Hub.
-    /// It can be a branch name, a tag name, or a commit id. If unspecified,
-    /// will use the default version.
-    #[arg(long)]
-    pub tokenizer_revision: Option<Unsupported>,
 
     /// Skip initialization of tokenizer and detokenizer. Expects valid
     /// `prompt_token_ids` and `None` for prompt from the input. The generated
@@ -458,16 +442,6 @@ pub struct ServerUnsupportedArgs {
         hide = true
     )]
     pub enable_auto_tool_choice: Option<Noop>,
-
-    /// If specified, exclude tool definitions in prompts when
-    /// tool_choice='none'.
-    #[arg(
-        long,
-        visible_alias = "no-exclude-tools-when-tool-choice-none",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub exclude_tools_when_tool_choice_none: Option<Unsupported>,
 
     /// Special the tool parser plugin write to parse the model-generated tool
     /// into OpenAI API format, the name register in this plugin can be used in
