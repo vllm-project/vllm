@@ -195,15 +195,21 @@ Out-of-band tensor mutation is outside this lifecycle and must not be reported a
 
 ## Execution environment
 
-The user selected GPUs 0 and 3 for local TP=2 and authorized an isolated local Mooncake Store.
-GPU 2 belongs to another running workload.
+The initial local TP=2 allocation was GPUs 0 and 3 with an isolated Mooncake Store.
+On October 20, after the resource wait and wrap-up, the user reassigned further
+experiments to GPUs 0 and 2. Keep the prior 0/3 measurements separate from the
+new 0/2 measurements; do not calculate speedups across the two allocations.
+The user requested only unexecuted experiments and excluded supplemental
+native/quota/cooperative replay references and the invalid priority replay's rerun.
 The local model remains Qwen/Qwen3.8-27B.
 Verify the downloaded revision/config before model execution.
 Use the supplied model and dataset download functions, selecting only the intended artifact instead of executing their unrelated top-level download lists.
 
 The open-source workload is verl Agent Loop's multi-turn tool example.
 Preserve equivalent model-visible work across baselines.
-The user removed external-model evaluation from acceptance on October 20. Complete the local Qwen3.8-27B TP=2 validation on GPUs 0 and 3, with conclusions scoped to that configuration.
+The user removed external-model evaluation from acceptance on October 20.
+Continue local Qwen3.8-27B TP=2 validation on the assigned GPU pair, with
+conclusions scoped to each actually tested configuration.
 
 The installed native Mooncake CUDA 13 package is `0.3.13.post1`.
 Local development uses an isolated master on `127.0.0.1:19151`, metrics/admin on `127.0.0.1:19153`, and TCP transfer.

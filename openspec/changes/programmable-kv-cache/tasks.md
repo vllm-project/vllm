@@ -212,3 +212,21 @@ independent CPU/GPU profiling and final acceptance reconciliation. The
 [acceptance report](../../../docs/programmable-kvc/acceptance-report-2026-10-20.md)
 preserves accepted measurements and the rejected sampling-gap run. The updated
 HTTP/benchmark suite has 40 passing checks, overlapping the broad 1,999-check suite.
+
+## New experiments resumed on GPUs 0/2, 2026-10-20
+
+The user explicitly resumed experiments on GPUs 0 and 2, superseding the stop
+above, then requested no supplemental reruns. The queue therefore excludes
+native/quota/cooperative replay references, cache-fit native references and
+the rejected priority replay's rerun. Old accepted data and the rejected
+sampling-gap attempt remain unchanged.
+
+Only unexecuted work is queued: cache-fit oracle/early/late forecasts, direct
+movement/composed commands, individual/paired local policies, repeated live
+comparisons and a separate CPU/GPU profile. Evidence is stored in
+`benchmarks/programmable_kv_cache/results/acceptance-2026-10-20-gpu02/`.
+Timings from this pair are not pooled with the prior GPU 0/3 results or used
+to calculate cross-pair speedups. The new pair's real-buffer check passed
+56 tests with one ROCm-only skip before the no-rerun instruction.
+Progress remains **78/82** pending executed evidence and reconciliation;
+the skipped priority replay remains excluded from accepted performance data.

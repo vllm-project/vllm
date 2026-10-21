@@ -1,5 +1,11 @@
 # Programmable KV cache 剩余验收（2026-10-20）
 
+最新状态：用户已要求在 GPU 0、2 继续尚未执行的实验，并取消参考组补跑及作废 priority 轮重跑。
+新队列从容量充足预测开始，随后执行显式 movement/composed、单项/成对策略、在线重复和独立 profile。
+新数据保存到 `benchmarks/programmable_kv_cache/results/acceptance-2026-10-20-gpu02/`，
+与下文 GPU 0/3 的数据分开，不据跨卡耗时计算收益。进度仍为 78/82，新增结果尚待汇总。
+下文停止边界保留为本轮历史记录，已被用户的继续指令取代。
+
 本轮按用户要求补充 OpenSpec 剩余验收，现按用户要求收尾并停止等待 GPU。
 外部两个模型的验收要求已移除，
 范围为本机 GPU 0/3、Qwen3.8-27B BF16 TP=2；结论限定于实际验证的配置。
