@@ -374,14 +374,19 @@ Merge **only if all four hold**:
 ### 5.5.1 Why we do not benchmark serving end-to-end here
 
 E2E speedup attributable to this fused kernel will be **sub-1%** in any
-realistic DeepSeek-V4-Pro-DSpark workload, regardless of GPU. Reasoning:
+realistic DeepSeek-V4 sizing, regardless of GPU. Reasoning:
 
-- The confidence head is invoked once per draft token batch under adaptive
+- The confidence head is invoked once per draft-token batch under adaptive
   verification. With typical `dspark_block_size=4` and per-decode TPOT in
   the ~10 ms regime, one fused call (≤ 50 µs) is ~0.5% of that budget.
 - Even a **2× kernel-level** speedup compresses E2E by < 0.3%. Serving-level
-  bench (e.g. `vllm bench serve`) noise on RTX 5090-class hardware already
-  exceeds that.
+  bench (e.g. `vllm bench serve`) noise on a dev-class DIY box exceeds that.
+- Production-scale DSpark target models do not fit on 8 × RTX 5090 (256 GB
+  total). DeepSeek-V4.1-Flash (552B total / 16B active, MXFP4 experts
+  + FP8 dense) packs to ~300 GB of weights — fits on 8 × H200 or 8 × MI350X
+  but not on consumer 8×32 GB. DeepSeek-V4-Pro (1.6T) packs to ~880 GB and
+  wants 8 × MI350X / 8 × B300. The PR-47419 reference stack is 8 × MI350X
+  for this reason.
 
 So the value claim here is **mechanism, not percentage**: one kernel launch
 instead of four, zero activation-checkpoint-library traffic per call, and
@@ -390,12 +395,24 @@ measurable E2E only when combined with the other DSpark fusions — mHC,
 RMSNorm — which have their own RFCs / PRs (e.g.
 [#41536](https://github.com/vllm-project/vllm/pull/41536) for fused mHC).
 
-If maintainers still want a serving-run demonstration, we can reproduce
-`vllm serve --load-format dummy deepseek-ai/DeepSeek-V4-Pro` with
-`--speculative-config '{"method":"dspark",...}'` on request — dummy weights
-do not change dispatch behaviour, so kernel-level deltas would still be
-visible under `nsys` / `torch.profiler`. But per-workload latency claims
-should be taken from the microbenchmark, not a serving run.
+If maintainers want a serving-run demonstration for dispatch validation
+(separate from any perf claim), the fastest path is a **shrunk synthetic
+config** under `--load-format dummy`:
+
+```bash
+# craft a small DeepSeek-V4-style config (~a few B params) whose
+# confidence_head dims match production (hidden_size=7168)
+# and serve it with:
+vllm serve --load-format dummy <your-shrunk-config> \
+  --speculative-config '{"method":"dspark","num_speculative_tokens":4,...}'
+# DSpark + dummy weights initializes real shapes, so the fused kernel builds,
+# dispatches, and runs — accuracy is meaningless but dispatch is exact.
+```
+
+That gives the maintainer a "kernel is exercised end-to-end" smoke signal
+within minutes, without the multi-terabyte weight download and without
+needing datacenter-class GPUs. Production-scale numbers remain H200 work
+(§7).
 
 ### 5.6 Preliminary results (RTX 5090, 2026-10-21)
 
