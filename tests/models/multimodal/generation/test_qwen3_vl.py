@@ -30,6 +30,7 @@ def test_qwen3_vl_evs_chunked_prefill(vllm_runner):
             dtype="bfloat16",
             max_model_len=8192,
             max_num_seqs=1,
+            enable_chunked_prefill=True,
             max_num_batched_tokens=max_num_batched_tokens,
             limit_mm_per_prompt={"video": 1},
             video_pruning_rate=0.75,
