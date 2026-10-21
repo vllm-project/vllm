@@ -339,6 +339,16 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # Process-global conv-state layout, resolved once here instead of on
         # every _forward call (it reads an env-derived flag each time).
         self._conv_state_dim_first = is_conv_state_dim_first()
+        # The ROCm spec decode kernel can store one state per step instead of
+        # one per draft token, deferring the rest to the next step. This needs
+        # an FP32 state, for exactness, and no prefix caching, which reads the
+        # per-token states.
+        self.defer_kda_spec_state = (
+            current_platform.is_rocm()
+            and self.num_spec > 0
+            and self.cache_config.mamba_cache_mode == "none"
+            and self.get_state_dtype()[1] == torch.float32
+        )
 
         additional_config = vllm_config.additional_config
         self.kda_prefill_backend = _resolve_kda_prefill_backend(
@@ -687,6 +697,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 g_bias=self.dt_bias,
                 compute_gate=True,
                 lower_bound=lower_bound,
+                defer_spec_state=self.defer_kda_spec_state,
             )
 
         # --- core attention: non-spec path (prefill or plain decode) ---
