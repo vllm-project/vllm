@@ -65,7 +65,7 @@ def _make_experts(**kwargs) -> DeepGemmMegaMoEExperts:
 def test_deep_gemm_mega_moe_capture_precedes_eplb(monkeypatch):
     experts = DeepGemmMegaMoEExperts.__new__(DeepGemmMegaMoEExperts)
     torch.nn.Module.__init__(experts)
-    experts._synchronize_first_launch = lambda: None
+    monkeypatch.setattr(experts, "_synchronize_first_launch", lambda: None)
     experts.prefix = "model.layers.3.ffn.experts"
     experts.max_num_tokens = 4
     experts.num_shared_experts = 0
@@ -668,8 +668,8 @@ def test_deep_gemm_mega_moe_adds_unfused_shared_expert_once(monkeypatch, fused):
         shared_l1_acts_sf=torch.empty(128, 1),
         num_max_tokens_per_rank=4,
     )
-    experts.get_symm_buffer = lambda: symm_buffer
-    experts._synchronize_first_launch = lambda: None
+    monkeypatch.setattr(experts, "get_symm_buffer", lambda: symm_buffer)
+    monkeypatch.setattr(experts, "_synchronize_first_launch", lambda: None)
 
     def shared_experts(x):
         return torch.full_like(x, 2)
