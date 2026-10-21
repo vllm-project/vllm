@@ -49,7 +49,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.request import Request
 
-from .test_mooncake_connector import patch_worker_dependencies
+from .test_mooncake_connector import _stub_worker_shutdown, patch_worker_dependencies
 from .utils import (
     create_request,
     create_scheduler,
@@ -207,6 +207,7 @@ def test_hybrid_gdn_remote_decode_truncates_prefill_before_cache_lookup():
     assert request._all_token_ids == original_tokens[:-1]
     assert request.num_prompt_tokens == len(original_tokens) - 1
     assert request.max_tokens == 1
+    assert request.kv_transfer_params is not None
     assert request.kv_transfer_params["_p_side_truncated"] is True
 
     # Re-adding or rescheduling the request must not truncate another token.
@@ -318,6 +319,7 @@ def test_register_kv_caches_emits_fa_and_gdn_regions(monkeypatch):
             kv_cache_config,
         )
         worker = connector.connector_worker
+        assert worker is not None
 
         num_blocks = kv_cache_config.num_blocks
         fa_spec = uniform_spec(kv_cache_config.kv_cache_groups[0])
@@ -353,7 +355,7 @@ def test_register_kv_caches_emits_fa_and_gdn_regions(monkeypatch):
         ]
 
         worker.shutdown()
-        worker.shutdown = noop_shutdown
+        _stub_worker_shutdown(worker, noop_shutdown)
         connector.connector_worker = None
 
 
@@ -375,6 +377,7 @@ def test_register_kv_caches_scales_attention_len_to_kernel_block(monkeypatch):
             kv_cache_config,
         )
         worker = connector.connector_worker
+        assert worker is not None
         factor = 4
         worker._physical_blocks_per_logical_kv_block = factor
 
@@ -392,7 +395,7 @@ def test_register_kv_caches_scales_attention_len_to_kernel_block(monkeypatch):
         assert worker.kv_block_len_per_layer == [physical_page_bytes]
 
         worker.shutdown()
-        worker.shutdown = noop_shutdown
+        _stub_worker_shutdown(worker, noop_shutdown)
         connector.connector_worker = None
 
 
@@ -405,7 +408,7 @@ def test_register_kv_caches_scales_attention_len_to_kernel_block(monkeypatch):
 async def test_build_transfer_params_uses_non_overlapping_physical_pages(block_offsets):
     kv_cache_config = make_hybrid_gdn_kv_cache_config(block_size=16)
     worker = object.__new__(MooncakeConnectorWorker)
-    worker.shutdown = noop_shutdown
+    _stub_worker_shutdown(worker, noop_shutdown)
     # __new__ skips __init__, where these caches are created.
     worker._prepared_transfer_regions = {}
     worker._layout_by_peer = OrderedDict()
@@ -421,11 +424,6 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages(block_o
         layer_name: spec
         for group in kv_cache_config.kv_cache_groups
         for layer_name, spec in group.kv_cache_specs.items()
-    }
-    worker._layer_group_indices = {
-        layer_name: group_index
-        for group_index, group in enumerate(kv_cache_config.kv_cache_groups)
-        for layer_name in group.layer_names
     }
 
     ratio = 4
@@ -574,6 +572,7 @@ def test_register_kv_caches_deduplicates_shared_backing_memory(monkeypatch):
             kv_cache_config,
         )
         worker = connector.connector_worker
+        assert worker is not None
 
         fa_spec = uniform_spec(kv_cache_config.kv_cache_groups[0])
         fa_cache_width = (
@@ -604,7 +603,7 @@ def test_register_kv_caches_deduplicates_shared_backing_memory(monkeypatch):
         assert registered_lens == [backing.untyped_storage().nbytes()]
 
         worker.shutdown()
-        worker.shutdown = noop_shutdown
+        _stub_worker_shutdown(worker, noop_shutdown)
         connector.connector_worker = None
 
 
@@ -626,6 +625,7 @@ def test_hybrid_gdn_transfer_params_preserve_group_identity(monkeypatch):
             kv_cache_config,
         )
         worker = connector.connector_worker
+        assert worker is not None
 
         block_len = 0x100
         transfer_id = "xfer-hybrid-gdn"
@@ -720,13 +720,13 @@ def test_hybrid_gdn_transfer_params_preserve_group_identity(monkeypatch):
         assert lengths == [block_len, 2 * block_len]
 
         worker.shutdown()
-        worker.shutdown = noop_shutdown
+        _stub_worker_shutdown(worker, noop_shutdown)
         connector.connector_worker = None
 
 
 def test_logical_to_kernel_block_ids_expands_fa_not_gdn():
     worker = object.__new__(MooncakeConnectorWorker)
-    worker.shutdown = noop_shutdown
+    _stub_worker_shutdown(worker, noop_shutdown)
     worker._physical_blocks_per_logical_kv_block = 17
     worker.kv_cache_config = make_hybrid_gdn_kv_cache_config(block_size=544)
 
@@ -756,6 +756,7 @@ def test_hybrid_gdn_keeps_packed_fa_and_gdn_regions_whole(
             kv_cache_config,
         )
         worker = connector.connector_worker
+        assert worker is not None
 
         worker.transfer_topo = SimpleNamespace(is_kv_layout_blocks_first=False)
         regions = worker._get_transfer_regions(
@@ -779,5 +780,5 @@ def test_hybrid_gdn_keeps_packed_fa_and_gdn_regions_whole(
         ]
 
         worker.shutdown()
-        worker.shutdown = noop_shutdown
+        _stub_worker_shutdown(worker, noop_shutdown)
         connector.connector_worker = None
