@@ -12,6 +12,7 @@ from transformers import NemotronHConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.config.parallel import ParallelConfig
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -40,6 +41,8 @@ from .nemotron_h import (
     NemotronHAttentionDecoderLayer,
     NemotronHMoEDecoderLayer,
 )
+
+logger = init_logger(__name__)
 
 
 class NemotronHMTPAttentionDecoderLayer(NemotronHAttentionDecoderLayer):
@@ -252,10 +255,7 @@ class NemotronHMultiTokenPredictor(nn.Module):
         self.pattern_len = len(self.pattern_str)
         assert self.pattern_len > 0
 
-        self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-        )
+        self.embed_tokens: VocabParallelEmbedding | None = None
 
         # Build flat list of layers
         self.layers = torch.nn.ModuleDict()
@@ -333,10 +333,10 @@ class NemotronHMultiTokenPredictor(nn.Module):
 class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant):
     """NemotronH MTP model."""
 
-    hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={"language_model.": ""},
-        orig_to_new_substr={"embeddings": "embed_tokens"},
-    )
+    has_own_embed_tokens = False
+    has_own_lm_head = False
+
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"language_model.": ""})
 
     packed_modules_mapping = {
         "qkv_proj": [
@@ -375,8 +375,12 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant):
         # The MTP block has no LM head of its own: the checkpoint's `lm_head.*`
         # is the target's, so the drafter always takes the target's module
         # after loading (load_eagle_model) and follows its weight updates.
-        self.has_own_lm_head = False
         self.lm_head: ParallelLMHead | None = None
+        logger.warning_once(
+            "NemotronHMTP shares the target embedding and LM head; checkpoint "
+            "embedding and lm_head weights are ignored, including any distinct "
+            "draft LM head."
+        )
 
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
 
@@ -548,6 +552,4 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant):
             weight_loader(param, loaded_weight)
             loaded_params.add(name)
 
-        # Replaced by the target's embedding after loading.
-        loaded_params.add("model.embed_tokens.weight")
         return loaded_params
