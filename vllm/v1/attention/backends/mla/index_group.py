@@ -121,7 +121,7 @@ class SparseMLAIndexGroup:
         *,
         block_stride_rows: int | None,
         return_valid_counts: bool,
-        request_state_indices: torch.Tensor | None = None,
+        idx_mapping: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         num_tokens = logical_topk_indices.shape[0]
         if num_tokens > self.physical_topk_indices.shape[0]:
@@ -133,7 +133,7 @@ class SparseMLAIndexGroup:
                 BLOCK_STRIDE_ROWS=block_stride_rows,
                 NUM_TOPK_TOKENS=logical_topk_indices.shape[1],
                 return_valid_counts=return_valid_counts,
-                request_state_indices=request_state_indices,
+                idx_mapping=idx_mapping,
             )
 
         physical_topk_indices = self.physical_topk_indices[:num_tokens]
@@ -157,7 +157,7 @@ class SparseMLAIndexGroup:
                     valid_counts_out=(
                         valid_topk_counts if return_valid_counts else None
                     ),
-                    request_state_indices=request_state_indices,
+                    idx_mapping=idx_mapping,
                 )
                 self.physical_topk_ready.record(self.side_stream)
         compute_stream.wait_event(self.physical_topk_ready)
@@ -253,7 +253,7 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
                 leader.view.block_size,
                 block_stride_rows=leader.view.attention_block_stride,
                 return_valid_counts=return_valid_counts,
-                request_state_indices=leader.runtime.request_state_indices,
+                idx_mapping=leader.runtime.request_state_indices,
             )
         source_block_table = cache.source_block_table
         assert source_block_table is not None
