@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Sequence
 
 DynamicSDSchedule = list[tuple[int, int, int]]
 
 
 def validate_and_normalize_dynamic_sd_schedule(
-    num_speculative_tokens_per_batch_size: object,
+    num_speculative_tokens_per_batch_size: Sequence[Sequence[int]] | None,
 ) -> DynamicSDSchedule:
     """Validate and normalize a Dynamic SD batch-size schedule.
 
@@ -75,7 +76,7 @@ def validate_and_normalize_dynamic_sd_schedule(
 
 
 def build_dynamic_sd_schedule_lookup(
-    num_speculative_tokens_per_batch_size: object,
+    num_speculative_tokens_per_batch_size: DynamicSDSchedule | None,
     vllm_max_batch_size: int,
     vllm_num_speculative_tokens: int,
 ) -> list[int]:
