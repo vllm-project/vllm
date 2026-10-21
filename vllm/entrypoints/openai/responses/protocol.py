@@ -56,6 +56,7 @@ from pydantic import (
     PrivateAttr,
     ValidationError,
     field_serializer,
+    field_validator,
     model_validator,
 )
 
@@ -212,8 +213,8 @@ def _resolve_named_tool_choice(tool_name: str, tools: list[Any]) -> str:
     )
 
 
-# Older openai SDK spell it "in-memory", while current ones do "in_memory"; accept both
-PromptCacheRetention = Literal["in_memory", "in-memory", "24h"]
+# OpenAI's response allows only in_memory / 24h; older request SDKs sent "in-memory"
+PromptCacheRetention = Literal["in_memory", "24h"]
 
 
 class PromptCacheOptions(OpenAIBaseModel):
@@ -466,6 +467,11 @@ class ResponsesRequest(OpenAIBaseModel):
         ),
     )
     # --8<-- [end:responses-extra-params]
+
+    @field_validator("prompt_cache_retention", mode="before")
+    @classmethod
+    def _normalize_prompt_cache_retention(cls, value: object) -> object:
+        return "in_memory" if value == "in-memory" else value
 
     def build_chat_params(
         self,

@@ -223,10 +223,13 @@ def test_safety_identifier_defaults_to_none() -> None:
     assert _echoed_response()["safety_identifier"] is None
 
 
-@pytest.mark.parametrize("retention", ["in_memory", "in-memory", "24h"])
-def test_prompt_cache_retention_is_echoed(retention: str) -> None:
-    response = _echoed_response(prompt_cache_retention=retention)
-    assert response["prompt_cache_retention"] == retention
+@pytest.mark.parametrize(
+    "sent, echoed",
+    [("in_memory", "in_memory"), ("in-memory", "in_memory"), ("24h", "24h")],
+)
+def test_prompt_cache_retention_is_echoed(sent: str, echoed: str) -> None:
+    response = _echoed_response(prompt_cache_retention=sent)
+    assert response["prompt_cache_retention"] == echoed
 
 
 def test_prompt_cache_retention_rejects_unknown_value() -> None:
