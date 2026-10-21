@@ -48,9 +48,7 @@ amdsmi = ["LICENSE", "README.md"]
 
 def _amdsmi_version(package_dir: Path) -> str:
     version_file = package_dir / "_version.py"
-    m = re.search(
-        r'^__version__\s*=\s*["\'](.+?)["\']', version_file.read_text(), re.M
-    )
+    m = re.search(r'^__version__\s*=\s*["\'](.+?)["\']', version_file.read_text(), re.M)
     if not m:
         raise SystemExit(f"no __version__ in {version_file}")
     return m.group(1)
@@ -72,9 +70,7 @@ def package_amdsmi(src_dir: Path, out_dir: Path) -> Path:
     # Only the importable package, not example/, tests/ or tools/.
     shutil.copytree(package_dir, out_dir / "amdsmi")
     version = _amdsmi_version(package_dir)
-    (out_dir / "pyproject.toml").write_text(
-        _AMDSMI_PYPROJECT.format(version=version)
-    )
+    (out_dir / "pyproject.toml").write_text(_AMDSMI_PYPROJECT.format(version=version))
     return out_dir
 
 
