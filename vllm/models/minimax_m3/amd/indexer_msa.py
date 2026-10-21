@@ -949,7 +949,7 @@ def msa_indexer_cp_enabled(
     shard layout and the indexer's head count have to be decided off one
     answer.
     """
-    requested = vllm_config.attention_config.indexer_cp
+    requested = vllm_config.attention_config.minimax_m3_indexer_cp
     sparse_cfg = getattr(
         vllm_config.model_config.hf_text_config, "sparse_attention_config", None
     )
