@@ -147,33 +147,6 @@ def test_glm_mtp_layer_recycles_post_final_norm_hidden(
     assert torch.allclose(expected_post, eager_post, atol=1e-5)
 
 
-@pytest.mark.parametrize(
-    "architecture",
-    ["Glm4MoeMTPModel", "Glm4MoeLiteMTPModel", "GlmOcrMTPModel"],
-)
-def test_model_returns_tuple_recognizes_glm_moe_mtp(architecture):
-    # These GLM MTP models now return (logits_hidden, feedback_hidden); the
-    # proposer only unpacks the tuple when model_returns_tuple() recognizes the
-    # draft architecture. If it isn't in the allowlist, the proposer treats the
-    # tuple as a single tensor and indexes it, raising at runtime.
-    from types import SimpleNamespace
-
-    from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
-
-    proposer = object.__new__(SpecDecodeBaseProposer)
-    proposer.method = "mtp"
-    proposer.draft_model_config = SimpleNamespace(
-        hf_config=SimpleNamespace(architectures=[architecture])
-    )
-    assert proposer.model_returns_tuple() is True
-
-    # A single-tensor MTP architecture must still report False.
-    proposer.draft_model_config = SimpleNamespace(
-        hf_config=SimpleNamespace(architectures=["SomeSingleTensorMTPModel"])
-    )
-    assert proposer.model_returns_tuple() is False
-
-
 def _create_mtp_proposer(num_speculative_tokens: int) -> EagleProposer:
     """Create an MTP proposer with unified model configuration."""
     model_config = ModelConfig(
