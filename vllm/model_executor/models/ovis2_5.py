@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """PyTorch Ovis model."""
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Hashable, Iterable, Mapping
 from functools import partial
-from typing import Annotated, Literal, TypedDict
+from typing import Annotated, Any, Literal, TypedDict
 
 import torch
 import torch.nn as nn
@@ -37,11 +37,15 @@ from vllm.multimodal.processing import (
 )
 from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.processors.ovis2_5 import Ovis2_5Processor
+from vllm.transformers_utils.processors.ovis2_5 import (
+    MIN_PIXELS,
+    Ovis2_5Processor,
+)
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsEncoderCudaGraph,
     SupportsMultiModal,
     SupportsPP,
     supports_pp,
@@ -51,6 +55,22 @@ IMAGE_TOKEN = "<image>"
 VIDEO_TOKEN = "<video>"
 INDICATOR_IDS = [151672, 151673, 151674, 151675]
 IMAGE_PAD_TOKEN_ID = 151655
+
+# Keys of (pixel values, grids, indicator tokens) in mm_kwargs per modality.
+_MM_INPUT_KEYS = {
+    "image": ("pixel_values", "grids", "indicator_tokens"),
+    "video": ("video_pixel_values", "video_grids", "video_indicator_tokens"),
+}
+
+
+def _pad_cumulative_seqlens_buffer(
+    dst: torch.Tensor,
+    src: torch.Tensor,
+) -> None:
+    # Repeat the last cumulative offset so padded entries are empty sequences.
+    n = src.shape[0]
+    dst[:n].copy_(src)
+    dst[n:] = src[-1]
 
 
 class Ovis2_5ImagePatchInputs(TensorSchema):
@@ -147,9 +167,12 @@ class VisualTokenizer(torch.nn.Module):
         return tokens
 
     def encode(
-        self, pixel_values: torch.Tensor, grid_thws: torch.Tensor
+        self,
+        pixel_values: torch.Tensor,
+        grid_thws: torch.Tensor | None,
+        encoder_metadata: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
-        features = self.vit(pixel_values, grid_thws)
+        features = self.vit(pixel_values, grid_thws, encoder_metadata=encoder_metadata)
         # refer to qwen2.5-vl patchmerger
         seq_len, _ = features.shape
         features = features.reshape(seq_len // (self.config.hidden_stride**2), -1)
@@ -160,6 +183,9 @@ class VisualTokenizer(torch.nn.Module):
         self, pixel_values: torch.Tensor, grid_thws: torch.Tensor
     ) -> torch.Tensor:
         features = self.encode(pixel_values, grid_thws)
+        return self.features_to_tokens(features)
+
+    def features_to_tokens(self, features: torch.Tensor) -> torch.Tensor:
         logits = self.head(features)
         tokens = self.tokenize(logits)
         # tokens' shape is [#Token, VocabSize-4],
@@ -388,11 +414,11 @@ class Ovis2_5MultiModalProcessor(BaseMultiModalProcessor[Ovis2_5ProcessingInfo])
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
-            grids=MultiModalFieldConfig.batched("image"),
+            grids=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
             indicator_tokens=MultiModalFieldConfig.batched("image"),
             video_pixel_values=MultiModalFieldConfig.batched("video"),
             video_indicator_tokens=MultiModalFieldConfig.batched("video"),
-            video_grids=MultiModalFieldConfig.batched("video"),
+            video_grids=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
         )
 
     def _get_prompt_updates(
@@ -434,7 +460,7 @@ class Ovis2_5MultiModalProcessor(BaseMultiModalProcessor[Ovis2_5ProcessingInfo])
     info=Ovis2_5ProcessingInfo,
     dummy_inputs=Ovis2_5DummyInputsBuilder,
 )
-class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
+class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP, SupportsEncoderCudaGraph):
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
@@ -450,6 +476,8 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
         quant_config = vllm_config.quant_config
 
         self.config: PreTrainedConfig = config
+        self.model_config = vllm_config.model_config
+        self.multimodal_config = vllm_config.model_config.multimodal_config
 
         with self._mark_language_model(vllm_config):
             self.llm = init_vllm_registered_model(
@@ -622,6 +650,237 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
                 multimodal_embeddings += tuple(video_embeddings)
 
         return multimodal_embeddings
+
+    # -- SupportsEncoderCudaGraph protocol methods --
+    #
+    # Only the ViT (`VisualTokenizer.encode`) is captured. The visual head,
+    # softmax over the visual vocabulary and the `vte` lookup are a handful
+    # of large GEMMs that gain nothing from CUDA graphs, so they run in
+    # `postprocess_encoder_output` together with the indicator embeddings.
+
+    def get_encoder_cudagraph_config(self):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphConfig,
+        )
+
+        return EncoderCudaGraphConfig(
+            modalities=["image", "video"],
+            buffer_keys=[
+                "pixel_values",
+                "pos_embeds",
+                "rotary_pos_emb_cos",
+                "rotary_pos_emb_sin",
+                "window_index",
+                "reverse_indices",
+                "cu_seqlens",
+                "cu_window_seqlens",
+                "max_seqlen_full",
+                "max_seqlen_window",
+            ],
+            padding_logics={
+                "cu_seqlens": _pad_cumulative_seqlens_buffer,
+                "cu_window_seqlens": _pad_cumulative_seqlens_buffer,
+            },
+            out_hidden_size=self.config.hidden_size,
+            max_frames_per_video=self.get_max_frames_per_video(),
+        )
+
+    def get_input_modality(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> str:
+        if "pixel_values" in mm_kwargs:
+            return "image"
+        if "video_pixel_values" in mm_kwargs:
+            return "video"
+        raise AssertionError("This line should be unreachable.")
+
+    def get_max_frames_per_video(self) -> int:
+        info = MULTIMODAL_REGISTRY.get_processing_info(self.model_config)
+        assert isinstance(info, Ovis2_5ProcessingInfo)
+        return info.get_num_frames_with_most_features(
+            seq_len=self.model_config.max_model_len,
+            mm_counts={"video": self.multimodal_config.get_limit_per_prompt("video")},
+        )
+
+    def get_encoder_cudagraph_budget_range(
+        self,
+        vllm_config: VllmConfig,
+    ) -> tuple[int, int]:
+        # Min: smallest image allowed by the processor (MIN_PIXELS) plus the
+        # start/end indicator tokens.
+        vit_config = self.config.vit_config
+        pixels_per_token = (vit_config.patch_size * vit_config.hidden_stride) ** 2
+        min_budget = MIN_PIXELS // pixels_per_token + 2
+        max_budget = min(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            self.model_config.max_model_len,
+        )
+        return (min_budget, max_budget)
+
+    def _get_encoder_cudagraph_inputs(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> tuple[list[torch.Tensor], list[list[int]], list[torch.Tensor]]:
+        """Return per-item (pixel values, [t, h, w] grid, indicator tokens)."""
+        pv_key, grid_key, ind_key = _MM_INPUT_KEYS[self.get_input_modality(mm_kwargs)]
+        pixel_values = list(mm_kwargs[pv_key])
+        grids = [g.reshape(3).tolist() for g in mm_kwargs[grid_key]]
+        indicator_tokens = list(mm_kwargs[ind_key])
+        return pixel_values, grids, indicator_tokens
+
+    def get_encoder_cudagraph_item_specs(
+        self,
+        mm_kwargs: dict[str, Any],
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
+
+        merge_unit = self.config.vit_config.hidden_stride**2
+        _, grids, indicator_tokens = self._get_encoder_cudagraph_inputs(mm_kwargs)
+        return [
+            EncoderItemSpec(
+                input_size=t * h * w,
+                # Visual tokens plus the indicator tokens wrapped around them.
+                output_tokens=t * h * w // merge_unit + indicators.shape[0],
+            )
+            for (t, h, w), indicators in zip(grids, indicator_tokens)
+        ]
+
+    def select_encoder_cudagraph_items(
+        self,
+        mm_kwargs: dict[str, Any],
+        indices: list[int],
+    ) -> dict[str, Any]:
+        keys = _MM_INPUT_KEYS[self.get_input_modality(mm_kwargs)]
+        return {key: [mm_kwargs[key][i] for i in indices] for key in keys}
+
+    def postprocess_encoder_output(
+        self,
+        outputs: dict[str, torch.Tensor],
+        indices: list[int],
+        per_item_out_tokens: list[int],
+        dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
+        clone: bool = False,
+        batch_mm_kwargs: dict[str, Any] | None = None,
+    ) -> None:
+        assert batch_mm_kwargs is not None
+        _, grids, indicator_tokens = self._get_encoder_cudagraph_inputs(batch_mm_kwargs)
+        merge_unit = self.config.vit_config.hidden_stride**2
+        num_visual_tokens = [t * h * w // merge_unit for t, h, w in grids]
+
+        # The captured output buffer is sized to the token budget; only the
+        # leading rows belong to real items.
+        features = outputs["default"][: sum(num_visual_tokens)]
+        visual_tokens = self.visual_tokenizer.features_to_tokens(features)
+        visual_embeds = self.vte(visual_tokens).split(num_visual_tokens)
+
+        # `torch.cat` always allocates, so the result never aliases the
+        # graph output buffer and `clone` needs no extra handling.
+        for idx, visual, indicators in zip(indices, visual_embeds, indicator_tokens):
+            indicator_embeds = self.vte(indicators)
+            dest[idx] = torch.cat(
+                [indicator_embeds[:1], visual, indicator_embeds[1:]], dim=0
+            )
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphCaptureInputs,
+        )
+
+        vit_config = self.config.vit_config
+        stride = vit_config.hidden_stride
+        # Ceil so that the total captured capacity is never below token_budget.
+        per_item_tokens = (token_budget + max_batch_size - 1) // max_batch_size
+
+        frames_per_item = max_frames_per_batch // max_batch_size
+        if frames_per_item > 1:
+            # Video-format grid so cu_seqlens is sized for one attention
+            # sequence per frame.
+            tokens_per_frame = (
+                per_item_tokens + frames_per_item - 1
+            ) // frames_per_item
+            grid_config = [
+                [frames_per_item, stride, tokens_per_frame * stride]
+            ] * max_batch_size
+        else:
+            grid_config = [[1, stride, per_item_tokens * stride]] * max_batch_size
+
+        total_patches = sum(t * h * w for t, h, w in grid_config)
+        patch_dim = (
+            vit_config.num_channels
+            * vit_config.temporal_patch_size
+            * vit_config.patch_size**2
+        )
+        # Contents are overwritten before every replay.
+        dummy_pixel_values = torch.zeros(
+            total_patches, patch_dim, device=device, dtype=dtype
+        )
+
+        # max_seqlen is baked into the graph at capture time, so capture
+        # with upper bounds covering any replay: one item spanning the whole
+        # budget for full attention, and one full window for window attention.
+        encoder = self.visual_tokenizer.vit.vision_model.encoder
+        window_merged = encoder.window_size // stride // encoder.patch_size
+        max_num_seqs = max(max_batch_size, max_frames_per_batch)
+        metadata = self.visual_tokenizer.vit.prepare_encoder_metadata(
+            grid_config,
+            max_num_seqs=max_num_seqs,
+            max_num_window_seqs=encoder.get_encoder_cudagraph_max_window_seqs(
+                token_budget, max_num_seqs
+            ),
+            max_seqlen_override=token_budget * stride**2,
+            max_seqlen_window_override=(window_merged * stride) ** 2,
+            device=device,
+        )
+        return EncoderCudaGraphCaptureInputs(
+            values=metadata | {"pixel_values": dummy_pixel_values}
+        )
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        path: str = "default",
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphReplayBuffers,
+        )
+
+        pixel_values, grids, _ = self._get_encoder_cudagraph_inputs(mm_kwargs)
+        # Sized to the actual batch; the manager pads cu*_seqlens into the
+        # captured buffers via `padding_logics`.
+        metadata = self.visual_tokenizer.vit.prepare_encoder_metadata(grids)
+        return EncoderCudaGraphReplayBuffers(
+            values=metadata | {"pixel_values": torch.cat(pixel_values)}
+        )
+
+    def encoder_cudagraph_forward(
+        self,
+        values: dict[str, torch.Tensor],
+        path: str = "default",
+    ) -> torch.Tensor:
+        pixel_values = values.pop("pixel_values")
+        return self.visual_tokenizer.encode(pixel_values, None, encoder_metadata=values)
+
+    def encoder_eager_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+        path: str = "default",
+    ) -> torch.Tensor:
+        pixel_values, grids, _ = self._get_encoder_cudagraph_inputs(mm_kwargs)
+        return self.visual_tokenizer.encode(
+            torch.cat(pixel_values).to(self.visual_tokenizer.dtype), grids
+        )
 
     def forward(
         self,
