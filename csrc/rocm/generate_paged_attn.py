@@ -206,9 +206,12 @@ FILE_HEAD = """\
 // clang-format off
 """
 
-TU_HEAD = FILE_HEAD + """
+TU_HEAD = (
+    FILE_HEAD
+    + """
 #include "attention_kernels.cuh"
 """
+)
 
 TU_ENTRY = """
 ATTN_ENTRY(paged_attention_{name}_bs{block_size}) {{
@@ -217,15 +220,21 @@ ATTN_ENTRY(paged_attention_{name}_bs{block_size}) {{
 }}
 """
 
-ENTRIES_HEAD = FILE_HEAD + """
+ENTRIES_HEAD = (
+    FILE_HEAD
+    + """
 // Prototypes of the entry points defined in the generated
 // attention_paged_attn_*.cu translation units.
 """
+)
 
-DISPATCH_HEAD = FILE_HEAD + """
+DISPATCH_HEAD = (
+    FILE_HEAD
+    + """
   // Dispatch on kv_cache_dtype, query dtype, mfma_type, block size and head
   // size, mirroring the template parameters of the generated entry points.
 """
+)
 
 
 def entry_point(variant, block_size):
@@ -246,18 +255,19 @@ def block_size_switch(variants, indent_level):
         lines.append(f"{inner}switch (head_size) {{")
         for variant in variants:
             lines.append(f"{inner}  case {variant['head_size']}:")
-            lines.append(f"{inner}    "
-                         f"{entry_point(variant, block_size)}(ATTN_FWD);")
+            lines.append(f"{inner}    {entry_point(variant, block_size)}(ATTN_FWD);")
             lines.append(f"{inner}    break;")
         lines.append(f"{inner}  default:")
-        lines.append(f'{inner}    TORCH_CHECK(false, '
-                     f'"Unsupported head size: ", head_size);')
+        lines.append(
+            f'{inner}    TORCH_CHECK(false, "Unsupported head size: ", head_size);'
+        )
         lines.append(f"{inner}    break;")
         lines.append(f"{inner}}}")
         lines.append(f"{indent}    break;")
     lines.append(f"{indent}  default:")
-    lines.append(f'{indent}    TORCH_CHECK(false, '
-                 f'"Unsupported block size: ", block_size);')
+    lines.append(
+        f'{indent}    TORCH_CHECK(false, "Unsupported block size: ", block_size);'
+    )
     lines.append(f"{indent}    break;")
     lines.append(f"{indent}}}")
     return lines
@@ -267,8 +277,11 @@ def group_variants():
     """Group VARIANTS by (kv_cache_dtype, query dtype, mfma_type), in order."""
     groups = {}
     for variant in VARIANTS:
-        key = (variant["kv_cache_dtype"], variant["query_scalar_type"],
-               variant["mfma_type"])
+        key = (
+            variant["kv_cache_dtype"],
+            variant["query_scalar_type"],
+            variant["mfma_type"],
+        )
         groups.setdefault(key, []).append(variant)
     return groups
 
@@ -279,7 +292,8 @@ def generate_dispatch():
     by_kv_cache_dtype = {}
     for (kv_cache_dtype, query_scalar_type, mfma_type), variants in groups.items():
         by_kv_cache_dtype.setdefault(kv_cache_dtype, {}).setdefault(
-            query_scalar_type, {})[mfma_type] = variants
+            query_scalar_type, {}
+        )[mfma_type] = variants
 
     lines = [DISPATCH_HEAD.rstrip("\n")]
     kv_cache_dtypes = list(by_kv_cache_dtype)
@@ -290,10 +304,13 @@ def generate_dispatch():
 
         by_query_dtype = by_kv_cache_dtype[kv_cache_dtype]
         for dtype_index, (query_scalar_type, by_mfma) in enumerate(
-                by_query_dtype.items()):
+            by_query_dtype.items()
+        ):
             dtype_keyword = "if" if dtype_index == 0 else "else if"
-            lines.append(f"    {dtype_keyword} (query.dtype() == "
-                         f"at::ScalarType::{query_scalar_type}) {{")
+            lines.append(
+                f"    {dtype_keyword} (query.dtype() == "
+                f"at::ScalarType::{query_scalar_type}) {{"
+            )
 
             mfma_types = list(by_mfma)
             if len(mfma_types) == 1 and mfma_types[0] is None:
@@ -305,29 +322,32 @@ def generate_dispatch():
                 if "f16" not in mfma_types:
                     raise SystemExit(
                         f"the {mfma_types} group needs an f16 arm, which is "
-                        "emitted as the catch-all else")
-                ordered = sorted(mfma_types,
-                                 key=lambda m: m == "f16")  # f16 last
+                        "emitted as the catch-all else"
+                    )
+                ordered = sorted(mfma_types, key=lambda m: m == "f16")  # f16 last
                 for mfma_index, mfma_type in enumerate(ordered):
                     if mfma_index == len(ordered) - 1:
                         lines.append("      else {")
                     else:
                         mfma_keyword = "if" if mfma_index == 0 else "else if"
-                        lines.append(f'      {mfma_keyword} '
-                                     f'(mfma_type == "{mfma_type}") {{')
+                        lines.append(
+                            f'      {mfma_keyword} (mfma_type == "{mfma_type}") {{'
+                        )
                     lines.extend(block_size_switch(by_mfma[mfma_type], 8))
                     lines.append("      }")
             lines.append("    }")
 
         lines.append("    else {")
-        lines.append('      TORCH_CHECK(false, "Unsupported data type: ", '
-                     "query.dtype());")
+        lines.append(
+            '      TORCH_CHECK(false, "Unsupported data type: ", query.dtype());'
+        )
         lines.append("    }")
         lines.append("  }")
 
     lines.append("  else {")
-    lines.append('    TORCH_CHECK(false, "Unsupported KV cache dtype: ", '
-                 "kv_cache_dtype);")
+    lines.append(
+        '    TORCH_CHECK(false, "Unsupported KV cache dtype: ", kv_cache_dtype);'
+    )
     lines.append("  }")
     return "\n".join(lines) + "\n"
 
@@ -347,14 +367,15 @@ def generate_tu(variant, block_size):
 def remove_old_files():
     # Only remove files this script produced: a name match alone would delete a
     # developer's scratch copy in the same directory.
-    for path in glob.glob(
-            os.path.join(OUTPUT_DIR, "attention_paged_attn_*.cu")):
+    for path in glob.glob(os.path.join(OUTPUT_DIR, "attention_paged_attn_*.cu")):
         with open(path) as fd:
             if fd.readline() != FILE_HEAD.splitlines()[0] + "\n":
                 continue
         os.remove(path)
-    for name in ("attention_paged_attn_entries.inc",
-                 "attention_paged_attn_dispatch.inc"):
+    for name in (
+        "attention_paged_attn_entries.inc",
+        "attention_paged_attn_dispatch.inc",
+    ):
         path = os.path.join(OUTPUT_DIR, name)
         if os.path.exists(path):
             os.remove(path)
@@ -373,7 +394,8 @@ def check_dispatch_covers_entries(entries, dispatch):
         if f"{name}(" not in dispatch:
             raise SystemExit(
                 f"{name} is instantiated but never dispatched: add it to "
-                "VARIANTS ordering/generate_dispatch(), or drop it.")
+                "VARIANTS ordering/generate_dispatch(), or drop it."
+            )
 
 
 def main():
@@ -389,8 +411,10 @@ def main():
     entries_inc = generate_entries()
     dispatch_inc = generate_dispatch()
     check_dispatch_covers_entries(entries, dispatch_inc)
-    for name, content in (("attention_paged_attn_entries.inc", entries_inc),
-                          ("attention_paged_attn_dispatch.inc", dispatch_inc)):
+    for name, content in (
+        ("attention_paged_attn_entries.inc", entries_inc),
+        ("attention_paged_attn_dispatch.inc", dispatch_inc),
+    ):
         write(name, content)
         outputs.append(name)
     # Record what is on disk next to the outputs: CMake checks this list instead
