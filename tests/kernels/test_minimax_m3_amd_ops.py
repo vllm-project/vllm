@@ -607,7 +607,8 @@ def test_routed_experts_expert_map_delegates_to_kernel():
             expert_mask=mask,
             quant_method=SimpleNamespace(moe_kernel=moe_kernel),
         )
-        return RoutedExperts.expert_map.fget(layer)
+        # mypy types a property read on the class as its getter function.
+        return RoutedExperts.expert_map.fget(layer)  # type: ignore[attr-defined]
 
     assert torch.equal(resolve(True), mask)  # AITER kernel -> 0/1 mask
     assert torch.equal(resolve(False), canonical)  # non-AITER -> canonical map

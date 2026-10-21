@@ -118,8 +118,10 @@ pub struct EngineCoreOutput {
     /// of a newly scheduled prefill and elided for subsequent decode outputs.
     #[serde(default)]
     pub prefill_stats: Option<Box<PrefillStats>>,
+    /// Routed-expert rows `[num_rows, num_layers, top_k]` captured for this
+    /// output, when `enable_return_routed_experts` is on.
     #[serde(default)]
-    pub routed_experts: Option<Box<OpaqueValue>>,
+    pub routed_experts: Option<Box<WireNdArray>>,
     /// Number of NaNs seen in logits. Values above zero indicate corruption.
     #[serde(default)]
     pub num_nans_in_logits: u32,
@@ -213,6 +215,11 @@ impl EngineCoreOutput {
             value
                 .resolve_aux_frame(frames)
                 .map_err(|message| ext_value_decode!("prompt_token_id_logprobs: {message}"))?;
+        }
+        if let Some(value) = self.routed_experts.as_mut() {
+            value
+                .resolve_aux_frame(frames)
+                .map_err(|message| ext_value_decode!("routed_experts: {message}"))?;
         }
         Ok(())
     }

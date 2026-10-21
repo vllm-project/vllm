@@ -24,7 +24,7 @@ from vllm.distributed.aux_output_connector.routed_experts import (
     pack_routed_experts,
     snapshot_routed_experts,
 )
-from vllm.exceptions import RetryableRequestError
+from vllm.exceptions import RetryableRequestError, VLLMValidationError
 from vllm.logprobs import FlatLogprobs, Logprob, PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
@@ -1903,15 +1903,29 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
 
 
 @pytest.mark.parametrize("runner", ["generate", "pooling"])
-def test_request_rejected_by_engine(runner: str, dummy_test_vectors):
+@pytest.mark.parametrize(
+    "error,exception_type",
+    [
+        (
+            RequestError(code="engine_paused", message="paused", retryable=True),
+            RetryableRequestError,
+        ),
+        (
+            RequestError(code="validation_error", message="incompatible backend"),
+            VLLMValidationError,
+        ),
+    ],
+)
+@pytest.mark.skip_global_cleanup
+def test_request_rejected_by_engine(runner: str, error, exception_type):
     """A request the engine rejects on arrival (e.g. while paused) raises its
-    retryable error to the caller, leaves no stats behind, and ends a
+    corresponding exception to the caller, leaves no stats behind, and ends a
     streaming-input session, including any input chunks sent since."""
-    output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=True)
+    output_processor = OutputProcessor(tokenizer=None, log_stats=True)
     request = EngineCoreRequest(
         request_id="request-0",
         external_req_id="external-0",
-        prompt_token_ids=dummy_test_vectors.prompt_tokens[0],
+        prompt_token_ids=[1, 2],
         mm_features=None,
         arrival_time=0,
         lora_request=None,
@@ -1923,7 +1937,6 @@ def test_request_rejected_by_engine(runner: str, dummy_test_vectors):
     )
     queue = RequestOutputCollector(RequestOutputKind.FINAL_ONLY, request.request_id)
     output_processor.add_request(request, None, queue=queue)
-    error = RequestError(code="engine_paused", message="paused", retryable=True)
     iteration_stats = IterationStats()
 
     result = output_processor.process_outputs(
@@ -1939,7 +1952,7 @@ def test_request_rejected_by_engine(runner: str, dummy_test_vectors):
     assert result.reqs_to_abort == ([request.request_id] if request.resumable else [])
     assert not iteration_stats.finished_requests
     assert not iteration_stats.time_to_first_tokens_iter
-    with pytest.raises(RetryableRequestError, match="paused"):
+    with pytest.raises(exception_type, match=error.message):
         queue.get_nowait()
 
 

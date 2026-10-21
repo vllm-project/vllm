@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -65,7 +65,8 @@ class AuxStepOutput(Mapping[str, AuxRequestOutput]):
 class AuxOutputSchedulerConnector:
     """Build worker metadata without owning auxiliary output payloads or stores."""
 
-    def __init__(self) -> None:
+    def __init__(self, hash_block_size: int) -> None:
+        self._hash_block_size = hash_block_size
         # Number of hashes already sent to the worker for each active request.
         self._sent_hash_counts: dict[str, int] = {}
         # Terminal events are delivered with the next connector metadata.
@@ -80,13 +81,14 @@ class AuxOutputSchedulerConnector:
         """Build one step's incremental worker metadata."""
         scheduled_requests: dict[str, int] = {}
         block_hashes_by_request: dict[str, PackedBlockHashes] = {}
-        for request_id in scheduler_output.num_scheduled_tokens:
-            num_sent = self._sent_hash_counts.setdefault(request_id, 0)
+        for request_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
+            self._sent_hash_counts.setdefault(request_id, 0)
             request = requests[request_id]
-            packed = self._pack_new_hashes(request.block_hashes, num_sent)
+            packed = self._take_new_hashes(
+                request, request.num_computed_tokens + num_tokens
+            )
             if packed is not None:
                 block_hashes_by_request[request_id] = packed
-            self._sent_hash_counts[request_id] = len(request.block_hashes)
             assert request.sampling_params is not None
             # A P/D prefiller may cut the prompt short of the requested start.
             scheduled_requests[request_id] = max(
@@ -99,15 +101,13 @@ class AuxOutputSchedulerConnector:
         # A settled token can complete a hash block after the next async schedule
         # was built. Send a hash-only update if the request was not rescheduled.
         if len(self._sent_hash_counts) != len(scheduled_requests):
-            for request_id, num_sent in self._sent_hash_counts.items():
+            for request_id in self._sent_hash_counts:
                 if request_id in scheduled_requests:
                     continue
                 request = requests[request_id]
-                packed = self._pack_new_hashes(request.block_hashes, num_sent)
-                if packed is None:
-                    continue
-                block_hashes_by_request[request_id] = packed
-                self._sent_hash_counts[request_id] = len(request.block_hashes)
+                packed = self._take_new_hashes(request, request.num_computed_tokens)
+                if packed is not None:
+                    block_hashes_by_request[request_id] = packed
         # Sending transfers ownership of these one-shot events.
         finished_requests = tuple(self._finished_requests)
         block_hashes_by_request.update(
@@ -156,22 +156,25 @@ class AuxOutputSchedulerConnector:
     def request_finished(self, request: Request) -> None:
         """Queue a request's terminal event and final block hashes."""
         request_id = request.request_id
-        num_sent = self._sent_hash_counts.pop(request_id, None)
-        if num_sent is None:
+        if request_id not in self._sent_hash_counts:
             return
         # The next metadata delivers this terminal event to the worker.
-        self._finished_requests[request_id] = self._pack_new_hashes(
-            request.block_hashes, num_sent
+        self._finished_requests[request_id] = self._take_new_hashes(
+            request, request.num_computed_tokens
         )
+        del self._sent_hash_counts[request_id]
 
-    @staticmethod
-    def _pack_new_hashes(
-        block_hashes: Sequence[bytes], num_sent: int
+    def _take_new_hashes(
+        self, request: Request, num_computed_tokens: int
     ) -> PackedBlockHashes | None:
+        block_hashes = request.block_hashes
+        num_sent = self._sent_hash_counts[request.request_id]
         assert num_sent <= len(block_hashes), "KV block-hash history shrank"
-        new_hashes = block_hashes[num_sent:]
-        if not new_hashes:
+        num_keyed = min(len(block_hashes), num_computed_tokens // self._hash_block_size)
+        if num_keyed <= num_sent:
             return None
+        self._sent_hash_counts[request.request_id] = num_keyed
+        new_hashes = block_hashes[num_sent:num_keyed]
         return PackedBlockHashes(b"".join(new_hashes), len(new_hashes[0]))
 
     def reset(self) -> None:
