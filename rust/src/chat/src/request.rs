@@ -681,6 +681,22 @@ impl ChatRequest {
         self.tool_context.parsing_enabled()
     }
 
+    /// Return how many parsed tool calls may be surfaced, or `None` for no
+    /// limit.
+    ///
+    /// With tool parsing off (e.g. `tool_choice=none`), calls a parser still
+    /// recognizes are dropped rather than surfaced, matching Python's parser
+    /// engine.
+    pub(crate) fn max_tool_calls(&self) -> Option<usize> {
+        if !self.tool_parsing_enabled() {
+            Some(0)
+        } else if !self.parallel_tool_calls() {
+            Some(1)
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn parse_template_bool(&self, key: &str) -> Result<Option<bool>> {
         match self.chat_options.template_kwargs.get(key) {
             None => Ok(None),
