@@ -68,7 +68,7 @@ def sync_cudagraph_and_dp_padding(
     """
     assert dp_size > 1, "DP size must be greater than 1"
     tensor = torch.zeros(
-        8 if profiler_sync is not None else 7,
+        9 if profiler_sync is not None else 7,
         dp_size,
         dtype=torch.int32,
         device="cpu",
@@ -81,11 +81,18 @@ def sync_cudagraph_and_dp_padding(
     tensor[5][dp_rank] = num_reqs
     tensor[6][dp_rank] = int(allow_skip_drafts)
     if profiler_sync is not None:
-        tensor[7][dp_rank] = int(profiler_sync._pending)
-    if should_skip_dp_coordination():
+        tensor[7][dp_rank] = int(profiler_sync.pending_start)
+        tensor[8][dp_rank] = int(profiler_sync.pending_stop)
+    skip_coordination = should_skip_dp_coordination()
+    if skip_coordination:
         tensor[:] = tensor[:, dp_rank, None].clone()
     else:
         get_dp_group().cpu_all_reduce_(tensor)
+
+    # observe runs on the full-width tensor: its rank indices are
+    # broadcast_object sources, so FT column drops must not shift them.
+    if profiler_sync is not None and not skip_coordination:
+        profiler_sync.observe(tensor[7].tolist(), tensor[8].tolist(), get_dp_group())
 
     # Full width, dead slots included: returned in DPSyncState, whose
     # consumers index it by original dp_rank.
@@ -105,8 +112,6 @@ def sync_cudagraph_and_dp_padding(
 
     # With dead DP ranks (FT), the dead ranks' columns were dropped above:
     # dim 1 (per-rank) of these rows covers live ranks only.
-    if profiler_sync is not None:
-        profiler_sync.observe(bool(tensor[7].any().item()))
 
     num_tokens_across_dp = tensor[0]
     cg_mode_across_dp = tensor[1]
