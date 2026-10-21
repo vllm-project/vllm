@@ -187,11 +187,14 @@ def _dynamic_sd_ngram_config(schedule: list[list[int]]) -> dict:
 def test_dynamic_sd_invalid_schedule_fails_at_config_time(vllm_runner):
     """An invalid schedule raises the config error itself, not an engine
     startup failure after the model has loaded."""
-    with pytest.raises(ValueError, match="non-overlapping"):
+    with (
+        pytest.raises(ValueError, match="non-overlapping"),
         vllm_runner(
             "Qwen/Qwen3-0.6B",
             speculative_config=_dynamic_sd_ngram_config([[1, 16, 3], [16, 32, 2]]),
-        )
+        ),
+    ):
+        pass
 
 
 @single_gpu_only

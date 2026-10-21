@@ -19,7 +19,7 @@ def validate_and_normalize_dynamic_sd_schedule(
             "num_speculative_tokens_per_batch_size is required for "
             "dynamic speculative decoding."
         )
-    if not isinstance(num_speculative_tokens_per_batch_size, list):
+    if not isinstance(num_speculative_tokens_per_batch_size, list | tuple):
         raise ValueError(
             "num_speculative_tokens_per_batch_size must be a non-empty list of "
             "(range_start, range_end, num_speculative_tokens) entries."

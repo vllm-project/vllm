@@ -32,7 +32,7 @@ implies that:
 * K=1 will be used when the concurrency is in range [65, 128]
 * K=0 will be used when the concurrency is in range [129, 512], i.e., no draft tokens will be produced.
 
-vLLM checks the schedule at startup, before loading the model. Ranges must start at 1, must not overlap, and must have `start_bs <= end_bs` and `optimal_K >= 0`. A concurrency that falls in a gap between ranges, or past the last range, uses the preceding range's K. Every K is capped at `num_speculative_tokens`. An empty schedule falls back to the static `num_speculative_tokens`.
+When dynamic SD is enabled, vLLM checks the schedule at startup, before loading the model. The first range must start at 1, ranges must not overlap, and each entry must have `start_bs <= end_bs` and `optimal_K >= 0`. A concurrency that falls in a gap between ranges, or past the last range, uses the preceding range's K. Every K is capped at `num_speculative_tokens`. An empty schedule falls back to the static `num_speculative_tokens`.
 
 ## Online Examples
 
