@@ -303,6 +303,55 @@ def test_glm53_template_forces_reasoning_streaming(glm53_style_tokenizer):
     assert content == GLM53_LEAK["content"]
 
 
+# The GLM-5.3 template with a thinking switch added back, as served with
+# --chat-template: enable_thinking=False must then be honoured.
+GLM53_TEMPLATE_WITH_SWITCH = GLM53_TEMPLATE.replace(
+    "<|assistant|>{{- '<think>' -}}",
+    "<|assistant|>{{- '<think>' if enable_thinking else '<think></think>' -}}",
+).replace(
+    "[gMASK]<sop>\n",
+    "[gMASK]<sop>\n{%- set enable_thinking = enable_thinking if enable_thinking"
+    " is defined else true -%}\n",
+)
+
+
+def test_glm53_served_template_with_switch_honors_thinking_disable(
+    glm53_style_tokenizer,
+):
+    parser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        glm53_style_tokenizer,
+        chat_template_kwargs={"enable_thinking": False},
+        chat_template=GLM53_TEMPLATE_WITH_SWITCH,
+    )
+    assert not _glm_engine(parser).thinking_enabled
+
+    answer = "2 + 2 = **4**"
+    output = glm53_style_tokenizer.tokenize(answer)
+    output_tokens: list[str] = [
+        glm53_style_tokenizer.convert_tokens_to_string([token]) for token in output
+    ]
+    for streaming in (False, True):
+        reasoning, content = run_reasoning_extraction(
+            parser, output_tokens, streaming=streaming
+        )
+        assert reasoning is None
+        assert content == answer
+
+
+@pytest.mark.parametrize("served", [None, "tool_use", GLM53_TEMPLATE])
+def test_glm53_served_template_without_switch_still_forces_reasoning(
+    served, glm53_style_tokenizer
+):
+    # No served template, a template name, or the stock template: the
+    # tokenizer's GLM-5.3 template decides, as before.
+    parser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        glm53_style_tokenizer,
+        chat_template_kwargs={"enable_thinking": False},
+        chat_template=served,
+    )
+    assert _glm_engine(parser).thinking_enabled
+
+
 def test_glm47_template_honors_thinking_disable(glm45_tokenizer):
     parser = ReasoningParserManager.get_reasoning_parser(parser_name)(
         glm45_tokenizer, chat_template_kwargs={"enable_thinking": False}
