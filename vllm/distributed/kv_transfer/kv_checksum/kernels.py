@@ -34,6 +34,7 @@ def _layers_checksum_kernel(
     CHUNK: tl.constexpr,
     BLOCK: tl.constexpr,
     SINGLE_LAYER: tl.constexpr,
+    ALIGNED: tl.constexpr,
 ):
     row = tl.program_id(0)
     chunk = tl.program_id(1)
@@ -46,6 +47,8 @@ def _layers_checksum_kernel(
         layer_ptr = tl.load(layers_ptr + 3 * layer).to(
             tl.pointer_type(pieces_ptr.dtype.element_ty)
         )
+        if ALIGNED:
+            layer_ptr = tl.multiple_of(layer_ptr, 16)
     first_slice = tl.load(layers_ptr + 3 * layer + 1).to(tl.uint64)
     column = tl.load(layers_ptr + 3 * layer + 2)
     block_id = tl.load(block_ids_ptr + row)
@@ -99,6 +102,7 @@ def layers_checksum(
     first_tokens: torch.Tensor,
     valid_tokens: torch.Tensor,
     out: torch.Tensor,
+    aligned: bool,
 ) -> None:
     """Add each layer's weighted piece sum of each block row into its column
     of ``out``.
@@ -115,6 +119,7 @@ def layers_checksum(
             first token.
         valid_tokens: ``[n]`` int64 tokens to include from each block's start.
         out: ``[n, num_columns]`` int64 accumulator with unit column stride.
+        aligned: Every address in ``layers`` is a multiple of 16 bytes.
 
     """
     _, kernel_blocks, heads, tokens, num_pieces = pieces.shape
@@ -137,4 +142,5 @@ def layers_checksum(
         CHUNK=_CHUNK,
         BLOCK=min(triton.next_power_of_2(num_pieces_in_block), 1024),
         SINGLE_LAYER=len(layers) == 1,
+        ALIGNED=aligned,
     )

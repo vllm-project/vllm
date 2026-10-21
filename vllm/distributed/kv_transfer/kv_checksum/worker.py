@@ -90,6 +90,7 @@ class _FusedLayers:
 
     def __init__(self, views: list[_LayerView], columns: list[int]) -> None:
         self.views = views
+        self.aligned = all(view.pieces.data_ptr() % 16 == 0 for view in views)
         self.layers = torch.tensor(
             [
                 [view.pieces.data_ptr(), view.first_slice, column]
@@ -118,7 +119,15 @@ class _FusedLayers:
 
         """
         pieces = self.views[0].pieces
-        layers_checksum(pieces, self.layers, block_ids, first_tokens, valid_tokens, out)
+        layers_checksum(
+            pieces,
+            self.layers,
+            block_ids,
+            first_tokens,
+            valid_tokens,
+            out,
+            self.aligned,
+        )
 
     def warm_up(self, num_columns: int) -> None:
         """Compile the Triton kernel now rather than in a serving step."""
