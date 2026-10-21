@@ -46,6 +46,7 @@ from vllm.utils.deep_gemm import (
     mqa_logits_use_mx_scales,
 )
 from vllm.utils.import_utils import has_cutedsl
+from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
@@ -405,6 +406,33 @@ class PrefillRowShard:
         )
 
 
+def _decode_logits_keep_bf16(topk_backend: str, dcp_world_size: int) -> bool:
+    """Whether the decode top-k reads SM100's BF16 paged MQA logits directly.
+
+    Otherwise they are upcast to FP32 first: other top-k backends and the DCP
+    merge need FP32.
+    """
+    return topk_backend == "deep_select" and dcp_world_size == 1
+
+
+def _decode_logits_peak_bytes(
+    num_rows: int, max_model_len: int, topk_backend: str, dcp_world_size: int
+) -> int:
+    """Bytes the paged MQA decode logits hold at once for ``num_rows`` rows.
+
+    DeepGEMM allocates them per call as [rows, max_model_len] (BF16 on SM100,
+    FP32 elsewhere), with rows padded to 1024 bytes and whole KV splits; the
+    FP32 upcast keeps that stride and coexists with its BF16 source.
+    """
+    if current_platform.is_device_capability_family(100):
+        bytes_per_elem = 2
+        if not _decode_logits_keep_bf16(topk_backend, dcp_world_size):
+            bytes_per_elem += 4
+    else:
+        bytes_per_elem = 4
+    return num_rows * round_up(max_model_len, 1024) * bytes_per_elem
+
+
 def _reserve_row_shard_exchange_transient(
     topk_indices_buffer: torch.Tensor, device: torch.device
 ) -> None:
@@ -463,6 +491,7 @@ def sparse_attn_indexer(
     candidate_block_size: int = 0,
     candidate_write: bool = False,
     topk_backend: str = "auto",
+    max_decode_tokens: int = 0,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     forward_context = get_forward_context()
@@ -498,11 +527,18 @@ def sparse_attn_indexer(
             profile_specs.extend(gather_spec * 2)
         current_workspace_manager().get_simultaneous(*profile_specs)
 
-        # Dummy allocation to simulate for peak logits tensor memory during inference.
-        # FP8 elements so elements == bytes
-        max_logits_elems = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+        # Dummy allocation for the peak logits memory during inference: the
+        # prefill chunks' budget, or the decode logits, which are sized by
+        # max_model_len rather than by that budget. Eager and piecewise steps
+        # allocate them outside the CUDA graph pools.
+        max_logits_bytes = max(
+            envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024,
+            _decode_logits_peak_bytes(
+                max_decode_tokens, max_model_len, topk_backend, dcp_world_size
+            ),
+        )
         _ = torch.empty(
-            max_logits_elems, dtype=torch.uint8, device=hidden_states.device
+            max_logits_bytes, dtype=torch.uint8, device=hidden_states.device
         )
 
         # The dummy run returns before exchange_topk executes, so reserve its
@@ -887,9 +923,9 @@ def sparse_attn_indexer(
                 max_model_len=max_model_len,
                 indices=decode_metadata.indices,
             )
-            # Keeping bf16 halves top-k/candidate reads; other top-k backends and
-            # DCP need fp32. SM100 decode is varlen: one context length per row.
-            if topk_backend != "deep_select" or dcp_world_size != 1:
+            # Keeping bf16 halves top-k/candidate reads. SM100 decode is varlen:
+            # one context length per row.
+            if not _decode_logits_keep_bf16(topk_backend, dcp_world_size):
                 logits = as_fp32_logits(logits, seq_lens.view(-1))
         num_rows = logits.shape[0]
         if candidate_blocks is not None:
@@ -985,6 +1021,7 @@ def sparse_attn_indexer_fake(
     candidate_block_size: int = 0,
     candidate_write: bool = False,
     topk_backend: str = "auto",
+    max_decode_tokens: int = 0,
 ) -> torch.Tensor:
     return topk_indices_buffer
 
@@ -1052,6 +1089,12 @@ class SparseAttnIndexer(CustomOp):
         vllm_config = get_current_vllm_config()
         parallel_config = vllm_config.parallel_config
         self.topk_backend = vllm_config.kernel_config.sparse_indexer_topk_backend
+        # Decode rows a step can score: requests up to the decode threshold
+        # (1 + speculative tokens) take the decode path, padded to that length.
+        scheduler_config = vllm_config.scheduler_config
+        self.max_decode_tokens = min(
+            scheduler_config.max_num_seqs, scheduler_config.max_num_batched_tokens
+        ) * (1 + vllm_config.num_speculative_tokens)
         self._parallel_config = parallel_config
         self.dcp_world_size = parallel_config.decode_context_parallel_size
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
@@ -1164,6 +1207,7 @@ class SparseAttnIndexer(CustomOp):
             candidate_block_size=self.candidate_block_size,
             candidate_write=self.candidate_write,
             topk_backend=self.topk_backend,
+            max_decode_tokens=self.max_decode_tokens,
         )
 
     def forward_xpu(
