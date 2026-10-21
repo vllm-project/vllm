@@ -3,30 +3,22 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Generate the ROCm paged attention translation units and their dispatch.
 
-Instantiating the paged attention kernels is by far the most expensive part of
-building _rocm_C: the device backend emits code for every (dtype, kv-cache
-dtype, head size, block size, alibi, out dtype, V-cache layout, gqa ratio)
-combination, so compiling all of them in a single file serialized ~10 min of
-device code generation onto one core.
+Instantiating these kernels dominates the _rocm_C build: one file holding every
+(dtype, kv-cache dtype, head size, block size, ...) combination serialized
+~10 min of device code generation onto one core.
 
-This script emits, from the single VARIANTS list below:
+All outputs derive from VARIANTS:
 
-  * attention_paged_attn_<variant>_bs<block_size>.cu: one translation unit per
-    (variant, block size) pair, each instantiating only its own slice of the
-    kernel set, so ninja compiles the slices in parallel (~48 s per unit instead
-    of ~95 s for a whole (dtype, kv-cache dtype, head size) set),
-  * attention_paged_attn_entries.inc: the prototypes of the entry points those
-    translation units define (included at file scope by attention_dispatch.cu),
-  * attention_paged_attn_dispatch.inc: the head-size/block-size/dtype dispatch
-    of paged_attention() (included inside the function body).
+  * attention_paged_attn_<variant>_bs<block_size>.cu: one unit per (variant,
+    block size), each instantiating only its slice (~48 s per unit, vs ~95 s for
+    a whole set), so ninja runs them in parallel,
+  * attention_paged_attn_entries.inc: entry-point prototypes (file scope),
+  * attention_paged_attn_dispatch.inc: paged_attention()'s dispatch (function
+    body).
 
-Variants, entry-point prototypes and the dispatch arms are all derived from
-VARIANTS, so a translation unit can no longer be compiled without being
-dispatched (which used to need a configure-time guard regexing
-attention_dispatch.cu).
-
-Generated files are written next to the kernels, like
-csrc/quantization/marlin/generate_kernels.py, and are gitignored.
+So a unit cannot be compiled without being dispatched - what the configure-time
+guard in CMakeLists.txt used to regex for. Outputs land next to the kernels (like
+marlin's generate_kernels.py) and are gitignored.
 """
 
 import glob
@@ -39,33 +31,19 @@ import sys
 # size).
 BLOCK_SIZES = [16, 32]
 
-# ALIBI_ENABLED and the out dtype are *not* split into their own translation
-# units: both are only a runtime branch on the optional alibi_slopes /
-# fp8_out_scale arguments (CALL_CUSTOM_LAUNCHER_OUT in attention_kernels.cuh),
-# and splitting them was measured to be a loss. It halves the per-unit codegen
-# (61.6 s -> 33.1 s for the h128 units) but every unit pays ~20 s just to parse
-# attention_kernels.cuh, so _rocm_C's serial work grew from 1434 s to 2974 s,
-# the -j64 wall stayed at 64 s (skinny_gemms is the limit there) and -j16 went
-# from 142 s to 240 s.
+# ALIBI_ENABLED and the out dtype stay runtime branches (CALL_CUSTOM_LAUNCHER_OUT)
+# instead of getting units of their own: see the NOTE in attention_kernels.cuh.
 
-# One entry per supported (query dtype, kv-cache dtype, head size) kernel set.
+# One entry per supported (query dtype, kv-cache dtype, head size) kernel set:
 #   name:               suffix of the generated file/entry point names
-#   query_type:         C++ type of the query/out (template parameter T)
-#   kv_type:            C++ type of the key/value cache (template parameter KVT)
-#                       (half/bfloat16 are written with their HIP spellings:
-#                       these sources are only compiled through hipify, which
-#                       maps __nv_bfloat16 to __hip_bfloat16 but leaves _Float16
-#                       alone - `__half` is a distinct type from _Float16 for the
-#                       MFMA builtins)
-#   kv_cache_enum:      Fp8KVCacheDataType passed to the launcher
-#   head_size:          head size instantiated
-#   mfma:               MFMAType template parameter
+#   query_type/kv_type: C++ types of the query/out and of the key/value cache
+#                       (template parameters T and KVT), written with the HIP
+#                       spellings hipify produces; `__half` is a distinct type
+#                       from `_Float16` for the MFMA builtins.
+#   kv_cache_enum/head_size/mfma: Fp8KVCacheDataType, head size and MFMAType
 #   query_scalar_type:  at::ScalarType of the query this variant serves
-#   kv_cache_dtype:     kv_cache_dtype string this variant serves ("auto",
-#                       "fp8"); the exact accepted spellings and the mfma_type
-#                       gating live below.
-#   mfma_type:          mfma_type string this variant serves, or None when the
-#                       kv-cache dtype does not split on mfma_type.
+#   kv_cache_dtype/mfma_type: the runtime strings this variant serves; mfma_type
+#                       is None when the kv-cache dtype does not split on it.
 VARIANTS = [
     {
         "name": "h64_f16_auto",

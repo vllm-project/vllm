@@ -3793,11 +3793,9 @@ void paged_attention_custom_launcher_navi(
                               PSIZE, ALIBI_ENABLED, MFMA_TYPE)             \
   }
 
-// The non-interleaved path picks the CDNA or the Navi launcher at runtime.
-// When the build has no gfx11/gfx12 arch (VLLM_ROCM_ATTN_NO_NAVI, defined by
-// the generated translation units, see csrc/rocm/generate_paged_attn.py),
-// is_navi_gpu() can never be true, so the Navi kernel set is dead weight and is
-// not instantiated.
+// The non-interleaved path picks the CDNA or the Navi launcher at runtime. With
+// no gfx11/gfx12 arch CMake defines VLLM_ROCM_ATTN_NO_NAVI: is_navi_gpu() can
+// then never be true, so the Navi set is dead weight and is not instantiated.
 #ifdef VLLM_ROCM_ATTN_NO_NAVI
   #define ATTN_CALL_NON_INTERLEAVED(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,  \
                                     OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE)  \
@@ -3861,13 +3859,11 @@ void paged_attention_custom_launcher_navi(
     }
 #endif
 
-// NOTE: ALIBI_ENABLED and the out dtype (fp8 vs query dtype) are kept as
-// runtime branches. Baking them into the generated entry points as well (4
-// translation units per (variant, block size) instead of 1) was measured to be
-// a loss: it halves the per-unit codegen (61.6 s -> 33.1 s) but every unit pays
-// ~20 s to parse this header, so the _rocm_C work grew from 1434 s to 2974 s,
-// the -j64 wall stayed at 64 s (skinny_gemms is the limit there) and -j16 went
-// from 142 s to 240 s.
+// NOTE: ALIBI_ENABLED and the out dtype (fp8 vs query dtype) stay runtime
+// branches rather than getting their own units (4 per (variant, block size)
+// instead of 1). That halves the per-unit codegen, but every unit pays ~20 s to
+// parse this header, so _rocm_C's serial work roughly doubles and the -j16 wall
+// went from 142 s to 240 s.
 
 // ---------------------------------------------------------------------------
 // Fixed-head-size entry points.
