@@ -333,6 +333,11 @@ def resolve_quant_method(
         if online_target is None:
             # The checkpoint quant method is applied as there is no online override.
             return base_quant_method
+        if online_target[3].hadamard_size is not None:
+            raise NotImplementedError(
+                f"{prefix}: online hadamard_size on an already quantized layer "
+                "(requantization) is not supported yet."
+            )
 
         online_quant_method = quant_config.online_quantization_config.get_quant_method(
             layer, prefix

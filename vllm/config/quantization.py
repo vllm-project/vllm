@@ -88,6 +88,13 @@ class QuantSpec:
     activation: QuantKeyField = None
     """Activation quantization key, or a name from QUANT_KEY_NAMES."""
 
+    hadamard_size: int | None = None
+    """Block size (a power of two) of an orthonormal Hadamard rotation applied
+    along the input dimension of both the weight and the activation before
+    quantization (see `InputHadamardLinearMethod`). The GEMM result is
+    unchanged up to quantization error, which the rotation shrinks by spreading
+    outliers across each block. Linear layers only; validated with MXFP4."""
+
     def __str__(self) -> str:
         def quant_key_str(quant_key: QuantKey | None) -> str:
             if quant_key is None:
@@ -101,7 +108,10 @@ class QuantSpec:
                 str(quant_key),
             )
 
-        return quant_key_str(self.weight)
+        name = quant_key_str(self.weight)
+        if self.hadamard_size is not None:
+            name = f"{name}_hadamard{self.hadamard_size}"
+        return name
 
 
 @config
@@ -211,6 +221,11 @@ _ONLINE_SHORTHANDS: dict[str, QuantizationConfigArgs] = {
     "mxfp4": QuantizationConfigArgs(
         linear=QuantSpec(weight=kMxfp4Static),
         moe=QuantSpec(weight=kMxfp4Static),
+    ),
+    # MXFP4 linear with a 32-wide Hadamard rotation of weights and activations;
+    # MoE stays unquantized (no `moe` field).
+    "mxfp4_hadamard32": QuantizationConfigArgs(
+        linear=QuantSpec(weight=kMxfp4Static, hadamard_size=32),
     ),
     # INT8 weight-only on MoE; linear stays unquantized (no `linear` field).
     "int8_per_channel_weight_only": QuantizationConfigArgs(

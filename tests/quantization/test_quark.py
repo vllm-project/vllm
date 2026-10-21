@@ -1671,6 +1671,30 @@ def test_mxfp4_gsm8k_correctness(config: AccuracyTestConfig):
     ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
 
 
+# Quark MXFP4 with an online 64-wide Hadamard rotation on q/k/v/gate/up
+# (`input_rotation` tensors). The weights are stored rotated, so a loader that
+# skips the activation rotation produces garbage.
+ONLINE_ROTATION_CONFIG = AccuracyTestConfig(
+    model_name="amd-quark/internal-testing-qwen3_0.6b-mxfp4-hadamard",
+    excepted_value=45.9,
+)
+
+
+@pytest.mark.skipif(not current_platform.supports_mx(), reason="requires MX support")
+def test_quark_online_rotation_wikitext():
+    config = ONLINE_ROTATION_CONFIG
+    results = lm_eval.simple_evaluate(
+        model="vllm",
+        model_args=config.get_model_args(
+            tp_size=1, kwargs={"cudagraph_capture_sizes": [16]}
+        ),
+        tasks="wikitext",
+        batch_size=64,
+    )
+    measured_value = results["results"]["wikitext"]["word_perplexity,none"]
+    assert measured_value == pytest.approx(config.excepted_value, abs=0.1)
+
+
 @pytest.mark.skipif(
     not QUARK_MXFP4_AVAILABLE,
     reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available",

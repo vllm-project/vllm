@@ -11,6 +11,7 @@ from vllm.config.quantization import (
     QuantSpec,
     resolve_quantization_config,
 )
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.online.base import (
     OnlineQuantizationConfig,
@@ -23,6 +24,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kInt4Static32,
     kInt8StaticChannelSym,
+    kMxfp4Static,
     kMxfp8Dynamic,
     kNvfp4DynamicToken,
     kNvfp4Static,
@@ -243,3 +245,49 @@ def test_targets_reject_moe_only_shorthand_for_linear_layer():
 
     with pytest.raises(ValueError, match="does not define a QuantSpec"):
         config.resolve_quant_method_cls(LinearBase, "model.layers.0.self_attn.o_proj")
+
+
+# ---- hadamard_size ---------------------------------------------------------
+
+
+def test_mxfp4_hadamard32_target_resolves_to_rotated_mxfp4_linear():
+    from vllm.model_executor.layers.quantization.online.mxfp4 import (
+        Mxfp4OnlineLinearMethod,
+    )
+
+    config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(
+            targets={"re:.*linear_attn\\.out_proj": "mxfp4_hadamard32"}
+        )
+    )
+    resolved = config.resolve_quant_method_cls(
+        LinearBase, "model.layers.0.linear_attn.out_proj"
+    )
+    assert resolved is not None
+    _, quant_key_str, _, spec, method_cls = resolved
+    assert quant_key_str == "mxfp4_hadamard32"
+    assert spec.hadamard_size == 32
+    assert method_cls is Mxfp4OnlineLinearMethod
+
+
+@pytest.mark.parametrize("size", [0, 24, 33])
+def test_hadamard_size_must_be_power_of_two(size):
+    config = OnlineQuantizationConfig(
+        quant_config_args(linear={"weight": kMxfp4Static, "hadamard_size": size})
+    )
+    with pytest.raises(ValueError, match="power of two"):
+        config.resolve_quant_method_cls(LinearBase, "model.layers.0.mlp.down_proj")
+
+
+@pytest.mark.parametrize(
+    "linear,moe",
+    [
+        ({"weight": "fp8_per_block_static", "hadamard_size": 32}, None),
+        (None, {"weight": kMxfp4Static, "hadamard_size": 32}),
+    ],
+)
+def test_hadamard_size_not_implemented_for_unvalidated_methods(linear, moe):
+    config = OnlineQuantizationConfig(quant_config_args(linear=linear, moe=moe))
+    layer_cls = LinearBase if linear is not None else RoutedExperts
+    with pytest.raises(NotImplementedError, match="hadamard_size"):
+        config.resolve_quant_method_cls(layer_cls, "model.layers.0.mlp.down_proj")
