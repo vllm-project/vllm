@@ -56,6 +56,10 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     ROCM_SEGMENTED_ATTN = (
         "vllm.v1.attention.backends.rocm_segmented_attn.RocmSegmentedAttentionBackend"
     )
+    ROCM_RDNA_SINGLESEQ_ATTN = (
+        "vllm.v1.attention.backends.rocm_rdna_singleseq_attn."
+        "RocmRdnaSingleSeqAttentionBackend"
+    )
     ROCM_AITER_MLA = "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend"
     ROCM_AITER_TRITON_MLA = (
         "vllm.v1.attention.backends.mla.aiter_triton_mla.AiterTritonMLABackend"
