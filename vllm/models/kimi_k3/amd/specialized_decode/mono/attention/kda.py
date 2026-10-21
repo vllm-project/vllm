@@ -1176,13 +1176,8 @@ def build(key: KdaPreBuild):
     @fx.struct
     class GemvLds:
         xl: fx.Array[fx.Int32, s * xrow // 2, 16]
-
-    @fx.struct
-    class CachedGemvLds:
-        xl: fx.Array[fx.Int32, s * xrow // 2, 16]
-        weights: fx.Array[fx.Int32, 2 * THREADS * key.cache_words, 16]
-
-    GemvStorage = CachedGemvLds if key.cache_words else GemvLds
+        # ``cached_projection``'s weights (a placeholder word without them)
+        weights: fx.Array[fx.Int32, max(2 * THREADS * key.cache_words, 1), 16]
 
     @fx.struct
     class KdaLds:
@@ -1196,7 +1191,7 @@ def build(key: KdaPreBuild):
     @fx.union
     class RoleLds:
         attn: AttnLds
-        gemv: GemvStorage  # type: ignore[valid-type]
+        gemv: GemvLds
         kda: KdaLds
 
     @fx.struct
