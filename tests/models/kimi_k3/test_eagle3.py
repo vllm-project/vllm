@@ -2,11 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock
 
+import pytest
 import torch
 
 from vllm.model_executor.models.interfaces import supports_eagle3
+from vllm.models.kimi_k3.amd import linear as amd_linear
 from vllm.models.kimi_k3.nvidia import model as kimi_model
 from vllm.models.kimi_k3.nvidia.model import (
     KimiK3ForConditionalGeneration,
@@ -15,8 +18,8 @@ from vllm.models.kimi_k3.nvidia.model import (
 )
 
 
-def _make_kimi_linear_model() -> KimiLinearModel:
-    model = object.__new__(KimiLinearModel)
+def _make_kimi_linear_model(cls: type = KimiLinearModel) -> Any:
+    model: Any = object.__new__(cls)
     object.__setattr__(model, "aux_hidden_state_layers", (2,))
     object.__setattr__(model, "use_sequence_parallel", False)
     object.__setattr__(model, "use_attn_res", False)
@@ -200,3 +203,137 @@ def test_attn_res_stream_capture_receives_the_layer_outputs_in_order(monkeypatch
     assert got_pending is layer_hidden_states
     assert got_residual is block_residual
     torch.testing.assert_close(aux_hidden_states[0], captured)
+
+
+class _AmdAttnResLayer:
+    """Stand in for an AMD layer whose AttnRes fills the snapshot it is given."""
+
+    def __init__(self, prefix_sum: torch.Tensor, mlp_output: torch.Tensor) -> None:
+        self.prefix_sum = prefix_sum
+        self.mlp_output = mlp_output
+        self.prefix_snapshot: torch.Tensor | None | str = "not called"
+
+    def __call__(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+        prefix_delta: torch.Tensor | None,
+        prefix_snapshot: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        self.prefix_snapshot = prefix_snapshot
+        if prefix_snapshot is not None:
+            # The fused kernel writes this sum while it updates the prefix.
+            torch.add(hidden_states, prefix_delta, out=prefix_snapshot)
+        return self.prefix_sum, residual, self.mlp_output
+
+
+@pytest.mark.parametrize("is_last_rank", [True, False])
+def test_amd_kimi_linear_forward_fills_aux_hidden_states_in_attn_res(
+    monkeypatch, is_last_rank: bool
+):
+    """The next AttnRes fills the aux buffer of a target layer. If no AttnRes
+    follows on this rank, one add fills it."""
+    model = _make_kimi_linear_model(amd_linear.KimiLinearModel)
+    object.__setattr__(model, "config", SimpleNamespace(attn_res_block_size=2))
+    object.__setattr__(model, "start_layer", 0)
+    object.__setattr__(model, "end_layer", 3)
+    object.__setattr__(model, "aux_hidden_state_layers", (1, 3))
+    layers = [
+        _AmdAttnResLayer(torch.tensor([[1.0, 2.0]]), torch.tensor([[3.0, 4.0]])),
+        _AmdAttnResLayer(torch.tensor([[5.0, 6.0]]), torch.tensor([[7.0, 8.0]])),
+        _AmdAttnResLayer(torch.tensor([[9.0, 10.0]]), torch.tensor([[11.0, 12.0]])),
+    ]
+    object.__setattr__(model, "layers", layers)
+    object.__setattr__(model, "output_attn_res_norm", Mock())
+    object.__setattr__(model, "output_attn_res_proj", Mock())
+    monkeypatch.setattr(
+        amd_linear,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=is_last_rank),
+    )
+    final_hidden_states = torch.tensor([[13.0, 14.0]])
+
+    def fake_apply_attn_res(prefix_sum, block_residual, proj, norm, num_blocks, **kw):
+        if kw["prefix_snapshot"] is not None:
+            torch.add(prefix_sum, kw["delta"], out=kw["prefix_snapshot"])
+        return final_hidden_states
+
+    monkeypatch.setattr(amd_linear, "_apply_attn_res", fake_apply_attn_res)
+
+    result = model.forward(
+        input_ids=None,
+        positions=torch.tensor([0]),
+        intermediate_tensors=None,
+        inputs_embeds=torch.tensor([[0.5, 1.5]]),
+    )
+
+    # Only the layer after a target layer receives a buffer.
+    assert layers[0].prefix_snapshot is None
+    assert layers[2].prefix_snapshot is None
+    first_snapshot = layers[1].prefix_snapshot
+    assert first_snapshot is not None
+    torch.testing.assert_close(
+        first_snapshot, layers[0].prefix_sum + layers[0].mlp_output
+    )
+
+    last_sum = layers[2].prefix_sum + layers[2].mlp_output
+    if is_last_rank:
+        output, aux_hidden_states = result
+        assert output is final_hidden_states
+        # The drafter reads the buffers the kernel wrote, not copies of them.
+        assert aux_hidden_states[0] is first_snapshot
+        torch.testing.assert_close(aux_hidden_states[1], last_sum)
+    else:
+        # No AttnRes follows the last layer on this rank, so one add remains.
+        torch.testing.assert_close(result["hidden_states"], last_sum)
+
+
+class _StopAfterAttnRes(Exception):
+    pass
+
+
+@pytest.mark.parametrize("with_snapshot", [True, False])
+def test_amd_decoder_layer_hands_prefix_snapshot_to_attn_res(
+    monkeypatch, with_snapshot: bool
+):
+    """The pre-attention AttnRes receives the snapshot that forward() gets."""
+    layer = object.__new__(amd_linear.KimiDecoderLayer)
+    for name, value in {
+        "use_attn_residuals": True,
+        "self_attn": SimpleNamespace(),
+        "self_attention_res_proj": Mock(),
+        "self_attention_res_norm": Mock(),
+        "input_layernorm": Mock(),
+        "prev_valid_blocks": 2,
+        "block_write_idx": 1,
+        "is_block_write_layer": False,
+    }.items():
+        object.__setattr__(layer, name, value)
+    calls = []
+
+    def fake_apply_attn_res(prefix_sum, block_residual, proj, norm, num_blocks, **kw):
+        calls.append((prefix_sum, block_residual, kw))
+        raise _StopAfterAttnRes
+
+    monkeypatch.setattr(amd_linear, "_apply_attn_res", fake_apply_attn_res)
+    hidden_states = torch.tensor([[1.0, 2.0]])
+    residual = torch.zeros(1, 3, 2)
+    prefix_delta = torch.tensor([[3.0, 4.0]])
+    prefix_snapshot = torch.empty(1, 2) if with_snapshot else None
+
+    with pytest.raises(_StopAfterAttnRes):
+        layer.forward(
+            torch.tensor([0]),
+            hidden_states,
+            residual,
+            prefix_delta=prefix_delta,
+            prefix_snapshot=prefix_snapshot,
+        )
+
+    ((got_prefix, got_residual, kw),) = calls
+    assert got_prefix is hidden_states
+    assert got_residual is residual
+    assert kw["delta"] is prefix_delta
+    assert kw["prefix_snapshot"] is prefix_snapshot
+    assert kw["block_write_idx"] == -1
