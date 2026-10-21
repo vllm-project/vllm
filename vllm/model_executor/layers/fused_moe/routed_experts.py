@@ -39,6 +39,22 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# Checkpoint suffixes of fused expert tensors that name quantized-expert
+# parameters, e.g. the compact MoNE exports store
+# ``experts.gate_up_proj.weight_packed`` for ``experts.w13_weight_packed``
+# and ``experts.gate_up_proj.input_global_scale`` for
+# ``experts.w13_input_global_scale``.
+_FUSED_QUANT_SUFFIXES = (
+    "weight_packed",
+    "weight_scale",
+    "weight_global_scale",
+    "weight_scale_2",
+    "weight_zero_point",
+    "weight_shape",
+    "input_global_scale",
+    "input_scale",
+)
+
 
 def _index_expert_mapping(
     mapping: list[tuple[str, str, int, str]],
@@ -1003,16 +1019,25 @@ class RoutedExperts(PluggableLayer):
 
         for expert_name, loaded_weight in weights:
             qual_name = f"{self.layer_name}.{expert_name}"
+            has_single_experts_component = qual_name.count("experts.") == 1
             expert_key = qual_name.partition("experts.")[2].partition(".")[0]
             named_expert = (
                 mapping_by_expert.get(expert_key)
-                if qual_name.count("experts.") == 1
+                if has_single_experts_component
                 else None
+            )
+            # Checkpoint tensors may stack every expert under the module
+            # name without a per-expert index (``experts.gate_up_proj...``);
+            # they carry all experts in one tensor whatever their rank.
+            is_module_fused = has_single_experts_component and not (
+                expert_key.isdecimal()
             )
             # Encoded per-expert [N, K / block_size, bytes_per_block] weights
             # have the same rank as fused [E, N, K] weights. An explicit expert
             # name identifies the per-expert layout without treating N as E.
-            is_fused = loaded_weight.dim() == 3 and named_expert is None
+            is_fused = named_expert is None and (
+                loaded_weight.dim() == 3 or is_module_fused
+            )
             # Fused tensors and ambiguous names keep the full mapping.
             candidates = expert_mapping
             if not is_fused and qual_name.count("experts.") == 1:
@@ -1035,6 +1060,14 @@ class RoutedExperts(PluggableLayer):
                     )
                 )
                 weight_name = qual_name.replace(weight_name, param_name)
+                # Quantized fused tensors suffix the module name; fold the
+                # known suffixes onto the ``w13_``/``w2_`` parameter stem.
+                # Unrecognized suffixes keep the separator so unknown names
+                # still fail loudly.
+                if weight_name.endswith(tuple(f".{s}" for s in _FUSED_QUANT_SUFFIXES)):
+                    weight_name = weight_name.replace(".w13_weight.", ".w13_").replace(
+                        ".w2_weight.", ".w2_"
+                    )
                 param_name = weight_name.removeprefix(f"{self.layer_name}.")
                 param = getattr(self, param_name, None)
                 if param is None:

@@ -65,6 +65,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def supports_eplb(self) -> bool:
         return True
 
+    @property
+    def supports_expert_substitution(self) -> bool:
+        return True
+
     def create_weights(
         self,
         layer: "RoutedExperts",

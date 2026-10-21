@@ -33,6 +33,14 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         self.moe_kernel: mk.FusedMoEKernel | None = None
 
     @property
+    def supports_expert_substitution(self) -> bool:
+        """Whether collapsed (constant-output) experts can replace rows of the
+        expert weights. Requires every per-expert tensor (weights and scales)
+        to load through the expert-ID mapping so compact physical rows stay
+        consistent, and a decomposed ``apply`` path."""
+        return False
+
+    @property
     def supports_internal_mk(self) -> bool:
         # NOTE(rob): temporary attribute to indicate support for
         # completed migration to the new internal MK interface.

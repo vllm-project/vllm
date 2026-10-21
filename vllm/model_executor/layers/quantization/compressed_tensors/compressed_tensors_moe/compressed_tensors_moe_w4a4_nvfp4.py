@@ -73,6 +73,13 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
     def supports_eplb(self) -> bool:
         return self.nvfp4_backend in _EPLB_SUPPORTED_NVFP4_BACKENDS
 
+    @property
+    def supports_expert_substitution(self) -> bool:
+        # Every NVFP4 tensor (packed weights, group scales, global scales)
+        # is stored per expert row, so compact physical rows load through
+        # the expert-ID mapping like unquantized weights.
+        return True
+
     def create_weights(
         self,
         layer: torch.nn.Module,

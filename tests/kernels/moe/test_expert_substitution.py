@@ -29,44 +29,16 @@ from vllm.v1.worker.workspace import init_workspace_manager
 MOE_PREFIX = "model.layers.1.mlp.experts"
 
 
-def _model_config(approximate_experts, **kwargs) -> SimpleNamespace:
-    return SimpleNamespace(
-        hf_config=SimpleNamespace(approximate_experts=approximate_experts),
-        **kwargs,
-    )
+def _moe_sparsity_config(num_experts):
+    """The ``quantization_config.moe_sparsity_config`` novice format."""
+    return {"method": "novice", "num_experts": num_experts}
 
 
-def _expert_substitution(targets: dict[str, dict[int, str]]) -> dict:
-    """The ``compression_config.transform_config.expert_substitution`` format."""
-    return {
-        "version": 1,
-        "router_semantics": {
-            "preserve_logical_expert_ids": True,
-            "preserve_router_weights": True,
-            "renormalize_after_substitution": False,
-        },
-        "targets": {
-            path: {
-                "num_logical_experts": 5,
-                "weight_layout": "compact_retained_experts",
-                "replacements": {
-                    str(expert_id): {
-                        "format": "constant-v1",
-                        "tensors": {"value": name},
-                    }
-                    for expert_id, name in replacements.items()
-                },
-            }
-            for path, replacements in targets.items()
-        },
-    }
-
-
-def _compressed_model_config(expert_substitution: dict, **kwargs) -> SimpleNamespace:
+def _model_config(num_experts, **kwargs) -> SimpleNamespace:
     return SimpleNamespace(
         hf_config=SimpleNamespace(
-            compression_config={
-                "transform_config": {"expert_substitution": expert_substitution}
+            quantization_config={
+                "moe_sparsity_config": _moe_sparsity_config(num_experts)
             }
         ),
         **kwargs,
@@ -78,114 +50,86 @@ def _substitution(hidden_size: int, dtype=torch.float32):
     return ConstantExpertSubstitution(1, 5, (1, 3), hidden_size, dtype)
 
 
-def test_parse_approximate_experts():
+def test_parse_moe_sparsity_config():
     assert get_expert_substitution_spec(None) is None
-    assert get_expert_substitution_spec(_model_config(None)) is None
-    spec = get_expert_substitution_spec(_model_config({"1": [3, 1], "2": [], 5: (0,)}))
-    assert spec.experts == {1: (1, 3), 5: (0,)}
-    assert spec.value_names == {}
+    assert (
+        get_expert_substitution_spec(
+            SimpleNamespace(hf_config=SimpleNamespace(quantization_config={}))
+        )
+        is None
+    )
+    spec = get_expert_substitution_spec(_model_config([None, 3, None, 5]))
+    assert spec.retained_experts == {1: 3, 3: 5}
     text_config = SimpleNamespace(
-        hf_text_config=SimpleNamespace(approximate_experts={"0": [2]}),
+        hf_text_config=SimpleNamespace(
+            quantization_config={"moe_sparsity_config": _moe_sparsity_config([2])}
+        ),
         hf_config=SimpleNamespace(),
     )
-    assert get_expert_substitution_spec(text_config).experts == {0: (2,)}
+    assert get_expert_substitution_spec(text_config).retained_experts == {0: 2}
 
 
 @pytest.mark.parametrize(
-    "approximate_experts",
-    [[1, 2], {"layer": [1]}, {"1": [1, 1]}, {"1": [-1]}, {"1": ["x"]}],
-)
-def test_parse_approximate_experts_rejects_invalid_entries(approximate_experts):
-    with pytest.raises(ValueError, match="approximate_experts"):
-        get_expert_substitution_spec(_model_config(approximate_experts))
-
-
-def test_parse_expert_substitution_with_explicit_value_names():
-    spec = get_expert_substitution_spec(
-        _compressed_model_config(
-            _expert_substitution(
-                {
-                    MOE_PREFIX: {3: "shared", 1: "layer_1.expert_1"},
-                    "model.layers.2.mlp.experts": {0: "shared"},
-                }
-            )
-        )
-    )
-    assert spec.experts == {1: (1, 3), 2: (0,)}
-    assert spec.value_names == {
-        "shared": ((1, 3), (2, 0)),
-        "layer_1.expert_1": ((1, 1),),
-    }
-
-
-@pytest.mark.parametrize(
-    "mutate",
+    "moe_sparsity_config",
     [
-        lambda raw: raw.update(version=2),
-        lambda raw: raw["router_semantics"].update(renormalize_after_substitution=True),
-        lambda raw: raw["targets"].update({"mlp.experts": raw["targets"][MOE_PREFIX]}),
-        lambda raw: raw["targets"][MOE_PREFIX].update(weight_layout="dense"),
-        lambda raw: raw["targets"][MOE_PREFIX]["replacements"]["1"].update(
-            format="linear-v1"
-        ),
-        lambda raw: raw["targets"][MOE_PREFIX]["replacements"]["1"].pop("tensors"),
+        {"method": "prune", "num_experts": [3]},
+        {"method": "novice"},
+        {"method": "novice", "num_experts": 3},
+        {"method": "novice", "num_experts": [0]},
+        {"method": "novice", "num_experts": ["x"]},
+        {"method": "novice", "num_experts": [1.5]},
+        {"method": "novice", "num_experts": [True]},
     ],
 )
-def test_parse_expert_substitution_rejects_unsupported_metadata(mutate):
-    raw = _expert_substitution({MOE_PREFIX: {1: "value"}})
-    mutate(raw)
-    with pytest.raises(ValueError, match="invalid expert_substitution metadata"):
-        get_expert_substitution_spec(_compressed_model_config(raw))
-
-
-def test_parse_rejects_both_formats():
-    config = _compressed_model_config(_expert_substitution({MOE_PREFIX: {1: "v"}}))
-    config.hf_config.approximate_experts = {"1": [1]}
-    with pytest.raises(ValueError, match="both"):
-        get_expert_substitution_spec(config)
+def test_parse_moe_sparsity_config_rejects_invalid_entries(moe_sparsity_config):
+    with pytest.raises(ValueError, match="invalid moe_sparsity_config"):
+        get_expert_substitution_spec(
+            SimpleNamespace(
+                hf_config=SimpleNamespace(
+                    quantization_config={"moe_sparsity_config": moe_sparsity_config}
+                )
+            )
+        )
 
 
 def test_make_expert_substitution_matches_layer_index():
-    config = _model_config({"1": [3, 1]})
+    # Layer 1 retains 3 of 5 experts; the trailing 2 become novices.
+    config = _model_config([None, 3])
     substitution = make_expert_substitution(config, MOE_PREFIX, 5, 16, torch.bfloat16)
 
     assert substitution is not None
     assert substitution.layer_idx == 1
-    assert substitution.substituted_expert_ids == (1, 3)
+    assert substitution.substituted_expert_ids == (3, 4)
     assert substitution.num_compute_experts == 3
-    assert substitution.values.dtype == torch.bfloat16
-    assert [substitution.physical_expert_id(i) for i in range(5)] == [0, -1, 1, -1, 2]
+    assert substitution.novices.dtype == torch.bfloat16
+    # Retained router rows already name their compact physical rows.
+    assert [substitution.physical_expert_id(i) for i in range(5)] == [0, 1, 2, -1, -1]
     assert (
-        make_expert_substitution(config, "model.layers.2.mlp.experts", 5, 16, None)
+        make_expert_substitution(config, "model.layers.0.mlp.experts", 5, 16, None)
         is None
     )
     assert make_expert_substitution(None, MOE_PREFIX, 5, 16, None) is None
-    explicit = _compressed_model_config(_expert_substitution({MOE_PREFIX: {1: "v"}}))
-    substitution = make_expert_substitution(explicit, MOE_PREFIX, 5, 16, None)
-    assert substitution is not None
-    assert substitution.substituted_expert_ids == (1,)
+    # A layer that retains every expert has no novices.
+    assert (
+        make_expert_substitution(_model_config([None, 5]), MOE_PREFIX, 5, 16, None)
+        is None
+    )
     with pytest.raises(ValueError, match="exactly one layer index"):
         make_expert_substitution(config, "mlp.experts", 5, 16, None)
-    with pytest.raises(ValueError, match="within"):
-        make_expert_substitution(config, MOE_PREFIX, 3, 16, None)
-    with pytest.raises(ValueError, match="retain at least one expert"):
-        make_expert_substitution(_model_config({"1": [0, 1]}), MOE_PREFIX, 2, 16, None)
+    with pytest.raises(ValueError, match="retains 6 experts"):
+        make_expert_substitution(_model_config([None, 6]), MOE_PREFIX, 5, 16, None)
 
 
-def test_constant_substitution_loads_values():
+def test_constant_substitution_loads_novices():
     substitution = _substitution(2)
-    substitution.weight_loader(substitution.values, torch.tensor([1.0, 2.0]), 3)
-    with pytest.raises(ValueError, match="missing approx_value .* \\[1\\]"):
+    novices = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+    with pytest.raises(ValueError, match="missing or incomplete"):
         substitution.validate_loaded_values("layer")
-    substitution.weight_loader(substitution.values, torch.tensor([3.0, 4.0]), 1)
+    substitution.weight_loader(substitution.novices, novices)
     substitution.validate_loaded_values("layer")
-    torch.testing.assert_close(
-        substitution.values, torch.tensor([[3.0, 4.0], [1.0, 2.0]])
-    )
-    with pytest.raises(ValueError, match="not listed"):
-        substitution.weight_loader(substitution.values, torch.ones(2), 2)
+    torch.testing.assert_close(substitution.novices, novices)
     with pytest.raises(ValueError, match="has shape"):
-        substitution.weight_loader(substitution.values, torch.ones(3), 1)
+        substitution.weight_loader(substitution.novices, torch.ones(3, 2))
 
 
 @pytest.mark.parametrize("num_tokens", [0, 1, 3, 7])
@@ -194,7 +138,7 @@ def test_constant_substitution_transforms_routes_and_computes_side_output(
     num_tokens, hidden_size
 ):
     substitution = _substitution(2)
-    substitution.values.data.copy_(torch.tensor([[10.0, 20.0], [30.0, 40.0]]))
+    substitution.novices.data.copy_(torch.tensor([[10.0, 20.0], [30.0, 40.0]]))
 
     rows = torch.arange(num_tokens) % 3
     topk_ids = torch.tensor([[1, 2], [4, 3], [99, -1]])[rows]
@@ -228,13 +172,13 @@ def test_constant_substitution_transforms_routes_and_computes_side_output(
 )
 def test_constant_substitution_preserves_router_weight_precision(dtype, device):
     substitution = _substitution(1, dtype).to(device)
-    substitution.values.data.copy_(
+    substitution.novices.data.copy_(
         torch.tensor([[60000.0], [-60000.0]], dtype=dtype, device=device)
     )
     topk_weights = torch.tensor([[0.5001, 0.4999]], dtype=torch.float32, device=device)
     topk_ids = torch.tensor([[1, 3]], device=device)
     # Nearly cancelling constants must retain the difference between FP32 weights.
-    expected = (topk_weights.double() @ substitution.values.double()).to(dtype)
+    expected = (topk_weights.double() @ substitution.novices.double()).to(dtype)
 
     actual = substitution.transform_routes(
         torch.zeros(1, 1, dtype=dtype, device=device), topk_weights, topk_ids
@@ -264,7 +208,7 @@ def test_substituted_routed_experts_adds_constant_on_one_tp_rank(tp_rank, padded
         moe_config=SimpleNamespace(tp_rank=tp_rank),
         quant_method=SimpleNamespace(is_monolithic=False, apply=apply),
     )
-    layer.expert_substitution.values.data.copy_(
+    layer.expert_substitution.novices.data.copy_(
         torch.tensor([[10.0, 20.0], [30.0, 40.0]])
     )
     actual = layer.forward_modular(
@@ -283,9 +227,7 @@ def test_substituted_routed_experts_adds_constant_on_one_tp_rank(tp_rank, padded
 )
 def test_standard_fused_moe_model_discovers_substitution(dist_init):
     vllm_config = VllmConfig()
-    vllm_config.model_config = _model_config(
-        {"0": [1]}, dtype=torch.bfloat16, is_moe=True
-    )
+    vllm_config.model_config = _model_config([3], dtype=torch.bfloat16, is_moe=True)
     vllm_config.kernel_config.moe_backend = "triton"
 
     with set_current_vllm_config(vllm_config):
@@ -300,7 +242,7 @@ def test_standard_fused_moe_model_discovers_substitution(dist_init):
 
     routed_experts = moe.experts.routed_experts
     assert isinstance(routed_experts, SubstitutedRoutedExperts)
-    assert routed_experts.expert_substitution.substituted_expert_ids == (1,)
+    assert routed_experts.expert_substitution.substituted_expert_ids == (3,)
     assert routed_experts.w13_weight.shape[0] == 3
     assert moe.experts.moe_config.require_decomposed_backend
 
@@ -325,9 +267,7 @@ def test_standard_fused_moe_model_discovers_substitution(dist_init):
 def test_fused_moe_combines_compact_experts_and_substitution(dist_init, moe_backend):
     hidden_size = 256
     vllm_config = VllmConfig()
-    vllm_config.model_config = _model_config(
-        {"0": [1, 3]}, dtype=torch.bfloat16, is_moe=True
-    )
+    vllm_config.model_config = _model_config([2], dtype=torch.bfloat16, is_moe=True)
     vllm_config.compilation_config.static_forward_context = {}
     vllm_config.kernel_config.moe_backend = moe_backend
 
@@ -347,7 +287,7 @@ def test_fused_moe_combines_compact_experts_and_substitution(dist_init, moe_back
         with torch.no_grad():
             layer.routed_experts.w13_weight.normal_(0, 0.01)
             layer.routed_experts.w2_weight.normal_(0, 0.01)
-            substitution.values.normal_(0, 0.01)
+            substitution.novices.normal_(0, 0.01)
         layer._quant_method.process_weights_after_loading(layer.routed_experts)
 
         hidden_states = torch.randn(8, hidden_size, dtype=torch.bfloat16, device="cuda")
@@ -389,12 +329,13 @@ def _tp_substitution_worker(
         with torch.no_grad():
             layer.routed_experts.w13_weight.zero_()
             layer.routed_experts.w2_weight.zero_()
-            layer.routed_experts.expert_substitution.values.fill_(0.25)
+            layer.routed_experts.expert_substitution.novices.fill_(0.25)
         layer._quant_method.process_weights_after_loading(layer.routed_experts)
 
         hidden_states = torch.zeros(2, 256, dtype=torch.bfloat16)
+        # Expert 3 is the novice; route every token to it.
         router_logits = torch.tensor(
-            [[-100.0, 100.0, -100.0, -100.0]] * 2,
+            [[-100.0, -100.0, -100.0, 100.0]] * 2,
             dtype=torch.float32,
         )
         get_forward_context().all_moe_layers = None
@@ -411,7 +352,7 @@ def _tp_substitution_worker(
 def test_constant_substitution_is_added_once_with_tp2():
     vllm_config = VllmConfig(parallel_config=ParallelConfig(tensor_parallel_size=2))
     vllm_config.model_config = _model_config(
-        {"0": [1]},
+        [3],
         dtype=torch.bfloat16,
         is_moe=True,
         sleep_mode_offload_cudagraph=False,
