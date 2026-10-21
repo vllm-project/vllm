@@ -234,3 +234,32 @@ def test_unquantized_loader_routes_per_expert_names_to_expert_mapping(
     list(MuseSparkRoutedExperts.load_weights(experts, individual))
     assert consolidated_calls == [["w13_weight", "w2_weight"]]
     assert per_expert_calls == [[name for name, _ in individual]]
+
+
+@pytest.mark.parametrize(
+    "expert_parallel,reduce_dtype,supported",
+    [(True, "fp32", True), (False, "bf16", True), (False, "fp32", False)],
+)
+def test_token_sharded_stream_needs_ep_or_a_bf16_tp_reduction(
+    monkeypatch, expert_parallel: bool, reduce_dtype: str, supported: bool
+) -> None:
+    from vllm import envs
+
+    monkeypatch.setattr(envs, "VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE", reduce_dtype)
+    monkeypatch.setattr(envs, "VLLM_ROCM_MUSE_SP_MIN_TOKENS", 1024)
+    parallel_config = SimpleNamespace(
+        enable_expert_parallel=expert_parallel,
+        tensor_parallel_size=8,
+        data_parallel_size=1,
+        pipeline_parallel_size=1,
+        prefill_context_parallel_size=1,
+        decode_context_parallel_size=1,
+        use_sequence_parallel_moe=False,
+    )
+    vllm_config = SimpleNamespace(
+        parallel_config=parallel_config,
+        model_config=SimpleNamespace(
+            hf_text_config=SimpleNamespace(mlp_layer_types=["sparse"] * 4)
+        ),
+    )
+    assert amd_model.token_sharded_stream_supported(vllm_config) is supported

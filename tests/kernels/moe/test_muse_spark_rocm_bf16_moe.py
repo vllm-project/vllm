@@ -405,7 +405,12 @@ _FAIL_CLOSED_EVERYWHERE = [
     (_moe_config(parallel_config=_parallel_config(sp_size=2)), "sequence"),
     (_moe_config(parallel_config=_parallel_config(enable_eplb=True)), "EPLB"),
     (_moe_config(is_lora_enabled=True), "LoRA"),
-    (_moe_config(skip_final_all_reduce=True), "unreduced"),
+    (
+        _moe_config(
+            parallel_config=_parallel_config(tp_size=8), skip_final_all_reduce=True
+        ),
+        "unreduced",
+    ),
 ]
 
 
@@ -424,6 +429,15 @@ def test_unsupported_deployments_fail_closed(
 ) -> None:
     with pytest.raises(NotImplementedError, match=reason):
         validate(config)
+
+
+def test_expert_parallel_moe_may_leave_the_final_reduce_to_the_model() -> None:
+    config = _moe_config(
+        parallel_config=_parallel_config(ep_size=8), skip_final_all_reduce=True
+    )
+    validate_bf16_deployment(config)
+    validate_fp8_deployment(config)
+    validate_mxfp4_deployment(config)
 
 
 @pytest.mark.parametrize(
@@ -961,6 +975,51 @@ def test_token_sharded_finalize_pads_and_slices_per_rank(monkeypatch) -> None:
     expected = reference.apply(None, routed[:3], weights[:3], ids[:3], False)
     torch.testing.assert_close(actual[:3], expected, atol=2e-2, rtol=2e-2)
     assert torch.count_nonzero(actual[3:]) == 0
+
+
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="requires a ROCm GPU")
+def test_token_sharded_stream_keeps_only_the_current_ranks_finalized_rows(
+    monkeypatch,
+) -> None:
+    torch.manual_seed(0)
+    num_tokens, top_k, hidden = 8, 8, 256
+    norm = _post_expert_norm_module(hidden).cuda()
+    routed = torch.randn(num_tokens, top_k, hidden, device="cuda", dtype=torch.bfloat16)
+    weights = torch.softmax(torch.randn(num_tokens, top_k, device="cuda"), dim=-1)
+    ids = torch.zeros(num_tokens, top_k, dtype=torch.int32, device="cuda")
+    scattered: list[int] = []
+
+    def _reduce_scatter(x: torch.Tensor, dim: int = -1) -> torch.Tensor:
+        assert dim == 0
+        scattered.append(x.shape[0])
+        return x[x.shape[0] // 2 :]
+
+    module = "vllm.models.muse_spark.amd.muse_moe_runner"
+    monkeypatch.setattr(
+        f"{module}.tensor_model_parallel_reduce_scatter", _reduce_scatter
+    )
+    for name in ("all_gather", "all_reduce"):
+        monkeypatch.setattr(
+            f"{module}.tensor_model_parallel_{name}",
+            lambda *args, **kwargs: pytest.fail("the stream stays token-sharded"),
+        )
+    monkeypatch.setattr(f"{module}.get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(f"{module}.get_tensor_model_parallel_rank", lambda: 1)
+    monkeypatch.setattr(f"{module}._FINALIZE_CHUNK_ELEMS", 4 * top_k * hidden)
+
+    reducer = MuseSparkTopKWeightAndReduce(norm.forward, pre_norm_all_reduce=True)
+    reducer.reduce_dtype = torch.bfloat16
+    output = torch.full(
+        (num_tokens, hidden), float("nan"), device="cuda", dtype=torch.bfloat16
+    )
+    with amd_muse_moe_runner.token_sharded_moe_output():
+        reducer.apply(output, routed, weights, ids, False)
+
+    assert scattered == [num_tokens]
+    reference = MuseSparkTopKWeightAndReduce(norm.forward, pre_norm_all_reduce=False)
+    expected = reference.apply(None, routed[4:], weights[4:], ids[4:], False)
+    torch.testing.assert_close(output[4:], expected)
+    assert output[:4].isnan().all()
 
 
 @pytest.mark.skipif(not ROCM_AITER_SUPPORTED, reason="requires supported AITER")
