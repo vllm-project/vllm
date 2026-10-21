@@ -46,12 +46,19 @@ The packed kernel and the in-launch split-K reduction on one XCD
 adapted from the group32 GEMM in ROCm/aiter#5750.
 """
 
+import os
 from typing import NamedTuple
 
 import torch
 
+from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    mxfp8_e4m3_quantize,
+)
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
+
+logger = init_logger(__name__)
 
 BLOCK_ROWS = 32
 
@@ -272,6 +279,124 @@ def _block32_packed_kernel(
         )
 
 
+# _block32_packed_kernel with the MXFP8 activation quantizer folded into
+# the K loop: x_ptr is the RAW bf16/fp16 [M, K] activation (row-major
+# contiguous), quantized per 32-element block in registers with the exact
+# _mxfp8_quant_triton_kernel arithmetic (amax -> biased E8M0 scale ->
+# reciprocal rescale -> RN cast to e4m3), so the separate quant launch and
+# the x_q/x_scale global round-trip disappear from the decode critical
+# path. Tiling, K-panel packing, split-K reduction and stores are
+# byte-for-byte the packed kernel, so the output is bit-identical to
+# quantize-then-GEMM by construction (same quant arithmetic on the same
+# values, same dot order).
+@triton.jit(do_not_specialize=["M"])
+def _block32_packed_quant_kernel(
+    x_ptr,
+    w_ptr,
+    ws_ptr,
+    out_ptr,
+    slot_ptr,
+    count_ptr,
+    M,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    stride_om,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    K_PACK: tl.constexpr,
+    K_PER_SPLIT: tl.constexpr,
+    EVEN_K: tl.constexpr,
+    FUSED_SPLITS: tl.constexpr,
+    FP8_MAX: tl.constexpr,
+    TINY: tl.constexpr,
+):
+    if FUSED_SPLITS > 1:
+        pid_m, pid_n, tile, pid_k = _split_tile(N, BLOCK_N, FUSED_SPLITS)
+        if pid_m * BLOCK_M >= M:
+            return
+        k_start = pid_k * K_PER_SPLIT
+        k_stop = tl.minimum(k_start + K_PER_SPLIT, K)
+    else:
+        pid_m, pid_n, pid_k = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+        if K_PER_SPLIT >= K:
+            k_start = 0
+            k_stop = K
+        else:
+            k_start = pid_k * K_PER_SPLIT
+            k_stop = tl.minimum(k_start + K_PER_SPLIT, K)
+    # Tile row r is token r // K_PACK reading K panel r % K_PACK (and likewise
+    # for weight rows), so one dot covers K_PACK consecutive BLOCK_K slices.
+    rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M * K_PACK) // K_PACK
+    x_panel = tl.arange(0, BLOCK_M * K_PACK) % K_PACK
+    cols = pid_n * BLOCK_N + tl.arange(0, BLOCK_N * K_PACK) // K_PACK
+    w_panel = tl.arange(0, BLOCK_N * K_PACK) % K_PACK
+    ks = tl.arange(0, BLOCK_K)
+    gs = tl.arange(0, BLOCK_K // 32)
+    row_ok = rows < M
+    col_ok = cols < N
+    acc = tl.zeros((BLOCK_M * K_PACK, BLOCK_N * K_PACK), dtype=tl.float32)
+    for base in range(k_start, k_stop, BLOCK_K * K_PACK):
+        xk = base + x_panel[:, None] * BLOCK_K + ks[None, :]
+        wk = base + w_panel[:, None] * BLOCK_K + ks[None, :]
+        wg = base // 32 + w_panel[:, None] * (BLOCK_K // 32) + gs[None, :]
+        x_mask = row_ok[:, None]
+        w_mask = col_ok[:, None]
+        ws_mask = col_ok[:, None]
+        if not EVEN_K:
+            x_mask = x_mask & (xk < K)
+            w_mask = w_mask & (wk < K)
+            ws_mask = ws_mask & (wg < K // 32)
+        # Fused MXFP8 quant, verbatim _mxfp8_quant_triton_kernel arithmetic.
+        # K is a multiple of 32 and every 32-block of the tile is 32-aligned,
+        # so each block is either fully inside K or fully masked (loaded 0.0,
+        # scale byte 0) -- the same values the separate quantizer produces
+        # for these rows. Masked rows likewise load 0.0 and quantize to
+        # scale byte 0 / value 0, matching the kernel's other=0 loads.
+        x = tl.load(x_ptr + rows[:, None] * K + xk, mask=x_mask, other=0.0).to(
+            tl.float32
+        )
+        xb = tl.reshape(x, (BLOCK_M * K_PACK, BLOCK_K // 32, 32))
+        amax = tl.maximum(tl.max(tl.abs(xb), axis=2), TINY)
+        sb = tl.ceil(tl.log2(amax / FP8_MAX)) + 127.0
+        sb = tl.minimum(tl.maximum(sb, 0.0), 254.0)
+        rescale = tl.exp2(127.0 - sb)
+        xq = tl.reshape(xb * rescale[:, :, None], (BLOCK_M * K_PACK, BLOCK_K)).to(
+            w_ptr.dtype.element_ty
+        )
+        xs = sb.to(tl.uint8)
+        w = tl.load(w_ptr + cols[:, None] * K + wk, mask=w_mask, other=0.0)
+        ws = tl.load(
+            ws_ptr + (cols[:, None] // 32) * (K // 32) + wg, mask=ws_mask, other=0
+        )
+        acc = tl.dot_scaled(xq, xs, "e4m3", w.T, ws, "e4m3", acc=acc)
+    # Keep only products of matching K panels: the block diagonal.
+    blocks = acc.reshape(BLOCK_M, K_PACK, BLOCK_N, K_PACK).trans(0, 2, 1, 3)
+    pair = tl.arange(0, K_PACK)
+    diagonal = tl.where(
+        pair[None, None, :, None] == pair[None, None, None, :], blocks, 0.0
+    )
+    y = tl.sum(tl.sum(diagonal, 3), 2)
+    out_rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    out_cols = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    out_ptrs = out_ptr + out_rows[:, None] * stride_om + out_cols[None, :]
+    out_mask = (out_rows[:, None] < M) & (out_cols[None, :] < N)
+    if FUSED_SPLITS > 1:
+        _sum_splits(
+            y,
+            out_ptrs,
+            out_mask,
+            slot_ptr + tile * (FUSED_SPLITS * BLOCK_M * BLOCK_N),
+            count_ptr + tile,
+            pid_k,
+            FUSED_SPLITS,
+        )
+    else:
+        tl.store(
+            out_ptrs + pid_k * M * N, y.to(out_ptr.dtype.element_ty), mask=out_mask
+        )
+
+
 @triton.jit(do_not_specialize=["M"])
 def _block32_splitk_reduce_kernel(
     partial_ptr,
@@ -331,9 +456,9 @@ def _packed(bm, bn, bk, k_pack, warps, stages, nonkdim, waves, fused=1) -> _Conf
     )
 
 
-# (N, K) -> [(max M, config), ...] for the DeepSeek-V4.1-Flash MXFP8 linears at
-# TP2/TP4, tuned on MI355X under HIP graphs with weights cold in the LLC. A
-# tier serves every M up to its bound; larger M reuse the last tier.
+# (N, K) -> [(max M, config), ...] for the DeepSeek-V4.1-Flash MXFP8
+# linears at TP2/TP4, tuned on MI355X under HIP graphs. A tier serves
+# every M up to its bound; larger M reuse the last tier.
 _TUNED: dict[tuple[int, int], list[tuple[int, _Config]]] = {
     # shared expert gate_up, TP4
     (1152, 5120): [
@@ -563,6 +688,49 @@ def _config(M: int, N: int, K: int) -> _Config:
     return tiers[-1][1]
 
 
+# Retuned tiling/scheduling for the fused-quant kernel, whose per-CTA
+# quant prologue shifts the best (BLOCK_M, BLOCK_N, num_warps, num_stages,
+# waves_per_eu). Entries override ONLY those five axes of the stock tier
+# active at M; the K-structure axes (block_k, k_split/k_pack,
+# fused_splits, matrix_instr_nonkdim) stay at that tier's values so no
+# output element's K-accumulation order changes and the fused output stays
+# bit-identical to the two-launch path at every M. Consulted only on the
+# quant_in_kernel path, never by the stock two-launch path.
+_TUNED_FUSED_QUANT: dict[
+    tuple[int, int], list[tuple[int, tuple[int, int, int, int, int]]]
+] = {
+    # (N, K): [(max_m, (block_m, block_n, warps, stages, waves)), ...]
+    # DeepSeek-V4.1-Flash TP4 decode shapes:
+    (1152, 5120): [(8, (8, 32, 4, 2, 0))],  # shared_gate_up
+    (1792, 5120): [(8, (8, 16, 4, 3, 1))],  # fused_wqa_wkv
+    (4096, 1280): [(8, (8, 16, 4, 2, 0))],  # indexer_wq_b
+    (5120, 576): [(8, (8, 16, 4, 2, 0))],  # shared_down
+    (5120, 2048): [(8, (8, 32, 8, 3, 0))],  # wo_b
+    (8192, 1280): [(8, (8, 32, 2, 3, 1))],  # wq_b
+    # DSpark draft shapes (stock falls to _default_config):
+    (1024, 2048): [(8, (8, 16, 4, 2, 1))],  # draft
+    (768, 1536): [(8, (8, 16, 4, 3, 0))],  # draft
+}
+
+
+def _fused_quant_config(M: int, N: int, K: int) -> _Config:
+    """The stock tier active at M with its tiling/scheduling retuned for the
+    in-kernel quant prologue (see _TUNED_FUSED_QUANT); the stock config
+    where the shape has no fused-tier entry. K-structure axes are always
+    the stock tier's own, so the output stays bit-exact at every M."""
+    base = _config(M, N, K)
+    for max_m, (bm, bn, warps, stages, waves) in _TUNED_FUSED_QUANT.get((N, K), ()):
+        if max_m >= M:
+            return base._replace(
+                block_m=bm,
+                block_n=bn,
+                num_warps=warps,
+                num_stages=stages,
+                waves_per_eu=waves,
+            )
+    return base
+
+
 _split_counters_by_stream: dict[tuple[int, int], torch.Tensor] = {}
 
 
@@ -599,7 +767,11 @@ def _launch(
     weight_scale: torch.Tensor,
     out: torch.Tensor,
     cfg: _Config,
+    quant_in_kernel: bool = False,
 ) -> None:
+    """Launch cfg's kernel. quant_in_kernel=True (packed cfgs only) makes
+    x the raw bf16/fp16 activation and x_scale None: the kernel quantizes
+    x per 32-block in registers (see _block32_packed_quant_kernel)."""
     M, K = x.shape
     N = weight.shape[0]
     opts = dict(
@@ -638,21 +810,46 @@ def _launch(
             grid = (grid_m, grid_n, splits)
         else:
             grid = (grid_n, grid_m, splits)
-    args = (x, x_scale, weight, weight_scale, target, slots, counters, M, N, K)
+    args: tuple
+    if quant_in_kernel:
+        if not cfg.packed:
+            raise ValueError("quant_in_kernel needs a packed tile config")
+        args = (x, weight, weight_scale, target, slots, counters, M, N, K)
+    else:
+        args = (x, x_scale, weight, weight_scale, target, slots, counters, M, N, K)
     stride = out.stride(0) if splits == 1 or fused > 1 else N
     if cfg.packed:
-        _block32_packed_kernel[grid](
-            *args,
-            stride,
-            BLOCK_M=cfg.block_m,
-            BLOCK_N=cfg.block_n,
-            BLOCK_K=cfg.block_k,
-            K_PACK=cfg.k_split,
-            K_PER_SPLIT=k_per_split,
-            EVEN_K=K % step == 0,
-            FUSED_SPLITS=fused,
-            **opts,
-        )
+        if quant_in_kernel:
+            # Same output contract as the packed kernel below (partials at
+            # pid_k * M * N when FUSED_SPLITS == 1 with multiple pid_k), so
+            # the split-K reduce after this branch applies unchanged.
+            _block32_packed_quant_kernel[grid](
+                *args,
+                stride,
+                BLOCK_M=cfg.block_m,
+                BLOCK_N=cfg.block_n,
+                BLOCK_K=cfg.block_k,
+                K_PACK=cfg.k_split,
+                K_PER_SPLIT=k_per_split,
+                EVEN_K=K % step == 0,
+                FUSED_SPLITS=fused,
+                FP8_MAX=_FP8_MAX,
+                TINY=_FP32_TINY,
+                **opts,
+            )
+        else:
+            _block32_packed_kernel[grid](
+                *args,
+                stride,
+                BLOCK_M=cfg.block_m,
+                BLOCK_N=cfg.block_n,
+                BLOCK_K=cfg.block_k,
+                K_PACK=cfg.k_split,
+                K_PER_SPLIT=k_per_split,
+                EVEN_K=K % step == 0,
+                FUSED_SPLITS=fused,
+                **opts,
+            )
     else:
         _block32_tiled_kernel[grid](
             *args,
@@ -734,4 +931,135 @@ def rocm_mxfp8_block32_gemm(
     """
     return torch.ops.vllm.rocm_mxfp8_block32_gemm(
         x, x_scale, weight, weight_scale, out_dtype
+    )
+
+
+# --- tiny-M fused quant+GEMM ------------------------------------------------
+# Decode-sized batches (M <= 8) otherwise pay a full activation-quant launch
+# just to produce the e4m3 tiles + E8M0 scales the packed GEMM immediately
+# re-reads; the fused kernel above computes that quant inside the GEMM's K
+# loop, removing the launch and its global round-trip from the decode
+# critical path. VLLM_DISABLE_FUSED_MXFP8_QUANT_GEMM=1 restores the
+# two-launch path (identical results).
+
+_TINY_M_FUSED_QUANT_MAX_M = 8
+# Shared with _mxfp8_quant_triton_kernel (the bit-exactness contract).
+_FP8_MAX = float(torch.finfo(torch.float8_e4m3fn).max)
+_FP32_TINY = float(torch.finfo(torch.float32).tiny)
+
+_FUSED_QUANT_ENV_OK: bool | None = None
+_FUSED_QUANT_HIT_SHAPES: set = set()
+
+
+def _fused_quant_env_ok() -> bool:
+    global _FUSED_QUANT_ENV_OK
+    if _FUSED_QUANT_ENV_OK is None:
+        _FUSED_QUANT_ENV_OK = (
+            os.environ.get("VLLM_DISABLE_FUSED_MXFP8_QUANT_GEMM", "0") != "1"
+        )
+    return _FUSED_QUANT_ENV_OK
+
+
+def _rocm_mxfp8_block32_gemm_quant_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    """``x @ weight.T`` for raw bf16/fp16 ``x`` and a 32x32 block-scaled
+    MXFP8 weight, quantizing ``x`` inside the GEMM at tiny M.
+
+    M <= 8 with a packed tile config (every tuned M <= 8 tier is packed)
+    runs one launch whose K loop computes the per-32-block E8M0 scale and
+    the e4m3 cast exactly as ``_mxfp8_quant_triton_kernel`` and feeds
+    ``tl.dot_scaled`` from registers -- bit-identical output to
+    ``mxfp8_e4m3_quantize`` + ``rocm_mxfp8_block32_gemm`` with one launch
+    fewer on the decode critical path. Everything else (larger M,
+    non-packed tiles, non-contiguous or non-bf16/fp16 x, or
+    ``VLLM_DISABLE_FUSED_MXFP8_QUANT_GEMM=1``) runs the stock two-launch
+    path with identical results. The branch is inside this opaque op so a
+    compiled caller cannot freeze the token-count decision.
+    """
+    M, K = x.shape
+    out = torch.empty((M, weight.shape[0]), dtype=out_dtype, device=x.device)
+    if M <= 0:
+        return out
+    cfg = _config(M, weight.shape[0], K)
+    eligible = (
+        cfg.packed
+        and M <= _TINY_M_FUSED_QUANT_MAX_M
+        and x.dtype in (torch.bfloat16, torch.float16)
+        and x.is_contiguous()
+    )
+    if eligible and _fused_quant_env_ok():
+        # Retuned tiling for the in-kernel quant prologue (same K-structure
+        # as the stock tier at M, so bit-exactness holds); the DISABLED and
+        # stock paths below keep the stock config untouched.
+        fused_cfg = _fused_quant_config(M, weight.shape[0], K)
+        shape = (M, weight.shape[0], K)
+        if shape not in _FUSED_QUANT_HIT_SHAPES:
+            _FUSED_QUANT_HIT_SHAPES.add(shape)
+            # warning_once keeps the engagement log one-shot per shape;
+            # WARNING, not INFO, so it reaches the server log.
+            logger.warning_once(
+                "tiny-M fused MXFP8 quant+GEMM HIT (M=%d, N=%d, K=%d, packed "
+                "tile %dx%dx%d k_pack=%d%s)",
+                M,
+                weight.shape[0],
+                K,
+                fused_cfg.block_m,
+                fused_cfg.block_n,
+                fused_cfg.block_k,
+                fused_cfg.k_split,
+                (
+                    f", fused_splits={fused_cfg.fused_splits}"
+                    if fused_cfg.fused_splits > 1
+                    else ""
+                ),
+            )
+        _launch(x, None, weight, weight_scale, out, fused_cfg, quant_in_kernel=True)
+    else:
+        if eligible:
+            logger.warning_once(
+                "tiny-M fused MXFP8 quant+GEMM fastpath is DISABLED (env "
+                "override VLLM_DISABLE_FUSED_MXFP8_QUANT_GEMM=1); using "
+                "separate mxfp8_e4m3_quantize + block32 GEMM launches"
+            )
+        x_q, x_scale = mxfp8_e4m3_quantize(x)
+        _launch(x_q, x_scale, weight, weight_scale, out, cfg)
+    return out
+
+
+def _rocm_mxfp8_block32_gemm_quant_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    return x.new_empty((x.shape[0], weight.shape[0]), dtype=out_dtype)
+
+
+# An opaque op for the same reason as rocm_mxfp8_block32_gemm: the fused vs
+# two-launch choice branches on the token count.
+direct_register_custom_op(
+    op_name="rocm_mxfp8_block32_gemm_quant",
+    op_func=_rocm_mxfp8_block32_gemm_quant_impl,
+    fake_impl=_rocm_mxfp8_block32_gemm_quant_fake,
+)
+
+
+def rocm_mxfp8_block32_gemm_quant(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    """``x @ weight.T`` for a raw bf16/fp16 ``x`` [M, K] and a 32x32
+    block-scaled MXFP8 ``weight`` [N, K] with ``weight_scale``
+    [N / 32, K / 32]. Tiny-M batches quantize inside the packed GEMM (see
+    ``_rocm_mxfp8_block32_gemm_quant_impl``); the kill switch is
+    ``VLLM_DISABLE_FUSED_MXFP8_QUANT_GEMM=1``.
+    """
+    return torch.ops.vllm.rocm_mxfp8_block32_gemm_quant(
+        x, weight, weight_scale, out_dtype
     )
