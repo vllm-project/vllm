@@ -8,7 +8,10 @@ import torch
 from torch import nn
 
 from vllm.model_executor.model_loader.reload import finalize_layerwise_reload
-from vllm.model_executor.model_loader.weight_utils import finalize_model_weights
+from vllm.model_executor.model_loader.weight_utils import (
+    discard_weight_parts,
+    finalize_model_weights,
+)
 from vllm.model_executor.models.deepseek_v2 import _try_load_fp8_indexer_wk
 
 PREFIX = "model.layers.0.self_attn.indexer"
@@ -68,6 +71,21 @@ class TestSplitWeightParts:
         with pytest.raises(ValueError, match=PREFIX):
             finalize_model_weights(module)
         finalize_model_weights(module)
+
+    def test_aborted_update_part_does_not_pair_with_next(self):
+        """An update that failed midway leaves a stashed weight; the next update
+        sends the scale first. The scale must wait for the new weight."""
+        weight, scale = _wk_tensors()
+        stale = (weight[0], (-weight[1].float()).to(weight[1].dtype))
+        module = nn.Module()
+        _load_in_calls(module, [[stale]])  # the update that never finished
+        discard_weight_parts(module)  # the next reload starts
+
+        assert _load_in_calls(module, [[scale]]) == []
+        got = _load_in_calls(module, [[weight]])
+        expected = _load_in_calls(nn.Module(), [[weight, scale]])
+        assert len(got) == 1
+        torch.testing.assert_close(got[0], expected[0])
 
 
 class _HookCounter(nn.Module):

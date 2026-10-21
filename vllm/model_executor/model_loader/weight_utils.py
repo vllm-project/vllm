@@ -1529,6 +1529,13 @@ def stash_weight_part(
     return None
 
 
+def discard_weight_parts(model: torch.nn.Module) -> None:
+    """Drop parts parked by an update that never finished, so they cannot pair
+    with the next update's parts. Called when a reload starts."""
+    for module in model.modules():
+        module.__dict__.pop("_pending_weight_parts", None)
+
+
 def finalize_model_weights(model: torch.nn.Module) -> None:
     """Run once after a full load or reload: reject multi-tensor weights whose
     parts never all arrived, then run the model-level post-load hook."""
