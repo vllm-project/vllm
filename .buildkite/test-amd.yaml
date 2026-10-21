@@ -1588,6 +1588,24 @@ steps:
   # case and the 8/16-GPU cases in test_latent_moe_tail.py still skip.
   - pytest -v -s -m "distributed" models/kimi_k3
 
+- label: ":amd: (MI355) MiniMax M3 Specialized Decode"
+  timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_4
+  num_gpus: 4
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/models/minimax_m3/amd/
+  - vllm/models/deepseek_v41/amd/mono/common/
+  - tests/models/minimax_m3/amd_specialized_decode/
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -v -s models/minimax_m3/amd_specialized_decode
+  # the long TP4 hand-off stress
+  - pytest -v -s --optional -m optional models/minimax_m3/amd_specialized_decode
+
 - label: ":amd: (MI300) Mamba Kernels" # TBD
   timeout_in_minutes: 55
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
