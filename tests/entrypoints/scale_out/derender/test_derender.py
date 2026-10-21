@@ -12,8 +12,10 @@ import pytest_asyncio
 from tests.utils import RemoteLaunchRenderServer
 from vllm.entrypoints.generate.base.protocol import FunctionCall
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     GenerateTokensResponse,
+    GenerateTokensStreamResponse,
 )
 from vllm.renderers.online_derenderer import OnlineDerenderer
 from vllm.tokenizers import get_tokenizer
@@ -134,6 +136,36 @@ async def test_derender_chat_passes_stop_reason_through(client):
     )
     assert response.status_code == 200
     assert response.json()["choices"][0]["stop_reason"] == "\n\n"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("return_token_ids", [False, True])
+@pytest.mark.parametrize("stream", [False, True])
+async def test_derender_chat_returns_requested_prompt_token_ids(
+    client, return_token_ids, stream
+):
+    """Like the coupled endpoint, prompt_token_ids is returned only on request."""
+    gen_req = await _render_chat(client)
+    prompt_ids = gen_req["token_ids"]
+    generate_response = _make_generate_response(prompt_ids[:3])
+    generate_response["prompt_token_ids"] = prompt_ids
+    chat_request = {
+        "model": MODEL_NAME,
+        "messages": [{"role": "user", "content": "Hello"}],
+        "return_token_ids": return_token_ids,
+    }
+    body: dict = {"model": MODEL_NAME, "chat_request": chat_request}
+    if stream:
+        body["stream"] = True
+        body["generate_chunk"] = generate_response
+    else:
+        body["generate_response"] = generate_response
+
+    response = await client.post("/v1/chat/completions/derender", json=body)
+
+    assert response.status_code == 200
+    data = response.json()["chunk"] if stream else response.json()
+    assert data.get("prompt_token_ids") == (prompt_ids if return_token_ids else None)
 
 
 @pytest.mark.asyncio
@@ -1579,3 +1611,45 @@ def test_derender_chat_keeps_parser_tool_call_id():
 
     (tool_call,) = choice.message.tool_calls
     assert tool_call.id == "functions.get_weather:1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("return_token_ids", [None, False, True])
+@pytest.mark.parametrize("stream", [False, True])
+async def test_derender_completion_preserves_requested_token_ids(
+    tokenizer, return_token_ids, stream
+):
+    renderer = MagicMock()
+    renderer.get_tokenizer.return_value = tokenizer
+    renderer._executor = None
+    model_config = MagicMock()
+    model_config.model = MODEL_NAME
+    model_config.hf_config.model_type = "llama"
+    derenderer = OnlineDerenderer(
+        model_config,
+        renderer,
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="string",
+    )
+    token_ids = tokenizer.encode("Hello world", add_special_tokens=False)
+    request = CompletionRequest(
+        model=MODEL_NAME, prompt="Hi", return_token_ids=return_token_ids
+    )
+    prompt_ids = tokenizer.encode("Hi")
+    payload = _make_generate_response(token_ids, finish_reason="length")
+    payload["prompt_token_ids"] = prompt_ids
+    if stream:
+        response, _ = await derenderer.derender_completion_stream(
+            MODEL_NAME,
+            GenerateTokensStreamResponse.model_validate(payload),
+            completion_request=request,
+        )
+        choices = response.choices
+    else:
+        choices, _, _ = await derenderer.derender_completion(
+            [GenerateTokensResponse.model_validate(payload)],
+            completion_request=request,
+        )
+    assert choices[0].token_ids == (token_ids if return_token_ids else None)
+    assert choices[0].prompt_token_ids == (prompt_ids if return_token_ids else None)
