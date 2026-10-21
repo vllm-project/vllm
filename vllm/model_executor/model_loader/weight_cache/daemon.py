@@ -96,7 +96,7 @@ from vllm.distributed import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
 )
-from vllm.logger import init_logger
+from vllm.logger import configure_logging, init_logger
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.model_loader.weight_cache.protocol import (
@@ -112,15 +112,16 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     send_msg,
     verify_peer_is_owner,
 )
+from vllm.model_executor.model_loader.weight_cache.seed import SeedTransport
 from vllm.model_executor.model_loader.weight_cache.utils import (
-    build_warmup_runner,
     export_model_attrs,
     format_daemon_role,
     is_draft_model_cacheable,
 )
-from vllm.model_executor.warmup.kernel_warmup import flashinfer_autotune
+from vllm.model_executor.model_loader.weight_cache.warmup_cache import (
+    FlashInferWarmupCache,
+)
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -186,10 +187,17 @@ class WeightCacheDaemon:
         is_draft: bool = False,
         dp_rank: int = 0,
         pp_rank: int = 0,
+        seed_listen: tuple[str, int] | None = None,
+        seed_source: tuple[str, int] | None = None,
+        seed_token: str | None = None,
     ):
         parallel_config = vllm_config.parallel_config
         if parallel_config.enable_eplb:
             raise ValueError("The weight cache daemon does not support EPLB.")
+        self.warmup_caches = [FlashInferWarmupCache()]
+        self.d2d = SeedTransport(
+            self.warmup_caches, seed_listen, seed_source, seed_token
+        )
         self.tp_size = parallel_config.tensor_parallel_size
         self.pp_size = parallel_config.pipeline_parallel_size
         self.dp_size = parallel_config.data_parallel_size
@@ -247,39 +255,9 @@ class WeightCacheDaemon:
         )
 
     def warmup(self) -> None:
-        """Run the FlashInfer autotune pass against the cached model."""
-        vllm_config = self.vllm_config
-        # Mirrors the gate in the engine's kernel warmup.
-        if (
-            vllm_config.kernel_config.enable_flashinfer_autotune is False
-            or not has_flashinfer()
-            or not current_platform.has_device_capability(90)
-            or is_draft_model_cacheable(vllm_config.speculative_config)
-        ):
-            return
-        try:
-            current_platform.update_block_size_for_backend(vllm_config)
-            runner = build_warmup_runner(
-                vllm_config,
-                self.local_rank,
-                is_draft=self.is_draft,
-                model_config=self.model_config,
-            )
-            assert self.model is not None, "warmup ran before load_model"
-            runner.load_model(model=self.model)
-            # The V2 runner requires skip_attn when no KV cache exists
-            flashinfer_autotune(runner, skip_attn=vllm_config.use_v2_model_runner)
-            logger.info(
-                "Weight cache %s daemon rank %d tuned FlashInfer; the tuned "
-                "configs are in the on-disk autotune cache",
-                self.role,
-                self.global_rank,
-            )
-        finally:
-            # Free the runner and the dummy-run activations; the daemon's
-            # weights are untouched.
-            gc.collect()
-            torch.accelerator.empty_cache()
+        """Run each warmup cache's pass (adopting remote caches via D2D)."""
+        for cache in self.warmup_caches:
+            cache.warmup(self, self.d2d)
 
     def load_model(self) -> None:
         torch.accelerator.set_device_index(self.local_rank)
@@ -363,6 +341,7 @@ class WeightCacheDaemon:
         server.bind(socket_path)
         os.chmod(socket_path, 0o600)
         server.listen()
+        self.d2d.start_listener()
         logger.info(
             "Weight cache %s daemon rank %d serving on %s",
             self.role,
@@ -390,6 +369,7 @@ class WeightCacheDaemon:
                             send_msg(conn, {"status": "error", "message": str(e)})
         finally:
             server.close()
+            self.d2d.close()
             if os.path.exists(socket_path):
                 os.unlink(socket_path)
             os.close(lock_fd)
@@ -498,7 +478,13 @@ def _run_daemon(
     is_draft: bool = False,
     dp_rank: int = 0,
     pp_rank: int = 0,
+    seed_listen: tuple[str, int] | None = None,
+    seed_source: tuple[str, int] | None = None,
+    seed_token: str | None = None,
 ) -> None:
+    # Spawned children get a fresh interpreter: apply the logging config
+    # explicitly or every vllm-logger line from this daemon is dropped.
+    configure_logging(vllm_config.logging_config)
     daemon = WeightCacheDaemon(
         vllm_config,
         global_rank,
@@ -508,6 +494,9 @@ def _run_daemon(
         is_draft,
         dp_rank,
         pp_rank,
+        seed_listen,
+        seed_source,
+        seed_token,
     )
     daemon.load_model()
     daemon.warmup()
