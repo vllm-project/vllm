@@ -3567,6 +3567,9 @@ def _rocm_sparse_attn_prefill_aiter(
     logger.info_once("Using AITER pa_prefill_sparse for sparse MLA prefill on gfx942")
     indices = _as_int32_contiguous_1d(indices)
     indptr = _as_int32_contiguous_1d(indptr)
+    inplace = (
+        output.shape == q.shape and output.dtype == q.dtype and output.is_contiguous()
+    )
     written = pa_prefill_sparse(
         q,
         kv,
@@ -3577,10 +3580,10 @@ def _rocm_sparse_attn_prefill_aiter(
         None,
         attn_sink,
         float(scale),
-        out=output if output.shape == q.shape and output.dtype == q.dtype else None,
+        out=output if inplace else None,
     )
     if written.data_ptr() != output.data_ptr():
-        output.copy_(written[..., : output.shape[-1]].to(output.dtype))
+        output.copy_(written[..., : output.shape[-1]])
 
 
 @functools.lru_cache
