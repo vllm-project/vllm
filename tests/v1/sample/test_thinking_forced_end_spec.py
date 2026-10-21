@@ -7,6 +7,7 @@ The harness drives ``ThinkingBudgetStateHolder`` the way V1 calls it
 ``RejectionSampler``) and verifies drafts greedily, so no GPU is needed.
 """
 
+import pytest
 import torch
 
 from vllm.sampling_params import SamplingParams
@@ -135,3 +136,18 @@ def test_forced_end_exact_when_no_draft_matches():
     holder, output = _start(budget=12)
     _run_until_closed(holder, output, lambda o: [9] * NUM_SPEC, _natural(3))
     _assert_exact_end(output)
+
+
+def test_forced_row_outside_the_logits_fails_loudly():
+    """A forced draft position with no logits row must raise, not be skipped:
+    skipping it drops an end token and corrupts the sequence again."""
+    holder, output = _start(budget=2)
+    output.extend([FILLER] * 4)
+    drafts = [9] * NUM_SPEC
+    holder.update_state([output], [drafts])
+
+    fits = holder.apply_to_logits(torch.zeros(NUM_SPEC, VOCAB), False, [drafts])
+    assert [int(torch.argmax(fits[j])) for j in range(NUM_SPEC)] == END[:NUM_SPEC]
+
+    with pytest.raises(AssertionError, match="outside the logits"):
+        holder.apply_to_logits(torch.zeros(NUM_SPEC - 1, VOCAB), False, [drafts])
