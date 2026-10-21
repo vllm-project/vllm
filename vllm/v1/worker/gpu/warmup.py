@@ -474,4 +474,6 @@ def _warmup_kernels(
     model_runner.kv_connector.set_disabled(False)
     if model_runner.kv_block_zeroer is not None:
         model_runner.kv_block_zeroer.zero_block_ids([0])
-    torch.accelerator.synchronize()
+    # CPU execution is synchronous and exposes no accelerator to synchronize.
+    if torch.accelerator.current_accelerator() is not None:
+        torch.accelerator.synchronize()

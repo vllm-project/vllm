@@ -7,6 +7,7 @@ import vllm.v1.worker.cpu.shm  # noqa # isort: skip
 import math
 import os
 import sys
+from typing import TYPE_CHECKING, cast
 
 import psutil
 import torch
@@ -25,6 +26,9 @@ from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.cpu_model_runner import CPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
 from vllm.v1.worker.worker_base import CompilationTimes
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
 
@@ -280,6 +284,32 @@ class CPUWorker(Worker):
         # Only compile here for models without kv cache
         if len(self.model_runner.kv_caches) == 0 and self._should_warm_up_model():
             self.model_runner.warming_up_model()
+        # profile_run skips the MRV2 scheduler-driven kernels, so their Triton
+        # JIT would land in the first request's TTFT. A single mixed step
+        # compiles them here; the full warmup_kernels matrix is unnecessary on
+        # CPU, where every extra shape is a cold Triton compile.
+        kernel_config = self.vllm_config.kernel_config
+        if self.use_v2_model_runner and kernel_config.enable_jit_warmup:
+            from vllm.v1.worker.gpu.warmup import run_mixed_prefill_decode_warmup
+
+            model_runner = cast("GPUModelRunner", self.model_runner)
+            num_tokens = min(
+                512,
+                self.scheduler_config.max_num_batched_tokens,
+                self.model_config.max_model_len,
+            )
+            # The KV-block zeroing kernel is driven by new_block_ids_to_zero,
+            # which the mixed step does not trigger, so warm it directly.
+            if model_runner.kv_block_zeroer is not None:
+                model_runner.kv_block_zeroer.warmup(
+                    model_runner.kv_cache_config.num_blocks
+                )
+            run_mixed_prefill_decode_warmup(
+                model_runner,
+                self.execute_model,
+                self.sample_tokens,
+                num_tokens,
+            )
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(
