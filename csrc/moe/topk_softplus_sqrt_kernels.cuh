@@ -716,19 +716,19 @@ void topkGatingSoftplusSqrtLauncherHelper(
 // Launches the kernel for one explicit wavefront size. WARP_SIZE (see
 // core/cuda_compat.h) is Utils::get_warp_size() on ROCm, i.e. only known at
 // runtime, so the warp size has to be a template parameter.
-#define LAUNCH_SOFTPLUS_SQRT_WARP(WARP_SIZE_PARAM, NUM_EXPERTS, WARPS_PER_TB,  \
+#define LAUNCH_SOFTPLUS_SQRT_WARP(WARP_SIZE_PARAM, NUM_EXPERTS, WARPS_PER_TB, \
                                   MAX_BYTES)                                  \
-  topkGatingSoftplusSqrtLauncherHelper<NUM_EXPERTS, WARPS_PER_TB,            \
+  topkGatingSoftplusSqrtLauncherHelper<NUM_EXPERTS, WARPS_PER_TB,             \
                                        WARP_SIZE_PARAM, MAX_BYTES>(           \
-      gating_output, nullptr, topk_weights, topk_indices,                    \
-      token_expert_indices, num_tokens, topk, 0, num_experts, renormalize,   \
-      routed_scaling_factor, correction_bias, use_hash, input_ids, tid2eid,  \
+      gating_output, nullptr, topk_weights, topk_indices,                     \
+      token_expert_indices, num_tokens, topk, 0, num_experts, renormalize,    \
+      routed_scaling_factor, correction_bias, use_hash, input_ids, tid2eid,   \
       stream, is_padding, bias_vl, image_sentinel_lo);
 
 #ifndef USE_ROCM
-  #define LAUNCH_SOFTPLUS_SQRT(NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES)           \
-    static_assert(WARP_SIZE == 32,                                             \
-                  "Unsupported warp size. Only 32 is supported for CUDA");     \
+  #define LAUNCH_SOFTPLUS_SQRT(NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES)       \
+    static_assert(WARP_SIZE == 32,                                         \
+                  "Unsupported warp size. Only 32 is supported for CUDA"); \
     LAUNCH_SOFTPLUS_SQRT_WARP(WARP_SIZE, NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES)
 #else
   // The wavefront size is fixed per GPU family: CDNA (gfx9xx) is wave64, RDNA
@@ -743,16 +743,16 @@ void topkGatingSoftplusSqrtLauncherHelper(
     #define LAUNCH_SOFTPLUS_SQRT(NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES) \
       LAUNCH_SOFTPLUS_SQRT_WARP(32, NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES)
   #else
-    #define LAUNCH_SOFTPLUS_SQRT(NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES)         \
-      if (WARP_SIZE == 64) {                                                   \
-        LAUNCH_SOFTPLUS_SQRT_WARP(64, NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES);   \
-      } else if (WARP_SIZE == 32) {                                            \
-        LAUNCH_SOFTPLUS_SQRT_WARP(32, NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES);   \
-      } else {                                                                 \
-        STD_TORCH_CHECK(false,                                                 \
-                        "Unsupported warp size. Only 32 and 64 are "          \
+    #define LAUNCH_SOFTPLUS_SQRT(NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES)       \
+      if (WARP_SIZE == 64) {                                                 \
+        LAUNCH_SOFTPLUS_SQRT_WARP(64, NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES); \
+      } else if (WARP_SIZE == 32) {                                          \
+        LAUNCH_SOFTPLUS_SQRT_WARP(32, NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES); \
+      } else {                                                               \
+        STD_TORCH_CHECK(false,                                               \
+                        "Unsupported warp size. Only 32 and 64 are "         \
                         "supported for ROCm, got ",                          \
-                        WARP_SIZE);                                            \
+                        WARP_SIZE);                                          \
       }
   #endif
 #endif
@@ -785,13 +785,15 @@ void topkGatingSoftplusSqrtKernelLauncher(
   STD_TORCH_CHECK(WARP_SIZE == 64,
                   "This build only instantiates wave64 kernels but the device "
                   "reports a wavefront size of ",
-                  WARP_SIZE, "; rebuild with the device's arch in "
+                  WARP_SIZE,
+                  "; rebuild with the device's arch in "
                   "PYTORCH_ROCM_ARCH");
 #elif defined(VLLM_TOPK_SOFTPLUS_SQRT_WAVE32_ONLY)
   STD_TORCH_CHECK(WARP_SIZE == 32,
                   "This build only instantiates wave32 kernels but the device "
                   "reports a wavefront size of ",
-                  WARP_SIZE, "; rebuild with the device's arch in "
+                  WARP_SIZE,
+                  "; rebuild with the device's arch in "
                   "PYTORCH_ROCM_ARCH");
 #endif
   static constexpr int WARPS_PER_TB = 4;
@@ -881,26 +883,26 @@ void topkGatingSoftplusSqrtKernelLauncher(
 // unit per (gating dtype, topk_indices dtype) pair, so that ninja generates the
 // device code for each pair in parallel. Declaring the instantiations extern
 // here keeps this file (the dispatch) from instantiating them a second time.
-#define VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(IndType, InputType, HashIndType)       \
-  extern template void topkGatingSoftplusSqrtKernelLauncher<                  \
-      IndType, InputType, HashIndType>(                                       \
-      const InputType*, float*, IndType*, int*, const int, const int,          \
-      const int, const bool, double, const float*, const bool,                 \
-      const HashIndType*, const HashIndType*, cudaStream_t, const bool*,       \
+#define VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(IndType, InputType, HashIndType)  \
+  extern template void                                                   \
+  topkGatingSoftplusSqrtKernelLauncher<IndType, InputType, HashIndType>( \
+      const InputType*, float*, IndType*, int*, const int, const int,    \
+      const int, const bool, double, const float*, const bool,           \
+      const HashIndType*, const HashIndType*, cudaStream_t, const bool*, \
       const float*, int64_t);
 
 // Same signature, for the units that provide the definition.
-#define VLLM_TOPK_SOFTPLUS_SQRT_INSTANTIATE(IndType, InputType, HashIndType)  \
-  template void topkGatingSoftplusSqrtKernelLauncher<                         \
-      IndType, InputType, HashIndType>(                                       \
-      const InputType*, float*, IndType*, int*, const int, const int,          \
-      const int, const bool, double, const float*, const bool,                 \
-      const HashIndType*, const HashIndType*, cudaStream_t, const bool*,       \
+#define VLLM_TOPK_SOFTPLUS_SQRT_INSTANTIATE(IndType, InputType, HashIndType) \
+  template void                                                              \
+  topkGatingSoftplusSqrtKernelLauncher<IndType, InputType, HashIndType>(     \
+      const InputType*, float*, IndType*, int*, const int, const int,        \
+      const int, const bool, double, const float*, const bool,               \
+      const HashIndType*, const HashIndType*, cudaStream_t, const bool*,     \
       const float*, int64_t);
 
-#define VLLM_TOPK_SOFTPLUS_SQRT_EXTERN_PAIR(IndType, InputType)              \
-  VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(IndType, InputType, int64_t)                \
-  VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(IndType, InputType, int)                    \
+#define VLLM_TOPK_SOFTPLUS_SQRT_EXTERN_PAIR(IndType, InputType) \
+  VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(IndType, InputType, int64_t)   \
+  VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(IndType, InputType, int)       \
   VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(IndType, InputType, IndType)
 
 // The hash index types the dispatch uses: int64_t, int, and the
