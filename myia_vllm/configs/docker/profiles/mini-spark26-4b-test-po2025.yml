@@ -1,0 +1,90 @@
+# Docker Compose profile — TEST ONLY : Spark-X2.6-4B-INT4 (candidat veille tier
+# mini, po-2025) — fenêtre GO user 21/10 soir « si le traffic est bas c'est
+# peut-être le moment de tester Spark-X2.6-4B-INT4 ».
+# ============================================================================
+# ATTENTION : déplace TEMPORAIREMENT FrogNano du slot :5003 (pas de co-host —
+# FrogNano occupe ~14,2/16 Go à gpu-util 0.78). Retour armé = re-up du profil
+# canonique mini-frognano-4b-po2025.yml (cache chaud, boot ~3-4 min).
+#
+# CHOIX DE CONFIG (délibérés, rester proche de la recette vLLM de la carte) :
+#   - --trust-remote-code OBLIGATOIRE (arch spark2_5 hors core vLLM, tag
+#     custom_code) — la classe de fragilité documentée au verdict du 21/10 ;
+#     c'est précisément ce que la fenêtre mesure (boot + batterie).
+#   - PAS de --kv-cache-dtype fp8 : arch attention inconnue via remote code ;
+#     la fenêtre juge la FIABILITÉ (batterie 7 axes vs référence FrogNano),
+#     pas la capacité KV.
+#   - PAS de --tool-call-parser (le parser spark25 de la carte est SGLang-only ;
+#     la recette vLLM de la carte l'omet) — écart vs FrogNano noté au dossier.
+#   - --chat-template explicite (recette carte) : le jinja du snapshot HF.
+#   - enable_thinking false par défaut : même kwarg que FrogNano prod et que
+#     la batterie (comparaison équitable, et le tier mini = travail mécanique).
+#   - restart: no + autoheal=False : un échec de boot ne doit pas crash-looper
+#     la nuit — retour FrogNano immédiat dans ce cas.
+#   - volume compile-cache DÉDIÉ (ne pas polluer celui de FrogNano).
+# ----------------------------------------------------------------------------
+services:
+  mini_spark26_4b_test:
+    image: vllm/vllm-openai:v0.32.0
+    container_name: myia_vllm-mini-spark26-4b-test
+    runtime: nvidia
+    labels:
+      - "autoheal=False"
+
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - OMP_NUM_THREADS=4
+      - VLLM_LOGGING_LEVEL=INFO
+      - VLLM_API_KEY=${VLLM_API_KEY_MINI}
+
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+      - vllm-compile-cache-spark26-test:/root/.cache/vllm
+
+    ports:
+      - "5003:8000"
+
+    ipc: host
+
+    command: >
+      XHToken/Spark-X2.6-4B-INT4
+      --served-model-name spark-2.6-4b
+      --host 0.0.0.0
+      --port 8000
+      --trust-remote-code
+      --model-impl transformers
+      --chat-template /root/.cache/huggingface/hub/models--XHToken--Spark-X2.6-4B-INT4/snapshots/4cd05c9e3bd23b08331fcc70fea6dbd5139ef29f/chat_template.jinja
+      --dtype auto
+      --gpu-memory-utilization 0.78
+      --max-model-len 32768
+      --max-num-seqs 32
+      --max-num-batched-tokens 8192
+      --enable-prefix-caching
+      --default-chat-template-kwargs '{"enable_thinking": false}'
+
+    deploy:
+      resources:
+        limits:
+          memory: 16g
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    restart: "no"
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 900s
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+volumes:
+  vllm-compile-cache-spark26-test:

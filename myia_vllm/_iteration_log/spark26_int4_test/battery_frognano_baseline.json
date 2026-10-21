@@ -1,0 +1,156 @@
+{
+  "label": "frognano_baseline_20261021",
+  "model": "frognano-4b",
+  "base_url": "http://localhost:5003",
+  "axes": {
+    "A0_control_kv": {
+      "verdict": "PASS",
+      "latency_s": 0.53,
+      "completion_tokens": 16,
+      "raw": "temp=41.5C free=22107MB",
+      "detail": {
+        "expects": [
+          "41.5C",
+          "22107MB"
+        ]
+      }
+    },
+    "A1_count_homog_60": {
+      "verdict": "PASS",
+      "latency_s": 0.32,
+      "completion_tokens": 3,
+      "raw": "60",
+      "detail": {
+        "count": 60,
+        "truth": 60
+      }
+    },
+    "A2_count_heterog": {
+      "verdict": "PASS",
+      "latency_s": 0.53,
+      "completion_tokens": 37,
+      "raw": "{\n\"FRUIT\": 6,\n\"LEGUME\": 6,\n\"LAITIER\": 6,\n\"VIANDE\": 6\n}",
+      "detail": {
+        "got": {
+          "FRUIT": 6,
+          "LEGUME": 6,
+          "LAITIER": 6,
+          "VIANDE": 6
+        },
+        "truth": {
+          "FRUIT": 6,
+          "LEGUME": 6,
+          "LAITIER": 6,
+          "VIANDE": 6
+        }
+      }
+    },
+    "A3_derived_mean": {
+      "verdict": "FAIL",
+      "latency_s": 0.15,
+      "completion_tokens": 6,
+      "raw": "10.77",
+      "detail": {
+        "got": 10.77,
+        "truth": 11.37
+      }
+    },
+    "A4_absence_log": {
+      "verdict": "PASS",
+      "latency_s": 0.52,
+      "completion_tokens": 17,
+      "raw": "{\n\"ERROR\": 7,\n\"WARN\": 5\n}",
+      "detail": {
+        "got": {
+          "ERROR": 7,
+          "WARN": 5
+        },
+        "truth": {
+          "ERROR": 7,
+          "WARN": 5
+        },
+        "fabricated_absence": false
+      }
+    },
+    "A5_condense_verbatim": {
+      "verdict": "PASS",
+      "latency_s": 0.83,
+      "completion_tokens": 70,
+      "raw": "Incident lecteur G tombé rétabli 15:05Z-17:18Z.\nLe moteur 5003 est resté UP avec health 200 en continu.\nGarde anti-crash-loop posée à 17:41 locale, Miroir PG intact.",
+      "detail": {
+        "quotes_present": {
+          "health 200 en continu": true,
+          "Miroir PG intact": true,
+          "17:41 locale": true
+        }
+      }
+    },
+    "A6_tag_attribution": {
+      "verdict": "PASS",
+      "latency_s": 1.62,
+      "completion_tokens": 158,
+      "raw": "```json\n[\n  {\"tag\": \"DONE\", \"author\": \"myia-po-2025|vllm\"},\n  {\"tag\": \"ACK\", \"author\": \"myia-po-2028|Maintenance\"},\n  {\"tag\": \"INFO\", \"author\": \"myia-ai-01|vllm\"},\n  {\"tag\": \"DONE\", \"author\": \"myia-po-2023|CoursIA\"},\n  {\"tag\": \"ASK\", \"author\": \"myia-po-2028|CoursIA-3\"},\n  {\"tag\": \"WARN\", \"author\": \"myia-po-2025|claudish\"}\n]\n```",
+      "detail": {
+        "tag_ok": "6/6",
+        "author_ok": "6/6",
+        "got": [
+          {
+            "tag": "DONE",
+            "author": "myia-po-2025|vllm"
+          },
+          {
+            "tag": "ACK",
+            "author": "myia-po-2028|Maintenance"
+          },
+          {
+            "tag": "INFO",
+            "author": "myia-ai-01|vllm"
+          },
+          {
+            "tag": "DONE",
+            "author": "myia-po-2023|CoursIA"
+          },
+          {
+            "tag": "ASK",
+            "author": "myia-po-2028|CoursIA-3"
+          },
+          {
+            "tag": "WARN",
+            "author": "myia-po-2025|claudish"
+          }
+        ],
+        "truth": [
+          {
+            "tag": "DONE",
+            "author": "myia-po-2025|vllm"
+          },
+          {
+            "tag": "ACK",
+            "author": "myia-po-2028|Maintenance"
+          },
+          {
+            "tag": "INFO",
+            "author": "myia-ai-01|vllm"
+          },
+          {
+            "tag": "DONE",
+            "author": "myia-po-2023|CoursIA"
+          },
+          {
+            "tag": "ASK",
+            "author": "myia-po-2028|CoursIA-3"
+          },
+          {
+            "tag": "WARN",
+            "author": "myia-po-2025|claudish"
+          }
+        ]
+      }
+    }
+  },
+  "score": {
+    "PASS": 6,
+    "PARTIAL": 0,
+    "FAIL": 1
+  }
+}
