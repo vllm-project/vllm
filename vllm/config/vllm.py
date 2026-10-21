@@ -99,6 +99,8 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
         "Qwen4ExpForCausalLM",
         "Qwen4ExpForConditionalGeneration",
         "Qwen4ExpMTP",
+        "Step5ForCausalLM",
+        "Step5ForConditionalGeneration",
     }
 )
 
@@ -1619,34 +1621,36 @@ class VllmConfig:
             and self.parallel_config.all2all_backend == "deepep_high_throughput"
         )
 
+        # Async scheduling incompatibilities specific to the V1 model runner.
+        v1_async_sched_incompat: str | None = None
+        if not self.use_v2_model_runner:
+            spec_config = self.speculative_config
+            if spec_config is not None and (
+                spec_config.method not in get_args(EagleModelTypes)
+                and spec_config.method not in get_args(NgramGPUTypes)
+                and spec_config.method not in ("draft_model", "dspark", "dflash")
+            ):
+                v1_async_sched_incompat = (
+                    f"{spec_config.method}-based speculative decoding"
+                )
+            elif spec_config is not None and spec_config.disable_padded_drafter_batch:
+                v1_async_sched_incompat = "disable_padded_drafter_batch=True"
+            elif self.parallel_config.pipeline_parallel_size > 1:
+                v1_async_sched_incompat = "pipeline parallelism"
+
         if self.scheduler_config.async_scheduling:
             # Async scheduling explicitly enabled, hard fail any incompatibilities.
-            # Currently, async scheduling only support eagle speculative
-            # decoding.
             if uses_rocm_deepep_ht_dbo:
                 raise ValueError(
                     "Async scheduling is not compatible with ROCm DeepEP "
                     "high-throughput DBO. Please use --no-async-scheduling or "
                     "select a different all2all backend."
                 )
-            if self.speculative_config is not None:
-                if (
-                    self.speculative_config.method not in get_args(EagleModelTypes)
-                    and self.speculative_config.method not in get_args(NgramGPUTypes)
-                    and self.speculative_config.method != "draft_model"
-                    and self.speculative_config.method != "dspark"
-                    and self.speculative_config.method != "dflash"
-                ):
-                    raise ValueError(
-                        "Currently, async scheduling is only supported "
-                        "with EAGLE/MTP/Draft Model/NGram GPU/DSpark/DFlash "
-                        "kind of speculative decoding"
-                    )
-                if self.speculative_config.disable_padded_drafter_batch:
-                    raise ValueError(
-                        "Async scheduling is not compatible with "
-                        "disable_padded_drafter_batch=True."
-                    )
+            if v1_async_sched_incompat is not None:
+                raise ValueError(
+                    "Async scheduling is not supported by the V1 model runner "
+                    f"with {v1_async_sched_incompat}."
+                )
             if not executor_supports_async_sched:
                 raise ValueError(
                     f"`{executor_backend}` does not support async scheduling yet."
@@ -1663,29 +1667,6 @@ class VllmConfig:
                     "Disabling asynchronous scheduling by default for pooling model."
                 )
                 self.scheduler_config.async_scheduling = False
-            elif (
-                self.speculative_config is not None
-                and self.speculative_config.method not in get_args(EagleModelTypes)
-                and self.speculative_config.method not in get_args(NgramGPUTypes)
-                and self.speculative_config.method != "draft_model"
-                and self.speculative_config.method != "dspark"
-                and self.speculative_config.method != "dflash"
-            ):
-                logger.warning_once(
-                    "Async scheduling not supported with %s-based "
-                    "speculative decoding and will be disabled.",
-                    self.speculative_config.method,
-                )
-                self.scheduler_config.async_scheduling = False
-            elif (
-                self.speculative_config is not None
-                and self.speculative_config.disable_padded_drafter_batch
-            ):
-                logger.warning_once(
-                    "Async scheduling is not compatible with "
-                    "disable_padded_drafter_batch=True and will be disabled.",
-                )
-                self.scheduler_config.async_scheduling = False
             elif not executor_supports_async_sched:
                 logger.warning_once(
                     "Async scheduling will be disabled because it is not supported "
@@ -1700,13 +1681,11 @@ class VllmConfig:
                     "DP+EP generation accuracy."
                 )
                 self.scheduler_config.async_scheduling = False
-            elif (
-                self.parallel_config.pipeline_parallel_size > 1
-                and not self.use_v2_model_runner
-            ):
+            elif v1_async_sched_incompat is not None:
                 logger.warning_once(
                     "Async scheduling is disabled because the V1 model runner "
-                    "does not support it with pipeline parallelism."
+                    "does not support it with %s.",
+                    v1_async_sched_incompat,
                 )
                 self.scheduler_config.async_scheduling = False
             else:
@@ -3077,6 +3056,14 @@ class VllmConfig:
             if self.speculative_config.draft_lm_head_quantization is not None:
                 unsupported.append("draft lm_head quantization")
 
+        # The attention-free Parse MTP draft requires the V2 speculator.
+        if self.speculative_config:
+            draft_config = self.speculative_config.draft_model_config
+            if draft_config is not None and "ParseAuxMTPModel" in (
+                draft_config.architectures or []
+            ):
+                unsupported.append("Parse 3.5 MTP")
+
         # Mixed sliding/full DFlash drafts need multiple KV groups (V2 only).
         if self._dflash_needs_multi_kv_group():
             unsupported.append("mixed sliding/full dflash drafts")
@@ -3092,6 +3079,12 @@ class VllmConfig:
 
         if self.parallel_config.enable_batch_sharded_sampling:
             unsupported.append("batch-sharded sampling")
+
+        if self.model_config is not None and self.model_config.architecture in (
+            "Step5ForCausalLM",
+            "Step5ForConditionalGeneration",
+        ):
+            unsupported.append("Step5")
 
         return unsupported
 
