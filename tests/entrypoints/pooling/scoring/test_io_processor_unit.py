@@ -4,6 +4,7 @@
 
 from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 import torch
@@ -24,6 +25,7 @@ from vllm.entrypoints.pooling.typing import OfflineScoringInputsContext
 from vllm.exceptions import VLLMValidationError
 from vllm.outputs import PoolingOutput, PoolingRequestOutput, RequestError
 from vllm.renderers import TokenizeParams
+from vllm.tokenizers import TokenizerLike
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -67,6 +69,8 @@ def llm_reranker_processor() -> CrossEncoderIOProcessor:
     processor.supports_score_template = False
     processor.use_sep_token = False
     processor.model = None
+    processor.saved_chat_template = None
+    processor.saved_chat_template_kwargs = {}
     return processor
 
 
@@ -202,7 +206,7 @@ def test_token_type_ids_stay_aligned_with_a_truncated_padded_prompt():
     describe the same positions, and the model is told the query segment is
     empty.
     """
-    tokenizer = _DummyTokenizer()
+    tokenizer = cast(TokenizerLike, _DummyTokenizer())
     num_query, num_doc = 20, 30
     prompt = TokensPrompt(prompt_token_ids=list(range(num_query + num_doc)))
     token_type_ids = [0] * num_query + [1] * num_doc
@@ -232,7 +236,7 @@ def test_token_type_ids_stay_aligned_with_a_truncated_padded_prompt():
     assert (doc_start, doc_end) == (10, 40)
     assert prompt_token_ids[:doc_start] == list(range(10, num_query))
     assert prompt_token_ids[doc_start:doc_end] == list(range(num_query, 50))
-    assert token_type_ids[doc_end:] == [tokenizer.pad_token_type_id] * 60
+    assert token_type_ids[doc_end:] == [_DummyTokenizer.pad_token_type_id] * 60
 
 
 def test_token_type_padding_uses_the_tokenizer_pad_type():
