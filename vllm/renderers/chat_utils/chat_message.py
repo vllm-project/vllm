@@ -616,11 +616,7 @@ def parse_chat_message_content(
     content = message.get("content")
     reasoning = message.get("reasoning")
 
-    if (
-        role == "assistant"
-        and isinstance(reasoning, dict)
-        and reasoning.get("type") == "prompt_embeds"
-    ):
+    if isinstance(reasoning, dict) and reasoning.get("type") == "prompt_embeds":
         reasoning = parse_chat_message_content_parts(
             role,
             [cast(ChatCompletionContentPartParam, reasoning)],
