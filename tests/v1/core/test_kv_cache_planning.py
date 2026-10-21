@@ -28,10 +28,12 @@ from vllm.config import (
 from vllm.config.attention import HiSparseConfig
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
+from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
 from vllm.v1.core.kv_cache_planning import (
     check_enough_kv_cache_memory,
     estimate_max_model_len,
     get_kv_cache_groups,
+    get_kv_cache_groups_from_builder,
     is_kv_cache_spec_uniform,
     kv_cache_groups_tp_replicas,
 )
@@ -1984,7 +1986,7 @@ def test_check_enough_kv_cache_memory_reserves_null_block():
     )
 
 
-def _spec_decode_kv_cache_groups(worker_specs, use_eagle_block_drop=True):
+def _spec_decode_config(use_eagle_block_drop=True):
     config = VllmConfig(model_config=ModelConfig(max_model_len=64))
     config.cache_config.kv_cache_layout = "BLHNC"
     config.speculative_config = SimpleNamespace(
@@ -1994,6 +1996,11 @@ def _spec_decode_kv_cache_groups(worker_specs, use_eagle_block_drop=True):
         use_multi_module_mtp=lambda: False,
         parallel_drafting=False,
     )
+    return config
+
+
+def _spec_decode_kv_cache_groups(worker_specs, use_eagle_block_drop=True):
+    config = _spec_decode_config(use_eagle_block_drop)
     configs = get_kv_cache_configs(config, worker_specs, [2**30] * len(worker_specs))
     return generate_scheduler_kv_cache_config(configs).kv_cache_groups
 
@@ -2055,6 +2062,19 @@ def test_eagle_groups_are_the_groups_holding_draft_layers(make_specs, pp):
     assert [g.is_eagle_group for g in scheduler_groups] == [
         bool(draft_layers & set(g.layer_names)) for g in groups
     ]
+
+
+def test_groups_from_builder_tag_eagle_groups():
+    # The V1 runner's profiling pass resolves the CUDA-graph mode from these
+    # groups, before get_kv_cache_configs runs.
+    config = _spec_decode_config()
+    groups = get_kv_cache_groups_from_builder(
+        get_kv_cache_config_builder(config), config, _hybrid_specs()
+    )
+    assert [g.is_eagle_group for g in groups] == [
+        "mtp.0" in g.layer_names for g in groups
+    ]
+    assert any(g.is_eagle_group for g in groups)
 
 
 def test_no_eagle_groups_without_eagle_block_drop():
