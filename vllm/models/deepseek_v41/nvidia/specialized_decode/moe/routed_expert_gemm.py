@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Low-batch routed-expert GEMMs for DeepSeek-V4.1 decode (1-8 rows).
+"""Low-batch routed-expert GEMMs for DeepSeek-V4.1 decode (1-192 rows).
 
 At concurrency 1 with DSpark, every target MoE layer applies its routed experts
 to six rows (384 experts, top-6; at TP4 every rank holds all experts at
@@ -8,7 +8,9 @@ intermediate 576, padded to 640). ``TrtLlmMxfp4ExpertsModular`` runs FlashInfer'
 TRT-LLM-gen routing kernel and two batched MXFP8 x MXFP4 GEMMs; at this size they
 stream the weights of about 22 experts per layer, so their cost is HBM time plus
 fixed per-kernel latency. This module computes the same values from the same
-tensors with CuTe DSL kernels sized for at most eight rows::
+tensors with CuTe DSL kernels sized for at most 192 rows (8-row token tiles;
+the route kernel and the front are built for calls of up to 8, 16, 32, 64, 128
+or 192 rows, and GEMM1 gathers each tile's rows)::
 
     router logits ─► front ───────────────────────┐ (top-k, MXFP8 input, routing)
     top-k ids, MXFP8 input ─► route ──────────────┤
@@ -53,6 +55,8 @@ import torch
 from cutlass import Float32, Int32
 from cutlass.cute.runtime import make_fake_stream, make_ptr
 
+import vllm.envs as envs
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 
@@ -63,7 +67,7 @@ from .routed_expert_gemm_cute import (
     RoutedExpertGemm2,
     tile_scale_bytes,
 )
-from .routed_expert_route_cute import RoutedExpertRoute
+from .routed_expert_route_cute import RoutedExpertRoute, levels_for
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
@@ -84,7 +88,25 @@ TOP_K = 6
 MAX_EXPERTS = 384
 MAX_TOP_K = 8
 TILE = 8
-MAX_ROWS = 8
+MAX_ROWS = 192
+# The row counts the route kernel and the front are built for.
+WIDTHS = tuple(w for w in (8, 16, 32, 64, 128, 192) if w <= MAX_ROWS)
+
+
+def width(rows: int) -> int:
+    """The kernels' build for calls of ``rows`` rows: the narrowest that
+    fits."""
+    return next(w for w in WIDTHS if rows <= w)
+
+
+def padding_mask(rows: int) -> torch.Tensor | None:
+    """The CUDA graph padding rows of this forward's first ``rows`` (bool),
+    the mask the stock router applies with ``VLLM_MOE_SKIP_PADDING``; None
+    without one."""
+    if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
+        is_padding = get_forward_context().is_padding
+        return is_padding[:rows] if is_padding is not None else None
+    return None
 
 
 def max_ctas(rows: int, top_k: int, experts: int) -> int:
@@ -100,8 +122,9 @@ def cta_words(ctas: int) -> int:
 
 
 def route_words(ctas: int) -> int:
-    """int32 length of the routing record for ``ctas`` token tiles."""
-    return 4 + 2 * cta_words(ctas) + TILE * ctas
+    """int32 length of the routing record for ``ctas`` token tiles (its
+    layout is in ``routed_expert_route_cute.py``)."""
+    return 4 + 3 * cta_words(ctas) + TILE * ctas
 
 
 @dataclass
@@ -150,7 +173,8 @@ class RoutedExpertGemm:
             torch.accelerator.current_device_index() if index is None else index
         )
         # Compile the kernels now, not inside a CUDA graph capture.
-        _route_kernel(self.device_index)
+        for built in WIDTHS:
+            _route_kernel(self.device_index, built)
         _gemm1_kernel(self.device_index)
         _gemm2_kernel(self.device_index)
         # The modular kernel's input quantization, reused so the activations
@@ -163,13 +187,14 @@ class RoutedExpertGemm:
 
     def set_front(self, config: FrontConfig) -> None:
         """Use the fused front with the router's ``config``."""
-        _front_kernel(self.device_index, config.bias_vl is not None)
+        for built in WIDTHS:
+            _front_kernel(self.device_index, config.bias_vl is not None, built)
         self.front_config = config
 
     def accepts(self, x: torch.Tensor, runner: torch.nn.Module) -> bool:
-        """Whether a call with router input ``x`` can take these kernels: 1-8
-        BF16 rows, and the runner's expert weights still the tensors bound here
-        (a weight reload replaces them)."""
+        """Whether a call with router input ``x`` can take these kernels: 1 to
+        ``MAX_ROWS`` BF16 rows, and the runner's expert weights still the
+        tensors bound here (a weight reload replaces them)."""
         return (
             1 <= x.size(0) <= MAX_ROWS
             and x.dtype == torch.bfloat16
@@ -203,7 +228,7 @@ class RoutedExpertGemm:
         ctas = max_ctas(rows, top_k, self.experts)
         permuted = torch.empty((rows, top_k), dtype=torch.int32, device=x.device)
         record = torch.empty(route_words(ctas), dtype=torch.int32, device=x.device)
-        _route_kernel(self.device_index)(
+        _route_kernel(self.device_index, width(rows))(
             *(_pointer(cutlass.Int32, t, 4) for t in (ids, permuted, record)),
             Int32(rows),
             Int32(top_k),
@@ -213,13 +238,18 @@ class RoutedExpertGemm:
         return Routing(x_quant, x_scale, ids, topk_weights, permuted, record, ctas)
 
     def front(
-        self, x: torch.Tensor, logits: torch.Tensor, input_ids: torch.Tensor | None
+        self,
+        x: torch.Tensor,
+        logits: torch.Tensor,
+        input_ids: torch.Tensor | None,
+        is_padding: torch.Tensor | None = None,
     ) -> Routing:
         """Top-k, MXFP8 quantization and routing record in one launch.
 
         ``x``: BF16 router input [rows, 5120]; ``logits``: FP32 router logits
         [rows, 384]; ``input_ids``: [rows] int32 or int64, read only with image
-        routing.
+        routing; ``is_padding``: bool [rows], rows no expert computes (ids -1,
+        weights 0), as the router's padding mask (:func:`padding_mask`).
         """
         config = self.front_config
         assert config is not None
@@ -237,7 +267,7 @@ class RoutedExpertGemm:
         if image:
             assert input_ids is not None
             ids = input_ids
-        _front_kernel(self.device_index, image)(
+        _front_kernel(self.device_index, image, width(rows))(
             _pointer(cutlass.Float32, logits, 16),
             _pointer(cutlass.Float32, config.bias, 16),
             _pointer(cutlass.Float32, config.bias_vl if image else config.bias, 16),
@@ -245,6 +275,8 @@ class RoutedExpertGemm:
             Int32(int(ids.dtype == torch.int64)),
             Int32(config.image_sentinel_lo),
             Float32(config.scale),
+            _pointer(cutlass.Uint8, topk_ids if is_padding is None else is_padding, 1),
+            Int32(is_padding is not None),
             _pointer(cutlass.Uint32, x, 16),
             _pointer(cutlass.Int32, topk_ids, 16),
             _pointer(cutlass.Float32, topk_weights, 16),
@@ -294,7 +326,7 @@ class RoutedExpertGemm:
         """Launch GEMM2 on GEMM1's outputs."""
         rows, top_k = routing.topk_ids.shape
         gemm2_rows = torch.empty(
-            (rows * top_k * TILE, HIDDEN),
+            (TILE * routing.ctas, HIDDEN),
             dtype=torch.bfloat16,
             device=routing.x_quant.device,
         )
@@ -331,11 +363,12 @@ def _fake(dtype: type[cutlass.Numeric], align: int):
 
 
 @cache
-def _route_kernel(device_index: int):
-    """``RoutedExpertRoute`` compiled for a device."""
+def _route_kernel(device_index: int, built: int):
+    """``RoutedExpertRoute`` compiled for a device and calls of up to
+    ``built`` rows."""
     with torch.accelerator.device_index(device_index):
         return cute.compile(
-            RoutedExpertRoute(),
+            RoutedExpertRoute(levels_for(built)),
             _fake(cutlass.Int32, 4),
             _fake(cutlass.Int32, 4),
             _fake(cutlass.Int32, 4),
@@ -347,12 +380,12 @@ def _route_kernel(device_index: int):
 
 
 @cache
-def _front_kernel(device_index: int, image: bool):
+def _front_kernel(device_index: int, image: bool, built: int):
     """``RoutedExpertFront`` compiled for a device, with or without image
-    routing."""
+    routing, for calls of up to ``built`` rows."""
     with torch.accelerator.device_index(device_index):
         return cute.compile(
-            RoutedExpertFront(image),
+            RoutedExpertFront(image, built),
             _fake(cutlass.Float32, 16),
             _fake(cutlass.Float32, 16),
             _fake(cutlass.Float32, 16),
@@ -360,6 +393,8 @@ def _front_kernel(device_index: int, image: bool):
             Int32(0),
             Int32(0),
             Float32(1.0),
+            _fake(cutlass.Uint8, 1),
+            Int32(0),
             _fake(cutlass.Uint32, 16),
             _fake(cutlass.Int32, 16),
             _fake(cutlass.Float32, 16),
@@ -400,7 +435,7 @@ def _gemm2_kernel(device_index: int):
     """``RoutedExpertGemm2`` compiled for a device."""
     with torch.accelerator.device_index(device_index):
         return cute.compile(
-            RoutedExpertGemm2(HIDDEN, PADDED),
+            RoutedExpertGemm2(HIDDEN, PADDED, 2 * SLICE // 128),
             _fake(cutlass.Float4E2M1FN, 32),
             _fake(cutlass.Float8E8M0FNU, 16),
             _fake(cutlass.Float8E4M3FN, 16),

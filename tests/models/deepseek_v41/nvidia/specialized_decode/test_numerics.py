@@ -8,8 +8,7 @@ Each check runs one rank late, so a missing wait reads a peer's stale data:
   plain, with the MXFP8 layer input, with a deferred MoE finalize and
   residual-only, bitwise against the separate all-reduce and mHC kernels;
 * the executor's sublayer boundary on it, with the next mHC coefficients on
-  the side stream and inline, against the separate kernels and the stock mHC
-  pre;
+  the side stream, against the separate kernels and the stock mHC pre;
 * the ``wo_b`` GEMM that publishes into the fused kernel's mailbox, per
   split-K tactic, bitwise against FlashInfer's GEMM plus the separate publish;
 * logits gathered with the custom all-gather, bitwise against NCCL;
@@ -188,7 +187,7 @@ def _check_all_reduce_mhc(arm, rank):
 
 def _check_boundaries(arm, rank):
     """``Boundaries.sublayer`` on a partial sum and on a deferred MoE output,
-    with the next coefficients on the side stream and inline: the streams
+    with the next coefficients on the side stream: the streams
     bitwise against the separate all-reduce and mHC post, the mixes bitwise
     against the stock mHC pre on those streams, and the layer input within
     the fused RMSNorm's ulp of it."""
@@ -263,28 +262,26 @@ def _check_boundaries(arm, rank):
                 stream=side,
             )
             torch.cuda.current_stream().wait_stream(side)
-            for side_stream in (True, False):
-                what = f"{name}, {rows} rows, side stream {side_stream}"
-                state = BoundaryState(
-                    mix["residual"], mix["post"], mix["comb"], mix["pre"], pending
-                )
-                decode_step = SimpleNamespace(side_stream=side_stream)
-                _late(rank, step := step + 1)
-                state, layer_input, _, aux = boundaries.sublayer(
-                    layer, False, state, decode_step, capture_aux=True
-                )
-                boundaries.join(layer, decode_step)
-                _assert_equal(
-                    (state.residual, aux),
-                    (streams, streams.mean(dim=1)),
-                    f"streams, {what}",
-                )
-                _assert_equal(
-                    (state.post, state.comb, state.pre),
-                    (want[0], want[1], want[3]),
-                    f"mixes, {what}",
-                )
-                assert _bf16_ulps(layer_input, want[2]) <= 1, what
+            what = f"{name}, {rows} rows"
+            state = BoundaryState(
+                mix["residual"], mix["post"], mix["comb"], mix["pre"], pending
+            )
+            _late(rank, step := step + 1)
+            state, layer_input, _, aux = boundaries.sublayer(
+                layer, False, state, capture_aux=True
+            )
+            boundaries.join(layer)
+            _assert_equal(
+                (state.residual, aux),
+                (streams, streams.mean(dim=1)),
+                f"streams, {what}",
+            )
+            _assert_equal(
+                (state.post, state.comb, state.pre),
+                (want[0], want[1], want[3]),
+                f"mixes, {what}",
+            )
+            assert _bf16_ulps(layer_input, want[2]) <= 1, what
 
 
 # ------------------------------------------------------- publishing wo_b
@@ -441,8 +438,10 @@ CANDIDATE_BLOCKS, CANDIDATE_BLOCK_SIZE = 2048, 8
 MAX_MODEL_LEN = 655_360
 PAGE_TOKENS = 128
 ROPE_POSITIONS = 2048
-# (requests, of which trailing padding requests).
-INDEX_BATCHES = ((8, 0), (32, 10))
+# (requests, of which trailing padding requests): one request (replicated),
+# requests split across ranks (the last rank idles), a short last slice, whole
+# requests.
+INDEX_BATCHES = ((1, 0), (2, 0), (5, 0), (8, 0), (32, 10))
 # A dense index source (ratio 2) and the candidate source (ratio 1).
 INDEX_LAYERS = ((2, False), (1, True))
 

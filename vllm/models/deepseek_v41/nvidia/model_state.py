@@ -289,9 +289,16 @@ class DeepseekV41ModelState(DefaultModelState):
         self, input_batch: InputBatch, req_states: RequestState
     ) -> dict[str, torch.Tensor | None]:
         model_inputs = super().prepare_inputs(input_batch, req_states)
-        window = self.lookback_token_ids
-        if window is None:
+        if self.lookback_token_ids is None:
             return model_inputs
+        self._fill_lookback(input_batch, req_states)
+        model_inputs["lookback_token_ids"] = self.lookback_token_ids
+        return model_inputs
+
+    def _fill_lookback(self, input_batch: InputBatch, req_states: RequestState) -> None:
+        """Gather the batch's lookback windows into ``lookback_token_ids``."""
+        window = self.lookback_token_ids
+        assert window is not None
         all_token_ids = req_states.all_token_ids.gpu
         depth = window.shape[1]
         _gather_lookback_kernel[(window.shape[0],)](
@@ -305,8 +312,6 @@ class DeepseekV41ModelState(DefaultModelState):
             DEPTH=depth,
             BLOCK_DEPTH=triton.next_power_of_2(depth),
         )
-        model_inputs["lookback_token_ids"] = window
-        return model_inputs
 
     def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
         model_inputs = super().prepare_dummy_inputs(num_reqs, num_tokens)

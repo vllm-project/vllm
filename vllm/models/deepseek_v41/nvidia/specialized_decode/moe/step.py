@@ -7,8 +7,8 @@ reduction, the shared-expert add and the all-reduce to the next boundary's
 fused kernel, including the layers before an Engram layer and the last one,
 whose boundaries take the kernel's residual-only variant:
 
-- up to ``LOW_BATCH_MAX_ROWS`` rows, on the low-batch routed-expert GEMMs
-  (``routed_expert_gemm``);
+- up to ``routed_expert_gemm.MAX_ROWS`` rows, on the low-batch routed-expert
+  GEMMs (``routed_expert_gemm``);
 - above that, on the runner's own ``_forward_impl`` with the deferral raised to
   the step's rows for the call (``deferred_finalize``).
 """
@@ -32,7 +32,7 @@ from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExpertsOrder,
 )
 
-from .routed_expert_gemm import RoutedExpertGemm, front_applies
+from .routed_expert_gemm import RoutedExpertGemm, front_applies, padding_mask
 
 if TYPE_CHECKING:
     from ...model import DeepseekV4MoE
@@ -88,7 +88,7 @@ class MoEStep:
         if not self.deferrable:
             return self.ffn(x, input_ids, None)
         gemm = self.gemm
-        if step.low_batch and gemm is not None and gemm.accepts(x, self.runner):
+        if gemm is not None and gemm.accepts(x, self.runner):
             routed, shared_output = self._forward_low_batch(gemm, x, input_ids)
             return MoEOutput(routed=routed, shared_output=shared_output)
         # The runner's custom op returns tensors only, so run its body directly.
@@ -119,7 +119,13 @@ class MoEStep:
         router_logits, _ = runner.gate(hidden_states)
         runner._maybe_apply_shared_experts(hidden_states, SharedExpertsOrder.NO_OVERLAP)
         if front_applies(gemm, runner):
-            routing = gemm.front(hidden_states, router_logits, input_ids)
+            # The router's padding mask, as select_experts applies it.
+            routing = gemm.front(
+                hidden_states,
+                router_logits,
+                input_ids,
+                padding_mask(hidden_states.size(0)),
+            )
         else:
             topk_weights, topk_ids = runner.router.select_experts(
                 hidden_states=hidden_states,

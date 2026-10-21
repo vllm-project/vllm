@@ -380,6 +380,8 @@ steps:
   - tests/models/deepseek_v41/nvidia/specialized_decode/test_kernels.py
   - tests/models/deepseek_v41/nvidia/specialized_decode/test_numerics.py
   - tests/models/deepseek_v41/nvidia/specialized_decode/test_layers.py
+  - tests/models/deepseek_v41/nvidia/specialized_decode/test_decode_topk.py
+  - tests/models/deepseek_v41/nvidia/specialized_decode/test_sparse_mla_cute.py
   - tests/distributed/test_custom_all_reduce.py
   - tests/kernels/test_engram.py
   commands:
@@ -388,6 +390,10 @@ steps:
   - pytest -v -s models/deepseek_v41/nvidia/specialized_decode/test_kernels.py
   - pytest -v -s models/deepseek_v41/nvidia/specialized_decode/test_numerics.py
   - pytest -v -s models/deepseek_v41/nvidia/specialized_decode/test_layers.py
+  - pytest -v -s models/deepseek_v41/nvidia/specialized_decode/test_decode_topk.py
+  - pytest -v -s models/deepseek_v41/nvidia/specialized_decode/test_sparse_mla_cute.py
+  - pytest -v -s distributed/test_custom_all_reduce.py -k all_reduce_mhc
+  - pytest -v -s kernels/test_engram.py
 
 - label: ':amd: (MI355) Kimi-K3 Specialized Decode'
   key: kimi-k3-specialized-decode-amd

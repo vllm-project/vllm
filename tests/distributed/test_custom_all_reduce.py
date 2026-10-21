@@ -70,7 +70,7 @@ def _all_reduce_mhc(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
         ensure_model_parallel_initialized(tp_size, pp_size)
         op = AllReduceMHC(
-            hidden_size=5120, hc_mult=4, max_num_tokens=16, top_k=6, device=device
+            hidden_size=5120, hc_mult=4, max_num_tokens=256, top_k=6, device=device
         )
 
         def check_eager_and_replayed(fused, check, halved, doubled):
@@ -98,12 +98,16 @@ def _all_reduce_mhc(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
             weight = torch.randn(5120, device=device, dtype=torch.bfloat16)
             return residual, post, comb, pre, weight
 
-        def run(n):
+        def contribution(n):
             torch.manual_seed(42 + rank)
             x = torch.randn(n, 5120, device=device, dtype=torch.bfloat16)
             # Packed +0/-0 pairs collide with the Lamport sentinel.
             x[:, :16] = 0
             x[:, 9:16:2] = -0.0
+            return x
+
+        def run(n):
+            x = contribution(n)
             residual, post, comb, pre, weight = mhc_inputs(n)
 
             def fused():
@@ -167,10 +171,26 @@ def _all_reduce_mhc(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
 
             check_eager_and_replayed(fused, check, gemm2, shared)
 
-        # Changing shapes cover shrinking and growing batches in one mailbox.
-        for n in (1, 6, 12, 8, 16, 3, 5, 2, 4, 1):
-            run(n)
-            run_finalize(n)
+        # Changing shapes cover shrinking and growing batches in one mailbox:
+        # LL only, BT only (200 rows take the wider owner reduce), then both
+        # protocols in turn, switching at 8 rows.
+        shapes = (1, 6, 12, 8, 16, 3, 5, 2, 4, 1)
+        for bt_min_rows, ns in ((257, shapes), (1, (*shapes, 200)), (8, shapes)):
+            op.bt_min_rows = op.bt_min_finalize_rows = bt_min_rows
+            for n in ns:
+                run(n)
+                run_finalize(n)
+
+        # Both protocols give the same bits.
+        for n in (6, 16, 200):
+            x = contribution(n)
+            inputs = mhc_inputs(n)
+            op.bt_min_rows = n + 1
+            ll = op(x, *inputs, 1e-6)
+            op.bt_min_rows = n
+            bt = op(x, *inputs, 1e-6)
+            assert torch.equal(ll[0], bt[0])
+            assert torch.equal(ll[1], bt[1])
 
 
 @pytest.mark.skipif(

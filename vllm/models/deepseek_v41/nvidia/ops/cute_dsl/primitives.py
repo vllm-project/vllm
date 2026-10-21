@@ -1,7 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+#
 # Adapted from FlashInfer's flashinfer/comm/mnnvl_cutedsl/cute_dsl_primitives.py
-# and runtime.py (flashinfer-ai/flashinfer@139af6f6).
+# and runtime.py (flashinfer-ai/flashinfer@139af6f6), which carry the notice
+# below. Modified by the vLLM contributors: helpers are selected, renamed and
+# extended.
+#
+# Copyright (c) 2026 by FlashInfer team.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# FlashInfer's NOTICE: FlashInfer / Copyright 2025-2026 NVIDIA /
+# Copyright 2023-2026 FlashInfer community (https://flashinfer.ai/)
 
 """PTX building blocks and launch helpers for the DSV4.1 LL all-reduce."""
 
@@ -115,6 +135,35 @@ def store_global_u32x4(address: Int64, packed, *, loc=None, ip=None) -> None:
         [address.ir_value(loc=loc, ip=ip), *words],
         "st.global.v4.u32 [$0], {$1, $2, $3, $4};",
         "l,r,r,r,r",
+        side_effects=True,
+        loc=loc,
+        ip=ip,
+    )
+
+
+@dsl_user_op
+def load_global_u64(address: Int64, *, loc=None, ip=None) -> Int64:
+    return Int64(
+        _asm(
+            T.i64(),
+            [address.ir_value(loc=loc, ip=ip)],
+            "ld.global.u64 $0, [$1];",
+            "=l,l",
+            side_effects=False,
+            loc=loc,
+            ip=ip,
+        )
+    )
+
+
+@dsl_user_op
+def store_global_u32x2(address: Int64, packed, *, loc=None, ip=None) -> None:
+    words = [packed[index].ir_value(loc=loc, ip=ip) for index in range(2)]
+    _asm(
+        None,
+        [address.ir_value(loc=loc, ip=ip), *words],
+        "st.global.v2.u32 [$0], {$1, $2};",
+        "l,r,r",
         side_effects=True,
         loc=loc,
         ip=ip,

@@ -31,12 +31,12 @@ logger = init_logger(__name__)
 # Rows of the executor's fused all-reduce + mHC mailbox: the largest FULL
 # decode graph at 64 requests x 6 DSpark tokens.
 FUSED_MHC_MAX_ROWS = 384
-# Rows whose next mHC coefficients run on the side stream; larger steps compute
-# them inline after the fused kernel.
-MHC_OVERLAP_MAX_ROWS = 48
 # Rows of the low-batch GEMMs: one DSpark verification step of up to 8 rows
 # (6 at one request).
 LOW_BATCH_MAX_ROWS = 8
+# Rows up to which the attention projections above LOW_BATCH_MAX_ROWS keep the
+# low-latency MXFP8 GEMM, with a 16-, 32- or 48-row activation tile.
+WIDE_LOW_LATENCY_MAX_ROWS = 48
 # The FlashInfer (requirements/cuda.txt) whose internals the publishing wo_b
 # GEMM, the MXFP8 layer input and the pinned MXFP8 tactics were checked
 # against. Its sparse-MLA decode takes caller-owned KV counters (since 0.7.1).

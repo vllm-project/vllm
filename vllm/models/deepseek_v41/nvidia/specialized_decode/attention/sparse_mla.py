@@ -16,6 +16,11 @@ with two changes, neither of which issues a collective:
   kernel returns every counter to zero when it finishes, so a buffer zeroed
   once stays valid for launches that do not overlap, as in the FlashInfer MLA
   backend.
+
+Batches whose clusters fit the GPU at once (at width 640, up to 8 requests with
+DSpark on a GB300) run the CuTe DSL kernel of ``sparse_mla_cute`` instead of
+TRTLLM-gen: it spreads a token's columns over one CTA per 128 instead of at most
+3.
 """
 
 from typing import TYPE_CHECKING, cast
@@ -31,6 +36,11 @@ from ...flashinfer_sparse import (
     _get_flashinfer_dsv4_workspace,
 )
 from .. import uses_checked_flashinfer
+from .sparse_mla_cute import (
+    SWA_COLUMNS,
+    sparse_mla_decode,
+    supports_sparse_mla_cute,
+)
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
@@ -369,12 +379,41 @@ class SparseMlaDecode:
             output = output.unsqueeze(1)
             decode_cu = None
             max_decode_query_len = 1
+        decode_indices = sparse_indices[:num_tokens]
+        # The CuTe kernel reads the first SWA_COLUMNS columns from the SWA pool.
+        if (
+            attn.window_size == SWA_COLUMNS
+            and swa_metadata.decode_swa_width == SWA_COLUMNS
+            and supports_sparse_mla_cute(
+                query,
+                swa_k_cache,
+                compressed_kv_cache,
+                decode_indices,
+                decode_topk_lens,
+                output,
+                bmm1_scale,
+                bmm2_scale,
+                attn.attn_sink,
+            )
+        ):
+            sparse_mla_decode(
+                query,
+                swa_k_cache,
+                compressed_kv_cache,
+                decode_indices,
+                decode_topk_lens,
+                output,
+                cast(float, bmm1_scale),
+                cast(float, bmm2_scale),
+                attn.attn_sink,
+            )
+            return
         trtllm_decode_sparse_mla_dsv4(
             query=query,
             swa_kv_cache=swa_k_cache,
             compressed_kv_cache=compressed_kv_cache,
             workspace_buffer=_get_flashinfer_dsv4_workspace(q.device),
-            sparse_indices=sparse_indices[:num_tokens],
+            sparse_indices=decode_indices,
             sparse_topk_lens=decode_topk_lens,
             seq_lens=decode_seq_lens,
             out=output,

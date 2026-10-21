@@ -34,7 +34,9 @@ three kernels; :class:`RoutedExpertFront` replaces them with one launch:
    log(1 + exp(x))), ``biased = score + bias`` (``bias_vl`` for image sentinel
    tokens), the six largest biased scores (lowest expert id on exact ties, NaN
    ranked as -1e30), and ``weights`` = the unbiased scores times scale / sum
-   (sum replaced by 1 unless positive);
+   (sum replaced by 1 unless positive); a CUDA graph padding row
+   (``VLLM_MOE_SKIP_PADDING``'s mask) gets ids -1 and weights 0, so no expert
+   computes it;
 2. the routed input's MXFP8 quantization (FlashInfer's linear-layout
    ``mxfp8_quantize``): per 32-value block, a UE8M0 scale rounded up from
    amax / 448 and E4M3 values rounded to nearest with saturation;
@@ -51,15 +53,25 @@ Triton kernel, the kernel calls the toolchain's ``logf`` (libdevice, through
 floating-point operation is left to the compiler, which could contract or
 flush it.
 
-Work split (grid ``1 + ceil(rows / 3)``, 1024 threads):
+Work split (1024 threads a CTA). The kernel is built for calls of up to 8,
+16, 32, 64, 128 or 192 rows (``max_rows``); the first ``S = 8`` CTAs select
+and form one thread block cluster, the rest quantize:
 
-* CTA 0: four warps per row each take the top-6 of 96 experts (three per
-  lane); one warp per row merges the 24 candidates and normalizes; then the
-  whole CTA builds the routing record from the selected ids. The selection is
-  a lexicographic (value, lowest id) maximum, so splitting it does not change
-  the result.
-* CTA ``1 + c``: quantizes rows ``3c .. 3c + 2`` of the BF16 input, two
-  threads per 32-value block.
+* Selecting CTA ``s`` takes rows ``s``, ``s + S``, ``s + 2 S``, ... (at most
+  ``max_rows / S`` rows: 1, 2, 4 or 8 up to 64 rows, 16 at 128, 24 at 192).
+  Four warps per row (two at 16 rows a CTA, one at 24) each take the top-6 of
+  their share of the experts (3, 6 or 12 per lane); one warp per row merges
+  the candidates and normalizes. The top-k is bound by instruction issue,
+  so its time grows with the rows a CTA holds; the rows are therefore spread
+  over all eight CTAs, even at 8 rows or fewer. The
+  selection is a lexicographic (value, lowest id) maximum, so splitting it
+  does not change the result. The merging warps store the selected ids to
+  CTA 0's shared memory (through distributed shared memory) and release
+  them with the cluster barrier, then CTA 0 builds the routing record from
+  them. The ids and weights go to global memory only after that release,
+  which would otherwise wait for those stores to reach L2.
+* Quantizing CTA ``S + c``: rows ``3c .. 3c + 2`` of the BF16 input, two
+  threads per 32-value block. The grid is rounded up to whole clusters.
 
 PDL: every CTA triggers its dependents on entry (GEMM1's set-up overlaps this
 kernel; GEMM1 reads the outputs only after its own grid-dependency wait). The
@@ -77,9 +89,11 @@ from cutlass.cutlass_dsl import T, dsl_user_op
 from ...ops.cute_dsl.primitives import load_global_u32x4
 from .routed_expert_route_cute import (
     MAX_EXPERTS,
-    WORDS,
     build_record,
     clear_scratch,
+    levels_for,
+    mask_words_for,
+    present_words,
     record_words,
     zero_record,
 )
@@ -87,19 +101,16 @@ from .routed_expert_route_cute import (
 HIDDEN = 5120
 EXPERTS = 384
 TOP_K = 6
-MAX_ROWS = 8
-PARTS = 4  # warps per row
-PER_LANE = EXPERTS // 32 // PARTS  # three experts per lane
-CANDIDATES = PARTS * TOP_K  # 24 per row, merged by one warp
 BLOCKS = HIDDEN // 32  # quantization blocks per row
 FRONT_THREADS = 1024
 ROW_THREADS = 2 * BLOCKS  # 320 threads quantize one row
 QUANT_ROWS = FRONT_THREADS // ROW_THREADS  # rows per quantizing CTA
+SELECT_CTAS = 8  # the selecting CTAs: a portable cluster
+MAX_PARTS = 4  # the most warps per row: 4 x 6 candidates fit one merging warp
 NAN_KEY_VALUE = 0xF149F2CA  # -1e30, Triton's rank of a NaN score
 
-assert FRONT_THREADS == MAX_ROWS * PARTS * 32
-assert CANDIDATES <= 32
 assert EXPERTS <= MAX_EXPERTS
+assert EXPERTS % 32 == 0
 
 
 def _asm(result, operands: list, text: str, constraints: str, loc, ip):
@@ -212,7 +223,7 @@ def lane_best(key: cute.Tensor):
     """The lane's best remaining entry: the largest key, then the lowest j."""
     best_key = Uint32(key[0])
     best_j = Int32(0)
-    for j in cutlass.range_constexpr(1, PER_LANE):
+    for j in cutlass.range_constexpr(1, cute.size(key)):
         if Uint32(key[j]) > best_key:
             best_key = Uint32(key[j])
             best_j = Int32(j)
@@ -221,15 +232,17 @@ def lane_best(key: cute.Tensor):
 
 @cute.jit
 def part_top_k(logit: cute.Tensor, bias: cute.Tensor, base: Int32, lane: Int32):
-    """One warp's top-6 of its 96 experts (expert = base + lane + 32 j), in
+    """One warp's top-6 of its share of the experts (expert = base + lane +
+    32 j, ``j`` below the size of ``logit``), in
     selection order: each round takes the warp's largest key with one
     ``redux.sync`` max, then the lowest expert id holding it with one min
     (Triton's ``tl.max``, then the lowest index equal to it); only the winning
     lane rescans. Lane ``s < 6`` gets slot ``s``: its key, id and unbiased
     score."""
-    score = cute.make_rmem_tensor((PER_LANE,), Float32)
-    key = cute.make_rmem_tensor((PER_LANE,), Uint32)
-    for j in cutlass.range_constexpr(PER_LANE):
+    per_lane = cute.size(logit)
+    score = cute.make_rmem_tensor((per_lane,), Float32)
+    key = cute.make_rmem_tensor((per_lane,), Uint32)
+    for j in cutlass.range_constexpr(per_lane):
         score[j], key[j] = score_and_key(logit[j], bias[j])
     best_key, best_j = lane_best(key)
     out_key = Uint32(0)
@@ -243,7 +256,7 @@ def part_top_k(logit: cute.Tensor, bias: cute.Tensor, base: Int32, lane: Int32):
         winner = Int32(cute.arch.warp_redux_sync(mine, "umin"))
         won = Float32(0.0)
         if winner - base == lane + 32 * best_j:
-            for j in cutlass.range_constexpr(PER_LANE):
+            for j in cutlass.range_constexpr(per_lane):
                 if best_j == j:
                     won = score[j]
                     key[j] = Uint32(0)  # below every value's key
@@ -262,15 +275,13 @@ def merge_row(
     expert: Int32,
     score: Float32,
     scale: Float32,
-    row: Int32,
     lane: Int32,
-    topk_ids: cute.Tensor,
-    topk_weights: cute.Tensor,
-    ids_shared: cute.Tensor,
+    padding: Int32,
 ):
-    """Merge a row's 24 candidates (lane ``c < 24`` holds candidate ``c``) into
-    its top-6, normalize as Triton does and store; lane ``s < 6`` ends with
-    slot ``s``."""
+    """Merge a row's candidates (lane ``c`` holds candidate ``c``) into
+    its top-6 and normalize as Triton does; lane ``s < 6`` returns slot
+    ``s``'s expert id and weight. A padding row (``padding`` nonzero) gets
+    id -1 and weight 0, as the Triton kernel's padding mask does."""
     slot_weight = Float32(0.0)  # lane s < 8 keeps slot s (Triton's 8-wide vector)
     slot_id = Int32(0)
     for slot in cutlass.range_constexpr(TOP_K):
@@ -292,10 +303,34 @@ def merge_row(
     total = slot_weight
     for shift in cutlass.range_constexpr(2, -1, -1):
         total = add_f32(total, cute.arch.shuffle_sync_bfly(total, 1 << shift))
+    weight = Float32(0.0)
     if lane < TOP_K:
-        topk_ids[row * TOP_K + lane] = slot_id
-        topk_weights[row * TOP_K + lane] = normalized_weight(scale, total, slot_weight)
-        ids_shared[row * TOP_K + lane] = slot_id
+        weight = normalized_weight(scale, total, slot_weight)
+        if padding != 0:
+            slot_id = Int32(-1)
+            weight = Float32(0.0)
+    return slot_id, weight
+
+
+@dsl_user_op
+def store_cta0_shared(pointer: cute.Pointer, value, *, loc=None, ip=None):
+    """Store the 32-bit ``value`` at ``pointer``'s shared-memory offset in CTA 0
+    of the cluster (distributed shared memory)."""
+    llvm.inline_asm(
+        None,
+        [
+            Int32(pointer.toint(loc=loc, ip=ip)).ir_value(loc=loc, ip=ip),
+            Int32(value).ir_value(loc=loc, ip=ip),
+        ],
+        "{\n.reg .u32 a;\nmapa.shared::cluster.u32 a, $0, 0;\n"
+        "st.shared::cluster.u32 [a], $1;\n}",
+        "r,r",
+        has_side_effects=True,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+        loc=loc,
+        ip=ip,
+    )
 
 
 # ---- MXFP8 quantization (FlashInfer's linear layout, two threads per block)
@@ -473,10 +508,21 @@ def quantize_row(
 
 class RoutedExpertFront:
     """The fused front (module docstring); ``image``: whether the router
-    routes image sentinel tokens with ``bias_vl``."""
+    routes image sentinel tokens with ``bias_vl``; ``max_rows``: 8, 16, 32,
+    64, 128 or 192, the most rows of a call."""
 
-    def __init__(self, image: bool) -> None:
+    def __init__(self, image: bool, max_rows: int = 8) -> None:
+        assert max_rows in (8, 16, 32, 64, 128, 192)
         self.image = image
+        self.max_rows = max_rows
+        self.selecting = SELECT_CTAS  # CTAs, one cluster
+        self.select_rows = max_rows // self.selecting  # 1-8, 16 at 128 rows, 24 at 192
+        # Warps per row: four, or as many as fit above 8 rows a CTA.
+        self.parts = min(FRONT_THREADS // 32 // self.select_rows, MAX_PARTS)
+        self.per_lane = EXPERTS // 32 // self.parts  # experts per lane
+        self.candidates = self.parts * TOP_K  # per row, merged by one warp
+        self.levels = levels_for(max_rows)
+        assert EXPERTS % (32 * self.parts) == 0 and self.candidates <= 32
 
     @cute.jit
     def __call__(
@@ -488,6 +534,8 @@ class RoutedExpertFront:
         ids_are_64bit: Int32,
         sentinel_lo: Int32,
         scale: Float32,
+        is_padding_ptr: cute.Pointer,
+        has_padding: Int32,
         x_ptr: cute.Pointer,
         topk_ids_ptr: cute.Pointer,
         topk_weights_ptr: cute.Pointer,
@@ -501,11 +549,16 @@ class RoutedExpertFront:
         """``logits``: FP32 [rows, 384]; ``bias``, ``bias_vl``: FP32 [384];
         ``input_ids``: [rows] int32, or int64 if ``ids_are_64bit``, as Int32
         words (``bias_vl`` and ``input_ids`` are read only with image routing;
-        pass any pointers otherwise); ``x``: BF16 [rows, 5120] as Uint32
+        pass any pointers otherwise); ``is_padding``: bool [rows], read only
+        if ``has_padding``; ``x``: BF16 [rows, 5120] as Uint32
         words; outputs: ``topk_ids`` int32 / ``topk_weights`` FP32 [rows, 6],
         ``x_quant`` [rows, 5120] E4M3 bytes, ``x_scale`` [rows, 160] UE8M0,
-        ``permuted`` [rows, 6] and the routing record. rows in [1, 8]."""
+        ``permuted`` [rows, 6] and the routing record. rows in [1, max_rows]."""
         slots = cute.make_layout(rows * TOP_K)
+        selecting = self.selecting
+        quantizing = (rows + QUANT_ROWS - 1) // QUANT_ROWS
+        # Whole clusters: the last one's spare CTAs exit at once.
+        quantizing = (quantizing + selecting - 1) // selecting * selecting
         self.kernel(
             cute.make_tensor(logits_ptr, cute.make_layout(rows * EXPERTS)),
             cute.make_tensor(bias_ptr, cute.make_layout(EXPERTS)),
@@ -514,6 +567,8 @@ class RoutedExpertFront:
             ids_are_64bit,
             sentinel_lo,
             scale,
+            cute.make_tensor(is_padding_ptr, cute.make_layout(rows)),
+            has_padding,
             cute.make_tensor(x_ptr, cute.make_layout(rows * HIDDEN // 2)),
             cute.make_tensor(topk_ids_ptr, slots),
             cute.make_tensor(topk_weights_ptr, slots),
@@ -525,10 +580,11 @@ class RoutedExpertFront:
             ),
             rows,
         ).launch(
-            grid=(1 + (rows + QUANT_ROWS - 1) // QUANT_ROWS, 1, 1),
+            grid=(selecting + quantizing, 1, 1),
             block=[FRONT_THREADS, 1, 1],
             stream=stream,
             use_pdl=True,
+            cluster=[selecting, 1, 1],
         )
 
     @cute.kernel
@@ -541,6 +597,8 @@ class RoutedExpertFront:
         ids_are_64bit: Int32,
         sentinel_lo: Int32,
         scale: Float32,
+        is_padding: cute.Tensor,
+        has_padding: Int32,
         x: cute.Tensor,
         topk_ids: cute.Tensor,
         topk_weights: cute.Tensor,
@@ -550,12 +608,13 @@ class RoutedExpertFront:
         record: cute.Tensor,
         rows: Int32,
     ):
-        """CTA 0 selects and routes; the others quantize (module docstring)."""
+        """The first ``selecting`` CTAs select (CTA 0 also routes); the others
+        quantize (module docstring)."""
         cute.arch.griddepcontrol_launch_dependents()
         thread, _, _ = cute.arch.thread_idx()
         cta, _, _ = cute.arch.block_idx()
-        if cta != 0:
-            row = (cta - 1) * QUANT_ROWS + thread // ROW_THREADS
+        if cta >= self.selecting:
+            row = (cta - self.selecting) * QUANT_ROWS + thread // ROW_THREADS
             if thread < QUANT_ROWS * ROW_THREADS and row < rows:
                 cute.arch.griddepcontrol_wait()
                 quantize_row(x, row, thread % ROW_THREADS, x_quant, x_scale)
@@ -568,11 +627,14 @@ class RoutedExpertFront:
                 ids_are_64bit,
                 sentinel_lo,
                 scale,
+                is_padding,
+                has_padding,
                 topk_ids,
                 topk_weights,
                 permuted,
                 record,
                 rows,
+                cta,
                 thread,
             )
 
@@ -586,53 +648,69 @@ class RoutedExpertFront:
         ids_are_64bit: Int32,
         sentinel_lo: Int32,
         scale: Float32,
+        is_padding: cute.Tensor,
+        has_padding: Int32,
         topk_ids: cute.Tensor,
         topk_weights: cute.Tensor,
         permuted: cute.Tensor,
         record: cute.Tensor,
         rows: Int32,
+        rank: Int32,
         thread: Int32,
     ):
-        """CTA 0: top-k of every row, then the routing record."""
+        """Selecting CTA ``rank``: top-k of its rows; then CTA 0 builds the
+        routing record from every row's ids."""
+        selecting, levels = self.selecting, self.levels
+        bitmap_words = present_words(levels)
+        mask_size = MAX_EXPERTS * mask_words_for(levels)
+        selected = self.max_rows * TOP_K
+        parts, per_lane, candidates = self.parts, self.per_lane, self.candidates
+        held = self.select_rows * candidates
 
         @cute.struct
         class Shared:
-            present: cute.struct.MemRange[Uint32, WORDS]
-            rows_of: cute.struct.MemRange[Uint32, MAX_EXPERTS]
-            ids: cute.struct.MemRange[Int32, MAX_ROWS * TOP_K]
-            candidate_key: cute.struct.MemRange[Uint32, MAX_ROWS * CANDIDATES]
-            candidate_id: cute.struct.MemRange[Int32, MAX_ROWS * CANDIDATES]
-            candidate_score: cute.struct.MemRange[Float32, MAX_ROWS * CANDIDATES]
+            present: cute.struct.MemRange[Uint32, bitmap_words]
+            rows_of: cute.struct.MemRange[Uint32, mask_size]
+            ids: cute.struct.MemRange[Int32, selected]
+            candidate_key: cute.struct.MemRange[Uint32, held]
+            candidate_id: cute.struct.MemRange[Int32, held]
+            candidate_score: cute.struct.MemRange[Float32, held]
 
         shared = cutlass.utils.SmemAllocator().allocate(Shared)
 
         def view(member, size):
             return cute.make_tensor(member.data_ptr(), cute.make_layout(size))
 
-        present = view(shared.present, WORDS)
-        rows_of = view(shared.rows_of, MAX_EXPERTS)
-        ids_shared = view(shared.ids, MAX_ROWS * TOP_K)
-        candidate_key = view(shared.candidate_key, MAX_ROWS * CANDIDATES)
-        candidate_id = view(shared.candidate_id, MAX_ROWS * CANDIDATES)
-        candidate_score = view(shared.candidate_score, MAX_ROWS * CANDIDATES)
-        clear_scratch(present, rows_of, thread, FRONT_THREADS)
+        present = view(shared.present, bitmap_words)
+        rows_of = view(shared.rows_of, mask_size)
+        ids_shared = view(shared.ids, selected)
+        candidate_key = view(shared.candidate_key, held)
+        candidate_id = view(shared.candidate_id, held)
+        candidate_score = view(shared.candidate_score, held)
+        # Every CTA of the cluster must have started before the stores to CTA
+        # 0's shared memory; this phase completes during the top-k.
+        cute.arch.cluster_arrive_relaxed()
+        if rank == 0:
+            clear_scratch(present, rows_of, thread, FRONT_THREADS, levels)
         warp = thread >> 5
         lane = thread & 31
-        row = warp // PARTS
-        part = warp % PARTS
-        base = part * 32 * PER_LANE  # this warp's experts: base + lane + 32 j
-        row_bias = cute.make_rmem_tensor((PER_LANE,), Float32)
-        row_bias_vl = cute.make_rmem_tensor((PER_LANE,), Float32)
+        local_row = warp // parts
+        part = warp % parts
+        row = rank + selecting * local_row
+        base = part * 32 * per_lane  # this warp's experts: base + lane + 32 j
+        row_bias = cute.make_rmem_tensor((per_lane,), Float32)
+        row_bias_vl = cute.make_rmem_tensor((per_lane,), Float32)
         if row < rows:
-            for j in cutlass.range_constexpr(PER_LANE):
+            for j in cutlass.range_constexpr(per_lane):
                 row_bias[j] = bias[base + lane + 32 * j]
                 if cutlass.const_expr(self.image):
                     row_bias_vl[j] = bias_vl[base + lane + 32 * j]
         cute.arch.griddepcontrol_wait()
-        zero_record(record, rows, TOP_K, EXPERTS, thread, FRONT_THREADS)
+        if rank == 0:
+            zero_record(record, rows, TOP_K, EXPERTS, thread, FRONT_THREADS)
         if row < rows:
-            logit = cute.make_rmem_tensor((PER_LANE,), Float32)
-            for j in cutlass.range_constexpr(PER_LANE):
+            logit = cute.make_rmem_tensor((per_lane,), Float32)
+            for j in cutlass.range_constexpr(per_lane):
                 logit[j] = logits[row * EXPERTS + base + lane + 32 * j]
             if cutlass.const_expr(self.image):
                 token = Int64(input_ids[row])
@@ -641,35 +719,51 @@ class RoutedExpertFront:
                     token = (Int64(input_ids[2 * row + 1]) << 32) | low_word
                 low = Int64(sentinel_lo)
                 if token >= low and token < low + 5:
-                    for j in cutlass.range_constexpr(PER_LANE):
+                    for j in cutlass.range_constexpr(per_lane):
                         row_bias[j] = row_bias_vl[j]
             key, expert, score = part_top_k(logit, row_bias, base, lane)
             if lane < TOP_K:
-                slot = row * CANDIDATES + part * TOP_K + lane
+                slot = local_row * candidates + part * TOP_K + lane
                 candidate_key[slot] = key
                 candidate_id[slot] = expert
                 candidate_score[slot] = score
         cute.arch.sync_threads()
+        cute.arch.cluster_wait()
+        slot_id = Int32(-1)
+        slot_weight = Float32(0.0)
         if row < rows and part == 0:
             key = Uint32(0)
             expert = Int32(-1)
             score = Float32(0.0)
-            if lane < CANDIDATES:
-                key = Uint32(candidate_key[row * CANDIDATES + lane])
-                expert = candidate_id[row * CANDIDATES + lane]
-                score = candidate_score[row * CANDIDATES + lane]
-            merge_row(
-                key, expert, score, scale, row, lane, topk_ids, topk_weights, ids_shared
+            if lane < candidates:
+                key = Uint32(candidate_key[local_row * candidates + lane])
+                expert = candidate_id[local_row * candidates + lane]
+                score = candidate_score[local_row * candidates + lane]
+            padding = Int32(0)
+            if has_padding != 0:
+                padding = Int32(is_padding[row])
+            slot_id, slot_weight = merge_row(key, expert, score, scale, lane, padding)
+            if lane < TOP_K:
+                store_cta0_shared(ids_shared.iterator + row * TOP_K + lane, slot_id)
+        # Release the stores to CTA 0; CTA 0 acquires them. The release orders
+        # every earlier store of the thread, so the global stores follow it
+        # rather than delay it by their round trip to L2 (about 0.2-0.4 us).
+        cute.arch.cluster_arrive()
+        if row < rows and part == 0 and lane < TOP_K:
+            topk_ids[row * TOP_K + lane] = slot_id
+            topk_weights[row * TOP_K + lane] = slot_weight
+        cute.arch.cluster_wait()
+        if rank == 0:
+            build_record(
+                present,
+                rows_of,
+                ids_shared,
+                permuted,
+                record,
+                rows,
+                Int32(TOP_K),
+                Int32(EXPERTS),
+                thread,
+                FRONT_THREADS,
+                levels,
             )
-        cute.arch.sync_threads()
-        build_record(
-            present,
-            rows_of,
-            ids_shared,
-            permuted,
-            record,
-            rows,
-            Int32(TOP_K),
-            Int32(EXPERTS),
-            thread,
-        )

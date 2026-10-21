@@ -9,7 +9,9 @@
   models, and before memory profiling);
 - CUDA graphs of the attention metadata builds of FULL decode steps
   (``metadata_graphs``), recorded with the inner CUDA graphs and replayed in
-  place of the eager build;
+  place of the eager build. A step that replays one gathers its engram
+  lookback windows on a side stream beside it, so the metadata graph hands
+  off to the forward's graph with no eager kernel between them;
 - no replay-start upload for decode steps whose starts are known to be zero.
 """
 
@@ -21,10 +23,12 @@ import torch
 from torch import nn
 
 from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.utils.torch_utils import current_stream
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
+from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
 
 from ...model_state import DeepseekV41ModelState
@@ -83,6 +87,14 @@ class DeepseekV41SpecializedDecodeModelState(DeepseekV41ModelState):
         self._zero_replay_starts = 0
         # The key whose metadata build capture_inner_cudagraphs records.
         self._recording: GraphKey | None = None
+        # The runner's request state, from the first prepare_inputs on; the
+        # lookback gather that runs beside a metadata graph reads it.
+        self._req_states: RequestState | None = None
+        # The gather's side stream and the event recorded after it.
+        self._lookback_side: tuple[torch.cuda.Stream, torch.cuda.Event] | None = None
+        # The batch whose lookback gather was issued beside its metadata graph,
+        # and the event that ends it.
+        self._staged_lookback: tuple[InputBatch, torch.cuda.Event] | None = None
 
     def initialize_kv_cache(
         self, kv_cache_config: KVCacheConfig, block_tables: BlockTables
@@ -99,6 +111,43 @@ class DeepseekV41SpecializedDecodeModelState(DeepseekV41ModelState):
             super()._upload_replay_start(values, num_reqs)
             self._zero_replay_starts = 0 if has_replay else num_reqs
         return self._replay_start[:num_reqs]
+
+    def prepare_inputs(
+        self, input_batch: InputBatch, req_states: RequestState
+    ) -> dict[str, torch.Tensor | None]:
+        self._req_states = req_states
+        return super().prepare_inputs(input_batch, req_states)
+
+    def _stage_lookback(self, input_batch: InputBatch) -> None:
+        """Issue the batch's lookback gather on a side stream, beside the
+        metadata graph about to replay. It reads the batch's request indices
+        and the token history, which the runner has written by now."""
+        if self.lookback_token_ids is None or self._req_states is None:
+            return
+        if self._lookback_side is None:
+            self._lookback_side = (torch.cuda.Stream(), torch.cuda.Event())
+        self._join_staged_lookback()
+        stream, event = self._lookback_side
+        stream.wait_stream(current_stream())
+        with torch.cuda.stream(stream):
+            super()._fill_lookback(input_batch, self._req_states)
+        event.record(stream)
+        self._staged_lookback = (input_batch, event)
+
+    def _join_staged_lookback(self) -> InputBatch | None:
+        """Make the current stream wait for a staged lookback gather, if any;
+        returns the batch it gathered."""
+        staged, self._staged_lookback = self._staged_lookback, None
+        if staged is None:
+            return None
+        current_stream().wait_event(staged[1])
+        return staged[0]
+
+    def _fill_lookback(self, input_batch: InputBatch, req_states: RequestState) -> None:
+        # Even a stale gather (a batch whose inputs were never prepared) is
+        # joined, so that no two gathers write the window at once.
+        if self._join_staged_lookback() is not input_batch:
+            super()._fill_lookback(input_batch, req_states)
 
     def _build_attn_metadata(
         self,
@@ -133,6 +182,7 @@ class DeepseekV41SpecializedDecodeModelState(DeepseekV41ModelState):
             if key is not None:
                 # decode_backend=latency_specialized refuses micro-batching.
                 assert ubatch_idx == 0
+                self._stage_lookback(input_batch)
                 attn_metadata = self.graphs.replay(key)
                 if attn_metadata is not None:
                     return attn_metadata

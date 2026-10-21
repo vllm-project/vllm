@@ -76,21 +76,27 @@ forward runs the stock layers, which the executor does not modify.
 
 | Path | Steps |
 | --- | --- |
-| Fused Lamport all-reduce + mHC at every sublayer boundary; the next mHC coefficients on the side stream up to 48 rows, inline beyond | all executor steps (up to 384 rows) |
+| Fused Lamport all-reduce + mHC at every sublayer boundary; the next mHC coefficients on the side stream | all executor steps (up to 384 rows) |
 | Every MoE finalize deferred to the next boundary's fused kernel, in a residual-only variant before an Engram layer and after the last layer | all executor steps |
 | The fused kernel also writes the attention input as MXFP8, which `fused_wqa_wkv` reads instead of quantizing again | all executor steps |
-| Aux hidden-state means on the mHC side stream | up to 48 rows |
-| Routed experts on CuTe DSL routing and `tcgen05` GEMM kernels (`moe/routed_expert_gemm.py`) | 1-8 rows |
+| Aux hidden-state means on the mHC side stream | all executor steps |
+| Routed experts on CuTe DSL routing and `tcgen05` GEMM kernels (`moe/routed_expert_gemm.py`) | 1-192 rows |
 | `fused_wqa_wkv`, `wq_b` and `wo_b` on FlashInfer's low-latency CuTe DSL MXFP8 GEMM with pinned tactics | 1-8 rows |
+| `fused_wqa_wkv`, `wq_b` and `wo_b` on the low-latency GEMM with a 16-, 32- or 48-row activation tile where its shape has a wide tactic, else on FlashInfer's `cute-dsl` MXFP8 GEMM with pinned tactics | 9-48 rows |
+| `fused_wqa_wkv`, `wq_b` and `wo_b` on FlashInfer's `cute-dsl` MXFP8 GEMM with pinned tactics instead of per-start autotuning | 49-384 rows |
 | Compressor, indexer-weight and indexer `wk` projections on a low-batch BF16 GEMM; the index key store reads `wk`'s FP32 output | 1-8 rows |
 | `wo_b` stores its output into the fused kernel's mailbox, which then only collects | 1-8 rows |
+| The decode Q/KV norm and the fused `wo_a` trigger their PDL dependents (`wq_b`, `wo_b`) early, as those load their weights before their own wait | 1-48 rows |
+| The embedding and the first layer's hc streams looked up from a full copy of the table on every rank (1.32 GB a GPU), without the all-reduce | all executor steps |
 | Indexer query, compressor and index key on side streams, each joined at its first reader | all executor steps; the side projections up to `VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD` rows |
-| Candidate consumers' candidate expansion and MQA-logits schedule on a side stream after the candidate source's indexer | up to 16 rows |
-| Dense indexer rows sharded over the TP ranks and all-gathered | steps of at least 8 requests that TP divides |
-| Candidate blocks selected with `cooperative_topk` | up to 64 rows per rank |
+| Candidate consumers' candidate expansion and MQA-logits schedule on a side stream after the candidate source's indexer | all executor steps |
+| Dense indexer rows sharded over the TP ranks, a contiguous even slice per rank (the last ones may be short or empty), and all-gathered over NCCL | uniform decode steps of at least 12 rows |
+| Token top-k, and the candidate source's blocks, selected from the BF16 logits with `decode_topk` (`attention/decode_topk_cute.py`) | up to 64 rows per rank; the candidate source while its 16-CTA rows fit two waves (14 rows on a GB300) |
+| Otherwise the candidate blocks selected with `cooperative_topk` on the upcast logits | up to 64 rows per rank |
 | Compressed layers sharing an index source reuse one sparse-index table; the first of them builds the other KV-cache groups' tables on a side stream | all executor steps |
-| Sparse-MLA decode launched on a KV-counter buffer zeroed once | all executor steps |
-| Engram WKV chain on a side stream right after each layer's lookup | up to 16 rows, with host-offloaded TP-only tables and a CuTe DSL MXFP8 `wkv` |
+| Sparse-MLA decode on a CuTe DSL kernel, a thread block cluster per token with one CTA per 128 columns (`attention/sparse_mla_cute.py`) | the target's causal decode while every token's cluster is resident at once (at width 640, up to 8 requests with DSpark on a GB300) |
+| Otherwise the TRTLLM-gen sparse-MLA decode, launched on a KV-counter buffer zeroed once | all other executor steps |
+| Engram WKV chain on a side stream right after each layer's lookup | all executor steps, with host-offloaded TP-only tables and a CuTe DSL MXFP8 `wkv` |
 | Attention metadata builds recorded at CUDA graph capture, one per batch shape the FULL decode graphs serve, and replayed | FULL-graph uniform decode |
 | LM head on FlashInfer's CuTe DSL BF16 GEMM | 1-16 rows |
 | Logits gathered with the custom all-gather | whenever it accepts the input |

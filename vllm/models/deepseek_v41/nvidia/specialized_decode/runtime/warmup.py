@@ -18,10 +18,18 @@ import vllm.utils.flashinfer as fi_utils
 from vllm.config import VllmConfig
 from vllm.distributed import get_tp_group
 from vllm.forward_context import set_forward_context
+from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 
-from .. import FUSED_MHC_MAX_ROWS, LOW_BATCH_MAX_ROWS
+from ...ops.o_proj import precompile_dsv41_o_proj_early_trigger
+from .. import FUSED_MHC_MAX_ROWS, LOW_BATCH_MAX_ROWS, WIDE_LOW_LATENCY_MAX_ROWS
+from ..attention import decode_topk_cute, sparse_mla_cute
 from ..attention.aux_projections import warmup_aux_projection_gemms
-from ..attention.mxfp8 import pinned_tactics, run_zeros, shape_representatives
+from ..attention.mxfp8 import (
+    compile_pinned,
+    pinned_tactics,
+    run_zeros,
+    shape_representatives,
+)
 from ..attention.step import AttentionStep, key_weight, side_weights
 from ..logits.lm_head import autotune_low_batch_lm_head, warmup_low_batch_lm_head
 from ..moe.step import deferred_finalize
@@ -52,6 +60,7 @@ def warm_up(decode: SpecializedDecode, vllm_config: VllmConfig) -> None:
         for linear in linears:
             for m in range(1, LOW_BATCH_MAX_ROWS + 1):
                 run_zeros(linear, m)
+            compile_pinned(linear)
         # The publishing wo_b compiles the tactics selected above; one layer
         # per shape compiles every layer's kernels.
         publishing = {
@@ -65,8 +74,34 @@ def warm_up(decode: SpecializedDecode, vllm_config: VllmConfig) -> None:
                 step.publisher.precompile(step.attn.wo_b, m)
         warmup_aux_projection_gemms(_aux_weights(steps))
         warmup_low_batch_lm_head(decode.lm_head)
+        device = torch.accelerator.current_device_index()
+        for has_sinks in {step.attn.attn_sink is not None for step in steps}:
+            sparse_mla_cute.precompile(device, has_sinks)
+        for width, k, block_mode in _decode_topk_variants(steps):
+            decode_topk_cute.precompile(device, width, k, block_mode)
+        # The fused WO-A variant the steps' o_proj launches (early_trigger);
+        # one layer per shape compiles every layer's kernels.
+        for attn in {
+            (a.n_local_groups, a.n_local_heads, a.o_lora_rank): a
+            for a in (step.attn for step in steps)
+        }.values():
+            precompile_dsv41_o_proj_early_trigger(attn, WIDE_LOW_LATENCY_MAX_ROWS)
     if decode.config.jit_warmup:
         _warm_up_mhc(decode, vllm_config, rows)
+
+
+def _decode_topk_variants(steps: list[AttentionStep]) -> set[tuple[int, int, bool]]:
+    """(logits width, k, block mode) of every ``decode_topk`` call the dense
+    indexers can make: the paged MQA logits are ``max_model_len`` wide."""
+    variants: set[tuple[int, int, bool]] = set()
+    for step in steps:
+        op = None if step.attn.indexer is None else step.attn.indexer.indexer_op
+        if not isinstance(op, SparseAttnIndexer) or op.topk_backend != "auto":
+            continue
+        variants.add((op.max_model_len, op.topk_tokens, False))
+        if op.candidate_blocks is not None and op.candidate_block_size == 8:
+            variants.add((op.max_model_len, op.candidate_blocks.shape[1], True))
+    return variants
 
 
 @contextmanager
@@ -97,7 +132,7 @@ def _deferred_moe(
     decode: SpecializedDecode, vllm_config: VllmConfig, rows: int, tune: bool
 ) -> None:
     """One deferring MoE layer on ``rows`` random rows with the finalize
-    deferred, as the executor runs it above ``LOW_BATCH_MAX_ROWS`` rows:
+    deferred, as the executor runs it above the routed-expert GEMMs' rows:
     tunes its experts over the serving buckets, and allocates what the
     deferred launch allocates on first use before memory profiling."""
     moe = next((plan.moe for plan in decode.plans if plan.moe.deferrable), None)

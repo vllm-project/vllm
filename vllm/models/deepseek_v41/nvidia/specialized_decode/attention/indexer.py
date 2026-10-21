@@ -5,15 +5,28 @@
 ``decode_rows`` runs a dense indexer (``SparseAttnIndexer``) on a copy of the
 varlen decode branch of ``sparse_attn_indexer``, with two additions:
 
-- Row sharding. The indexer is replicated across the TP ranks. In a step of at
-  least ``ROW_SHARD_MIN_REQUESTS`` requests whose count the ranks divide, each
-  rank scores, selects candidates for and top-k's only its contiguous slice of
-  the rows; TP all-gathers of the int32 rows rebuild ``topk_indices_buffer``
-  and, in the candidate source, the candidate blocks.
-- The candidate source selects its candidate blocks with ``cooperative_topk``
-  for up to 64 rows per rank (see ``candidate_topk``).
+- Row sharding. The indexer is replicated across the TP ranks. In a uniform
+  decode step of at least ``ROW_SHARD_MIN_ROWS`` rows, each rank scores,
+  selects candidates for and top-k's only its contiguous slice of the rows
+  (an even number of them, so the last ranks' slices may be short or empty);
+  TP all-gathers of the int32 rows (see ``_all_gather_rows``) rebuild
+  ``topk_indices_buffer`` and, in the candidate source, the candidate blocks.
+  A slice may split a request: varlen rows are independent.
+- Selection from the BF16 logits. For up to 64 rows per rank, ``decode_topk``
+  (``decode_topk_cute``) selects the token top-k, and in the candidate source
+  the candidate blocks, from SM100's BF16 logits without upcasting them. The
+  candidate source's logits are twice as wide (compress ratio 1), so at a 1M
+  context they need 16 CTAs a row and take that path only up to two waves of
+  such clusters (14 rows on a GB300); otherwise the candidate source selects
+  with ``cooperative_topk`` (see ``candidate_topk``) on the upcast logits.
 
 Steps it does not take run the stock indexer.
+
+``decode_rows`` runs in two parts. ``plan_decode_rows`` takes the gates,
+resets the top-k rows and builds the slice's DeepGEMM schedule: none of it
+reads the layer's index query or keys, so the attention step issues it while
+the current stream would otherwise wait for them. ``finish_decode_rows``
+scores, selects and gathers once they are ready.
 
 ``CandidateOverlap`` moves the candidate consumers' candidate expansion and
 sparse MQA-logits schedule onto a side stream.
@@ -21,6 +34,8 @@ sparse MQA-logits schedule onto a side stream.
 The row-sharded path issues TP collectives, so its gates read only host state
 that every TP rank shares: the step's row and request counts.
 """
+
+from dataclasses import dataclass
 
 import torch
 from torch import nn
@@ -41,7 +56,6 @@ from vllm.model_executor.layers.sparse_attn_indexer import (
     kv_cache_as_quant_view,
 )
 from vllm.model_executor.layers.sparse_mqa_indexer import SparseMQAIndexer
-from vllm.models.common.ops.sequence_parallel import sp_all_gather
 from vllm.models.deepseek_v41.attention import DeepseekV4Indexer
 from vllm.models.deepseek_v41.common.ops import fused_indexer_q_rope_quant
 from vllm.triton_utils import triton
@@ -50,6 +64,7 @@ from vllm.utils.deep_gemm import (
     get_paged_mqa_logits_metadata,
     get_paged_sparse_mqa_logits_metadata,
     mqa_logits_mx_inputs,
+    mqa_logits_use_mx_scales,
 )
 from vllm.v1.attention.backends.mla.indexer import (
     DeepSeekV32IndexerDecodeMetadata,
@@ -64,35 +79,42 @@ from .candidate_topk import (
     select_candidate_blocks_cooperative,
     supports_cooperative_candidates,
 )
+from .decode_topk_cute import decode_topk, supports_decode_topk
 
-# Fewest requests of a row-sharded decode step.
-ROW_SHARD_MIN_REQUESTS = 8
-# Most rows of a step whose candidate expansion overlaps.
-OVERLAP_MAX_ROWS = 16
+# Fewest rows of a row-sharded decode step (two requests of six rows): a
+# single request's slices save less than the all-gathers cost.
+ROW_SHARD_MIN_ROWS = 12
+
+
+def row_shard_rows(num_rows: int, num_requests: int, world_size: int) -> int | None:
+    """Rows each rank's slice spans in a pure-decode step, or None when the
+    step stays replicated. Rank ``r`` scores rows ``[r n, (r + 1) n)``
+    clipped to the step's rows.
+
+    Slices start on an even row: DeepGEMM's paged MQA logits needs its int32
+    ``indices`` 8-byte aligned. Varlen rows are independent, so a slice may
+    split a request. Steps whose rows are not a multiple of their requests
+    (some capture and profiling runs) stay replicated.
+    """
+    if world_size < 2 or not num_requests or num_rows % num_requests:
+        return None
+    if num_rows < ROW_SHARD_MIN_ROWS:
+        return None
+    rows = -(-num_rows // world_size)
+    return rows + rows % 2
 
 
 def row_shard_bounds(
     num_rows: int, num_requests: int, world_size: int, rank: int
 ) -> tuple[int, int] | None:
-    """Rows ``[start, end)`` that ``rank`` scores in a pure-decode step, or
-    None when the step stays replicated.
-
-    Each slice holds whole requests of a uniform step; varlen rows are
-    independent, so the split is exact either way. Slices start on an even
-    row: DeepGEMM's paged MQA logits needs its int32 ``indices`` 8-byte
-    aligned. DSpark decode steps always split so; capture and profiling runs
-    of one row a request may not, and stay replicated.
-    """
-    rows = num_rows // world_size
-    if (
-        world_size < 2
-        or num_requests < ROW_SHARD_MIN_REQUESTS
-        or num_requests % world_size
-        or num_rows % num_requests
-        or rows % 2
-    ):
+    """Rows ``[start, end)`` that ``rank`` scores in a pure-decode step (an
+    empty range for a rank past the last row), or None when the step stays
+    replicated."""
+    rows = row_shard_rows(num_rows, num_requests, world_size)
+    if rows is None:
         return None
-    return rank * rows, (rank + 1) * rows
+    start = min(rank * rows, num_rows)
+    return start, min(start + rows, num_rows)
 
 
 def rope_quant_q(
@@ -114,15 +136,44 @@ def rope_quant_q(
         use_fp4=indexer.use_fp4_kv,
         weights_out_dtype=indexer.indexer_weights_dtype,
     )
+    if mqa_logits_use_mx_scales():
+        # The SM100 logits kernels take BF16 weights. Cast them here, on the
+        # query's side stream, rather than in the scoring path
+        # (``mqa_logits_mx_inputs``); a no-op for BF16 weights.
+        weights = weights.to(torch.bfloat16)
     if isinstance(q_quant, tuple):
         return q_quant[0], q_quant[1], weights
     return q_quant, None, weights
 
 
-def _all_gather_rows(local: torch.Tensor, out: torch.Tensor) -> None:
-    # The custom all-gather takes floating-point rows and moves the int32
-    # bits unchanged: its Lamport variant rewrites only the INT32_MIN pattern.
-    out.copy_(sp_all_gather(local.view(torch.float32)).view(torch.int32))
+def _all_gather_rows(buffer: torch.Tensor, rows: int, num_rows: int) -> None:
+    """Gather every rank's ``rows``-row slice of ``buffer`` into its first
+    ``num_rows`` rows; rows past ``num_rows`` (a short or empty last slice)
+    are dropped."""
+    group = get_tp_group()
+    local = buffer[group.rank_in_group * rows : (group.rank_in_group + 1) * rows]
+    # NCCL, not the custom all-gather: its MNNVL Lamport kernel never waits for
+    # a rank's own multicast copy, so a late copy can be read as a peer's slot
+    # by a later gather of another size, and a step's gathers differ in size
+    # (the top-k rows, then the candidate blocks).
+    gathered = group.all_gather(local, 0)
+    buffer[:num_rows].copy_(gathered[:num_rows])
+
+
+@dataclass
+class DecodeRowsPlan:
+    """The rows a rank scores in ``finish_decode_rows`` and their schedule."""
+
+    decode: DeepSeekV32IndexerDecodeMetadata
+    max_seq_len: int
+    num_rows: int
+    # Rows of each rank's slice, or None when the step stays replicated.
+    shard: int | None
+    start: int
+    end: int
+    fast_candidates: bool
+    # DeepGEMM's paged MQA-logits schedule of rows ``[start, end)``.
+    schedule: torch.Tensor
 
 
 def decode_rows(
@@ -133,6 +184,14 @@ def decode_rows(
 ) -> torch.Tensor:
     """``op(hidden_states, q_quant, None, weights)`` for a pure-decode step,
     row-sharded and with cooperative candidates where they apply."""
+    plan = plan_decode_rows(op, hidden_states.shape[0])
+    return finish_decode_rows(op, hidden_states, q_quant, weights, plan)
+
+
+def plan_decode_rows(op: SparseAttnIndexer, num_tokens: int) -> DecodeRowsPlan | None:
+    """The first part of ``decode_rows`` for a step of ``num_tokens`` tokens:
+    reset the top-k rows and build the slice's schedule. None when the stock
+    indexer runs instead (and nothing was issued)."""
     attn_metadata = get_forward_context().attn_metadata
     metadata = (
         attn_metadata.get(op.k_cache.prefix)
@@ -148,11 +207,22 @@ def decode_rows(
         or metadata.decode.global_seq_lens is not None
         or not op.skip_k_cache_insert
     ):
-        return op(hidden_states, q_quant, None, weights)
+        return None
     num_rows = metadata.num_decode_tokens
     tp_group = get_tp_group()
-    bounds = row_shard_bounds(
-        num_rows, metadata.num_decodes, tp_group.world_size, tp_group.rank_in_group
+    shard = row_shard_rows(num_rows, metadata.num_decodes, tp_group.world_size)
+    if shard is not None and any(
+        buffer is not None and buffer.shape[0] < tp_group.world_size * shard
+        for buffer in (op.topk_indices_buffer, op.candidate_blocks)
+    ):
+        # The rows past the step's that the slices span do not fit.
+        shard = None
+    bounds = (
+        None
+        if shard is None
+        else row_shard_bounds(
+            num_rows, metadata.num_decodes, tp_group.world_size, tp_group.rank_in_group
+        )
     )
     start, end = bounds or (0, num_rows)
     fast_candidates = (
@@ -165,33 +235,57 @@ def decode_rows(
         )
     )
     if bounds is None and not fast_candidates:
-        return op(hidden_states, q_quant, None, weights)
+        return None
 
-    q_values, q_scale = q_quant if isinstance(q_quant, tuple) else (q_quant, None)
-    topk_indices_buffer = op.topk_indices_buffer
-    topk_indices_buffer[: hidden_states.shape[0]] = -1
-    _decode_rows(
-        op,
-        q_values,
-        q_scale,
-        weights,
-        metadata.decode,
+    decode = metadata.decode
+    assert decode.indices is not None
+    op.topk_indices_buffer[:num_tokens] = -1
+    schedule = decode.schedule_metadata
+    if end > start and end - start < decode.seq_lens.shape[0]:
+        # The slice's own schedule; a FULL graph records it.
+        kv_cache = kv_cache_as_quant_view(
+            op.k_cache.kv_cache, op.head_dim, op.use_fp4_cache
+        )
+        schedule = get_paged_mqa_logits_metadata(
+            decode.seq_lens[start:end],
+            kv_cache.shape[1],
+            schedule.shape[0] - 1,
+            indices=decode.indices[start:end],
+        )
+    return DecodeRowsPlan(
+        decode,
         metadata.max_seq_len,
+        num_rows,
+        shard,
         start,
         end,
         fast_candidates,
+        schedule,
     )
-    if bounds is not None:
+
+
+def finish_decode_rows(
+    op: SparseAttnIndexer,
+    hidden_states: torch.Tensor,
+    q_quant: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+    weights: torch.Tensor,
+    plan: DecodeRowsPlan | None,
+) -> torch.Tensor:
+    """The rest of ``decode_rows`` once the index query and keys are ready:
+    score and select the planned rows and gather the slices."""
+    if plan is None:
+        return op(hidden_states, q_quant, None, weights)
+    q_values, q_scale = q_quant if isinstance(q_quant, tuple) else (q_quant, None)
+    if plan.end > plan.start:
+        _decode_rows(op, q_values, q_scale, weights, plan)
+    if plan.shard is not None:
         _all_gather_rows(
-            topk_indices_buffer[start:end, : op.topk_tokens],
-            topk_indices_buffer[:num_rows, : op.topk_tokens],
+            op.topk_indices_buffer[:, : op.topk_tokens], plan.shard, plan.num_rows
         )
         if op.candidate_write:
             assert op.candidate_blocks is not None
-            _all_gather_rows(
-                op.candidate_blocks[start:end], op.candidate_blocks[:num_rows]
-            )
-    return topk_indices_buffer
+            _all_gather_rows(op.candidate_blocks, plan.shard, plan.num_rows)
+    return op.topk_indices_buffer
 
 
 def _decode_rows(
@@ -199,27 +293,18 @@ def _decode_rows(
     q: torch.Tensor,
     q_scale: torch.Tensor | None,
     weights: torch.Tensor,
-    decode: DeepSeekV32IndexerDecodeMetadata,
-    max_seq_len: int,
-    start: int,
-    end: int,
-    fast_candidates: bool,
+    plan: DecodeRowsPlan,
 ) -> None:
-    """The varlen decode branch of `sparse_attn_indexer` on rows
+    """The varlen decode branch of `sparse_attn_indexer` on the planned rows
     ``[start, end)``: paged MQA logits, candidate selection or mask, and
     top-k into the same rows of the shared buffers."""
+    decode, start, end = plan.decode, plan.start, plan.end
     assert decode.indices is not None
     kv_cache = kv_cache_as_quant_view(
         op.k_cache.kv_cache, op.head_dim, op.use_fp4_cache
     )
     seq_lens = decode.seq_lens[start:end]
     indices = decode.indices[start:end]
-    schedule = decode.schedule_metadata
-    if end - start < decode.seq_lens.shape[0]:
-        # The slice's own schedule; a FULL graph records it.
-        schedule = get_paged_mqa_logits_metadata(
-            seq_lens, kv_cache.shape[1], schedule.shape[0] - 1, indices=indices
-        )
     q = q[start:end].unsqueeze(1)
     if op.use_fp4_cache:
         q = q.view(torch.int8)
@@ -227,22 +312,27 @@ def _decode_rows(
         q_scale = q_scale[start:end].unsqueeze(1)
     q_scale, decode_weights = mqa_logits_mx_inputs(q, q_scale, weights[start:end])
     row_ends = seq_lens.view(-1)
-    logits = as_fp32_logits(
-        fp8_fp4_paged_mqa_logits(
-            (q, q_scale),
-            kv_cache,
-            decode_weights,
-            seq_lens,
-            decode.block_table[start:end],
-            schedule,
-            max_model_len=op.max_model_len,
-            indices=indices,
-        ),
-        row_ends,
+    raw = fp8_fp4_paged_mqa_logits(
+        (q, q_scale),
+        kv_cache,
+        decode_weights,
+        seq_lens,
+        decode.block_table[start:end],
+        plan.schedule,
+        max_model_len=op.max_model_len,
+        indices=indices,
     )
+    topk_rows = op.topk_indices_buffer[start:end, : op.topk_tokens]
+    if _selects_from_bf16(op, raw, plan.fast_candidates):
+        # Straight from the BF16 logits: no upcast.
+        if op.candidate_blocks is not None:
+            decode_topk(raw, row_ends, op.candidate_blocks[start:end], block_mode=True)
+        decode_topk(raw, row_ends, topk_rows, block_mode=False)
+        return
+    logits = as_fp32_logits(raw, row_ends)
     if op.candidate_blocks is not None:
         candidates = op.candidate_blocks[start:end]
-        if fast_candidates:
+        if plan.fast_candidates:
             select_candidate_blocks_cooperative(
                 logits, row_ends, op.candidate_block_size, candidates
             )
@@ -263,9 +353,31 @@ def _decode_rows(
         logits,
         seq_lens,
         1,
-        op.topk_indices_buffer[start:end, : op.topk_tokens],
+        topk_rows,
         op.topk_tokens,
-        max_seq_len,
+        plan.max_seq_len,
+    )
+
+
+def _selects_from_bf16(
+    op: SparseAttnIndexer, logits: torch.Tensor, fast_candidates: bool
+) -> bool:
+    """Whether ``decode_topk`` selects the token top-k, and the candidate
+    blocks if the layer writes them, from these logits."""
+    rows = logits.shape[0]
+    if not (
+        op.topk_backend == "auto"
+        and supports_decode_topk(logits, rows, op.topk_tokens, block_mode=False)
+    ):
+        return False
+    if op.candidate_blocks is None:
+        return True
+    return (
+        fast_candidates
+        and op.candidate_block_size == 8
+        and supports_decode_topk(
+            logits, rows, op.candidate_blocks.shape[1], block_mode=True
+        )
     )
 
 
