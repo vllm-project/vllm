@@ -18,6 +18,7 @@ from vllm.transformers_utils.config import (
     ConfigFormat,
     get_safetensors_params_metadata,
 )
+from vllm.transformers_utils.configs.granite_switch import SWITCH_CACHE_LAYERS
 from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 from vllm.transformers_utils.repo_utils import (
     file_or_path_exists,
@@ -830,6 +831,28 @@ class MossAudioModelArchConfigConvertor(ModelArchConfigConvertorBase):
         return max_position_embeddings, "language_config.max_position_embeddings"
 
 
+class GraniteSwitchModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    def get_num_hidden_layers(self) -> int:
+        num_layers = super().get_num_hidden_layers()
+        if getattr(self.hf_text_config, "num_adapters", 0) > 0:
+            # num_hidden_layers on disk is inflated by SWITCH_CACHE_LAYERS so a
+            # Transformers DynamicCache sizes correctly for the switch's two
+            # paged-KV heads. vLLM finds those Attention modules itself, so what
+            # this must report is the physical decoder-layer count - that is
+            # what pipeline-parallel slicing partitions.
+            return max(0, num_layers - SWITCH_CACHE_LAYERS)
+        return num_layers
+
+    def get_head_size(self) -> int:
+        # Granite Switch names the attention head size projection_head_dim, so
+        # the base class's head_dim lookup would miss it and fall back to
+        # hidden_size // num_attention_heads.
+        return (
+            getattr(self.hf_text_config, "projection_head_dim", None)
+            or super().get_head_size()
+        )
+
+
 # hf_config.model_type -> convertor class
 MODEL_ARCH_CONFIG_CONVERTORS = {
     "bailing_hybrid_mtp": BailingHybridMTPModelArchConfigConvertor,
@@ -849,6 +872,7 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "gemma4_unified_text": Gemma4ModelArchConfigConvertor,
     "glm4_moe_mtp": GLM4MoeMTPModelArchConfigConvertor,
     "glm_ocr_mtp": GLM4MoeMTPModelArchConfigConvertor,
+    "granite_switch": GraniteSwitchModelArchConfigConvertor,
     "longcat_flash": LongCatFlashModelArchConfigConvertor,
     "longcat_flash_mtp": LongCatFlashMTPModelArchConfigConvertor,
     "mamba": MambaModelArchConfigConvertor,
