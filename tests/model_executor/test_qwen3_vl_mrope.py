@@ -14,7 +14,6 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     PlaceholderRange,
 )
-from vllm.multimodal.video_prune.evs import recompute_mrope_positions
 
 
 @pytest.fixture(autouse=True, scope="module")
@@ -95,7 +94,8 @@ def make_video_embedding(
 
 
 def lump_video_tokens(tokens: torch.Tensor) -> torch.Tensor:
-    """Move every video token onto the first frame, as the processor does for EVS."""
+    """Move every video token onto the first frame, as the processor does when
+    pruning."""
     num_video_tokens = int((tokens == VIDEO_TOKEN_ID).sum())
     rest = tokens[tokens != VIDEO_TOKEN_ID].tolist()
     first_vision_start = rest.index(VISION_START_TOKEN_ID)
@@ -112,6 +112,11 @@ def lump_video_tokens(tokens: torch.Tensor) -> torch.Tensor:
 @pytest.mark.parametrize("num_suffix_tokens", [0, 7])
 @pytest.mark.parametrize("video_pruning_rate", [0, 0.25, 0.75])
 @pytest.mark.parametrize("interleave_text_tokens", [(0, 0), (1, 4)])
+# Qwen3-VL prompts keep the outer vision markers around the expanded video; the
+# recompute may start at the outer vision_start (-1) or right after it (0).
+@pytest.mark.parametrize(
+    "outer_vision_markers, cursor_shift", [(False, 0), (True, 0), (True, -1)]
+)
 def test_match_qwen3vl_mrope_evs_on(
     spatial_merge_size: int,
     num_prefix_tokens: int,
@@ -119,14 +124,18 @@ def test_match_qwen3vl_mrope_evs_on(
     num_suffix_tokens: int,
     video_pruning_rate: float,
     interleave_text_tokens: tuple[int, int],
+    outer_vision_markers: bool,
+    cursor_shift: int,
 ):
     hf_config = DummyConfig()
     hf_config.vision_config.spatial_merge_size = spatial_merge_size
 
     t, h, w = grid_thw
     population = list(range(1, 100))
-    prefix_tokens = random.choices(population, k=num_prefix_tokens)
-    suffix_tokens = random.choices(population, k=num_suffix_tokens)
+    outer_start = [VISION_START_TOKEN_ID] if outer_vision_markers else []
+    outer_end = [VISION_END_TOKEN_ID] if outer_vision_markers else []
+    prefix_tokens = random.choices(population, k=num_prefix_tokens) + outer_start
+    suffix_tokens = outer_end + random.choices(population, k=num_suffix_tokens)
 
     video_tokens, video_tokens_pruned, retention_mask = make_video_embedding(
         t,
@@ -243,89 +252,10 @@ def test_match_qwen3vl_mrope_evs_on(
         input_ids=input_tokens_pruned,
         multimodal_embeddings=multimodal_embeddings,
         mrope_positions=computed_mrope,
-        num_computed_tokens=len(prefix_tokens),
+        num_computed_tokens=len(prefix_tokens) + cursor_shift,
         vision_start_token_id=hf_config.vision_start_token_id,
         image_token_id=hf_config.image_token_id,
         video_token_id=hf_config.video_token_id,
     )
 
     assert torch.equal(actual_mrope, expected_mrope_masked)
-
-
-TEXT_TOKEN_ID = 1
-TIMESTAMP_TOKEN_ID = 2
-NUM_TIMESTAMP_TOKENS = 6
-
-
-@pytest.mark.parametrize("prefix_len", [3, 20])
-@pytest.mark.parametrize(
-    "outer_vision_markers, cursor_after_outer_start",
-    [(False, False), (True, False), (True, True)],
-)
-def test_recompute_mrope_positions_outer_vision_markers(
-    prefix_len: int, outer_vision_markers: bool, cursor_after_outer_start: bool
-):
-    """Transformers>=5.10 keeps the prompt's outer vision_start/vision_end around
-    the expanded video; the video must still start at its placeholder."""
-    num_frames, num_kept = 4, 10
-
-    def frame(num_video_tokens: int) -> list[int]:
-        return (
-            [TIMESTAMP_TOKEN_ID] * NUM_TIMESTAMP_TOKENS
-            + [VISION_START_TOKEN_ID]
-            + [VIDEO_TOKEN_ID] * num_video_tokens
-            + [VISION_END_TOKEN_ID]
-        )
-
-    # EVS puts every kept token on the first frame of the prompt, while the
-    # embeddings spread them over the frames.
-    placeholder = frame(num_kept) + sum((frame(0) for _ in range(num_frames - 1)), [])
-    embed_tokens = torch.tensor(sum((frame(n) for n in (4, 2, 2, 2)), []))
-    assert len(placeholder) == len(embed_tokens)
-
-    num_embeds = len(embed_tokens)
-    idx = torch.arange(num_embeds)
-    mm_pos = torch.stack(
-        [
-            2 * idx,
-            3 * idx + 1,
-            5 * idx + 2,
-            embed_tokens.eq(VISION_START_TOKEN_ID).long(),
-            embed_tokens.eq(VIDEO_TOKEN_ID).long(),
-        ]
-    )
-
-    outer_start = [VISION_START_TOKEN_ID] if outer_vision_markers else []
-    outer_end = [VISION_END_TOKEN_ID] if outer_vision_markers else []
-    prompt = (
-        [TEXT_TOKEN_ID] * prefix_len
-        + outer_start
-        + placeholder
-        + outer_end
-        + [TEXT_TOKEN_ID] * 3
-    )
-    placeholder_start = prefix_len + len(outer_start)
-    num_computed_tokens = placeholder_start if cursor_after_outer_start else prefix_len
-
-    num_tokens = len(prompt)
-    positions = torch.arange(num_tokens).repeat(3, 1)
-    expected = positions.clone()
-    expected[:, placeholder_start : placeholder_start + num_embeds] = (
-        mm_pos[0:3] + placeholder_start
-    )
-    text_start = placeholder_start + num_embeds
-    next_position = int(mm_pos[0:3].max()) + placeholder_start + 1
-    expected[:, text_start:] = next_position + torch.arange(num_tokens - text_start)
-
-    actual, delta = recompute_mrope_positions(
-        torch.tensor(prompt),
-        [mm_pos],
-        positions,
-        num_computed_tokens,
-        VISION_START_TOKEN_ID,
-        IMAGE_TOKEN_ID,
-        VIDEO_TOKEN_ID,
-    )
-
-    assert torch.equal(actual, expected)
-    assert delta == int(expected.max()) + 1 - num_tokens
