@@ -38,16 +38,10 @@ class TrtLlmMxint4ExpertsMonolithic(TrtLlmExpertsBase, mk.FusedMoEExpertsMonolit
         max_num_tokens: int | None = None,
         num_dispatchers: int | None = None,
     ):
+        # TrtLlmExpertsBase.__init__ stops the cooperative chain, so run the
+        # FusedMoEExperts base (activation_config, max_num_tokens, ...) first.
+        mk.FusedMoEExpertsMonolithic.__init__(self, moe_config, quant_config)
         super().__init__(moe_config, quant_config)
-        self.topk = moe_config.experts_per_token
-        self.intermediate_size_per_partition = (
-            moe_config.intermediate_size_per_partition
-        )
-        self.local_num_experts = moe_config.num_local_experts
-        self.ep_rank = moe_config.ep_rank
-        self.routing_method = moe_config.routing_method
-
-        self._init_trtllm_moe_workspace()
 
     @staticmethod
     def _supports_current_device() -> bool:
@@ -117,10 +111,6 @@ class TrtLlmMxint4ExpertsMonolithic(TrtLlmExpertsBase, mk.FusedMoEExpertsMonolit
             )
         return True
 
-    @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
-
     def supports_expert_map(self) -> bool:
         return False
 
@@ -171,7 +161,7 @@ class TrtLlmMxint4ExpertsMonolithic(TrtLlmExpertsBase, mk.FusedMoEExpertsMonolit
             num_expert_group=num_expert_group,
             topk_group=topk_group,
             e_score_correction_bias=e_score_correction_bias,
-            routing_method_type=self.routing_method,
+            routing_method_type=self.routing_method_type,
             routing_replay_out=routing_replay_out,
             workspace_buffer=self._get_workspace(
                 hidden_states,

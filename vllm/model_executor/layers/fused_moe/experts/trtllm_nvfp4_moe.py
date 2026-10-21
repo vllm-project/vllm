@@ -36,8 +36,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Static,
 )
 from vllm.model_executor.utils import is_weights_pre_processed
-from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
 logger = init_logger(__name__)
 
@@ -51,26 +49,14 @@ class TrtLlmNvFp4ExpertsBase(TrtLlmExpertsBase):
         quant_config: FusedMoEQuantConfig,
         per_token_activation: bool = False,
     ):
-        self.moe_config = moe_config
-        self.quant_config = quant_config
+        super().__init__(moe_config, quant_config)
         # Quantize the input here (deferred from prepare) to capture a per-token
         # global scale, instead of a static one.
         self.per_token_activation = per_token_activation
-
-        self.routing_method_type = self.moe_config.routing_method
-        self.topk = moe_config.experts_per_token
-        self.intermediate_size_per_partition = (
-            moe_config.intermediate_size_per_partition
-        )
-        self.hidden_dim = moe_config.hidden_dim
         self.hidden_dim_unpadded = (
             moe_config.hidden_dim_unpadded or moe_config.hidden_dim
         )
-        self.local_num_experts = moe_config.num_local_experts
-        self.ep_rank = moe_config.moe_parallel_config.ep_rank
         self.is_situ = moe_config.activation == MoEActivation.SITU
-
-        self._init_trtllm_moe_workspace()
 
         self.g1_scale_c = self._compute_g1_scale_c()
 
@@ -206,16 +192,6 @@ class TrtLlmNvFp4ExpertsBase(TrtLlmExpertsBase):
             self.gemm1_alpha = layer.gemm1_alpha
 
     @staticmethod
-    def _supports_current_device() -> bool:
-        """Supports only Blackwell-family GPUs."""
-        p = current_platform
-        return (
-            p.is_cuda()
-            and p.is_device_capability_family(100)
-            and has_flashinfer_trtllm_fused_moe()
-        )
-
-    @staticmethod
     def _supports_no_act_and_mul() -> bool:
         """Supports non-gated MoE (i.e. Nemotron-Nano)."""
         return True
@@ -252,10 +228,6 @@ class TrtLlmNvFp4ExpertsBase(TrtLlmExpertsBase):
         # NOTE: non-256-aligned dims will trigger a warning log and may
         # cause performance degradation due to activation slicing.
         return True
-
-    @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
 
     @property
     def expects_unquantized_inputs(self) -> bool:

@@ -46,22 +46,10 @@ class TrtLlmMxfp4ExpertsBase(TrtLlmExpertsBase):
         quant_config: FusedMoEQuantConfig,
         **kwargs,
     ):
-        self.moe_config = moe_config
-        self.quant_config = quant_config
-
-        self.routing_method_type = moe_config.routing_method
-        self.topk = moe_config.experts_per_token
-        self.intermediate_size_per_partition = (
-            moe_config.intermediate_size_per_partition
-        )
-        self.hidden_dim = moe_config.hidden_dim
+        super().__init__(moe_config, quant_config)
         self.hidden_dim_unpadded = (
             moe_config.hidden_dim_unpadded or moe_config.hidden_dim
         )
-        self.local_num_experts = moe_config.num_local_experts
-        self.ep_rank = moe_config.moe_parallel_config.ep_rank
-
-        self._init_trtllm_moe_workspace()
 
         # MXFP4-specific TRTLLM parameters from quant_config
         device = torch.accelerator.current_device_index()
@@ -157,10 +145,6 @@ class TrtLlmMxfp4ExpertsBase(TrtLlmExpertsBase):
     @staticmethod
     def _flashinfer_activation_type(activation: MoEActivation) -> int:
         return activation_to_flashinfer_int(activation)
-
-    @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
 
     @property
     def expects_unquantized_inputs(self) -> bool:

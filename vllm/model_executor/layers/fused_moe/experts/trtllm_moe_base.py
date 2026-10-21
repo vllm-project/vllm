@@ -1,14 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Caller-owned workspace shared by the trtllm-gen fused-MoE backends."""
+"""Shared base for the trtllm-gen fused-MoE backends."""
 
 from typing import TYPE_CHECKING
 
 import torch
 
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.modular_kernel import (
+    FusedMoEActivationFormat,
+)
+from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_trtllm_fused_moe_workspace_size,
+    has_flashinfer_trtllm_fused_moe,
 )
 from vllm.v1.worker.workspace import (
     current_workspace_manager,
@@ -16,7 +21,10 @@ from vllm.v1.worker.workspace import (
 )
 
 if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEConfig,
+        FusedMoEQuantConfig,
+    )
 
 logger = init_logger(__name__)
 
@@ -27,8 +35,9 @@ _workspace_nbytes: dict[tuple, int] = {}
 
 
 class TrtLlmExpertsBase:
-    """Reserve one trtllm-gen MoE workspace and share it across MoE layers.
+    """Shared base of the trtllm-gen fused-MoE backends.
 
+    Reserves one trtllm-gen MoE workspace and shares it across MoE layers.
     Without a caller-owned workspace, FlashInfer's trtllm-gen launchers
     allocate and free their routing maps, intermediate GEMM outputs and
     batched-GEMM workspaces through the PyTorch caching allocator on every MoE
@@ -36,12 +45,44 @@ class TrtLlmExpertsBase:
     buffer for the largest batch once, during memory profiling, and share it
     across all MoE layers that run sequentially in the current ubatch and lane.
 
-    Subclasses must set ``moe_config``, ``local_num_experts`` and call
-    ``_init_trtllm_moe_workspace()`` from their constructor.
+    The constructor caches the config-derived fields common to every backend
+    and initializes the workspace; subclasses call
+    ``super().__init__(moe_config, quant_config)`` and add their own fields.
     """
 
     moe_config: "FusedMoEConfig"
     local_num_experts: int
+
+    def __init__(
+        self,
+        moe_config: "FusedMoEConfig",
+        quant_config: "FusedMoEQuantConfig",
+    ) -> None:
+        self.moe_config = moe_config
+        self.quant_config = quant_config
+        self.routing_method_type = moe_config.routing_method
+        self.topk = moe_config.experts_per_token
+        self.intermediate_size_per_partition = (
+            moe_config.intermediate_size_per_partition
+        )
+        self.hidden_dim = moe_config.hidden_dim
+        self.local_num_experts = moe_config.num_local_experts
+        self.ep_rank = moe_config.moe_parallel_config.ep_rank
+        self._init_trtllm_moe_workspace()
+
+    @staticmethod
+    def activation_format() -> FusedMoEActivationFormat:
+        return FusedMoEActivationFormat.Standard
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        """Supports only Blackwell-family GPUs."""
+        p = current_platform
+        return (
+            p.is_cuda()
+            and p.is_device_capability_family(100)
+            and has_flashinfer_trtllm_fused_moe()
+        )
 
     def _init_trtllm_moe_workspace(self) -> None:
         # Upper bound on the rows a launch sees. Every DP rank may contribute
