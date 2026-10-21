@@ -251,6 +251,11 @@ class BatchFrontendArgs(BaseFrontendArgs):
     """The path or url to a single output file. Currently supports
     local file paths, or web (http or https) urls. If a URL is specified,
     the file should be available via HTTP PUT."""
+    resume: bool = False
+    """Resume a batch using an existing local output file. Skip custom_ids with
+    successful (HTTP 200) responses and append new attempts for other requests.
+    An incomplete final JSON line is discarded. Reuse the same input and model
+    configuration; custom_ids in the input must be unique. Disabled by default."""
     output_tmp_dir: str | None = None
     """Directory for staging a URL input, a piped input, or the output before
     it is uploaded to a URL. When unset, piped input and output are held in
@@ -414,18 +419,69 @@ async def open_batch_input(
         yield staged
 
 
-def validate_batch(input_file: IO[str]) -> int:
-    """Parse every request and return the count; requests are re-parsed when run."""
+def validate_batch(input_file: IO[str], completed_ids: set[str] | None = None) -> int:
+    """Validate the input and count requests that still need to run."""
     num_requests = 0
+    seen_ids: set[str] = set()
     for line_number, request_json in enumerate(input_file, start=1):
         if not request_json.strip():
             continue
         try:
-            BatchRequestInput.model_validate_json(request_json)
+            request = BatchRequestInput.model_validate_json(request_json)
         except pydantic.ValidationError as e:
             raise ValueError(f"Invalid request on line {line_number}: {e}") from e
-        num_requests += 1
+        if completed_ids is not None:
+            if request.custom_id in seen_ids:
+                raise ValueError(
+                    f"Duplicate custom_id {request.custom_id!r} on line {line_number}."
+                )
+            seen_ids.add(request.custom_id)
+        if not completed_ids or request.custom_id not in completed_ids:
+            num_requests += 1
+    if completed_ids and completed_ids - seen_ids:
+        raise ValueError(
+            "The output contains successful custom_ids absent from the input."
+        )
     return num_requests
+
+
+def read_completed_batch_requests(path: str) -> tuple[set[str], int]:
+    """Read successful IDs and the byte offset of the last complete output line."""
+    completed_ids: set[str] = set()
+    valid_end = 0
+    if not os.path.exists(path):
+        return completed_ids, valid_end
+    with open(path, "rb") as output_file:
+        line_number = 0
+        while line := output_file.readline():
+            line_number += 1
+            if line.strip():
+                try:
+                    data = json.loads(line)
+                except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                    if not line.endswith(b"\n"):
+                        logger.warning(
+                            "Discarding incomplete final output line %d when resuming.",
+                            line_number,
+                        )
+                        break
+                    raise ValueError(
+                        f"Invalid JSON in output on line {line_number}."
+                    ) from exc
+                try:
+                    response = BatchRequestOutput.model_validate(data)
+                except pydantic.ValidationError as exc:
+                    raise ValueError(
+                        f"Invalid batch output on line {line_number}: {exc}"
+                    ) from exc
+                if (
+                    response.error is None
+                    and response.response is not None
+                    and response.response.status_code == HTTPStatus.OK
+                ):
+                    completed_ids.add(response.custom_id)
+            valid_end = output_file.tell()
+    return completed_ids, valid_end
 
 
 async def upload_data(
@@ -487,9 +543,9 @@ async def upload_data(
 
 @contextlib.asynccontextmanager
 async def batch_output_writer(
-    path_or_url: str, output_tmp_dir: str | None
+    path_or_url: str, output_tmp_dir: str | None, resume_offset: int | None = None
 ) -> AsyncIterator[IO[str]]:
-    """Yield a file that receives responses in input order.
+    """Write new responses in input order, appending when resuming.
 
     A local file holds the responses for a prefix of the input if the run
     fails. A URL destination is staged and uploaded only once the batch
@@ -497,7 +553,14 @@ async def batch_output_writer(
     """
     if not is_url(path_or_url):
         logger.info("Writing outputs to local file %s", path_or_url)
-        with open(path_or_url, "w", encoding="utf-8") as f:
+        mode = "w" if resume_offset is None else "a+"
+        with open(path_or_url, mode, encoding="utf-8", newline="\n") as f:
+            if resume_offset is not None:
+                f.truncate(resume_offset)
+                if resume_offset:
+                    f.seek(resume_offset - 1)
+                    if f.read(1) != "\n":
+                        f.write("\n")
             yield f
         return
 
@@ -891,6 +954,13 @@ def validate_run_batch_args(args):
         )
 
     output_file = args.output_file
+    if args.resume:
+        if is_url(output_file):
+            raise ValueError("--resume requires a local output file, not a URL.")
+        if os.path.exists(output_file) and not stat.S_ISREG(
+            os.stat(output_file).st_mode
+        ):
+            raise ValueError("--resume requires a regular output file.")
     if not is_url(output_file):
         parent = os.path.dirname(os.path.abspath(output_file))
         if os.path.isdir(output_file):
@@ -967,6 +1037,7 @@ async def dispatch_batch(
     max_inflight: int,
     window: int | None = None,
     engine_client: EngineClient | None = None,
+    completed_ids: set[str] | None = None,
 ) -> None:
     """Run every request with at most `max_inflight` alive at once.
 
@@ -1021,6 +1092,8 @@ async def dispatch_batch(
         for request_json in input_file:
             if not request_json.strip():
                 continue
+            if completed_ids and json.loads(request_json)["custom_id"] in completed_ids:
+                continue
             await unwritten.acquire()
             await running.acquire()
             if failure is not None:
@@ -1055,6 +1128,8 @@ async def run_batch(
     args: Namespace,
     input_file: IO[str],
     num_requests: int,
+    completed_ids: set[str] | None = None,
+    resume_offset: int | None = None,
 ) -> None:
     endpoint_registry = await build_endpoint_registry(
         engine_client=engine_client,
@@ -1074,7 +1149,7 @@ async def run_batch(
     tracker = BatchProgressTracker()
 
     async with batch_output_writer(
-        args.output_file, args.output_tmp_dir
+        args.output_file, args.output_tmp_dir, resume_offset
     ) as output_file:
         with tracker.pbar(total=num_requests):
             await dispatch_batch(
@@ -1085,6 +1160,7 @@ async def run_batch(
                 max_inflight,
                 window,
                 engine_client,
+                completed_ids,
             )
 
 
@@ -1098,14 +1174,43 @@ async def main(args: Namespace):
     # Validate the batch before loading the model, so bad input fails fast.
     logger.info("Reading batch from %s...", args.input_file)
     async with open_batch_input(args.input_file, args.output_tmp_dir) as input_file:
-        num_requests = validate_batch(input_file)
+        completed_ids: set[str] | None = None
+        resume_offset = None
+        if args.resume:
+            completed_ids, resume_offset = read_completed_batch_requests(
+                args.output_file
+            )
+        num_requests = validate_batch(input_file, completed_ids)
         input_file.seek(0)
+        if completed_ids is not None:
+            logger.info(
+                "Resuming batch: skipping %d successful requests, running %d requests.",
+                len(completed_ids),
+                num_requests,
+            )
+
+        if args.resume and num_requests == 0:
+            async with batch_output_writer(
+                args.output_file, args.output_tmp_dir, resume_offset
+            ):
+                pass
+            logger.info(
+                "All batch requests already completed; no model will be loaded."
+            )
+            return
 
         async with build_async_engine_client(
             args,
             usage_context=UsageContext.OPENAI_BATCH_RUNNER,
         ) as engine_client:
-            await run_batch(engine_client, args, input_file, num_requests)
+            await run_batch(
+                engine_client,
+                args,
+                input_file,
+                num_requests,
+                completed_ids,
+                resume_offset,
+            )
 
 
 if __name__ == "__main__":

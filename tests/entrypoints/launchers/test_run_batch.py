@@ -9,6 +9,7 @@ import tempfile
 import threading
 from collections.abc import Generator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -523,6 +524,63 @@ def test_completions():
             # Ensure that the output format conforms to the openai api.
             # Validation should throw if the schema is wrong.
             BatchRequestOutput.model_validate_json(line)
+
+
+def test_resume_retries_failed_requests_and_preserves_completed_output(tmp_path):
+    """The real batch CLI appends retries without regenerating successful IDs."""
+    requests = [json.loads(line) for line in INPUT_BATCH.splitlines()[:2]]
+    for request in requests:
+        request["body"]["max_tokens"] = 4
+        request["body"]["temperature"] = 0
+    input_path = tmp_path / "input.jsonl"
+    input_path.write_text("".join(json.dumps(request) + "\n" for request in requests))
+    output_path = tmp_path / "output.jsonl"
+    command = [
+        "vllm",
+        "run-batch",
+        "-i",
+        str(input_path),
+        "-o",
+        str(output_path),
+        "--model",
+        CHAT_MODEL_NAME,
+        "--enforce-eager",
+        "--max-model-len",
+        "128",
+    ]
+    first = subprocess.run(command, capture_output=True, text=True, timeout=180)
+    assert first.returncode == 0, first.stdout + first.stderr
+    original = output_path.read_bytes().splitlines(keepends=True)
+    assert len(original) == 2
+    assert all(json.loads(line)["response"]["status_code"] == 200 for line in original)
+    failed = json.loads(original[1])
+    failed["response"] = None
+    failed["error"] = {"message": "interrupted"}
+    prefix = original[0] + (json.dumps(failed) + "\n").encode()
+    output_path.write_bytes(prefix + b'{"id":"unfinished')
+
+    resumed = subprocess.run(
+        [*command, "--resume"], capture_output=True, text=True, timeout=180
+    )
+    assert resumed.returncode == 0, resumed.stdout + resumed.stderr
+    result = output_path.read_bytes()
+    assert result.startswith(prefix)
+    outputs = [
+        BatchRequestOutput.model_validate_json(line) for line in result.splitlines()
+    ]
+    successful_ids = [
+        item.custom_id
+        for item in outputs
+        if item.response is not None and item.response.status_code == 200
+    ]
+    assert successful_ids == [request["custom_id"] for request in requests]
+    assert len(outputs) == 3
+    completed = subprocess.run(
+        [*command, "--resume"], capture_output=True, text=True, timeout=180
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "no model will be loaded" in completed.stdout + completed.stderr
+    assert output_path.read_bytes() == result
 
 
 def test_completions_invalid_input():
@@ -1177,6 +1235,100 @@ def test_validate_batch_rejects_malformed_request(tmp_path):
         validate_batch(f)
 
 
+def test_validate_batch_rejects_duplicate_ids_when_resuming():
+    request = INPUT_BATCH.splitlines()[0]
+    assert validate_batch(StringIO(request + "\n" + request)) == 2
+    with pytest.raises(ValueError, match="Duplicate custom_id.*line 2"):
+        validate_batch(StringIO(request + "\n" + request), set())
+
+
+def test_validate_batch_counts_only_pending_requests():
+    assert validate_batch(StringIO(INPUT_BATCH), {"request-1"}) == 4
+    with pytest.raises(ValueError, match="absent from the input"):
+        validate_batch(StringIO(INPUT_BATCH), {"another-batch"})
+
+
+def test_resume_rejects_remote_output_before_loading_model(tmp_path):
+    args = make_arg_parser(FlexibleArgumentParser()).parse_args(
+        [
+            "-i",
+            str(tmp_path / "input.jsonl"),
+            "-o",
+            "https://example.com/out.jsonl",
+            "--resume",
+        ]
+    )
+    with pytest.raises(ValueError, match="requires a local output file"):
+        validate_run_batch_args(args)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tail", [b"", b"\n", b'\n{"id":"partial', b'\n{"id":"\xe4'])
+async def test_resume_keeps_complete_records_and_repairs_only_partial_tail(
+    tmp_path, tail
+):
+    success = BatchRequestOutput.model_validate(
+        {
+            "id": "batch-1",
+            "custom_id": "request-1",
+            "error": None,
+            "response": {"request_id": "req-1", "status_code": 200, "body": None},
+        }
+    )
+    failure = BatchRequestOutput.model_validate(
+        {
+            "id": "batch-2",
+            "custom_id": "request-2",
+            "error": None,
+            "response": {"request_id": "req-2", "status_code": 500, "body": None},
+        }
+    )
+    prefix = (success.model_dump_json() + "\n" + failure.model_dump_json()).encode()
+    output_path = tmp_path / "output.jsonl"
+    output_path.write_bytes(prefix + tail)
+    completed, offset = run_batch_module.read_completed_batch_requests(str(output_path))
+    assert completed == {"request-1"}
+    assert output_path.read_bytes() == prefix + tail
+    async with batch_output_writer(str(output_path), None, offset) as output_file:
+        print(failure.model_dump_json(), file=output_file)
+    assert (
+        output_path.read_bytes()
+        == prefix + b"\n" + failure.model_dump_json().encode() + b"\n"
+    )
+
+
+@pytest.mark.parametrize("contents", [b"invalid\n{}\n", b"invalid\n", b"{}"])
+def test_resume_rejects_corrupt_complete_records(tmp_path, contents):
+    output_path = tmp_path / "output.jsonl"
+    output_path.write_bytes(contents)
+    with pytest.raises(ValueError, match="output on line 1"):
+        run_batch_module.read_completed_batch_requests(str(output_path))
+    assert output_path.read_bytes() == contents
+
+
+@pytest.mark.asyncio
+async def test_dispatch_batch_skips_successful_ids():
+    output_file = StringIO()
+    tracker = BatchProgressTracker()
+    with tracker.pbar(total=4) as pbar:
+        await dispatch_batch(
+            StringIO(INPUT_BATCH),
+            output_file,
+            {},
+            tracker,
+            max_inflight=1,
+            completed_ids={"request-1"},
+        )
+        assert pbar.n == 4
+    outputs = [json.loads(line) for line in output_file.getvalue().splitlines()]
+    assert [output["custom_id"] for output in outputs] == [
+        "request-2",
+        "request-3",
+        "request-4",
+        "request-5",
+    ]
+
+
 @pytest.mark.asyncio
 async def test_open_batch_input_keeps_a_carriage_return_inside_a_line(tmp_path):
     """A bare carriage return is JSON whitespace, not a line break."""
@@ -1305,11 +1457,8 @@ def test_unwritable_output_file_is_rejected_before_engine_start(tmp_path):
     """A bad output path fails argument validation, not after the model loads."""
 
     def args(output_file):
-        return SimpleNamespace(
-            max_inflight=None,
-            input_file=str(tmp_path / "input.jsonl"),
-            output_file=output_file,
-            structured_outputs_config=SimpleNamespace(reasoning_parser=None),
+        return make_arg_parser(FlexibleArgumentParser()).parse_args(
+            ["-i", str(tmp_path / "input.jsonl"), "-o", output_file]
         )
 
     with pytest.raises(ValueError, match="does not exist"):
