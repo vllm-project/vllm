@@ -223,7 +223,9 @@ class HiSparseHostPool:
         self.shared_region: SharedOffloadRegion | None = None
 
     def allocate(self, size: int) -> torch.Tensor:
-        assert self.backing is None, "HiSparse host pool is already allocated."
+        if self.backing is not None:
+            assert self.backing.numel() == size, "HiSparse host pool size changed."
+            return self.backing
         config = self.kv_cache_config
         if config.hisparse_shared_host_pool:
             tensor_sizes = [
@@ -251,6 +253,23 @@ class HiSparseHostPool:
             check_hisparse_host_memory(size)
             self.backing, self.registered = allocate_pinned_host_pool(size)
         return self.backing
+
+
+_host_pools: dict[str, HiSparseHostPool] = {}
+
+
+def get_hisparse_host_pool(
+    vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
+) -> HiSparseHostPool:
+    """Return the engine's host pool, which outlives the profiling KV cache."""
+    instance_id = vllm_config.instance_id
+    if instance_id not in _host_pools:
+        _host_pools[instance_id] = HiSparseHostPool(vllm_config, kv_cache_config)
+    return _host_pools[instance_id]
+
+
+def drop_hisparse_host_pool(vllm_config: VllmConfig) -> None:
+    _host_pools.pop(vllm_config.instance_id, None)
 
 
 def use_shared_hisparse_host_pool(vllm_config: VllmConfig) -> bool:

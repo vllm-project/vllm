@@ -45,6 +45,7 @@ from vllm.entrypoints.openai.responses.protocol import (
     OutputTokensDetails,
     ResponseCompletedEvent,
     ResponseCreatedEvent,
+    ResponseIncompleteEvent,
     ResponseInProgressEvent,
     ResponseInputOutputItem,
     ResponseInputOutputMessage,
@@ -66,6 +67,7 @@ from vllm.entrypoints.openai.responses.utils import (
     build_response_output_items,
     extract_function_tool_names,
     extract_tool_types,
+    response_item_status,
     reuse_streamed_item_ids,
 )
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
@@ -524,6 +526,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 trace_headers=trace_headers,
                 session_id=session_id,
                 reasoning_parser_kwargs=reasoning_parser_kwargs,
+                reasoning_ended=True if request._grammar_from_parser else None,
             )
             generators.append(generator)
 
@@ -645,6 +648,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         trace_headers: Mapping[str, str] | None = None,
         session_id: str | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
+        reasoning_ended: bool | None = None,
     ):
         max_model_len = self.model_config.max_model_len
         cache_salt = cast(str | None, engine_input.get("cache_salt"))
@@ -671,6 +675,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 priority=priority,
                 session_id=session_id,
                 reasoning_parser_kwargs=reasoning_parser_kwargs,
+                reasoning_ended=reasoning_ended,
             )
 
             async for res in generator:
@@ -1045,6 +1050,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 tool_calls=maybe_filter_parallel_tool_calls(tool_calls or [], request),
                 logprobs=logprobs,
                 tools=request.tools,
+                finish_reason=final_output.finish_reason,
             )
 
         # Fallback when no parser is configured
@@ -1062,7 +1068,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 if final_output.text
                 else [],
                 role="assistant",
-                status="completed",
+                status=response_item_status(final_output.finish_reason),
                 type="message",
             )
         ]
@@ -1124,7 +1130,10 @@ class OpenAIServingResponses(GenerateBaseServing):
             while current_index < len(event_deque):
                 event = event_deque[current_index]
                 yield event
-                if getattr(event, "type", "unknown") == "response.completed":
+                if getattr(event, "type", "unknown") in (
+                    "response.completed",
+                    "response.incomplete",
+                ):
                     return
                 current_index += 1
 
@@ -1222,6 +1231,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 top_logprobs=request.top_logprobs,
             )
 
+        finish_reason: str | None = None
         async for ctx in result_generator:
             assert isinstance(ctx, SimpleContext)
             if ctx.last_output is None or not ctx.last_output.outputs:
@@ -1229,6 +1239,7 @@ class OpenAIServingResponses(GenerateBaseServing):
 
             output = ctx.last_output.outputs[0]
             self._raise_if_error(output.finish_reason, request.request_id)
+            finish_reason = output.finish_reason
             delta_text = output.text
             delta_token_ids = as_list(output.token_ids)
 
@@ -1261,7 +1272,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 for event in processor.emit_delta(dm, output, _get_logprobs):
                     yield _increment_sequence_number_and_return(event)
 
-        for event in processor.close_current():
+        for event in processor.close_current(response_item_status(finish_reason)):
             yield _increment_sequence_number_and_return(event)
 
         assert isinstance(context, SimpleContext)
@@ -1415,10 +1426,20 @@ class OpenAIServingResponses(GenerateBaseServing):
                 request_metadata,
                 created_time=created_time,
             )
-            yield _increment_sequence_number_and_return(
-                ResponseCompletedEvent(
+            terminal_event: StreamingResponsesResponse
+            if (
+                isinstance(final_response, ResponsesResponse)
+                and final_response.status == "incomplete"
+            ):
+                terminal_event = ResponseIncompleteEvent(
+                    type="response.incomplete",
+                    sequence_number=-1,
+                    response=final_response,
+                )
+            else:
+                terminal_event = ResponseCompletedEvent(
                     type="response.completed",
                     sequence_number=-1,
                     response=final_response,
                 )
-            )
+            yield _increment_sequence_number_and_return(terminal_event)
