@@ -1486,12 +1486,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 elseif(VLLM_GPU_LANG STREQUAL "HIP")
   target_compile_definitions(_moe_C_stable_libtorch PRIVATE USE_ROCM)
 
-  # The softplus-sqrt topk kernel is specialized on the wavefront size, but ROCm
-  # only exposes that value at runtime (Utils::get_warp_size()), so the wave64
-  # and the wave32 kernel are both instantiated unless the build tells us which
-  # one is reachable. The wavefront size is fixed per GPU family: CDNA (gfx9xx)
-  # is wave64, RDNA (gfx10xx and later) is wave32. Instantiate only the arm that
-  # the targeted archs can select.
+  # The kernel is specialized on the wavefront size, but ROCm only exposes that
+  # value at runtime, so both arms are instantiated unless the build says which
+  # one the targeted archs can select (CDNA/gfx9xx is wave64, RDNA is wave32).
   set(TOPK_WAVE_ONLY_DEFINE "")
   set(_MOE_WAVE64_ARCHS ${VLLM_GPU_ARCHES})
   list(FILTER _MOE_WAVE64_ARCHS INCLUDE REGEX "^gfx9")
