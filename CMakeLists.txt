@@ -1291,73 +1291,27 @@ endif()
 #
 
 #
-# The softplus-sqrt topk kernels are instantiated per (gating dtype,
-# topk_indices dtype) in their own translation unit, generated from the single
-# variant list in generate_topk_softplus_sqrt.py.
-#
-set(TOPK_SOFTPLUS_SQRT_GEN_SCRIPT
-  ${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/generate_topk_softplus_sqrt.py)
-# Editing the script has to re-run configure, otherwise the units on disk stay
-# stale until something else triggers a reconfigure.
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-  ${TOPK_SOFTPLUS_SQRT_GEN_SCRIPT})
-file(MD5 ${TOPK_SOFTPLUS_SQRT_GEN_SCRIPT} TOPK_SOFTPLUS_SQRT_GEN_SCRIPT_HASH)
-# The script records the hash it generated for plus the exact list of files it
-# wrote, in a stamp next to the outputs. That list is what tells a missing unit
-# apart from an up-to-date tree, and the stamp lives in the source tree (not in
-# a per-build-directory cache) because the outputs do.
-set(TOPK_SOFTPLUS_SQRT_GEN_STAMP
-  ${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/.topk_softplus_sqrt_generated)
-set(TOPK_SOFTPLUS_SQRT_GENERATED "")
-set(TOPK_SOFTPLUS_SQRT_RECORDED "")
-if (EXISTS ${TOPK_SOFTPLUS_SQRT_GEN_STAMP})
-  file(STRINGS ${TOPK_SOFTPLUS_SQRT_GEN_STAMP} _topk_stamp)
-  if (_topk_stamp)
-    list(GET _topk_stamp 0 TOPK_SOFTPLUS_SQRT_GENERATED)
-    list(REMOVE_AT _topk_stamp 0)
-    set(TOPK_SOFTPLUS_SQRT_RECORDED ${_topk_stamp})
-  endif()
-endif()
-set(_topk_missing FALSE)
-foreach (_topk_f ${TOPK_SOFTPLUS_SQRT_RECORDED})
-  if (NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/${_topk_f})
-    set(_topk_missing TRUE)
-  endif()
-endforeach()
-message(STATUS "softplus-sqrt topk generation script hash: ${TOPK_SOFTPLUS_SQRT_GEN_SCRIPT_HASH}")
-
-file(GLOB TOPK_SOFTPLUS_SQRT_GEN_SRC RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
-  "csrc/moe/topk_softplus_sqrt_launch_*.cu")
-if (NOT TOPK_SOFTPLUS_SQRT_GEN_SRC
-    OR _topk_missing
-    OR NOT TOPK_SOFTPLUS_SQRT_GENERATED STREQUAL ${TOPK_SOFTPLUS_SQRT_GEN_SCRIPT_HASH})
-  execute_process(
-    COMMAND ${Python_EXECUTABLE} ${TOPK_SOFTPLUS_SQRT_GEN_SCRIPT}
-    RESULT_VARIABLE topk_softplus_sqrt_generation_result
-    OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/topk_softplus_sqrt_generation.log
-    ERROR_FILE ${CMAKE_CURRENT_BINARY_DIR}/topk_softplus_sqrt_generation.log
-  )
-
-  if (NOT topk_softplus_sqrt_generation_result EQUAL 0)
-    message(FATAL_ERROR "softplus-sqrt topk generation failed."
-                        " Result: \"${topk_softplus_sqrt_generation_result}\""
-                        "\nCheck the log for details: "
-                        "${CMAKE_CURRENT_BINARY_DIR}/topk_softplus_sqrt_generation.log")
-  else()
-    message(STATUS "softplus-sqrt topk generation completed successfully.")
-  endif()
-  file(GLOB TOPK_SOFTPLUS_SQRT_GEN_SRC RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
-    "csrc/moe/topk_softplus_sqrt_launch_*.cu")
-else()
-  message(STATUS "softplus-sqrt topk generation is up to date.")
-endif()
+# The softplus-sqrt topk kernels are instantiated one translation unit per
+# (gating dtype, topk_indices dtype) pair, in topk_softplus_sqrt_<dtype>_<idx>.cu,
+# so that ninja generates the device code for each pair in parallel instead of
+# serializing ~100 s of it onto a single core.
+set(VLLM_TOPK_SOFTPLUS_SQRT_SRC
+  "csrc/moe/topk_softplus_sqrt_f32_int32.cu"
+  "csrc/moe/topk_softplus_sqrt_f32_uint32.cu"
+  "csrc/moe/topk_softplus_sqrt_f32_int64.cu"
+  "csrc/moe/topk_softplus_sqrt_f16_int32.cu"
+  "csrc/moe/topk_softplus_sqrt_f16_uint32.cu"
+  "csrc/moe/topk_softplus_sqrt_f16_int64.cu"
+  "csrc/moe/topk_softplus_sqrt_bf16_int32.cu"
+  "csrc/moe/topk_softplus_sqrt_bf16_uint32.cu"
+  "csrc/moe/topk_softplus_sqrt_bf16_int64.cu")
 
 set(VLLM_MOE_EXT_SRC
   "csrc/moe/torch_bindings.cpp"
   "csrc/moe/moe_align_sum_kernels.cu"
   "csrc/moe/topk_softmax_kernels.cu"
   "csrc/moe/topk_softplus_sqrt_kernels.cu"
-  ${TOPK_SOFTPLUS_SQRT_GEN_SRC})
+  ${VLLM_TOPK_SOFTPLUS_SQRT_SRC})
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_MOE_EXT_SRC
@@ -1556,8 +1510,8 @@ elseif(VLLM_GPU_LANG STREQUAL "HIP")
   if (TOPK_WAVE_ONLY_DEFINE)
     # The hipified copies under CMAKE_CURRENT_BINARY_DIR are what the HIP build
     # actually compiles, so the definition has to be set on both spellings.
-    set(_TOPK_WAVE_ONLY_SRC ${TOPK_SOFTPLUS_SQRT_GEN_SRC})
-    foreach (_topk_src ${TOPK_SOFTPLUS_SQRT_GEN_SRC})
+    set(_TOPK_WAVE_ONLY_SRC ${VLLM_TOPK_SOFTPLUS_SQRT_SRC})
+    foreach (_topk_src ${VLLM_TOPK_SOFTPLUS_SQRT_SRC})
       string(REGEX REPLACE "\\.cu$" ".hip" _topk_hip "${_topk_src}")
       list(APPEND _TOPK_WAVE_ONLY_SRC "${CMAKE_CURRENT_BINARY_DIR}/${_topk_hip}")
     endforeach()

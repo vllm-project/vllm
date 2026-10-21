@@ -1,8 +1,0 @@
-# Generated at configure time by generate_topk_softplus_sqrt.py.
-topk_softplus_sqrt_launch_*.cu
-topk_softplus_sqrt_launch_entries.inc
-topk_softplus_sqrt_dispatch.inc
-# Record of what is on disk (script hash + the list of generated files); the
-# generated units do not depend on the arch list, the wavefront define is a
-# per-source compile definition.
-.topk_softplus_sqrt_generated

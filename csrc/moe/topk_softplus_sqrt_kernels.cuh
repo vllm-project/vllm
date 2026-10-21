@@ -51,32 +51,6 @@ typedef __hip_bfloat162 __nv_bfloat162;
 namespace vllm {
 namespace moe {
 
-// Gating dtypes instantiated by the generated launch translation units. They
-// are aliased here so that the generated sources stay CUDA/HIP agnostic: hipify
-// rewrites the CUDA spellings in this header, not in the generated files.
-using TopkGatingHalf = __half;
-using TopkGatingBFloat16 = __nv_bfloat16;
-
-// Launch arguments gathered by topk_softplus_sqrt() in
-// topk_softplus_sqrt_kernels.cu and consumed by the generated
-// topk_softplus_sqrt_launch_*.cu entry points.
-struct TopkSoftplusSqrtParams {
-  float* topk_weights = nullptr;
-  int* token_expert_indices = nullptr;
-  int num_tokens = 0;
-  int num_experts = 0;
-  int topk = 0;
-  bool renormalize = false;
-  double routed_scaling_factor = 0.0;
-  const float* correction_bias = nullptr;
-  const bool* is_padding = nullptr;
-  const float* bias_vl = nullptr;
-  int64_t image_sentinel_lo = 0;
-  const void* input_ids = nullptr;
-  const void* tid2eid = nullptr;
-  bool ids_are_int64 = false;
-  cudaStream_t stream = nullptr;
-};
 
 template <typename HashIndType>
 __device__ __forceinline__ int64_t load_index_as_int64(const HashIndType* ptr,
@@ -905,5 +879,56 @@ void topkGatingSoftplusSqrtKernelLauncher(
   }
 }
 
+// The launcher is instantiated in topk_softplus_sqrt_<gating>_<indices>.cu, one
+// unit per (gating dtype, topk_indices dtype) pair, so that ninja generates the
+// device code for each pair in parallel. Declaring the instantiations extern
+// here keeps this file (the dispatch) from instantiating them a second time.
+#define VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(IndType, InputType, HashIndType)       \
+  extern template void topkGatingSoftplusSqrtKernelLauncher<                  \
+      IndType, InputType, HashIndType>(                                       \
+      const InputType*, float*, IndType*, int*, const int, const int,          \
+      const int, const bool, double, const float*, const bool,                 \
+      const HashIndType*, const HashIndType*, cudaStream_t, const bool*,       \
+      const float*, int64_t);
+
+// Same signature, for the units that provide the definition.
+#define VLLM_TOPK_SOFTPLUS_SQRT_INSTANTIATE(IndType, InputType, HashIndType)  \
+  template void topkGatingSoftplusSqrtKernelLauncher<                         \
+      IndType, InputType, HashIndType>(                                       \
+      const InputType*, float*, IndType*, int*, const int, const int,          \
+      const int, const bool, double, const float*, const bool,                 \
+      const HashIndType*, const HashIndType*, cudaStream_t, const bool*,       \
+      const float*, int64_t);
+
+
+VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(int, float, int64_t)
+VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(int, float, int)
+
+VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(uint32_t, float, int64_t)
+VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(uint32_t, float, int)
+VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(uint32_t, float, uint32_t)
+
+VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(int64_t, float, int64_t)
+VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(int64_t, float, int)
+
+VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(int, __half, int64_t)
+VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(int, __half, int)
+
+VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(uint32_t, __half, int64_t)
+VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(uint32_t, __half, int)
+VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(uint32_t, __half, uint32_t)
+
+VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(int64_t, __half, int64_t)
+VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(int64_t, __half, int)
+
+VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(int, __nv_bfloat16, int64_t)
+VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(int, __nv_bfloat16, int)
+
+VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(uint32_t, __nv_bfloat16, int64_t)
+VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(uint32_t, __nv_bfloat16, int)
+VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(uint32_t, __nv_bfloat16, uint32_t)
+
+VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(int64_t, __nv_bfloat16, int64_t)
+VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(int64_t, __nv_bfloat16, int)
 }  // namespace moe
 }  // namespace vllm
