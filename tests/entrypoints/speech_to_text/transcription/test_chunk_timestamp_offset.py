@@ -34,6 +34,7 @@ async def test_chunk_offsets_are_cumulative_not_nominal():
 
     serving = SpeechToTextBaseServing.__new__(SpeechToTextBaseServing)
     serving._decode_and_chunk_speech_async = AsyncMock(return_value=(chunks, duration))
+    serving._vad_executor = None
     serving.asr_config = SpeechToTextConfig(
         sample_rate=float(SR),
         max_audio_clip_s=30,

@@ -1157,7 +1157,7 @@ shellingham==1.5.4
     # via
     #   perceptron
     #   typer
-silero-vad==6.2.1
+silero-vad==6.2.3
     # via -r requirements/test/rocm.in
 simplejson==3.20.2
     # via choreographer

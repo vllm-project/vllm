@@ -409,10 +409,13 @@ class VAD:
             return
 
         try:
-            from silero_vad import get_speech_timestamps, load_silero_vad
+            from silero_vad import get_speech_timestamps_sequence, load_silero_vad
 
-            self.model = load_silero_vad(onnx=True)
-            self._get_speech_timestamps = get_speech_timestamps
+            # The sequence model runs one ONNX call per block of frames
+            # instead of one per 32ms frame, so the GIL is released for
+            # almost all of the VAD compute.
+            self.model = load_silero_vad(sequence=True)
+            self._get_speech_timestamps = get_speech_timestamps_sequence
         except ImportError as exc:
             raise ImportError(
                 "Silero VAD is not installed. Please install it using "
@@ -451,15 +454,11 @@ class VAD:
 
 
 class ThreadLocalVADProvider:
-    """
-    Create and cache one loaded ``VAD`` instance per worker thread.
+    """Create and cache one loaded ``VAD`` instance per worker thread.
 
-    Silero VAD's ONNX model is stateful (it keeps internal RNN
-    state/context that is reset per call and mutated while streaming).
-    Sharing one instance across the preprocess thread pool corrupts that
-    state under concurrency and degrades segmentation. We therefore use a
-    per-thread VAD instance so concurrent requests stay isolated without
-    serializing VAD behind a lock (which would hurt throughput).
+    Each worker thread gets its own ONNX Runtime session so concurrent
+    requests run VAD in parallel without sharing a session or serializing
+    behind a lock.
     """
 
     def __init__(self) -> None:
@@ -487,8 +486,7 @@ def split_audio_with_vad(
     audio_data: np.ndarray,
     sample_rate: int,
 ) -> list[np.ndarray]:
-    """
-    Split audio according to the configured VAD and chunking policy.
+    """Split audio according to the configured VAD and chunking policy.
     * Silero VAD improves noise robustness and hallucination robustness.
     * RMS split is used to adhere to the max_clip_duration_s limit.
     Using Silero VAD for satisfying max_clip_duration_s limit didnt work well
@@ -498,13 +496,15 @@ def split_audio_with_vad(
     ``SpeechToTextConfig.allow_audio_chunking`` and whether VAD is enabled:
 
     * VAD + RMS: run Silero VAD first, then further split only those
-      individual speech segments that exceed ``max_audio_clip_s``.
+      individual speech segments that exceed ``max_audio_clip_s``. If no
+      speech is detected, return an empty list.
     * RMS only: run ``split_audio()`` on the full waveform when the
       overall clip duration exceeds ``max_audio_clip_s``.
     * VAD only: remove non-speech by concatenating detected speech spans into
-      a single trimmed chunk. If no speech is detected, return the original
-      audio unchanged.
+      a single trimmed chunk. If no speech is detected, return an empty list.
     * no chunking: return the original audio as a single chunk.
+
+    An empty list means the caller should return an empty transcript.
     """
     if asr_config.allow_audio_chunking:
         assert asr_config.max_audio_clip_s is not None
@@ -563,8 +563,7 @@ def split_audio_with_vad(
                 trimmed_audio_data = np.concatenate(chunks, axis=-1)
                 return [trimmed_audio_data]
             else:
-                # TODO (ekagra): early return if no speech is detected
-                return [audio_data]
+                return []
         else:
             return [audio_data]
 

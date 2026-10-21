@@ -8,9 +8,11 @@ import numpy as np
 import pytest
 import torch
 
+from vllm.config.speech_to_text import SpeechToTextConfig, VADConfig
 from vllm.multimodal.audio import (
     MONO_AUDIO_SPEC,
     PASSTHROUGH_AUDIO_SPEC,
+    VAD,
     AudioResampler,
     AudioSpec,
     ChannelReduction,
@@ -20,6 +22,7 @@ from vllm.multimodal.audio import (
     resample_audio_scipy,
     resample_audio_torchaudio,
     split_audio,
+    split_audio_with_vad,
 )
 
 
@@ -931,3 +934,41 @@ class TestAudioChunking:
         )
 
         assert len(chunks_48k) >= 2
+
+
+@pytest.mark.parametrize("max_audio_clip_s", [30, None])
+def test_split_audio_with_vad_returns_no_chunks_without_speech(max_audio_clip_s):
+    pytest.importorskip("silero_vad")
+    sample_rate = 16000
+    silence = np.zeros(sample_rate * 5, dtype=np.float32)
+    asr_config = SpeechToTextConfig(max_audio_clip_s=max_audio_clip_s)
+
+    chunks = split_audio_with_vad(
+        duration=5.0,
+        asr_config=asr_config,
+        vad=VAD(),
+        vad_config=VADConfig(enabled=True),
+        audio_data=silence,
+        sample_rate=sample_rate,
+    )
+
+    assert chunks == []
+
+
+@pytest.mark.parametrize("max_audio_clip_s", [30, None])
+def test_split_audio_without_vad_keeps_silent_audio(max_audio_clip_s):
+    sample_rate = 16000
+    silence = np.zeros(sample_rate * 5, dtype=np.float32)
+    asr_config = SpeechToTextConfig(max_audio_clip_s=max_audio_clip_s)
+
+    chunks = split_audio_with_vad(
+        duration=5.0,
+        asr_config=asr_config,
+        vad=None,
+        vad_config=VADConfig(enabled=False),
+        audio_data=silence,
+        sample_rate=sample_rate,
+    )
+
+    assert len(chunks) == 1
+    np.testing.assert_array_equal(chunks[0], silence)

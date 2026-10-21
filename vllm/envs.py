@@ -81,6 +81,7 @@ if TYPE_CHECKING:
     VLLM_MAX_AUDIO_DECODE_DURATION_S: int = 600
     VLLM_MAX_AUDIO_DECODE_BYTES: int = 268_435_456
     VLLM_MAX_AUDIO_PREPROCESS_WORKERS: int = max(1, min(os.cpu_count() or 1, 2))
+    VLLM_MAX_VAD_WORKERS: int = max(1, min(os.cpu_count() or 1, 4))
     VLLM_MAX_EMBED_DECODE_BYTES: int = 2_147_483_648
     VLLM_MAX_IMAGE_PIXELS: int = 178_956_970
     VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES: int = 715_827_880
@@ -1027,6 +1028,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv(
             "VLLM_MAX_AUDIO_PREPROCESS_WORKERS",
             str(max(1, min(os.cpu_count() or 1, 2))),
+        )
+    ),
+    # Number of worker threads for running VAD on VAD-enabled STT requests.
+    # When > 0, VAD + audio splitting run on a dedicated thread pool so they
+    # scale independently of audio decoding, which stays on the
+    # VLLM_MAX_AUDIO_PREPROCESS_WORKERS pool. When 0, VAD shares the
+    # preprocess pool.
+    "VLLM_MAX_VAD_WORKERS": lambda: int(
+        os.getenv(
+            "VLLM_MAX_VAD_WORKERS",
+            str(max(1, min(os.cpu_count() or 1, 4))),
         )
     ),
     # Maximum decoded image size in pixels.  Small compressed images can
@@ -2397,6 +2409,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_MAX_AUDIO_DECODE_DURATION_S",
         "VLLM_MAX_AUDIO_DECODE_BYTES",
         "VLLM_MAX_AUDIO_PREPROCESS_WORKERS",
+        "VLLM_MAX_VAD_WORKERS",
         "VLLM_MAX_EMBED_DECODE_BYTES",
         "VLLM_MAX_IMAGE_PIXELS",
         "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES",

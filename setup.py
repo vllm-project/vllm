@@ -1722,7 +1722,7 @@ setup(
             "scipy",
             "soundfile",
             "soxr",
-            "silero-vad==6.2.1",
+            "silero-vad==6.2.3",
             "onnxruntime==1.27.0",
             "mistral_common[audio]",
         ],  # Required for audio processing

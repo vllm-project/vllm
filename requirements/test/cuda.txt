@@ -1178,7 +1178,7 @@ shellingham==1.5.4
     # via
     #   perceptron
     #   typer
-silero-vad==6.2.1
+silero-vad==6.2.3
     # via -r requirements/test/cuda.in
 six==1.16.0
     # via
@@ -1305,7 +1305,6 @@ torchaudio==2.11.0+cu130
     #   -c requirements/cuda.txt
     #   -r requirements/test/cuda.in
     #   encodec
-    #   silero-vad
     #   vocos
 torchcodec==0.14.0+cu130
     # via
