@@ -27,6 +27,7 @@ from vllm.model_executor.layers.rotary_embedding.common import (
     ApplyRotaryEmb,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import async_tensor_h2d
 
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 from .vision import is_vit_use_data_parallel
@@ -456,6 +457,7 @@ class Siglip2Encoder(nn.Module):
         pos_ids = torch.cat(pos_ids, dim=0)
         max_grid_size = max(max(h, w) for _, h, w in grid_thw)
         rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size)
+        pos_ids = async_tensor_h2d(pos_ids, rotary_pos_emb_full.device)
         rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
         return rotary_pos_emb
 
@@ -581,7 +583,8 @@ class Siglip2Encoder(nn.Module):
         rotary_pos_emb = rotary_pos_emb.reshape(
             seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1
         )
-        rotary_pos_emb = rotary_pos_emb[window_index, :, :]
+        window_index_dev = async_tensor_h2d(window_index, rotary_pos_emb.device)
+        rotary_pos_emb = rotary_pos_emb[window_index_dev, :, :]
         rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
         emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
 
@@ -608,10 +611,10 @@ class Siglip2Encoder(nn.Module):
         return {
             "rotary_pos_emb_cos": emb.cos().to(device=device),
             "rotary_pos_emb_sin": emb.sin().to(device=device),
-            "window_index": window_index.to(device=device, non_blocking=True),
-            "reverse_indices": reverse_indices.to(device=device, non_blocking=True),
-            "cu_seqlens": cu_seqlens.to(device=device, non_blocking=True),
-            "cu_window_seqlens": cu_window_seqlens.to(device=device, non_blocking=True),
+            "window_index": async_tensor_h2d(window_index, device),
+            "reverse_indices": async_tensor_h2d(reverse_indices, device),
+            "cu_seqlens": async_tensor_h2d(cu_seqlens, device),
+            "cu_window_seqlens": async_tensor_h2d(cu_window_seqlens, device),
             # Kept on CPU: attention wrappers call `.item()` on these, and
             # under CUDA graph capture the value is baked into the graph.
             "max_seqlen_full": torch.tensor(max_seqlen_override, dtype=torch.int32),
