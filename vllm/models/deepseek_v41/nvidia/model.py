@@ -542,6 +542,12 @@ class DeepseekV4DecoderLayer(nn.Module):
                 )
             else:
                 residual = x
+                if self.engram is not None and engram_hashes is not None:
+                    residual = self.engram(
+                        residual,
+                        engram_hashes[:, self.engram.layer_hash_index],
+                        engram_mask,
+                    )
                 post_mix, res_mix, x, attn_pre = mhc_pre(
                     residual,
                     self.hc_attn_fn,
@@ -703,13 +709,16 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             or self.parallel_config.use_ubatching
             or vllm_config.speculative_config is not None
             or vllm_config.kv_transfer_config is not None
-            or vllm_config.cache_config.enable_prefix_caching
+            or (
+                vllm_config.cache_config.enable_prefix_caching
+                and not vllm_config.cache_config.swa_bounded_replay
+            )
             or vllm_config.kernel_config.moe_backend in MEGA_MOE_BACKENDS
         ):
             raise NotImplementedError(
                 "DeepSeek-V4.1 PCP currently requires PP=DP=DCP=1, with no "
-                "microbatching, speculative decoding, KV transfer, prefix "
-                "caching, or MegaMoE."
+                "microbatching, speculative decoding, KV transfer, or MegaMoE. "
+                "Prefix caching requires SWA bounded replay."
             )
         self.use_native_mega_moe = (
             vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
@@ -1447,6 +1456,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             ckpt_down_proj_name="w2",
             ckpt_up_proj_name="w3",
             num_experts=self.config.n_routed_experts,
+            num_redundant_experts=first_layer.ffn.n_redundant_experts,
         )
 
     def finalize_mhc_broadcast_weights(self) -> None:
