@@ -181,7 +181,7 @@ def _fwd_kernel_stage1(
             e_max = n_e_max
 
         offs_mid_o = (
-            cur_batch * stride_mid_ob
+            cur_batch.to(tl.int64) * stride_mid_ob
             + cur_head * stride_mid_oh
             + split_kv_id * stride_mid_os
             + offs_dv
@@ -194,7 +194,7 @@ def _fwd_kernel_stage1(
         )
 
         offs_mid_o_1 = (
-            cur_batch * stride_mid_ob
+            cur_batch.to(tl.int64) * stride_mid_ob
             + cur_head * stride_mid_oh
             + split_kv_id * stride_mid_os
             + Lv
@@ -440,7 +440,7 @@ def _fwd_grouped_kernel_stage1(
             e_max = n_e_max
 
         offs_mid_o = (
-            cur_batch * stride_mid_ob
+            cur_batch.to(tl.int64) * stride_mid_ob
             + cur_head[:, None] * stride_mid_oh
             + split_kv_id * stride_mid_os
             + offs_dv[None, :]
@@ -453,7 +453,7 @@ def _fwd_grouped_kernel_stage1(
         )
 
         offs_mid_o_1 = (
-            cur_batch * stride_mid_ob
+            cur_batch.to(tl.int64) * stride_mid_ob
             + cur_head * stride_mid_oh
             + split_kv_id * stride_mid_os
             + Lv
@@ -600,8 +600,8 @@ def _fwd_kernel_stage2(
     e_max = -float("inf")
     acc = tl.zeros([BLOCK_DV], dtype=tl.float32)
 
-    offs_v = cur_batch * stride_mid_ob + cur_head * stride_mid_oh + offs_d
-    offs_logic = cur_batch * stride_mid_ob + cur_head * stride_mid_oh + Lv
+    offs_v = cur_batch.to(tl.int64) * stride_mid_ob + cur_head * stride_mid_oh + offs_d
+    offs_logic = cur_batch.to(tl.int64) * stride_mid_ob + cur_head * stride_mid_oh + Lv
 
     for split_kv_id in range(0, NUM_KV_SPLITS):
         kv_len_per_split = tl.cdiv(cur_batch_seq_len, NUM_KV_SPLITS)

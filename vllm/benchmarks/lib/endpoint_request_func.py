@@ -255,7 +255,6 @@ async def async_request_openai_completions(
                 handler = StreamedResponseHandler()
 
                 async for chunk_bytes in response.content.iter_any():
-                    chunk_bytes = chunk_bytes.strip()
                     if not chunk_bytes:
                         continue
 
@@ -390,6 +389,23 @@ def _get_chat_messages(
     ]
 
 
+def _choice_has_streamed_output(choice: dict[str, Any]) -> bool:
+    delta = choice.get("delta")
+    if not isinstance(delta, dict):
+        return False
+    if (
+        delta.get("content")
+        or delta.get("reasoning")
+        or delta.get("tool_calls")
+        or delta.get("function_call")
+    ):
+        return True
+    # A generated token can decode to an empty string, e.g. a special token
+    # under skip_special_tokens. Those chunks carry `content` and no `role`.
+    # The opening metadata chunk carries `role`.
+    return delta.get("content") == "" and "role" not in delta
+
+
 async def async_request_openai_chat_completions(
     request_func_input: RequestFuncInput,
     session: aiohttp.ClientSession,
@@ -433,7 +449,6 @@ async def async_request_openai_chat_completions(
                 first_chunk_received = False
                 handler = StreamedResponseHandler()
                 async for chunk_bytes in response.content.iter_any():
-                    chunk_bytes = chunk_bytes.strip()
                     if not chunk_bytes:
                         continue
 
@@ -452,7 +467,9 @@ async def async_request_openai_chat_completions(
                             data = json.loads(chunk)
                             _update_server_metrics(output, data)
 
-                            if choices := data.get("choices"):
+                            if (
+                                choices := data.get("choices")
+                            ) and _choice_has_streamed_output(choices[0]):
                                 content = choices[0]["delta"].get("content")
                                 # First token
                                 if not first_chunk_received:
@@ -735,7 +752,6 @@ async def async_request_openai_audio(
                     handler = StreamedResponseHandler()
 
                     async for chunk_bytes in response.content.iter_any():
-                        chunk_bytes = chunk_bytes.strip()
                         if not chunk_bytes:
                             continue
 
