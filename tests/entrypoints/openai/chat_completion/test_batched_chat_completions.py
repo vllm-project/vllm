@@ -29,6 +29,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.exceptions import VLLMValidationError
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.reasoning import ReasoningParserManager
@@ -312,6 +313,7 @@ async def test_batched_echo_does_not_prepend_user_prompt() -> None:
         request_metadata=RequestResponseMetadata(request_id="req-echo"),
     )
 
+    assert not isinstance(response, ErrorResponse)
     assert response.choices[0].message.content == "ASSISTANT ANSWER"
 
 
@@ -347,6 +349,7 @@ async def test_batched_echo_prepends_matching_assistant_prefix() -> None:
         request_metadata=RequestResponseMetadata(request_id="req-echo-2"),
     )
 
+    assert not isinstance(response, ErrorResponse)
     assert response.choices[0].message.content == "PREFIX ASSISTANT ANSWER"
 
 
@@ -436,7 +439,7 @@ async def test_batched_parser_receives_each_prompt_prefix() -> None:
     serving.response_role = "assistant"
     serving.system_fingerprint = None
     serving.chat_template = None
-    serving.chat_template_content_format = "auto"
+    serving.chat_template_content_format = "auto"  # type: ignore[misc]  # Final attr
     serving.default_chat_template_kwargs = {}
 
     request = BatchChatCompletionRequest(

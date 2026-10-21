@@ -4,13 +4,14 @@
 
 from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 import torch
 from tokenizers import Tokenizer, models, pre_tokenizers, processors
 from transformers import TokenizersBackend
 
-from vllm import TokensPrompt
+from vllm import PoolingParams, TokensPrompt
 from vllm.entrypoints.pooling.scoring.io_processor import (
     BiEncoderIOProcessor,
     CrossEncoderIOProcessor,
@@ -18,9 +19,12 @@ from vllm.entrypoints.pooling.scoring.io_processor import (
     LateInteractionIOProcessor,
     _apply_post_tokenization_to_token_type_ids,
 )
+from vllm.entrypoints.pooling.scoring.typing import ScoringData
 from vllm.entrypoints.pooling.scoring.utils import compress_token_type_ids
+from vllm.entrypoints.pooling.typing import OfflineScoringInputsContext
 from vllm.outputs import PoolingOutput, PoolingRequestOutput, RequestError
 from vllm.renderers import TokenizeParams
+from vllm.tokenizers import TokenizerLike
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -63,6 +67,8 @@ def llm_reranker_processor() -> CrossEncoderIOProcessor:
     processor.supports_score_template = False
     processor.use_sep_token = False
     processor.model = None
+    processor.saved_chat_template = None
+    processor.saved_chat_template_kwargs = {}
     return processor
 
 
@@ -81,6 +87,49 @@ def test_llm_reranker_tokenization_is_independent_of_nonbinding_doc_limit(
     assert nonbinding["prompt_token_ids"] == expected
 
 
+@pytest.mark.parametrize(
+    "default_template,request_template,expected",
+    [
+        ("{{ messages[0].content }} {{ messages[1].content }}", None, "a bc"),
+        (
+            "{{ messages[0].content }} {{ messages[1].content }}",
+            "{{ messages[1].content }} {{ messages[0].content }}",
+            "bc a",
+        ),
+        (None, "{{ messages[1].content }} {{ messages[0].content }}", "bc a"),
+        (None, None, "abc"),
+    ],
+)
+def test_offline_scoring_uses_default_template_unless_overridden(
+    llm_reranker_processor, default_template, request_template, expected
+):
+    processor = llm_reranker_processor
+    processor.chat_template = default_template
+    processor.renderer = SimpleNamespace(
+        default_cmpl_tok_params=TokenizeParams(max_total_tokens=32)
+    )
+    ctx = OfflineScoringInputsContext(
+        pooling_task="classify",
+        tokenization_kwargs=None,
+        lora_request=None,
+        priorities=None,
+        scoring_data=ScoringData(data_1=["a"], data_2=["bc"]),
+        chat_template=request_template,
+        pooling_params=PoolingParams(),
+    )
+    factory, _ = processor.get_request_factory_offline(ctx)
+    (request,) = factory()
+    text, prompt = processor.get_score_prompt(
+        request["data_1"],
+        request["data_2"],
+        request["tok_params"].get_encode_kwargs(),
+        chat_template=request["chat_template"],
+    )
+
+    assert text == expected
+    assert prompt["prompt_token_ids"] == processor.tokenizer.encode(expected)
+
+
 def test_token_type_ids_stay_aligned_with_a_truncated_padded_prompt():
     """The cross-encoder segment boundary must survive truncate + pad.
 
@@ -90,7 +139,7 @@ def test_token_type_ids_stay_aligned_with_a_truncated_padded_prompt():
     describe the same positions, and the model is told the query segment is
     empty.
     """
-    tokenizer = _DummyTokenizer()
+    tokenizer = cast(TokenizerLike, _DummyTokenizer())
     num_query, num_doc = 20, 30
     prompt = TokensPrompt(prompt_token_ids=list(range(num_query + num_doc)))
     token_type_ids = [0] * num_query + [1] * num_doc
@@ -120,7 +169,7 @@ def test_token_type_ids_stay_aligned_with_a_truncated_padded_prompt():
     assert (doc_start, doc_end) == (10, 40)
     assert prompt_token_ids[:doc_start] == list(range(10, num_query))
     assert prompt_token_ids[doc_start:doc_end] == list(range(num_query, 50))
-    assert token_type_ids[doc_end:] == [tokenizer.pad_token_type_id] * 60
+    assert token_type_ids[doc_end:] == [_DummyTokenizer.pad_token_type_id] * 60
 
 
 def test_token_type_padding_uses_the_tokenizer_pad_type():

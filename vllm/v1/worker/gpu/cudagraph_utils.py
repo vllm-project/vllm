@@ -3,7 +3,7 @@
 import gc
 import itertools
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Hashable, Iterable, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from itertools import groupby, product
@@ -567,10 +567,12 @@ class CudaGraphManager:
         get_offloader().sync_prev_onload()
         self.graphs[desc].replay()
 
-    def init_breakable_cg_runner(self, model: nn.Module) -> None:
+    def init_breakable_cg_runner(
+        self, model: nn.Module, key_fn: Callable[..., Hashable] | None = None
+    ) -> None:
         if self.breakable_cg_runner is None:
             self.breakable_cg_runner = BreakableCUDAGraphWrapper(
-                model, self.vllm_config
+                model, self.vllm_config, key_fn=key_fn
             )
 
     def run_pw_graph(self, model: nn.Module, model_inputs: dict[str, Any]) -> Any:
@@ -1036,26 +1038,22 @@ def _extrapolate_full_graph_memory(mem_samples: list[int], total_graphs: int) ->
 
 def _init_minimal_kv_cache_for_profiling(runner: "GPUModelRunner") -> None:
     """Allocate the smallest KV cache that still lets every graph be captured."""
-    from vllm.v1.core.kv_cache_planning import (
-        get_kv_cache_config_from_groups,
-        get_kv_cache_groups,
-    )
+    from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
+    from vllm.v1.core.kv_cache_planning import get_kv_cache_groups_from_builder
 
     kv_cache_spec = runner.get_kv_cache_spec()
-    kv_cache_groups = get_kv_cache_groups(runner.vllm_config, kv_cache_spec)
+    builder = get_kv_cache_config_builder(runner.vllm_config)
+    kv_cache_groups = get_kv_cache_groups_from_builder(
+        builder, runner.vllm_config, kv_cache_spec
+    )
     # At least one block per sequence is required to capture the graphs.
     min_blocks = (
         min(runner.max_num_reqs, runner.compilation_config.max_cudagraph_capture_size)
         or 1
     )
-    saved_override = runner.cache_config.num_gpu_blocks_override
-    runner.cache_config.num_gpu_blocks_override = min_blocks
-    try:
-        minimal_config = get_kv_cache_config_from_groups(
-            runner.vllm_config, kv_cache_groups, available_memory=0
-        )
-    finally:
-        runner.cache_config.num_gpu_blocks_override = saved_override
+    minimal_config = builder.get_kv_cache_config_from_groups(
+        runner.vllm_config, kv_cache_groups, num_blocks=min_blocks
+    )
 
     runner.initialize_kv_cache(minimal_config, is_profiling=True)
     runner.cache_config.num_gpu_blocks = minimal_config.num_blocks

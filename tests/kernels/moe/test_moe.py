@@ -8,7 +8,7 @@ Run `pytest tests/kernels/test_moe.py`.
 import functools
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NotRequired, TypedDict
 
 import pytest
 import torch
@@ -172,7 +172,15 @@ EP_SIZE = [1, 4]
 TOP_KS = [2, 6]
 TOP_KS_SMALL = [1, 2]
 
-MOE_MARLIN_QUANT_TEST_CONFIGS = [
+
+class MarlinMoEQuantTestConfig(TypedDict):
+    a_type: NotRequired[list[ScalarType]]
+    b_type: ScalarType
+    c_type: NotRequired[list[ScalarType]]
+    group_blocks: list[int]
+
+
+MOE_MARLIN_QUANT_TEST_CONFIGS: list[MarlinMoEQuantTestConfig] = [
     # AWQ-INT4
     {"b_type": scalar_types.uint4, "group_blocks": [-1, 2, 4, 8]},
     # GPTQ-INT4
