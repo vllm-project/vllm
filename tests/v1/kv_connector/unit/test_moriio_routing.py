@@ -84,6 +84,7 @@ def test_request_finished_rank_tracks_the_actual_rank():
 
     _, params = _request_finished(s, req, block_ids=[])
 
+    assert params is not None
     assert params["remote_dp_rank"] == 4
     assert params["remote_dp_size_local"] == 8
 

@@ -243,7 +243,8 @@ def _build_rank(model, tp_rank, tp_size, layout, hma, state, is_producer) -> Ran
     }
     worker._record_slice_layouts(caches)
     # Built without __init__: there is no engine to shut down.
-    worker.shutdown = lambda: None
+    # Keep this stub through __del__; a scoped patch would restore real cleanup.
+    setattr(worker, "shutdown", lambda: None)  # noqa: B010
     return Rank(tp_rank, tp_size, caches, regions, worker)
 
 
@@ -252,7 +253,13 @@ class _Session:
         self.src, self.dst = src, dst
 
 
-def _connect(producer: Rank, consumers: list[Rank], dp_engine: str) -> None:
+def _connect(
+    producer: Rank,
+    consumers: list[Rank],
+    dp_engine: str,
+    *,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Route the producer's sessions and notifications to the decode ranks."""
     consumer = consumers[0].worker
     metadata = MoRIIOAgentMetadata(
@@ -300,7 +307,7 @@ def _connect(producer: Rank, consumers: list[Rank], dp_engine: str) -> None:
             {"type": message_type, "transfer_id": transfer_id, **(message_fields or {})}
         )
 
-    producer.worker._get_built_session = get_built_session
+    monkeypatch.setattr(producer.worker, "_get_built_session", get_built_session)
     producer.wrapper = SimpleNamespace(
         done_remote_allocate_req_dict={},
         lock=threading.Lock(),
@@ -386,7 +393,7 @@ def test_write_lands_every_shard_byte_exact(
     writers: dict[int, set[int]] = {d: set() for d in range(consumer_tp)}
     pending = []
     for producer in producers:
-        _connect(producer, consumers, "decode")
+        _connect(producer, consumers, "decode", monkeypatch=monkeypatch)
         mapping = producer.worker._write_tp_mapping(consumer_tp)
         for target in mapping.targets:
             writers[target.tp_rank].add(producer.tp_rank)
@@ -456,7 +463,7 @@ def test_write_refuses_peer_with_different_block_size(monkeypatch):
     for layer in layers:
         consumers[0].worker.attention_block_sizes[layer.name] = 2 * BLOCK_SIZE
     producer = _build_rank("mla", 0, 2, KVCacheLayout.LBNHC, True, state, True)
-    _connect(producer, consumers, "decode")
+    _connect(producer, consumers, "decode", monkeypatch=monkeypatch)
     info = RemoteAllocInfo(block_ids=[DECODE_BLOCKS["full"]])
     producer.wrapper.done_remote_allocate_req_dict["t"] = info
     writer = make_moriio_writer(producer.worker)
