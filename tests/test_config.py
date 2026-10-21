@@ -914,6 +914,10 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
         ("Qwen4ExpForConditionalGeneration", True, False),
         ("Qwen4ExpMTP", False, True),
         ("Qwen4ExpMTP", True, False),
+        ("Glm5NextForCausalLM", False, True),
+        ("Glm5NextForCausalLM", True, True),
+        ("Glm5NextForConditionalGeneration", False, True),
+        ("Glm5NextForConditionalGeneration", True, True),
     ],
 )
 def test_breakable_cudagraph_platform_default(
