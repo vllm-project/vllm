@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace
 from enum import Enum, auto
 from typing import TYPE_CHECKING, NamedTuple
 
+import regex as re
 from openai_harmony import HarmonyError, Message, Role
 from xgrammar import StructuralTag
 from xgrammar.openai_tool_call_schema import BuiltinToolParam, FunctionToolParam
@@ -116,6 +117,15 @@ class HarmonyParser(DelegatingParser):
 
         # For error recovery
         self._current_message_tokens: list[int] = []
+        self._declared_function_names = (
+            None
+            if tools is None
+            else frozenset(
+                tool.function.name if hasattr(tool, "function") else tool.name
+                for tool in tools
+                if tool.type == "function"
+            )
+        )
 
     @property
     def _harmony_parser(self) -> StreamableParser:
@@ -136,7 +146,11 @@ class HarmonyParser(DelegatingParser):
     def flush(self) -> list[Segment]:
         segments: list[Segment] = []
         try:
-            self._harmony_parser.process_eos()
+            try:
+                self._harmony_parser.process_eos()
+            except HarmonyError:
+                if not self._repair_unterminated_tool_header(segments):
+                    raise
             msg = self._poll_completed_message()
         except HarmonyError:
             logger.warning(
@@ -524,6 +538,72 @@ class HarmonyParser(DelegatingParser):
         self._parser = parser
         self._num_processed_messages = 0
         self._current_message_tokens = [*corrected_tokens, token_id]
+        return True
+
+    def _repair_unterminated_tool_header(self, segments: list[Segment]) -> bool:
+        """Recover a complete function-call object buffered as a header at EOS."""
+        encoding = get_encoding()
+        tokens = self._current_message_tokens
+        channel_token = encoding.encode("<|channel|>", allowed_special="all")[0]
+        call_token = encoding.encode("<|call|>", allowed_special="all")[0]
+        if not tokens or tokens[-1] != call_token or channel_token not in tokens:
+            return False
+        channel_index = tokens.index(channel_token)
+        prefix = tokens[:channel_index]
+        if prefix and prefix != encoding.encode(
+            "<|start|>assistant", allowed_special={"<|start|>"}
+        ):
+            return False
+        try:
+            payload = tokens[channel_index + 1 : -1]
+            if any(encoding.is_special_token(token) for token in payload):
+                return False
+            text = encoding.decode_utf8(payload)
+        except HarmonyError:
+            return False
+        match = re.fullmatch(
+            r"(analysis|commentary) to=(functions\.[A-Za-z0-9_-]+)"
+            r"(\{.*\}[ \t\r\n]*)",
+            text,
+            re.DOTALL,
+        )
+        if match is None:
+            return False
+        channel, recipient, arguments = match.groups()
+        if (
+            self._declared_function_names is not None
+            and recipient.removeprefix("functions.")
+            not in self._declared_function_names
+        ):
+            return False
+        try:
+            if not isinstance(json.loads(arguments), dict):
+                return False
+        except (ValueError, RecursionError):
+            return False
+
+        # Keep argument IDs unless a BPE token crosses the header/body boundary.
+        boundary = match.start(3)
+        for index in range(1, len(payload) + 1):
+            length = len(encoding.decode_utf8(payload[:index]))
+            if length >= boundary:
+                argument_tokens = (
+                    payload[index:]
+                    if length == boundary
+                    else encoding.encode(arguments, disallowed_special=())
+                )
+                break
+        replay_tokens = encoding.encode(
+            f"<|channel|>{channel} to={recipient} <|constrain|>json<|message|>",
+            allowed_special={"<|channel|>", "<|constrain|>", "<|message|>"},
+        ) + [*argument_tokens, call_token]
+        counted = self._num_counted_tokens, self._num_reasoning_tokens
+        self._parser = get_streamable_parser_for_assistant()
+        self._num_processed_messages = 0
+        self._current_message_tokens = []
+        segments.extend(self.process_chunk(replay_tokens).segments)
+        self._num_counted_tokens, self._num_reasoning_tokens = counted
+        self._harmony_parser.process_eos()
         return True
 
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:

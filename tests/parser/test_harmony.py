@@ -1422,6 +1422,197 @@ class TestCountReasoningTokens:
         assert (reasoning, content) == ("Think", "Answer")
 
 
+class TestUnterminatedToolHeader:
+    @pytest.mark.parametrize("channel", ["analysis", "commentary"])
+    @pytest.mark.parametrize("chunk_size", [None, 1, 4, 11])
+    @pytest.mark.parametrize("prefix", ["", "<|start|>assistant"])
+    def test_complete_call(
+        self, harmony_parser, chat_request, monkeypatch, channel, chunk_size, prefix
+    ):
+        arguments = '{"command": "str_replace", "path": "/tmp/é", "new_str": "x"}'
+        output = encode_output(
+            f"{prefix}<|channel|>{channel} to=functions.file_editor{arguments}<|call|>"
+        )
+        if chunk_size is None:
+            reasoning, content, calls = harmony_parser.parse(
+                "", chat_request, model_output_token_ids=output
+            )
+            assert reasoning is content is None
+            assert tool_call_tuples(calls) == [
+                ("file_editor", json.dumps(json.loads(arguments)))
+            ]
+        else:
+            messages, deltas = parse_delta_stream(
+                harmony_parser, chat_request, output, chunk_size, monkeypatch
+            )
+            assert collect_streamed_tool_calls(deltas) == [
+                (0, "file_editor", arguments)
+            ]
+            assert message_rows(messages) == [
+                (channel, "functions.file_editor", "<|constrain|>json", arguments)
+            ]
+        assert harmony_parser._num_counted_tokens == len(output)
+        assert harmony_parser.count_reasoning_tokens(output) == 0
+        assert_parser_is_reset(harmony_parser)
+
+    @pytest.mark.parametrize("chunk_size", [None, 1, 4, 11])
+    @pytest.mark.parametrize("cross_boundary", [False, True])
+    def test_literal_control_text_survives(
+        self, harmony_parser, chat_request, monkeypatch, chunk_size, cross_boundary
+    ):
+        arguments = '{"x":"<|call|><|start|><|message|><|constrain|><|end|>"}'
+        output = (
+            encode_output("<|channel|>commentary to=functions.file_editor")
+            + get_encoding().encode(arguments, disallowed_special=())
+            + encode_output("<|call|>")
+        )
+        name = "file_editor"
+        if cross_boundary:
+            name += "_"
+            output = (
+                encode_output("<|channel|>commentary to=functions.file_editor")
+                + [22305]  # Ordinary BPE token spelling `_{`.
+                + get_encoding().encode(arguments[1:], disallowed_special=())
+                + encode_output("<|call|>")
+            )
+        if chunk_size is None:
+            result = harmony_parser.process_chunk(output)
+            result.segments.extend(harmony_parser.flush())
+            assert completed_message_rows(result.segments)[0][3] == arguments
+            return
+        messages, deltas = parse_delta_stream(
+            harmony_parser, chat_request, output, chunk_size, monkeypatch
+        )
+        assert get_text(messages[0]) == arguments
+        assert collect_streamed_tool_calls(deltas) == [(0, name, arguments)]
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            'python{"x":1}<|call|>',
+            'browser.search{"x":1}<|call|>',
+            'not_a_declared_tool{"x":1}<|call|>',
+            '{"x":1}<|call|>',
+            'functions.{"x":1}<|call|>',
+            'functions.bad.name{"x":1}<|call|>',
+            'functions.file_editor{"x":1<|call|>',
+            'functions.file_editor{"x":"unterminated<|call|>',
+            'functions.file_editor{"x":1}{}<|call|>',
+            'functions.file_editor{"x":1} prose<|call|>',
+            "functions.file_editor[]<|call|>",
+            'functions.file_editor"string"<|call|>',
+            'functions.file_editor{"x":1}',
+            'functions.file_editor{"x":1}<|end|>',
+            "functions.file_editor<|constrain|><|call|>",
+            'functions.file_editor {"x":1}<|call|>',
+            'functions.file_editor{"x":"<|call|>"}<|call|>',
+        ],
+    )
+    @pytest.mark.parametrize("chunk_size", [None, 1, 4, 11])
+    def test_unsafe_shape_stays_raw(
+        self, harmony_parser, chat_request, monkeypatch, body, chunk_size
+    ):
+        text = "<|channel|>commentary to=" + body
+        output = encode_output(text)
+        if chunk_size is None:
+            reasoning, content, calls = harmony_parser.parse(
+                "", chat_request, model_output_token_ids=output
+            )
+            assert reasoning is calls is None
+            assert content == text
+        else:
+            _, deltas = parse_delta_stream(
+                harmony_parser, chat_request, output, chunk_size, monkeypatch
+            )
+            assert collect_streamed_tool_calls(deltas) == []
+            assert "".join(d.content or "" for d in deltas) == text
+
+    @pytest.mark.parametrize("prefix", [" ", "\n", "prose"])
+    def test_leading_text_stays_raw(self, harmony_parser, chat_request, prefix):
+        text = prefix + '<|channel|>commentary to=functions.file_editor{"x":1}<|call|>'
+        reasoning, content, calls = harmony_parser.parse(
+            "", chat_request, model_output_token_ids=encode_output(text)
+        )
+        assert reasoning is calls is None
+        assert content == text
+
+    @pytest.mark.parametrize("declared", [[], ["different"], ["file_editor"]])
+    def test_declared_tool_scope(self, gpt_oss_tokenizer, chat_request, declared):
+        tools = (
+            ChatCompletionRequest(
+                model=REASONING_MODEL_NAME,
+                messages=[],
+                tools=[
+                    {"type": "function", "function": {"name": name, "parameters": {}}}
+                    for name in declared
+                ],
+            ).tools
+            if declared
+            else []
+        )
+        parser = HarmonyParser(gpt_oss_tokenizer, tools=tools)
+        output = encode_output(
+            '<|channel|>commentary to=functions.file_editor{"x":1}<|call|>'
+        )
+        result = parser.process_chunk(output)
+        result.segments.extend(parser.flush())
+        rows = completed_message_rows(result.segments)
+        assert rows[0][1] == (
+            "functions.file_editor" if "file_editor" in declared else None
+        )
+
+    @pytest.mark.parametrize("chunk_size", [1, 4, 11])
+    def test_order_counters_and_later_turn(
+        self, harmony_parser, chat_request, monkeypatch, chunk_size
+    ):
+        earlier = encode_output(
+            "<|channel|>analysis<|message|>Think<|end|>"
+            "<|start|>assistant<|channel|>commentary to=functions.first "
+            '<|constrain|>json<|message|>{"a":1}<|end|>'
+            "<|start|>assistant<|channel|>commentary to=python "
+            "<|constrain|>python code<|message|>print(1)<|end|>"
+            "<|start|>assistant"
+        )
+        malformed = encode_output(
+            '<|channel|>analysis to=functions.file_editor{"x":1}\n <|call|>'
+        )
+        output = earlier + malformed
+        expected_reasoning = HarmonyParser(harmony_parser.model_tokenizer)
+        expected_reasoning.process_chunk(earlier)
+        messages, deltas = parse_delta_stream(
+            harmony_parser, chat_request, output, chunk_size, monkeypatch
+        )
+        assert [m.recipient for m in messages] == [
+            None,
+            "functions.first",
+            "python",
+            "functions.file_editor",
+        ]
+        assert collect_streamed_tool_calls(deltas) == [
+            (0, "first", '{"a":1}'),
+            (1, "file_editor", '{"x":1}\n '),
+        ]
+        assert harmony_parser._num_counted_tokens == len(output)
+        assert (
+            harmony_parser._num_reasoning_tokens
+            == expected_reasoning._num_reasoning_tokens
+        )
+        assert not any(s.recipient or s.delta for s in harmony_parser.flush())
+        deltas = []
+        for i in range(0, len(malformed), chunk_size):
+            d = harmony_parser.parse_delta(
+                "", malformed[i : i + chunk_size], chat_request, finished=False
+            )
+            if d:
+                deltas.append(d)
+        deltas.append(harmony_parser.parse_delta("", [], chat_request, finished=True))
+        assert collect_streamed_tool_calls([d for d in deltas if d]) == [
+            (0, "file_editor", '{"x":1}\n ')
+        ]
+        assert harmony_parser._num_counted_tokens == len(output) + len(malformed)
+        assert_parser_is_reset(harmony_parser)
+
+
 class TestAdjustRequest:
     REQUEST_TEXT = "Hello"
     TOOL_TYPE = "function"
