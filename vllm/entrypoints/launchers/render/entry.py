@@ -93,6 +93,7 @@ async def run_launch_fastapi(args: argparse.Namespace) -> None:
     # by `verify_and_update_config` during VllmConfig construction.
     vllm_config = VllmConfig(
         model_config=model_config,
+        observability_config=engine_args.create_observability_config(),
         logging_config=engine_args.create_logging_config(),
         structured_outputs_config=engine_args.create_structured_outputs_config(),
     )

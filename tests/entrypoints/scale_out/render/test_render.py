@@ -10,6 +10,13 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 import pytest_asyncio
+from fastapi import FastAPI
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.sdk.trace.sampling import ALWAYS_OFF
+from opentelemetry.trace import SpanKind, StatusCode
+from prometheus_client import REGISTRY
 
 from tests.utils import RemoteLaunchRenderServer
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -18,9 +25,143 @@ from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.scale_out.render.api_router import router
 from vllm.entrypoints.scale_out.render.serving import ServingRender
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.entrypoints.serve.utils.api_utils import _request_tracer
 from vllm.renderers.online_renderer import OnlineRenderer
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+SERVED_MODEL_NAME = "render-test"
+TRACEPARENT = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+
+
+@pytest.fixture(params=["recording", "unsampled", "disabled"])
+def render_spans(request, monkeypatch):
+    exporter = InMemorySpanExporter()
+    provider = (
+        TracerProvider(sampler=ALWAYS_OFF)
+        if request.param == "unsampled"
+        else TracerProvider()
+    )
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(
+        "vllm.tracing.otel.trace.get_tracer",
+        lambda *args, **kwargs: provider.get_tracer("test.render"),
+    )
+    if request.param == "disabled":
+        monkeypatch.setattr("vllm.tracing.otel._IS_OTEL_AVAILABLE", False)
+    # Each test installs its own provider, so its tracer must not be reused.
+    _request_tracer.cache_clear()
+    yield exporter, request.param == "recording"
+    _request_tracer.cache_clear()
+    provider.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("api_surface", ["chat_completions", "messages"])
+@pytest.mark.parametrize("outcome", ["rendered", "returned_error", "raised_error"])
+@pytest.mark.parametrize(
+    "tool_request", [False, True, None], ids=["plain", "named", "null"]
+)
+async def test_render_tool_outcomes(api_surface, outcome, tool_request, render_spans):
+    """Count each tool render once without exposing request or error values."""
+    app = FastAPI()
+    app.include_router(router)
+    serving = _build_serving_render()
+    serving.model_config.model = MODEL_NAME
+    serving.model_config.served_model_name = SERVED_MODEL_NAME
+    app.state.serving_render = serving
+    result = {"token_ids": [7, 8, 9]}
+    handler = AsyncMock(return_value=SimpleNamespace(model_dump=lambda: result))
+    if outcome == "returned_error":
+        handler.return_value = serving.create_error_response("private-render-error")
+    elif outcome == "raised_error":
+        handler.side_effect = RuntimeError("private-render-error")
+    payload: dict[str, object] = {
+        "model": "private-request-model",
+        "messages": [{"role": "user", "content": "private-prompt"}],
+    }
+    if api_surface == "messages":
+        serving.render_messages_request = handler
+        payload["max_tokens"] = 1
+        route = "/v1/messages/render"
+        tool: dict[str, object] = {
+            "name": "private-tool",
+            "input_schema": {"type": "object"},
+        }
+        choice: dict[str, object] = {"type": "tool", "name": "private-tool"}
+    else:
+        serving.render_chat_request = handler
+        route = "/v1/chat/completions/render"
+        tool = {
+            "type": "function",
+            "function": {"name": "private-tool", "parameters": {"type": "object"}},
+        }
+        choice = {"type": "function", "function": {"name": "private-tool"}}
+    if tool_request:
+        payload.update(tools=[tool], tool_choice=choice)
+    elif tool_request is None:
+        payload.update(tools=None, tool_choice=None)
+    labels = {
+        "model_name": SERVED_MODEL_NAME,
+        "api_surface": api_surface,
+        "status": "rendered" if outcome == "rendered" else "error",
+    }
+    metric = "vllm:tool_call_render_requests_total"
+    before = REGISTRY.get_sample_value(metric, labels) or 0
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        if outcome == "raised_error":
+            with pytest.raises(RuntimeError, match="private-render-error"):
+                await client.post(
+                    route, json=payload, headers={"traceparent": TRACEPARENT}
+                )
+        else:
+            response = await client.post(
+                route, json=payload, headers={"traceparent": TRACEPARENT}
+            )
+            assert response.status_code == (200 if outcome == "rendered" else 400)
+            if outcome == "rendered":
+                assert response.json() == result
+    handler.assert_awaited_once()
+    request, _ = handler.call_args.args
+    assert request.model == payload["model"]
+    assert request.tools is not None if tool_request else request.tools is None
+    assert (REGISTRY.get_sample_value(metric, labels) or 0) - before == int(
+        bool(tool_request)
+    )
+    for collector in REGISTRY.collect():
+        for sample in collector.samples:
+            if sample.name == metric:
+                assert set(sample.labels) == {"model_name", "api_surface", "status"}
+                assert sample.labels["model_name"] == SERVED_MODEL_NAME
+                assert "private" not in str(sample.labels)
+    exporter, recording = render_spans
+    spans = exporter.get_finished_spans()
+    if recording:
+        assert len(spans) == 1
+        span = spans[0]
+        assert span.kind == SpanKind.SERVER
+        assert span.context.trace_id == int(TRACEPARENT.split("-")[1], 16)
+        assert span.parent.span_id == int(TRACEPARENT.split("-")[2], 16)
+        assert dict(span.attributes) == (
+            {
+                "vllm.tool_calling.present": True,
+                "vllm.tool_calling.tool_count": 1,
+                "vllm.tool_calling.tool_choice": "named",
+                "vllm.tool_calling.api_surface": api_surface,
+                "vllm.tool_calling.render_status": labels["status"],
+            }
+            if tool_request
+            else {}
+        )
+        assert not span.events
+        assert span.status.status_code == (
+            StatusCode.UNSET if outcome == "rendered" else StatusCode.ERROR
+        )
+        assert not span.status.description
+    else:
+        assert not spans
 
 
 def _build_serving_render() -> ServingRender:
