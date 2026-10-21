@@ -31,6 +31,7 @@ from vllm.model_executor.layers.fusion.quant_activation import (
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    KimiK3MergedQKVGateLinear,
     MergedColumnParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
@@ -80,6 +81,10 @@ from vllm.models.kimi_k3.amd.kda import KimiK3DeltaAttention
 from vllm.models.kimi_k3.amd.latent_moe_runner import ROCmLatentMoERunner
 from vllm.models.kimi_k3.amd.mla import KimiK3MultiHeadLatentAttentionWrapper
 from vllm.models.kimi_k3.amd.ops.attn_res import attn_res
+from vllm.models.kimi_k3.amd.specialized_decode.hooks import SpecializedDecodeMixin
+from vllm.models.kimi_k3.amd.specialized_decode.runtime import (
+    specialized_decode_config,
+)
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.math_utils import cdiv
@@ -404,7 +409,20 @@ class KimiMLAAttention(nn.Module):
         self.use_nope = use_nope
         assert self.use_nope is True
         assert num_heads % tp_size == 0
-        if self.q_lora_rank is not None:
+        self.use_output_gate = config.mla_use_output_gate
+        if self.q_lora_rank is not None and self.use_output_gate:
+            self.fused_qkv_a_proj = KimiK3MergedQKVGateLinear(
+                hidden_size=self.hidden_size,
+                q_lora_rank=self.q_lora_rank,
+                kv_lora_rank=self.kv_lora_rank,
+                qk_rope_head_dim=self.qk_rope_head_dim,
+                total_num_heads=num_heads,
+                v_head_dim=self.v_head_dim,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.fused_qkv_a_proj",
+            )
+        elif self.q_lora_rank is not None:
             self.fused_qkv_a_proj = MergedColumnParallelLinear(
                 self.hidden_size,
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
@@ -460,8 +478,7 @@ class KimiMLAAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        self.use_output_gate = config.mla_use_output_gate
-        if self.use_output_gate:
+        if self.use_output_gate and self.q_lora_rank is None:
             projection_size = self.num_heads * self.v_head_dim
             self.g_proj = ColumnParallelLinear(
                 self.hidden_size,
@@ -911,6 +928,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
+        step=None,  # specialized_decode's plan
         **kwargs,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if get_pp_group().is_first_rank:
@@ -957,7 +975,8 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
 
         attn_res_block_num = cdiv(self.end_layer, self.config.attn_res_block_size)
         num_tokens = hidden_states.size(0)
-        use_sp = sp.should_shard(
+        # Specialized decode kernels take the full token batch.
+        use_sp = step is None and sp.should_shard(
             num_tokens,
             has_residual=residual is not None,
             has_aux_layers=bool(self.aux_hidden_state_layers),
@@ -977,13 +996,19 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             self.layers[self.start_layer : self.end_layer],
             start=self.start_layer,
         ):
-            hidden_states, residual, prefix_delta = layer(
-                positions=positions,
-                hidden_states=hidden_states,
-                residual=residual,
-                prefix_delta=prefix_delta,
-                sp_num_tokens=num_tokens if use_sp else None,
-            )
+            kernel = step.layer(layer_idx) if step is not None else None
+            if kernel is not None:
+                hidden_states, residual, prefix_delta = kernel(
+                    positions, hidden_states, residual, prefix_delta
+                )
+            else:
+                hidden_states, residual, prefix_delta = layer(
+                    positions=positions,
+                    hidden_states=hidden_states,
+                    residual=residual,
+                    prefix_delta=prefix_delta,
+                    sp_num_tokens=num_tokens if use_sp else None,
+                )
             if (layer_idx + 1) in self.aux_hidden_state_layers:
                 self._maybe_add_hidden_state(
                     aux_hidden_states,
@@ -1045,6 +1070,8 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
                 (".fused_qkv_a_proj", ".q_a_proj", 0),
                 (".fused_qkv_a_proj", ".kv_a_proj_with_mqa", 1),
             ]
+            if self.config.mla_use_output_gate:
+                stacked_params_mapping.append((".fused_qkv_a_proj", ".g_proj", 2))
         if self.config.is_moe:
             # Params for weights, fp8 weight scales, fp8 activation scales
             # (param_name, weight_name, expert_id, shard_id)
@@ -1152,10 +1179,18 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
 
 
 class KimiLinearForCausalLM(
-    nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid
+    nn.Module,
+    HasInnerState,
+    SupportsPP,
+    MixtureOfExperts,
+    IsHybrid,
+    SpecializedDecodeMixin,
 ):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        # raises for an unsupported deployment before any weight is allocated
+        decode_config = specialized_decode_config(vllm_config)
         super().__init__()
+        self.init_specialized_decode(decode_config)
         self.model_config = vllm_config.model_config
         self.vllm_config = vllm_config
         self.config = self.model_config.hf_config
@@ -1197,8 +1232,9 @@ class KimiLinearForCausalLM(
         inputs_embeds: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor | IntermediateTensors:
+        step = self.plan_specialized_decode(positions, intermediate_tensors)
         hidden_states = self.model(
-            input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
+            input_ids, positions, intermediate_tensors, inputs_embeds, step, **kwargs
         )
         return hidden_states
 
@@ -1243,6 +1279,7 @@ class KimiLinearForCausalLM(
     ) -> torch.Tensor | None:
         # The model's final norm is applied here (not at the end of forward) so
         # that the pre-norm hidden states can be fed to the MTP draft model.
+        self.after_specialized_decode_step()
         hidden_states = self.model.norm(hidden_states, None)
         return self.logits_processor(self.lm_head, hidden_states)
 

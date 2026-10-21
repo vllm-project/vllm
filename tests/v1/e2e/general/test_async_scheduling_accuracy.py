@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 import torch
 
+import vllm.envs as envs
 from tests.conftest import HfRunner, VllmRunner
 from tests.utils import (
     large_gpu_mark,
@@ -32,7 +33,7 @@ from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.platforms import current_platform
 from vllm.sampling_params import StructuredOutputsParams
 from vllm.utils.torch_utils import set_default_torch_num_threads
-from vllm.v1.metrics.reader import Metric
+from vllm.v1.metrics.reader import Counter, Metric
 
 MODEL = "Qwen/Qwen3-0.6B"
 EAGLE3_TARGET_MODEL = "meta-llama/Llama-3.2-1B-Instruct"
@@ -168,9 +169,16 @@ def test_with_eagle3_spec_decoding(
     reason=("XPU matmul/attention kernels are not batch-invariant"),
 )
 def test_with_ngram_gpu_spec_decoding(
-    vllm_runner: type[VllmRunner], hf_runner: type[HfRunner]
+    vllm_runner: type[VllmRunner],
+    hf_runner: type[HfRunner],
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """Check ngram accuracy and acceptance across scheduling configurations."""
+    if current_platform.is_rocm():
+        # hipBLASLt picks GEMM solutions by batch shape, so sync and async runs
+        # can flip near-tie greedy tokens and shift ngram acceptance.
+        monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+        monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
     ngram_gpu_config = {
         "method": "ngram_gpu",
         "num_speculative_tokens": 3,
@@ -397,9 +405,11 @@ def _get_acceptance_rate(before: list[Metric], after: list[Metric]) -> float:
 
 
 def _get_count(before: list[Metric], after: list[Metric], name: str) -> int:
-    before_val = next(m.value for m in before if m.name == name)
-    after_val = next(m.value for m in after if m.name == name)
-    return after_val - before_val
+    before_metric = next(m for m in before if m.name == name)
+    after_metric = next(m for m in after if m.name == name)
+    assert isinstance(before_metric, Counter)
+    assert isinstance(after_metric, Counter)
+    return after_metric.value - before_metric.value
 
 
 @pytest.mark.parametrize(

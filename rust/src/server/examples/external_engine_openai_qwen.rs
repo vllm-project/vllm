@@ -17,7 +17,6 @@ use clap::Parser;
 use futures::StreamExt as _;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
-use vllm_chat::ToolStrictLevel;
 use vllm_engine_core_client::TransportMode;
 use vllm_server::{
     ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
@@ -73,11 +72,13 @@ async fn main() -> Result<()> {
         grpc_listener_mode: None,
         tool_call_parser: ParserSelection::Auto,
         reasoning_parser: ParserSelection::Auto,
-        tool_strict_level: ToolStrictLevel::Auto,
+        tool_strict_level: None,
         renderer: RendererSelection::Auto,
         language_model_only: false,
         chat_template: None,
         default_chat_template_kwargs: None,
+        trust_request_chat_template: false,
+        exclude_tools_when_tool_choice_none: false,
         limit_mm_per_prompt: HashMap::new(),
         lora_modules: Vec::new(),
         chat_template_content_format: ChatTemplateContentFormatOption::Auto,
