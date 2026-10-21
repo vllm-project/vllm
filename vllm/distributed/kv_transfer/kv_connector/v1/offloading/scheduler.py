@@ -638,7 +638,13 @@ class OffloadingConnectorScheduler:
         # be freed before a request finishes).
         self._block_id_to_pending_jobs: dict[int, set[int]] = {}
 
-        self._events_tracker = OffloadingEventsTracker(spec.kv_events_config)
+        self._events_tracker = OffloadingEventsTracker(
+            spec.kv_events_config,
+            {
+                group.group_idx: group.kv_event_group_spec
+                for group in self.config.kv_group_configs
+            },
+        )
 
     # Holds the manager lock for the current schedule(), or None between steps.
     # Read and written only by the scheduler thread, so it needs no
