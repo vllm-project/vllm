@@ -468,6 +468,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")
     list(APPEND VLLM_STABLE_EXT_SRC
+      "csrc/cuda_tpsp.cu"
       "csrc/hisparse_kernels.cu"
       "csrc/attention/dcp_utils/dcp_direct_a2a_lse_reduce.cu"
       "csrc/attention/dcp_utils/dcp_direct_kv_gather.cu"
@@ -1235,6 +1236,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   # Needed to use cuda/hip APIs from C-shim
   if(VLLM_GPU_LANG STREQUAL "CUDA")
     target_compile_definitions(_C_stable_libtorch PRIVATE USE_CUDA)
+    find_library(VLLM_TPSP_CUBLAS_LIBRARY NAMES cublas
+      HINTS "${CUDA_TOOLKIT_ROOT_DIR}/lib64" REQUIRED)
+    target_link_libraries(_C_stable_libtorch PRIVATE
+      ${VLLM_TPSP_CUBLAS_LIBRARY})
     if(COOPERATIVE_TOPK_ARCHS)
       target_compile_definitions(_C_stable_libtorch PRIVATE
         VLLM_ENABLE_COOPERATIVE_TOPK=1)
