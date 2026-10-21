@@ -1085,14 +1085,20 @@ def _retain_eagle_hit_blocks_below_window(
     lands and hashes one block too few and no later request can hit. Mirrors
     the coordinator: every group is an EAGLE group when none is flagged.
     Packed groups widen each per-layer spec, which the scheduler unwraps.
+    Engines without a KV transfer connector never import blocks, so they keep
+    the unwidened window.
 
     Args:
-        vllm_config: Config supplying the speculative method, if any.
+        vllm_config: Config supplying the speculative method and KV transfer
+            connector, if any.
         kv_cache_groups: Groups to update in place.
 
     """
     spec_config = vllm_config.speculative_config
     if spec_config is None or not spec_config.use_eagle_block_drop():
+        return
+    transfer_config = vllm_config.kv_transfer_config
+    if transfer_config is None or not transfer_config.is_kv_transfer_instance:
         return
 
     def widen(spec: KVCacheSpec) -> KVCacheSpec:

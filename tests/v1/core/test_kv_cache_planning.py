@@ -2066,6 +2066,7 @@ def test_eagle_sliding_window_group_retains_hit_blocks_below_window():
     config.speculative_config = SimpleNamespace(
         method="eagle", use_eagle_block_drop=lambda: True
     )
+    config.kv_transfer_config = SimpleNamespace(is_kv_transfer_instance=True)
 
     def specs_by_layer(specs):
         # Mirror get_kv_cache_configs: tag the groups holding draft layers,
@@ -2092,6 +2093,13 @@ def test_eagle_sliding_window_group_retains_hit_blocks_below_window():
         "target.attn": target_spec,
         "draft.attn": _as_draft(retained_draft_spec),
     }
+
+    # Without a KV transfer connector no block is imported: nothing changes.
+    config.kv_transfer_config = None
+    assert specs_by_layer(specs) == specs
+    config.kv_transfer_config = SimpleNamespace(is_kv_transfer_instance=False)
+    assert specs_by_layer(specs) == specs
+    config.kv_transfer_config = SimpleNamespace(is_kv_transfer_instance=True)
 
     # Without a drafter nothing changes.
     config.speculative_config = None

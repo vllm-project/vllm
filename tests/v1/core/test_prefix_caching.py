@@ -4559,6 +4559,7 @@ def test_eagle_swa_resend_hits_after_connector_import(packed, num_prompt_tokens)
         speculative_config=SimpleNamespace(
             method="dflash", use_eagle=lambda: True, use_eagle_block_drop=lambda: True
         ),
+        kv_transfer_config=SimpleNamespace(is_kv_transfer_instance=True),
     )
     groups = kv_cache_planning.get_kv_cache_groups(config, specs)
     wrapped = [isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs) for g in groups]
