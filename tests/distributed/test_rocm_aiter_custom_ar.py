@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import ctypes
+
 import pytest
 import ray
 import torch
@@ -9,7 +11,13 @@ import torch.distributed as dist
 from vllm._aiter_ops import is_aiter_found, rocm_aiter_ops
 from vllm.device_allocator import alloc_conf
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce  # noqa
-from vllm.distributed.parallel_state import get_dp_group, get_tp_group, graph_capture
+from vllm.distributed.device_communicators.cuda_wrapper import find_loaded_library
+from vllm.distributed.parallel_state import (
+    GraphCaptureContext,
+    get_dp_group,
+    get_tp_group,
+    graph_capture,
+)
 from vllm.envs import disable_envs_cache
 from vllm.platforms import current_platform
 
@@ -135,6 +143,23 @@ def test_rocm_aiter_custom_allreduce(
     multi_process_parallel(monkeypatch, tp_size, pipeline_parallel_size, test_target)
 
 
+def _num_memcpy_nodes(graph: torch.cuda.CUDAGraph) -> int:
+    hip = ctypes.CDLL(find_loaded_library("libamdhip64"))
+    handle = ctypes.c_void_p(graph.raw_cuda_graph())
+    num = ctypes.c_size_t()
+    assert hip.hipGraphGetNodes(handle, None, ctypes.byref(num)) == 0
+    nodes = (ctypes.c_void_p * num.value)()
+    assert hip.hipGraphGetNodes(handle, nodes, ctypes.byref(num)) == 0
+    node_type = ctypes.c_int()
+    count = 0
+    for node in nodes:
+        assert (
+            hip.hipGraphNodeGetType(ctypes.c_void_p(node), ctypes.byref(node_type)) == 0
+        )
+        count += node_type.value == 1  # hipGraphNodeTypeMemcpy
+    return count
+
+
 @ray.remote(num_gpus=1, max_calls=1)
 def graph_allreduce_expandable_segments(
     monkeypatch: pytest.MonkeyPatch,
@@ -154,23 +179,27 @@ def graph_allreduce_expandable_segments(
         alloc_conf.set_alloc_conf(conf)
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
         ensure_model_parallel_initialized(tp_size, pp_size)
-        aiter_ar_comm = get_tp_group().device_communicator.aiter_ar_comm
-        assert aiter_ar_comm.registers_graph_buffers
+        assert get_tp_group().device_communicator.aiter_ar_comm.registers_graph_buffers
 
-        shape, dtype = test_cases[-1]
-        with graph_capture(device=device) as graph_capture_context:
-            # Registered path: the input is bound directly, with no staging copy.
-            assert aiter_ar_comm.aiter_ca.enable_register_for_capturing
-            inp = torch.ones(shape, dtype=dtype, device=device)
-            expected = inp * tp_size
-            torch.accelerator.synchronize()
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph, stream=graph_capture_context.stream):
-                out = tensor_model_parallel_all_reduce(inp)
+        def capture_allreduce(capture_ctx) -> int:
+            shape, dtype = test_cases[-1]
+            with capture_ctx as graph_capture_context:
+                inp = torch.ones(shape, dtype=dtype, device=device)
+                torch.accelerator.synchronize()
+                graph = torch.cuda.CUDAGraph(keep_graph=True)
+                with torch.cuda.graph(graph, stream=graph_capture_context.stream):
+                    out = tensor_model_parallel_all_reduce(inp)
+            graph.replay()
+            torch.testing.assert_close(out, inp * tp_size)
+            return _num_memcpy_nodes(graph)
 
+        # Without the guard, AITER stages the VMM-backed input through a copy.
+        unguarded = get_tp_group().graph_capture(
+            GraphCaptureContext(torch.cuda.Stream(device=device))
+        )
+        assert capture_allreduce(unguarded) == 1
+        assert capture_allreduce(graph_capture(device=device)) == 0
         assert alloc_conf.expandable_segments_enabled()
-        graph.replay()
-        torch.testing.assert_close(out, expected)
 
 
 def _aiter_defers_capture_registration() -> bool:

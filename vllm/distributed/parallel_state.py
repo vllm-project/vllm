@@ -1717,7 +1717,7 @@ def graph_capture(device: torch.device):
         and not _aiter_registers_graph_buffers(dp)
     )
     with (
-        non_expandable_allocations(non_expandable),
+        non_expandable_allocations() if non_expandable else nullcontext(),
         tp.graph_capture(context),
         pp.graph_capture(context),
         dp.graph_capture(context),

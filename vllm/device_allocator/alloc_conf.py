@@ -122,11 +122,8 @@ def set_alloc_conf(conf: str) -> None:
 
 
 @contextmanager
-def non_expandable_allocations(enabled: bool = True) -> Generator[None, None, None]:
+def non_expandable_allocations() -> Generator[None, None, None]:
     """Run the body with ``expandable_segments`` off, then restore the config."""
-    if not enabled:
-        yield
-        return
     conf = current_alloc_conf()
     if not conf_flag_enabled(conf, EXPANDABLE_SEGMENTS):
         yield
