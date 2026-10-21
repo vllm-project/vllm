@@ -47,13 +47,14 @@ def dspark_confidence_fused(
     temp: float = 1.0,
     *,
     max_fused_batch: int = 2048,
-) -> torch.Tensor:
+) -> torch.Tensor | None:
     """Compute sigmoid((hidden ; markov_embed) @ weight / temp) with fused kernel.
 
-    Falls back to PyTorch reference when the fused kernel isn't applicable
-    (CPU tensors, wrong dtypes, batch > max_fused_batch, wrong strides, etc).
+    Returns ``None`` when the fused kernel isn't applicable (CPU tensors,
+    wrong dtypes, batch > ``max_fused_batch``, wrong strides, etc.) so the
+    caller can fall back to the PyTorch reference path.
 
-    Returns: (n,) fp32.
+    Returns: ``(n,) fp32`` post-sigmoid probabilities, or ``None``.
     """
     n = hidden.shape[0]
     r = weight.shape[0] - hidden.shape[-1]
@@ -72,12 +73,10 @@ def dspark_confidence_fused(
         and n <= max_fused_batch
     )
 
-    if fused_ok:
-        out = torch.empty(n, dtype=torch.float32, device=hidden.device)
-        # Calls via custom op so CUDA-Graph capture and torch.compile work.
-        torch.ops.vllm.dspark_confidence_tilelang(
-            hidden, markov_embed, weight, out, temp
-        )
-        return out
+    if not fused_ok:
+        return None
 
-    return dspark_confidence_torch(hidden, markov_embed, weight, temp)
+    out = torch.empty(n, dtype=torch.float32, device=hidden.device)
+    # Calls via custom op so CUDA-Graph capture and torch.compile work.
+    torch.ops.vllm.dspark_confidence_tilelang(hidden, markov_embed, weight, out, temp)
+    return out
