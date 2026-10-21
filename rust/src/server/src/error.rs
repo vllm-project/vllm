@@ -28,7 +28,7 @@ pub enum ApiError {
     /// An unexpected internal failure happened before streaming started.
     ServerError { message: String },
     /// The engine rejected the request with a retryable error.
-    ServiceUnavailable { code: String, message: String },
+    ServiceUnavailable { message: String },
 }
 
 impl ApiError {
@@ -44,49 +44,41 @@ impl ApiError {
         }
     }
 
-    /// Convert this error into the standard OpenAI-compatible JSON error
-    /// payload.
+    /// Convert this error into the vLLM JSON error payload: `type` names the
+    /// error class as the Python frontend does, and `code` is the HTTP status.
     pub fn to_error_response(&self) -> ErrorResponse {
-        let error = match self {
-            Self::InvalidRequest { message, param } => ErrorDetail {
-                message: message.clone(),
-                error_type: "invalid_request_error".to_string(),
-                param: param.map(|p| p.to_string()),
-                code: Some("invalid_request_error".to_string()),
-            },
-            Self::ModelNotFound { model } => ErrorDetail {
-                message: format!("The model `{model}` does not exist."),
-                error_type: "invalid_request_error".to_string(),
-                param: Some("model".to_string()),
-                code: Some("model_not_found".to_string()),
-            },
-            Self::ServerError { message } => ErrorDetail {
-                message: message.clone(),
-                error_type: "server_error".to_string(),
-                param: None,
-                code: Some("server_error".to_string()),
-            },
-            Self::JsonParseError { message } => ErrorDetail {
-                message: message.clone(),
-                error_type: "invalid_request_error".to_string(),
-                param: None,
-                code: Some("json_parse_error".to_string()),
-            },
-            Self::Conflict { message } => ErrorDetail {
-                message: message.clone(),
-                error_type: "conflict_error".to_string(),
-                param: None,
-                code: Some("conflict_error".to_string()),
-            },
-            Self::ServiceUnavailable { code, message } => ErrorDetail {
-                message: message.clone(),
-                error_type: "service_unavailable_error".to_string(),
-                param: None,
-                code: Some(code.clone()),
-            },
+        let (error_type, message, param) = match self {
+            Self::InvalidRequest { message, param } => (
+                "BadRequestError",
+                message.clone(),
+                param.map(str::to_string),
+            ),
+            Self::ModelNotFound { model } => (
+                "NotFoundError",
+                format!("The model `{model}` does not exist."),
+                Some("model".to_string()),
+            ),
+            // Python reports a body that fails to parse into the request
+            // model through FastAPI's validation handler, which names the
+            // HTTP status instead of an error class.
+            Self::JsonParseError { message } => ("Bad Request", message.clone(), None),
+            // Python has no error class for 409; like its `HTTPException`
+            // handler, name the status.
+            Self::Conflict { message } => ("Conflict", message.clone(), None),
+            Self::ServerError { message } => ("InternalServerError", message.clone(), None),
+            Self::ServiceUnavailable { message } => {
+                ("ServiceUnavailableError", message.clone(), None)
+            }
         };
 
-        ErrorResponse { error }
+        ErrorResponse {
+            error: ErrorDetail {
+                message,
+                error_type: error_type.to_string(),
+                param,
+                code: self.status_code().as_u16(),
+            },
+        }
     }
 }
 
@@ -126,7 +118,6 @@ pub fn chat_submit_error(context: &'static str, error: vllm_chat::Error) -> ApiE
 pub fn engine_error(error: Option<&RequestError>) -> ApiError {
     match error {
         Some(error) if error.retryable => ApiError::ServiceUnavailable {
-            code: error.code.clone(),
             message: error.message.clone(),
         },
         _ => server_error!("Internal server error"),
@@ -135,7 +126,35 @@ pub fn engine_error(error: Option<&RequestError>) -> ApiError {
 
 #[cfg(test)]
 mod tests {
+    use expect_test::expect;
+    use itertools::Itertools as _;
+
     use super::*;
+
+    /// Each error class serializes like Python's `ErrorInfo`: the class name
+    /// in `type` and the HTTP status as an integer `code`.
+    #[test]
+    fn error_response_names_error_class_and_status_code() {
+        let errors = [
+            ApiError::invalid_request("top_p must be in (0, 1].", Some("top_p")),
+            ApiError::model_not_found("missing"),
+            ApiError::json_parse_error("expected value at line 1 column 1"),
+            ApiError::conflict("A profiling session is already active."),
+            ApiError::server_error("Internal server error"),
+            ApiError::service_unavailable("Generation is paused."),
+        ];
+        let rendered = errors
+            .iter()
+            .map(|error| serde_json::to_string(&error.to_error_response()).unwrap())
+            .join("\n");
+        expect![[r#"
+            {"error":{"message":"top_p must be in (0, 1].","type":"BadRequestError","param":"top_p","code":400}}
+            {"error":{"message":"The model `missing` does not exist.","type":"NotFoundError","param":"model","code":404}}
+            {"error":{"message":"expected value at line 1 column 1","type":"Bad Request","param":null,"code":400}}
+            {"error":{"message":"A profiling session is already active.","type":"Conflict","param":null,"code":409}}
+            {"error":{"message":"Internal server error","type":"InternalServerError","param":null,"code":500}}
+            {"error":{"message":"Generation is paused.","type":"ServiceUnavailableError","param":null,"code":503}}"#]].assert_eq(&rendered);
+    }
 
     #[test]
     fn prompt_too_long_maps_to_invalid_request() {
@@ -146,7 +165,7 @@ mod tests {
         let api_error = text_submit_error("failed to submit completion request", error);
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
         let response = api_error.to_error_response();
-        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert_eq!(response.error.error_type, "BadRequestError");
         assert!(response.error.message.contains("8192"));
         assert!(response.error.message.contains("9000"));
     }
@@ -159,7 +178,7 @@ mod tests {
         );
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
         let response = api_error.to_error_response();
-        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert_eq!(response.error.error_type, "BadRequestError");
         assert!(response.error.message.contains("thinking_token_budget"));
     }
 
@@ -174,7 +193,7 @@ mod tests {
         );
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
         let response = api_error.to_error_response();
-        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert_eq!(response.error.error_type, "BadRequestError");
         assert!(response.error.message.contains("min_tokens=5"));
         assert!(response.error.message.contains("max_tokens=4"));
     }
@@ -191,7 +210,7 @@ mod tests {
         );
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
         let response = api_error.to_error_response();
-        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert_eq!(response.error.error_type, "BadRequestError");
         assert!(response.error.message.contains("top_p"));
     }
 
@@ -219,7 +238,7 @@ mod tests {
             assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
             assert_eq!(
                 api_error.to_error_response().error.error_type,
-                "invalid_request_error"
+                "BadRequestError"
             );
         }
     }
@@ -232,7 +251,7 @@ mod tests {
         let api_error = chat_submit_error("failed to submit chat request", error);
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
         let response = api_error.to_error_response();
-        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert_eq!(response.error.error_type, "BadRequestError");
         assert_eq!(response.error.message, "Unexpected reasoning effort high.");
     }
 
@@ -278,7 +297,7 @@ mod tests {
         let api_error = text_submit_error("failed to submit completion request", error);
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
         let response = api_error.to_error_response();
-        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert_eq!(response.error.error_type, "BadRequestError");
         assert!(response.error.message.contains("logprobs"));
     }
 
@@ -312,7 +331,7 @@ mod tests {
         let api_error = text_submit_error("failed to submit completion request", error);
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
         let response = api_error.to_error_response();
-        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert_eq!(response.error.error_type, "BadRequestError");
         assert!(response.error.message.contains("allowed_token_ids"));
     }
 
@@ -325,7 +344,7 @@ mod tests {
         let api_error = text_submit_error("failed to submit completion request", error);
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
         let response = api_error.to_error_response();
-        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert_eq!(response.error.error_type, "BadRequestError");
         assert!(response.error.message.contains("truncate_prompt_tokens=8000"));
         assert!(response.error.message.contains("max_model_len = 4000"));
     }
@@ -336,7 +355,7 @@ mod tests {
         let api_error = text_submit_error("failed to submit completion request", error);
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
         let response = api_error.to_error_response();
-        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert_eq!(response.error.error_type, "BadRequestError");
         assert!(response.error.message.contains("-2"));
         assert!(response.error.message.contains("must be >= -1"));
     }
