@@ -1058,8 +1058,12 @@ class TestStreamLogprobs:
             state=state,
         )
 
-        assert chunk1.choices[0].logprobs.text_offset[0] == 0
-        assert chunk2.choices[0].logprobs.text_offset[0] == len(chunk1.choices[0].text)
+        logprobs1 = chunk1.choices[0].logprobs
+        logprobs2 = chunk2.choices[0].logprobs
+        assert logprobs1 is not None and logprobs2 is not None
+        assert logprobs1.text_offset[0] == 0
+        # Logprob tokens may retain a leading space absent from response text.
+        assert logprobs2.text_offset[0] == sum(len(token) for token in logprobs1.tokens)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("skip_special_tokens", [False, True])
