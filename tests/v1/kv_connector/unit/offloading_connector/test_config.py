@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for translating vLLM cache metadata to native offloading config."""
 
+from dataclasses import replace
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
@@ -10,6 +12,9 @@ import torch
 
 from tests.v1.kv_connector.unit.offloading_connector.utils import MockOffloadingSpec
 from vllm.config import KVTransferConfig, ParallelConfig, VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.canonical_mapping import (
+    derive_canonical_mappings,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
     build_offloading_config,
 )
@@ -37,6 +42,475 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
+
+
+def _gdn_hybrid_profile(tp=1, num_blocks=4):
+    from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+
+    config = _make_vllm_config(
+        tensor_parallel_size=tp,
+        extra_config={
+            "canonical_layout": True,
+            "cpu_bytes_to_use": 1 << 20,
+            "spec_name": "TieringOffloadingSpec",
+        },
+    )
+    config.use_v2_model_runner = False
+    config.cache_config.cache_dtype = "auto"
+    config.model_config.dtype = torch.bfloat16
+    config.speculative_config = None
+    config.cache_config.use_replayssm = False
+    config.cache_config.kv_cache_layout = "LBNHC"
+    config.parallel_config.distributed_executor_backend = "mp"
+    config.model_config.hf_text_config = SimpleNamespace(
+        linear_num_key_heads=8,
+        linear_num_value_heads=8,
+        linear_key_head_dim=2,
+        linear_value_head_dim=4,
+        linear_conv_kernel_dim=4,
+    )
+    full = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=4 // tp,
+        head_size=4,
+        dtype=torch.bfloat16,
+    )
+    gdn = MambaSpec(
+        block_size=16,
+        shapes=((64 // tp, 3), (8 // tp, 4, 2)),
+        dtypes=(torch.bfloat16, torch.float32),
+        page_size_padded=full.page_size_bytes,
+        mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+        mamba_cache_mode="align",
+    )
+    groups = [
+        KVCacheGroupSpec(["gdn0", "gdn1"], gdn),
+        KVCacheGroupSpec(["full0", "full1"], full),
+    ]
+    page = full.page_size_bytes
+    cache = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_groups=groups,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=2 * num_blocks * page,
+                layers=group.layer_names,
+                layer_stride=num_blocks * page,
+                block_stride=page,
+            )
+            for group in groups
+        ],
+    )
+    return config, cache
+
+
+@pytest.mark.parametrize("tp", [1, 2, 4])
+def test_gdn_format_is_tp_independent_and_scheduler_consistent(tp, monkeypatch):
+    from vllm.model_executor.layers.mamba.mamba_utils import get_conv_state_layout
+
+    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "DS")
+    get_conv_state_layout.cache_clear()
+    config, cache = _gdn_hybrid_profile(tp)
+    resolved = build_offloading_config(config, cache)
+    baseline = build_offloading_config(*_gdn_hybrid_profile())
+    assert resolved.parallel.is_parallelism_agnostic
+    assert resolved.recurrent_schema == baseline.recurrent_schema
+    assert resolved.canonical_storage_layout == baseline.canonical_storage_layout
+    scheduler = generate_scheduler_kv_cache_config([cache] * tp)
+    assert build_offloading_config(config, scheduler) == resolved
+    config_b, cache_b = _gdn_hybrid_profile(tp, num_blocks=7)
+    resolved_b = build_offloading_config(config_b, cache_b)
+    assert resolved_b.recurrent_schema == resolved.recurrent_schema
+    assert resolved_b.canonical_storage_layout == resolved.canonical_storage_layout
+    get_conv_state_layout.cache_clear()
+
+
+@pytest.mark.parametrize("heterogeneous", [False, True])
+def test_gdn_uniform_wrapper_matches_scheduler_decision(heterogeneous, monkeypatch):
+    from vllm.model_executor.layers.mamba.mamba_utils import get_conv_state_layout
+    from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
+    from vllm.v1.kv_cache_interface import KVCacheLayout
+
+    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "DS")
+    get_conv_state_layout.cache_clear()
+    config, cache = _gdn_hybrid_profile(2)
+    group = cache.kv_cache_groups[0]
+    spec = group.kv_cache_spec
+    group.kv_cache_spec = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={
+            "gdn0": spec,
+            "gdn1": replace(spec, dtypes=(torch.float16, torch.float32))
+            if heterogeneous
+            else spec,
+        },
+    )
+    config.attention_config.hisparse_config = None
+    config.cache_config.get_resolved_kv_cache_layout.return_value = KVCacheLayout.LBNHC
+    config.cache_config.num_gpu_blocks_override = cache.num_blocks
+    allocated = get_kv_cache_config_from_groups(config, cache.kv_cache_groups, 1 << 20)
+    worker = build_offloading_config(config, allocated)
+    scheduler = build_offloading_config(
+        config, generate_scheduler_kv_cache_config([allocated])
+    )
+    assert worker.recurrent_schema == scheduler.recurrent_schema
+    assert worker.canonical_storage_layout == scheduler.canonical_storage_layout
+    assert (worker.recurrent_schema is not None) is (not heterogeneous)
+    get_conv_state_layout.cache_clear()
+
+
+@pytest.mark.parametrize(
+    "unsupported",
+    [
+        "quant",
+        "packed",
+        "speculative",
+        "replicated",
+        "extra",
+        "SD",
+        "cpu",
+        "custom",
+        "attention_dtype",
+    ],
+)
+def test_gdn_global_certification_failure_keeps_legacy_format(unsupported, monkeypatch):
+    from vllm.model_executor.layers.mamba.mamba_utils import get_conv_state_layout
+    from vllm.v1.kv_cache_interface import KVQuantMode
+
+    monkeypatch.setenv(
+        "VLLM_SSM_CONV_STATE_LAYOUT", "SD" if unsupported == "SD" else "DS"
+    )
+    get_conv_state_layout.cache_clear()
+    config, cache = _gdn_hybrid_profile(2)
+    if unsupported in ("cpu", "custom"):
+        config.kv_transfer_config.kv_connector_extra_config["spec_name"] = (
+            "CPUOffloadingSpec" if unsupported == "cpu" else "CustomOffloadingSpec"
+        )
+    elif unsupported == "attention_dtype":
+        cache.kv_cache_groups[1].kv_cache_spec = replace(
+            cache.kv_cache_groups[1].kv_cache_spec, dtype=torch.float16
+        )
+    elif unsupported == "quant":
+        cache.kv_cache_groups[1].kv_cache_spec = replace(
+            cache.kv_cache_groups[1].kv_cache_spec,
+            kv_quant_mode=KVQuantMode.INT8_PER_TOKEN_HEAD,
+        )
+    elif unsupported == "packed":
+        cache.kv_cache_tensors[0].layer_stride = cache.kv_cache_tensors[0].block_stride
+    elif unsupported == "speculative":
+        config.speculative_config = SimpleNamespace(num_speculative_tokens=1)
+    elif unsupported in ("replicated", "extra"):
+        gdn = cache.kv_cache_groups[0].kv_cache_spec
+        cache.kv_cache_groups[0].kv_cache_spec = replace(
+            gdn,
+            **(
+                {"tp_replicated": True}
+                if unsupported == "replicated"
+                else {
+                    "shapes": (*gdn.shapes, (2,)),
+                    "dtypes": (*gdn.dtypes, torch.float32),
+                }
+            ),
+        )
+    result = build_offloading_config(config, cache)
+    assert result.recurrent_schema is None
+    assert result.canonical_storage_layout is None
+    assert not result.parallel.is_parallelism_agnostic
+    get_conv_state_layout.cache_clear()
+
+
+@pytest.mark.parametrize(
+    "section,overrides",
+    [
+        pytest.param(None, {"use_v2_model_runner": True}, id="mrv2"),
+        pytest.param(
+            "parallel_config", {"pipeline_parallel_size": 2, "world_size": 4}, id="pp2"
+        ),
+        pytest.param(
+            "parallel_config",
+            {"prefill_context_parallel_size": 2, "world_size": 4},
+            id="pcp2",
+        ),
+        pytest.param("parallel_config", {"decode_context_parallel_size": 2}, id="dcp2"),
+        pytest.param("parallel_config", {"data_parallel_size": 2}, id="dp2"),
+        pytest.param("parallel_config", {"world_size": 4}, id="world-ne-tp"),
+        pytest.param("parallel_config", {"nnodes": 2}, id="multi-node"),
+        pytest.param(
+            "parallel_config", {"distributed_executor_backend": "ray"}, id="ray"
+        ),
+        pytest.param(
+            "parallel_config", {"distributed_executor_backend": "uni"}, id="uni"
+        ),
+        pytest.param(
+            "parallel_config",
+            {"distributed_executor_backend": None},
+            id="unresolved-executor",
+        ),
+        pytest.param(
+            "parallel_config",
+            {"distributed_executor_backend": type("DummyExecutor", (), {})},
+            id="custom-executor",
+        ),
+        pytest.param(
+            "cache_config", {"enable_prefix_caching": False}, id="prefix-cache-disabled"
+        ),
+    ],
+)
+def test_gdn_execution_gate_preserves_legacy_format(
+    section, overrides, monkeypatch, tmp_path
+):
+    """Unsupported GDN execution must not upgrade mapping or storage identity."""
+    from vllm.model_executor.layers.mamba.mamba_utils import get_conv_state_layout
+
+    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "DS")
+    get_conv_state_layout.cache_clear()
+    config, cache = _gdn_hybrid_profile(2)
+    supported = build_offloading_config(config, cache)
+    assert supported.parallel.is_parallelism_agnostic
+    assert supported.recurrent_schema is not None
+    assert supported.canonical_storage_layout is not None
+    target = config if section is None else getattr(config, section)
+    for field, value in overrides.items():
+        monkeypatch.setattr(target, field, value)
+    rejected = build_offloading_config(config, cache)
+    assert not rejected.parallel.is_parallelism_agnostic
+    assert not rejected.replicated_layout
+    assert rejected.recurrent_schema is None
+    assert rejected.canonical_storage_layout is None
+    p = config.parallel_config
+    scheduler = generate_scheduler_kv_cache_config([cache] * p.world_size)
+    assert build_offloading_config(config, scheduler) == rejected
+
+    spec = TieringOffloadingSpec(rejected)
+    actual = FileMapper.from_offloading_spec(
+        str(tmp_path), spec, parallel_agnostic=True
+    )
+    legacy = FileMapper.from_offloading_spec(
+        str(tmp_path), spec, parallel_agnostic=False
+    )
+    assert actual.get_run_config() == legacy.get_run_config()
+    assert actual.base_path == legacy.base_path
+    assert actual.fields["parallel_agnostic"] is False
+    for field, value in (
+        ("tp_size", p.tensor_parallel_size),
+        ("pp_size", p.pipeline_parallel_size),
+        ("pcp_size", p.prefill_context_parallel_size),
+        ("dcp_size", p.decode_context_parallel_size),
+    ):
+        assert actual.fields[field] == value
+    assert "recurrent_schema" not in actual.fields
+    assert "canonical_storage_layout" not in actual.fields
+
+    gdn = cache.kv_cache_groups[0]
+    payload, page = (
+        gdn.kv_cache_spec.real_page_size_bytes,
+        gdn.kv_cache_spec.page_size_bytes,
+    )
+    tensors = {
+        name: torch.empty(cache.num_blocks * page, dtype=torch.int8).as_strided(
+            (cache.num_blocks, 1, 1, payload), (page, payload, payload, 1)
+        )
+        for name in gdn.layer_names
+    }
+    mappings = derive_canonical_mappings(
+        config, cache, tensors, rejected.recurrent_schema
+    )
+    if p.world_size != p.tensor_parallel_size * p.prefill_context_parallel_size:
+        assert mappings == {}
+    else:
+        for name in gdn.layer_names:
+            mapping = mappings[name]
+            assert not mapping.parallelism_agnostic
+            assert mapping.canonical_page_size_bytes == p.world_size * payload
+            assert len(mapping.runs) == 1
+            assert mapping.runs[0].canonical_offset == p.rank * payload
+            assert mapping.runs[0].fragment_size == payload
+    get_conv_state_layout.cache_clear()
+
+
+def test_gdn_namespace_covers_component_dtype_and_slot_geometry(monkeypatch, tmp_path):
+    from vllm.model_executor.layers.mamba.mamba_utils import get_conv_state_layout
+
+    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "DS")
+    get_conv_state_layout.cache_clear()
+    mappers = []
+    for tp in (1, 2):
+        config, cache = _gdn_hybrid_profile(tp)
+        spec = TieringOffloadingSpec(build_offloading_config(config, cache))
+        mappers.append(
+            FileMapper.from_offloading_spec(str(tmp_path), spec, parallel_agnostic=True)
+        )
+    assert mappers[0].get_run_config() == mappers[1].get_run_config()
+    assert mappers[0].base_path == mappers[1].base_path
+    original = mappers[0]
+    config, cache = _gdn_hybrid_profile()
+    gdn = cache.kv_cache_groups[0].kv_cache_spec
+    cache.kv_cache_groups[0].kv_cache_spec = replace(
+        gdn, dtypes=(torch.float16, torch.float32)
+    )
+    changed = TieringOffloadingSpec(build_offloading_config(config, cache))
+    assert (
+        FileMapper.from_offloading_spec(
+            str(tmp_path), changed, parallel_agnostic=True
+        ).base_path
+        != original.base_path
+    )
+    changed.kv_bytes_per_chunk *= 2
+    bigger = FileMapper.from_offloading_spec(
+        str(tmp_path), changed, parallel_agnostic=True
+    )
+    changed.kv_bytes_per_chunk //= 2
+    assert (
+        bigger.base_path
+        != FileMapper.from_offloading_spec(
+            str(tmp_path), changed, parallel_agnostic=True
+        ).base_path
+    )
+    layout = changed.config.canonical_storage_layout
+    unchanged = FileMapper.from_offloading_spec(
+        str(tmp_path), changed, parallel_agnostic=True
+    )
+    # Equal-length row but different group/segment interpretation must miss.
+    changed.config = replace(
+        changed.config,
+        canonical_storage_layout=replace(
+            layout,
+            group_refs=(tuple(reversed(layout.group_refs[0])), layout.group_refs[1]),
+        ),
+    )
+    assert (
+        FileMapper.from_offloading_spec(
+            str(tmp_path), changed, parallel_agnostic=True
+        ).base_path
+        != unchanged.base_path
+    )
+    get_conv_state_layout.cache_clear()
+
+
+@pytest.mark.parametrize("tp", [1, 2, 4])
+@pytest.mark.parametrize(
+    "unsupported",
+    ["quant", "attention_chunk_size", "sliding_window", "non_causal"],
+)
+def test_gdn_mapping_and_identity_use_same_resolved_decision(
+    tp, unsupported, monkeypatch, tmp_path
+):
+    """An ineligible hybrid must retain the same-topology opaque format."""
+    from vllm.model_executor.layers.mamba.mamba_utils import get_conv_state_layout
+    from vllm.v1.kv_cache_interface import KVQuantMode
+
+    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "DS")
+    get_conv_state_layout.cache_clear()
+    config, cache = _gdn_hybrid_profile(tp)
+    spec = cache.kv_cache_groups[0].kv_cache_spec
+    payload, page = spec.real_page_size_bytes, spec.page_size_bytes
+    caches = {
+        name: torch.empty(cache.num_blocks * page, dtype=torch.int8).as_strided(
+            (cache.num_blocks, 1, 1, payload), (page, payload, payload, 1)
+        )
+        for name in cache.kv_cache_groups[0].layer_names
+    }
+    full = cache.kv_cache_groups[1].kv_cache_spec
+    caches.update(
+        {
+            name: torch.empty(
+                cache.num_blocks,
+                full.block_size,
+                full.num_kv_heads,
+                2 * full.head_size,
+                dtype=full.dtype,
+            ).permute(0, 2, 1, 3)
+            for name in cache.kv_cache_groups[1].layer_names
+        }
+    )
+    old = derive_canonical_mappings(config, cache, caches)
+    supported = build_offloading_config(config, cache)
+    new = derive_canonical_mappings(config, cache, caches, supported.recurrent_schema)
+    assert not old["gdn0"].parallelism_agnostic
+    assert new["gdn0"].parallelism_agnostic
+    assert len(new["gdn0"].runs) == (1 if tp == 1 else 4)
+    assert (
+        old["gdn0"].canonical_page_size_bytes == new["gdn0"].canonical_page_size_bytes
+    )
+    assert (old["gdn0"].runs == new["gdn0"].runs) is (tp == 1)
+    cache.kv_cache_groups[1].kv_cache_spec = replace(
+        full,
+        **(
+            {"kv_quant_mode": KVQuantMode.INT8_PER_TOKEN_HEAD}
+            if unsupported == "quant"
+            else {unsupported: True if unsupported == "non_causal" else 64}
+        ),
+    )
+    rejected = build_offloading_config(config, cache)
+    assert rejected.recurrent_schema is None
+    assert rejected.canonical_storage_layout is None
+    assert not rejected.parallel.is_parallelism_agnostic
+    assert (
+        build_offloading_config(
+            config, generate_scheduler_kv_cache_config([cache] * tp)
+        )
+        == rejected
+    )
+    assert (
+        derive_canonical_mappings(config, cache, caches, rejected.recurrent_schema)[
+            "gdn0"
+        ]
+        == old["gdn0"]
+    )
+    legacy = replace(
+        supported,
+        recurrent_schema=None,
+        canonical_storage_layout=None,
+        parallel=replace(supported.parallel, is_parallelism_agnostic=False),
+    )
+    actual = FileMapper.from_offloading_spec(
+        str(tmp_path), TieringOffloadingSpec(rejected), parallel_agnostic=True
+    )
+    expected = FileMapper.from_offloading_spec(
+        str(tmp_path), TieringOffloadingSpec(legacy), parallel_agnostic=True
+    )
+    assert actual.get_run_config() == expected.get_run_config()
+    assert actual.base_path == expected.base_path
+    assert actual.fields["tp_size"] == tp
+    assert "recurrent_schema" not in actual.fields
+    assert "canonical_storage_layout" not in actual.fields
+    if unsupported == "quant":
+        with pytest.raises(ValueError, match="full0"):
+            derive_canonical_mappings(config, cache, caches, supported.recurrent_schema)
+    get_conv_state_layout.cache_clear()
+
+
+@pytest.mark.parametrize(
+    "failure", ["unpaired", "schema_version", "layout_version", "coverage"]
+)
+def test_gdn_incomplete_format_fails_closed(failure, monkeypatch):
+    from vllm.model_executor.layers.mamba.mamba_utils import get_conv_state_layout
+
+    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "DS")
+    get_conv_state_layout.cache_clear()
+    config, cache = _gdn_hybrid_profile(2)
+    resolved = build_offloading_config(config, cache)
+    with pytest.raises(ValueError):
+        if failure == "unpaired":
+            replace(resolved, canonical_storage_layout=None)
+        elif failure == "schema_version":
+            replace(
+                resolved,
+                recurrent_schema=replace(resolved.recurrent_schema, format="unknown"),
+            )
+        elif failure == "layout_version":
+            replace(
+                resolved,
+                canonical_storage_layout=replace(
+                    resolved.canonical_storage_layout, format="unknown"
+                ),
+            )
+        else:
+            truncated = replace(
+                resolved.recurrent_schema, layers=resolved.recurrent_schema.layers[:1]
+            )
+            derive_canonical_mappings(config, cache, {}, truncated)
+    get_conv_state_layout.cache_clear()
 
 
 def _make_vllm_config(

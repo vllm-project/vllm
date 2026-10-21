@@ -59,6 +59,53 @@ _CTX = ReqContext(req_id="test")
 _MOCK_OFFLOADING_SPEC = MagicMock()
 
 
+@pytest.mark.parametrize("mixed", [False, True])
+@pytest.mark.parametrize("alias", [False, True])
+def test_gdn_rejects_p2p_before_transport_or_registration(monkeypatch, mixed, alias):
+    from dataclasses import replace
+
+    from tests.v1.kv_connector.unit.offloading_connector.test_config import (
+        _gdn_hybrid_profile,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
+        build_offloading_config,
+    )
+    from vllm.model_executor.layers.mamba.mamba_utils import get_conv_state_layout
+    from vllm.v1.kv_offload.tiering.p2p import manager as p2p
+
+    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "DS")
+    get_conv_state_layout.cache_clear()
+    config, cache = _gdn_hybrid_profile(2)
+    resolved = build_offloading_config(config, cache)
+
+    class CustomP2P(p2p.P2PSecondaryTierManager):
+        pass
+
+    if alias:
+        monkeypatch.setitem(
+            SecondaryTierFactory._registry, "gdn_test_peer", lambda: CustomP2P
+        )
+    tiers = [{"type": "gdn_test_peer" if alias else "p2p"}]
+    if mixed:
+        tiers.insert(0, {"type": "fs", "root_dir": "/unused"})
+    resolved = replace(
+        resolved, extra_config={**resolved.extra_config, "secondary_tiers": tiers}
+    )
+    with (
+        patch.object(p2p, "P2PSession") as session,
+        patch.object(p2p, "NixlTransport") as transport,
+        patch.object(p2p.P2PSecondaryTierManager, "__init__") as manager,
+        patch("vllm.v1.kv_offload.tiering.spec.SharedOffloadRegion") as region,
+    ):
+        with pytest.raises(ValueError, match="does not support P2P"):
+            TieringOffloadingSpec(resolved)
+        session.assert_not_called()
+        transport.assert_not_called()
+        manager.assert_not_called()
+        region.assert_not_called()
+    get_conv_state_layout.cache_clear()
+
+
 def _mock_mmap_region(num_chunks: int, row_bytes: int = 16):
     """Create a mock SharedOffloadRegion for testing."""
     mock = MagicMock()
@@ -1276,7 +1323,7 @@ class TestTieringOffloadingManager:
         self._simulate_on_schedule_end()
 
         ctx = self._make_request_level_request("req_cascade")
-        self.manager.primary_tier.lookup = lambda key, req_context: (LookupResult.RETRY)
+        self.manager.primary_tier.lookup = lambda key, req_context: LookupResult.RETRY
 
         with pytest.raises(AssertionError):
             self.manager._cascade_existing_chunks_to_request_level_tiers(keys, ctx, {0})

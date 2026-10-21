@@ -1,17 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
+import os
 import socket
+import subprocess
+import sys
 import time
+from pathlib import Path
 
 import msgspec
 import msgspec.msgpack
 import prometheus_client
 import pytest
+import torch
 import zmq
 from tqdm import tqdm
 
 from vllm import LLM, SamplingParams, TokensPrompt
-from vllm.config import KVEventsConfig, KVTransferConfig
+from vllm.config import KVEventsConfig, KVTransferConfig, VllmConfig
 from vllm.distributed.kv_events import BlockStored, KVEventBatch
 from vllm.platforms import current_platform
 
@@ -73,6 +79,445 @@ _FIRST_EVENT_POLL_MS = 10_000 if current_platform.is_rocm() else 1000
 # Hard ceiling (seconds) on how long get_new_cpu_stored_events may loop,
 # to prevent hangs if non-CPU events keep arriving indefinitely.
 _EVENT_DRAIN_TIMEOUT = 60
+
+
+def _assert_gdn_native_state(actual, shards, tp, rank):
+    """Compare native channels/heads, independently of canonical copy offsets."""
+    assert 0 <= rank < tp
+    assert shards and all(set(shard) == set(actual) for shard in shards)
+    checked_bytes = 0
+    for name, value in actual.items():
+        parts = [shard[name] for shard in shards]
+        assert all(part.dtype == value.dtype for part in parts), name
+        full = torch.cat(parts, dim=0)
+        assert full.shape[0] % tp == 0, name
+        expected = full.chunk(tp, dim=0)[rank]
+        assert value.shape == expected.shape, name
+        left = value.contiguous().view(torch.uint8)
+        right = expected.contiguous().view(torch.uint8)
+        assert torch.equal(left, right), name
+        checked_bytes += left.numel()
+    return checked_bytes
+
+
+class _GDNStateOracle:
+    """Test-only native pre-store snapshots and post-completion byte checks."""
+
+    vllm_config: VllmConfig
+
+    def gdn_oracle_records(self):
+        return self._gdn_records
+
+    def init_worker_extension(self):
+        from vllm.config import get_layers_from_vllm_config
+        from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
+            OffloadingConnectorWorker,
+        )
+        from vllm.model_executor.layers.attention.attention import Attention
+        from vllm.model_executor.layers.mamba.abstract import MambaBase
+        from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+        from vllm.v1.kv_offload.cpu.gpu_worker import SingleDirectionOffloadingHandler
+
+        directory = Path(os.environ["VLLM_TEST_GDN_ORACLE_DIR"])
+        source_tp = int(os.environ["VLLM_TEST_GDN_SOURCE_TP"])
+        tp = self.vllm_config.parallel_config.tensor_parallel_size
+        rank = self.vllm_config.parallel_config.rank
+        self._gdn_records: list[dict] = []
+        modules, pending = {}, {}
+        groups: list[list[str]] = []
+        original_init = OffloadingConnectorWorker._init_worker
+        original_submit = SingleDirectionOffloadingHandler.transfer_async
+        original_finish = SingleDirectionOffloadingHandler.get_finished
+
+        def initialize(connector, caches):
+            original_init(connector, caches)
+            assert connector.spec.config.recurrent_schema.format == "gdn-ds-v1"
+            modules.update(get_layers_from_vllm_config(self.vllm_config, MambaBase))
+            modules.update(get_layers_from_vllm_config(self.vllm_config, Attention))
+            groups.extend(
+                g.layer_names for g in connector.kv_cache_config.kv_cache_groups
+            )
+
+        def snapshot(group, block):
+            values = {}
+            for name in groups[group]:
+                layer = modules[name]
+                if isinstance(layer, MambaBase):
+                    conv, temporal = layer.kv_cache
+                    q, v = layer.key_dim // tp, layer.value_dim // tp
+                    assert conv.shape[1:] == (2 * q + v, 3)
+                    assert temporal.shape[1:] == (
+                        layer.num_v_heads // tp,
+                        layer.head_v_dim,
+                        layer.head_k_dim,
+                    )
+                    pieces = dict(zip(("Q", "K", "V"), conv[block].split((q, q, v))))
+                    pieces["S"] = temporal[block]
+                else:
+                    cache = layer.kv_cache
+                    assert cache.ndim == 4 and cache.shape[2] == 1024
+                    key, value = cache[block].chunk(2, dim=-1)
+                    pieces = {"AK": key, "AV": value}
+                # Only diagnostic host reads are exempt, never production calls.
+                with gpu_sync_allowed():
+                    values.update(
+                        {
+                            f"{name}::{k}": v.detach().cpu().contiguous()
+                            for k, v in pieces.items()
+                        }
+                    )
+            return values
+
+        def entries(handler, src, dst):
+            gpu, cpu = (src, dst) if handler.gpu_to_cpu else (dst, src)
+            assert handler.src_blocks_per_chunk == handler.dst_blocks_per_chunk == 1
+            assert sum(gpu.group_sizes) == len(gpu.block_ids) == len(cpu.block_ids)
+            offset = 0
+            for group, count in enumerate(gpu.group_sizes):
+                for i in range(count):
+                    yield (
+                        group,
+                        int(gpu.block_indices[group]) + i,
+                        int(gpu.block_ids[offset + i]),
+                        int(cpu.block_ids[offset + i]),
+                    )
+                offset += count
+
+        def submit(handler, job_id, src, dst):
+            if handler.gpu_to_cpu and not source_tp:
+                for group, logical, block, slot in entries(handler, src, dst):
+                    filename = f"g{group}-b{logical}-j{job_id}-r{rank}.pt"
+                    torch.save(snapshot(group, block), directory / filename)
+                    self._gdn_records.append(
+                        dict(
+                            rank=rank,
+                            group=group,
+                            logical=logical,
+                            slot=slot,
+                            file=filename,
+                        )
+                    )
+            success = original_submit(handler, job_id, src, dst)
+            if success and not handler.gpu_to_cpu:
+                pending[(id(handler), job_id)] = (src, dst)
+            return success
+
+        def finish(handler):
+            completed = original_finish(handler)
+            for result in completed:
+                specs = pending.pop((id(handler), result.job_id), None)
+                if specs is None:
+                    continue
+                assert result.success and source_tp
+                provider = json.loads((directory / "provider.json").read_text())
+                for group, logical, block, slot in entries(handler, *specs):
+                    key = (directory / f"load-slot{slot}.key").read_text()
+                    reference = provider[key]
+                    assert (reference["group"], reference["logical"]) == (
+                        group,
+                        logical,
+                    )
+                    assert len(reference["files"]) == source_tp
+                    shards = [
+                        torch.load(directory / f, weights_only=True)
+                        for f in reference["files"]
+                    ]
+                    actual = snapshot(group, block)
+                    size = _assert_gdn_native_state(actual, shards, tp, rank)
+                    self._gdn_records.append(
+                        dict(
+                            key=key,
+                            group=group,
+                            bytes=size,
+                            components=sorted(
+                                {name.rsplit("::", 1)[1] for name in actual}
+                            ),
+                        )
+                    )
+            return completed
+
+        OffloadingConnectorWorker._init_worker = initialize
+        SingleDirectionOffloadingHandler.transfer_async = submit
+        SingleDirectionOffloadingHandler.get_finished = finish
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("source_tp,target_tp", [(1, 2), (2, 1), (2, 4), (4, 2)])
+@pytest.mark.parametrize("conv_dtype", [torch.bfloat16, torch.float16])
+def test_gdn_canonical_fs_cross_tp_oracle(source_tp, target_tp, conv_dtype):
+    """Distinct native markers catch matching-but-wrong canonical permutations."""
+    full = {}
+    for i, (name, shape) in enumerate(
+        [
+            ("Q", (8, 3)),
+            ("K", (8, 3)),
+            ("V", (16, 3)),
+            ("S", (8, 4, 2)),
+            ("AK", (4, 11, 6)),
+            ("AV", (4, 11, 6)),
+        ]
+    ):
+        dtype = torch.float32 if name == "S" else conv_dtype
+        full[name] = (
+            torch.arange(torch.tensor(shape).prod()).reshape(shape) % 29 + 32 * i
+        ).to(dtype)
+    shards = [
+        {k: v.chunk(source_tp)[r] for k, v in full.items()} for r in range(source_tp)
+    ]
+    for rank in range(target_tp):
+        actual = {k: v.chunk(target_tp)[rank].clone() for k, v in full.items()}
+        expected_bytes = sum(v.numel() * v.element_size() for v in actual.values())
+        assert (
+            _assert_gdn_native_state(actual, shards, target_tp, rank) == expected_bytes
+        )
+        for mutation in (
+            dict(actual, Q=actual["K"], K=actual["Q"]),
+            dict(actual, S=actual["S"].roll(1, 0)),
+            dict(actual, AK=actual["AV"], AV=actual["AK"]),
+        ):
+            with pytest.raises(AssertionError):
+                _assert_gdn_native_state(mutation, shards, target_tp, rank)
+    if source_tp > 1:
+        packed = torch.cat([torch.cat([s[k] for k in ("Q", "K", "V")]) for s in shards])
+        wrong = dict(full, **dict(zip(("Q", "K", "V"), packed.split((8, 8, 16)))))
+        with pytest.raises(AssertionError):
+            _assert_gdn_native_state(wrong, shards, 1, 0)
+
+
+def _gdn_fs_model_case(model, tp, root, result_path, oracle_root, source_tp):
+    """Run in a fresh process so no producer GPU/primary cache can survive."""
+    from vllm.v1.kv_offload.base import get_offload_group_idx
+    from vllm.v1.kv_offload.tiering.fs.manager import FileSystemTierManager
+
+    directory = Path(oracle_root)
+    jobs = {}
+    fs_records: dict[str, list[dict]] = {"store": [], "load": []}
+    original_store = FileSystemTierManager.submit_store
+    original_load = FileSystemTierManager.submit_load
+    original_finish = FileSystemTierManager.get_finished_jobs
+
+    def submit(tier, job, kind):
+        jobs[job.job_id] = (kind, job)
+        return (original_store if kind == "store" else original_load)(tier, job)
+
+    def finish(tier):
+        completed = list(original_finish(tier))
+        for result in completed:
+            kind, job = jobs.pop(result.job_id)
+            assert result.success
+            for key, slot in zip(job.keys, job.chunk_ids):
+                fs_records[kind].append(
+                    dict(
+                        key=key.hex(), slot=int(slot), group=get_offload_group_idx(key)
+                    )
+                )
+                if kind == "load":
+                    (directory / f"load-slot{int(slot)}.key").write_text(key.hex())
+        return completed
+
+    patches = pytest.MonkeyPatch()
+    patches.setattr(
+        FileSystemTierManager, "submit_store", lambda s, j: submit(s, j, "store")
+    )
+    patches.setattr(
+        FileSystemTierManager, "submit_load", lambda s, j: submit(s, j, "load")
+    )
+    patches.setattr(FileSystemTierManager, "get_finished_jobs", finish)
+    os.environ["VLLM_TEST_GDN_ORACLE_DIR"] = oracle_root
+    os.environ["VLLM_TEST_GDN_SOURCE_TP"] = str(source_tp)
+    revision = (
+        "2fc06364715b967f1860aea9cf38778875588b17"
+        if model == "Qwen/Qwen3.5-0.8B"
+        else None
+    )
+    llm = LLM(
+        model=model,
+        revision=revision,
+        tokenizer_revision=revision,
+        language_model_only=True,
+        dtype="bfloat16",
+        tensor_parallel_size=tp,
+        distributed_executor_backend="mp",
+        worker_extension_cls=(
+            "tests.v1.kv_connector.unit.test_offloading_connector._GDNStateOracle"
+        ),
+        max_model_len=4096,
+        max_num_seqs=1,
+        max_num_batched_tokens=1024,
+        num_gpu_blocks_override=32,
+        gpu_memory_utilization=0.25,
+        block_size=1024,
+        prefix_match_unit=16,
+        enable_prefix_caching=True,
+        mamba_cache_dtype="bfloat16",
+        mamba_ssm_cache_dtype="float32",
+        attention_config={"backend": "FLASH_ATTN"},
+        additional_config={"gdn_prefill_backend": "triton"},
+        enforce_eager=True,
+        disable_log_stats=False,
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="OffloadingConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "spec_name": "TieringOffloadingSpec",
+                "canonical_layout": True,
+                "cpu_bytes_to_use": 1 << 30,
+                "blocks_per_chunk": 1,
+                "secondary_tiers": [
+                    {
+                        "type": "fs",
+                        "root_dir": root,
+                        "n_read_threads": 2,
+                        "n_write_threads": 2,
+                    }
+                ],
+            },
+        ),
+    )
+    try:
+        result = llm.generate(
+            [TokensPrompt(prompt_token_ids=[785 + i % 97 for i in range(2049)])],
+            SamplingParams(
+                temperature=0,
+                max_tokens=64,
+                ignore_eos=True,
+                extra_args={
+                    "kv_transfer_params": {"max_offload_tokens": 0}
+                    if source_tp
+                    else {"max_load_tokens": 0}
+                },
+            ),
+            use_tqdm=False,
+        )[0]
+        # Drive delayed worker acks using the existing integration helper.
+        _wait_for_prefix_cache_reset(llm)
+        connector = llm.llm_engine.engine_core.engine_core.scheduler.connector.scheduler
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            with connector.manager.lock:
+                pending = connector.manager.has_pending_work() or bool(connector._jobs)
+            if not pending:
+                break
+            llm.llm_engine.step()
+            time.sleep(0.001)
+        else:
+            raise TimeoutError("GDN filesystem stores did not complete")
+        tier = connector.manager.secondary_tiers[0]
+        oracle = llm.collective_rpc("gdn_oracle_records")
+        if not source_tp:
+            provider = {}
+            for event in fs_records["store"]:
+                records = [
+                    [
+                        r
+                        for r in per_rank
+                        if (r["slot"], r["group"]) == (event["slot"], event["group"])
+                    ]
+                    for per_rank in oracle
+                ]
+                assert all(len(r) == 1 for r in records)
+                assert [r[0]["rank"] for r in records] == list(range(tp))
+                assert len({r[0]["logical"] for r in records}) == 1
+                provider[event["key"]] = dict(
+                    group=event["group"],
+                    logical=records[0][0]["logical"],
+                    files=[r[0]["file"] for r in records],
+                )
+            (directory / "provider.json").write_text(json.dumps(provider))
+        llm.llm_engine.do_log_stats()
+        metrics = [
+            metric
+            for metric in llm.get_metrics()
+            if metric.name == "vllm:kv_offload_tiering_read_bytes"
+        ]
+        Path(result_path).write_text(
+            json.dumps(
+                {
+                    "tokens": result.outputs[0].token_ids,
+                    "cached_tokens": result.num_cached_tokens,
+                    "fs_read_bytes": sum(metric.value for metric in metrics),
+                    "row_size": connector.manager.secondary_tiers[0]._block_size,
+                    "identity": tier.file_mapper.get_run_config(),
+                    "oracle": oracle,
+                    "fs_loads": fs_records["load"],
+                }
+            )
+        )
+    finally:
+        llm.llm_engine.engine_core.shutdown()
+        patches.undo()
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
+@pytest.mark.parametrize("producer_tp,consumer_tp", [(1, 2), (2, 1)])
+def test_gdn_canonical_fs_cross_tp(tmp_path, producer_tp, consumer_tp):
+    if torch.accelerator.device_count() < 2:
+        pytest.skip("requires two GPUs")
+    model = os.environ.get("VLLM_TEST_GDN_MODEL", "Qwen/Qwen3.5-0.8B")
+    environment = dict(
+        os.environ,
+        VLLM_USE_V2_MODEL_RUNNER="0",
+        VLLM_ENABLE_V1_MULTIPROCESSING="0",
+        VLLM_WORKER_MULTIPROC_METHOD="spawn",
+        VLLM_SSM_CONV_STATE_LAYOUT="DS",
+        VLLM_KV_CACHE_LAYOUT="LBNHC",
+        PYTHONHASHSEED="0",
+    )
+
+    def run(name, tp, cache_root, source_tp=0):
+        result = tmp_path / f"{name}.json"
+        oracle_root = tmp_path / "oracle"
+        oracle_root.mkdir(exist_ok=True)
+        command = (
+            "import json,sys; "
+            "from tests.v1.kv_connector.unit.test_offloading_connector "
+            "import _gdn_fs_model_case; _gdn_fs_model_case(*json.loads(sys.argv[1]))"
+        )
+        subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                command,
+                json.dumps(
+                    [
+                        model,
+                        tp,
+                        str(cache_root),
+                        str(result),
+                        str(oracle_root),
+                        source_tp,
+                    ]
+                ),
+            ],
+            env=environment,
+            check=True,
+            timeout=300,
+        )
+        return json.loads(result.read_text())
+
+    producer = run("producer", producer_tp, tmp_path / "shared")
+    consumer = run("consumer", consumer_tp, tmp_path / "shared", producer_tp)
+    assert producer["cached_tokens"] == 0
+    assert consumer["cached_tokens"] == 2048
+    assert consumer["fs_read_bytes"] >= consumer["row_size"] * 5
+    assert consumer["identity"] == producer["identity"]
+    assert consumer["identity"]["recurrent_schema"]["format"] == "gdn-ds-v1"
+    assert len(consumer["oracle"]) == consumer_tp
+    loaded_keys = {event["key"] for event in consumer["fs_loads"]}
+    assert {event["group"] for event in consumer["fs_loads"]} == {0, 1, 2, 3}
+    for records in consumer["oracle"]:
+        assert {r["key"] for r in records} == loaded_keys
+        assert sum(r["bytes"] for r in records) > 0
+        assert {c for r in records for c in r["components"]} == {
+            "Q",
+            "K",
+            "V",
+            "S",
+            "AK",
+            "AV",
+        }
+    # Native-state bytes, not cross-TP token parity, are the correctness oracle.
+    assert len(producer["tokens"]) == len(consumer["tokens"]) == 64
 
 
 class MockSubscriber:

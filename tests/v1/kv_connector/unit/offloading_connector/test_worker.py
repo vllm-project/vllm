@@ -46,6 +46,66 @@ HEAD_SIZE = 64
 DTYPE = torch.float16
 DEVICE_TYPE = current_platform.device_type
 
+
+@pytest.mark.parametrize("damage", [None, "uniform", "stride", "alias"])
+def test_gdn_certified_registration_checks_live_plan(damage, monkeypatch):
+    from tests.v1.kv_connector.unit.offloading_connector.test_config import (
+        _gdn_hybrid_profile,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
+        build_offloading_config,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
+        OffloadingConnectorWorker,
+    )
+    from vllm.model_executor.layers.mamba.mamba_utils import get_conv_state_layout
+    from vllm.v1.worker.utils import allocate_kv_cache
+
+    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "DS")
+    get_conv_state_layout.cache_clear()
+    config, cache = _gdn_hybrid_profile()
+    if damage == "uniform":
+        group = cache.kv_cache_groups[0]
+        group.kv_cache_spec = UniformTypeKVCacheSpecs(
+            block_size=16,
+            kv_cache_specs={name: group.kv_cache_spec for name in group.layer_names},
+        )
+    caches = allocate_kv_cache(
+        cache, torch.device(DEVICE_TYPE), KVCacheLayout.LBNHC, [16, 16]
+    )
+    spec = MagicMock(spec=OffloadingSpec)
+    spec.config = build_offloading_config(config, cache)
+    spec.replicated_layout = False
+    connector = OffloadingConnectorWorker(spec, config, cache)
+    if damage == "stride":
+        raw = caches["gdn0"]
+        caches["gdn0"] = raw.as_strided(
+            raw.shape, (raw.stride(0) + 4, *raw.stride()[1:])
+        )
+    elif damage == "alias":
+        raw = caches["gdn1"]
+        backing = torch.empty_like(
+            raw.as_strided((raw.untyped_storage().nbytes(),), (1,), storage_offset=0)
+        )
+        caches["gdn1"] = backing.as_strided(
+            raw.shape, raw.stride(), raw.storage_offset()
+        )
+    if damage in ("stride", "alias"):
+        with pytest.raises(ValueError, match="gdn0|storage layout"):
+            connector.register_kv_caches(caches)
+        spec.get_worker.assert_not_called()
+    else:
+        connector.register_kv_caches(caches)
+        live = spec.get_worker.call_args.args[0]
+        assert len(live.tensors) == 2
+        assert all(
+            ref.mapping.parallelism_agnostic
+            for group in live.group_data_refs
+            for ref in group
+        )
+    get_conv_state_layout.cache_clear()
+
+
 # Attention backends to test
 ATTN_BACKENDS: list[str] = []
 if current_platform.is_cuda():
@@ -109,6 +169,8 @@ def _make_worker(
     spec.replicated_layout = replicated_layout
     spec.config = MagicMock()
     spec.config.canonical_layout = canonical_layout
+    spec.config.recurrent_schema = None
+    spec.config.canonical_storage_layout = None
     spec.config.parallel.rank = rank
     spec.get_worker.return_value = MagicMock()
 

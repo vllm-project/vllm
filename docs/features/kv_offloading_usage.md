@@ -360,6 +360,53 @@ Runtime handshake for a P2P (or P/D) pull, once the orchestrator has set the key
 
 In classic **P/D mode** (`remote_prefiller` set, no `remote_kv_source`), the lookup phase (steps 2–4) is skipped: the decode consumer assumes the prefiller holds all of the request's blocks, so every block `lookup()` returns an immediate hit and the consumer jumps straight to the **`FetchMsg`** in step 5. The `LookupMsg`/`LookupRespMsg` round-trip only happens in P2P mode, where the consumer does not know in advance which blocks the peer has cached.
 
+### Cross-TP filesystem reuse for GDN hybrids
+
+`canonical_layout: true` enables filesystem cache reuse across TP sizes for
+restricted attention+GDN hybrids. Example for `Qwen/Qwen3.5-0.8B` (TP1↔TP2):
+
+```bash
+VLLM_SSM_CONV_STATE_LAYOUT=DS VLLM_KV_CACHE_LAYOUT=LBNHC PYTHONHASHSEED=0 \
+VLLM_USE_V2_MODEL_RUNNER=0 \
+vllm serve Qwen/Qwen3.5-0.8B \
+  --language-model-only --dtype bfloat16 --tensor-parallel-size 2 \
+  --distributed-executor-backend mp --enable-prefix-caching \
+  --block-size 1024 --prefix-match-unit 16 \
+  --mamba-cache-dtype bfloat16 --mamba-ssm-cache-dtype float32 \
+  --attention-config '{"backend":"FLASH_ATTN"}' \
+  --additional-config '{"gdn_prefill_backend":"triton"}' \
+  --kv-transfer-config '{
+    "kv_connector":"OffloadingConnector", "kv_role":"kv_both",
+    "kv_connector_extra_config":{
+      "spec_name":"TieringOffloadingSpec", "canonical_layout":true,
+      "blocks_per_chunk":1, "cpu_bytes_to_use":1073741824,
+      "secondary_tiers":[{"type":"fs","root_dir":"/path/to/shared-cache"}]
+    }
+  }'
+```
+
+Use the same pinned model revision, hash seed, block/hash sizes and shared filesystem root; only TP may differ.
+Supported configurations require:
+
+- Native `OffloadingConnector` with `TieringOffloadingSpec`, Model Runner V1, prefix caching, single-node multiprocessing and PP=PCP=DCP=DP=1.
+- DS convolution layout, layer-compact allocations, align-mode checkpoints and exactly two TP-sharded GDN components. Supported `(conv, temporal)` dtypes are `(bfloat16, float32)` and `(float16, float32)`.
+- Unquantized, head-sharded BF16/FP16 causal full-attention KV; no sliding windows or attention chunking.
+
+Mamba1/Mamba2, replicated recurrent state, SD/packed layouts, speculative decoding,
+ReplaySSM and extra checkpoint/ring states are unsupported. The new format rejects
+P2P tiers, including mixed FS+P2P configurations.
+
+Old GDN cache files are isolated and not reused, even at the same TP; attention-only
+cache identities are unchanged. Unsupported profiles do not enable cross-TP GDN reuse.
+
+Reuse requires attention KV and all GDN checkpoints at a common prefix boundary;
+a smaller hash unit does not create more recurrent checkpoints. Wait for producer
+stores to complete before stopping it, and check external cache hits and FS reads.
+
+Cross-TP reuse can change outputs and task accuracy, even when state bytes are
+restored exactly; accuracy neutrality is not guaranteed. Evaluate your workload
+against a cold run at the consumer's TP before deployment.
+
 ### Out-of-Tree Secondary Tiers
 
 Implement `SecondaryTierManager` (`vllm/v1/kv_offload/tiering/base.py`) in your own package — no vLLM fork or patch required — and point the tier config at it directly:

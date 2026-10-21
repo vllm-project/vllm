@@ -13,15 +13,47 @@ from vllm.v1.kv_offload.base import (
     CopyRun,
     GPULoadStoreSpec,
 )
+from vllm.v1.kv_offload.config import CanonicalStorageLayout
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.gpu_worker import (
     SingleDirectionOffloadingHandler,
     _build_copy_plan,
     _canonical_block_sizes,
     _canonical_page_ids,
+    _validate_canonical_cpu_views,
     pin_mmap_region,
 )
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+
+
+@pytest.mark.parametrize(
+    "mutation", [None, "offset", "stride", "order", "size", "count"]
+)
+def test_live_canonical_cpu_layout(mutation):
+    from types import SimpleNamespace
+
+    base = torch.empty(3 * 128, dtype=torch.int8)
+    region = SimpleNamespace(num_chunks=3, total_size_bytes=384, base_tensor=base)
+    tensors = [
+        base.as_strided((3, 32), (128, 1), 0),
+        base.as_strided((3, 48), (128, 1), 32),
+    ]
+    layout = CanonicalStorageLayout((16, 24), ((0,), (1,)))
+    if mutation == "offset":
+        tensors[1] = base.as_strided((3, 48), (128, 1), 33)
+    elif mutation == "stride":
+        tensors[0] = base.as_strided((3, 32), (127, 1), 0)
+    elif mutation == "order":
+        tensors.reverse()
+    elif mutation == "size":
+        tensors[1] = tensors[1][:, :-1]
+    elif mutation == "count":
+        tensors.pop()
+    if mutation is None:
+        _validate_canonical_cpu_views(tensors, region, layout, 2)
+    else:
+        with pytest.raises(ValueError, match="GDN canonical CPU segment"):
+            _validate_canonical_cpu_views(tensors, region, layout, 2)
 
 
 def _ref(mapping: CanonicalPageMapping, tensor_idx: int = 0) -> CanonicalKVCacheRef:
@@ -120,6 +152,81 @@ def _canonical_handler(gpu_tensor, cpu_tensor, mapping, gpu_to_cpu):
         gpu_to_cpu=gpu_to_cpu,
         canonical_layout=True,
     )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("writer_tp,reader_tp", [(1, 2), (2, 1)])
+@pytest.mark.parametrize("conv_dtype", [torch.bfloat16, torch.float16])
+def test_gdn_gpu_cross_tp_payload_and_padding(
+    writer_tp, reader_tp, conv_dtype, monkeypatch
+):
+    """Actual DMA preserves independently constructed Q/K/V and FP32 state bytes."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.recurrent import (
+        gdn_mapping,
+    )
+    from vllm.model_executor.layers.mamba.mamba_utils import get_conv_state_layout
+    from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+    from vllm.v1.kv_cache_interface import MambaSpec
+
+    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "DS")
+    get_conv_state_layout.cache_clear()
+    sizes = (96, 96, 192, 256)
+    components = [
+        (torch.arange(size).repeat(3, 1) + i * 43).remainder(251).to(torch.int8)
+        for i, size in enumerate(sizes)
+    ]
+    expected = torch.cat(components, dim=1)
+    cpu = torch.full((3, sum(sizes)), -91, dtype=torch.int8, pin_memory=True)
+    handlers = []
+
+    def allocation(tp, rank):
+        payload = sum(sizes) // tp
+        page = payload + 32
+        spec = MambaSpec(
+            block_size=16,
+            shapes=((64 // tp, 3), (8 // tp, 4, 2)),
+            dtypes=(conv_dtype, torch.float32),
+            page_size_padded=page,
+            mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+            mamba_cache_mode="align",
+        )
+        backing = torch.full(
+            (32 + 3 * page + 32,), -91, dtype=torch.int8, device="cuda"
+        )
+        physical = backing.as_strided((3, page), (page, 1), storage_offset=32)
+        raw = physical[:, :payload].view(3, 1, 1, payload)
+        mapping = gdn_mapping(spec, raw, 3, tp, rank)
+        shard = torch.cat(
+            [
+                c[:, rank * (s // tp) : (rank + 1) * (s // tp)]
+                for s, c in zip(sizes, components)
+            ],
+            dim=1,
+        )
+        return backing, physical, mapping, shard
+
+    try:
+        for rank in reversed(range(writer_tp)):
+            backing, physical, mapping, shard = allocation(writer_tp, rank)
+            physical[:, : mapping.local_page_size_bytes].copy_(shard)
+            torch.accelerator.synchronize()
+            handler = _canonical_handler(physical, cpu, mapping, True)
+            handlers.append(handler)
+            _transfer(handler, 3, True)
+        assert torch.equal(cpu, expected)
+        for rank in range(reader_tp):
+            backing, physical, mapping, shard = allocation(reader_tp, rank)
+            handler = _canonical_handler(physical, cpu, mapping, False)
+            handlers.append(handler)
+            _transfer(handler, 3, False)
+            actual = physical.cpu()
+            assert torch.equal(actual[:, : mapping.local_page_size_bytes], shard)
+            assert torch.all(actual[:, mapping.local_page_size_bytes :] == -91)
+            assert torch.all(backing[:32] == -91) and torch.all(backing[-32:] == -91)
+    finally:
+        for handler in handlers:
+            handler.shutdown()
+        get_conv_state_layout.cache_clear()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
