@@ -1,16 +1,83 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import json
 
 import pytest
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from vllm.entrypoints.generate.base.protocol import StreamOptions
+from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse
 from vllm.entrypoints.serve.utils import api_utils
 from vllm.entrypoints.serve.utils.api_utils import (
     get_max_tokens,
     should_include_usage,
 )
+
+pytestmark = pytest.mark.skip_global_cleanup
+
+
+class JsonPayload(BaseModel):
+    text: str
+    values: dict[int, int]
+
+
+@pytest.mark.parametrize("container", [None, list, tuple])
+def test_create_json_response_serializes_models(container):
+    model = JsonPayload(text="测试模型", values={1: 2})
+    result = container([model, model]) if container else model
+    content = (
+        [model.model_dump(), model.model_dump()] if container else model.model_dump()
+    )
+
+    response = api_utils.create_json_response(result)
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/json"
+    assert int(response.headers["content-length"]) == len(response.body)
+    assert json.loads(response.body) == json.loads(JSONResponse(content=content).body)
+
+
+def test_create_json_response_serializes_empty_list():
+    response = api_utils.create_json_response([])
+
+    assert response.status_code == 200
+    assert response.body == b"[]"
+
+
+@pytest.mark.parametrize("multiple", [False, True])
+def test_create_json_response_preserves_large_integers(multiple):
+    model = JsonPayload(text="opaque identifier", values={1: 2**80})
+
+    response = api_utils.create_json_response([model] if multiple else model)
+
+    data = json.loads(response.body)
+    item = data[0] if multiple else data
+    assert response.status_code == 200
+    assert item["values"]["1"] == 2**80
+
+
+@pytest.mark.parametrize("value", [1, 2**80])
+def test_create_json_response_preserves_custom_status(value):
+    model = JsonPayload(text="created", values={1: value})
+
+    response = api_utils.create_json_response(model, status_code=201)
+
+    assert response.status_code == 201
+    assert json.loads(response.body)["values"]["1"] == value
+
+
+def test_create_json_response_preserves_error_status():
+    error = ErrorResponse(
+        error=ErrorInfo(message="invalid prompt", type="BadRequestError", code=400)
+    )
+
+    response = api_utils.create_json_response(error)
+
+    assert response.status_code == 400
+    assert json.loads(response.body) == error.model_dump()
 
 
 @pytest.mark.asyncio

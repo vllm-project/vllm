@@ -18,7 +18,6 @@ from tests.utils import RemoteLaunchRenderServer
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-from vllm.entrypoints.scale_out.render import api_router
 from vllm.entrypoints.scale_out.render.api_router import router
 from vllm.entrypoints.scale_out.render.serving import ServingRender
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
@@ -26,7 +25,8 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     MultiModalFeatures,
     PlaceholderRangeInfo,
 )
-from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.entrypoints.serve.utils.api_utils import create_json_response
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import SamplingParams
 
@@ -57,51 +57,13 @@ def test_render_response_serializes_multimodal_data_with_orjson(monkeypatch, mul
     expected = json.loads(JSONResponse(content=content).body)
     encode_json = MagicMock(wraps=orjson.dumps)
     monkeypatch.setattr(orjson, "dumps", encode_json)
-    response = api_router._render_response(result)
+    response = create_json_response(result)
 
     encode_json.assert_called_once()
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/json"
     assert int(response.headers["content-length"]) == len(response.body)
     assert json.loads(response.body) == expected
-
-
-@pytest.mark.skip_global_cleanup
-def test_render_response_serializes_empty_list():
-    response = api_router._render_response([])
-
-    assert response.status_code == 200
-    assert response.body == b"[]"
-
-
-@pytest.mark.parametrize("multiple", [False, True])
-@pytest.mark.skip_global_cleanup
-def test_render_response_preserves_large_integer_transfer_params(multiple):
-    request = GenerateRequest(
-        token_ids=[1],
-        sampling_params=SamplingParams(max_tokens=1),
-        kv_transfer_params={"opaque_id": 2**80},
-    )
-    result = [request] if multiple else request
-
-    response = api_router._render_response(result)
-
-    data = json.loads(response.body)
-    item = data[0] if multiple else data
-    assert response.status_code == 200
-    assert item["kv_transfer_params"]["opaque_id"] == 2**80
-
-
-@pytest.mark.skip_global_cleanup
-def test_render_response_preserves_error_status():
-    error = ErrorResponse(
-        error=ErrorInfo(message="invalid prompt", type="BadRequestError", code=400)
-    )
-
-    response = api_router._render_response(error)
-
-    assert response.status_code == 400
-    assert json.loads(response.body) == error.model_dump()
 
 
 def _build_serving_render() -> ServingRender:

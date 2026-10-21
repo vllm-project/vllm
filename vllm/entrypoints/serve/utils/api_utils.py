@@ -3,9 +3,11 @@
 
 import asyncio
 import functools
+from collections.abc import Sequence
 from http import HTTPStatus
 from typing import Any
 
+import orjson
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -14,10 +16,33 @@ from starlette.background import BackgroundTask, BackgroundTasks
 
 from vllm.entrypoints.generate.base.protocol import StreamOptions
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
+
+
+def create_json_response(
+    result: BaseModel | Sequence[BaseModel], *, status_code: int = HTTPStatus.OK
+) -> Response:
+    """Encode models with orjson, preserving error status and JSONResponse fallback."""
+    if isinstance(result, ErrorResponse):
+        return JSONResponse(content=result.model_dump(), status_code=result.error.code)
+
+    content = (
+        result.model_dump()
+        if isinstance(result, BaseModel)
+        else [item.model_dump() for item in result]
+    )
+    try:
+        body = orjson.dumps(content, option=orjson.OPT_NON_STR_KEYS)
+    except TypeError:
+        # Preserve JSONResponse support for integers outside the 64-bit range.
+        return JSONResponse(content=content, status_code=status_code)
+    return Response(
+        content=body, status_code=status_code, media_type="application/json"
+    )
 
 
 async def listen_for_disconnect(request: Request) -> None:
