@@ -7,6 +7,7 @@
 //! - Engine args: <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/engine/arg_utils.py#L657-L1311>
 //! - Environment variables: <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/envs.py#L472>
 
+mod model;
 mod ssl;
 mod unsupported;
 
@@ -35,8 +36,9 @@ use vllm_server::{
     DEFAULT_KEEP_ALIVE_TIMEOUT, HttpListenerMode, LoraModulePath, ParserSelection, RenderConfig,
     RendererSelection,
 };
-use vllm_text::backend::hf::HfOverrides;
+use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
 
+use crate::cli::model::ModelArgs;
 use crate::cli::ssl::SslArgs;
 use crate::cli::unsupported::UnsupportedArgs;
 
@@ -111,11 +113,9 @@ pub enum BenchCommand {
 /// Arguments for the engine-free text renderer.
 #[derive(Debug, Args, PartialEq, Eq)]
 pub struct RenderArgs {
-    /// Model identifier or local model directory containing tokenizer files.
-    model: String,
-    /// Model revision on the Hugging Face Hub (branch, tag, or commit SHA).
-    #[arg(long)]
-    revision: Option<String>,
+    /// The model and the sources of its tokenizer and config files.
+    #[command(flatten)]
+    model: ModelArgs,
     /// JSON Merge Patch (RFC 7396) for config.json; null removes a field.
     #[arg(long, value_parser = parse_json::<HfOverrides>, default_value = "{}", value_name = "JSON")]
     hf_overrides: HfOverrides,
@@ -176,10 +176,17 @@ pub struct RenderArgs {
 impl RenderArgs {
     pub(super) fn into_config(self) -> RenderConfig {
         let tls = self.ssl.tls_config();
+        let ModelFileSources {
+            model,
+            tokenizer,
+            hf_config,
+        } = self.model.file_sources();
 
         RenderConfig {
-            model: self.model,
-            revision: self.revision,
+            model: model.id,
+            revision: model.revision,
+            tokenizer,
+            hf_config,
             hf_overrides: self.hf_overrides,
             served_model_name: self.served_model_name,
             host: self.host,
@@ -217,15 +224,10 @@ pub struct JsonStringList(pub Vec<String>);
 #[derive(Educe, Clone, Args, PartialEq, Eq, Deserialize)]
 #[educe(Debug)]
 pub struct SharedRuntimeArgs {
-    #[serde(rename = "model_tag")]
-    /// Model identifier or local model directory used for backend loading and
-    /// public model ID.
-    pub model: String,
-
-    /// Model revision on the Hugging Face Hub (branch, tag, or commit SHA).
-    #[arg(long)]
-    #[serde(default)]
-    pub revision: Option<String>,
+    /// The model and the sources of its tokenizer and config files.
+    #[command(flatten)]
+    #[serde(flatten)]
+    pub model: ModelArgs,
 
     /// JSON Merge Patch (RFC 7396) for config.json; null removes a field.
     /// Objects merge recursively and arrays/scalars replace existing values.
@@ -567,6 +569,11 @@ impl SharedRuntimeArgs {
         let cors = self.cors_config();
         let tls = self.ssl.tls_config();
         let profiler = self.profiler();
+        let ModelFileSources {
+            model,
+            tokenizer,
+            hf_config,
+        } = self.model.file_sources();
 
         Config {
             transport_mode: TransportMode::Bootstrapped {
@@ -581,8 +588,10 @@ impl SharedRuntimeArgs {
                 Some(address) => CoordinatorMode::External { address },
                 None => CoordinatorMode::None,
             },
-            model: self.model,
-            revision: self.revision,
+            model: model.id,
+            revision: model.revision,
+            tokenizer,
+            hf_config,
             hf_overrides: self.hf_overrides,
             generation_config: self.generation_config,
             served_model_name: self.served_model_name,
@@ -635,6 +644,11 @@ impl SharedRuntimeArgs {
         let cors = self.cors_config();
         let tls = self.ssl.tls_config();
         let profiler = self.profiler();
+        let ModelFileSources {
+            model,
+            tokenizer,
+            hf_config,
+        } = self.model.file_sources();
 
         Config {
             transport_mode: TransportMode::HandshakeOwner {
@@ -646,8 +660,10 @@ impl SharedRuntimeArgs {
                 local_output_address,
             },
             coordinator_mode: CoordinatorMode::MaybeInProc,
-            model: self.model,
-            revision: self.revision,
+            model: model.id,
+            revision: model.revision,
+            tokenizer,
+            hf_config,
             hf_overrides: self.hf_overrides,
             generation_config: self.generation_config,
             served_model_name: self.served_model_name,
@@ -888,16 +904,19 @@ impl ServeArgs {
     /// Build the managed Python-engine spawn configuration with the given
     /// handshake port.
     pub fn to_managed_engine_config(&self, handshake_port: u16) -> ManagedEngineConfig {
-        let reasoning_parser =
-            effective_engine_reasoning_parser(&self.runtime.reasoning_parser, &self.runtime.model);
+        let reasoning_parser = effective_engine_reasoning_parser(
+            &self.runtime.reasoning_parser,
+            &self.runtime.model.id,
+        );
         let profiler_config = self.runtime.profiler_config_json();
         let hf_overrides = (!self.runtime.hf_overrides.is_empty()).then(|| {
             serde_json::to_string(&self.runtime.hf_overrides).expect("JSON object serializes")
         });
 
-        self.managed_engine.clone().into_config(
-            self.runtime.model.clone(),
-            self.runtime.revision.clone(),
+        let mut managed_engine = self.managed_engine.clone();
+        managed_engine.python_args.extend(self.runtime.model.python_args());
+        managed_engine.into_config(
+            self.runtime.model.id.clone(),
             self.runtime.max_logprobs,
             profiler_config,
             reasoning_parser.as_deref(),

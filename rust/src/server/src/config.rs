@@ -18,7 +18,7 @@ use vllm_chat::{
     ToolStrictLevel,
 };
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
-use vllm_text::backend::hf::HfOverrides;
+use vllm_text::backend::hf::{HfOverrides, ModelSource};
 
 /// Default keep-alive idle timeout (seconds); also the head-read bound
 /// when keep-alive is disabled (`0`).
@@ -224,6 +224,10 @@ pub struct Config {
     pub model: String,
     /// Model revision on the Hugging Face Hub (branch, tag, or commit SHA).
     pub revision: Option<String>,
+    /// Source of the tokenizer files and the chat template, or `None` for `model`.
+    pub tokenizer: Option<ModelSource>,
+    /// Source of `config.json` and `generation_config.json`, or `None` for `model`.
+    pub hf_config: Option<ModelSource>,
     /// JSON Merge Patch applied to the model config before backend initialization.
     pub hf_overrides: HfOverrides,
     /// Which generation-config sampling defaults to inherit.
