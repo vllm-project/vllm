@@ -29,7 +29,7 @@ use axum::body::Body;
 use axum::http::Request;
 pub use config::{
     ApiServerOptions, Config, CoordinatorMode, CorsConfig, DEFAULT_KEEP_ALIVE_TIMEOUT,
-    HttpListenerMode, LoraModulePath, TlsConfig,
+    DEFAULT_LOG_STATS_INTERVAL, HttpListenerMode, LoraModulePath, TlsConfig,
 };
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
@@ -127,7 +127,8 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     .context("failed to connect to engine core")?;
 
     let llm = Llm::new(client)
-        .with_log_stats(!config.disable_log_stats)
+        .with_log_stats(config.log_stats_interval.filter(|_| !config.disable_log_stats))
+        .with_request_id_randomization(!config.disable_request_id_randomization)
         .with_stream_interval(config.stream_interval);
     let text = TextLlm::new(llm, text_backend).with_max_logprobs(config.max_logprobs);
 

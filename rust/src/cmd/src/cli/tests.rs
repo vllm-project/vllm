@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::collections::HashMap;
+use std::time::Duration;
+
 use expect_test::expect;
 use vllm_engine_core_client::TransportMode;
 use vllm_server::{
@@ -9,7 +12,7 @@ use vllm_server::{
 };
 use vllm_text::backend::hf::ModelSource;
 
-use super::{BenchCommand, Cli, Command};
+use super::{BenchCommand, Cli, Command, LogStatsInterval, SharedRuntimeArgs, parse_int_flag};
 
 #[test]
 fn bench_serve_args_parse_without_managed_engine_repartition() {
@@ -223,6 +226,8 @@ fn serve_args_forward_python_flags_with_separator() {
                         enable_tokenizer_info_endpoint: false,
                         sse_keep_alive_interval: 0,
                         disable_log_stats: false,
+                        log_stats_interval: None,
+                        disable_request_id_randomization: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -418,6 +423,107 @@ fn serve_args_forward_stream_interval_to_frontend_config() {
     ])
     .unwrap_err();
     assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+}
+
+#[test]
+fn serve_args_forward_env_only_settings_to_frontend_config() {
+    let parse = |extra_args: &[&str]| {
+        let cli =
+            Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"].iter().chain(extra_args))
+                .unwrap();
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve args");
+        };
+        args.to_frontend_config("tcp://127.0.0.1:62100".to_string())
+    };
+
+    let config = parse(&[]);
+    assert_eq!(config.log_stats_interval, Some(Duration::from_secs(10)));
+    assert!(!config.disable_request_id_randomization);
+
+    // Set through `VLLM_LOG_STATS_INTERVAL` and
+    // `VLLM_DISABLE_REQUEST_ID_RANDOMIZATION`, which bind these hidden flags.
+    let config = parse(&[
+        "--log-stats-interval",
+        "2.5",
+        "--disable-request-id-randomization",
+        "1",
+    ]);
+    assert_eq!(config.log_stats_interval, Some(Duration::from_millis(2500)));
+    assert!(config.disable_request_id_randomization);
+}
+
+#[test]
+fn args_json_reads_env_only_settings_from_env() {
+    let apply = |vars: &[(&str, &str)]| {
+        let vars: HashMap<_, _> = vars.iter().copied().collect();
+        let mut args: SharedRuntimeArgs =
+            serde_json::from_str(r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#).unwrap();
+        args.apply_env_fallbacks(|name| vars.get(name).map(|value| value.to_string()))
+            .map(|()| args)
+    };
+
+    let args = apply(&[]).unwrap();
+    assert_eq!(args.log_stats_interval(), Some(Duration::from_secs(10)));
+    assert!(!args.disable_request_id_randomization);
+
+    let args = apply(&[
+        ("VLLM_LOG_STATS_INTERVAL", "0.5"),
+        ("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION", "1"),
+    ])
+    .unwrap();
+    assert_eq!(args.log_stats_interval(), Some(Duration::from_millis(500)));
+    assert!(args.disable_request_id_randomization);
+
+    let args = apply(&[("VLLM_LOG_STATS_INTERVAL", "inf")]).unwrap();
+    assert_eq!(args.log_stats_interval(), None);
+
+    let errors = [
+        apply(&[("VLLM_LOG_STATS_INTERVAL", "ten")]).unwrap_err(),
+        apply(&[("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION", "true")]).unwrap_err(),
+    ];
+    expect![[r#"
+        [
+            "invalid VLLM_LOG_STATS_INTERVAL: `ten` is not a number of seconds",
+            "invalid VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: `true` is not an integer",
+        ]
+    "#]]
+    .assert_debug_eq(&errors);
+}
+
+#[test]
+fn log_stats_interval_falls_back_to_default_like_python() {
+    let parsed = [
+        "10", " 2.5 ", "1e-10", "0", "-1", "nan", "1e30", "inf", "ten",
+    ]
+    .map(|value| format!("{value:?} -> {:?}", value.parse::<LogStatsInterval>()))
+    .join("\n");
+    expect![[r#"
+        "10" -> Ok(Every(10s))
+        " 2.5 " -> Ok(Every(2.5s))
+        "1e-10" -> Ok(Every(0ns))
+        "0" -> Ok(Every(10s))
+        "-1" -> Ok(Every(10s))
+        "nan" -> Ok(Every(10s))
+        "1e30" -> Ok(Never)
+        "inf" -> Ok(Never)
+        "ten" -> Err("`ten` is not a number of seconds")"#]]
+    .assert_eq(&parsed);
+}
+
+#[test]
+fn int_flag_parses_like_python_bool_int() {
+    let parsed = ["0", "1", " 2 ", "-1", "true", ""]
+        .map(|value| format!("{value:?} -> {:?}", parse_int_flag(value)))
+        .join("\n");
+    expect![[r#"
+        "0" -> Ok(false)
+        "1" -> Ok(true)
+        " 2 " -> Ok(true)
+        "-1" -> Ok(true)
+        "true" -> Err("`true` is not an integer")
+        "" -> Err("`` is not an integer")"#]]
+    .assert_eq(&parsed);
 }
 
 #[test]
@@ -1134,6 +1240,8 @@ fn frontend_args_accept_json() {
                         enable_tokenizer_info_endpoint: false,
                         sse_keep_alive_interval: 0,
                         disable_log_stats: false,
+                        log_stats_interval: None,
+                        disable_request_id_randomization: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -1984,6 +2092,8 @@ fn serve_args_accept_handshake_aliases() {
                         enable_tokenizer_info_endpoint: false,
                         sse_keep_alive_interval: 0,
                         disable_log_stats: false,
+                        log_stats_interval: None,
+                        disable_request_id_randomization: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -2160,6 +2270,10 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             tls: None,
             api_keys: [],
             disable_log_stats: false,
+            log_stats_interval: Some(
+                10s,
+            ),
+            disable_request_id_randomization: false,
             shutdown_timeout: 0ns,
             manages_engine: true,
             keep_alive_timeout: 5s,
@@ -2260,6 +2374,10 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             tls: None,
             api_keys: [],
             disable_log_stats: false,
+            log_stats_interval: Some(
+                10s,
+            ),
+            disable_request_id_randomization: false,
             shutdown_timeout: 0ns,
             manages_engine: true,
             keep_alive_timeout: 5s,
@@ -2448,6 +2566,10 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             tls: None,
             api_keys: [],
             disable_log_stats: false,
+            log_stats_interval: Some(
+                10s,
+            ),
+            disable_request_id_randomization: false,
             shutdown_timeout: 0ns,
             manages_engine: false,
             keep_alive_timeout: 5s,
