@@ -849,13 +849,12 @@ def _maybe_convert_weights_for_experts(
             # DSV4's SEPARATED layout needs the real production converter
             # (not the gpt-oss one below), on un-interleaved weights.
             from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
-                Mxfp4MoeBackend,
                 convert_weight_to_mxfp4_moe_kernel_format,
             )
 
             w1, w2, w1_scale, w2_scale, _, _ = (
                 convert_weight_to_mxfp4_moe_kernel_format(
-                    mxfp4_backend=Mxfp4MoeBackend.AITER_MXFP4_BF16,
+                    mxfp4_backend=config.mxfp4_backend,
                     layer=torch.nn.Module(),
                     w13_weight=rank_weights.w1.clone(),
                     w2_weight=rank_weights.w2.clone(),

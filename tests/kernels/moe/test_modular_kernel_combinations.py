@@ -752,10 +752,14 @@ def test_aiter_moe_dispatch_policy_forwarded_through_apply(dispatch_policy: int)
 #
 # AITER_MOE_SORT_BACKEND is read once at aiter import time, same as the
 # CK/FlyDSL flags above, but only matters when aiter's internal `output_aux`
-# flag is set. The only path that sets it is MXFP4 W4A16 DeepSeek-V4.1 (DSV4)
-# a4w4, opted into via VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4=1 (see
+# flag is set. The only path that sets it is MXFP4 DeepSeek-V4.1 (DSV4) a4w4,
+# opted into via VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4=1 (see
 # FusedMoEConfig.__post_init__ / rocm_aiter_fused_experts()'s
-# use_mxfp4_w4a4_dsv4 branch) -- this is why PR #58393 deferred it.
+# use_mxfp4_w4a4_dsv4 branch) -- this is why PR #58393 deferred it. Despite
+# the "a4w4" name, this is vLLM's W4A16 scheme at the modular-kernel layer
+# (activations aren't pre-quantized): AITER's DSV4 kernel quantizes them to
+# 4-bit internally, which is also why aiter's env var and the issue's own
+# table call it "a4w4"/"W4A4".
 #
 # Shape (E=384, K=5120, N=640, topk=6, M=16) is a real DeepSeek-V4.1-tuned
 # shape (dsv41_fp4_tuned_fmoe.csv) that selects block_m=16, the only block_m
@@ -894,11 +898,12 @@ def test_aiter_moe_sort_backend_dispatch_env_matrix_mxfp4(backend: str):
         world_size=1,
         use_mxfp4_w4a4_dsv4=True,
     )
-    assert config.is_valid()[0]
-    assert config.fe_supports_quant_scheme(), (
-        f"AiterMxfp4Experts does not support quant scheme {quant_config} "
-        "(this also gates the test to MI350/gfx950 hardware)."
-    )
+    valid, reason = config.is_valid()
+    if not valid:
+        # Also where AiterMxfp4Experts's gfx950-only check lives (is_valid()
+        # checks fe_supports_quant_scheme()) -- a skip, not a failure, since
+        # e.g. the MI300 CI lane running this file isn't gfx950.
+        pytest.skip(reason)
 
     weights = WeightTensors.make(config)
     vllm_config, env_dict = config.make_env_data()
