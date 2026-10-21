@@ -1,17 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit tests for the breakable cudagraph primitives.
-"""
+"""Unit tests for the breakable cudagraph primitives."""
 
 from __future__ import annotations
 
 import threading
 from contextlib import nullcontext
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+
+from vllm.platforms import current_platform
+
+DEVICE_TYPE = current_platform.device_type
+HAS_DEVICE_GRAPH = current_platform.is_cuda_alike() or current_platform.is_xpu()
+
+if current_platform.is_xpu():
+    from vllm.v1.worker.xpu_model_runner import _torch_cuda_wrapper
+
+    # Route torch.cuda graph/stream APIs to torch.xpu, as XPUModelRunner does.
+    with _torch_cuda_wrapper():
+        pass
 
 
 @pytest.fixture(autouse=True)
@@ -43,6 +53,7 @@ def test_piecewise_capture_builds_fresh_metadata_for_both_passes():
     manager._capture_descs = {CUDAGraphMode.PIECEWISE: [desc]}
     manager._graphs_captured = False
     manager.use_breakable_cg = True
+    manager.ubatch_runner = None
 
     create_calls = []
     forward_calls = []
@@ -97,8 +108,8 @@ def cuda_capture_stream():
     stream, so all capture-using tests need to run under
     ``torch.cuda.stream(...)`` for a separate stream.
     """
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA required")
+    if not HAS_DEVICE_GRAPH:
+        pytest.skip("CUDA or XPU graph required")
     from vllm.utils.torch_utils import _current_stream_tls
 
     prev_stream = getattr(_current_stream_tls, "value", None)
@@ -201,7 +212,7 @@ def test_active_state_isolated_across_threads(cuda_capture_stream):
 def test_capture_with_no_eager_break_records_one_graph(cuda_capture_stream):
     from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
 
-    x = torch.zeros(4, device="cuda")
+    x = torch.zeros(4, device=DEVICE_TYPE)
     cap = BreakableCUDAGraphCapture()
     with cap:
         x.add_(1.0)
@@ -213,7 +224,7 @@ def test_capture_with_no_eager_break_records_one_graph(cuda_capture_stream):
 def test_add_eager_creates_alternating_graph_eager_graph(cuda_capture_stream):
     from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
 
-    x = torch.zeros(4, device="cuda")
+    x = torch.zeros(4, device=DEVICE_TYPE)
     counter = {"eager_calls": 0}
 
     def eager_step():
@@ -254,7 +265,7 @@ def test_capture_replay_matches_eager_simple(cuda_capture_stream):
     """
     from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
 
-    x = torch.zeros(8, device="cuda")
+    x = torch.zeros(8, device=DEVICE_TYPE)
     log: list[str] = []
 
     def eager_break_op():
@@ -270,21 +281,21 @@ def test_capture_replay_matches_eager_simple(cuda_capture_stream):
     # Capture-time: graph kernels were recorded only; eager segment ran
     # once on x == 0, leaving x == 0.
     torch.accelerator.synchronize()
-    assert torch.equal(x, torch.zeros(8, device="cuda"))
+    assert torch.equal(x, torch.zeros(8, device=DEVICE_TYPE))
     assert log == ["eager"]
 
     # Replay with a fresh input: 10 -> 11 -> 22 -> 27.
     x.fill_(10.0)
     cap.replay()
     torch.accelerator.synchronize()
-    assert torch.equal(x, torch.full((8,), 27.0, device="cuda"))
+    assert torch.equal(x, torch.full((8,), 27.0, device=DEVICE_TYPE))
     assert log == ["eager", "eager"]
 
     # Replay again with another input: 100 -> 101 -> 202 -> 207.
     x.fill_(100.0)
     cap.replay()
     torch.accelerator.synchronize()
-    assert torch.equal(x, torch.full((8,), 207.0, device="cuda"))
+    assert torch.equal(x, torch.full((8,), 207.0, device=DEVICE_TYPE))
     assert log == ["eager", "eager", "eager"]
 
 
@@ -302,13 +313,13 @@ def test_decorator_breaks_when_invoked_inside_capture(cuda_capture_stream):
         # In-place double; stands in for "real" attention work.
         t.mul_(2.0)
 
-    x = torch.zeros(4, device="cuda")
+    x = torch.zeros(4, device=DEVICE_TYPE)
 
     # Outside capture: decorator should just call through.
     x.fill_(3.0)
     attention_like(x)
     torch.accelerator.synchronize()
-    assert torch.equal(x, torch.full((4,), 6.0, device="cuda"))
+    assert torch.equal(x, torch.full((4,), 6.0, device=DEVICE_TYPE))
 
     # Inside capture: decorator should split the graph. Only the eager
     # segment actually mutates state during capture.
@@ -319,7 +330,7 @@ def test_decorator_breaks_when_invoked_inside_capture(cuda_capture_stream):
         attention_like(x)  # eager: x *= 2 (on x == 0, no-op)
         x.add_(1.0)  # recorded
     torch.accelerator.synchronize()
-    assert torch.equal(x, torch.zeros(4, device="cuda"))
+    assert torch.equal(x, torch.zeros(4, device=DEVICE_TYPE))
     # 2 graph segments + 1 eager segment, ordered G E G; the arithmetic
     # equivalence check below verifies the ordering.
     assert len(cap.segments) == 3
@@ -330,7 +341,58 @@ def test_decorator_breaks_when_invoked_inside_capture(cuda_capture_stream):
     x.fill_(2.0)
     cap.replay()
     torch.accelerator.synchronize()
-    assert torch.equal(x, torch.full((4,), 15.0, device="cuda"))
+    assert torch.equal(x, torch.full((4,), 15.0, device=DEVICE_TYPE))
+
+
+@pytest.mark.parametrize("keyword", [False, True])
+def test_quantized_activation_replay_does_not_retain_tensors(
+    cuda_capture_stream, keyword
+):
+    """Release the producer tensors while preserving both buffers on replay."""
+    import gc
+    import weakref
+
+    from vllm.compilation.breakable_cudagraph import (
+        BreakableCUDAGraphCapture,
+        eager_break_during_capture,
+    )
+    from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
+    from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
+
+    @eager_break_during_capture
+    def consume(x, data_out, scale_out):
+        data_out.copy_(x.data)
+        scale_out.copy_(x.scale)
+
+    source = torch.ones((128, 128), device=DEVICE_TYPE, dtype=torch.bfloat16)
+    data_out = source.to(torch.float8_e4m3fn)
+    scale_out = source[:, ::32].to(torch.uint8)
+    output = torch.empty_like(source)
+    cap = BreakableCUDAGraphCapture()
+    with cap:
+        data = source.to(torch.float8_e4m3fn)
+        scale = source[:, ::32].to(torch.uint8)
+        activation = QuantizedActivation(
+            data, scale, source.dtype, source.shape, kMxfp8Dynamic
+        )
+        data_ref, scale_ref = weakref.ref(data), weakref.ref(scale)
+        if keyword:
+            consume(x=activation, data_out=data_out, scale_out=scale_out)
+        else:
+            consume(activation, data_out, scale_out)
+        output.copy_(data_out)
+
+    del data, scale, activation
+    gc.collect()
+    assert data_ref() is None
+    assert scale_ref() is None
+
+    for value in (1, 2, 3):
+        source.fill_(value)
+        cap.replay()
+        cuda_capture_stream.synchronize()
+        torch.testing.assert_close(output, source, rtol=0, atol=0)
+        torch.testing.assert_close(scale_out, source[:, ::32].to(torch.uint8))
 
 
 def test_eager_attention_inside_multistream_overlap(cuda_capture_stream):
@@ -341,7 +403,7 @@ def test_eager_attention_inside_multistream_overlap(cuda_capture_stream):
     )
     from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 
-    x = torch.zeros(1024, device="cuda")
+    x = torch.zeros(1024, device=DEVICE_TYPE)
     output = torch.empty_like(x)
     aux_stream = torch.cuda.Stream()
     main_event = torch.cuda.Event()
@@ -390,7 +452,7 @@ def test_replay_invokes_eager_segments_in_order(cuda_capture_stream):
     from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
 
     log: list[str] = []
-    x = torch.zeros(1, device="cuda")
+    x = torch.zeros(1, device=DEVICE_TYPE)
 
     def make_eager(name):
         def step():
@@ -452,7 +514,7 @@ def test_nested_decorated_op_runs_inline(cuda_capture_stream):
         eager_break_during_capture,
     )
 
-    x = torch.zeros(4, device="cuda")
+    x = torch.zeros(4, device=DEVICE_TYPE)
     inner_calls = 0
 
     @eager_break_during_capture
@@ -483,5 +545,135 @@ def test_nested_decorated_op_runs_inline(cuda_capture_stream):
     cap.replay()
     torch.accelerator.synchronize()
     # 0 -> +2 -> +1 (inner) -> +10 (outer) -> +100 = 113
-    assert torch.equal(x, torch.full((4,), 113.0, device="cuda"))
+    assert torch.equal(x, torch.full((4,), 113.0, device=DEVICE_TYPE))
     assert inner_calls == 2  # replay invokes the outer's lambda again
+
+
+# ---------------------------------------------------------------------------
+# BreakableCUDAGraphWrapper: runtime_mode dispatch gating
+# ---------------------------------------------------------------------------
+
+
+def _mock_vllm_config():
+    config = MagicMock()
+    config.parallel_config.data_parallel_size = 1
+    config.parallel_config.use_sequence_parallel_moe = False
+    config.parallel_config.is_moe_model = False
+    return config
+
+
+def test_wrapper_falls_through_on_runtime_mode_mismatch():
+    """A PIECEWISE-scoped wrapper runs other modes eagerly, capturing
+    nothing, so an outer CUDAGraphWrapper can own them."""
+    from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
+    from vllm.config import CUDAGraphMode
+    from vllm.forward_context import BatchDescriptor, set_forward_context
+
+    calls = []
+
+    def model(x):
+        calls.append(x)
+        return x + 1
+
+    config = _mock_vllm_config()
+    wrapper = BreakableCUDAGraphWrapper(
+        model, config, runtime_mode=CUDAGraphMode.PIECEWISE
+    )
+    desc = BatchDescriptor(num_tokens=4)
+
+    with set_forward_context(
+        None,
+        config,
+        cudagraph_runtime_mode=CUDAGraphMode.FULL,
+        batch_descriptor=desc,
+    ):
+        assert wrapper(1) == 2
+
+    assert calls == [1]
+    assert not wrapper.entries
+
+
+def test_wrapper_captures_on_runtime_mode_match():
+    from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
+    from vllm.config import CUDAGraphMode
+    from vllm.forward_context import BatchDescriptor, set_forward_context
+
+    calls = []
+
+    def model(x):
+        calls.append(x)
+        return x + 1
+
+    config = _mock_vllm_config()
+    wrapper = BreakableCUDAGraphWrapper(
+        model, config, runtime_mode=CUDAGraphMode.PIECEWISE
+    )
+    desc = BatchDescriptor(num_tokens=4)
+
+    sentinel = object()
+    with (
+        patch.object(
+            BreakableCUDAGraphWrapper, "_capture", return_value=sentinel
+        ) as mock_capture,
+        set_forward_context(
+            None,
+            config,
+            cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
+            batch_descriptor=desc,
+        ),
+    ):
+        assert wrapper(1) is sentinel
+
+    mock_capture.assert_called_once()
+    assert calls == []
+    assert desc in wrapper.entries
+
+
+def test_wrapper_default_matches_any_non_none_mode():
+    """runtime_mode=None matches any non-NONE mode (MRV2 relies on this)."""
+    from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
+    from vllm.config import CUDAGraphMode
+    from vllm.forward_context import BatchDescriptor, set_forward_context
+
+    def model(x):
+        return x + 1
+
+    config = _mock_vllm_config()
+    wrapper = BreakableCUDAGraphWrapper(model, config)
+    desc = BatchDescriptor(num_tokens=4)
+
+    sentinel = object()
+    with (
+        patch.object(
+            BreakableCUDAGraphWrapper, "_capture", return_value=sentinel
+        ) as mock_capture,
+        set_forward_context(
+            None,
+            config,
+            cudagraph_runtime_mode=CUDAGraphMode.FULL,
+            batch_descriptor=desc,
+        ),
+    ):
+        assert wrapper(1) is sentinel
+
+    mock_capture.assert_called_once()
+    assert desc in wrapper.entries
+
+
+def test_unwrap_recurses_through_nested_wrappers():
+    """unwrap() reaches the raw model through nested wrappers."""
+    from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
+    from vllm.compilation.cuda_graph import CUDAGraphWrapper
+    from vllm.config import CUDAGraphMode
+
+    def model(x):
+        return x + 1
+
+    config = _mock_vllm_config()
+    inner = BreakableCUDAGraphWrapper(
+        model, config, runtime_mode=CUDAGraphMode.PIECEWISE
+    )
+    outer = CUDAGraphWrapper(inner, config, runtime_mode=CUDAGraphMode.FULL)
+
+    assert inner.unwrap() is model
+    assert outer.unwrap() is model

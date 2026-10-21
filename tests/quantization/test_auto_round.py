@@ -15,6 +15,10 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.fused_moe import RoutedExperts
+from vllm.model_executor.layers.fused_moe.activation import (
+    ApplyMoEActivationConfig,
+    MoEActivation,
+)
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
@@ -176,7 +180,7 @@ class DummyFusedMoE:
 
 
 def make_config(**overrides) -> INCConfig:
-    kwargs = {
+    kwargs: dict[str, Any] = {
         "weight_bits": 4,
         "group_size": 128,
         "sym": True,
@@ -191,7 +195,7 @@ def make_config(**overrides) -> INCConfig:
 
 
 def make_layer_config(**overrides) -> INCLayerConfig:
-    kwargs = {
+    kwargs: dict[str, Any] = {
         "bits": 4,
         "group_size": 128,
         "sym": True,
@@ -1528,6 +1532,65 @@ def test_wna16_xpu_moe_w4a16_backend_skips_ark(monkeypatch) -> None:
     assert method is expected_method
 
 
+@pytest.mark.parametrize(
+    "method_cls",
+    [
+        inc_wna16_moe.INCARKWNA16MoEMethod,
+        inc_w4a8_moe.INCARKW4A8MoEMethod,
+    ],
+    ids=["wna16", "w4a8"],
+)
+@pytest.mark.parametrize("layer_overrides", [False, True])
+def test_wna16_xpu_moe_weight_loading_preserves_activation_config(
+    monkeypatch, method_cls, layer_overrides: bool
+) -> None:
+    monkeypatch.delenv("ARK_MOE_W4A8_EAGER_PREPACK", raising=False)
+    monkeypatch.setattr(
+        torch.ops,
+        "_moe_C",
+        SimpleNamespace(remap_hidden_states=object(), moe_gather=object()),
+    )
+    method = object.__new__(method_cls)
+    method.moe = cast(
+        Any,
+        SimpleNamespace(
+            swiglu_alpha=1.5,
+            swiglu_beta=0.5,
+            swiglu_limit=7.0,
+            activation_situ_beta=1.702,
+            activation_situ_linear_beta=1.0,
+        ),
+    )
+    method.ark = SimpleNamespace(
+        MoeSymmetricGemm=SimpleNamespace(prepare=lambda *args, **kwargs: object())
+    )
+    layer = SimpleNamespace(
+        global_num_experts=1,
+        expert_map=None,
+        apply_router_weight_on_input=False,
+        activation=MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        group_size=32,
+        w13_qweight=torch.zeros((1, 64, 16), dtype=torch.uint8),
+        w13_scales=torch.ones((1, 64, 1), dtype=torch.float16),
+        w2_qweight=torch.zeros((1, 32, 16), dtype=torch.uint8),
+        w2_scales=torch.ones((1, 32, 1), dtype=torch.float16),
+    )
+    if layer_overrides:
+        layer.swiglu_alpha = 2.0
+        layer.swiglu_beta = 1.0
+        layer.swiglu_limit = 3.0
+
+    method.process_weights_after_loading(layer)
+
+    assert method.activation_config == ApplyMoEActivationConfig(
+        alpha=2.0 if layer_overrides else 1.5,
+        beta=1.0 if layer_overrides else 0.5,
+        clamp_limit=3.0 if layer_overrides else 7.0,
+        activation_situ_beta=1.702,
+        activation_situ_linear_beta=1.0,
+    )
+
+
 def test_wna16_xpu_moe_w4a8_backend_uses_ark_w4a8(monkeypatch) -> None:
     captured = {}
 
@@ -1804,7 +1867,7 @@ def test_inc_mxfp8_linear_scheme_delegates_to_kernel(monkeypatch) -> None:
     kernel = DummyKernel()
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp8_linear.init_mxfp8_linear_kernel",
-        lambda: kernel,
+        lambda weight_shape: kernel,
     )
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp8_linear.ModelWeightParameter",
@@ -1843,7 +1906,7 @@ def test_inc_mxfp8_linear_scheme_delegates_to_kernel(monkeypatch) -> None:
 def test_inc_mxfp8_linear_scheme_requires_block_32_input(monkeypatch) -> None:
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp8_linear.init_mxfp8_linear_kernel",
-        lambda: object(),
+        lambda weight_shape: object(),
     )
     scheme = INCMxfp8LinearScheme()
 
@@ -2208,19 +2271,6 @@ def test_wna16_linear_gptq_unsupported_config_raises() -> None:
         INCWNA16LinearScheme(make_layer_config(sym=False))
 
 
-def test_wna16_xpu_unsupported_config_still_raises(monkeypatch) -> None:
-    monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
-    monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
-
-    with pytest.raises(NotImplementedError, match="unsupported config"):
-        INCWna16Scheme().get_linear_method(
-            make_config(weight_bits=2, sym=False),
-            object(),
-            "layer",
-            make_layer_config(bits=2, sym=False),
-        )
-
-
 def test_inc_get_quant_method_unquantized_linear_returns_unquantized() -> None:
     config = make_config(extra_config={"layer": {"bits": 16}})
     layer = object.__new__(LinearBase)
@@ -2237,7 +2287,7 @@ def test_inc_get_quant_method_unquantized_moe_returns_unquantized(
     when extra_config has bits >= 16."""
     config = make_config(extra_config={"layer": {"bits": 16}})
     layer = object.__new__(RoutedExperts)
-    layer.moe_config = None  # UnquantizedFusedMoEMethod accepts moe_config
+    layer.moe_config = None
 
     class DummyUnquantizedFusedMoEMethod:
         def __init__(self, moe_config) -> None:
@@ -2664,7 +2714,7 @@ def _with_w4a8_kernel(monkeypatch) -> None:
 
 def _dispatch(layer_config=None):
     return INCWna16Scheme().get_linear_method(
-        object(), object(), "layer", layer_config or make_layer_config()
+        make_config(), object(), "layer", layer_config or make_layer_config()
     )
 
 

@@ -1,0 +1,103 @@
+meta:
+  title: "Phi-4-multimodal-instruct"
+  slug: "phi-4-multimodal-instruct"
+  provider: "Microsoft"
+  description: "Microsoft Phi-4 multimodal model supporting text, image, and audio inputs with text outputs."
+  date_added: 2026-08-19
+  date_updated: 2026-09-12
+  tasks:
+    - multimodal
+  performance_headline: "Validated on Intel Xeon 6"
+  hardware:
+    xeon6: verified
+
+model:
+  model_id: "microsoft/Phi-4-multimodal-instruct"
+  min_vllm_version: "0.8.0"
+  architecture: dense
+  parameter_count: "5.6B"
+  active_parameters: "5.6B"
+  context_length: 131072
+  base_args:
+    - "--trust-remote-code"
+  base_env: {}
+
+features: {}
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 14
+    description: "Full precision BF16"
+    supported_hardware: [xeon6]
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+hardware_overrides: {}
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  Phi-4-multimodal-instruct processes text, image, and audio inputs and
+  generates text. `--trust-remote-code` is retained because the model's
+  multimodal LoRA components require it.
+
+  ## Prerequisites
+
+  - Hardware: Intel Xeon 6/Xeon 5 CPUs
+  - vLLM >= 0.8.0
+
+  ### Docker (Intel Xeon 6 CPUs)
+
+  ```bash
+  docker pull vllm/vllm-openai-cpu:latest-x86_64
+  ```
+
+  ## Intel Xeon 6
+
+  ```bash
+  vllm serve microsoft/Phi-4-multimodal-instruct \
+    --trust-remote-code \
+    --tensor-parallel-size 1
+  ```
+
+  Docker (the image entrypoint is `vllm serve`):
+
+  ```bash
+  docker run \
+    --privileged --ipc=host -p 8000:8000 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai-cpu:latest-x86_64 microsoft/Phi-4-multimodal-instruct \
+    --trust-remote-code \
+    --tensor-parallel-size 1
+  ```
+
+  The example uses TP=1. Adjust TP/DP for the deployment topology;
+  host-specific CPU placement is intentionally not hard-coded.
+
+  ## Runtime and Platform Tuning
+
+  The following settings are intentionally not prescribed as portable CPU model
+  defaults because they depend on the workload, hardware, or runtime environment:
+
+  - `--max-num-batched-tokens`: scheduler/throughput tuning.
+  - `--max-num-seqs`: concurrency and scheduler-capacity tuning.
+  - `--gpu-memory-utilization`: platform memory-budget tuning.
+  - `--no-enable-prefix-caching`: workload/benchmark cache-policy tuning.
+  - `VLLM_ENGINE_ITERATION_TIMEOUT_S`: operational runtime timeout.
+
+  These settings may still appear in validated hardware-specific overrides. Tune
+  them at deployment time based on platform resources, workload shape, and
+  latency/throughput goals.
+
+  ## References
+
+  - [Model card](https://huggingface.co/microsoft/Phi-4-multimodal-instruct)
+  - [vLLM Phi-4 usage guide](https://docs.vllm.ai/projects/recipes/en/stable/Microsoft/Phi-4.html)
+  - [vLLM CPU installation](https://docs.vllm.ai/en/latest/getting_started/installation/cpu/)

@@ -25,8 +25,8 @@ XPU_WNA16_SUPPORTED_BITS = {2, 4}
 # 5/6/7-bit biased scalar types also fall back to humming at kernel selection.
 CUDA_HUMMING_SUPPORTED_BITS = {2, 3, 5, 6, 7}
 
-# Backends selectable through VLLM_XPU_INC_WNA16_BACKEND that are served by the
-# oneDNN int4 GEMMs rather than by ARK. These only cover int4.
+# Linear backends served by oneDNN int4 GEMMs rather than ARK through
+# VLLM_XPU_INC_WNA16_BACKEND. MoE backends are selected separately.
 XPU_ONEDNN_BACKENDS = ("w4a16", "w4a8")
 
 

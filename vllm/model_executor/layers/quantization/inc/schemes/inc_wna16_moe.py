@@ -6,8 +6,14 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.activation import apply_moe_activation
-from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+from vllm.model_executor.layers.fused_moe.activation import (
+    ApplyMoEActivationConfig,
+    apply_moe_activation,
+)
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEQuantConfig,
+)
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.model_executor.layers.quantization.moe_wna16 import (
@@ -44,9 +50,7 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
         is_available, error_str, ark, _ = get_ark_state()
         xpu_lib = getattr(ark, "xpu_lib", None) if ark is not None else None
         if not self._has_ark_moe_kernel(is_available, ark, xpu_lib):
-            reason = error_str or (
-                f"ARK {self.kernel_name} MoE kernels are unavailable."
-            )
+            reason = error_str or f"ARK {self.kernel_name} MoE kernels are unavailable."
             raise ImportError(
                 f"Failed to initialize ARK {self.kernel_name} MoE. {reason}"
             )
@@ -63,6 +67,10 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
         self.router_weight_ones: torch.Tensor | None = None
         self.router_weights_fn = self._keep_router_weights
         self.activation = None
+        self.activation_config = ApplyMoEActivationConfig.from_configs(
+            moe,
+            FusedMoEQuantConfig.make(),
+        )
         self.inter_size: int = 0
         self.inter_size_scale: int = 1
         self.w13_moe = None
@@ -99,6 +107,14 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
         else:
             self.router_weights_fn = self._keep_router_weights
         self.activation = layer.activation
+        self.activation_config = ApplyMoEActivationConfig.from_configs(
+            self.moe,
+            FusedMoEQuantConfig.make(
+                gemm1_alpha=getattr(layer, "swiglu_alpha", None),
+                gemm1_beta=getattr(layer, "swiglu_beta", None),
+                gemm1_clamp_limit=getattr(layer, "swiglu_limit", None),
+            ),
+        )
         self.inter_size = layer.w13_qweight.shape[-2] // 2
         self.inter_size_scale = 1 if layer.activation.is_gated else 2
         self.remap_hidden_states_op = torch.ops._moe_C.remap_hidden_states
@@ -326,6 +342,7 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
             self.activation,
             act_output,
             gemm1_output,
+            activation_config=self.activation_config,
         )
 
         gemm2_output = self._apply_w2_moe(

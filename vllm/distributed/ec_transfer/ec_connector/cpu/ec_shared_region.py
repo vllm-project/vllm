@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Lightweight mmap-backed shared memory region for encoder cache (EC) data.
+"""Lightweight mmap-backed shared memory region for encoder cache (EC) data.
 
 Modeled after SharedOffloadRegion (vllm/v1/kv_offload/cpu/) but simplified
 for EC: flat shared layout, no multi-tensor cursor, no block_size_factor.
