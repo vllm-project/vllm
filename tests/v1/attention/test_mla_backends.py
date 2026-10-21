@@ -35,7 +35,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, set_random_seed
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
 from vllm.v1.attention.backends.mla import flashmla as flashmla_module
@@ -1671,8 +1671,6 @@ def _run_backend_correctness(
     multiple GPUs. This tests that backends work correctly with different
     head counts.
     """
-    set_random_seed(42)
-
     # Filter backends to those that support the requested kv_cache_dtype
     backends_to_test = [
         b
@@ -1762,23 +1760,6 @@ def _run_backend_correctness(
     num_q_heads = vllm_config.model_config.get_num_attention_heads(
         vllm_config.parallel_config
     )
-    if (
-        is_spec_decode_test
-        and kv_cache_dtype == "auto"
-        and AttentionBackendEnum.ROCM_AITER_MLA in backends_to_test
-    ):
-        from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAHelper
-
-        if not AiterMLAHelper.has_bf16_verify_kernel(num_q_heads, max(query_lens)):
-            backends_to_test = [
-                b
-                for b in backends_to_test
-                if b
-                not in (
-                    AttentionBackendEnum.ROCM_AITER_MLA,
-                    AttentionBackendEnum.ROCM_AITER_TRITON_MLA,
-                )
-            ]
     head_size = vllm_config.model_config.get_head_size()
     dtype = _convert_dtype_to_torch(vllm_config.model_config.dtype)
     kv_lora_rank = 512
@@ -2242,18 +2223,6 @@ def test_chunked_context_backend_correctness(
         pytest.skip("TRTLLM ragged-specific test configuration")
     if use_prefill_query_quantization and kv_cache_dtype == "auto":
         pytest.skip("FP8 prefill queries require an FP8 KV cache")
-    if (
-        prefill_backend == MLAPrefillBackendEnum.ROCM_AITER_FA
-        and qk_nope_head_dim == 192
-        and kv_cache_dtype == "auto"
-    ):
-        from vllm.platforms.rocm import on_gfx942
-
-        if on_gfx942():
-            pytest.skip(
-                "AITER's CK fmha (head dim 256 on gfx942) rounds bf16 toward "
-                "zero (CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=2)"
-            )
     if trtllm_ragged_backend == "cute-dsl":
         query_dtype = (
             current_platform.fp8_dtype()

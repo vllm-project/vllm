@@ -203,19 +203,6 @@ def _aiter_mla_non_causal_asm_kernels() -> bool:
     return bool(on_gfx950())
 
 
-def _aiter_mla_bf16_verify_fold() -> bool:
-    """Whether AITER folds a bf16 verify past qseqlen 4 onto a persistent kernel.
-
-    Only gfx950 ships the fold. gfx942 has just the non-persistent qseqlen-8
-    entry, which is exact at 16 heads only.
-    """
-    try:
-        from vllm.platforms.rocm import on_gfx950
-    except Exception:  # noqa: BLE001
-        return False
-    return bool(on_gfx950())
-
-
 @functools.lru_cache(maxsize=1)
 def _gluon_mla_decode_supported() -> bool:
     """The small-head Gluon MLA decode kernel only has a gfx950 (CDNA4) build.
@@ -967,20 +954,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # _build_decode needs the cache dtype to pick the decode kernel; keep
         # the normalized string instead of dropping it at the end of __init__.
         self._kv_cache_dtype_str = kv_cache_dtype_str
-        if (
-            self.dcp_world_size == 1
-            and not is_quantized_kv_cache(kv_cache_dtype_str)
-            and not AiterMLAHelper.has_bf16_verify_kernel(
-                self._decode_num_heads, self._mtp_decode_qlen
-            )
-        ):
-            raise ValueError(
-                "AITER has no bf16 MLA decode kernel on this GPU for "
-                f"{self._decode_num_heads} heads at query length "
-                f"{self._mtp_decode_qlen}. Use an fp8 KV cache, at most "
-                f"{AiterMLAHelper._ASM_PADDED_MAX_PS_QLEN - 1} speculative "
-                "tokens, or TRITON_MLA."
-            )
         # Sized per layer, matching the flat KV tensor the kernel is handed.
         num_gpu_blocks = vllm_config.cache_config.num_gpu_blocks
         self._kv_cache_bytes = (
@@ -1707,18 +1680,15 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             not use_gluon_decode
             and not use_gluon_verify
             and not _is_row_view_dcp_route(dcp_route)
-            # Without the gfx950 fold no rank has a bf16 persistent kernel
-            # past qlen 4; the non-persistent entry covers 16 heads. fp8
+            # A padded rank has no bf16 persistent kernel past qlen 4 where the
+            # gfx950 fold is absent; the non-persistent entry covers it. fp8
             # keeps the schedule -- its fold rejects non-persistent outright.
             # A non-causal block keeps it too: what the fold drops past qlen 4
             # is the block's causal staircase, which a non-causal block does
             # not have, and the schedule is the only thing carrying its mask.
             and (
                 not causal
-                or (
-                    self._decode_num_heads >= AiterMLAHelper._AITER_MIN_MLA_HEADS
-                    and _aiter_mla_bf16_verify_fold()
-                )
+                or self._decode_num_heads >= AiterMLAHelper._AITER_MIN_MLA_HEADS
                 or max_qo_len <= AiterMLAHelper._ASM_PADDED_MAX_PS_QLEN
                 or is_quantized_kv_cache(self._kv_cache_dtype_str)
             )
@@ -2062,16 +2032,6 @@ class AiterMLAHelper:
         """
         kernel_heads = AiterMLAHelper.get_actual_mla_num_heads(num_heads)
         return kernel_heads in AiterMLAHelper._AITER_FP8_NON_CAUSAL_QLEN2_HEADS
-
-    @staticmethod
-    def has_bf16_verify_kernel(num_heads: int, qlen: int) -> bool:
-        """Whether a causal bf16 (num_heads, qlen) block has an ASM decode."""
-        return (
-            qlen <= AiterMLAHelper._ASM_PADDED_MAX_PS_QLEN
-            or AiterMLAHelper.get_actual_mla_num_heads(num_heads)
-            == AiterMLAHelper._AITER_MIN_MLA_HEADS
-            or _aiter_mla_bf16_verify_fold()
-        )
 
     @staticmethod
     def get_actual_mla_num_heads(num_heads: int) -> int:
