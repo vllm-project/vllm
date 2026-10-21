@@ -341,6 +341,9 @@ class AnthropicServingMessages(OpenAIServingChat):
             merge_inline_system=merge_inline_system,
         )
         req = cls._build_base_request(anthropic_request, openai_messages)
+        if openai_messages and openai_messages[-1]["role"] == "assistant":
+            req.continue_final_message = True
+            req.add_generation_prompt = False
         cls._handle_streaming_options(req, anthropic_request)
         cls._handle_output_config(req, anthropic_request)
         cls._handle_thinking(req, anthropic_request, disabled_thinking_effort)

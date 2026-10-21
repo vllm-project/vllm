@@ -50,6 +50,59 @@ async def test_simple_messages(client: anthropic.AsyncAnthropic):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_assistant_prefill_matches_chat_continuation(client, server, stream):
+    """Prefill text and token counts agree with the explicit OpenAI continuation."""
+    model = "claude-3-7-sonnet-latest"
+    messages = [
+        {"role": "user", "content": "What is the capital of France?"},
+        {"role": "assistant", "content": "The capital of France is"},
+    ]
+    template_kwargs = {"enable_thinking": False}
+    async with server.get_async_client() as openai_client:
+        expected = await openai_client.chat.completions.create(
+            model=model,
+            messages=messages,
+            max_tokens=16,
+            temperature=0,
+            extra_body={
+                "continue_final_message": True,
+                "add_generation_prompt": False,
+                "chat_template_kwargs": template_kwargs,
+            },
+        )
+    counted = await client.messages.count_tokens(
+        model=model,
+        messages=messages,
+        extra_body={"chat_template_kwargs": template_kwargs},
+    )
+    assert counted.input_tokens == expected.usage.prompt_tokens
+
+    response = await client.messages.create(
+        model=model,
+        messages=messages,
+        max_tokens=16,
+        stream=stream,
+        extra_body={"temperature": 0, "chat_template_kwargs": template_kwargs},
+    )
+    if stream:
+        text = ""
+        input_tokens = None
+        async for event in response:
+            if event.type == "message_start":
+                input_tokens = event.message.usage.input_tokens
+            elif (
+                event.type == "content_block_delta" and event.delta.type == "text_delta"
+            ):
+                text += event.delta.text
+    else:
+        text = "".join(block.text for block in response.content if block.type == "text")
+        input_tokens = response.usage.input_tokens
+    assert text == expected.choices[0].message.content
+    assert input_tokens == counted.input_tokens
+
+
+@pytest.mark.asyncio
 async def test_system_message(client: anthropic.AsyncAnthropic):
     resp = await client.messages.create(
         model="claude-3-7-sonnet-latest",

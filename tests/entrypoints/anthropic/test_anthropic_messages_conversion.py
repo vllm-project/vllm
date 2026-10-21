@@ -73,6 +73,38 @@ def _make_request(
     )
 
 
+@pytest.mark.parametrize("count_tokens", [False, True])
+@pytest.mark.parametrize(
+    "content", ["The answer is (", [{"type": "text", "text": "The answer is ("}]]
+)
+def test_final_assistant_text_is_continued(content, count_tokens):
+    """Both Anthropic endpoints render the same partial assistant turn."""
+    messages = [
+        {"role": "user", "content": "Choose A or B."},
+        {"role": "assistant", "content": content},
+    ]
+    request = (
+        AnthropicCountTokensRequest(model="test-model", messages=messages)
+        if count_tokens
+        else _make_request(messages)
+    )
+    converted = _convert(request)
+    assert converted.continue_final_message
+    assert not converted.add_generation_prompt
+
+
+def test_assistant_history_does_not_continue_after_user_message():
+    request = _make_request(
+        [
+            {"role": "assistant", "content": "Hello."},
+            {"role": "user", "content": "Choose A or B."},
+        ]
+    )
+    converted = _convert(request)
+    assert not converted.continue_final_message
+    assert converted.add_generation_prompt
+
+
 # ======================================================================
 # _convert_image_source_to_url
 # ======================================================================
