@@ -19,7 +19,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import cdiv, next_power_of_2
-from vllm.utils.torch_utils import get_dtype_size, is_quantized_kv_cache
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -47,6 +47,7 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVQuantMode,
     get_kv_quant_mode,
+    is_quantized_kv_cache,
 )
 
 logger = init_logger(__name__)
@@ -549,6 +550,11 @@ class TritonAttentionImpl(AttentionImpl):
         self.use_alibi_sqrt = use_alibi_sqrt
         self.chunk_lookback = chunk_lookback
         self.supports_quant_query_input = current_platform.is_cuda()
+        if current_platform.is_rocm():
+            # Enable GPUs with fp8 MMA support
+            from vllm.platforms.rocm import on_gfx11, on_gfx90a
+
+            self.supports_quant_query_input = not (on_gfx90a() or on_gfx11())
 
         self._kv_quant_mode = get_kv_quant_mode(kv_cache_dtype)
         self._is_per_token_head_quant = self._kv_quant_mode.is_per_token_head
