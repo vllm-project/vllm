@@ -224,6 +224,19 @@ class PromptCacheOptions(OpenAIBaseModel):
     comparison_response_id: str | None = None
 
 
+class PromptCacheOptionsParam(PromptCacheOptions):
+    """Request-side variant; prewarm is request-only in OpenAI's schema."""
+
+    prewarm: bool | None = None
+
+    def to_response(self) -> PromptCacheOptions:
+        return PromptCacheOptions(
+            mode=self.mode,
+            ttl=self.ttl,
+            comparison_response_id=self.comparison_response_id,
+        )
+
+
 class ResponsesRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/responses/create
@@ -310,7 +323,7 @@ class ResponsesRequest(OpenAIBaseModel):
             "and vLLM will ignore it."
         ),
     )
-    prompt_cache_options: PromptCacheOptions | None = Field(
+    prompt_cache_options: PromptCacheOptionsParam | None = Field(
         default=None,
         description=(
             "Prompt-caching options. Accepted and echoed in the response; "
@@ -974,7 +987,11 @@ class ResponsesResponse(OpenAIBaseModel):
             previous_response_id=request.previous_response_id,
             prompt=request.prompt,
             prompt_cache_key=request.prompt_cache_key,
-            prompt_cache_options=request.prompt_cache_options,
+            prompt_cache_options=(
+                request.prompt_cache_options.to_response()
+                if request.prompt_cache_options is not None
+                else None
+            ),
             prompt_cache_retention=request.prompt_cache_retention,
             reasoning=request.reasoning,
             service_tier=request.service_tier,

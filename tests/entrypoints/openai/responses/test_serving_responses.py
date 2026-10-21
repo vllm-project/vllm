@@ -255,6 +255,28 @@ def test_prompt_cache_options_rejects_unknown_ttl() -> None:
         )
 
 
+def test_prompt_cache_options_request_accepts_prewarm() -> None:
+    request = ResponsesRequest(
+        model="test-model",
+        input="hi",
+        prompt_cache_options={"mode": "explicit", "prewarm": True},
+    )
+
+    assert request.prompt_cache_options.prewarm is True
+
+
+def test_prompt_cache_options_response_drops_prewarm() -> None:
+    response = _echoed_response(
+        prompt_cache_options={"mode": "explicit", "prewarm": True},
+    )
+
+    assert response["prompt_cache_options"] == {
+        "mode": "explicit",
+        "ttl": "30m",
+        "comparison_response_id": None,
+    }
+
+
 def test_created_event_carries_echoed_fields() -> None:
     event = ResponseCreatedEvent(
         type="response.created",
