@@ -68,7 +68,7 @@ def test_has_flashinfer_requires_ninja(
         "cubin",
         "nvcc",
         "ninja",
-        "sm75",
+        "device",
         "capability_unavailable",
         "provider_arch",
         "provider_modules",
@@ -76,7 +76,7 @@ def test_has_flashinfer_requires_ninja(
     ),
     [
         # A shim by itself, even alongside FlashInfer cubins, has no kernels.
-        (True, True, True, False, False, False, False, None, None, False),
+        (True, True, True, False, False, (12, 0), False, None, None, False),
         # A provider does not substitute for has_flashinfer()'s cubin/JIT check.
         (
             True,
@@ -84,7 +84,7 @@ def test_has_flashinfer_requires_ninja(
             False,
             False,
             False,
-            False,
+            (12, 0),
             False,
             "sm120",
             "attention_module",
@@ -97,22 +97,61 @@ def test_has_flashinfer_requires_ninja(
             True,
             False,
             False,
-            False,
+            (12, 0),
             False,
             "sm120",
             "attention_module",
             True,
         ),
         # A provider with no modules is not usable.
-        (True, True, True, False, False, False, False, "sm120", None, False),
-        # A suffixed provider is not accepted without a matching active target.
+        (True, True, True, False, False, (12, 0), False, "sm120", None, False),
+        # An architecture-specific target matches the exact active architecture.
         (
             True,
             True,
             True,
             False,
             False,
+            (12, 0),
             False,
+            "sm120a",
+            "attention_module",
+            True,
+        ),
+        # A family target matches SM120.
+        (
+            True,
+            True,
+            True,
+            False,
+            False,
+            (12, 0),
+            False,
+            "sm120f",
+            "attention_module",
+            True,
+        ),
+        # A family target is forward-compatible with SM121.
+        (
+            True,
+            True,
+            True,
+            False,
+            False,
+            (12, 1),
+            False,
+            "sm120f",
+            "attention_module",
+            True,
+        ),
+        # An architecture-specific target is not forward-compatible with SM121.
+        (
+            True,
+            True,
+            True,
+            False,
+            False,
+            (12, 1),
             False,
             "sm120a",
             "attention_module",
@@ -125,7 +164,7 @@ def test_has_flashinfer_requires_ninja(
             True,
             False,
             False,
-            False,
+            (12, 0),
             False,
             "sm90a",
             "attention_module",
@@ -138,15 +177,15 @@ def test_has_flashinfer_requires_ninja(
             True,
             False,
             False,
-            False,
+            (12, 0),
             True,
             "sm120a",
             "attention_module",
             True,
         ),
-        (True, True, True, False, False, False, True, "sm120", None, False),
+        (True, True, True, False, False, (12, 0), True, "sm120", None, False),
         # Runtime compilation remains a valid path without an AOT provider.
-        (True, False, False, True, True, False, False, None, None, True),
+        (True, False, False, True, True, (12, 0), False, None, None, True),
         # The SM75 guard still rejects the jit-cache path without a compiler.
         (
             True,
@@ -154,13 +193,13 @@ def test_has_flashinfer_requires_ninja(
             True,
             False,
             False,
-            True,
+            (7, 5),
             False,
             "sm75",
             "attention_module",
             False,
         ),
-        (False, True, True, False, False, False, False, None, None, False),
+        (False, True, True, False, False, (12, 0), False, None, None, False),
     ],
 )
 def test_is_flashinfer_jit_usable(
@@ -170,7 +209,7 @@ def test_is_flashinfer_jit_usable(
     cubin: bool,
     nvcc: bool,
     ninja: bool,
-    sm75: bool,
+    device: tuple[int, int],
     capability_unavailable: bool,
     provider_arch: str | None,
     provider_modules: str | None,
@@ -209,19 +248,16 @@ def test_is_flashinfer_jit_usable(
         "which",
         lambda name: "/usr/bin/ninja" if name == "ninja" and ninja else None,
     )
+    major, minor = device
     monkeypatch.setattr(
         fi.current_platform,
         "is_device_capability",
-        lambda capability: sm75 and capability == 75,
+        lambda capability: (major, minor) == (7, 5) and capability == 75,
     )
     monkeypatch.setattr(
         fi.current_platform,
         "get_device_capability",
-        lambda: None
-        if capability_unavailable
-        else DeviceCapability(7, 5)
-        if sm75
-        else DeviceCapability(12, 0),
+        lambda: None if capability_unavailable else DeviceCapability(major, minor),
     )
     monkeypatch.setattr(
         fi.importlib,
@@ -231,3 +267,29 @@ def test_is_flashinfer_jit_usable(
 
     assert fi.is_flashinfer_jit_usable() is expected
     fi.has_flashinfer.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("provider_architecture", "device_architecture", "expected"),
+    [
+        ("sm120f", "sm120", True),  # stock FlashInfer 0.7.2 provider on SM120
+        ("sm120f", "sm121", True),  # forward-compatible family target
+        ("sm120a", "sm120", True),  # exact architecture-specific target
+        ("sm120a", "sm121", False),  # architecture-specific target is not forward-compatible
+        ("sm120", "sm121", True),  # unsuffixed forward-compatible within the major
+        ("sm121", "sm120", False),  # provider target is newer than the device
+        ("sm90a", "sm120", False),
+        ("not-an-arch", "sm120", False),
+    ],
+)
+def test_flashinfer_cuda_architecture_compatibility(
+    provider_architecture: str,
+    device_architecture: str,
+    expected: bool,
+):
+    assert (
+        fi._is_compatible_flashinfer_cuda_architecture(
+            provider_architecture, device_architecture
+        )
+        is expected
+    )

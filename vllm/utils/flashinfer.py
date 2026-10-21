@@ -10,6 +10,7 @@ import functools
 import importlib
 import importlib.util
 import os
+import re
 import shutil
 from collections.abc import Callable
 from typing import Any, NoReturn
@@ -71,6 +72,27 @@ def _flashinfer_nvcc_path() -> str | None:
     return shutil.which(os.path.join(cuda_home, "bin", "nvcc"))
 
 
+def _is_compatible_flashinfer_cuda_architecture(
+    provider_architecture: str, device_architecture: str
+) -> bool:
+    """Mirror FlashInfer 0.7.2 SASS target compatibility for provider metadata."""
+    pattern = r"sm(?P<major>[0-9]{1,2})(?P<minor>[0-9])(?P<suffix>[af]?)"
+    provider = re.fullmatch(pattern, provider_architecture)
+    device = re.fullmatch(pattern, device_architecture)
+    if provider is None or device is None:
+        return False
+
+    provider_major = int(provider.group("major"))
+    provider_minor = int(provider.group("minor"))
+    device_major = int(device.group("major"))
+    device_minor = int(device.group("minor"))
+    suffix = provider.group("suffix")
+
+    if suffix == "a":
+        return (provider_major, provider_minor) == (device_major, device_minor)
+    return provider_major == device_major and provider_minor <= device_minor
+
+
 def _has_compatible_flashinfer_jit_cache_provider() -> bool:
     """Return whether an installed provider advertises kernels for this GPU."""
     if importlib.util.find_spec("flashinfer_jit_cache") is None:
@@ -100,7 +122,7 @@ def _has_compatible_flashinfer_jit_cache_provider() -> bool:
 
     device_architecture = f"sm{device_capability.to_int()}"
     return any(
-        architecture == device_architecture
+        _is_compatible_flashinfer_cuda_architecture(architecture, device_architecture)
         for provider in providers
         if provider.modules and provider.cuda_architectures
         for architecture in provider.cuda_architectures
