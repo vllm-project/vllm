@@ -1201,6 +1201,23 @@ class Platform:
         raise NotImplementedError
 
     @classmethod
+    def get_process_device_memory_bytes(cls, device: torch.device) -> int | None:
+        """Bytes of device memory that this process holds on ``device``, as
+        the kernel driver counts them, after waiting for queued device work.
+
+        Unlike torch's allocator statistics, this includes memory that the
+        GPU runtime allocates behind torch's back (for example per-graph
+        buffers). Unlike the device-wide free memory, it is not shared with
+        other processes. It may still miss memory the driver allocates for
+        its own use (on ROCm: the save areas of hardware queues). Callers
+        use only differences between two readings.
+
+        Returns ``None`` when the platform has no such per-process counter;
+        that is the default, so callers keep their existing behaviour.
+        """
+        return None
+
+    @classmethod
     def get_punica_wrapper(cls) -> str:
         """Return the punica wrapper for current platform."""
         raise NotImplementedError
