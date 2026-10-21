@@ -19,7 +19,6 @@ from torch import nn
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
-from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
     SkinnyGemmConfig,
     shape_dynamic_skinny_gemm,
@@ -29,8 +28,6 @@ from vllm.model_executor.layers.linear import (
     UnquantizedLinearMethod,
 )
 from vllm.platforms import current_platform
-
-logger = init_logger(__name__)
 
 Backend = Literal["cute", "dsv3_fused_a"]
 ResolvedCall = tuple[Backend, SkinnyGemmConfig | None]
@@ -103,9 +100,7 @@ _SM107_QKV_A_PROJECTION = GLM52ProjectionSpec(
     cute_configs=(
         (1, SkinnyGemmConfig(1, 256, 4, k_unroll=2)),
         (2, SkinnyGemmConfig(2, 128, 2, k_unroll=2)),
-        (3, SkinnyGemmConfig(3, 128, 2, k_unroll=2)),
         (4, SkinnyGemmConfig(4, 128, 2, k_unroll=2)),
-        (5, SkinnyGemmConfig(5, 128, 2)),
     ),
     dsv3_tokens=frozenset(range(6, 9)),
 )
@@ -117,7 +112,6 @@ _SM107_EH_PROJECTION = GLM52ProjectionSpec(
     cute_configs=(
         (1, SkinnyGemmConfig(1, 256, 2, vector_width=4, static_k=12288)),
         (2, SkinnyGemmConfig(2, 64, 4, k_unroll=4)),
-        (3, SkinnyGemmConfig(3, 64, 2, k_unroll=2)),
         (4, SkinnyGemmConfig(4, 128, 4)),
     ),
 )
@@ -129,9 +123,7 @@ _SM107_Q_B_TP4_PROJECTION = GLM52ProjectionSpec(
     cute_configs=(
         (1, SkinnyGemmConfig(1, 128, 4, k_unroll=2)),
         (2, SkinnyGemmConfig(2, 128, 4, k_unroll=2)),
-        (3, SkinnyGemmConfig(3, 128, 4, k_unroll=2)),
         (4, SkinnyGemmConfig(4, 64, 4, k_unroll=4)),
-        (5, SkinnyGemmConfig(5, 64, 2, k_unroll=2)),
         (6, SkinnyGemmConfig(6, 64, 2, k_unroll=2)),
     ),
 )
@@ -143,7 +135,6 @@ _SM107_O_PROJ_TP4_PROJECTION = GLM52ProjectionSpec(
     cute_configs=(
         (1, SkinnyGemmConfig(1, 128, 3, k_unroll=4)),
         (2, SkinnyGemmConfig(2, 64, 4, k_unroll=4)),
-        (3, SkinnyGemmConfig(3, 128, 4)),
     ),
 )
 
@@ -154,9 +145,7 @@ _SM107_WK_WEIGHTS_PROJECTION = GLM52ProjectionSpec(
     cute_configs=(
         (1, SkinnyGemmConfig(1, 256, 1, k_unroll=2, static_k=6144)),
         (2, SkinnyGemmConfig(2, 256, 1, k_unroll=2, static_k=6144)),
-        (3, SkinnyGemmConfig(3, 256, 1, k_unroll=2)),
         (4, SkinnyGemmConfig(4, 256, 1, k_unroll=2)),
-        (5, SkinnyGemmConfig(5, 128, 2, k_unroll=2)),
         (6, SkinnyGemmConfig(6, 256, 1, k_unroll=2)),
         (8, SkinnyGemmConfig(8, 256, 1, k_unroll=2)),
         (12, SkinnyGemmConfig(12, 256, 1, k_unroll=2)),
@@ -171,9 +160,7 @@ _SM107_SHARED_GATE_UP_TP4_PROJECTION = GLM52ProjectionSpec(
     cute_configs=(
         (1, SkinnyGemmConfig(1, 256, 2, k_unroll=2)),
         (2, SkinnyGemmConfig(2, 256, 2, k_unroll=2)),
-        (3, SkinnyGemmConfig(3, 256, 2, k_unroll=2)),
         (4, SkinnyGemmConfig(4, 128, 1, k_unroll=2)),
-        (5, SkinnyGemmConfig(5, 128, 2, k_unroll=2)),
         (6, SkinnyGemmConfig(6, 128, 1, k_unroll=2)),
         (8, SkinnyGemmConfig(8, 128, 2, k_unroll=2)),
     ),
@@ -186,7 +173,6 @@ _SM107_SHARED_DOWN_TP4_PROJECTION = GLM52ProjectionSpec(
     cute_configs=(
         (1, SkinnyGemmConfig(1, 64, 6, k_unroll=4)),
         (2, SkinnyGemmConfig(2, 64, 4, k_unroll=4)),
-        (3, SkinnyGemmConfig(3, 64, 4)),
         (4, SkinnyGemmConfig(4, 32, 4, k_unroll=2)),
         (6, SkinnyGemmConfig(6, 32, 4, k_unroll=2)),
     ),
@@ -318,7 +304,6 @@ def enable_glm52_low_latency_gemm(
         return
 
     warmup_configs: set[SkinnyGemmConfig] = set()
-    installed: dict[tuple[int, int], int] = {}
     for child in module.modules():
         if (
             not isinstance(child, LinearBase)
@@ -333,17 +318,5 @@ def enable_glm52_low_latency_gemm(
             continue
         child.quant_method = GLM52LowLatencyLinearMethod(spec.build_plan())
         warmup_configs.update(config for _, config in spec.cute_configs)
-        installed[(spec.n, spec.k)] = installed.get((spec.n, spec.k), 0) + 1
-
-    if installed:
-        # A missing backend silently falls back to the default GEMM for its
-        # token counts, so report both.
-        logger.info_once(
-            "GLM-5.2 low-latency BF16 GEMM installed for local (N, K): %s "
-            "(CuTe DSL available: %s, dsv3_fused_a_gemm available: %s).",
-            ", ".join(f"{n}x{k} (x{count})" for (n, k), count in installed.items()),
-            shape_dynamic_skinny_gemm.is_available(),
-            hasattr(torch.ops._C, "dsv3_fused_a_gemm"),
-        )
 
     _request_warmup(dtype, warmup_configs)
