@@ -31,6 +31,9 @@ Do not open one-off PRs for tiny edits (single typo, isolated style change, one 
     - Test commands run and results.
     - Model evaluation results when the change affects output, accuracy, or serving.
     - Clear statement that AI assistance was used.
+- User-visible changes (features, CLI args, config fields, env vars, models,
+  hardware, defaults, deprecations) must update the rendered docs in the same PR;
+  follow [Documenting User-Visible Changes](docs/contributing/README.md#documenting-user-visible-changes).
 - Before opening a PR (drafts included) or requesting re-review, run the [`pr-checklist`](.agents/skills/pr-checklist/SKILL.md) skill and address its findings.
 
 ### Fail-closed behavior
@@ -154,3 +157,5 @@ vulnerability process.
 - **Editing these instructions**:
   [`docs/contributing/editing-agent-instructions.md`](docs/contributing/editing-agent-instructions.md)
   — Rules for modifying AGENTS.md or any domain-specific guide it references.
+- **Rust frontend (`rust/`)**: [`rust/AGENTS.md`](rust/AGENTS.md)
+  — Crate ownership, design principles, Python parity, and testing conventions.
