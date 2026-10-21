@@ -23,6 +23,10 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.config.load import LoadConfig
+from vllm.model_executor.models.glm4_moe_mtp import (
+    Glm4MoeMultiTokenPredictor,
+    Glm4MoeMultiTokenPredictorLayer,
+)
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -55,6 +59,46 @@ def test_glm_mtp_defers_lm_head(default_vllm_config):
 
     parallel_lm_head.assert_not_called()
     assert layer.shared_head.head is None
+
+
+@pytest.mark.parametrize("batch_size", [1, 3])
+def test_glm4_mtp_normalizes_feedback_without_changing_logits(batch_size):
+    hidden_states = torch.tensor([[1.0, -2.0, 3.0, 4.0]]).repeat(batch_size, 1)
+    residual = torch.ones_like(hidden_states)
+    norm = torch.nn.RMSNorm(4, eps=1e-5)
+    with torch.no_grad():
+        norm.weight.copy_(torch.tensor([0.5, 1.0, 1.5, 2.0]))
+
+    layer = mock.Mock(spec=Glm4MoeMultiTokenPredictorLayer)
+    layer.enorm = layer.hnorm = torch.nn.Identity()
+    layer.eh_proj = mock.Mock(return_value=hidden_states)
+    layer.mtp_block = mock.Mock(return_value=(hidden_states, residual))
+    layer.shared_head = mock.Mock(side_effect=norm)
+    layer.shared_head.head = torch.nn.Identity()
+
+    logits_hidden, feedback_hidden = Glm4MoeMultiTokenPredictorLayer.forward(
+        layer,
+        input_ids=torch.ones(batch_size, dtype=torch.long),
+        positions=torch.arange(1, batch_size + 1),
+        previous_hidden_states=hidden_states,
+        inputs_embeds=hidden_states,
+    )
+    expected_hidden = hidden_states + residual
+    expected_normalized = norm(expected_hidden)
+    torch.testing.assert_close(logits_hidden, expected_hidden)
+    torch.testing.assert_close(feedback_hidden, expected_normalized)
+    assert not torch.allclose(feedback_hidden, logits_hidden)
+    assert layer.shared_head.call_count == 1
+
+    predictor = mock.Mock(spec=Glm4MoeMultiTokenPredictor)
+    predictor.num_mtp_layers = 1
+    predictor.mtp_start_layer_idx = 0
+    predictor.layers = {"0": layer}
+    predictor.logits_processor = mock.Mock(side_effect=lambda head, x: head(x))
+    logits = Glm4MoeMultiTokenPredictor.compute_logits(predictor, logits_hidden)
+
+    torch.testing.assert_close(logits, expected_normalized)
+    assert layer.shared_head.call_args.args[0] is logits_hidden
 
 
 def _create_mtp_proposer(num_speculative_tokens: int) -> EagleProposer:
