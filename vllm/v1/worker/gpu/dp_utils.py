@@ -187,13 +187,34 @@ def sync_cudagraph_and_dp_padding(
         max_query_len=synced_max_query_len,
     )
 
-    # Update num_tokens_across_dp to reflect padded size.
-    num_tokens_across_dp[:] = synced_desc.num_tokens
+    # Redispatch can change the mode or padding on only some ranks.
+    final_dispatch = torch.zeros(2, dp_size, dtype=torch.int32, device="cpu")
+    final_dispatch[0, dp_rank] = synced_desc.cg_mode.value
+    final_dispatch[1, dp_rank] = synced_desc.num_tokens
+    if should_skip_dp_coordination():
+        final_dispatch[:] = final_dispatch[:, dp_rank, None].clone()
+    else:
+        get_dp_group().cpu_all_reduce_(final_dispatch)
+    eager = bool(torch.any(final_dispatch[0] == CUDAGraphMode.NONE.value)) or not (
+        torch.all(final_dispatch == final_dispatch[:, :1]).item()
+    )
+    if eager:
+        synced_desc = replace(
+            synced_desc,
+            cg_mode=CUDAGraphMode.NONE,
+            num_tokens=num_tokens,
+            num_reqs=num_reqs,
+            uniform_token_count=None,
+            max_query_len=None,
+        )
+    else:
+        # Update num_tokens_across_dp to reflect the agreed padded size.
+        num_tokens_across_dp[:] = synced_desc.num_tokens
 
     return synced_desc, DPSyncState(
         num_tokens_across_dp=num_tokens_across_dp,
         uniform_token_count=synced_uniform_token_count,
-        eager=False,
+        eager=eager,
         num_reqs=int(num_reqs_across_dp.max()),
     )
 
