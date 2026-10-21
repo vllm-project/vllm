@@ -1,8 +1,9 @@
 # Add application-directed programmable KV cache control
 
 Local PR description during the October 20 GPU 0/2 continuation. Implementation
-and the tests reported below are committed. Full acceptance remains incomplete;
-new actual live repetitions and independent profiling are running.
+and the tests reported below are committed. Full acceptance remains incomplete:
+native/quota live repetitions passed; external GPU interference prevents accepting
+cooperative live timing, and independent profiling is still unexecuted.
 This document has not been published to the remote PR.
 
 ## Purpose
@@ -22,11 +23,12 @@ This updates PR #62382. Duplicate checks against RFC #57103 and the programmable
 Reproduction commands and capability limits are in [the benchmark guide](../../benchmarks/programmable_kv_cache/README.md). All Python commands use the uv-managed `.venv`. The executed checks are:
 
 - Related control/state/engine/HTTP, scheduler/prefix-cache, Mooncake adapter, offloading and tiering suites using the complete command in [the testing report](rollout-report-2026-10-18.md): 1,999 passed.
-- `.venv/bin/python -m pytest tests/entrypoints/serve/kv_control/test_api.py -q`: 40 passed after the sampling fix; overlaps the broad suite.
+- `.venv/bin/python -m pytest tests/entrypoints/serve/kv_control/test_api.py -q`: 41 passed, including offline answer-completion auditing that leaves raw reports unchanged; overlaps the broad suite.
+- `.venv/bin/python -m pytest -q tests/v1/{test_kv_hint_control,test_kv_hint_state}.py tests/v1/engine/test_kv_control.py tests/entrypoints/serve/kv_control/test_api.py tests/v1/core/{test_prefix_caching,test_scheduler}.py`: 681 passed for the occupancy guard. The later offline-audit addition is covered by the 41-check suite above; these counts overlap.
 - `.venv/bin/python -m pytest -q tests/v1/kv_offload/cpu/{test_gpu_worker,test_canonical_layout,test_swap_blocks_batch,test_swap_blocks_triton}.py tests/v1/kv_connector/mooncake_integration/test_store_buffers.py` on GPUs 0/3: 56 passed, one ROCm-only skip.
 - `.venv/bin/python -m benchmarks.programmable_kv_cache.run_recovery` with `--evaluation-samples 128 --lifecycle --weight-update --cpu-evaluation-samples 128`, and separately with `--capacity-deferral-only`: passed. Model/dataset/trace/output arguments and full executed commands are retained in the local `acceptance-2026-10-19/queue.json` evidence directory. These check real cross-engine reuse, branches/TTLs, duplicate/racing/cancelled control, Store outage/restart, real IPC parameter update/rollback, capacity retry/fallback and paired model quality.
-- Repeated deployment-budget native/quota/cooperative replay, cache-fit native/idle/noop, separately labeled recorded-pause oracle and incorrect pressure forecasts: completed as reported below. One actual verl cooperative loop completed; native/quota/cooperative live repetitions remain incomplete.
-- CPU metadata measurements and completed-data phase/RPC/transfer analysis: completed. The final-runtime independent CPU/GPU profile and remaining direct/component/low-pressure forecast comparisons are unexecuted.
+- Repeated deployment-budget native/quota/cooperative replay, cache-fit native/idle/noop, separately labeled recorded-pause oracle and incorrect forecasts: completed as reported below. New direct/component and cache-fit forecast diagnostics passed. Actual native/quota verl loops each completed twice; valid cooperative repetitions remain incomplete.
+- CPU metadata measurements and completed-data phase/RPC/transfer analysis: completed, including all 19 accepted GPU 0/2 runs and their operating clocks. The guarded-source independent CPU/GPU profile remains unexecuted.
 - `.venv/bin/pre-commit run`, `.venv/bin/pre-commit run mypy-3.12 --all-files --hook-stage manual`, and `openspec validate programmable-kv-cache --strict`: passed for the tested source. The wrap-up changes only documentation; default hooks, strict OpenSpec validation and `git diff --check` are run for that update.
 
 ## Test Result
@@ -53,7 +55,7 @@ Cache-fit replay has four families and 256 trajectories. Two runs per configurat
 
 An additional cache-fit native/idle/noop comparison ran two full workloads per arm: medians 168.54/168.49/168.39 s, identical cache hits, no preemption or transfer, and six passing GPU ownership audits. The differences below 0.1% do not establish universal zero overhead.
 
-Pressure forecast diagnostics preserve the same inputs, output lengths and actual pauses. Recorded-pause oracle, fixed 1 ms and deliberately inaccurate fixed 30 s predictions each ran twice, with medians 1,230.42/1,181.00/1,077.04 s. All six passed the workload/GPU checks with zero backend failure, missing or discarded transfers. The 30 s variant increases cache reuse in this pressure workload; its cache-fit behavior remains pending and it is not the selected default. This result does not establish that less accurate tool predictions are preferable or that tool-pause oracle knows future GPU admission.
+Pressure forecast diagnostics preserve the same inputs, output lengths and actual pauses. Recorded-pause oracle, fixed 1 ms and deliberately inaccurate fixed 30 s predictions each ran twice, with medians 1,230.42/1,181.00/1,077.04 s. All six passed the workload/GPU checks with zero backend failure, missing or discarded transfers. The 30 s variant increases cache reuse in this pressure workload; subsequent cache-fit runs expose the regression described below. It is not the selected default. This result does not establish that less accurate tool predictions are preferable or that tool-pause oracle knows future GPU admission.
 
 Related offline CPU regression: 1,999 passed. The updated HTTP/benchmark regression file: 40 passed, overlapping the broad suite. Actual GPU buffer/CPU/Mooncake checks: 56 passed, one ROCm-specific skip. These overlapping counts are not summed.
 
@@ -80,8 +82,27 @@ There are no cross-pair speedup claims. Three acceptance tasks remain open:
 **10.5** actual live repetitions and their analysis; **11.3** independent CPU/GPU
 profiling and analysis; **10.6** final acceptance reconciliation. Preparing this
 local description does not close those gates or publish the update. The queue
-is running only the remaining new experiments. Detailed executed evidence
+has exited after two external SGLang interference events on GPU 0; both attempts
+are archived and excluded from accepted timing. Remaining cooperative repetitions
+and profiling require an exclusive GPU 0/2 window. Detailed executed evidence
 is in [the acceptance report](acceptance-report-2026-10-20.md).
+
+New actual native/quota live runs have elapsed medians of 2,139.17/1,471.01 s,
+with 912/921 versus 926/917 model calls and 59,412/59,658 versus 59,761/59,520
+output tokens. Generated trajectories differ, so these are not equal-work
+speedup ratios. Original rewards are 250/249 versus 249/248 out of 256.
+Offline auditing requires a final `####` answer and `finish_reason=stop`:
+both configurations then score 249/248, with different individual answers.
+The original native reward includes one incidental number in an unfinished
+answer per round. Raw rewards and reports remain unchanged; the additional
+quality field makes this distinction explicit.
+
+GPU 2 software thermal throttling was observed at 83–85°C, with a later sampled
+maximum of 86°C. User-requested clocks, fan settings and 300 W power limits
+were left unchanged. Busy-sample SM medians in pressure/live windows are
+1,395 MHz on GPU 0 and 1,170–1,185 MHz on GPU 2. Earlier logs contain clocks
+but no continuous temperature/throttle flags. Small timing differences, including
+the two-run occupancy-guard comparison, are not attributed wholly to code.
 
 Acceptance is scoped to this local model/hardware/layout. Native Mooncake uses complete primary boundaries and PCP=DCP=1; CPU control uses one block per chunk. CPU Share, cold Retain/delete, SimpleCPU control, KVCR request-free actions and mixed-owner envelopes are not advertised. Real Dynamo/llm-d and a full trainer/optimizer run are outside this delivery.
 

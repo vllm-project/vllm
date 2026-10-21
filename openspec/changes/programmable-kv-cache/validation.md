@@ -11,7 +11,8 @@
 原始记录位于 `benchmarks/programmable_kv_cache/results/acceptance-2026-10-19/`。
 任务 7.4/7.5/7.9/11.4 及本地 PR 描述 8.4 已完成，整体为 79/82。
 用户已在收尾后重新指定 GPU 0/2，只执行新实验；显式和组件矩阵、低压力预测及其修复验证已完成，
-在线重复、profile 和最终验收汇总继续执行。
+native/quota 各两轮在线运行已完成；协同在线两次被外部 GPU 进程干扰，
+队列已退出，等待独占窗口后再执行协同两轮和独立 profile。
 
 | 数据 | 已验证范围 |
 | --- | --- |
@@ -42,6 +43,11 @@ GPU 0/2 的新记录位于 `benchmarks/programmable_kv_cache/results/acceptance-
 | `component-comparison.json`、五个 `pressure-*/matrix.json` | 五个单项/成对策略组全部完成，保留负面结果、逻辑 missing、物理搬运、CPU 与 32 个家族尾延迟 |
 | `frozen-source{,-before-forecast-guard}.json`、`forecast-fix-comparison.json` | 本轮仅改变 `ToolWaitPolicy` 的当前压力判断，前后策略源码与记录提交对齐 |
 | `verl-identity.json`、`health-checks.jsonl` | 实际依赖提交/源文件身份和约十分钟一次的轻量检查，检查自身的只读 RPC 单列 |
+| `live-native/`、`live-quota/`、`completed-analysis.json` | 各两轮实际在线，GPU 审计和清理通过；合计 19 个有效运行的原始摘要、源码、时钟和工作量复核，完整矩阵仍未完成 |
+| `live-quality-audit.json`、`quality-audit-{before,tests}.log` | 离线区分原始 reward 与完整最终答案；两组完整正确数均 249/248，保留不同的错误题；41 项检查通过，输入报告未修改 |
+| `mypy-quality-audit.log`、`hooks-quality-audit.log` | 离线质量审计新增后的全量 Python 3.12 类型及默认 hooks 通过 |
+| `live-cooperative-gpu-sharing{,-2}/`、`gpu-sharing-diagnostic{,-2}.json` | 外部 SGLang 进程分别干扰首轮和重试，计时均不采用；第二次提前中止，仅停止本任务进程 |
+| `thermal-monitor.json`、`thermal-gpu.csv` | 用户要求保持设置，发现温控后每 10 s 采样；GPU 2 最高 86°C，记录软件限频；无历史温度回填 |
 
 原生/主策略重复性能证据仍来自 GPU 0/3；新组不与其混算收益。
 本轮未补跑 priority-only 无效轮或 native/quota/完整策略参考组。

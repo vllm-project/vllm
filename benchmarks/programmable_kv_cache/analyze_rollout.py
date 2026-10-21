@@ -10,6 +10,8 @@ import statistics
 from collections import defaultdict
 from pathlib import Path
 
+from benchmarks.programmable_kv_cache.client import answer_number
+
 
 def distribution(values):
     values = sorted(values)
@@ -34,6 +36,44 @@ def audit(path):
     for rows in trajectories.values():
         rows.sort(key=lambda row: row["turn"])
         pauses.extend(b["started"] - a["finished"] for a, b in zip(rows, rows[1:]))
+    episodes = report.get("episodes", [])
+    quality = None
+    if episodes and all("reward" in row for row in episodes):
+        endings = [
+            (episode, trajectories.get(episode["request_id"], [{}])[-1])
+            for episode in episodes
+        ]
+        complete = {
+            episode["request_id"]
+            for episode, final in endings
+            if "####" in final.get("text", "") and final.get("finish_reason") == "stop"
+        }
+        quality = {
+            "episodes": len(episodes),
+            "reported_correct": sum(row["reward"] for row in episodes),
+            "completed_final_correct": sum(
+                episode["request_id"] in complete
+                and episode.get("expected") is not None
+                and answer_number(final["text"]) == episode["expected"]
+                for episode, final in endings
+            ),
+            "missing_final_marker": sum(
+                "####" not in final.get("text", "") for _, final in endings
+            ),
+            "final_length_limited": sum(
+                final.get("finish_reason") == "length" for _, final in endings
+            ),
+            "reported_correct_without_completed_final": sum(
+                episode["reward"]
+                for episode, _ in endings
+                if episode["request_id"] not in complete
+            ),
+            "incomplete_final_request_ids": [
+                episode["request_id"]
+                for episode, _ in endings
+                if episode["request_id"] not in complete
+            ],
+        }
     signals = defaultdict(list)
     for row in report["controls"]:
         if "driver_signal" in row:
@@ -75,6 +115,7 @@ def audit(path):
             [r["client_queue_seconds"] for r in report.get("episodes", [])]
         ),
         "summary": summary,
+        "quality": quality,
         "instrumented": config.get("profile", False),
         "conditions": {
             key: config.get(key)

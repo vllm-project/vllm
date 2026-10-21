@@ -259,3 +259,30 @@ The actual live native/quota/cooperative runs use the same initial workload
 configuration but may generate different trajectories; they are not equal-work
 replay speedups. The verl dependency remains clean at
 `fbb4b3a8bf636f290c9c59fc346f756849e9c241`.
+
+### Online results and resource-window failure
+
+Native and quota each completed two actual live rounds with passing GPU audits.
+The completed-data audit covers 19 valid runs: 15 fixed-work replays and four
+actual live runs. Native/quota elapsed medians are 2139.17/1471.01 s; their
+generated work differs, so this is not an equal-work throughput claim.
+Original correct counts are 250/249 and 249/248 out of 256. Offline answer
+completion auditing excludes incidental numbers in unfinished responses:
+both configurations then have 249/248 completed final answers correct.
+Original rewards and raw reports remain unchanged; individual answers differ.
+The updated nearby HTTP/benchmark suite has 41 passing checks and full
+mypy-3.12 passes. This addition changes offline analysis, not model execution.
+
+Two cooperative attempts were invalidated by an external SGLang process on
+GPU 0. The first completed model work but failed the ownership audit; the
+second was interrupted early after another interference was detected. Both
+attempts are archived, and no timing from either is accepted. Only this task's
+queue was stopped; no external process was signaled. GPU 2 software thermal
+throttling is recorded; clocks, power limits and fan settings remain unchanged
+at the user's request. Historical CSVs provide clocks, not continuous thermal
+flags, and small timing differences are not attributed wholly to policy.
+
+Tasks **10.5, 11.3 and 10.6 remain open**. The queue has exited and requires
+an exclusive GPU 0/2 window for two valid cooperative live rounds and the
+independent profile before final reconciliation. No complete-matrix marker
+exists. Accepted native/quota and replay groups will not be rerun.

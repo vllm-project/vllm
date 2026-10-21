@@ -70,6 +70,55 @@ def test_rollout_analysis_retains_opposite_forecast_errors(tmp_path):
     assert result["forecast_underestimates"] == result["forecast_overestimates"] == 1
 
 
+def test_rollout_audit_separates_complete_answers_from_incidental_numbers(tmp_path):
+    """A correct number in an unfinished answer must not prove model quality."""
+    import gzip
+
+    from benchmarks.programmable_kv_cache.analyze_rollout import audit
+
+    path = tmp_path / "report.json.gz"
+    endings = [
+        ("#### 4", "stop"),
+        ("He can miss up to 4 classes", "length"),
+        ("#### 4", "length"),
+        ("<tool_call>calculate(4)</tool_call>", "stop"),
+    ]
+    with gzip.open(path, "wt") as file:
+        json.dump(
+            {
+                "passed": True,
+                "requests": [
+                    {
+                        "request_id": str(i),
+                        "turn": 0,
+                        "text": text,
+                        "finish_reason": reason,
+                    }
+                    for i, (text, reason) in enumerate(endings)
+                ],
+                "episodes": [
+                    {
+                        "request_id": str(i),
+                        "expected": "4",
+                        "reward": 1,
+                        "client_queue_seconds": 0,
+                    }
+                    for i in range(len(endings))
+                ],
+                "controls": [],
+            },
+            file,
+        )
+    original = path.read_bytes()
+    quality = audit(path)["quality"]
+    assert quality["episodes"] == quality["reported_correct"] == 4
+    assert quality["completed_final_correct"] == 1
+    assert quality["missing_final_marker"] == quality["final_length_limited"] == 2
+    assert quality["reported_correct_without_completed_final"] == 3
+    assert quality["incomplete_final_request_ids"] == ["1", "2", "3"]
+    assert path.read_bytes() == original
+
+
 def test_sync_control_acknowledges_after_preserving_terminal_failure():
     from benchmarks.programmable_kv_cache.client import wait_operation
 
