@@ -150,3 +150,37 @@ chemin Git Bash s'est encore reproduit au premier essai, `MSYS_NO_PATHCONV=1`).
   C: 826 GiB libres ⇒ **plafond 48 GiB**, la cible nominale.
 - Reste à valider en fenêtre réelle : **la sémantique d'une suppression sous
   moteur vivant** (miss propre vs ENOENT sur le chemin lookup→load).
+## Fenêtre prod 2026-10-21 19:15Z — ADOPTÉE en prod de fait + pruner ARMÉ (PR #142)
+
+Suite de `../fstier_window_20261021/RUNBOOK.md`. Geste : down prod (RAM 32) → up
+`medium-swift15-27b-fstier.yml` (RAM 8 + fs 48). Boot 4,5 min (compile-cache
+valide). Indispo réelle ~5 min, puis **2ᵉ indispo 19:26→~19:39Z** : watchdog
+WEDGE 2/2 pendant la ruée de re-prefill post-fenêtre (3 req, prefill 20 048 tok/s,
+KV 33 % — **famine documentée, pas une panne** ; le moteur travaillait). Amélioration
+candidate (non faite) : porte WEDGE sur « gros prefill en vol » (prompt throughput
+élevé) avant de redémarrer.
+
+**Chiffres du boot 19:29Z (75 min de trafic réel)** : 39,8 GB écrits fs,
+6,9 GB relus, **263 chunk-hits fs / 229 K tokens servis depuis le disque**
+(les blocs écrits par la génération 19:15-19:28 ont survécu au restart et
+servent les replays — la feature en prod réelle), 0 préemption, commit
+92,0→87,5 % à J+0 (90,8 % à J+1h30, tier RAM 8 GiB se remplissant).
+
+**Le pruneur a failli être armé aveugle** : premier dry-run = `files_total: 0`
+sur un tier de 39 GB / 1 582 blocs. Trois causes (PR #142) : regex `^_r\d+$`
+(anchored, ne matche jamais `<model>_<hash>_r0`), niveau de répertoire
+`<2hex>_g<gen>` manquant au layout v0.32.0 (`<ns>/<3hex>/<2hex>_g<gen>/<bloc>.bin`
+— le NOTES ci-dessus décrivait `<3hex>/<bloc>`), blocs root (l'utilisateur WSL
+par défaut ne peut pas supprimer — wrapper `-u root`).
+
+**Sonde suppression sous moteur vivant : PASSÉE** (l'item ouvert ci-dessus) :
+bloc >30 min supprimé à 20:4xZ → 0 erreur, gate 200, +8 chunk-hits fs servis
+après (miss propre `os.path.exists`). **Tâche `fstier-prune` 30 min armée**
+(`fstier_register_task.ps1`, pattern nbaudit, user-level) : apply = supprime
+uniquement >cap (>30 min d'âge) ; premier passage réel 1 649 blocs / 43,3 GB →
+0 suppression (sous cap), 0 erreur. Le cap auto-serre quand le tier mange le
+libre invité (formule min(48, invité−40, C:−12 %)).
+
+Reste ouvert : merge du profil fstier dans `medium-swift15-27b.yml` (propre,
+au prochain cycle calme — la prod tourne sur le profil fstier tel quel),
+vigie du rythme de remplissage vs cadence 30 min sous charge Minimax.
