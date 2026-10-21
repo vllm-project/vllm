@@ -59,6 +59,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from vllm.utils.deep_gemm import DeepGemmQuantScaleFMT
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 
 # AITER only supports per-channel-per-channel INT8 gemm
@@ -556,7 +557,12 @@ def test_compressed_tensors_fp8_block_enabled(
     else:
         assert isinstance(qkv_proj.scheme.fp8_linear, Fp8BlockScaledMMLinearKernel)
         assert qkv_proj.weight.dtype is fp8_dtype
-        assert qkv_proj.weight_scale.dtype is torch.float32
+        expected_scale_dtype = (
+            torch.int32
+            if DeepGemmQuantScaleFMT.from_oracle() is DeepGemmQuantScaleFMT.UE8M0
+            else torch.float32
+        )
+        assert qkv_proj.weight_scale.dtype is expected_scale_dtype
     assert len(qkv_proj.weight.shape) == 2
     assert len(qkv_proj.weight_scale.shape) == 2
 
