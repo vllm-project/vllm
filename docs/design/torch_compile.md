@@ -185,6 +185,16 @@ The computation graph is further split into pieces, by the `splitting_ops` (usua
 
 Every submodule can be identified by its index, and will be processed individually.
 
+### Custom operator input layouts
+
+`direct_register_custom_op` preserves eager input strides by default with
+`torch.Tag.needs_exact_strides`, including when Inductor compiles attention and
+KV-cache updates inside a full graph. Custom kernels can therefore rely on the
+input layout they receive in eager execution. Operators that support other
+layouts can explicitly pass `torch.Tag.needs_fixed_stride_order` or
+`torch.Tag.flexible_layout` in `tags`; those choices are preserved. Unrelated
+tags, such as `torch.Tag.cudagraph_unsafe`, do not change the layout default.
+
 ## Computation Graph Compilation
 
 In the very verbose logs, we can also see:

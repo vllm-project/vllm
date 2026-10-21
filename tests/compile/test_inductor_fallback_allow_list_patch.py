@@ -13,17 +13,63 @@ The slow path is what made ``torch.compile`` effectively hang on Kimi-K2.6
 TP=8 (deep MoE/TP IR provenance trees). These tests cover both the proxy's
 semantics in isolation and the membership-check fast-path that Inductor's
 ``GraphLowering.call_function`` actually performs, so we can validate the
-optimization without needing a full GPU compile.
+optimization without needing a full GPU compile. A CUDA regression test also
+checks that the fast-path preserves custom-op input layouts.
 """
 
 import time
 
 import pytest
+import torch
 
 from vllm.env_override import (
     _patch_inductor_fallback_allow_list,
     _VllmFallbackAllowList,
 )
+from vllm.utils.torch_utils import direct_register_custom_op
+
+
+@pytest.mark.parametrize("tags", [(), (torch.Tag.cudagraph_unsafe,)])
+def test_custom_op_preserves_eager_strides(tags, use_fresh_inductor_cache):
+    """Allow-listed ops must retain the layout assumed by their eager kernels."""
+    num_heads, head_size, num_tokens = 8, 128, 64
+
+    def get_strides(key: torch.Tensor) -> torch.Tensor:
+        return torch.tensor(key.stride(), device=key.device)
+
+    def fake_get_strides(key: torch.Tensor) -> torch.Tensor:
+        return key.new_empty((3,), dtype=torch.int64)
+
+    with torch.library._scoped_library("vllm", "FRAGMENT") as lib:
+        direct_register_custom_op(
+            "test_eager_strides",
+            get_strides,
+            fake_impl=fake_get_strides,
+            target_lib=lib,
+            tags=tags,
+        )
+
+        def forward(x, weight, cos, sin):
+            key = (x @ weight).view(1, -1, num_heads, head_size).transpose(1, 2)
+            rotated = torch.cat(
+                (-key[..., head_size // 2 :], key[..., : head_size // 2]), dim=-1
+            )
+            key = key * cos.unsqueeze(1) + rotated * sin.unsqueeze(1)
+            key = key.transpose(1, 2).reshape(-1, num_heads, head_size)
+            return torch.ops.vllm.test_eager_strides(key)
+
+        args = [
+            torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+            for shape in (
+                (num_tokens, 512),
+                (512, num_heads * head_size),
+                (1, num_tokens, head_size),
+                (1, num_tokens, head_size),
+            )
+        ]
+        expected = forward(*args)
+        actual = torch.compile(forward, fullgraph=True, dynamic=True)(*args)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 class TestVllmFallbackAllowListProxy:

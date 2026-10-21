@@ -148,6 +148,38 @@ def test_hybrid_attention(vllm_runner: type[VllmRunner]) -> None:
     )
 
 
+def test_inductor_preserves_attention_layout(
+    vllm_runner: type[VllmRunner],
+    example_prompts: list[str],
+    disable_vllm_compile_cache,
+) -> None:
+    """Compiling the Transformers KV-cache update must preserve generation."""
+    kwargs = {
+        "model_impl": "transformers",
+        "max_model_len": 1024,
+        "max_num_seqs": 4,
+        "max_num_batched_tokens": 1024,
+        "enable_chunked_prefill": True,
+        "gpu_memory_utilization": 0.5,
+        "dtype": "bfloat16",
+    }
+    check_implementation(
+        vllm_runner,
+        vllm_runner,
+        example_prompts[:4],
+        model="Qwen/Qwen2.5-0.5B-Instruct",
+        kwargs_ref={**kwargs, "enforce_eager": True},
+        kwargs_test={
+            **kwargs,
+            "compilation_config": {
+                "mode": 2,
+                "backend": "inductor",
+                "cudagraph_mode": "NONE",
+            },
+        },
+    )
+
+
 def get_sinks(model) -> dict[int, torch.Tensor]:
     """The sink tensor each attention layer was handed, keyed by layer index."""
     sinks = {}
