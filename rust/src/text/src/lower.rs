@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::cmp::Ordering;
 use std::collections::BTreeSet;
 
 pub(crate) mod logprobs;
@@ -338,14 +339,19 @@ pub fn resolve_max_tokens(
     max_model_len: u32,
     prompt_len: u32,
 ) -> Result<u32> {
-    let model_max_tokens = if prompt_len >= max_model_len {
-        return Err(Error::PromptTooLong {
-            max_model_len,
-            prompt_len,
-        });
-    } else {
-        max_model_len - prompt_len
-    };
+    match prompt_len.cmp(&max_model_len) {
+        Ordering::Greater => {
+            return Err(Error::PromptTooLong {
+                max_model_len,
+                prompt_len,
+            });
+        }
+        // Python accepts this prompt and then rejects the resulting
+        // `max_tokens=0`.
+        Ordering::Equal => return Err(Error::PromptFillsContext { max_model_len }),
+        Ordering::Less => {}
+    }
+    let model_max_tokens = max_model_len - prompt_len;
 
     let request_max_tokens = user_max_tokens.or(default_max_tokens);
     Ok(request_max_tokens.map_or(model_max_tokens, |n| n.min(model_max_tokens)))
@@ -1699,10 +1705,7 @@ mod tests {
         let result = resolve_max_tokens(Some(10), None, 100, 100);
         assert!(matches!(
             result,
-            Err(Error::PromptTooLong {
-                max_model_len: 100,
-                prompt_len: 100,
-            })
+            Err(Error::PromptFillsContext { max_model_len: 100 })
         ));
     }
 
