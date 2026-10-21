@@ -237,6 +237,12 @@ class ToolWaitPolicy(KVPolicy):
     def _worth_moving(
         self, pause: float | None, view: CacheObservation | None = None
     ) -> bool:
+        if (
+            view is not None
+            and self.consider_pause_duration
+            and view.referenced_blocks < self.min_pressure * view.total_blocks
+        ):
+            return False
         minimum_window = max(
             self.min_pause_seconds, self._store_seconds + self._load_seconds
         )
@@ -269,6 +275,12 @@ class ToolWaitPolicy(KVPolicy):
     def needs_request_observation_for_view(
         self, payload: SignalPayload, view: CacheObservation
     ) -> bool:
+        if (
+            payload.signal == "tool_wait"
+            and self.consider_pause_duration
+            and view.referenced_blocks < self.min_pressure * view.total_blocks
+        ):
+            return False
         return self.needs_request_observation(payload) or (
             payload.signal == "tool_wait" and self._has_admission_pressure(view)
         )

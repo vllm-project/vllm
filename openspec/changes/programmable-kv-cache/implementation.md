@@ -228,6 +228,10 @@ Demand estimates reuse the cache managers' group-specific allocation rules, opti
 Quota can reserve running growth, borrow idle capacity for a session's first request and score known reuse; the scheduler still owns allocation, queue mutation and preemption.
 
 Tool-wait policy can skip movement below configured pressure.
+For pause-aware movement, the threshold applies to current referenced blocks
+as well as projected demand; a long forecast cannot bypass current occupancy.
+Ineligible low-pressure signals do not require a request-demand scan. The
+explicit pressure-only diagnostic retains its projected-demand behavior.
 Completion feedback keeps a bounded memo of actually stored targets and learns copy lead time from reported bytes/elapsed time.
 This memo is advisory, never a cold residency claim.
 An actual resume joins a compatible running prediction; pending or conflicting plans remain supersedable.

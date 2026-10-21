@@ -89,6 +89,11 @@ Stored-target hints SHALL remain bounded and shall not assert current backend re
 The reference movement policy SHALL consider an optional pause estimate on the
 initial tool-wait signal before proposing a store. It SHALL avoid speculative
 store/load round trips whose estimated duration exceeds the application pause.
+With pause-aware movement enabled, a configured pressure threshold SHALL also
+apply to current referenced GPU blocks. Projected future demand and a long pause
+estimate alone SHALL NOT authorize MOVE below that threshold. This check SHALL
+avoid building a request-demand observation when movement is already ineligible.
+The explicitly selected pressure-only diagnostic mode retains its projected-demand behavior.
 Skipped movement state SHALL be bounded and released with its logical owners.
 Explicit movement commands SHALL keep their original meaning.
 
@@ -96,6 +101,11 @@ Explicit movement commands SHALL keep their original meaning.
 
 - **WHEN** a predicted tool wait is shorter than the configured minimum pause
 - **THEN** pressure alone does not cause a store followed by a speculative load
+
+#### Scenario: Overestimated pause while the cache fits
+
+- **WHEN** a long predicted pause and projected request growth exceed the pressure threshold but current referenced occupancy remains below it
+- **THEN** automatic movement preserves the resident content without store/load work or a request-demand scan
 
 ### Requirement: Revalidate admission headroom
 

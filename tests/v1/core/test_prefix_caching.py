@@ -6969,9 +6969,12 @@ def test_custom_policy_without_signal_filter_receives_all_signals():
     assert parent.status == OperationStatus.COMPLETED
 
 
-@pytest.mark.parametrize("held_blocks,min_pressure", [(0, 0), (1, 0.6)])
-def test_short_pause_under_low_pressure_preserves_observation_without_request_scan(
-    monkeypatch, held_blocks, min_pressure
+@pytest.mark.parametrize(
+    "held_blocks,min_pressure,pause_seconds",
+    [(0, 0, 0.01), (1, 0.6, 0.01), (1, 0.6, 30)],
+)
+def test_pause_under_low_pressure_preserves_observation_without_request_scan(
+    monkeypatch, held_blocks, min_pressure, pause_seconds
 ):
     from vllm.v1.kv_hints.policy import ToolWaitPolicy
 
@@ -6988,7 +6991,7 @@ def test_short_pause_under_low_pressure_preserves_observation_without_request_sc
     arrivals = dict(runtime._arrivals)
 
     def unexpected_scan():
-        pytest.fail("A short-pause decision does not need request demand")
+        pytest.fail("Low-pressure movement does not need request demand")
 
     monkeypatch.setattr(runtime, "requests", unexpected_scan)
     for signal in ("tool_wait", "resume"):
@@ -6996,7 +6999,7 @@ def test_short_pause_under_low_pressure_preserves_observation_without_request_sc
             controller,
             signal,
             "signal",
-            {"target": target, "signal": signal, "resume_after_seconds": 0.01},
+            {"target": target, "signal": signal, "resume_after_seconds": pause_seconds},
         )
         assert result.status == OperationStatus.COMPLETED
     assert runtime._view is view
@@ -7100,17 +7103,20 @@ def test_short_tool_pause_preserves_resident_content_without_a_round_trip():
 
 
 @pytest.mark.parametrize(
-    "busy_blocks,queue_age,store_seconds,offload",
+    "busy_blocks,queue_age,store_seconds,pause_seconds,pressure_only,offload",
     [
-        (1, 1, 0, False),
-        (2, 0.1, 0, False),
-        (2, 1, 0, True),
-        (2, 1, 2, False),
-        (2, 3, 2, True),
+        (1, 1, 0, 0.01, False, False),
+        (2, 0.1, 0, 0.01, False, False),
+        (2, 1, 0, 0.01, False, True),
+        (2, 1, 2, 0.01, False, False),
+        (2, 3, 2, 0.01, False, True),
+        (1, 1, 0, 30, False, False),
+        (2, 0.1, 0, 30, False, True),
+        (1, 1, 0, 30, True, True),
     ],
 )
-def test_short_pause_offloads_only_with_current_pressure_and_sustained_wait(
-    busy_blocks, queue_age, store_seconds, offload
+def test_tool_pause_offloads_only_with_current_pressure_and_usable_window(
+    busy_blocks, queue_age, store_seconds, pause_seconds, pressure_only, offload
 ):
     from vllm.v1.kv_hints.policy import ToolWaitPolicy
 
@@ -7123,7 +7129,9 @@ def test_short_pause_offloads_only_with_current_pressure_and_sustained_wait(
     busy.status = RequestStatus.RUNNING
     runtime, now = install_movement_policies(manager, controller)
     runtime.policies["movement"] = ToolWaitPolicy(
-        prefetch_on_admission=True, min_pressure=0.6
+        prefetch_on_admission=True,
+        min_pressure=0.6,
+        consider_pause_duration=not pressure_only,
     )
     runtime.requests = lambda: (busy,)
     if store_seconds:
@@ -7149,7 +7157,11 @@ def test_short_pause_offloads_only_with_current_pressure_and_sustained_wait(
         controller,
         "decide",
         "signal",
-        {"target": target, "signal": "tool_wait", "resume_after_seconds": 0.01},
+        {
+            "target": target,
+            "signal": "tool_wait",
+            "resume_after_seconds": pause_seconds,
+        },
     )
     assert len(result.derived_operations) == int(offload)
     assert len(adapter.jobs) == int(offload)
