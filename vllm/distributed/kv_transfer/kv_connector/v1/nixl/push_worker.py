@@ -49,6 +49,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     PUSH_REG_NOTIF_PREFIX,
+    HeartbeatInfo,
     NixlAgentMetadata,
     NixlConnectorMetadata,
     RemoteMeta,
@@ -250,7 +251,19 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 self._reqs_to_send[req_id] = expiration_time
 
         # Heartbeats call NIXL. Run them on the writer, not the model thread.
+        # Copy the map: the uni executor hands the scheduler's live object here.
         if metadata.heartbeat_by_engine:
+            metadata.heartbeat_by_engine = {
+                engine_id: HeartbeatInfo(
+                    req_ids=set(info.req_ids),
+                    host=info.host,
+                    port=info.port,
+                    tp_size=info.tp_size,
+                    dcp_size=info.dcp_size,
+                    pp_size=info.pp_size,
+                )
+                for engine_id, info in metadata.heartbeat_by_engine.items()
+            }
             self._heartbeat_inbox.put(metadata)
             self._push_writer_wake.set()
 
@@ -265,8 +278,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             super()._send_heartbeats(metadata)
 
     def _poll_sending_transfers(self) -> None:
-        with self._sending_transfers_lock:
-            done, failed = super()._pop_done_transfers(self._sending_transfers)
+        # Do not hold _sending_transfers_lock across check_xfer_state. The
+        # model thread takes that lock in get_transfer_results.
+        done, failed = super()._pop_done_transfers(self._sending_transfers)
         if done or failed:
             self._push_result_inbox.put((done, failed))
 
@@ -347,15 +361,6 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         """Serialize endpoint setup with push data-plane operations."""
         with self._nixl_io_lock:
             return super()._nixl_handshake(*args, **kwargs)
-
-    def _pop_done_transfers(
-        self, transfers: dict[str, list[int]]
-    ) -> tuple[set[str], set[str]]:
-        """Complete notification-driven push receives without polling NIXL."""
-        done = {req_id for req_id, handles in transfers.items() if not handles}
-        for req_id in done:
-            del transfers[req_id]
-        return done, set()
 
     def _handle_push_reg_notif(self, notif: bytes) -> None:
         try:

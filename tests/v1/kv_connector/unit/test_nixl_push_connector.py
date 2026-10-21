@@ -676,7 +676,8 @@ class TestPushWriterStartLoadKv:
         assert ("req" in w._reqs_to_process) is sharded
         assert ("req" in w._reqs_to_send) is sharded
         assert w._push_writer_wake.is_set() is sharded
-        assert w._send_heartbeats.called is sharded
+        # Heartbeats run on the writer, and this metadata has none.
+        assert w._send_heartbeats.called is False
 
 
 # The P→D handshake must run on the base worker's background executor, never
@@ -939,11 +940,16 @@ class TestPushWriterNotifs:
         with patch.object(
             NixlBaseConnectorWorker, "_send_heartbeats"
         ) as send_heartbeats:
+            original = metadata.heartbeat_by_engine["prefill"]
             w.start_load_kv(metadata)
+            original.req_ids.add("later")
             send_heartbeats.assert_not_called()
 
             w._drain_heartbeats()
             send_heartbeats.assert_called_once_with(metadata)
+            sent = send_heartbeats.call_args.args[0].heartbeat_by_engine["prefill"]
+            assert sent is not original
+            assert sent.req_ids == {"req"}
 
     def test_get_new_notifs_processes_forwarded_completion_notif(self):
         """Non-PUSH_REG notifs forwarded by the writer thread are drained
@@ -1043,6 +1049,32 @@ class TestPushWriterNotifs:
         assert self._poll_and_get(w).finished_sending == {request_id}
         w.nixl_wrapper.check_xfer_state.assert_called()
 
+    def test_model_thread_does_not_block_on_write_poll(self):
+        w = self._pollable_worker()
+        self._make_sending_req(w)
+        started = threading.Event()
+        release = threading.Event()
+
+        def block_check(_handle):
+            if not started.is_set():
+                started.set()
+                assert release.wait(timeout=5)
+            return "PROC"
+
+        w.nixl_wrapper.check_xfer_state.side_effect = block_check
+        poller = threading.Thread(target=w._poll_sending_transfers)
+        poller.start()
+        assert started.wait(timeout=2)
+
+        t0 = time.perf_counter()
+        assert w.get_transfer_results().finished_sending == set()
+        # The writer is still inside check_xfer_state. Taking the transfer
+        # lock across that call would stall the model thread here.
+        assert time.perf_counter() - t0 < 1.0
+        release.set()
+        poller.join(timeout=6)
+        assert not poller.is_alive()
+
     @pytest.mark.parametrize(("pp_size", "is_hma"), [(1, False), (2, True)])
     def test_completed_push_send_releases_blocks_without_consumer_notif(
         self, pp_size, is_hma
@@ -1140,7 +1172,6 @@ class TestPushWriterNotifs:
         request_id = self._make_sending_req(w)
         w.nixl_wrapper.check_xfer_state.side_effect = [
             first_state,
-            "PROC",
             "PROC",
             "DONE",
         ]
@@ -1367,6 +1398,7 @@ class TestPushWriterNegative:
         w._sending_transfers["req-failed"] = [17]
         w._reqs_to_send["req-failed"] = time.perf_counter() + 30
         w._reqs_to_process.add("req-failed")
+        w._poll_sending_transfers()
 
         with patch.object(
             NixlPushConnectorWorker.__mro__[1],
