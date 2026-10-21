@@ -425,6 +425,9 @@ class FlashAttentionBackend(AttentionBackend):
             return False
         if head_size <= 256:
             return True
+        if current_platform.is_xpu():
+            # The XPU SYCL kernels support head sizes up to 512.
+            return head_size <= 512
         if is_fa_version_supported(4):
             return head_size <= 512
         return False
