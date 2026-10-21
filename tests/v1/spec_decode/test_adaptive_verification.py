@@ -33,6 +33,7 @@ def make_manager(
         prefill_len=SimpleNamespace(np=np.ones(num_reqs, dtype=np.int32)),
     )
     manager.cost_tables = (np.zeros(num_reqs + 1), verify_cost_ms)
+    manager._verify_cost_per_req = 0.0
     manager._max_total_logits = 1 << 30
     manager.num_bonus_tokens = 1
     return manager
@@ -193,7 +194,7 @@ def test_profiled_batches_seed_cost_curves_via_consumer(monkeypatch):
     monkeypatch.setattr(
         manager,
         "set_cost_curves",
-        lambda draft, verify: curves.update(draft=draft, verify=verify),
+        lambda draft, verify, **_: curves.update(draft=draft, verify=verify),
     )
 
     timings = [
@@ -204,6 +205,7 @@ def test_profiled_batches_seed_cost_curves_via_consumer(monkeypatch):
             num_reqs=batch["num_tokens"] // 8,
             # Only the captured sizes replay a graph; the tail sizes run eager.
             full_cudagraph=batch["num_tokens"] <= 1024,
+            context_len=batch["context_len"],
         )
         for batch in manager.batches_to_profile([8, 1024])
     ]
@@ -221,6 +223,78 @@ def test_profiled_batches_seed_cost_curves_via_consumer(monkeypatch):
     # count they would land inside the captured range and, once made monotonic,
     # smear that eager cost across every larger request count.
     assert curves["draft"] == [(1, 1.0), (128, 1.0)]
+
+
+def _profile_context_split(monkeypatch, max_num_reqs, per_req, per_token_context):
+    """Profiles a manager whose verify cost is 10 + 0.01 / token, plus per_req
+    per request and per_token_context per token for context reads."""
+    monkeypatch.setattr(
+        adaptive_module,
+        "get_tp_group",
+        lambda: SimpleNamespace(broadcast_object=lambda obj, src: obj),
+    )
+    manager = AdaptiveVerificationManager.__new__(AdaptiveVerificationManager)
+    manager.req_states = SimpleNamespace(
+        max_num_batched_tokens=64, max_num_reqs=max_num_reqs
+    )
+    manager.num_speculative_steps = 7
+    manager.num_bonus_tokens = 1
+    manager._cudagraph_limit = 64
+
+    sizes = [8, 16, 32, 64]
+    batches = list(manager.batches_to_profile(sizes))
+    assert {b["num_tokens"] for b in batches if b["context_len"] == 0} == set(sizes)
+
+    def sample(num_tokens: int, context_len: int) -> StepTimingSample:
+        num_reqs = min(num_tokens, max_num_reqs)
+        context = per_req * num_reqs + per_token_context * num_tokens
+        return StepTimingSample(
+            forward_ms=10.0 + 0.01 * num_tokens + context * (context_len > 0),
+            drafter_ms=1.0,
+            num_target_tokens=num_tokens,
+            num_reqs=num_reqs,
+            full_cudagraph=True,
+            context_len=context_len,
+        )
+
+    manager.set_initial_cost_curves(
+        [sample(b["num_tokens"], b["context_len"]) for b in batches]
+    )
+    return manager
+
+
+@pytest.mark.parametrize(
+    ("per_req", "per_token_context"),
+    [(0.3, 0.0), (0.1, 0.2)],
+    ids=["dense", "sparse"],
+)
+def test_drafts_are_not_priced_as_new_requests(monkeypatch, per_req, per_token_context):
+    """Profiles up to max_num_reqs run one token per request, so each request's
+    context reads land in the per-token curve unless split out. A draft joins a
+    request already in the batch: it pays only context reads that scale with
+    tokens, which sparse attention has and dense attention doesn't."""
+    manager = _profile_context_split(monkeypatch, 16, per_req, per_token_context)
+
+    assert manager._verify_cost_per_req == pytest.approx(per_req)
+    assert manager.cost_tables is not None
+    verify = manager.cost_tables[1]
+    # 16 requests verifying 1 vs 3 drafts each: the same contexts.
+    np.testing.assert_allclose(verify[64] - verify[32], (0.01 + per_token_context) * 32)
+
+
+def test_context_split_falls_back_to_per_token_pricing(monkeypatch):
+    # Every profile runs one token per request: requests and tokens can't be
+    # told apart, so context stays priced per token, as before.
+    manager = _profile_context_split(monkeypatch, 64, 0.3, 0.0)
+    assert manager._verify_cost_per_req == 0.0
+
+    # Profiling without any context still prices every token, as before.
+    sizes = [8, 16, 32, 64]
+    manager.set_initial_cost_curves(
+        [StepTimingSample(1.0 + t, 1.0, t, t, True, context_len=0) for t in sizes]
+    )
+    assert manager._verify_cost_per_req == 0.0
+    np.testing.assert_allclose(manager.cost_tables[1][sizes], [1.0 + t for t in sizes])
 
 
 def test_compact_batch_preserves_totals_and_bounds():

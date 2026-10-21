@@ -148,6 +148,8 @@ class AdaptiveVerificationManager:
         self._max_total_logits = max_total_logits
         self.query_start_loc = query_start_loc
         self.cost_tables: tuple[np.ndarray, np.ndarray] | None = None
+        # Per-request verify ms on top of the per-token verify cost table.
+        self._verify_cost_per_req = 0.0
         # Largest cudagraph-captured token count; above it nothing pads.
         self._cudagraph_limit = 0
         self._batch_budget: tuple[dict[str, int], dict[str, int], int] | None = None
@@ -208,6 +210,73 @@ class AdaptiveVerificationManager:
                     "num_tokens": num_tokens,
                     "context_len": envs.VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN,
                 }
+        # The captured sizes again without context. Dummy runs pad every request
+        # a graph holds, so the request count can't be varied at a fixed token
+        # count; dropping the context instead isolates what each request's
+        # context reads cost.
+        for num_tokens in capture_sizes:
+            for _ in range(_PROFILE_REPLAYS):
+                yield {"num_tokens": num_tokens, "context_len": 0}
+
+    @staticmethod
+    def _estimate_context_cost_per_req(
+        samples: list[StepTimingSample],
+        contextless_samples: list[StepTimingSample],
+    ) -> float:
+        """Verify ms of context reads per request in the batch, independent of
+        how many of its tokens are verified.
+
+        Up to max_num_reqs, profiles run one token per request, so pricing drafts
+        along that curve charges each draft a whole request's context, while a
+        draft joins a request already in the batch. The context's extra cost is
+        a * num_reqs + b * num_tokens: dense attention reads a request's context
+        once (b ~ 0), while sparse attention also indexes and gathers it per
+        token. Larger profiles run several tokens per request, which separates
+        a from b; the verify table keeps b. Returns 0, pricing context per token
+        as before, when the profiles can't separate them."""
+
+        def by_tokens(group: list[StepTimingSample]) -> dict[int, tuple[float, float]]:
+            grouped: defaultdict[int, list[StepTimingSample]] = defaultdict(list)
+            for s in group:
+                if s.full_cudagraph:
+                    grouped[s.num_target_tokens].append(s)
+            return {
+                t: (
+                    float(np.median([s.forward_ms for s in g])),
+                    float(np.median([s.num_reqs for s in g])),
+                )
+                for t, g in grouped.items()
+            }
+
+        with_context = by_tokens(samples)
+        without_context = by_tokens(contextless_samples)
+        sizes = [
+            (with_context[t][1], t, with_context[t][0] - without_context[t][0])
+            for t in sorted(with_context.keys() & without_context.keys())
+            if with_context[t][1] == without_context[t][1] > 0
+        ]
+        if not sizes:
+            return 0.0
+        num_reqs, num_tokens, context_cost = (np.asarray(x) for x in zip(*sizes))
+        if np.all(num_tokens == num_reqs):
+            # One token per request. a and b are indistinguishable, so price
+            # context per-token.
+            return 0.0
+
+        # Solve the following system of equations:
+        #   context_cost = a * num_reqs + b * num_tokens
+        # to find how much of the context cost is per-request vs per-token.
+        design = np.stack([num_reqs, num_tokens], axis=1).astype(np.float64)
+        (a, b), *_ = np.linalg.lstsq(design, context_cost, rcond=None)
+        if b < 0:
+            # Context cost does not scale with number of tokens, so refit it all
+            # per-request.
+            a = np.dot(num_reqs, context_cost) / np.dot(num_reqs, num_reqs)
+        if a <= 0:
+            # Context cost does not scale with the number of requests, so price
+            # context per-token.
+            return 0.0
+        return float(a)
 
     def set_initial_cost_curves(self, samples: list[StepTimingSample]) -> None:
         def median_curve(
@@ -218,6 +287,12 @@ class AdaptiveVerificationManager:
                 grouped[key].append(value)
             return [(k, float(np.median(v))) for k, v in sorted(grouped.items())]
 
+        contextless_samples = [s for s in samples if s.context_len == 0]
+        # Profiling without context at all leaves nothing to compare against.
+        if len(contextless_samples) < len(samples):
+            samples = [s for s in samples if s.context_len > 0]
+        else:
+            contextless_samples = []
         # Draft curve: eager-target steps inflate drafter timings (the CPU is
         # still launching kernels, opening gaps between the drafter's events),
         # and request counts — unlike token counts — collide across execution
@@ -225,19 +300,25 @@ class AdaptiveVerificationManager:
         draft_curve = median_curve(
             (s.num_reqs, s.drafter_ms) for s in samples if s.full_cudagraph
         )
+        per_req = self._estimate_context_cost_per_req(samples, contextless_samples)
+        logger.info("Adaptive verification: %.4f verify ms per request", per_req)
         verify_curve = median_curve(
-            (s.num_target_tokens, s.forward_ms) for s in samples
+            (s.num_target_tokens, s.forward_ms - per_req * s.num_reqs) for s in samples
         )
-        self.set_cost_curves(draft_curve, verify_curve)
+        self.set_cost_curves(draft_curve, verify_curve, verify_cost_per_req=per_req)
 
     def set_cost_curves(
         self,
         draft_curve: list[tuple[int, float]],
         verify_curve: list[tuple[int, float]],
+        verify_cost_per_req: float = 0.0,
     ) -> None:
-        draft_curve, verify_curve = get_tp_group().broadcast_object(
-            (draft_curve, verify_curve), src=0
+        draft_curve, verify_curve, verify_cost_per_req = (
+            get_tp_group().broadcast_object(
+                (draft_curve, verify_curve, verify_cost_per_req), src=0
+            )
         )
+        self._verify_cost_per_req = verify_cost_per_req
         if not draft_curve or not verify_curve:
             raise RuntimeError(
                 "Adaptive verification could not profile step costs. Pass "
@@ -327,6 +408,7 @@ class AdaptiveVerificationManager:
         )
         costs = (
             draft_cost_ms[len(req_ids)]
+            + self._verify_cost_per_req * num_reqs
             + verify_cost_ms[
                 num_non_draft_tokens_total : num_non_draft_tokens_total
                 + max_draft_budget
