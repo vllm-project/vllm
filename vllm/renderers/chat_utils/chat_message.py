@@ -274,7 +274,7 @@ def parse_chat_message_content_mm_part(
             )
             image_embeds = image_params.get("image_embeds", None)
             return "image_embeds", image_embeds
-        if "audio_embeds" in part:
+        if "audio_embeds" in part and part_type != "video_embeds":
             # "audio_embeds" could be None if UUID is provided.
             audio_params = cast(  # type: ignore[assignment]
                 ChatCompletionContentPartAudioEmbedsParam, part
@@ -512,7 +512,8 @@ def parse_chat_message_content_part(
         content = (
             cast(MultiModalEmbedsPayload, content) if content is not None else None
         )
-        mm_parser.parse_video_embeds(content, uuid)
+        audio_embeds = cast(MultiModalEmbedsPayload | None, part.get("audio_embeds"))
+        mm_parser.parse_video_embeds(content, uuid, audio_embeds)
         modality = "video"
     elif part_type == "prompt_embeds":
         if not content:

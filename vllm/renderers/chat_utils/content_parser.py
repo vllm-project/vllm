@@ -124,6 +124,7 @@ class BaseMultiModalContentParser(ABC):
         self,
         video_embeds: MultiModalEmbedsPayload | None,
         uuid: str | None = None,
+        audio_embeds: MultiModalEmbedsPayload | None = None,
     ) -> None:
         raise NotImplementedError
 
@@ -294,6 +295,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         self,
         video_embeds: MultiModalEmbedsPayload | None,
         uuid: str | None = None,
+        audio_embeds: MultiModalEmbedsPayload | None = None,
     ) -> None:
         mm_config = self.model_config.get_multimodal_config()
         if not mm_config.enable_mm_embeds:
@@ -315,6 +317,8 @@ class MultiModalContentParser(BaseMultiModalContentParser):
             placeholder = self._tracker.add("video_embeds", (None, uuid))
 
         self._add_placeholder("video", placeholder)
+        if audio_embeds is not None:
+            self.parse_audio_embeds(audio_embeds, uuid)
 
 
 class AsyncMultiModalContentParser(BaseMultiModalContentParser):
@@ -528,6 +532,7 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         self,
         video_embeds: MultiModalEmbedsPayload | None,
         uuid: str | None = None,
+        audio_embeds: MultiModalEmbedsPayload | None = None,
     ) -> None:
         mm_config = self.model_config.get_multimodal_config()
         if not mm_config.enable_mm_embeds:
@@ -541,6 +546,8 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
             partial(self._video_embeds_with_uuid_async, video_embeds, uuid),
         )
         self._add_placeholder("video", placeholder)
+        if audio_embeds is not None:
+            self.parse_audio_embeds(audio_embeds, uuid)
 
     async def _video_embeds_with_uuid_async(
         self,
