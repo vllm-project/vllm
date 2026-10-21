@@ -840,3 +840,92 @@ def test_flashinfer_dspark_noncausal_block_sees_future_tokens(context_len):
             attention[token].float(), weights @ keys, atol=0.05, rtol=0.05
         )
     _assert_projects_alike(z_unfused, z_fused)
+
+
+@pytest.mark.parametrize("num_slots", [2, 4])
+def test_packed_spec_decode_matches_unpacked(num_slots: int):
+    """Packing a request's spec positions into one head tile must not change
+    any position's output: each slot sees only its own keys and sink."""
+    import vllm.v1.attention.ops.flashmla as fm
+    from vllm.models.deepseek_v41.nvidia.ops.packed_sparse_decode import (
+        merge_slot_indices,
+        pack_slot_rows,
+        unpack_slot_rows,
+    )
+    from vllm.platforms import current_platform
+
+    ok, reason = fm.is_flashmla_sparse_supported()
+    if not ok:
+        pytest.skip(reason)
+    if not current_platform.is_device_capability_family(90):
+        pytest.skip("row masks are SM90 only")
+
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    num_reqs, rows, h_pad, d = 5, 8, 64, 512
+    num_tokens = num_reqs * num_slots
+    page, num_pages, topk = 64, 16, 128
+    bytes_per_token = 448 + 64 * 2 + 8
+    cache = torch.randint(
+        0, 64, (num_pages, page, bytes_per_token), dtype=torch.uint8, device=device
+    )
+    # Each page holds page data rows (448 fp8 NoPE + 64 bf16 RoPE) followed by
+    # page 8-byte e8m0 scale rows; zero RoPE and use scale 1.0.
+    flat = cache.view(num_pages, -1)
+    data = flat[:, : page * 576].view(num_pages, page, 576)
+    data[..., 448:] = 0
+    flat[:, page * 576 :] = 127
+    k_cache = cache.unsqueeze(2)
+
+    q = torch.randn(num_tokens, h_pad, d, dtype=torch.bfloat16, device=device)
+    q[:, rows:] = 0
+    sink = torch.full((h_pad,), float("-inf"), device=device)
+    sink[:rows] = torch.randn(rows, device=device)
+
+    # Overlapping, unequal key sets per position, as consecutive spec tokens
+    # of one request produce.
+    base = torch.randperm(num_pages * page, device=device)[: topk + 16]
+    indices = torch.full((num_tokens, 1, topk), -1, dtype=torch.int32, device=device)
+    lens = torch.empty(num_tokens, dtype=torch.int32, device=device)
+    for t in range(num_tokens):
+        n = topk - 4 * (t % num_slots)
+        indices[t, 0, :n] = base[t % num_slots : t % num_slots + n].int()
+        lens[t] = n
+
+    def run(qq, idx, ln, sk, mask=None, rps=0):
+        sched = fm.get_mla_metadata()[0]
+        out, _ = fm.flash_mla_with_kvcache(
+            q=qq,
+            k_cache=k_cache,
+            block_table=None,
+            head_dim_v=d,
+            tile_scheduler_metadata=sched,
+            cache_seqlens=None,
+            is_fp8_kvcache=True,
+            indices=idx,
+            topk_length=ln,
+            softmax_scale=d**-0.5,
+            attn_sink=sk,
+            indices_mask=mask,
+            rows_per_slot=rps,
+        )
+        return out
+
+    ref = run(q.unsqueeze(1), indices, lens, sink)[:, 0, :rows]
+
+    u_idx, u_mask, u_len = merge_slot_indices(
+        indices.view(num_tokens, -1), lens, num_slots
+    )
+    packed_sink = torch.full_like(sink, float("-inf"))
+    packed_sink[: num_slots * rows] = sink[:rows].repeat(num_slots)
+    out_p = run(
+        pack_slot_rows(q, num_reqs, num_slots, rows, h_pad),
+        u_idx,
+        u_len,
+        packed_sink,
+        u_mask,
+        rows,
+    )
+    got = torch.zeros(num_tokens, h_pad, d, dtype=torch.bfloat16, device=device)
+    unpack_slot_rows(out_p, got, num_slots, rows)
+    torch.testing.assert_close(got[:, :rows], ref, rtol=2e-2, atol=2e-2)

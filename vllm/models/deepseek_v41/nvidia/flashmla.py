@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING, ClassVar, cast
 
 import torch
 
+from vllm import envs
+from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4.nvidia.ops.o_proj import compute_fp8_einsum_recipe
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
@@ -17,22 +19,30 @@ from vllm.models.deepseek_v41.nvidia.ops.o_proj import (
     dsv41_o_proj,
     register_dsv41_o_proj_warmup,
 )
+from vllm.models.deepseek_v41.nvidia.ops.packed_sparse_decode import (
+    merge_slot_indices,
+    pack_slot_rows,
+    unpack_slot_rows,
+)
 from vllm.models.deepseek_v41.sparse_mla import (
     DeepseekV4FlashMLABackend,
     DeepseekV4FlashMLAMetadata,
     DeepseekV41SparseSWAMetadataBuilder,
 )
+from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
-from vllm.v1.attention.backend import AttentionCGSupport
+from vllm.v1.attention.backend import AttentionCGSupport, max_decode_query_len
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWABackend
 from vllm.v1.attention.ops.flashmla import (
     flash_mla_sparse_fwd,
     flash_mla_with_kvcache,
+    get_mla_metadata,
 )
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
+    from vllm.v1.attention.ops.flashmla import FlashMLASchedMeta
 
 
 class DeepseekSparseSWAFlashMLAMetadataBuilder(DeepseekV41SparseSWAMetadataBuilder):
@@ -63,6 +73,27 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             self._o_proj_block_size
         )
         register_dsv41_o_proj_warmup(self)
+        # Spec-decode packing: each request's 1 + K positions share one head
+        # tile, n_local_heads rows apiece.
+        self._pack_slots = max_decode_query_len(get_current_vllm_config())
+        self._pack_spec_decode = (
+            envs.VLLM_DSV41_PACK_SPEC_DECODE
+            and current_platform.is_device_capability_family(90)
+            and self.padded_heads == 64
+            and self._pack_slots > 1
+            and self._pack_slots * self.n_local_heads <= self.padded_heads
+        )
+        self._packed_attn_sink: torch.Tensor | None = None
+
+    def _get_packed_attn_sink(self) -> torch.Tensor:
+        # Built on first use so it sees the loaded sink. Tile row r holds head
+        # r % n_local_heads; rows past the packed slots stay -inf.
+        if self._packed_attn_sink is None:
+            sink = torch.full_like(self.attn_sink, float("-inf"))
+            n = self._pack_slots * self.n_local_heads
+            sink[:n] = self.attn_sink[: self.n_local_heads].repeat(self._pack_slots)
+            self._packed_attn_sink = sink
+        return self._packed_attn_sink
 
     def _o_proj(self, attn_out: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         return dsv41_o_proj(self, attn_out, positions)
@@ -239,6 +270,24 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             "allocate one for this layer type."
         )
 
+        # Pack only when every decode request is exactly 1 + K tokens wide.
+        if (
+            self._pack_spec_decode
+            and num_decodes > 0
+            and num_decode_tokens == num_decodes * self._pack_slots
+        ):
+            self._forward_decode_packed(
+                q.squeeze(1),
+                swa_cache,
+                kv_cache if not swa_only else None,
+                swa_metadata,
+                topk_indices,
+                topk_lens,
+                tile_metadata,
+                output,
+            )
+            return
+
         out, _ = flash_mla_with_kvcache(
             q=q,
             k_cache=swa_cache,
@@ -256,6 +305,75 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             extra_topk_length=topk_lens,
             out=output.unsqueeze(1),
         )
+
+    def _forward_decode_packed(
+        self,
+        q: torch.Tensor,
+        swa_cache: torch.Tensor,
+        kv_cache: torch.Tensor | None,
+        swa_metadata: "DeepseekSparseSWAMetadata",
+        topk_indices: torch.Tensor | None,
+        topk_lens: torch.Tensor | None,
+        tile_metadata: "FlashMLASchedMeta",
+        output: torch.Tensor,
+    ) -> None:
+        num_decodes = swa_metadata.num_decodes
+        num_decode_tokens = swa_metadata.num_decode_tokens
+        rows = self.n_local_heads
+        slots = self._pack_slots
+
+        # The SWA union is shared by every layer; the top-k union by every
+        # consumer of the same index source, so build each once per step.
+        cache = swa_metadata.packed_decode_cache
+        swa_key = "swa"
+        if swa_key not in cache:
+            assert swa_metadata.decode_swa_indices is not None
+            assert swa_metadata.decode_swa_lens is not None
+            cache[swa_key] = merge_slot_indices(
+                swa_metadata.decode_swa_indices.view(num_decode_tokens, -1),
+                swa_metadata.decode_swa_lens,
+                slots,
+            )
+        swa_idx, swa_mask, swa_len = cache[swa_key]
+        extra_idx = extra_mask = extra_len = None
+        if topk_indices is not None:
+            assert topk_lens is not None
+            topk_key = ("topk", self.index_source_layer_id, self.compress_ratio)
+            if topk_key not in cache:
+                cache[topk_key] = merge_slot_indices(
+                    topk_indices.view(num_decode_tokens, -1),
+                    topk_lens,
+                    slots,
+                )
+            extra_idx, extra_mask, extra_len = cache[topk_key]
+            # Union lengths differ between index sources, while a split plan
+            # is only valid for the lengths it was built from.
+            sched_key = ("sched", *topk_key)
+            if sched_key not in cache:
+                cache[sched_key] = (get_mla_metadata()[0],)
+            tile_metadata = cache[sched_key][0]
+
+        q_packed = pack_slot_rows(q, num_decodes, slots, rows, self.padded_heads)
+        out_packed, _ = flash_mla_with_kvcache(
+            q=q_packed,
+            k_cache=swa_cache,
+            block_table=None,
+            head_dim_v=512,
+            tile_scheduler_metadata=tile_metadata,
+            cache_seqlens=None,
+            is_fp8_kvcache=True,
+            indices=swa_idx,
+            topk_length=swa_len,
+            softmax_scale=self.scale,
+            attn_sink=self._get_packed_attn_sink(),
+            extra_k_cache=kv_cache,
+            extra_indices_in_kvcache=extra_idx,
+            extra_topk_length=extra_len,
+            indices_mask=swa_mask,
+            extra_indices_mask=extra_mask,
+            rows_per_slot=rows,
+        )
+        unpack_slot_rows(out_packed, output, slots, rows)
 
     def _forward_prefill(
         self,
