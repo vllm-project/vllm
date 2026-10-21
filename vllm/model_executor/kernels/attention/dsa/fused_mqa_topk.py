@@ -30,6 +30,16 @@ FUSED_MQA_TOPK_TOPKS = (512, 1024, 2048)
 FUSED_MQA_TOPK_MAX_ROWS = 16384
 FUSED_MQA_TOPK_MAX_KEYS = 1 << 20
 
+
+def fused_mqa_topk_min_keys(topk: int) -> int:
+    """Keys per row below which the dense logits + top-k path is as fast or
+    faster, so callers keep prefill chunks whose longest row sees fewer keys on
+    the dense path. B300 real captures, fused vs dense: top-512 0.89x at 16K
+    keys and 1.06x at 32K; top-1024 0.93x / 1.01x; top-2048 0.92x at 32K and
+    1.13x at 64K."""
+    return 1 << 16 if topk > 1024 else 1 << 15
+
+
 _CANDIDATES_PER_ROW = 16384
 _RETAINED_PER_ROW = 4096
 _SLOTS_PER_SM = 2
