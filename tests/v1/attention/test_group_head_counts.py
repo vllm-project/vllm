@@ -132,6 +132,7 @@ def _request_group(
         metadata = builder.build(0, common).scheduler_metadata
 
     # Workitem count is at byte 68; 48-byte items start at byte 192.
+    assert metadata is not None
     words = metadata.view(torch.int32)
     workitem_count = words[68 // 4].item()
     workitems = words[192 // 4 : 192 // 4 + workitem_count * 12].reshape(-1, 12)
