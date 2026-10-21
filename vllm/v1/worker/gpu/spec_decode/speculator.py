@@ -129,7 +129,8 @@ class DraftModelSpeculator(BaseSpeculator):
 
         assert vllm_config.speculative_config is not None
         self.speculative_config = vllm_config.speculative_config
-        self.method = self.speculative_config.method
+        # The built-in method, also for a custom speculator based on one.
+        self.method = self.speculative_config.builtin_method
         self.num_speculative_steps = self.speculative_config.num_speculative_tokens
         self.draft_model_config = self.speculative_config.draft_model_config
 

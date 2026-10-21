@@ -3970,7 +3970,7 @@ def test_watermarking_forces_model_runner_v2(monkeypatch):
     )
 
 
-@patch("vllm.config.speculative.ModelConfig")
+@patch("vllm.config.ModelConfig")
 def test_mtp_draft_uses_model_weights_not_local_cache(mock_model_config_cls):
     """Regression test: MTP + runai_streamer should use model_weights (original
     S3 URL) for the draft model, not model (local cache dir set by
@@ -3986,6 +3986,7 @@ def test_mtp_draft_uses_model_weights_not_local_cache(mock_model_config_cls):
     mock_draft.hf_config.n_predict = None
     mock_draft.hf_config.num_nextn_predict_layers = 1
     mock_draft.hf_config.max_position_embeddings = 4096
+    mock_draft.speculator_config_class = None
     mock_draft.max_model_len = 4096
     mock_model_config_cls.return_value = mock_draft
 

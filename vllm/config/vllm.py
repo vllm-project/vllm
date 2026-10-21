@@ -27,6 +27,9 @@ from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils import random_uuid
 from vllm.utils.hashing import safe_hash
+from vllm.v1.worker.gpu.spec_decode.speculator_config import (
+    get_custom_speculator_config_class,
+)
 
 from .attention import AttentionConfig, HiSparseConfig
 from .aux_output import AuxOutputConfig
@@ -702,21 +705,21 @@ class VllmConfig:
             return True
 
         speculative_config = getattr(self, "speculative_config", None)
-        if speculative_config and speculative_config.speculator_config_class:
+        custom_method = getattr(speculative_config, "method", None)
+        if get_custom_speculator_config_class(custom_method) is not None:
+            requires_v2 = f"Custom speculative method '{custom_method}' requires"
             if envs.VLLM_USE_V2_MODEL_RUNNER is False:
                 raise ValueError(
-                    "speculator_config_class requires Model Runner V2; remove "
-                    "VLLM_USE_V2_MODEL_RUNNER=0."
+                    f"{requires_v2} Model Runner V2; remove VLLM_USE_V2_MODEL_RUNNER=0."
                 )
             if not HAS_TRITON:
                 raise ValueError(
-                    "speculator_config_class requires Model Runner V2, which "
-                    "requires Triton."
+                    f"{requires_v2} Model Runner V2, which requires Triton."
                 )
             if unsupported := self._get_v2_model_runner_unsupported_features():
                 raise ValueError(
-                    "speculator_config_class requires Model Runner V2, which does not "
-                    f"yet support {', '.join(unsupported)}."
+                    f"{requires_v2} Model Runner V2, which does not yet support "
+                    f"{', '.join(unsupported)}."
                 )
             return True
 
@@ -3081,9 +3084,16 @@ class VllmConfig:
 
         # DSpark is implemented only by the V2 GPU model runner.
         if self.speculative_config:
+            # Imported here since it imports vllm.config.
+            from vllm.v1.worker.gpu.spec_decode.xpress.config import (
+                XPressSpeculatorConfig,
+            )
+
             if self.speculative_config.method == "dspark":
                 unsupported.append("dspark speculative decoding")
-            elif self.speculative_config.is_xpress():
+            elif isinstance(
+                self.speculative_config.speculator_config, XPressSpeculatorConfig
+            ):
                 unsupported.append("xpress speculative decoding")
             if self.speculative_config.enable_adaptive_verification:
                 unsupported.append("adaptive draft verification")

@@ -47,18 +47,31 @@ def test_none_overrides_fall_back_to_arch_mapping():
     assert composed is SpeculativeConfig.hf_config_override
 
 
+_SELF_CONTAINED_DRAFT_SPECULATORS = {
+    "Gemma4DSparkModel": (
+        "vllm.v1.worker.gpu.spec_decode.dspark.config.DSparkSpeculatorConfig"
+    ),
+}
+
+
 def _make_speculative_config(
     hf_kwargs: dict, architecture: str, **speculative_kwargs
 ) -> SpeculativeConfig:
     hf_config = SpeculativeConfig.hf_config_override(_make_hf_config(**hf_kwargs))
     draft = MagicMock(
-        hf_config=hf_config, architectures=hf_config.architectures, max_model_len=128
+        hf_config=hf_config,
+        architectures=hf_config.architectures,
+        max_model_len=128,
+        # Self-contained DSpark draft models declare their speculator.
+        speculator_config_class=_SELF_CONTAINED_DRAFT_SPECULATORS.get(
+            hf_config.architectures[0]
+        ),
     )
     draft.registry.inspect_model_cls.return_value = (None, architecture)
     target = MagicMock(max_model_len=128, quantization=None, hf_overrides={})
     target.hf_config.model_type = hf_kwargs["model_type"]
 
-    with patch("vllm.config.speculative.ModelConfig", return_value=draft):
+    with patch("vllm.config.ModelConfig", return_value=draft):
         return SpeculativeConfig(
             model="draft",
             **speculative_kwargs,
@@ -238,6 +251,7 @@ def _make_mtp_speculative_config(
         hf_config=draft_hf_config,
         architectures=draft_hf_config.architectures,
         max_model_len=128,
+        speculator_config_class=None,
     )
     target_model_config = MagicMock(
         model="target",
@@ -246,7 +260,7 @@ def _make_mtp_speculative_config(
         hf_overrides={},
     )
 
-    with patch("vllm.config.speculative.ModelConfig", return_value=draft_model_config):
+    with patch("vllm.config.ModelConfig", return_value=draft_model_config):
         return SpeculativeConfig(
             model="draft",
             method="mtp",

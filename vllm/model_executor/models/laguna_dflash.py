@@ -236,6 +236,11 @@ class DFlashLagunaModel(DFlashQwen3Model, EagleModelMixin):
 
 
 class DFlashLagunaForCausalLM(nn.Module, SupportsEagle3):
+    # The speculator this is a draft model of (see SpeculativeDraftModel).
+    speculator_config_class = (
+        "vllm.v1.worker.gpu.spec_decode.dflash.config.DFlashSpeculatorConfig"
+    )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
         speculative_config = vllm_config.speculative_config

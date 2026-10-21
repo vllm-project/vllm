@@ -19,13 +19,19 @@ from vllm.transformers_utils.config import get_hf_text_config, iter_rope_paramet
 from vllm.utils.hashing import safe_hash
 from vllm.utils.import_utils import LazyLoader, has_arctic_inference
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.worker.gpu.spec_decode.speculator_config import (
+    SpeculatorConfig,
+    get_custom_speculator_config_class,
+    get_method_config_class,
+    get_speculator_config_class,
+    registered_speculative_methods,
+)
 
 if TYPE_CHECKING:
     from transformers import PreTrainedConfig
 
     import vllm.model_executor.layers.quantization as me_quant
     from vllm.config.vllm import VllmConfig
-    from vllm.v1.worker.gpu.spec_decode.speculator_config import SpeculatorConfig
 else:
     PreTrainedConfig = Any
     VllmConfig = Any
@@ -91,12 +97,12 @@ _QWEN3_OMNI_TARGET_ARCHITECTURES = frozenset(
     }
 )
 _QWEN3_OMNI_DSPARK_ARCHITECTURE = "Qwen3OmniDSparkModel"
-_MUSE_SPARK_DSPARK_ARCHITECTURE = "MuseSparkDSparkModel"
-
-# Draft architectures that carry an XPress refiner. EAGLEConfig rewrites a dflash
-# draft's architecture to DFlash{arch}, so a checkpoint is seen under either name;
-# get_speculator_config_class() reads this same set.
-XPRESS_ARCHITECTURES = frozenset({"Qwen3XPressModel", "DFlashQwen3XPressModel"})
+# See `SpeculatorConfig.supported_options`.
+_METHOD_SPECIFIC_OPTIONS = (
+    "dspark_draft_topk",
+    "index_share_for_mtp_iteration",
+    "xpress_topc",
+)
 
 # RoPE types for which get_rope uses max_position_embeddings only to size the
 # cos_sin_cache, so raising it leaves the rotary frequencies unchanged. Others
@@ -417,29 +423,22 @@ class SpeculativeConfig:
     model: str | None = None
     """The name of the draft model, eagle head, or additional weights, if
     provided."""
-    method: SpeculativeMethod | None = None
+    method: SpeculativeMethod | str | None = None
     """The name of the speculative method to use. If users provide and set the
     `model` param, the speculative method type will be detected automatically
     if possible, if `model` param is not provided, the method name must be
     provided.
 
     If using `ngram` method, the related configuration `prompt_lookup_max` and
-    `prompt_lookup_min` should be considered."""
-    speculator_config_class: str | None = None
-    """Fully-qualified name of the config class of a user-provided speculator
-    for the V2 model runner (e.g. `"my_module.MySpeculatorConfig"`), used with
-    `method="custom_class"`. The class must subclass
-    `vllm.v1.worker.gpu.spec_decode.speculator_config.SpeculatorConfig`,
-    describe how the speculator behaves, and name the speculator class itself
-    (a `BaseSpeculator` subclass) in its `speculator_class`. It is imported in
-    every vLLM process, so its module should not import the speculator. This
-    is an experimental interface that may change between releases."""
-    base_method: SpeculativeMethod | None = None
-    """Optional built-in speculative method whose interpretation of `model` a
-    custom speculator uses, i.e. how the draft model config is created. If not
-    set, `model` is passed through uninterpreted and the draft model config is
-    the target's. The speculator's behavior is described by its
-    `speculator_config_class`, regardless of `base_method`."""
+    `prompt_lookup_min` should be considered.
+
+    A configured method is never changed based on the draft checkpoint, but it
+    is checked against it where the checkpoint can be recognized (e.g. `mtp`
+    requires an MTP draft, and `draft_model` rejects one).
+
+    Besides the built-in methods, this can be a custom method registered with
+    `vllm.v1.worker.gpu.spec_decode.speculator_config.register_speculative_method`
+    (e.g. by a vLLM plugin), which requires the V2 model runner."""
     draft_tensor_parallel_size: int | None = Field(default=None, ge=1)
     """The degree of the tensor parallelism for the draft model. Can only be 1
     or the same as the target model's tensor parallel size."""
@@ -685,8 +684,6 @@ class SpeculativeConfig:
         # they return intermediate hidden states in addition to the final hidden state.
         uses_aux_hidden_states = self.uses_aux_hidden_states
         factors.append(uses_aux_hidden_states)
-        if self.method == "dspark":
-            factors.append(self.enable_adaptive_verification)
 
         if self.draft_model_config is not None:
             factors.append(self.draft_model_config.compute_hash())
@@ -701,16 +698,8 @@ class SpeculativeConfig:
                 factors.append(tuple(layer_ids))
 
         # A custom speculator may compile a different draft model graph.
-        factors.append(self.speculator_config_class)
-
-        if self.method == "mtp" and self.draft_model_config is not None:
-            factors.append(
-                getattr(
-                    self.draft_model_config.hf_config,
-                    "index_share_for_mtp_iteration",
-                    False,
-                )
-            )
+        factors.append(self.method)
+        factors.extend(self.speculator_config.hash_factors())
 
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
@@ -718,6 +707,21 @@ class SpeculativeConfig:
     @staticmethod
     def hf_config_override(hf_config: PreTrainedConfig) -> PreTrainedConfig:
         initial_architecture = hf_config.architectures[0]
+        if (
+            initial_architecture == "DSparkDraftModel"
+            and hf_config.model_type == "qwen3"
+        ):
+            # Qwen3 DSpark drafts reuse the DeepSeek-V4 DSpark architecture name.
+            hf_config.update({"architectures": ["Qwen3DSparkModel"]})
+            return hf_config
+        if initial_architecture == "Gemma4DSparkModel":
+            # Normalize the Gemma4 DSpark draft's config keys to DSpark's.
+            if (
+                getattr(hf_config, "dspark_target_layer_ids", None) is None
+                and getattr(hf_config, "target_layer_ids", None) is not None
+            ):
+                hf_config.dspark_target_layer_ids = hf_config.target_layer_ids
+            return hf_config
         if initial_architecture == "RadioMBartPrefixForCausalLM" and getattr(
             getattr(hf_config, "decoder", None), "causal_vision_prefix", False
         ):
@@ -1214,33 +1218,6 @@ class SpeculativeConfig:
         parts = model.split(".")
         return len(parts) >= 2 and all(part.isidentifier() for part in parts)
 
-    def _resolve_speculator_class_method(self) -> None:
-        """Replace `method="custom_class"` with `base_method` when a custom
-        `speculator_config_class` is given, so that the draft model config is
-        created as for the built-in method. Without `base_method`, `method`
-        stays "custom_class"."""
-        if self.speculator_config_class is None:
-            if self.base_method is not None:
-                raise ValueError(
-                    "base_method requires speculator_config_class to be set."
-                )
-            return
-        if self.base_method == "custom_class":
-            raise ValueError("base_method cannot be 'custom_class'.")
-        if self.method in (None, "custom_class"):
-            logger.warning_once(
-                "Using custom speculator config class '%s'. This is an "
-                "experimental feature and the speculator interface is subject "
-                "to breaking changes in future vLLM releases.",
-                self.speculator_config_class,
-            )
-            self.method = self.base_method or "custom_class"
-        elif self.method != (self.base_method or "custom_class"):
-            raise ValueError(
-                "speculator_config_class requires method='custom_class', "
-                f"got method={self.method!r}."
-            )
-
     def __post_init__(self):
         # Note: "method" is a new parameter that helps to extend the
         # configuration of non-model-based proposers, and the "model" parameter
@@ -1250,468 +1227,53 @@ class SpeculativeConfig:
         # can not be detected, it will be considered as the "draft_model" by
         # default.
 
-        self._resolve_speculator_class_method()
-
         # infer method from user args
-        if self.method is None and SpeculativeConfig._is_custom_proposer_path(
+        if get_custom_speculator_config_class(self.method) is not None:
+            logger.warning_once(
+                "Using custom speculative method '%s'. This is an experimental "
+                "feature and the speculator interface is subject to breaking "
+                "changes in future vLLM releases.",
+                self.method,
+            )
+        elif self.method is None and SpeculativeConfig._is_custom_proposer_path(
             self.model
         ):
+            # V1 model runner only: a custom proposer's module path.
             self.method = "custom_class"
-        elif self.method is None:
-            if self.model in ("ngram", "[ngram]"):
-                self.method = "ngram"
-            else:
-                self.method = "draft_model"
+        elif self.method is None and self.model in ("ngram", "[ngram]"):
+            self.method = "ngram"
+        # Otherwise, it stays None until detected from the draft checkpoint.
 
         if self.method in get_args(MTPModelTypes) and self.method != "mtp":
             logger.warning(
                 "method `%s` is deprecated and replaced with mtp.", self.method
             )
             self.method = "mtp"
-
-        if self.model is None and self.num_speculative_tokens is not None:
-            if self.method == "mtp":
-                if self.target_model_config is None:
-                    raise ValueError("target_model_config must be present for mtp")
-                # use the draft model from the same model:
-                # Use model_weights if set (e.g. runai_streamer replaces
-                # model with a local cache dir but keeps the original path
-                # in model_weights), so the draft model can load weights
-                # from the same source as the target model.
-                self.model = (
-                    self.target_model_config.model_weights
-                    or self.target_model_config.model
-                )
-                # Align the quantization of draft model for cases such as
-                # --quantization fp8 with a bf16 checkpoint.
-                if not self.quantization:
-                    self.quantization = self.target_model_config.quantization
-            elif self.method == "dspark":
-                # DeepSeek DSpark can ship the weights inside the target checkpoint
-                if self.target_model_config is None:
-                    raise ValueError("target_model_config must be present for dspark")
-                self.model = self.target_model_config.model
-                if not self.quantization:
-                    self.quantization = self.target_model_config.quantization
-            elif self.method in ("ngram", "[ngram]"):
-                self.model = "ngram"
-            elif self.method == "ngram_gpu":
-                self.model = "ngram_gpu"
-            elif self.method == "suffix":
-                self.model = "suffix"
-            elif self.method == "extract_hidden_states":
-                self.model = "extract_hidden_states"
-            elif self.method == "custom_class":
-                # A V1 custom proposer is loaded from the module path in model; a
-                # custom speculator_config_class doesn't need a model.
-                if self.speculator_config_class is None:
-                    raise ValueError(
-                        "method='custom_class' requires 'model' to contain the "
-                        "custom proposer module path (e.g., 'my_module.MyProposer')."
-                    )
-            else:
-                raise ValueError(
-                    "num_speculative_tokens was provided but without speculative model."
-                )
-
-        if self.method in ("ngram", "[ngram]"):
+        elif self.method == "[ngram]":
             self.method = "ngram"
 
-        if self.method in ("ngram", "ngram_gpu"):
-            # Set default values if not provided
-            if self.prompt_lookup_min is None and self.prompt_lookup_max is None:
-                # TODO(woosuk): Tune these values. They are arbitrarily chosen.
-                self.prompt_lookup_min = 5
-                self.prompt_lookup_max = 5
-            elif self.prompt_lookup_min is None:
-                if self.prompt_lookup_max is None:
-                    raise ValueError(
-                        "Either prompt_lookup_max or prompt_lookup_min must be "
-                        "provided when using the ngram method."
-                    )
-                self.prompt_lookup_min = self.prompt_lookup_max
-            elif self.prompt_lookup_max is None:
-                if self.prompt_lookup_min is None:
-                    raise ValueError(
-                        "Either prompt_lookup_max or prompt_lookup_min must be "
-                        "provided when using the ngram method."
-                    )
-                self.prompt_lookup_max = self.prompt_lookup_min
+        config_cls = get_method_config_class(self)
+        if self.model is None and self.num_speculative_tokens is not None:
+            self.model = config_cls.default_model(self)
+        config_cls.configure(self)
+        if self.method is None:
+            self.method = config_cls.builtin_method  # type: ignore[assignment]
+        # The draft checkpoint may have determined the speculator.
+        config_cls = get_speculator_config_class(self)
 
-            # Validate values
-            if self.prompt_lookup_min > self.prompt_lookup_max:
-                raise ValueError(
-                    f"prompt_lookup_min={self.prompt_lookup_min} must "
-                    f"be <= prompt_lookup_max={self.prompt_lookup_max}"
-                )
-
-            # TODO: current we still need extract vocab_size from target model
-            # config, in future, we may try refactor it out, and set
-            # draft related config as None here.
-            self.draft_model_config = self.target_model_config
-            self.draft_parallel_config = self.target_parallel_config
-        elif self.method == "suffix":
-            self._validate_suffix_decoding()
-        elif self.method == "custom_class":
-            # Custom class proposer does not need a draft model.
-            # It will dynamically load the user-provided class at runtime.
-            if self.speculator_config_class is None:
-                logger.warning_once(
-                    "Using a custom class-based proposer backend. This is an "
-                    "experimental feature and the proposer interface is subject "
-                    "to breaking changes in future vLLM releases."
-                )
-            self.prompt_lookup_max = 0
-            self.prompt_lookup_min = 0
-            self.draft_model_config = self.target_model_config
-            self.draft_parallel_config = self.target_parallel_config
-        elif self.method == "extract_hidden_states":
-            from vllm.transformers_utils.configs.extract_hidden_states import (
-                ExtractHiddenStatesConfig,
-            )
-
-            # ExtractHiddenStatesModel is instantiated manually in load_model()
-            # We just need to store the target model config for KV cache shape info
-            self.model = "extract_hidden_states"
-            self.prompt_lookup_max = 0
-            self.prompt_lookup_min = 0
-
-            if hasattr(self.draft_model_config, "hf_config"):
-                hf_config = self.draft_model_config.hf_config.to_dict()
-            elif (
-                isinstance(self.draft_model_config, dict)
-                and "hf_config" in self.draft_model_config
+        for option in _METHOD_SPECIFIC_OPTIONS:
+            if (
+                getattr(self, option) is not None
+                and option not in config_cls.supported_options
             ):
-                hf_config = self.draft_model_config["hf_config"]
-            else:
-                hf_config = {}
-
-            self.draft_model_config = copy.copy(self.target_model_config)
-            self.draft_model_config.hf_config = ExtractHiddenStatesConfig(
-                self.draft_model_config.hf_config, **hf_config
-            )
-            self.update_arch_()
-            self.draft_parallel_config = self.target_parallel_config
-
-        else:
-            self.prompt_lookup_max = 0
-            self.prompt_lookup_min = 0
-
-            if self.model is not None:
-                # Compose any callable hf_overrides set on the target so the
-                # draft config receives the same transform (e.g. the test
-                # shrink). Dict overrides stay target-only.
-                draft_hf_overrides = SpeculativeConfig.compose_draft_hf_overrides(
-                    self.target_model_config.hf_overrides
-                )
-                self.draft_model_config = ModelConfig(
-                    model=self.model,
-                    runner="draft",
-                    tokenizer=(
-                        self.model
-                        if self.use_heterogeneous_vocab
-                        else self.target_model_config.tokenizer
-                    ),
-                    tokenizer_mode=self.target_model_config.tokenizer_mode,
-                    trust_remote_code=self.target_model_config.trust_remote_code,
-                    allowed_local_media_path=self.target_model_config.allowed_local_media_path,
-                    allowed_media_domains=self.target_model_config.allowed_media_domains,
-                    dtype=self.target_model_config.dtype,
-                    seed=self.target_model_config.seed,
-                    revision=self.revision,
-                    code_revision=self.code_revision,
-                    tokenizer_revision=self.target_model_config.tokenizer_revision,
-                    max_model_len=self.max_model_len,  # type: ignore[arg-type]
-                    spec_target_max_model_len=self.target_model_config.max_model_len,
-                    quantization=self.quantization,
-                    enforce_eager=self.target_model_config.enforce_eager,
-                    max_logprobs=self.target_model_config.max_logprobs,
-                    hf_overrides=draft_hf_overrides,
-                    config_format=self.target_model_config.config_format,
-                )
-
-                # Automatically detect the method
-                if self.method in (
-                    "eagle",
-                    "eagle3",
-                    "dflash",
-                    "dspark",
-                ):
-                    pass
-                # examples:
-                # yuhuili/EAGLE-LLaMA3-Instruct-8B
-                # yuhuili/EAGLE3-LLaMA3.1-Instruct-8B
-                # AngelSlim/Qwen3-8B_eagle3
-                # deepseek-ai/dspark_qwen3_8b_block7
-                elif "eagle-" in self.draft_model_config.model.lower():
-                    self.method = "eagle"
-                elif "eagle3" in self.draft_model_config.model.lower():
-                    self.method = "eagle3"
-                elif (
-                    "dflash" in self.draft_model_config.model.lower()
-                    or "MuseGlimmerAssistantModel"
-                    in self.draft_model_config.architectures
-                ):
-                    self.method = "dflash"
-                elif (
-                    "dspark" in self.draft_model_config.model.lower()
-                    or "Qwen3DSparkModel" in self.draft_model_config.architectures
-                    or _QWEN3_OMNI_DSPARK_ARCHITECTURE
-                    in self.draft_model_config.architectures
-                    or _MUSE_SPARK_DSPARK_ARCHITECTURE
-                    in self.draft_model_config.architectures
-                    or "Gemma4DSparkModel" in self.draft_model_config.architectures
-                    or (
-                        "DSparkDraftModel" in self.draft_model_config.architectures
-                        and self.draft_model_config.hf_config.model_type == "qwen3"
-                    )
-                ):
-                    self.method = "dspark"
-                elif self.draft_model_config.hf_config.model_type in get_args(
-                    MTPModelTypes
-                ):
-                    self.method = "mtp"
-                    if (
-                        self.target_model_config is not None
-                        and self.target_model_config.hf_config.model_type
-                        == "deepseek_v41"
-                    ):
-                        raise ValueError(
-                            "DeepSeek V4.1 has no classic-MTP draft: its "
-                            "checkpoints ship DSpark stages under mtp.* "
-                            "(main_proj/markov_head/confidence_head) and carry "
-                            "no e_proj/h_proj/enorm/hnorm/hc_head weights. Use "
-                            "speculative method 'dspark' instead of 'mtp'."
-                        )
-                    if (
-                        self.num_speculative_tokens > 1
-                        and self.draft_model_config.hf_config.model_type
-                        not in ("step3p5_mtp", "step5_mtp", "inkling_mtp")
-                    ):
-                        logger.warning(
-                            "Enabling num_speculative_tokens > 1 will run "
-                            "multiple times of forward on same MTP layer"
-                            ",which may result in lower acceptance rate"
-                        )
-                elif self.method == "draft_model":
-                    pass
-                else:
-                    raise NotImplementedError(
-                        f"Unsupported speculative method: '{self.method}'"
-                    )
-
-                if self.method != "draft_model":
-                    # Every draft but an independent model shares the target's
-                    # positional space; a draft checkpoint with a smaller
-                    # max_position_embeddings than the target under-sizes its
-                    # rotary cache (#48894, #57941).
-                    SpeculativeConfig._maybe_override_draft_max_position_embeddings(
-                        self.draft_model_config.hf_config,
-                        self.target_model_config.max_model_len,
-                    )
-
-                # Replace hf_config for EAGLE draft_model
-                if self.method in ("eagle", "eagle3", "dflash"):
-                    from vllm.transformers_utils.configs.eagle import EAGLEConfig
-                    from vllm.transformers_utils.configs.speculators import (
-                        SpeculatorsConfig,
-                    )
-
-                    if isinstance(
-                        self.draft_model_config.hf_config,
-                        (EAGLEConfig, SpeculatorsConfig),
-                    ):
-                        pass
-                    else:
-                        eagle_config = EAGLEConfig(
-                            self.draft_model_config.hf_config,
-                            method=self.method,
-                            model_type="eagle",
-                        )
-                        self.draft_model_config.hf_config = eagle_config
-                        self.update_arch_()
-
-                if (
-                    self.method == "dspark"
-                    and "DSparkDraftModel" in self.draft_model_config.architectures
-                    and self.draft_model_config.hf_config.model_type == "qwen3"
-                ):
-                    self.draft_model_config.hf_config.architectures = [
-                        "Qwen3DSparkModel"
-                    ]
-                    self.update_arch_()
-                elif self.method == "dspark" and (
-                    "Qwen3DSparkModel" not in self.draft_model_config.architectures
-                    and _QWEN3_OMNI_DSPARK_ARCHITECTURE
-                    not in self.draft_model_config.architectures
-                    and _MUSE_SPARK_DSPARK_ARCHITECTURE
-                    not in self.draft_model_config.architectures
-                    and "Gemma4DSparkModel" not in self.draft_model_config.architectures
-                    and "K3DSparkModel" not in self.draft_model_config.architectures
-                ):
-                    # DeepSeek-V4(.1) DSpark reuses the full target config
-                    # and its weights ship in the target checkpoint.
-                    is_v41 = (
-                        self.target_model_config.hf_config.model_type == "deepseek_v41"
-                    )
-                    draft_hf_config = self.draft_model_config.hf_config
-                    draft_hf_config.model_type = (
-                        "deepseek_v41" if is_v41 else "deepseek_v4"
-                    )
-                    draft_hf_config.architectures = [
-                        "DSparkV41DraftModel" if is_v41 else "DSparkDraftModel"
-                    ]
-                    self.draft_model_config.quantization = (
-                        self.target_model_config.quantization
-                    )
-                    self.update_arch_()
-                elif (
-                    self.method == "dspark"
-                    and "Gemma4DSparkModel" in self.draft_model_config.architectures
-                ):
-                    # Normalize the self-contained Gemma4 draft's config keys to
-                    # the DSpark conventions.
-                    hf = self.draft_model_config.hf_config
-                    if (
-                        getattr(hf, "dspark_target_layer_ids", None) is None
-                        and getattr(hf, "target_layer_ids", None) is not None
-                    ):
-                        hf.dspark_target_layer_ids = hf.target_layer_ids
-
-                if self.method in ("dflash", "dspark"):
-                    self.parallel_drafting = True
-
-                n_predict = getattr(
-                    self.draft_model_config.hf_config, "n_predict", None
-                )
-                if (
-                    "ParseAuxMTPModel" in self.draft_model_config.architectures
-                    and self.num_speculative_tokens not in (None, 1)
-                ):
-                    raise ValueError("Parse 3.5 has only one trained MTP step")
-                if self.use_dspark():
-                    if self.num_speculative_tokens is None:
-                        # DSpark's parallel width is independent of MTP stages.
-                        hf_config = self.draft_model_config.hf_config
-                        block_size = getattr(hf_config, "block_size", None)
-                        if block_size is None:
-                            block_size = getattr(hf_config, "dspark_block_size", None)
-                        self.num_speculative_tokens = block_size
-                elif n_predict is not None:
-                    if self.num_speculative_tokens is None:
-                        # Default to max value defined in draft model config.
-                        self.num_speculative_tokens = n_predict
-                    elif (
-                        self.num_speculative_tokens > n_predict
-                        and self.num_speculative_tokens % n_predict != 0
-                    ):
-                        # Ensure divisibility for MTP module reuse.
-                        raise ValueError(
-                            f"num_speculative_tokens:{self.num_speculative_tokens}"
-                            f" must be divisible by {n_predict=}"
-                        )
-
-                if self.num_speculative_tokens is None:
-                    raise ValueError(
-                        "A speculative model was provided, but "
-                        "`num_speculative_tokens` was not provided"
-                    )
-
-                if self.xpress_topc is not None and not self.is_xpress():
-                    raise ValueError("xpress_topc is only supported by XPress")
-
-                if self.is_xpress():
-                    hf_config = self.draft_model_config.hf_config
-                    xpress_topc = self.xpress_topc
-                    if xpress_topc is None:
-                        xpress_topc = getattr(hf_config, "xpress_topc", None)
-                    if xpress_topc is not None:
-                        draft_vocab_size = (
-                            getattr(hf_config, "draft_vocab_size", None)
-                            or hf_config.vocab_size
-                        )
-                        if not 0 <= xpress_topc <= draft_vocab_size:
-                            raise ValueError(
-                                "xpress_topc must be between 0 and the draft "
-                                f"vocabulary size ({draft_vocab_size})"
-                            )
-                        hf_config.xpress_topc = xpress_topc
-
-                if self.dspark_draft_topk is not None and self.method != "dspark":
-                    raise ValueError("dspark_draft_topk is only supported by DSpark")
-
-                dspark_draft_topk = None
-                if self.method == "dspark":
-                    hf_config = self.draft_model_config.hf_config
-                    dspark_draft_topk = self.dspark_draft_topk
-                    if dspark_draft_topk is None:
-                        dspark_draft_topk = getattr(
-                            hf_config, "dspark_draft_topk", None
-                        )
-                    if dspark_draft_topk is not None:
-                        draft_vocab_size = (
-                            getattr(hf_config, "draft_vocab_size", None)
-                            or hf_config.vocab_size
-                        )
-                        if not 1 <= dspark_draft_topk <= draft_vocab_size:
-                            raise ValueError(
-                                "dspark_draft_topk must be between 1 and the "
-                                f"draft vocabulary size ({draft_vocab_size})"
-                            )
-                        if (
-                            "Qwen3DSparkModel"
-                            not in self.draft_model_config.architectures
-                            and _QWEN3_OMNI_DSPARK_ARCHITECTURE
-                            not in self.draft_model_config.architectures
-                        ):
-                            raise ValueError(
-                                "dspark_draft_topk is only supported by "
-                                "Qwen3DSparkModel and Qwen3OmniDSparkModel"
-                            )
-                        hf_config.dspark_draft_topk = dspark_draft_topk
-
-                    assert self.target_model_config is not None
-                    _validate_qwen3_omni_dspark(
-                        self.target_model_config,
-                        self.draft_model_config,
-                        self.num_speculative_tokens,
-                    )
-
-                self.draft_tensor_parallel_size = (
-                    SpeculativeConfig._verify_and_get_draft_tp(
-                        self.target_parallel_config,
-                        self.draft_tensor_parallel_size,
-                    )
-                )
-                self.draft_model_config.max_model_len = (
-                    SpeculativeConfig._maybe_override_draft_max_model_len(
-                        self.max_model_len,
-                        self.draft_model_config.max_model_len,
-                        self.target_model_config.max_model_len,
-                    )
-                )
-
-                # Use the final draft config, after any architecture overrides,
-                # so EP agrees with ModelConfig's expert-count validation.
-                self.draft_parallel_config = (
-                    SpeculativeConfig.create_draft_parallel_config(
-                        self.target_parallel_config,
-                        self.draft_tensor_parallel_size,
-                        draft_model_config=self.draft_model_config,
-                    )
-                )
-
-        if self.index_share_for_mtp_iteration is not None:
-            if self.method != "mtp" or self.draft_model_config is None:
                 raise ValueError(
-                    "index_share_for_mtp_iteration is only supported with method='mtp'"
+                    f"{option} is not supported with speculative method "
+                    f"{self.method!r}."
                 )
-            self.draft_model_config.hf_config.index_share_for_mtp_iteration = (
-                self.index_share_for_mtp_iteration
-            )
+        config_cls.apply_options(self)
 
         if (
-            self.method != "dspark"
+            config_cls.adaptive_verification_uses_draft_logits
             and self.enable_adaptive_verification
             and self.use_local_argmax_reduction
         ):
@@ -1721,23 +1283,21 @@ class SpeculativeConfig:
                 "materializes. Disable one of them."
             )
 
-        # Validate a custom speculator config class early.
-        _ = self.speculator_config
-
         return self
 
     @property
-    def speculator_config(self) -> "SpeculatorConfig":
-        """Describes the configured speculator's behavior; see
-        `vllm.v1.worker.gpu.spec_decode.speculator_config`.
-
-        This is derived from the other fields on each access, which is cheap.
-        """
-        from vllm.v1.worker.gpu.spec_decode.speculator_config import (
-            get_speculator_config_class,
-        )
-
+    def speculator_config(self) -> SpeculatorConfig:
+        """The configured speculator's config (derived on each access)."""
         return get_speculator_config_class(self)(self)
+
+    @property
+    def builtin_method(self) -> str | None:
+        """`method`, or for a custom method, the built-in method its config is
+        based on. Use this (or the `use_*` methods) to check for a method, so
+        that custom speculators based on built-in ones are treated like them.
+        """
+        custom_cls = get_custom_speculator_config_class(self.method)
+        return self.method if custom_cls is None else custom_cls.builtin_method
 
     # Shortcuts for commonly used speculator config properties.
 
@@ -1762,6 +1322,7 @@ class SpeculativeConfig:
         return self.speculator_config.supports_parallel_drafting
 
     def _validate_suffix_decoding(self):
+        # V1 model runner only, to be removed with it.
         if not has_arctic_inference():
             raise ImportError(
                 "Arctic Inference is required for suffix decoding. "
@@ -1964,6 +1525,19 @@ class SpeculativeConfig:
                 vllm_config = replace(vllm_config, **{config_name: sub_config})
         return vllm_config
 
+    @field_validator("method")
+    @classmethod
+    def _validate_method(cls, value: str | None) -> str | None:
+        if value is None or value in get_args(SpeculativeMethod):
+            return value
+        if value not in (registered := registered_speculative_methods()):
+            raise ValueError(
+                f"Unknown speculative method {value!r}. Built-in methods: "
+                f"{sorted(get_args(SpeculativeMethod))}; registered custom "
+                f"methods: {registered}."
+            )
+        return value
+
     @field_validator("attention_backend", mode="before")
     @classmethod
     def _parse_attention_backend(cls, value: Any) -> Any:
@@ -2030,27 +1604,11 @@ class SpeculativeConfig:
                 self.draft_parallel_config
             )
 
-        if self.use_heterogeneous_vocab and not self.uses_draft_model():
-            raise ValueError(
-                "use_heterogeneous_vocab only works with method='draft_model'"
-            )
-
-        if self.use_heterogeneous_vocab and self.draft_sample_method != "greedy":
-            raise ValueError(
-                "use_heterogeneous_vocab currently only supports greedy draft "
-                "sampling. Set draft_sample_method='greedy' (the default) or "
-                "omit it."
-            )
-
-        if self.use_heterogeneous_vocab and self.use_local_argmax_reduction:
-            raise ValueError(
-                "use_heterogeneous_vocab is not compatible with "
-                "use_local_argmax_reduction because token-level intersection "
-                "requires the full draft logits."
-            )
+        if self.use_heterogeneous_vocab:
+            self._verify_heterogeneous_vocab_args()
 
         if self.rejection_sample_method == "fly":
-            if self.uses_extract_hidden_states():
+            if not self.speculator_config.proposes_draft_tokens:
                 raise ValueError(
                     "FLy is not compatible with method='extract_hidden_states', "
                     "which does not perform speculative decoding."
@@ -2075,9 +1633,30 @@ class SpeculativeConfig:
             self.verify_equal_vocab_size_if_draft_model()
         return self
 
+    def _verify_heterogeneous_vocab_args(self) -> None:
+        # V1 model runner only (V2 falls back to V1 for this).
+        if not self.speculator_config.supports_heterogeneous_vocab:
+            raise ValueError(
+                "use_heterogeneous_vocab only works with method='draft_model'"
+            )
+
+        if self.draft_sample_method != "greedy":
+            raise ValueError(
+                "use_heterogeneous_vocab currently only supports greedy draft "
+                "sampling. Set draft_sample_method='greedy' (the default) or "
+                "omit it."
+            )
+
+        if self.use_local_argmax_reduction:
+            raise ValueError(
+                "use_heterogeneous_vocab is not compatible with "
+                "use_local_argmax_reduction because token-level intersection "
+                "requires the full draft logits."
+            )
+
     def verify_equal_vocab_size_if_draft_model(self):
         if (
-            self.method == "draft_model"
+            self.speculator_config.requires_equal_draft_vocab_size
             and self.target_model_config is not None
             and self.draft_model_config is not None
         ):
@@ -2119,7 +1698,7 @@ class SpeculativeConfig:
 
     def use_gemma4_mtp(self) -> bool:
         return (
-            self.method == "mtp"
+            self.builtin_method == "mtp"
             and self.draft_model_config is not None
             and getattr(self.draft_model_config.hf_config, "model_type", None)
             == "gemma4_mtp"
@@ -2127,7 +1706,7 @@ class SpeculativeConfig:
 
     def use_step3p5_mtp(self) -> bool:
         return (
-            self.method == "mtp"
+            self.builtin_method == "mtp"
             and self.draft_model_config is not None
             and getattr(self.draft_model_config.hf_config, "model_type", None)
             == "step3p5_mtp"
@@ -2137,7 +1716,7 @@ class SpeculativeConfig:
         # NOTE: This method is usually a stand-in for "speculative decoding using
         # target model hidden states"
         # TODO(ben): Refactor this so the naming is clearer
-        return self.method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
+        return self.builtin_method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
 
     def needs_eagle_block_drop(self) -> bool:
         """Whether draft KV at a position depends on the next token.
@@ -2147,22 +1726,6 @@ class SpeculativeConfig:
         alone, so only EAGLE/EAGLE3/MTP require the trailing-block drop.
         """
         return self.use_eagle() and not (self.use_dflash() or self.use_dspark())
-
-    def is_xpress(self) -> bool:
-        """Whether the dflash draft carries an XPress refiner.
-
-        XPress serves under method="dflash": it is a refiner on top of the same
-        drafter, and the inheritance mirrors that (XPressSpeculator subclasses
-        DFlashSpeculator).
-        """
-        return (
-            self.method == "dflash"
-            and self.draft_model_config is not None
-            and any(
-                arch in XPRESS_ARCHITECTURES
-                for arch in self.draft_model_config.architectures
-            )
-        )
 
     def use_eagle_block_drop(self) -> bool:
         """Whether the volatile trailing prefix-cache block should be dropped."""
@@ -2178,16 +1741,16 @@ class SpeculativeConfig:
         )
 
     def use_dflash(self) -> bool:
-        return self.method == "dflash"
+        return self.builtin_method == "dflash"
 
     def use_dspark(self) -> bool:
-        return self.method == "dspark"
+        return self.builtin_method == "dspark"
 
     def uses_dynamic_speculative_decoding(self) -> bool:
         return self.num_speculative_tokens_per_batch_size is not None
 
     def uses_draft_model(self) -> bool:
-        return self.method == "draft_model"
+        return self.builtin_method == "draft_model"
 
     def uses_draft_kv_cache(self) -> bool:
         return (
@@ -2197,16 +1760,16 @@ class SpeculativeConfig:
         )
 
     def uses_extract_hidden_states(self) -> bool:
-        return self.method == "extract_hidden_states"
+        return self.builtin_method == "extract_hidden_states"
 
     def use_ngram_gpu(self) -> bool:
-        return self.method == "ngram_gpu"
+        return self.builtin_method == "ngram_gpu"
 
     def use_ngram(self) -> bool:
-        return self.method in ("ngram", "ngram_gpu")
+        return self.builtin_method in ("ngram", "ngram_gpu")
 
     def use_multi_module_mtp(self) -> bool:
-        if self.method != "mtp" or self.draft_model_config is None:
+        if self.builtin_method != "mtp" or self.draft_model_config is None:
             return False
         num_mtp_layers = getattr(
             self.draft_model_config.hf_config, "num_nextn_predict_layers", 1
@@ -2227,9 +1790,4 @@ class SpeculativeConfig:
             else self.draft_model_config.model
         )
         num_spec_tokens = self.num_speculative_tokens
-        if (speculator_config_class := self.speculator_config_class) is not None:
-            return (
-                f"SpeculativeConfig({method=}, {speculator_config_class=}, "
-                f"{model=}, {num_spec_tokens=})"
-            )
         return f"SpeculativeConfig({method=}, {model=}, {num_spec_tokens=})"

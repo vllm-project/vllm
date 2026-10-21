@@ -6,16 +6,17 @@ from typing import TYPE_CHECKING, cast
 
 import torch
 
-from vllm.config import VllmConfig
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
+# Keep this light: vllm.config imports the speculator configs in this package.
 if TYPE_CHECKING:
+    from vllm.config import VllmConfig
     from vllm.v1.worker.gpu.spec_decode.speculator import BaseSpeculator
     from vllm.v1.worker.gpu.states import RequestState
 
 
 def init_speculator(
-    vllm_config: VllmConfig,
+    vllm_config: "VllmConfig",
     device: torch.device,
     req_states: "RequestState",
 ):

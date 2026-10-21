@@ -2061,6 +2061,12 @@ class ModelConfig:
         return self._model_info.has_inner_state
 
     @property
+    def speculator_config_class(self) -> str | None:
+        """For a speculative decoding draft model, the config class of the
+        speculator it's for, if it declares one (see `SpeculativeDraftModel`)."""
+        return self._model_info.speculator_config_class
+
+    @property
     def supports_replayssm(self) -> bool:
         return self._model_info.supports_replayssm
 
