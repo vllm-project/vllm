@@ -88,7 +88,9 @@ When adding tests:
 
 - **Design before you write.** Answer four questions first: what is the module
   for, what is its I/O contract, what failure am I guarding against, and what is
-  the cheapest level that catches it (unit over integration over e2e)?
+  the cheapest level that actually reproduces it? Fixes to user-visible
+  behavior need a test through a real entry point (`LLM`, OpenAI server); see
+  [`tests/AGENTS.md`](tests/AGENTS.md).
 - **Reuse before create.** Extend existing test files, `conftest.py` fixtures, and
   helpers; add a new file only when no nearby suite fits.
 - **Test behavior with intent.** Assert observable outcomes through public APIs;
