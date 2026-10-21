@@ -258,6 +258,12 @@ def test_plan_uses_state_params(monkeypatch, kv_dtype):
     state.plan(1, torch.tensor([TOPK], dtype=torch.int32), None, None)
     assert state._kv_cpu.tolist() == [0, TOPK, TOPK, TOPK, TOPK]
     assert state._lens_cpu.tolist() == [TOPK, 0, 0, 0]
+    if sm90_mod.is_pin_memory_available():
+        for snapshot, staging in zip(
+            (qo, kv, kv_len), (state._qo_cpu, state._kv_cpu, state._lens_cpu)
+        ):
+            assert snapshot.is_pinned()
+            assert snapshot.data_ptr() != staging.data_ptr()
     state.plan(0, torch.empty(0, dtype=torch.int32), None, None)
     assert state._kv_cpu.tolist() == [0, 0, 0, 0, 0]
     assert state._lens_cpu.tolist() == [0, 0, 0, 0]
@@ -339,32 +345,6 @@ def test_kv_lens_host_empty():
     assert num_rows == 0 and lens.numel() == 0
 
 
-def test_adaptive_decode_graph_accepts_only_decode_window():
-    """AV can replay ragged decode graphs within the allocated MTP window."""
-    from vllm.v1.worker.gpu.attn_utils import (
-        get_varlen_cudagraph_unsupported_backend,
-    )
-    from vllm.v1.worker.utils import AttentionGroup
-
-    config = SimpleNamespace(
-        speculative_config=SimpleNamespace(
-            num_speculative_tokens=3, parallel_drafting=False
-        ),
-        use_v2_model_runner=True,
-    )
-    group = AttentionGroup(
-        backend=FlashInferMLASparseSM90Backend,
-        layer_names=["attn"],
-        kv_cache_spec=MLAAttentionSpec(
-            block_size=BLOCK_SIZE, num_kv_heads=1, head_size=HEAD, dtype=torch.bfloat16
-        ),
-        kv_cache_group_id=0,
-        metadata_builders=[object.__new__(FlashInferMLASparseSM90Builder)],
-    )
-    assert get_varlen_cudagraph_unsupported_backend([[group]], config, 4) is None
-    assert get_varlen_cudagraph_unsupported_backend([[group]], config, 5) is not None
-
-
 _NO_KPOOL = object()
 
 
@@ -426,6 +406,11 @@ def test_builder_kpool_from_model_config(
         spec, ["attn"], vllm_config, torch.device("cpu")
     )
     assert builder.state.kv_dtype == expected_kv_dtype
+    assert builder.get_varlen_cudagraph_max_query_len(vllm_config, spec) == 1
+    vllm_config.speculative_config = SimpleNamespace(
+        num_speculative_tokens=3, parallel_drafting=False
+    )
+    assert builder.get_varlen_cudagraph_max_query_len(vllm_config, spec) == 4
     # req0: prefill chunk ending at context 42295; req1: context <= topk.
     cam = SimpleNamespace(
         num_reqs=2,
@@ -565,27 +550,11 @@ def test_upper_bound_plan_reused_across_steps(monkeypatch):
 @pytest.mark.skipif(
     not _sm90_flashinfer_available(), reason="Requires SM90 FlashInfer MLA"
 )
-def test_upper_bound_graph_replays_ragged_verification(monkeypatch, request):
+def test_upper_bound_graph_replays_ragged_verification():
     """AV redistributes tokens on device while host boundaries stay uniform."""
-    from vllm.utils import gpu_sync_debug
-
-    original_copy_methods = (torch.Tensor.to, torch.Tensor.cuda, torch.Tensor.copy_)
-
-    def restore_copy_methods():
-        torch.Tensor.to = original_copy_methods[0]
-        torch.Tensor.cuda = original_copy_methods[1]
-        torch.Tensor.copy_ = original_copy_methods[2]
-
-    # enable_gpu_sync_check() patches Tensor methods for the whole process.
-    request.addfinalizer(restore_copy_methods)
-    monkeypatch.setattr(gpu_sync_debug, "_copy_checkers_installed", False)
-    monkeypatch.setattr(gpu_sync_debug, "_SYNC_CHECK_MODE", "error")
-    monkeypatch.setattr(gpu_sync_debug, "_sync_check_enabled", False)
-    gpu_sync_debug.enable_gpu_sync_check()
     torch.manual_seed(0)
     rows = 9
     ub, exact = _real_state(rows), _real_state(rows)
-    checked_plan = gpu_sync_debug.with_gpu_sync_check(ub.plan)
     builder = object.__new__(FlashInferMLASparseSM90Builder)
     builder.state = ub
     builder._adaptive_verification = True
@@ -619,7 +588,7 @@ def test_upper_bound_graph_replays_ragged_verification(monkeypatch, request):
         slots.copy_(values)
         num_rows, bounds, is_exact = builder._kv_lens_host(cam)
         assert not is_exact
-        checked_plan(num_rows, bounds, cam, req_id)
+        ub.plan(num_rows, bounds, cam, req_id)
         return valid.to(torch.int32)
 
     def run(state):

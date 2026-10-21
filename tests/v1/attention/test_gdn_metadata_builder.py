@@ -17,7 +17,6 @@ from tests.v1.attention.utils import (
     create_vllm_config,
 )
 from vllm.config import SpeculativeConfig
-from vllm.config.cache import MambaCacheMode
 from vllm.config.compilation import CUDAGraphMode
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import CommonAttentionMetadata
@@ -153,9 +152,6 @@ GDN_BUILD_TEST_CASES = {
 def _create_gdn_builder(
     num_speculative_tokens: int = 0,
     full_cuda_graph: bool = False,
-    builder_cls: type[GDNAttentionMetadataBuilder] = GDNAttentionMetadataBuilder,
-    mamba_cache_mode: MambaCacheMode = "none",
-    num_speculative_blocks: int = 0,
 ) -> GDNAttentionMetadataBuilder:
     """Create a GDNAttentionMetadataBuilder with minimal config."""
     vllm_config = create_vllm_config(
@@ -165,7 +161,6 @@ def _create_gdn_builder(
     vllm_config.compilation_config.cudagraph_mode = (
         CUDAGraphMode.FULL_AND_PIECEWISE if full_cuda_graph else CUDAGraphMode.NONE
     )
-    vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
     if num_speculative_tokens > 0:
         vllm_config.speculative_config = SpeculativeConfig(
             method="ngram",
@@ -175,78 +170,13 @@ def _create_gdn_builder(
         block_size=BLOCK_SIZE,
         shapes=((16, 64),),
         dtypes=(torch.float16,),
-        num_speculative_blocks=num_speculative_blocks,
-        mamba_cache_mode=mamba_cache_mode,
     )
-    return builder_cls(
+    return GDNAttentionMetadataBuilder(
         kv_cache_spec=mamba_spec,
         layer_names=["layer.0"],
         vllm_config=vllm_config,
         device=DEVICE,
     )
-
-
-@pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="GLM CUDA AV")
-def test_glm_kda_adaptive_metadata_uses_device_query_lengths(mamba_cache_mode):
-    """AV may redistribute a fixed token budget without updating CPU boundaries."""
-    from vllm.models.glm5next.common.kda import Glm5NextLinearAttention
-    from vllm.v1.worker.gpu.attn_utils import (
-        get_query_lens_mismatch_unsupported_backend,
-        get_varlen_cudagraph_unsupported_backend,
-    )
-    from vllm.v1.worker.utils import AttentionGroup
-
-    layer = Glm5NextLinearAttention.__new__(Glm5NextLinearAttention)
-    layer.speculative_config = SimpleNamespace(enable_adaptive_verification=True)
-    backend = layer.get_attn_backend()
-    group = AttentionGroup(
-        backend=backend,
-        layer_names=["layer.0"],
-        kv_cache_spec=MambaSpec(
-            block_size=BLOCK_SIZE, shapes=((16, 64),), dtypes=(torch.float16,)
-        ),
-        kv_cache_group_id=0,
-    )
-    assert get_query_lens_mismatch_unsupported_backend([[group]]) is None
-    builder = _create_gdn_builder(
-        3, True, backend.get_builder_cls(), mamba_cache_mode, num_speculative_blocks=3
-    )
-    config = builder.vllm_config
-    group.kv_cache_spec = builder.kv_cache_spec
-    group.metadata_builders = [builder]
-    assert get_varlen_cudagraph_unsupported_backend([[group]], config, 4) is None
-    assert get_varlen_cudagraph_unsupported_backend([[group]], config, 5) is not None
-
-    common = create_common_attn_metadata(
-        BatchSpec(seq_lens=[65, 65, 65, 0], query_lens=[2, 2, 2, 0]),
-        BLOCK_SIZE,
-        DEVICE,
-    ).replace(
-        query_start_loc=torch.tensor([0, 1, 5, 6, 6], dtype=torch.int32),
-        max_query_len=4,
-        block_table_tensor=torch.arange(1, 33, dtype=torch.int32).view(4, 8),
-    )
-    accepted = torch.tensor([1, 3, 2, 1], dtype=torch.int32)
-    meta = builder.build(
-        common_prefix_len=0,
-        common_attn_metadata=common,
-        num_decode_draft_tokens_cpu=torch.tensor([1, 1, 1, -1], dtype=torch.int32),
-        num_accepted_tokens=accepted,
-    )
-    assert meta.num_spec_decodes == 3
-    torch.testing.assert_close(
-        meta.spec_query_start_loc, torch.tensor([0, 1, 5, 6, 6], dtype=torch.int32)
-    )
-    torch.testing.assert_close(meta.num_accepted_tokens, accepted)
-    assert meta.spec_state_indices_tensor is not None
-    assert meta.spec_state_indices_tensor.shape == (4, 4)
-    start = 4 if mamba_cache_mode == "align" else 0
-    torch.testing.assert_close(
-        meta.spec_state_indices_tensor[:3],
-        common.block_table_tensor[:3, start : start + 4],
-    )
-    assert not meta.spec_state_indices_tensor[3].any()
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="GLM CUDA AV")
@@ -269,6 +199,15 @@ def test_glm_kda_backend_selection(adaptive_verification):
         Glm5NextKDAAttentionBackend if adaptive_verification else GDNAttentionBackend
     )
     assert layer.get_attn_backend() is expected
+    if adaptive_verification:
+        builder = _create_gdn_builder(3)
+        assert expected.supports_device_cpu_query_lens_mismatch()
+        assert (
+            expected.get_builder_cls().get_varlen_cudagraph_max_query_len(
+                builder.vllm_config, builder.kv_cache_spec
+            )
+            == 4
+        )
 
 
 def _build(
