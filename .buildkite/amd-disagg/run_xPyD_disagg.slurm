@@ -61,17 +61,11 @@ echo "$DISAGG_SCRIPTS_DIR"
 CONTAINER_SCRIPTS="${CONTAINER_SCRIPTS:-/vllm-workspace/.buildkite/amd-disagg}"
 CLUSTER_ENV_IN="${CLUSTER_ENV_IN:-${CONTAINER_SCRIPTS}/cluster.sh}"
 
-# Overlay the staged vLLM fixes onto the image's copies: deepseek_v32/amd/model.py
-# carries the GLM-5.2 MoE all-reduce fix for TP and wide-EP.
-# VLLM_DIST_PACKAGES must match the image. If it doesn't, the mounts land on
-# paths nothing imports and the run silently uses the image's copies.
+# Overlay the vLLM fixes staged by run-slurm-disagg-test.sh onto the image's
+# copies. VLLM_DIST_PACKAGES must match the image. If it doesn't, the mounts land
+# on paths nothing imports and the run silently uses the image's copies.
 VLLM_DIST_PACKAGES="${VLLM_DIST_PACKAGES:-/usr/local/lib/python3.12/dist-packages}"
 VLLM_OVERLAY_ARGS=()
-_dsv32_amd_overlay="${DISAGG_SCRIPTS_DIR}/overlays/models_deepseek_v32_amd_model.py"
-if [ -f "$_dsv32_amd_overlay" ]; then
-    VLLM_OVERLAY_ARGS+=(-v "${_dsv32_amd_overlay}:${VLLM_DIST_PACKAGES}/vllm/models/deepseek_v32/amd/model.py:ro")
-    echo "[disagg-pd] vLLM overlay: deepseek_v32/amd/model.py"
-fi
 
 
 # Health endpoints (TP-mode ports from cluster.sh defaults).
