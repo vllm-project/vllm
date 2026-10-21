@@ -4,7 +4,6 @@
 from typing import TYPE_CHECKING, Any
 
 import torch
-from torch.nn.parameter import Parameter
 
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
@@ -15,6 +14,7 @@ from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     PackedvLLMParameter,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.scalar_type import scalar_types
 
 from .inc_scheme import INCLinearScheme
@@ -323,11 +323,9 @@ class INCXPULinearMethod(INCXPULinearBase):
             qweight_data = self._convert_awq_qweight_to_gptq(qweight_data)
 
         qweight_ct = qweight_data.t().contiguous()
-        layer.qweight = Parameter(qweight_ct.t(), requires_grad=False)
-        layer.scales = Parameter(layer.scales.data, requires_grad=False)
-        layer.qzeros = Parameter(
-            torch.tensor([8], dtype=torch.int8, device=device),
-            requires_grad=False,
+        replace_parameter(layer, "qweight", qweight_ct.t())
+        replace_parameter(
+            layer, "qzeros", torch.tensor([8], dtype=torch.int8, device=device)
         )
 
     def apply_weights(
@@ -430,7 +428,7 @@ class INCARKLinearMethod(INCXPULinearBase):
 
         ark_linear.post_init()
 
-        layer.qweight = Parameter(ark_linear.qweight.detach(), requires_grad=False)
+        replace_parameter(layer, "qweight", ark_linear.qweight.detach())
         layer.ark_bias = ark_linear.bias
         layer.ark_compute_type = ark_linear.cdt
         layer.ark_weight_type = ark_linear.wdt

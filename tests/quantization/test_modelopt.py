@@ -183,9 +183,8 @@ def test_modelopt_mxfp8_pre_processed_weights_follow_kernel(monkeypatch):
 
 
 def test_modelopt_fp8_updates_weight_dims_after_transpose():
-    """Humming reads weight.input_dim/output_dim. Swapping the
-    ModelWeightParameter for a plain Parameter drops them, so the per-tensor
-    FP8 scheme must restore them for the transposed [in, out] layout.
+    """The per-tensor FP8 scheme transposes the weight to [in, out] and records
+    that layout in layer.processed_weight_dims, which Humming reads.
     """
     from vllm.config.quantization import QuantSpec
     from vllm.model_executor.layers.quantization.modelopt import (
@@ -216,8 +215,7 @@ def test_modelopt_fp8_updates_weight_dims_after_transpose():
     method.process_weights_after_loading(layer)
 
     assert layer.weight.shape == (2, 3)
-    assert layer.weight.input_dim == 0
-    assert layer.weight.output_dim == 1
+    assert layer.processed_weight_dims == (0, 1)
     method.kernel.process_weights_after_loading.assert_called_once_with(layer)
 
 
