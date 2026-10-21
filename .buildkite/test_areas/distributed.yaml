@@ -88,7 +88,7 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
   - vllm/v1/executor/
-  - vllm/worker/worker_base.py
+  - vllm/v1/worker/worker_base.py
   - vllm/v1/engine/
   - vllm/v1/worker/
   - tests/v1/distributed
@@ -120,7 +120,7 @@ steps:
       - "!vllm/distributed/kv_transfer/"
       - vllm/engine/
       - vllm/v1/executor/
-      - vllm/worker/worker_base.py
+      - vllm/v1/worker/worker_base.py
       - vllm/v1/engine/
       - vllm/v1/worker/
       - tests/v1/distributed
@@ -139,7 +139,7 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
   - vllm/v1/executor/
-  - vllm/worker/worker_base.py
+  - vllm/v1/worker/worker_base.py
   - vllm/v1/engine/
   - vllm/v1/worker/
   - tests/compile/test_wrapper.py
@@ -163,7 +163,7 @@ steps:
       - "!vllm/distributed/kv_transfer/"
       - vllm/engine/
       - vllm/v1/executor/
-      - vllm/worker/worker_base.py
+      - vllm/v1/worker/worker_base.py
       - vllm/v1/engine/
       - vllm/v1/worker/
       - tests/compile/test_wrapper.py
@@ -184,7 +184,7 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
   - vllm/v1/executor/
-  - vllm/worker/worker_base.py
+  - vllm/v1/worker/worker_base.py
   - vllm/v1/engine/
   - vllm/v1/worker/
   - tests/distributed/
@@ -517,7 +517,6 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - vllm/distributed/
-      - vllm/v1/distributed/
       - vllm/model_executor/layers/fused_moe/
       - vllm/v1/attention/backends/
       - vllm/v1/attention/selector.py
