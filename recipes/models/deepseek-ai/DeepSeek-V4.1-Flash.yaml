@@ -966,6 +966,15 @@ guide: |
   wait at c128. It keeps `--prefill-schedule-interval` at 1 and captures graphs only up to
   576 tokens (`--max-cudagraph-capture-size 576`), as DEP2 does at c8 and c16.
 
+  Every DEP lane (DEP2, DEP4 and DEP2 with host KV) serves through a vLLM Router with the
+  `consistent_hash` policy, which keeps each conversation on the DP rank that already holds
+  its prefix. Set `--intra-node-data-parallel-size` to the engine's `--data-parallel-size`:
+
+  ```
+  vllm-router --host 0.0.0.0 --port 8000 --policy consistent_hash \
+    --intra-node-data-parallel-size 2 --worker-urls http://localhost:8100
+  ```
+
   In the command builder, pick **B200** and the **FP8 (0909)** checkpoint, and tick
   **Speculative decoding** and **Text only** (both are opt-in). **Tensor Parallel** then
   renders the TP2 c1 settings, and **Data + Expert Parallel** renders the DEP2 c24/c32 engine
