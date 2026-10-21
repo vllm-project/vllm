@@ -95,6 +95,7 @@ Total input tokens:                      1369
 Total generated tokens:                  2212
 Request throughput (req/s):              1.73
 Output token throughput (tok/s):         382.89
+Peak output token throughput (tok/s):    512.00
 Total token throughput (tok/s):          619.85
 ---------------Time to First Token----------------
 Mean TTFT (ms):                          71.54
@@ -149,6 +150,12 @@ over every output token.
 In this example, the benchmark observes two 40 ms ITL samples. The three tokens
 in the second streamed output do not create additional ITL samples, so mean ITL
 is 40 ms. TPOT is `(180 ms - 100 ms) / (5 - 1) = 20 ms/token`.
+
+**Peak output token throughput** is the maximum over fixed, non-overlapping
+one-second buckets, with each streamed output weighted by its request's mean
+tokens per output. When chunk sizes vary, such as under speculative decoding,
+this estimate may overestimate or underestimate the peak calculated using exact
+per-output token counts.
 
 #### Results Visualization
 
