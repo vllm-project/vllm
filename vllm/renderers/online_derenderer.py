@@ -25,6 +25,9 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionStreamResponse,
     ChatMessage,
 )
+from vllm.entrypoints.openai.chat_completion.stream_processor import (
+    ChatStreamProcessor,
+)
 from vllm.entrypoints.openai.completion.protocol import (
     CompletionLogProbs,
     CompletionRequest,
@@ -40,10 +43,7 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
 )
 from vllm.entrypoints.serve.engine.protocol import UsageInfo
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.entrypoints.serve.utils.tool_calls_utils import (
-    maybe_filter_parallel_tool_calls,
-    resolve_finish_reason,
-)
+from vllm.entrypoints.serve.utils.tool_calls_utils import resolve_finish_reason
 from vllm.logger import init_logger
 from vllm.parser import Parser, ParserManager
 from vllm.renderers import BaseRenderer
@@ -610,14 +610,16 @@ class OnlineDerenderer:
         logprobs are dropped on every chunk, again like the coupled endpoint.
         """
         tokenizer = self.renderer.get_tokenizer()
-        hide_metadata = not chat_request.include_reasoning
         top_limit = _chat_top_logprobs_limit(chat_request)
 
-        parser = parser_cls(
-            tokenizer,
-            chat_request.tools,
-            chat_template_kwargs=self._resolve_chat_template_kwargs(chat_request),
-            model_config=self.model_config,
+        processor = ChatStreamProcessor(
+            chat_request,
+            parser_cls(
+                tokenizer,
+                chat_request.tools,
+                chat_template_kwargs=self._resolve_chat_template_kwargs(chat_request),
+                model_config=self.model_config,
+            ),
         )
 
         # Ephemeral incremental detok window, local to this call. Threaded
@@ -648,26 +650,22 @@ class OnlineDerenderer:
                     skip_special_tokens=skip_special,
                     spaces_between_special_tokens=spaces_between,
                 )
-                parser.parse_delta(
-                    text,
-                    chunk,
-                    chat_request,
-                    prompt_token_ids=prompt_token_ids,
-                    finished=False,
-                )
+                processor.step(text, chunk, None, prompt_token_ids)
 
         # Replay history to reconstruct parser state. The result is thrown
         # away and only the current chunk's emission goes to the client.
         _replay(state.output_token_ids, state.output_chunk_lens)
+        # Replay rebuilds the same flag. The carried one stays authoritative.
+        processor.tools_streamed = state.tools_streamed
 
         stream_choices: list[ChatCompletionResponseStreamChoice] = []
         output_token_ids = list(state.output_token_ids)
         output_chunk_lens = list(state.output_chunk_lens)
         role_sent = state.role_sent
-        tools_streamed = state.tools_streamed
         last_tool_call_ids = list(state.last_tool_call_ids)
         logprob_context = list(state.logprob_context_token_ids)
 
+        hide_metadata = processor.hide_metadata
         return_token_ids = chat_request.return_token_ids and not hide_metadata
 
         # At most one choice: the caller (derender_chat_stream) already
@@ -679,43 +677,31 @@ class OnlineDerenderer:
         if generate_chunk.choices:
             choice = generate_chunk.choices[0]
             delta_tids = choice.token_ids or []
-            is_finished = choice.finish_reason is not None
+            delta_message: DeltaMessage | None = None
+            finish_reason: str | None = None
 
-            if delta_tids:
-                # One parse_delta call for the whole chunk (producer
-                # granularity), not one per token. See the granularity note
-                # in this method's docstring.
-                text, detok_state = self._detokenize_delta(
-                    tokenizer,
-                    self._text_token_ids(
-                        delta_tids,
-                        choice.finish_reason,
-                        choice.stop_reason,
-                        chat_request,
-                    ),
-                    detok_state,
-                    skip_special_tokens=skip_special,
-                    spaces_between_special_tokens=spaces_between,
+            # One step for the whole chunk (producer granularity), not one
+            # per token. See the granularity note in this method's docstring.
+            # A finish only chunk (no new tokens) still steps, to flush any
+            # buffered tool call arguments.
+            if delta_tids or choice.finish_reason is not None:
+                text = ""
+                if delta_tids:
+                    text, detok_state = self._detokenize_delta(
+                        tokenizer,
+                        self._text_token_ids(
+                            delta_tids,
+                            choice.finish_reason,
+                            choice.stop_reason,
+                            chat_request,
+                        ),
+                        detok_state,
+                        skip_special_tokens=skip_special,
+                        spaces_between_special_tokens=spaces_between,
+                    )
+                delta_message, finish_reason = processor.step(
+                    text, delta_tids, choice.finish_reason, prompt_token_ids
                 )
-                delta_message = parser.parse_delta(
-                    text,
-                    delta_tids,
-                    chat_request,
-                    prompt_token_ids=prompt_token_ids,
-                    finished=is_finished,
-                )
-            elif is_finished:
-                # Finish only chunk (no new tokens). Still flush any
-                # buffered tool call arguments.
-                delta_message = parser.parse_delta(
-                    "",
-                    [],
-                    chat_request,
-                    prompt_token_ids=prompt_token_ids,
-                    finished=True,
-                )
-            else:
-                delta_message = None
 
             if delta_tids:
                 output_token_ids.extend(delta_tids)
@@ -737,7 +723,6 @@ class OnlineDerenderer:
                 delta_message = DeltaMessage()
 
             if delta_message.tool_calls:
-                tools_streamed = True
                 for tc in delta_message.tool_calls:
                     if tc.id is None:
                         continue
@@ -752,22 +737,15 @@ class OnlineDerenderer:
                 delta_message.role = "assistant"
                 role_sent = True
 
-            finish_reason = choice.finish_reason
-            if finish_reason is not None:
-                finish_reason = resolve_finish_reason(
-                    finish_reason, chat_request, tools_streamed
-                )
-
-            stream_choice = ChatCompletionResponseStreamChoice(
-                index=choice.index,
-                delta=delta_message,
-                logprobs=resolved_logprobs,
-                finish_reason=finish_reason,
-                stop_reason=choice.stop_reason,
-                token_ids=choice.token_ids if return_token_ids else None,
-            )
             stream_choices.append(
-                maybe_filter_parallel_tool_calls(stream_choice, chat_request)
+                ChatCompletionResponseStreamChoice(
+                    index=choice.index,
+                    delta=delta_message,
+                    logprobs=resolved_logprobs,
+                    finish_reason=finish_reason,
+                    stop_reason=choice.stop_reason,
+                    token_ids=choice.token_ids if return_token_ids else None,
+                )
             )
 
         updated_state = state.model_copy(
@@ -775,7 +753,7 @@ class OnlineDerenderer:
                 "output_token_ids": output_token_ids,
                 "output_chunk_lens": output_chunk_lens,
                 "role_sent": role_sent,
-                "tools_streamed": tools_streamed,
+                "tools_streamed": processor.tools_streamed,
                 "last_tool_call_ids": last_tool_call_ids,
                 "logprob_context_token_ids": logprob_context,
             }
@@ -880,6 +858,9 @@ class OnlineDerenderer:
                         finish_reason=choice.finish_reason,
                         stop_reason=choice.stop_reason,
                         logprobs=completion_logprobs,
+                        prompt_token_ids=(
+                            gen.prompt_token_ids if return_token_ids else None
+                        ),
                         token_ids=choice.token_ids if return_token_ids else None,
                     )
                 )
@@ -989,6 +970,9 @@ class OnlineDerenderer:
                     logprobs=completion_logprobs,
                     finish_reason=choice.finish_reason,
                     stop_reason=choice.stop_reason,
+                    prompt_token_ids=(
+                        generate_chunk.prompt_token_ids if return_token_ids else None
+                    ),
                     token_ids=choice.token_ids if return_token_ids else None,
                 )
             )
