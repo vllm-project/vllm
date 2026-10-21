@@ -326,24 +326,20 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
             block_scale, per_token_scale = a1q_scale, None
         output1_scale_gate_scalar = self.quant_config.g1_alphas
 
-        # A caller-owned workspace requires do_finalize=True.
-        workspace = (
-            None
-            if output is None
-            else self._get_workspace(
-                hidden_states,
-                quant_mode="nvfp4",
-                hidden_size=self.hidden_dim,
-                intermediate_size=self.intermediate_size_per_partition,
-                num_experts=global_num_experts,
-                top_k=self.topk,
-                activation_type=activation_to_flashinfer_int(activation),
-                use_per_token_scale=per_token_scale is not None,
-                valid_hidden_size=self.hidden_dim_unpadded,
-                valid_intermediate_size=(
-                    self.moe_config.intermediate_size_per_partition_unpadded
-                ),
-            )
+        workspace = self._get_workspace(
+            hidden_states,
+            do_finalize=output is not None,
+            quant_mode="nvfp4",
+            hidden_size=self.hidden_dim,
+            intermediate_size=self.intermediate_size_per_partition,
+            num_experts=global_num_experts,
+            top_k=self.topk,
+            activation_type=activation_to_flashinfer_int(activation),
+            use_per_token_scale=per_token_scale is not None,
+            valid_hidden_size=self.hidden_dim_unpadded,
+            valid_intermediate_size=(
+                self.moe_config.intermediate_size_per_partition_unpadded
+            ),
         )
 
         # Invoke kernel.
@@ -382,7 +378,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
             tune_max_num_tokens=min(
                 fi_moe_largest_bucket(self.moe_config), self._get_chunk_size()
             ),
-            workspace_buffer=workspace,
+            **({"workspace_buffer": workspace} if workspace is not None else {}),
         )
         if output is not None:
             return None
@@ -544,24 +540,20 @@ class TrtLlmNvFp4ExpertsMonolithic(
         # dummy 0-token forward has to keep the finalized (empty) form.
         defer = self.moe_config.should_defer_moe_finalize(num_tokens)
 
-        # A caller-owned workspace requires do_finalize=True.
-        workspace = (
-            None
-            if defer
-            else self._get_workspace(
-                hidden_states,
-                quant_mode="nvfp4",
-                hidden_size=self.hidden_dim,
-                intermediate_size=self.intermediate_size_per_partition,
-                num_experts=global_num_experts,
-                top_k=self.topk,
-                activation_type=activation_to_flashinfer_int(activation),
-                use_per_token_scale=per_token_scale is not None,
-                valid_hidden_size=self.hidden_dim_unpadded,
-                valid_intermediate_size=(
-                    self.moe_config.intermediate_size_per_partition_unpadded
-                ),
-            )
+        workspace = self._get_workspace(
+            hidden_states,
+            do_finalize=not defer,
+            quant_mode="nvfp4",
+            hidden_size=self.hidden_dim,
+            intermediate_size=self.intermediate_size_per_partition,
+            num_experts=global_num_experts,
+            top_k=self.topk,
+            activation_type=activation_to_flashinfer_int(activation),
+            use_per_token_scale=per_token_scale is not None,
+            valid_hidden_size=self.hidden_dim_unpadded,
+            valid_intermediate_size=(
+                self.moe_config.intermediate_size_per_partition_unpadded
+            ),
         )
 
         # Invoke kernel.
@@ -600,7 +592,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
             per_token_scale=per_token_scale,
             tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
             routing_replay_out=routing_replay_out,
-            workspace_buffer=workspace,
+            **({"workspace_buffer": workspace} if workspace is not None else {}),
         )
         routed_output = convert_flashinfer_moe_output(
             flashinfer_output,

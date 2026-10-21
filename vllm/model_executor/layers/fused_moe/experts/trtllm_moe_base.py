@@ -94,6 +94,7 @@ class TrtLlmExpertsBase:
         self,
         hidden_states: torch.Tensor,
         *,
+        do_finalize: bool = True,
         quant_mode: str,
         hidden_size: int,
         intermediate_size: int,
@@ -116,7 +117,9 @@ class TrtLlmExpertsBase:
         FlashInfer's per-call workspace allocation.
         """
         if (
-            not is_workspace_manager_initialized()
+            # A caller-owned workspace requires finalized output.
+            not do_finalize
+            or not is_workspace_manager_initialized()
             # Unexpectedly large batches keep the per-call allocation rather
             # than pinning one more persistent buffer per distinct size.
             or hidden_states.size(0) > self._workspace_rows

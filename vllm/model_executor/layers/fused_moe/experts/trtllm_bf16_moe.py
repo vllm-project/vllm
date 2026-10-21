@@ -205,7 +205,7 @@ class TrtLlmBf16ExpertsModular(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsModular)
             weight_layout=WeightLayout.BlockMajorK,
             do_finalize=True,
             activation_type=activation_to_flashinfer_int(activation),
-            workspace_buffer=workspace,
+            **({"workspace_buffer": workspace} if workspace is not None else {}),
         )
         # FlashInfer's BF16 routed wrapper does not expose an output= argument.
         output.copy_(result[0] if isinstance(result, list) else result)
@@ -267,21 +267,17 @@ class TrtLlmBf16ExpertsMonolithic(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsMonol
         # dummy 0-token forward has to keep the finalized (empty) form.
         defer = self.moe_config.should_defer_moe_finalize(num_tokens)
 
-        # A caller-owned workspace requires do_finalize=True.
-        workspace = (
-            None
-            if defer
-            else self._get_workspace(
-                hidden_states,
-                quant_mode="bf16",
-                hidden_size=self.hidden_dim,
-                intermediate_size=self.intermediate_size_per_partition,
-                num_experts=global_num_experts,
-                top_k=self.topk,
-                activation_type=activation_to_flashinfer_int(activation),
-                use_shuffled_weight=True,
-                weight_layout=int(WeightLayout.BlockMajorK),
-            )
+        workspace = self._get_workspace(
+            hidden_states,
+            do_finalize=not defer,
+            quant_mode="bf16",
+            hidden_size=self.hidden_dim,
+            intermediate_size=self.intermediate_size_per_partition,
+            num_experts=global_num_experts,
+            top_k=self.topk,
+            activation_type=activation_to_flashinfer_int(activation),
+            use_shuffled_weight=True,
+            weight_layout=int(WeightLayout.BlockMajorK),
         )
 
         flashinfer_output = flashinfer.fused_moe.trtllm_bf16_moe(
@@ -303,7 +299,7 @@ class TrtLlmBf16ExpertsMonolithic(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsMonol
             tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
             routing_replay_out=routing_replay_out,
             do_finalize=not defer,
-            workspace_buffer=workspace,
+            **({"workspace_buffer": workspace} if workspace is not None else {}),
         )
         routed_output = convert_flashinfer_moe_output(
             flashinfer_output,

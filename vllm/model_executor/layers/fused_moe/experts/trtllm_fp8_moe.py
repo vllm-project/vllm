@@ -281,21 +281,17 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
 
         num_tokens = hidden_states.shape[0]
         defer = self.moe_config.should_defer_moe_finalize(num_tokens)
-        # A caller-owned workspace requires do_finalize=True.
-        workspace = (
-            None
-            if defer
-            else self._get_workspace(
-                hidden_states,
-                quant_mode="mxfp8" if is_mxfp8 else "fp8_block_scale",
-                hidden_size=self.hidden_dim,
-                intermediate_size=self.intermediate_size_per_partition,
-                num_experts=global_num_experts,
-                top_k=topk_ids.size(1),
-                activation_type=activation_to_flashinfer_int(activation),
-                use_shuffled_weight=use_shuffled_weight,
-                weight_layout=int(weight_layout),
-            )
+        workspace = self._get_workspace(
+            hidden_states,
+            do_finalize=not defer,
+            quant_mode="mxfp8" if is_mxfp8 else "fp8_block_scale",
+            hidden_size=self.hidden_dim,
+            intermediate_size=self.intermediate_size_per_partition,
+            num_experts=global_num_experts,
+            top_k=topk_ids.size(1),
+            activation_type=activation_to_flashinfer_int(activation),
+            use_shuffled_weight=use_shuffled_weight,
+            weight_layout=int(weight_layout),
         )
         flashinfer_output = flashinfer.fused_moe.trtllm_fp8_block_scale_routed_moe(
             topk_ids=(topk_ids, topk_weights),
@@ -324,7 +320,7 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
             do_finalize=not defer,
             output=None if defer else output,
             tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
-            workspace_buffer=workspace,
+            **({"workspace_buffer": workspace} if workspace is not None else {}),
         )
         if not defer:
             return None
@@ -483,6 +479,18 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             n_group = num_expert_group or 0
             selected_topk_group = topk_group or 0
 
+        workspace = self._get_workspace(
+            hidden_states,
+            quant_mode="mxfp8" if is_mxfp8 else "fp8_block_scale",
+            hidden_size=self.hidden_dim,
+            intermediate_size=self.intermediate_size_per_partition,
+            num_experts=global_num_experts,
+            top_k=self.topk,
+            activation_type=activation_type,
+            use_shuffled_weight=use_shuffled_weight,
+            weight_layout=int(weight_layout),
+        )
+
         kwargs = dict(
             routing_logits=router_logits,
             routing_bias=e_score_correction_bias,
@@ -509,17 +517,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             fp8_quantization_type=fp8_quant_type,
             routing_replay_out=routing_replay_out,
             tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
-            workspace_buffer=self._get_workspace(
-                hidden_states,
-                quant_mode="mxfp8" if is_mxfp8 else "fp8_block_scale",
-                hidden_size=self.hidden_dim,
-                intermediate_size=self.intermediate_size_per_partition,
-                num_experts=global_num_experts,
-                top_k=self.topk,
-                activation_type=activation_type,
-                use_shuffled_weight=use_shuffled_weight,
-                weight_layout=int(weight_layout),
-            ),
+            **({"workspace_buffer": workspace} if workspace is not None else {}),
         )
         if is_mxfp8 or activation == MoEActivation.RELU2_NO_MUL:
             kwargs["activation_type"] = activation_type
@@ -558,6 +556,17 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
         else:
             assert not apply_router_weight_on_input
 
+        workspace = self._get_workspace(
+            hidden_states,
+            quant_mode="fp8_per_tensor",
+            hidden_size=self.hidden_dim,
+            intermediate_size=self.intermediate_size_per_partition,
+            num_experts=global_num_experts,
+            top_k=self.topk,
+            activation_type=activation_type,
+            use_routing_scales_on_input=apply_router_weight_on_input,
+        )
+
         out = flashinfer.fused_moe.trtllm_fp8_per_tensor_scale_moe(
             routing_logits=router_logits,
             routing_bias=e_score_correction_bias,
@@ -580,16 +589,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             activation_type=activation_type,
             tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
             routing_replay_out=routing_replay_out,
-            workspace_buffer=self._get_workspace(
-                hidden_states,
-                quant_mode="fp8_per_tensor",
-                hidden_size=self.hidden_dim,
-                intermediate_size=self.intermediate_size_per_partition,
-                num_experts=global_num_experts,
-                top_k=self.topk,
-                activation_type=activation_type,
-                use_routing_scales_on_input=apply_router_weight_on_input,
-            ),
+            **({"workspace_buffer": workspace} if workspace is not None else {}),
         )
         return out
 
