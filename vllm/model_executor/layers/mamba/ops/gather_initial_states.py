@@ -1,12 +1,59 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import itertools
+
 import torch
 
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonWarmupTensor,
+    triton_kernel_dispatcher_with_warmup,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 
+def _gather_initial_states_launch(state, indices, valid, output, row_size):
+    block_size = min(triton.next_power_of_2(row_size), 1024)
+    return (triton.cdiv(row_size, block_size), indices.shape[0]), dict(
+        state_ptr=state,
+        indices_ptr=indices,
+        has_initial_state_ptr=valid,
+        output_ptr=output,
+        stride_state_batch=state.stride(0),
+        stride_indices=indices.stride(0),
+        stride_has_initial_state=valid.stride(0),
+        row_size=row_size,
+        BLOCK_SIZE=block_size,
+        num_warps=8,
+        launch_pdl=current_platform.is_arch_support_pdl(),
+    )
+
+
+def _gather_initial_states_warmup_inputs(*, row_size, state_dtype):
+    # Mamba2 masks are fresh contiguous comparison outputs. Cache pages can
+    # have padding; block-table column views have scalar stride classes 1,
+    # generic, or divisible-by-16, and either pointer-alignment class.
+    for state_stride, index_stride, aligned in itertools.product(
+        (row_size, row_size + 1), (1, 2, 16), (True, False)
+    ):
+        grid, args = _gather_initial_states_launch(
+            TritonWarmupTensor(
+                state_dtype, shape=(2, row_size), strides=(state_stride, 1)
+            ),
+            TritonWarmupTensor(
+                torch.int32, aligned=aligned, shape=(2,), strides=(index_stride,)
+            ),
+            TritonWarmupTensor(torch.bool, shape=(2,)),
+            TritonWarmupTensor(state_dtype, shape=(2, row_size)),
+            row_size,
+        )
+        yield dict(grid=grid, **args)
+
+
+@triton_kernel_dispatcher_with_warmup(
+    warmup_inputs=_gather_initial_states_warmup_inputs
+)
 @triton.jit
 def _gather_initial_states_kernel(
     state_ptr,
@@ -65,19 +112,8 @@ def gather_initial_states(
         dtype=state.dtype,
         device=state.device,
     )
-    block_size = min(triton.next_power_of_2(row_size), 1024)
-    grid = (triton.cdiv(row_size, block_size), indices.numel())
-    _gather_initial_states_kernel[grid](
-        state,
-        indices,
-        has_initial_state,
-        output,
-        state.stride(0),
-        indices.stride(0),
-        has_initial_state.stride(0),
-        row_size=row_size,
-        BLOCK_SIZE=block_size,
-        num_warps=8,
-        launch_pdl=current_platform.is_arch_support_pdl(),
+    grid, args = _gather_initial_states_launch(
+        state, indices, has_initial_state, output, row_size
     )
+    _gather_initial_states_kernel[grid](**args)
     return output
