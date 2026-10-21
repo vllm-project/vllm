@@ -35,7 +35,13 @@ NUMERICS = (
         "a 2048-token selection a tail overflows drops the last positions of its "
         "lowest-scored pool (vLLM: the last of its top-k order)"
     ),
+    (
+        "an e4m3 KV cache is read back to bf16 for the attention (vLLM: fp8 query "
+        "and fp8 MFMA)"
+    ),
 )
+# bf16, or e4m3 over a per-tensor scale as vLLM's ROCm sparse MLA stores it
+KV_DTYPES = ("auto", "bfloat16", "fp8", "fp8_e4m3")
 GEOMETRY = {
     "hidden_size": 4096,
     "n_routed_experts": 288,
@@ -95,8 +101,10 @@ def refuse_config(vllm_config: VllmConfig) -> list[str]:
         reasons.append("needs tensor parallel size 2, 4 or 8")
     if vllm_config.parallel_config.use_sequence_parallel_moe:
         reasons.append("sequence-parallel MoE")
-    if vllm_config.cache_config.cache_dtype not in ("auto", "bfloat16"):
-        reasons.append(f"{vllm_config.cache_config.cache_dtype} KV cache (needs bf16)")
+    if vllm_config.cache_config.cache_dtype not in KV_DTYPES:
+        reasons.append(
+            f"{vllm_config.cache_config.cache_dtype} KV cache (needs bf16 or e4m3)"
+        )
     ssm = getattr(vllm_config.cache_config, "mamba_ssm_cache_dtype", "auto")
     if ssm not in ("auto", "float32"):
         reasons.append(f"{ssm} KDA recurrent state (needs float32)")
@@ -123,7 +131,9 @@ MONO_SPEC = MonoSpec(
         "conv": CacheReq("self_attn.kv_cache[0]", (torch.bfloat16,), when=is_kda),
         "rec": CacheReq("self_attn.kv_cache[1]", (torch.float32,), when=is_kda),
         "mla": CacheReq(
-            "self_attn.mla_attn.mla_attn.kv_cache", (torch.bfloat16,), when=is_dsa
+            "self_attn.mla_attn.mla_attn.kv_cache",
+            (torch.bfloat16, torch.uint8, torch.float8_e4m3fn),
+            when=is_dsa,
         ),
         "icache": CacheReq(
             "self_attn.indexer.k_cache.kv_cache", (torch.uint8,), when=is_dsa

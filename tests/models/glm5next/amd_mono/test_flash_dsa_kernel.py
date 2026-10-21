@@ -165,7 +165,7 @@ class _Caches:
     """Random caches for S requests of up to MAX_LEN tokens, the block table, and
     the step's row table."""
 
-    def __init__(self, S: int, device, seed: int) -> None:
+    def __init__(self, S: int, device, seed: int, kv_fp8: bool = False) -> None:
         from vllm.models.glm5next.amd.ops.mono.config import INDEX_DIM, KV_LORA
         from vllm.models.glm5next.amd.ops.mono.ffn.layout import ROW_WORDS
 
@@ -175,6 +175,12 @@ class _Caches:
         ipb = BLOCK // 4
         self.ipb = ipb
         self.kv = torch.randn(nb, BLOCK, KV_LORA, generator=g, device=device).bfloat16()
+        # an e4m3 cache over a per-tensor scale (vLLM's _k_scale; not 1 here so
+        # the test sees it applied)
+        self.k_scale = None
+        if kv_fp8:
+            self.k_scale = torch.tensor([0.5], device=device)
+            self.kv = _e4m3(self.kv, self.k_scale)
         vals = (torch.randn(nb, ipb, INDEX_DIM, generator=g, device=device) * 64).clamp(
             -448, 448
         )
@@ -211,7 +217,13 @@ class _Caches:
     def caches(self):
         from vllm.models.glm5next.amd.ops.mono.ffn.op import FlashDsaCaches
 
-        return FlashDsaCaches(self.kv, self.idx, self.tail)
+        return FlashDsaCaches(self.kv, self.idx, self.tail, self.k_scale)
+
+    def deq(self, rows: torch.Tensor) -> torch.Tensor:
+        """Cache rows as fp32 values."""
+        if self.k_scale is None:
+            return rows.float()
+        return rows.view(torch.float8_e4m3fn).float() * self.k_scale
 
     def clone(self):
         c = object.__new__(_Caches)
@@ -235,7 +247,14 @@ def _rms(x, w, eps=1e-5):
     ).bfloat16()
 
 
-def _check(rank: int, tp: int, device, fp8) -> None:
+def _e4m3(x: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    """The fp8 MLA cache write of vLLM (``concat_and_cache_mla``): x / scale,
+    saturated to the e4m3 range, as raw bytes."""
+    e4m3 = (x.float() / scale).clamp(-448, 448).to(torch.float8_e4m3fn)
+    return e4m3.view(torch.uint8)
+
+
+def _check(rank: int, tp: int, device, fp8, kv_fp8: bool = False) -> None:
     import torch.distributed as dist
     import torch.nn.functional as F
 
@@ -278,6 +297,7 @@ def _check(rank: int, tp: int, device, fp8) -> None:
             dsa=True,
             max_pools=max_pools,
             dsa_fp8=fp8,
+            kv_fp8=kv_fp8,
         )
         op = FlashFfnOp(rt, lay.weights(), 0, dsa=dsa.weights())
         g = lay.g
@@ -287,7 +307,7 @@ def _check(rank: int, tp: int, device, fp8) -> None:
         comb = torch.softmax(
             torch.randn(S, HC_MULT, HC_MULT, generator=g, device=device), -1
         )
-        cache = _Caches(S, device, seed=10 + S)
+        cache = _Caches(S, device, seed=10 + S, kv_fp8=kv_fp8)
         before = cache.clone()
         rows, live = cache.rows, S - 1
         pos = rows[:, 0].long()
@@ -342,8 +362,16 @@ def _check(rank: int, tp: int, device, fp8) -> None:
         kv_want = _rms(kva, dsa.g_kv)
         flat_kv = cache.kv.view(-1, KV_LORA)
         for r in range(live):
-            got_row = flat_kv[int(rows[r, 1])]
-            assert _rel(got_row, kv_want[r]) < 1e-2, f"S={S} row {r}: KV cache row"
+            got_row = cache.deq(flat_kv[int(rows[r, 1])])
+            if kv_fp8:
+                # the bytes vLLM's write makes of the same normed row; a bf16 ulp
+                # in the norm can move a value across an e4m3 rounding boundary
+                want8 = _e4m3(kv_want[r], cache.k_scale)
+                diff = (flat_kv[int(rows[r, 1])] != want8).float().mean()
+                assert diff < 0.02, f"S={S} row {r}: e4m3 bytes differ at {diff}"
+                assert _rel(got_row, kv_want[r]) < 6e-2, f"S={S} row {r}: KV row"
+            else:
+                assert _rel(got_row, kv_want[r]) < 1e-2, f"S={S} row {r}: KV cache row"
         changed = before.kv.view(-1, KV_LORA).ne(flat_kv).any(-1)
         assert int(changed.sum()) <= live, f"S={S}: stray MLA cache writes"
 
@@ -459,7 +487,7 @@ def _check(rank: int, tp: int, device, fp8) -> None:
                 continue
             toks = torch.arange(L, device=device) if L <= TOPK_TOKENS else sel[r].long()
             blk = cache.bt[r, toks // BLOCK].long()
-            kvr = cache.kv[blk, toks % BLOCK].float()  # [T, 512]
+            kvr = cache.deq(cache.kv[blk, toks % BLOCK])  # [T, 512]
             sc = torch.einsum("hl,tl->ht", q_lat[r].float(), kvr) * MLA_SCALE
             o_lat = (torch.softmax(sc, -1) @ kvr).bfloat16().float()
             want = torch.einsum("hl,hvl->hv", o_lat, dsa.w_uv.float())
@@ -522,12 +550,23 @@ FORMATS = {
 
 @pytest.mark.skipif(not _on_cdna4(), reason="the Flash MonoKernel targets CDNA4")
 @pytest.mark.parametrize(
-    "tp, fmt", [(2, "mixed"), (4, "fp8"), (4, "bf16"), (8, "mixed")]
+    "tp, fmt, kv_fp8",
+    [
+        (2, "mixed", False),
+        (4, "fp8", False),
+        (4, "bf16", False),
+        (8, "mixed", False),
+        (4, "mixed", True),
+        (8, "mixed", True),
+    ],
 )
-def test_dsa_layer_matches_vllm_ops(monkeypatch: pytest.MonkeyPatch, tp: int, fmt: str):
+def test_dsa_layer_matches_vllm_ops(
+    monkeypatch: pytest.MonkeyPatch, tp: int, fmt: str, kv_fp8: bool
+):
+    """``kv_fp8``: an e4m3 MLA cache, as ``--kv-cache-dtype fp8_e4m3`` gives."""
     from ....utils import multi_process_parallel
 
     if torch.accelerator.device_count() < tp:
         pytest.skip(f"needs {tp} GPUs")
     pytest.importorskip("flydsl")
-    multi_process_parallel(monkeypatch, tp, 1, _worker(_check, FORMATS[fmt]))
+    multi_process_parallel(monkeypatch, tp, 1, _worker(_check, FORMATS[fmt], kv_fp8))

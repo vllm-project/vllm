@@ -163,9 +163,10 @@ def f8_word(k):
     return (k // 64) * 16 + ((k % 32) // 8) * 4 + ((k % 64) // 32) * 2 + (k % 8) // 4
 
 
-def fp8_to_bf16x8(word0, word1):
-    """Convert two dwords of eight FP8 values to a BF16 vector."""
-    one = as_ir_value(fx.Float32(1.0))
+def fp8_to_bf16x8(word0, word1, scale=None):
+    """Convert two dwords of eight FP8 values to a BF16 vector, times ``scale``
+    (an f32 value; 1 when omitted)."""
+    one = as_ir_value(fx.Float32(1.0) if scale is None else scale)
     parts = []
     for word in (word0, word1):
         for half in range_constexpr(2):

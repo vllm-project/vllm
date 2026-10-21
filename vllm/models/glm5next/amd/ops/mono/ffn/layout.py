@@ -103,6 +103,9 @@ DSA_TAB = (
     "idx_block_pools",
     "tail_block_elems",
     "tail_gate_elems",
+    # f32 scalar: the MLA cache's per-tensor scale when it holds e4m3 (vLLM's
+    # ``_k_scale``); unused for a bf16 cache
+    "k_scale",
 )
 
 N_ROW_TILES = HIDDEN // ROW_TILE
