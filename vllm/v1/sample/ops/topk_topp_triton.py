@@ -330,8 +330,30 @@ def _topk_topp_kernel(
                         write_pos = tl.where(fb_mask, cumulative_pos, -1)
                         tl.store(BUFFER_ROW + write_pos, logits_blk, mask=fb_mask)
 
+                    # If avg_logit gather yielded <= k, fallback to all finite logits
+                    if num_outliers_fb <= k:
+                        num_outliers_fb = tl.zeros((), dtype=tl.uint32)
+                        for i in range(0, NUM_TILES):
+                            offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+                            mask_n = offs_n < VOCAB_SIZE
+                            logits_blk = tl.load(
+                                LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf")
+                            )
+
+                            fb_mask = (logits_blk > -float("inf")) & mask_n
+                            cumulative_pos = tl.cast(
+                                tl.cumsum(fb_mask) - 1 + num_outliers_fb, tl.int32
+                            )
+                            num_outliers_fb += tl.sum(fb_mask)
+                            write_pos = tl.where(fb_mask, cumulative_pos, -1)
+                            tl.store(BUFFER_ROW + write_pos, logits_blk, mask=fb_mask)
+
+                        min_range = min_logit
+                    else:
+                        # Lower search bound MUST match the gather pivot (avg_logit)
+                        min_range = avg_logit
+
                     max_range = max_logit
-                    min_range = min_logit
                     search_range = tl.cast(num_outliers_fb, tl.int32)
                     search_iters = tl.cast(
                         (num_outliers_fb + BLOCK_SIZE_TRUNC - 1) // BLOCK_SIZE_TRUNC,
