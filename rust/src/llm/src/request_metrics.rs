@@ -18,6 +18,15 @@ const PROMPT_TOKEN_SOURCE_LOCAL_COMPUTE: &str = "local_compute";
 const PROMPT_TOKEN_SOURCE_LOCAL_CACHE_HIT: &str = "local_cache_hit";
 const PROMPT_TOKEN_SOURCE_EXTERNAL_KV_TRANSFER: &str = "external_kv_transfer";
 
+/// Engine lifecycle timestamps used by frontend per-request response metrics.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct RequestTimestamps {
+    pub queued_ts: f64,
+    pub scheduled_ts: f64,
+    pub first_token_ts: f64,
+    pub last_token_ts: f64,
+}
+
 /// Request-scoped metrics state tracked across streamed engine-core updates.
 ///
 /// This is the Rust-side counterpart of the Python frontend's request-lifecycle
@@ -47,6 +56,7 @@ pub(crate) struct RequestMetricsTracker {
     num_generation_tokens: u32,
     num_preemptions: u64,
     latest_num_cached_tokens: u32,
+    is_corrupted: bool,
 }
 
 /// Cached request metric handles for one model and engine index.
@@ -61,6 +71,7 @@ struct RequestMetricHandles {
     prompt_tokens_external_kv_transfer: U64Counter,
     prompt_tokens_cached: U64Counter,
     generation_tokens: U64Counter,
+    corrupted_requests: U64Counter,
 
     // Request lifecycle counters and histograms.
     request_success: Family<FinishedReasonLabels, U64Counter>,
@@ -123,6 +134,7 @@ impl RequestMetricsTracker {
             num_generation_tokens: 0,
             num_preemptions: 0,
             latest_num_cached_tokens: 0,
+            is_corrupted: false,
         }
     }
 
@@ -141,6 +153,7 @@ impl RequestMetricsTracker {
         }
         self.num_generation_tokens += output.new_token_ids.len() as u32;
         self.handles.generation_tokens.inc_by(output.new_token_ids.len() as u64);
+        self.is_corrupted |= output.num_nans_in_logits > 0;
 
         if let Some(events) = &output.events {
             self.observe_events(events);
@@ -187,6 +200,9 @@ impl RequestMetricsTracker {
         };
 
         self.record_request_success(finish_reason);
+        if self.is_corrupted {
+            self.handles.corrupted_requests.inc();
+        }
 
         self.handles.request_prompt_tokens.observe(self.prompt_len as f64);
         self.handles
@@ -217,6 +233,16 @@ impl RequestMetricsTracker {
             events.request_queue_time_seconds.observe(queue_time_seconds);
             events.request_prefill_time_seconds.observe(prefill_time_seconds);
             events.request_inference_time_seconds.observe(inference_time_seconds);
+        }
+    }
+
+    /// Engine lifecycle timestamps recorded so far.
+    pub(crate) fn timestamps(&self) -> RequestTimestamps {
+        RequestTimestamps {
+            queued_ts: self.queued_ts,
+            scheduled_ts: self.scheduled_ts,
+            first_token_ts: self.first_token_ts,
+            last_token_ts: self.last_token_ts,
         }
     }
 
@@ -297,6 +323,7 @@ fn resolve_request_metric_handles(
         ),
         prompt_tokens_cached: metrics.prompt_tokens_cached.get_or_create_owned(&labels),
         generation_tokens: metrics.generation_tokens.get_or_create_owned(&labels),
+        corrupted_requests: metrics.corrupted_requests.get_or_create_owned(&labels),
         request_success: metrics.request_success.clone(),
         request_prompt_tokens: metrics.request_prompt_tokens.get_or_create_owned(&labels),
         request_generation_tokens: metrics.request_generation_tokens.get_or_create_owned(&labels),
@@ -379,11 +406,13 @@ pub fn current_unix_timestamp_secs() -> f64 {
 mod tests {
     use vllm_engine_core_client::protocol::output::{EngineCoreEvent, EngineCoreEventType};
     use vllm_engine_core_client::protocol::stats::PrefillStats;
+    use vllm_metrics::METRICS;
 
-    use super::{RequestMetricsTracker, diff_or_zero};
+    use super::{RequestMetricsTracker, RequestTimestamps, diff_or_zero};
 
     #[test]
     fn tracker_updates_timing_state_across_prefill_decode_and_finish() {
+        METRICS.request.set_max_model_len(4096);
         let mut tracker =
             RequestMetricsTracker::new("model".to_string(), 2, 100.0, 64, Some(128), 1, true);
 
@@ -437,6 +466,15 @@ mod tests {
         assert_eq!(tracker.scheduled_ts, 9.0);
         assert_eq!(tracker.first_token_ts, 10.0);
         assert_eq!(tracker.last_token_ts, 11.5);
+        assert_eq!(
+            tracker.timestamps(),
+            RequestTimestamps {
+                queued_ts: 8.0,
+                scheduled_ts: 9.0,
+                first_token_ts: 10.0,
+                last_token_ts: 11.5,
+            }
+        );
         assert!((tracker.first_token_latency - 0.2).abs() < 1e-9);
         assert_eq!(
             diff_or_zero(tracker.last_token_ts, tracker.first_token_ts),

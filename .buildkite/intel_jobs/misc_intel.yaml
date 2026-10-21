@@ -2,7 +2,7 @@ group: Miscellaneous Intel
 depends_on:
   - image-build-xpu
 steps:
-- label: XPU Batch Invariance
+- label: ":intel: (BMG) Batch Invariance"
   key: xpu-batch-invariance
   timeout_in_minutes: 60
   num_devices: 2
@@ -30,7 +30,7 @@ steps:
       pytest -v -s v1/determinism/test_xpu_batch_invariant_ut.py &&
       bash ../.buildkite/scripts/hardware_ci/run-xpu-batch-invariance.sh'
 
-- label: V1 Core + KV + Metrics
+- label: ":intel: (BMG) V1 Core + KV + Metrics"
   key: v1-core-kv-metrics-intel
   timeout_in_minutes: 45
   device: intel_gpu
@@ -64,7 +64,7 @@ steps:
       VLLM_BATCH_INVARIANT=1 pytest -v -s -m "not cpu_test" v1/ec_connector/unit
       --ignore=v1/ec_connector/unit/test_ec_cpu_connector.py'
 
-- label: EC CPU Connector (XPU)
+- label: ":intel: (BMG) EC CPU Connector (XPU)"
   key: ec-cpu-connector-xpu
   timeout_in_minutes: 45
   device: intel_gpu
@@ -96,7 +96,7 @@ steps:
       cd tests &&
       pytest -v -s v1/ec_connector/unit/test_ec_cpu_connector.py'
 
-- label: V1 Sample + Logits
+- label: ":intel: (BMG) V1 Sample + Logits"
   key: v1-sample-logits-intel
   timeout_in_minutes: 90
   device: intel_gpu
@@ -141,7 +141,7 @@ steps:
         limit: 1
   parallelism: 4
 
-- label: Basic Models Tests (Initialization)
+- label: ":intel: (BMG) Basic Models Tests (Initialization)"
   key: basic-models-tests-initialization
   timeout_in_minutes: 60
   device: intel_gpu
@@ -166,7 +166,7 @@ steps:
       cd tests &&
       pytest -v -s models/test_initialization.py::test_can_initialize_large_subset[Eagle3MiniMaxM2ForCausalLM]'
 
-- label: XPU CPU Offload
+- label: ":intel: (BMG) CPU Offload"
   key: xpu-cpu-offload
   timeout_in_minutes: 60
   device: intel_gpu
@@ -183,7 +183,6 @@ steps:
   source_file_dependencies:
     - vllm/
     - vllm/v1/kv_offload/
-    - vllm/v1/kv_connector/
     - tests/v1/kv_offload/
     - tests/v1/kv_connector/unit/test_offloading_connector.py
   commands:
@@ -194,7 +193,7 @@ steps:
       pytest -v -s v1/kv_offload &&
       pytest -v -s v1/kv_connector/unit/test_offloading_connector.py'
 
-- label: NixlConnector PD accuracy (4 GPUs)
+- label: ":intel: (BMG) NixlConnector PD accuracy (4 GPUs)"
   key: nixlconnector-pd-accuracy-4-gpus
   timeout_in_minutes: 60
   num_devices: 4
@@ -223,7 +222,7 @@ steps:
       PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2 bash v1/kv_connector/nixl_integration/run_xpu_disagg_accuracy_test.sh &&
       PREFILLER_TP_SIZE=2 DECODER_TP_SIZE=2 bash v1/kv_connector/nixl_integration/run_xpu_disagg_accuracy_test.sh'
 
-- label: Regression
+- label: ":intel: (BMG) Regression"
   key: regression
   timeout_in_minutes: 50
   device: intel_gpu
@@ -256,7 +255,7 @@ steps:
       'cd tests &&
       pytest -v -s test_regression.py'
 
-- label: Metrics, Tracing (2 GPUs)
+- label: ":intel: (BMG) Metrics, Tracing (2 GPUs)"
   key: metrics-tracing-2-gpus
   timeout_in_minutes: 45
   num_devices: 2
@@ -291,7 +290,7 @@ steps:
     'cd tests &&
     pytest -v -s v1/tracing'
 
-- label: Async Engine, Inputs, Utils, Worker
+- label: ":intel: (BMG) Async Engine, Inputs, Utils, Worker"
   key: async-engine-inputs-utils-worker
   timeout_in_minutes: 55
   device: intel_gpu
@@ -330,7 +329,7 @@ steps:
     pytest -v -s -m "not cpu_test" ./multimodal &&
     pytest -v -s utils_ --ignore=utils_/test_mem_utils.py'
 
-- label: Detokenizer Stop Strings (XPU)
+- label: ":intel: (BMG) Detokenizer Stop Strings (XPU)"
   key: detokenizer-stop-strings-xpu
   timeout_in_minutes: 45
   device: intel_gpu
@@ -367,7 +366,7 @@ steps:
       'cd tests &&
       pytest -v -s detokenizer/test_stop_strings.py'
 
-- label: Fusion Unit Tests
+- label: ":intel: (BMG) Fusion Unit Tests"
   key: fusion-unit-tests
   timeout_in_minutes: 30
   device: intel_gpu

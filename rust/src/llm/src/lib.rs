@@ -5,6 +5,7 @@ use std::num::NonZeroU32;
 
 use tracing::Span;
 use vllm_engine_core_client::EngineCoreClient;
+use vllm_metrics::METRICS;
 
 mod error;
 mod inflight;
@@ -19,7 +20,7 @@ pub use output::{
     GenerateOutputStreamExt, GeneratePromptInfo, TokenUsage, WeightVersionSpan,
 };
 pub use request::GenerateRequest;
-pub use request_metrics::current_unix_timestamp_secs;
+pub use request_metrics::{RequestTimestamps, current_unix_timestamp_secs};
 pub use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs, TokenLogprob};
 
 use crate::inflight::InflightRequests;
@@ -45,6 +46,7 @@ impl Llm {
     /// Create a new minimal LLM facade from an already connected engine-core
     /// client.
     pub fn new(client: EngineCoreClient) -> Self {
+        METRICS.request.set_max_model_len(client.max_model_len());
         Self {
             client,
             randomize_request_id: true,
