@@ -24,6 +24,9 @@ use vllm_text::backend::hf::HfOverrides;
 /// when keep-alive is disabled (`0`).
 pub const DEFAULT_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Default interval between periodic engine statistics logs.
+pub const DEFAULT_LOG_STATS_INTERVAL: Duration = Duration::from_secs(10);
+
 /// How the HTTP or gRPC server obtains its listening socket.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum HttpListenerMode {
@@ -286,6 +289,12 @@ pub struct Config {
     /// engine-reported scheduler stats and request lifecycle events are not
     /// exported.
     pub disable_log_stats: bool,
+    /// Interval between periodic stats logs (`VLLM_LOG_STATS_INTERVAL`,
+    /// default 10s), or `None` to never log while still recording stats.
+    pub log_stats_interval: Option<Duration>,
+    /// Keep external request IDs as engine-core request IDs instead of adding
+    /// a random suffix (`VLLM_DISABLE_REQUEST_ID_RANDOMIZATION`).
+    pub disable_request_id_randomization: bool,
     /// Maximum time to wait for active HTTP/gRPC requests to drain on shutdown.
     pub shutdown_timeout: Duration,
     /// Whether the caller manages the engine process and shuts it down when

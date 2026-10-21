@@ -88,6 +88,8 @@ async fn main() -> Result<()> {
         tls: None,
         api_keys: Vec::new(),
         disable_log_stats: false,
+        log_stats_interval: Some(Duration::from_secs(10)),
+        disable_request_id_randomization: false,
         shutdown_timeout: Duration::ZERO,
         manages_engine: false,
         keep_alive_timeout: Duration::from_secs(5),

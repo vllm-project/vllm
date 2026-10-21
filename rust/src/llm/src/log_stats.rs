@@ -11,7 +11,6 @@ use vllm_metrics::{
     SchedulerLogStatsInterval, U64Counter, U64Gauge, WaitingReasonLabels,
 };
 
-const LOG_STATS_INTERVAL: Duration = Duration::from_secs(10);
 const WAITING_REASON_DEFERRED: &str = "deferred";
 
 /// Cached, cloned metric handles for one engine. Each clone shares the same
@@ -89,9 +88,9 @@ pub(crate) struct StatsLogger {
 
 impl StatsLogger {
     /// Start the background stats logging task.
-    pub(crate) fn start(model_name: String, engine_indices: Vec<u32>) -> Self {
+    pub(crate) fn start(model_name: String, engine_indices: Vec<u32>, interval: Duration) -> Self {
         let task = AbortOnDropHandle::new(tokio::spawn(async move {
-            run_stats_logger(model_name, engine_indices).await;
+            run_stats_logger(model_name, engine_indices, interval).await;
         }));
         Self { _task: task }
     }
@@ -169,10 +168,10 @@ fn resolve_engine_metrics(model_name: &str, engine_indices: &[u32]) -> Vec<Engin
         .collect()
 }
 
-async fn run_stats_logger(model_name: String, engine_indices: Vec<u32>) {
+async fn run_stats_logger(model_name: String, engine_indices: Vec<u32>, interval: Duration) {
     let engines = resolve_engine_metrics(&model_name, &engine_indices);
 
-    let mut interval = tokio::time::interval(LOG_STATS_INTERVAL);
+    let mut interval = tokio::time::interval(interval);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // The first tick fires immediately; skip it so the first log is after one full
     // interval.
