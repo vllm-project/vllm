@@ -6,10 +6,13 @@ Tests the functionality of the DecodeBenchConnector which fills KV cache
 with dummy values for decode performance benchmarking.
 """
 
+from dataclasses import dataclass
+
 import pytest
 import torch
 
 from vllm import SamplingParams
+from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 
 # ruff: noqa: E501
@@ -35,6 +38,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheSpec,
     KVQuantMode,
     MambaSpec,
     SlidingWindowSpec,
@@ -488,6 +492,101 @@ def test_decode_bench_connector_bounded_window_group_fills_allocated():
                     head_size=1,
                     dtype=torch.float32,
                     sliding_window=16,
+                ),
+            ),
+        ],
+    )
+    scheduler_connector = DecodeBenchConnector(
+        vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
+    )
+    num_external_tokens = 48
+    request = create_request(
+        request_id=1, num_tokens=num_external_tokens + 1, block_size=16
+    )
+    blocks = KVCacheBlocks(
+        (
+            [
+                KVCacheBlock(block_id=1),
+                KVCacheBlock(block_id=2),
+                KVCacheBlock(block_id=3),
+            ],
+            [KVCacheBlock(block_id=4), KVCacheBlock(block_id=5)],
+        )
+    )
+    scheduler_connector.update_state_after_alloc(request, blocks, num_external_tokens)
+    metadata = scheduler_connector.build_connector_meta(SchedulerOutput.make_empty())
+    assert isinstance(metadata, DecodeBenchConnectorMetadata)
+    assert metadata.reqs_to_fill == {
+        request.request_id: (([1, 2, 3], [4, 5]), num_external_tokens)
+    }
+
+
+@dataclass(frozen=True)
+class _BoundedHotCacheSpec(KVCacheSpec):
+    """Minimal stand-in for a bounded, non-AttentionSpec cache spec.
+
+    Mirrors the shape of HiSparseHotSpec: a direct KVCacheSpec subclass with
+    a fixed per-request allocation (`blocks_per_request`), which is unrelated
+    to the sequence length the token-paged math would imply.
+    """
+
+    page_size: int
+    blocks_per_request: int
+
+    @property
+    def prefix_cacheable(self) -> bool:
+        return False
+
+    @property
+    def page_size_bytes(self) -> int:
+        return self.page_size
+
+    @property
+    def block_table_token_alignment(self) -> int | None:
+        return None
+
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        return self.blocks_per_request * self.page_size
+
+    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
+        return self.blocks_per_request
+
+    @property
+    def has_layer_views(self) -> bool:
+        return False
+
+    @property
+    def uses_slot_mapping(self) -> bool:
+        return False
+
+
+def test_decode_bench_connector_bounded_kv_cache_spec_group_fills_allocated():
+    """Bounded non-AttentionSpec groups fill all allocated blocks.
+
+    Regression test: HiSparse hot groups are direct KVCacheSpec subclasses
+    whose per-request allocation is capped by blocks_per_request regardless
+    of sequence length; the connector applied token-paged block-range math
+    to them and asserted once the sequence outgrew the cap.
+    """
+    vllm_config = create_vllm_config(
+        block_size=16,
+        max_num_batched_tokens=1000,
+        kv_connector="DecodeBenchConnector",
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["attention"],
+                FullAttentionSpec(
+                    block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["hot"],
+                _BoundedHotCacheSpec(
+                    block_size=16, page_size=1024, blocks_per_request=2
                 ),
             ),
         ],
