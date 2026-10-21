@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable, Mapping
-from typing import Annotated, Literal, TypeAlias
+from collections.abc import Hashable, Iterable, Mapping
+from typing import Annotated, Any, Literal, TypeAlias
 
 import torch
 import torch.nn as nn
@@ -34,6 +34,7 @@ from vllm.model_executor.layers.rotary_embedding.common import (
 )
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
+    SupportsEncoderCudaGraph,
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
@@ -60,6 +61,7 @@ from vllm.transformers_utils.configs.dotsocr import DotsOCRConfig, DotsVisionCon
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
 
 from .vision import is_vit_use_data_parallel, run_dp_sharded_mrope_vision_model
 
@@ -548,7 +550,6 @@ class DotsVisionTransformer(nn.Module):
         grid_thw: list[list[int]],
         *,
         max_batch_size: int | None = None,
-        max_frames_per_batch: int | None = None,
         max_seqlen_override: int | None = None,
         device: torch.device | None = None,
     ) -> dict[str, torch.Tensor]:
@@ -573,9 +574,7 @@ class DotsVisionTransformer(nn.Module):
         # Keep cu_seqlens shape stable across capture/replay.
         # Pad with the last offset so that padded sequences are empty and the
         # offsets stay valid.
-        pad_to = (
-            max_frames_per_batch if max_frames_per_batch is not None else max_batch_size
-        )
+        pad_to = max_batch_size
         if pad_to is not None:
             num_seqs = len(cu_seqlens) - 1
             if num_seqs < pad_to:
@@ -645,7 +644,9 @@ class DotsVisionTransformer(nn.Module):
     info=DotsOCRProcessingInfo,
     dummy_inputs=DotsOCRDummyInputsBuilder,
 )
-class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
+class DotsOCRForCausalLM(
+    nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA, SupportsEncoderCudaGraph
+):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             ".attn.qkv_proj.": ".attn.qkv.",
@@ -792,6 +793,185 @@ class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
             return []
         vision_embeddings = self._process_image_input(image_input)
         return vision_embeddings
+
+    # -- SupportsEncoderCudaGraph protocol methods --
+
+    # image_grid_thw is a tensor in the original mm_kwargs, but a list after
+    # select_encoder_cudagraph_items(); the manager passes both back in
+    # (e.g. get_encoder_cudagraph_item_specs() before replay).
+    def _get_image_grid_thw(self, mm_kwargs: dict[str, Any]) -> list[list[int]]:
+        grid_thw = mm_kwargs["image_grid_thw"]
+        if not isinstance(grid_thw, list):
+            grid_thw = grid_thw.tolist()
+        return grid_thw
+
+    def get_encoder_cudagraph_config(self):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphConfig,
+        )
+
+        return EncoderCudaGraphConfig(
+            modalities=["image"],
+            buffer_keys=[
+                "pixel_values",
+                "rotary_pos_emb",
+                "cu_seqlens",
+                "max_seqlen",
+            ],
+            out_hidden_size=self.vision_tower.out_hidden_size,
+        )
+
+    def get_encoder_cudagraph_budget_range(
+        self,
+        vllm_config: VllmConfig,
+    ) -> tuple[int, int]:
+        # Min: 64, consistent with Qwen2-VL / Qwen3-VL.
+        # The smallest dots.ocr image is only 4 tokens (56x56), but a smaller
+        # min_budget would shrink max_batch_size (= min(max // min, min)) to 4.
+        # Document pages are usually large, so padding tiny images up to 64
+        # tokens costs little.
+        min_budget = 64
+        # Max: capped by max_num_batched_tokens
+        max_budget = min(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            vllm_config.model_config.max_model_len,
+        )
+        return (min_budget, max_budget)
+
+    def get_encoder_cudagraph_item_specs(
+        self,
+        mm_kwargs: dict[str, Any],
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
+
+        m = self.vision_tower.spatial_merge_size
+        grid_thw = self._get_image_grid_thw(mm_kwargs)
+        return [
+            EncoderItemSpec(
+                input_size=t * h * w,
+                output_tokens=t * (h // m) * (w // m),
+            )
+            for t, h, w in grid_thw
+        ]
+
+    def select_encoder_cudagraph_items(
+        self, mm_kwargs: dict[str, Any], indices: list[int]
+    ) -> dict[str, Any]:
+        grid_thw = self._get_image_grid_thw(mm_kwargs)
+        pixel_values = mm_kwargs["pixel_values"]
+
+        if len(indices) == 0:
+            return {
+                "pixel_values": pixel_values[:0],
+                "image_grid_thw": [],
+            }
+
+        # Compute cumulative patch offsets for slicing pixel_values.
+        patches_per_item = [t * h * w for t, h, w in grid_thw]
+        cum_patches = [0]
+        for p in patches_per_item:
+            cum_patches.append(cum_patches[-1] + p)
+
+        selected_pv = torch.cat(
+            [pixel_values[cum_patches[i] : cum_patches[i + 1]] for i in indices]
+        )
+        selected_grid = [grid_thw[i] for i in indices]
+
+        return {
+            "pixel_values": selected_pv,
+            "image_grid_thw": selected_grid,
+        }
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphCaptureInputs,
+        )
+
+        spatial_merge_size = self.vision_tower.spatial_merge_size
+        # Use ceil so captured capacity is never smaller than token_budget.
+        per_mm_item_output = (token_budget + max_batch_size - 1) // max_batch_size
+
+        grid_config = [
+            [1, spatial_merge_size, per_mm_item_output * spatial_merge_size]
+            for _ in range(max_batch_size)
+        ]
+
+        patchifier = self.vision_tower.patch_embed.patchifier
+        in_channels = patchifier.num_channels
+        patch_size = patchifier.patch_size
+        temporal_patch_size = patchifier.temporal_patch_size
+        total_patches = sum(t * h * w for t, h, w in grid_config)
+        flattened_patch_size = (
+            in_channels * temporal_patch_size * patch_size * patch_size
+        )
+        # Dummy all-zero pixel values; overwritten with real data before every replay.
+        dummy_pixel_values = torch.zeros(
+            total_patches,
+            flattened_patch_size,
+            device=device,
+            dtype=dtype,
+        )
+
+        # max_seqlen.item() gets baked into the CUDA graph at capture time.
+        metadata = self.vision_tower.prepare_encoder_metadata(
+            grid_config,
+            max_batch_size=max_batch_size,
+            max_seqlen_override=token_budget * (spatial_merge_size**2),
+            device=device,
+        )
+
+        values = metadata | {
+            "pixel_values": dummy_pixel_values,
+        }
+
+        return EncoderCudaGraphCaptureInputs(
+            values=values,
+        )
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        path: str = "default",
+    ) -> EncoderCudaGraphReplayBuffers:
+        grid_thw = self._get_image_grid_thw(mm_kwargs)
+        metadata = self.vision_tower.prepare_encoder_metadata(
+            grid_thw,
+            max_batch_size=max_batch_size,
+        )
+
+        values = metadata | {
+            "pixel_values": mm_kwargs["pixel_values"],
+        }
+        return EncoderCudaGraphReplayBuffers(values=values)
+
+    def encoder_cudagraph_forward(
+        self,
+        values: dict[str, torch.Tensor],
+        path: str = "default",
+    ) -> torch.Tensor:
+        pixel_values = values.pop("pixel_values")
+        metadata = values
+        return self.vision_tower(pixel_values, None, encoder_metadata=metadata)
+
+    def encoder_eager_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+        path: str = "default",
+    ) -> torch.Tensor:
+        pixel_values = mm_kwargs["pixel_values"]
+        grid_thw = mm_kwargs["image_grid_thw"]
+        return self.vision_tower(pixel_values, grid_thw)
 
     def forward(
         self,
