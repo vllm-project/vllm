@@ -506,9 +506,8 @@ def select_indexer_impl_cls(
     support.
     """
     if get_current_vllm_config().attention_config.minimax_m3_indexer_cp:
-        # Only a bf16 cache should arrive: AttentionConfig admits fp8 too, but
-        # that one is the AITER MSA indexer's and it is selected before this.
-        # Platform and TP size are only known here.
+        # AttentionConfig already rejects non-bf16 index caches; platform and
+        # TP size are only known here.
         tp_size = get_tensor_model_parallel_world_size()
         if not current_platform.is_rocm() or tp_size < 2:
             raise ValueError(
@@ -517,10 +516,8 @@ def select_indexer_impl_cls(
             )
         if indexer_kv_dtype != "bf16":
             raise ValueError(
-                "attention_config.minimax_m3_indexer_cp needs a bf16 index "
-                f"cache to run here, got indexer_kv_dtype={indexer_kv_dtype!r}; "
-                "fp8 is served by the AITER MSA CP indexer, which this config "
-                "did not select -- its reason is logged above"
+                "attention_config.minimax_m3_indexer_cp requires a bf16 index "
+                f"cache, got indexer_kv_dtype={indexer_kv_dtype!r}"
             )
         from vllm.models.minimax_m3.amd.indexer_context_parallel import (
             MiniMaxM3IndexerTritonCPImpl,
