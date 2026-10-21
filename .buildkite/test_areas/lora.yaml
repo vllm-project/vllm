@@ -31,8 +31,10 @@ steps:
       - image-build-amd
 
 
-- label: ":nvidia: (L4) LoRA TP (Distributed) %N"
+- label: ":nvidia: (L4) [Nightly] LoRA TP (Distributed) %N"
   key: lora-tp-distributed
+  # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
+  optional: true
   timeout_in_minutes: 25
   device: l4
   num_devices: 4
@@ -61,6 +63,8 @@ steps:
     - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s -x lora/test_sequence_classification.py::test_batched_loras_tp
   mirror:
     amd:
+      # Run on PRs even when the L4 step is optional (nightly only).
+      optional: false
       label: ":amd: (MI300) LoRA TP (Distributed) Shard %N"
       dind: false
       device: mi300_4
