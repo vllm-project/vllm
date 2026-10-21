@@ -31,6 +31,8 @@ from vllm.lora.layers import (
     ReplicatedLinearWithLoRA,
     RowParallelLinearWithLoRA,
     RowParallelLinearWithShardedLoRA,
+    Step5FusedQKVIndexerWithLoRA,
+    Step5SparseIndexerWWithLoRA,
     VocabParallelEmbeddingWithLoRA,
 )
 from vllm.model_executor.custom_op import maybe_get_oot_by_class
@@ -77,6 +79,8 @@ def get_lora_id():
 # Order matters here: more specific wrappers must be checked before generic
 # merged/column-parallel wrappers in from_layer().
 _all_lora_classes: tuple[type[BaseLayerWithLoRA], ...] = (
+    Step5FusedQKVIndexerWithLoRA,
+    Step5SparseIndexerWWithLoRA,
     VocabParallelEmbeddingWithLoRA,
     ColumnParallelLinearWithLoRA,
     MergedColumnParallelLinearWithLoRA,
