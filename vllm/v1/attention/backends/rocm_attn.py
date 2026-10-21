@@ -237,8 +237,11 @@ class RocmAttentionBackend(AttentionBackend):
         # The native HIP kernels hardcode group-contiguous block addressing, so
         # they need the K and V groups to span all blocks (H outermost within the layer)
         # The Triton fallbacks are stride-aware, so block-interior LBHNC is also
-        # supported, just without the native kernels.
-        return (KVCacheLayout.LHBNC, KVCacheLayout.LBHNC)
+        # supported, just without the native kernels. So is block-outermost
+        # BLHNC, which only widens the block stride; models whose other
+        # backends require it (e.g. the GLM-5.3-Flash indexer, with a DFlash2
+        # drafter on this backend) need it.
+        return (KVCacheLayout.LHBNC, KVCacheLayout.LBHNC, KVCacheLayout.BLHNC)
 
     @staticmethod
     def get_builder_cls() -> type["RocmAttentionMetadataBuilder"]:
