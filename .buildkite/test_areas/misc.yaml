@@ -190,6 +190,27 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s -rs v1/kv_connector/unit/test_moriio_*.py
 
+# UMBP is built on mori, so its tests skip on CUDA. Run them on MI355 whenever
+# the connector or its tests change.
+- label: ":amd: (MI355 DPX) UMBP Connector Unit Tests"
+  key: amd-umbp-connector-unit-mi355
+  dind: false
+  device: mi355_dpx
+  num_devices: 1
+  timeout_in_minutes: 30
+  working_dir: /vllm-workspace/tests
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/umbp/
+  - vllm/distributed/kv_transfer/kv_connector/v1/base.py
+  - vllm/v1/kv_cache_interface.py
+  - tests/v1/kv_connector/unit/test_umbp_
+  - tests/v1/kv_connector/umbp_test_utils.py
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s -rs v1/kv_connector/unit/test_umbp_*.py
+
 # Single-node MoRIIO WRITE P/D on dummy weights: prefill and decode on separate
 # GPUs over xGMI, compared exactly against a direct serve.
 - label: ":amd: (MI355) MoRIIO WRITE P/D Dummy-Weight E2E Shard %N"
@@ -502,7 +523,7 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 18GB) Python-only Installation"
+- label: ":nvidia: (H200 MIG 18GB) [Nightly] Python-only Installation"
   key: python-only-installation
   depends_on: ~
   optional: true
@@ -526,7 +547,7 @@ steps:
       - setup.py
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H200 MIG 18GB) Python 3.14 Smoke Nightly"
+- label: ":nvidia: (H200 MIG 18GB) [Nightly] Python 3.14 Smoke"
   key: python-314-smoke-nightly
   depends_on: ~
   optional: true
@@ -589,7 +610,7 @@ steps:
   - vllm/device_allocator/
   - vllm/connections.py
   - vllm/engine/arg_utils.py
-  - vllm/entrypoints/chat_utils.py
+  - vllm/renderers/chat_utils/
   - vllm/entrypoints/mcp/
   - vllm/entrypoints/openai/chat_completion/protocol.py
   - vllm/entrypoints/openai/completion/protocol.py
@@ -872,7 +893,7 @@ steps:
       - pytest -v -s v1/determinism/test_online_batch_invariance.py
       - pytest -v -s v1/determinism/test_mx_linear_batch_invariant.py
 
-- label: ":nvidia: (H100) Batch Invariance (Distributed)"
+- label: ":nvidia: (H100) [Nightly] Batch Invariance (Distributed)"
   key: batch-invariance-distributed-4xh100
   automatic_shard: true
   timeout_in_minutes: 45
@@ -915,7 +936,7 @@ steps:
       - VLLM_TP_SIZE=4 VLLM_NEEDLE_TRIALS=2 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_ATTN
       - VLLM_TEST_MODEL=allenai/OLMoE-1B-7B-0924 VLLM_TEST_SERVER_ARGS="--data-parallel-size 4 --enable-expert-parallel --max-model-len 4096" pytest -v -s v1/determinism/test_online_batch_invariance.py
 
-- label: ":nvidia: (H200 MIG 35GB) Acceptance Length (Large Models)"
+- label: ":nvidia: (H200 MIG 35GB) [Nightly] Acceptance Length (Large Models)"
   device: h200_35gb
   key: acceptance-length-test-large-models
   timeout_in_minutes: 20

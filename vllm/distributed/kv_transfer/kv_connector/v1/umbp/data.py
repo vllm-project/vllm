@@ -13,16 +13,39 @@ import hashlib
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
+from dataclasses import fields as dataclass_fields
 from enum import Enum
 from typing import Any, NamedTuple
 
 import torch
 
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
     KVConnectorWorkerMetadata,
 )
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    KVCacheSpec,
+    UniformTypeKVCacheSpecs,
+)
+
+
+def _layer_specs(group: KVCacheGroupSpec) -> dict[str, KVCacheSpec]:
+    """Map each layer of a cache group to the spec describing its own pages."""
+    spec = group.kv_cache_spec
+    if isinstance(spec, UniformTypeKVCacheSpecs):
+        return {name: spec.kv_cache_specs[name] for name in group.layer_names}
+    return dict.fromkeys(group.layer_names, spec)
+
+
+def _spec_fingerprint(spec: KVCacheSpec) -> dict[str, str]:
+    """Every field that shapes a layer's stored bytes, in a stable form."""
+    return {
+        "kind": type(spec).__name__,
+        **{item.name: str(getattr(spec, item.name)) for item in dataclass_fields(spec)},
+    }
 
 
 @dataclass(frozen=True)
@@ -110,17 +133,29 @@ class UMBPNamespace:
     value: str
 
     @classmethod
+    def configured(cls, vllm_config: Any) -> UMBPNamespace | None:
+        """Return the explicit ``key_namespace``, or None when it is derived."""
+        extra = vllm_config.kv_transfer_config.kv_connector_extra_config
+        configured = extra.get("key_namespace", "auto")
+        if configured == "auto":
+            return None
+        if not isinstance(configured, str) or not configured:
+            raise ValueError("key_namespace must be a non-empty string or 'auto'")
+        return cls(configured)
+
+    @classmethod
     def from_vllm_config(
         cls,
         vllm_config: Any,
         kv_cache_config: KVCacheConfig,
     ) -> UMBPNamespace:
-        extra = vllm_config.kv_transfer_config.kv_connector_extra_config
-        configured = extra.get("key_namespace", "auto")
-        if configured != "auto":
-            if not isinstance(configured, str) or not configured:
-                raise ValueError("key_namespace must be a non-empty string or 'auto'")
-            return cls(configured)
+        """Derive the namespace from a worker's per-layer KV cache config.
+
+        The scheduler's config flattens UniformTypeKVCacheSpecs groups, so the
+        scheduler adopts the namespace its workers report instead.
+        """
+        if (configured := cls.configured(vllm_config)) is not None:
+            return configured
 
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
@@ -146,8 +181,10 @@ class UMBPNamespace:
                 {
                     "layers": group.layer_names,
                     "block_size": group.kv_cache_spec.block_size,
-                    "kind": type(group.kv_cache_spec).__name__,
-                    "dtype": str(getattr(group.kv_cache_spec, "dtype", None)),
+                    "layer_specs": {
+                        name: _spec_fingerprint(spec)
+                        for name, spec in _layer_specs(group).items()
+                    },
                 }
                 for group in kv_cache_config.kv_cache_groups
             ],
@@ -155,13 +192,20 @@ class UMBPNamespace:
             "pp": parallel_config.pipeline_parallel_size,
             "pcp": getattr(parallel_config, "prefill_context_parallel_size", 1),
             "dcp": getattr(parallel_config, "decode_context_parallel_size", 1),
-            "layout_version": 1,
+            "layout_version": 2,
         }
         if speculative is not None:
             # Added only when set, so namespaces without a drafter are unchanged.
             fields["speculative"] = speculative
         payload = json.dumps(fields, sort_keys=True, separators=(",", ":")).encode()
         return cls(hashlib.sha256(payload).hexdigest()[:32])
+
+
+@dataclass(frozen=True)
+class UMBPHandshakeMetadata(KVConnectorHandshakeMetadata):
+    """Namespace a worker derived, reported to the scheduler at startup."""
+
+    namespace: str
 
 
 @dataclass(frozen=True)
@@ -269,20 +313,19 @@ class KVLayoutPlanner:
 
     @classmethod
     def from_kv_cache_config(cls, config: KVCacheConfig) -> KVLayoutPlanner:
-        group_by_layer = {
-            layer: group_id
+        layer_specs = {
+            layer: (group_id, spec)
             for group_id, group in enumerate(config.kv_cache_groups)
-            for layer in group.layer_names
             if group.enable_kv_transfer
+            for layer, spec in _layer_specs(group).items()
         }
         regions: list[KVRegion] = []
         offset = 0
         for tensor in config.kv_cache_tensors:
             for layer_name in tensor.layers:
-                group_id = group_by_layer.get(layer_name)
-                if group_id is None:
+                if layer_name not in layer_specs:
                     continue
-                spec = config.kv_cache_groups[group_id].kv_cache_spec
+                group_id, spec = layer_specs[layer_name]
                 block_bytes = spec.page_size_bytes
                 regions.append(
                     KVRegion(

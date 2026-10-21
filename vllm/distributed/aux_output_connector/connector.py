@@ -55,6 +55,14 @@ class AuxOutputSchedulerConnector:
     ) -> None:
         self._enable_routed_experts = enable_routed_experts
         self._enable_indexer = enable_indexer
+        self._prompt_start_fields = tuple(
+            field
+            for enabled, field in (
+                (enable_routed_experts, "routed_experts_prompt_start"),
+                (enable_indexer, "indexer_topk_prompt_start"),
+            )
+            if enabled
+        )
         self._hash_block_size = hash_block_size
         # Number of hashes already sent to the worker for each active request.
         self._sent_hash_counts: dict[str, int] = {}
@@ -78,17 +86,7 @@ class AuxOutputSchedulerConnector:
             )
             if packed is not None:
                 block_hashes_by_request[request_id] = packed
-            assert request.sampling_params is not None
-            # A P/D prefiller may cut the prompt short of the requested start.
-            starts = []
-            if self._enable_routed_experts:
-                starts.append(request.sampling_params.routed_experts_prompt_start)
-            if self._enable_indexer:
-                starts.append(request.sampling_params.indexer_topk_prompt_start)
-            scheduled_requests[request_id] = max(
-                min(min(starts), request.num_prompt_tokens),
-                0 if request.num_output_tokens == 0 else request.num_tokens - 1,
-            )
+            scheduled_requests[request_id] = self._get_request_start(request)
         # A settled token can complete a hash block after the next async schedule
         # was built. Send a hash-only update if the request was not rescheduled.
         if len(self._sent_hash_counts) != len(scheduled_requests):
@@ -112,6 +110,18 @@ class AuxOutputSchedulerConnector:
             scheduled_requests,
             block_hashes_by_request,
             finished_requests,
+        )
+
+    def _get_request_start(self, request: Request) -> int:
+        assert request.sampling_params is not None
+        prompt_start: int = min(
+            getattr(request.sampling_params, field)
+            for field in self._prompt_start_fields
+        )
+        # A P/D prefiller may cut the prompt short of the requested start.
+        return max(
+            min(prompt_start, request.num_prompt_tokens),
+            0 if request.num_output_tokens == 0 else request.num_tokens - 1,
         )
 
     def take_output(
