@@ -89,8 +89,8 @@ def _qwen3_arg_converter(raw_args: str, partial: bool) -> str:
     return json.dumps(params, ensure_ascii=False)
 
 
-# What ends an open value in ``_PARAM_RE``: a closing tag or the next opener.
-_PARAM_VALUE_END_RE = re.compile(r"<\s*/\s*parameter\s*>|<\s*parameter\s*=")
+# What ends an open value: a closing tag, the next opener or ``</function>``.
+_PARAM_VALUE_END_RE = re.compile(r"<\s*/\s*parameter\s*>|<\s*parameter\s*=|</function>")
 
 
 def _param_value_end_window(text: str) -> str:
