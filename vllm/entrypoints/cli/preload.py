@@ -143,6 +143,39 @@ class PreloadSubcommand(CLISubcommand):
             default="0.0.0.0",
             help="Host for the parent /health endpoint (default: 0.0.0.0).",
         )
+        parser.add_argument(
+            "--weight-cache-listen-host",
+            type=str,
+            default=None,
+            help="Host to bind for authenticated daemon-to-daemon requests.",
+        )
+        parser.add_argument(
+            "--weight-cache-listen-port",
+            type=int,
+            default=None,
+            help="Base port for daemon-to-daemon requests; each daemon binds "
+            "base_port + group offset + its global rank.",
+        )
+        parser.add_argument(
+            "--weight-cache-seed-host",
+            type=str,
+            default=None,
+            help="Host of a source daemon replica to seed warmup caches from.",
+        )
+        parser.add_argument(
+            "--weight-cache-seed-port",
+            type=int,
+            default=None,
+            help="Base port of the source daemon replica; each daemon dials "
+            "base_port + group offset + its global rank.",
+        )
+        parser.add_argument(
+            "--weight-cache-seed-token",
+            type=str,
+            default=None,
+            help="Shared secret for daemon-to-daemon requests. The JSON "
+            "connection is unencrypted; use a trusted network.",
+        )
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
@@ -179,6 +212,31 @@ class PreloadSubcommand(CLISubcommand):
         tp_size = parallel_config.tensor_parallel_size
         pp_size = parallel_config.pipeline_parallel_size
         dp_size = parallel_config.data_parallel_size
+        world_size = dp_size * pp_size * tp_size
+
+        listen_args = (args.weight_cache_listen_host, args.weight_cache_listen_port)
+        source_args = (args.weight_cache_seed_host, args.weight_cache_seed_port)
+        if any(value is None for value in listen_args) and any(
+            value is not None for value in listen_args
+        ):
+            raise ValueError(
+                "Weight cache listen host and port must be provided together"
+            )
+        if any(value is None for value in source_args) and any(
+            value is not None for value in source_args
+        ):
+            raise ValueError(
+                "Weight cache seed host and port must be provided together"
+            )
+        if any(value is not None for value in (*listen_args, *source_args)):
+            if not args.weight_cache_seed_token:
+                raise ValueError(
+                    "Weight cache listener/source requires --weight-cache-seed-token"
+                )
+        elif args.weight_cache_seed_token:
+            raise ValueError(
+                "--weight-cache-seed-token requires a listener or a source"
+            )
 
         placements = plan_local_ranks(parallel_config)
         local_world_size = len(placements)
@@ -248,32 +306,64 @@ class PreloadSubcommand(CLISubcommand):
                 groups, placements
             )
         }
-        procs = [
-            ctx.Process(
-                target=_run_daemon,
-                args=(
-                    dp_rank * pp_size * tp_size + pp_rank * tp_size + tp_rank,
-                    local_rank,
-                    config,
-                    init_method,
-                    args.weight_cache_socket_dir,
-                    ready_queue,
-                    is_draft,
-                    dp_rank,
-                    pp_rank,
-                ),
-                name=(
-                    f"vllm-weight-cache-{format_daemon_role(is_draft)}-"
-                    f"{(dp_rank * pp_size * tp_size + pp_rank * tp_size + tp_rank)}"
-                ),
-            )
-            for (is_draft, config, init_method), (
-                local_rank,
-                dp_rank,
-                pp_rank,
-                tp_rank,
-            ) in product(groups, placements)
-        ]
+        for base_port in (
+            args.weight_cache_listen_port,
+            args.weight_cache_seed_port,
+        ):
+            if base_port is None:
+                continue
+            max_port = base_port + len(groups) * world_size - 1
+            if not 1 <= base_port <= 65535 or max_port > 65535:
+                raise ValueError(
+                    f"Daemon-to-daemon port range {base_port}-{max_port} exceeds 65535"
+                )
+
+        procs = []
+        for group_index, (is_draft, config, init_method) in enumerate(groups):
+            # Draft daemons live past the target group's port block so both
+            # roles can be reached over a single seed host:base_port.
+            port_offset = group_index * world_size
+            for local_rank, dp_rank, pp_rank, tp_rank in placements:
+                global_rank = dp_rank * pp_size * tp_size + pp_rank * tp_size + tp_rank
+                seed_listen = (
+                    (
+                        args.weight_cache_listen_host,
+                        args.weight_cache_listen_port + port_offset + global_rank,
+                    )
+                    if args.weight_cache_listen_host is not None
+                    else None
+                )
+                seed_source = (
+                    (
+                        args.weight_cache_seed_host,
+                        args.weight_cache_seed_port + port_offset + global_rank,
+                    )
+                    if args.weight_cache_seed_host is not None
+                    else None
+                )
+                procs.append(
+                    ctx.Process(
+                        target=_run_daemon,
+                        args=(
+                            global_rank,
+                            local_rank,
+                            config,
+                            init_method,
+                            args.weight_cache_socket_dir,
+                            ready_queue,
+                            is_draft,
+                            dp_rank,
+                            pp_rank,
+                            seed_listen,
+                            seed_source,
+                            args.weight_cache_seed_token,
+                        ),
+                        name=(
+                            f"vllm-weight-cache-{format_daemon_role(is_draft)}-"
+                            f"{global_rank}"
+                        ),
+                    )
+                )
         health_state = _HealthState(procs)
         health_server = None
         health_thread = None
