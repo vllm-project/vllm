@@ -1053,15 +1053,15 @@ class Qwen2_5OmniConditionalGenerationMixin:
     def _process_image_input(
         self, image_input: Qwen2_5_VLImageInputs
     ) -> tuple[torch.Tensor, ...]:
-        if image_input["type"] == "image_embeds":
-            return image_input["image_embeds"].type(self.visual.dtype)
-
         grid_thw = image_input["image_grid_thw"]
         assert grid_thw.ndim == 2
 
-        pixel_values = image_input["pixel_values"].type(self.visual.dtype)
-        with set_forward_context(None, self.vllm_config):
-            image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
+        if image_input["type"] == "image_embeds":
+            image_embeds = image_input["image_embeds"].type(self.visual.dtype)
+        else:
+            pixel_values = image_input["pixel_values"].type(self.visual.dtype)
+            with set_forward_context(None, self.vllm_config):
+                image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
         # Split concatenated embeddings for each image item.
         merge_size = self.visual.spatial_merge_size
         sizes = grid_thw.prod(-1) // merge_size // merge_size
@@ -1071,16 +1071,18 @@ class Qwen2_5OmniConditionalGenerationMixin:
     def _process_video_input(
         self,
         video_input: Qwen2_5_VLVideoInputs,
-    ) -> torch.Tensor:
-        if video_input["type"] == "video_embeds":
-            return video_input["video_embeds"].type(self.visual.dtype)
-
+    ) -> tuple[torch.Tensor, ...]:
         grid_thw = video_input["video_grid_thw"]
         assert grid_thw.ndim == 2
 
-        pixel_values_videos = video_input["pixel_values_videos"].type(self.visual.dtype)
-        with set_forward_context(None, self.vllm_config):
-            video_embeds = self.visual(pixel_values_videos, grid_thw=grid_thw)
+        if video_input["type"] == "video_embeds":
+            video_embeds = video_input["video_embeds"].type(self.visual.dtype)
+        else:
+            pixel_values_videos = video_input["pixel_values_videos"].type(
+                self.visual.dtype
+            )
+            with set_forward_context(None, self.vllm_config):
+                video_embeds = self.visual(pixel_values_videos, grid_thw=grid_thw)
         # Split concatenated embeddings for each video item.
         merge_size = self.visual.spatial_merge_size
         sizes = grid_thw.prod(-1) // merge_size // merge_size

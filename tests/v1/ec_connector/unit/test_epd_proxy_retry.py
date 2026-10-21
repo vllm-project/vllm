@@ -193,6 +193,10 @@ def test_image_batches_preserve_item_identity(
                     },
                 )
                 entry["item_indices"].append(index)
+                # Mooncake aggregates by hash, retaining the last occurrence's ID.
+                entry["transfer_id"] = body["ec_transfer_params"]["ec_items"][index][
+                    "transfer_id"
+                ]
             # Response ordering must not affect the image-to-metadata mapping.
             return _EncoderResponse(dict(reversed(list(params.items()))))
 
@@ -265,6 +269,50 @@ def test_image_batches_preserve_item_identity(
     assert [
         ECMooncakeScheduler._request_transfer_id(request, i) for i in range(len(images))
     ] == expected_transfers
+
+
+@pytest.mark.parametrize("consumer", [None, "tcp://consumer:1"])
+@pytest.mark.parametrize("has_indices", [False, True])
+@pytest.mark.parametrize("has_metadata", [False, True])
+def test_audio_in_video_accepts_single_video_feature(
+    proxy, monkeypatch, consumer, has_indices, has_metadata
+):
+    """A video-only encoder can ignore use_audio_in_video without breaking decode."""
+    seen = []
+    metadata = {"video_grid_thw": [1, 2, 4]} if has_metadata else {}
+    entry: dict[str, Any] = {"modality": "video", "metadata": metadata}
+    if has_indices:
+        entry["item_indices"] = [0]
+
+    class Session:
+        async def post(self, url, data=None, headers=None):
+            seen.append(msgspec.json.decode(data))
+            return _EncoderResponse({"video-hash": entry})
+
+    monkeypatch.setattr(proxy, "encode_session", Session())
+    monkeypatch.setattr(proxy, "NO_REWRITE", False)
+    video = {"type": "video_url", "video_url": {"url": "video-only"}}
+    body = {
+        "messages": [{"role": "user", "content": [video]}],
+        "mm_processor_kwargs": {"use_audio_in_video": True},
+    }
+    prepared, _, _ = asyncio.run(
+        proxy.prepare_for_decode(body, "r", ["http://encoder"], "", consumer)
+    )
+    content = prepared["messages"][0]["content"]
+    expected = (
+        {"type": "video_embeds", "video_embeds": metadata} if has_metadata else video
+    )
+    assert content == [{**expected, "uuid": proxy.content_uuid(video)}]
+    if consumer is not None:
+        assert prepared["ec_transfer_params"]["ec_items"] == [
+            {
+                "mm_hash": "video-hash",
+                "transfer_id": seen[0]["ec_transfer_params"]["ec_items"][0][
+                    "transfer_id"
+                ],
+            }
+        ]
 
 
 def test_batch_rejects_ambiguous_metadata(proxy, monkeypatch):

@@ -750,12 +750,16 @@ async def fanout_encoder_primer(
                         raise HTTPException(502, "Duplicate encoder item index")
                     by_index[local_index] = (mm_hash, reported)
             for local_index, idx in enumerate(indices):
-                if len(item_transfer_ids[idx]) == 2:
-                    if {entry.get("modality") for entry in params.values()} != {
+                audio_in_video = (
+                    len(item_transfer_ids[idx]) == 2
+                    and len(params) == 2
+                    and {entry.get("modality") for entry in params.values()}
+                    == {
                         "video",
                         "audio",
-                    } or len(params) != 2:
-                        raise HTTPException(502, "Encoder must report video and audio")
+                    }
+                )
+                if audio_in_video:
                     features = sorted(
                         params.items(), key=lambda pair: pair[1]["modality"] != "video"
                     )
@@ -778,11 +782,11 @@ async def fanout_encoder_primer(
                     features = [matched]
                 item_meta[idx] = []
                 for mm_hash, reported in features:
-                    feature_index = (
-                        reported["item_indices"][0]
-                        if len(item_transfer_ids[idx]) == 2
-                        else 0
-                    )
+                    feature_index = reported["item_indices"][0] if audio_in_video else 0
+                    # Push IDs are per occurrence; reports may be grouped by hash.
+                    transfer_id = item_transfer_ids[idx][feature_index]
+                    if consumer_zmq is None:
+                        transfer_id = reported.get("transfer_id") or transfer_id
                     item_meta[idx].append(
                         {
                             "metadata": reported.get("metadata") or {},
@@ -791,8 +795,7 @@ async def fanout_encoder_primer(
                                 "_embeds"
                             ),
                             "mm_hash": mm_hash,
-                            "transfer_id": reported.get("transfer_id")
-                            or item_transfer_ids[idx][feature_index],
+                            "transfer_id": transfer_id,
                         }
                     )
                 # Whatever the encoder reported alongside `metadata` is the
