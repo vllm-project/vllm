@@ -2471,3 +2471,48 @@ def test_sync_recved_kv_copies_each_group_own_layers(group_block_ids):
     assert calls == [
         ([name], [name], ids, ids, "h2d") for name, ids in zip(names, group_block_ids)
     ]
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "ratio,expected",
+    [(1, [[1, 2], [5]]), (2, [[2, 3, 4, 5], [5]])],
+    ids=["same_block_size", "smaller_kernel_blocks"],
+)
+def test_save_kv_to_host_copies_each_group_own_layers(ratio, expected):
+    """P saves each group's layers only at that group's blocks. With smaller
+    kernel blocks, attention ids are expanded but Mamba ids are not, so copying
+    a Mamba layer at attention kernel ids could index past its blocks."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import ReqMeta
+
+    calls = []
+    worker = _make_host_buffer_worker(
+        lambda src, dst, src_ids, dst_ids, direction: calls.append(
+            (list(src), list(dst), src_ids, dst_ids, direction)
+        )
+    )
+    worker._physical_blocks_per_logical_kv_block = ratio
+    names = ["attn", "mamba"]
+    worker.host_xfer_buffers = dict.fromkeys([*names, "shared"])
+    worker.device_kv_caches = dict.fromkeys([*names, "shared"])
+    specs = [
+        FullAttentionSpec(
+            block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float16
+        ),
+        MambaSpec(block_size=16, shapes=((16,),), dtypes=(torch.float16,)),
+    ]
+    worker.kv_cache_config = SimpleNamespace(
+        transfer_groups=[
+            SimpleNamespace(layer_names=[name], kv_cache_spec=spec)
+            for name, spec in zip(names, specs)
+        ]
+    )
+
+    meta = ReqMeta(
+        local_block_ids=[[1, 2], [5]], local_physical_block_ids=[], tp_size=1
+    )
+    worker.save_kv_to_host(SimpleNamespace(reqs_to_save={"req": meta}))
+
+    assert calls == [
+        ([name], [name], ids, ids, "d2h") for name, ids in zip(names, expected)
+    ]

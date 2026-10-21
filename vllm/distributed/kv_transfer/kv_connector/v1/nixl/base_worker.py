@@ -2844,19 +2844,20 @@ class NixlBaseConnectorWorker:
                         req_id,
                         ",".join(map(str, meta.local_physical_block_ids)),
                     )
-                # blocking
-                block_ids = [
-                    block_id
-                    for group in meta.local_physical_block_ids
-                    for block_id in group
-                ]
-                self.copy_blocks(
-                    self.device_kv_caches,
-                    self.host_xfer_buffers,
-                    block_ids,
-                    block_ids,
-                    "d2h",
-                )
+                # Copy each group's layers only at that group's blocks, as in
+                # sync_recved_kv_to_device. Attention kernel block ids can
+                # exceed the number of Mamba state blocks.
+                for group, block_ids in zip(
+                    self.kv_cache_config.transfer_groups,
+                    meta.local_physical_block_ids,
+                ):
+                    self.copy_blocks(
+                        {n: self.device_kv_caches[n] for n in group.layer_names},
+                        {n: self.host_xfer_buffers[n] for n in group.layer_names},
+                        block_ids,
+                        block_ids,
+                        "d2h",
+                    )
 
     def post_process_device_kv_on_receive(
         self,
