@@ -239,6 +239,7 @@ steps:
 # test_ll_fp32w_gemm run in Gate Linear CuTeDSL Kernels (B200)).
 - label: ":nvidia: (B200) Miscellaneous Kernels"
   key: kernels-root-misc-test-b200
+  automatic_shard: true
   timeout_in_minutes: 30
   device: b200-k8s
   source_file_dependencies:
@@ -272,6 +273,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) Miscellaneous Kernels"
+      automatic_shard: true
       dind: false
       device: mi355_1
       timeout_in_minutes: 55
@@ -693,7 +695,7 @@ steps:
       - vllm/platforms/
       - vllm/envs.py
       - vllm/utils/torch_utils.py
-      - requirements/rocm-test.txt
+      - requirements/test/rocm.txt
       # W4A4 format numerics and replay via emulation. TODO: native packed
       # activation/KV-cache layouts and CUDA-only kernels need AMD backends.
       commands:
@@ -740,7 +742,7 @@ steps:
       commands:
       - pytest -v -s tests/kernels/test_rocm_fp32_router_gemm.py tests/kernels/test_gate_linear_rocm_dispatch.py tests/kernels/test_bf16x3_router_gemm_rocm.py
 
-- label: ":nvidia: (DGX) Spark b12x Linear Kernels Nightly"
+- label: ":nvidia: (DGX Spark) [Nightly] b12x Linear Kernels"
   key: b12x-linear-kernels-dgx-spark-nightly
   timeout_in_minutes: 60
   device: dgx-spark
@@ -805,7 +807,7 @@ steps:
       - tools/benchmark_helion_kernels.py
 
  
-- label: ":nvidia: (H100) FP8 MoE Kernels"
+- label: ":nvidia: (H100) [Nightly] FP8 MoE Kernels"
   key: kernels-fp8-moe-test-1xh100
   timeout_in_minutes: 40
   device: h100
@@ -822,7 +824,7 @@ steps:
     - pytest -v -s kernels/moe/test_triton_moe_no_act_mul.py
     - pytest -v -s kernels/moe/test_triton_moe_ptpc_fp8.py
 
-- label: ":nvidia: (H100) DeepEP FP8 MoE Kernels"
+- label: ":nvidia: (H100) [Nightly] DeepEP FP8 MoE Kernels"
   key: kernels-fp8-moe-test-2xh100
   timeout_in_minutes: 45
   device: h100
@@ -851,7 +853,7 @@ steps:
       commands:
       - pytest -v -s kernels/moe/test_deepep_moe.py
 
-- label: ":nvidia: (B200) FP4 MoE Kernels"
+- label: ":nvidia: (B200) [Nightly] FP4 MoE Kernels"
   key: kernels-fp4-moe-test-b200
   timeout_in_minutes: 25
   device: b200-k8s
@@ -978,7 +980,7 @@ steps:
       - vllm/v1/worker/workspace.py
       - vllm/platforms/
       - vllm/_aiter_ops.py
-      - requirements/rocm-test.txt
+      - requirements/test/rocm.txt
       # Same-node MoRI/AITER BF16 and per-token/channel FP8. TODO: the
       # DeepEP v2 FlashInfer backend matrix has no direct AMD implementation.
       commands:
@@ -1056,7 +1058,7 @@ steps:
   - csrc/quantization/fp4/
   - csrc/attention/mla/
   - csrc/quantization/w8a8/cutlass/moe/
-  - vllm/model_executor/layers/fused_moe/cutlass_moe.py
+  - vllm/model_executor/layers/fused_moe/experts/cutlass_moe.py
   - vllm/v1/attention/backends/triton_attn.py
   - vllm/v1/attention/backends/rocm_attn.py
   - vllm/v1/attention/backends/rocm_aiter_fa.py
