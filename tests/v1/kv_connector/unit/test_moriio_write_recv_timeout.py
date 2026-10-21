@@ -56,6 +56,7 @@ moriio_connector = importlib.import_module(
 )
 
 MoRIIOMode = moriio_common.MoRIIOMode
+MoRIIOConnectorMetadata = moriio_common.MoRIIOConnectorMetadata
 MoRIIOConnectorScheduler = moriio_connector.MoRIIOConnectorScheduler
 MoRIIOConnectorWorker = moriio_connector.MoRIIOConnectorWorker
 
@@ -445,10 +446,28 @@ def test_build_connector_meta_ships_timed_out_blocks_once():
     assert second.write_load_failed_block_ids == []
 
 
-def test_worker_drains_timed_out_blocks_through_the_load_error_set():
-    """Timed-out blocks share the READ load-failure drain."""
+def _make_consumer_worker() -> MoRIIOConnectorWorker:
+    """A WRITE-consumer worker without the heavy real ``__init__``.
+
+    ``start_load_kv`` and ``get_block_ids_with_load_errors`` are the real
+    methods; only the attributes they read before returning are set.
+    """
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
-    worker._invalid_block_ids = {10, 11}
+    worker.is_producer = False
+    worker.mode = MoRIIOMode.WRITE
+    worker._invalid_block_ids = set()
+    return worker
+
+
+def test_worker_feeds_timed_out_blocks_into_the_load_error_drain():
+    """``start_load_kv`` hands the scheduler's timed-out blocks to the READ
+    load-failure drain, which returns them from
+    ``get_block_ids_with_load_errors``."""
+    worker = _make_consumer_worker()
+    metadata = MoRIIOConnectorMetadata()
+    metadata.write_load_failed_block_ids = [10, 11]
+
+    worker.start_load_kv(metadata)
 
     assert worker.get_block_ids_with_load_errors() == {10, 11}
     # Drained: a second call reports nothing new.
@@ -501,7 +520,41 @@ def consumer(monkeypatch, clock):
     connector = scheduler.connector.connector_scheduler
     # The notify goes to the producer over ZMQ; there is none here.
     monkeypatch.setattr(connector, "send_notify_block", lambda **kwargs: None)
+    scheduler._test_worker = _make_consumer_worker()
     return scheduler, connector
+
+
+def _run_worker(scheduler, out) -> set[int]:
+    """The worker half of a step, with the real worker methods.
+
+    The metadata goes through ``MoRIIOConnectorWorker.start_load_kv`` and the
+    block ids come back from ``get_block_ids_with_load_errors``, in the order
+    ``KVConnectorModelRunnerMixin`` calls them.
+    """
+    worker = scheduler._test_worker
+    worker.start_load_kv(out.kv_connector_metadata)
+    return worker.get_block_ids_with_load_errors()
+
+
+def _runner_output(
+    scheduler,
+    out,
+    invalid: set[int],
+    finished_recving: set[str] | None = None,
+    failed_recving: set[str] | None = None,
+):
+    scheduled = [scheduler.requests[i] for i in out.num_scheduled_tokens]
+    if finished_recving or invalid or scheduled:
+        runner_output = create_model_runner_output(
+            scheduled,
+            finished_recving=finished_recving,
+            invalid_block_ids=invalid or None,
+        )
+    else:
+        runner_output = EMPTY_MODEL_RUNNER_OUTPUT
+    if failed_recving:
+        runner_output.kv_connector_output.failed_recving = failed_recving
+    return runner_output
 
 
 def _step(
@@ -511,24 +564,13 @@ def _step(
 ) -> set[int]:
     """One engine step. Returns the block ids reported as timed out.
 
-    The worker is simulated the way the real one behaves: block ids the
-    scheduler connector put in the metadata come back as ``invalid_block_ids``
-    (the worker adds them to ``_invalid_block_ids``, and
-    ``get_block_ids_with_load_errors`` returns them in the same step).
+    Schedule, run the worker half, then process the output, all in lockstep.
     """
     out = scheduler.schedule()
-    timed_out = set(out.kv_connector_metadata.write_load_failed_block_ids)
-    scheduled = [scheduler.requests[i] for i in out.num_scheduled_tokens]
-    if finished_recving or timed_out or scheduled:
-        runner_output = create_model_runner_output(
-            scheduled,
-            finished_recving=finished_recving,
-            invalid_block_ids=timed_out or None,
-        )
-    else:
-        runner_output = EMPTY_MODEL_RUNNER_OUTPUT
-    if failed_recving:
-        runner_output.kv_connector_output.failed_recving = failed_recving
+    timed_out = _run_worker(scheduler, out)
+    runner_output = _runner_output(
+        scheduler, out, timed_out, finished_recving, failed_recving
+    )
     scheduler.update_from_output(out, runner_output)
     return timed_out
 
@@ -678,6 +720,46 @@ def test_scheduler_releases_an_aborted_request_whose_kv_arrives_in_time(
     assert _step(scheduler) == set()
     assert not log.warning.called
     assert not log.error.called
+
+
+def test_scheduler_reports_a_timeout_once_when_two_schedules_precede_the_output(
+    consumer, clock
+):
+    """Batch queue / async scheduling: step N+1 is scheduled before the output
+    of step N is processed. The timeout must still be reported exactly once and
+    the request failed exactly once."""
+    scheduler, connector = consumer
+    pool = scheduler.kv_cache_manager.block_pool
+    request = _add_waiting_request(scheduler)
+    request_id = request.request_id
+    held = pool.get_num_free_blocks()
+    clock.advance(TIMEOUT_S + 1)
+
+    first = scheduler.schedule()
+    second = scheduler.schedule()
+
+    # Only the first schedule carries the timed-out blocks, and the request has
+    # not failed yet: nothing has processed an output.
+    assert first.kv_connector_metadata.write_load_failed_block_ids
+    assert second.kv_connector_metadata.write_load_failed_block_ids == []
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+    # Outputs are processed in order, one step behind the schedule.
+    invalid = _run_worker(scheduler, first)
+    assert invalid
+    scheduler.update_from_output(first, _runner_output(scheduler, first, invalid))
+    assert request.status == RequestStatus.FINISHED_ERROR
+
+    assert _run_worker(scheduler, second) == set()
+    scheduler.update_from_output(second, _runner_output(scheduler, second, set()))
+
+    # Failed once; its blocks stay held until a real finished_recving.
+    assert request.status == RequestStatus.FINISHED_ERROR
+    assert request_id in scheduler.requests
+    assert pool.get_num_free_blocks() == held
+    assert request_id not in connector._write_recv_deadline
+    _step(scheduler, finished_recving={request_id})
+    assert request_id not in scheduler.requests
 
 
 def test_scheduler_does_not_time_out_a_request_the_producer_reported_failed(
