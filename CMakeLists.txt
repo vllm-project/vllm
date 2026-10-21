@@ -1294,7 +1294,7 @@ endif()
 # The softplus-sqrt topk kernels are instantiated one translation unit per
 # (gating dtype, topk_indices dtype) pair, in topk_softplus_sqrt_<dtype>_<idx>.cu,
 # so that ninja generates the device code for each pair in parallel instead of
-# serializing ~100 s of it onto a single core.
+# serializing it onto a single core.
 set(VLLM_TOPK_SOFTPLUS_SQRT_SRC
   "csrc/moe/topk_softplus_sqrt_f32_int32.cu"
   "csrc/moe/topk_softplus_sqrt_f32_uint32.cu"
@@ -1491,8 +1491,7 @@ elseif(VLLM_GPU_LANG STREQUAL "HIP")
   # and the wave32 kernel are both instantiated unless the build tells us which
   # one is reachable. The wavefront size is fixed per GPU family: CDNA (gfx9xx)
   # is wave64, RDNA (gfx10xx and later) is wave32. Instantiate only the arm that
-  # the targeted archs can select, and only for the generated topk units (not for
-  # the whole extension).
+  # the targeted archs can select.
   set(TOPK_WAVE_ONLY_DEFINE "")
   set(_MOE_WAVE64_ARCHS ${VLLM_GPU_ARCHES})
   list(FILTER _MOE_WAVE64_ARCHS INCLUDE REGEX "^gfx9")
@@ -1508,15 +1507,12 @@ elseif(VLLM_GPU_LANG STREQUAL "HIP")
     message(STATUS "topk softplus-sqrt: both wavefront sizes (archs: ${VLLM_GPU_ARCHES})")
   endif()
   if (TOPK_WAVE_ONLY_DEFINE)
-    # The hipified copies under CMAKE_CURRENT_BINARY_DIR are what the HIP build
-    # actually compiles, so the definition has to be set on both spellings.
-    set(_TOPK_WAVE_ONLY_SRC ${VLLM_TOPK_SOFTPLUS_SQRT_SRC})
-    foreach (_topk_src ${VLLM_TOPK_SOFTPLUS_SQRT_SRC})
-      string(REGEX REPLACE "\\.cu$" ".hip" _topk_hip "${_topk_src}")
-      list(APPEND _TOPK_WAVE_ONLY_SRC "${CMAKE_CURRENT_BINARY_DIR}/${_topk_hip}")
-    endforeach()
-    set_source_files_properties(${_TOPK_WAVE_ONLY_SRC} PROPERTIES
-      COMPILE_DEFINITIONS ${TOPK_WAVE_ONLY_DEFINE})
+    # Set on the whole extension rather than per source: the dispatch unit also
+    # sees the launcher template body, and one definition for the target keeps
+    # every unit consistent (the dispatch does not instantiate it, see the
+    # extern declarations in the header).
+    target_compile_definitions(_moe_C_stable_libtorch PRIVATE
+      ${TOPK_WAVE_ONLY_DEFINE})
   endif()
 endif()
 

@@ -18,10 +18,9 @@
  * limitations under the License.
  */
 
-// Kernels and launchers of the fused softplus-sqrt topk. The instantiations
-// themselves are spread over the generated thin units
-// topk_softplus_sqrt_launch_*.cu (one per gating dtype x topk_indices dtype),
-// emitted from the variant list in generate_topk_softplus_sqrt.py.
+// Kernels and launchers of the fused softplus-sqrt topk. The instantiations are
+// spread over topk_softplus_sqrt_<gating>_<indices>.cu, one unit per (gating
+// dtype, topk_indices dtype) pair.
 #pragma once
 
 #include <type_traits>
@@ -50,7 +49,6 @@ typedef __hip_bfloat162 __nv_bfloat162;
 
 namespace vllm {
 namespace moe {
-
 
 template <typename HashIndType>
 __device__ __forceinline__ int64_t load_index_as_int64(const HashIndType* ptr,
@@ -900,35 +898,24 @@ void topkGatingSoftplusSqrtKernelLauncher(
       const HashIndType*, const HashIndType*, cudaStream_t, const bool*,       \
       const float*, int64_t);
 
+#define VLLM_TOPK_SOFTPLUS_SQRT_EXTERN_PAIR(IndType, InputType)              \
+  VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(IndType, InputType, int64_t)                \
+  VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(IndType, InputType, int)                    \
+  VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(IndType, InputType, IndType)
 
-VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(int, float, int64_t)
-VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(int, float, int)
+// The hash index types the dispatch uses: int64_t, int, and the
+// `HashIndType = IndType` default. The int variants are declared twice by the
+// macro, which is fine for a declaration (the instantiating units list the two
+// distinct types explicitly, since a repeated explicit instantiation is not).
+VLLM_TOPK_SOFTPLUS_SQRT_EXTERN_PAIR(int, float)
+VLLM_TOPK_SOFTPLUS_SQRT_EXTERN_PAIR(uint32_t, float)
+VLLM_TOPK_SOFTPLUS_SQRT_EXTERN_PAIR(int64_t, float)
+VLLM_TOPK_SOFTPLUS_SQRT_EXTERN_PAIR(int, __half)
+VLLM_TOPK_SOFTPLUS_SQRT_EXTERN_PAIR(uint32_t, __half)
+VLLM_TOPK_SOFTPLUS_SQRT_EXTERN_PAIR(int64_t, __half)
+VLLM_TOPK_SOFTPLUS_SQRT_EXTERN_PAIR(int, __nv_bfloat16)
+VLLM_TOPK_SOFTPLUS_SQRT_EXTERN_PAIR(uint32_t, __nv_bfloat16)
+VLLM_TOPK_SOFTPLUS_SQRT_EXTERN_PAIR(int64_t, __nv_bfloat16)
 
-VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(uint32_t, float, int64_t)
-VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(uint32_t, float, int)
-VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(uint32_t, float, uint32_t)
-
-VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(int64_t, float, int64_t)
-VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(int64_t, float, int)
-
-VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(int, __half, int64_t)
-VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(int, __half, int)
-
-VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(uint32_t, __half, int64_t)
-VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(uint32_t, __half, int)
-VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(uint32_t, __half, uint32_t)
-
-VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(int64_t, __half, int64_t)
-VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(int64_t, __half, int)
-
-VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(int, __nv_bfloat16, int64_t)
-VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(int, __nv_bfloat16, int)
-
-VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(uint32_t, __nv_bfloat16, int64_t)
-VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(uint32_t, __nv_bfloat16, int)
-VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(uint32_t, __nv_bfloat16, uint32_t)
-
-VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(int64_t, __nv_bfloat16, int64_t)
-VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(int64_t, __nv_bfloat16, int)
 }  // namespace moe
 }  // namespace vllm
