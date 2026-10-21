@@ -14,6 +14,7 @@ from vllm.logger import init_logger
 
 # being imported for _all_lora_classes below
 from vllm.lora.layers import (
+    BaseClassificationHeadWithLoRA,
     BaseLayerWithLoRA,
     ClassificationHeadWithLoRA,
     ColumnParallelLinearWithLoRA,
@@ -31,6 +32,9 @@ from vllm.lora.layers import (
     ReplicatedLinearWithLoRA,
     RowParallelLinearWithLoRA,
     RowParallelLinearWithShardedLoRA,
+    Step5FusedQKVIndexerWithLoRA,
+    Step5SparseIndexerWWithLoRA,
+    TokenClassificationHeadWithLoRA,
     VocabParallelEmbeddingWithLoRA,
 )
 from vllm.model_executor.custom_op import maybe_get_oot_by_class
@@ -77,6 +81,8 @@ def get_lora_id():
 # Order matters here: more specific wrappers must be checked before generic
 # merged/column-parallel wrappers in from_layer().
 _all_lora_classes: tuple[type[BaseLayerWithLoRA], ...] = (
+    Step5FusedQKVIndexerWithLoRA,
+    Step5SparseIndexerWWithLoRA,
     VocabParallelEmbeddingWithLoRA,
     ColumnParallelLinearWithLoRA,
     MergedColumnParallelLinearWithLoRA,
@@ -148,8 +154,15 @@ def from_layer_classification(
     max_loras: int,
     lora_config: LoRAConfig,
     model_config: PreTrainedConfig | None = None,
-) -> ClassificationHeadWithLoRA:
-    instance_layer = ClassificationHeadWithLoRA(layer)
+    *,
+    is_token_level: bool = False,
+) -> BaseClassificationHeadWithLoRA:
+    head_cls = (
+        TokenClassificationHeadWithLoRA
+        if is_token_level
+        else ClassificationHeadWithLoRA
+    )
+    instance_layer = head_cls(layer)
     instance_layer.create_lora_weights(max_loras, lora_config, model_config)
     return instance_layer
 
@@ -205,7 +218,7 @@ def parse_fine_tuned_lora_name(
 
     parts = name.split(".")
     if (parts[-1] == "weight" or parts[-1] == "bias") and len(parts) >= 2:
-        if parts[-2] in ["lora_A", "lora_B"]:
+        if parts[-2] in ["lora_A", "lora_B"] and parts[-1] == "weight":
             new_name = ".".join(parts[start_index:-2])
             return new_name, parts[-2] == "lora_A"
         # For modules_to_save in classification.
@@ -409,13 +422,11 @@ def process_packed_modules_mapping(
                 "experts.w3",
             ]
         elif (not model.is_3d_moe_weight) or force_2d_moe:
-            # Filter out malformed entries: non-gated MoE has empty
-            # ckpt_up_proj_name which results in weight_name containing ".."
-            # (e.g., "experts.0.." instead of "experts.0.layer_name.")
+            # Non-gated MoE yields two entries per expert (no w3); the
+            # manager pads them to triplets before packing.
             packed_modules_mapping["experts"] = [
                 weight_name.rstrip(".")
                 for _, weight_name, _, _ in get_moe_expert_mapping(model)
-                if ".." not in weight_name
             ]
 
         return packed_modules_mapping

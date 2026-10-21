@@ -19,10 +19,6 @@ import torch.nn as nn
 import vllm.envs as envs
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.kernel import NATIVE_MEGA_MOE_BACKENDS
-from vllm.distributed import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.mhc.tilelang import (
@@ -44,7 +40,7 @@ from vllm.model_executor.models.qwen3_dspark import (
     DSparkConfidenceHead,
     DSparkMarkovHead,
 )
-from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.models.utils import extract_layer_index, maybe_prefix
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
@@ -409,12 +405,6 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         loaded_params: set[str] = set()
         loaded_confidence_head = False
 
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        n_local_head = self.config.num_attention_heads // tp_size
-        head_start = n_local_head * tp_rank
-        head_end = n_local_head * (tp_rank + 1)
-
         for name, loaded_weight in weights:
             mapped = self._remap_dspark_name(name)
             if mapped is None:
@@ -431,6 +421,13 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                     else f".{self.linear_scale_name}"
                 )
                 name = name.removesuffix(".scale") + suffix
+            if ".shared_experts." in name:
+                experts = self.model.layers[extract_layer_index(name)].ffn.experts
+                if getattr(experts, "has_fused_shared_experts", False):
+                    loaded_params.add(
+                        experts.load_shared_expert_weight(name, loaded_weight)
+                    )
+                    continue
             if ".shared_experts.w2" in name:
                 name = name.replace(".shared_experts.w2", ".shared_experts.down_proj")
             if self.pad_shared_expert and ".shared_experts." in name:
@@ -476,11 +473,6 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                 loaded_params.add(name)
                 break
             else:
-                if "attn_sink" in name:
-                    narrow = loaded_weight[head_start:head_end]
-                    params_dict[name][: narrow.shape[0]].copy_(narrow)
-                    loaded_params.add(name)
-                    continue
                 if name.endswith(".ffn.gate.bias"):
                     name = name.replace(
                         ".ffn.gate.bias", ".ffn.gate.e_score_correction_bias"
@@ -492,30 +484,8 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
 
         if self.model.confidence_head is not None and not loaded_confidence_head:
             self.model.confidence_head = None
-        self.process_weights_after_loading()
         logger.info_once("DSpark draft model loaded: %d params", len(loaded_params))
         return loaded_params
-
-    def _finalize_moe(self) -> None:
-        for layer in self.model.layers:
-            layer.ffn.finalize_mega_moe_weights()
-
-    def _finalize_attn(self) -> None:
-        """Run the attention backend's post-load weight step on the draft layers.
-
-        They are ordinary DeepseekV4DecoderLayers, so they take the engine-wide
-        attention backend and owe it whatever the target model owes it -- mega
-        attention permutes wq_b / wo_a here and refuses to run without it.
-        Idempotent, like the target's.
-        """
-        for layer in self.model.layers:
-            finalize = getattr(layer.attn, "finalize_loaded_weights", None)
-            if finalize is not None:
-                finalize()
-
-    def process_weights_after_loading(self) -> None:
-        self._finalize_moe()
-        self._finalize_attn()
 
     def _remap_dspark_name(self, name: str) -> str | None:
         """Map a checkpoint ``mtp.{i}.*`` name to this model's parameter path.
