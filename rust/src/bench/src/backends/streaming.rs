@@ -7,6 +7,7 @@
 /// Mirrors Python's `StreamedResponseHandler` from endpoint_request_func.py:22-60.
 pub struct StreamedResponseHandler {
     buffer: Vec<u8>,
+    previous_was_cr: bool,
     /// Reusable message buffer — avoids allocating a new Vec per `add_chunk` call.
     messages: Vec<String>,
 }
@@ -15,6 +16,7 @@ impl StreamedResponseHandler {
     pub fn new() -> Self {
         Self {
             buffer: Vec::with_capacity(4096),
+            previous_was_cr: false,
             messages: Vec::with_capacity(4),
         }
     }
@@ -26,7 +28,15 @@ impl StreamedResponseHandler {
     pub fn add_chunk(&mut self, chunk_bytes: &[u8]) -> &[String] {
         self.messages.clear();
 
-        self.buffer.extend_from_slice(chunk_bytes);
+        // Normalize SSE line endings, including CRLF split across chunks.
+        for &byte in chunk_bytes {
+            if byte == b'\n' && self.previous_was_cr {
+                self.previous_was_cr = false;
+                continue;
+            }
+            self.previous_was_cr = byte == b'\r';
+            self.buffer.push(if self.previous_was_cr { b'\n' } else { byte });
+        }
 
         // Split by double newlines (SSE message separator)
         while let Some(pos) = self.buffer.windows(2).position(|window| window == b"\n\n") {
@@ -66,17 +76,6 @@ impl StreamedResponseHandler {
 
         &self.messages
     }
-}
-
-/// Trim leading/trailing ASCII whitespace from a byte slice.
-pub fn trim_bytes(bytes: &[u8]) -> &[u8] {
-    let start = bytes.iter().position(|b| !b.is_ascii_whitespace()).unwrap_or(bytes.len());
-    let end = bytes
-        .iter()
-        .rposition(|b| !b.is_ascii_whitespace())
-        .map(|p| p + 1)
-        .unwrap_or(start);
-    &bytes[start..end]
 }
 
 #[cfg(test)]
@@ -167,5 +166,52 @@ mod tests {
         let msgs = handler.add_chunk(b"event: message\ndata: {\"choices\":[{\"text\":\"hi\"}]}");
         assert_eq!(msgs.len(), 1);
         assert!(msgs[0].contains("choices"));
+    }
+
+    #[test]
+    fn test_sse_line_endings_across_transport_chunks() {
+        let expected = [
+            "data: {\"text\":\" leading 中 trailing \"}",
+            "event: message\ndata: {\"usage\":{\"completion_tokens\":3}}",
+            "data: [DONE]",
+        ];
+        for line_ending in ["\n", "\r\n", "\r"] {
+            let stream = expected
+                .iter()
+                .map(|message| {
+                    format!(
+                        "{}{line_ending}{line_ending}",
+                        message.replace('\n', line_ending)
+                    )
+                })
+                .collect::<String>();
+            for chunk_size in 1..=stream.len() {
+                let mut handler = StreamedResponseHandler::new();
+                let mut messages = Vec::new();
+                for chunk in stream.as_bytes().chunks(chunk_size) {
+                    messages.extend_from_slice(handler.add_chunk(chunk));
+                }
+                assert_eq!(
+                    messages, expected,
+                    "line ending {line_ending:?}, chunk size {chunk_size}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_mixed_sse_line_endings() {
+        let mut handler = StreamedResponseHandler::new();
+        let messages = handler.add_chunk(
+            b": ping\r\ndata: {\"text\":\"a\"}\r\r\nevent: message\ndata: {\"text\":\"b\"}\r\n\ndata: [DONE]\n\n",
+        );
+        assert_eq!(
+            messages,
+            &[
+                ": ping\ndata: {\"text\":\"a\"}",
+                "event: message\ndata: {\"text\":\"b\"}",
+                "data: [DONE]",
+            ]
+        );
     }
 }
