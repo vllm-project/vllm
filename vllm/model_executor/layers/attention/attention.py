@@ -600,6 +600,11 @@ class Attention(nn.Module, AttentionLayerBase):
         if not should_load_quant_weights(quant_method):
             set_default_quant_scales(self, register_buffer=False)
 
+        # Scales derived from the (re)loaded q/k/v scales, after the defaults.
+        refresh = getattr(self.impl, "refresh_layer_scales", None)
+        if refresh is not None:
+            refresh(self)
+
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
 
