@@ -1649,7 +1649,8 @@ async fn render_completion_returns_generate_request_with_body_request_id() {
                         "request_id": "body-req",
                         "model": "render-model",
                         "prompt": "hello",
-                        "max_tokens": 8
+                        "max_tokens": 8,
+                        "return_token_ids": true
                     })
                     .to_string(),
                 ))
@@ -1666,6 +1667,7 @@ async fn render_completion_returns_generate_request_with_body_request_id() {
     assert_eq!(json[0]["model"], "render-model");
     assert_eq!(json[0]["stream"], false);
     assert_eq!(json[0]["sampling_params"]["max_tokens"], 8);
+    assert_eq!(json[0]["return_token_ids"], true);
     assert!(!json[0]["token_ids"].as_array().unwrap().is_empty());
     assert!(json[0].get("stream_options").is_none());
     assert!(json[0].get("prompt_token_ids").is_none());
@@ -1714,7 +1716,8 @@ async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
                         "vllm_xargs": {"custom": 1},
                         "kv_transfer_params": {"do_remote_decode": true},
                         "ec_transfer_params": {"do_remote_encode": true},
-                        "chat_template_kwargs": {"enable_thinking": false}
+                        "chat_template_kwargs": {"enable_thinking": false},
+                        "return_token_ids": true
                     })
                     .to_string(),
                 ))
@@ -1753,7 +1756,9 @@ async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
         render_json["reasoning_parser_kwargs"],
         json!({"chat_template_kwargs": {"enable_thinking": false}})
     );
+    assert_eq!(render_json["return_token_ids"], true);
 
+    let expected_prompt_token_ids = json!(token_ids);
     let (chat, engine_task) = test_models_with_engine_outputs_and_backend_inner(
         b"engine-render-generate-round-trip",
         |request_id| engine_outputs_for_request(request_id, default_stream_output_specs()),
@@ -1804,9 +1809,14 @@ async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
         .expect("call generate app");
 
     assert_eq!(generate_response.status(), StatusCode::OK);
-    let _ = to_bytes(generate_response.into_body(), usize::MAX)
+    let generate_body = to_bytes(generate_response.into_body(), usize::MAX)
         .await
         .expect("read generate response");
+    let generate_json: serde_json::Value =
+        serde_json::from_slice(&generate_body).expect("decode generate response");
+    // The request's `return_token_ids` survives render, so generate echoes
+    // the prompt as the chat route would.
+    assert_eq!(generate_json["prompt_token_ids"], expected_prompt_token_ids);
     engine_task.finish().await;
 }
 

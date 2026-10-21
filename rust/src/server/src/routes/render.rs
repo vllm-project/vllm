@@ -85,6 +85,7 @@ fn lower_render_request(
     model: String,
     stream: bool,
     stream_options: Option<StreamOptions>,
+    return_token_ids: Option<bool>,
 ) -> Result<GenerateRequest, ApiError> {
     let prepared = state
         .text
@@ -114,7 +115,7 @@ fn lower_render_request(
         kv_transfer_params,
         ec_transfer_params,
         content_parts: None,
-        return_token_ids: None,
+        return_token_ids,
         output_mode: None,
         // Carry what the chat route would pass to the engine, so the engine
         // gates structured outputs the same way on `/inference/v1/generate`.
@@ -160,6 +161,7 @@ async fn render_chat(
     let model = response_model(&state, body.model.as_deref());
     let stream = body.stream;
     let stream_options = body.stream_options.clone();
+    let return_token_ids = body.return_token_ids;
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
     let chat_request = lower_chat_request(body, &model_resolution(&state), request_context)?;
     let (text_request, _) = state
@@ -173,6 +175,7 @@ async fn render_chat(
         model,
         stream,
         stream_options,
+        return_token_ids,
     )?))
 }
 
@@ -184,6 +187,7 @@ async fn render_completion(
     let model = response_model(&state, body.model.as_deref());
     let stream = body.stream;
     let stream_options = body.stream_options.clone();
+    let return_token_ids = body.return_token_ids;
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
     let tokenizer = state.text.tokenizer();
     let text_request = lower_completion_request(
@@ -198,5 +202,6 @@ async fn render_completion(
         model,
         stream,
         stream_options,
+        return_token_ids,
     )?]))
 }
