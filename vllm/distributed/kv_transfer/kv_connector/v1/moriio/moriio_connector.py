@@ -17,7 +17,7 @@ import numpy as np
 import torch
 import zmq
 
-from vllm.config import CUDAGraphMode, KVTransferConfig, VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
     clip_ssm_state_blocks,
@@ -97,7 +97,7 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
     get_world_group,
 )
-from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import (
@@ -416,8 +416,8 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_worker.start_load_kv(self._connector_metadata)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
-        assert self.connector_worker is not None
-        self.connector_worker.wait_for_layer_load(layer_name)
+        """READs are awaited in start_load_kv, before the forward."""
+        pass
 
     def save_kv_layer(
         self,
@@ -846,8 +846,8 @@ class MoRIIOConnectorScheduler:
         #
         # The second element declares who waits for the KV, not whether it has
         # arrived. False keeps the wait on this side: the forward runs in the
-        # same step, and the connector blocks in wait_for_layer_load (or in
-        # start_load_kv under full-graph capture) until the KV is really there.
+        # same step, and the connector blocks in start_load_kv, before the
+        # forward, until the KV is really there.
         return max(num_external_tokens - 1, 0), False
 
     def on_new_request(self, request: "Request") -> None:
@@ -1922,13 +1922,8 @@ class MoRIIOConnectorWorker:
         self._recving_local_blocks: dict[ReqId, list[int]] = {}
         # Drained by get_block_ids_with_load_errors.
         self._invalid_block_ids: set[int] = set()
-        # This step's posted reads, awaited before the forward when the
-        # per-layer barrier cannot run.
+        # This step's posted reads, awaited in start_load_kv before the forward.
         self._reads_issued_this_step: list = []
-        # This step's posted recurrent-state reads. Mamba layers are not
-        # wrapped by the attention KV-transfer decorator, so wait_for_layer_load
-        # never fires for them and these must be awaited in start_load_kv.
-        self._mamba_reads_this_step: list = []
 
         # Track the expiration time of requests that are waiting to be sent.
         self._reqs_to_send: dict[ReqId, float] = {}
@@ -2915,44 +2910,6 @@ class MoRIIOConnectorWorker:
             failed_recving=failed_recving,
         )
 
-    def wait_for_layer_load(self, layer_name: str) -> None:
-        """Block until all in-flight READs of this layer have landed.
-
-        A host-side blocking wait must not run during full-graph capture.
-        """
-        if self.is_producer or self.mode != MoRIIOMode.READ:
-            return
-
-        if get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.FULL:
-            return
-
-        with self.moriio_wrapper.lock:
-            pending = [
-                status
-                for status_by_layer in self._recving_transfers.values()
-                for status in status_by_layer.get(layer_name, ())
-            ]
-
-        if not pending:
-            return
-
-        try:
-            self.moriio_wrapper.waiting_for_transfer_complete(pending)
-        except TransferError:
-            if self._has_mamba:
-                logger.exception(
-                    "MoRIIO hybrid READ failed before layer %s; aborting the "
-                    "forward because HMA load-error recovery is unsupported.",
-                    layer_name,
-                )
-                raise
-            logger.warning(
-                "MoRIIO READ barrier did not complete for layer %s; proceeding "
-                "to transfer cleanup.",
-                layer_name,
-                exc_info=True,
-            )
-
     def _pop_done_transfers(self) -> set[str]:
         done_req_ids: set[str] = set()
         _xfer_timeout = self.moriio_config.recv_abort_timeout
@@ -3035,40 +2992,37 @@ class MoRIIOConnectorWorker:
             return done_req_ids
 
     def _await_reads_issued_this_step(self) -> None:
-        """Step-level READ barrier, for the reads no per-layer barrier covers.
+        """Block until every READ posted this step has landed.
 
-        load_kv_async=False promises the KV is in place before the forward runs.
-        wait_for_layer_load keeps that promise per layer, letting early layers
-        overlap later transfers, but it only fires for layers that go through
-        the attention KV-transfer decorator. Two cases fall through it:
+        load_kv_async=False promises the KV is in place before the forward. A
+        per-layer barrier can't keep it: illegal under FULL cudagraph, and absent
+        for mamba/KDA state and indexer caches.
 
-        * mamba/KDA layers have no such hook at all, so their conv+ssm reads
-          would otherwise be consumed while still in flight;
-        * under CUDAGraphMode.FULL a host-side blocking wait is illegal
-          anywhere in the graph, so every read is awaited here instead.
-
-        start_load_kv runs outside the graph, so blocking here is safe.
-        Attention reads keep their per-layer overlap in the non-FULL case.
-
-        Attention-only failures are reported via
-        get_block_ids_with_load_errors. Hybrid failures are re-raised because
-        the scheduler's recovery path does not support multiple cache groups;
-        this fails the step closed instead of running forward with incomplete
-        recurrent state.
+        A READ still in flight when the wait gives up fails the step in both
+        modes: RDMA may still write into its blocks, so the forward must not
+        consume them. If every READ is terminal, attention-only failures are
+        reported via get_block_ids_with_load_errors. Hybrid failures are
+        re-raised because the scheduler's recovery path does not support
+        multiple cache groups.
         """
-        all_statuses = self._reads_issued_this_step
+        statuses = self._reads_issued_this_step
         self._reads_issued_this_step = []
-        mamba_statuses = self._mamba_reads_this_step
-        self._mamba_reads_this_step = []
-        if get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.FULL:
-            statuses = all_statuses
-        else:
-            statuses = mamba_statuses
         if not statuses:
             return
         try:
-            self.moriio_wrapper.waiting_for_transfer_complete(statuses)
+            self.moriio_wrapper.waiting_for_transfer_complete(
+                statuses, fail_fast=self._has_mamba
+            )
         except TransferError:
+            in_flight = sum(not (s.Succeeded() or s.Failed()) for s in statuses)
+            if in_flight:
+                logger.exception(
+                    "MoRIIO READ barrier failed with %d/%d reads still in "
+                    "flight; failing the step.",
+                    in_flight,
+                    len(statuses),
+                )
+                raise
             if self._has_mamba:
                 logger.exception(
                     "MoRIIO hybrid READ failed before the forward; aborting "
@@ -4080,13 +4034,7 @@ class MoRIIOConnectorWorker:
                 self._recving_local_blocks.setdefault(
                     request_id, list(failed_recv_blocks)
                 )
-                # Awaited before the forward when the per-layer barrier cannot
-                # run (see _await_reads_issued_this_step).
                 self._reads_issued_this_step.extend(statuses)
-                if self._is_mamba_layer(layer_name):
-                    # No per-layer barrier exists for mamba layers, so these are
-                    # always awaited in start_load_kv.
-                    self._mamba_reads_this_step.extend(statuses)
                 self._recving_transfers_callback_addr[request_id] = (
                     remote_host,
                     str(
