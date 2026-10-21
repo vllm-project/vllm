@@ -246,10 +246,6 @@ class Hf3fsMetadataServer:
         body = await request.body()
         return orjson.loads(body)
 
-    def _json_response(self, content: dict):
-        """Return ORJSONResponse to bypass jsonable_encoder."""
-        return ORJSONResponse(content)
-
     def _setup_routes(self):
         """Setup FastAPI routes for new API design."""
         self.app.post("/rank/{rank}/initialize")(self.initialize_rank)
@@ -266,13 +262,13 @@ class Hf3fsMetadataServer:
         num_pages = data.get("num_pages", 0)
 
         if role == "scheduler":
-            return self._json_response(
+            return ORJSONResponse(
                 {"message": "Scheduler role does not require initialization"}
             )
 
         if role == "worker" and num_pages > 0:
             self.state.initialize_rank(rank, num_pages)
-            return self._json_response(
+            return ORJSONResponse(
                 {"message": f"Rank {rank} initialized with {num_pages} pages"}
             )
         else:
@@ -298,7 +294,7 @@ class Hf3fsMetadataServer:
 
             # Convert results to response format
             response = {"rank": rank, "results": list(results.items())}
-            return self._json_response(response)
+            return ORJSONResponse(response)
         except Exception as e:
             raise HTTPException(
                 status_code=500, detail=f"Allocation failed: {str(e)}"
@@ -339,7 +335,7 @@ class Hf3fsMetadataServer:
 
         try:
             exists_results = self.state.batch_key_exists(keys)
-            return self._json_response({"exists": exists_results})
+            return ORJSONResponse({"exists": exists_results})
         except Exception as e:
             raise HTTPException(
                 status_code=500, detail=f"Key existence check failed: {str(e)}"
@@ -360,7 +356,7 @@ class Hf3fsMetadataServer:
         try:
             # Get key locations
             locations = self.state.get_key_locations(rank, keys)
-            return self._json_response({"locations": locations})
+            return ORJSONResponse({"locations": locations})
         except Exception as e:
             raise HTTPException(
                 status_code=500, detail=f"Failed to get key locations: {str(e)}"
