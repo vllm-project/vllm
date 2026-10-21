@@ -144,8 +144,7 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
         if (in_features // num_groups) % 4 != 0 or in_features % 2 != 0:
             return False
 
-        # Keep a loaded but unused zero-point param registered.
-        self.w_zp_name = None
+        self._release_unused_zp(layer)
 
         unpack_from_int32 = _import_unpack_from_int32()
 
@@ -206,8 +205,7 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
             return
 
         if not self.config.zero_points:
-            # Keep a loaded but unused zero-point param registered.
-            self.w_zp_name = None
+            self._release_unused_zp(layer)
 
         weight_q = getattr(layer, self.w_q_name)
         weight_s = getattr(layer, self.w_s_name)

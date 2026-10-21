@@ -114,8 +114,7 @@ class ConchLinearKernel(MPLinearKernel):
         if self.config.zero_points:
             self._transform_param(layer, self.w_zp_name, transform_w_zp)
         else:
-            # Keep a loaded but unused zero-point param registered.
-            self.w_zp_name = None
+            self._release_unused_zp(layer)
 
     def apply_weights(
         self,

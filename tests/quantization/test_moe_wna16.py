@@ -384,8 +384,9 @@ def test_compressed_tensors_wna16_moe_converts_and_sets_up_humming_kernel():
     assert method.moe_kernel is not None
     assert set(layer.weight_schemas) == {"w13", "w2"}
     assert set(layer.humming_configs) == {"w13", "w2"}
-    assert not hasattr(layer, "w13_weight_packed")
-    assert not hasattr(layer, "w2_weight_packed")
+    # The large unused checkpoint weights stay registered with empty storage.
+    assert layer.w13_weight_packed.numel() == 0
+    assert layer.w2_weight_packed.numel() == 0
     assert layer.w13_weight.dtype is torch.int32
     assert layer.w2_weight.dtype is torch.int32
 

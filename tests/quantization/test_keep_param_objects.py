@@ -191,8 +191,6 @@ def _check_keeps_param_objects(build: Callable, vllm_config) -> None:
     after = dict(layer.named_parameters(recurse=False, remove_duplicate=False))
     for name, (param, attrs, dims) in before.items():
         assert after.get(name) is param, name
-        # Never left with empty storage: renamed params alias the runtime name.
-        assert after[name].numel() > 0, name
         assert attrs <= param.__dict__.keys(), name
         # The loader shards by these on reload, so they keep the checkpoint layout.
         assert _dims(param) == dims, name

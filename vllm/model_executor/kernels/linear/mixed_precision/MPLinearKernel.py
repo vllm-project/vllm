@@ -69,6 +69,13 @@ class MPLinearKernel(ABC):
     ) -> torch.Tensor:
         raise NotImplementedError
 
+    def _release_unused_zp(self, layer: torch.nn.Module) -> None:
+        name = self.w_zp_name
+        if name is not None and getattr(layer, name, None) is not None:
+            # Loaded but unused: keep the param, free its data.
+            replace_parameter(layer, name, getattr(layer, name).new_empty(0))
+        self.w_zp_name = None
+
     def _transform_param(
         self, layer: torch.nn.Module, name: str | None, fn: Callable
     ) -> None:

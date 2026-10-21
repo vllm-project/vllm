@@ -512,10 +512,8 @@ def test_process_weights_sets_placeholder_scales(kv_cache_dtype: str):
 
     assert layer._k_scale_float == 1.0
     assert layer._v_scale_float == 1.0
-    assert not hasattr(layer, "k_scale")
-    assert not hasattr(layer, "v_scale")
-    assert not hasattr(layer, "q_scale")
-    assert not hasattr(layer, "prob_scale")
+    for name in ("k_scale", "v_scale", "q_scale", "prob_scale"):
+        assert hasattr(layer, name)
 
 
 # ===========================================================================

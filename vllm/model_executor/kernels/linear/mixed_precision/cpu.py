@@ -144,8 +144,7 @@ class CPUWNA16LinearKernel(MPLinearKernel):
 
     def process_weights_after_loading(self, layer: torch.nn.Module):
         if not self.config.zero_points:
-            # Keep a loaded but unused zero-point param registered.
-            self.w_zp_name = None
+            self._release_unused_zp(layer)
 
         weights = getattr(layer, self.w_q_name)
         # Require GPTQ pack format
