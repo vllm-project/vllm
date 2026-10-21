@@ -12,6 +12,7 @@ from vllm.distributed import (
     get_ep_group,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -191,9 +192,19 @@ def mori_use_mxfp8_dispatch(
     Only safe when AITER would have quantized the activations to MXFP8 itself
     anyway: it consumes a pre-quantized FP8 operand plus E8M0 scales by sorting
     the scales rather than re-quantizing, but a BF16-activation kernel would
-    dequantize the FP8 payload without ever applying the scales.
+    dequantize the FP8 payload without ever applying the scales, and an
+    FP4-activation kernel would hand the FP8 payload to an MXFP4 quant that
+    only accepts BF16/FP16.
+
+    The query below fixes Silu + INTERLEAVE, so restrict this to the expert
+    configurations that resolve the same way in AiterExperts (see
+    experts/rocm_aiter_moe.py): SiTU picks its activation dtype from
+    AITER_SITUV2_*, and the DeepSeek-V4.1 a4w4 opt-in passes q_dtype_a=fp4x2
+    with SEPARATED, both while the quant config is still w4a16.
     """
     if not current_platform.is_rocm() or not quant_config.use_mxfp4_w4a16:
+        return False
+    if moe.use_mxfp4_w4a4_dsv4 or moe.activation != MoEActivation.SILU:
         return False
     if moe.hidden_dim % MXFP8_GROUP_SIZE != 0:
         return False
