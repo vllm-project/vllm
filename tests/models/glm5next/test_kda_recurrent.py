@@ -169,10 +169,19 @@ def test_fused_recurrent_kda_strided_inputs_bit_identical_to_contiguous(
 )
 @pytest.mark.parametrize("num_seqs", [1, 5])
 @pytest.mark.parametrize("num_spec", [1, 3, 7])
+@pytest.mark.parametrize("gluon", [False, True])
 @torch.inference_mode()
-def test_fused_recurrent_kda_defer_spec_state(num_seqs: int, num_spec: int):
+def test_fused_recurrent_kda_defer_spec_state(
+    num_seqs: int, num_spec: int, gluon: bool, monkeypatch
+):
     """Deferred spec states give the same outputs, step after step, as states
-    stored after every token."""
+    stored after every token, with the Triton kernel and with the gfx950
+    Gluon kernel."""
+    from vllm.models.glm5next.amd.ops.third_party.kda import kernels
+
+    if gluon and not kernels._on_gfx950():
+        pytest.skip("The Gluon kernel is gfx950-only")
+    monkeypatch.setattr(kernels, "_on_gfx950", lambda: gluon)
     torch.manual_seed(0)
     device = torch.device("cuda")
     query_len = num_spec + 1

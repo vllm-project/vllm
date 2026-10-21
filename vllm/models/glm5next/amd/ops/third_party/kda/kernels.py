@@ -10,8 +10,15 @@
 # ruff: noqa: E501
 
 
+from functools import cache
+
 import torch
 
+from vllm.models.glm5next.amd.ops.kda_spec_decode_gluon import (
+    kda_spec_decode_defer,
+    supports_kda_spec_decode_gluon,
+)
+from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.chunk_delta_h import (
     chunk_gated_delta_rule_fwd_h,
 )
@@ -31,6 +38,15 @@ from .fused_recurrent import (
 
 BT_LIST_AUTOTUNE = [32, 64, 128]
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [4, 8, 16, 32]
+
+
+@cache
+def _on_gfx950() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx950
+
+    return on_gfx950()
 
 
 def fused_recurrent_kda_fwd(
@@ -111,6 +127,39 @@ def fused_recurrent_kda_fwd(
         stride_indices_seq, stride_indices_tok = ssm_state_indices.stride(0), 1
     else:
         stride_indices_seq, stride_indices_tok = ssm_state_indices.stride()
+
+    # The Gluon kernel's records differ from this kernel's, so the choice
+    # depends only on the model and the device, never on the batch.
+    if (
+        defer_spec_state
+        and compute_gate
+        and use_qk_l2norm_in_kernel
+        and sigmoid_beta
+        and _on_gfx950()
+        and supports_kda_spec_decode_gluon(K, V, beta.ndim == v.ndim)
+    ):
+        assert cu_seqlens is not None
+        kda_spec_decode_defer(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            scale,
+            initial_state,
+            cu_seqlens,
+            ssm_state_indices,
+            num_accepted_tokens,
+            a_log,
+            g_bias,
+            lower_bound,
+            o,
+            token_stride(q),
+            token_stride(k),
+            token_stride(v),
+            token_stride(beta),
+        )
+        return o, final_state
 
     grid = (NK, NV, N * HV)
     fused_recurrent_gated_delta_rule_fwd_kernel[grid](
