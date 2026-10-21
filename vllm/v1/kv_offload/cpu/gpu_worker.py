@@ -32,6 +32,7 @@ from vllm.v1.kv_offload.cpu.swap_blocks_triton import (
     THRESHOLD_BYTES,
     swap_blocks_batch,
 )
+from vllm.v1.kv_offload.transfer_backend import KVTransferBackend
 
 logger = init_logger(__name__)
 
@@ -201,9 +202,13 @@ MIN_HOST_REGISTER_SAVED_BYTES = 3 * 1024**2
 
 
 def pin_mmap_region(
-    region: SharedOffloadRegion, worker_slot_only: bool = False
+    region: SharedOffloadRegion,
+    worker_slot_only: bool = False,
+    backend: KVTransferBackend | None = None,
 ) -> None:
     """Register row-aligned chunks or this worker's slots, rolling back on failure."""
+    if backend is None:
+        backend = PlatformTransferBackend()
     rank = region.rank
     base_ptr = region._base.data_ptr()
     total_size = region.total_size_bytes
@@ -243,7 +248,7 @@ def pin_mmap_region(
     registered_bytes = 0
     for offset, size in ranges:
         address = base_ptr + offset
-        if host_register(address, size):
+        if backend.host_register(address, size):
             addresses.append(address)
             registered_bytes += size
             continue
@@ -255,7 +260,7 @@ def pin_mmap_region(
             total_size / 1e9,
         )
         for registered in reversed(addresses):
-            host_unregister(registered)
+            backend.host_unregister(registered)
         return
 
     region.pinned_addresses.extend(addresses)
@@ -270,15 +275,48 @@ def pin_mmap_region(
 
 def _new_descriptor_buffers(
     num_copy_ops: int,
+    ptr_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     pin = PIN_MEMORY
     # CUDA cache_kernels.cu requires int64; XPU DMA engine requires uint64.
-    ptr_dtype = torch.uint64 if current_platform.is_xpu() else torch.int64
+    if ptr_dtype is None:
+        ptr_dtype = torch.uint64 if current_platform.is_xpu() else torch.int64
     return (
         torch.empty(num_copy_ops, dtype=ptr_dtype, pin_memory=pin),
         torch.empty(num_copy_ops, dtype=ptr_dtype, pin_memory=pin),
         torch.empty(num_copy_ops, dtype=ptr_dtype, pin_memory=pin),
     )
+
+
+class PlatformTransferBackend(KVTransferBackend):
+    """Built-in backend binding the CUDA-alike and XPU transfer paths.
+
+    All methods resolve module globals at call time, so tests can
+    monkeypatch `gpu_worker.host_register` et al. Platform plugins register
+    their own `KVTransferBackend` instead of relying on this class.
+    """
+
+    def select_copy_op(
+        self,
+        layer_refs_per_group: list[list[CanonicalKVCacheRef]],
+        gpu_to_cpu: bool,
+        host_memory_is_pinned: bool = True,
+    ):
+        return _select_swap_blocks_fn(
+            layer_refs_per_group, gpu_to_cpu, host_memory_is_pinned
+        )
+
+    def descriptor_ptr_dtype(self) -> torch.dtype:
+        return torch.uint64 if current_platform.is_xpu() else torch.int64
+
+    def validate_device_tensor(self, tensor: torch.Tensor) -> None:
+        assert tensor.is_cuda or tensor.is_xpu
+
+    def host_register(self, ptr: int, num_bytes: int) -> bool:
+        return host_register(ptr, num_bytes)
+
+    def host_unregister(self, ptr: int) -> None:
+        host_unregister(ptr)
 
 
 class SingleDirectionOffloadingHandler:
@@ -297,6 +335,7 @@ class SingleDirectionOffloadingHandler:
         gpu_to_cpu: bool,
         canonical_layout: bool = False,
         host_memory_is_pinned: bool = True,
+        backend: KVTransferBackend | None = None,
     ):
         """Initialize a SingleDirectionOffloadingHandler.
 
@@ -313,8 +352,17 @@ class SingleDirectionOffloadingHandler:
                 described by the refs' mappings.
             host_memory_is_pinned: whether the CPU tensors are pinned, so GPU
                 kernels may dereference them directly.
+            backend: device-operation backend (transfer contract); None
+                resolves the platform's registered default.
 
         """
+        if backend is None:
+            from vllm.v1.kv_offload.transfer_backend import (
+                resolve_kv_transfer_backend,
+            )
+
+            backend = resolve_kv_transfer_backend()
+        self._backend = backend
         assert len(gpu_tensors) == len(cpu_tensors)
         assert len(gpu_tensors) > 0
 
@@ -328,7 +376,7 @@ class SingleDirectionOffloadingHandler:
         for t_idx, (gpu_tensor, cpu_tensor) in enumerate(zip(gpu_tensors, cpu_tensors)):
             assert gpu_tensor.dtype == torch.int8
             assert gpu_tensor.ndim == 2
-            assert gpu_tensor.is_cuda or gpu_tensor.is_xpu
+            backend.validate_device_tensor(gpu_tensor)
             assert cpu_tensor.dtype == torch.int8
             assert cpu_tensor.ndim == 2
             assert cpu_tensor.device.type == "cpu"
@@ -349,7 +397,7 @@ class SingleDirectionOffloadingHandler:
         )
         self.gpu_to_cpu: bool = gpu_to_cpu
         self.layer_refs_per_group = layer_refs_per_group
-        self._swap_blocks_batch = _select_swap_blocks_fn(
+        self._swap_blocks_batch = backend.select_copy_op(
             layer_refs_per_group, gpu_to_cpu, host_memory_is_pinned
         )
 
@@ -609,10 +657,14 @@ class SingleDirectionOffloadingHandler:
         batch_src, batch_dst, batch_sizes = (
             self._buffer_pool.pop()
             if self._buffer_pool
-            else _new_descriptor_buffers(num_copy_ops)
+            else _new_descriptor_buffers(
+                num_copy_ops, self._backend.descriptor_ptr_dtype()
+            )
         )
         if batch_src.numel() < num_copy_ops:
-            batch_src, batch_dst, batch_sizes = _new_descriptor_buffers(num_copy_ops)
+            batch_src, batch_dst, batch_sizes = _new_descriptor_buffers(
+                num_copy_ops, self._backend.descriptor_ptr_dtype()
+            )
 
         src = batch_src[:num_copy_ops]
         dst = batch_dst[:num_copy_ops]
@@ -805,8 +857,16 @@ class CPUOffloadingWorker(OffloadingWorker):
         num_cpu_chunks: int,
         mmap_region: SharedOffloadRegion | None = None,
         canonical_layout: bool = False,
+        backend: KVTransferBackend | None = None,
     ):
         assert not canonical_layout or mmap_region is not None
+        if backend is None:
+            from vllm.v1.kv_offload.transfer_backend import (
+                resolve_kv_transfer_backend,
+            )
+
+            backend = resolve_kv_transfer_backend()
+        self._backend = backend
         # The caller owns mmap_region until this constructor returns. After a
         # successful construction, the worker is the sole owner and releases
         # it after both transfer directions have stopped.
@@ -814,7 +874,9 @@ class CPUOffloadingWorker(OffloadingWorker):
         pin_memory = PIN_MEMORY
         logger.info("Allocating %d CPU tensors...", len(kv_caches.tensors))
         if mmap_region is not None and pin_memory:
-            pin_mmap_region(mmap_region, worker_slot_only=not canonical_layout)
+            pin_mmap_region(
+                mmap_region, worker_slot_only=not canonical_layout, backend=backend
+            )
         host_memory_is_pinned = pin_memory and (
             mmap_region is None or mmap_region.is_pinned
         )
@@ -868,6 +930,7 @@ class CPUOffloadingWorker(OffloadingWorker):
             gpu_to_cpu=True,
             canonical_layout=canonical_layout,
             host_memory_is_pinned=host_memory_is_pinned,
+            backend=backend,
         )
 
         self._load_handler = SingleDirectionOffloadingHandler(
@@ -878,6 +941,7 @@ class CPUOffloadingWorker(OffloadingWorker):
             gpu_to_cpu=False,
             canonical_layout=canonical_layout,
             host_memory_is_pinned=host_memory_is_pinned,
+            backend=backend,
         )
 
     def submit_store(
