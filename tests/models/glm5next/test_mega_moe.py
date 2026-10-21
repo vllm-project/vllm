@@ -12,6 +12,11 @@ from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
     DeepGemmMegaMoEExperts,
     MegaMoEActivation,
 )
+from vllm.model_executor.model_loader.reload import (
+    finalize_layerwise_reload,
+    initialize_layerwise_reload,
+    record_metadata_for_reloading,
+)
 from vllm.models.glm5next.nvidia.mega_moe import (
     Glm5NextMegaMoEExperts,
     requant_block_fp8_to_ue8m0,
@@ -153,8 +158,9 @@ def _load_shuffled(experts, ckpt, seed, suffix="") -> None:
     generator = torch.Generator().manual_seed(seed)
     for i in torch.randperm(len(shards), generator=generator).tolist():
         name, loaded_weight, shard_id, expert_id = shards[i]
-        loaded = experts.weight_loader(
-            getattr(experts, name),
+        param = getattr(experts, name)
+        loaded = param.weight_loader(
+            param,
             loaded_weight,
             f"experts.{name}",
             shard_id=shard_id,
@@ -230,7 +236,8 @@ def test_block_fp8_shards_requantize_into_the_kernel_layout():
 @pytest.mark.parametrize("first", ["weight", "weight_scale_inv"])
 def test_weight_update_split_across_calls(first):
     """A weight update may send weights and block scales in separate
-    load_weights calls; each shard is requantized once both have arrived."""
+    load_weights calls. The finish step rejects a shard still missing its
+    other half and requantizes each shard once both are in."""
     experts = _experts()
     _load_shuffled(experts, _checkpoint(4, seed=0), seed=0)
     experts.requantize_block_fp8()
@@ -238,18 +245,23 @@ def test_weight_update_split_across_calls(first):
     ckpt = _checkpoint(4, seed=1)
     second = "weight_scale_inv" if first == "weight" else "weight"
     _load_shuffled(experts, ckpt, seed=1, suffix=first)
-    experts.requantize_block_fp8()
+    with pytest.raises(ValueError, match="without their weight or block scale"):
+        experts.requantize_block_fp8()
     _load_shuffled(experts, ckpt, seed=2, suffix=second)
     experts.requantize_block_fp8()
 
     _assert_layout(_routed(experts), _expected_routed(ckpt))
 
 
-def test_block_fp8_shared_expert_is_fused_and_requantized():
-    experts = _experts()
-    assert experts.has_fused_shared_experts
-    w13, s13 = _block_fp8(torch.randn(1, 2 * INTER, HIDDEN) * 0.02)
-    w2, s2 = _block_fp8(torch.randn(1, HIDDEN, INTER) * 0.02)
+def _shared_checkpoint(seed: int) -> dict[str, torch.Tensor]:
+    generator = torch.Generator().manual_seed(seed)
+    w13, s13 = _block_fp8(torch.randn(1, 2 * INTER, HIDDEN, generator=generator) * 0.02)
+    w2, s2 = _block_fp8(torch.randn(1, HIDDEN, INTER, generator=generator) * 0.02)
+    return {"w13": w13, "s13": s13, "w2": w2, "s2": s2}
+
+
+def _load_shared(experts, ckpt) -> None:
+    w13, s13, w2, s2 = ckpt["w13"], ckpt["s13"], ckpt["w2"], ckpt["s2"]
     params = {f"mlp.experts.{n}" for n, _ in experts.named_parameters()}
     for name, data in [
         ("down_proj.weight_scale_inv", s2[0]),
@@ -262,18 +274,57 @@ def test_block_fp8_shared_expert_is_fused_and_requantized():
         loaded = experts.load_shared_expert_weight(f"mlp.shared_experts.{name}", data)
         assert loaded in params
 
-    experts.requantize_block_fp8()
 
-    q13, sf13 = requant_block_fp8_to_ue8m0(w13, s13)
-    q2, sf2 = requant_block_fp8_to_ue8m0(w2, s2)
-    expected = _reference_mega_moe_layout(q13, sf13, q2, sf2)
-    actual = (
+def _expected_shared(ckpt):
+    q13, sf13 = requant_block_fp8_to_ue8m0(ckpt["w13"], ckpt["s13"])
+    q2, sf2 = requant_block_fp8_to_ue8m0(ckpt["w2"], ckpt["s2"])
+    return [t[0] for t in _reference_mega_moe_layout(q13, sf13, q2, sf2)]
+
+
+def _shared(experts):
+    return (
         experts.shared_l1_weight,
         experts.shared_l1_weight_scale,
         experts.shared_l2_weight,
         experts.shared_l2_weight_scale,
     )
-    _assert_layout(actual, (t[0] for t in expected))
+
+
+def test_block_fp8_shared_expert_is_fused_and_requantized():
+    experts = _experts()
+    assert experts.has_fused_shared_experts
+    ckpt = _shared_checkpoint(seed=0)
+    _load_shared(experts, ckpt)
+
+    experts.requantize_block_fp8()
+
+    _assert_layout(_shared(experts), _expected_shared(ckpt))
+
+
+def test_layerwise_reload_requantizes_into_the_kernel_tensors():
+    """Reload and weight transfer restore the layer on meta, buffer every load,
+    replay it once the layer is complete and finish with the model's
+    process_weights_after_loading; the kernel tensors keep their storage."""
+    experts = _experts()
+    record_metadata_for_reloading(experts)
+    _load_shuffled(experts, _checkpoint(4, seed=0), seed=0)
+    _load_shared(experts, _shared_checkpoint(seed=0))
+    experts.requantize_block_fp8()
+    storage = {n: p.data_ptr() for n, p in experts.named_parameters()}
+
+    ckpt, shared_ckpt = _checkpoint(4, seed=1), _shared_checkpoint(seed=1)
+    initialize_layerwise_reload(experts)
+    _load_shuffled(experts, ckpt, seed=1)
+    _load_shared(experts, shared_ckpt)
+    # Every loaded tensor is in, so the layer was replayed without waiting for
+    # finalize: the derived kernel scales do not count as missing loads.
+    assert not experts.w13_weight.is_meta
+    finalize_layerwise_reload(experts, None)  # type: ignore[arg-type]
+    experts.requantize_block_fp8()
+
+    _assert_layout(_routed(experts), _expected_routed(ckpt))
+    _assert_layout(_shared(experts), _expected_shared(shared_ckpt))
+    assert {n: p.data_ptr() for n, p in experts.named_parameters()} == storage
 
 
 def test_shared_expert_with_other_scales_is_not_fused():
@@ -310,5 +361,5 @@ def test_requantize_rejects_missing_block_scales():
             expert_id=2,
         )
 
-    with pytest.raises(ValueError, match="block scales"):
+    with pytest.raises(ValueError, match="without their weight or block scale"):
         experts.requantize_block_fp8()

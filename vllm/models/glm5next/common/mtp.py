@@ -440,6 +440,8 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
                     f"MTP speculative decoding layer {layer_idx} weights "
                     f"missing from checkpoint."
                 )
+        return loaded_params
+
+    def process_weights_after_loading(self) -> None:
         for mlp in self.moe_mlp_layers:
             mlp.finalize_mega_moe_weights()
-        return loaded_params
