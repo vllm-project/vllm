@@ -50,6 +50,7 @@ from ..common.mm_preprocess import (
     DeepseekV4VLDummyInputsBuilder,
     DeepseekV4VLMultiModalProcessor,
     DeepseekV4VLProcessingInfo,
+    num_image_tokens,
 )
 from ..common.vl_cudagraph import DeepseekV4VLEncoderCudaGraphMixin
 from ..decoder_replay_layers import DecoderReplayLayers
@@ -140,7 +141,7 @@ class DeepseekV41ForCausalLM(
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
-        if modality == "image":
+        if modality.startswith("image"):
             return IMAGE_PLACEHOLDER
         raise ValueError(f"Unsupported modality: {modality!r}")
 
@@ -247,6 +248,13 @@ class DeepseekV41ForCausalLM(
         return tuple(embeds)
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
+        image_embeds = kwargs.get("image_embeds")
+        if image_embeds is not None:
+            llm_grid = kwargs["llm_grid"]
+            assert isinstance(image_embeds, torch.Tensor)
+            assert isinstance(llm_grid, torch.Tensor)
+            sizes = [num_image_tokens(h, w) for h, w in llm_grid.tolist()]
+            return image_embeds.split(sizes)
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
