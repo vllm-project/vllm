@@ -1774,13 +1774,16 @@ class Step5MoE(nn.Module):
             reduce_in_fp32=True,
         )
         # Small batches run the shared expert on the aux stream, beside the
-        # router and routed experts. It must not issue a collective there.
+        # router and routed experts. It must not issue a collective there,
+        # which fully-sharded LoRA layers do regardless of reduce_results.
+        lora_config = vllm_config.lora_config
         self.shared_stream = (
             aux_stream()
             if (self.tp_size == 1 or not reduce_results)
             and not self.use_mega_moe
             and not self.use_sequence_parallel
             and not self.enable_eplb
+            and not (lora_config is not None and lora_config.fully_sharded_loras)
             and not envs.VLLM_DISABLE_SHARED_EXPERTS_STREAM
             else None
         )
