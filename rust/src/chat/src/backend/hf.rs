@@ -284,6 +284,7 @@ mod tests {
                 language_model_only: false,
                 chat_template_content_format: Default::default(),
                 chat_template: None,
+                trust_request_chat_template: false,
                 default_chat_template_kwargs: HashMap::new(),
                 limit_mm_per_prompt: HashMap::new(),
             },
@@ -380,7 +381,7 @@ mod tests {
         let error = match backend.new_chat_output_processor(
             &mut request,
             NewChatOutputProcessorOptions {
-                tool_strict_level: crate::ToolStrictLevel::Auto,
+                tool_strict_level: None,
                 tool_call_parser: &ParserSelection::Explicit("json".to_string()),
                 reasoning_parser: &ParserSelection::Auto,
             },

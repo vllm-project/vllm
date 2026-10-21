@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use bytes::Bytes;
 use enum_as_inner::EnumAsInner;
@@ -116,8 +117,10 @@ pub struct EngineCoreOutput {
     /// of a newly scheduled prefill and elided for subsequent decode outputs.
     #[serde(default)]
     pub prefill_stats: Option<Box<PrefillStats>>,
+    /// Routed-expert rows `[num_rows, num_layers, top_k]` captured for this
+    /// output, when `enable_return_routed_experts` is on.
     #[serde(default)]
-    pub routed_experts: Option<Box<OpaqueValue>>,
+    pub routed_experts: Option<Box<WireNdArray>>,
     /// Number of NaNs seen in logits. Values above zero indicate corruption.
     #[serde(default)]
     pub num_nans_in_logits: u32,
@@ -142,6 +145,24 @@ pub struct EngineCoreOutput {
     /// the first output of a request that asked for them.
     #[serde(default)]
     pub prompt_token_id_logprobs: Option<Box<WireNdArray>>,
+    /// Request-level error sent with [`EngineCoreFinishReason::Error`], e.g.
+    /// when a paused engine rejects a request.
+    #[serde(default)]
+    pub error: Option<Box<RequestError>>,
+}
+
+/// A request-level error that does not mark the engine as unhealthy.
+///
+/// Python models this as a plain `@dataclass`, so it is serialized by msgspec
+/// as a map (named fields).
+///
+/// Original Python definition: `RequestError` in `vllm/outputs.py`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestError {
+    pub code: String,
+    pub message: String,
+    #[serde(default)]
+    pub retryable: bool,
 }
 
 /// Raw per-sequence speculative-decoding accumulator.
@@ -194,6 +215,11 @@ impl EngineCoreOutput {
                 .resolve_aux_frame(frames)
                 .map_err(|message| ext_value_decode!("prompt_token_id_logprobs: {message}"))?;
         }
+        if let Some(value) = self.routed_experts.as_mut() {
+            value
+                .resolve_aux_frame(frames)
+                .map_err(|message| ext_value_decode!("routed_experts: {message}"))?;
+        }
         Ok(())
     }
 }
@@ -228,7 +254,8 @@ struct WireEngineCoreOutputs {
     /// wave needs to start in other engines.
     #[serde(default)]
     start_wave: Option<u32>,
-    /// Decoded for Python wire compatibility; not exposed by the Rust frontend.
+    /// Label of the weights used for this step, as set by the
+    /// `set_weight_version` utility; `"default"` until set.
     #[serde(default)]
     weight_version: Option<String>,
 }
@@ -247,6 +274,9 @@ pub struct RequestBatchOutputs {
     pub scheduler_stats: Option<Box<SchedulerStats>>,
     pub timestamp: f64,
     pub finished_requests: Option<BTreeSet<String>>,
+    /// Label of the weights used for this step. It changes only while
+    /// generation is paused, so it applies to every output in the batch.
+    pub weight_version: Option<Arc<str>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -327,6 +357,7 @@ impl TryFrom<WireEngineCoreOutputs> for EngineCoreOutputs {
                 scheduler_stats: value.scheduler_stats,
                 timestamp: value.timestamp,
                 finished_requests: value.finished_requests,
+                weight_version: value.weight_version.map(Arc::from),
             }
             .into()),
             (false, Some(_), None, None) => Ok(UtilityCallOutput {
@@ -365,6 +396,7 @@ impl From<EngineCoreOutputs> for WireEngineCoreOutputs {
                 scheduler_stats: batch.scheduler_stats,
                 timestamp: batch.timestamp,
                 finished_requests: batch.finished_requests,
+                weight_version: batch.weight_version.map(|version| version.to_string()),
                 ..Default::default()
             },
             EngineCoreOutputs::Utility(utility) => Self {
@@ -549,6 +581,7 @@ mod tests {
                             new_sampling_mask: None,
                             spec_decode_metrics: None,
                             prompt_token_id_logprobs: None,
+                            error: None,
                         },
                     ],
                     scheduler_stats: None,
@@ -558,6 +591,7 @@ mod tests {
                             "req-1",
                         },
                     ),
+                    weight_version: None,
                 },
             )
         "#]]
