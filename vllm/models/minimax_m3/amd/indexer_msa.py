@@ -2,29 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MSA (gfx950/CDNA4) indexer impl for MiniMax M3.
 
-Scores index blocks and selects the top-k with AITER's fp8 MFMA kernels. Only
-the scorer differs between the two sides of the batch: prefill's rows are
-ragged, each with its own causal reach, so they take
-``pa_sparse_block_score_prefill``, while decode's are uniform per request and
-take ``pa_sparse_block_score_decode``. The two share one tile body in AITER, so
-they agree block for block, and both hand a ``[heads, rows, blocks]`` fp32
-score to the same ``pa_sparse_block_topk``.
-
-That top-k also emits the attend's page table. The winners are already in its
-workgroup's LDS, so resolving them through the block table there costs one wave
-and saves the attend a second pass over the selection.
-
-Indexer CP shards the block axis instead of replicating it, so its decode runs
-a three-stage chain: score this rank's stride of the blocks, cut that to this
-rank's own full top-k, exchange the candidates, merge them into the global
-selection. AITER serves all three, over the same kernels as the unsharded pair
--- a ``world`` of 1 collapses the shard back to the whole axis, which is what
-keeps the two paths from drifting. The shapes the MFMA cannot take are refused
-by the CP gate rather than served another way, since the fallback for them is
-simply to run unsharded.
-
-Both phases emit the attend's page table in the same numbering, so the two
-sides of a batch can share one buffer whichever wrote which rows.
+Scores index blocks and selects the top-k with AITER's fp8 MFMA kernels. Prefill
+and decode differ only in the scorer -- ragged rows against uniform ones -- and
+share one ``pa_sparse_block_topk``, which also emits the attend's page table in
+one numbering for both. Under indexer CP, decode instead scores this rank's
+stride of the blocks, cuts it to the full top-k, exchanges the candidates and
+merges them, over those same kernels at ``world`` > 1.
 """
 
 import math
@@ -285,32 +268,22 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
-        # Both passes are v_mfma_f32_16x16x32_fp8_fp8 with no bf16 instantiation,
-        # so an index cache of any other dtype would be read as e4m3 bytes.
-        # The selector will not get here, but nothing else may either.
+
         if self.indexer_kv_dtype not in ("fp8", "fp8_e4m3"):
             raise ValueError(
                 "The MSA indexer requires an fp8 e4m3 index cache, got "
                 f"indexer_kv_dtype={self.indexer_kv_dtype!r}"
             )
-        # Shared, stable-address page table + per-row context bound the top-k
-        # emits for the attend. Owned by the model so one allocation serves
-        # every layer; left None when it reserved none, in which case the
-        # attend rebuilds the table itself.
+
         self.sparse_bt_buffer: torch.Tensor | None = None
         self.sparse_ctx_buffer: torch.Tensor | None = None
-        # Indexer CP, assigned by the wrapper for the same reason the buffers
-        # are: the impl's base ``__init__`` lives in common and knows none of
-        # this. ``cp_world == 1`` is the tensor-parallel path, where
-        # ``num_index_heads`` is already only this rank's heads.
+
         self.indexer_cp = False
         self.cp_world = 1
         self.cp_rank = 0
-        # The CP decode pass's bound, score buffer and peer mapping, filled in
-        # by ``init_cp`` once the topology above is known.
+
         self.cp_max_seq_len = 0
-        # Rows the candidate buffers are strided by, which has to stay fixed
-        # across calls even as the decode batch varies.
+
         self.cp_cand_rows = 0
         self._cp_score: torch.Tensor | None = None
         self._cp_peers: IndexerCpPeers | None = None
@@ -427,22 +400,10 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
     ) -> None:
         """Score this rank's block shard, then select across the shards.
 
-        Two kernels, not four: the selector nominates its shard's candidates,
-        writes them into the peer that owns those heads over the IPC mapping
-        ``init_cp`` set up, merges what arrives and emits the attend's page
-        table, all in one launch. There is no collective between the halves --
-        see ``indexer_cp`` for why removing it is the point.
-
-        Both passes have to agree on one context bound, since the score pass
-        sizes the shard off it and the selector cuts its causal reach against
-        it. ``cp_max_seq_len`` is that bound for both, and it is
-        ``max_model_len`` rather than the batch's own longest row so that a
-        captured graph cannot specialize a shard width.
-
-        Every rank must reach this with the same row count, which the batch
-        being replicated across the tensor-parallel group already gives: the
-        ranks pair a block up with its own index on each peer, so a mismatch
-        hangs rather than producing wrong output.
+        Two kernels: the selector nominates, exchanges over the IPC mapping and
+        merges in one launch, with no collective between the halves. Both bound
+        the context by ``cp_max_seq_len`` so capture cannot specialize a shard
+        width. Every rank must reach this with the same row count or it hangs.
         """
         from aiter.ops.msa_attention import (
             pa_sparse_block_score_decode,
@@ -779,19 +740,10 @@ def msa_indexer_unsupported_reason(
     """Return why this config cannot use this indexer, or None if it can.
 
     Checks platform (ROCm/gfx950), the AITER sparse PA attend, index-cache
-    dtype, the kernels' shape contract and the max context in blocks.
-    ``select_msa_indexer_impl_cls`` logs the string and falls back when it is
-    not None.
-
-    The default ``cp_world=1`` asks about the ordinary indexer and ignores
-    every argument below it. Above one the question becomes whether the same
-    indexer can be run context-parallel, which is the same checks plus the
-    ones sharding adds, and the extra arguments describe the shape sharding
-    creates. One gate rather than two because CP is a way of running this
-    indexer and not a different one: everything the unsharded pass needs, a
-    sharded pass needs too, and a second gate would be free to disagree about
-    it. Still a reason and not an error at either width -- a config refused
-    with ``cp_world > 1`` runs unsharded, one refused at 1 runs on Triton.
+    dtype, the kernels' shape contract and the max context in blocks. The
+    default ``cp_world=1`` ignores every argument below it and asks about the
+    unsharded indexer; above one it adds the checks sharding brings. Callers
+    fall back on a reason rather than raise.
     """
     if not current_platform.is_rocm():
         return (
@@ -841,51 +793,30 @@ def msa_indexer_unsupported_reason(
     if cp_world <= 1:
         return None
 
-    # From here, only what sharding is what creates. The kernels' own limits
-    # are read from AITER rather than restated: they are properties of how the
-    # passes are built -- one MFMA tile's columns, one wave's lanes -- so a
-    # copy would be a second answer to a question AITER already answers, free
-    # to drift from the one that is enforced at the call.
     from aiter.ops.msa_block_select import SCORE_MFMA_COLS, TOPK_CP_MAX_CAND
 
     if dcp_size > 1:
-        # Both features claim the context axis, but DCP claims it in the
-        # cache: virtual block size, slot mappings that drop non-owned tokens,
-        # an LSE-merged attend. Layering this on top would shard an
-        # already-sharded context.
         return (
             f"decode_context_parallel_size={dcp_size} > 1 (KV-cache DCP owns "
             "the context axis; indexer CP replaces it, it does not extend it)"
         )
     if cp_world > num_index_heads or num_index_heads % cp_world:
-        # Every rank scores every head, so what the exchange routes is a
-        # contiguous run of heads per rank; that run has to be the same width
-        # on all of them, and it has to be the same run the tensor-parallel
-        # split already gave this rank its kv heads from.
         return (
             f"needs num_index_heads divisible by cp_world, got "
             f"cp_world={cp_world}, num_index_heads={num_index_heads}"
         )
     if num_index_heads * max_query_len > SCORE_MFMA_COLS:
-        # The score pass packs one (query token, index head) pair per MFMA
-        # column. Under CP the head count is the model's rather than this
-        # rank's, so a wide enough draft is what runs the columns out.
         return (
             f"num_index_heads={num_index_heads} x query_len={max_query_len} "
             f"exceeds the {SCORE_MFMA_COLS} MFMA columns of the score pass"
         )
     candidates = cp_world * topk_blocks
     if candidates > TOPK_CP_MAX_CAND:
-        # The merge reads every shard's nominations at once, which is what
-        # lets it skip the whole-row selector's histogram narrowing, and it
-        # holds them in one wave's lanes.
         return (
             f"cp_world={cp_world} x topk_blocks={topk_blocks} = {candidates} "
             f"exceeds the {TOPK_CP_MAX_CAND} candidates the merge holds"
         )
     if num_index_heads // cp_world != num_kv_heads:
-        # The merge emits the page table off its own selection, one row per kv
-        # head, so it needs the two 1:1.
         return (
             f"this rank would own {num_index_heads // cp_world} index head(s) "
             f"but {num_kv_heads} kv head(s); the merge's page table needs "
@@ -902,12 +833,7 @@ def select_msa_indexer_impl_cls(
     indexer_kv_dtype: IndexerKVDType | str,
     score_type: str = "max",
 ) -> type[MiniMaxM3IndexerMSAImpl] | None:
-    """The MSA indexer impl if this config can use it, else None.
-
-    ``None`` sends the caller to the platform-neutral ``MiniMaxM3Indexer``,
-    which on ROCm means the Triton indexer -- and a bf16-only one, so an fp8
-    index cache that lands here has nowhere to go.
-    """
+    """The MSA indexer impl if this config can use it, else None."""
     reason = msa_indexer_unsupported_reason(
         topk_blocks=topk_blocks,
         sparse_block_size=sparse_block_size,
@@ -935,19 +861,8 @@ def msa_indexer_cp_enabled(
 ) -> bool:
     """Whether to run the selected MSA indexer context-parallel.
 
-    The same gate ``select_msa_indexer_impl_cls`` used, asked again at the CP
-    world so that the conditions sharding adds come into it. Cheap to re-ask
-    and deliberately the same function: the two answers cannot disagree about
-    the platform or the kernels' contract, which is what would otherwise let
-    a rank shard an indexer that was never selected.
-
-    Recomputed rather than cached: every input is a config or topology value
-    fixed for the process, so the answer is stable, and a module-level cache
-    would only make it survive across the configs a test builds.
-
-    Asked once per model and handed to every layer, since the projection's
-    shard layout and the indexer's head count have to be decided off one
-    answer.
+    ``select_msa_indexer_impl_cls``'s gate re-asked at the CP world. Call once
+    per model: the projection layout and head count are decided off one answer.
     """
     requested = vllm_config.attention_config.minimax_m3_indexer_cp
     sparse_cfg = getattr(
@@ -978,12 +893,7 @@ def msa_indexer_cp_enabled(
             score_type=sparse_cfg.get("sparse_score_type", "max"),
             cp_world=tp_size,
             num_index_heads=int(sparse_cfg["sparse_num_index_heads"]),
-            # Mirrors the model's own split, which is where the emitted page
-            # table's head axis comes from.
             num_kv_heads=max(1, int(config.num_key_value_heads) // tp_size),
-            # A verification step's draft tokens are extra rows of one decode
-            # pass: they score against the same blocks, so the indexer sees
-            # them together.
             max_query_len=n_spec + 1,
             dcp_size=vllm_config.parallel_config.decode_context_parallel_size,
         )

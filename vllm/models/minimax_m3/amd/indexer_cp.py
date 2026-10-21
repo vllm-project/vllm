@@ -30,28 +30,9 @@ _HIP_PAGE = 4096
 
 
 def _ipc_alloc(nbytes: int, group) -> torch.Tensor:
-    """Allocate ``nbytes`` on every rank and return all their addresses.
+    """Allocate a zeroed, IPC-shared ``nbytes`` on every rank.
 
-    Comes back as a ``[world]`` int64 CPU tensor, entry ``r`` being rank
-    ``r``'s buffer as addressed from here -- this rank's own at its own index,
-    an IPC mapping everywhere else. That is the form the kernel's peer table
-    takes, and it is read on the host at launch, so a replay of a captured
-    graph needs the addresses to still be valid: nothing frees them.
-
-    ``create_shared_buffer`` is the custom all-reduce's own allocator, reused
-    rather than reimplemented. It wants the same three things this does: a
-    plain device address outside torch's caching allocator, since under
-    expandable segments a torch pointer lives in a ``hipMallocAsync`` pool and
-    cannot be exported over IPC at all; uncached memory, since the merge spins
-    on candidates a peer wrote and has to read them past this device's caches,
-    which its C++ gets from ``hipExtMallocWithFlags`` on ROCm; and the handle
-    exchanged over the gloo group, because the device group is NCCL.
-
-    It also zeroes the buffer, which is load-bearing and happens only here. A
-    candidate carries the generation that wrote it and no generation is ever
-    0, so zero is what the merge reads as "has not arrived". Re-zeroing later
-    would not just be unnecessary, it would race a peer that had not yet read
-    the previous round.
+    Returns a ``[world]`` int64 CPU tensor of their device addresses, never freed.
     """
     from vllm.distributed.device_communicators.custom_all_reduce import CustomAllreduce
 
@@ -64,12 +45,7 @@ def _ipc_alloc(nbytes: int, group) -> torch.Tensor:
 class IndexerCpPeers:
     """The buffers the CP selector exchanges through.
 
-    ``cand_ptrs`` is a ``[world]`` int64 CPU tensor of device addresses, which
-    is what ``pa_sparse_block_topk_cp`` takes: it builds the kernel's peer
-    table on the host so the pointers arrive in registers rather than behind a
-    load. ``cp_gen`` is this rank's own, not mapped to anyone -- a candidate
-    carries the generation that wrote it, so the only shared state is the
-    candidates themselves.
+    ``cand_ptrs`` is every rank's candidate buffer; ``cp_gen`` is this rank's own.
     """
 
     cand_ptrs: torch.Tensor
@@ -80,28 +56,10 @@ _PEERS: dict[tuple[int, int, int, int], IndexerCpPeers] = {}
 
 
 def get_indexer_cp_peers(owned_heads: int, max_rows: int, topk: int) -> IndexerCpPeers:
-    """The buffers the CP selector exchanges through, allocated once.
+    """The buffers the CP selector exchanges through, allocated once per key.
 
-    Persistent and shared by every layer rather than allocated per launch. The
-    addresses are what make that necessary: they are read on the host and baked
-    into captured graphs, so a replay has to find the same buffer, and nothing
-    is ever freed. Fifty-odd layers each mapping their own would be fifty-odd
-    IPC mappings per rank for buffers only one layer at a time is inside.
-
-    What lets one buffer serve the whole stack is the generation in each
-    candidate. A layer's writes land in the half of the buffer the previous
-    layer is not reading, and carry a tag saying which call produced them, so
-    consecutive layers never have to be separated by a barrier.
-
-    Keyed by shape because the buffers are sized to it, and by head count
-    because the generation counters are indexed by the launch's head extent --
-    two head counts sharing a counter array would be comparing tags across
-    different calls. Every rank must reach this with the same key; they are
-    allocating against each other.
-
-    ``max_rows`` is the widest decode batch, not the current one, for the same
-    capture reason: the size has to be the one every captured batch addresses,
-    and a short batch simply leaves the tail unused.
+    Cached and shared by every layer, sized to ``max_rows`` so captured graphs
+    always address the same buffer. Every rank must reach this with the same key.
     """
     from aiter.ops.msa_block_select import CP_MAX_BLOCKS, topk_cp_candidate_numel
 
@@ -114,9 +72,6 @@ def get_indexer_cp_peers(owned_heads: int, max_rows: int, topk: int) -> IndexerC
     numel = topk_cp_candidate_numel(group.world_size, owned_heads, max_rows, topk)
     peers = IndexerCpPeers(
         cand_ptrs=_ipc_alloc(numel * 8, group),
-        # Not IPC and not zeroed again after this: the counter is read only by
-        # the rank that owns it, and a stale value is exactly what the next
-        # call distinguishes itself from.
         cp_gen=torch.zeros(CP_MAX_BLOCKS, dtype=torch.int32, device="cuda"),
     )
     _PEERS[key] = peers

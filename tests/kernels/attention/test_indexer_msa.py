@@ -165,17 +165,6 @@ def _require_msa_kernels():
 
 
 def _decode_inputs(batch: int, ctx: int, device: torch.device):
-    """A decode batch, identical on every rank that builds it.
-
-    Drawn from a seeded CPU generator and then copied over rather than drawn
-    on the device, so the ranks agree by construction instead of by trusting
-    that per-device RNG streams line up.
-
-    The index cache holds one row's worth of pages and each request gets its
-    own permutation of them. The requests still read different keys, but the
-    cache stops growing with the batch -- at 128K over 64 requests the honest
-    allocation is about a gigabyte.
-    """
     gen = torch.Generator().manual_seed(0x5EED)
     blocks = _cdiv(ctx, MSA_SPARSE_BLOCK_SIZE)
     rows = batch * _QUERY_LEN
