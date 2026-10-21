@@ -22,6 +22,7 @@ param(
     [double]$MaxGiB = 48,
     [double]$ReservePct = 12,
     [int]$MinAgeMin = 30,
+    [string]$GuardMounts = '/mnt/c',
     [string]$Distro = 'Ubuntu'
 )
 
@@ -40,7 +41,8 @@ $wslArgs = @('-d', $Distro, '--exec', 'python3', $script,
              '--state-file', $state,
              '--max-gib', "$MaxGiB",
              '--reserve-pct', "$ReservePct",
-             '--min-age-min', "$MinAgeMin")
+             '--min-age-min', "$MinAgeMin",
+             '--guard-mounts', $GuardMounts)
 if ($Apply) { $wslArgs += '--apply' }
 
 & wsl.exe @wslArgs
