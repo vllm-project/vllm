@@ -12,9 +12,15 @@ Layout (content-addressed, one file per KV block):
     <root>/<model>_<hash>_r<TP rank>/<3 hex>/<block>
     blocks are 26_247_168 B (~25 MB) on the Swift-1.5 nvfp4 config.
 
-Cap policy (arbitrated with Maintenance 2026-10-20):
-    cap = min(MAX_GIB, free_D - 12% of D: total)
-so the tier can never starve the disk it lives on.
+Cap policy (arbitrated with Maintenance 2026-10-20, corrected 2026-10-21):
+    cap = min(MAX_GIB, guest_free - 12% of guest total,
+              for each guard mount: free - 12% of its total)
+
+The tier physically lives in the Ubuntu WSL ext4.vhdx
+(`C:\\Users\\MYIA\\AppData\\Local\\wsl\\{...}\\ext4.vhdx`, 850 GB, on C:),
+NOT on D: — measured 2026-10-21 via the Lxss registry key. So the volume to
+guard is C: (where the vhdx grows) plus the guest filesystem itself. D: at
+90% is a separate host concern and must not cap this tier.
 
 Safety rules
 ------------
@@ -51,18 +57,45 @@ def utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def compute_cap(d_mount: str, max_gib: float, reserve_pct: float) -> dict:
-    usage = shutil.disk_usage(d_mount)
-    reserve = int(usage.total * reserve_pct / 100.0)
-    available = max(0, usage.free - reserve)
-    cap = min(int(max_gib * GIB), available)
+def compute_cap(root: str, guard_mounts: list[str], max_gib: float,
+                reserve_pct: float, guest_floor_gib: float) -> dict:
+    """cap = min(max_gib, guest_free - guest_floor, for each mount: free - reserve%)."""
+    checks = {}
+    availables = []
+    # Guest root filesystem: absolute floor (it hosts the HF cache + WSL system,
+    # a percentage of its total would be both huge and meaningless).
+    try:
+        usage = shutil.disk_usage(root)
+        floor = int(guest_floor_gib * GIB)
+        available = max(0, usage.free - floor)
+        checks["guest_root"] = {
+            "path": root, "total_bytes": usage.total, "free_bytes": usage.free,
+            "floor_bytes": floor, "available_bytes": available,
+        }
+        availables.append(available)
+    except OSError as exc:
+        checks["guest_root"] = {"path": root, "error": str(exc)}
+    # Guard mounts (host volumes backing the vhdx): percentage reserve.
+    for m in guard_mounts:
+        try:
+            usage = shutil.disk_usage(m)
+        except OSError as exc:
+            checks[m] = {"path": m, "error": str(exc)}
+            continue
+        reserve = int(usage.total * reserve_pct / 100.0)
+        available = max(0, usage.free - reserve)
+        checks[m] = {
+            "path": m, "total_bytes": usage.total, "free_bytes": usage.free,
+            "reserve_bytes": reserve, "available_bytes": available,
+        }
+        availables.append(available)
+    cap = min([int(max_gib * GIB)] + availables) if availables else 0
     return {
-        "d_total_bytes": usage.total,
-        "d_free_bytes": usage.free,
-        "reserve_bytes": reserve,
         "cap_bytes": cap,
         "max_gib": max_gib,
         "reserve_pct": reserve_pct,
+        "guest_floor_gib": guest_floor_gib,
+        "space_checks": checks,
     }
 
 
@@ -105,16 +138,21 @@ def collect(root: str, min_age_min: int) -> tuple[list[dict], list[str], int, in
 def main() -> int:
     ap = argparse.ArgumentParser(description="Prune the vLLM KV fs offload tier (dry-run by default).")
     ap.add_argument("--root", default="/home/user/vllm/.kv-tier-fs", help="tier root inside WSL")
-    ap.add_argument("--d-mount", default="/mnt/d", help="mount of the disk that carries the tier")
+    ap.add_argument("--guard-mounts", default="/mnt/c",
+                    help="comma-separated volumes whose free space must be preserved "
+                         "(default /mnt/c: host of the Ubuntu ext4.vhdx that backs the tier)")
     ap.add_argument("--max-gib", type=float, default=48.0, help="hard cap regardless of free space")
-    ap.add_argument("--reserve-pct", type=float, default=12.0, help="percent of D: total kept free")
+    ap.add_argument("--reserve-pct", type=float, default=12.0, help="percent of a guard mount's total kept free")
+    ap.add_argument("--guest-floor-gib", type=float, default=40.0,
+                    help="absolute GB kept free on the guest FS (hosts HF cache + WSL system)")
     ap.add_argument("--min-age-min", type=int, default=30, help="never delete blocks younger than this")
     ap.add_argument("--state-file", default="/mnt/d/vllm/myia_vllm/logs/fstier_state.json")
     ap.add_argument("--apply", action="store_true", help="actually delete (default: dry-run)")
     args = ap.parse_args()
 
     started = time.time()
-    cap = compute_cap(args.d_mount, args.max_gib, args.reserve_pct)
+    guard = [m.strip() for m in args.guard_mounts.split(",") if m.strip()]
+    cap = compute_cap(args.root, guard, args.max_gib, args.reserve_pct, args.guest_floor_gib)
     candidates, errors, files_total, bytes_total = collect(args.root, args.min_age_min)
 
     over = bytes_total - cap["cap_bytes"]
