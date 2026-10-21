@@ -177,6 +177,37 @@ async def test_render_completion_hoists_transfer_params_for_every_prompt():
 
 @pytest.mark.asyncio
 @pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("return_token_ids", [None, True])
+async def test_render_forwards_return_token_ids(return_token_ids):
+    """The engine only returns prompt_token_ids which derender needs to
+    answer `return_token_ids` when the GenerateRequest asks for them."""
+    serving = _build_serving_render()
+    serving.online_renderer.render_chat = AsyncMock(
+        return_value=([], [{"prompt_token_ids": [7, 8, 9]}])
+    )
+    serving.online_renderer.render_completion = AsyncMock(
+        return_value=[{"prompt_token_ids": [7, 8, 9]}]
+    )
+
+    chat = await serving.render_chat_request(
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": "Test prompt"}],
+            return_token_ids=return_token_ids,
+        )
+    )
+    (completion,) = await serving.render_completion_request(
+        CompletionRequest(
+            model=MODEL_NAME, prompt="a", return_token_ids=return_token_ids
+        )
+    )
+
+    assert chat.return_token_ids == return_token_ids
+    assert completion.return_token_ids == return_token_ids
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
 async def test_render_responses_rejects_previous_response_id():
     serving = _build_serving_render()
     serving.online_renderer.render_responses = AsyncMock()
