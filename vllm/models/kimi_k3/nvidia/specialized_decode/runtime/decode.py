@@ -186,6 +186,8 @@ class SpecializedDecode:
             if layer.is_moe_layer:
                 fresh = pack_front(layer.mlp, self.rank, self.tp)
                 self.packed[layer.layer_idx].copy_(fresh)
+            else:
+                self.feed_forward[layer.layer_idx].refresh_weights(layer.mlp)
             core = getattr(self.attention[layer.layer_idx], "core", None)
             refresh = getattr(core, "refresh_weights", None)
             if refresh is not None:
