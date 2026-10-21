@@ -16,9 +16,14 @@ from tests.utils import create_new_process_for_each_test
 from vllm import LLM, SamplingParams, TokensPrompt
 from vllm.config import CacheConfig
 from vllm.distributed import cleanup_dist_env_and_memory
-from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFunc
+from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateCopyFunc,
+    is_conv_state_dim_first,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -29,9 +34,8 @@ from vllm.v1.request import Request
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.worker import mamba_utils
-from vllm.v1.worker.gpu_input_batch import CachedRequestState
+from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-from vllm.v1.worker.lora_model_runner_mixin import GPUInputBatch
 from vllm.v1.worker.mamba_utils import get_mamba_groups
 
 
@@ -54,7 +58,14 @@ async_scheduling_mode = False
 num_accepted_tokens = 1
 prompt_token_ids: list[int] = []
 MODEL = "Qwen/Qwen3-Next-80B-A3B-Instruct-FP8"
-BLOCK_SIZE = 560
+# Must be a value no platform rewrites, since the step actions below encode
+# where block boundaries fall. XPU rounds GDN block sizes up to a multiple of 64
+# (XPUPlatform.update_block_size_for_backend), so use one.
+BLOCK_SIZE = 576
+# The step actions also encode the split at the prompt's last block boundary,
+# which a GDN prefill backend with internal checkpoints (FlashInfer) skips; see
+# get_internal_checkpoint_step_configs.
+GDN_PREFILL_CONFIG = {"gdn_prefill_backend": "triton"}
 DEVICE_TYPE = current_platform.device_type
 NUM_HIDDEN_LAYERS = 1
 cur_step_action_idx = 0
@@ -62,7 +73,9 @@ cur_step_action: StepAction | None = None
 step_actions: list[StepAction] = []
 
 
-def get_fake_sample_fn() -> SamplerOutput:
+def get_fake_sample_fn() -> Callable[
+    [GPUModelRunner, torch.Tensor | None, SpecDecodeMetadata | None], SamplerOutput
+]:
     def fake_sample_fn(
         self: GPUModelRunner,
         logits: torch.Tensor | None,
@@ -77,7 +90,7 @@ def get_fake_sample_fn() -> SamplerOutput:
             first_token_id_index = num_computed_tokens + 1
         if spec_decode_metadata is None:
             return SamplerOutput(
-                sampled_token_ids=torch.tensor(
+                sampled_token_ids=async_tensor_h2d(
                     [[prompt_token_ids[first_token_id_index]]],
                     device=DEVICE_TYPE,
                     dtype=torch.int32,
@@ -90,7 +103,7 @@ def get_fake_sample_fn() -> SamplerOutput:
         ]
         sampled_token_ids = accepted_tokens
         return SamplerOutput(
-            sampled_token_ids=torch.tensor(
+            sampled_token_ids=async_tensor_h2d(
                 [sampled_token_ids],
                 device=DEVICE_TYPE,
                 dtype=torch.int32,
@@ -125,6 +138,10 @@ def get_fake_propose_draft_token_ids_fn():
             first_token_id_index = (
                 num_computed_tokens + 1
             )  # bonus token isn't considered as computed
+        # num_accepted_tokens_cpu is filled by a non-blocking D2H copy in the
+        # same step; wait for it or a lagging GPU yields stale counts.
+        if self.num_accepted_tokens_event is not None:
+            self.num_accepted_tokens_event.synchronize()
         first_token_id_index += self.input_batch.num_accepted_tokens_cpu[0].item()
         proposed_draft_token_ids = [
             prompt_token_ids[
@@ -132,7 +149,7 @@ def get_fake_propose_draft_token_ids_fn():
             ]
         ]
 
-        next_token_ids = torch.tensor(
+        next_token_ids = async_tensor_h2d(
             prompt_token_ids[
                 first_token_id_index - 1 : first_token_id_index
                 - 1
@@ -142,7 +159,7 @@ def get_fake_propose_draft_token_ids_fn():
             dtype=torch.int32,
         )
 
-        valid_sampled_tokens_count = torch.tensor(
+        valid_sampled_tokens_count = async_tensor_h2d(
             [num_accepted_tokens],
             device=DEVICE_TYPE,
             dtype=torch.int32,
@@ -150,7 +167,7 @@ def get_fake_propose_draft_token_ids_fn():
 
         self._copy_valid_sampled_token_count(next_token_ids, valid_sampled_tokens_count)
 
-        return torch.tensor(
+        return async_tensor_h2d(
             proposed_draft_token_ids,
             device=DEVICE_TYPE,
             dtype=torch.int32,
@@ -188,6 +205,7 @@ def get_fake_allocate_slots_fn(original_allocate_slots_fn: Callable):
         full_sequence_must_fit: bool = False,
         reserved_blocks: int = 0,
         has_scheduled_reqs: bool = True,
+        skip_zeroing_group_ids: tuple[int, ...] = (),
     ):
         ret = original_allocate_slots_fn(
             self,
@@ -202,6 +220,7 @@ def get_fake_allocate_slots_fn(original_allocate_slots_fn: Callable):
             full_sequence_must_fit,
             reserved_blocks,
             has_scheduled_reqs,
+            skip_zeroing_group_ids,
         )
         if cur_step_action is not None:
             cur_block_ids = self.coordinator.single_type_managers[0].req_to_blocks[
@@ -232,7 +251,8 @@ def get_fake_execute_model_fn(original_execute_model_fn: Callable):
                 iter(scheduler_output.num_scheduled_tokens.values())
             )
             assert num_scheduled_tokens == cur_step_action.num_scheduled_tokens
-        mamba_group_ids, mamba_spec = get_mamba_groups(self.kv_cache_config)
+        mamba_groups = get_mamba_groups(self.kv_cache_config)
+        mamba_spec, mamba_group_ids = next(iter(mamba_groups.items()))
         mamba_group_id = mamba_group_ids[0]
         mamba_layer_name = self.kv_cache_config.kv_cache_groups[
             mamba_group_id
@@ -312,14 +332,15 @@ def get_fake_process_mamba_fn(
         action: tuple[int, int],
         kv_cache_config: KVCacheConfig,
         forward_context: dict[str, Any],
-        input_batch: GPUInputBatch,
+        input_batch: InputBatch,
     ):
         assert copy_info is not None
         if action == (-1, -1):
             assert len(copy_info[0]) == len(copy_info[1]) == len(copy_info[2]) == 0
         else:
             assert len(copy_info[0]) == len(copy_info[1]) == len(copy_info[2]) == 2
-            mamba_group_ids, mamba_spec = get_mamba_groups(kv_cache_config)
+            mamba_groups = get_mamba_groups(kv_cache_config)
+            mamba_spec, mamba_group_ids = next(iter(mamba_groups.items()))
             mamba_group_id = mamba_group_ids[0]
             mamba_layer_name = kv_cache_config.kv_cache_groups[
                 mamba_group_id
@@ -338,16 +359,43 @@ def get_fake_process_mamba_fn(
             assert copy_info[0][-1] == expected_temporal_src
             assert copy_info[1][-1] == expected_temporal_dest
 
+    def check_fused_copy_info(
+        action: tuple[int, int],
+        align_ctx: mamba_utils.MambaSpecDecodeGPUContext,
+    ):
+        # Align + spec-decode on a hybrid model routes the pre-copy through the
+        # fused kernel (preprocess_mamba -> run_fused_precopy) instead of
+        # do_mamba_copy_block, so copy_info is never populated. Verify from the
+        # fused buffers (req-0 scope, mirroring check_copy_info):
+        #   - the copy DECISION: src_col is -1 iff no pre-copy is scheduled;
+        #   - the DESTINATION column: state_idx == action[1] (curr_state_idx;
+        #     maps directly through block_ids, exactly as check_copy_info's dst).
+        # The source column is NOT asserted here: on the scalar path the source
+        # address is produced by the per-state copy func with an accept-token
+        # bias offset (collect_mamba_copy_meta), so prev_state_idx does not map
+        # to action[0] by plain equality. Source block-level exactness (incl.
+        # the accept-bias) is covered by test_precopy_mamba_align.py.
+        assert align_ctx.precopy_src_col_buf is not None
+        assert align_ctx.mamba_state_idx_buf is not None
+        src_col = int(align_ctx.precopy_src_col_buf.np[0])
+        state_idx = int(align_ctx.mamba_state_idx_buf.np[0])
+        if action == (-1, -1):
+            assert src_col == -1
+        else:
+            assert src_col != -1
+            assert state_idx == action[1]
+
     def fake_preprocess_mamba_fn(
         scheduler_output: SchedulerOutput,
         kv_cache_config: KVCacheConfig,
         cache_config: CacheConfig,
         mamba_state_idx: dict[str, int],
-        input_batch: GPUInputBatch,
+        input_batch: InputBatch,
         requests: dict[str, CachedRequestState],
         forward_context: dict[str, Any],
         mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
         copy_bufs: mamba_utils.MambaCopyBuffers,
+        align_ctx: mamba_utils.MambaSpecDecodeGPUContext | None = None,
     ):
         nonlocal copy_info
         copy_info = None
@@ -361,14 +409,21 @@ def get_fake_process_mamba_fn(
             forward_context,
             mamba_state_copy_funcs,
             copy_bufs,
+            align_ctx,
         )
         if cur_step_action is not None:
-            check_copy_info(
-                cur_step_action.preprocess_copy_idx,
-                kv_cache_config,
-                forward_context,
-                input_batch,
-            )
+            if align_ctx is not None:
+                check_fused_copy_info(
+                    cur_step_action.preprocess_copy_idx,
+                    align_ctx,
+                )
+            else:
+                check_copy_info(
+                    cur_step_action.preprocess_copy_idx,
+                    kv_cache_config,
+                    forward_context,
+                    input_batch,
+                )
         return ret
 
     def fake_copy_fn(copy_bufs: mamba_utils.MambaCopyBuffers):
@@ -403,10 +458,12 @@ def _run_ref_mamba_state_worker():
         )
         prompt_dataset = datasets.load_dataset("heheda/a_long_article")
         full_prompt = prompt_dataset["train"][0]["text"]
+        # Patched for the lifetime of this spawned worker process.
+        monkeypatch = pytest.MonkeyPatch()
         fake_execute_model_fn = get_fake_execute_model_fn(GPUModelRunner.execute_model)
-        GPUModelRunner.execute_model = fake_execute_model_fn
+        monkeypatch.setattr(GPUModelRunner, "execute_model", fake_execute_model_fn)
         fake_sample_fn = get_fake_sample_fn()
-        GPUModelRunner._sample = fake_sample_fn
+        monkeypatch.setattr(GPUModelRunner, "_sample", fake_sample_fn)
         engine = LLM(
             model=MODEL,
             load_format="dummy",
@@ -506,26 +563,27 @@ def get_mamba_prefix_cache_step_configs(
     async_scheduling: bool = False,
 ) -> dict[str, TestConfig]:
     a = async_scheduling
+    B = BLOCK_SIZE
     tests = {
         "accept_1": TestConfig(
-            num_prompt_tokens=554,
+            num_prompt_tokens=B - 6,
             num_generated_tokens=20,
             num_accepted_tokens=1,
             step_actions=[
-                StepAction(0, 554, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(554, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(0, B - 6, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B - 6, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(
-                    555, 4, [1, 1, 1, 1, 1] if a else [1, 1, 1, 1], (-1, -1), (-1, -1)
+                    B - 5, 4, [1, 1, 1, 1, 1] if a else [1, 1, 1, 1], (-1, -1), (-1, -1)
                 ),
                 StepAction(
-                    556, 4, [1, 1, 1, 1, 1] if a else [1, 1, 1, 1], (-1, -1), (-1, -1)
+                    B - 4, 4, [1, 1, 1, 1, 1] if a else [1, 1, 1, 1], (-1, -1), (-1, -1)
                 ),
-                StepAction(557, 4, [1, 1, 1, 1, 1], (0, 1), (-1, -1)),
-                StepAction(558, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(559, 4, [1, 1, 1, 1, 1], (-1, -1), (1, 0)),
-                StepAction(560, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B - 3, 4, [1, 1, 1, 1, 1], (0, 1), (-1, -1)),
+                StepAction(B - 2, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B - 1, 4, [1, 1, 1, 1, 1], (-1, -1), (1, 0)),
+                StepAction(B, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(
-                    561,
+                    B + 1,
                     4,
                     [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
                     (-1, -1),
@@ -535,19 +593,19 @@ def get_mamba_prefix_cache_step_configs(
         ),
         # test case 2.1: no hit, accept 2 tokens
         "accept_2_1": TestConfig(
-            num_prompt_tokens=554,
+            num_prompt_tokens=B - 6,
             num_generated_tokens=20,
             num_accepted_tokens=2,
             step_actions=[
-                StepAction(0, 554, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(554, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(0, B - 6, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B - 6, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(
-                    556, 4, [1, 1, 1, 1, 1] if a else [1, 1, 1, 1], (-1, -1), (-1, -1)
+                    B - 4, 4, [1, 1, 1, 1, 1] if a else [1, 1, 1, 1], (-1, -1), (-1, -1)
                 ),
-                StepAction(558, 4, [1, 1, 1, 1, 1], (1, 1), (2, 0)),
-                StepAction(560, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B - 2, 4, [1, 1, 1, 1, 1], (1, 1), (2, 0)),
+                StepAction(B, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(
-                    562,
+                    B + 2,
                     4,
                     [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
                     (-1, -1),
@@ -557,56 +615,56 @@ def get_mamba_prefix_cache_step_configs(
         ),
         # test case 2.2: no hit, accept 2 tokens
         "accept_2_2": TestConfig(
-            num_prompt_tokens=555,
+            num_prompt_tokens=B - 5,
             num_generated_tokens=20,
             num_accepted_tokens=2,
             step_actions=[
-                StepAction(0, 555, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(555, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(557, 4, [1, 1, 1, 1, 1], (1, 1), (-1, -1)),
-                StepAction(559, 4, [1, 1, 1, 1, 1], (-1, -1), (1, 0)),
+                StepAction(0, B - 5, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B - 5, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B - 3, 4, [1, 1, 1, 1, 1], (1, 1), (-1, -1)),
+                StepAction(B - 1, 4, [1, 1, 1, 1, 1], (-1, -1), (1, 0)),
                 StepAction(
-                    561,
+                    B + 1,
                     4,
                     [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
-                StepAction(563, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B + 3, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
         "accept_3_1": TestConfig(
-            num_prompt_tokens=553,
+            num_prompt_tokens=B - 7,
             num_generated_tokens=20,
             num_accepted_tokens=3,
             step_actions=[
-                StepAction(0, 553, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(553, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(0, B - 7, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B - 7, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(
-                    556, 4, [1, 1, 1, 1, 1] if a else [1, 1, 1, 1], (-1, -1), (-1, -1)
+                    B - 4, 4, [1, 1, 1, 1, 1] if a else [1, 1, 1, 1], (-1, -1), (-1, -1)
                 ),
-                StepAction(559, 4, [1, 1, 1, 1, 1], (2, 1), (1, 0)),
+                StepAction(B - 1, 4, [1, 1, 1, 1, 1], (2, 1), (1, 0)),
                 StepAction(
-                    562,
+                    B + 2,
                     4,
                     [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
-                StepAction(565, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B + 5, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
         "accept_3_2": TestConfig(
-            num_prompt_tokens=554,
+            num_prompt_tokens=B - 6,
             num_generated_tokens=20,
             num_accepted_tokens=3,
             step_actions=[
-                StepAction(0, 554, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(554, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(557, 4, [1, 1, 1, 1, 1], (2, 1), (3, 0)),
-                StepAction(560, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(0, B - 6, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B - 6, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B - 3, 4, [1, 1, 1, 1, 1], (2, 1), (3, 0)),
+                StepAction(B, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(
-                    563,
+                    B + 3,
                     4,
                     [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
                     (-1, -1),
@@ -615,87 +673,87 @@ def get_mamba_prefix_cache_step_configs(
             ],
         ),
         "accept_3_3": TestConfig(
-            num_prompt_tokens=555,
+            num_prompt_tokens=B - 5,
             num_generated_tokens=20,
             num_accepted_tokens=3,
             step_actions=[
-                StepAction(0, 555, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(555, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(558, 4, [1, 1, 1, 1, 1], (2, 1), (2, 0)),
+                StepAction(0, B - 5, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B - 5, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B - 2, 4, [1, 1, 1, 1, 1], (2, 1), (2, 0)),
                 StepAction(
-                    561,
+                    B + 1,
                     4,
                     [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
-                StepAction(564, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B + 4, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
         "accept_4_1": TestConfig(
-            num_prompt_tokens=553,
+            num_prompt_tokens=B - 7,
             num_generated_tokens=20,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, 553, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(553, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(557, 4, [1, 1, 1, 1, 1], (3, 1), (3, 0)),
+                StepAction(0, B - 7, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B - 7, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B - 3, 4, [1, 1, 1, 1, 1], (3, 1), (3, 0)),
                 StepAction(
-                    561,
+                    B + 1,
                     4,
                     [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
-                StepAction(565, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B + 5, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
         "accept_4_2": TestConfig(
-            num_prompt_tokens=554,
+            num_prompt_tokens=B - 6,
             num_generated_tokens=25,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, 554, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(554, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(558, 4, [1, 1, 1, 1, 1], (3, 1), (2, 0)),
+                StepAction(0, B - 6, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B - 6, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B - 2, 4, [1, 1, 1, 1, 1], (3, 1), (2, 0)),
                 StepAction(
-                    562,
+                    B + 2,
                     4,
                     [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
-                StepAction(566, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B + 6, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
         "accept_4_3": TestConfig(
-            num_prompt_tokens=555,
+            num_prompt_tokens=B - 5,
             num_generated_tokens=25,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, 555, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(555, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(559, 4, [1, 1, 1, 1, 1], (3, 1), (1, 0)),
+                StepAction(0, B - 5, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B - 5, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B - 1, 4, [1, 1, 1, 1, 1], (3, 1), (1, 0)),
                 StepAction(
-                    563,
+                    B + 3,
                     4,
                     [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
-                StepAction(567, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B + 7, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
         "accept_4_4": TestConfig(
-            num_prompt_tokens=556,
+            num_prompt_tokens=B - 4,
             num_generated_tokens=25,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, 556, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(556, 4, [1, 1, 1, 1], (-1, -1), (3, 0)),
-                StepAction(560, 4, [1, 1, 1, 1, 1], (0, 1), (-1, -1)),
+                StepAction(0, B - 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B - 4, 4, [1, 1, 1, 1], (-1, -1), (3, 0)),
+                StepAction(B, 4, [1, 1, 1, 1, 1], (0, 1), (-1, -1)),
                 StepAction(
-                    564,
+                    B + 4,
                     4,
                     [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
                     (-1, -1),
@@ -704,23 +762,23 @@ def get_mamba_prefix_cache_step_configs(
             ],
         ),
         "prompt_block_size": TestConfig(
-            num_prompt_tokens=560,
+            num_prompt_tokens=B,
             num_generated_tokens=10,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, 560, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(560, 4, [1, 1, 1, 1, 1], (0, 1), (-1, -1)),
+                StepAction(0, B, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B, 4, [1, 1, 1, 1, 1], (0, 1), (-1, -1)),
             ],
         ),
         "prompt_2_block_size": TestConfig(
-            num_prompt_tokens=560 * 2,
+            num_prompt_tokens=B * 2,
             num_generated_tokens=10,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, 560, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(560, 560, [1, 1, 1, 1, 1], (0, 1), (-1, -1)),
+                StepAction(0, B, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B, B, [1, 1, 1, 1, 1], (0, 1), (-1, -1)),
                 StepAction(
-                    560 * 2,
+                    B * 2,
                     4,
                     [1, 1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1, 1],
                     (1, 2),
@@ -729,14 +787,14 @@ def get_mamba_prefix_cache_step_configs(
             ],
         ),
         "prompt_2_block_size_10": TestConfig(
-            num_prompt_tokens=560 * 2 + 10,
+            num_prompt_tokens=B * 2 + 10,
             num_generated_tokens=10,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, 560, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(560, 570, [1, 0, 1, 1, 1, 1], (0, 2), (-1, -1)),
+                StepAction(0, B, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B, B + 10, [1, 0, 1, 1, 1, 1], (0, 2), (-1, -1)),
                 StepAction(
-                    560 * 2 + 10,
+                    B * 2 + 10,
                     4,
                     [1, 0, 1, 1, 1, 1] if a else [0, 0, 1, 1, 1, 1],
                     (-1, -1),
@@ -745,14 +803,14 @@ def get_mamba_prefix_cache_step_configs(
             ],
         ),
         "prompt_3_block_size": TestConfig(
-            num_prompt_tokens=560 * 3,
+            num_prompt_tokens=B * 3,
             num_generated_tokens=10,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, 560 * 2, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(560 * 2, 560, [0, 1, 1, 1, 1, 1], (1, 2), (-1, -1)),
+                StepAction(0, B * 2, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B * 2, B, [0, 1, 1, 1, 1, 1], (1, 2), (-1, -1)),
                 StepAction(
-                    560 * 3,
+                    B * 3,
                     4,
                     [0, 1, 1, 1, 1, 1, 1] if a else [0, 0, 1, 1, 1, 1, 1],
                     (2, 3),
@@ -761,14 +819,14 @@ def get_mamba_prefix_cache_step_configs(
             ],
         ),
         "prompt_3_block_size_10": TestConfig(
-            num_prompt_tokens=560 * 3 + 10,
+            num_prompt_tokens=B * 3 + 10,
             num_generated_tokens=10,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, 560 * 2, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(560 * 2, 570, [0, 1, 0, 1, 1, 1, 1], (1, 3), (-1, -1)),
+                StepAction(0, B * 2, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B * 2, B + 10, [0, 1, 0, 1, 1, 1, 1], (1, 3), (-1, -1)),
                 StepAction(
-                    560 * 3 + 10,
+                    B * 3 + 10,
                     4,
                     [0, 1, 0, 1, 1, 1, 1] if a else [0, 0, 0, 1, 1, 1, 1],
                     (-1, -1),
@@ -777,21 +835,21 @@ def get_mamba_prefix_cache_step_configs(
             ],
         ),
         "prompt_10_block_size": TestConfig(
-            num_prompt_tokens=560 * 10,
+            num_prompt_tokens=B * 10,
             num_generated_tokens=10,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, 560 * 5, [0, 0, 0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(0, B * 5, [0, 0, 0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(
-                    560 * 5,
-                    560 * 4,
+                    B * 5,
+                    B * 4,
                     [0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1],
                     (4, 8),
                     (-1, -1),
                 ),
                 StepAction(
-                    560 * 9,
-                    560,
+                    B * 9,
+                    B,
                     [0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1, 1]
                     if a
                     else [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1],
@@ -799,9 +857,9 @@ def get_mamba_prefix_cache_step_configs(
                     (-1, -1),
                 ),
                 StepAction(
-                    560 * 10,
+                    B * 10,
                     4,
-                    [0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1, 1, 1]
+                    [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1]
                     if a
                     else [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1],
                     (9, 10),
@@ -810,21 +868,21 @@ def get_mamba_prefix_cache_step_configs(
             ],
         ),
         "prompt_10_block_size_10": TestConfig(
-            num_prompt_tokens=560 * 10 + 10,
+            num_prompt_tokens=B * 10 + 10,
             num_generated_tokens=10,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, 560 * 5, [0, 0, 0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(0, B * 5, [0, 0, 0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(
-                    560 * 5,
-                    560 * 4,
+                    B * 5,
+                    B * 4,
                     [0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1],
                     (4, 8),
                     (-1, -1),
                 ),
                 StepAction(
-                    560 * 9,
-                    560 + 10,
+                    B * 9,
+                    B + 10,
                     [0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 1, 1]
                     if a
                     else [0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1],
@@ -837,9 +895,80 @@ def get_mamba_prefix_cache_step_configs(
     return tests
 
 
+def get_internal_checkpoint_step_configs() -> dict[str, TestConfig]:
+    """Async-scheduling steps when the GDN prefill exports the checkpoint at
+    the prompt's last block boundary itself, so the final chunk runs whole.
+
+    The checkpoint goes in the second-to-last block the chunk reaches, keyed to
+    the boundary: column 1 holds the state at B for a 2B + 10 prompt.
+    """
+    B = BLOCK_SIZE
+    return {
+        "prompt_2_block_size": TestConfig(
+            num_prompt_tokens=B * 2,
+            num_generated_tokens=10,
+            num_accepted_tokens=4,
+            step_actions=[
+                StepAction(0, B * 2, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B * 2, 4, [1, 1, 1, 1, 1, 1], (1, 2), (-1, -1)),
+            ],
+        ),
+        "prompt_2_block_size_10": TestConfig(
+            num_prompt_tokens=B * 2 + 10,
+            num_generated_tokens=10,
+            num_accepted_tokens=4,
+            step_actions=[
+                StepAction(0, B * 2 + 10, [0, 1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B * 2 + 10, 4, [0, 1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+            ],
+        ),
+        "prompt_10_block_size": TestConfig(
+            num_prompt_tokens=B * 10,
+            num_generated_tokens=10,
+            num_accepted_tokens=4,
+            step_actions=[
+                StepAction(0, B * 5, [0, 0, 0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(
+                    B * 5,
+                    B * 5,
+                    [0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1, 1],
+                    (4, 9),
+                    (-1, -1),
+                ),
+                StepAction(
+                    B * 10,
+                    4,
+                    [0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1, 1, 1],
+                    (9, 10),
+                    (-1, -1),
+                ),
+            ],
+        ),
+        "prompt_10_block_size_10": TestConfig(
+            num_prompt_tokens=B * 10 + 10,
+            num_generated_tokens=10,
+            num_accepted_tokens=4,
+            step_actions=[
+                StepAction(0, B * 5, [0, 0, 0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(
+                    B * 5,
+                    B * 5 + 10,
+                    [0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1],
+                    (4, 10),
+                    (-1, -1),
+                ),
+            ],
+        ),
+    }
+
+
 def _run_mamba_prefix_cache_mrv1(
     monkeypatch: pytest.MonkeyPatch, async_scheduling: bool
 ):
+    # This test patches the V1 model runner, so pin V1 explicitly: MoE/hybrid
+    # models like Qwen3-Next now default to the V2 runner.
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    envs.disable_envs_cache()
     global async_scheduling_mode
     async_scheduling_mode = async_scheduling
     run_ref_mamba_state_in_subprocess()
@@ -853,7 +982,7 @@ def _run_mamba_prefix_cache_mrv1(
         load_format="dummy",
         enable_prefix_caching=True,
         block_size=BLOCK_SIZE,
-        mamba_cache_mode="align",
+        additional_config=GDN_PREFILL_CONFIG,
         speculative_config={
             "method": "qwen3_next_mtp",
             "num_speculative_tokens": num_speculative_tokens,
@@ -863,6 +992,7 @@ def _run_mamba_prefix_cache_mrv1(
         async_scheduling=async_scheduling,
         seed=42,
     )
+    assert isinstance(engine.llm_engine.engine_core, InprocClient)
     global prompt_token_ids
     prompt_token_ids = engine.get_tokenizer().encode(full_prompt)
     print(f"Token IDs length: {len(prompt_token_ids)}")
@@ -898,19 +1028,22 @@ def _run_mamba_prefix_cache_mrv1(
     cleanup_dist_env_and_memory()
 
 
-@create_new_process_for_each_test()
+@create_new_process_for_each_test("spawn")
 def test_mamba_prefix_cache_mrv1(monkeypatch: pytest.MonkeyPatch):
     _run_mamba_prefix_cache_mrv1(monkeypatch, async_scheduling=False)
 
 
-@create_new_process_for_each_test()
+@create_new_process_for_each_test("spawn")
 def test_mamba_prefix_cache_mrv1_async(monkeypatch: pytest.MonkeyPatch):
     _run_mamba_prefix_cache_mrv1(monkeypatch, async_scheduling=True)
 
 
 def _run_mamba_prefix_cache_mrv2(
-    monkeypatch: pytest.MonkeyPatch, async_scheduling: bool
+    monkeypatch: pytest.MonkeyPatch,
+    async_scheduling: bool,
+    additional_config: dict[str, Any] = GDN_PREFILL_CONFIG,
 ):
+    internal_checkpoints = additional_config["gdn_prefill_backend"] == "flashinfer"
     global async_scheduling_mode
     async_scheduling_mode = async_scheduling
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
@@ -937,14 +1070,18 @@ def _run_mamba_prefix_cache_mrv2(
         forward_context = (
             model_state.vllm_config.compilation_config.static_forward_context
         )
-        group_ids, _ = get_mamba_groups(kv_cache_config)
-        for group_id in group_ids:
-            block_table = block_tables[group_id]
-            for layer_name in kv_cache_config.kv_cache_groups[group_id].layer_names:
-                yield forward_context[layer_name].kv_cache[-1], block_table
+        mamba_groups = get_mamba_groups(kv_cache_config)
+        for group_ids in mamba_groups.values():
+            for group_id in group_ids:
+                block_table = block_tables[group_id]
+                for layer_name in kv_cache_config.kv_cache_groups[group_id].layer_names:
+                    yield forward_context[layer_name].kv_cache[-1], block_table
 
     def temporal_block(temporal_state, block_table, col):
-        return temporal_state[int(block_table[0, col].item())]
+        # Resolving the block id for assertions is a deliberate D2H.
+        with gpu_sync_allowed():
+            block_id = int(block_table[0, col].item())
+        return temporal_state[block_id]
 
     def wrapped_preprocess_state(
         self: MambaHybridModelState,
@@ -968,19 +1105,24 @@ def _run_mamba_prefix_cache_mrv2(
             self, input_batch, block_tables, kv_cache_config, num_computed_tokens
         )
         if cur_step_action is not None:
-            req_idx = int(input_batch.idx_mapping[0].item())
-            src_col = int(self._mamba_src_col_gpu[req_idx].item())
-            off = int(self._mamba_src_off_gpu[req_idx].item())
-            dst = int(self._mamba_state_idx_gpu[req_idx].item())
+            # Reading the GPU-side copy state back to assert on it is a
+            # deliberate D2H.
+            with gpu_sync_allowed():
+                req_idx = int(input_batch.idx_mapping[0].item())
+                src_col = int(self._mamba_src_col_gpu[req_idx].item())
+                off = int(self._mamba_src_off_gpu[req_idx].item())
+                dst = int(self._mamba_state_idx_gpu[req_idx].item())
             actual = (-1, -1) if src_col < 0 or src_col == dst else (src_col + off, dst)
             assert actual == expected, (
                 f"V2 align preprocess copy: expected={expected}, "
                 f"actual={actual}, {cur_step_action=}"
             )
-            for temporal, bt, src_state in snapshots:
-                torch.testing.assert_close(
-                    temporal_block(temporal, bt, expected[1]), src_state
-                )
+            # Comparing device tensors for the assertion is a deliberate D2H.
+            with gpu_sync_allowed():
+                for temporal, bt, src_state in snapshots:
+                    torch.testing.assert_close(
+                        temporal_block(temporal, bt, expected[1]), src_state
+                    )
         return ret
 
     def wrapped_postprocess_state(
@@ -1011,10 +1153,12 @@ def _run_mamba_prefix_cache_mrv2(
         ret = original_postprocess_state(
             self, idx_mapping, num_sampled, num_computed_tokens
         )
-        for temporal, bt, src_state in snapshots:
-            torch.testing.assert_close(
-                temporal_block(temporal, bt, expected[1]), src_state
-            )
+        # Comparing device tensors for the assertion is a deliberate D2H.
+        with gpu_sync_allowed():
+            for temporal, bt, src_state in snapshots:
+                torch.testing.assert_close(
+                    temporal_block(temporal, bt, expected[1]), src_state
+                )
         return ret
 
     def wrapped_execute_model(
@@ -1035,11 +1179,27 @@ def _run_mamba_prefix_cache_mrv2(
         ret = original_execute_model(self, scheduler_output, *args, **kwargs)
         if cur_step_action is not None and self.execute_model_state is not None:
             input_batch = self.execute_model_state.input_batch
-            assert (
-                cur_step_action.num_computed_tokens_start
-                == input_batch.positions[input_batch.query_start_loc[0]].item()
-            )
+            # Reading positions back to assert on them is a deliberate D2H.
+            with gpu_sync_allowed():
+                start_pos = input_batch.positions[input_batch.query_start_loc[0]].item()
+            assert cur_step_action.num_computed_tokens_start == start_pos
+        if scheduler_output.scheduled_new_reqs and "snapshot_col" in captured:
+            captured["snapshot"] = block_states(self, captured.pop("snapshot_col"))
         return ret
+
+    def block_states(runner: MRV2GPUModelRunner, col: int) -> list[list[torch.Tensor]]:
+        # Each Mamba layer's (conv, temporal) states in block column col.
+        kv_cache_config = captured["kv_cache_config"]
+        forward_context = runner.vllm_config.compilation_config.static_forward_context
+        return [
+            [
+                temporal_block(state, captured["block_tables"][group_id], col).clone()
+                for state in forward_context[layer_name].kv_cache
+            ]
+            for group_ids in get_mamba_groups(kv_cache_config).values()
+            for group_id in group_ids
+            for layer_name in kv_cache_config.kv_cache_groups[group_id].layer_names
+        ]
 
     def fake_sample(
         self: MRV2GPUModelRunner,
@@ -1056,11 +1216,10 @@ def _run_mamba_prefix_cache_mrv2(
             device=hidden_states.device,
             dtype=torch.int64,
         )
-        num_logits = torch.tensor(
+        num_logits = async_tensor_h2d(
             input_batch.cu_num_logits_np[1 : num_reqs + 1]
             - input_batch.cu_num_logits_np[:num_reqs],
             device=hidden_states.device,
-            dtype=torch.int32,
         )
         accepted = torch.full_like(num_logits, num_accepted_tokens)
         num_sampled = torch.minimum(accepted, num_logits)
@@ -1073,6 +1232,7 @@ def _run_mamba_prefix_cache_mrv2(
             logprobs_tensors=None,
             num_nans=None,
             num_sampled=num_sampled,
+            num_rejected=num_rejected,
         )
         return sampler_output, num_sampled, num_rejected
 
@@ -1102,7 +1262,7 @@ def _run_mamba_prefix_cache_mrv2(
         skip_tokenizer_init=True,
         enable_prefix_caching=True,
         block_size=BLOCK_SIZE,
-        mamba_cache_mode="align",
+        additional_config=additional_config,
         speculative_config={
             "method": "qwen3_next_mtp",
             "num_speculative_tokens": num_speculative_tokens,
@@ -1113,9 +1273,14 @@ def _run_mamba_prefix_cache_mrv2(
         async_scheduling=async_scheduling,
         seed=42,
     )
+    assert isinstance(engine.llm_engine.engine_core, InprocClient)
 
     try:
-        tests = get_mamba_prefix_cache_step_configs(async_scheduling)
+        tests = (
+            get_internal_checkpoint_step_configs()
+            if internal_checkpoints
+            else get_mamba_prefix_cache_step_configs(async_scheduling)
+        )
 
         global step_actions
         global cur_step_action_idx
@@ -1161,6 +1326,35 @@ def _run_mamba_prefix_cache_mrv2(
             f"got events={second_events!r}"
         )
         assert engine.llm_engine.engine_core.engine_core.scheduler.reset_prefix_cache()
+
+        if internal_checkpoints:
+            # The checkpoint a 2B + 10 prefill exports at B (column 1) is the
+            # final state of a prefill that stops at B (column 0). Distinct
+            # tokens make a shifted conv window visible.
+            tokens = [(i * 7919) % 30000 + 1 for i in range(BLOCK_SIZE * 2 + 10)]
+            scheduler = engine.llm_engine.engine_core.engine_core.scheduler
+            states = []
+            for num_tokens, col in ((BLOCK_SIZE, 0), (len(tokens), 1)):
+                captured["snapshot_col"] = col
+                _ = engine.generate(
+                    [TokensPrompt(prompt_token_ids=tokens[:num_tokens])],
+                    sampling_params=sampling_params,
+                )
+                states.append(captured.pop("snapshot"))
+                assert scheduler.reset_prefix_cache()
+            hf_config = engine.llm_engine.model_config.hf_text_config
+            state_len = hf_config.linear_conv_kernel_dim - 1
+            for (ref_conv, ref_ssm), (conv, ssm) in zip(*states):
+                if not is_conv_state_dim_first():
+                    ref_conv, conv = ref_conv.mT, conv.mT
+                # Under MTP the conv state has num_spec scratch columns after
+                # the window.
+                for new, ref in (
+                    (conv[..., :state_len], ref_conv[..., :state_len]),
+                    (ssm, ref_ssm),
+                ):
+                    rel_err = (new.float() - ref.float()).norm() / ref.float().norm()
+                    assert rel_err < 1e-2, rel_err
     finally:
         del engine
         torch.accelerator.empty_cache()
@@ -1175,3 +1369,26 @@ def test_mamba_prefix_cache_mrv2(monkeypatch: pytest.MonkeyPatch):
 @create_new_process_for_each_test()
 def test_mamba_prefix_cache_mrv2_async(monkeypatch: pytest.MonkeyPatch):
     _run_mamba_prefix_cache_mrv2(monkeypatch, async_scheduling=True)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda()
+    or not (
+        current_platform.is_device_capability(90)
+        or (
+            (
+                current_platform.is_device_capability_family(100)
+                or current_platform.is_device_capability_family(120)
+            )
+            and current_platform.get_cuda_runtime_major() >= 13
+        )
+    ),
+    reason="FlashInfer GDN prefill needs SM90, or SM100/SM120 with CUDA 13.",
+)
+@create_new_process_for_each_test()
+def test_mamba_prefix_cache_mrv2_async_flashinfer(monkeypatch: pytest.MonkeyPatch):
+    _run_mamba_prefix_cache_mrv2(
+        monkeypatch,
+        async_scheduling=True,
+        additional_config={"gdn_prefill_backend": "flashinfer"},
+    )

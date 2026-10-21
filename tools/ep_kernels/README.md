@@ -11,6 +11,46 @@ Step 2 is necessary for multi-node deployment.
 
 All scripts accept a positional argument as workspace path for staging the build, defaulting to `$(pwd)/ep_kernels_workspace`.
 
+## NCCL version requirement for DeepEPv2
+
+DeepEPv2 (`--all2all-backend deepep_v2`) uses the NCCL GIN (GPU-Initiated
+Networking) backend, which requires NCCL >= 2.30.4 both when DeepEP is built
+and at runtime. PyTorch pins an older release as a dependency (PyTorch 2.13
+pins `nvidia-nccl-cu13==2.29.7`), so a plain `pip install` or `uv pip install`
+of vLLM is not enough. The vLLM Docker images already override it.
+
+Upgrade NCCL before running `install_python_libraries.sh`. Use
+`nvidia-nccl-cu12` on CUDA 12.
+
+**With uv** (recommended):
+
+```bash
+# Create an override file
+echo "nvidia-nccl-cu13>=2.30.4" > /tmp/nccl-override.txt
+export UV_OVERRIDE=/tmp/nccl-override.txt
+
+# All subsequent uv pip install commands will respect the override
+uv pip install vllm
+```
+
+Keep `UV_OVERRIDE` set for later installs into the same environment. Without
+it, any `uv pip install` that resolves PyTorch again restores the pinned NCCL.
+
+**With pip**, or to fix an existing environment:
+
+```bash
+pip install "nvidia-nccl-cu13>=2.30.4" --no-deps
+```
+
+`install_python_libraries.sh` warns when the installed NCCL is too old. If
+DeepEP was built against an older NCCL, upgrade NCCL and run the script again.
+When NCCL is too old at runtime, vLLM logs the reason at startup and
+`deepep_v2` fails with the same message. You can check with:
+
+```bash
+python -c "from vllm.utils.import_utils import deep_ep_v2_unavailable_reason; print(deep_ep_v2_unavailable_reason() or 'deepep_v2 is available')"
+```
+
 ## Usage
 
 ```bash

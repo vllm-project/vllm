@@ -188,7 +188,7 @@ def _tq_fused_store_fp8(
     # ── FP8 KEY: cast to FP8 in-kernel and store ─────────────────
     d_offs = tl.arange(0, BLOCK_D)
     d_mask = d_offs < D
-    k_vals = tl.load(Key_ptr + base + d_offs, mask=d_mask, other=0.0)
+    k_vals = tl.load(Key_ptr + base + d_offs, mask=d_mask, other=0.0).to(tl.float32)
     k_fp8 = k_vals.to(tl.float8e4b15) if FP8_E4B15 else k_vals.to(tl.float8e4nv)
     k_bytes = k_fp8.to(tl.uint8, bitcast=True)
     tl.store(KV_cache_ptr + slot_base + d_offs, k_bytes, mask=d_mask)
@@ -389,7 +389,7 @@ def triton_turboquant_store(
         _tq_fused_store_fp8[grid](
             k_flat,
             v_flat,
-            kv_cache.view(-1),
+            kv_cache,
             slot_mapping,
             stride_cache_block=stride_block,
             stride_cache_pos=stride_pos,
@@ -425,7 +425,7 @@ def triton_turboquant_store(
         norms.squeeze(1),
         v_flat,
         midpoints,
-        kv_cache.view(-1),
+        kv_cache,
         slot_mapping,
         stride_cache_block=stride_block,
         stride_cache_pos=stride_pos,

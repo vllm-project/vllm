@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the unified Gemma4 parser engine."""
 
+import dataclasses
 import json
 from unittest.mock import MagicMock
 
@@ -14,11 +15,17 @@ from tests.parser.engine.streaming_helpers import (
     collect_tool_arguments,
     simulate_tool_streaming,
 )
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+    ChatCompletionToolsParam,
 )
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
-from vllm.parser.gemma4 import Gemma4Parser
+from vllm.parser.gemma4 import (
+    STRING_DELIM,
+    Gemma4Parser,
+    _gemma4_arg_value_extender,
+    gemma4_config,
+)
 
 # ── Special token IDs (arbitrary but consistent) ─────────────────────
 CHANNEL_START_ID = 50  # <|channel>
@@ -170,7 +177,7 @@ def mock_tokenizer():
 
 @pytest.fixture
 def parser(mock_tokenizer):
-    return Gemma4Parser(mock_tokenizer)
+    return Gemma4Parser(mock_tokenizer, chat_template_kwargs={"enable_thinking": True})
 
 
 @pytest.fixture
@@ -289,7 +296,10 @@ class TestGemma4PromptOpenReasoning:
 
     @pytest.fixture
     def open_reasoning_parser(self, open_reasoning_tokenizer):
-        return Gemma4Parser(open_reasoning_tokenizer)
+        return Gemma4Parser(
+            open_reasoning_tokenizer,
+            chat_template_kwargs={"enable_thinking": True},
+        )
 
     @staticmethod
     def _prompt_ids_open_channel() -> list[int]:
@@ -378,15 +388,14 @@ _PRE_INIT_THOUGHT_GEN_SEQUENCE: list[tuple[int, str]] = [
 
 class TestGemma4PreInitReasoningRobustness:
     """Tests for the ``(REASONING, THINK_START)`` no-op transition and
-    cooperating ``thought\\n`` prefix stripping when the engine has been
-    pre-initialised to ``REASONING`` from the prompt.
+    cooperating ``thought\\n`` prefix stripping.
 
-    These cover the case the reviewer raised: prompt ends with
-    ``<|turn>model\\n`` (``is_reasoning_end`` returns ``False`` because
-    thinking is enabled, so the engine is pre-initialised), but the model
-    still emits its own ``<|channel>thought\\n…<channel|>content``. The
-    ``thought\\n`` prefix must be stripped, the ``<|channel>`` must not
-    leak as text, and the post-``<channel|>`` text must appear as content.
+    Covers both engine start states: a new-turn prompt (engine starts in
+    ``CONTENT`` and the model emits its own ``<|channel>`` opener) and a
+    prompt ending inside an open ``<|channel>`` block (engine
+    pre-initialised to ``REASONING``). In both cases the ``thought\\n``
+    prefix must be stripped, the ``<|channel>`` must not leak as text,
+    and the post-``<channel|>`` text must appear as content.
     """
 
     @pytest.fixture
@@ -395,15 +404,16 @@ class TestGemma4PreInitReasoningRobustness:
 
     @pytest.fixture
     def pre_init_parser(self, pre_init_tokenizer):
-        return Gemma4Parser(pre_init_tokenizer)
+        return Gemma4Parser(
+            pre_init_tokenizer, chat_template_kwargs={"enable_thinking": True}
+        )
 
-    def test_redundant_channel_open_swallowed_after_new_turn(
+    def test_model_emitted_channel_open_after_new_turn(
         self, pre_init_parser, pre_init_tokenizer, request_obj
     ):
-        # Prompt ends with ``<|turn>model\n``-style sentinel. With
-        # ``enable_thinking=True`` (the default), ``is_reasoning_end``
-        # returns ``False`` for a ``<|turn>`` tail, so the engine is
-        # pre-initialised to ``REASONING``.
+        # Prompt ends with a ``<|turn>model\n``-style sentinel, i.e. not
+        # inside an open ``<|channel>`` block, so the engine starts in
+        # ``CONTENT`` and the model's own opener drives the transition.
         results = _stream_tokens_batched(
             pre_init_parser,
             pre_init_tokenizer,
@@ -414,8 +424,7 @@ class TestGemma4PreInitReasoningRobustness:
 
         reasoning, content, _ = _collect_fields(results)
 
-        # ``thought\n`` prefix must be stripped from reasoning even though
-        # the engine was pre-initialised to REASONING.
+        # ``thought\n`` prefix must be stripped from reasoning.
         assert reasoning.startswith("Reason"), (
             f"thought\\n prefix leaked into reasoning: {reasoning!r}"
         )
@@ -462,6 +471,84 @@ class TestGemma4PreInitReasoningRobustness:
         )
         assert "Reasoning body" in reasoning
         assert "Final content" in content
+
+
+# ── Channel-less direct answer (no reasoning markers at all) ──────────
+
+_PLAIN_ANSWER_TEXT = "This is a direct final answer without channel markers."
+_PLAIN_ANSWER_TOKENS: list[tuple[int, str]] = []
+for _i, _word in enumerate(_PLAIN_ANSWER_TEXT.split(" ")):
+    _prefix = " " if _i > 0 else ""
+    _PLAIN_ANSWER_TOKENS.append((7000 + _i, _prefix + _word))
+
+
+class TestGemma4ChannelLessOutputConsistency:
+    """Streaming and non-streaming must classify channel-less output
+    identically.
+
+    With ``enable_thinking=True``, a prompt that merely starts a new model
+    turn (ends with ``<|turn>model\\n``) used to pre-initialise the
+    streaming engine to ``REASONING``, so a direct answer containing no
+    channel markers was streamed entirely as ``reasoning`` while the
+    non-streaming path returned the same text as ``content``.
+
+    Regression test for vllm-project/vllm#48217.
+    """
+
+    @pytest.fixture
+    def plain_tokenizer(self):
+        return _make_tokenizer(_PLAIN_ANSWER_TOKENS)
+
+    @pytest.fixture
+    def plain_parser(self, plain_tokenizer):
+        return Gemma4Parser(
+            plain_tokenizer, chat_template_kwargs={"enable_thinking": True}
+        )
+
+    def test_streaming_channel_less_output_is_content(
+        self, plain_parser, plain_tokenizer, request_obj
+    ):
+        results = _stream_tokens_batched(
+            plain_parser,
+            plain_tokenizer,
+            request_obj,
+            batch_size=1,
+            # New-turn tail: ``<|turn>model\n``.
+            prompt_token_ids=[NEW_TURN_ID, 9100, 9101],
+        )
+
+        reasoning, content, _ = _collect_fields(results)
+
+        assert content == _PLAIN_ANSWER_TEXT, (
+            f"Channel-less output missing from content: {content!r}"
+        )
+        assert not reasoning, (
+            f"Channel-less output misclassified as reasoning: {reasoning!r}"
+        )
+
+    def test_streaming_matches_non_streaming(
+        self, plain_parser, plain_tokenizer, request_obj
+    ):
+        reasoning, content = plain_parser.extract_reasoning(
+            _PLAIN_ANSWER_TEXT, request_obj
+        )
+        assert reasoning is None
+        assert content == _PLAIN_ANSWER_TEXT
+
+        stream_parser = Gemma4Parser(
+            plain_tokenizer, chat_template_kwargs={"enable_thinking": True}
+        )
+        results = _stream_tokens_batched(
+            stream_parser,
+            plain_tokenizer,
+            request_obj,
+            batch_size=1,
+            prompt_token_ids=[NEW_TURN_ID, 9100, 9101],
+        )
+        stream_reasoning, stream_content, _ = _collect_fields(results)
+
+        assert (stream_reasoning or None) == reasoning
+        assert (stream_content or None) == content
 
 
 # ── Second model output: two tool calls with holdback ────────────────
@@ -1536,3 +1623,253 @@ class TestCommaInStringValueRegression:
         assert result.tools_called is True
         args = json.loads(result.tool_calls[0].function.arguments)
         assert args["destination"] == "456 Oakwood Avenue, Rivermist, 83214"
+
+
+class TestGemma4IsReasoningEnd:
+    @staticmethod
+    def _parser(thinking: bool):
+        return Gemma4Parser(
+            _make_tokenizer(_PLAIN_ANSWER_TOKENS),
+            chat_template_kwargs={"enable_thinking": thinking},
+        )
+
+    @pytest.mark.parametrize(
+        ("ids", "thinking", "ended"),
+        [
+            ([CHANNEL_START_ID, 3000, CHANNEL_END_ID], True, True),
+            ([CHANNEL_START_ID, 3000, TOOL_CALL_START_ID], True, True),
+            ([CHANNEL_START_ID, 3000], True, False),
+            ([NEW_TURN_ID, 9100], True, False),
+            ([CHANNEL_END_ID, NEW_TURN_ID, 9100], True, False),
+            ([NEW_TURN_ID, 9100], False, True),
+            # The bundled template's thinking-off prompt: closed channel.
+            ([NEW_TURN_ID, 9100, CHANNEL_START_ID, 3000, CHANNEL_END_ID], False, True),
+            # A marker still wins with thinking off: the grammar honours it.
+            ([CHANNEL_START_ID, 3000], False, False),
+            # A tool-call opener after the channel closed: still ended.
+            (
+                [CHANNEL_START_ID, 3000, CHANNEL_END_ID, TOOL_CALL_START_ID, 9200],
+                True,
+                True,
+            ),
+        ],
+    )
+    def test_is_reasoning_end(self, ids, thinking, ended):
+        assert self._parser(thinking).is_reasoning_end(ids) is ended
+
+
+# ── Argument value extender ──────────────────────────────────────────
+
+_D = STRING_DELIM
+
+_EXTENDER_TOOL = ChatCompletionToolsParam(
+    type="function",
+    function={
+        "name": "f",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "string"},
+                "location": {"type": "string"},
+                "n": {"type": "integer"},
+            },
+        },
+    },
+)
+
+_EXTENDER_BODIES = [
+    f"location:{_D}Paris, France{_D}",
+    f"a:{_D}x{_D},b:{_D}hello }} world{_D}",
+    f"a:{_D}smile :-) ok{_D},n:42",
+    f"a:{_D}trailing spaces   {_D},n:42",
+    f'a:{_D}decoys <|x <|"y <|"|z{_D}',
+    f'a:{_D}quote " backslash \\ newline\nunicode 杭州{_D}',
+    f"a:{_D}x{_D},{_D}quoted key{_D}:{_D}val{_D}",
+    f"a:{_D}x{_D},nested:{{inner:{_D}deep value{_D},n:1}}",
+    f"items:[{_D}a{_D},{_D}b, c{_D}],a:{_D}last{_D}",
+    f"a:{_D}call:x{_D},b:{_D}brace {{ colon:{_D}",
+    f"a:{_D}{_D},b:{_D}}}}}{_D}",
+]
+
+_TRUNCATED_BODIES = [
+    f"a:{_D}hello }}",
+    f"a:{_D}hello )",
+    f"a:{_D}hello   ",
+    f'a:{_D}hello<|"',
+    f"a:{_D}x{_D},b:{_D}open",
+    f"a:{_D}",
+]
+
+
+_TOOL_MODES = pytest.mark.parametrize(
+    "tools", [[], [_EXTENDER_TOOL]], ids=["no_schema", "schema"]
+)
+
+
+def _pieces(text: str, size: int) -> list[str]:
+    return [text[i : i + size] for i in range(0, len(text), size)]
+
+
+def _stream_args(parser, request, chunks: list[str], finished: bool = True) -> str:
+    args = []
+    for i, chunk in enumerate(chunks):
+        last = finished and i == len(chunks) - 1
+        delta = parser.parse_delta(chunk, [], request, finished=last)
+        for tool_call in (delta and delta.tool_calls) or []:
+            if tool_call.function and tool_call.function.arguments:
+                args.append(tool_call.function.arguments)
+    return "".join(args)
+
+
+class TestGemma4ArgValueExtender:
+    """The extender streams exactly what ``_gemma4_arg_converter`` would, so
+    the converter-only path, which only differs in when it emits, must agree
+    with it byte for byte on the accumulated arguments."""
+
+    @staticmethod
+    def _parser(tokenizer, tools, extender: bool):
+        config = gemma4_config()
+        if not extender:
+            config = dataclasses.replace(config, arg_value_extender=None)
+        return Gemma4Parser(tokenizer, tools, parser_engine_config=config)
+
+    @_TOOL_MODES
+    @pytest.mark.parametrize("size", [1, 3, 7, 64])
+    @pytest.mark.parametrize("body", _EXTENDER_BODIES)
+    def test_matches_converter_at_every_chunking(
+        self, tool_call_tokenizer, mock_request, body, size, tools
+    ):
+        mock_request.tools = tools
+        text = f"<|tool_call>call:f{{{body}}}<tool_call|>"
+        chunks = _pieces(text, size)
+
+        reference = self._parser(tool_call_tokenizer, tools, extender=True)
+        expected = reference.extract_tool_calls(text, mock_request)
+        expected = expected.tool_calls[0].function.arguments
+
+        with_extender = _stream_args(
+            self._parser(tool_call_tokenizer, tools, extender=True),
+            mock_request,
+            chunks,
+        )
+        converter_only = _stream_args(
+            self._parser(tool_call_tokenizer, tools, extender=False),
+            mock_request,
+            chunks,
+        )
+
+        assert with_extender == converter_only == expected
+
+    @_TOOL_MODES
+    @pytest.mark.parametrize("size", [1, 3, 7])
+    @pytest.mark.parametrize("body", _TRUNCATED_BODIES)
+    def test_truncated_stream_matches_converter(
+        self, tool_call_tokenizer, mock_request, body, size, tools
+    ):
+        """A stream cut inside the value ends with the converter's final
+        flush, so the extender must hold back the whitespace, closer or
+        partial delimiter that flush would drop."""
+        mock_request.tools = tools
+        chunks = _pieces(f"<|tool_call>call:f{{{body}", size)
+
+        with_extender = _stream_args(
+            self._parser(tool_call_tokenizer, tools, extender=True),
+            mock_request,
+            chunks,
+        )
+        converter_only = _stream_args(
+            self._parser(tool_call_tokenizer, tools, extender=False),
+            mock_request,
+            chunks,
+        )
+
+        assert with_extender == converter_only
+        json.loads(with_extender)
+
+    @pytest.mark.parametrize("offset", range(1, len(STRING_DELIM)))
+    def test_split_closing_delimiter(self, tool_call_parser, mock_request, offset):
+        """``STRING_DELIM`` is not a lexer terminal, so the extender may see
+        the close split across deltas and must window across them."""
+        head = f"<|tool_call>call:f{{a:{_D}Paris"
+        tail = ",n:1}<tool_call|>"
+        chunks = [head, _D[:offset], _D[offset:] + tail]
+
+        streamed = _stream_args(tool_call_parser, mock_request, chunks)
+
+        assert streamed == '{"a": "Paris", "n": "1"}'
+
+    def test_string_value_streams_before_it_closes(
+        self, tool_call_tokenizer, mock_request
+    ):
+        """Body deltas carry no structural char, so without the extender the
+        gate holds the whole value until the close."""
+        head = [f"<|tool_call>call:f{{location:{_D}", "Paris"]
+
+        def streamed_before_close(extender: bool) -> str:
+            parser = self._parser(tool_call_tokenizer, [], extender)
+            return _stream_args(parser, mock_request, head, finished=False)
+
+        assert streamed_before_close(extender=True) == '{"location": "Paris'
+        assert streamed_before_close(extender=False) == '{"location": "'
+
+    def test_conversions_do_not_grow_with_value_length(
+        self, tool_call_tokenizer, mock_request
+    ):
+        def streaming_conversions(words: int) -> int:
+            calls = 0
+            base = gemma4_config()
+
+            def counting_converter(raw_args: str, partial: bool) -> str:
+                nonlocal calls
+                if partial:
+                    calls += 1
+                assert base.arg_converter is not None
+                return base.arg_converter(raw_args, partial)
+
+            parser = Gemma4Parser(
+                tool_call_tokenizer,
+                parser_engine_config=dataclasses.replace(
+                    base, arg_converter=counting_converter
+                ),
+            )
+            value = "word, " * words
+            text = f"<|tool_call>call:f{{a:{_D}{value}{_D},n:1}}<tool_call|>"
+            _stream_args(parser, mock_request, _pieces(text, 4))
+            return calls
+
+        assert streaming_conversions(words=40) == streaming_conversions(words=400)
+
+    @pytest.mark.parametrize(
+        "raw_args",
+        [
+            f"a:{_D}closed{_D}",
+            f"a:{_D}x{_D},{_D}open ke",
+            f"nested:{{inner:{_D}deep",
+            f"a:{_D}x{_D},b:{_D}y{_D},a:{_D}dup",
+            "a:tr",
+            'a:<|"',
+        ],
+        ids=["closed", "open_key", "nested", "duplicate_key", "bare", "opener"],
+    )
+    def test_factory_declines_without_open_last_string_value(self, raw_args):
+        assert _gemma4_arg_value_extender(raw_args) is None
+
+    def test_extender_holds_back_what_the_converter_hides(self):
+        extend = _gemma4_arg_value_extender(f"a:{_D}hello")
+        assert extend is not None
+        assert [extend(d) for d in [" }", "x", ")", "(", '<|"', "y", '<|"', "|>"]] == [
+            " ",
+            "}x",
+            "",
+            ")(",
+            "",
+            '<|\\"y',
+            "",
+            None,
+        ]
+
+    def test_factory_holds_back_the_tail_already_hidden(self):
+        extend = _gemma4_arg_value_extender(f"a:{_D}hello }} ")
+        assert extend is not None
+        assert extend("x") == "} x"

@@ -13,6 +13,7 @@ import torch
 
 from tests.utils import RemoteOpenAIServer
 from vllm.config import ModelConfig
+from vllm.exceptions import VLLMValidationError
 from vllm.renderers.embed_utils import safe_load_prompt_embeds
 
 
@@ -63,6 +64,7 @@ def test_load_prompt_embeds(
     model_config = Mock(spec=ModelConfig)
     model_config.enable_prompt_embeds = True
     model_config.get_hidden_size.return_value = hidden_size
+    model_config.hf_text_config = object()
     model_config.dtype = dtype
 
     # construct arbitrary tensors of various dtypes, layouts, and sizes.
@@ -111,5 +113,5 @@ def test_disable_prompt_embeds(dtype: torch.dtype, seq_len: int, hidden_size: in
     buffer.seek(0)
     encoded_tensor = pybase64.b64encode(buffer.getvalue())
 
-    with pytest.raises(ValueError, match="--enable-prompt-embeds"):
+    with pytest.raises(VLLMValidationError, match="--enable-prompt-embeds"):
         safe_load_prompt_embeds(model_config, encoded_tensor)

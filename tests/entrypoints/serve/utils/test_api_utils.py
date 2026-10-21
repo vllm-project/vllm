@@ -1,21 +1,65 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
 
 import pytest
+from fastapi import FastAPI, Request
 
-from vllm.entrypoints.openai.engine.protocol import StreamOptions
+from vllm.entrypoints.generate.base.protocol import StreamOptions
+from vllm.entrypoints.serve.utils import api_utils
 from vllm.entrypoints.serve.utils.api_utils import (
     get_max_tokens,
-    sanitize_message,
     should_include_usage,
 )
 
 
-def test_sanitize_message():
-    assert (
-        sanitize_message("<_io.BytesIO object at 0x7a95e299e750>")
-        == "<_io.BytesIO object>"
-    )
+@pytest.mark.asyncio
+async def test_with_cancellation_disconnect_skips_response_validation():
+    """A disconnect must cancel the handler without a response_model 500."""
+    app = FastAPI()
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    @app.post("/", response_model=str)
+    @api_utils.with_cancellation
+    async def handler(body: dict, raw_request: Request):
+        started.set()
+        try:
+            await asyncio.Future()
+        finally:
+            cancelled.set()
+
+    messages = []
+    body_sent = False
+
+    async def receive():
+        nonlocal body_sent
+        if not body_sent:
+            body_sent = True
+            return {"type": "http.request", "body": b"{}", "more_body": False}
+        await started.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        messages.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/",
+        "raw_path": b"/",
+        "query_string": b"",
+        "headers": [(b"content-type", b"application/json")],
+        "client": ("127.0.0.1", 1234),
+        "server": ("test", 80),
+    }
+    await asyncio.wait_for(app(scope, receive, send), timeout=5)
+    assert messages[0]["status"] == 200
+    assert messages[1]["body"] == b""
+    await asyncio.wait_for(cancelled.wait(), timeout=5)
 
 
 @pytest.mark.parametrize(
@@ -118,49 +162,3 @@ class TestGetMaxTokens:
                 input_length=150,
                 default_sampling_params={"max_tokens": 2048},
             )
-
-
-class TestSanitizeMessageFilePaths:
-    """sanitize_message should also strip file paths and traceback
-    frames, not just memory addresses - see #31683."""
-
-    def test_strips_traceback_style_frame(self):
-        msg = (
-            "1 validation error:\n"
-            "  {'type': 'list_type', 'loc': ('body', 'messages')}\n"
-            '\n  File "/usr/local/lib/python3.12/dist-packages/vllm/'
-            'entrypoints/serve/utils/api_utils.py", line 40, '
-            "in create_chat_completion\n"
-            "    POST /v1/chat/completions"
-        )
-        result = sanitize_message(msg)
-        assert "/usr/local/" not in result
-        assert "api_utils.py" not in result
-        assert "list_type" in result
-
-    def test_strips_arbitrary_absolute_path(self):
-        result = sanitize_message("Error in /home/user/project/vllm/server.py")
-        assert "/home/user" not in result
-
-    def test_strips_single_parent_container_path(self):
-        """Regression: /app/server.py and /workspace/server.py (common in
-        container deployments) were missed by the original {2,} quantifier."""
-        assert "/app/" not in sanitize_message("Error in /app/server.py")
-        assert "/workspace/" not in sanitize_message("Error in /workspace/server.py")
-
-    def test_preserves_api_endpoint_paths(self):
-        msg = "POST /v1/chat/completions failed"
-        assert "/v1/chat/completions" in sanitize_message(msg)
-
-    def test_preserves_short_field_references(self):
-        msg = "Invalid value for field 'body.messages'"
-        assert sanitize_message(msg) == msg
-
-    def test_strips_both_address_and_path(self):
-        msg = (
-            "<Request at 0x7f123> failed at "
-            "/usr/local/lib/python3.12/dist-packages/vllm/server.py"
-        )
-        result = sanitize_message(msg)
-        assert "0x" not in result
-        assert "/usr/local/" not in result

@@ -43,8 +43,12 @@ def compute_local_expert_ids(
     :func:`vllm.model_executor.layers.fused_moe.layer.determine_expert_map`.
 
     Args:
+        num_experts: Total number of experts in the layer.
+        ep_size: Expert parallel world size.
+        ep_rank: Rank whose local expert ids are computed.
         placement: ``"linear"`` for contiguous assignment,
             ``"round_robin"`` for interleaved assignment.
+
     """
     if ep_size <= 1:
         return None
@@ -76,6 +80,6 @@ def should_skip_weight(
     # Only skip heavy weight tensors, never scale/metadata tensors.
     # Scale tensors are tiny and some backends need them from ALL experts
     # (e.g. FlashInfer NVFP4 computes a global max of activation scales).
-    if not weight_name.endswith(".weight"):
+    if not weight_name.endswith((".weight", ".weight_packed")):
         return False
     return eid not in local_expert_ids

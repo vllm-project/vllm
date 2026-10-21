@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+import asyncio
 from abc import ABC, abstractmethod
-from collections.abc import AsyncGenerator, Mapping
+from collections.abc import AsyncGenerator
 from concurrent.futures import Executor
 from http import HTTPStatus
 from typing import ClassVar
@@ -10,26 +10,21 @@ from typing import ClassVar
 import torch
 from fastapi import Request
 from fastapi.responses import Response
-from starlette.datastructures import Headers
 
 from vllm import PoolingRequestOutput, envs
 from vllm.config import VllmConfig
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import ChatTemplateConfig
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.generate.base.protocol import validate_request_mm_kwargs
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.engine.typing import AnyRequest
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.lora.request import LoRARequest
 from vllm.renderers.base import BaseRenderer
-from vllm.tracing import (
-    contains_trace_headers,
-    extract_trace_headers,
-    log_tracing_disabled_warning,
-)
+from vllm.renderers.chat_utils import ChatTemplateConfig
 from vllm.utils.async_utils import make_async, merge_async_iterators
 
+from ...serve.engine.protocol import ErrorResponse
 from ..typing import AnyPoolingRequest, PoolingServeContext
 from .io_processor import PoolingIOProcessor
 
@@ -60,12 +55,10 @@ class PoolingBaseServing(ABC, BaseServing):
         self.return_tokens_as_token_ids = return_tokens_as_token_ids
         self.log_error_stack = log_error_stack
         self.chat_template_config = chat_template_config
+        self.trust_request_mm_kwargs = chat_template_config.trust_request_mm_kwargs
 
         # Shared thread pool executor for preprocessing and postprocessing.
         self._executor: Executor = self.renderer._executor
-        self._preprocessing_async = make_async(
-            self._preprocessing, executor=self._executor
-        )
         self._postprocessing_async = make_async(
             self._postprocessing, executor=self._executor
         )
@@ -77,7 +70,7 @@ class PoolingBaseServing(ABC, BaseServing):
     ) -> Response:
         io_processor = self.get_io_processor(request)
         ctx = await self._init_ctx(io_processor, request, raw_request)
-        await self._preprocessing_async(io_processor, ctx)
+        await self._preprocessing(io_processor, ctx)
         await self._prepare_generators(ctx)
         await self._collect_batch(ctx)
         return await self._postprocessing_async(io_processor, ctx)
@@ -86,11 +79,17 @@ class PoolingBaseServing(ABC, BaseServing):
     def get_io_processor(self, request: AnyPoolingRequest) -> PoolingIOProcessor:
         raise NotImplementedError
 
-    @torch.inference_mode()
-    def _preprocessing(
+    async def _preprocessing(
         self, io_processor: PoolingIOProcessor, ctx: PoolingServeContext
     ):
-        return io_processor.pre_process_online(ctx)
+        requests = io_processor.get_request_factory_online(ctx)
+
+        if len(requests) == 0:
+            raise ValueError("You must pass at least one prompt")
+
+        ctx.engine_inputs = await asyncio.gather(
+            *[io_processor.render_async(request) for request in requests]
+        )
 
     @torch.inference_mode()
     def _postprocessing(
@@ -105,21 +104,39 @@ class PoolingBaseServing(ABC, BaseServing):
         request: AnyPoolingRequest,
         raw_request: Request | None = None,
     ):
-        model_name = self.models.model_name()
-        request_id = f"{self.request_id_prefix}-{self._base_request_id(raw_request)}"
+        validate_request_mm_kwargs(
+            mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
+            media_io_kwargs=getattr(request, "media_io_kwargs", None),
+            trust_request_mm_kwargs=self.trust_request_mm_kwargs,
+        )
+        base_request_id = self._base_request_id(
+            raw_request, getattr(request, "request_id", None)
+        )
+        request_id = f"{self.request_id_prefix}-{base_request_id}"
         await self._check_model(request)
 
         pooling_params = io_processor.create_pooling_params(request)
+        lora_request = self._maybe_get_adapters(request)
+        model_name = self.models.model_name(lora_request)
+        priorities = getattr(request, "priority", 0)
+        prompt_extras = {
+            k: v
+            for k in ("mm_processor_kwargs", "cache_salt", "chat_template_kwargs")
+            if (v := getattr(request, k, None)) is not None
+        }
+
         ctx = PoolingServeContext(
             request=request,
             raw_request=raw_request,
             model_name=model_name,
             pooling_params=pooling_params,
             request_id=request_id,
+            lora_request=lora_request,
+            priorities=priorities,
+            prompt_extras=prompt_extras,
         )
 
         self._validate_request(ctx)
-        ctx.lora_request = self._maybe_get_adapters(ctx.request)
         return ctx
 
     async def _prepare_generators(
@@ -127,7 +144,7 @@ class PoolingBaseServing(ABC, BaseServing):
         ctx: PoolingServeContext,
     ):
         if ctx.engine_inputs is None:
-            raise ValueError("Engine prompts not available")
+            raise ValueError("Engine inputs not available")
 
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
 
@@ -139,12 +156,7 @@ class PoolingBaseServing(ABC, BaseServing):
 
         assert ctx.pooling_params is not None
         pooling_params = ctx.pooling_params
-
-        if isinstance(pooling_params, list):
-            for params in pooling_params:
-                params.verify(self.model_config)
-        else:
-            pooling_params.verify(self.model_config)
+        pooling_params.verify(self.model_config)
 
         for i, engine_input in enumerate(ctx.engine_inputs):
             prompt_request_id = (
@@ -153,26 +165,20 @@ class PoolingBaseServing(ABC, BaseServing):
                 else ctx.prompt_request_ids[i]
             )
 
-            params = (
-                pooling_params[i]
-                if isinstance(pooling_params, list)
-                else pooling_params
-            )
-
             self._log_inputs(
                 prompt_request_id,
-                engine_input,
-                params=params,
+                engine_input["prompts"],
+                params=engine_input["params"],
                 lora_request=ctx.lora_request,
             )
 
             generator = self.engine_client.encode(
-                engine_input,
-                params,
-                prompt_request_id,
-                lora_request=ctx.lora_request,
+                request_id=prompt_request_id,
+                prompt=engine_input["prompts"],
+                pooling_params=engine_input["params"],
+                lora_request=engine_input["lora_requests"],
+                priority=engine_input["priorities"],
                 trace_headers=trace_headers,
-                priority=getattr(ctx.request, "priority", 0),
             )
 
             generators.append(generator)
@@ -194,6 +200,8 @@ class PoolingBaseServing(ABC, BaseServing):
         final_res_batch = [None] * num_inputs
 
         async for i, res in ctx.result_generator:
+            if res.error is not None:
+                raise res.error.to_exception()
             final_res_batch[i] = res
 
         if None in final_res_batch:
@@ -242,20 +250,6 @@ class PoolingBaseServing(ABC, BaseServing):
                 "greater than max_model_len."
                 " Please request a smaller truncation size."
             )
-
-        return None
-
-    async def _get_trace_headers(
-        self,
-        headers: Headers,
-    ) -> Mapping[str, str] | None:
-        is_tracing_enabled = await self.engine_client.is_tracing_enabled()
-
-        if is_tracing_enabled:
-            return extract_trace_headers(headers)
-
-        if contains_trace_headers(headers):
-            log_tracing_disabled_warning()
 
         return None
 

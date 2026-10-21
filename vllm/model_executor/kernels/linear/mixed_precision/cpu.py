@@ -9,6 +9,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_quantized_values_into_int32,
     unpack_quantized_values_into_int32,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.scalar_type import scalar_types
 
@@ -101,11 +102,12 @@ class CPUWNA16LinearKernel(MPLinearKernel):
         else:
             # w4a8 kernel always requires zp, allocate a fake zp
             assert self.w_zp_name
-            packed_zp = torch.nn.Parameter(
+            replace_parameter(
+                layer,
+                self.w_zp_name,
                 torch.ones(group_num, zp_output_size, dtype=torch.int32) * -2004318072,
-                requires_grad=False,
             )
-            setattr(layer, self.w_zp_name, packed_zp)
+            packed_zp = getattr(layer, self.w_zp_name)
 
         # FIXME: some bugs in convert_weight_packed_scale_zp with GPTQ format,
         # repack to AWQ weight
@@ -144,9 +146,6 @@ class CPUWNA16LinearKernel(MPLinearKernel):
         if (not self.config.zero_points) and (self.w_zp_name is not None):
             setattr(layer, self.w_zp_name, None)
 
-        if (not self.config.has_g_idx) and (self.w_gidx_name is not None):
-            setattr(layer, self.w_gidx_name, None)
-
         weights = getattr(layer, self.w_q_name)
         # Require GPTQ pack format
         assert weights.input_dim == weights.packed_dim
@@ -172,7 +171,6 @@ class CPUWNA16LinearKernel(MPLinearKernel):
         supports_riscv = current_platform.get_cpu_architecture() == CpuArchEnum.RISCV
         layer.use_w4a8 = (
             envs.VLLM_CPU_INT4_W4A8
-            and not self.config.has_g_idx
             and self.config.act_type == torch.bfloat16
             and (supports_amx or supports_riscv)
         )
@@ -189,7 +187,7 @@ class CPUWNA16LinearKernel(MPLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        w_q, w_s, w_zp, w_gidx = self._get_weight_params(layer)
+        w_q, w_s, w_zp = self._get_weight_params(layer)
         if layer.use_w4a8:
             x = ops.int4_scaled_mm_cpu(
                 x=x,
@@ -204,7 +202,6 @@ class CPUWNA16LinearKernel(MPLinearKernel):
                 q_weight=w_q,
                 scales=w_s,
                 zeros=w_zp,
-                g_idx=w_gidx,
                 bias=bias,
                 pack_factor=8,  # 32 // 4
                 isa_hint=layer.isa_hint,
@@ -218,5 +215,10 @@ def _get_isa_hint(dtype: torch.dtype) -> str:
         return "amx"
     elif current_platform.get_cpu_architecture() == CpuArchEnum.RISCV:
         return "rvv"
+    elif (
+        dtype == torch.bfloat16
+        and current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC
+    ):
+        return "vsx"
     else:
         return "vec"

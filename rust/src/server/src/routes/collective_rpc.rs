@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -33,7 +36,7 @@ pub async fn collective_rpc(
     State(state): State<Arc<AppState>>,
     body: Result<Json<CollectiveRpcRequest>, JsonRejection>,
 ) -> Result<Json<CollectiveRpcResponse>, ApiError> {
-    let Json(body) = body.map_err(|error| ApiError::json_parse_error(error.body_text()))?;
+    let Json(body) = body?;
     let method = body.method.ok_or_else(|| {
         ApiError::invalid_request(
             "Missing 'method' in request body".to_string(),

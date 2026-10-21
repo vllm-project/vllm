@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use winnow::ascii::multispace0 as ws0;
 use winnow::combinator::{alt, peek, seq};
 use winnow::error::{ContextError, ErrMode, ModalResult, StrContext};
@@ -219,6 +222,7 @@ fn header_event(input: &mut JsonToolInput<'_>) -> ModalResult<Granite4Event> {
     const CONFIG: JsonToolCallConfig = JsonToolCallConfig {
         parser_name: "Granite4",
         start_marker: "",
+        framed_start_marker: None,
         end_marker: "",
         marker_whitespace: JsonToolCallWhitespace::Optional,
         delimiter: None,
