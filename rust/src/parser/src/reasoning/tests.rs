@@ -3,14 +3,14 @@
 
 use std::sync::Arc;
 
-use vllm_tokenizer::test_utils::{TestTokenizer, decode_chunks};
+use vllm_tokenizer::test_utils::{TestTokenizer, decode_chunks, decode_ids};
 use vllm_tokenizer::{DecodedText, DynTokenizer, TokenAnchor, TokenAttribution, Tokenizer as _};
 
 use super::{
-    CohereCmdReasoningParser, DeepSeekR1ReasoningParser, DelimitedReasoningParser,
-    DelimitedReasoningParserBuilder, KimiReasoningParser, MiniMaxM3ReasoningParser,
-    Qwen3ReasoningParser, ReasoningDelta, ReasoningParser, Result, SeedOssReasoningParser,
-    Step3p5ReasoningParser,
+    CohereCmdReasoningParser, DeepSeekR1ReasoningParser, DeepSeekV3ReasoningParser,
+    DelimitedReasoningParser, DelimitedReasoningParserBuilder, Glm45ReasoningParser,
+    KimiReasoningParser, MiniMaxM3ReasoningParser, Qwen3ReasoningParser, ReasoningDelta,
+    ReasoningParser, Result, SeedOssReasoningParser, Step3p5ReasoningParser,
 };
 
 pub(crate) const THINK_START_ID: u32 = 256;
@@ -177,41 +177,79 @@ fn delimited_marker_tokens_are_dropped_from_attributions() {
     assert_eq!(collected.content_ids, [4]);
 }
 
-#[test]
-fn reasoning_parsers_conserve_token_attributions() {
-    type ParserCase = (
-        fn(DynTokenizer) -> Result<Box<dyn ReasoningParser>>,
-        u32,
-        &'static str,
-    );
+/// One delimited reasoning family: name, constructor, start token ID, and end
+/// delimiter in [`fake_tokenizer`].
+type FamilyCase = (
+    &'static str,
+    fn(DynTokenizer) -> Result<Box<dyn ReasoningParser>>,
+    u32,
+    &'static str,
+);
 
-    let parsers: Vec<ParserCase> = vec![
-        (Qwen3ReasoningParser::create, THINK_START_ID, "qwen3"),
+/// The reasoning families built on [`DelimitedReasoningParser`]. DeepSeek V4,
+/// GLM-4.7, Kimi K2, and MiMo alias the DeepSeek V3 parser.
+fn delimited_families() -> Vec<FamilyCase> {
+    vec![
         (
+            "qwen3",
+            Qwen3ReasoningParser::create,
+            THINK_START_ID,
+            "</think>",
+        ),
+        (
+            "deepseek_r1",
             DeepSeekR1ReasoningParser::create,
             THINK_START_ID,
-            "deepseek_r1",
+            "</think>",
         ),
-        (KimiReasoningParser::create, MINIMAX_THINK_START_ID, "kimi"),
         (
+            "deepseek_v3",
+            DeepSeekV3ReasoningParser::create,
+            THINK_START_ID,
+            "</think>",
+        ),
+        (
+            "glm45",
+            Glm45ReasoningParser::create,
+            THINK_START_ID,
+            "</think>",
+        ),
+        (
+            "kimi",
+            KimiReasoningParser::create,
+            MINIMAX_THINK_START_ID,
+            "◁/think▷",
+        ),
+        (
+            "cohere_cmd",
             CohereCmdReasoningParser::create,
             START_THINKING_ID,
-            "cohere_cmd",
+            "<|END_THINKING|>",
         ),
         (
+            "seed_oss",
             SeedOssReasoningParser::create,
             SEED_THINK_START_ID,
-            "seed_oss",
+            "</seed:think>",
         ),
         (
+            "minimax_m3",
             MiniMaxM3ReasoningParser::create,
             MM_THINK_START_ID,
-            "minimax_m3",
+            "</mm:think>",
         ),
-        (Step3p5ReasoningParser::create, THINK_START_ID, "step3p5"),
-    ];
+        (
+            "step3p5",
+            Step3p5ReasoningParser::create,
+            THINK_START_ID,
+            "</think>",
+        ),
+    ]
+}
 
-    for (create, think_start_id, name) in parsers {
+#[test]
+fn reasoning_parsers_conserve_token_attributions() {
+    for (name, create, think_start_id, end_marker) in delimited_families() {
         let mut parser = create(Arc::new(fake_tokenizer())).unwrap();
         // Prompt prefills the start marker, opening reasoning before the stream.
         parser.initialize(&[think_start_id]).unwrap();
@@ -220,13 +258,6 @@ fn reasoning_parsers_conserve_token_attributions() {
         // the end marker token, then visible content (4). The zero-width token
         // is attributed to reasoning, matching Python's current-state rule;
         // the marker token is dropped with its span.
-        let end_marker = match name {
-            "kimi" => "◁/think▷",
-            "cohere_cmd" => "<|END_THINKING|>",
-            "seed_oss" => "</seed:think>",
-            "minimax_m3" => "</mm:think>",
-            _ => "</think>",
-        };
         let chunks = attributed_chunks(&[Some("reason"), None, Some(end_marker), Some("answer")]);
 
         let collected = collect_attributed(parser.as_mut(), chunks);
@@ -236,6 +267,71 @@ fn reasoning_parsers_conserve_token_attributions() {
         assert_eq!(collected.reasoning_ids, [1, 2], "{name}");
         assert_eq!(collected.content_ids, [4], "{name}");
     }
+}
+
+#[test]
+fn delimited_families_end_reasoning_only_at_the_dedicated_end_token() {
+    let tokenizer = fake_tokenizer();
+    let dedicated = |text: &str| tokenizer.encode(text, false).unwrap();
+    for (name, create, think_start_id, end_marker) in delimited_families() {
+        let mut parser = create(Arc::new(fake_tokenizer())).unwrap();
+        parser.initialize(&[think_start_id]).unwrap();
+
+        // The model quotes the end delimiter with ordinary tokens, then ends
+        // reasoning with the dedicated token.
+        let ids = [
+            dedicated("quote "),
+            tokenizer.encode_ordinary(end_marker).unwrap(),
+            dedicated(" then"),
+            dedicated(end_marker),
+            dedicated("answer"),
+        ]
+        .concat();
+        let collected = collect_attributed(parser.as_mut(), vec![decode_ids(&tokenizer, &ids)]);
+
+        assert_eq!(
+            collected.reasoning_text,
+            format!("quote {end_marker} then"),
+            "{name}"
+        );
+        assert_eq!(collected.content_text, "answer", "{name}");
+    }
+}
+
+#[test]
+fn delimited_ordinary_start_delimiter_stays_content() {
+    let tokenizer = fake_tokenizer();
+    let mut parser =
+        DelimitedReasoningParserBuilder::new(Arc::new(fake_tokenizer()), "<think>", "</think>")
+            .build()
+            .unwrap();
+    parser.initialize(&[THINK_END_ID]).unwrap();
+
+    let ids = [
+        tokenizer.encode_ordinary("<think>").unwrap(),
+        tokenizer.encode("x", false).unwrap(),
+    ]
+    .concat();
+    let delta = parser.push(decode_ids(&tokenizer, &ids));
+    assert_eq!(delta.reasoning, None);
+    assert_eq!(content_str(&delta), Some("<think>x"));
+}
+
+#[test]
+fn delimited_ordinary_partial_end_delimiter_streams_immediately() {
+    let tokenizer = fake_tokenizer();
+    let mut parser =
+        DelimitedReasoningParserBuilder::new(Arc::new(fake_tokenizer()), "<think>", "</think>")
+            .build()
+            .unwrap();
+    parser.initialize(&[THINK_START_ID]).unwrap();
+
+    // Not held back: ordinary bytes cannot grow into the dedicated token.
+    let delta = parser.push(decode_ids(
+        &tokenizer,
+        &tokenizer.encode_ordinary("reason</thi").unwrap(),
+    ));
+    assert_eq!(reasoning_str(&delta), Some("reason</thi"));
 }
 
 /// Build one chunk per piece, each carrying a single token attributed to it.

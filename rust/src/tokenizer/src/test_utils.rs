@@ -290,12 +290,21 @@ impl Tokenizer for TestTokenizer {
 /// tokens that produced it, and a token split across chunks keeps its anchor in
 /// the chunk holding its first byte.
 pub fn decode_chunks(tokenizer: &dyn Tokenizer, chunks: &[&str]) -> Vec<DecodedText> {
+    let mut rest = decode_ids(
+        tokenizer,
+        &tokenizer.encode(&chunks.concat(), false).unwrap(),
+    );
+    chunks.iter().map(|chunk| rest.drain_prefix(chunk.len())).collect()
+}
+
+/// Decode generated `token_ids` through the incremental decoder, as the
+/// frontend does, keeping each token's attribution.
+pub fn decode_ids(tokenizer: &dyn Tokenizer, token_ids: &[u32]) -> DecodedText {
     let mut decoder = tokenizer.create_decode_stream(&[], false, 0);
-    for token_id in tokenizer.encode(&chunks.concat(), false).unwrap() {
+    for &token_id in token_ids {
         decoder.push_token(token_id).unwrap();
     }
-    let mut rest = decoder.flush(None).unwrap().1;
-    chunks.iter().map(|chunk| rest.drain_prefix(chunk.len())).collect()
+    decoder.flush(None).unwrap().1
 }
 
 #[cfg(test)]
