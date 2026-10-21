@@ -1107,8 +1107,7 @@ class VllmConfig:
         speculative_config.num_speculative_tokens_per_batch_size = None
 
     def _validate_dynamic_sd_schedule(self) -> None:
-        """Reject an invalid schedule before the model loads, rather than when
-        the scheduler or CUDA graph capture builds the lookup."""
+        """Validate the schedule before the model loads."""
         speculative_config = self.speculative_config
         if (
             speculative_config is None
