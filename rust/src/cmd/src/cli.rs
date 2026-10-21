@@ -15,9 +15,10 @@ use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::time::Duration;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{ArgAction, Args, Parser, Subcommand};
 use educe::Educe;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -33,8 +34,8 @@ use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
 use vllm_server::{
     ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
-    DEFAULT_KEEP_ALIVE_TIMEOUT, HttpListenerMode, LoraModulePath, ParserSelection, RenderConfig,
-    RendererSelection,
+    DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL, HttpListenerMode, LoraModulePath,
+    ParserSelection, RenderConfig, RendererSelection,
 };
 use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
 
@@ -436,6 +437,26 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub disable_log_stats: bool,
 
+    /// Seconds between periodic engine statistics logs (default 10). Like
+    /// Python, it is set only through `VLLM_LOG_STATS_INTERVAL`.
+    #[arg(long, hide = true, env = "VLLM_LOG_STATS_INTERVAL")]
+    #[serde(skip)]
+    pub log_stats_interval: Option<LogStatsInterval>,
+
+    /// Keep external request IDs as engine-core request IDs instead of adding
+    /// a random suffix. Like Python, it is set only through the deprecated
+    /// `VLLM_DISABLE_REQUEST_ID_RANDOMIZATION`.
+    #[arg(
+        long,
+        hide = true,
+        env = "VLLM_DISABLE_REQUEST_ID_RANDOMIZATION",
+        action = ArgAction::Set,
+        value_parser = parse_int_flag,
+        default_value = "0"
+    )]
+    #[serde(skip)]
+    pub disable_request_id_randomization: bool,
+
     /// The model name(s) used in the API. If multiple names are provided, the
     /// server will respond to any of the provided names. The model name in the
     /// model field of a response will be the first name in this list. If not
@@ -512,6 +533,16 @@ impl SharedRuntimeArgs {
             .map_or(DEFAULT_KEEP_ALIVE_TIMEOUT, Duration::from_secs)
     }
 
+    /// Interval between periodic engine statistics logs, or `None` to never
+    /// log.
+    pub fn log_stats_interval(&self) -> Option<Duration> {
+        match self.log_stats_interval {
+            None => Some(DEFAULT_LOG_STATS_INTERVAL),
+            Some(LogStatsInterval::Every(interval)) => Some(interval),
+            Some(LogStatsInterval::Never) => None,
+        }
+    }
+
     /// Return the configured profiler mode, when profiling is enabled.
     pub fn profiler(&self) -> Option<String> {
         self.profiler_config.as_ref().and_then(|c| c.profiler.clone())
@@ -538,13 +569,29 @@ impl SharedRuntimeArgs {
         })
     }
 
-    /// Apply fallback logic for API key configuration from env variables.
-    fn apply_env_api_key_fallback(&mut self) {
+    /// Apply fallback logic for configuration from env variables, using
+    /// `lookup` to read the environment.
+    fn apply_env_fallbacks(
+        &mut self,
+        lookup: impl Fn(&str) -> Option<String>,
+    ) -> Result<(), String> {
         if self.api_key.is_empty()
-            && let Ok(api_key) = std::env::var("VLLM_API_KEY")
+            && let Some(api_key) = lookup("VLLM_API_KEY")
         {
             self.api_key.push(api_key);
         }
+        if let Some(value) = lookup("VLLM_LOG_STATS_INTERVAL") {
+            let interval = value
+                .parse()
+                .map_err(|error| format!("invalid VLLM_LOG_STATS_INTERVAL: {error}"))?;
+            self.log_stats_interval = Some(interval);
+        }
+        if let Some(value) = lookup("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION") {
+            self.disable_request_id_randomization = parse_int_flag(&value).map_err(|error| {
+                format!("invalid VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: {error}")
+            })?;
+        }
+        Ok(())
     }
 
     /// Build the OpenAI-server config for the Python-bootstrap worker contract.
@@ -565,6 +612,7 @@ impl SharedRuntimeArgs {
         let ready_timeout = self.ready_timeout();
         let shutdown_timeout = self.shutdown_timeout();
         let keep_alive_timeout = self.keep_alive_timeout();
+        let log_stats_interval = self.log_stats_interval();
         let api_server_options = self.api_server_options();
         let cors = self.cors_config();
         let tls = self.ssl.tls_config();
@@ -616,6 +664,8 @@ impl SharedRuntimeArgs {
             tls,
             api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
+            log_stats_interval,
+            disable_request_id_randomization: self.disable_request_id_randomization,
             shutdown_timeout,
             // The engine is launched and supervised by another process.
             manages_engine: false,
@@ -640,6 +690,7 @@ impl SharedRuntimeArgs {
         let ready_timeout = self.ready_timeout();
         let shutdown_timeout = self.shutdown_timeout();
         let keep_alive_timeout = self.keep_alive_timeout();
+        let log_stats_interval = self.log_stats_interval();
         let api_server_options = self.api_server_options();
         let cors = self.cors_config();
         let tls = self.ssl.tls_config();
@@ -688,6 +739,8 @@ impl SharedRuntimeArgs {
             tls,
             api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
+            log_stats_interval,
+            disable_request_id_randomization: self.disable_request_id_randomization,
             shutdown_timeout,
             manages_engine,
             keep_alive_timeout,
@@ -755,6 +808,38 @@ pub struct ProfilerConfig {
     pub extra: serde_json::Map<String, Value>,
 }
 
+/// Parsed `VLLM_LOG_STATS_INTERVAL`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogStatsInterval {
+    Every(Duration),
+    /// Too long to ever elapse, such as `inf`, which Python sleeps forever on.
+    Never,
+}
+
+/// Parse `VLLM_LOG_STATS_INTERVAL` seconds like Python: a non-positive value
+/// falls back to the default, and any positive one is slept on as is.
+impl FromStr for LogStatsInterval {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let seconds: f64 = value
+            .trim()
+            .parse()
+            .map_err(|_| format!("`{value}` is not a number of seconds"))?;
+        if seconds.is_nan() || seconds <= 0.0 {
+            return Ok(Self::Every(DEFAULT_LOG_STATS_INTERVAL));
+        }
+        Ok(Duration::try_from_secs_f64(seconds).map_or(Self::Never, Self::Every))
+    }
+}
+
+/// Parse an integer flag environment variable as Python's `bool(int(value))`,
+/// for decimal integers in the `i64` range.
+fn parse_int_flag(value: &str) -> Result<bool, String> {
+    let value: i64 = value.trim().parse().map_err(|_| format!("`{value}` is not an integer"))?;
+    Ok(value != 0)
+}
+
 fn parse_json<T: DeserializeOwned>(value: &str) -> Result<T, String> {
     serde_json::from_str(value).map_err(|e| format!("invalid JSON object: {}", e.as_report()))
 }
@@ -764,7 +849,7 @@ fn parse_runtime_args_json(value: &str) -> Result<SharedRuntimeArgs, String> {
         .map_err(|e| format!("invalid JSON arguments: {}", e.as_report()))?;
     // --args-json is parsed with serde, so clap's env support does not run for
     // the Python-supervised frontend path.
-    args.apply_env_api_key_fallback();
+    args.apply_env_fallbacks(|name| std::env::var(name).ok())?;
     args.unsupported.check()?;
     Ok(args)
 }
