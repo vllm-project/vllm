@@ -1423,15 +1423,34 @@ class TestCountReasoningTokens:
 
 
 class TestUnterminatedToolHeader:
-    @pytest.mark.parametrize("channel", ["analysis", "commentary"])
+    @pytest.mark.parametrize(
+        ("channel", "separator"),
+        [
+            ("analysis", ""),
+            ("commentary", ""),
+            ("commentary", " "),
+            ("commentary", "<|constrain|>"),
+        ],
+    )
     @pytest.mark.parametrize("chunk_size", [None, 1, 4, 11])
     @pytest.mark.parametrize("prefix", ["", "<|start|>assistant"])
     def test_complete_call(
-        self, harmony_parser, chat_request, monkeypatch, channel, chunk_size, prefix
+        self,
+        harmony_parser,
+        chat_request,
+        monkeypatch,
+        channel,
+        separator,
+        chunk_size,
+        prefix,
     ):
         arguments = '{"command": "str_replace", "path": "/tmp/é", "new_str": "x"}'
+        if separator == " ":
+            arguments = separator + arguments
+            separator = ""
         output = encode_output(
-            f"{prefix}<|channel|>{channel} to=functions.file_editor{arguments}<|call|>"
+            f"{prefix}<|channel|>{channel} to=functions.file_editor"
+            f"{separator}{arguments}<|call|>"
         )
         if chunk_size is None:
             reasoning, content, calls = harmony_parser.parse(
@@ -1504,7 +1523,8 @@ class TestUnterminatedToolHeader:
             'functions.file_editor{"x":1}',
             'functions.file_editor{"x":1}<|end|>',
             "functions.file_editor<|constrain|><|call|>",
-            'functions.file_editor {"x":1}<|call|>',
+            'functions.file_editor ({"x":1}<|call|>',
+            'functions.file_editor{"x":"<|constrain|>"}<|call|>',
             'functions.file_editor{"x":"<|call|>"}<|call|>',
         ],
     )
@@ -1526,6 +1546,28 @@ class TestUnterminatedToolHeader:
             )
             assert collect_streamed_tool_calls(deltas) == []
             assert "".join(d.content or "" for d in deltas) == text
+
+    @pytest.mark.parametrize("chunk_size", [None, 1, 4, 11])
+    def test_literal_constrain_in_header_stays_raw(
+        self, harmony_parser, chat_request, monkeypatch, chunk_size
+    ):
+        output = (
+            encode_output("<|channel|>commentary to=functions.file_editor")
+            + get_encoding().encode('<|constrain|>{"x":1}', disallowed_special=())
+            + encode_output("<|call|>")
+        )
+        if chunk_size is None:
+            _, content, calls = harmony_parser.parse(
+                "", chat_request, model_output_token_ids=output
+            )
+            assert calls is None
+        else:
+            _, deltas = parse_delta_stream(
+                harmony_parser, chat_request, output, chunk_size, monkeypatch
+            )
+            assert collect_streamed_tool_calls(deltas) == []
+            content = "".join(d.content or "" for d in deltas)
+        assert content == get_encoding().decode(output)
 
     @pytest.mark.parametrize("prefix", [" ", "\n", "prose"])
     def test_leading_text_stays_raw(self, harmony_parser, chat_request, prefix):

@@ -546,6 +546,7 @@ class HarmonyParser(DelegatingParser):
         tokens = self._current_message_tokens
         channel_token = encoding.encode("<|channel|>", allowed_special="all")[0]
         call_token = encoding.encode("<|call|>", allowed_special="all")[0]
+        constrain_token = encoding.encode("<|constrain|>", allowed_special="all")[0]
         if not tokens or tokens[-1] != call_token or channel_token not in tokens:
             return False
         channel_index = tokens.index(channel_token)
@@ -556,6 +557,17 @@ class HarmonyParser(DelegatingParser):
             return False
         try:
             payload = tokens[channel_index + 1 : -1]
+            if constrain_token in payload:
+                index = payload.index(constrain_token)
+                header = encoding.decode_utf8(payload[:index])
+                if (
+                    re.fullmatch(
+                        r"(?:analysis|commentary) to=functions\.[A-Za-z0-9_-]+", header
+                    )
+                    is None
+                ):
+                    return False
+                payload = payload[:index] + payload[index + 1 :]
             if any(encoding.is_special_token(token) for token in payload):
                 return False
             text = encoding.decode_utf8(payload)
@@ -563,7 +575,7 @@ class HarmonyParser(DelegatingParser):
             return False
         match = re.fullmatch(
             r"(analysis|commentary) to=(functions\.[A-Za-z0-9_-]+)"
-            r"(\{.*\}[ \t\r\n]*)",
+            r"([ \t\r\n]*\{.*\}[ \t\r\n]*)",
             text,
             re.DOTALL,
         )
