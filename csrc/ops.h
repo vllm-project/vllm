@@ -493,6 +493,34 @@ void beam_allreduce(torch::stable::Tensor const& input,
                     torch::stable::Tensor& output, int64_t buffer_ptrs,
                     torch::stable::Tensor& flags, int64_t multicast_ptr,
                     int64_t world, int64_t rank);
+void beam_moe_gather_norm(torch::stable::Tensor const& experts,
+                          torch::stable::Tensor const& expert_weights,
+                          torch::stable::Tensor const& residual,
+                          std::optional<torch::stable::Tensor> post_weight,
+                          std::optional<torch::stable::Tensor> next_weight,
+                          torch::stable::Tensor& hidden,
+                          std::optional<torch::stable::Tensor> normalized,
+                          int64_t buffer_ptrs, torch::stable::Tensor& flags,
+                          int64_t multicast_ptr, int64_t local_ptr,
+                          int64_t world, int64_t rank, double post_eps,
+                          double next_eps, double x_scale, double r_scale,
+                          bool post_norm, bool next_norm, bool scaled,
+                          bool one_shot, double routed_scale);
+void beam_moe_finalize(torch::stable::Tensor const& experts,
+                       torch::stable::Tensor const& weights,
+                       torch::stable::Tensor& output,
+                       std::optional<torch::stable::Tensor> post_weight,
+                       double routed_scale, double eps, bool post_norm);
+void beam_moe_finalize_norm(torch::stable::Tensor const& experts,
+                            torch::stable::Tensor const& weights,
+                            torch::stable::Tensor const& residual,
+                            std::optional<torch::stable::Tensor> post_weight,
+                            std::optional<torch::stable::Tensor> next_weight,
+                            torch::stable::Tensor& output,
+                            std::optional<torch::stable::Tensor> normalized,
+                            double routed_scale, double post_eps,
+                            double next_eps, double x_scale, double r_scale,
+                            bool post_norm, bool next_norm, bool scaled);
 #endif
 
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES

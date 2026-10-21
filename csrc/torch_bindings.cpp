@@ -591,6 +591,25 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   ops.def(
       "beam_allreduce(Tensor input, Tensor! output, int buffer_ptrs, "
       "Tensor! flags, int multicast_ptr, int world, int rank) -> ()");
+  // MegaMoE finalize of token-major expert rows, with Beam's boundary norms.
+  ops.def(
+      "beam_moe_gather_norm(Tensor experts, Tensor expert_weights, "
+      "Tensor residual, Tensor? post_weight, Tensor? next_weight, "
+      "Tensor! hidden, Tensor!? normalized, int buffer_ptrs, Tensor! flags, "
+      "int multicast_ptr, int local_ptr, int world, int rank, "
+      "float post_eps, float next_eps, float x_scale, float r_scale, "
+      "bool post_norm, bool next_norm, bool scaled, bool one_shot, "
+      "float routed_scale) -> ()");
+  ops.def(
+      "beam_moe_finalize(Tensor experts, Tensor weights, Tensor! output, "
+      "Tensor? post_weight, float routed_scale, float eps, "
+      "bool post_norm) -> ()");
+  ops.def(
+      "beam_moe_finalize_norm(Tensor experts, Tensor weights, "
+      "Tensor residual, Tensor? post_weight, Tensor? next_weight, "
+      "Tensor! output, Tensor!? normalized, float routed_scale, "
+      "float post_eps, float next_eps, float x_scale, float r_scale, "
+      "bool post_norm, bool next_norm, bool scaled) -> ()");
 #endif
 
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES
@@ -893,6 +912,9 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
 #ifdef VLLM_ENABLE_BEAM_KERNELS
   ops.impl("beam_allreduce_norm", TORCH_BOX(&beam_allreduce_norm));
   ops.impl("beam_allreduce", TORCH_BOX(&beam_allreduce));
+  ops.impl("beam_moe_gather_norm", TORCH_BOX(&beam_moe_gather_norm));
+  ops.impl("beam_moe_finalize", TORCH_BOX(&beam_moe_finalize));
+  ops.impl("beam_moe_finalize_norm", TORCH_BOX(&beam_moe_finalize_norm));
 #endif
 
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES
