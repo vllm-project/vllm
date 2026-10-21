@@ -47,6 +47,7 @@ from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
 def _make_vllm_config(
     *,
     extra_config: dict[str, Any] | None = None,
+    use_mla: bool = False,
     tensor_parallel_size: int = 1,
     pipeline_parallel_size: int = 1,
     prefill_context_parallel_size: int = 1,
@@ -61,7 +62,7 @@ def _make_vllm_config(
     config.cache_config.prefix_cache_retention_interval = None
     config.model_config.model = "test-model"
     config.model_config.max_model_len = 4096
-    config.model_config.use_mla = False
+    config.model_config.use_mla = use_mla
     # _full_attention_spec's heads at tp=1: the parallelism-agnostic gate
     # requires the head shard to cover the model's KV heads exactly
     config.model_config.get_total_num_kv_heads.return_value = 4
@@ -294,7 +295,7 @@ def _parallelism_agnostic(
     canonical: bool = False,
 ) -> bool:
     config = _make_vllm_config(
-        extra_config={"canonical_layout": True} if canonical else None
+        extra_config={"canonical_layout": True} if canonical else None,
     )
     kv_cache_config = KVCacheConfig(
         num_blocks=0,
@@ -323,8 +324,8 @@ def _replicated_layout(
         pipeline_parallel_size=pipeline_parallel_size,
         prefill_context_parallel_size=prefill_context_parallel_size,
         decode_context_parallel_size=decode_context_parallel_size,
+        use_mla=use_mla,
     )
-    config.model_config.use_mla = use_mla
     config.parallel_config.distributed_executor_backend = distributed_executor_backend
     config.parallel_config.nnodes = nnodes
     if world_size is not None:
@@ -1179,8 +1180,8 @@ def test_uncertifiable_canonical_layout_resets_replication(
         config = _make_vllm_config(
             tensor_parallel_size=2,
             extra_config={"canonical_layout": True} if canonical else None,
+            use_mla=True,
         )
-        config.model_config.use_mla = True
 
         group = make_kv_cache_group(["layer"], spec)
         PAGE = group.page_size_bytes
