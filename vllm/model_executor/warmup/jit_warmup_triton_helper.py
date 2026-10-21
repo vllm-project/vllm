@@ -672,9 +672,17 @@ class _DecoratedTritonJitKernel(_AutomaticTritonJitKernel):
 class TritonKernelDispatcher(Protocol[P]):
     """Callable Triton launcher with compile-time warmup support."""
 
+    __name__: str
+
     def __call__(self, *args: P.args, **kwargs: P.kwargs) -> Any: ...
 
     def register_warmup(self, *args: Any, **kwargs: Any) -> None: ...
+
+    def get_warmup_keys(
+        self, *, vllm_config: Any | None = None, **kwargs: Any
+    ) -> list[TritonCompileKey]: ...
+
+    def compile(self, compile_key: TritonCompileKey) -> None: ...
 
 
 @overload
