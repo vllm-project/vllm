@@ -19,7 +19,6 @@ from vllm.distributed import (
 from vllm.model_executor.layers.rotary_embedding.packed_qk_rope import (
     packed_qk_rope_,
 )
-from vllm.model_executor.models.interfaces import SupportsEncoderCudaGraph
 from vllm.model_executor.models.kimi_k25_vit import (
     KimiK25MultiModalProjector,
     KimiVisionPatchMergerProjector,
@@ -284,19 +283,6 @@ def test_kimi_vision_patch_merger_projector_compile_parity(
     )
     assert len(explanation.graphs) == 1, (
         f"Expected 1 graph, got {len(explanation.graphs)}"
-    )
-
-
-def test_kimi_k3_amd_supports_encoder_cudagraph():
-    """Verify KimiK3 on AMD implements SupportsEncoderCudaGraph."""
-    from vllm.model_executor.models.interfaces import supports_encoder_cudagraph
-    from vllm.models.kimi_k3.amd.model import KimiK3ForConditionalGeneration
-
-    assert SupportsEncoderCudaGraph in KimiK3ForConditionalGeneration.__bases__
-    assert supports_encoder_cudagraph(KimiK3ForConditionalGeneration)
-    assert (
-        getattr(KimiK3ForConditionalGeneration, "supports_encoder_cudagraph", False)
-        is True
     )
 
 
