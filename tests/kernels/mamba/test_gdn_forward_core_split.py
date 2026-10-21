@@ -52,7 +52,7 @@ from tests.v1.attention.utils import (  # noqa: E402
     create_common_attn_metadata,
     create_vllm_config,
 )
-from vllm.config import set_current_vllm_config  # noqa: E402
+from vllm.config import SpeculativeConfig, set_current_vllm_config  # noqa: E402
 from vllm.model_executor.layers.mamba.gdn import qwen_gdn_linear_attn  # noqa: E402
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (  # noqa: E402
     ChunkGatedDeltaRule,
@@ -304,3 +304,87 @@ def test_forward_core_split_matches_unified(
         atol = rtol = 6e-2
     torch.testing.assert_close(out_split, out_unified, atol=atol, rtol=rtol)
     torch.testing.assert_close(ssm_state_split, ssm_state_unified, atol=atol, rtol=rtol)
+
+
+@pytest.mark.parametrize("state_dtype", [torch.bfloat16, torch.float32])
+def test_forward_core_spec_slices_match_gather(state_dtype: torch.dtype) -> None:
+    """A spec-first mixed batch: slicing the two token blocks and writing the
+    outputs in place gives bitwise the gather/index_copy_ result."""
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    num_spec = 2
+    vllm_config = _make_vllm_config()
+    vllm_config.speculative_config = SpeculativeConfig(
+        method="ngram", num_speculative_tokens=num_spec
+    )
+    query_lens = [num_spec + 1, num_spec + 1, 300, 64]
+    batch = BatchSpec(seq_lens=[70, 90, 337, 64], query_lens=query_lens)
+    builder = GDNAttentionMetadataBuilder(
+        kv_cache_spec=MambaSpec(
+            block_size=BLOCK_SIZE, shapes=((16, 64),), dtypes=(torch.float16,)
+        ),
+        layer_names=[PREFIX],
+        vllm_config=vllm_config,
+        device=device,
+    )
+    common = create_common_attn_metadata(
+        batch, BLOCK_SIZE, device, arange_block_indices=True
+    )
+    # Keep every state slot off the null block, which the kernels skip.
+    common = common.replace(block_table_tensor=common.block_table_tensor + 1)
+    with set_current_vllm_config(vllm_config):
+        meta_slice = builder.build(
+            common_prefix_len=0,
+            common_attn_metadata=common,
+            num_accepted_tokens=torch.ones(4, dtype=torch.int32, device=device),
+            num_decode_draft_tokens_cpu=torch.tensor(
+                [num_spec, num_spec, -1, -1], dtype=torch.int32
+            ),
+        )
+    assert meta_slice.num_spec_decodes == 2 and meta_slice.num_prefills == 2
+    assert meta_slice.spec_token_start == 0
+    meta_gather = dataclasses.replace(
+        meta_slice, spec_token_start=None, non_spec_token_start=None
+    )
+
+    assert meta_slice.spec_state_indices_tensor is not None
+    assert meta_slice.non_spec_state_indices_tensor is not None
+    pool_size = 1 + int(
+        max(
+            meta_slice.spec_state_indices_tensor.max(),
+            meta_slice.non_spec_state_indices_tensor.max(),
+        )
+    )
+    conv_state_shape, temporal_state_shape = (
+        MambaStateShapeCalculator.gated_delta_net_state_shape(
+            1, H, HV, K, V, CONV_KERNEL, num_spec=num_spec
+        )
+    )
+    conv_state0 = 0.05 * torch.randn(
+        pool_size, *conv_state_shape, dtype=torch.bfloat16, device=device
+    )
+    ssm_state0 = 0.05 * torch.randn(
+        pool_size, *temporal_state_shape, dtype=state_dtype, device=device
+    )
+    weights = (
+        0.1 * torch.randn(HV, dtype=torch.float32, device=device),
+        0.1 * torch.randn(HV, dtype=torch.float32, device=device),
+        0.1
+        * torch.randn(CONV_DIM, 1, CONV_KERNEL, dtype=torch.bfloat16, device=device),
+        0.1 * torch.randn(CONV_DIM, dtype=torch.bfloat16, device=device),
+    )
+    num_tokens = sum(query_lens)
+    mixed_qkv = 0.1 * torch.randn(
+        num_tokens, CONV_DIM, dtype=torch.bfloat16, device=device
+    )
+    a = 0.1 * torch.randn(num_tokens, HV, dtype=torch.bfloat16, device=device)
+    b = 0.1 * torch.randn(num_tokens, HV, dtype=torch.bfloat16, device=device)
+
+    results = []
+    for meta in (meta_slice, meta_gather):
+        conv_state, ssm_state = conv_state0.clone(), ssm_state0.clone()
+        layer = _build_layer(vllm_config, conv_state, ssm_state, *weights)
+        out = _run_forward_core(layer, meta, mixed_qkv, b, a, num_tokens)
+        results.append((out, conv_state, ssm_state))
+    for sliced, gathered in zip(*results):
+        torch.testing.assert_close(sliced, gathered, atol=0, rtol=0)
