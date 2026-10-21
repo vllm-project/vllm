@@ -539,13 +539,19 @@ def get_fused_shared_expert_layers(
                 "Mixed per-layer shared-expert fusion within a pipeline "
                 "stage/model is not supported with EPLB"
             )
+        vllm_config = get_current_vllm_config_or_none()
+        parallel_config = (
+            vllm_config.parallel_config if vllm_config is not None else None
+        )
+        if parallel_config is not None and parallel_config.enable_expert_parallel:
+            raise NotImplementedError(
+                "Mixed per-layer shared-expert fusion with expert parallelism is "
+                "not tested. Please open an issue if you need this combination."
+            )
         # These backends size one shared buffer from the first MoE layer's
         # geometry (all2all.py NixlEPAll2AllManager._init_buffer/get_handle).
-        vllm_config = get_current_vllm_config_or_none()
         all2all_backend = (
-            vllm_config.parallel_config.all2all_backend
-            if vllm_config is not None
-            else None
+            parallel_config.all2all_backend if parallel_config is not None else None
         )
         if all2all_backend == "nixl_ep":
             raise NotImplementedError(

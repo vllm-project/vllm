@@ -336,6 +336,7 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             if spec_layer is None:
                 continue
             name = self._rewrite_spec_layer_name(spec_layer, name)
+            # Only parse the layer index when FSE is enabled.
             if (
                 "mlp.shared_experts." in name
                 and bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())

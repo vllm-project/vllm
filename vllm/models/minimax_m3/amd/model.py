@@ -1535,6 +1535,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             # down->w2) so it loads via the routed expert loader. Runs before the
             # stacked/dense mappings so shared_experts.gate_proj/up_proj are not
             # captured by the dense gate_up_proj mapping.
+            # Only parse the layer index when FSE is enabled.
             if (
                 ".shared_experts." in name
                 and bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())

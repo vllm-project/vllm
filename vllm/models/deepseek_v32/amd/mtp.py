@@ -296,6 +296,7 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
                     weight_loader(param, loaded_weight)
                     loaded_params.add(name)
                 continue
+            # Only parse the layer index when FSE is enabled.
             is_fusion_moe_shared_experts_layer = (
                 "mlp.shared_experts" in name
                 and bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())

@@ -932,6 +932,7 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
+            # Only parse the layer index when FSE is enabled.
             if (
                 "mlp.shared_experts." in name
                 and bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())

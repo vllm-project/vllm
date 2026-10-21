@@ -860,6 +860,7 @@ class AXK1Model(nn.Module):
             if spec_layer is not None:
                 continue  # skip spec decode layers for main model
 
+            # Only parse the layer index when FSE is enabled.
             is_fusion_moe_shared_experts_layer = (
                 "mlp.shared_experts" in name
                 and bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())

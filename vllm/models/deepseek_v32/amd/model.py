@@ -261,6 +261,7 @@ class DeepseekV32Model(torch.nn.Module):
                 continue
             if get_spec_layer_idx_from_weight_name(self.config, name) is not None:
                 continue
+            # Only parse the layer index when FSE is enabled.
             is_fusion_moe_shared_experts_layer = (
                 "mlp.shared_experts" in name
                 and bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())

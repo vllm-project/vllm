@@ -1656,6 +1656,7 @@ class DeepseekV2Model(nn.Module):
             ):
                 continue  # this layer has no indexer; drop its checkpoint weights
 
+            # Only parse the layer index when FSE is enabled.
             is_fusion_moe_shared_experts_layer = (
                 "mlp.shared_experts" in name
                 and bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())

@@ -1013,28 +1013,36 @@ def test_fused_shared_expert_layers_matches_container_index_space() -> None:
     assert not redirected("layers.28.mlp.shared_expert.down_proj.weight", dict_layers)
 
 
-def test_mixed_fused_shared_experts_rejected_with_nixl_ep_all2all() -> None:
-    """Mixed FSE must be rejected when the all2all backend shares one buffer.
+@pytest.mark.parametrize(
+    ("enable_expert_parallel", "match"),
+    [
+        (True, "expert parallelism is not tested"),
+        (False, "nixl_ep"),
+    ],
+)
+def test_mixed_fused_shared_experts_rejected_with_ep_or_nixl_ep(
+    enable_expert_parallel: bool, match: str
+) -> None:
+    """Mixed FSE must be rejected with EP or a shared-workspace all2all backend.
 
-    ``NixlEPAll2AllManager`` keeps a single process-wide buffer that is
-    initialized once from the first MoE layer's ``num_experts_per_rank`` and
-    ignores later geometries. A mixed model has fused layers with
-    ``n_routed + n_shared`` experts and non-fused layers with ``n_routed``, so
-    reusing that buffer would silently map experts to the wrong slots.
-    Construction must fail cleanly instead of running the untested mixed path.
+    With EP, per-layer geometry differences are not validated. ``nixl_ep``
+    additionally keeps a single process-wide buffer initialized from the first
+    MoE layer's ``num_experts_per_rank`` and ignores later geometries. A mixed
+    model has fused layers with ``n_routed + n_shared`` experts and non-fused
+    layers with ``n_routed``, so reusing that buffer would silently map experts
+    to the wrong slots. Construction must fail cleanly instead of running the
+    untested mixed path.
     """
     model = _make_fake_moe_model(["0", "1"], [True, False], use_dict=False)
 
     vllm_config = VllmConfig()
-    vllm_config.parallel_config.enable_expert_parallel = True
+    vllm_config.parallel_config.enable_expert_parallel = enable_expert_parallel
     vllm_config.parallel_config.data_parallel_size = 2
     vllm_config.parallel_config.all2all_backend = "nixl_ep"
 
     with (
         set_current_vllm_config(vllm_config),
-        pytest.raises(
-            NotImplementedError, match="Mixed per-layer shared-expert fusion"
-        ),
+        pytest.raises(NotImplementedError, match=match),
     ):
         get_fused_shared_expert_layers(model, _FakeMoE)
 

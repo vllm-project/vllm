@@ -301,6 +301,7 @@ class Glm4MoeLiteMTP(nn.Module, SupportsPP, Glm4MixtureOfExperts):
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is None:
                 continue
+            # Only parse the layer index when FSE is enabled.
             is_fusion_moe_shared_experts_layer = (
                 "mlp.shared_experts" in name
                 and bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())
