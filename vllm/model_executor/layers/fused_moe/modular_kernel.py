@@ -531,11 +531,6 @@ class FusedMoEExperts(ABC):
     def is_monolithic() -> bool:
         raise NotImplementedError("Implemented by subclasses.")
 
-    @staticmethod
-    def _supports_hash_routing() -> bool:
-        """Whether a monolithic kernel implements hash routing."""
-        return False
-
     @property
     def expects_unquantized_inputs(self) -> bool:
         """Whether or not the PrepareFinalize should defer input quantization
@@ -847,6 +842,11 @@ class FusedMoEExpertsModular(FusedMoEExperts):
     def workspace_dtype(self, act_dtype: torch.dtype) -> torch.dtype:
         """Workspace type: The dtype to use for the workspace tensors."""
         return act_dtype
+
+    def output_hidden_dim(self, hidden_dim: int) -> int:
+        """Hidden size of the finalized output. Experts that drop the hidden
+        padding return the unpadded size."""
+        return hidden_dim
 
     @abstractmethod
     def workspace_shapes(
@@ -1326,7 +1326,8 @@ class FusedMoEKernelModularImpl:
         # low-latency kernels are always batched and can never run into
         # the tensor.numel() == 0 case.
         if M_full == 0:
-            return torch.empty_like(a1q, dtype=in_dtype)
+            out_dim = self.fused_experts.output_hidden_dim(a1q.size(-1))
+            return a1q.new_empty((*a1q.shape[:-1], out_dim), dtype=in_dtype)
 
         workspace13, workspace2, fused_out, fused_out_is_specialized = (
             self._allocate_buffers(
@@ -1510,7 +1511,12 @@ class FusedMoEKernelModularImpl:
             a fused consumer.
 
         """
-        output = torch.empty_like(hidden_states)
+        output = hidden_states.new_empty(
+            (
+                *hidden_states.shape[:-1],
+                self.fused_experts.output_hidden_dim(hidden_states.size(-1)),
+            )
+        )
 
         local_num_experts = w1.shape[0]
         if global_num_experts == -1:

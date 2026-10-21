@@ -16,7 +16,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.platforms.rocm import on_gfx1250
-from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionLayer,
     AttentionType,
@@ -34,6 +33,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayout,
     KVQuantMode,
     get_kv_quant_mode,
+    is_quantized_kv_cache,
 )
 
 logger = init_logger(__name__)
@@ -413,6 +413,11 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
     def fused_qk_norm_mrope_kvcache_supported(self) -> bool:
         return IS_AITER_FOUND
 
+    def set_interleaved_v_cache(self):
+        # No-op override of RocmAttentionImpl: this backend
+        # decodes with the AITER triton unified-attention kernel
+        pass
+
     def do_qk_norm_rope_kvcache_update(
         self,
         layer: AttentionLayer,
@@ -449,6 +454,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             v_scale=layer._v_scale_cpu,
             kv_cache_dtype=self.kv_cache_dtype,
             use_shuffle_layout=self._use_shuffle_kv,
+            return_kv=False,
         )
 
     def do_qk_norm_mrope_kvcache_update(
