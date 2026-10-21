@@ -165,6 +165,7 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
         minimax_m3_msa_warmup,
     )
+    from vllm.model_executor.warmup.step5_dsa_warmup import step5_dsa_warmup
 
     if not worker.use_v2_model_runner:
         # The KV-block zeroing kernel is driven by the scheduler's
@@ -235,6 +236,7 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
 
     flashinfer_sparse_mla_decode_autotune_warmup(worker)
     deepseek_v4_sparse_mla_attention_warmup(worker)
+    step5_dsa_warmup(worker)
 
     # Deep GEMM warmup
     do_deep_gemm_warmup = (
@@ -459,7 +461,8 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
         cache_root = resolve_flashinfer_autotune_v2_root()
         if is_leader:
             logger.info_once(
-                "Using FlashInfer managed autotune cache (root=%s)",
+                "Using FlashInfer managed autotune cache (root=%s). Pass "
+                "--disable-flashinfer-autotune to skip autotuning.",
                 cache_root if cache_root is not None else "flashinfer default",
             )
         autotune_context = autotune_v2(
@@ -473,7 +476,11 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
             f"{cache_path.stem}_dp{dp_rank}_rank{world.rank_in_group}{cache_path.suffix}"
         )
         if is_leader:
-            logger.info_once("Using FlashInfer autotune cache file: %s", cache_path)
+            logger.info_once(
+                "Using FlashInfer autotune cache file: %s. Pass "
+                "--disable-flashinfer-autotune to skip autotuning.",
+                cache_path,
+            )
 
         if _all_ranks_have_matching_cache(cache_path, tune_group):
             loaded = tuner.load_configs(str(cache_path))
