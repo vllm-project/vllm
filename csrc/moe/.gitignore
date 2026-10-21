@@ -2,3 +2,6 @@
 topk_softplus_sqrt_launch_*.cu
 topk_softplus_sqrt_launch_entries.inc
 topk_softplus_sqrt_dispatch.inc
+# Record of what is on disk (script hash + arch list), so that a second build
+# directory with a different arch list regenerates instead of silently reusing.
+.topk_softplus_sqrt_generated

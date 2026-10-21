@@ -5,7 +5,7 @@
 
 Instantiating topkGatingSoftplusSqrtKernelLauncher is by far the most expensive
 part of building _moe_C_stable_libtorch: per (gating dtype, topk_indices dtype,
-hash index dtype) the launcher emits one kernel per expert count (13), per warp
+hash index dtype) the launcher emits one kernel per expert count (15), per warp
 size (2), per compile-time `use_hash` value (2), i.e. ~1900 device kernels for
 the full cross product. In a single translation unit they serialize ~100 s of
 AMDGPU code generation onto one core, which makes that file the critical path of
@@ -22,7 +22,7 @@ This script emits from the single VARIANTS list below:
   * topk_softplus_sqrt_dispatch.inc: the dtype dispatch on gating_output and
     topk_indices (included inside topk_softplus_sqrt()).
 
-The dartype pairs, their at::ScalarType counterparts and the dispatch order are
+The datatype pairs, their at::ScalarType counterparts and the dispatch order are
 all derived from VARIANTS, so adding a variant is a one-line change here and no
 hand-written prototype/dispatch entry can go stale.
 

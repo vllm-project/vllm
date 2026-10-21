@@ -756,10 +756,24 @@ void topkGatingSoftplusSqrtLauncherHelper(
   // only the arm that can actually run is instantiated - compiling both used
   // to double the number of device kernels emitted for this file.
   #if defined(VLLM_TOPK_SOFTPLUS_SQRT_WAVE64_ONLY)
-    #define LAUNCH_SOFTPLUS_SQRT(NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES) \
+    // Only the wave64 arm is instantiated, so a device whose wavefront size is
+    // not 64 would run a kernel built for the wrong width: check it here rather
+    // than launching silently (the previous code only had an assert, which
+    // -DNDEBUG compiles out).
+    #define LAUNCH_SOFTPLUS_SQRT(NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES)         \
+      STD_TORCH_CHECK(WARP_SIZE == 64,                                         \
+                      "This build only instantiates wave64 kernels but the "   \
+                      "device reports a wavefront size of ",                   \
+                      WARP_SIZE, "; rebuild with the device's arch in "       \
+                      "PYTORCH_ROCM_ARCH");                                    \
       LAUNCH_SOFTPLUS_SQRT_WARP(64, NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES)
   #elif defined(VLLM_TOPK_SOFTPLUS_SQRT_WAVE32_ONLY)
-    #define LAUNCH_SOFTPLUS_SQRT(NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES) \
+    #define LAUNCH_SOFTPLUS_SQRT(NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES)         \
+      STD_TORCH_CHECK(WARP_SIZE == 32,                                         \
+                      "This build only instantiates wave32 kernels but the "   \
+                      "device reports a wavefront size of ",                   \
+                      WARP_SIZE, "; rebuild with the device's arch in "       \
+                      "PYTORCH_ROCM_ARCH");                                    \
       LAUNCH_SOFTPLUS_SQRT_WARP(32, NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES)
   #else
     #define LAUNCH_SOFTPLUS_SQRT(NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES)         \

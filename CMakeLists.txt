@@ -1300,13 +1300,25 @@ endif()
 set(TOPK_SOFTPLUS_SQRT_GEN_SCRIPT
   ${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/generate_topk_softplus_sqrt.py)
 file(MD5 ${TOPK_SOFTPLUS_SQRT_GEN_SCRIPT} TOPK_SOFTPLUS_SQRT_GEN_SCRIPT_HASH)
+# The generated units live in the source tree (hipify produces the compiled
+# copies from there), so the record of what is on disk has to live next to them:
+# a cache entry is per build directory, and two build directories would then
+# overwrite each other's units without noticing.
+set(TOPK_SOFTPLUS_SQRT_GEN_STAMP
+  ${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/.topk_softplus_sqrt_generated)
+set(TOPK_SOFTPLUS_SQRT_GENERATED "")
+if (EXISTS ${TOPK_SOFTPLUS_SQRT_GEN_STAMP})
+  file(READ ${TOPK_SOFTPLUS_SQRT_GEN_STAMP} TOPK_SOFTPLUS_SQRT_GENERATED)
+endif()
 message(STATUS "softplus-sqrt topk generation script hash: ${TOPK_SOFTPLUS_SQRT_GEN_SCRIPT_HASH}")
 
 file(GLOB TOPK_SOFTPLUS_SQRT_GEN_SRC RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
   "csrc/moe/topk_softplus_sqrt_launch_*.cu")
+file(GLOB TOPK_SOFTPLUS_SQRT_GEN_INC RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
+  "csrc/moe/topk_softplus_sqrt_*.inc")
 if (NOT TOPK_SOFTPLUS_SQRT_GEN_SRC
-    OR NOT DEFINED CACHE{TOPK_SOFTPLUS_SQRT_GEN_SCRIPT_HASH}
-    OR NOT $CACHE{TOPK_SOFTPLUS_SQRT_GEN_SCRIPT_HASH} STREQUAL ${TOPK_SOFTPLUS_SQRT_GEN_SCRIPT_HASH})
+    OR NOT TOPK_SOFTPLUS_SQRT_GEN_INC
+    OR NOT TOPK_SOFTPLUS_SQRT_GENERATED STREQUAL ${TOPK_SOFTPLUS_SQRT_GEN_SCRIPT_HASH})
   execute_process(
     COMMAND ${CMAKE_COMMAND} -E env
     PYTHONPATH=$ENV{PYTHONPATH}
@@ -1322,12 +1334,13 @@ if (NOT TOPK_SOFTPLUS_SQRT_GEN_SRC
                         "\nCheck the log for details: "
                         "${CMAKE_CURRENT_BINARY_DIR}/topk_softplus_sqrt_generation.log")
   else()
-    set(TOPK_SOFTPLUS_SQRT_GEN_SCRIPT_HASH ${TOPK_SOFTPLUS_SQRT_GEN_SCRIPT_HASH}
-        CACHE STRING "Last run softplus-sqrt topk generate script hash" FORCE)
+    file(WRITE ${TOPK_SOFTPLUS_SQRT_GEN_STAMP} ${TOPK_SOFTPLUS_SQRT_GEN_SCRIPT_HASH})
     message(STATUS "softplus-sqrt topk generation completed successfully.")
   endif()
   file(GLOB TOPK_SOFTPLUS_SQRT_GEN_SRC RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
     "csrc/moe/topk_softplus_sqrt_launch_*.cu")
+  file(GLOB TOPK_SOFTPLUS_SQRT_GEN_INC RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
+    "csrc/moe/topk_softplus_sqrt_*.inc")
 else()
   message(STATUS "softplus-sqrt topk generation script has not changed, skipping generation.")
 endif()
@@ -1517,21 +1530,32 @@ elseif(VLLM_GPU_LANG STREQUAL "HIP")
   # and the wave32 kernel are both instantiated unless the build tells us which
   # one is reachable. The wavefront size is fixed per GPU family: CDNA (gfx9xx)
   # is wave64, RDNA (gfx10xx and later) is wave32. Instantiate only the arm that
-  # the targeted archs can select.
+  # the targeted archs can select, and only for the generated topk units (not for
+  # the whole extension).
+  set(TOPK_WAVE_ONLY_DEFINE "")
   set(_MOE_WAVE64_ARCHS ${VLLM_GPU_ARCHES})
   list(FILTER _MOE_WAVE64_ARCHS INCLUDE REGEX "^gfx9")
   set(_MOE_WAVE32_ARCHS ${VLLM_GPU_ARCHES})
   list(FILTER _MOE_WAVE32_ARCHS EXCLUDE REGEX "^gfx9")
   if(_MOE_WAVE64_ARCHS AND NOT _MOE_WAVE32_ARCHS)
     message(STATUS "topk softplus-sqrt: wave64 only (CDNA archs: ${VLLM_GPU_ARCHES})")
-    target_compile_definitions(_moe_C_stable_libtorch PRIVATE
-      VLLM_TOPK_SOFTPLUS_SQRT_WAVE64_ONLY)
+    set(TOPK_WAVE_ONLY_DEFINE VLLM_TOPK_SOFTPLUS_SQRT_WAVE64_ONLY)
   elseif(_MOE_WAVE32_ARCHS AND NOT _MOE_WAVE64_ARCHS)
     message(STATUS "topk softplus-sqrt: wave32 only (RDNA archs: ${VLLM_GPU_ARCHES})")
-    target_compile_definitions(_moe_C_stable_libtorch PRIVATE
-      VLLM_TOPK_SOFTPLUS_SQRT_WAVE32_ONLY)
+    set(TOPK_WAVE_ONLY_DEFINE VLLM_TOPK_SOFTPLUS_SQRT_WAVE32_ONLY)
   else()
     message(STATUS "topk softplus-sqrt: both wavefront sizes (archs: ${VLLM_GPU_ARCHES})")
+  endif()
+  if (TOPK_WAVE_ONLY_DEFINE)
+    # The hipified copies under CMAKE_CURRENT_BINARY_DIR are what the HIP build
+    # actually compiles, so the definition has to be set on both spellings.
+    set(_TOPK_WAVE_ONLY_SRC ${TOPK_SOFTPLUS_SQRT_GEN_SRC})
+    foreach (_topk_src ${TOPK_SOFTPLUS_SQRT_GEN_SRC})
+      string(REGEX REPLACE "\\.cu$" ".hip" _topk_hip "${_topk_src}")
+      list(APPEND _TOPK_WAVE_ONLY_SRC "${CMAKE_CURRENT_BINARY_DIR}/${_topk_hip}")
+    endforeach()
+    set_source_files_properties(${_TOPK_WAVE_ONLY_SRC} PROPERTIES
+      COMPILE_DEFINITIONS ${TOPK_WAVE_ONLY_DEFINE})
   endif()
 endif()
 
