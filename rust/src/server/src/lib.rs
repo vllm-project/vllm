@@ -92,6 +92,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
             renderer: config.renderer,
             language_model_only: config.language_model_only,
             chat_template: config.chat_template.clone(),
+            trust_request_chat_template: config.trust_request_chat_template,
             chat_template_content_format: config.chat_template_content_format,
             default_chat_template_kwargs: config
                 .default_chat_template_kwargs

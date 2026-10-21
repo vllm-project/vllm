@@ -352,6 +352,12 @@ class Gemma4Config(VerifyAndUpdateConfig):
                         "for all layers to avoid mixed FA3/FA4 penalty.",
                         head_dims,
                     )
+        elif current_platform.is_xpu():
+            logger.info(
+                "Gemma4 model has heterogeneous head dimensions %s. Leaving the "
+                "attention backend choice to the XPU platform.",
+                head_dims,
+            )
         elif vllm_config.attention_config.backend is None:
             vllm_config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
             logger.info(

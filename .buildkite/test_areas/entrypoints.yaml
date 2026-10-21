@@ -2,7 +2,7 @@ group: Entrypoints
 depends_on: 
   - image-build
 steps:
-- label: ":nvidia: (H200) Initialized Snapshot E2E"
+- label: ":nvidia: (H200) [Nightly] Initialized Snapshot E2E"
   key: initialized-snapshot-e2e
   device: h200
   num_devices: 1

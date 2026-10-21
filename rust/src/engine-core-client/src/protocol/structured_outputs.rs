@@ -7,6 +7,7 @@ use serde_json::Value;
 
 use crate::error::{Error, Result};
 
+mod nesting;
 mod xgrammar;
 
 /// Structured-output backend selected for EngineCore grammar compilation.
@@ -148,13 +149,23 @@ impl StructuredOutputsParams {
                         .to_string(),
                 })
             }
+            StructuredOutputConstraint::StructuralTag(tag) => {
+                let tag = serde_json::from_str::<Value>(tag).map_err(|_| {
+                    Error::InvalidStructuredOutputsParams {
+                        message: "Invalid structural tag specification.".to_string(),
+                    }
+                })?;
+                nesting::check_structural_tag(&tag)
+            }
             _ => Ok(()),
         }
     }
 
-    /// Reject a schema the selected backend would accept but enforce only in
-    /// part, as Python does when validating against xgrammar.
+    /// Reject a schema nested too deeply to compile, or one the selected
+    /// backend would accept but enforce only in part, as Python does when
+    /// validating against xgrammar.
     fn validate_json_schema(&self, schema: &Value) -> Result<()> {
+        nesting::check_json_schema(schema)?;
         if self.backend == StructuredOutputBackend::Xgrammar
             && xgrammar::has_unsupported_json_features(schema)
         {
@@ -418,6 +429,62 @@ mod tests {
     fn validate_rejects_empty_structural_tag() {
         let error = StructuredOutputsParams::structural_tag("\n\t").validate().unwrap_err();
         assert!(error.to_string().contains("structural_tag cannot be an empty string"));
+    }
+
+    /// An array schema whose objects nest `depth` levels deep.
+    fn schema_nested(depth: usize) -> Value {
+        (1..depth).fold(
+            serde_json::json!({ "type": "string" }),
+            |items, _| serde_json::json!({ "type": "array", "items": items }),
+        )
+    }
+
+    #[test]
+    fn validate_caps_json_schema_nesting() {
+        for (depth, accepted) in [(64, true), (65, false)] {
+            let schema = schema_nested(depth);
+            for params in [
+                StructuredOutputsParams::json(Value::String(schema.to_string())),
+                StructuredOutputsParams::json(schema),
+            ] {
+                let result = params.validate();
+                if accepted {
+                    assert!(result.is_ok(), "depth {depth}: {result:?}");
+                } else {
+                    let error = result.unwrap_err();
+                    assert!(
+                        error.to_string().contains(
+                            "The JSON schema is nested too deeply: objects and arrays may nest \
+                             at most 64 levels"
+                        ),
+                        "depth {depth}: {error}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn validate_caps_structural_tag_nesting_with_wrapper_allowance() {
+        let tag = |depth: usize| {
+            let format = serde_json::json!({
+                "type": "json_schema",
+                "json_schema": schema_nested(depth - 2),
+            });
+            serde_json::json!({ "type": "structural_tag", "format": format }).to_string()
+        };
+
+        assert!(StructuredOutputsParams::structural_tag(tag(80)).validate().is_ok());
+        let error = StructuredOutputsParams::structural_tag(tag(81)).validate().unwrap_err();
+        assert!(error.to_string().contains("nested too deeply"));
+    }
+
+    #[test]
+    fn validate_rejects_malformed_structural_tag() {
+        let error = StructuredOutputsParams::structural_tag(r#"{"type": "structural_tag""#)
+            .validate()
+            .unwrap_err();
+        assert!(error.to_string().contains("Invalid structural tag specification."));
     }
 
     #[test]

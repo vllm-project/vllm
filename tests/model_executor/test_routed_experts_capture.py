@@ -31,6 +31,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     bind_routed_experts_capturer,
 )
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
+from vllm.platforms.interface import Platform
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
@@ -326,6 +327,55 @@ def test_monolithic_capture_survives_kernel_rebuilds():
         assert captured[-1] == [[t + offset, t + offset + 1] for t in range(3)]
     with pytest.raises(ValueError, match="not supported"):
         forward(_ToyMonolithicExperts(supports_capture=False))
+
+
+@pytest.mark.parametrize(
+    "rows, top_k",
+    [([[7, 8], [9, 10]], 2), ([], 2), ([[0]], 1)],
+    ids=["multiple-elements", "idle-rank", "zero-expert-id"],
+)
+def test_platform_rows_override_preserves_tensor_results(monkeypatch, rows, top_k):
+    """Platform rows bypass shape inference, even when empty or all zero."""
+    capturer = _capturer_with_buffer(dp_rank=1, tp_size=2, num_experts_per_tok=top_k)
+    expected = torch.tensor(rows, dtype=torch.int32).reshape(-1, top_k)
+    ctx = _forward_context(batch_descriptor=BatchDescriptor(num_tokens=5))
+    topk = torch.full((7, top_k), -2, dtype=torch.int32)
+
+    class CustomPlatform(Platform):
+        @classmethod
+        def get_routed_experts_local_rows(cls, ids, context, dp_rank, tp_size):
+            assert ids is topk and context is ctx
+            assert (dp_rank, tp_size) == (1, 2)
+            return expected
+
+    monkeypatch.setattr(f"{_REC_MODULE}.current_platform", CustomPlatform())
+    with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
+        capturer.capture(0, topk)
+
+    torch.testing.assert_close(capturer.device_buffer[: len(expected), 0], expected)
+    assert (capturer.device_buffer[len(expected) :] == -1).all()
+
+
+def test_platform_rows_none_restores_default_layout(monkeypatch):
+    """The default hook still gathers and trims TP shards."""
+    capturer = _capturer_with_buffer(tp_size=2)
+    local_shard = torch.tensor([[10, 11], [12, 13]], dtype=torch.int32)
+    gathered = torch.tensor([[10, 11], [12, 13], [14, 15], [-1, -1]], dtype=torch.int32)
+    ctx = _forward_context(
+        dp_metadata=DPMetadata(num_tokens_across_dp_cpu=torch.tensor([3]))
+    )
+    monkeypatch.setattr(f"{_REC_MODULE}.current_platform", Platform())
+    tp_group = Mock()
+    tp_group.all_gather.return_value = gathered
+    with (
+        patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx),
+        patch(f"{_REC_MODULE}.get_tp_group", return_value=tp_group),
+    ):
+        capturer.capture(0, local_shard)
+
+    tp_group.all_gather.assert_called_once()
+    torch.testing.assert_close(capturer.device_buffer[:3, 0], gathered[:3])
+    assert (capturer.device_buffer[3:] == -1).all()
 
 
 def test_routed_experts_capturer_single_dp_no_metadata():

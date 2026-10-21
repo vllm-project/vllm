@@ -33,7 +33,7 @@ from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.platforms import current_platform
 from vllm.sampling_params import StructuredOutputsParams
 from vllm.utils.torch_utils import set_default_torch_num_threads
-from vllm.v1.metrics.reader import Metric
+from vllm.v1.metrics.reader import Counter, Metric
 
 MODEL = "Qwen/Qwen3-0.6B"
 EAGLE3_TARGET_MODEL = "meta-llama/Llama-3.2-1B-Instruct"
@@ -405,9 +405,11 @@ def _get_acceptance_rate(before: list[Metric], after: list[Metric]) -> float:
 
 
 def _get_count(before: list[Metric], after: list[Metric], name: str) -> int:
-    before_val = next(m.value for m in before if m.name == name)
-    after_val = next(m.value for m in after if m.name == name)
-    return after_val - before_val
+    before_metric = next(m for m in before if m.name == name)
+    after_metric = next(m for m in after if m.name == name)
+    assert isinstance(before_metric, Counter)
+    assert isinstance(after_metric, Counter)
+    return after_metric.value - before_metric.value
 
 
 @pytest.mark.parametrize(

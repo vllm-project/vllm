@@ -2,7 +2,7 @@ group: Disaggregated Mooncake
 depends_on:
   - image-build
 steps:
-- label: ":nvidia: (B200) Distributed MooncakeConnector PD accuracy"
+- label: ":nvidia: (B200) [Nightly] Distributed MooncakeConnector PD accuracy"
   key: distributed-mooncakeconnector-pd-accuracy-4-gpus
   # Nightly only: 4-GPU B200 pods wait hours behind smaller jobs on per-PR runs.
   optional: true

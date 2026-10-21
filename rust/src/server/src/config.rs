@@ -62,6 +62,8 @@ pub struct ApiServerOptions {
     pub enable_request_id_headers: bool,
     /// When `true`, register the scale-out `/inference/v1/generate` route.
     pub enable_scale_out: bool,
+    /// When `true`, register `/tokenizer_info`.
+    pub enable_tokenizer_info_endpoint: bool,
     /// Idle interval after which streaming SSE responses send a keep-alive
     /// comment. `None` disables keep-alive comments.
     pub sse_keep_alive_interval: Option<Duration>,
@@ -251,6 +253,8 @@ pub struct Config {
     pub chat_template: Option<String>,
     /// Server-default keyword arguments merged into every chat-template render.
     pub default_chat_template_kwargs: Option<HashMap<String, Value>>,
+    /// Whether requests may supply their own chat template.
+    pub trust_request_chat_template: bool,
     /// Maximum number of input items allowed per prompt for each modality.
     /// Unspecified modalities are unlimited.
     pub limit_mm_per_prompt: MmLimitPerPrompt,

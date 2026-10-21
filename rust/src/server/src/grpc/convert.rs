@@ -96,7 +96,7 @@ pub fn to_text_request(
 
     let mut sampling_params =
         build_sampling_params(req.temperature, sampling, decoding, stopping, response)?;
-    sampling_params.watermarking = req.watermarking.unwrap_or(true);
+    sampling_params.watermarking = req.watermarking;
 
     // Thread KVCacheParameters → SamplingParams fields.
     if let Some(kv) = kv {
@@ -709,10 +709,7 @@ mod tests {
                 let decoded = pb::GenerateRequest::decode(encoded.as_slice()).unwrap();
                 let text = to_text_request(decoded, stream, &["test-model".to_string()])
                     .expect("convert request");
-                assert_eq!(
-                    text.sampling_params.watermarking,
-                    watermarking.unwrap_or(true)
-                );
+                assert_eq!(text.sampling_params.watermarking, watermarking);
             }
         }
     }

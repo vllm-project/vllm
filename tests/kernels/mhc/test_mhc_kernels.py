@@ -376,7 +376,9 @@ def mhc_fused_post_pre_delayed_ref(
     residual: torch.Tensor,
     post_layer_mix: torch.Tensor,
     comb_res_mix: torch.Tensor,
-    *mix_args,
+    *mix_args: *tuple[
+        torch.Tensor, torch.Tensor, torch.Tensor, float, float, float, float, int
+    ],
     pre_mix: torch.Tensor | None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Project the post result before it is rounded to BF16.

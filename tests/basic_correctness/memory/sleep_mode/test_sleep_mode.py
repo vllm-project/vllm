@@ -167,6 +167,10 @@ def _lora_logits_mapping_correct(model) -> bool:
 
 
 @multi_gpu_test(num_gpus=2)
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="LoRA state is kept in the runtime pool only on CUDA/ROCm",
+)
 def test_deep_sleep_lora_tp2(monkeypatch):
     """Level-2 sleep/wake/reload with enable_lora=True and TP=2.
 

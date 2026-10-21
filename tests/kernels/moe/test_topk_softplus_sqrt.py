@@ -139,6 +139,7 @@ def test_hash_routing_backend_selection(
         monkeypatch, default_vllm_config, has_hash_routing, backend
     )
     _, experts_cls = select_deepseek_v4_mxfp4_moe_backend(config)
+    assert experts_cls is not None
     assert experts_cls.__name__ == expected_experts
     # Monolithic kernels route internally, so they read the table from the layer.
     assert (layer.routed_experts.hash_indices_table is not None) == has_hash_routing

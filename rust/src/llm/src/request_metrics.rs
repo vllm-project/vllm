@@ -406,11 +406,13 @@ pub fn current_unix_timestamp_secs() -> f64 {
 mod tests {
     use vllm_engine_core_client::protocol::output::{EngineCoreEvent, EngineCoreEventType};
     use vllm_engine_core_client::protocol::stats::PrefillStats;
+    use vllm_metrics::METRICS;
 
     use super::{RequestMetricsTracker, RequestTimestamps, diff_or_zero};
 
     #[test]
     fn tracker_updates_timing_state_across_prefill_decode_and_finish() {
+        METRICS.request.set_max_model_len(4096);
         let mut tracker =
             RequestMetricsTracker::new("model".to_string(), 2, 100.0, 64, Some(128), 1, true);
 

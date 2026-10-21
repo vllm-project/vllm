@@ -222,6 +222,10 @@ def ref_moe_forward(
             act = F.silu(gate) * up
         elif activation == "gelu":
             act = F.gelu(gate) * up
+        elif activation == "swigluoai":
+            gate = gate.clamp(max=7.0)
+            up = up.clamp(-7.0, 7.0)
+            act = gate * torch.sigmoid(1.702 * gate) * (up + 1)
         else:
             raise ValueError(f"Unknown activation: {activation}")
         output[expert_mask] = act @ w2_f[expert_idx].T
@@ -646,7 +650,9 @@ def test_aiter_moe_padding_env_var(
         ("SITU", False, 1, (40, 96), (40, 96)),
     ],
 )
-def test_aiter_moe_pads(activation, use_mxfp4_w4a4, tp_size, pads, expected):
+def test_aiter_moe_pads(
+    activation, use_mxfp4_w4a4, tp_size, pads: tuple[int, int], expected
+):
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
         aiter_moe_pads,
@@ -901,6 +907,7 @@ def test_aiter_fused_moe_mi350_mxfp4_w4a16_accuracy():
         case.w2_ref,
         case.topk_weights,
         case.topk_ids,
+        activation="swigluoai",
     )
     out = rocm_aiter_fused_experts(
         hidden_states=case.hidden_states,

@@ -9,6 +9,7 @@ from concurrent.futures import Executor, Future, ThreadPoolExecutor
 from contextlib import ExitStack
 from dataclasses import replace
 from functools import cached_property
+from threading import Lock
 from typing import TYPE_CHECKING, Any, Generic, overload
 
 from typing_extensions import TypeVar
@@ -170,6 +171,8 @@ class BaseRenderer(ABC, Generic[_T]):
         )
 
         self._mm_processor_cache: BaseMultiModalProcessorCache | None = None
+        self._pending_mm_cache_invalidations: set[str] = set()
+        self._mm_cache_invalidation_lock = Lock()
 
         # A second processor with its own processor-only cache.
         # Used by the tokenize endpoint so that tokenize-only
@@ -390,6 +393,36 @@ class BaseRenderer(ABC, Generic[_T]):
         """Serialize clear_mm_cache through the multimodal executor to avoid
         races with concurrent process_inputs on the mm_processor_cache."""
         await self._clear_mm_cache_async()
+
+    def queue_mm_cache_invalidations(self, mm_hashes: Sequence[str]) -> None:
+        """Coalesce stale sender entries without interrupting processing."""
+        cache = self.mm_processor_cache
+        if cache is None or not mm_hashes:
+            return
+        pending = {h for h in mm_hashes if cache.is_cached_item(h)}
+        if not pending:
+            return
+        with self._mm_cache_invalidation_lock:
+            self._pending_mm_cache_invalidations.update(pending)
+
+    def _drain_mm_cache_invalidations(self) -> None:
+        cache = self.mm_processor_cache
+        if cache is None:
+            return
+
+        with self._mm_cache_invalidation_lock:
+            pending = self._pending_mm_cache_invalidations
+            self._pending_mm_cache_invalidations = set()
+
+        while pending:
+            mm_hash = pending.pop()
+            try:
+                cache.invalidate(mm_hash)
+            except Exception:
+                pending.add(mm_hash)
+                with self._mm_cache_invalidation_lock:
+                    self._pending_mm_cache_invalidations.update(pending)
+                raise
 
     def shutdown(self) -> None:
         # Wait for any background MM warmup to finish first: it runs on the
@@ -909,6 +942,7 @@ class BaseRenderer(ABC, Generic[_T]):
         *,
         skip_mm_cache: bool = False,
     ) -> "MultiModalInput":
+        self._drain_mm_cache_invalidations()
         mm_processor = self.get_mm_processor()
 
         mm_req_id = f"renderer{self.api_process_rank}-mm-{self._mm_req_counter.inc(1)}"

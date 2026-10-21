@@ -632,6 +632,10 @@ _MULTIMODAL_MODELS = {
         "nemotron_parse",
         "NemotronParseForConditionalGeneration",
     ),
+    "RadioMBartPrefixForCausalLM": (
+        "nemotron_parse3_5",
+        "RadioMBartPrefixForCausalLM",
+    ),
     "WhisperForConditionalGeneration": ("whisper", "WhisperForConditionalGeneration"),
 }
 
@@ -705,6 +709,7 @@ _SPECULATIVE_DECODING_MODELS = {
     "GlmOcrMTPModel": ("glm_ocr_mtp", "GlmOcrMTP"),
     "Glm5NextMTPModel": ("vllm.models.glm5next", "Glm5NextMTP"),
     "OpenPanguMTPModel": ("openpangu_mtp", "OpenPanguMTP"),
+    "ParseAuxMTPModel": ("nemotron_parse3_5_mtp", "ParseAuxMTPModel"),
     "Qwen3NextMTP": ("qwen3_next_mtp", "Qwen3NextMTP"),
     "Step5MTP": ("vllm.models.step5", "Step5MTP"),
     "Qwen4ExpMTP": ("vllm.models.qwen4_exp", "Qwen4ExpMTP"),

@@ -82,8 +82,9 @@ vllm preload --model /path/to/model --tensor-parallel-size 4
    cached weights: checkpoint content (hashed from safetensors metadata, so
    identical weights in different directories still match), model
    architecture, TP/DP size/rank, dtype, quantization method and config, text
-   RoPE parameters, model revision, and vLLM version. On any mismatch the engine
-   falls back to disk loading (unless `fallback` is disabled).
+   RoPE parameters, model revision, KV cache dtype and quantization skip layers,
+   and vLLM version. On any mismatch the engine falls back to disk loading
+   (unless `fallback` is disabled).
 4. The engine also verifies the daemon's GPU UUID matches its own device, so a
    stale socket cannot serve weights for the wrong GPU.
 
