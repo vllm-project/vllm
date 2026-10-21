@@ -565,10 +565,20 @@ def test_upper_bound_plan_reused_across_steps(monkeypatch):
 @pytest.mark.skipif(
     not _sm90_flashinfer_available(), reason="Requires SM90 FlashInfer MLA"
 )
-def test_upper_bound_graph_replays_ragged_verification(monkeypatch):
+def test_upper_bound_graph_replays_ragged_verification(monkeypatch, request):
     """AV redistributes tokens on device while host boundaries stay uniform."""
     from vllm.utils import gpu_sync_debug
 
+    original_copy_methods = (torch.Tensor.to, torch.Tensor.cuda, torch.Tensor.copy_)
+
+    def restore_copy_methods():
+        torch.Tensor.to = original_copy_methods[0]
+        torch.Tensor.cuda = original_copy_methods[1]
+        torch.Tensor.copy_ = original_copy_methods[2]
+
+    # enable_gpu_sync_check() patches Tensor methods for the whole process.
+    request.addfinalizer(restore_copy_methods)
+    monkeypatch.setattr(gpu_sync_debug, "_copy_checkers_installed", False)
     monkeypatch.setattr(gpu_sync_debug, "_SYNC_CHECK_MODE", "error")
     monkeypatch.setattr(gpu_sync_debug, "_sync_check_enabled", False)
     gpu_sync_debug.enable_gpu_sync_check()

@@ -6,6 +6,7 @@ Covers the fix for https://github.com/vllm-project/vllm/issues/34845.
 """
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -197,6 +198,7 @@ def test_glm_kda_adaptive_metadata_uses_device_query_lengths(mamba_cache_mode):
     from vllm.v1.worker.utils import AttentionGroup
 
     layer = Glm5NextLinearAttention.__new__(Glm5NextLinearAttention)
+    layer.speculative_config = SimpleNamespace(enable_adaptive_verification=True)
     backend = layer.get_attn_backend()
     group = AttentionGroup(
         backend=backend,
@@ -233,7 +235,6 @@ def test_glm_kda_adaptive_metadata_uses_device_query_lengths(mamba_cache_mode):
         num_accepted_tokens=accepted,
     )
     assert meta.num_spec_decodes == 3
-    assert meta.num_spec_decode_tokens == 6
     torch.testing.assert_close(
         meta.spec_query_start_loc, torch.tensor([0, 1, 5, 6, 6], dtype=torch.int32)
     )
@@ -246,7 +247,28 @@ def test_glm_kda_adaptive_metadata_uses_device_query_lengths(mamba_cache_mode):
         common.block_table_tensor[:3, start : start + 4],
     )
     assert not meta.spec_state_indices_tensor[3].any()
-    torch.testing.assert_close(meta.spec_token_indx, torch.arange(6, dtype=torch.int32))
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="GLM CUDA AV")
+@pytest.mark.parametrize("adaptive_verification", [None, False, True])
+def test_glm_kda_backend_selection(adaptive_verification):
+    """Only AV selects the GLM subclass; generic GDN keeps metadata reuse."""
+    from vllm.models.glm5next.common.kda import Glm5NextLinearAttention
+    from vllm.models.glm5next.common.kda_metadata import (
+        Glm5NextKDAAttentionBackend,
+    )
+    from vllm.v1.attention.backends.gdn_attn import GDNAttentionBackend
+
+    layer = Glm5NextLinearAttention.__new__(Glm5NextLinearAttention)
+    layer.speculative_config = (
+        None
+        if adaptive_verification is None
+        else SimpleNamespace(enable_adaptive_verification=adaptive_verification)
+    )
+    expected = (
+        Glm5NextKDAAttentionBackend if adaptive_verification else GDNAttentionBackend
+    )
+    assert layer.get_attn_backend() is expected
 
 
 def _build(

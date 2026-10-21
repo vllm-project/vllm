@@ -168,7 +168,14 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
     conv_size: int
 
     def get_attn_backend(self) -> type[AttentionBackend]:
-        if current_platform.is_cuda():
+        # The subclass only adds the adaptive-verification declarations, and
+        # it is excluded from the generic builder's metadata reuse.
+        speculative_config = self.speculative_config
+        if (
+            current_platform.is_cuda()
+            and speculative_config is not None
+            and speculative_config.enable_adaptive_verification
+        ):
             return Glm5NextKDAAttentionBackend
         return super().get_attn_backend()
 
