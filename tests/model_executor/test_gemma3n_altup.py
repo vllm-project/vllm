@@ -7,6 +7,8 @@ import torch.nn as nn
 
 from vllm.model_executor.models.gemma3n import Gemma3nAltUp
 
+pytestmark = pytest.mark.skip_global_cleanup
+
 
 class PredictionCoefs(nn.Module):
     def __init__(self, output: torch.Tensor) -> None:
