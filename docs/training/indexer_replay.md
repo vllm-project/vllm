@@ -2,19 +2,19 @@
 
 Enable `--enable-return-indexer-topk` to return ordinary sparse-attention
 selections through the local AuxOutput SHM connector. This path stores raw
-`int32` token IDs and does not use a Profile or a model-specific codec.
+`int32` indices and does not use a Profile or a model-specific codec.
 
 ```bash
 vllm serve deepseek-ai/DeepSeek-V3.2 --enable-return-indexer-topk
 ```
 
-The adapters cover DeepSeek V3.2 and GLM-5.2 DSA, including their shared
-reference MLA path. Dots3 NOTE's overridden forward also captures its raw
+The adapters cover DeepSeek V3.2 / GLM-5.2 DSA and their shared reference MLA
+path, plus DeepSeek V4's common GPU attention path. Dots3 NOTE also captures raw
 token selections; GLM4-MoE-Lite uses the reference path when configured for DSA.
 Support is an implementation claim pending model validation.
 
-DeepSeek V4/V4.1 compressed-cache coordinates, GLM-5.3 KPool, Qwen4Exp QSA,
-Step5 Region selection and HY-V4 are deferred to the dependent Profile PR.
+DeepSeek V4.1, GLM-5.3 KPool, Qwen4Exp QSA, Step5 Region selection and HY-V4
+are deferred to the dependent Profile PR.
 MiniMax-M3 has no adapter. A model/backend without ordinary capture sources
 fails at startup instead of returning an empty replay.
 
@@ -26,6 +26,11 @@ Source planes are ordered by their actual layer IDs. IndexCache consumers
 reuse the source plane selected by the model configuration; a shared consumer
 does not create another plane. All sources must have the same TopK width.
 Order, padding and invalid IDs are preserved exactly as captured.
+
+DeepSeek V4 captures only actual C4A Indexer layers; HCA/SWA layers do not add
+planes. Its indices address the compressed KV cache and are returned unchanged,
+as consumed by Attention. They are not expanded to original token positions.
+This fixed-width raw format requires no Profile or codec.
 
 Python Chat Completions, Completions and Token-in-Token-out responses include
 `indexer_topk` on the terminal choice/chunk. The value is a base64-encoded NumPy
