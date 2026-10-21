@@ -89,8 +89,10 @@ class AuxOutputSchedulerConnector:
         scheduled_requests: dict[str, int] = {}
         block_hashes_by_request: dict[str, PackedBlockHashes] = {}
         for request_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
-            self._sent_hash_counts.setdefault(request_id, 0)
             request = requests[request_id]
+            if self._skips_routing(request):
+                continue
+            self._sent_hash_counts.setdefault(request_id, 0)
             packed = self._take_new_hashes(
                 request, request.num_computed_tokens + num_tokens
             )
@@ -136,6 +138,9 @@ class AuxOutputSchedulerConnector:
         return metadata
 
     def max_cache_hit(self, request: Request) -> int:
+        if self._skips_routing(request):
+            # No routing to serve, so the KV cache alone bounds the hit.
+            return request.num_tokens - 1
         num_blocks = 0
         for block, keys in self._kv_blocks(request.block_hashes):
             if block in self._kv_cached:
@@ -148,12 +153,16 @@ class AuxOutputSchedulerConnector:
     def cap_external_hit(
         self, request: Request, num_local: int, num_external: int
     ) -> int:
+        if self._skips_routing(request):
+            return num_external
         num_hit = num_local + num_external
         if num_hit % self._block_size == 0 and num_hit <= self.max_cache_hit(request):
             return num_external
         return 0
 
     def request_loading(self, request: Request, num_tokens: int) -> None:
+        if self._skips_routing(request):
+            return
         blocks = islice(
             self._kv_blocks(request.block_hashes), num_tokens // self._block_size
         )
@@ -189,6 +198,8 @@ class AuxOutputSchedulerConnector:
         output: dict[str, AuxRequestOutput] | None,
     ) -> np.ndarray | None:
         """Return the accepted R3 rows for one scheduled request."""
+        if self._skips_routing(request):
+            return None
         request_id = request.request_id
         assert output is not None and request_id in output, (
             f"auxiliary output worker output is missing {request_id}"
@@ -217,6 +228,9 @@ class AuxOutputSchedulerConnector:
         """Queue a request's terminal event and final block hashes."""
         request_id = request.request_id
         self._loading.pop(request_id, None)
+        if self._skips_routing(request):
+            # Its blocks have no stored routing to retain.
+            return
         num_blocks = request.num_computed_tokens // self._block_size
         for block, keys in islice(self._kv_blocks(request.block_hashes), num_blocks):
             if block not in self._kv_cached and self._gpu_cached(keys[-1]):
@@ -230,6 +244,11 @@ class AuxOutputSchedulerConnector:
             request, request.num_computed_tokens
         )
         del self._sent_hash_counts[request_id]
+
+    @staticmethod
+    def _skips_routing(request: Request) -> bool:
+        params = request.sampling_params
+        return params is not None and not params.return_routed_experts
 
     @staticmethod
     def _pack_hashes(hashes: Sequence[bytes]) -> PackedBlockHashes | None:

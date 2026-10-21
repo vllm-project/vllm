@@ -447,6 +447,11 @@ class SamplingParams(
     already-returned prefix to avoid duplicating routing for prompt tokens
     covered by earlier turns. Default 0 returns routing for all prompt
     tokens."""
+    return_routed_experts: bool = True
+    """When enable_return_routed_experts is active, set False to skip this
+    request: its routing is neither recorded nor returned, and its prefix-cache
+    blocks are kept apart from those of requests that record routing. Ignored
+    when the server does not record routed experts."""
     trace_decode_token_ids: list[int] | None = None
     """If provided, forces the engine to emit this predetermined sequence of
     token IDs during decoding instead of sampling randomly. Real logprobs are
@@ -489,6 +494,7 @@ class SamplingParams(
         repetition_detection: RepetitionDetectionParams | None = None,
         logprob_token_ids: list[int] | None = None,
         routed_experts_prompt_start: int = 0,
+        return_routed_experts: bool = True,
         # Debugging / RL-specific parameters.
         trace_decode_token_ids: list[int] | None = None,
     ) -> "SamplingParams":
@@ -557,6 +563,7 @@ class SamplingParams(
             skip_clone=skip_clone,
             repetition_detection=repetition_detection,
             routed_experts_prompt_start=routed_experts_prompt_start,
+            return_routed_experts=return_routed_experts,
             trace_decode_token_ids=trace_decode_token_ids,
         )
 
