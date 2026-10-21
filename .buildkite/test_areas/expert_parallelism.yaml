@@ -334,127 +334,101 @@ steps:
       # EEP_PASS is read by nothing. It is there so a 100k line log can be cut
       # into passes by one grep instead of by counting command banners.
       #
-      # What the seven pass run settled, and why this run looks nothing like it.
+      # What the eight pass run of 20 October settled, and what this one asks.
       #
-      # It is no longer worth varying the levers one at a time, because the gate
-      # is random. Three passes with the same configuration as far as the climb
-      # is concerned went 1 for 3, and the two passes that climbed came from two
-      # different configurations. A one variable comparison cannot be read when
-      # luck decides the outcome, so every pass here carries the best known
-      # climb configuration and only the candidate fixes differ.
+      # Three results, and one of them retracts a claim this file used to make.
       #
-      # The best known climb configuration is the caching allocator off. Pooled
-      # over both runs, eager cases only, it is 0 of 6 with the allocator on and
-      # 6 of 10 with it off. So it roughly quadruples the chance of a climb and
-      # never makes it certain. The registration cache is negative in both
-      # directions and is kept off only because that is the arm with the most
-      # samples behind it. The warm-up is neutral, measured by two passes that
-      # differed in nothing else and failed identically, and is kept on.
+      # VLLM_EEP_HOLD_OLD_EPLB_COMM climbed 4 of 4 against 1 of 4 without it, and the
+      # teardown report says why, except that the mechanism is the opposite of the one
+      # guessed above. Without the lever the old communicator is collected nine to ten
+      # seconds BEFORE the first reshuffle read, not during it, in all four passes that
+      # ran that way. So the harm is not a teardown inside the read window, it is a
+      # registration released before the transfers that depend on the same memory.
       #
-      # VLLM_EEP_DEBUG_POISON_POINT is gone, having answered. Every step up to
-      # and including the FIRST create_standby_groups left IPC healthy, and the
-      # refusal is the second one, so no step poisons the process: the second
-      # ncclCommInitRank bootstrap in a process is simply refused. That is the
-      # 22 of 22 and 0 of 10 statistic measured from inside the process. It is
-      # dropped rather than kept because it exports a 6 MiB buffer after every
-      # named step, about nine extra exports per rank during the climb, and the
-      # export is the operation under suspicion. It is the only systematic
-      # difference between the run that climbed 3 of 3 and the one that climbed
-      # 1 of 3, and that has to be cleared before any climb number means
-      # anything.
+      # That turned into a cause. The new communicator registers byte for byte the same
+      # ranges as the old one, measured across all 26 layers, which is expected since
+      # reconfigure_physical_expert_slots only moves views over preallocated buffers.
+      # Each communicator carries its own NIXL agent, so during a climb one process
+      # holds two agents registered over identical pages and the first teardown
+      # deregisters memory the other is reading from. What exactly breaks between the
+      # two agents is not proven: the simplest version, a shared UCX cache entry, is
+      # argued against by UCX_RCACHE_ENABLE=n being negative. The overlap, the ordering
+      # and the effect of inverting it are established.
       #
-      # VLLM_EEP_USE_COMM_SHRINK=1 is on in every pass now, because it worked.
-      # It builds the standby groups for the smaller size out of the live
-      # communicator with ncclCommShrink instead of bootstrapping a fresh one.
-      # In the one pass that reached the scale down it was called six times with
-      # zero export refusals against six in the pass that climbed without it, in
-      # the same build, and the scale down then ran the whole path for the first
-      # time. That also let the EPLB async worker fix execute for the first time
-      # and it held. The local worry, 15 shareable buffers rather than 0, turned
-      # out not to matter: the refusal is tied to the bootstrap, not the count.
+      # VLLM_EEP_SHARED_ARENA_REGISTRATION is that cause addressed instead of delayed.
+      # It counts the live registrations over the expert arena and releases one only
+      # when it is the last, parking the earlier agents untouched, since dropping an
+      # agent takes its registration with it. It replaces the hold lever, which is off
+      # in every pass here so this can be read on its own.
       #
-      # It cost a new failure, and this run is mostly about that. Within five
-      # seconds of a successful scale down both surviving ranks faulted. Two
-      # readings fit and they want opposite fixes, which is why the run is split
-      # down the middle rather than spent on one of them.
+      # VLLM_EEP_SHRINK_KEEP_PARENT worked, 1 of 1, and produced the first complete
+      # scale down this group has ever had: six shrink calls, the keep message on both
+      # survivors, Scale down completed in 8.140 s, no fault at teardown. It is on in
+      # every pass now. One defect in it is known and not yet addressed: the deferred
+      # parent is only released at the next retirement, and with no third
+      # reconfiguration it holds its buffers until the process exits.
       #
-      # The ordering reading: the child shares the parent's buffers, and the
-      # survivors retire that parent through the early retirement that is the
-      # fix for the refusal on the first collective. VLLM_EEP_SHRINK_KEEP_PARENT
-      # holds back exactly the groups a shrunk communicator still runs on, and
-      # retires them one reconfiguration later. If the refusal comes back, the
-      # early retirement is load bearing for a reason this does not understand.
+      # The retraction is the shrink as a bypass for the refusal at the second
+      # bootstrap. On one sample it looked clean. On five it is 1 of 5, with three
+      # passes calling it twice and being refused anyway. The local worry that was set
+      # aside does matter after all: a child built with sharing on still exports 15
+      # shareable buffers rather than none, so the shrink lowers the odds rather than
+      # removing the refusal. Sharing stays on because keep parent handles what it
+      # costs, and because the alternative gives the child 64 buffers instead of 15.
       #
-      # The recycling reading: on DP0 the faulting address has a history, and it
-      # is the only fault address in either run that has one. A 1824 MiB device
-      # segment appeared, was released 72 s later, and four seconds before the
-      # fault a fresh 6 MiB buffer, the size RCCL uses for shareable buffers,
-      # was mapped inside the range that segment had held. The fault landed on
-      # its base. NCCL_COMM_SHRINK_SHARE_RESOURCES=0 tests that direction by
-      # giving the child its own buffers instead, which is also the arm that
-      # risks bringing the refusal back, since a child without sharing allocates
-      # 64 buffers rather than 15.
+      # A claim about UCX also has to go. ucm free non HSA managed memory appears 28725
+      # times in that run, so it is routine noise from the hook UCX puts on every free
+      # and must not be read as a pointer at the failure. What survives is narrower and
+      # still useful: the number of distinct unresolved addresses per process is small,
+      # 25 to 123, and the refused address is inside that set every time, 4 of 4.
       #
-      # VLLM_EEP_HOLD_OLD_EPLB_COMM is the one candidate this run carries for
-      # the climb. The new EPLB communicator is built in prepare_reconfiguration
-      # and registers the same expert weight tensors the old one still has
-      # registered, so two NIXL registrations cover the same memory until the
-      # old object is collected, and its __del__ then deregisters that memory
-      # with nothing deciding when. A reference the async worker captured can
-      # delay it into the window where peers are reading, which is where the
-      # faults land, and it would explain why only the ranks that were already
-      # there fault, since only they have an old communicator to collect. This
-      # holds a reference across the reshuffle and drops it afterwards, so the
-      # teardown happens at a time this code picks. VLLM_EEP_DEBUG_COMM_TEARDOWN
-      # prints when each one is collected and how much it deregisters, on every
-      # pass, so the timing is on the record whether or not the lever helps.
+      # Hence the one variable this run is built around, the caching allocator. All
+      # eight passes above had it off, so every free went straight back to the driver,
+      # which is what keeps refilling that set of unresolvable addresses. It is kept off
+      # only because it helps the climb, 0 of 6 with it on against 6 of 10 with it off
+      # pooled over two runs. If the arena fix carries the climb on its own, the
+      # allocator can come back, and the refusal on the way down loses its fuel. That
+      # pairing, a working climb with the allocator on, has never been tried, because
+      # with the allocator on no climb ever reached a scale down.
       #
-      # Two readings of that mechanism were checked and dropped before costing a
-      # run: the agent name carries a uuid4 suffix so no stale rkey can be
-      # mistaken for a new one, and reconfigure_physical_expert_slots only moves
-      # views over preallocated buffers, so the weight tensors are not
-      # reallocated and the registration does not go stale that way.
+      #   pass  arena fix  caching allocator
+      #      1      on            on
+      #      2      on            off
+      #      3      off           on
+      #      4      on            on
+      #      5      on            off
+      #      6      off           on
+      #      7      on            on
+      #      8      on            off
       #
-      #   pass  share  keep parent  hold old comm
-      #      1    on        on            on
-      #      2    off       off           on
-      #      3    on        on            off
-      #      4    off       off           off
-      #      5    on        on            on
-      #      6    off       off           on
-      #      7    on        on            off
-      #      8    off       off           off
+      # Three of each of the two cells that carry the fix and two controls without it,
+      # interleaved so that after three passes every cell already has one sample, since
+      # whatever runs last is what the limit cuts. The allocator passes omit
+      # PYTORCH_NO_HIP_MEMORY_CACHING entirely rather than setting it to 0, because
+      # torch reads it as set or unset and not as a value.
       #
-      # Two samples of each cell, and the climb lever is balanced four against
-      # four so its rate can be read across the whole run. The order interleaves
-      # the cells rather than grouping them, because whatever runs last is what
-      # the limit cuts, and after four passes one sample of every cell is in.
-      #
-      # UCX_MEM_EVENTS=no is not the same lever as UCX_RCACHE_ENABLE=n and has
-      # already failed: it removes the hooks that invalidate the cache, so it
-      # makes a stale entry more likely, not less. What points at the cache is
-      # the address: UCX warns `ucm free non HSA managed memory` for the exact
-      # pointer that is then refused, seven times out of seven, with no refusal
-      # lacking a warning and no warning lacking a refusal. UCX's own free hook
-      # prints that line and returns without dispatching the free event, so on
-      # those pointers its cache is never told the range went away. RCCL takes
-      # them through hipExtMallocWithFlags with flags 3, which is why the torch
-      # pool setting does not reach them.
-      - EEP_PASS=1of8 UCX_RCACHE_ENABLE=n PYTORCH_NO_HIP_MEMORY_CACHING=1 PYTORCH_NO_CUDA_MEMORY_CACHING=1 VLLM_EEP_USE_COMM_SHRINK=1 NCCL_COMM_SHRINK_SHARE_RESOURCES=1 VLLM_EEP_SHRINK_KEEP_PARENT=1 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_XFER_DESCS=1 VLLM_EEP_DEBUG_MAPPINGS=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_WARM_NIXL_TRANSFERS=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,ALLOC NCCL_DEBUG_FILE=/tmp/nccl-eep-%h-%p.log VLLM_EEP_HOLD_OLD_EPLB_COMM=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=UCX_RCACHE_ENABLE,PYTORCH_NO_HIP_MEMORY_CACHING,PYTORCH_NO_CUDA_MEMORY_CACHING,VLLM_EEP_USE_COMM_SHRINK,NCCL_COMM_SHRINK_SHARE_RESOURCES,VLLM_EEP_SHRINK_KEEP_PARENT,RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_XFER_DESCS,VLLM_EEP_DEBUG_MAPPINGS,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_WARM_NIXL_TRANSFERS,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,AMD_LOG_LEVEL,PYTHONFAULTHANDLER,NCCL_DEBUG,NCCL_DEBUG_SUBSYS,NCCL_DEBUG_FILE,VLLM_EEP_HOLD_OLD_EPLB_COMM pytest -v -s --timeout=780 --timeout-method=thread distributed/test_elastic_ep.py -k enforce_eager_none || true
+      # Failure 7 is new and this run cannot test it, only meet it. The pass that
+      # completed its scale down died 78 s later in ordinary serving, when a routine
+      # EPLB rearrange ran an all_reduce on the EP group and RCCL was refused an IPC
+      # export. That is the same refusal as on the first collective, at a moment nothing
+      # had ever reached before. Torch hid it: the logging decorator in c10d_logger
+      # calls get_backend on a group no longer in the world map and raises a ValueError
+      # that replaces the real error, so the traceback has to be read chained.
+      - EEP_PASS=1of8 UCX_RCACHE_ENABLE=n VLLM_EEP_USE_COMM_SHRINK=1 NCCL_COMM_SHRINK_SHARE_RESOURCES=1 VLLM_EEP_SHRINK_KEEP_PARENT=1 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_XFER_DESCS=1 VLLM_EEP_DEBUG_MAPPINGS=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_WARM_NIXL_TRANSFERS=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,ALLOC NCCL_DEBUG_FILE=/tmp/nccl-eep-%h-%p.log VLLM_EEP_SHARED_ARENA_REGISTRATION=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=UCX_RCACHE_ENABLE,VLLM_EEP_USE_COMM_SHRINK,NCCL_COMM_SHRINK_SHARE_RESOURCES,VLLM_EEP_SHRINK_KEEP_PARENT,RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_XFER_DESCS,VLLM_EEP_DEBUG_MAPPINGS,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_WARM_NIXL_TRANSFERS,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,AMD_LOG_LEVEL,PYTHONFAULTHANDLER,NCCL_DEBUG,NCCL_DEBUG_SUBSYS,NCCL_DEBUG_FILE,VLLM_EEP_SHARED_ARENA_REGISTRATION pytest -v -s --timeout=780 --timeout-method=thread distributed/test_elastic_ep.py -k enforce_eager_none || true
       - for f in /tmp/nccl-eep-*.log; do [ -e "$$f" ] || continue; echo "=== $$f ==="; echo "lines $$(wc -l < "$$f") shareable_buffers $$(grep -c 'Allocated shareable buffer' "$$f") freed $$(grep -c ncclCudaFree "$$f") destroyed $$(grep -c 'Destroy COMPLETE' "$$f") aborted $$(grep -ci ncclCommAbort "$$f") abort_complete $$(grep -c 'Abort COMPLETE' "$$f") init_complete $$(grep -c 'Init COMPLETE' "$$f")"; grep -B3 -A8 'hipIpcGetMemHandle failed' "$$f" || true; tail -n 200 "$$f"; done; rm -f /tmp/nccl-eep-*.log; true
-      - EEP_PASS=2of8 UCX_RCACHE_ENABLE=n PYTORCH_NO_HIP_MEMORY_CACHING=1 PYTORCH_NO_CUDA_MEMORY_CACHING=1 VLLM_EEP_USE_COMM_SHRINK=1 NCCL_COMM_SHRINK_SHARE_RESOURCES=0 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_XFER_DESCS=1 VLLM_EEP_DEBUG_MAPPINGS=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_WARM_NIXL_TRANSFERS=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,ALLOC NCCL_DEBUG_FILE=/tmp/nccl-eep-%h-%p.log VLLM_EEP_HOLD_OLD_EPLB_COMM=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=UCX_RCACHE_ENABLE,PYTORCH_NO_HIP_MEMORY_CACHING,PYTORCH_NO_CUDA_MEMORY_CACHING,VLLM_EEP_USE_COMM_SHRINK,NCCL_COMM_SHRINK_SHARE_RESOURCES,RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_XFER_DESCS,VLLM_EEP_DEBUG_MAPPINGS,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_WARM_NIXL_TRANSFERS,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,AMD_LOG_LEVEL,PYTHONFAULTHANDLER,NCCL_DEBUG,NCCL_DEBUG_SUBSYS,NCCL_DEBUG_FILE,VLLM_EEP_HOLD_OLD_EPLB_COMM pytest -v -s --timeout=780 --timeout-method=thread distributed/test_elastic_ep.py -k enforce_eager_none || true
+      - EEP_PASS=2of8 PYTORCH_NO_HIP_MEMORY_CACHING=1 PYTORCH_NO_CUDA_MEMORY_CACHING=1 UCX_RCACHE_ENABLE=n VLLM_EEP_USE_COMM_SHRINK=1 NCCL_COMM_SHRINK_SHARE_RESOURCES=1 VLLM_EEP_SHRINK_KEEP_PARENT=1 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_XFER_DESCS=1 VLLM_EEP_DEBUG_MAPPINGS=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_WARM_NIXL_TRANSFERS=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,ALLOC NCCL_DEBUG_FILE=/tmp/nccl-eep-%h-%p.log VLLM_EEP_SHARED_ARENA_REGISTRATION=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=PYTORCH_NO_HIP_MEMORY_CACHING,PYTORCH_NO_CUDA_MEMORY_CACHING,UCX_RCACHE_ENABLE,VLLM_EEP_USE_COMM_SHRINK,NCCL_COMM_SHRINK_SHARE_RESOURCES,VLLM_EEP_SHRINK_KEEP_PARENT,RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_XFER_DESCS,VLLM_EEP_DEBUG_MAPPINGS,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_WARM_NIXL_TRANSFERS,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,AMD_LOG_LEVEL,PYTHONFAULTHANDLER,NCCL_DEBUG,NCCL_DEBUG_SUBSYS,NCCL_DEBUG_FILE,VLLM_EEP_SHARED_ARENA_REGISTRATION pytest -v -s --timeout=780 --timeout-method=thread distributed/test_elastic_ep.py -k enforce_eager_none || true
       - for f in /tmp/nccl-eep-*.log; do [ -e "$$f" ] || continue; echo "=== $$f ==="; echo "lines $$(wc -l < "$$f") shareable_buffers $$(grep -c 'Allocated shareable buffer' "$$f") freed $$(grep -c ncclCudaFree "$$f") destroyed $$(grep -c 'Destroy COMPLETE' "$$f") aborted $$(grep -ci ncclCommAbort "$$f") abort_complete $$(grep -c 'Abort COMPLETE' "$$f") init_complete $$(grep -c 'Init COMPLETE' "$$f")"; grep -B3 -A8 'hipIpcGetMemHandle failed' "$$f" || true; tail -n 200 "$$f"; done; rm -f /tmp/nccl-eep-*.log; true
-      - EEP_PASS=3of8 UCX_RCACHE_ENABLE=n PYTORCH_NO_HIP_MEMORY_CACHING=1 PYTORCH_NO_CUDA_MEMORY_CACHING=1 VLLM_EEP_USE_COMM_SHRINK=1 NCCL_COMM_SHRINK_SHARE_RESOURCES=1 VLLM_EEP_SHRINK_KEEP_PARENT=1 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_XFER_DESCS=1 VLLM_EEP_DEBUG_MAPPINGS=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_WARM_NIXL_TRANSFERS=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,ALLOC NCCL_DEBUG_FILE=/tmp/nccl-eep-%h-%p.log VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=UCX_RCACHE_ENABLE,PYTORCH_NO_HIP_MEMORY_CACHING,PYTORCH_NO_CUDA_MEMORY_CACHING,VLLM_EEP_USE_COMM_SHRINK,NCCL_COMM_SHRINK_SHARE_RESOURCES,VLLM_EEP_SHRINK_KEEP_PARENT,RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_XFER_DESCS,VLLM_EEP_DEBUG_MAPPINGS,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_WARM_NIXL_TRANSFERS,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,AMD_LOG_LEVEL,PYTHONFAULTHANDLER,NCCL_DEBUG,NCCL_DEBUG_SUBSYS,NCCL_DEBUG_FILE pytest -v -s --timeout=780 --timeout-method=thread distributed/test_elastic_ep.py -k enforce_eager_none || true
+      - EEP_PASS=3of8 UCX_RCACHE_ENABLE=n VLLM_EEP_USE_COMM_SHRINK=1 NCCL_COMM_SHRINK_SHARE_RESOURCES=1 VLLM_EEP_SHRINK_KEEP_PARENT=1 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_XFER_DESCS=1 VLLM_EEP_DEBUG_MAPPINGS=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_WARM_NIXL_TRANSFERS=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,ALLOC NCCL_DEBUG_FILE=/tmp/nccl-eep-%h-%p.log VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=UCX_RCACHE_ENABLE,VLLM_EEP_USE_COMM_SHRINK,NCCL_COMM_SHRINK_SHARE_RESOURCES,VLLM_EEP_SHRINK_KEEP_PARENT,RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_XFER_DESCS,VLLM_EEP_DEBUG_MAPPINGS,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_WARM_NIXL_TRANSFERS,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,AMD_LOG_LEVEL,PYTHONFAULTHANDLER,NCCL_DEBUG,NCCL_DEBUG_SUBSYS,NCCL_DEBUG_FILE pytest -v -s --timeout=780 --timeout-method=thread distributed/test_elastic_ep.py -k enforce_eager_none || true
       - for f in /tmp/nccl-eep-*.log; do [ -e "$$f" ] || continue; echo "=== $$f ==="; echo "lines $$(wc -l < "$$f") shareable_buffers $$(grep -c 'Allocated shareable buffer' "$$f") freed $$(grep -c ncclCudaFree "$$f") destroyed $$(grep -c 'Destroy COMPLETE' "$$f") aborted $$(grep -ci ncclCommAbort "$$f") abort_complete $$(grep -c 'Abort COMPLETE' "$$f") init_complete $$(grep -c 'Init COMPLETE' "$$f")"; grep -B3 -A8 'hipIpcGetMemHandle failed' "$$f" || true; tail -n 200 "$$f"; done; rm -f /tmp/nccl-eep-*.log; true
-      - EEP_PASS=4of8 UCX_RCACHE_ENABLE=n PYTORCH_NO_HIP_MEMORY_CACHING=1 PYTORCH_NO_CUDA_MEMORY_CACHING=1 VLLM_EEP_USE_COMM_SHRINK=1 NCCL_COMM_SHRINK_SHARE_RESOURCES=0 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_XFER_DESCS=1 VLLM_EEP_DEBUG_MAPPINGS=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_WARM_NIXL_TRANSFERS=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,ALLOC NCCL_DEBUG_FILE=/tmp/nccl-eep-%h-%p.log VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=UCX_RCACHE_ENABLE,PYTORCH_NO_HIP_MEMORY_CACHING,PYTORCH_NO_CUDA_MEMORY_CACHING,VLLM_EEP_USE_COMM_SHRINK,NCCL_COMM_SHRINK_SHARE_RESOURCES,RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_XFER_DESCS,VLLM_EEP_DEBUG_MAPPINGS,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_WARM_NIXL_TRANSFERS,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,AMD_LOG_LEVEL,PYTHONFAULTHANDLER,NCCL_DEBUG,NCCL_DEBUG_SUBSYS,NCCL_DEBUG_FILE pytest -v -s --timeout=780 --timeout-method=thread distributed/test_elastic_ep.py -k enforce_eager_none || true
+      - EEP_PASS=4of8 UCX_RCACHE_ENABLE=n VLLM_EEP_USE_COMM_SHRINK=1 NCCL_COMM_SHRINK_SHARE_RESOURCES=1 VLLM_EEP_SHRINK_KEEP_PARENT=1 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_XFER_DESCS=1 VLLM_EEP_DEBUG_MAPPINGS=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_WARM_NIXL_TRANSFERS=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,ALLOC NCCL_DEBUG_FILE=/tmp/nccl-eep-%h-%p.log VLLM_EEP_SHARED_ARENA_REGISTRATION=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=UCX_RCACHE_ENABLE,VLLM_EEP_USE_COMM_SHRINK,NCCL_COMM_SHRINK_SHARE_RESOURCES,VLLM_EEP_SHRINK_KEEP_PARENT,RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_XFER_DESCS,VLLM_EEP_DEBUG_MAPPINGS,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_WARM_NIXL_TRANSFERS,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,AMD_LOG_LEVEL,PYTHONFAULTHANDLER,NCCL_DEBUG,NCCL_DEBUG_SUBSYS,NCCL_DEBUG_FILE,VLLM_EEP_SHARED_ARENA_REGISTRATION pytest -v -s --timeout=780 --timeout-method=thread distributed/test_elastic_ep.py -k enforce_eager_none || true
       - for f in /tmp/nccl-eep-*.log; do [ -e "$$f" ] || continue; echo "=== $$f ==="; echo "lines $$(wc -l < "$$f") shareable_buffers $$(grep -c 'Allocated shareable buffer' "$$f") freed $$(grep -c ncclCudaFree "$$f") destroyed $$(grep -c 'Destroy COMPLETE' "$$f") aborted $$(grep -ci ncclCommAbort "$$f") abort_complete $$(grep -c 'Abort COMPLETE' "$$f") init_complete $$(grep -c 'Init COMPLETE' "$$f")"; grep -B3 -A8 'hipIpcGetMemHandle failed' "$$f" || true; tail -n 200 "$$f"; done; rm -f /tmp/nccl-eep-*.log; true
-      - EEP_PASS=5of8 UCX_RCACHE_ENABLE=n PYTORCH_NO_HIP_MEMORY_CACHING=1 PYTORCH_NO_CUDA_MEMORY_CACHING=1 VLLM_EEP_USE_COMM_SHRINK=1 NCCL_COMM_SHRINK_SHARE_RESOURCES=1 VLLM_EEP_SHRINK_KEEP_PARENT=1 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_XFER_DESCS=1 VLLM_EEP_DEBUG_MAPPINGS=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_WARM_NIXL_TRANSFERS=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,ALLOC NCCL_DEBUG_FILE=/tmp/nccl-eep-%h-%p.log VLLM_EEP_HOLD_OLD_EPLB_COMM=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=UCX_RCACHE_ENABLE,PYTORCH_NO_HIP_MEMORY_CACHING,PYTORCH_NO_CUDA_MEMORY_CACHING,VLLM_EEP_USE_COMM_SHRINK,NCCL_COMM_SHRINK_SHARE_RESOURCES,VLLM_EEP_SHRINK_KEEP_PARENT,RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_XFER_DESCS,VLLM_EEP_DEBUG_MAPPINGS,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_WARM_NIXL_TRANSFERS,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,AMD_LOG_LEVEL,PYTHONFAULTHANDLER,NCCL_DEBUG,NCCL_DEBUG_SUBSYS,NCCL_DEBUG_FILE,VLLM_EEP_HOLD_OLD_EPLB_COMM pytest -v -s --timeout=780 --timeout-method=thread distributed/test_elastic_ep.py -k enforce_eager_none || true
+      - EEP_PASS=5of8 PYTORCH_NO_HIP_MEMORY_CACHING=1 PYTORCH_NO_CUDA_MEMORY_CACHING=1 UCX_RCACHE_ENABLE=n VLLM_EEP_USE_COMM_SHRINK=1 NCCL_COMM_SHRINK_SHARE_RESOURCES=1 VLLM_EEP_SHRINK_KEEP_PARENT=1 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_XFER_DESCS=1 VLLM_EEP_DEBUG_MAPPINGS=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_WARM_NIXL_TRANSFERS=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,ALLOC NCCL_DEBUG_FILE=/tmp/nccl-eep-%h-%p.log VLLM_EEP_SHARED_ARENA_REGISTRATION=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=PYTORCH_NO_HIP_MEMORY_CACHING,PYTORCH_NO_CUDA_MEMORY_CACHING,UCX_RCACHE_ENABLE,VLLM_EEP_USE_COMM_SHRINK,NCCL_COMM_SHRINK_SHARE_RESOURCES,VLLM_EEP_SHRINK_KEEP_PARENT,RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_XFER_DESCS,VLLM_EEP_DEBUG_MAPPINGS,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_WARM_NIXL_TRANSFERS,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,AMD_LOG_LEVEL,PYTHONFAULTHANDLER,NCCL_DEBUG,NCCL_DEBUG_SUBSYS,NCCL_DEBUG_FILE,VLLM_EEP_SHARED_ARENA_REGISTRATION pytest -v -s --timeout=780 --timeout-method=thread distributed/test_elastic_ep.py -k enforce_eager_none || true
       - for f in /tmp/nccl-eep-*.log; do [ -e "$$f" ] || continue; echo "=== $$f ==="; echo "lines $$(wc -l < "$$f") shareable_buffers $$(grep -c 'Allocated shareable buffer' "$$f") freed $$(grep -c ncclCudaFree "$$f") destroyed $$(grep -c 'Destroy COMPLETE' "$$f") aborted $$(grep -ci ncclCommAbort "$$f") abort_complete $$(grep -c 'Abort COMPLETE' "$$f") init_complete $$(grep -c 'Init COMPLETE' "$$f")"; grep -B3 -A8 'hipIpcGetMemHandle failed' "$$f" || true; tail -n 200 "$$f"; done; rm -f /tmp/nccl-eep-*.log; true
-      - EEP_PASS=6of8 UCX_RCACHE_ENABLE=n PYTORCH_NO_HIP_MEMORY_CACHING=1 PYTORCH_NO_CUDA_MEMORY_CACHING=1 VLLM_EEP_USE_COMM_SHRINK=1 NCCL_COMM_SHRINK_SHARE_RESOURCES=0 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_XFER_DESCS=1 VLLM_EEP_DEBUG_MAPPINGS=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_WARM_NIXL_TRANSFERS=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,ALLOC NCCL_DEBUG_FILE=/tmp/nccl-eep-%h-%p.log VLLM_EEP_HOLD_OLD_EPLB_COMM=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=UCX_RCACHE_ENABLE,PYTORCH_NO_HIP_MEMORY_CACHING,PYTORCH_NO_CUDA_MEMORY_CACHING,VLLM_EEP_USE_COMM_SHRINK,NCCL_COMM_SHRINK_SHARE_RESOURCES,RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_XFER_DESCS,VLLM_EEP_DEBUG_MAPPINGS,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_WARM_NIXL_TRANSFERS,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,AMD_LOG_LEVEL,PYTHONFAULTHANDLER,NCCL_DEBUG,NCCL_DEBUG_SUBSYS,NCCL_DEBUG_FILE,VLLM_EEP_HOLD_OLD_EPLB_COMM pytest -v -s --timeout=780 --timeout-method=thread distributed/test_elastic_ep.py -k enforce_eager_none || true
+      - EEP_PASS=6of8 UCX_RCACHE_ENABLE=n VLLM_EEP_USE_COMM_SHRINK=1 NCCL_COMM_SHRINK_SHARE_RESOURCES=1 VLLM_EEP_SHRINK_KEEP_PARENT=1 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_XFER_DESCS=1 VLLM_EEP_DEBUG_MAPPINGS=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_WARM_NIXL_TRANSFERS=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,ALLOC NCCL_DEBUG_FILE=/tmp/nccl-eep-%h-%p.log VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=UCX_RCACHE_ENABLE,VLLM_EEP_USE_COMM_SHRINK,NCCL_COMM_SHRINK_SHARE_RESOURCES,VLLM_EEP_SHRINK_KEEP_PARENT,RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_XFER_DESCS,VLLM_EEP_DEBUG_MAPPINGS,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_WARM_NIXL_TRANSFERS,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,AMD_LOG_LEVEL,PYTHONFAULTHANDLER,NCCL_DEBUG,NCCL_DEBUG_SUBSYS,NCCL_DEBUG_FILE pytest -v -s --timeout=780 --timeout-method=thread distributed/test_elastic_ep.py -k enforce_eager_none || true
       - for f in /tmp/nccl-eep-*.log; do [ -e "$$f" ] || continue; echo "=== $$f ==="; echo "lines $$(wc -l < "$$f") shareable_buffers $$(grep -c 'Allocated shareable buffer' "$$f") freed $$(grep -c ncclCudaFree "$$f") destroyed $$(grep -c 'Destroy COMPLETE' "$$f") aborted $$(grep -ci ncclCommAbort "$$f") abort_complete $$(grep -c 'Abort COMPLETE' "$$f") init_complete $$(grep -c 'Init COMPLETE' "$$f")"; grep -B3 -A8 'hipIpcGetMemHandle failed' "$$f" || true; tail -n 200 "$$f"; done; rm -f /tmp/nccl-eep-*.log; true
-      - EEP_PASS=7of8 UCX_RCACHE_ENABLE=n PYTORCH_NO_HIP_MEMORY_CACHING=1 PYTORCH_NO_CUDA_MEMORY_CACHING=1 VLLM_EEP_USE_COMM_SHRINK=1 NCCL_COMM_SHRINK_SHARE_RESOURCES=1 VLLM_EEP_SHRINK_KEEP_PARENT=1 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_XFER_DESCS=1 VLLM_EEP_DEBUG_MAPPINGS=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_WARM_NIXL_TRANSFERS=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,ALLOC NCCL_DEBUG_FILE=/tmp/nccl-eep-%h-%p.log VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=UCX_RCACHE_ENABLE,PYTORCH_NO_HIP_MEMORY_CACHING,PYTORCH_NO_CUDA_MEMORY_CACHING,VLLM_EEP_USE_COMM_SHRINK,NCCL_COMM_SHRINK_SHARE_RESOURCES,VLLM_EEP_SHRINK_KEEP_PARENT,RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_XFER_DESCS,VLLM_EEP_DEBUG_MAPPINGS,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_WARM_NIXL_TRANSFERS,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,AMD_LOG_LEVEL,PYTHONFAULTHANDLER,NCCL_DEBUG,NCCL_DEBUG_SUBSYS,NCCL_DEBUG_FILE pytest -v -s --timeout=780 --timeout-method=thread distributed/test_elastic_ep.py -k enforce_eager_none || true
+      - EEP_PASS=7of8 UCX_RCACHE_ENABLE=n VLLM_EEP_USE_COMM_SHRINK=1 NCCL_COMM_SHRINK_SHARE_RESOURCES=1 VLLM_EEP_SHRINK_KEEP_PARENT=1 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_XFER_DESCS=1 VLLM_EEP_DEBUG_MAPPINGS=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_WARM_NIXL_TRANSFERS=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,ALLOC NCCL_DEBUG_FILE=/tmp/nccl-eep-%h-%p.log VLLM_EEP_SHARED_ARENA_REGISTRATION=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=UCX_RCACHE_ENABLE,VLLM_EEP_USE_COMM_SHRINK,NCCL_COMM_SHRINK_SHARE_RESOURCES,VLLM_EEP_SHRINK_KEEP_PARENT,RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_XFER_DESCS,VLLM_EEP_DEBUG_MAPPINGS,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_WARM_NIXL_TRANSFERS,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,AMD_LOG_LEVEL,PYTHONFAULTHANDLER,NCCL_DEBUG,NCCL_DEBUG_SUBSYS,NCCL_DEBUG_FILE,VLLM_EEP_SHARED_ARENA_REGISTRATION pytest -v -s --timeout=780 --timeout-method=thread distributed/test_elastic_ep.py -k enforce_eager_none || true
       - for f in /tmp/nccl-eep-*.log; do [ -e "$$f" ] || continue; echo "=== $$f ==="; echo "lines $$(wc -l < "$$f") shareable_buffers $$(grep -c 'Allocated shareable buffer' "$$f") freed $$(grep -c ncclCudaFree "$$f") destroyed $$(grep -c 'Destroy COMPLETE' "$$f") aborted $$(grep -ci ncclCommAbort "$$f") abort_complete $$(grep -c 'Abort COMPLETE' "$$f") init_complete $$(grep -c 'Init COMPLETE' "$$f")"; grep -B3 -A8 'hipIpcGetMemHandle failed' "$$f" || true; tail -n 200 "$$f"; done; rm -f /tmp/nccl-eep-*.log; true
-      - EEP_PASS=8of8 UCX_RCACHE_ENABLE=n PYTORCH_NO_HIP_MEMORY_CACHING=1 PYTORCH_NO_CUDA_MEMORY_CACHING=1 VLLM_EEP_USE_COMM_SHRINK=1 NCCL_COMM_SHRINK_SHARE_RESOURCES=0 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_XFER_DESCS=1 VLLM_EEP_DEBUG_MAPPINGS=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_WARM_NIXL_TRANSFERS=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,ALLOC NCCL_DEBUG_FILE=/tmp/nccl-eep-%h-%p.log VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=UCX_RCACHE_ENABLE,PYTORCH_NO_HIP_MEMORY_CACHING,PYTORCH_NO_CUDA_MEMORY_CACHING,VLLM_EEP_USE_COMM_SHRINK,NCCL_COMM_SHRINK_SHARE_RESOURCES,RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_XFER_DESCS,VLLM_EEP_DEBUG_MAPPINGS,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_WARM_NIXL_TRANSFERS,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,AMD_LOG_LEVEL,PYTHONFAULTHANDLER,NCCL_DEBUG,NCCL_DEBUG_SUBSYS,NCCL_DEBUG_FILE pytest -v -s --timeout=780 --timeout-method=thread distributed/test_elastic_ep.py -k enforce_eager_none || true
+      - EEP_PASS=8of8 PYTORCH_NO_HIP_MEMORY_CACHING=1 PYTORCH_NO_CUDA_MEMORY_CACHING=1 UCX_RCACHE_ENABLE=n VLLM_EEP_USE_COMM_SHRINK=1 NCCL_COMM_SHRINK_SHARE_RESOURCES=1 VLLM_EEP_SHRINK_KEEP_PARENT=1 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_XFER_DESCS=1 VLLM_EEP_DEBUG_MAPPINGS=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_WARM_NIXL_TRANSFERS=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,ALLOC NCCL_DEBUG_FILE=/tmp/nccl-eep-%h-%p.log VLLM_EEP_SHARED_ARENA_REGISTRATION=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=PYTORCH_NO_HIP_MEMORY_CACHING,PYTORCH_NO_CUDA_MEMORY_CACHING,UCX_RCACHE_ENABLE,VLLM_EEP_USE_COMM_SHRINK,NCCL_COMM_SHRINK_SHARE_RESOURCES,VLLM_EEP_SHRINK_KEEP_PARENT,RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_XFER_DESCS,VLLM_EEP_DEBUG_MAPPINGS,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_WARM_NIXL_TRANSFERS,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,AMD_LOG_LEVEL,PYTHONFAULTHANDLER,NCCL_DEBUG,NCCL_DEBUG_SUBSYS,NCCL_DEBUG_FILE,VLLM_EEP_SHARED_ARENA_REGISTRATION pytest -v -s --timeout=780 --timeout-method=thread distributed/test_elastic_ep.py -k enforce_eager_none || true
       - for f in /tmp/nccl-eep-*.log; do [ -e "$$f" ] || continue; echo "=== $$f ==="; echo "lines $$(wc -l < "$$f") shareable_buffers $$(grep -c 'Allocated shareable buffer' "$$f") freed $$(grep -c ncclCudaFree "$$f") destroyed $$(grep -c 'Destroy COMPLETE' "$$f") aborted $$(grep -ci ncclCommAbort "$$f") abort_complete $$(grep -c 'Abort COMPLETE' "$$f") init_complete $$(grep -c 'Init COMPLETE' "$$f")"; grep -B3 -A8 'hipIpcGetMemHandle failed' "$$f" || true; tail -n 200 "$$f"; done; rm -f /tmp/nccl-eep-*.log; true
       # Every command ends in || true, so the step stays green and the log is the
       # deliverable rather than the result.

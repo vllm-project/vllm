@@ -44,6 +44,13 @@ def has_nixl() -> bool:
     return nixl_utils.NixlWrapper is not None
 
 
+# Expert arena -> how many live NIXL registrations in this process cover it,
+# and the agents that must stay alive for those registrations to hold. See
+# `_arena_registration_is_last`.
+_ARENA_USERS: dict[tuple[int, tuple[tuple[int, int], ...]], int] = {}
+_PARKED_AGENTS: list[object] = []
+
+
 class EplbCommunicator(ABC):
     """Abstract EPLB communicator for expert weight transfers."""
 
@@ -373,6 +380,9 @@ class NixlEplbCommunicator(EplbCommunicator):
         self._nixl_memory_type = "VRAM"
         # NIXL registration handles; deregistered in __del__.
         self._registered_descs: list[object] = []
+        # Identifies the expert arena this agent registered, so a teardown can
+        # tell whether another communicator still covers the same memory.
+        self._arena_key: tuple[int, tuple[tuple[int, int], ...]] | None = None
         self._remote_agents: dict[int, str] = {}
         # peer -> (layer, tensor) ->
         # (base_ptr, bytes_per_expert, dev_id, total_bytes, num_rows).
@@ -634,6 +644,48 @@ class NixlEplbCommunicator(EplbCommunicator):
         descs = self._nixl_wrapper.get_reg_descs(all_tensors)
         self._nixl_wrapper.register_memory(descs)
         self._registered_descs.append(descs)
+
+        if os.getenv("VLLM_EEP_SHARED_ARENA_REGISTRATION") == "1":
+            # The span of the expert weights, which is what peers read from.
+            # A span rather than the exact descriptor list, because a
+            # reconfiguration re-points the views and only has to land on the
+            # same arena, not on the same tensor objects.
+            lo = min(
+                tensor.data_ptr()
+                for layer in self._all_expert_weights
+                for tensor in layer
+            )
+            hi = max(
+                tensor.data_ptr() + tensor.numel() * tensor.element_size()
+                for layer in self._all_expert_weights
+                for tensor in layer
+            )
+            self._arena_key = (self._cuda_device_id, ((lo, hi),))
+            _ARENA_USERS[self._arena_key] = _ARENA_USERS.get(self._arena_key, 0) + 1
+
+    def _arena_registration_is_last(self) -> bool:
+        """Whether this teardown may release the registration over the arena.
+
+        A reconfiguration builds the new communicator before the switch, and
+        the expert arena never moves, so for a while two NIXL agents in this
+        process hold a registration over the very same pages. Whichever is
+        collected first would otherwise deregister memory the other is reading
+        from, which is the climb failing in the middle of the layer 0 reads.
+
+        Releasing is therefore allowed only for the last registration over the
+        arena. The earlier ones keep both their descriptors and their agent,
+        which is what `_PARKED_AGENTS` is for: dropping the agent would take
+        its registration down with it.
+        """
+        key = self._arena_key
+        if key is None:
+            return True
+        remaining = _ARENA_USERS.get(key, 1) - 1
+        if remaining > 0:
+            _ARENA_USERS[key] = remaining
+            return False
+        _ARENA_USERS.pop(key, None)
+        return True
 
     def _report_allocation_extents(self) -> None:
         """Report how much memory each published tensor really exports.
@@ -1042,9 +1094,12 @@ class NixlEplbCommunicator(EplbCommunicator):
 
         Diagnostic only.
         """
-        if os.getenv("VLLM_EEP_DEBUG_COMM_TEARDOWN") != "1":
-            return
+        # At interpreter shutdown the module globals are already gone, so even
+        # reading the flag can raise. A teardown report is never worth a
+        # traceback on the way out.
         with contextlib.suppress(Exception):
+            if os.getenv("VLLM_EEP_DEBUG_COMM_TEARDOWN") != "1":
+                return
             logger.warning(
                 "[EEP-DEBUG] eplb communicator teardown: %d registration(s), "
                 "%d remote agent(s), %d transfer handle(s)",
@@ -1054,7 +1109,18 @@ class NixlEplbCommunicator(EplbCommunicator):
             )
 
     def __del__(self) -> None:
-        self._report_teardown()
+        # At interpreter shutdown the module globals this body needs, down to
+        # `contextlib` itself, may already be None, and every worker exit then
+        # prints a traceback per communicator. Nothing here is worth that, so
+        # the whole teardown is guarded without touching a module global.
+        try:  # noqa: SIM105 `contextlib` is exactly what may be gone here
+            self._teardown()
+        except BaseException:  # noqa: BLE001
+            pass
+
+    def _teardown(self) -> None:
+        with contextlib.suppress(Exception):
+            self._report_teardown()
         with contextlib.suppress(Exception):
             for local_h, remote_h, xfer_h in self._xfer_entries:
                 with contextlib.suppress(Exception):
@@ -1063,6 +1129,22 @@ class NixlEplbCommunicator(EplbCommunicator):
                     self._nixl_wrapper.release_dlist_handle(local_h)
                 with contextlib.suppress(Exception):
                     self._nixl_wrapper.release_dlist_handle(remote_h)
+        release_arena = True
+        with contextlib.suppress(Exception):
+            release_arena = self._arena_registration_is_last()
+        if not release_arena:
+            # Park the agent untouched. Removing its peers here would run the
+            # same teardown paths over the same rkeys that the live agent is
+            # using, which is the defect this guard exists for.
+            with contextlib.suppress(Exception):
+                _PARKED_AGENTS.append(self._nixl_wrapper)
+                logger.warning(
+                    "[EEP-DEBUG] keeping an eplb registration alive because "
+                    "another communicator still covers the same expert arena, "
+                    "%d agent(s) parked so far",
+                    len(_PARKED_AGENTS),
+                )
+            return
         with contextlib.suppress(Exception):
             for descs in self._registered_descs:
                 with contextlib.suppress(Exception):
