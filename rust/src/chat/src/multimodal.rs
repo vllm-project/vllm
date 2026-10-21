@@ -14,15 +14,15 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::Path;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 use itertools::{Either, izip};
 use llm_multimodal::registry::ModelRegistryError;
 use llm_multimodal::{
     AsyncMultiModalTracker, AudioClip, AudioPreProcessor, EncoderFieldLayouts, FieldLayout,
     ImageFrame, MediaConnector, MediaConnectorConfig, MediaContentPart, Modality, ModelMetadata,
-    ModelProcessorSpec, ModelRegistry, PreProcessorConfig, PreprocessedEncoderInputs,
-    PromptReplacement, Tokenizer as TokenResolver, TrackedMedia, VideoClip, VisionPreProcessor,
+    ModelProcessorSpec, PreProcessorConfig, PreprocessedEncoderInputs, PromptReplacement,
+    Tokenizer as TokenResolver, TrackedMedia, VideoClip, VisionPreProcessor,
     VisionPreprocessingContext,
 };
 use serde::{Deserialize, Serialize};
@@ -42,6 +42,7 @@ mod expand;
 mod image;
 mod input;
 mod item;
+mod models;
 mod preprocessed;
 mod tensor;
 mod timing;
@@ -132,8 +133,7 @@ impl MultimodalModelContext {
 
     /// Resolve a static model processor spec for one loaded model.
     fn resolve_model_spec(&self) -> Option<&'static dyn ModelProcessorSpec> {
-        static REGISTRY: LazyLock<ModelRegistry> = LazyLock::new(ModelRegistry::new);
-        REGISTRY.lookup(&self.metadata())
+        models::lookup_spec(&self.metadata())
     }
 
     /// Build a vision preprocessor for one loaded model and modality.
@@ -714,7 +714,7 @@ fn input_audio_data_url(data: &str, format: Option<&str>) -> Result<String> {
 ///
 /// Embedding inputs share their base modality's budget rather than getting one
 /// of their own, matching Python's `modality.replace("_embeds", "")` in
-/// `vllm/entrypoints/chat_utils.py`.
+/// `vllm/renderers/chat_utils.py`.
 fn media_part_limit_modality(part: &MediaContentPart) -> Option<MmModality> {
     match part {
         MediaContentPart::Text { .. } => None,
@@ -996,6 +996,13 @@ mod tests {
     pub(super) const QWEN3_IMAGE_PAD_ID: u32 = 151655;
     pub(super) const QWEN3_VIDEO_PAD_ID: u32 = 151656;
 
+    pub(super) const STEP3_IM_PATCH_ID: u32 = 151680;
+    pub(super) const STEP3_IM_START_ID: u32 = 151681;
+    pub(super) const STEP3_IM_END_ID: u32 = 151682;
+    pub(super) const STEP3_PATCH_START_ID: u32 = 151683;
+    pub(super) const STEP3_PATCH_END_ID: u32 = 151684;
+    pub(super) const STEP3_PATCH_NEWLINE_ID: u32 = 151685;
+
     pub(super) const DEEPSEEK_V41_IMAGE_ID: u32 = 129264;
     pub(super) const DEEPSEEK_V41_IMAGE_PAD_ID: u32 = 129265;
 
@@ -1013,6 +1020,17 @@ mod tests {
         TestTokenizer::new()
             .with_regular_token("<|image_pad|>", QWEN3_IMAGE_PAD_ID)
             .with_regular_token("<|video_pad|>", QWEN3_VIDEO_PAD_ID)
+    }
+
+    /// Step5-VL reuses Step3-VL's six multimodal special tokens.
+    pub(super) fn step3_vl_tokenizer() -> TestTokenizer {
+        TestTokenizer::new()
+            .with_regular_token("<im_patch>", STEP3_IM_PATCH_ID)
+            .with_regular_token("<im_start>", STEP3_IM_START_ID)
+            .with_regular_token("<im_end>", STEP3_IM_END_ID)
+            .with_regular_token("<patch_start>", STEP3_PATCH_START_ID)
+            .with_regular_token("<patch_end>", STEP3_PATCH_END_ID)
+            .with_regular_token("<patch_newline>", STEP3_PATCH_NEWLINE_ID)
     }
 
     fn test_info_with_limits(
@@ -1204,6 +1222,76 @@ mod tests {
 
         assert_eq!(info.placeholder_token(Modality::Image), Some("<|image|>"));
         assert_eq!(info.placeholder_token(Modality::Video), None);
+    }
+
+    fn step5_vl_info() -> MultimodalModelInfo {
+        let config = serde_json::json!({"model_type": "step5_vl"});
+        test_info("step5_vl", config, step3_vl_tokenizer())
+    }
+
+    #[test]
+    fn step5_vl_resolves_image_support_only() {
+        let info = step5_vl_info();
+
+        assert_eq!(info.placeholder_token(Modality::Image), Some("<im_patch>"));
+        assert_eq!(info.placeholder_token(Modality::Video), None);
+        assert_eq!(info.placeholder_token(Modality::Audio), None);
+
+        let image = info.image.as_ref().expect("image support should resolve");
+        // The marker and the embed token are the same `<im_patch>` token; the
+        // structural tokens only appear inside the replacement sequence.
+        assert_eq!(image.placeholder.marker_token_id, STEP3_IM_PATCH_ID);
+        assert_eq!(image.placeholder.embed_token_id, STEP3_IM_PATCH_ID);
+        assert_eq!(image.processor.model_name(), "step3_vl");
+    }
+
+    #[test]
+    fn step5_vl_declares_unlimited_image_modality_only() {
+        let info = step5_vl_info();
+        let raw = info.context.resolve_model_spec().expect("step3_vl spec should resolve");
+        let limits = raw.modality_limits(&info.context.metadata()).unwrap();
+
+        assert_eq!(limits.get(&Modality::Image), Some(&usize::MAX));
+        assert_eq!(limits.get(&Modality::Video), None);
+        assert_eq!(limits.get(&Modality::Audio), None);
+    }
+
+    #[test]
+    fn step5_text_only_model_does_not_resolve_multimodal_support() {
+        let context = MultimodalModelContext {
+            model_id: "step5-test".to_string(),
+            model_type: Some("step5".to_string()),
+            config: serde_json::json!({"model_type": "step5"}),
+            tokenizer: TokenizerResolver(Arc::new(TestTokenizer::new())),
+        };
+
+        let info = MultimodalModelInfo::from_loaded(
+            context,
+            PreProcessorConfig::default(),
+            PreProcessorConfig::default(),
+            HashMap::new(),
+        )
+        .expect("resolution should not error");
+
+        assert!(info.is_none());
+    }
+
+    #[test]
+    fn deepseek_v41_uses_spec_declared_encoder_input_key() {
+        let context = MultimodalModelContext {
+            model_id: "deepseek-v4.1-test".to_string(),
+            model_type: Some("deepseek_v41".to_string()),
+            config: serde_json::json!({"model_type": "deepseek_v41"}),
+            tokenizer: TokenizerResolver(Arc::new(TestTokenizer::new())),
+        };
+        let raw = context.resolve_model_spec().expect("deepseek_v41 spec should resolve");
+        let spec = ResolvedMultimodalSpec::new(raw, Modality::Image);
+
+        assert_eq!(spec.primary_key(), "patches");
+        assert!(matches!(
+            spec.field_layout_for("patches"),
+            Some(FieldLayout::Flat { sizes_key }) if sizes_key == "patches_per_image"
+        ));
     }
 
     fn deepseek_v41_info() -> MultimodalModelInfo {

@@ -23,6 +23,7 @@ from vllm.config import (
 )
 from vllm.config.cache import MambaCacheMode
 from vllm.config.kv_events import KVEventsConfig
+from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (
     SimpleCPUOffloadConnector,
 )
@@ -46,13 +47,14 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
-    KpoolTailSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheSpec,
     KVCacheTensor,
     MambaSpec,
     SlidingWindowSpec,
 )
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 from vllm.v1.simple_kv_offload.manager import SimpleCPUOffloadScheduler
@@ -143,13 +145,12 @@ def _make_scratch_kv_cache_config(
     register_all_kvcache_specs(vllm_config=None)
     fa_config = _make_kv_cache_config(num_blocks, num_groups=1)
     scratch_layers = ["layer_scratch"]
-    scratch_spec = KpoolTailSpec(
+    scratch_spec = CircularBufferSpec(
         block_size=scratch_block_size,
         num_kv_heads=2,
         head_size=HEAD_SIZE,
         head_size_v=0,
         dtype=DTYPE,
-        sliding_window=scratch_block_size,
     )
     assert not scratch_spec.prefix_cacheable
     scratch_bytes = scratch_spec.page_size_bytes * num_blocks
@@ -211,6 +212,86 @@ class SchedulerFixture:
     vllm_config: VllmConfig
     kv_cache_config: KVCacheConfig
     num_groups: int = 1
+
+
+@pytest.mark.parametrize(
+    ("backend", "source"),
+    [("cpu", CacheHitSource.HOST), ("disk", CacheHitSource.DISK)],
+)
+def test_connector_reports_configured_cache_source(
+    tmp_path, backend: str, source: CacheHitSource
+):
+    kv_cache_config = _make_kv_cache_config(num_blocks=4)
+    vllm_config = _make_vllm_config()
+    extra_config = {
+        "cpu_bytes_to_use_per_rank": _BYTES_PER_BLOCK * 4,
+        "kv_offload_backend": backend,
+    }
+    if backend == "disk":
+        extra_config.update(
+            disk_path=str(tmp_path / "kv-offload.bin"),
+            disk_capacity_bytes=_BYTES_PER_BLOCK * 4,
+        )
+    assert vllm_config.kv_transfer_config is not None
+    vllm_config.kv_transfer_config.kv_connector_extra_config = extra_config
+
+    connector = SimpleCPUOffloadConnector(
+        vllm_config,
+        KVConnectorRole.SCHEDULER,
+        kv_cache_config,
+    )
+
+    assert connector.get_external_cache_hit_sources(None, 32) == {source: 32}  # type: ignore[arg-type]
+    assert connector.get_external_cache_hit_sources(None, 0) == {}  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("num_layers", [1, 2])
+@pytest.mark.parametrize("backend", ["cpu", "disk"])
+def test_connector_explicit_cpu_blocks_align_uneven_stages(
+    tmp_path, num_layers: int, backend: str
+):
+    """The same configured pool size must fit lighter and heavier PP stages."""
+    config = _make_kv_cache_config(num_blocks=16)
+    names = [f"layer_{i}" for i in range(num_layers)]
+    config.kv_cache_groups[0].layer_names = names
+    config.kv_cache_tensors[0].layers = names
+    config.kv_cache_tensors[0].size *= num_layers
+    vllm_config = _make_vllm_config()
+    extra = {
+        "cpu_bytes_to_use_per_rank": _BYTES_PER_BLOCK * 8,
+        "num_cpu_blocks": 4,
+        "kv_offload_backend": backend,
+    }
+    if backend == "disk":
+        extra.update(
+            disk_path=str(tmp_path / "offload.bin"),
+            disk_capacity_bytes=_BYTES_PER_BLOCK * 8,
+        )
+    assert vllm_config.kv_transfer_config is not None
+    vllm_config.kv_transfer_config.kv_connector_extra_config = extra
+    connector = SimpleCPUOffloadConnector(
+        vllm_config, KVConnectorRole.SCHEDULER, config
+    )
+    assert connector.scheduler_manager is not None
+    assert connector.scheduler_manager.num_cpu_blocks == 4
+    assert len(connector.scheduler_manager.cpu_block_pool.blocks) == 4
+
+
+@pytest.mark.parametrize(
+    "count, capacity_bytes",
+    [(count, _BYTES_PER_BLOCK * 8) for count in [0, -1, True, 1.5, "4", 9]]
+    + [(1, _BYTES_PER_BLOCK // 2)],
+)
+def test_connector_rejects_invalid_explicit_cpu_blocks(count, capacity_bytes):
+    config = _make_kv_cache_config(num_blocks=16)
+    vllm_config = _make_vllm_config()
+    assert vllm_config.kv_transfer_config is not None
+    vllm_config.kv_transfer_config.kv_connector_extra_config = {
+        "cpu_bytes_to_use_per_rank": capacity_bytes,
+        "num_cpu_blocks": count,
+    }
+    with pytest.raises(ValueError, match="num_cpu_blocks"):
+        SimpleCPUOffloadConnector(vllm_config, KVConnectorRole.SCHEDULER, config)
 
 
 def make_scheduler(
@@ -338,7 +419,6 @@ def make_scheduler_output(
         total_num_scheduled_tokens=sum(req_id_to_num_tokens.values()),
         scheduled_spec_decode_tokens={},
         scheduled_encoder_inputs={},
-        num_common_prefix_blocks=[],
         preempted_req_ids=set(),
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
@@ -2325,8 +2405,6 @@ def _make_hybrid_attention_mamba_scheduler(
     enable_kv_cache_events: bool = False,
 ) -> SchedulerFixture:
     """Build a scheduler for one attention group plus one Mamba group."""
-    scheduler_block_size = scheduler_block_size or block_size
-    hash_block_size = hash_block_size or block_size
     attention_spec = FullAttentionSpec(
         block_size=attention_block_size,
         num_kv_heads=NUM_KV_HEADS,
@@ -2339,9 +2417,38 @@ def _make_hybrid_attention_mamba_scheduler(
         dtypes=(torch.float32,),
         mamba_cache_mode=mamba_cache_mode,
     )
+    return _make_two_group_scheduler(
+        attention_spec,
+        ("mamba", mamba_spec),
+        num_cpu_blocks=num_cpu_blocks,
+        num_gpu_blocks=num_gpu_blocks,
+        scheduler_block_size=scheduler_block_size or block_size,
+        hash_block_size=hash_block_size or block_size,
+        dcp_world_size=dcp_world_size,
+        lazy=lazy,
+        mamba_cache_mode=mamba_cache_mode,
+        enable_kv_cache_events=enable_kv_cache_events,
+    )
+
+
+def _make_two_group_scheduler(
+    attention_spec: FullAttentionSpec,
+    second_group: tuple[str, KVCacheSpec],
+    *,
+    num_cpu_blocks: int,
+    num_gpu_blocks: int,
+    scheduler_block_size: int,
+    hash_block_size: int,
+    dcp_world_size: int,
+    lazy: bool = False,
+    mamba_cache_mode: MambaCacheMode = "align",
+    enable_kv_cache_events: bool = False,
+) -> SchedulerFixture:
+    """Build a scheduler for one attention group plus one named second group."""
+    second_name, second_spec = second_group
     groups = [
         KVCacheGroupSpec(["attention"], attention_spec),
-        KVCacheGroupSpec(["mamba"], mamba_spec),
+        KVCacheGroupSpec([second_name], second_spec),
     ]
     tensors = [
         KVCacheTensor(
@@ -2350,7 +2457,7 @@ def _make_hybrid_attention_mamba_scheduler(
             layer_stride=spec.page_size_bytes * num_gpu_blocks,
             block_stride=spec.page_size_bytes,
         )
-        for group, spec in zip(groups, (attention_spec, mamba_spec))
+        for group, spec in zip(groups, (attention_spec, second_spec))
     ]
     kv_cache_config = KVCacheConfig(
         num_blocks=num_gpu_blocks,
@@ -2398,34 +2505,48 @@ def test_hybrid_store_uses_resolved_group_block_sizes() -> None:
     silently offloads only a fraction of them.
     """
     attention_block_size = BLOCK_SIZE
-    mamba_block_size = 4 * BLOCK_SIZE
+    replicated_block_size = 4 * BLOCK_SIZE
     dcp_world_size = 2
-    fix = _make_hybrid_attention_mamba_scheduler(
+    fix = _make_two_group_scheduler(
+        FullAttentionSpec(
+            block_size=attention_block_size,
+            num_kv_heads=NUM_KV_HEADS,
+            head_size=HEAD_SIZE,
+            dtype=DTYPE,
+        ),
+        (
+            "replicated_attention",
+            FullAttentionSpec(
+                block_size=replicated_block_size,
+                num_kv_heads=NUM_KV_HEADS,
+                head_size=HEAD_SIZE,
+                dtype=DTYPE,
+                dcp_sharded=False,
+            ),
+        ),
         num_cpu_blocks=32,
         num_gpu_blocks=32,
-        attention_block_size=attention_block_size,
-        block_size=mamba_block_size,
+        scheduler_block_size=replicated_block_size,
         # Every prefix-cacheable group's resolved block size must be a multiple
         # of the hash block, so it cannot exceed the smallest of them.
         hash_block_size=BLOCK_SIZE,
         dcp_world_size=dcp_world_size,
-        mamba_cache_mode="none",
     )
     sched = fix.scheduler
     gpu_pool = fix.gpu_block_pool
-    attention_size, mamba_size = sched.group_block_sizes
+    attention_size, replicated_size = sched.group_block_sizes
     assert attention_size == attention_block_size * dcp_world_size
-    assert mamba_size == mamba_block_size
+    assert replicated_size == replicated_block_size
 
     confirmed = 2 * sched.block_size
     req = _make_cp_request(num_blocks=8, virtual_block_size=BLOCK_SIZE)
     attention_blocks = _allocate_cp_gpu_blocks(
         gpu_pool, req, confirmed // attention_size, attention_size, group_id=0
     )
-    mamba_blocks = _allocate_cp_gpu_blocks(
-        gpu_pool, req, confirmed // mamba_size, mamba_size, group_id=1
+    replicated_blocks = _allocate_cp_gpu_blocks(
+        gpu_pool, req, confirmed // replicated_size, replicated_size, group_id=1
     )
-    kv_blocks = KVCacheBlocks(blocks=(attention_blocks, mamba_blocks))
+    kv_blocks = KVCacheBlocks(blocks=(attention_blocks, replicated_blocks))
     sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
     sched.build_connector_meta(
         make_scheduler_output(
@@ -2446,11 +2567,11 @@ def test_hybrid_store_uses_resolved_group_block_sizes() -> None:
     # count.
     assert sched._reqs_to_store[req.request_id].num_stored_blocks == [
         confirmed // attention_size,
-        confirmed // mamba_size,
+        confirmed // replicated_size,
     ]
     assert set(meta.store_gpu_blocks) == {
         *(b.block_id for b in attention_blocks),
-        *(b.block_id for b in mamba_blocks),
+        *(b.block_id for b in replicated_blocks),
     }
 
 

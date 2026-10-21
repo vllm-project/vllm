@@ -1064,7 +1064,11 @@ class xpu_ops:
             "when block_table is disabled, cu_seqlens_k is needed"
         )
         if out is None:
-            out = torch.empty(q.shape, dtype=q.dtype, device=q.device)
+            out = torch.empty(
+                q.shape[:-1] + (v.shape[-1],),
+                dtype=q.dtype,
+                device=q.device,
+            )
         real_window_size: tuple[int, int]
         if window_size is None:
             real_window_size = (-1, -1)
@@ -1087,8 +1091,8 @@ class xpu_ops:
             block_table=block_table,
             s_aux=s_aux,
             window_size=real_window_size,
-            # alibi_slopes = alibi_slopes,
-            # softcap=softcap,
+            alibi_slopes=alibi_slopes,
+            softcap=softcap,
             return_softmax_lse=return_softmax_lse,
             q_descale=q_descale,
             k_descale=k_descale,
