@@ -5,16 +5,9 @@ steps:
 - label: ":intel: (BMG) Samplers Test (XPU Kernel)"
   key: samplers-test-xpu-kernel-intel
   timeout_in_minutes: 40
-  device: intel_gpu
-  agent_tags:
-    label: production
-    gpu: 1+
-    mem: 16+
-  no_plugin: true
-  working_dir: "."
+  device: intel_gpu_k8s
+  working_dir: "/workspace/vllm"
   env:
-    REGISTRY: "public.ecr.aws/q9t5s3a7"
-    REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
   - vllm/model_executor/layers
@@ -22,25 +15,15 @@ steps:
   - tests/conftest.py
   - vllm/entrypoints/generate/beam_search
   commands:
-    - >-
-      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'cd tests &&
-      VLLM_XPU_USE_SAMPLER_KERNEL=1 pytest -v -s samplers
-      --ignore=samplers/test_beam_search.py'
+    - cd tests
+    - VLLM_XPU_USE_SAMPLER_KERNEL=1 pytest -v -s samplers --ignore=samplers/test_beam_search.py
 
 - label: ":intel: (BMG) Samplers Beam Search Test (XPU Kernel)"
   key: samplers-beam-search-test-xpu-kernel-intel
   timeout_in_minutes: 40
-  device: intel_gpu
-  agent_tags:
-    label: production
-    gpu: 1+
-    mem: 24+
-  no_plugin: true
-  working_dir: "."
+  device: intel_gpu_k8s
+  working_dir: "/workspace/vllm"
   env:
-    REGISTRY: "public.ecr.aws/q9t5s3a7"
-    REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
   - vllm/model_executor/layers
@@ -48,7 +31,5 @@ steps:
   - tests/conftest.py
   - vllm/entrypoints/generate/beam_search
   commands:
-    - >-
-      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'cd tests &&
-      VLLM_XPU_USE_SAMPLER_KERNEL=1 pytest -v -s samplers/test_beam_search.py'
+    - cd tests
+    - VLLM_XPU_USE_SAMPLER_KERNEL=1 pytest -v -s samplers/test_beam_search.py

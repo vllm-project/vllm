@@ -5,22 +5,13 @@ steps:
 - label: ":intel: (BMG) Benchmarks CLI"
   key: benchmarks-cli-test
   timeout_in_minutes: 40
-  device: intel_gpu
-  agent_tags:
-    label: production
-    gpu: 1+
-    mem: 16+
-  no_plugin: true
-  working_dir: "."
+  device: intel_gpu_k8s
+  working_dir: "/workspace/vllm"
   env:
-    REGISTRY: "public.ecr.aws/q9t5s3a7"
-    REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
   - vllm/
   - tests/benchmarks/
   commands:
-    - >-
-      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'cd tests &&
-      pytest -v -s benchmarks/'
+    - cd tests
+    - pytest -v -s benchmarks/

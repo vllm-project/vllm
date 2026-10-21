@@ -50,7 +50,6 @@ tests/lora/test_qwen3moe_tp.py  # --ignore'd from sharded LoRA run; no dedicated
 # tests/v1/ - the v1 subtree is otherwise covered by many `pytest v1/...` jobs.
 tests/v1/ec_connector/integration/test_epd_correctness.py  # run_epd_correctness_test.sh exists but no Buildkite job invokes it
 tests/v1/ec_connector/integration/test_nixl_failure.py  # 2-GPU + NIXL E/PD integration test (#55290); no Buildkite job collects ec_connector/integration/
-tests/v1/kv_connector/nixl_integration/test_disagg_accuracy.py  # run by intel_jobs/misc_intel.yaml's run_xpu_disagg_accuracy_test.sh, which names it via $EXP_ROOT (the script's own dir) - not statically resolvable
 
 # tests/platforms/
 tests/platforms/test_cpu.py  # CPU-only unit test; no job targets tests/platforms/
