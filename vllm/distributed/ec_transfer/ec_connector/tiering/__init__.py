@@ -4,6 +4,7 @@
 """Tiered encoder-cache connector building blocks."""
 
 from vllm.distributed.ec_transfer.ec_connector.tiering.config import (
+    ECFileSystemBackpressureConfig,
     ECFileSystemTierConfig,
     ECTieringConfig,
 )
@@ -26,6 +27,7 @@ __all__ = [
     "EC_FILE_FORMAT_VERSION",
     "ECCacheNamespace",
     "ECFileEntry",
+    "ECFileSystemBackpressureConfig",
     "ECFileSystemTier",
     "ECFileSystemTierManager",
     "ECFileSystemTierConfig",

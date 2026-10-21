@@ -12,9 +12,16 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from uuid import uuid4
 
+from vllm.distributed.ec_transfer.ec_connector.tiering.config import (
+    ECFileSystemBackpressureConfig,
+)
 from vllm.distributed.ec_transfer.ec_connector.tiering.layout import (
     get_ec_entry_path,
     get_ec_temporary_path,
+)
+from vllm.v1.kv_offload.tiering.backpressure import (
+    BackpressureDetector,
+    EMABackpressureDetector,
 )
 
 if TYPE_CHECKING:
@@ -96,6 +103,7 @@ class ECFileSystemTierManager:
         n_write_threads: int,
         *,
         fsync: bool = False,
+        backpressure: ECFileSystemBackpressureConfig | None = None,
         executor: _ECFileIOExecutor | None = None,
     ) -> None:
         if executor is None:
@@ -109,6 +117,12 @@ class ECFileSystemTierManager:
         self._namespace_digest = namespace_digest
         self._fsync = fsync
         self._executor = executor
+        self._backpressure_detector: BackpressureDetector | None = None
+        if backpressure is not None and backpressure.enabled:
+            self._backpressure_detector = EMABackpressureDetector(
+                high_water_s=backpressure.high_water_s,
+                low_water_s=backpressure.low_water_s,
+            )
         self._accepting = True
         self._shutdown = False
         self._next_generation = 0
@@ -156,6 +170,9 @@ class ECFileSystemTierManager:
         """Submit a write; publish it in memory only after completion."""
         if not self._accepting:
             return False
+        if self._backpressure_detector is not None:
+            if not self._backpressure_detector.should_store(len(sources)):
+                return False
 
         entry_path = get_ec_entry_path(
             self._root_dir,
@@ -234,6 +251,11 @@ class ECFileSystemTierManager:
     def _complete_write(self, completion: ECFileIOCompletion) -> None:
         entry = self._pending_writes.pop(completion.job_id)
         if completion.success:
+            if self._backpressure_detector is not None:
+                self._backpressure_detector.on_store_completed(
+                    completion.queue_time + completion.transfer_time,
+                    completion.file_size_bytes,
+                )
             self._entries[completion.cache_key] = _IndexedEntry(
                 entry=entry,
                 generation=self._next_generation,
@@ -288,7 +310,8 @@ class ECFileSystemTier(Protocol):
         The sources must contain every byte of every block, including undefined
         padding in the final block. On acceptance, exactly one completion must
         eventually be returned by :meth:`poll_completed_writes`. Return
-        ``False`` when the tier is no longer accepting work.
+        ``False`` when the tier is no longer accepting work or store pressure
+        policy skips this cache opportunity.
         """
         ...
 

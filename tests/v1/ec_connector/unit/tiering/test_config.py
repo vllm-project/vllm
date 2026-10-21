@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from vllm.distributed.ec_transfer.ec_connector.tiering.config import (
+    ECFileSystemBackpressureConfig,
     ECFileSystemTierConfig,
     ECTieringConfig,
 )
@@ -50,6 +51,11 @@ def test_filesystem_tier_uses_thread_defaults() -> None:
         capacity_bytes=4096,
         n_read_threads=4,
         n_write_threads=2,
+        backpressure=ECFileSystemBackpressureConfig(
+            enabled=True,
+            high_water_s=0.010,
+            low_water_s=0.002,
+        ),
         fsync=False,
     )
 
@@ -65,6 +71,11 @@ def test_filesystem_tier_accepts_explicit_values() -> None:
                         "capacity_bytes": 8192,
                         "n_read_threads": 8,
                         "n_write_threads": 3,
+                        "backpressure": {
+                            "enabled": False,
+                            "high_water_s": 0.2,
+                            "low_water_s": 0.1,
+                        },
                         "fsync": True,
                     }
                 ]
@@ -77,6 +88,11 @@ def test_filesystem_tier_accepts_explicit_values() -> None:
         capacity_bytes=8192,
         n_read_threads=8,
         n_write_threads=3,
+        backpressure=ECFileSystemBackpressureConfig(
+            enabled=False,
+            high_water_s=0.2,
+            low_water_s=0.1,
+        ),
         fsync=True,
     )
 
@@ -95,6 +111,42 @@ def test_filesystem_tier_accepts_explicit_values() -> None:
         (
             [{"type": "fs", "root_dir": "/tmp/cache"}],
             r"'capacity_bytes' is required",
+        ),
+        (
+            [
+                {
+                    "type": "fs",
+                    "root_dir": "/tmp/cache",
+                    "capacity_bytes": 1,
+                    "backpressure": True,
+                }
+            ],
+            r"filesystem backpressure must be a dictionary",
+        ),
+        (
+            [
+                {
+                    "type": "fs",
+                    "root_dir": "/tmp/cache",
+                    "capacity_bytes": 1,
+                    "backpressure": {
+                        "high_water_s": 0.1,
+                        "low_water_s": 0.2,
+                    },
+                }
+            ],
+            r"'low_water_s' must be less than or equal to 'high_water_s'",
+        ),
+        (
+            [
+                {
+                    "type": "fs",
+                    "root_dir": "/tmp/cache",
+                    "capacity_bytes": 1,
+                    "backpressure": {"alpha": 0.2},
+                }
+            ],
+            r"backpressure contains unsupported fields: alpha",
         ),
         (
             [
