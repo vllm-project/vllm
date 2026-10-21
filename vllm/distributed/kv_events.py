@@ -70,7 +70,8 @@ class BlockStored(KVCacheEvent):
     """Extra keys used in block hash computation, one entry per block in
     block_hashes. Each entry contains, in order, the LoRA name (if
     `lora_name` is set), `(mm_identifier, offset)` pairs, the cache_salt
-    string and prompt embedding digests for that specific block. These are
+    string, prompt embedding digests and `False` if the request set
+    `return_routed_experts=False`, for that specific block. These are
     published untagged; the block hash itself uses each value tagged with
     its source, e.g. `("lora", name)` or `("mm", mm_identifier, offset)`.
     """

@@ -100,6 +100,20 @@ class TestChatCompletionStopTokenIds:
 
         assert sampling_params.routed_experts_prompt_start == 3
 
+    def test_return_routed_experts_is_forwarded(self):
+        request = ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "hello"}],
+            return_routed_experts=False,
+        )
+
+        sampling_params = request.to_sampling_params(
+            max_tokens=100,
+            default_sampling_params={},
+        )
+
+        assert sampling_params.return_routed_experts is False
+
     def test_duplicate_stop_token_ids_deduplicated(self):
         """Overlapping stop_token_ids between client and server are deduplicated."""
         request = ChatCompletionRequest(

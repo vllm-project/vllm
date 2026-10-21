@@ -86,3 +86,20 @@ async def test_generate_routed_experts(client):
     assert (routed_experts >= 0).all()
     assert (routed_experts < NUM_LOCAL_EXPERTS).all()
     assert num_tokens == len(prompt_token_ids) + len(choice["token_ids"]) - 1
+
+
+@pytest.mark.asyncio
+async def test_generate_routed_experts_opt_out(client):
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {
+            "max_tokens": 10,
+            "temperature": 0.0,
+            "return_routed_experts": False,
+        },
+        "stream": False,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    resp.raise_for_status()
+    assert resp.json()["choices"][0]["routed_experts"] is None

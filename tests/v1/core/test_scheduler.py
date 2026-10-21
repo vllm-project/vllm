@@ -315,6 +315,128 @@ def test_evicted_blocks_release_their_auxiliary_outputs_past_capacity():
     assert list(metadata.released_block_hashes) == first.block_hashes[:3]
 
 
+def test_routed_experts_opt_out_is_not_recorded():
+    """A request with return_routed_experts=False is not sent to the worker."""
+    scheduler = create_scheduler(enable_prefix_caching=True)
+    scheduler.aux_output_connector = AuxOutputSchedulerConnector(
+        scheduler.kv_cache_manager
+    )
+    (recorded,) = create_requests(
+        num_requests=1, num_tokens=32, max_tokens=1, req_ids=["recorded"]
+    )
+    (skipped,) = create_requests(
+        num_requests=1,
+        num_tokens=32,
+        max_tokens=1,
+        req_ids=["skipped"],
+        return_routed_experts=False,
+    )
+    scheduler.add_request(recorded)
+    scheduler.add_request(skipped)
+    scheduler_output = scheduler.schedule()
+    metadata = scheduler_output.aux_output_connector_metadata
+    assert metadata.requests == {"recorded": 0}
+    assert set(metadata.block_hashes) == {"recorded"}
+
+    # The worker returns rows only for the recorded request.
+    outputs = scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(
+            req_ids=["recorded", "skipped"],
+            req_id_to_index={"recorded": 0, "skipped": 1},
+            sampled_token_ids=[[0], [0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+            aux_output_connector_output={
+                "recorded": AuxRequestOutput(0, np.zeros((32, 1, 1), np.uint8))
+            },
+        ),
+    )
+    by_id = {output.request_id: output for output in outputs[0].outputs}
+    assert by_id["recorded"].routed_experts.shape == (32, 1, 1)
+    assert by_id["skipped"].routed_experts is None
+
+    # Only the recorded request has a terminal event for the worker.
+    metadata = scheduler.schedule().aux_output_connector_metadata
+    assert metadata.finished_requests == ("recorded",)
+
+
+def test_routed_experts_opt_out_prefix_cache_is_separate():
+    """Opted-out blocks have no stored routing, so they must not serve requests
+    that record it. Opted-out requests still share blocks with each other."""
+    scheduler = create_scheduler(enable_prefix_caching=True)
+    scheduler.aux_output_connector = AuxOutputSchedulerConnector(
+        scheduler.kv_cache_manager
+    )
+
+    def run(request_id: str, return_routed_experts: bool) -> int:
+        (request,) = create_requests(
+            num_requests=1,
+            num_tokens=48,
+            max_tokens=1,
+            req_ids=[request_id],
+            return_routed_experts=return_routed_experts,
+        )
+        scheduler.add_request(request)
+        scheduler_output = scheduler.schedule()
+        (new_request,) = scheduler_output.scheduled_new_reqs
+        rows = (
+            {request_id: AuxRequestOutput(0, np.zeros((48, 1, 1), np.uint8))}
+            if return_routed_experts
+            else None
+        )
+        scheduler.update_from_output(
+            scheduler_output,
+            ModelRunnerOutput(
+                req_ids=[request_id],
+                req_id_to_index={request_id: 0},
+                sampled_token_ids=[[0]],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+                aux_output_connector_output=rows,
+            ),
+        )
+        assert request.is_finished()
+        return new_request.num_computed_tokens
+
+    # The same 48-token prompt: two opted-out runs, then two recorded runs.
+    assert run("skipped-0", return_routed_experts=False) == 0
+    assert run("skipped-1", return_routed_experts=False) == 32
+    assert run("recorded-0", return_routed_experts=True) == 0
+    assert run("recorded-1", return_routed_experts=True) == 32
+
+
+@pytest.mark.parametrize("return_routed_experts", [True, False])
+def test_routed_experts_opt_out_skips_retention(return_routed_experts):
+    """Opted-out blocks have no stored routing: they are not retained, and the
+    KV cache alone bounds their external hits."""
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        use_kv_connector=mock_kv(matched_tokens=32, is_async=False),
+    )
+    scheduler.aux_output_connector = AuxOutputSchedulerConnector(
+        scheduler.kv_cache_manager, scheduler.connector
+    )
+    first, second = create_requests(
+        num_requests=2, num_tokens=80, return_routed_experts=return_routed_experts
+    )
+    scheduler.add_request(first)
+    output = scheduler.schedule()
+    scheduler.finish_requests(first.request_id, RequestStatus.FINISHED_ABORTED)
+
+    scheduler.add_request(second)
+    metadata = scheduler.schedule().aux_output_connector_metadata
+
+    if return_routed_experts:
+        assert output.num_scheduled_tokens[first.request_id] == 80
+        assert list(metadata.retained_block_hashes) == first.block_hashes
+    else:
+        assert output.num_scheduled_tokens[first.request_id] == 80 - 32
+        assert metadata.retained_block_hashes is None
+
+
 def test_finish_request():
     scheduler = create_scheduler()
     scheduler.aux_output_connector = Mock()
