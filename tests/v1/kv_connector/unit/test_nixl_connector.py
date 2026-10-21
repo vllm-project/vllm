@@ -722,7 +722,6 @@ class TestNixlHandshake:
 
         worker = connector.connector_worker
         assert worker is not None
-        assert worker is not None
         assert worker.pcp_rank == pcp_rank
         assert worker.pcp_dcp_sharded is (dcp_size > 1)
         assert worker.transfer_tp_rank == (pcp_rank if dcp_size > 1 else 0)
