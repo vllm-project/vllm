@@ -2107,6 +2107,26 @@ class Scheduler(SchedulerInterface):
             structured_output_request_ids, bitmask, num_acceptable_drafts
         )
 
+    def compute_draft_grammar_bitmask(self) -> "npt.NDArray[np.int32] | None":
+        """Compute draft grammar bitmask for the next step's draft tokens.
+
+        This is called after draft tokens have been generated and accepted/rejected,
+        so the grammar state is up to date. The bitmask will be used to constrain
+        the drafter's first draft token in the next step.
+        """
+        # Find all requests that use structured output and have draft tokens
+        structured_output_request_ids = [
+            req_id
+            for req_id, req in self.requests.items()
+            if req.use_structured_output and req.spec_token_ids
+        ]
+        if not structured_output_request_ids:
+            return None
+
+        return self.structured_output_manager.draft_grammar_bitmask(
+            self.requests, structured_output_request_ids
+        )
+
     def update_from_output(
         self,
         scheduler_output: SchedulerOutput,

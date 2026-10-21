@@ -552,6 +552,75 @@ class StructuredOutputManager:
         structured_req.reasoning_ended = True
         return grammar.accept_tokens(request.request_id, new_token_ids[grammar_start:])
 
+    def draft_grammar_bitmask(
+        self,
+        requests: dict[str, "Request"],
+        structured_output_request_ids: list[str],
+    ) -> "npt.NDArray[np.int32] | None":
+        """Compute grammar bitmask for drafter's first draft token per request.
+
+        Returns a compact bitmask with one row per structured output request,
+        representing the allowed tokens in the current grammar state (before
+        any draft tokens are generated). This is used to constrain the drafter's
+        first draft token for each request.
+        """
+        if not structured_output_request_ids:
+            return None
+
+        vocab_size = self.vocab_size
+        bitmask_width = (vocab_size + 31) // 32
+        bitmask = np.zeros(
+            (len(structured_output_request_ids), bitmask_width),
+            dtype=np.uint32,
+        )
+
+        for i, req_id in enumerate(structured_output_request_ids):
+            request = requests[req_id]
+            structured_output_request = request.structured_output_request
+            if TYPE_CHECKING:
+                assert structured_output_request is not None
+            grammar = structured_output_request.grammar
+            if TYPE_CHECKING:
+                assert isinstance(grammar, StructuredOutputGrammar)
+
+            apply_bitmask, masked_ids = self._get_draft_bitmask_params(request)
+            if apply_bitmask and not grammar.is_terminated():
+                grammar.fill_bitmask_draft(bitmask, i)
+            else:
+                bitmask[i].fill(0xFFFFFFFF)
+                if masked_ids:
+                    for token_id in masked_ids:
+                        bitmask[i, token_id >> 5] &= ~np.uint32(1 << (token_id & 31))
+
+        return bitmask.view(np.int32)
+
+    def _get_draft_bitmask_params(
+        self, request: "Request"
+    ) -> tuple[bool, tuple[int, ...]]:
+        """Get parameters for draft grammar bitmask (first token only)."""
+        if self.enable_in_reasoning:
+            return True, ()
+
+        structured_req = request.structured_output_request
+        assert structured_req is not None
+        if structured_req.reasoning_ended:
+            return True, ()
+
+        reasoner = self._get_reasoner(request)
+        if reasoner is None:
+            return True, ()
+
+        if structured_req.reasoning_ended is None:
+            if reasoner.is_reasoning_end(request.prompt_token_ids or []):
+                return True, ()
+            structured_req.reasoning_ended = False
+
+        if not structured_req.reasoning_ended:
+            masked_ids = self._masked_reasoning_ends(request)
+            return False, masked_ids
+
+        return True, ()
+
     def clear_backend(self) -> None:
         # Finish tasks that can still use the backend before releasing it.
         if not self.vllm_config.model_config.skip_tokenizer_init:

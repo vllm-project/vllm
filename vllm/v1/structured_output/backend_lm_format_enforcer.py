@@ -79,6 +79,12 @@ class LMFormatEnforcerGrammar(StructuredOutputGrammar):
         )
         bitmask[batch_index] = allowed_tokens.allowed_tokens
 
+    def fill_bitmask_draft(self, bitmask: np.ndarray, batch_index: int) -> None:
+        allowed_tokens = self.token_enforcer.get_allowed_tokens(
+            self.current_tokens_prefix
+        )
+        bitmask[batch_index] = allowed_tokens.allowed_tokens.view(np.ndarray)
+
     def is_terminated(self) -> bool:
         # We are considered terminated if the prefix ends with eos_token_id
         return_value = (

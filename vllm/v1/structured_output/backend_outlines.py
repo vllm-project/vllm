@@ -183,6 +183,12 @@ class OutlinesGrammar(StructuredOutputGrammar):
         mask = bitmask[idx]
         self.guide.write_mask_into(mask.data_ptr(), mask.numel(), mask.element_size())
 
+    def fill_bitmask_draft(self, bitmask: np.ndarray, idx: int) -> None:
+        mask = bitmask[idx]
+        # Create a torch tensor view of the numpy array
+        mask_tensor = torch.from_numpy(mask)
+        self.guide.write_mask_into(mask_tensor.data_ptr(), mask_tensor.numel(), mask_tensor.element_size())
+
     def is_terminated(self) -> bool:
         return self._is_terminated
 

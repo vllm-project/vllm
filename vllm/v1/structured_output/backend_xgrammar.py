@@ -315,6 +315,11 @@ class XgrammarGrammar(StructuredOutputGrammar):
     def fill_bitmask(self, bitmask: torch.Tensor, idx: int) -> None:
         self.matcher.fill_next_token_bitmask(bitmask, idx)
 
+    def fill_bitmask_draft(self, bitmask: np.ndarray, idx: int) -> None:
+        # Convert numpy array to torch tensor for xgrammar
+        bitmask_tensor = torch.from_numpy(bitmask[idx:idx+1])
+        self.matcher.fill_next_token_bitmask(bitmask_tensor, 0)
+
     def is_terminated(self) -> bool:
         return self._is_terminated
 

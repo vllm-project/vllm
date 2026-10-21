@@ -80,6 +80,16 @@ class StructuredOutputGrammar(ABC):
         """
 
     @abstractmethod
+    def fill_bitmask_draft(self, bitmask: "np.ndarray", batch_index: int) -> None:
+        """Fills the bitmask for drafter's first draft token.
+
+        Args:
+            bitmask (np.ndarray): The bitmask to fill (shape: [batch, vocab_bits])
+            batch_index (int): The index in the bitmask to fill
+
+        """
+
+    @abstractmethod
     def is_terminated(self) -> bool:
         """Checks whether the structured output process has terminated.
 

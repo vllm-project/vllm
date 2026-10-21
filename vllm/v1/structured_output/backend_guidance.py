@@ -291,6 +291,12 @@ class GuidanceGrammar(StructuredOutputGrammar):
         llguidance_torch.fill_next_token_bitmask(self.ll_matcher, bitmask, idx)
         self.check_error()
 
+    def fill_bitmask_draft(self, bitmask: np.ndarray, idx: int) -> None:
+        # Convert numpy array to torch tensor for llguidance
+        bitmask_tensor = torch.from_numpy(bitmask[idx:idx+1])
+        llguidance_torch.fill_next_token_bitmask(self.ll_matcher, bitmask_tensor, 0)
+        self.check_error()
+
     def is_terminated(self) -> bool:
         return self.terminated
 

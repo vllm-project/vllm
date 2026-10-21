@@ -64,6 +64,9 @@ class StandaloneARSpeculator(DraftModelSpeculator):
         self.expanded_slot_mappings: torch.Tensor
         self.supports_mm_inputs = False
 
+        # Draft grammar bitmask for structured output (set per propose call)
+        self._draft_grammar_bitmask: torch.Tensor | None = None
+
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         pass  # CUDA graph not yet supported for standalone AR speculator.
 
@@ -250,6 +253,8 @@ class StandaloneARSpeculator(DraftModelSpeculator):
             self.seeds,
             self.current_draft_step,
             self.draft_logits,
+            spec_step_idx=0,
+            draft_grammar_bitmask=self._draft_grammar_bitmask,
         )
 
     def _multi_step_decode(
@@ -346,6 +351,8 @@ class StandaloneARSpeculator(DraftModelSpeculator):
                 self.seeds,
                 self.current_draft_step,
                 self.draft_logits,
+                spec_step_idx=step,
+                draft_grammar_bitmask=None,  # Only apply to first draft token
             )
 
     @torch.inference_mode()
@@ -368,6 +375,7 @@ class StandaloneARSpeculator(DraftModelSpeculator):
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
         num_speculative_tokens: int | None = None,
+        draft_grammar_bitmask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert self.model is not None
 
@@ -385,6 +393,9 @@ class StandaloneARSpeculator(DraftModelSpeculator):
             temperature,
             seeds,
         )
+
+        # Store draft grammar bitmask for use in sample_draft
+        self._draft_grammar_bitmask = draft_grammar_bitmask
 
         self._prefill(
             input_batch,

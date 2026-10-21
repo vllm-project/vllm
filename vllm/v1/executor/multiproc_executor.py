@@ -339,11 +339,14 @@ class MultiprocExecutor(Executor):
             self.failure_callback = callback
 
     def execute_model(  # type: ignore[override]
-        self, scheduler_output: SchedulerOutput, non_block: bool = False
+        self,
+        scheduler_output: SchedulerOutput,
+        draft_grammar_bitmask: "npt.NDArray[np.int32] | None" = None,
+        non_block: bool = False,
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
         return self.collective_rpc(
             "execute_model",
-            args=(scheduler_output,),
+            args=(scheduler_output, draft_grammar_bitmask),
             unique_reply_rank=self.output_rank,
             non_block=non_block,
             timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
@@ -352,11 +355,14 @@ class MultiprocExecutor(Executor):
         )
 
     def sample_tokens(  # type: ignore[override]
-        self, grammar_output: GrammarOutput | None, non_block: bool = False
+        self,
+        grammar_output: GrammarOutput | None,
+        draft_grammar_bitmask: "npt.NDArray[np.int32] | None" = None,
+        non_block: bool = False,
     ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
         return self.collective_rpc(
             "sample_tokens",
-            args=(grammar_output,),
+            args=(grammar_output, draft_grammar_bitmask),
             unique_reply_rank=self.output_rank,
             non_block=non_block,
             timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,

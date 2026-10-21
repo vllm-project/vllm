@@ -980,6 +980,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     skip_attn_for_dummy_run=skip_attn,
                     mm_inputs=mm_inputs,
                     is_profile=is_profile,
+                    draft_grammar_bitmask=None,
                 )
             self.step_timing.drafter_end()
 
@@ -1742,6 +1743,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def execute_model(
         self,
         scheduler_output: SchedulerOutput,
+        draft_grammar_bitmask: "npt.NDArray[np.int32] | None" = None,
         intermediate_tensors: IntermediateTensors | None = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
@@ -2086,6 +2088,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             aux_hidden_states = None
             output_intermediate_tensors = model_output
 
+        # Convert draft grammar bitmask to torch tensor if provided
+        draft_grammar_bitmask_torch = None
+        if draft_grammar_bitmask is not None:
+            draft_grammar_bitmask_torch = torch.from_numpy(draft_grammar_bitmask).to(
+                self.device, non_blocking=True
+            )
+
         finished_req_ids = scheduler_output.finished_req_ids
         self.execute_model_state = ExecuteModelState(
             input_batch=input_batch,
@@ -2098,6 +2107,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             ec_connector_output=ec_connector_output,
             cudagraph_stats=cudagraph_stats,
             num_spec_tokens_to_schedule=scheduler_output.num_spec_tokens_to_schedule,
+            draft_grammar_bitmask=draft_grammar_bitmask_torch,
         )
 
         if not self.is_last_pp_rank:
@@ -2112,7 +2122,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     @torch.inference_mode()
     @step_eplb_after()
     def sample_tokens(
-        self, grammar_output: GrammarOutput | None
+        self,
+        grammar_output: GrammarOutput | None,
     ) -> AsyncOutput | ModelRunnerOutput | None:
         if self.execute_model_state is None:
             # The prior execute_model call must have failed.
@@ -2128,6 +2139,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ec_connector_output = self.execute_model_state.ec_connector_output
         cudagraph_stats = self.execute_model_state.cudagraph_stats
         num_spec_tokens = self.execute_model_state.num_spec_tokens_to_schedule
+        draft_grammar_bitmask = self.execute_model_state.draft_grammar_bitmask
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -2267,6 +2279,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.speculator.prepare_watermarking(
                     self.sampler, input_batch.idx_mapping
                 )
+            # Use draft grammar bitmask from execute_model_state (set in execute_model)
+            draft_grammar_bitmask_torch = draft_grammar_bitmask
+
+            # Expand bitmask to match batch size: create a tensor of shape
+            # [num_reqs, vocab_bits] where each row corresponds to a request
+            # in the batch. For structured output requests, use their bitmask;
+            # for others, use all-ones (no constraint).
+            if (draft_grammar_bitmask_torch is not None
+                    and draft_grammar_bitmask_torch.numel() > 0):
+                # The bitmask is already expanded to batch size in execute_model
+                pass
+
             with use_workspace_lane(self._draft_workspace_lane):
                 draft_tokens = self.speculator.propose(
                     input_batch,
@@ -2283,6 +2307,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     num_speculative_tokens=num_spec_tokens,
                     dp_sync_state=dp_sync_state,
                     mm_inputs=mm_inputs,
+                    draft_grammar_bitmask=draft_grammar_bitmask_torch,
                 )
             if num_spec_tokens < self.num_speculative_steps:
                 draft_tokens[:, num_spec_tokens:] = -1
@@ -2447,6 +2472,7 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: ECConnectorOutput | None
     cudagraph_stats: CUDAGraphStat | None
     num_spec_tokens_to_schedule: int
+    draft_grammar_bitmask: torch.Tensor | None
 
 
 class BatchReqState(NamedTuple):

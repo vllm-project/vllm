@@ -37,10 +37,14 @@ from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
     OnlineAcceptanceEstimator,
 )
 from vllm.v1.worker.utils import AttentionGroup
+from vllm.utils.import_utils import LazyLoader
 
 if TYPE_CHECKING:
+    import xgrammar as xgr
     from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
     from vllm.v1.worker.gpu.pcp_manager import PCPManager
+else:
+    xgr = LazyLoader("xgr", globals(), "xgrammar")
 
 logger = init_logger(__name__)
 
@@ -99,6 +103,7 @@ class BaseSpeculator(ABC):
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
         num_speculative_tokens: int | None = None,
+        draft_grammar_bitmask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         pass
 
@@ -448,11 +453,17 @@ class DraftModelSpeculator(BaseSpeculator):
         draft_logits: torch.Tensor | None,
         spec_step_idx: int = 0,
         num_steps: int = 1,
+        draft_grammar_bitmask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if draft_logits is None and self.use_local_argmax_reduction:
             return self.get_draft_top_tokens(hidden_states, spec_step_idx)
 
         logits = self.compute_draft_logits(hidden_states, spec_step_idx)
+
+        # Apply draft grammar bitmask for the first speculative token
+        if draft_grammar_bitmask is not None and spec_step_idx == 0:
+            self._apply_draft_grammar_bitmask(logits, draft_grammar_bitmask, idx_mapping)
+
         if draft_logits is not None:
             sampler = (
                 gumbel_sample
@@ -475,6 +486,24 @@ class DraftModelSpeculator(BaseSpeculator):
             sampled = logits.argmax(dim=-1)
         self._maybe_predict_acceptance(logits, idx_mapping, draft_step)
         return sampled
+
+    def _apply_draft_grammar_bitmask(
+        self,
+        logits: torch.Tensor,
+        draft_grammar_bitmask: torch.Tensor,
+        idx_mapping: torch.Tensor,
+    ) -> None:
+        """Apply draft grammar bitmask to logits for structured output requests.
+
+        Args:
+            logits: [num_reqs, vocab_size] draft logits
+            draft_grammar_bitmask: [num_reqs, vocab_bits] bitmask (expanded to batch)
+            idx_mapping: [num_reqs] mapping from batch index to request state index
+        """
+        # The bitmask is now expanded to match the batch size, so we can apply
+        # it directly to the logits. Each row corresponds to a request in the batch.
+        if draft_grammar_bitmask.numel() > 0:
+            xgr.apply_token_bitmask_inplace(logits, draft_grammar_bitmask)
 
     def _maybe_predict_acceptance(
         self, logits: torch.Tensor, idx_mapping: torch.Tensor, draft_step: torch.Tensor

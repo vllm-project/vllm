@@ -117,11 +117,14 @@ class UniProcExecutor(Executor):
         return future
 
     def execute_model(  # type: ignore[override]
-        self, scheduler_output: SchedulerOutput, non_block: bool = False
+        self,
+        scheduler_output: SchedulerOutput,
+        draft_grammar_bitmask: "npt.NDArray[np.int32] | None" = None,
+        non_block: bool = False,
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
         output = self.collective_rpc(
             "execute_model",
-            args=(scheduler_output,),
+            args=(scheduler_output, draft_grammar_bitmask),
             non_block=non_block,
             single_value=True,
         )
@@ -132,11 +135,14 @@ class UniProcExecutor(Executor):
         return output
 
     def sample_tokens(  # type: ignore[override]
-        self, grammar_output: GrammarOutput | None, non_block: bool = False
+        self,
+        grammar_output: GrammarOutput | None,
+        draft_grammar_bitmask: "npt.NDArray[np.int32] | None" = None,
+        non_block: bool = False,
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
         return self.collective_rpc(
             "sample_tokens",
-            args=(grammar_output,),
+            args=(grammar_output, draft_grammar_bitmask),
             non_block=non_block,
             single_value=True,
         )

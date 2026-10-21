@@ -164,6 +164,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
         num_speculative_tokens: int | None = None,
+        draft_grammar_bitmask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         num_reqs = input_batch.num_reqs
         seq_lens_cpu_upper_bound = input_batch.seq_lens_cpu_upper_bound

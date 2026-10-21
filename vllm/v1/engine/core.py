@@ -187,6 +187,9 @@ class EngineCore:
         self.check_for_draft_tokens = (
             self.use_spec_decode or vllm_config.model_config.is_diffusion
         )
+        # Draft grammar bitmask for the next step's draft tokens.
+        # Computed after getting draft tokens from the previous step.
+        self._next_draft_grammar_bitmask: "npt.NDArray[np.int32] | None" = None
         if self.scheduler.connector is not None:  # type: ignore
             self.model_executor.init_kv_output_aggregator(self.scheduler.connector)  # type: ignore
         if self.scheduler.ec_connector is not None:  # type: ignore
@@ -649,7 +652,11 @@ class EngineCore:
         if not self.scheduler.has_requests():
             return {}, False
         scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
-        future = self.model_executor.execute_model(scheduler_output, non_block=True)
+        future = self.model_executor.execute_model(
+            scheduler_output,
+            draft_grammar_bitmask=self._next_draft_grammar_bitmask,
+            non_block=True,
+        )
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with (
             self.capture_iteration_details(scheduler_output) as iteration_details,
@@ -668,6 +675,17 @@ class EngineCore:
         self._attach_iteration_details(engine_core_outputs, iteration_details)
         self._attach_weight_version(engine_core_outputs)
 
+        # Compute draft grammar bitmask for next step if using speculative decoding
+        # with structured output.
+        if self.check_for_draft_tokens and not self.async_scheduling:
+            draft_token_ids = self.model_executor.take_draft_token_ids()
+            if draft_token_ids is not None:
+                self.scheduler.update_draft_token_ids(draft_token_ids)
+                # Compute draft grammar bitmask for next step
+                self._next_draft_grammar_bitmask = (
+                    self.scheduler.compute_draft_grammar_bitmask()
+                )
+
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
     def post_step(self, model_executed: bool) -> None:
@@ -678,6 +696,10 @@ class EngineCore:
             draft_token_ids = self.model_executor.take_draft_token_ids()
             if draft_token_ids is not None:
                 self.scheduler.update_draft_token_ids(draft_token_ids)
+                # Compute draft grammar bitmask for next step
+                self._next_draft_grammar_bitmask = (
+                    self.scheduler.compute_draft_grammar_bitmask()
+                )
 
     def step_with_batch_queue(
         self,
@@ -709,7 +731,9 @@ class EngineCore:
             scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
             with self.log_error_detail(scheduler_output):
                 exec_future = self.model_executor.execute_model(
-                    scheduler_output, non_block=True
+                    scheduler_output,
+                    draft_grammar_bitmask=self._next_draft_grammar_bitmask,
+                    non_block=True,
                 )
             if not self.is_mm_encoder_only:
                 model_executed = scheduler_output.total_num_scheduled_tokens > 0
@@ -721,9 +745,7 @@ class EngineCore:
                 if not scheduler_output.pending_structured_output_tokens:
                     # We aren't waiting for any tokens, get any grammar output
                     # and sample immediately.
-                    grammar_output = self.scheduler.get_grammar_bitmask(
-                        scheduler_output
-                    )
+                    grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
                     future = self.model_executor.sample_tokens(
                         grammar_output, non_block=True
                     )
@@ -770,6 +792,17 @@ class EngineCore:
         self._attach_iteration_details(engine_core_outputs, iteration_details)
         self._attach_weight_version(engine_core_outputs)
 
+        # Compute draft grammar bitmask for next step if using speculative decoding
+        # with structured output.
+        if self.check_for_draft_tokens:
+            draft_token_ids = self.model_executor.take_draft_token_ids()
+            if draft_token_ids is not None:
+                self.scheduler.update_draft_token_ids(draft_token_ids)
+                # Compute draft grammar bitmask for next step
+                self._next_draft_grammar_bitmask = (
+                    self.scheduler.compute_draft_grammar_bitmask()
+                )
+
         # NOTE(nick): We can either handle the deferred tasks here or save
         # in a field and do it immediately once step_with_batch_queue is
         # re-called. The latter slightly favors TTFT over TPOT/throughput.
@@ -790,7 +823,9 @@ class EngineCore:
             grammar_output = self.scheduler.get_grammar_bitmask(
                 deferred_scheduler_output
             )
-            future = self.model_executor.sample_tokens(grammar_output, non_block=True)
+            future = self.model_executor.sample_tokens(
+                grammar_output, non_block=True
+            )
             batch_queue.appendleft((future, deferred_scheduler_output, exec_future))
 
         return engine_core_outputs, model_executed

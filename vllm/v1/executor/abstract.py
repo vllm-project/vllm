@@ -231,41 +231,61 @@ class Executor(ABC):
 
     @overload
     def execute_model(
-        self, scheduler_output: SchedulerOutput, non_block: Literal[False] = False
+        self,
+        scheduler_output: SchedulerOutput,
+        draft_grammar_bitmask: "npt.NDArray[np.int32] | None" = None,
+        non_block: Literal[False] = False,
     ) -> ModelRunnerOutput | None:
         pass
 
     @overload
     def execute_model(
-        self, scheduler_output: SchedulerOutput, non_block: Literal[True] = True
+        self,
+        scheduler_output: SchedulerOutput,
+        draft_grammar_bitmask: "npt.NDArray[np.int32] | None" = None,
+        non_block: Literal[True] = True,
     ) -> Future[ModelRunnerOutput | None]:
         pass
 
     def execute_model(
-        self, scheduler_output: SchedulerOutput, non_block: bool = False
+        self,
+        scheduler_output: SchedulerOutput,
+        draft_grammar_bitmask: "npt.NDArray[np.int32] | None" = None,
+        non_block: bool = False,
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
         output = self.collective_rpc(  # type: ignore[call-overload]
-            "execute_model", args=(scheduler_output,), non_block=non_block
+            "execute_model", args=(scheduler_output, draft_grammar_bitmask), non_block=non_block
         )
         return output[0]
 
     @overload
     def sample_tokens(
-        self, grammar_output: GrammarOutput | None, non_block: Literal[False] = False
+        self,
+        grammar_output: GrammarOutput | None,
+        draft_grammar_bitmask: "npt.NDArray[np.int32] | None" = None,
+        non_block: Literal[False] = False,
     ) -> ModelRunnerOutput:
         pass
 
     @overload
     def sample_tokens(
-        self, grammar_output: GrammarOutput | None, non_block: Literal[True] = True
+        self,
+        grammar_output: GrammarOutput | None,
+        draft_grammar_bitmask: "npt.NDArray[np.int32] | None" = None,
+        non_block: Literal[True] = True,
     ) -> Future[ModelRunnerOutput]:
         pass
 
     def sample_tokens(
-        self, grammar_output: GrammarOutput | None, non_block: bool = False
+        self,
+        grammar_output: GrammarOutput | None,
+        draft_grammar_bitmask: "npt.NDArray[np.int32] | None" = None,
+        non_block: bool = False,
     ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
         output = self.collective_rpc(  # type: ignore[call-overload]
-            "sample_tokens", args=(grammar_output,), non_block=non_block
+            "sample_tokens",
+            args=(grammar_output, draft_grammar_bitmask),
+            non_block=non_block,
         )
         return output[0]
 

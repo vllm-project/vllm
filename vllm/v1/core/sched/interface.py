@@ -90,6 +90,21 @@ class SchedulerInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def compute_draft_grammar_bitmask(self) -> "npt.NDArray[np.int32] | None":
+        """Compute draft grammar bitmask for the next step's draft tokens.
+
+        This is called after draft tokens have been generated and accepted/rejected,
+        so the grammar state is up to date. The bitmask will be used to constrain
+        the drafter's first draft token in the next step.
+
+        Returns:
+            A numpy array of shape [num_structured_reqs, vocab_bits] representing
+            the allowed tokens for each structured output request's first draft token.
+            Returns None if no structured output requests have draft tokens.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     def update_from_output(
         self,
         scheduler_output: "SchedulerOutput",
