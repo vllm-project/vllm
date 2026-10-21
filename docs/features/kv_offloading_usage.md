@@ -95,6 +95,10 @@ vllm serve <model> \
   }'
 ```
 
+### Multiple Nodes
+
+Without secondary tiers, each node's CPU region serves only its own workers. Secondary tiers run in the engine core, next to worker rank 0 (the head node), and read only the head node's region, which lacks the slots of workers on other nodes. An engine with secondary tiers whose workers span several nodes is therefore rejected when its workers are created, and its engine core must share a node with worker rank 0. Secondary tiers are not supported with elastic expert parallelism (`enable_elastic_ep`) yet.
+
 ## `kv_connector_extra_config` Reference
 
 | Key | Required | Default | Scope | Notes |

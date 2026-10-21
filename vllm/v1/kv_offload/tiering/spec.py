@@ -67,6 +67,7 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
+from vllm.v1.kv_offload.cpu.node_topology import multi_node_topology
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.v1.kv_offload.tiering.base import (
@@ -82,6 +83,11 @@ from vllm.v1.kv_offload.tiering.manager import (
 )
 
 logger = init_logger(__name__)
+
+# Executors that keep a sole worker on the engine core's node and report
+# workers on other nodes through nnodes (mp). Ray, external_launcher and
+# custom executors give neither guarantee.
+_NODE_LOCAL_BACKENDS = ("mp", "uni", None)
 
 
 class TieringOffloadingSpec(CPUOffloadingSpec):
@@ -316,6 +322,13 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         self.secondary_tier_configs = self.extra_config.get("secondary_tiers", [])
         if not isinstance(self.secondary_tier_configs, list):
             raise ValueError("secondary_tiers must be a list of tier configurations")
+        if self.secondary_tier_configs and config.parallel.elastic_ep:
+            # A replica added by scale-up initializes its KV cache alone, so
+            # it cannot run the node-placement collective with the others.
+            raise ValueError(
+                "TieringOffloadingSpec secondary tiers are not supported with "
+                "elastic expert parallelism (enable_elastic_ep)."
+            )
 
         # Pause between tier-poll rounds for tiers that need servicing
         # between engine steps. Zero or negative disables the thread, which
@@ -395,6 +408,22 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                     cpu_page_size=self.cpu_page_size_per_worker,
                 )
                 self._scheduler_mmap = scheduler_mmap
+                parallel = self.config.parallel
+                if (
+                    self.secondary_tier_configs
+                    and scheduler_mmap.created_file
+                    # Only mp and uni keep a sole worker on this node.
+                    and (
+                        parallel.world_size > 1
+                        or parallel.executor_backend not in _NODE_LOCAL_BACKENDS
+                    )
+                ):
+                    # Secondary tiers read the region worker rank 0 writes.
+                    raise RuntimeError(
+                        "The tiering scheduler created the shared CPU region "
+                        "instead of joining its workers' region: the engine "
+                        "core must share a node with worker rank 0."
+                    )
 
                 # Create primary tier (CPU-based)
                 primary_tier = CPUPrimaryTierOffloadingManager(
@@ -518,6 +547,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
     @override
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
+        self._check_node_placement()
         rank = 0 if self.replicated_layout else self.config.parallel.rank
         worker_mmap = SharedOffloadRegion(
             engine_id=self._engine_id,
@@ -539,6 +569,66 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         except Exception:
             worker_mmap.cleanup()
             raise
+
+    def _check_node_placement(self) -> None:
+        """Reject secondary tiers on an engine whose workers span nodes.
+
+        Secondary tiers run on the head node and read only its region, so
+        workers on other nodes would store slots no tier reads (#54415).
+        Collective over every worker of every data parallel replica.
+        """
+        parallel = self.config.parallel
+        # Without secondary tiers each node's region serves its own workers.
+        if not self.secondary_tier_configs:
+            return
+        backend = parallel.executor_backend
+        # Only mp counts nodes (nnodes) and uni runs one process; Ray,
+        # external_launcher and custom executors keep nnodes at 1, so
+        # local_world_size cannot tell whether their workers span nodes.
+        may_span_nodes = parallel.spans_nodes or backend not in _NODE_LOCAL_BACKENDS
+        if not may_span_nodes:
+            return
+        replica_size = parallel.world_size
+        if backend == "external_launcher":
+            # ParallelConfig counts every data parallel replica in world_size.
+            replica_size //= parallel.data_parallel_size
+        topology, spans_nodes = multi_node_topology(replica_size)
+        if spans_nodes is None and replica_size > 1:
+            raise RuntimeError(
+                "Secondary tiers need to know whether this engine's workers "
+                "span several nodes, but its worker group could not be "
+                "identified."
+            )
+        if not (spans_nodes or parallel.spans_nodes):
+            return
+        if backend == "external_launcher":
+            raise RuntimeError(
+                "TieringOffloadingSpec secondary tiers do not support the "
+                "external_launcher executor across nodes."
+            )
+        if topology is None or not parallel.spans_nodes:
+            raise RuntimeError(
+                "Secondary tiers of an engine spanning several nodes require "
+                "the multiprocessing executor with nnodes > 1; this engine's "
+                "worker group or node count could not be identified."
+            )
+        if self.config.canonical_layout:
+            raise ValueError(
+                "canonical_layout interleaves every rank's bytes in one row "
+                "area and cannot be split across nodes; remove "
+                "canonical_layout from kv_connector_extra_config."
+            )
+        num_slots = self.kv_bytes_per_chunk // self.cpu_page_size_per_worker
+        if num_slots < parallel.world_size:
+            raise ValueError(
+                "The head node's CPU region must hold every worker's slot "
+                "for secondary tiers to serve workers on several nodes."
+            )
+        raise NotImplementedError(
+            "TieringOffloadingSpec secondary tiers read only the head node's "
+            "CPU region, which lacks the slots of workers on other nodes; "
+            "engines whose workers span several nodes are not supported yet."
+        )
 
     def _validate_canonical_refs(self, kv_caches: CanonicalKVCaches) -> None:
         """Require a mapping on every ref and record layer portability.
