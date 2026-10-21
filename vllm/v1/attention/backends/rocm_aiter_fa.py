@@ -494,7 +494,10 @@ class AiterFlashAttentionMetadataBuilder(
                 "with Aiter Flash Attention Impl."
             )
             sliding_window_configs.add(layer.impl.sliding_window)
-            if layer.kv_sharing_target_layer_name is not None:
+            if (
+                layer.kv_sharing_target_layer_name is not None
+                or layer.kv_cache_update_bypass
+            ):
                 kv_sharing_shape = (layer.impl.num_kv_heads, layer.impl.head_size)
 
         while len(sliding_window_configs) > 0:
@@ -530,18 +533,17 @@ class AiterFlashAttentionMetadataBuilder(
         )
         self.k_scale: dict[str, torch.Tensor] | None = None
         self.v_scale: dict[str, torch.Tensor] | None = None
-        if kv_sharing_shape is None:
-            # Also used by key=None layers (supports_kv_cache_update_bypass).
-            kv_sharing_shape = (self.num_heads_kv, self.headdim)
-        self.kv_sharing_workspace = torch.empty(
-            (
-                2,
-                vllm_config.scheduler_config.max_num_batched_tokens,
-                *kv_sharing_shape,
-            ),
-            dtype=self.model_config.dtype,
-            device=device,
-        )
+        self.kv_sharing_workspace: torch.Tensor | None = None
+        if kv_sharing_shape is not None:
+            self.kv_sharing_workspace = torch.empty(
+                (
+                    2,
+                    vllm_config.scheduler_config.max_num_batched_tokens,
+                    *kv_sharing_shape,
+                ),
+                dtype=self.model_config.dtype,
+                device=device,
+            )
 
     def _build_swa_decode_tables(
         self,

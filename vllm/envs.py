@@ -136,7 +136,6 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_CUSTOM_AR: bool = True
     VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE: str = "fp32"
-    VLLM_ROCM_MUSE_MOE_ONLINE_QUANT: str = ""
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
@@ -1260,11 +1259,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Muse Spark on ROCm: dtype of the TP reduction before the post-expert norm.
     "VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE": lambda: os.getenv(
         "VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE", "fp32"
-    ).lower(),
-    # Muse Spark on ROCm: online-quantize routed experts ("" or "mxfp4"; first
-    # and last layer stay BF16).
-    "VLLM_ROCM_MUSE_MOE_ONLINE_QUANT": lambda: os.getenv(
-        "VLLM_ROCM_MUSE_MOE_ONLINE_QUANT", ""
     ).lower(),
     # use aiter linear op if aiter ops are enabled
     # The following list of related ops

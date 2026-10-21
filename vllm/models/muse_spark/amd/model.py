@@ -60,7 +60,7 @@ from vllm.models.muse_spark.common.ops.fused_rmsnorm import (
 )
 from vllm.platforms.rocm import on_gfx950
 from vllm.sequence import IntermediateTensors
-from vllm.third_party.flash_linear_attention.ops.fused_norm_gate import (
+from vllm.third_party.flash_linear_attention.ops.kda import (
     rms_norm_gated,
 )
 from vllm.transformers_utils.configs.muse_spark import (
@@ -186,6 +186,8 @@ class MuseSpark1xMoE(nn.Module):
         self.route_scale = config.routed_scaling_factor
 
         self.router_output_multiplier = config.output_multiplier
+        self._router_multiplier_folded = False
+        self.router.weight.weight_loader = self._load_router_weight
 
         self.moe_router = MuseSpark1xRouter(
             top_k=config.num_experts_per_tok,
@@ -200,7 +202,7 @@ class MuseSpark1xMoE(nn.Module):
         hidden_size = config.moe_hidden_size
         # Plain F.linear: AITER's gfx950 tuned-GEMM table picks lossy split-K
         # BF16-accumulating kernels for these shapes.
-        self.pooler: ReplicatedLinear | None = ReplicatedLinear(
+        self.pooler = ReplicatedLinear(
             config.hidden_size,
             hidden_size,
             bias=False,
@@ -208,7 +210,7 @@ class MuseSpark1xMoE(nn.Module):
             prefix=f"{prefix}.pooler",
         )
         self.pooler.quant_method = MuseSparkTorchLinearMethod()
-        self.unpooler: ReplicatedLinear | None = ReplicatedLinear(
+        self.unpooler = ReplicatedLinear(
             hidden_size,
             config.hidden_size,
             bias=False,
@@ -217,33 +219,28 @@ class MuseSpark1xMoE(nn.Module):
         )
         self.unpooler.quant_method = MuseSparkTorchLinearMethod()
 
-        if self.pooler is not None:
-            self.pre_expert_norm: MuseSpark1xRMSNorm | None = MuseSpark1xRMSNorm(
-                hidden_size=hidden_size,
-                eps=config.rms_norm_eps,
-                has_weight=True,
-                is_post_norm=False,
-                zero_centered_gamma=True,
-                post_norm_gain_center_type="one",
-                residual_id=2 * layer_idx + 2,
-                output_norm_gain_center_type="zero",
-            )
-        else:
-            self.pre_expert_norm = None
+        self.pre_expert_norm = MuseSpark1xRMSNorm(
+            hidden_size=hidden_size,
+            eps=config.rms_norm_eps,
+            has_weight=True,
+            is_post_norm=False,
+            zero_centered_gamma=True,
+            post_norm_gain_center_type="one",
+            residual_id=2 * layer_idx + 2,
+            output_norm_gain_center_type="zero",
+        )
 
         self.intermediate_size = config.moe_intermediate_size
 
-        self.post_expert_norm: MuseSpark1xRMSNorm | None = (
-            MuseSpark1xRMSNormWithInputScale(
-                hidden_size=hidden_size,
-                eps=config.post_norm_eps,
-                has_weight=True,
-                is_post_norm=True,
-                zero_centered_gamma=True,
-                post_norm_gain_center_type="one",
-                residual_id=None,
-                output_norm_gain_center_type="zero",
-            )
+        self.post_expert_norm = MuseSpark1xRMSNormWithInputScale(
+            hidden_size=hidden_size,
+            eps=config.post_norm_eps,
+            has_weight=True,
+            is_post_norm=True,
+            zero_centered_gamma=True,
+            post_norm_gain_center_type="one",
+            residual_id=None,
+            output_norm_gain_center_type="zero",
         )
         self.experts: nn.Module = FusedMoEFactory(
             num_experts=config.num_local_experts,
@@ -265,12 +262,21 @@ class MuseSpark1xMoE(nn.Module):
             moe_config_cls=MuseSparkMoEConfig,
         )
 
+    def _load_router_weight(
+        self, param: nn.Parameter, loaded_weight: torch.Tensor
+    ) -> None:
+        self.router.weight_loader(param, loaded_weight)
+        self._router_multiplier_folded = False
+
     def fold_router_output_multiplier(self) -> None:
         """Fold the router output multiplier and split the bf16x3 planes."""
-        if self.router_output_multiplier is not None:
+        if (
+            not self._router_multiplier_folded
+            and self.router_output_multiplier is not None
+        ):
             with torch.no_grad():
                 self.router.weight.mul_(self.router_output_multiplier)
-            self.router_output_multiplier = None
+            self._router_multiplier_folded = True
             self.moe_router.router_output_multiplier = None
         weight = self.router.weight.data
         # Configs are tuned and validated on gfx950 only.
@@ -279,7 +285,11 @@ class MuseSpark1xMoE(nn.Module):
             and weight.dtype == torch.float32
             and supports_router_bf16x3(*weight.shape)
         ):
-            self._router_planes = split_fp32_to_bf16x3(weight)
+            planes = split_fp32_to_bf16x3(weight)
+            if getattr(self, "_router_planes", None) is None:
+                self._router_planes = planes
+            else:
+                self._router_planes.copy_(planes)
 
     def _router_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         planes = getattr(self, "_router_planes", None)
@@ -297,21 +307,13 @@ class MuseSpark1xMoE(nn.Module):
     def _experts_take_expanded_input(self) -> bool:
         """Whether the experts consume one input row per route (AITER MXFP4)."""
         norm = self.pre_expert_norm
-        return (
-            norm is not None
-            and norm.variance_size_override is None
-            and isinstance(
-                self.experts.routed_experts.quant_method, MuseSparkQuarkOCPMXFusedMoE
-            )
+        return norm.variance_size_override is None and isinstance(
+            self.experts.routed_experts.quant_method, MuseSparkQuarkOCPMXFusedMoE
         )
 
     def _pool(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        if self.pooler is None:
-            return hidden_states
         hidden_states, _ = self.pooler(hidden_states)
         norm = self.pre_expert_norm
-        if norm is None:
-            return hidden_states
         if self._experts_take_expanded_input and hidden_states.is_contiguous():
             return fused_rmsnorm_expand(
                 hidden_states,
@@ -336,8 +338,7 @@ class MuseSpark1xMoE(nn.Module):
             router_logits=router_logits,
         )
 
-        if self.unpooler is not None:
-            experts_out, _ = self.unpooler(experts_out)
+        experts_out, _ = self.unpooler(experts_out)
 
         if self.is_sequence_parallel:
             experts_out = tensor_model_parallel_all_gather(experts_out, 0)
@@ -541,6 +542,7 @@ class MuseSpark1xAttention(nn.Module):
             and self.default_dtype in (torch.bfloat16, torch.float16)
             and supports_fused_kv_insert(self.attn)
         )
+        self.attn.kv_cache_update_bypass = self.fused_qk_norm_rope_kv_insert
 
     @staticmethod
     def compute_attn_temperature_scale(

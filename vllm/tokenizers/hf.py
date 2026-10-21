@@ -6,58 +6,16 @@ import queue
 from pathlib import Path
 from typing import TypeAlias, TypeVar
 
-import huggingface_hub
 from transformers import AutoTokenizer, PythonBackend, TokenizersBackend
 
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_sentence_transformer_tokenizer_config
-from vllm.transformers_utils.repo_utils import hf_api
 
 from .protocol import TokenizerLike
 
 HfTokenizer: TypeAlias = PythonBackend | TokenizersBackend
 _T = TypeVar("_T", bound=TokenizerLike)
 logger = init_logger(__name__)
-
-
-def _load_chat_template_fallback(
-    path_or_repo_id: str | Path,
-    *,
-    revision: str | None = None,
-    cache_dir: str | None = None,
-    token: str | bool | None = None,
-    local_files_only: bool = False,
-    subfolder: str = "",
-) -> str | None:
-    """Load a standalone Jinja template when HF provides no default template."""
-    try:
-        model_path = Path(path_or_repo_id)
-        if not model_path.is_dir():
-            model_path = Path(
-                hf_api().snapshot_download(
-                    str(path_or_repo_id),
-                    revision=revision,
-                    cache_dir=cache_dir,
-                    token=token,
-                    local_files_only=(
-                        local_files_only or huggingface_hub.constants.HF_HUB_OFFLINE
-                    ),
-                    allow_patterns=[str(Path(subfolder) / "*.jinja")],
-                )
-            )
-
-        templates = sorted((model_path / subfolder).glob("*.jinja"))
-        if len(templates) != 1:
-            return None
-        template = templates[0].read_text(encoding="utf-8")
-        return template if template.strip() else None
-    except Exception:
-        logger.debug(
-            "Failed to load standalone chat template for %s",
-            path_or_repo_id,
-            exc_info=True,
-        )
-        return None
 
 
 class ThreadSafeHFTokenizerMixin:
@@ -251,16 +209,6 @@ class CachedHfTokenizer(TokenizerLike):
                 raise RuntimeError(err_msg) from e
             else:
                 raise e
-
-        if not tokenizer.chat_template:
-            tokenizer.chat_template = _load_chat_template_fallback(
-                path_or_repo_id,
-                revision=revision,
-                cache_dir=download_dir,
-                token=kwargs.get("token"),
-                local_files_only=kwargs.get("local_files_only", False),
-                subfolder=kwargs.get("subfolder", ""),
-            )
 
         # The special_tokens in tokenizer should also be
         # controlled by do_lower_case in encoder_config

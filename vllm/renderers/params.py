@@ -120,8 +120,6 @@ class ChatParams:
             chat_template_kwargs=merge_kwargs(
                 default_chat_template_kwargs,
                 self.chat_template_kwargs,
-                # Explicit null and "auto" values belong to the template.
-                unset_values=(),
             ),
             media_io_kwargs=merge_media_io_kwargs(
                 default_media_io_kwargs,

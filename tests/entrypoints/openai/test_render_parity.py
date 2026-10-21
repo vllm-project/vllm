@@ -482,10 +482,10 @@ class TestReasoningRenderParity:
 
 @pytest.mark.asyncio
 class TestTemplateKwargsRenderParity:
-    async def test_explicit_template_values_override_defaults(
+    async def test_unset_template_values_preserve_defaults(
         self, online_renderer, serving_responses, monkeypatch
     ):
-        """Preserve explicit null and auto values through both API prep paths."""
+        """Null and auto inherit server defaults; explicit false overrides them."""
         online_renderer.default_chat_template_kwargs = {
             "reasoning_effort": "medium",
             "mode": "strict",
@@ -510,7 +510,11 @@ class TestTemplateKwargsRenderParity:
         )
         for captured in (chat, responses):
             actual = captured.chat_params.chat_template_kwargs
-            assert {key: actual[key] for key in overrides} == overrides
+            assert {key: actual[key] for key in overrides} == {
+                "reasoning_effort": "medium",
+                "mode": "strict",
+                "enable_thinking": False,
+            }
 
     async def test_passthrough_fields(
         self, online_renderer, serving_responses, monkeypatch
