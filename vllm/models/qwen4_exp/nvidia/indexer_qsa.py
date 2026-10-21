@@ -9,12 +9,7 @@ from torch import nn
 from transformers import Qwen4ExpTextConfig
 
 from vllm.config import VllmConfig
-from vllm.distributed.aux_output_connector.profile import IndexerSource
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.indexer_capture import (
-    IndexerCaptureSink,
-    configure_indexer_capture,
-)
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -133,28 +128,6 @@ class QSAIndexer(nn.Module):
         # MTP step 0 selects the target-aligned rows; later steps reuse them
         # while continuing to update the QSA side cache.
         self.skip_topk = False
-        self.indexer_capture: IndexerCaptureSink | None = None
-        if vllm_config.aux_output_config.enable_return_indexer_topk:
-            compact = vllm_config.aux_output_config.indexer_encoding == "compact"
-            width = (
-                self.token_topk // self.compress_ratio + 2
-                if compact
-                else self.token_topk + self.compress_ratio
-            )
-            configure_indexer_capture(
-                self,
-                vllm_config,
-                IndexerSource(
-                    self.layer_id,
-                    (width,),
-                    "compressed_block_id" if compact else "logical_token_id",
-                    codec="qsa_blocks" if compact else "int32",
-                    ratio=self.compress_ratio,
-                    topk=self.token_topk,
-                    consumer_layer_ids=(self.layer_id,),
-                    trailing_count=True,
-                ),
-            )
 
         self.index_qk_proj = ReplicatedLinear(
             int(config.hidden_size),
@@ -499,15 +472,6 @@ class QSAIndexer(nn.Module):
             self.token_topk,
             out,
         )
-        if self.indexer_capture is not None:
-            if self.indexer_capture.source.codec == "qsa_blocks":
-                self.indexer_capture.capture_qsa(
-                    block_indices,
-                    compressed_metadata.logical_positions[:num_tokens],
-                    visible_blocks,
-                )
-            else:
-                self.indexer_capture.capture(out)
         return out, main_outputs
 
 

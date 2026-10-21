@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -42,9 +42,7 @@ class AuxRequestOutput:
     routed_experts_rows: np.ndarray
     """Routed expert IDs per token, or zero-width rows when disabled."""
     indexer_rows: np.ndarray | None = None
-    """Encoded indexer selections per token, or None when disabled."""
-    indexer_profile: dict[str, Any] | None = None
-    """Metadata describing indexer sources and decoding, if enabled."""
+    """Token TopK IDs per source layer, or None when disabled."""
 
 
 class AuxOutputSchedulerConnector:
@@ -175,12 +173,12 @@ class AuxOutputSchedulerConnector:
         self,
         request: Request,
         output: dict[str, AuxRequestOutput] | None,
-    ) -> tuple[np.ndarray | None, dict[str, Any] | None]:
+    ) -> np.ndarray | None:
         if not self._enable_indexer:
-            return None, None
+            return None
         assert output is not None
         value = output[request.request_id]
-        assert value.indexer_rows is not None and value.indexer_profile is not None
+        assert value.indexer_rows is not None
         assert request.sampling_params is not None
         start = max(
             0,
@@ -192,9 +190,9 @@ class AuxOutputSchedulerConnector:
         )
         end = request.num_tokens - 1 - value.token_start
         if end < 0:
-            return None, None
+            return None
         assert end <= len(value.indexer_rows), "Indexer output exceeds accepted range"
-        return value.indexer_rows[start:end], value.indexer_profile
+        return value.indexer_rows[start:end]
 
     def request_finished(self, request: Request) -> None:
         """Queue a request's terminal event and final block hashes."""

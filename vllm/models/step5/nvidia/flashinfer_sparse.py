@@ -120,7 +120,6 @@ class Step5FlashInferSparse:
         v_scale=None,
         query_len=1,
         gate=None,
-        capture=None,
     ):
         """Decode attention for rows of ``query_len`` tokens per request.
 
@@ -134,8 +133,6 @@ class Step5FlashInferSparse:
         regions = self.select_regions(
             scores, current, topk, topk_lengths=topk_lengths, sort=False
         )
-        if capture is not None:
-            capture.capture_regions(regions)
         # Reads selected regions straight from paged KV: no gather scratch,
         # no host plan, split merge fused for small split counts.
         sparse_decode_attention(

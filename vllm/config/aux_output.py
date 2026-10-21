@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Configuration for execution auxiliary outputs."""
 
-from typing import Literal
-
 from pydantic import Field
 
 from vllm.config.utils import config
@@ -18,12 +16,6 @@ class AuxOutputConfig:
 
     enable_return_indexer_topk: bool = False
     """Capture and return sparse-attention index selections."""
-
-    indexer_output_format: Literal["raw", "packed"] = "raw"
-    """Return decoded int32 selections or compact payload with a profile."""
-
-    indexer_encoding: Literal["raw", "compact"] = "compact"
-    """Use model-specific lossless encoding when available."""
 
     max_bytes: int | None = Field(default=None, gt=0)
     """LRU capacity, or ``None`` to derive it from the KV cache capacity."""
@@ -43,6 +35,5 @@ class AuxOutputConfig:
         if self.enable_return_indexer_topk:
             factors.update(
                 enable_return_indexer_topk=True,
-                indexer_encoding=self.indexer_encoding,
             )
         return hash_factors(factors)

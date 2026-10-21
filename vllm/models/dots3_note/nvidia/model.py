@@ -197,7 +197,7 @@ def _forward_note_mla(
     if capture is not None:
         assert attention.topk_indices_buffer is not None
         capture.capture(
-            attention.topk_indices_buffer[: len(hidden_states), : capture.source.width]
+            attention.topk_indices_buffer[: len(hidden_states), : capture.rows.shape[1]]
         )
     if llama_4_scaling is not None:
         q *= llama_4_scaling

@@ -417,12 +417,6 @@ class GenerateChoiceBase(BaseModel):
     indexer_topk: str | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
-    indexer_payload: str | None = Field(
-        default=None, exclude_if=lambda value: value is None
-    )
-    indexer_profile: dict[str, Any] | None = Field(
-        default=None, exclude_if=lambda value: value is None
-    )
     sampling_mask: list[list[int]] | None = None
     # Contiguous weight version spans over output-token indexes.
     weight_versions: list[WeightVersionSpan] | None = None
@@ -461,12 +455,6 @@ class GenerateStreamChoiceBase(BaseModel):
     token_ids: list[int] | None = None
     routed_experts: str | None = None
     indexer_topk: str | None = Field(
-        default=None, exclude_if=lambda value: value is None
-    )
-    indexer_payload: str | None = Field(
-        default=None, exclude_if=lambda value: value is None
-    )
-    indexer_profile: dict[str, Any] | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
     sampling_mask: list[list[int]] | None = None

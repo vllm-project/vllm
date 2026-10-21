@@ -2288,7 +2288,6 @@ class Scheduler(SchedulerInterface):
 
             routed_experts = None
             indexer_rows = None
-            indexer_profile = None
             should_emit_output = bool(
                 new_token_ids or pooler_output is not None or stopped
             )
@@ -2296,10 +2295,8 @@ class Scheduler(SchedulerInterface):
                 routed_experts = self.aux_output_connector.take_output(
                     request, model_runner_output.aux_output_connector_output
                 )
-                indexer_rows, indexer_profile = (
-                    self.aux_output_connector.take_indexer_output(
-                        request, model_runner_output.aux_output_connector_output
-                    )
+                indexer_rows = self.aux_output_connector.take_indexer_output(
+                    request, model_runner_output.aux_output_connector_output
                 )
             if should_emit_output:
                 prefill_stats = request.take_prefill_stats()
@@ -2382,8 +2379,6 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
                         indexer_rows=indexer_rows,
-                        indexer_profile=indexer_profile,
-                        indexer_output_format=self.vllm_config.aux_output_config.indexer_output_format,
                         num_nans_in_logits=request.num_nans_in_logits,
                     )
                 )
