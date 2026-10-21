@@ -46,6 +46,7 @@ _MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS: set[str] = {
 _VLLM_TOKENIZERS = {
     # ``cohere`` mode uses the standard cached HF tokenizer; only the
     # renderer (template stage) is replaced with a melody-based one.
+    "alpamayo2_super": ("alpamayo2_super", "Alpamayo2SuperTokenizer"),
     "cohere": ("hf", "CachedHfTokenizer"),
     "deepseek_v32": ("deepseek_v32", "DeepseekV32Tokenizer"),
     "deepseek_v4": ("deepseek_v4", "DeepseekV4Tokenizer"),
