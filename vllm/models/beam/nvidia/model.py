@@ -132,21 +132,11 @@ class BeamDecoderLayer(nn.Module):
         self.finalize_boundary = None
         if fuse_mlp_reduce and isinstance(self.mlp, BeamSparseMoeBlock):
             assert allreduce_workspace is not None
-            moe_config = self.mlp.experts.moe_config
-            allow_ep = moe_config.ep_size == allreduce_workspace.world_size
-            max_tokens = allreduce_workspace.max_tokens
-            if allow_ep:
-                max_tokens = min(max_tokens, allreduce_workspace.ep_finalize_max_tokens)
-            self.mlp.defer_finalize(max_tokens, allow_ep=allow_ep)
+            self.mlp.defer_finalize(allreduce_workspace.max_tokens)
             self.finalize_boundary = partial(
                 beam_finalize_allreduce_norm_residual_norm,
                 workspace=allreduce_workspace,
                 routed_scale=self.mlp.experts.routed_scaling_factor,
-                oneshot_max_tokens=(
-                    allreduce_workspace.ep_finalize_oneshot_max_tokens
-                    if allow_ep
-                    else 0
-                ),
             )
 
         self.input_layernorm = RMSNorm(config.hidden_size)

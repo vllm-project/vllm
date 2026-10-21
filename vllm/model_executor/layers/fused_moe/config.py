@@ -1315,7 +1315,6 @@ class FusedMoEConfig:
     # Requested through `defer_moe_finalize()`, read through
     # `should_defer_moe_finalize()`.
     _defer_moe_finalize: bool = field(default=False, init=False)
-    _defer_moe_finalize_allow_ep: bool = field(default=False, init=False)
     # Most tokens a deferred call covers: the consumer's capacity, lowered by
     # experts that would split a larger call across kernel launches. Negative
     # means unbounded.
@@ -1475,28 +1474,20 @@ class FusedMoEConfig:
         Evaluated on read rather than in ``__post_init__`` because deferral is
         requested after construction, like ``skip_final_all_reduce``.
         """
-        # Replicated-token EP can use the same all-reduce if the consumer
-        # handles nonlocal experts. Dispatched tokens require a combine, and
-        # consumers cannot strip hidden-dim padding from GEMM2 rows.
+        # The consumer fuses a TP all-reduce. Other parallel modes require a
+        # combine or reduce-scatter after the experts and cannot defer it, and
+        # the consumer has no way to strip hidden-dim padding from GEMM2 rows.
         return (
             self._defer_moe_finalize
-            and (
-                (self.tp_size > 1 and self.ep_size == 1)
-                or (
-                    self._defer_moe_finalize_allow_ep
-                    and self.tp_size == 1
-                    and self.ep_size > 1
-                )
-            )
+            and self.tp_size > 1
             and self.dp_size == 1
+            and self.ep_size == 1
             and self.pcp_size == 1
             and not self.is_sequence_parallel
             and self.hidden_dim == self.hidden_dim_unpadded
         )
 
-    def defer_moe_finalize(
-        self, max_num_tokens: int = -1, *, allow_ep: bool = False
-    ) -> None:
+    def defer_moe_finalize(self, max_num_tokens: int = -1) -> None:
         """Ask the experts to leave the top-k reduction to the layer's consumer.
 
         A layer whose consumer can fuse the top-k reduction (e.g. into its TP
@@ -1510,7 +1501,7 @@ class FusedMoEConfig:
         - The experts return an ``UnfinalizedMoEOutput`` instead of finalized
           states for every call ``should_defer_moe_finalize`` accepts.
         - ``should_defer_moe_finalize(num_tokens)`` is the answer for a call:
-          it requires TP or explicitly supported replicated-token EP, no padding
+          it requires a TP-only deployment without hidden-dim padding
           (``use_deferred_moe_finalize``), a non-empty call and at most
           ``defer_moe_finalize_max_num_tokens`` tokens. The cap starts at
           ``max_num_tokens`` and only ever goes down: experts that would split a
@@ -1526,12 +1517,9 @@ class FusedMoEConfig:
         Args:
             max_num_tokens: Most tokens per call the consumer can take in
                 deferred form. Negative means no limit of its own.
-            allow_ep: The consumer handles nonlocal expert rows and reduces
-                across the replicated-token EP group.
 
         """
         self._defer_moe_finalize = True
-        self._defer_moe_finalize_allow_ep = allow_ep
         self.limit_deferred_moe_finalize(max_num_tokens)
 
     def should_defer_moe_finalize(self, num_tokens: int) -> bool:

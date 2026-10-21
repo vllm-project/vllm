@@ -105,7 +105,7 @@ class BeamSparseMoeBlock(nn.Module):
             prefix=f"{prefix}.experts",
         )
 
-    def defer_finalize(self, max_tokens: int, *, allow_ep: bool = False) -> None:
+    def defer_finalize(self, max_tokens: int) -> None:
         from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import (
             TrtLlmNvFp4ExpertsModular,
             TrtLlmNvFp4ExpertsMonolithic,
@@ -115,7 +115,7 @@ class BeamSparseMoeBlock(nn.Module):
             self.experts.routed_experts.quant_method, "experts_cls", None
         )
         if experts_cls in (TrtLlmNvFp4ExpertsModular, TrtLlmNvFp4ExpertsMonolithic):
-            self.experts.moe_config.defer_moe_finalize(max_tokens, allow_ep=allow_ep)
+            self.experts.moe_config.defer_moe_finalize(max_tokens)
 
     def forward(
         self, hidden_states: torch.Tensor

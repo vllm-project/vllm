@@ -570,7 +570,7 @@ def test_allreduce_boundary_handles_batch_changes_and_graph_replay(
     )
 
 
-def _beam_finalize_worker(rank, world_size, port, expert_parallel, hidden_size):
+def _beam_finalize_worker(rank, world_size, port, hidden_size):
     import torch.distributed as dist
 
     from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
@@ -590,33 +590,17 @@ def _beam_finalize_worker(rank, world_size, port, expert_parallel, hidden_size):
     group = dist.new_group(backend="gloo")
     n, k = hidden_size, 8
     workspace = BeamAllReduceWorkspace(group, n, 4095)
-    if expert_parallel:
-        cutoff = workspace.ep_finalize_oneshot_max_tokens
-        batches = [0, 1, cutoff, cutoff + 1, 513]
-        if hidden_size == 5120:
-            batches.append(4095)
-        batches.append(2)
-    else:
-        batches = [0, 1, 127, 513, 2]
-    for iteration, m in enumerate(batches):
+    for iteration, m in enumerate([0, 1, 127, 513, 2]):
         torch.manual_seed(100 + iteration)
         residual = torch.randn(m, n, device="cuda", dtype=torch.bfloat16)
         weight = torch.randn(n, device="cuda", dtype=torch.bfloat16)
-        owners = torch.randint(world_size, (m, k), device="cuda")
-        owners[::3] = torch.arange(m, device="cuda")[::3, None] % world_size
-        shared_weights = torch.rand(m, k, device="cuda") / k
         torch.manual_seed(200 + rank + iteration)
         experts = torch.randn(m * k, n, device="cuda", dtype=torch.bfloat16)
-        weights = (
-            shared_weights if expert_parallel else torch.rand(m, k, device="cuda") / k
-        )
+        weights = torch.rand(m, k, device="cuda") / k
         if iteration % 2:
             weights = weights.bfloat16()
         permutation = torch.randperm(m * k, device="cuda", dtype=torch.int32).view(m, k)
-        if expert_parallel:
-            permutation.masked_fill_(owners != rank, -1)
-        else:
-            permutation[::3, -1] = -1
+        permutation[::3, -1] = -1
         x = UnfinalizedMoEOutput(experts, weights, permutation)
         routed_scale = 2.5 if iteration % 2 else 1.0
         next_norm = iteration % 2 == 0
@@ -635,12 +619,7 @@ def _beam_finalize_worker(rank, world_size, port, expert_parallel, hidden_size):
         )
 
         def run(args=args):
-            return beam_finalize_allreduce_norm_residual_norm(
-                *args,
-                oneshot_max_tokens=(
-                    workspace.ep_finalize_oneshot_max_tokens if expert_parallel else 0
-                ),
-            )
+            return beam_finalize_allreduce_norm_residual_norm(*args)
 
         def check(actual, args=args):
             x, residual, pw, peps, nw, neps, scales, _, routed_scale = args
@@ -665,10 +644,6 @@ def _beam_finalize_worker(rank, world_size, port, expert_parallel, hidden_size):
             _assert_boundary_close(actual, expected)
 
         check(run())
-        if expert_parallel and m == workspace.ep_finalize_oneshot_max_tokens:
-            tight_workspace = BeamAllReduceWorkspace(group, n, m)
-            args = (*args[:-2], tight_workspace, routed_scale)
-            check(run(args), args)
         torch.accelerator.synchronize()
         dist.barrier()
         graph = torch.cuda.CUDAGraph()
@@ -676,9 +651,6 @@ def _beam_finalize_worker(rank, world_size, port, expert_parallel, hidden_size):
             captured = run(args)
         for _ in range(2):
             experts.mul_(0.5)
-            if expert_parallel:
-                weights.mul_(0.75)
-                permutation.copy_(permutation.roll(1, dims=0))
             graph.replay()
             check(captured, args)
             # Alternate two-stage finalization with the one-stage decode path
@@ -698,20 +670,8 @@ def _beam_finalize_worker(rank, world_size, port, expert_parallel, hidden_size):
     dist.destroy_process_group()
 
 
-@pytest.mark.parametrize(
-    "world_size,expert_parallel,hidden_size",
-    [
-        (2, False, 5120),
-        (4, False, 5120),
-        (4, True, 5120),
-        (2, True, 1024),
-        (4, True, 2048),
-        (4, True, 8192),
-    ],
-)
-def test_moe_finalize_allreduce_preserves_local_rounding_and_replay(
-    world_size, expert_parallel, hidden_size
-):
+@pytest.mark.parametrize("world_size", [2, 4])
+def test_moe_finalize_allreduce_preserves_local_rounding_and_replay(world_size):
     """Empty local routes and live routing metadata retain BF16 casts on replay."""
     from torch.multiprocessing import spawn
 
@@ -722,7 +682,7 @@ def test_moe_finalize_allreduce_preserves_local_rounding_and_replay(
     _skip_without_beam_allreduce()
     spawn(
         _beam_finalize_worker,
-        args=(world_size, get_open_port(), expert_parallel, hidden_size),
+        args=(world_size, get_open_port(), 5120),
         nprocs=world_size,
     )
 
