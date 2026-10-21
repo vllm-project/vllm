@@ -892,3 +892,69 @@ def test_eplb_communicator_pipeline_parallel(world_size, backend):
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
     distributed_run(_test_eplb_communicator_pipeline_parallel, world_size, backend)
+
+
+def _test_eplb_pynccl_preserves_ue8m0_bytes(env, world_size, operation):
+    set_env_vars_and_device(env)
+    config = VllmConfig()
+    config.parallel_config.tensor_parallel_size = world_size
+    with set_current_vllm_config(config):
+        ensure_model_parallel_initialized(world_size, 1)
+        group = get_tp_group()
+        rank = group.rank_in_group
+        peer = 1 - rank
+        raw = (torch.arange(272, device="cuda") + rank).to(torch.uint8)
+        original_raw = raw.clone()
+        scales = raw[8:264].view(torch.float8_e8m0fnu).reshape(1, -1)
+        received = torch.full_like(raw, 255)
+        received_scales = received[8:264].view(torch.float8_e8m0fnu).reshape(1, -1)
+        weights = torch.full((1, 16), rank, device="cuda", dtype=torch.bfloat16)
+        received_weights = torch.empty_like(weights)
+        communicator = create_eplb_communicator(
+            group_coordinator=group,
+            backend="pynccl",
+            expert_weights=[[weights, scales]],
+            expert_buffer=[received_weights, received_scales],
+        )
+        if operation == "p2p":
+            communicator.add_send([weights, scales], peer, expert_id=0)
+            communicator.add_recv(
+                [received_weights, received_scales], peer, expert_id=0
+            )
+            communicator.execute()
+        else:
+            old_indices = torch.arange(world_size).reshape(1, -1)
+            rearrange_expert_weights_inplace(
+                old_indices,
+                old_indices.flip(1),
+                [[weights, scales]],
+                [received_weights, received_scales],
+                group.device_group,
+                communicator,
+                is_profile=operation == "profile",
+            )
+        torch.accelerator.synchronize()
+
+        if operation == "profile":
+            assert torch.equal(raw, original_raw)
+            torch.testing.assert_close(weights, torch.full_like(weights, rank))
+            return
+        if operation == "rearrange":
+            received_scales, received_weights = scales, weights
+        expected = (torch.arange(8, 264, device="cuda") + peer).to(torch.uint8)
+        assert torch.equal(received_scales.view(torch.uint8).reshape(-1), expected)
+        assert torch.equal(raw[:8], original_raw[:8])
+        assert torch.equal(raw[264:], original_raw[264:])
+        assert torch.all(received[:8] == 255)
+        assert torch.all(received[264:] == 255)
+        torch.testing.assert_close(received_weights, torch.full_like(weights, peer))
+
+
+@pytest.mark.parametrize("operation", ["p2p", "profile", "rearrange"])
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike() or torch.accelerator.device_count() < 2,
+    reason="requires two CUDA-like GPUs",
+)
+def test_eplb_pynccl_preserves_ue8m0_bytes(operation):
+    """Keep UE8M0 bytes intact through profiling and offset-buffer migration."""
+    distributed_run(_test_eplb_pynccl_preserves_ue8m0_bytes, 2, operation)

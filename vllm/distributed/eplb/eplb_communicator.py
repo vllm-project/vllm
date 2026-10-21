@@ -689,6 +689,9 @@ class PyNcclEplbCommunicator(EplbCommunicator):
     ) -> None:
         self._ensure_group_started()
         for tensor in tensors:
+            # NCCL has no UE8M0 dtype; P2P byte views preserve every scale bit.
+            if tensor.dtype == torch.float8_e8m0fnu:
+                tensor = tensor.view(torch.uint8)
             self._pynccl_comm.send(tensor, dst_rank, stream=self._stream)
 
     def add_recv(
@@ -699,6 +702,8 @@ class PyNcclEplbCommunicator(EplbCommunicator):
     ) -> None:
         self._ensure_group_started()
         for tensor in tensors:
+            if tensor.dtype == torch.float8_e8m0fnu:
+                tensor = tensor.view(torch.uint8)
             self._pynccl_comm.recv(tensor, src_rank, stream=self._stream)
 
     def execute(self) -> None:
@@ -752,7 +757,8 @@ def create_eplb_communicator(
             {
                 tensor.dtype
                 for tensor in first_layer
-                if not ncclDataTypeEnum.supports_torch_dtype(tensor.dtype)
+                if tensor.dtype != torch.float8_e8m0fnu
+                and not ncclDataTypeEnum.supports_torch_dtype(tensor.dtype)
             },
             key=str,
         )

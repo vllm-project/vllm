@@ -710,6 +710,9 @@ def rearrange_expert_weights_inplace(
                 torch.empty_like(w) for w in first_layer_weights
             ]
             for weight, buffer in zip(expert_weights[0], profile_buffer):
+                if weight.dtype == torch.float8_e8m0fnu:
+                    weight = weight.view(torch.uint8)
+                    buffer = buffer.view(torch.uint8)
                 dummy_recv_buffer = [buffer for _ in range(ep_size)]
                 torch.distributed.barrier()
                 all_gather(
