@@ -275,6 +275,63 @@ __launch_bounds__(TPB) __global__ void moeTopK(
   2) This implementation assumes k is small, but will work for any k.
 */
 
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800 && !defined(USE_ROCM)
+  #define VLLM_TOPK_HAS_WARP_REDUX 1
+#else
+  #define VLLM_TOPK_HAS_WARP_REDUX 0
+#endif
+
+#if VLLM_TOPK_HAS_WARP_REDUX
+/*
+  Selects the next expert of a row that one full warp owns, with two redux.sync max
+  reductions instead of a shuffle butterfly. Each lane offers its best unselected slot
+  as the pair (score bits, ~expert). For scores >= +0 the unsigned order of the bits is
+  the float order, and a larger ~expert is a lower expert, so the result is the maximum
+  score with the lowest expert index on ties: the same rule as the butterfly.
+  A lane without an unselected slot offers (0, 0), which loses to every real slot.
+  The owner lane marks its slot in selected_slots. Returns the expert and sets score.
+*/
+template <int VPT, int ELTS_PER_LDG, int COLS_PER_GROUP_LDG>
+__device__ __forceinline__ int selectFullWarpMax(
+    const float (&scores)[VPT], uint32_t& selected_slots, const int first_col, float& score)
+{
+    static_assert(VPT <= 32, "selected_slots has one bit per slot");
+    constexpr uint32_t kFullWarpMask = 0xffffffffu;
+    float best_score = 0.f;
+    int best_slot = -1;
+    int best_expert = 0;
+#pragma unroll
+    for (int ldg = 0; ldg < VPT / ELTS_PER_LDG; ++ldg)
+    {
+#pragma unroll
+        for (int ii = 0; ii < ELTS_PER_LDG; ++ii)
+        {
+            const int slot = ldg * ELTS_PER_LDG + ii;
+            const bool is_free = ((selected_slots >> slot) & 1u) == 0u;
+            // Strict > keeps the lowest column of this lane on ties.
+            if (is_free && (best_slot < 0 || scores[slot] > best_score))
+            {
+                best_score = scores[slot];
+                best_slot = slot;
+                best_expert = first_col + ldg * COLS_PER_GROUP_LDG + ii;
+            }
+        }
+    }
+    const bool has_slot = best_slot >= 0;
+    const uint32_t score_bits = has_slot ? __float_as_uint(best_score) : 0u;
+    const uint32_t expert_key = has_slot ? ~static_cast<uint32_t>(best_expert) : 0u;
+    const uint32_t max_score_bits = __reduce_max_sync(kFullWarpMask, score_bits);
+    const uint32_t max_expert_key =
+        __reduce_max_sync(kFullWarpMask, score_bits == max_score_bits ? expert_key : 0u);
+    if (has_slot && expert_key == max_expert_key)
+    {
+        selected_slots |= 1u << best_slot;
+    }
+    score = __uint_as_float(max_score_bits);
+    return static_cast<int>(~max_expert_key);
+}
+#endif
+
 template <int VPT, int NUM_EXPERTS, int WARPS_PER_CTA, int BYTES_PER_LDG, int WARP_SIZE_PARAM, typename IndType,
           typename InputType = float, ScoringFunc SF>
 __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
@@ -478,6 +535,62 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
 
     static constexpr int COLS_PER_GROUP_LDG = ELTS_PER_LDG * THREADS_PER_ROW;
 
+    // Lane 0 of the row group writes each selection and keeps the renormalization sum.
+    float selected_sum = 0.f;
+    const auto write_selection = [&](const int k_idx, const int expert, const float score)
+    {
+        // Add a guard to ignore experts not included by this node
+        const bool node_uses_expert = expert >= start_expert && expert < end_expert;
+        const bool should_process_row = row_is_active && node_uses_expert;
+        const bool is_pad_row = is_padding != nullptr && is_padding[thread_row];
+
+        // The lead thread from each sub-group will write out the final results to global memory. (This will be a
+        // single) thread per row of the input/output matrices.
+        const int idx = k * thread_row + k_idx;
+        output[idx] = score;
+        indices[idx] = is_pad_row ? static_cast<IndType>(-1)
+                                   : (should_process_row ? (expert - start_expert) : NUM_EXPERTS);
+        source_rows[idx] = k_idx * num_rows + thread_row;
+        if (renormalize) {
+            selected_sum += score;
+        }
+    };
+    // Apply renormalization and routed scaling factor to final weights.
+    const auto scale_selections = [&]()
+    {
+      float scale = static_cast<float>(routed_scaling_factor);
+      if (renormalize) {
+        const float denom = selected_sum > 0.f ? selected_sum : 1.f;
+        scale /= denom;
+      }
+      for (int k_idx = 0; k_idx < k; ++k_idx) {
+        const int idx = k * thread_row + k_idx;
+        output[idx] = output[idx] * scale;
+      }
+    };
+
+#if VLLM_TOPK_HAS_WARP_REDUX
+    if constexpr (THREADS_PER_ROW == WARP_SIZE_PARAM) {
+      // Without a bias the choice score is the output score, which is >= +0 after the
+      // clamp above. Biased choice scores can be negative and use the butterfly below.
+      if (bias == nullptr) {
+        uint32_t selected_slots = 0u;
+        for (int k_idx = 0; k_idx < k; ++k_idx) {
+          float score;
+          const int expert = selectFullWarpMax<VPT, ELTS_PER_LDG, COLS_PER_GROUP_LDG>(
+              row_chunk, selected_slots, first_elt_read_by_thread, score);
+          if (thread_group_idx == 0) {
+            write_selection(k_idx, expert, score);
+          }
+        }
+        if (thread_group_idx == 0) {
+          scale_selections();
+        }
+        return;
+      }
+    }
+#endif
+
     // If bias is not null, use biased value for selection
     float row_chunk_for_choice[VPT];
     // Apply correction bias
@@ -502,7 +615,6 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
     // with the max index.
     int start_col = first_elt_read_by_thread;
 
-    float selected_sum = 0.f;
     for (int k_idx = 0; k_idx < k; ++k_idx)
     {
         // First, each thread does the local argmax
@@ -551,21 +663,7 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
         // Write the max for this k iteration to global memory.
         if (thread_group_idx == 0)
         {
-            // Add a guard to ignore experts not included by this node
-            const bool node_uses_expert = expert >= start_expert && expert < end_expert;
-            const bool should_process_row = row_is_active && node_uses_expert;
-            const bool is_pad_row = is_padding != nullptr && is_padding[thread_row];
-
-            // The lead thread from each sub-group will write out the final results to global memory. (This will be a
-            // single) thread per row of the input/output matrices.
-            const int idx = k * thread_row + k_idx;
-            output[idx] = max_val;
-            indices[idx] = is_pad_row ? static_cast<IndType>(-1)
-                                       : (should_process_row ? (expert - start_expert) : NUM_EXPERTS);
-            source_rows[idx] = k_idx * num_rows + thread_row;
-            if (renormalize) {
-                selected_sum += max_val;
-            }
+            write_selection(k_idx, expert, max_val);
         }
 
         // Finally, we clear the value in the thread with the current max if there is another iteration to run.
@@ -584,17 +682,8 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
         }
     }
 
-    // Apply renormalization and routed scaling factor to final weights.
     if (thread_group_idx == 0) {
-      float scale = static_cast<float>(routed_scaling_factor);
-      if (renormalize) {
-        const float denom = selected_sum > 0.f ? selected_sum : 1.f;
-        scale /= denom;
-      }
-      for (int k_idx = 0; k_idx < k; ++k_idx) {
-        const int idx = k * thread_row + k_idx;
-        output[idx] = output[idx] * scale;
-      }
+      scale_selections();
     }
 }
 
