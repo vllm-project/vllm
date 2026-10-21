@@ -50,7 +50,13 @@ def is_v1_kv_transfer_group(connector: KVConnectorBaseType | None = None) -> boo
 
 
 def _sync_engine_id_across_tp(vllm_config: "VllmConfig") -> None:
-    """Synchronize engine_id across TP, PCP and PP within each DP engine."""
+    """Broadcast engine_id from TP rank 0 so all workers in a
+    multi-node TP group share the same value.
+
+    When PCP is enabled, also broadcast across PCP ranks.
+    When PP is enabled, also broadcast across PP ranks so all workers in
+    the same model-parallel engine share the same value.
+    """
     from vllm.distributed.parallel_state import (
         get_pcp_group,
         get_pp_group,
