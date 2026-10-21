@@ -1314,6 +1314,167 @@ class TestTieringOffloadingManager:
         tier2_on_request_finished.assert_called_once_with(ctx)
         assert ctx.req_id not in self.manager._req_state
 
+    def test_external_request_finishes_after_promotion_submit(
+        self, manager_setup, monkeypatch
+    ):
+        """A request finalized inside serve_external_requests() must submit its
+        pending promotion before the source tier releases per-request state."""
+        chunk = to_keys([0])[0]
+        self.secondary_tier1.chunks[chunk] = True
+
+        events = []
+        tier1_submit_load = MagicMock(
+            side_effect=lambda job: events.append(
+                ("submit_load", job.req_context.req_id)
+            )
+        )
+        tier1_on_request_finished = MagicMock(
+            side_effect=lambda ctx: events.append(("finished", ctx.req_id))
+        )
+        monkeypatch.setattr(self.secondary_tier1, "submit_load", tier1_submit_load)
+        monkeypatch.setattr(
+            self.secondary_tier1, "on_request_finished", tier1_on_request_finished
+        )
+
+        ctx = ReqContext(req_id="kvcr-source:0")
+
+        def serve_external(parent):
+            parent.on_new_request(ctx)
+            assert parent.lookup(chunk, ctx) is LookupResult.HIT_PENDING
+            parent.on_request_finished(ctx)
+
+        monkeypatch.setattr(
+            self.secondary_tier2, "serve_external_requests", serve_external
+        )
+        self.manager.on_schedule_end(
+            ScheduleEndContext(new_req_ids=(), preempted_req_ids=())
+        )
+
+        assert events == [
+            ("submit_load", "kvcr-source:0"),
+            ("finished", "kvcr-source:0"),
+        ]
+        tier1_submit_load.assert_called_once()
+        job_metadata = tier1_submit_load.call_args.args[0]
+        assert list(job_metadata.keys) == [chunk]
+
+    def test_complete_store_flushes_promotion_before_finishing(
+        self, manager_setup, monkeypatch
+    ):
+        """The last store completion can unblock finalization; its pending
+        promotion must still be submitted before the tier is notified."""
+        chunks = to_keys(range(2))
+        promo_chunk = to_keys([4])[0]
+        self.secondary_tier1.chunks[promo_chunk] = True
+        ctx = ReqContext(req_id="req_store_promotion")
+
+        events = []
+        tier1_submit_load = MagicMock(
+            side_effect=lambda job: events.append(
+                ("submit_load", job.req_context.req_id)
+            )
+        )
+        tier1_on_request_finished = MagicMock(
+            side_effect=lambda req_context: events.append(
+                ("finished", req_context.req_id)
+            )
+        )
+        monkeypatch.setattr(self.secondary_tier1, "submit_load", tier1_submit_load)
+        monkeypatch.setattr(
+            self.secondary_tier1, "on_request_finished", tier1_on_request_finished
+        )
+
+        self._start_request(ctx)
+        self.manager.prepare_store(chunks, ctx)
+        assert self.manager.lookup(promo_chunk, ctx) is LookupResult.HIT_PENDING
+
+        self.manager.on_request_finished(ctx)
+        assert events == []
+
+        self.manager.complete_store(chunks, ctx, success=True)
+
+        assert events == [
+            ("submit_load", ctx.req_id),
+            ("finished", ctx.req_id),
+        ]
+        assert ctx.req_id not in self.manager._req_state
+
+    def test_finalizing_one_request_keeps_other_promotions_queued(
+        self, manager_setup, monkeypatch
+    ):
+        """Per-request flushing must not submit another request's promotion."""
+        chunk_a, chunk_b = to_keys([0, 1])
+        self.secondary_tier1.chunks[chunk_a] = True
+        self.secondary_tier1.chunks[chunk_b] = True
+        ctx_a = ReqContext(req_id="req_a")
+        ctx_b = ReqContext(req_id="req_b")
+
+        events = []
+        tier1_submit_load = MagicMock(
+            side_effect=lambda job: events.append(
+                ("submit_load", job.req_context.req_id)
+            )
+        )
+        monkeypatch.setattr(self.secondary_tier1, "submit_load", tier1_submit_load)
+
+        self._start_request(ctx_a)
+        self._start_request(ctx_b)
+        assert self.manager.lookup(chunk_a, ctx_a) is LookupResult.HIT_PENDING
+        assert self.manager.lookup(chunk_b, ctx_b) is LookupResult.HIT_PENDING
+
+        self.manager.on_request_finished(ctx_a)
+
+        assert events == [("submit_load", ctx_a.req_id)]
+        assert set(self.manager._pending_load_submissions[0]) == {ctx_b.req_id}
+
+        self.manager.on_request_finished(ctx_b)
+
+        assert events == [
+            ("submit_load", ctx_a.req_id),
+            ("submit_load", ctx_b.req_id),
+        ]
+        assert not self.manager._pending_load_submissions
+
+    def test_submit_load_failure_releases_promotion(self, manager_setup, monkeypatch):
+        """A synchronous submission failure must not leak the job or its
+        primary slot, and must not block request finalization."""
+        chunk = to_keys([0])[0]
+        self.secondary_tier1.chunks[chunk] = True
+        ctx = ReqContext(req_id="req_submit_load_failure")
+
+        tier1_submit_load = MagicMock(side_effect=RuntimeError("submit failed"))
+        tier1_on_request_finished = MagicMock(
+            wraps=self.secondary_tier1.on_request_finished
+        )
+        monkeypatch.setattr(self.secondary_tier1, "submit_load", tier1_submit_load)
+        monkeypatch.setattr(
+            self.secondary_tier1, "on_request_finished", tier1_on_request_finished
+        )
+
+        self._start_request(ctx)
+        assert self.manager.lookup(chunk, ctx) is LookupResult.HIT_PENDING
+        assert self.manager.has_pending_work()
+
+        self.manager.on_request_finished(ctx)
+
+        assert self.manager._jobs == {}
+        assert not self.manager._pending_load_submissions
+        assert self.manager.primary_tier.lookup(chunk, ctx) is LookupResult.MISS
+        assert not self.manager.has_pending_work()
+        tier1_on_request_finished.assert_called_once_with(ctx)
+        assert ctx.req_id not in self.manager._req_state
+
+    def test_has_pending_work_includes_deferred_promotions(self, manager_setup):
+        """An unflushed promotion must keep the engine stepping."""
+        chunk = to_keys([0])[0]
+        self.secondary_tier1.chunks[chunk] = True
+        ctx = ReqContext(req_id="req_deferred_promotion")
+
+        self._start_request(ctx)
+        assert not self.manager.has_pending_work()
+        assert self.manager.lookup(chunk, ctx) is LookupResult.HIT_PENDING
+        assert self.manager.has_pending_work()
+
     def test_reset_cache_finalizes_delayed_secondary_request(
         self, manager_setup, monkeypatch
     ):

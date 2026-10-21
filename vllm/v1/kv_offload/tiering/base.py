@@ -279,6 +279,11 @@ class SecondaryTierManager(ABC):
 
         Report completion via ``get_finished_jobs()``.
 
+        If this method raises, the manager treats the job as failed and
+        releases its primary-tier slots. The implementation must not retain
+        the job or continue the transfer after raising. Once this method
+        returns, it must report a terminal result via ``get_finished_jobs()``.
+
         Args:
             job_metadata: Job metadata including job_id, keys, and chunk_ids
                           identifying the primary-tier slots to write into.
@@ -345,6 +350,11 @@ class SecondaryTierManager(ABC):
         report via get_finished_jobs(). This is the right place to release
         per-request bookkeeping.
 
+        This may be called while ``serve_external_requests()`` is still
+        running, because an external request can finish inside that call. The
+        manager submits any promotions queued for this request before calling
+        this method.
+
         Args:
             req_context: per-request context.
 
@@ -364,6 +374,11 @@ class SecondaryTierManager(ABC):
         caller holds the manager lock throughout it -- so a lookup() HIT taken
         here stays valid until this call pins it. An implementation must not
         release that lock partway through.
+
+        This call may finalize a synthetic request by invoking
+        ``parent.on_request_finished()`` before returning. The manager submits
+        that request's pending promotions before notifying secondary tiers, so
+        ``on_request_finished()`` may release per-request state.
 
         Tiers that don't serve external requests leave this as a no-op. A tier
         that overrides it without setting tolerates_off_thread_polling is served

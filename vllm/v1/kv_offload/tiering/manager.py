@@ -462,11 +462,13 @@ class TieringOffloadingManager(OffloadingManager):
         counterpart has asked for -- the same two steps on_schedule_end() runs,
         narrowed to the tiers that opted in.
 
-        Excludes _flush_pending_promotions() and _flush_pending_cascades() by
-        design: both are per-step batching points, and running them here would
-        fragment batches the scheduler thread accumulated during schedule(). A
-        promotion that a lookup() from this path initiates therefore waits for
-        the next on_schedule_end() to be submitted.
+        Excludes the global _flush_pending_promotions() and
+        _flush_pending_cascades() by design: both are per-step batching points,
+        and running them here would fragment batches the scheduler thread
+        accumulated during schedule(). A promotion initiated by a lookup() from
+        this path therefore waits for the next on_schedule_end(), unless its
+        request finalizes in the same serve call -- then
+        _maybe_finalize_request() submits it before on_request_finished().
 
         The caller must hold self.lock for the whole call. serve_external_requests()
         relies on that: it establishes lookup() HITs and then pins them, and the
@@ -828,6 +830,40 @@ class TieringOffloadingManager(OffloadingManager):
         entry.chunk_ids.extend(store_spec.chunk_ids)
         return True
 
+    def _submit_promotion(self, tier_idx: int, entry: PendingPromotion) -> None:
+        transfer_job = TransferJob(
+            job_id=self._next_job_id(),
+            keys=entry.keys,
+            chunk_ids=np.array(entry.chunk_ids, dtype=np.int32),
+            is_promotion=True,
+            req_context=entry.req_context,
+        )
+        self._register_job(transfer_job, tier_idx)
+        try:
+            self.secondary_tiers[tier_idx].submit_load(transfer_job)
+        except Exception:
+            logger.exception(
+                "Failed to submit promotion job %d to tier #%d",
+                transfer_job.job_id,
+                tier_idx,
+            )
+            job_metadata = self._pop_job(transfer_job.job_id)
+            assert job_metadata is not None
+            failed = JobResult(job_id=transfer_job.job_id, success=False)
+            self._metrics.on_job_finished(job_metadata, failed)
+            self._complete_promotion(job_metadata, failed)
+
+    def _flush_pending_promotions_for(self, req_context: ReqContext) -> None:
+        """Submit promotions queued by one request before it is finalized."""
+        for tier_idx, pending_by_ctx in list(self._pending_load_submissions.items()):
+            for req_id, entry in list(pending_by_ctx.items()):
+                if entry.req_context is not req_context:
+                    continue
+                del pending_by_ctx[req_id]
+                self._submit_promotion(tier_idx, entry)
+            if not pending_by_ctx:
+                del self._pending_load_submissions[tier_idx]
+
     def _flush_pending_promotions(self) -> None:
         """Submit one batched submit_load() per (tier, request).
 
@@ -838,18 +874,8 @@ class TieringOffloadingManager(OffloadingManager):
             return
 
         for tier_idx, pending_by_ctx in self._pending_load_submissions.items():
-            tier = self.secondary_tiers[tier_idx]
             for entry in pending_by_ctx.values():
-                job_id = self._next_job_id()
-                job_metadata = TransferJob(
-                    job_id=job_id,
-                    keys=entry.keys,
-                    chunk_ids=np.array(entry.chunk_ids, dtype=np.int32),
-                    is_promotion=True,
-                    req_context=entry.req_context,
-                )
-                self._register_job(job_metadata, tier_idx)
-                tier.submit_load(job_metadata)
+                self._submit_promotion(tier_idx, entry)
 
         self._pending_load_submissions.clear()
 
@@ -1162,6 +1188,7 @@ class TieringOffloadingManager(OffloadingManager):
         if state.pending_cascade_keys:
             return
 
+        self._flush_pending_promotions_for(state.req_context)
         for tier_idx, tier in enumerate(self.secondary_tiers):
             if tier_idx == exclude_tier_idx:
                 continue
@@ -1207,13 +1234,11 @@ class TieringOffloadingManager(OffloadingManager):
 
     @override
     def has_pending_work(self) -> bool:
-        # In-flight primary<->secondary transfers (pending promotions are
-        # translated to transfer jobs in on_schedule_end), plus any work the
-        # secondary tiers themselves still have outstanding.
-        # Deferred releases keep the tiers polled until they complete.
+        # Deferred promotions and releases, in-flight transfers, and tier work.
         return (
             bool(self._jobs)
             or bool(self._deferred_releases)
+            or any(self._pending_load_submissions.values())
             or any(state.pending_cascade_keys for state in self._req_state.values())
             or any(tier.has_pending_work() for tier in self.secondary_tiers)
         )
