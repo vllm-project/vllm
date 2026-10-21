@@ -3877,9 +3877,9 @@ void paged_attention_custom_launcher_navi(
 // size, block size, alibi, out dtype, v-cache layout) combination. To let ninja
 // compile them in parallel instead of serializing ~10 min onto a single core,
 // the instantiations are spread over one translation unit per (dtype, kv-cache
-// dtype, head size, block size, alibi, out dtype) combination: the translation
-// units, their prototypes and the dispatch arms of paged_attention() are all
-// emitted from the variant list in csrc/rocm/generate_paged_attn.py.
+// dtype, head size, block size) combination: the translation units, their
+// prototypes and the dispatch arms of paged_attention() are all emitted from
+// the variant list in csrc/rocm/generate_paged_attn.py.
 // ---------------------------------------------------------------------------
 
 // Parameter list shared by paged_attention() and every entry point defined in

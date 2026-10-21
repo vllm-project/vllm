@@ -1576,13 +1576,25 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   list(JOIN VLLM_GPU_ARCHES "," ROCM_ATTN_ARCHS)
   set(ROCM_ATTN_GEN_HASH_ARCH
     "${ROCM_ATTN_GEN_SCRIPT_HASH}(ARCH:${ROCM_ATTN_ARCHS})")
+  # The generated units live in the source tree, and hipify makes the compiled
+  # copies from there, so the record of what is on disk has to live next to them:
+  # a cache entry is per build directory, and two build directories would then
+  # overwrite each other's units without noticing.
+  set(ROCM_ATTN_GEN_STAMP
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/rocm/.paged_attn_generated)
+  set(ROCM_ATTN_GENERATED "")
+  if (EXISTS ${ROCM_ATTN_GEN_STAMP})
+    file(READ ${ROCM_ATTN_GEN_STAMP} ROCM_ATTN_GENERATED)
+  endif()
   message(STATUS "paged attention generation script hash: ${ROCM_ATTN_GEN_HASH_ARCH}")
 
   file(GLOB VLLM_ATTENTION_PAGED_ATTN_SRC RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
     "csrc/rocm/attention_paged_attn_*.cu")
+  file(GLOB VLLM_ATTENTION_PAGED_ATTN_INC RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
+    "csrc/rocm/attention_paged_attn_*.inc")
   if (NOT VLLM_ATTENTION_PAGED_ATTN_SRC
-      OR NOT DEFINED CACHE{ROCM_ATTN_GEN_HASH_ARCH}
-      OR NOT $CACHE{ROCM_ATTN_GEN_HASH_ARCH} STREQUAL ${ROCM_ATTN_GEN_HASH_ARCH})
+      OR NOT VLLM_ATTENTION_PAGED_ATTN_INC
+      OR NOT ROCM_ATTN_GENERATED STREQUAL ${ROCM_ATTN_GEN_HASH_ARCH})
     execute_process(
       COMMAND ${CMAKE_COMMAND} -E env
       PYTHONPATH=$ENV{PYTHONPATH}
@@ -1598,12 +1610,13 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
                           "\nCheck the log for details: "
                           "${CMAKE_CURRENT_BINARY_DIR}/rocm_attn_generation.log")
     else()
-      set(ROCM_ATTN_GEN_HASH_ARCH ${ROCM_ATTN_GEN_HASH_ARCH}
-          CACHE STRING "Last run paged attention generate script hash (arch)" FORCE)
+      file(WRITE ${ROCM_ATTN_GEN_STAMP} ${ROCM_ATTN_GEN_HASH_ARCH})
       message(STATUS "Paged attention generation completed successfully.")
     endif()
     file(GLOB VLLM_ATTENTION_PAGED_ATTN_SRC RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
       "csrc/rocm/attention_paged_attn_*.cu")
+    file(GLOB VLLM_ATTENTION_PAGED_ATTN_INC RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
+      "csrc/rocm/attention_paged_attn_*.inc")
   else()
     message(STATUS "Paged attention generation script has not changed, skipping generation.")
   endif()

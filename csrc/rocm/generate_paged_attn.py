@@ -35,7 +35,7 @@ import sys
 
 # Block sizes the kernels are instantiated for (see CALL_CUSTOM_LAUNCHER in
 # attention_kernels.cuh). One translation unit is generated per (variant, block
-# size, alibi, out dtype).
+# size).
 BLOCK_SIZES = [16, 32]
 
 # ALIBI_ENABLED and the out dtype are *not* split into their own translation
@@ -318,16 +318,20 @@ def generate_dispatch():
             if len(mfma_types) == 1 and mfma_types[0] is None:
                 lines.extend(block_size_switch(by_mfma[None], 6))
             else:
-                for mfma_index, mfma_type in enumerate(mfma_types):
-                    mfma_keyword = "if" if mfma_index == 0 else "else if"
-                    lines.append(f'      {mfma_keyword} '
-                                 f'(mfma_type == "{mfma_type}") {{')
+                # ``mfma_type`` is matched with a plain ``else`` on the last arm,
+                # as the hand-written dispatch used to: any value other than the
+                # recognised ones keeps selecting that arm instead of failing.
+                ordered = sorted(mfma_types,
+                                 key=lambda m: m == "f16")  # f16 last
+                for mfma_index, mfma_type in enumerate(ordered):
+                    if mfma_index == len(ordered) - 1:
+                        lines.append("      else {")
+                    else:
+                        mfma_keyword = "if" if mfma_index == 0 else "else if"
+                        lines.append(f'      {mfma_keyword} '
+                                     f'(mfma_type == "{mfma_type}") {{')
                     lines.extend(block_size_switch(by_mfma[mfma_type], 8))
                     lines.append("      }")
-                lines.append("      else {")
-                lines.append('        TORCH_CHECK(false, '
-                             '"Unsupported mfma_type: ", mfma_type);')
-                lines.append("      }")
             lines.append("    }")
 
         lines.append("    else {")
