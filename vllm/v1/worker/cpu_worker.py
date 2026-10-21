@@ -41,7 +41,9 @@ class CPUWorker(Worker):
         # TODO: use numactl for process setup
         # TODO: optimize for `interleaved` policy
         # Bind memory node
-        allowed_memory_nodes = get_visible_memory_node()
+        allowed_memory_nodes = get_visible_memory_node(
+            vllm_config.parallel_config.assigned_physical_gpu_ids
+        )
         allowed_cpu_list = get_allowed_cpu_list()
         cpu_core = allowed_cpu_list[0]
 
