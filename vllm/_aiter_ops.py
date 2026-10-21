@@ -5201,5 +5201,8 @@ class rocm_aiter_ops:
         )
 
 
-rocm_aiter_ops.register_ops_once()
-_sync_aiter_situv2_moe_env()
+# Import-time setup is ROCm-only: other platforms import this module from
+# shared code but never use AITER, so they should not run any of it.
+if current_platform.is_rocm():
+    rocm_aiter_ops.register_ops_once()
+    _sync_aiter_situv2_moe_env()
