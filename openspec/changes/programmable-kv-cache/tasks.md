@@ -115,8 +115,8 @@ At that stop point progress was 56/64 and no experiment or regression queue rema
 - [x] 10.2 Add bounded current-residency queries and control-result acknowledgement with preserved duplicate semantics and observable capacity.
 - [x] 10.3 Improve policy demand/movement budgets and hot-path observation costs with behavioral coverage.
 - [x] 10.4 Integrate the real verl tool loop and executable tools with an application-directed controller, generated branches, fallback and cleanup.
-- [ ] 10.5 Run repeated fixed-work and live rollout comparisons across cache pressure, policy ablations and adverse predictions; evaluate the 25% throughput target and preserve all results.
-- [ ] 10.6 Run relevant regression/lint/model checks and reconcile runtime documentation, acceptance gaps and the final performance report.
+- [x] 10.5 Run repeated fixed-work and live rollout comparisons across cache pressure, policy ablations and adverse predictions; evaluate the 25% throughput target and preserve all results.
+- [x] 10.6 Run relevant regression/lint/model checks and reconcile runtime documentation, acceptance gaps and the final performance report.
 
 ## 11. Control overhead and deployment-scale experiments
 
@@ -129,7 +129,7 @@ Section 12 records the later completed pressure/fit repetitions and real tool lo
 
 - [x] 11.1 Remove avoidable control waits and queries while preserving result collection, resource publication and cleanup ordering; add behavioral regressions.
 - [x] 11.2 Run repeated cache-fit and pressure workloads at gpu_memory_utilization >= 0.5, with larger rollout counts and prefix working sets.
-- [ ] 11.3 Analyze request phases, control RPCs, CPU profiles and GPU logs; retain adverse prediction and regression results.
+- [x] 11.3 Analyze request phases, control RPCs, CPU profiles and GPU logs; retain adverse prediction and regression results.
 - [x] 11.4 Complete relevant unit/adapter/GPU, lifecycle, fault/restart and model-quality checks on the final implementation.
 - [x] 11.5 Record commands, raw evidence locations, measured conclusions and validation scope; pass required code checks and commit locally.
 
@@ -286,3 +286,54 @@ Tasks **10.5, 11.3 and 10.6 remain open**. The queue has exited and requires
 an exclusive GPU 0/2 window for two valid cooperative live rounds and the
 independent profile before final reconciliation. No complete-matrix marker
 exists. Accepted native/quota and replay groups will not be rerun.
+
+### Remaining live comparisons completed, 2026-10-21
+
+The user reassigned only unfinished work to GPUs 2/3, retaining all accepted
+results. Both cooperative live rounds passed ownership/cleanup at 985.81/978.93 s,
+921/919 model calls, 59,088/58,969 output tokens and 246/249 completed final
+answers correct out of 256. Native/quota completed-answer counts remain 249/248.
+All initial token prompts and problem/sample IDs match; continuations differ.
+The first cooperative round loses three answers and the second gains one
+relative to each reference. Semantic and incomplete-answer cases, identical
+inputs before generation divergence, and the absence of a logits/activation
+comparison are recorded without claiming accuracy equivalence.
+
+Task 10.5 is complete: repeated fixed-work controls, pressure/fit forecasts,
+component diagnostics and all six actual live rounds have been evaluated.
+The matched historical GPU 0/3 main replay exceeds the 25% target at +68.0%
+versus native; this is not a new ordinary full-policy measurement after the
+occupancy guard. No supplementary reference was run to change cards, and
+all invalid sharing/coverage attempts remain excluded. Current progress is
+**80/82**; tasks **11.3 and 10.6** await the separate profile and final reconciliation.
+
+### Independent profile completed
+
+Task 11.3 is complete. The GPU 2/3 profile finished the full fixed workload,
+passed ownership/cleanup and CPU-time checks, and saved four CPU profiles and
+two CUDA traces. CPU/GPU/RPC/request-phase analysis is in the acceptance report.
+Control self CPU is recorded separately from called/native work; shared-memory
+polling and rank imbalance are observed without assigning all cost to policies.
+GPU 2 thermal throttling and per-window clocks are retained with settings unchanged.
+The instrumented run is excluded from normal throughput comparisons.
+
+`final-analysis.json` verifies 22 accepted runs, including six live rounds and
+one profile, while retaining all 12 old matrix hashes. Thirty frozen source
+files match; all task model/Store/sampler processes and ports are released.
+Current progress is **81/82**, with **10.6** pending final document checks and commit.
+
+### Final acceptance reconciled
+
+Task 10.6 is complete. Final documentation hooks, strict OpenSpec validation and
+diff checks pass. Runtime/kernel code still matches the tested occupancy-guard
+source; the 681 related runtime checks, 41 updated HTTP/benchmark checks, full
+mypy and real transfer/model checks remain scoped to their recorded sources.
+The continuation changed only documentation and local experiment orchestration,
+and added no accepted reference reruns. All 22 accepted local runs, source/quality
+differences, unsupported capabilities, invalid attempts and hardware conditions
+are indexed in the report and local PR description. Human publication review
+and testing are still required by contribution policy and are not claimed here.
+
+Current progress is **82/82**. All implementation/acceptance tasks are complete
+within the user-approved model and experiment scope. The change is not archived,
+and no remote PR update is published by this local completion.

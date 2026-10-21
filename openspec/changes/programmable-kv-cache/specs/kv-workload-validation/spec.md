@@ -56,7 +56,8 @@ Separate correctness validation SHALL establish that local and external KV from 
 
 Acceptance SHALL use Qwen3.8-27B TP=2 on the user-assigned local GPU pair.
 The initial allocation was GPUs 0 and 3; the October 20 continuation uses GPUs 0 and 2.
-Reports SHALL keep the two allocations' measurements separate and SHALL NOT calculate speedups across them.
+On October 21 the user assigned only the unfinished cooperative live repetitions and profiling to GPUs 2 and 3, retaining accepted results without reruns.
+Reports SHALL record each job's actual allocation and operating conditions separately and SHALL NOT present differences across allocations as equal-condition speedups.
 Reports SHALL record the actual cache-group/layout and hardware coverage and SHALL NOT generalize measured results to untested configurations.
 
 #### Scenario: Local evaluation succeeds

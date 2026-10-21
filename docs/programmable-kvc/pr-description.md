@@ -1,9 +1,8 @@
 # Add application-directed programmable KV cache control
 
-Local PR description during the October 20 GPU 0/2 continuation. Implementation
-and the tests reported below are committed. Full acceptance remains incomplete:
-native/quota live repetitions passed; external GPU interference prevents accepting
-cooperative live timing, and independent profiling is still unexecuted.
+Local PR description during the October 21 GPU 2/3 continuation. Implementation
+and code checks are committed. All six actual live repetitions, independent
+CPU/GPU profiling and final acceptance reconciliation passed within the stated scope.
 This document has not been published to the remote PR.
 
 ## Purpose
@@ -27,15 +26,15 @@ Reproduction commands and capability limits are in [the benchmark guide](../../b
 - `.venv/bin/python -m pytest -q tests/v1/{test_kv_hint_control,test_kv_hint_state}.py tests/v1/engine/test_kv_control.py tests/entrypoints/serve/kv_control/test_api.py tests/v1/core/{test_prefix_caching,test_scheduler}.py`: 681 passed for the occupancy guard. The later offline-audit addition is covered by the 41-check suite above; these counts overlap.
 - `.venv/bin/python -m pytest -q tests/v1/kv_offload/cpu/{test_gpu_worker,test_canonical_layout,test_swap_blocks_batch,test_swap_blocks_triton}.py tests/v1/kv_connector/mooncake_integration/test_store_buffers.py` on GPUs 0/3: 56 passed, one ROCm-only skip.
 - `.venv/bin/python -m benchmarks.programmable_kv_cache.run_recovery` with `--evaluation-samples 128 --lifecycle --weight-update --cpu-evaluation-samples 128`, and separately with `--capacity-deferral-only`: passed. Model/dataset/trace/output arguments and full executed commands are retained in the local `acceptance-2026-10-19/queue.json` evidence directory. These check real cross-engine reuse, branches/TTLs, duplicate/racing/cancelled control, Store outage/restart, real IPC parameter update/rollback, capacity retry/fallback and paired model quality.
-- Repeated deployment-budget native/quota/cooperative replay, cache-fit native/idle/noop, separately labeled recorded-pause oracle and incorrect forecasts: completed as reported below. New direct/component and cache-fit forecast diagnostics passed. Actual native/quota verl loops each completed twice; valid cooperative repetitions remain incomplete.
-- CPU metadata measurements and completed-data phase/RPC/transfer analysis: completed, including all 19 accepted GPU 0/2 runs and their operating clocks. The guarded-source independent CPU/GPU profile remains unexecuted.
+- Repeated deployment-budget native/quota/cooperative replay, cache-fit native/idle/noop, separately labeled recorded-pause oracle and incorrect forecasts: completed as reported below. New direct/component and cache-fit forecast diagnostics passed. Actual native/quota/cooperative verl loops each completed twice with passing GPU ownership and cleanup checks.
+- CPU metadata measurements and completed-data phase/RPC/transfer analysis: completed. The final audit covers 22 accepted runs, including 19 retained GPU 0/2 runs, two new GPU 2/3 live rounds and the separate full-work profile with four saved CPU profiles and two CUDA traces. The instrumented run is excluded from normal timing comparisons.
 - `.venv/bin/pre-commit run`, `.venv/bin/pre-commit run mypy-3.12 --all-files --hook-stage manual`, and `openspec validate programmable-kv-cache --strict`: passed for the tested source. The wrap-up changes only documentation; default hooks, strict OpenSpec validation and `git diff --check` are run for that update.
 
 ## Test Result
 
-The following primary comparisons are complete. Remaining acceptance is explicitly
-listed below and is not represented as passing. Completed comparisons and new
-GPU 0/2 measurements are separated by source version and hardware allocation.
+The following comparisons and acceptance checks are complete within the stated
+scope. Source versions, actual GPU allocations and unsupported or unmeasured
+configurations remain explicit.
 
 Qwen3.8-27B BF16, TP=2, GPUs 0/3 (A100 80GB PCIe), `gpu_memory_utilization=0.5`, actual KV 12.12 GiB/card, concurrency 64, batch token budget 4096 and max context 16384. Compilation/CUDA graphs are enabled; no fixed KV-byte override or profiler is used for ordinary timing.
 
@@ -72,19 +71,20 @@ index; instrumented runs are excluded from ordinary throughput comparisons.
 
 Final-runtime recovery, real parameter update/rollback, and capacity partial/retry/fallback passed. Both CPU and Mooncake paired 128-question evaluations score 124/128 for recomputation and preparation, with zero answer mismatches and zero length cuts; cached tokens are 0/784 per question. Final result records and pending transfers are empty. Functional runs use eager TP=2 and utilization 0.45 to accommodate two engines; they are excluded from performance ratios.
 
-One direct-priority replay completed its model/control work but failed a predeclared process-log coverage limit (11.072 s gap, allowed maximum 10 s); its timing is excluded. Process ownership sampling is now one second, with the same rejection boundary and regression coverage. Same-sampling references and the rejected arm's repeat remain unexecuted.
+One direct-priority replay completed its model/control work but failed a predeclared process-log coverage limit (11.072 s gap, allowed maximum 10 s); its timing is excluded. Process ownership sampling is now one second, with the same rejection boundary and regression coverage. Same-sampling references and the rejected arm's repeat were excluded by the user's no-rerun instruction.
 
-OpenSpec is **79/82**. New GPU 0/2 direct movement/composed and all five
+OpenSpec is **82/82**. New GPU 0/2 direct movement/composed and all five
 single/paired local-policy arms passed equal-work and GPU checks. Each diagnostic
 arm ran once; no same-pair native/quota/full replay reference or rejected
 priority-only replay was added, following the user's no-rerun instruction.
-There are no cross-pair speedup claims. Three acceptance tasks remain open:
-**10.5** actual live repetitions and their analysis; **11.3** independent CPU/GPU
-profiling and analysis; **10.6** final acceptance reconciliation. Preparing this
-local description does not close those gates or publish the update. The queue
-has exited after two external SGLang interference events on GPU 0; both attempts
-are archived and excluded from accepted timing. Remaining cooperative repetitions
-and profiling require an exclusive GPU 0/2 window. Detailed executed evidence
+There are no cross-pair equal-condition speedup claims. Tasks **10.5**, **11.3**
+and **10.6** are complete, including final documentation hooks, strict OpenSpec
+validation and source/cleanup reconciliation.
+Preparing this local description does not publish the update.
+External SGLang interference attempts on GPU 0 remain archived and excluded.
+The user assigned only unfinished cooperative repetitions and profiling to GPUs
+2/3, retaining all accepted results without reruns. Both cooperative rounds and
+the profile passed; task processes and ports have been released. Detailed executed evidence
 is in [the acceptance report](acceptance-report-2026-10-20.md).
 
 New actual native/quota live runs have elapsed medians of 2,139.17/1,471.01 s,
@@ -97,12 +97,38 @@ The original native reward includes one incidental number in an unfinished
 answer per round. Raw rewards and reports remain unchanged; the additional
 quality field makes this distinction explicit.
 
+Cooperative live rounds on GPUs 2/3 complete in 985.81/978.93 s, with 921/919
+calls, 59,088/58,969 output tokens and 4,605,216/4,653,824 cached tokens.
+Backend failure/missing/discard counters are zero; preemptions are 0/1.
+Completed final answers score 246/249 out of 256. All 256 initial token prompts
+and problem/sample IDs match the references. The first round loses three answers
+and the second gains one relative to each reference; percent interpretation,
+unit errors and an unfinished tool trajectory are retained. Divergence begins
+with sampled generation after matching input tokens, without a logits/activation
+comparison establishing the cause. These correlated samples over 64 questions
+do not establish accuracy equivalence or noninferiority. Online trajectories and
+actual GPU allocations differ; these times do not replace the matched historical
+equal-work replay used to evaluate the 25% throughput target.
+
 GPU 2 software thermal throttling was observed at 83–85°C, with a later sampled
 maximum of 86°C. User-requested clocks, fan settings and 300 W power limits
-were left unchanged. Busy-sample SM medians in pressure/live windows are
+were left unchanged. Busy-sample SM medians in retained GPU 0/2 pressure/live windows are
 1,395 MHz on GPU 0 and 1,170–1,185 MHz on GPU 2. Earlier logs contain clocks
 but no continuous temperature/throttle flags. Small timing differences, including
 the two-run occupancy-guard comparison, are not attributed wholly to code.
+
+The independent profile preserves all 256 trajectories, 920 calls and 60,136
+output tokens, with a passing workload fingerprint, ownership and cleanup audit.
+All four selected CPU profiles pass nonnegative/function-to-process CPU checks.
+Engine `kv_hints` functions contribute 31.73 self CPU seconds, excluding called
+modules/native work. Shared-memory polling, metrics export and native Mooncake
+get/put calls remain visible; no native profiling reference establishes net
+control overhead. Each GPU trace contains 60,489 kernel events from 32 sampled
+iterations after a 128-iteration delay. GEMM/AllReduce duration imbalance is
+consistent with the thermal record, without a controlled causal comparison.
+Event durations can overlap and do not measure whole-run occupancy or transfer
+cost. New live busy-sample SM medians are 765 MHz on GPU 2 and 1,335 MHz on GPU 3;
+the profile medians are 750/1,335 MHz. No clock, fan or power setting was changed.
 
 Acceptance is scoped to this local model/hardware/layout. Native Mooncake uses complete primary boundaries and PCP=DCP=1; CPU control uses one block per chunk. CPU Share, cold Retain/delete, SimpleCPU control, KVCR request-free actions and mixed-owner envelopes are not advertised. Real Dynamo/llm-d and a full trainer/optimizer run are outside this delivery.
 

@@ -201,6 +201,12 @@ experiments to GPUs 0 and 2. Keep the prior 0/3 measurements separate from the
 new 0/2 measurements; do not calculate speedups across the two allocations.
 The user requested only unexecuted experiments and excluded supplemental
 native/quota/cooperative replay references and the invalid priority replay's rerun.
+On October 21, after external GPU 0 interference, the user assigned only the
+unfinished cooperative live repetitions and profiling to GPUs 2 and 3.
+All selected devices are A100 80GB PCIe. Retain accepted results without
+rerunning them; record actual GPU identities, operating clocks and thermal
+conditions per job. Actual live trajectories remain distinct from equal-work
+replay comparisons.
 The local model remains Qwen/Qwen3.8-27B.
 Verify the downloaded revision/config before model execution.
 Use the supplied model and dataset download functions, selecting only the intended artifact instead of executing their unrelated top-level download lists.

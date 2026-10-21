@@ -9,10 +9,10 @@
 ## Current acceptance
 
 原始记录位于 `benchmarks/programmable_kv_cache/results/acceptance-2026-10-19/`。
-任务 7.4/7.5/7.9/11.4 及本地 PR 描述 8.4 已完成，整体为 79/82。
+全部实现与验收任务已完成，整体为 **82/82**，范围限定为用户允许的模型、配置和实验。
 用户已在收尾后重新指定 GPU 0/2，只执行新实验；显式和组件矩阵、低压力预测及其修复验证已完成，
-native/quota 各两轮在线运行已完成；协同在线两次被外部 GPU 进程干扰，
-队列已退出，等待独占窗口后再执行协同两轮和独立 profile。
+native/quota 各两轮在线运行已完成；协同在线的受干扰尝试保留但不采用其计时。
+用户随后指定 GPU 2/3，只运行未完成组，协同两轮和独立 profile 均已通过，最终文档与 PR 描述已同步。
 
 | 数据 | 已验证范围 |
 | --- | --- |
@@ -24,7 +24,7 @@ native/quota 各两轮在线运行已完成；协同在线两次被外部 GPU �
 | `main-analysis.json`、`shared-load-analysis.json`、`cooperative-final-normal-preparation-audit.json` | 主实验逐家族尾延迟、预测误差、共享物理加载 ID 和操作范围覆盖；不能将所有命中归因于搬运 |
 | `attempt-index.json`、`recovery-before-ack/`、`recovery-ack-replay-order/` | 未完成/失败的工具验证尝试，未计入通过数据 |
 | `fit-overhead-summary.json`、`pressure-prediction-comparison.json` | 六轮空载开销及六轮压力预测对照；输入/输出长度相同、GPU 审计通过；30 s 预测为失准诊断输入 |
-| `sampling-gap-diagnostic.json`、`pressure-direct-sampling-gap/` | 模型/控制完成但 11.072 s 采样空档超过 10 s 标准的无效性能轮，待重跑 |
+| `sampling-gap-diagnostic.json`、`pressure-direct-sampling-gap/` | 模型/控制完成但 11.072 s 采样空档超过 10 s 标准的无效性能轮，按用户要求未补跑 |
 | `mypy-sampling-final.log`、`hooks-sampling-staged.log` | 采样加密后 Python 3.12 类型、默认 hooks 通过；拒绝空档的标准保持不变 |
 | `user-wrap-up.json` | 用户要求的停止边界、已完成/未完成任务、进程退出及无矩阵完成标记；后续需显式恢复 |
 
@@ -48,6 +48,14 @@ GPU 0/2 的新记录位于 `benchmarks/programmable_kv_cache/results/acceptance-
 | `mypy-quality-audit.log`、`hooks-quality-audit.log` | 离线质量审计新增后的全量 Python 3.12 类型及默认 hooks 通过 |
 | `live-cooperative-gpu-sharing{,-2}/`、`gpu-sharing-diagnostic{,-2}.json` | 外部 SGLang 进程分别干扰首轮和重试，计时均不采用；第二次提前中止，仅停止本任务进程 |
 | `thermal-monitor.json`、`thermal-gpu.csv` | 用户要求保持设置，发现温控后每 10 s 采样；GPU 2 最高 86°C，记录软件限频；无历史温度回填 |
+| `gpu23-continuation.json`、`live-cooperative/` | 保留 12 个已通过矩阵及其原始 SHA256；GPU 2/3 协同两轮 985.81/978.93 s，GPU 审计与清理通过，未补跑参考组 |
+| `live-comparison-audit.json` | 六轮在线初始提示及题号/采样 ID 一致；完整最终答案 native/quota 249/248、协同 246/249；逐错误和首次生成分叉保留，不宣称准确率等同 |
+| `gpu03-interruption-diagnostic.json`、`interrupted-cleanup-diagnostic.json` | GPU 0/3 受干扰中止，以及经 UID/启动计数/日志句柄确认的本任务遗留进程清理；外部任务未被操作 |
+| `thermal-gpu03.csv`、`thermal-gpu23.csv` | 各次实际分配的温度、时钟、限频记录分开，GPU 2/3 全程采样已保存，未修改设备设置 |
+| `pressure-profile/`、`profile-analysis.json`、`profile-interpretation.json` | 完整固定工作量，四份 CPU profile、两份 CUDA trace；CPU 时间及 GPU 归属通过，调用与自身成本分开，不并入普通吞吐 |
+| `final-analysis.json`、`full-matrix-complete.json` | 本目录 22 次有效运行、14 个组，含六次在线和一次 profile；旧矩阵 SHA256 不变，按实际 GPU 分配、运行时钟与温度记录 |
+| `final-source-cleanup.json` | 30 个冻结源码文件匹配；仅文档修改；本任务模型、Store、队列、采样进程退出，端口释放 |
+| `final-doc-hooks.log` | 最终文档默认 hooks 通过；严格 OpenSpec、diff 检查通过，运行时源码与已测版本一致 |
 
 原生/主策略重复性能证据仍来自 GPU 0/3；新组不与其混算收益。
 本轮未补跑 priority-only 无效轮或 native/quota/完整策略参考组。
