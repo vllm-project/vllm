@@ -321,35 +321,25 @@ def flash_attn_varlen_func(
         assert len(window_size) == 2
         real_window_size = (window_size[0], window_size[1])
 
-    fa4_fp8_kv_dequant = (
-        k.dtype == torch.float8_e4m3fn
+    fa4_fp8_kv_dequant = False
+    if (
+        fa_version == 4
+        and k.dtype == torch.float8_e4m3fn
         and torch.cuda.get_device_capability()[0] == 9
-        and q.shape[-1] == k.shape[-1] == v.shape[-1] == 512
-    )
-    if fa_version == 4:
-        if fa4_fp8_kv_dequant:
-            if not causal and real_window_size[0] < 0 and real_window_size[1] < 0:
-                raise NotImplementedError(
-                    "SM90 FP8 MMA noncausal full attention has known accuracy errors."
-                )
-        elif (
-            k.dtype == torch.float8_e4m3fn
-            and torch.cuda.get_device_capability()[0] == 9
-        ):
-            if (
-                q.dtype == torch.float8_e4m3fn
-                and q.shape[-1] <= 256
-                and k.shape[-1] == q.shape[-1] == v.shape[-1]
-            ):
-                if dynamic_causal is not None or block_sparse_tensors is not None:
-                    raise NotImplementedError(
-                        "FA3 FP8 fallback does not support dynamic causal or block sparsity."
-                    )
-                fa_version = 3
-            else:
-                raise NotImplementedError(
-                    "SM90 FP8 MMA requires d512; FA3 requires equal FP8 heads <=256."
-                )
+    ):
+        fa4_fp8_kv_dequant = q.shape[-1] == k.shape[-1] == v.shape[-1] == 512
+        if not fa4_fp8_kv_dequant:
+            # Unreachable in-tree: FA4 with an FP8 KV cache on SM90 is only
+            # selected for head_size=512 (see flash_attn_supports_kv_cache_dtype).
+            raise NotImplementedError(
+                "FA4 on SM90 supports FP8 K/V only with q/k/v head_size=512, got "
+                f"q={q.dtype}/{q.shape[-1]}, k={k.dtype}/{k.shape[-1]}, "
+                f"v={v.dtype}/{v.shape[-1]} (dtype/head_size); use fa_version=3."
+            )
+        if not causal and real_window_size[0] < 0 and real_window_size[1] < 0:
+            raise NotImplementedError(
+                "SM90 FP8 MMA noncausal full attention has known accuracy errors."
+            )
 
     assert output_scale is None or fa_version == 4, (
         f"Fused FP8 output (output_scale) is only supported by FA4, "
