@@ -542,6 +542,17 @@ impl ResolvedToolContext {
     pub fn parsing_enabled(&self) -> bool {
         !matches!(self.tool_choice, ChatToolChoice::None) && !self.effective_tools.is_empty()
     }
+
+    /// Drop request-level tools when `tool_choice` is `none`, so they are not
+    /// rendered into the prompt. Message-scoped tools stay, as they are part of
+    /// the chat history.
+    pub(crate) fn exclude_initial_tools_if_none(&mut self) {
+        if matches!(self.tool_choice, ChatToolChoice::None) {
+            // `new` places request-level tools first in `effective_tools`.
+            self.effective_tools.drain(..self.initial_tools.len());
+            self.initial_tools.clear();
+        }
+    }
 }
 
 impl Default for ResolvedToolContext {

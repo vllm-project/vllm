@@ -64,9 +64,6 @@ pub struct ApiServerOptions {
     pub enable_scale_out: bool,
     /// When `true`, register `/tokenizer_info`.
     pub enable_tokenizer_info_endpoint: bool,
-    /// Drop request-level tool definitions from the prompt when
-    /// `tool_choice` is `none`.
-    pub exclude_tools_when_tool_choice_none: bool,
     /// Idle interval after which streaming SSE responses send a keep-alive
     /// comment. `None` disables keep-alive comments.
     pub sse_keep_alive_interval: Option<Duration>,
@@ -258,6 +255,9 @@ pub struct Config {
     pub default_chat_template_kwargs: Option<HashMap<String, Value>>,
     /// Whether requests may supply their own chat template.
     pub trust_request_chat_template: bool,
+    /// Whether request-level tools are left out of the prompt when
+    /// `tool_choice` is `none`.
+    pub exclude_tools_when_tool_choice_none: bool,
     /// Maximum number of input items allowed per prompt for each modality.
     /// Unspecified modalities are unlimited.
     pub limit_mm_per_prompt: MmLimitPerPrompt,

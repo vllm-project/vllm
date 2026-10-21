@@ -430,17 +430,6 @@ fn convert_message_tools(tools: Option<Vec<Tool>>) -> Result<Option<Vec<ChatTool
     Ok((!tools.is_empty()).then_some(tools))
 }
 
-/// Drop request-level tools from a `tool_choice="none"` request so they are not
-/// rendered into the prompt (`--exclude-tools-when-tool-choice-none`).
-pub(crate) fn exclude_tools_if_tool_choice_none(request: &mut ChatCompletionRequest) {
-    if matches!(
-        request.tool_choice,
-        Some(ToolChoice::Value(ToolChoiceValue::None))
-    ) {
-        request.tools = None;
-    }
-}
-
 fn convert_tool_choice(tool_choice: &ToolChoice) -> Result<ChatToolChoice, ApiError> {
     match tool_choice {
         ToolChoice::Value(ToolChoiceValue::Auto) => Ok(ChatToolChoice::Auto),
@@ -482,7 +471,7 @@ mod tests {
     };
     use vllm_tokenizer::{Tokenizer, test_utils::TestTokenizer};
 
-    use super::{exclude_tools_if_tool_choice_none, prepare_chat_request};
+    use super::prepare_chat_request;
     use crate::lora::LoraModelResolution;
     use crate::routes::openai::chat_completions::types::{
         AssistantRole, ChatCompletionMessage, ChatCompletionRequest,
@@ -1529,38 +1518,6 @@ mod tests {
             }]
         );
         assert_eq!(prepared.chat_request.tool_choice(), &ChatToolChoice::None);
-    }
-
-    #[test]
-    fn exclude_tools_only_drops_tools_for_tool_choice_none() {
-        let tools: Vec<Tool> = serde_json::from_value(json!([
-            {"type": "function", "function": {"name": "get_weather", "parameters": {}}},
-        ]))
-        .unwrap();
-        for (tool_choice, expect_tools) in [
-            (Some(ToolChoice::Value(ToolChoiceValue::None)), false),
-            (Some(ToolChoice::Value(ToolChoiceValue::Auto)), true),
-            (None, true),
-        ] {
-            let mut request = ChatCompletionRequest {
-                tools: Some(tools.clone()),
-                tool_choice: tool_choice.clone(),
-                ..base_request()
-            };
-            exclude_tools_if_tool_choice_none(&mut request);
-
-            let prepared = prepare_chat_request(
-                request,
-                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
-                ResolvedRequestContext::default(),
-            )
-            .unwrap();
-            assert_eq!(
-                !prepared.chat_request.tools().is_empty(),
-                expect_tools,
-                "{tool_choice:?}"
-            );
-        }
     }
 
     #[test]

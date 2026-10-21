@@ -2007,6 +2007,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             chat_template: None,
             default_chat_template_kwargs: None,
             trust_request_chat_template: false,
+            exclude_tools_when_tool_choice_none: false,
             limit_mm_per_prompt: {},
             lora_modules: [],
             chat_template_content_format: Auto,
@@ -2019,7 +2020,6 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 enable_request_id_headers: false,
                 enable_scale_out: false,
                 enable_tokenizer_info_endpoint: false,
-                exclude_tools_when_tool_choice_none: false,
                 sse_keep_alive_interval: None,
             },
             cors: CorsConfig {
@@ -2105,6 +2105,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             chat_template: None,
             default_chat_template_kwargs: None,
             trust_request_chat_template: false,
+            exclude_tools_when_tool_choice_none: false,
             limit_mm_per_prompt: {},
             lora_modules: [],
             chat_template_content_format: Auto,
@@ -2117,7 +2118,6 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 enable_request_id_headers: false,
                 enable_scale_out: false,
                 enable_tokenizer_info_endpoint: false,
-                exclude_tools_when_tool_choice_none: false,
                 sse_keep_alive_interval: None,
             },
             cors: CorsConfig {
@@ -2227,7 +2227,7 @@ fn frontend_config_excludes_tools_when_tool_choice_none_from_args_json() {
     let Command::Frontend(args) = cli.command else {
         panic!("expected frontend args");
     };
-    assert!(args.into_config().api_server_options.exclude_tools_when_tool_choice_none);
+    assert!(args.into_config().exclude_tools_when_tool_choice_none);
 }
 
 #[test]
@@ -2291,6 +2291,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             chat_template: None,
             default_chat_template_kwargs: None,
             trust_request_chat_template: false,
+            exclude_tools_when_tool_choice_none: false,
             limit_mm_per_prompt: {},
             lora_modules: [],
             chat_template_content_format: Auto,
@@ -2303,7 +2304,6 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 enable_request_id_headers: false,
                 enable_scale_out: false,
                 enable_tokenizer_info_endpoint: false,
-                exclude_tools_when_tool_choice_none: false,
                 sse_keep_alive_interval: None,
             },
             cors: CorsConfig {

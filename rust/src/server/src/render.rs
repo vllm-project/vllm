@@ -67,7 +67,6 @@ pub(crate) struct RenderState {
     pub(crate) max_model_len: Option<u32>,
     pub(crate) text: TextRequestProcessor,
     pub(crate) chat: ChatRequestProcessor,
-    pub(crate) exclude_tools_when_tool_choice_none: bool,
 }
 
 async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
@@ -98,14 +97,14 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
             config.tool_call_parser.clone(),
             config.reasoning_parser.clone(),
         )
-        .with_tool_strict_level(config.tool_strict_level);
+        .with_tool_strict_level(config.tool_strict_level)
+        .with_exclude_tools_when_tool_choice_none(config.exclude_tools_when_tool_choice_none);
     Ok(Arc::new(RenderState {
         model: config.model.clone(),
         served_model_names,
         max_model_len: config.max_model_len,
         text,
         chat,
-        exclude_tools_when_tool_choice_none: config.exclude_tools_when_tool_choice_none,
     }))
 }
 

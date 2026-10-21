@@ -161,12 +161,7 @@ async fn render_chat(
     let stream = body.stream;
     let stream_options = body.stream_options.clone();
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
-    let chat_request = lower_chat_request(
-        body,
-        &model_resolution(&state),
-        request_context,
-        state.exclude_tools_when_tool_choice_none,
-    )?;
+    let chat_request = lower_chat_request(body, &model_resolution(&state), request_context)?;
     let (text_request, _) = state
         .chat
         .prepare(chat_request, &state.text)
