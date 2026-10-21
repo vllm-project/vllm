@@ -252,7 +252,7 @@ steps:
   - vllm/config/parallel.py
   - vllm/distributed/parallel_state.py
   - vllm/model_executor/layers/attention/mla_attention.py
-  - vllm/model_executor/layers/attention/pcp.py
+  - vllm/v1/attention/ops/pcp.py
   - vllm/model_executor/layers/attention/sparse_mla_attention.py
   - vllm/model_executor/layers/sparse_attn_indexer.py
   - vllm/v1/attention/backends/mla/flashmla_sparse.py
@@ -1202,9 +1202,7 @@ steps:
   - tests/evals/qwen4_exp/
   - vllm/model_executor/layers/mamba/
   - vllm/models/qwen4_exp/
-  - vllm/transformers_utils/configs/qwen4_exp.py
   - vllm/v1/attention/backends/short_conv_attn.py
-  - vllm/v1/spec_decode/qwen4_exp.py
   commands:
     - uv pip install --system 'evalscope==1.10.0'
     - pytest -s -v evals/qwen4_exp/test_accuracy.py --config-list-file=configs/models-b200.txt
@@ -1220,9 +1218,7 @@ steps:
   - tests/evals/qwen4_exp/
   - vllm/model_executor/layers/mamba/
   - vllm/models/qwen4_exp/
-  - vllm/transformers_utils/configs/qwen4_exp.py
   - vllm/v1/attention/backends/short_conv_attn.py
-  - vllm/v1/spec_decode/qwen4_exp.py
   commands:
     - uv pip install --system 'evalscope==1.10.0'
     - pytest -s -v evals/qwen4_exp/test_accuracy.py --config-list-file=configs/models-h200.txt
@@ -1241,7 +1237,6 @@ steps:
       - tests/evals/qwen4_exp/
       - vllm/model_executor/layers/mamba/
       - vllm/models/qwen4_exp/
-      - vllm/transformers_utils/configs/qwen4_exp.py
       - vllm/v1/attention/backends/short_conv_attn.py
       - vllm/platforms/rocm.py
       env:
