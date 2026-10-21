@@ -235,13 +235,16 @@ def test_openapi_stateless(case: schemathesis.Case):
     }.get(key, DEFAULT_TIMEOUT_SECONDS)
 
     # No need to verify SSL certificate for localhost
-    systemone = case.operation.path == "/v1/systemone"
+    unsupported_decisions = case.operation.path in {
+        "/v1/systemone",
+        "/v1/decisions",
+    }
     response = case.call_and_validate(
         verify=False,
         timeout=timeout,
         headers={"Content-Type": "application/json"},
-        excluded_checks=[not_a_server_error] if systemone else None,
+        excluded_checks=[not_a_server_error] if unsupported_decisions else None,
     )
-    if systemone:
-        # SmolVLM does not support structured decisions.
+    if unsupported_decisions:
+        # SmolVLM does not support either decision endpoint.
         assert response.status_code < 500 or response.status_code == 501

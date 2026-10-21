@@ -4,13 +4,14 @@
 //! Conversion between gRPC protobuf types and internal `vllm-text`
 //! request/response types.
 
-use thiserror_ext::AsReport as _;
 use tonic::Status;
 use uuid::Uuid;
 use vllm_engine_core_client::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
-use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
+use vllm_engine_core_client::protocol::structured_outputs::{
+    StructuredOutputBackend, StructuredOutputsParams,
+};
 use vllm_text::{
     DecodedLogprobs, DecodedPromptLogprobs, FinishReason, Finished, Prompt, PromptTruncation,
     PromptTruncationLimit, SamplingParams, TextDecodeOptions, TextRequest, TruncationSide,
@@ -95,7 +96,7 @@ pub fn to_text_request(
 
     let mut sampling_params =
         build_sampling_params(req.temperature, sampling, decoding, stopping, response)?;
-    sampling_params.watermarking = req.watermarking.unwrap_or(true);
+    sampling_params.watermarking = req.watermarking;
 
     // Thread KVCacheParameters → SamplingParams fields.
     if let Some(kv) = kv {
@@ -275,6 +276,8 @@ fn candidate_logprob_spec(
     }
 }
 
+/// EngineCore compiles every request with the backend of the first one it sees,
+/// so all gRPC constraints use xgrammar.
 fn convert_structured_output(
     d: &pb::DecodingParameters,
 ) -> Result<Option<StructuredOutputsParams>, Status> {
@@ -283,7 +286,7 @@ fn convert_structured_output(
         Some(so) => so,
     };
     use pb::decoding_parameters::StructuredOutput;
-    let params = match so {
+    let mut params = match so {
         StructuredOutput::Json(schema) => {
             let json: serde_json::Value = serde_json::from_str(schema)
                 .map_err(|e| Status::invalid_argument(format!("invalid json schema: {e}")))?;
@@ -300,9 +303,7 @@ fn convert_structured_output(
             StructuredOutputsParams::structural_tag(tag.clone())
         }
     };
-    params
-        .validate()
-        .map_err(|error| Status::invalid_argument(error.to_report_string()))?;
+    params.backend = StructuredOutputBackend::Xgrammar;
     Ok(Some(params))
 }
 
@@ -398,7 +399,10 @@ fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> Result<pb::FinishIn
             (PbFinishReason::Stop as i32, sr)
         }
         FinishReason::Length => (PbFinishReason::Length as i32, None),
-        FinishReason::Error => return Err(Status::internal("engine failed during generation")),
+        FinishReason::Error(Some(error)) if error.retryable => {
+            return Err(Status::unavailable(error.message.clone()));
+        }
+        FinishReason::Error(_) => return Err(Status::internal("engine failed during generation")),
         FinishReason::Abort | FinishReason::Repetition(_) => (PbFinishReason::Aborted as i32, None),
     };
 
@@ -565,7 +569,7 @@ impl ResponseOpts {
 #[cfg(test)]
 mod tests {
     use prost::Message as _;
-    use vllm_engine_core_client::protocol::output::StopReason;
+    use vllm_engine_core_client::protocol::output::{RequestError, StopReason};
     use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
     use vllm_text::{
         FinishReason, Finished, Prompt, SamplingHints, SamplingLimits, lower_sampling_params,
@@ -574,7 +578,8 @@ mod tests {
 
     use super::pb::finish_info::{FinishReason as PbFinishReason, StopReason as PbStopReason};
     use super::{
-        ResponseOpts, json_to_proto_struct, pb, to_finish_info, to_sequence_output, to_text_request,
+        ResponseOpts, Status, StructuredOutputBackend, StructuredOutputsParams,
+        json_to_proto_struct, pb, to_finish_info, to_sequence_output, to_text_request,
     };
 
     fn base_request() -> pb::GenerateRequest {
@@ -704,10 +709,7 @@ mod tests {
                 let decoded = pb::GenerateRequest::decode(encoded.as_slice()).unwrap();
                 let text = to_text_request(decoded, stream, &["test-model".to_string()])
                     .expect("convert request");
-                assert_eq!(
-                    text.sampling_params.watermarking,
-                    watermarking.unwrap_or(true)
-                );
+                assert_eq!(text.sampling_params.watermarking, watermarking);
             }
         }
     }
@@ -759,18 +761,41 @@ mod tests {
         assert_eq!(text.sampling_params.temperature, Some(0.0));
     }
 
-    #[test]
-    fn grpc_rejects_empty_grammar_before_engine() {
-        use super::pb::decoding_parameters::StructuredOutput;
+    fn lower_structured_output(
+        so: super::pb::decoding_parameters::StructuredOutput,
+    ) -> Result<StructuredOutputsParams, Status> {
         let req = pb::GenerateRequest {
             decoding: Some(pb::DecodingParameters {
-                structured_output: Some(StructuredOutput::Grammar("  ".to_string())),
+                structured_output: Some(so),
                 ..Default::default()
             }),
             ..base_request()
         };
-        let err = to_text_request(req, false, &["test-model".to_string()]).unwrap_err();
-        assert!(err.message().contains("grammar cannot be an empty string"));
+        Ok(to_text_request(req, false, &["test-model".to_string()])?
+            .sampling_params
+            .structured_outputs
+            .expect("structured outputs set"))
+    }
+
+    #[test]
+    fn grpc_structured_outputs_use_xgrammar() {
+        use super::pb::decoding_parameters::StructuredOutput;
+        for so in [
+            StructuredOutput::Json(r#"{"type": "object"}"#.to_string()),
+            StructuredOutput::JsonObject(true),
+            StructuredOutput::Regex("[a-z]+".to_string()),
+            StructuredOutput::Grammar(r#"root ::= "a""#.to_string()),
+            StructuredOutput::Choice(super::pb::decoding_parameters::StringChoices {
+                choices: vec!["a".to_string()],
+            }),
+            StructuredOutput::StructuralTag(
+                r#"{"type": "structural_tag", "format": {"type": "const_string", "value": "x"}}"#
+                    .to_string(),
+            ),
+        ] {
+            let params = lower_structured_output(so.clone()).expect("convert ok");
+            assert_eq!(params.backend, StructuredOutputBackend::Xgrammar, "{so:?}");
+        }
     }
 
     #[test]
@@ -1014,6 +1039,22 @@ mod tests {
 
         assert_eq!(info.finish_reason, PbFinishReason::Aborted as i32);
         assert_eq!(info.stop_reason, None);
+    }
+
+    #[test]
+    fn retryable_engine_error_maps_to_unavailable() {
+        let error = RequestError {
+            code: "engine_paused".to_string(),
+            message: "Generation is paused.".to_string(),
+            retryable: true,
+        };
+        let fin = finished(FinishReason::Error(Some(Box::new(error))));
+        let status = to_finish_info(&fin, &[]).expect_err("retryable error");
+        assert_eq!(status.code(), tonic::Code::Unavailable);
+
+        let fin = finished(FinishReason::Error(None));
+        let status = to_finish_info(&fin, &[]).expect_err("internal error");
+        assert_eq!(status.code(), tonic::Code::Internal);
     }
 
     #[test]
