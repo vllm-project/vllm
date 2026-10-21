@@ -12,7 +12,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 IndexerKVDType = Literal["auto", "bf16", "fp8", "mxfp4", "nvfp4"]
 MiniMaxM3MSADecodeBackend = Literal["triton", "cutlass"]
-IndexerCacheSharding = Literal["off", "on"]
+IndexerCacheSharding = Literal["off", "auto", "on"]
 
 
 @config
@@ -99,9 +99,11 @@ class AttentionConfig:
 
     indexer_cache_sharding: IndexerCacheSharding = "off"
     """Shard the indexer cache across TP ranks on supported backends.
-    Set "on" to request sharding; defaults to "off". The cache layout is
-    selected at startup and stays fixed for the engine. MSA supports FP8
-    index K on single-node NVLink TP2 and TP4."""
+    "auto" selects once at startup using backend-specific thresholds on
+    configured context-length and batch limits, not current request lengths
+    or batch sizes. The selected cache layout stays fixed for the engine.
+    "on" requests sharding wherever supported. MSA supports FP8 index K on
+    single-node NVLink TP2 and TP4; "auto" currently selects TP4 only."""
 
     indexer_sparse_logits: bool = False
     """DeepSeek V4.1 two-level indexer: score only the candidate blocks with

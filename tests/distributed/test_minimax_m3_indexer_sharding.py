@@ -63,6 +63,7 @@ def _indexer_sharding(monkeypatch, tp_size, pp_size, rank, distributed_init_port
             assert msa.resolve_index_k_shard(config, 4, "fp8", 16) == tp_size
             comm = msa.get_comm()
             assert comm is not None
+            assert comm.gather is not None
             _check_indexer_forwards(config, device, rank, comm)
             _check_sharding_policy(config, comm)
         get_tp_group().barrier()
@@ -72,6 +73,9 @@ def _check_initialization_fallback(config, device, rank):
     import torch.distributed._symmetric_memory as symm_mem
 
     from vllm.models.minimax_m3.nvidia import indexer_msa as msa
+    from vllm.models.minimax_m3.nvidia.ops.index_k_gather import (
+        _index_k_pull_pages_kernel,
+    )
 
     for name, value in (("enable_dbo", True), ("ubatch_size", 2)):
         with pytest.MonkeyPatch.context() as m:
@@ -84,6 +88,8 @@ def _check_initialization_fallback(config, device, rank):
     for failure in (
         "topology",
         "recv_allocation",
+        "gather_allocation",
+        "gather_compile",
     ):
         with pytest.MonkeyPatch.context() as m:
             m.setattr(msa, "_COMM", None)
@@ -93,10 +99,17 @@ def _check_initialization_fallback(config, device, rank):
             def fail_allocation(*args, failure=failure, **kwargs):
                 nonlocal injected
                 shape = args[0]
-                if failure == "recv_allocation" and len(shape) == 5:
+                if (failure == "recv_allocation" and len(shape) == 5) or (
+                    failure == "gather_allocation" and len(shape) == 1
+                ):
                     injected = True
                     raise RuntimeError("injected indexer allocation failure")
                 return original_empty(*args, **kwargs)
+
+            def fail_compile(*args, **kwargs):
+                nonlocal injected
+                injected = True
+                raise RuntimeError("injected indexer compilation failure")
 
             def fail_topology(_):
                 nonlocal injected
@@ -106,6 +119,8 @@ def _check_initialization_fallback(config, device, rank):
             if rank == 1:
                 if failure == "topology":
                     m.setattr(current_platform, "is_fully_connected", fail_topology)
+                elif failure == "gather_compile":
+                    m.setattr(_index_k_pull_pages_kernel, "warmup", fail_compile)
                 else:
                     m.setattr(symm_mem, "empty", fail_allocation)
 
@@ -115,9 +130,21 @@ def _check_initialization_fallback(config, device, rank):
             try:
                 shard = msa.resolve_index_k_shard(config, 4, "fp8", 16)
                 assert injected == (rank == 1)
-                assert shard == 1
-                assert msa.get_comm() is None
-                assert msa._COMM_FAILED
+                if failure in ("topology", "recv_allocation"):
+                    assert shard == 1
+                    assert msa.get_comm() is None
+                    assert msa._COMM_FAILED
+                else:
+                    assert shard == 4
+                    comm = msa.get_comm()
+                    assert comm is not None and comm.gather is None
+                    local = torch.full(
+                        (1, 32, 128), rank, dtype=torch.uint8, device=device
+                    )
+                    pages = torch.tensor([0], device=device)
+                    full = msa.gather_prefill_pages(local, pages, comm)
+                    expected = torch.arange(128, device=device) % 4
+                    assert torch.equal(full[0, :, 0].long(), expected)
             finally:
                 faulthandler.cancel_dump_traceback_later()
 
@@ -273,9 +300,22 @@ def _check_indexer_forwards(config, device, rank, comm):
                 msa.gather_prefill_pages(impl.index_cache.kv_cache, pages, comm)
                 for impl in layers[1]
             ]
-            for actual, cache in zip(gathered, caches):
+            with pytest.MonkeyPatch.context() as m:
+                m.setattr(msa, "GATHER_MAX_PAGES", pages.numel() - 1)
+                assert (
+                    comm.gather.gather(layers[1][0].index_cache.kv_cache, pages) is None
+                )
+                fallback = [
+                    msa.gather_prefill_pages(impl.index_cache.kv_cache, pages, comm)
+                    for impl in layers[1]
+                ]
+                for _ in range(3):
+                    run(True, metadata, queries)
+                check(metadata, queries, num_tokens)
+            for actual, nccl, cache in zip(gathered, fallback, caches):
                 expected = cache.view(torch.uint8).index_select(0, pages)
                 assert torch.equal(actual.view(torch.uint8), expected)
+                assert torch.equal(nccl.view(torch.uint8), expected)
 
 
 @pytest.mark.timeout(600)
@@ -311,11 +351,29 @@ def _check_sharding_policy(config, original_comm):
     )
     model = copy(policy.model_config)
     for mode, length, cap, active_cap, q, eager, graph_mode, expected in [
-        ("on", 4096, 1, None, 4, False, CUDAGraphMode.FULL, original_comm.world),
+        ("auto", 192 * 1024 - 1, 32, None, 1, False, CUDAGraphMode.FULL, 1),
+        ("auto", 192 * 1024, 31, None, 1, False, CUDAGraphMode.FULL, 1),
+        ("auto", 192 * 1024, 32, None, 1, False, CUDAGraphMode.FULL, 4),
+        ("auto", 1024 * 1024 - 1, 8, None, 1, False, CUDAGraphMode.FULL, 1),
+        ("auto", 1024 * 1024, 7, None, 1, False, CUDAGraphMode.FULL, 1),
+        ("auto", 1024 * 1024, 8, None, 1, False, CUDAGraphMode.FULL, 4),
+        ("auto", 192 * 1024, 64, 31, 1, False, CUDAGraphMode.FULL, 1),
+        ("auto", 192 * 1024, 64, 32, 1, False, CUDAGraphMode.FULL, 4),
+        ("auto", 1024 * 1024, 32, None, 4, False, CUDAGraphMode.FULL, 1),
+        ("on", 4096, 1, None, 4, False, CUDAGraphMode.FULL, 4),
         ("off", 1024 * 1024, 32, None, 1, False, CUDAGraphMode.FULL, 1),
-        ("on", 4096, 1, None, 1, True, CUDAGraphMode.NONE, original_comm.world),
+        ("auto", 192 * 1024, 32, None, 1, True, CUDAGraphMode.FULL, 1),
+        ("auto", 192 * 1024, 32, None, 1, False, CUDAGraphMode.NONE, 1),
+        ("auto", 192 * 1024, 32, None, 1, False, CUDAGraphMode.PIECEWISE, 1),
+        ("auto", 192 * 1024, 32, None, 1, False, CUDAGraphMode.FULL_DECODE_ONLY, 4),
+        ("auto", 192 * 1024, 32, None, 1, False, CUDAGraphMode.FULL_AND_PIECEWISE, 4),
+        ("on", 4096, 1, None, 1, True, CUDAGraphMode.NONE, 4),
         ("off", 1024 * 1024, 32, None, 1, True, CUDAGraphMode.NONE, 1),
     ]:
+        if expected > 1:
+            expected = (
+                original_comm.world if mode == "on" or original_comm.world == 4 else 1
+            )
         policy.model_config = copy(model)
         policy.model_config.max_model_len = length
         policy.model_config.enforce_eager = eager
@@ -341,6 +399,8 @@ def _check_sharding_policy(config, original_comm):
             assert current is before
         else:
             assert current is not before
+            assert current.gather is not None
+            assert current.gather is not original_comm.gather
             assert current.max_decode_tokens == cap * q
             assert msa.get_comm(policy, 4) is current
     assert original_comm.num_layers == 5
@@ -362,6 +422,7 @@ def _check_sharding_policy(config, original_comm):
         ("on", "fp8", 16, 2, 1, 1, False),
         ("on", "fp8", 16, 1, 2, 1, False),
         ("on", "fp8", 16, 1, 1, 9, False),
+        ("auto", "fp8", 16, 1, 1, 1, True),
         ("on", "fp8", 16, 1, 1, 1, True),
     ]:
         policy.attention_config = AttentionConfig(indexer_cache_sharding=mode)
