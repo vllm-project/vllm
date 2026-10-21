@@ -230,3 +230,16 @@ to calculate cross-pair speedups. The new pair's real-buffer check passed
 56 tests with one ROCm-only skip before the no-rerun instruction.
 Progress remains **78/82** pending executed evidence and reconciliation;
 the skipped priority replay remains excluded from accepted performance data.
+
+The first six GPU 0/2 cache-fit forecast runs passed. Fixed 30 s predictions
+wrote 3.49/1.90 GB with zero loads, lost cached tokens and increased median
+elapsed time 3.67% over the same-pair oracle runs. The queue was stopped at
+the next empty GPU gate for diagnosis; no unfinished inference was discarded.
+Fix `3fe298ed64` applies current referenced occupancy before pause-aware MOVE
+and before building a demand observation. Eleven targeted and 681 related
+checks, default hooks, full mypy-3.12 and strict OpenSpec passed. Both targeted
+guarded-forecast GPU runs passed at 180.59/183.15 s with zero transfers and
+8,084,608 cached tokens each, reducing median elapsed time 4.10% versus the
+same-pair pre-fix runs. The remaining new arms are running.
+The old negative measurements remain preserved, and tasks remain unchecked
+until the relevant new measurements and final reconciliation are complete.
