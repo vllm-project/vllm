@@ -76,7 +76,7 @@ features:
       dspark:
         label: "DSpark"
         description: "Seven-token DSpark profile used for BF16, MXFP4, and NVFP4."
-        variants: [bf16, bf16_online_mxfp4, mxfp4, default]
+        variants: [bf16, mxfp4, default]
         args:
           - "--speculative-config"
           - '{"method":"dspark","model":"Inferact/Muse-Spark-Open-DSpark","num_speculative_tokens":7,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":true}'
