@@ -88,7 +88,6 @@ class XPUMLASparseMetadata(AttentionMetadata):
 
     num_actual_tokens: int  # Number of tokens excluding padding.
     query_start_loc: torch.Tensor
-    slot_mapping: torch.Tensor
 
     block_table: torch.Tensor
     req_id_per_token: torch.Tensor
@@ -177,7 +176,6 @@ class XPUMLASparseMetadataBuilder(AttentionMetadataBuilder[XPUMLASparseMetadata]
             max_seq_len=common_attn_metadata.max_seq_len,
             num_actual_tokens=common_attn_metadata.num_actual_tokens,
             query_start_loc=common_attn_metadata.query_start_loc,
-            slot_mapping=common_attn_metadata.slot_mapping,
             block_table=common_attn_metadata.block_table_tensor,
             req_id_per_token=req_id_per_token,
             block_size=self.kv_cache_spec.block_size,
