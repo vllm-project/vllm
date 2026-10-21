@@ -475,7 +475,7 @@ void fused_kda_chunk(
     std::optional<torch::stable::Tensor> has_initial_state);
 #endif
 
-#ifdef VLLM_ENABLE_BEAM_ALLREDUCE
+#ifdef VLLM_ENABLE_BEAM_KERNELS
 void beam_allreduce_norm(
     torch::stable::Tensor const& input, torch::stable::Tensor const& residual,
     std::optional<torch::stable::Tensor> post_weight,

@@ -577,7 +577,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor? state_indices=None, Tensor? has_initial_state=None) -> ()");
 #endif
 
-#ifdef VLLM_ENABLE_BEAM_ALLREDUCE
+#ifdef VLLM_ENABLE_BEAM_KERNELS
   // Beam's MNNVL all-reduce fused with its norm-residual-norm boundary.
   ops.def(
       "beam_allreduce_norm(Tensor input, Tensor residual, "
@@ -890,7 +890,7 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("fused_kda_chunk", TORCH_BOX(&fused_kda_chunk));
 #endif
 
-#ifdef VLLM_ENABLE_BEAM_ALLREDUCE
+#ifdef VLLM_ENABLE_BEAM_KERNELS
   ops.impl("beam_allreduce_norm", TORCH_BOX(&beam_allreduce_norm));
   ops.impl("beam_allreduce", TORCH_BOX(&beam_allreduce));
 #endif
