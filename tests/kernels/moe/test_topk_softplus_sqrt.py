@@ -198,6 +198,7 @@ def test_aiter_w4a16_expert_parallel_selection(
     )
     if supported:
         _, experts_cls = select_deepseek_v4_mxfp4_moe_backend(config)
+        assert experts_cls is not None
         assert experts_cls.__name__ == "AiterW4A16ExpertsMonolithic"
     else:
         with pytest.raises(ValueError, match="parallel config"):
