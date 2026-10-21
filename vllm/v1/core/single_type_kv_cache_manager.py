@@ -1063,11 +1063,16 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         must delay freeing/caching of blocks."""
         bounded_replay: bool = False
         """DeepSeek-V4.1: replay the window instead of prefix caching it."""
+        rebuilt_by_replay: bool = False
+        """Left out of prefix caching without a replay window of its own:
+        another group's bounded replay recomputes enough tokens to rebuild it
+        (e.g. the DeepSeek-V4 compressor states under the SWA replay)."""
 
     @classmethod
     def prefix_cacheable(cls, config: ManagerConfig) -> bool:
-        assert isinstance(config.params, SlidingWindowManager.Params)
-        return not config.params.bounded_replay
+        params = config.params
+        assert isinstance(params, SlidingWindowManager.Params)
+        return not (params.bounded_replay or params.rebuilt_by_replay)
 
     @classmethod
     def prefix_replay_tokens(cls, config: ManagerConfig) -> int:

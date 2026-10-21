@@ -243,6 +243,18 @@ class KVConnectorBase_V1(ABC):
         """
         return False
 
+    @classmethod
+    def requests_sliding_window_replay(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
+        """Whether models that support SWA bounded replay should enable it.
+
+        Such a model keeps its sliding-window state out of prefix caching and
+        rebuilds it after a hit by recomputing the hit's last window, so the
+        connector only needs to store the compressed, prefix-cacheable KV.
+        """
+        return False
+
     def __init__(
         self,
         vllm_config: "VllmConfig",

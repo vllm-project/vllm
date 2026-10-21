@@ -133,6 +133,7 @@ Set these options in `kv_connector_extra_config`:
 | `save_decode_cache` | `false` | Also store blocks produced by decoding. Does not apply with `lazy_offload`. |
 | `lazy_offload` | `false` | Store reusable blocks selected from the GPU free queue instead of storing them eagerly after each forward step. The scan runs when that queue changes, and blocks already known to be in the pool are not looked up again until a later recheck. Lazy stores follow the GPU prefix cache, so they include blocks produced by decoding. A lookup that cannot reach the pool, or a failed lazy store, backs off instead of storing the window again. |
 | `lazy_offload_max_blocks` | derived | Maximum number of free-queue blocks examined by each lazy scan. |
+| `rebuild_sliding_window` | `true` | For models with SWA bounded replay (DeepSeek-V4 on ROCm), store only the compressed KV and rebuild the sliding-window state by recomputing the hit's last window. With `false` every cache group is stored. |
 | `enable_partial_hash_hits` | `false` | Allow hits that end inside a block, at core's prefix-match unit (`cache_config.prefix_match_unit`). |
 | `num_workers`, `timeout_ms` | `4`, `30000` | Transfer threads per worker, and the transfer timeout. A synchronous wait that times out fails the step rather than reusing its blocks. |
 | `key_namespace` | derived | Overrides the namespace derived from the model, revision, KV layout, cache groups, parallel topology and draft model. The pool can then hold KV from a different layout, so attention backends that require KV written by their own cache layout fall back as with other connectors. |
@@ -142,6 +143,19 @@ examples above. An object can be evicted between lookup and load; the default
 `fail` policy fails the request instead of recomputing it.
 
 With `kv_role: "kv_consumer"` the connector only restores and never stores.
+
+## DeepSeek-V4 on ROCm
+
+DeepSeek-V4 on ROCm stores only the compressed KV (the C4 and C128 latents and
+the C4 indexer). The sliding-window cache and the compressor states, which
+would otherwise be thousands of tiny objects per request, stay out of prefix
+caching: after a hit the scheduler recomputes the hit's last `sliding_window`
+tokens (SWA bounded replay), which rebuilds them. This also applies to GPU
+prefix-cache hits while the connector is configured. Replayed tokens attend to
+the sliding window only from the replay start, so their rebuilt window KV is an
+approximation; the compressed and sparse top-k context stays exact. Startup
+logs `DeepSeek-V4 SWA bounded replay: enabled`, or `disabled (...)` with the
+reason.
 
 ## Limitations
 
