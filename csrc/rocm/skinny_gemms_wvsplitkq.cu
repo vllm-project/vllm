@@ -1,11 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 //
-// Host-side launcher of the wvSplitKQ skiny GEMM. The kernels (and the device code
-// they instantiate) live in skinny_gemms.cuh; each family is kept in its own
-// translation unit so ninja compiles the families in parallel (skinny_gemms.cu
-// used to hold all of them and took ~58 s of device code generation on one
-// core).
+// Host-side launcher of the wvSplitKQ skinny GEMM; kernels in skinny_gemms.cuh.
 #include "skinny_gemms.cuh"
 
 #include "dispatch_utils.h"                 // VLLM_DISPATCH_FP8_TYPES

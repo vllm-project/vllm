@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 //
-// Host-side launcher of the wvSplitKrc skiny GEMM. The kernels (and the device code
-// they instantiate) live in skinny_gemms.cuh; each family is kept in its own
-// translation unit so ninja compiles the families in parallel (skinny_gemms.cu
-// used to hold all of them and took ~58 s of device code generation on one
-// core).
+// Host-side launcher of the wvSplitKrc skinny GEMM; kernels in skinny_gemms.cuh.
 #include "skinny_gemms.cuh"
+
+// Pre-allocated split-K workspace pool (see WvSplitKrcPool below):
+// ~7.5 MiB per slot, plus slots held back for capturing streams, which
+// cannot allocate one themselves.
+static constexpr int64_t kWvSlots = 8;
+static constexpr int64_t kWvCaptureSlots = 8;
 
 torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
                          const std::optional<at::Tensor>& in_bias,
@@ -174,7 +176,7 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
                     kWvCaptureSlots,
                     " distinct streams have captured a graph containing "
                     "wvSplitKrc. Raise kWvCaptureSlots in "
-                    "csrc/rocm/skinny_gemms.cu.");
+                    "csrc/rocm/skinny_gemms_wvsplitkrc.cu.");
         cap_it = P.capture_slot_of
                      .emplace(stream, static_cast<int>(kWvSlots) +
                                           P.next_capture_slot++)
