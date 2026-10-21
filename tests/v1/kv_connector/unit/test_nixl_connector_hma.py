@@ -1690,15 +1690,19 @@ def test_host_buffer_save_single_step_prefill():
 
 
 @pytest.mark.cpu_test
-def test_host_buffer_save_resumed_request_replaces_blocks():
+@pytest.mark.parametrize("as_new", [False, True], ids=["v1_cached", "v2_new"])
+def test_host_buffer_save_resumed_request_replaces_blocks(as_new):
     """A resumed request carries its full block list; blocks accumulated
-    before preemption must not be saved."""
+    before preemption must not be saved. Model Runner V2 schedules it as a
+    new request instead of a resumed cached one."""
     req = create_request(num_tokens=10, do_remote_decode=True)
     sched = _host_save_scheduler(req)
 
     assert _host_save_step(sched, req, 6, ([1, 2], [7]), new=True) is None
     req.num_computed_tokens = 0
-    resumed = _host_save_step(sched, req, 10, ([4], [8]), resumed=True)
+    resumed = _host_save_step(
+        sched, req, 10, ([4], [8]), new=as_new, resumed=not as_new
+    )
     assert resumed == ([4], [8])
 
 

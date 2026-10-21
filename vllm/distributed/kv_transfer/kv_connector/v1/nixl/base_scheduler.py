@@ -450,13 +450,17 @@ class NixlBaseConnectorScheduler:
         # Drop requests that left _reqs_need_save early, e.g. aborted mid-prefill.
         for stale_id in pending.keys() - self._reqs_need_save.keys():
             del pending[stale_id]
+        # Model Runner V2 schedules resumed requests as new requests.
+        new_req_ids = {
+            new_req.req_id for new_req in scheduler_output.scheduled_new_reqs
+        }
         for req_id, new_block_id_groups, resumed in yield_req_data(scheduler_output):
             req = self._reqs_need_save.get(req_id)
             if req is None:
                 continue
             if new_block_id_groups is not None:
-                if resumed or req_id not in pending:
-                    # Resumed requests carry their full block list.
+                if resumed or req_id in new_req_ids or req_id not in pending:
+                    # New and resumed requests carry their full block list.
                     pending[req_id] = tuple(list(g) for g in new_block_id_groups)
                 else:
                     for group, new_blocks in zip(pending[req_id], new_block_id_groups):
