@@ -10,6 +10,7 @@ steps:
   source_file_dependencies:
   - csrc/
   - vllm/model_executor/layers/quantization
+  - vllm/transformers_utils/model_arch_config_convertor.py
   - vllm/models/deepseek_v41/quant_config.py
   - vllm/utils/humming.py
   - tests/quantization

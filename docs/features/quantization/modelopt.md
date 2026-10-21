@@ -20,6 +20,8 @@ following `quantization.quant_algo` values:
 - `W4A16_NVFP4`: weight-only ModelOpt NVFP4 checkpoints with 16-bit
   activations (use `quantization="modelopt_fp4"`).
 - `MXFP8`: ModelOpt MXFP8 checkpoints (use `quantization="modelopt_mxfp8"`).
+- `MIXED_PRECISION`: per-layer formats specified by `quantized_layers`
+  (use `quantization="modelopt_mixed"`).
 
 !!! note
     For NVFP4 checkpoints, vLLM selects a GEMM kernel automatically at load

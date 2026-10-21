@@ -5,6 +5,7 @@
 Run `pytest tests/quantization/test_modelopt.py`.
 """
 
+import json
 import os
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -519,6 +520,82 @@ def test_modelopt_fp8_checkpoint_setup(default_vllm_config, vllm_runner):
         output = llm.generate_greedy(["Hello my name is"], max_tokens=4)
         assert output
         print(f"ModelOpt FP8 output: {output}")
+
+
+def test_modelopt_nested_mixed_checkpoint(tmp_path, monkeypatch, vllm_runner):
+    """Native and flattened ModelOpt metadata load the same FP8/BF16 weights."""
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    from vllm import SamplingParams
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    config = LlamaConfig(
+        vocab_size=128,
+        hidden_size=128,
+        intermediate_size=256,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        max_position_embeddings=64,
+    )
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(0)
+        model = LlamaForCausalLM(config).to(torch.bfloat16)
+    weights = model.state_dict()
+    prefix = "model.layers.0.mlp.down_proj"
+    weight = weights[f"{prefix}.weight"].float()
+    scale = weight.abs().max() / torch.finfo(torch.float8_e4m3fn).max
+    weights[f"{prefix}.weight"] = (weight / scale).to(torch.float8_e4m3fn)
+    weights[f"{prefix}.weight_scale"] = scale
+    weights[f"{prefix}.input_scale"] = torch.tensor(1.0 / 448)
+    quantization: dict[str, Any] = {
+        "quant_algo": "MIXED_PRECISION",
+        "kv_cache_quant_algo": None,
+        "quantized_layers": {prefix: {"quant_algo": "FP8"}},
+        "exclude_modules": [],
+    }
+    metadata = {
+        "nested": {
+            "producer": {"name": "modelopt", "version": "0.49.0"},
+            "quantization": quantization,
+        },
+        "flat": {"quant_method": "modelopt", **quantization},
+    }
+
+    def check_model(loaded):
+        mlp = loaded.model.layers[0].mlp
+        quantized = mlp.down_proj
+        assert isinstance(quantized.quant_method, ModelOptLinearMethod)
+        assert quantized.weight.dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz)
+        assert torch.isfinite(quantized.weight.float()).all()
+        assert torch.isfinite(quantized.weight_scale).all()
+        assert torch.isfinite(quantized.input_scale).all()
+        assert isinstance(mlp.gate_up_proj.quant_method, UnquantizedLinearMethod)
+        assert mlp.gate_up_proj.weight.dtype == torch.bfloat16
+
+    params = SamplingParams(temperature=0, max_tokens=4, ignore_eos=True)
+    outputs = []
+    for name, quantization_config in metadata.items():
+        model_path = tmp_path / name
+        model.config.quantization_config = quantization_config
+        model.save_pretrained(model_path, state_dict=dict(weights))
+        (model_path / "hf_quant_config.json").write_text(
+            json.dumps(quantization_config)
+        )
+        with vllm_runner(
+            str(model_path),
+            skip_tokenizer_init=True,
+            trust_remote_code=False,
+            enforce_eager=True,
+            enable_flashinfer_autotune=False,
+            max_model_len=32,
+            max_num_seqs=1,
+            kv_cache_memory_bytes=16 << 20,
+        ) as llm:
+            llm.apply_model(check_model)
+            outputs.append(llm.generate([[1, 2, 3]], params)[0][0][0])
+    assert len(outputs[0]) == 7
+    assert outputs[1] == outputs[0]
 
 
 @pytest.mark.skipif(
