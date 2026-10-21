@@ -96,7 +96,6 @@ class InputBatch:
         device: torch.device,
         vocab_size: int,
         block_sizes: list[int],  # The block_size of each kv cache group
-        kernel_block_sizes: list[int],
         max_num_blocks_per_req: list[int],
         logitsprocs: LogitsProcessors | None = None,
         logitsprocs_need_output_token_ids: bool = False,
@@ -187,7 +186,6 @@ class InputBatch:
             pin_memory=PIN_MEMORY,
             device=device,
             block_sizes=block_sizes,
-            kernel_block_sizes=kernel_block_sizes,
             max_num_blocks=max_num_blocks_per_req,
             cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
             slot_mapping_modes=slot_mapping_modes,
@@ -323,7 +321,6 @@ class InputBatch:
         """Track add-request operations for logits processors.
         Not applicable to pooling models.
         """
-
         # Fill the next empty index if there is one.
         if (new_req_index := self.batch_update_builder.pop_removed()) is None:
             # Append to end otherwise.
@@ -531,8 +528,8 @@ class InputBatch:
 
         Returns:
           Removed request index, or `None` if `req_id` not recognized
-        """
 
+        """
         req_index = self.req_id_to_index.pop(req_id, None)
         if req_index is None:
             return None
@@ -542,6 +539,7 @@ class InputBatch:
         self.req_output_token_ids[req_index] = None
         self.spec_token_ids[req_index].clear()
         self.block_table.clear_row(req_index)
+        self.req_prompt_embeds.pop(req_index, None)
 
         # LoRA
         lora_id = self.request_lora_mapping[req_index]
@@ -688,12 +686,8 @@ class InputBatch:
         swap_dict_values(self.bad_words_token_ids, i1, i2)
 
         if self.allowed_token_ids_mask_cpu_tensor is not None:
-            (
-                self.allowed_token_ids_mask_cpu_tensor[i1],
-                self.allowed_token_ids_mask_cpu_tensor[i2],
-            ) = (
-                self.allowed_token_ids_mask_cpu_tensor[i2],
-                self.allowed_token_ids_mask_cpu_tensor[i1],
+            self.allowed_token_ids_mask_cpu_tensor[[i1, i2]] = (
+                self.allowed_token_ids_mask_cpu_tensor[[i2, i1]]
             )
 
     def _get_active_token_count(self, req_index: int) -> int:
@@ -710,6 +704,7 @@ class InputBatch:
         Returns:
           swaps: list of (from,to) swap tuples for moved requests
           empty_req_indices: indices not filled by condensation
+
         """
         num_reqs = self.num_reqs
 
@@ -820,6 +815,7 @@ class InputBatch:
                 self.allowed_token_ids_mask_cpu_tensor[empty_index] = (
                     self.allowed_token_ids_mask_cpu_tensor[last_req_index]
                 )
+                self.allowed_token_ids_mask_cpu_tensor[last_req_index].fill_(False)
 
             bad_words_token_ids = self.bad_words_token_ids.pop(last_req_index, None)
             if bad_words_token_ids is not None:
@@ -835,7 +831,6 @@ class InputBatch:
 
     def refresh_metadata(self):
         """Apply any batch updates to sampling metadata."""
-
         if self.is_pooling_model:
             batch_changed = self.batch_update_builder.reset()
             if batch_changed:
@@ -1001,18 +996,19 @@ class InputBatch:
     def make_lora_inputs(
         self, num_scheduled_tokens: np.ndarray, num_sampled_tokens: np.ndarray
     ) -> tuple[tuple[int, ...], tuple[int, ...], set[LoRARequest]]:
-        """
-        Given the num_scheduled_tokens for each request in the batch, return
+        """Given the num_scheduled_tokens for each request in the batch, return
         datastructures used to activate the current LoRAs.
+
         Returns:
             1. prompt_lora_mapping: A tuple of size np.sum(num_sampled_tokens)
-               where, prompt_lora_mapping[i] is the LoRA id to use for the ith
-               sampled token.
+                where, prompt_lora_mapping[i] is the LoRA id to use for the ith
+                sampled token.
             2. token_lora_mapping: A tuple of size np.sum(num_scheduled_tokens)
-               where, token_lora_mapping[i] is the LoRA id to use for ith token.
+                where, token_lora_mapping[i] is the LoRA id to use for ith
+                token.
             3. lora_requests: Set of relevant LoRA requests.
-        """
 
+        """
         req_lora_mapping = self.request_lora_mapping[: self.num_reqs]
         prompt_lora_mapping = tuple(req_lora_mapping.repeat(num_sampled_tokens))
         token_lora_mapping = tuple(req_lora_mapping.repeat(num_scheduled_tokens))
@@ -1028,8 +1024,7 @@ class InputBatch:
         sampled_token_ids_cpu: torch.Tensor,
         async_copy_ready_event: torch.Event,
     ) -> None:
-        """
-        In async scheduling case, store ref to sampled_token_ids_cpu
+        """In async scheduling case, store ref to sampled_token_ids_cpu
         tensor and corresponding copy-ready event. Used to repair
         output_token_ids prior to sampling, if needed by logits processors.
         """
@@ -1041,8 +1036,7 @@ class InputBatch:
             self.async_copy_ready_event = None
 
     def update_async_output_token_ids(self) -> None:
-        """
-        In async scheduling case, update output_token_ids in sampling metadata
+        """In async scheduling case, update output_token_ids in sampling metadata
         from prior steps sampled token ids once they've finished copying to CPU.
         This is called right before they are needed by the logits processors.
         """
@@ -1088,8 +1082,7 @@ class InputBatch:
             # ^ Implicitly resizes to (first_placeholder + num_to_replace)
 
     def update_async_spec_token_ids(self, draft_token_ids: list[list[int]]) -> None:
-        """
-        In async scheduling case, update spec_token_ids in sampling metadata with
+        """In async scheduling case, update spec_token_ids in sampling metadata with
         real draft token ids from prior step. This is called right before they are
         needed by the rejection sampler for penalty/bad_words computation.
         """

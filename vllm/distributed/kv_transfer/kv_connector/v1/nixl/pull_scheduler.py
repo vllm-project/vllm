@@ -34,8 +34,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
     ) -> tuple[int, bool]:
-        """
-        For remote prefill, pull all prompt blocks from remote
+        """For remote prefill, pull all prompt blocks from remote
         asynchronously relative to engine execution.
 
         Args:
@@ -47,8 +46,8 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
               external KV cache beyond what is already computed.
             * true if the external KV cache tokens will be loaded
               asynchronously (between scheduler steps).
-        """
 
+        """
         params = request.kv_transfer_params
         logger.debug(
             "NIXLConnector get_num_new_matched_tokens: "
@@ -194,8 +193,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
         request: "Request",
         block_ids: "BlockIds",
     ) -> tuple[bool, dict[str, Any] | None]:
-        """
-        Once a request is finished, determine whether request blocks
+        """Once a request is finished, determine whether request blocks
         should be freed now or will be sent asynchronously and freed later.
         """
         from vllm.v1.request import RequestStatus
@@ -290,5 +288,6 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             pp_size=self.vllm_config.parallel_config.pipeline_parallel_size,
             remote_num_tokens=remote_num_tokens,
             remote_blocks_expiry_time=blocks_expiry_time,
+            remote_registration_generation=self._registration_generation,
             transfer_mode=self._TRANSFER_MODE,
         )

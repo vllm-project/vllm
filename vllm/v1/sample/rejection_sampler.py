@@ -27,6 +27,11 @@ from vllm.v1.sample.ops.bad_words import apply_bad_words_with_drafts
 from vllm.v1.sample.ops.penalties import apply_all_penalties
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.sample.sampler import Sampler
+from vllm.v1.spec_decode.fly import (
+    apply_fly_greedy_acceptance_kernel,
+    apply_fly_random_acceptance_kernel,
+    compute_fly_entropy,
+)
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates
 
@@ -43,8 +48,7 @@ MAX_SPEC_LEN = 128
 
 
 class RejectionSampler(nn.Module):
-    """
-    The implementation strictly follows the algorithm described in
+    """The implementation strictly follows the algorithm described in
         https://arxiv.org/abs/2211.17192.
     However, we want to clarify the terminology used in the implementation:
     accepted tokens: tokens that are accepted based on the relationship
@@ -73,6 +77,20 @@ class RejectionSampler(nn.Module):
     ):
         super().__init__()
         self.sampler = sampler
+        self.use_fly = bool(
+            spec_config is not None and spec_config.rejection_sample_method == "fly"
+        )
+        self.fly_window_size: int | None = None
+        self.fly_entropy_threshold: float | None = None
+        self.fly_entropy_top_k = 3
+        if self.use_fly:
+            assert spec_config is not None
+            assert spec_config.fly_window_size is not None
+            self.fly_window_size = spec_config.fly_window_size
+            self.fly_entropy_threshold = spec_config.fly_entropy_threshold
+            self.fly_entropy_top_k = spec_config.fly_entropy_top_k
+            if device is not None and device.type == "cpu":
+                raise NotImplementedError("FLy verification is not supported on CPU.")
         self.use_fp64_gumbel = getattr(sampler, "use_fp64_gumbel", False)
         logprobs_mode = self.sampler.logprobs_mode
         self.is_processed_logprobs_mode = logprobs_mode in PROCESSED_LOGPROBS_MODES
@@ -113,8 +131,7 @@ class RejectionSampler(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> SamplerOutput:
-        """
-        Args:
+        """Args:
             metadata:
                 Metadata for spec decoding.
             draft_probs (Optional[torch.Tensor]):
@@ -130,10 +147,12 @@ class RejectionSampler(nn.Module):
             sampling_metadata (vllm.v1.sample.metadata.SamplingMetadata):
                 Additional metadata needed for sampling, such as temperature,
                 top-k/top-p parameters, or other relevant information.
+
         Returns:
             SamplerOutput:
                 Contains the final output token IDs and their logprobs if
                 requested.
+
         """
         assert metadata.max_spec_len <= MAX_SPEC_LEN
 
@@ -197,6 +216,9 @@ class RejectionSampler(nn.Module):
             synthetic_mode=self.synthetic_mode,
             synthetic_conditional_rates=self.synthetic_conditional_rates,
             use_fp64_gumbel=self.use_fp64_gumbel,
+            fly_window_size=self.fly_window_size,
+            fly_entropy_threshold=self.fly_entropy_threshold,
+            fly_entropy_top_k=self.fly_entropy_top_k,
         )
 
         logprobs_tensors = None
@@ -272,6 +294,7 @@ class RejectionSampler(nn.Module):
         logprobs_tensors: LogprobsTensors | None = None,
     ) -> tuple[list[list[int]], LogprobsLists | None]:
         """Parse the output of the rejection sampler.
+
         Args:
             output_token_ids: The sampled token IDs in shape
                 [batch_size, max_spec_len + 1]. The rejected tokens are
@@ -280,8 +303,10 @@ class RejectionSampler(nn.Module):
             vocab_size: The size of the vocabulary.
             discard_req_indices: Optional row indices to discard tokens in.
             logprobs_tensors: Optional logprobs tensors to filter.
+
         Returns:
             A list of lists of token IDs.
+
         """
         output_token_ids_np = output_token_ids.cpu().numpy()
         # Create mask for valid tokens.
@@ -422,6 +447,9 @@ def rejection_sample(
     synthetic_mode: bool = False,
     synthetic_conditional_rates: torch.Tensor | None = None,
     use_fp64_gumbel: bool = False,
+    fly_window_size: int | None = None,
+    fly_entropy_threshold: float | None = None,
+    fly_entropy_top_k: int = 3,
 ) -> torch.Tensor:
     assert draft_token_ids.ndim == 1
     assert draft_probs is None or draft_probs.ndim == 2
@@ -436,6 +464,11 @@ def rejection_sample(
     assert draft_probs is None or draft_probs.is_contiguous()
     assert bonus_token_ids.is_contiguous()
     assert target_logits.shape == (num_tokens, vocab_size)
+    fly_enabled = fly_window_size is not None
+    if fly_enabled:
+        assert fly_entropy_threshold is not None
+        if synthetic_mode:
+            raise ValueError("FLy is incompatible with synthetic rejection sampling")
 
     # Create output buffer.
     output_token_ids = torch.full(
@@ -463,9 +496,32 @@ def rejection_sample(
             device,
         )
 
+    target_probs: torch.Tensor | None = None
+    if fly_enabled or not sampling_metadata.all_greedy:
+        target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
+        assert target_probs.is_contiguous()
+
+    fly_entropy: torch.Tensor | None = None
+    if fly_enabled:
+        assert target_probs is not None
+        fly_entropy = compute_fly_entropy(target_probs, fly_entropy_top_k)
+
     if not sampling_metadata.all_random:
         # Rejection sampling for greedy sampling requests.
         target_argmax = target_logits.argmax(dim=-1)
+        if fly_enabled:
+            assert fly_entropy is not None and fly_window_size is not None
+            apply_fly_greedy_acceptance_kernel[(batch_size,)](
+                cu_num_draft_tokens,
+                draft_token_ids,
+                target_argmax,
+                target_logits,
+                fly_entropy,
+                is_greedy,
+                vocab_size,
+                fly_entropy_threshold,
+                FLY_WINDOW_SIZE=fly_window_size,
+            )
         _rejection_greedy_sample(
             output_token_ids,
             cu_num_draft_tokens,
@@ -480,8 +536,7 @@ def rejection_sample(
         if sampling_metadata.all_greedy:
             return output_token_ids
 
-    # Compute probability distribution from target logits.
-    target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
+    assert target_probs is not None
     assert target_probs.is_contiguous()
 
     # Sample recovered tokens for each position.
@@ -500,6 +555,21 @@ def rejection_sample(
 
     # Rejection sampling for random sampling requests.
     assert uniform_probs is not None
+    if fly_enabled:
+        assert fly_entropy is not None and fly_window_size is not None
+        apply_fly_random_acceptance_kernel[(batch_size,)](
+            cu_num_draft_tokens,
+            draft_token_ids,
+            draft_probs,
+            target_probs,
+            uniform_probs,
+            fly_entropy,
+            is_greedy,
+            vocab_size,
+            fly_entropy_threshold,
+            NO_DRAFT_PROBS=draft_probs is None,
+            FLY_WINDOW_SIZE=fly_window_size,
+        )
     _rejection_random_sample(
         output_token_ids,
         cu_num_draft_tokens,
@@ -536,6 +606,7 @@ def apply_sampling_constraints(
     Returns:
         torch.Tensor: Processed logits if non-greedy sampling is used,
         otherwise returns the original logits.
+
     """
     assert logits.ndim == 2
     assert cu_num_draft_tokens.ndim == 1
@@ -597,8 +668,10 @@ def expand_batch_to_tokens(
             Value to be replaced if it is found in x.
         replace_to: int = 0
             Value to replace with when replace_from is found.
+
     Returns:
         expanded_x: [num_tokens] tensor.
+
     """
     batch_size = x.shape[0]
     assert cu_num_tokens.shape[0] == batch_size
@@ -619,8 +692,7 @@ def generate_uniform_probs(
     generators: dict[int, torch.Generator],
     device: torch.device,
 ) -> torch.Tensor:
-    """
-    Generates a batch of uniform random samples, with optional seeding
+    """Generates a batch of uniform random samples, with optional seeding
     if available.
 
     This method creates a tensor of shape `(num_tokens, )` filled
@@ -639,10 +711,12 @@ def generate_uniform_probs(
             `torch.Generator` objects.
         device: torch.device
             The device on which to allocate the tensor.
+
     Returns:
         uniform_rand: torch.Tensor
             A tensor of shape `(num_tokens, )` containing uniform
             random values in the range [0, 1).
+
     """
     # NOTE(woosuk): We deliberately use float64 instead of float32 here
     # because when using float32, there's a non-negligible chance that

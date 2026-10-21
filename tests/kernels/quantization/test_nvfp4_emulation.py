@@ -4,9 +4,21 @@ from typing import cast
 
 import pytest
 import torch
+from nvfp4_utils import (
+    FLOAT4_E2M1_MAX,
+    FLOAT8_E4M3_MAX,
+    break_fp4_bytes,
+    kE2M1ToFloat,
+)
 from safetensors import safe_open
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config.kernel import KernelConfig
+from vllm.model_executor.kernels.linear import init_nvfp4_linear_kernel
+from vllm.model_executor.kernels.linear.nvfp4.emulation import (
+    EmulationNvFp4LinearKernel,
+)
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -34,6 +46,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.transformers_utils.repo_utils import hf_api
 from vllm.triton_utils import triton
+from vllm.utils.torch_utils import set_random_seed
 
 if current_platform.is_rocm():
     from vllm.platforms.rocm import on_gfx950
@@ -64,8 +77,7 @@ def loaded_model_files():
 
 
 class Nvfp4QuantizationEmulationTritonExpertsReference(TritonExperts):
-    """
-    Extension of TritonExperts to support emulated NVFP4 MoE experts.
+    """Extension of TritonExperts to support emulated NVFP4 MoE experts.
 
     It may be used for NVFP4 models when the device does not have
     native support for this dtype.
@@ -770,3 +782,85 @@ def test_nvfp4_moe_correctness(
         atol=0.0 if on_gfx950() else 0.02,
         rtol=0,
     )
+
+
+def _dense_nvfp4_reference(
+    layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None
+) -> torch.Tensor:
+    """Decode E2M1 nibbles and both scale levels without production helpers."""
+    levels = kE2M1ToFloat.cpu()
+    weight = break_fp4_bytes(layer.weight.cpu(), torch.float32)
+    weight *= (
+        layer.weight_scale.cpu().float() * layer.weight_global_scale.cpu()
+    ).repeat_interleave(16, dim=-1)
+    blocks = x.cpu().float().reshape(x.shape[0], -1, 16)
+    global_scale = layer.input_global_scale_inv.cpu()
+    scales = (
+        (blocks.abs().amax(-1, keepdim=True) * (1.0 / FLOAT4_E2M1_MAX) * global_scale)
+        .clamp(max=FLOAT8_E4M3_MAX)
+        .to(torch.float8_e4m3fn)
+        .float()
+    )
+    inverse = torch.where(scales == 0, 0, global_scale / scales)
+    scaled = (blocks * inverse).abs().clamp(max=FLOAT4_E2M1_MAX)
+    distances = (scaled.unsqueeze(-1) - levels).abs()
+    # E2M1 ties round to the even significand (even encoding).
+    nearest_mask = distances == distances.amin(-1, keepdim=True)
+    even_mask = nearest_mask & (torch.arange(8, device="cpu") % 2 == 0)
+    candidates = torch.where(even_mask.any(-1, keepdim=True), even_mask, nearest_mask)
+    nearest = candidates.to(torch.int8).argmax(-1)
+    activation = levels[nearest] * blocks.sign() * (scales / global_scale)
+    expected = activation.reshape_as(x).to(x.dtype) @ weight.to(x.dtype).T
+    if bias is not None:
+        expected += bias.cpu()
+    return expected
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm NVFP4 fallback")
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("m,n,k", [(1, 32, 64), (17, 128, 256)])
+@pytest.mark.parametrize("with_bias", [False, True])
+def test_nvfp4_dense_emulation(
+    dtype: torch.dtype, m: int, n: int, k: int, with_bias: bool
+) -> None:
+    """W4A4 fallback preserves packed scales, bias and outputs across replay."""
+    set_random_seed(47)
+    layer = torch.nn.Module()
+    # Every signed E2M1 code appears, including both zero encodings.
+    codes = (torch.randperm(n * k, device="cuda") % 16).reshape(n, k)
+    layer.weight = (codes[:, ::2] | (codes[:, 1::2] << 4)).to(torch.uint8)
+    layer.weight_scale = (
+        torch.arange(n * k // 16, device="cuda").reshape(n, k // 16) % 7 / 8
+    ).to(torch.float8_e4m3fn)
+    layer.weight_global_scale = torch.tensor(0.25, device="cuda")
+    layer.input_global_scale_inv = torch.tensor(3.0, device="cuda")
+    x = torch.randn(m, k, device="cuda", dtype=dtype)
+    x[:, :16] = 0
+    bias = torch.randn(n, device="cuda", dtype=dtype) if with_bias else None
+    with set_current_vllm_config(
+        VllmConfig(kernel_config=KernelConfig(linear_backend="emulation"))
+    ):
+        kernel = init_nvfp4_linear_kernel()
+    assert isinstance(kernel, EmulationNvFp4LinearKernel)
+    kernel.process_weights_after_loading(layer)
+    original_weight = layer.weight.clone()
+    original_scale = layer.weight_scale.view(torch.uint8).clone()
+    actual = kernel.apply_weights(layer, x, bias)
+    torch.testing.assert_close(
+        actual.cpu(), _dense_nvfp4_reference(layer, x, bias), atol=0.03, rtol=0.01
+    )
+    assert actual.abs().max() > 0.1
+    saved = actual.clone()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = kernel.apply_weights(layer, x, bias)
+    for sign in (-1, 1):
+        x.mul_(sign * 0.75)
+        graph.replay()
+        torch.accelerator.synchronize()
+        torch.testing.assert_close(
+            captured.cpu(), _dense_nvfp4_reference(layer, x, bias), atol=0.03, rtol=0.01
+        )
+        torch.testing.assert_close(actual, saved, atol=0, rtol=0)
+    assert torch.equal(layer.weight, original_weight)
+    assert torch.equal(layer.weight_scale.view(torch.uint8), original_scale)

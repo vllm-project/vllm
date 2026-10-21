@@ -6,7 +6,7 @@ from vllm.logger import init_logger
 from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
-    from transformers import PretrainedConfig
+    from transformers import PreTrainedConfig
 
     from vllm.config import CacheConfig, ModelConfig, VllmConfig
     from vllm.config.cache import MambaDType
@@ -23,6 +23,51 @@ class VerifyAndUpdateConfig:
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         return
+
+
+class AliceAIForCausalLMConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        hf_config = model_config.hf_config
+        if getattr(hf_config, "kda_allow_negative_eigenvalues", None) is not False:
+            raise NotImplementedError(
+                "AliceAI requires kda_allow_negative_eigenvalues=false"
+            )
+        if getattr(hf_config, "router_score_function", None) != "sigmoid":
+            raise ValueError("AliceAI requires router_score_function='sigmoid'")
+        if getattr(hf_config, "router_bias_correction", None) is not True:
+            raise ValueError("AliceAI requires router_bias_correction=true")
+        mtp_layers = getattr(hf_config, "mtp_num_hidden_layers", 0)
+        if mtp_layers:
+            logger.warning(
+                "AliceAI checkpoint declares %s MTP layer(s), but this "
+                "implementation ignores the MTP configuration and weights; "
+                "MTP speculative decoding is unavailable.",
+                mtp_layers,
+            )
+
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        if vllm_config.parallel_config.pipeline_parallel_size != 1:
+            raise NotImplementedError(
+                "AliceAI does not support pipeline parallelism; "
+                "pipeline_parallel_size=1 is required"
+            )
+
+        speculative_config = vllm_config.speculative_config
+        speculative_method = (
+            speculative_config.method if speculative_config is not None else None
+        )
+        if speculative_method in {
+            "dflash",
+            "dspark",
+            "eagle3",
+            "extract_hidden_states",
+        }:
+            raise NotImplementedError(
+                "AliceAI does not support speculative method "
+                f"{speculative_method!r} because it requires auxiliary hidden states"
+            )
 
 
 class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
@@ -43,11 +88,57 @@ class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
 class GlmMoeDsaForCausalLM(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        from vllm.platforms import current_platform
+
+        cache_config = vllm_config.cache_config
+        if (
+            cache_config.cache_dtype == "auto"
+            and current_platform.is_cuda()
+            and current_platform.is_device_capability_family(100)
+        ):
+            cache_config.cache_dtype = "fp8_e4m3"
+            logger.info_once("Using fp8 kv-cache for GlmMoeDsaForCausalLM on SM10x")
+            # MTP shares the target's KV cache layout; a separate draft model
+            # must not inherit a default it was never validated with.
+            spec_config = vllm_config.speculative_config
+            if (
+                spec_config is not None
+                and spec_config.method != "mtp"
+                and spec_config.kv_cache_dtype is None
+            ):
+                spec_config.kv_cache_dtype = "auto"
+
         # For Glm-Moe-DSA, qrep + a2a is better than the default all-gather + ag-rs
         # in most cases.
         vllm_config.parallel_config.set_dcp_defaults(
             comm_backend="a2a", q_replicate=True
         )
+
+
+class Glm5NextModelConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        from vllm.platforms import current_platform
+
+        cache_config = vllm_config.cache_config
+        if (
+            cache_config.cache_dtype != "auto"
+            or not current_platform.is_cuda()
+            or not current_platform.is_device_capability_family(100)
+            or getattr(vllm_config.model_config.hf_text_config, "index_topk", None)
+            is None
+        ):
+            return
+
+        cache_config.cache_dtype = "fp8"
+        logger.info_once("Using fp8 KV cache for GLM-5.3-Flash")
+        spec_config = vllm_config.speculative_config
+        if (
+            spec_config is not None
+            and spec_config.method != "mtp"
+            and spec_config.kv_cache_dtype is None
+        ):
+            spec_config.kv_cache_dtype = "auto"
 
 
 class Ernie4_5_VLMoeForConditionalGenerationConfig(VerifyAndUpdateConfig):
@@ -212,12 +303,15 @@ class Gemma4Config(VerifyAndUpdateConfig):
         """Configure attention for heterogeneous head dimensions.
 
         Gemma4 uses different head dimensions for sliding window vs full attention
-        layers. The default FA3 on Hopper cannot handle head_dim > 256, which causes
-        mixed backend selection and numerical divergence.
+        layers. The default FA3 on Hopper cannot handle head_dim > 256.
 
-        When FA4 is available we force it for ALL layers, giving a uniform kernel path
-        and avoiding the mixed FA3+FA4 penalty. When FA4 is not available we fall back
-        to Triton.
+        On SM90 with FP8 KV cache, use FA3 for supported layers and let the generic
+        FlashAttention selector upgrade larger head dimensions to FA4.
+        The multimodal-prefix composite routes image masks to Triton and causal
+        requests to this per-layer FA3/FA4 selection. For other configurations,
+        force FA4 for all layers to avoid the mixed
+        FA3+FA4 penalty.
+        When FA4 is not available, fall back to Triton.
         """
         model_config = vllm_config.model_config
         arch_config = model_config.model_arch_config
@@ -230,6 +324,7 @@ class Gemma4Config(VerifyAndUpdateConfig):
         if len(set(head_dims.values())) <= 1:
             return
 
+        from vllm.platforms import current_platform
         from vllm.v1.attention.backends.fa_utils import is_fa_version_supported
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -241,12 +336,28 @@ class Gemma4Config(VerifyAndUpdateConfig):
                 and vllm_config.attention_config.backend
                 in (None, AttentionBackendEnum.FLASH_ATTN)
             ):
-                vllm_config.attention_config.flash_attn_version = 4
-                logger.info(
-                    "Gemma4 model has heterogeneous head dimensions %s. Using FA4 for "
-                    "all layers to avoid mixed FA3/FA4 penalty.",
-                    head_dims,
-                )
+                use_per_layer_fa = current_platform.is_device_capability_family(
+                    90
+                ) and vllm_config.cache_config.cache_dtype.startswith("fp8")
+                if use_per_layer_fa:
+                    logger.info(
+                        "Gemma4 model has heterogeneous head dimensions %s. Using "
+                        "per-layer FA3/FA4 selection for FP8 KV cache on SM90.",
+                        head_dims,
+                    )
+                else:
+                    vllm_config.attention_config.flash_attn_version = 4
+                    logger.info(
+                        "Gemma4 model has heterogeneous head dimensions %s. Using FA4 "
+                        "for all layers to avoid mixed FA3/FA4 penalty.",
+                        head_dims,
+                    )
+        elif current_platform.is_xpu():
+            logger.info(
+                "Gemma4 model has heterogeneous head dimensions %s. Leaving the "
+                "attention backend choice to the XPU platform.",
+                head_dims,
+            )
         elif vllm_config.attention_config.backend is None:
             vllm_config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
             logger.info(
@@ -254,6 +365,31 @@ class Gemma4Config(VerifyAndUpdateConfig):
                 "%s. FA4 not available, forcing TRITON_ATTN backend.",
                 head_dims,
             )
+
+
+class EmbeddingGemma2ModelConfig(Gemma4Config):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        Gemma4Config.verify_and_update_config(vllm_config)
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        attn_config = vllm_config.attention_config
+        if attn_config.backend is None:
+            attn_config.backend = AttentionBackendEnum.TRITON_ATTN
+            logger.info(
+                "EmbeddingGemma2: attention backend not specified; defaulting to "
+                "TRITON_ATTN (validated backend for heterogeneous head dimensions)."
+            )
+        else:
+            logger.info(
+                "EmbeddingGemma2: using attention backend %s", attn_config.backend
+            )
+
+        model_config = vllm_config.model_config
+        if model_config.max_model_len > 8192 and getattr(
+            model_config, "original_max_model_len", None
+        ) in (None, -1):
+            model_config.max_model_len = 8192
 
 
 class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
@@ -280,11 +416,14 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
                 "FLASH_ATTN or TRITON_ATTN instead."
             )
         if attention_config.backend is None and not attention_config.use_non_causal:
+            # Only the sm_100 default backend order reads this flag (it puts
+            # FlashInfer first for causal models). Elsewhere Gemma4Config above
+            # keeps FlashInfer out: FA4 on every layer, else TRITON_ATTN.
             attention_config.use_non_causal = True
             logger.info(
-                "DiffusionGemma uses mixed causal/bidirectional attention "
-                "within a batch; setting use_non_causal=True to exclude "
-                "FlashInfer from auto-selection."
+                "DiffusionGemma mixes causal and bidirectional attention in "
+                "one batch; setting use_non_causal=True so the default backend "
+                "order prefers FlashAttention over FlashInfer."
             )
 
         # Auto-create DiffusionConfig from HF config if not provided.
@@ -445,8 +584,7 @@ class GteNewModelConfig(VerifyAndUpdateConfig):
 class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
     @classmethod
     def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
-        """
-        Perform early validation and setup for hybrid attention/mamba models.
+        """Perform early validation and setup for hybrid attention/mamba models.
 
         Block size alignment with mamba page sizes is handled later by
         Platform.update_block_size_for_backend(), which runs after model
@@ -454,6 +592,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
 
         Args:
             vllm_config: vLLM Config
+
         """
         # Enable FULL_AND_PIECEWISE by default
         MambaModelConfig.verify_and_update_config(vllm_config)
@@ -529,6 +668,7 @@ class JinaVLForSequenceClassificationConfig(VerifyAndUpdateConfig):
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         config = model_config.hf_config
         config.num_labels = 1
+        config.get_text_config().num_labels = 1
         pooler_config = model_config.pooler_config
         assert pooler_config is not None
         if pooler_config.logit_mean is None:
@@ -609,12 +749,12 @@ class LlamaNemotronVLConfig(VerifyAndUpdateConfig):
 class MambaModelConfig(VerifyAndUpdateConfig):
     @classmethod
     def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
-        """
-        Enable FULL_AND_PIECEWISE cuda graph mode by default (required
+        """Enable FULL_AND_PIECEWISE cuda graph mode by default (required
         to get good performance for mamba layers in V1).
 
         Args:
             vllm_config: vLLM Config
+
         """
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
@@ -628,20 +768,9 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                     cache_config.mamba_cache_mode,
                     model_config.architecture,
                 )
-            if (
-                cache_config.mamba_cache_mode == "all"
-                and not model_config.supports_mamba_prefix_caching
-            ):
-                cache_config.mamba_cache_mode = "align"
-                logger.warning(
-                    "Hybrid or mamba-based model detected without support "
-                    "for prefix caching with Mamba cache 'all' mode: "
-                    "falling back to 'align' mode."
-                )
-            if cache_config.mamba_cache_mode == "align":
-                assert vllm_config.scheduler_config.enable_chunked_prefill, (
-                    "Chunked prefill is required for mamba cache mode 'align'."
-                )
+            assert vllm_config.scheduler_config.enable_chunked_prefill, (
+                "Chunked prefill is required for Mamba prefix caching."
+            )
             # By default, mamba block size will be set to max_model_len (see
             # below). When enabling prefix caching, we align mamba block size
             # to the block size as the basic granularity for prefix caching.
@@ -663,7 +792,7 @@ class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
 
     @classmethod
     def update_mamba_ssm_cache_dtype(
-        cls, *, cache_config: "CacheConfig", hf_config: "PretrainedConfig"
+        cls, *, cache_config: "CacheConfig", hf_config: "PreTrainedConfig"
     ) -> None:
         """Update mamba_ssm_cache_dtype for NemotronH models when set to 'auto'
         (or not explicitly set), to the value specified in the HF config, or to
@@ -860,11 +989,21 @@ class Qwen4ExpForConditionalGenerationConfig(Qwen3_5ForConditionalGenerationConf
 
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        from vllm.platforms import current_platform
+
         Qwen3_5ForConditionalGenerationConfig.verify_and_update_config(vllm_config)
         text_config = vllm_config.model_config.hf_text_config
         if text_config.hc_count <= 1:
             raise ValueError("Qwen4Exp requires hc_count > 1")
         parallel_config = vllm_config.parallel_config
+        # MoE SP also enables HC SP without the explicit HC flag.
+        if (
+            current_platform.is_cuda_alike()
+            and parallel_config.use_sequence_parallel_moe
+            and parallel_config.pipeline_parallel_size != 1
+        ):
+            raise ValueError("Qwen4Exp MoE SP requires PP=1")
+
         uses_ple_or_qsa = bool(text_config.ple_layer_ids) or (
             getattr(text_config, "indexer_n_heads", None) is not None
         )
@@ -954,6 +1093,54 @@ class ColQwen3_5Config(Qwen3_5ForConditionalGenerationConfig):
             config.is_causal = is_causal
 
 
+class D3ForSequenceClassificationConfig(Qwen3_5ForConditionalGenerationConfig):
+    """Apply the contract declared by a Decision 3.0 `decision_config.json`."""
+
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        hf_config = model_config.hf_config
+        decision = getattr(hf_config, "decision_config", None)
+        if not isinstance(decision, dict):
+            raise ValueError("Decision 3.0 checkpoints need a decision_config.json")
+        if decision.get("format_version") != 1:
+            raise ValueError(
+                "unsupported decision_config.json format_version "
+                f"{decision.get('format_version')!r}; vLLM reads version 1"
+            )
+        if decision.get("pooling", "last") != "last":
+            raise ValueError(
+                f"unsupported decision_config.json pooling {decision['pooling']!r}"
+            )
+        attention_mode = decision.get("attention_mode", "causal")
+        if attention_mode not in ("causal", "noncausal_full_attention"):
+            raise ValueError(
+                f"unsupported decision_config.json attention_mode {attention_mode!r}"
+            )
+        codes = decision.get("codes")
+        token_ids = decision.get("token_ids")
+        if not codes or not isinstance(token_ids, list) or len(codes) != len(token_ids):
+            raise ValueError(
+                "decision_config.json must list one token id per answer code"
+            )
+
+        # The full attention layers read the whole prompt in both directions;
+        # the Gated DeltaNet layers stay causal.
+        is_causal = attention_mode == "causal"
+        for config in {
+            id(config): config for config in (hf_config, model_config.hf_text_config)
+        }.values():
+            config.is_causal = is_causal
+        # One readout row per answer code.
+        hf_config.id2label = dict(enumerate(codes))
+
+        # Probabilities only exist over a question's own options, so the head
+        # returns raw code logits unless activation is requested.
+        pooler_config = model_config.pooler_config
+        assert pooler_config is not None
+        if pooler_config.use_activation is None:
+            pooler_config.use_activation = False
+
+
 class SnowflakeGteNewModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -999,19 +1186,24 @@ class LongcatFlashNgramForCausalLMConfig(VerifyAndUpdateConfig):
 
 
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
+    "AliceAIForCausalLM": AliceAIForCausalLMConfig,
     "ColBERTJinaRobertaModel": JinaRobertaModelConfig,
     "ColQwen3_5": ColQwen3_5Config,
+    "D3ForSequenceClassification": D3ForSequenceClassificationConfig,
     "DeepseekV4ForCausalLM": DeepseekV4ForCausalLMConfig,
     "DeepseekV4ForConditionalGeneration": DeepseekV4ForCausalLMConfig,
     "DeepseekV41ForCausalLM": DeepseekV4ForCausalLMConfig,
     "DeepseekV32ForCausalLM": DeepseekV32ForCausalLM,
     "DiffusionGemmaForBlockDiffusion": DiffusionGemmaModelForBlockDiffusionConfig,  # noqa: E501
+    "EmbeddingGemma2Model": EmbeddingGemma2ModelConfig,
     "Ernie4_5_VLMoeForConditionalGeneration": Ernie4_5_VLMoeForConditionalGenerationConfig,  # noqa: E501
     "FalconMambaForCausalLM": MambaModelConfig,
     "Gemma3TextModel": Gemma3TextModelConfig,
     "Gemma4ForCausalLM": Gemma4Config,
     "Gemma4ForConditionalGeneration": Gemma4Config,
     "Gemma4UnifiedForConditionalGeneration": Gemma4Config,
+    "Glm5NextForCausalLM": Glm5NextModelConfig,
+    "Glm5NextForConditionalGeneration": Glm5NextModelConfig,
     "GlmMoeDsaForCausalLM": GlmMoeDsaForCausalLM,
     "GptOssForCausalLM": GptOssForCausalLMConfig,
     "LongcatFlashNgramForCausalLM": LongcatFlashNgramForCausalLMConfig,

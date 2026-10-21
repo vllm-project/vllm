@@ -31,8 +31,7 @@ class EncoderCacheManagerConfig:
 
 
 class EncoderCacheManagerMetadata(ABC):  # noqa: B024
-    """
-    Abstract Metadata used to communicate between the
+    """Abstract Metadata used to communicate between the
     Scheduler EncoderCacheManager and Worker EncoderCacheManager.
     """
 

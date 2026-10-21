@@ -8,9 +8,10 @@ use std::sync::{Arc, LazyLock};
 pub use vllm_parser::tool::{
     DeepSeekV3ToolParser, DeepSeekV4ToolParser, DeepSeekV31ToolParser, DeepSeekV32ToolParser,
     DeepSeekV41ToolParser, Glm45MoeToolParser, Glm47MoeToolParser, Granite4ToolParser,
-    HermesToolParser, Internlm2ToolParser, KimiK2ToolParser, Llama3JsonToolParser,
+    HermesToolParser, Internlm2ToolParser, KimiK2ToolParser, Llama3JsonToolParser, MiMoToolParser,
     MinimaxM2ToolParser, MinimaxM3ToolParser, MistralToolParser, Phi4MiniJsonToolParser,
-    Qwen3CoderToolParser, Qwen3XmlToolParser, SeedOssToolParser, ToolParser, ToolParserError,
+    Qwen3CoderToolParser, Qwen3JsonToolParser, SeedOssToolParser, Step5ToolParser, ToolParser,
+    ToolParserError,
 };
 
 use crate::parser::ParserFactory;
@@ -33,13 +34,18 @@ pub mod names {
     pub const KIMI_K2: &str = "kimi_k2";
     pub const LLAMA3_JSON: &str = "llama3_json";
     pub const LLAMA4_JSON: &str = "llama4_json";
+    pub const MIMO: &str = "mimo";
     pub const MINIMAX_M2: &str = "minimax_m2";
     pub const MINIMAX_M3: &str = "minimax_m3";
     pub const MISTRAL: &str = "mistral";
     pub const PHI4_MINI_JSON: &str = "phi4_mini_json";
     pub const QWEN3_CODER: &str = "qwen3_coder";
+    // The `<tool_call>`-wrapped JSON format of Qwen2.5, QwQ and Qwen3.
+    pub const QWEN3_JSON: &str = "qwen3_json";
+    // An alias of `qwen3_coder` for the same XML format.
     pub const QWEN3_XML: &str = "qwen3_xml";
     pub const SEED_OSS: &str = "seed_oss";
+    pub const STEP5: &str = "step5";
 }
 
 /// Constructor signature for one registered tool parser implementation.
@@ -76,22 +82,26 @@ impl ToolParserFactory {
             .register_parser::<KimiK2ToolParser>(names::KIMI_K2)
             .register_parser::<Llama3JsonToolParser>(names::LLAMA3_JSON)
             .register_parser::<Llama3JsonToolParser>(names::LLAMA4_JSON)
+            .register_parser::<MiMoToolParser>(names::MIMO)
             .register_parser::<MinimaxM2ToolParser>(names::MINIMAX_M2)
             .register_parser::<MinimaxM3ToolParser>(names::MINIMAX_M3)
             .register_parser::<MistralToolParser>(names::MISTRAL)
             .register_parser::<Phi4MiniJsonToolParser>(names::PHI4_MINI_JSON)
-            .register_parser::<Qwen3XmlToolParser>(names::QWEN3_XML)
             .register_parser::<Qwen3CoderToolParser>(names::QWEN3_CODER)
+            .register_parser::<Qwen3CoderToolParser>(names::QWEN3_XML)
+            .register_parser::<Qwen3JsonToolParser>(names::QWEN3_JSON)
+            .register_parser::<Step5ToolParser>(names::STEP5)
             .register_parser::<SeedOssToolParser>(names::SEED_OSS);
 
         factory
             .register_pattern("mistral-", names::MISTRAL)
             .register_pattern("mixtral-", names::MISTRAL)
+            .register_pattern("mimo-v2", names::MIMO)
             .register_pattern("qwen3-coder", names::QWEN3_CODER)
             .register_pattern("qwen3.5", names::QWEN3_CODER)
-            .register_pattern("qwq", names::HERMES)
-            .register_pattern("qwen2.5", names::HERMES)
-            .register_pattern("qwen3", names::QWEN3_XML)
+            .register_pattern("qwq", names::QWEN3_JSON)
+            .register_pattern("qwen2.5", names::QWEN3_JSON)
+            .register_pattern("qwen3", names::QWEN3_JSON)
             .register_pattern("hermes", names::HERMES)
             // Narrow to `internlm2` substring so it matches `internlm2-chat-7b`
             // and `internlm2_5-7b-chat` but NOT `internlm-chat-7b` (InternLM v1,
@@ -119,6 +129,8 @@ impl ToolParserFactory {
             .register_pattern("mm-m3", names::MINIMAX_M3)
             .register_pattern("minimax", names::MINIMAX_M2)
             .register_pattern("mm-m2", names::MINIMAX_M2)
+            .register_pattern("step-5", names::STEP5)
+            .register_pattern("step5", names::STEP5)
             .register_pattern("seed-oss", names::SEED_OSS)
             .register_pattern("seedoss", names::SEED_OSS);
 

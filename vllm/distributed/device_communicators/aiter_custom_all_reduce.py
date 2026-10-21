@@ -22,9 +22,7 @@ class AiterCustomAllreduce:
 
     @classmethod
     def effective_max_size(cls) -> int:
-        """
-        Max input byte size eligible for AITER custom allreduce.
-        """
+        """Max input byte size eligible for AITER custom allreduce."""
         return cls.MAX_SIZE // 2
 
     def __init__(
@@ -32,6 +30,8 @@ class AiterCustomAllreduce:
         group: ProcessGroup,
         device: int | str | torch.device,
         max_size: int | None = None,
+        *,
+        register_graph_buffers: bool = True,
     ):
         from aiter.dist.device_communicators.custom_all_reduce import (
             CustomAllreduce as _AiterCustomAllreduce,
@@ -40,7 +40,10 @@ class AiterCustomAllreduce:
         if max_size is None:
             max_size = self.MAX_SIZE
 
-        self._impl = _AiterCustomAllreduce(group, device, max_size=max_size)
+        kwargs = {}
+        if not register_graph_buffers:
+            kwargs["enable_register_for_capturing"] = False
+        self._impl = _AiterCustomAllreduce(group, device, max_size=max_size, **kwargs)
 
     @property
     def aiter_ca(self):

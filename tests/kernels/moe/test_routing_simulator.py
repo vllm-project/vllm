@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Test script for the token-to-expert routing simulator.
+"""Test script for the token-to-expert routing simulator.
 
 This script demonstrates how to use the routing simulator to test
 different routing strategies and analyze their performance, including

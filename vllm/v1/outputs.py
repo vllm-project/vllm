@@ -15,13 +15,16 @@ from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
+    from vllm.distributed.aux_output_connector.connector import AuxRequestOutput
     from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorWorkerMetadata
+    from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
     from vllm.distributed.kv_events import KVConnectorKVEvents
     from vllm.distributed.kv_transfer.kv_connector.v1.base import (
         KVConnectorWorkerMetadata,
     )
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 else:
+    AuxRequestOutput = object
     KVConnectorStats = object
     KVConnectorWorkerMetadata = object
     KVConnectorKVEvents = object
@@ -54,19 +57,25 @@ class LogprobsLists(NamedTuple):
 
 
 class SamplingMaskLists(NamedTuple):
-    """CSR sampling masks; a step slice holds one position (``offsets=None``)."""
+    """CSR sampling masks; a request slice may contain multiple positions."""
 
     # [num_kept_tokens]
     token_ids: np.ndarray
     # [num_positions + 1], or None for a single position
     offsets: np.ndarray | None = None
-    # Unused with one position per request; kept for the wire layout.
+    # [num_requests + 1] for multi-position request batches.
     cu_num_generated_tokens: list[int] | None = None
 
     def slice_request(self, req_idx: int, num_positions: int) -> "SamplingMaskLists":
-        assert num_positions == 1 and self.offsets is not None
+        assert self.offsets is not None
+        cu = self.cu_num_generated_tokens
+        start = req_idx if cu is None else cu[req_idx]
+        end = start + num_positions
+        lo, hi = self.offsets[start], self.offsets[end]
+        if num_positions == 1:
+            return SamplingMaskLists(self.token_ids[lo:hi])
         return SamplingMaskLists(
-            self.token_ids[self.offsets[req_idx] : self.offsets[req_idx + 1]]
+            self.token_ids[lo:hi], self.offsets[start : end + 1] - lo
         )
 
     def to_nested_list(self) -> list[list[int]]:
@@ -166,7 +175,6 @@ class LogprobsTensors(NamedTuple):
         num_positions: int, num_tokens_per_position: int
     ) -> "LogprobsTensors":
         """Create empty LogprobsTensors on CPU."""
-
         logprob_token_ids = torch.empty(
             (num_positions, num_tokens_per_position),
             dtype=torch.int32,
@@ -186,73 +194,6 @@ class LogprobsTensors(NamedTuple):
             logprobs=logprobs,
             selected_token_ranks=selected_token_ranks,
         )
-
-
-class RoutedExpertsTensors(NamedTuple):
-    """Device-side snapshot of routed experts data, pending async D2H.
-
-    Produced by :class:`GPUModelRunner` at the end of each async-scheduled
-    step. The copy stream waits on the default stream, then issues
-    non-blocking D2H via :meth:`to_cpu_nonblocking` into a pinned CPU
-    buffer; :class:`AsyncGPUModelRunnerOutput.get_output` synchronizes
-    the copy before the scheduler reads it.
-
-    Sliced to ``total_num_scheduled_tokens`` (step-level, across all
-    requests — NOT per-request). Both ``routing_data`` and
-    ``slot_mapping`` must be private clones when sourced from shared
-    capturer / prepare-input buffers, so the next forward pass /
-    ``_prepare_inputs`` on the default stream does not race with a
-    D2H still pending on the copy stream.
-    """
-
-    # (num_scheduled_tokens, num_layers, num_experts_per_tok)
-    routing_data: torch.Tensor
-    # (num_scheduled_tokens,)
-    slot_mapping: torch.Tensor
-
-    def to_cpu_nonblocking(self) -> "RoutedExpertsTensors":
-        """Issue non-blocking D2H on the current stream.
-
-        NOTE: ``non_blocking=True`` only delivers true overlap when the
-        CPU target is pinned. The current fallback here allocates a
-        new pageable CPU tensor per call, which silently degrades to a
-        synchronous copy; acceptable because the sync happens on the
-        dedicated copy stream, not the default stream.
-        """
-        if self.routing_data.device.type == "cpu":
-            return self
-        return RoutedExpertsTensors(
-            self.routing_data.to("cpu", non_blocking=True),
-            self.slot_mapping.to("cpu", non_blocking=True),
-        )
-
-    def tolists(self) -> "RoutedExpertsLists":
-        """Convert to the numpy-backed form consumed by the scheduler.
-
-        ``.cpu()`` is a no-op when the tensor is already on CPU, so this
-        is cheap for the post-D2H case; for raw device tensors it will
-        synchronously block, which is only reached in tests.
-        """
-        return RoutedExpertsLists(
-            self.routing_data.cpu().numpy(),
-            self.slot_mapping.cpu().numpy(),
-        )
-
-
-class RoutedExpertsLists(NamedTuple):
-    """CPU-side routed experts, the form :meth:`RoutedExpertsManager.store_batch`
-    consumes.
-
-    Batched per scheduler step: the leading dim is the number of tokens
-    scheduled across all requests in this step (``total_num_scheduled_tokens``),
-    not per-request tokens. ``slot_mapping[i]`` tells the scheduler which
-    physical KV-cache slot row ``i`` of ``routing_data`` belongs to.
-    """
-
-    # (num_scheduled_tokens, num_layers, num_experts_per_tok)
-    routing_data: np.ndarray
-    # (num_scheduled_tokens,)
-    slot_mapping: np.ndarray
 
 
 # [num_reqs, <dynamic>]
@@ -308,12 +249,14 @@ class ECConnectorOutput:
     # [mm_hash]
     finished_sending: set[str] | None = None
     finished_recving: set[str] | None = None
+    ec_connector_stats: "ECConnectorStats | None" = None
     ec_connector_worker_meta: ECConnectorWorkerMetadata | None = None
 
     def is_empty(self):
         return (
             not self.finished_sending
             and not self.finished_recving
+            and not self.ec_connector_stats
             and not self.ec_connector_worker_meta
         )
 
@@ -346,6 +289,9 @@ class ModelRunnerOutput:
         default_factory=dict
     )
 
+    # req_id -> [num_scored_rows, num_token_ids] prompt_logprob_token_ids scores.
+    prompt_token_id_logprobs_dict: dict[str, torch.Tensor] = field(default_factory=dict)
+
     # [num_reqs, hidden_size]
     pooler_output: list[torch.Tensor | None] | None = None
 
@@ -359,16 +305,7 @@ class ModelRunnerOutput:
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
 
-    # Per-step routed experts data captured by the worker.
-    # ``routing_data`` shape: (num_scheduled_tokens, num_layers,
-    #                         num_experts_per_tok); expert IDs as uint8/uint16.
-    # ``slot_mapping`` shape: (num_scheduled_tokens,); physical KV-cache
-    #                         slot for each row of routing_data.
-    # ``num_scheduled_tokens`` is step-level (total across all requests
-    # in this step), not per-request. The scheduler persists this into
-    # its slot buffer via ``slot_buffer[slot_mapping] = routing_data``.
-    # ``None`` when ``enable_return_routed_experts`` is off.
-    routed_experts: RoutedExpertsLists | None = None
+    aux_output_connector_output: dict[str, AuxRequestOutput] | None = None
 
     # ``None`` when ``return_sampling_mask`` is off.
     sampling_masks: SamplingMaskLists | None = None
@@ -437,8 +374,7 @@ class DraftTokenIds:
 def make_empty_encoder_model_runner_output(
     scheduler_output: "SchedulerOutput",
 ) -> ModelRunnerOutput:
-    """
-    Create a ModelRunnerOutput stub that contains the correct
+    """Create a ModelRunnerOutput stub that contains the correct
     per-request bookkeeping but no generated data yet.
     """
     if not scheduler_output.num_scheduled_tokens:

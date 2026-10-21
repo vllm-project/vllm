@@ -62,7 +62,12 @@ if is_aiter_found_and_supported():
         N = weight.shape[0]
         K = weight.shape[1]
         if rocm_use_aiter_fp4_asm_gemm:
-            if M <= 64 and rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(N, K):
+            # The preshuffle kernel's tuned configs split K in some M buckets.
+            if (
+                M <= 64
+                and not envs.VLLM_BATCH_INVARIANT
+                and rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(N, K)
+            ):
                 if x_scales is None:
                     # use hip quant kernel for performance
                     if M >= 32:
@@ -116,7 +121,16 @@ if is_aiter_found_and_supported():
                 x_q.shape[0], weight.shape[0], device=x_q.device, dtype=out_dtype
             )
 
-            gemm_afp4wfp4(x_q, weight, x_s, weight_scale.T, out_dtype, y)
+            config = None
+            if envs.VLLM_BATCH_INVARIANT:
+                # The configs split K in some M buckets (up to M <= 256 for
+                # tuned shapes). Keep the tile, drop the split.
+                from aiter.ops.triton.gemm_afp4wfp4 import _get_config
+
+                config, _ = _get_config(M, N, K)
+                config = dict(config, NUM_KSPLIT=1)
+
+            gemm_afp4wfp4(x_q, weight, x_s, weight_scale.T, out_dtype, y, config)
             return y
 
     def gemm_with_dynamic_quant_fake(
@@ -145,7 +159,8 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
 
     def __init__(self, config: MxFp4LinearLayerConfig) -> None:
         super().__init__(config)
-        self.use_asm_gemm = rocm_aiter_ops.is_asm_fp4_gemm_dynamic_quant_enabled()
+        self.asm_gemm_supported = rocm_aiter_ops.is_asm_fp4_gemm_supported()
+        self.use_asm_gemm = False
         self.out_dtype = torch.get_default_dtype()
 
     @classmethod
@@ -185,6 +200,13 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # Use preshuffled ASM (P) and Triton (D) GEMM when tuned in aiter
+        if self.asm_gemm_supported:
+            n, k_bytes = layer.weight.shape
+            self.use_asm_gemm = rocm_aiter_ops.is_asm_fp4_gemm_tuned(
+                n, k_bytes
+            ) and rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(n, k_bytes)
+
         if self.use_asm_gemm and not _asm_fp4_scale_swizzle_supported(
             layer.weight_scale.data
         ):
