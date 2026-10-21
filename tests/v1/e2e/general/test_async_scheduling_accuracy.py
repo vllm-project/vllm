@@ -107,14 +107,24 @@ def test_without_spec_decoding(
     run_tests(vllm_runner, hf_runner, MODEL, test_configs, test_sampling_params)
 
 
+def _enable_rocm_batch_invariance(monkeypatch: pytest.MonkeyPatch) -> None:
+    if current_platform.is_rocm():
+        # hipBLASLt picks GEMM solutions by batch shape, so sync and async runs
+        # can flip near-tie greedy tokens and shift spec-decode acceptance.
+        monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+        monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+
+
 @single_gpu_only
 @large_gpu_mark(min_gb=16)
 def test_with_eagle3_spec_decoding(
     vllm_runner: type[VllmRunner],
     hf_runner: type[HfRunner],
     sample_json_schema,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """Check accuracy and acceptance, including drafts that exceed model length."""
+    _enable_rocm_batch_invariance(monkeypatch)
     spec_config = {
         "method": "eagle3",
         "num_speculative_tokens": 2,
@@ -174,11 +184,7 @@ def test_with_ngram_gpu_spec_decoding(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Check ngram accuracy and acceptance across scheduling configurations."""
-    if current_platform.is_rocm():
-        # hipBLASLt picks GEMM solutions by batch shape, so sync and async runs
-        # can flip near-tie greedy tokens and shift ngram acceptance.
-        monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
-        monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    _enable_rocm_batch_invariance(monkeypatch)
     ngram_gpu_config = {
         "method": "ngram_gpu",
         "num_speculative_tokens": 3,

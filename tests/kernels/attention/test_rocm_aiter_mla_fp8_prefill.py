@@ -103,6 +103,7 @@ def _make_impl(num_heads: int):
     impl.scale = SCALE
     impl._mla_prefill_ps_asm_fwd = mla_prefill_ps_asm_fwd
     impl._mla_reduce_v1 = mla_reduce_v1
+    impl._fp8_prefill_one_scale = None
     return impl
 
 
