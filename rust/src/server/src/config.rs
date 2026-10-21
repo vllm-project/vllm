@@ -18,11 +18,15 @@ use vllm_chat::{
     ToolStrictLevel,
 };
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
-use vllm_text::backend::hf::HfOverrides;
+use vllm_metrics::CustomHistogramBuckets;
+use vllm_text::backend::hf::{HfOverrides, ModelSource};
 
 /// Default keep-alive idle timeout (seconds); also the head-read bound
 /// when keep-alive is disabled (`0`).
 pub const DEFAULT_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Default interval between periodic engine statistics logs.
+pub const DEFAULT_LOG_STATS_INTERVAL: Duration = Duration::from_secs(10);
 
 /// How the HTTP or gRPC server obtains its listening socket.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -224,6 +228,10 @@ pub struct Config {
     pub model: String,
     /// Model revision on the Hugging Face Hub (branch, tag, or commit SHA).
     pub revision: Option<String>,
+    /// Source of the tokenizer files and the chat template, or `None` for `model`.
+    pub tokenizer: Option<ModelSource>,
+    /// Source of `config.json` and `generation_config.json`, or `None` for `model`.
+    pub hf_config: Option<ModelSource>,
     /// JSON Merge Patch applied to the model config before backend initialization.
     pub hf_overrides: HfOverrides,
     /// Which generation-config sampling defaults to inherit.
@@ -255,6 +263,9 @@ pub struct Config {
     pub default_chat_template_kwargs: Option<HashMap<String, Value>>,
     /// Whether requests may supply their own chat template.
     pub trust_request_chat_template: bool,
+    /// Whether request-level tools are left out of the prompt when
+    /// `tool_choice` is `none`.
+    pub exclude_tools_when_tool_choice_none: bool,
     /// Maximum number of input items allowed per prompt for each modality.
     /// Unspecified modalities are unlimited.
     pub limit_mm_per_prompt: MmLimitPerPrompt,
@@ -286,6 +297,15 @@ pub struct Config {
     /// engine-reported scheduler stats and request lifecycle events are not
     /// exported.
     pub disable_log_stats: bool,
+    /// Replacement bucket bounds for the core histogram families
+    /// (`--custom-histogram-buckets`); empty keeps the defaults.
+    pub custom_histogram_buckets: CustomHistogramBuckets,
+    /// Interval between periodic stats logs (`VLLM_LOG_STATS_INTERVAL`,
+    /// default 10s), or `None` to never log while still recording stats.
+    pub log_stats_interval: Option<Duration>,
+    /// Keep external request IDs as engine-core request IDs instead of adding
+    /// a random suffix (`VLLM_DISABLE_REQUEST_ID_RANDOMIZATION`).
+    pub disable_request_id_randomization: bool,
     /// Maximum time to wait for active HTTP/gRPC requests to drain on shutdown.
     pub shutdown_timeout: Duration,
     /// Whether the caller manages the engine process and shuts it down when
