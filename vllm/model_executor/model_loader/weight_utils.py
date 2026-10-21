@@ -1516,9 +1516,7 @@ def stash_weight_part(
     tensor: torch.Tensor,
     parts: tuple[str, ...] = ("weight", "scale"),
 ) -> dict[str, torch.Tensor] | None:
-    """Buffer one part of a multi-tensor checkpoint weight on ``module``, so the
-    parts may arrive in different ``load_weights`` calls. Returns all parts once
-    complete; ``finalize_model_weights`` raises on parts left unpaired."""
+    """Park one part of a multi-tensor weight on `module`; return all once complete."""
     pending = module.__dict__.setdefault("_pending_weight_parts", {})
     entry = pending.setdefault(key, {})
     entry[part] = tensor
@@ -1530,8 +1528,7 @@ def stash_weight_part(
 
 
 def finalize_model_weights(model: torch.nn.Module) -> None:
-    """Run once after a full load or reload: reject multi-tensor weights whose
-    parts never all arrived, then run the model-level post-load hook."""
+    """Once per full load or reload: reject unpaired parts, run the model hook."""
     incomplete = [
         f"{key} (has {sorted(entry)})"
         for module in model.modules()

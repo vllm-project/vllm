@@ -202,7 +202,7 @@ def test_layerwise_reload_is_rejected_and_keeps_weights():
 @pytest.mark.parametrize("missing_value", [False, True])
 def test_tensorizer_finalizes_local_substitution_values(monkeypatch, missing_value):
     """Raw Tensorizer loading must reject an unloaded local constant row."""
-    from vllm.model_executor.model_loader import base_loader, tensorizer_loader
+    from vllm.model_executor.model_loader import tensorizer_loader
 
     model = _cpu_model(local_layers=(0,))
     weights = [(_approx_value(0, 1), torch.zeros(2))]
@@ -210,32 +210,19 @@ def test_tensorizer_finalizes_local_substitution_values(monkeypatch, missing_val
         weights.append((_approx_value(0, 2), torch.ones(2)))
     finalize = Mock(wraps=model.process_weights_after_loading)
     monkeypatch.setattr(model, "process_weights_after_loading", finalize)
-    monkeypatch.setattr(base_loader, "initialize_model", lambda **kwargs: model)
-    monkeypatch.setattr(tensorizer_loader, "is_vllm_tensorized", lambda _: False)
-    load_config = LoadConfig(
-        load_format="tensorizer",
-        model_loader_extra_config={"tensorizer_config": {"tensorizer_uri": "raw"}},
-    )
-    loader = tensorizer_loader.TensorizerLoader(load_config)
+    monkeypatch.setattr(tensorizer_loader, "initialize_model", lambda **kwargs: model)
+    loader = object.__new__(tensorizer_loader.TensorizerLoader)
     monkeypatch.setattr(loader, "_get_weights_iterator", lambda: iter(weights))
-    model_config = SimpleNamespace(
-        dtype=torch.float32,
-        quantization=None,
-        word_embeddings_untied_by_checkpoint=False,
-    )
     config = SimpleNamespace(
-        model_config=model_config,
-        load_config=load_config,
-        device_config=SimpleNamespace(device=torch.device("cpu")),
-        parallel_config=SimpleNamespace(tensor_parallel_size=1),
-        quant_config=None,
+        model_config=SimpleNamespace(dtype=torch.float32),
+        device_config=SimpleNamespace(device="cpu"),
     )
 
     if missing_value:
         with pytest.raises(ValueError, match=r"missing approx_value .* \[2\]"):
-            loader.load_model(config, model_config)
+            loader._load_model_serialized_cpu(config)
     else:
-        assert loader.load_model(config, model_config) is model
+        assert loader._load_model_serialized_cpu(config) is model
         torch.testing.assert_close(
             model.model.layers[0].mlp.experts.values,
             torch.tensor([[0.0, 0.0], [1.0, 1.0]]),

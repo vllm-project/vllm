@@ -540,6 +540,10 @@ class DeepseekV4MegaMoEExperts(nn.Module):
             symm_buffer.topk_weights[:num_tokens],
         )
 
+        # This method must have been already called during the weight loading phase.
+        # We call it again here to cover the dummy weight loading case.
+        self.finalize_weights()
+
         assert self._transformed_l1_weights is not None
         assert self._transformed_l2_weights is not None
         deep_gemm.fp8_fp4_mega_moe(
