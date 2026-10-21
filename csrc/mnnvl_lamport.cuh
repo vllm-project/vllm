@@ -15,7 +15,7 @@
  */
 
 // MNNVL Lamport all-reduce primitives adapted from FlashInfer's
-// include/flashinfer/comm/trtllm_mnnvl_allreduce.cuh (v0.7.0), itself from
+// include/flashinfer/comm/trtllm_mnnvl_allreduce.cuh (v0.7.2), itself from
 // TensorRT-LLM. Workspace layout: three Lamport buffers per rank, initialized
 // to FP32 -0.0, plus a uint32 flag array
 // {current, dirty, bytes per buffer, dirty stages, bytes to clear[4], count}.
