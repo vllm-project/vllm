@@ -627,6 +627,7 @@ if (warp_idx == 8) {
         }
         float accum_pair[2][32];
         [[maybe_unused]] float lin_pair[2][4];
+        [[maybe_unused]] float bp4[4];  // > 16K: row scores of the slot
 #pragma unroll
         for (uint32_t pair = 0; pair < 4; pair += 2) {
           if constexpr (kLin) {
@@ -681,36 +682,8 @@ if (warp_idx == 8) {
           if constexpr (kLin) {
 #pragma unroll
             for (uint32_t r = 0; r < 2; ++r) {
-              const uint32_t i = pair + r;
               const auto sum = __fadd2_rn(sum_0[r], sum_1[r]);
-              const float bp = (sum.x + sum.y) * scale_kv;
-              if (bp > gate_score[i]) {  // gate first; range / finiteness only
-                                         // for passing keys
-                const float bq = bp * row_s[i];
-                const uint32_t row = row_base2 + query_base + i;
-                if (kv_offset >= seq_k_start[i] && kv_offset < seq_k_end[i] &&
-                    isfinite(bq)) {
-                  const uint32_t count = lane_counts[i];
-                  if (count < kRingSlots) {
-                    const uint32_t code =
-                        fused_candidates::candidate_fp24_code(bq);
-                    hdata.records[produce_epoch & 1][warp_idx][i][count][lane] =
-                        (code << 8) |
-                        ((kv_split_idx - flush_base) * 2 + kv_half);
-                    lane_counts[i] = count + 1;
-                  } else {
-                    const int slot = atomicAdd(counts + row, 1);
-                    if (slot < static_cast<int>(kCandGlobalCap)) {
-                      const uint64_t off =
-                          static_cast<uint64_t>(int64_t(row) + cand_row_delta) *
-                              kCandGlobalCap +
-                          slot;
-                      fused_candidates::store_candidate(
-                          vals + off, indices + off, bq, kv_offset);
-                    }
-                  }
-                }
-              }
+              bp4[pair + r] = (sum.x + sum.y) * scale_kv;
             }
           } else
 #pragma unroll
@@ -799,6 +772,45 @@ if (warp_idx == 8) {
                 }
               }
             }
+        }
+        if constexpr (kLin) {
+          // One warp vote per slot: most keys fail every gate, so the common
+          // path is 4 compares + 1 vote + 1 uniform branch.
+          const bool any_pass = (bp4[0] > gate_score[0]) | (bp4[1] > gate_score[1]) |
+                                (bp4[2] > gate_score[2]) | (bp4[3] > gate_score[3]);
+          if (__any_sync(0xffffffffu, any_pass)) [[unlikely]] {
+#pragma unroll
+            for (uint32_t i = 0; i < 4; ++i) {
+              const float bp = bp4[i];
+              if (bp > gate_score[i]) {  // gate first; range / finiteness only
+                                         // for passing keys
+                const float bq = bp * row_s[i];
+                const uint32_t row = row_base2 + query_base + i;
+                if (kv_offset >= seq_k_start[i] && kv_offset < seq_k_end[i] &&
+                    isfinite(bq)) {
+                  const uint32_t count = lane_counts[i];
+                  if (count < kRingSlots) {
+                    const uint32_t code =
+                        fused_candidates::candidate_fp24_code(bq);
+                    hdata.records[produce_epoch & 1][warp_idx][i][count][lane] =
+                        (code << 8) |
+                        ((kv_split_idx - flush_base) * 2 + kv_half);
+                    lane_counts[i] = count + 1;
+                  } else {
+                    const int slot = atomicAdd(counts + row, 1);
+                    if (slot < static_cast<int>(kCandGlobalCap)) {
+                      const uint64_t off =
+                          static_cast<uint64_t>(int64_t(row) + cand_row_delta) *
+                              kCandGlobalCap +
+                          slot;
+                      fused_candidates::store_candidate(
+                          vals + off, indices + off, bq, kv_offset);
+                    }
+                  }
+                }
+              }
+            }
+          }
         }
       }
       if (!kSmem &&

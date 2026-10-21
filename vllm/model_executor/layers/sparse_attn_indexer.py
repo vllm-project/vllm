@@ -30,9 +30,9 @@ from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
     select_candidate_blocks as _select_candidate_blocks,
 )
 from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
-    FUSED_MQA_TOPK_MAX_KEYS,
     fused_mqa_topk_config_supported,
     fused_mqa_topk_key_scales,
+    fused_mqa_topk_min_keys,
     fused_mqa_topk_prefill,
     get_fused_mqa_topk_workspace,
 )
@@ -519,15 +519,13 @@ def sparse_attn_indexer(
             get_fused_mqa_topk_workspace(q_quant.device)
 
         # Dummy allocation to simulate for peak logits tensor memory during inference.
-        # Skipped when the fused kernel serves every prefill chunk: the planner never
-        # packs a chunk past its key limit, so with max_model_len within that limit
-        # no chunk reaches the dense logits path.
-        if not (uses_fused and max_model_len <= FUSED_MQA_TOPK_MAX_KEYS):
-            # FP8 elements so elements == bytes
-            max_logits_elems = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
-            _ = torch.empty(
-                max_logits_elems, dtype=torch.uint8, device=hidden_states.device
-            )
+        # Needed with the fused kernel too: chunks below fused_mqa_topk_min_keys
+        # keys per row take the dense path (row-split to stay within the budget).
+        # FP8 elements so elements == bytes
+        max_logits_elems = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+        _ = torch.empty(
+            max_logits_elems, dtype=torch.uint8, device=hidden_states.device
+        )
 
         # The dummy run returns before exchange_topk executes, so reserve its
         # worst-case transient for the memory profile.
@@ -731,7 +729,8 @@ def sparse_attn_indexer(
                         torch.int32 if mqa_logits_use_mx_scales() else torch.float32
                     ).squeeze(-1)
                 # Single-launch fused MQA-logits + top-k (SM100, FP8, 32 heads,
-                # top-k 512/1024/2048): no logits buffer, any context length.
+                # top-k 512/1024/2048): no logits buffer, for chunks whose rows
+                # see at least fused_mqa_topk_min_keys keys (dense is as fast below).
                 # It needs every row's whole context: no DCP, or PCP + DCP after
                 # the de-interleaving gather. Pure DCP (per-shard top-k + merge),
                 # the FP4 cache and v4.1 candidate selection stay dense.
@@ -742,6 +741,7 @@ def sparse_attn_indexer(
                 )
                 if (
                     use_fused
+                    and chunk.max_seqlen_k >= fused_mqa_topk_min_keys(topk_tokens)
                     and q_scale_slice is None
                     and candidate_blocks is None
                     and fused_mqa_topk_prefill(
