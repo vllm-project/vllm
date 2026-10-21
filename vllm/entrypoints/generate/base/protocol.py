@@ -18,6 +18,7 @@ from vllm.config.utils import replace
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
+from vllm.multimodal.feature_specs import MMPayload as MMPayload
 from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.sampling_params import StructuredOutputsParams
 
@@ -32,8 +33,6 @@ TopLogprobsParam: TypeAlias = Annotated[
     int,
     BeforeValidator(lambda v: 0 if v is None else v, json_schema_input_type=int | None),
 ]
-
-MMPayload: TypeAlias = Literal["tensors", "none"]
 
 _CACHE_SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
 _MAX_CACHE_SALT_LENGTH = 128
