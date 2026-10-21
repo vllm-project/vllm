@@ -490,6 +490,8 @@ def _get_backend_priorities(
     use_mla: bool,
     use_sparse: bool,
     use_kv_connector: bool = False,
+    use_spec_decode: bool = False,
+    is_hybrid: bool = False,
 ) -> list[AttentionBackendEnum]:
     from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 
@@ -511,15 +513,26 @@ def _get_backend_priorities(
     backends = []
     # Keep ROCM_ATTN disabled for KV connectors until connector transfer
     # semantics are validated for its asymmetric native K/V cache views.
-    if not use_kv_connector:
+    use_rocm_attn = not use_kv_connector
+    # Spec decode and hybrid models put ROCM_ATTN on its slower Triton path.
+    spec_or_hybrid = use_spec_decode or is_hybrid
+    if use_rocm_attn and not spec_or_hybrid:
         backends.append(AttentionBackendEnum.ROCM_ATTN)
     if rocm_aiter_ops.is_mha_enabled():
         backends.append(AttentionBackendEnum.ROCM_AITER_FA)
+    # ROCM_AITER_UNIFIED_ATTN gives wrong output on gfx950 for some KV cache
+    # sizes until the aiter pin includes the fix (#62606), so spec decode and
+    # hybrid models rank TRITON_ATTN above it for now.
+    if spec_or_hybrid:
+        backends.append(AttentionBackendEnum.TRITON_ATTN)
     if is_aiter_found_and_supported():
         backends.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
     elif rocm_aiter_ops.is_rdna_aiter_enabled():
         backends.insert(0, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
-    backends.append(AttentionBackendEnum.TRITON_ATTN)
+    if not spec_or_hybrid:
+        backends.append(AttentionBackendEnum.TRITON_ATTN)
+    if use_rocm_attn and spec_or_hybrid:
+        backends.append(AttentionBackendEnum.ROCM_ATTN)
     backends.append(AttentionBackendEnum.TURBOQUANT)
     backends.append(AttentionBackendEnum.ULTRAQUANT)
 
@@ -691,17 +704,23 @@ class RocmPlatform(Platform):
         valid_backends_priorities = []
         invalid_reasons = {}
 
+        from vllm.config import get_current_vllm_config_or_none
+
+        vllm_config = get_current_vllm_config_or_none()
+        model_config = vllm_config.model_config if vllm_config is not None else None
+        use_spec_decode = (
+            vllm_config is not None and vllm_config.speculative_config is not None
+        )
+        is_hybrid = model_config is not None and model_config.is_hybrid
         backend_priorities = _get_backend_priorities(
             attn_selector_config.use_mla,
             attn_selector_config.use_sparse,
             attn_selector_config.use_kv_connector,
+            use_spec_decode=use_spec_decode,
+            is_hybrid=is_hybrid,
         )
-        from vllm.config import get_current_vllm_config_or_none
-
-        vllm_config = get_current_vllm_config_or_none()
         is_encoder_decoder = (
-            getattr(getattr(vllm_config, "model_config", None), "attn_type", None)
-            == "encoder_decoder"
+            getattr(model_config, "attn_type", None) == "encoder_decoder"
         )
         # ROCM_ATTN still uses a legacy attention layout (KV is the outer
         # dimension) that is incompatible with the encoder backend layouts. The
