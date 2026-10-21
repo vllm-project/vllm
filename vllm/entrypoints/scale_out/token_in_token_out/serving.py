@@ -6,6 +6,7 @@ import asyncio
 import concurrent.futures
 import contextvars
 import functools
+import itertools
 import math
 import time
 from collections.abc import AsyncGenerator, Callable
@@ -23,6 +24,7 @@ from vllm.entrypoints.generate.base.protocol import (
 from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
     build_spec_decoding_metrics,
+    chat_top_logprobs_limit,
     clamp_prompt_logprobs,
     format_token_id_placeholder,
 )
@@ -30,6 +32,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProb,
     ChatCompletionLogProbs,
     ChatCompletionLogProbsContent,
+    ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import (
@@ -39,7 +42,7 @@ from vllm.entrypoints.serve.engine.protocol import (
 )
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.exceptions import GenerationError
+from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.inputs import EngineInput, TokensPrompt, mm_input
 from vllm.logger import init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
@@ -50,6 +53,7 @@ from vllm.multimodal.inputs import (
 )
 from vllm.outputs import RequestOutput
 from vllm.renderers.chat_utils import AsyncMultiModalItemTracker
+from vllm.renderers.online_derenderer import OnlineDerenderer
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tokenizers import TokenizerLike
@@ -62,6 +66,8 @@ from .mm_features import (
     placeholder_ranges_from_engine_input,
 )
 from .protocol import (
+    GenerateDerenderChoice,
+    GenerateDerenderResponse,
     GenerateLogProb,
     GenerateLogProbs,
     GenerateLogProbsContent,
@@ -156,6 +162,7 @@ class ServingTokens(GenerateBaseServing):
         models: OpenAIServingModels,
         online_renderer: OnlineRenderer,
         *,
+        online_derenderer: OnlineDerenderer,
         request_logger: RequestLogger | None,
         force_no_detokenize: bool = False,
         return_tokens_as_token_ids: bool = False,
@@ -169,6 +176,7 @@ class ServingTokens(GenerateBaseServing):
             return_tokens_as_token_ids=return_tokens_as_token_ids,
         )
         self.online_renderer = online_renderer
+        self.online_derenderer = online_derenderer
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_log_outputs = enable_log_outputs
         self.force_no_detokenize = force_no_detokenize
@@ -271,6 +279,26 @@ class ServingTokens(GenerateBaseServing):
                 "--skip-tokenizer-init). Send the request to a server that "
                 "loads a tokenizer, or use output_mode='tokens'."
             )
+        # Built before generating so an invalid parse_context fails fast.
+        derender_request: ChatCompletionRequest | None = None
+        if request.output_mode == "derender":
+            # TODO(#57442, #60915): reject the sampled-only and top-k logprob
+            # flags here once either lands.
+            if request.stream:
+                return self.create_error_response(
+                    "output_mode='derender' does not support stream=true."
+                )
+            if self.online_derenderer.parser is not None:
+                if request.parse_context is None:
+                    return self.create_error_response(
+                        "output_mode='derender' requires parse_context on a "
+                        "server with a tool or reasoning parser. Use the one "
+                        "returned by /render."
+                    )
+                try:
+                    derender_request = request.parse_context.to_chat_request()
+                except (ValueError, VLLMValidationError) as e:
+                    return self.create_error_response(e)
         try:
             msgspec.msgpack.encode(
                 (
@@ -435,7 +463,12 @@ class ServingTokens(GenerateBaseServing):
             )
 
         return await self.serve_tokens_full_generator(
-            request, result_generator, request_id, model_name, request_metadata
+            request,
+            result_generator,
+            request_id,
+            model_name,
+            request_metadata,
+            derender_request=derender_request,
         )
 
     async def serve_tokens_full_generator(
@@ -445,6 +478,7 @@ class ServingTokens(GenerateBaseServing):
         request_id: str,
         model_name: str,
         request_metadata: RequestResponseMetadata,
+        derender_request: ChatCompletionRequest | None = None,
     ) -> ErrorResponse | GenerateResponse | RenderedGenerateResponse:
         created_time = int(time.time())
         final_res: RequestOutput | None = None
@@ -457,18 +491,36 @@ class ServingTokens(GenerateBaseServing):
 
         assert final_res is not None
 
-        response, usage, choice_meta = await build_response_off_loop(
-            _flat_logprob_entries(final_res),
-            functools.partial(
-                self._build_full_response,
+        response: GenerateResponse | RenderedGenerateResponse
+        if request.output_mode == "derender":
+            derendered = await self._build_derender_response(
                 request,
                 final_res,
                 request_id,
                 model_name,
                 created_time,
-            ),
-        )
-        request_metadata.final_usage_info = usage
+                request_metadata,
+                derender_request,
+            )
+            if isinstance(derendered, ErrorResponse):
+                return derendered
+            response = derendered
+            choice_meta = [
+                (choice.index, choice.finish_reason) for choice in derendered.choices
+            ]
+        else:
+            response, choice_meta = await build_response_off_loop(
+                _flat_logprob_entries(final_res),
+                functools.partial(
+                    self._build_full_response,
+                    request,
+                    final_res,
+                    request_id,
+                    model_name,
+                    created_time,
+                    request_metadata,
+                ),
+            )
 
         # Log complete response if output logging is enabled
         if self.enable_log_outputs and self.request_logger:
@@ -491,29 +543,33 @@ class ServingTokens(GenerateBaseServing):
 
         return response
 
-    def _build_full_response(
+    def _build_choice_fields(
         self,
         request: GenerateRequest,
         final_res: RequestOutput,
         request_id: str,
-        model_name: str,
-        created_time: int,
-    ) -> tuple[
-        GenerateResponse | RenderedGenerateResponse,
-        UsageInfo,
-        list[tuple[int, str | None]],
-    ]:
-        """The response, its usage and (index, finish_reason) per choice.
-
-        CPU only, no shared-state side effects: may run in a worker thread.
+        fragments: dict[int, list[bytes]] | None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """The fields of each choice, one per output, and the generated token
+        count. With ``fragments``, tokens-mode logprobs rendered from
+        FlatLogprobs rows go there by choice position instead.
         """
         sampling_params: SamplingParams = request.sampling_params
-        text_mode = request.output_mode == "text"
+        derender_mode = request.output_mode == "derender"
+        text_mode = request.output_mode == "text" or derender_mode
         tokenizer = self._logprobs_tokenizer(text_mode)
-        # choice position -> pre-rendered JSON of its logprobs
-        fragments: dict[int, list[bytes]] = {}
-        tokens_choices: list[GenerateTokensChoice] = []
-        text_choices: list[GenerateTextChoice] = []
+        # The derender level returns chat logprobs, so it honors
+        # logprob_token_ids and applies the chat top_logprobs cut.
+        if derender_mode:
+            num_logprobs = sampling_params.num_logprobs
+            top_limit = chat_top_logprobs_limit(
+                sampling_params.logprobs, bool(sampling_params.logprob_token_ids)
+            )
+        else:
+            num_logprobs = sampling_params.logprobs
+            top_limit = None
+
+        choice_fields: list[dict[str, Any]] = []
         num_generated_tokens = 0
         for output in final_res.outputs:
             self._raise_if_error(output.finish_reason, request_id)
@@ -523,23 +579,29 @@ class ServingTokens(GenerateBaseServing):
 
             # This is top_logprobs in completions API
             logprobs: GenerateLogProbs | ChatCompletionLogProbs | None = None
-            if sampling_params.logprobs is not None:
+            if num_logprobs is not None:
                 assert out_logprobs is not None, "Did not output logprobs"
                 rendered = None
                 top_logprobs: GenericSequence[dict[int, Logprob] | None] = out_logprobs
-                if isinstance(out_logprobs, FlatLogprobs) and not text_mode:
+                if (
+                    fragments is not None
+                    and isinstance(out_logprobs, FlatLogprobs)
+                    and not text_mode
+                ):
                     rendered = render_tokens_logprobs(token_ids, out_logprobs)
                     if rendered is None:
                         # Irregular rows: the per-entry path. Iterating once
                         # is cheaper than indexing each position.
                         top_logprobs = list(out_logprobs)
                 if rendered is not None:
-                    fragments[len(tokens_choices)] = rendered
+                    assert fragments is not None
+                    fragments[len(choice_fields)] = rendered
                 elif text_mode:
                     logprobs = self._create_text_logprobs(
                         token_ids=token_ids,
                         top_logprobs=out_logprobs,
                         tokenizer=tokenizer,
+                        top_limit=top_limit,
                     )
                 else:
                     logprobs = self._create_tokens_logprobs(
@@ -557,24 +619,144 @@ class ServingTokens(GenerateBaseServing):
             if output.sampling_mask is not None:
                 sampling_mask = output.sampling_mask.token_ids
 
-            choice_fields: dict[str, Any] = dict(
-                index=output.index,
-                logprobs=logprobs,
-                finish_reason=output.finish_reason if output.finish_reason else "stop",
-                stop_reason=output.stop_reason,
-                token_ids=as_list(output.token_ids),
-                routed_experts=routed_experts_b64,
-                sampling_mask=sampling_mask,
-                weight_versions=output.weight_versions,
-            )
-            if text_mode:
-                text_choices.append(
-                    GenerateTextChoice(text=output.text, **choice_fields)
+            choice_fields.append(
+                dict(
+                    index=output.index,
+                    logprobs=logprobs,
+                    finish_reason=(
+                        output.finish_reason if output.finish_reason else "stop"
+                    ),
+                    stop_reason=output.stop_reason,
+                    token_ids=as_list(output.token_ids),
+                    routed_experts=routed_experts_b64,
+                    sampling_mask=sampling_mask,
+                    weight_versions=output.weight_versions,
                 )
-            else:
-                tokens_choices.append(GenerateTokensChoice(**choice_fields))
+            )
             num_generated_tokens += len(output.token_ids)
+        return choice_fields, num_generated_tokens
 
+    def _build_full_response(
+        self,
+        request: GenerateRequest,
+        final_res: RequestOutput,
+        request_id: str,
+        model_name: str,
+        created_time: int,
+        request_metadata: RequestResponseMetadata,
+    ) -> tuple[
+        GenerateResponse | RenderedGenerateResponse, list[tuple[int, str | None]]
+    ]:
+        """The tokens or text response and (index, finish_reason) per choice.
+
+        CPU only, touching no state beyond this request: may run in a worker
+        thread.
+        """
+        # choice position -> pre-rendered JSON of its logprobs
+        fragments: dict[int, list[bytes]] = {}
+        choice_fields, num_generated_tokens = self._build_choice_fields(
+            request, final_res, request_id, fragments
+        )
+        response_fields = self._build_response_fields(
+            request,
+            final_res,
+            request_id,
+            model_name,
+            created_time,
+            num_generated_tokens,
+            request_metadata,
+        )
+        response: GenerateTokensResponse | GenerateTextResponse
+        if request.output_mode == "text":
+            response = GenerateTextResponse(
+                choices=[
+                    GenerateTextChoice(text=output.text, **fields)
+                    for output, fields in zip(
+                        final_res.outputs, choice_fields, strict=True
+                    )
+                ],
+                **response_fields,
+            )
+        else:
+            response = GenerateTokensResponse(
+                choices=[GenerateTokensChoice(**fields) for fields in choice_fields],
+                **response_fields,
+            )
+
+        choice_meta = [
+            (choice.index, choice.finish_reason) for choice in response.choices
+        ]
+        if fragments:
+            parts = render_json_with_fragments(
+                response.model_dump(), "logprobs", fragments
+            )
+            # Joined here, so a large body is never copied on the event loop.
+            return RenderedGenerateResponse(b"".join(parts)), choice_meta
+        return response, choice_meta
+
+    async def _build_derender_response(
+        self,
+        request: GenerateRequest,
+        final_res: RequestOutput,
+        request_id: str,
+        model_name: str,
+        created_time: int,
+        request_metadata: RequestResponseMetadata,
+        derender_request: ChatCompletionRequest | None,
+    ) -> ErrorResponse | GenerateDerenderResponse:
+        choice_fields, num_generated_tokens = self._build_choice_fields(
+            request, final_res, request_id, fragments=None
+        )
+        history_tool_call_cnt = (
+            request.parse_context.history_tool_call_cnt
+            if request.parse_context is not None
+            else 0
+        )
+        try:
+            parsed = await self.online_derenderer.derender_text_choices(
+                final_res.outputs,
+                derender_request,
+                history_tool_call_cnt,
+                final_res.prompt_token_ids,
+            )
+        except (ValueError, VLLMValidationError) as e:
+            return self.create_error_response(e)
+        # Like coupled chat, hide per-token metadata when a parser hides
+        # the reasoning: logprobs, token IDs or sampling masks would leak it.
+        hide_metadata = (
+            derender_request is not None and not derender_request.include_reasoning
+        )
+        derender_choices: list[GenerateDerenderChoice] = []
+        for (message, finish_reason), fields in zip(parsed, choice_fields, strict=True):
+            fields["finish_reason"] = finish_reason
+            if hide_metadata:
+                fields["logprobs"] = None
+                fields["token_ids"] = None
+                fields["sampling_mask"] = None
+            derender_choices.append(GenerateDerenderChoice(message=message, **fields))
+
+        response_fields = self._build_response_fields(
+            request,
+            final_res,
+            request_id,
+            model_name,
+            created_time,
+            num_generated_tokens,
+            request_metadata,
+        )
+        return GenerateDerenderResponse(choices=derender_choices, **response_fields)
+
+    def _build_response_fields(
+        self,
+        request: GenerateRequest,
+        final_res: RequestOutput,
+        request_id: str,
+        model_name: str,
+        created_time: int,
+        num_generated_tokens: int,
+        request_metadata: RequestResponseMetadata,
+    ) -> dict[str, Any]:
+        """Build the fields shared by every non-streaming response level."""
         assert final_res.prompt_token_ids is not None
         num_prompt_tokens = len(final_res.prompt_token_ids)
         if final_res.encoder_prompt_token_ids is not None:
@@ -594,12 +776,14 @@ class ServingTokens(GenerateBaseServing):
                 cached_tokens=final_res.num_cached_tokens
             )
 
+        request_metadata.final_usage_info = usage
+
         per_request_metrics = None
         if request.sampling_params.n == 1:
             spec_stats = build_spec_decoding_metrics(final_res)
             if spec_stats is not None:
                 per_request_metrics = PerRequestMetrics(speculative_decoding=spec_stats)
-        response_fields: dict[str, Any] = dict(
+        return dict(
             request_id=request_id,
             created=created_time,
             model=model_name,
@@ -618,22 +802,6 @@ class ServingTokens(GenerateBaseServing):
             kv_transfer_params=final_res.kv_transfer_params,
             ec_transfer_params=final_res.ec_transfer_params,
         )
-        response: GenerateTokensResponse | GenerateTextResponse
-        if text_mode:
-            response = GenerateTextResponse(choices=text_choices, **response_fields)
-        else:
-            response = GenerateTokensResponse(choices=tokens_choices, **response_fields)
-
-        choice_meta = [
-            (choice.index, choice.finish_reason) for choice in response.choices
-        ]
-        if fragments:
-            parts = render_json_with_fragments(
-                response.model_dump(), "logprobs", fragments
-            )
-            # Joined here, so a large body is never copied on the event loop.
-            return RenderedGenerateResponse(b"".join(parts)), usage, choice_meta
-        return response, usage, choice_meta
 
     async def serve_tokens_stream_generator(
         self,
@@ -826,14 +994,15 @@ class ServingTokens(GenerateBaseServing):
         token_ids: GenericSequence[int],
         top_logprobs: GenericSequence[dict[int, Logprob] | None],
         tokenizer: TokenizerLike | None = None,
+        top_limit: int | None = None,
     ) -> ChatCompletionLogProbs:
-        """Create OpenAI-style logprobs for ``output_mode="text"``.
+        """Create OpenAI style logprobs for the `text` and `derender` levels.
 
-        With a ``tokenizer`` the tokens are decoded strings and carry ``bytes``;
-        without one (``--return-tokens-as-token-ids``) they are ``token_id:N``
-        placeholders. Like tokens mode, ``top_logprobs`` carries every candidate
-        the engine returned (the sampled token first, then the top k), not cut
-        to the requested count.
+        With a `tokenizer` the tokens are decoded strings and carry `bytes`.
+        Without one (`--return-tokens-as-token-ids`) they are `token_id:N`
+        placeholders. `top_logprobs` keeps the first `top_limit` candidates
+        the engine returned (the sampled token first, then the top k) or all
+        of them when `top_limit` is None, as in tokens mode.
         """
         logprobs_content: list[ChatCompletionLogProbsContent] = []
 
@@ -855,7 +1024,9 @@ class ServingTokens(GenerateBaseServing):
                         bytes=token_bytes,
                         top_logprobs=[
                             _top_logprob(top_id, logprob, tokenizer)
-                            for top_id, logprob in step_top_logprobs.items()
+                            for top_id, logprob in itertools.islice(
+                                step_top_logprobs.items(), top_limit
+                            )
                         ],
                     )
                 )

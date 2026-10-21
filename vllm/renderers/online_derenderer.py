@@ -25,6 +25,9 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionStreamResponse,
     ChatMessage,
 )
+from vllm.entrypoints.openai.chat_completion.stream_processor import (
+    ChatStreamProcessor,
+)
 from vllm.entrypoints.openai.completion.protocol import (
     CompletionLogProbs,
     CompletionRequest,
@@ -45,6 +48,7 @@ from vllm.entrypoints.serve.utils.tool_calls_utils import (
     resolve_finish_reason,
 )
 from vllm.logger import init_logger
+from vllm.outputs import CompletionOutput
 from vllm.parser import Parser, ParserManager
 from vllm.renderers import BaseRenderer
 from vllm.renderers.chat_utils import (
@@ -115,6 +119,9 @@ class OnlineDerenderer:
         # offload them in one hop to keep the event loop responsive.
         self._derender_chat_async = make_async(
             self._derender_chat, executor=renderer._executor
+        )
+        self._derender_text_choices_async = make_async(
+            self._derender_text_choices, executor=renderer._executor
         )
         self._derender_completion_async = make_async(
             self._derender_completion, executor=renderer._executor
@@ -278,6 +285,58 @@ class OnlineDerenderer:
 
         return choices
 
+    async def derender_text_choices(
+        self,
+        outputs: Sequence[CompletionOutput],
+        chat_request: ChatCompletionRequest | None,
+        history_tool_call_cnt: int,
+        prompt_token_ids: list[int] | None,
+    ) -> list[tuple[ChatMessage, str]]:
+        """Parse the engine's decoded output text into assistant messages.
+
+        Args:
+            outputs: Final engine outputs, already detokenized.
+            chat_request: Chat request built from `parse_context`. With None
+                or no parser on this server, the message content is the text.
+            history_tool_call_cnt: Tool calls already in the conversation.
+            prompt_token_ids: Prompt token IDs, if known.
+
+        Returns:
+            One message and chat `finish_reason` per output in order.
+
+        """
+        return await self._derender_text_choices_async(
+            outputs, chat_request, history_tool_call_cnt, prompt_token_ids
+        )
+
+    def _derender_text_choices(
+        self,
+        outputs: Sequence[CompletionOutput],
+        chat_request: ChatCompletionRequest | None,
+        history_tool_call_cnt: int,
+        prompt_token_ids: list[int] | None,
+    ) -> list[tuple[ChatMessage, str]]:
+        tokenizer = self.renderer.get_tokenizer()
+        results: list[tuple[ChatMessage, str]] = []
+        for output in outputs:
+            if self.parser is None or chat_request is None:
+                message = ChatMessage(role="assistant", content=output.text)
+            else:
+                message = self._parse_and_assemble(
+                    tokenizer,
+                    output.text,
+                    output.token_ids,
+                    chat_request,
+                    chat_request.chat_template_kwargs or {},
+                    prompt_token_ids,
+                    history_tool_call_count=history_tool_call_cnt,
+                )
+            finish_reason = resolve_finish_reason(
+                output.finish_reason, chat_request, bool(message.tool_calls)
+            )
+            results.append((message, finish_reason))
+        return results
+
     def _resolve_chat_template_kwargs(
         self, chat_request: ChatCompletionRequest
     ) -> dict[str, Any]:
@@ -300,6 +359,7 @@ class OnlineDerenderer:
         chat_request: ChatCompletionRequest,
         chat_template_kwargs: dict[str, Any],
         prompt_token_ids: list[int] | None,
+        history_tool_call_count: int | None = None,
     ) -> ChatMessage:
         """Parse decoded output text into an assistant `ChatMessage`.
 
@@ -311,6 +371,9 @@ class OnlineDerenderer:
                 `include_reasoning`.
             chat_template_kwargs: Already resolved template kwargs.
             prompt_token_ids: Prompt token IDs, if known.
+            history_tool_call_count: Tool calls in the conversation, for
+                requests that carry no messages. None derives it from
+                `chat_request`.
 
         Returns:
             The assembled assistant message.
@@ -325,6 +388,8 @@ class OnlineDerenderer:
         )
         if prompt_token_ids is not None:
             parser.set_prompt_token_ids(prompt_token_ids)
+        if history_tool_call_count is not None:
+            parser.set_history_tool_call_count(history_tool_call_count)
         reasoning, content, tool_calls = parser.parse(
             text,
             chat_request,
@@ -338,7 +403,7 @@ class OnlineDerenderer:
         tc_items = (
             [
                 ToolCall(id=tc.id or make_tool_call_id(), function=tc)
-                for tc in tool_calls
+                for tc in maybe_filter_parallel_tool_calls(tool_calls, chat_request)
             ]
             if tool_calls
             else []
@@ -610,14 +675,16 @@ class OnlineDerenderer:
         logprobs are dropped on every chunk, again like the coupled endpoint.
         """
         tokenizer = self.renderer.get_tokenizer()
-        hide_metadata = not chat_request.include_reasoning
         top_limit = _chat_top_logprobs_limit(chat_request)
 
-        parser = parser_cls(
-            tokenizer,
-            chat_request.tools,
-            chat_template_kwargs=self._resolve_chat_template_kwargs(chat_request),
-            model_config=self.model_config,
+        processor = ChatStreamProcessor(
+            chat_request,
+            parser_cls(
+                tokenizer,
+                chat_request.tools,
+                chat_template_kwargs=self._resolve_chat_template_kwargs(chat_request),
+                model_config=self.model_config,
+            ),
         )
 
         # Ephemeral incremental detok window, local to this call. Threaded
@@ -648,26 +715,22 @@ class OnlineDerenderer:
                     skip_special_tokens=skip_special,
                     spaces_between_special_tokens=spaces_between,
                 )
-                parser.parse_delta(
-                    text,
-                    chunk,
-                    chat_request,
-                    prompt_token_ids=prompt_token_ids,
-                    finished=False,
-                )
+                processor.step(text, chunk, None, prompt_token_ids)
 
         # Replay history to reconstruct parser state. The result is thrown
         # away and only the current chunk's emission goes to the client.
         _replay(state.output_token_ids, state.output_chunk_lens)
+        # Replay rebuilds the same flag. The carried one stays authoritative.
+        processor.tools_streamed = state.tools_streamed
 
         stream_choices: list[ChatCompletionResponseStreamChoice] = []
         output_token_ids = list(state.output_token_ids)
         output_chunk_lens = list(state.output_chunk_lens)
         role_sent = state.role_sent
-        tools_streamed = state.tools_streamed
         last_tool_call_ids = list(state.last_tool_call_ids)
         logprob_context = list(state.logprob_context_token_ids)
 
+        hide_metadata = processor.hide_metadata
         return_token_ids = chat_request.return_token_ids and not hide_metadata
 
         # At most one choice: the caller (derender_chat_stream) already
@@ -679,43 +742,31 @@ class OnlineDerenderer:
         if generate_chunk.choices:
             choice = generate_chunk.choices[0]
             delta_tids = choice.token_ids or []
-            is_finished = choice.finish_reason is not None
+            delta_message: DeltaMessage | None = None
+            finish_reason: str | None = None
 
-            if delta_tids:
-                # One parse_delta call for the whole chunk (producer
-                # granularity), not one per token. See the granularity note
-                # in this method's docstring.
-                text, detok_state = self._detokenize_delta(
-                    tokenizer,
-                    self._text_token_ids(
-                        delta_tids,
-                        choice.finish_reason,
-                        choice.stop_reason,
-                        chat_request,
-                    ),
-                    detok_state,
-                    skip_special_tokens=skip_special,
-                    spaces_between_special_tokens=spaces_between,
+            # One step for the whole chunk (producer granularity), not one
+            # per token. See the granularity note in this method's docstring.
+            # A finish only chunk (no new tokens) still steps, to flush any
+            # buffered tool call arguments.
+            if delta_tids or choice.finish_reason is not None:
+                text = ""
+                if delta_tids:
+                    text, detok_state = self._detokenize_delta(
+                        tokenizer,
+                        self._text_token_ids(
+                            delta_tids,
+                            choice.finish_reason,
+                            choice.stop_reason,
+                            chat_request,
+                        ),
+                        detok_state,
+                        skip_special_tokens=skip_special,
+                        spaces_between_special_tokens=spaces_between,
+                    )
+                delta_message, finish_reason = processor.step(
+                    text, delta_tids, choice.finish_reason, prompt_token_ids
                 )
-                delta_message = parser.parse_delta(
-                    text,
-                    delta_tids,
-                    chat_request,
-                    prompt_token_ids=prompt_token_ids,
-                    finished=is_finished,
-                )
-            elif is_finished:
-                # Finish only chunk (no new tokens). Still flush any
-                # buffered tool call arguments.
-                delta_message = parser.parse_delta(
-                    "",
-                    [],
-                    chat_request,
-                    prompt_token_ids=prompt_token_ids,
-                    finished=True,
-                )
-            else:
-                delta_message = None
 
             if delta_tids:
                 output_token_ids.extend(delta_tids)
@@ -737,7 +788,6 @@ class OnlineDerenderer:
                 delta_message = DeltaMessage()
 
             if delta_message.tool_calls:
-                tools_streamed = True
                 for tc in delta_message.tool_calls:
                     if tc.id is None:
                         continue
@@ -752,22 +802,15 @@ class OnlineDerenderer:
                 delta_message.role = "assistant"
                 role_sent = True
 
-            finish_reason = choice.finish_reason
-            if finish_reason is not None:
-                finish_reason = resolve_finish_reason(
-                    finish_reason, chat_request, tools_streamed
-                )
-
-            stream_choice = ChatCompletionResponseStreamChoice(
-                index=choice.index,
-                delta=delta_message,
-                logprobs=resolved_logprobs,
-                finish_reason=finish_reason,
-                stop_reason=choice.stop_reason,
-                token_ids=choice.token_ids if return_token_ids else None,
-            )
             stream_choices.append(
-                maybe_filter_parallel_tool_calls(stream_choice, chat_request)
+                ChatCompletionResponseStreamChoice(
+                    index=choice.index,
+                    delta=delta_message,
+                    logprobs=resolved_logprobs,
+                    finish_reason=finish_reason,
+                    stop_reason=choice.stop_reason,
+                    token_ids=choice.token_ids if return_token_ids else None,
+                )
             )
 
         updated_state = state.model_copy(
@@ -775,7 +818,7 @@ class OnlineDerenderer:
                 "output_token_ids": output_token_ids,
                 "output_chunk_lens": output_chunk_lens,
                 "role_sent": role_sent,
-                "tools_streamed": tools_streamed,
+                "tools_streamed": processor.tools_streamed,
                 "last_tool_call_ids": last_tool_call_ids,
                 "logprob_context_token_ids": logprob_context,
             }
@@ -880,6 +923,9 @@ class OnlineDerenderer:
                         finish_reason=choice.finish_reason,
                         stop_reason=choice.stop_reason,
                         logprobs=completion_logprobs,
+                        prompt_token_ids=(
+                            gen.prompt_token_ids if return_token_ids else None
+                        ),
                         token_ids=choice.token_ids if return_token_ids else None,
                     )
                 )
@@ -989,6 +1035,9 @@ class OnlineDerenderer:
                     logprobs=completion_logprobs,
                     finish_reason=choice.finish_reason,
                     stop_reason=choice.stop_reason,
+                    prompt_token_ids=(
+                        generate_chunk.prompt_token_ids if return_token_ids else None
+                    ),
                     token_ids=choice.token_ids if return_token_ids else None,
                 )
             )

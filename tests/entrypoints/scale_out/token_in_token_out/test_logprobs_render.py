@@ -19,6 +19,7 @@ from tests.entrypoints.scale_out.token_in_token_out.test_generate_stream import 
     _make_request_output,
     _mock_engine,
 )
+from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
 from vllm.entrypoints.scale_out.token_in_token_out import serving as serving_mod
 from vllm.entrypoints.scale_out.token_in_token_out.api_router import (
     _RenderedJSONResponse,
@@ -89,7 +90,12 @@ def _body(serving, k, outputs, finish_reason="length"):
         model=MODEL_NAME,
     )
     response = serving._build_full_response(
-        request, _final(outputs, finish_reason), "r", MODEL_NAME, 1700000000
+        request,
+        _final(outputs, finish_reason),
+        "r",
+        MODEL_NAME,
+        1700000000,
+        RequestResponseMetadata(request_id="r"),
     )[0]
     if isinstance(response, RenderedGenerateResponse):
         return response.body, True
