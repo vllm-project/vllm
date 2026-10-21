@@ -521,15 +521,16 @@ def _get_backend_priorities(
     if rocm_aiter_ops.is_mha_enabled():
         backends.append(AttentionBackendEnum.ROCM_AITER_FA)
     # ROCM_AITER_UNIFIED_ATTN gives wrong output on gfx950 for some KV cache
-    # sizes until the aiter pin includes the fix (#62606), so spec decode and
-    # hybrid models rank TRITON_ATTN above it for now.
-    if spec_or_hybrid:
+    # sizes until the aiter pin includes the fix (#62606), so rank
+    # TRITON_ATTN above it there for now.
+    triton_first = on_gfx950()
+    if triton_first:
         backends.append(AttentionBackendEnum.TRITON_ATTN)
     if is_aiter_found_and_supported():
         backends.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
     elif rocm_aiter_ops.is_rdna_aiter_enabled():
         backends.insert(0, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
-    if not spec_or_hybrid:
+    if not triton_first:
         backends.append(AttentionBackendEnum.TRITON_ATTN)
     if use_rocm_attn and spec_or_hybrid:
         backends.append(AttentionBackendEnum.ROCM_ATTN)
