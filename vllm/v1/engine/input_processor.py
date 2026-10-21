@@ -454,6 +454,9 @@ class InputProcessor:
             prompt_len = length_from_prompt_token_ids_or_embeds(
                 prompt_token_ids, prompt_embeds
             )
+            # Without recording, an opt-out would only split the prefix cache.
+            if not self.vllm_config.aux_output_config.enable_return_routed_experts:
+                sampling_params.return_routed_experts = True
             if not 0 <= sampling_params.routed_experts_prompt_start <= prompt_len:
                 raise VLLMValidationError(
                     f"routed_experts_prompt_start must be between 0 and "

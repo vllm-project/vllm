@@ -828,3 +828,19 @@ def test_completion_request_forwards_routed_experts_prompt_start():
     )
 
     assert sampling_params.routed_experts_prompt_start == 3
+
+
+def test_completion_request_forwards_return_routed_experts():
+    request = CompletionRequest(
+        model="test-model",
+        prompt="Hello",
+        max_tokens=10,
+        return_routed_experts=False,
+    )
+
+    sampling_params = request.to_sampling_params(
+        max_tokens=10,
+        default_sampling_params={},
+    )
+
+    assert sampling_params.return_routed_experts is False

@@ -412,7 +412,8 @@ class GenerateChoiceBase(BaseModel):
     # Decode:
     #   np.load(io.BytesIO(base64.b64decode(s)))
     # `None` if (a) the request was aborted before any forward pass,
-    # or (b) `enable_return_routed_experts` is off server-side.
+    # (b) `enable_return_routed_experts` is off server-side, or (c) the
+    # request set `sampling_params.return_routed_experts=False`.
     routed_experts: str | None = None
     sampling_mask: list[list[int]] | None = None
     # Contiguous weight version spans over output-token indexes.

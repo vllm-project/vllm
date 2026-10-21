@@ -228,6 +228,99 @@ def test_routed_experts_hashes_follow_scheduled_tokens():
     assert sent == request.block_hashes[:11]
 
 
+def test_routed_experts_opt_out_is_not_recorded():
+    """A request with return_routed_experts=False is not sent to the worker."""
+    scheduler = create_scheduler(enable_prefix_caching=True)
+    scheduler.aux_output_connector = AuxOutputSchedulerConnector(
+        scheduler.hash_block_size
+    )
+    (recorded,) = create_requests(
+        num_requests=1, num_tokens=32, max_tokens=1, req_ids=["recorded"]
+    )
+    (skipped,) = create_requests(
+        num_requests=1,
+        num_tokens=32,
+        max_tokens=1,
+        req_ids=["skipped"],
+        return_routed_experts=False,
+    )
+    scheduler.add_request(recorded)
+    scheduler.add_request(skipped)
+    scheduler_output = scheduler.schedule()
+    metadata = scheduler_output.aux_output_connector_metadata
+    assert metadata.requests == {"recorded": 0}
+    assert set(metadata.block_hashes) == {"recorded"}
+
+    # The worker returns rows only for the recorded request.
+    outputs = scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(
+            req_ids=["recorded", "skipped"],
+            req_id_to_index={"recorded": 0, "skipped": 1},
+            sampled_token_ids=[[0], [0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+            aux_output_connector_output={
+                "recorded": AuxRequestOutput(0, np.zeros((32, 1, 1), np.uint8))
+            },
+        ),
+    )
+    by_id = {output.request_id: output for output in outputs[0].outputs}
+    assert by_id["recorded"].routed_experts.shape == (32, 1, 1)
+    assert by_id["skipped"].routed_experts is None
+
+    # Only the recorded request has a terminal event for the worker.
+    metadata = scheduler.schedule().aux_output_connector_metadata
+    assert metadata.finished_requests == ("recorded",)
+
+
+def test_routed_experts_opt_out_prefix_cache_is_separate():
+    """Opted-out blocks have no stored routing, so they must not serve requests
+    that record it. Opted-out requests still share blocks with each other."""
+    scheduler = create_scheduler(enable_prefix_caching=True)
+    scheduler.aux_output_connector = AuxOutputSchedulerConnector(
+        scheduler.hash_block_size
+    )
+
+    def run(request_id: str, return_routed_experts: bool) -> int:
+        (request,) = create_requests(
+            num_requests=1,
+            num_tokens=48,
+            max_tokens=1,
+            req_ids=[request_id],
+            return_routed_experts=return_routed_experts,
+        )
+        scheduler.add_request(request)
+        scheduler_output = scheduler.schedule()
+        (new_request,) = scheduler_output.scheduled_new_reqs
+        rows = (
+            {request_id: AuxRequestOutput(0, np.zeros((48, 1, 1), np.uint8))}
+            if return_routed_experts
+            else None
+        )
+        scheduler.update_from_output(
+            scheduler_output,
+            ModelRunnerOutput(
+                req_ids=[request_id],
+                req_id_to_index={request_id: 0},
+                sampled_token_ids=[[0]],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+                aux_output_connector_output=rows,
+            ),
+        )
+        assert request.is_finished()
+        return new_request.num_computed_tokens
+
+    # The same 48-token prompt: two opted-out runs, then two recorded runs.
+    assert run("skipped-0", return_routed_experts=False) == 0
+    assert run("skipped-1", return_routed_experts=False) == 32
+    assert run("recorded-0", return_routed_experts=True) == 0
+    assert run("recorded-1", return_routed_experts=True) == 32
+
+
 def test_finish_request():
     scheduler = create_scheduler()
     scheduler.aux_output_connector = Mock()
