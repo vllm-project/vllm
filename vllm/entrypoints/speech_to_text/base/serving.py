@@ -603,8 +603,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 "translate": TranslationSegment,
             }
             segment_class: type[SpeechToTextSegment] = segments_types[self.task_type]
-            chunk_size_in_s = self.asr_config.max_audio_clip_s
-            if chunk_size_in_s is None:
+            if self.asr_config.max_audio_clip_s is None:
                 assert len(list_result_generator) == 1, (
                     "`max_audio_clip_s` is set to None, audio cannot be chunked"
                 )
