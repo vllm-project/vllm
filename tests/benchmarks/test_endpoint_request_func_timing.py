@@ -76,15 +76,20 @@ def _token_chunk(index: int, *, chat: bool) -> bytes:
     return _sse({"id": "cmpl-test", "object": "x", "choices": [choice]})
 
 
-def _usage_chunk(n_tokens: int, *, metrics: dict[str, Any] | None = None) -> bytes:
+def _usage_chunk(
+    n_tokens: int,
+    *,
+    prompt_tokens: int = 7,
+    metrics: dict[str, Any] | None = None,
+) -> bytes:
     payload = {
         "id": "cmpl-test",
         "object": "x",
         "choices": [],
         "usage": {
-            "prompt_tokens": 7,
+            "prompt_tokens": prompt_tokens,
             "completion_tokens": n_tokens,
-            "total_tokens": 7 + n_tokens,
+            "total_tokens": prompt_tokens + n_tokens,
         },
     }
     if metrics is not None:
@@ -378,6 +383,30 @@ def test_trailing_usage_chunk_does_not_extend_latency(
         f"token ({expected_latency}), not run on to the usage chunk "
         f"({expected_latency + tick})"
     )
+
+
+@pytest.mark.parametrize(
+    "endpoint_id,request_func,api_url,chat",
+    STREAMING_ENDPOINTS,
+    ids=[e[0] for e in STREAMING_ENDPOINTS],
+)
+def test_prompt_len_comes_from_server_usage(
+    endpoint_id: str,
+    request_func,
+    api_url: str,
+    chat: bool,
+) -> None:
+    """Input tokens are what the server reports, not the dataset's estimate.
+
+    For audio the dataset counts a text prompt the request never sends, while
+    the server counts the encoded audio: 1504 tokens for a 15 s Whisper clip.
+    """
+    n_tokens = 3
+    chunks = _build_stream(n_tokens, chat=chat)
+    chunks[-2] = (0.0, _usage_chunk(n_tokens, prompt_tokens=1504))
+    output = _run(request_func, api_url, endpoint_id, chunks, n_tokens)
+
+    assert output.prompt_len == 1504
 
 
 @pytest.mark.parametrize(
