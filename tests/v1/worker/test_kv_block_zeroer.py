@@ -9,10 +9,8 @@ import torch
 
 from tests.v1.attention.utils import dense_kv_cache_views
 from vllm.v1.kv_cache_interface import (
-    ChunkedLocalAttentionSpec,
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheLayout,
-    SlidingWindowSpec,
 )
 from vllm.v1.worker import utils as worker_utils
 from vllm.v1.worker.utils import (
@@ -23,28 +21,9 @@ from vllm.v1.worker.utils import (
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-@pytest.mark.parametrize(
-    "spec",
-    [
-        SlidingWindowSpec(
-            block_size=2,
-            num_kv_heads=1,
-            head_size=1,
-            dtype=torch.uint8,
-            sliding_window=4,
-        ),
-        ChunkedLocalAttentionSpec(
-            block_size=2,
-            num_kv_heads=1,
-            head_size=1,
-            dtype=torch.uint8,
-            attention_chunk_size=4,
-        ),
-    ],
-    ids=["sliding-window", "chunked-local"],
-)
-def test_attention_blocks_are_zeroed(spec):
+def test_attention_blocks_are_zeroed():
     device = torch.device("cuda")
+    spec = AttentionSpec(block_size=2, num_kv_heads=1, head_size=1, dtype=torch.uint8)
     storage = torch.ones((4, 1, 2, 2), dtype=torch.uint8, device=device)
     layer_name = "draft.self_attn"
     zeroer = KVBlockZeroer(
@@ -70,12 +49,11 @@ def test_layers_in_one_group_may_use_different_kernel_pages_per_block():
     """Derive kernel pages per block from each layer's allocation."""
     device = torch.device("cuda")
     num_blocks = 4
-    spec = SlidingWindowSpec(
+    spec = AttentionSpec(
         block_size=2,
         num_kv_heads=1,
         head_size=1,
         dtype=torch.int32,
-        sliding_window=2,
     )
     # Two kernel pages per logical block.
     wide = torch.ones((num_blocks * 2, 3), dtype=torch.int32, device=device)
@@ -236,12 +214,11 @@ def test_large_dsv4_launch_geometry(monkeypatch):
     n_blocks, n_segs = 6870, 181
     layer_names = [f"layer.{i}" for i in range(n_segs)]
     page_sizes = [9344 if i % 2 == 0 else 292 for i in range(n_segs)]
-    spec = SlidingWindowSpec(
+    spec = AttentionSpec(
         block_size=1,
         num_kv_heads=1,
         head_size=1,
         dtype=torch.int32,
-        sliding_window=1,
     )
     storages = {
         name: torch.ones((1, page_size), dtype=torch.int32)
@@ -361,9 +338,7 @@ def test_zeroes_exactly_one_block_per_layer(layout: KVCacheLayout):
     tile under block-major layouts (no out-of-bounds writes, no clobbering)."""
     device = torch.device("cuda")
     num_blocks, num_layers = 4, 2
-    spec = FullAttentionSpec(
-        block_size=4, num_kv_heads=2, head_size=8, dtype=torch.float32
-    )
+    spec = AttentionSpec(block_size=4, num_kv_heads=2, head_size=8, dtype=torch.float32)
     raw = torch.empty(
         num_blocks * num_layers * spec.page_size_bytes,
         dtype=torch.int8,

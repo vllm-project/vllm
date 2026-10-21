@@ -7,7 +7,7 @@ import hashlib
 import math
 import os
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -23,16 +23,10 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.multimodal.utils import get_mm_features_in_window
 from vllm.utils.hashing import xxhash, xxhash_cbor
-from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
-    KVCacheSpec,
-    MambaSpec,
-    UniformTypeKVCacheSpecs,
-    iter_layer_specs,
 )
-from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.request import Request
 from vllm.v1.utils import tensor_data
 
@@ -737,26 +731,25 @@ def hash_block_tokens(
     )
 
 
-def resolve_dcp_kv_block_size(spec: KVCacheSpec, dcp_world_size: int) -> int:
-    """Return the token span of a cache block under DCP."""
-    return spec.block_size * (dcp_world_size if spec.dcp_sharded else 1)
+def resolve_dcp_kv_block_size(group: KVCacheGroupSpec, dcp_world_size: int) -> int:
+    """Return the token span of a group's cache block under DCP."""
+    return group.block_size * (dcp_world_size if group.dcp_sharded else 1)
 
 
-def resolve_dcp_kv_cache_spec(spec: KVCacheSpec, dcp_world_size: int) -> KVCacheSpec:
-    """Return a KV cache spec with block sizes adjusted for DCP."""
-    block_size = resolve_dcp_kv_block_size(spec, dcp_world_size)
-    if block_size == spec.block_size:
-        return spec
-    if isinstance(spec, UniformTypeKVCacheSpecs):
-        return replace(
-            spec,
-            block_size=block_size,
-            kv_cache_specs={
-                name: resolve_dcp_kv_cache_spec(layer_spec, dcp_world_size)
-                for name, layer_spec in spec.kv_cache_specs.items()
-            },
-        )
-    return replace(spec, block_size=block_size)
+def is_mamba_group(group: KVCacheGroupSpec) -> bool:
+    from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+
+    return issubclass(group.manager_cls, MambaManager)
+
+
+def is_mamba_align_group(group: KVCacheGroupSpec) -> bool:
+    """Whether ``group`` holds Mamba state cached in "align" mode."""
+    from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+
+    config = group.manager_config
+    return (
+        isinstance(config, MambaManager.Config) and config.mamba_cache_mode == "align"
+    )
 
 
 def partial_hash_hits_enabled(
@@ -771,14 +764,12 @@ def partial_hash_hits_enabled(
     prefix-cacheable group to support fine-grained lookups.
     """
     if not any(
-        isinstance(spec, MambaSpec)
-        and spec.mamba_cache_mode == "align"
+        is_mamba_align_group(group)
         and (
-            (dcp_world_size == 1 and spec.block_size > hash_block_size)
-            or (dcp_world_size > 1 and spec.block_size >= hash_block_size)
+            (dcp_world_size == 1 and group.block_size > hash_block_size)
+            or (dcp_world_size > 1 and group.block_size >= hash_block_size)
         )
         for group in kv_cache_groups
-        for spec in iter_layer_specs(group.kv_cache_spec)
     ):
         return False
     if manager_classes is None:
@@ -786,10 +777,9 @@ def partial_hash_hits_enabled(
     unsupported_managers = {
         manager_cls.__name__
         for group, manager_cls in zip(kv_cache_groups, manager_classes)
-        if group.kv_cache_spec.prefix_cacheable
+        if group.prefix_cacheable
         and not manager_cls.supports_fine_grained_hash_lookup
-        and resolve_dcp_kv_block_size(group.kv_cache_spec, dcp_world_size)
-        != hash_block_size
+        and resolve_dcp_kv_block_size(group, dcp_world_size) != hash_block_size
     }
     if unsupported_managers:
         logger.warning_once(
@@ -838,7 +828,7 @@ def resolve_kv_cache_block_sizes(
     groups = kv_cache_config.kv_cache_groups
 
     if len(groups) <= 1:
-        if groups and not groups[0].kv_cache_spec.dcp_sharded:
+        if groups and not groups[0].dcp_sharded:
             dcp = 1
         bs = cache_config.block_size * dcp
         # Reject a prefix_match_unit that would otherwise be silently ignored.
@@ -857,9 +847,7 @@ def resolve_kv_cache_block_sizes(
             )
         return bs, bs
 
-    group_block_sizes = [
-        resolve_dcp_kv_block_size(g.kv_cache_spec, dcp) for g in groups
-    ]
+    group_block_sizes = [resolve_dcp_kv_block_size(g, dcp) for g in groups]
     scheduler_block_size = math.lcm(*group_block_sizes)
 
     logger.info_once("kv cache group sizes %s", tuple(group_block_sizes))
@@ -876,16 +864,14 @@ def resolve_kv_cache_block_sizes(
     # scheduler block size. Read the mode from the resolved group spec because
     # its block size may have been updated independently of cache_config.
     if any(
-        isinstance(spec, MambaSpec) and spec.mamba_cache_mode != "align"
-        for group in groups
-        for spec in iter_layer_specs(group.kv_cache_spec)
+        is_mamba_group(group) and not is_mamba_align_group(group) for group in groups
     ):
         return scheduler_block_size, scheduler_block_size
 
     hashing_sizes = [
         block_size
         for group, block_size in zip(groups, group_block_sizes)
-        if group.kv_cache_spec.prefix_cacheable
+        if group.prefix_cacheable
     ] or group_block_sizes
     requested = cache_config.prefix_match_unit
     hash_block_size = requested if requested is not None else math.gcd(*hashing_sizes)
@@ -899,10 +885,9 @@ def resolve_kv_cache_block_sizes(
     prefix_alignments = {
         spec.tokens_per_state
         for group in groups
-        for spec in iter_layer_specs(group.kv_cache_spec)
-        if spec.prefix_cacheable
-        and isinstance(spec.tokens_per_state, int)
-        and spec.tokens_per_state > 1
+        if group.prefix_cacheable
+        for spec in group.kv_cache_specs.values()
+        if isinstance(spec.tokens_per_state, int) and spec.tokens_per_state > 1
     }
     cache_hit_alignment = (
         hash_block_size
@@ -933,13 +918,7 @@ def resolve_cache_hit_alignment_tokens(
     groups = kv_cache_config.kv_cache_groups
     if not vllm_config.cache_config.enable_prefix_caching or len(groups) <= 1:
         return scheduler_block_size
-    manager_classes = []
-    for group in groups:
-        manager_cls = KVCacheSpecRegistry.get_manager_class(
-            group.kv_cache_spec, group.role
-        )
-        assert manager_cls is not None
-        manager_classes.append(manager_cls)
+    manager_classes = [group.manager_cls for group in groups]
     if partial_hash_hits_enabled(
         groups,
         hash_block_size,
@@ -1018,22 +997,15 @@ def get_max_concurrency_for_kv_cache_config(
     """Get the maximum concurrency for the given KV cache configuration.
 
     A request at max_model_len consumes whole blocks from each group's block
-    table — cdiv(per-request bytes, page bytes) of the group's spec — and all
-    device groups draw those block ids from one shared pool, so the per-request
-    total is the sum over groups. The memory/page ratio is identical whether
-    a group carries an aggregated UniformTypeKVCacheSpecs (worker config) or
-    a representative per-layer spec (scheduler config), so both capacity
-    call sites agree.
+    table, and all device groups draw those block ids from one shared pool, so
+    the per-request total is the sum over groups.
 
     Host groups use a separate pool; the smaller concurrency limit applies.
     """
     num_blocks_per_request = 0
     host_blocks_per_request = 0
     for group in kv_cache_config.kv_cache_groups:
-        required = cdiv(
-            group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
-            group.kv_cache_spec.page_size_bytes,
-        )
+        required = group.max_blocks_per_request(vllm_config)
         if group.host_resident:
             host_blocks_per_request += required
         else:
@@ -1061,13 +1033,6 @@ def generate_scheduler_kv_cache_config(
     # All workers have the same kv_cache_config except layer names, so use
     # an arbitrary one to initialize the scheduler.
     cfg = copy.deepcopy(kv_cache_configs[0])
-    for group in cfg.kv_cache_groups:
-        if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
-            # All layers in the UniformTypeKVCacheSpecs have the same type,
-            # so use an arbitrary one to initialize the scheduler.
-            group.kv_cache_spec = next(
-                iter(group.kv_cache_spec.kv_cache_specs.values())
-            )
     return cfg
 
 

@@ -141,19 +141,19 @@ from vllm.v1.attention.backends.utils import (
     reorder_batch_to_split_decodes_and_prefills,
 )
 from vllm.v1.core.sched.output import NewRequestData
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CrossAttentionManager,
+    EncoderOnlyAttentionManager,
+)
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    CrossAttentionSpec,
-    EncoderOnlyAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheLayerConfig,
     KVCacheSpec,
     KVCacheSpecKind,
-    UniformTypeKVCacheSpecs,
-    get_kv_cache_spec_kind,
 )
-from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
     AsyncModelRunnerOutput,
@@ -228,7 +228,7 @@ from .utils import (
     allocate_kv_cache,
     bind_kv_cache,
     copy_kv_cache_blocks_inplace,
-    customize_attention_spec,
+    customize_layer_config,
     map_kv_caches_to_kernel_blocks,
     prepare_kernel_block_sizes,
     sanity_check_mm_encoder_outputs,
@@ -1870,11 +1870,11 @@ class GPUModelRunner(
     def _get_encoder_seq_lens(
         self,
         num_scheduled_tokens: dict[str, int],
-        kv_cache_spec: KVCacheSpec,
+        kv_cache_group: KVCacheGroupSpec,
         num_reqs: int,
         for_cudagraph_capture: bool = False,
     ) -> tuple[torch.Tensor | None, np.ndarray | None]:
-        if not isinstance(kv_cache_spec, CrossAttentionSpec):
+        if not issubclass(kv_cache_group.manager_cls, CrossAttentionManager):
             return None, None
 
         # Zero out buffer for padding requests that are not actually scheduled (CGs)
@@ -2284,8 +2284,8 @@ class GPUModelRunner(
 
         def _get_block_table(kv_cache_gid: int):
             assert num_reqs_padded is not None and num_tokens_padded is not None
-            kv_cache_spec = kv_cache_groups[kv_cache_gid].kv_cache_spec
-            if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
+            manager_cls = kv_cache_groups[kv_cache_gid].manager_cls
+            if issubclass(manager_cls, EncoderOnlyAttentionManager):
                 blk_table_tensor = torch.zeros(
                     (num_reqs_padded, 1),
                     dtype=torch.int32,
@@ -2447,9 +2447,8 @@ class GPUModelRunner(
         ) -> None:
             attn_group = self.attn_groups[kv_cache_gid][attn_gid]
             builder = attn_group.get_metadata_builder(ubid or 0)
-            kv_cache_spec = kv_cache_groups[kv_cache_gid].kv_cache_spec
-            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-                kv_cache_spec = kv_cache_spec.kv_cache_specs[attn_group.layer_names[0]]
+            kv_cache_specs = kv_cache_groups[kv_cache_gid].kv_cache_specs
+            kv_cache_spec = kv_cache_specs[attn_group.layer_names[0]]
             cache_key = (kv_cache_spec, type(builder))
 
             extra_attn_metadata_args = {}
@@ -2516,7 +2515,7 @@ class GPUModelRunner(
             # for each kv_cache_group.
             cm.encoder_seq_lens, cm.encoder_seq_lens_cpu = self._get_encoder_seq_lens(
                 num_scheduled_tokens or {},
-                kv_cache_group.kv_cache_spec,
+                kv_cache_group,
                 num_reqs_padded,
                 for_cudagraph_capture=for_cudagraph_capture,
             )
@@ -3881,10 +3880,8 @@ class GPUModelRunner(
 
         def _get_slot_mapping(kv_cache_gid: int):
             assert num_reqs_padded is not None and num_tokens_padded is not None
-            kv_cache_spec = self.kv_cache_config.kv_cache_groups[
-                kv_cache_gid
-            ].kv_cache_spec
-            if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
+            kv_cache_group = self.kv_cache_config.kv_cache_groups[kv_cache_gid]
+            if issubclass(kv_cache_group.manager_cls, EncoderOnlyAttentionManager):
                 slot_mapping = torch.zeros(
                     (num_tokens_padded,),
                     dtype=torch.int64,
@@ -4071,7 +4068,7 @@ class GPUModelRunner(
                     for g in self.attn_groups[id]
                 )
                 for id, spec in enumerate(self.kv_cache_config.kv_cache_groups)
-                if not isinstance(spec.kv_cache_spec, EncoderOnlyAttentionSpec)
+                if not issubclass(spec.manager_cls, EncoderOnlyAttentionManager)
             )
             pad_attn = cudagraph_mode == CUDAGraphMode.FULL
 
@@ -6177,11 +6174,9 @@ class GPUModelRunner(
         from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
         from vllm.v1.core.kv_cache_planning import get_kv_cache_groups_from_builder
 
-        kv_cache_spec = self.get_kv_cache_spec()
-        KVCacheSpecRegistry.check_kv_cache_spec_registry(kv_cache_spec)
         builder = get_kv_cache_config_builder(self.vllm_config)
         kv_cache_groups = get_kv_cache_groups_from_builder(
-            builder, self.vllm_config, kv_cache_spec
+            builder, self.vllm_config, self.get_kv_cache_layer_configs()
         )
         # the minimum number of blocks required is 1 block *per sequence*
         min_blocks = (
@@ -6698,9 +6693,7 @@ class GPUModelRunner(
                     )
 
                 full_cls_name = attn_backend.full_cls_name()
-                layer_kv_cache_spec = kv_cache_group_spec.kv_cache_spec
-                if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
-                    layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
+                layer_kv_cache_spec = kv_cache_group_spec.kv_cache_specs[layer_name]
                 # Non-Attention layer types (e.g. Mamba1, ShortConv) do not
                 # expose ``num_heads``; fall back to 0 so they cluster as
                 # before. Such layers never coexist with Attention in a
@@ -6769,6 +6762,7 @@ class GPUModelRunner(
                     num_metadata_builders=1
                     if not self.parallel_config.use_ubatching
                     else self.parallel_config.num_ubatches,
+                    kv_cache_group=kv_cache_config.kv_cache_groups[kv_cache_group_id],
                 )
         # Calculate reorder batch threshold (if needed)
         # Note (tdoublep): do this *after* constructing builders,
@@ -6806,8 +6800,12 @@ class GPUModelRunner(
             for attn_backend in attn_backend_set:
                 builder_cls = attn_backend.get_builder_cls()
 
-                cg_support = builder_cls.get_cudagraph_support(
-                    self.vllm_config, kv_cache_group.kv_cache_spec
+                cg_support = min(
+                    (
+                        builder_cls.get_cudagraph_support(self.vllm_config, spec)
+                        for spec in set(kv_cache_group.kv_cache_specs.values())
+                    ),
+                    key=lambda support: support.value,
                 )
                 if cg_support.value < min_cg_support.value:
                     min_cg_support = cg_support
@@ -6878,17 +6876,14 @@ class GPUModelRunner(
         slot_mapping_modes = []
         max_model_len = max(self.max_model_len, self.max_encoder_len)
         for kv_cache_group in kv_cache_config.kv_cache_groups:
-            kv_cache_spec = kv_cache_group.kv_cache_spec
-            kv_cache_spec_kind = get_kv_cache_spec_kind(kv_cache_spec)
-            if kv_cache_spec_kind == KVCacheSpecKind.ENCODER_ONLY_ATTENTION:
+            if issubclass(kv_cache_group.manager_cls, EncoderOnlyAttentionManager):
                 continue
-            block_size = kv_cache_spec.block_size
-            block_sizes.append(block_size)
-            if kv_cache_spec_kind == KVCacheSpecKind.MAMBA:
+            block_sizes.append(kv_cache_group.block_size)
+            if kv_cache_group.kind == KVCacheSpecKind.MAMBA:
                 slot_mapping_modes.append(SlotMappingMode.NONE)
             else:
                 slot_mapping_modes.append(SlotMappingMode.TOKEN_TO_KV_SLOT)
-            max_num_blocks_per_req = kv_cache_spec.max_num_blocks_per_req(
+            max_num_blocks_per_req = kv_cache_group.max_num_blocks_per_req(
                 self.vllm_config, max_model_len
             )
             max_num_blocks.append(max_num_blocks_per_req)
@@ -7086,39 +7081,36 @@ class GPUModelRunner(
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
         """Add encoder-only layers to the KV cache config."""
         block_size = self.vllm_config.cache_config.block_size
-        encoder_only_attn_specs: dict[AttentionSpec, list[str]] = defaultdict(list)
+        encoder_only_layers: dict[str, KVCacheLayerConfig] = {}
         attn_layers = get_layers_from_vllm_config(self.vllm_config, Attention)
         for layer_name, attn_module in attn_layers.items():
             if attn_module.attn_type == AttentionType.ENCODER_ONLY:
-                attn_spec: AttentionSpec = EncoderOnlyAttentionSpec(
+                attn_spec = AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=attn_module.num_kv_heads,
                     head_size=attn_module.head_size,
                     dtype=self.kv_cache_dtype,
                 )
-                encoder_only_attn_specs[attn_spec].append(layer_name)
+                layer = EncoderOnlyAttentionManager.layer_config(attn_spec)
+                encoder_only_layers[layer_name] = layer
                 self.runner_only_attn_layers.add(layer_name)
-        if len(encoder_only_attn_specs) > 0:
-            assert len(encoder_only_attn_specs) == 1, (
-                "Only support one encoder-only attention spec now"
-            )
-            spec, layer_names = encoder_only_attn_specs.popitem()
+        if encoder_only_layers:
             self.kv_cache_config.kv_cache_groups.append(
-                KVCacheGroupSpec(layer_names=layer_names, kv_cache_spec=spec)
+                KVCacheGroupSpec.from_layers(encoder_only_layers)
             )
 
-    def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
-        """Generates the KVCacheSpec by parsing the kv cache format from each
-        Attention module in the static forward context.
+    def get_kv_cache_layer_configs(self) -> dict[str, KVCacheLayerConfig]:
+        """Collects the KV cache config of each Attention module in the static
+        forward context.
 
         Returns:
-            KVCacheSpec: A dictionary mapping layer names to their KV cache
-            format. Layers that do not need KV cache are not included.
+            A dictionary mapping layer names to their KV cache manager, policy,
+            and layout. Layers that do not need KV cache are not included.
 
         """
         if has_ec_transfer() and not get_ec_transfer().is_consumer:
             return {}
-        kv_cache_spec: dict[str, KVCacheSpec] = {}
+        layer_configs: dict[str, KVCacheLayerConfig] = {}
         layer_type = cast(type[Any], AttentionLayerBase)
         attn_layers = get_layers_from_vllm_config(self.vllm_config, layer_type)
         for layer_name, attn_module in attn_layers.items():
@@ -7135,16 +7127,15 @@ class GPUModelRunner(
                 self.shared_kv_cache_layers[layer_name] = kv_tgt_layer
                 continue
             # Skip modules that don't need KV cache (eg encoder-only attention)
-            if spec := attn_module.get_kv_cache_spec(self.vllm_config):
-                if isinstance(spec, AttentionSpec):
-                    spec = customize_attention_spec(
-                        attn_module.get_attn_backend(), spec
-                    )
+            if layer_config := attn_module.get_kv_cache_config(self.vllm_config):
+                layer_config = customize_layer_config(
+                    attn_module.get_attn_backend(), layer_config
+                )
                 if attn_module.is_draft_layer:
-                    spec = replace(spec, is_draft=True)
-                kv_cache_spec[layer_name] = spec
+                    layer_config = replace(layer_config, is_draft=True)
+                layer_configs[layer_name] = layer_config
 
-        return kv_cache_spec
+        return layer_configs
 
     def _to_list(self, sampled_token_ids: torch.Tensor) -> list[list[int]]:
         # This is a short term mitigation for issue mentioned in

@@ -23,6 +23,7 @@ from vllm.config import SpeculativeConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import MambaSpec
 
 BLOCK_SIZE = 16
@@ -53,7 +54,6 @@ def _builder(
         block_size=BLOCK_SIZE,
         shapes=shapes,
         dtypes=dtypes,
-        num_speculative_blocks=NUM_SPEC,
     )
 
     return GDNAttentionMetadataBuilder(
@@ -61,6 +61,9 @@ def _builder(
         layer_names=["layer.0"],
         vllm_config=vllm_config,
         device=DEVICE,
+        kv_cache_manager_config=MambaManager.Config(
+            mamba_cache_mode=mamba_cache_mode, num_speculative_blocks=NUM_SPEC
+        ),
     )
 
 

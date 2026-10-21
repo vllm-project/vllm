@@ -24,7 +24,7 @@ from vllm.v1.attention.backends.b12x import (
     _max_page_table_width,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheLayout
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
 
 
 def _require_b12x_paged_attention() -> None:
@@ -136,7 +136,7 @@ def test_b12x_attention_config_support(
 
 def test_b12x_attention_uses_two_plane_nhd_cache() -> None:
     spec = B12xPagedAttentionBackend.customize_spec(
-        FullAttentionSpec(
+        AttentionSpec(
             block_size=128,
             num_kv_heads=4,
             head_size=128,

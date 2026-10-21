@@ -65,7 +65,8 @@ from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
-from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+from vllm.v1.kv_cache_interface import KVCacheLayerConfig
 
 logger = init_logger(__name__)
 
@@ -90,9 +91,10 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             num_spec=self.num_spec,
         )
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MambaSpec:
-        spec = super().get_kv_cache_spec(vllm_config)
-        assert isinstance(spec, MambaSpec)
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
+        layer_config = super().get_kv_cache_config(vllm_config)
+        assert layer_config is not None
+        assert isinstance(layer_config.manager_config, MambaManager.Config)
         # Only the fused path exports the checkpoint snapshots
         can_checkpoint = (
             self.use_prefill_checkpoint
@@ -102,10 +104,13 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         if can_checkpoint and vllm_config.cache_config.mamba_cache_mode == "align":
             logger.info_once("Kimi-K3 KDA prefill checkpoint enabled.")
         return replace(
-            spec,
-            num_prefill_checkpoint_blocks=int(can_checkpoint),
-            prefill_checkpoint_alignment=(
-                KDA_CHECKPOINT_ALIGNMENT if can_checkpoint else None
+            layer_config,
+            manager_config=replace(
+                layer_config.manager_config,
+                num_prefill_checkpoint_blocks=int(can_checkpoint),
+                prefill_checkpoint_alignment=(
+                    KDA_CHECKPOINT_ALIGNMENT if can_checkpoint else None
+                ),
             ),
         )
 

@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 import torch
 
+from tests.v1.core.utils import new_kv_cache_group
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFunc,
     MambaStateCopyFuncsByType,
@@ -16,11 +17,12 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 )
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheLayerConfig,
     MambaSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
@@ -130,10 +132,14 @@ def test_resumed_req_ids_cleared_from_mamba_state_idx():
     preprocess_mamba must still clear its mamba_state_idx entry,
     otherwise stale indices can point beyond the new block allocation.
     """
-    spec = MagicMock(block_size=64, num_speculative_blocks=0)
+    spec = MagicMock(block_size=64)
     cache_config = MagicMock(enable_prefix_caching=True)
     input_batch = MagicMock(req_ids=[])
-    copy_bufs = MagicMock(mamba_group_ids=[0], mamba_spec=spec)
+    copy_bufs = MagicMock(
+        mamba_group_ids=[0],
+        mamba_spec=spec,
+        mamba_config=MambaManager.Config(mamba_cache_mode="align"),
+    )
 
     mamba_state_idx: dict[str, int] = {
         "finished": 1,
@@ -397,11 +403,9 @@ def _make_kv_cache_config(cfg: _TestConfig, layer_names: list[str]) -> KVCacheCo
             (cfg.temporal_state_dim,),
         ),
         dtypes=(cfg.dtype, cfg.dtype),
-        mamba_cache_mode="align",
     )
-    group = KVCacheGroupSpec(
-        layer_names=layer_names,
-        kv_cache_spec=mamba_spec,
+    group = new_kv_cache_group(
+        layer_names, mamba_spec, MambaManager.Config(mamba_cache_mode="align")
     )
     return KVCacheConfig(
         num_blocks=cfg.num_blocks,
@@ -485,23 +489,22 @@ def test_mamba_groups_support_different_state_specs():
         shapes=((4, 4), (2, 4, 4)),
         dtypes=(torch.float16, torch.float32),
         mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
-        mamba_cache_mode="align",
-        num_speculative_blocks=3,
     )
     short_conv_spec = MambaSpec(
         block_size=16,
         shapes=((12, 8),),
         dtypes=(torch.float16,),
         mamba_type=MambaAttentionBackendEnum.SHORT_CONV,
-        mamba_cache_mode="align",
-        num_speculative_blocks=3,
+    )
+    mamba_config = MambaManager.Config(
+        mamba_cache_mode="align", num_speculative_blocks=3
     )
     kv_cache_config = KVCacheConfig(
         num_blocks=8,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(["gdn.0", "gdn.1"], gdn_spec),
-            KVCacheGroupSpec(["ple.0"], short_conv_spec),
+            new_kv_cache_group(["gdn.0", "gdn.1"], gdn_spec, mamba_config),
+            new_kv_cache_group(["ple.0"], short_conv_spec, mamba_config),
         ],
     )
 
@@ -553,22 +556,21 @@ def test_mamba_groups_support_different_state_specs():
     assert ctx.state_conv_widths.tolist() == [4, 0, 4, 0, 12]
 
 
-def test_mamba_groups_support_mixed_specs_in_uniform_group():
+def test_mamba_groups_support_mixed_specs_in_one_group():
     gdn_spec = MambaSpec(
         block_size=16,
         shapes=((4, 4), (2, 4, 4)),
         dtypes=(torch.float16, torch.float32),
         mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
-        mamba_cache_mode="align",
-        num_speculative_blocks=3,
     )
     short_conv_spec = MambaSpec(
         block_size=16,
         shapes=((12, 8),),
         dtypes=(torch.float16,),
         mamba_type=MambaAttentionBackendEnum.SHORT_CONV,
-        mamba_cache_mode="align",
-        num_speculative_blocks=3,
+    )
+    mamba_config = MambaManager.Config(
+        mamba_cache_mode="align", num_speculative_blocks=3
     )
     layer_specs = {
         "gdn.0": gdn_spec,
@@ -579,12 +581,11 @@ def test_mamba_groups_support_mixed_specs_in_uniform_group():
         num_blocks=8,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
-                list(layer_specs),
-                UniformTypeKVCacheSpecs(
-                    block_size=16,
-                    kv_cache_specs=layer_specs,
-                ),
+            KVCacheGroupSpec.from_layers(
+                {
+                    name: KVCacheLayerConfig(mamba_config, spec)
+                    for name, spec in layer_specs.items()
+                }
             )
         ],
     )

@@ -36,11 +36,15 @@ from vllm.v1.attention.backends.utils import (
     PAD_SLOT_ID,
     split_decodes_and_prefills,
 )
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
+    FullAttentionManager,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    CircularBufferSpec,
+    KVCacheLayerConfig,
     KVCacheLayout,
-    KVCacheSpec,
+    ManagerConfig,
     MLAAttentionSpec,
 )
 
@@ -600,6 +604,7 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
     """Build QSA metadata from vLLM's cache-group-specific common metadata."""
 
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    requires_kv_cache_manager_config: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -607,11 +612,15 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
+        *,
+        kv_cache_manager_config: ManagerConfig,
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
         assert self.reorder_batch_threshold is not None
-        self.is_circular_buffer = isinstance(kv_cache_spec, CircularBufferSpec)
+        self.is_circular_buffer = isinstance(
+            kv_cache_manager_config, CircularBufferManager.Config
+        )
         if isinstance(kv_cache_spec, MLAAttentionSpec):
             compress_ratio = kv_cache_spec.tokens_per_state
             assert isinstance(compress_ratio, int), (
@@ -839,7 +848,7 @@ class QSAKeyStateCache(_QSAStateCache):
             return None
         return self.kv_cache[..., self.rope_position_offset :].view(torch.int64)
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
         # Hold the open group's committed keys plus every row a speculative
         # step stores before acceptance is known, rounded up to whole groups so
         # the ring divides the attention block size (it joins the LCM that sets
@@ -851,27 +860,29 @@ class QSAKeyStateCache(_QSAStateCache):
             f"QSA ring capacity {capacity} must divide the attention block "
             f"size {self.cache_config.block_size}"
         )
-        return CircularBufferSpec(
+        spec = AttentionSpec(
             block_size=capacity,
             num_kv_heads=1,
             head_size=self.head_size,
             head_size_v=0,
             dtype=self.dtype,
         )
+        return CircularBufferManager.layer_config(spec)
 
 
 class QSACompressedKeyCache(_QSAStateCache):
     """Normed, group-first-RoPE key at one row per complete group."""
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
         del vllm_config
-        return MLAAttentionSpec(
+        spec = MLAAttentionSpec(
             block_size=self.cache_config.block_size,
             num_kv_heads=1,
             head_size=self.head_size,
             dtype=self.dtype,
             tokens_per_state=self.compress_ratio,
         )
+        return FullAttentionManager.layer_config(spec)
 
 
 __all__ = [

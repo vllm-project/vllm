@@ -14,14 +14,17 @@ import pytest
 import torch
 
 from tests.v1.core.test_prefix_caching import make_kv_cache_manager
-from tests.v1.core.utils import create_requests
+from tests.v1.core.utils import create_requests, new_kv_cache_group
 from vllm.config.speculative import SpeculativeConfig
 from vllm.config.vllm import VllmConfig
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
+    MambaManager,
+)
 from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     MambaSpec,
@@ -43,9 +46,9 @@ pytestmark = pytest.mark.skipif(
 
 
 def _attention_group() -> KVCacheGroupSpec:
-    return KVCacheGroupSpec(
+    return new_kv_cache_group(
         ["layer"],
-        FullAttentionSpec(
+        AttentionSpec(
             block_size=BLOCK_SIZE,
             num_kv_heads=1,
             head_size=1,
@@ -55,25 +58,29 @@ def _attention_group() -> KVCacheGroupSpec:
 
 
 def _circular_group() -> KVCacheGroupSpec:
-    return KVCacheGroupSpec(
+    return new_kv_cache_group(
         ["circular"],
-        CircularBufferSpec(
-            block_size=BLOCK_SIZE,
-            num_kv_heads=1,
-            head_size=1,
-            dtype=torch.float32,
+        CircularBufferManager.layer_config(
+            AttentionSpec(
+                block_size=BLOCK_SIZE,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+            )
         ),
     )
 
 
 def _mamba_group(mamba_cache_mode: str) -> KVCacheGroupSpec:
     # Name carries the mode so several groups can coexist in one config.
-    return KVCacheGroupSpec(
+    return new_kv_cache_group(
         [f"mamba_{mamba_cache_mode}"],
-        MambaSpec(
-            block_size=BLOCK_SIZE,
-            shapes=((1,),),
-            dtypes=(torch.float32,),
+        MambaManager.layer_config(
+            MambaSpec(
+                block_size=BLOCK_SIZE,
+                shapes=((1,),),
+                dtypes=(torch.float32,),
+            ),
             mamba_cache_mode=mamba_cache_mode,
             num_speculative_blocks=NUM_SPEC_STEPS,
         ),
@@ -271,7 +278,7 @@ def test_reserved_block_count_matches_real_kv_cache_manager():
     decode_query_len = NUM_SPEC_STEPS + 1
 
     kv_cache_config = _hybrid_kv_cache_config(num_blocks=256)
-    specs = [g.kv_cache_spec for g in kv_cache_config.kv_cache_groups]
+    groups = kv_cache_config.kv_cache_groups
     manager = make_kv_cache_manager(
         kv_cache_config,
         max_model_len=MAX_MODEL_LEN,
@@ -294,17 +301,17 @@ def test_reserved_block_count_matches_real_kv_cache_manager():
         assert blocks is not None, "block pool exhausted"
         held = manager.get_block_ids(request.request_id)
         num_tokens = request.num_computed_tokens + num_new_tokens
-        for spec, group_held in zip(specs, held):
+        for group, group_held in zip(groups, held):
             expected = _reserved_block_count(
                 num_tokens,
-                spec,
+                group,
                 num_lookahead_tokens=num_lookahead_tokens,
                 max_model_len=MAX_MODEL_LEN,
                 max_encoder_len=0,
             )
+            mode = getattr(group.manager_config, "mamba_cache_mode", None)
             assert len(group_held) == expected, (
-                f"{type(spec).__name__} "
-                f"mode={getattr(spec, 'mamba_cache_mode', None)}: real manager "
+                f"{group.manager_cls.__name__} mode={mode}: real manager "
                 f"holds {len(group_held)} blocks for {num_tokens} tokens, "
                 f"_reserved_block_count predicts {expected}"
             )

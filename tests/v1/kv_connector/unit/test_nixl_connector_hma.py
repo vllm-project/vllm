@@ -13,6 +13,8 @@ import pytest
 import torch
 
 from tests.v1.attention.utils import MockMambaBuilder
+from tests.v1.core.utils import uniform_spec
+from tests.v1.kv_connector.unit.offloading_connector.utils import make_kv_cache_group
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
@@ -27,9 +29,8 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     SlidingWindowManager,
 )
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheTensor,
     MLAAttentionSpec,
 )
@@ -75,12 +76,13 @@ def region_pull_worker():
         num_blocks=100,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(["resident"], spec, enable_kv_transfer=False),
-            KVCacheGroupSpec(["host"], spec),
-            KVCacheGroupSpec(["indexer"], spec),
+            make_kv_cache_group(["resident"], spec, enable_kv_transfer=False),
+            make_kv_cache_group(["host"], spec),
+            make_kv_cache_group(["indexer"], spec),
         ],
     )
     worker._group_spec_types = (MLAAttentionSpec, MLAAttentionSpec)
+    worker._group_is_scratch = (False,) * len(worker._group_spec_types)
     worker.region_group_ids = [0, 1]
     worker.dst_region_group_ids = {"P": [0, 0]}
     worker.num_regions = 2
@@ -301,9 +303,9 @@ def test_region_pull_completion_zeros_only_own_padding(region_pull_worker):
 @pytest.mark.parametrize(
     "swa_enabled,expected_sw_sizes",
     [
-        # SWA enabled: FullAttentionSpec (0) + SlidingWindowSpec (2048/16=128)
+        # SWA enabled: full attention (0) + sliding window (2048/16=128)
         (True, [0, 128 + 1]),
-        # SWA disabled: only FullAttentionSpec (0)
+        # SWA disabled: only AttentionSpec (0)
         (False, [0]),
     ],
 )
@@ -628,12 +630,12 @@ def test_sync_device_after_direct_recv_gates(
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    "group_spec_types,remote_physical_per_logical,"
+    "group_kinds,remote_physical_per_logical,"
     "local_physical_per_logical,tp_ratio,remote_block_ids,"
     "expected_remote_block_ids",
     [
         pytest.param(
-            ("FullAttentionSpec", "SlidingWindowSpec"),
+            ("full_attention", "sliding_window"),
             2,
             2,
             1,
@@ -646,7 +648,7 @@ def test_sync_device_after_direct_recv_gates(
         # FA logical block 5 → kernel [170..203], block 6 → [204..237].
         # Mamba block unchanged.
         pytest.param(
-            ("FullAttentionSpec", "MambaSpec"),
+            ("full_attention", "mamba"),
             34,
             66,
             -4,
@@ -657,7 +659,7 @@ def test_sync_device_after_direct_recv_gates(
     ],
 )
 def test_read_blocks_for_req_expands_remote_ids(
-    group_spec_types,
+    group_kinds,
     remote_physical_per_logical,
     local_physical_per_logical,
     tp_ratio,
@@ -682,17 +684,16 @@ def test_read_blocks_for_req_expands_remote_ids(
         NixlConnectorWorker,
     )
     from vllm.v1.kv_cache_interface import (
-        FullAttentionSpec,
+        AttentionSpec,
         MambaSpec,
-        SlidingWindowSpec,
     )
 
-    spec_name_to_type = {
-        "FullAttentionSpec": FullAttentionSpec,
-        "SlidingWindowSpec": SlidingWindowSpec,
-        "MambaSpec": MambaSpec,
+    kind_to_spec_type = {
+        "full_attention": AttentionSpec,
+        "sliding_window": AttentionSpec,
+        "mamba": MambaSpec,
     }
-    resolved_types = tuple(spec_name_to_type[n] for n in group_spec_types)
+    resolved_types = tuple(kind_to_spec_type[n] for n in group_kinds)
 
     worker = object.__new__(NixlConnectorWorker)
     worker._physical_blocks_per_logical_kv_block = local_physical_per_logical
@@ -704,11 +705,12 @@ def test_read_blocks_for_req_expands_remote_ids(
     worker._bidirectional_kv_xfer_enabled = False
     worker.dcp_size = 1
     worker.dcp_rank = 0
-    worker._group_spec_types = resolved_types
+    worker._group_kinds = resolved_types
+    worker._group_is_scratch = (False,) * len(resolved_types)
     worker._has_mamba = any(t is MambaSpec for t in resolved_types)
 
     has_mamba = any(t is MambaSpec for t in resolved_types)
-    has_swa = any(t is SlidingWindowSpec for t in resolved_types)
+    has_swa = "sliding_window" in group_kinds
     worker.kv_cache_config = make_kv_cache_config(
         block_size=16, swa_enabled=has_swa, mamba_enabled=has_mamba
     )
@@ -802,12 +804,13 @@ def test_apply_prefix_caching_mamba_hybrid(
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
     )
-    from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
     worker = object.__new__(NixlConnectorWorker)
     worker._has_mamba = True
     worker._physical_blocks_per_logical_kv_block = local_physical_per_logical
-    worker._group_spec_types = (FullAttentionSpec, MambaSpec)
+    worker._group_spec_types = (AttentionSpec, MambaSpec)
+    worker._group_is_scratch = (False,) * len(worker._group_spec_types)
     worker.kv_cache_config = make_kv_cache_config(block_size=16, mamba_enabled=True)
 
     aligned_local, aligned_remote = worker._apply_prefix_caching(
@@ -882,12 +885,13 @@ def test_apply_prefix_caching_ssm_prefix_cache_hit(
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
     )
-    from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
     worker = object.__new__(NixlConnectorWorker)
     worker._has_mamba = True
     worker._physical_blocks_per_logical_kv_block = local_physical_per_logical
-    worker._group_spec_types = (FullAttentionSpec, MambaSpec)
+    worker._group_spec_types = (AttentionSpec, MambaSpec)
+    worker._group_is_scratch = (False,) * len(worker._group_spec_types)
     worker.kv_cache_config = make_kv_cache_config(block_size=16, mamba_enabled=True)
 
     aligned_local, aligned_remote = worker._apply_prefix_caching(
@@ -913,12 +917,13 @@ def test_apply_prefix_caching_ssm_unpairable_slots_rejected():
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
     )
-    from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
     worker = object.__new__(NixlConnectorWorker)
     worker._has_mamba = True
     worker._physical_blocks_per_logical_kv_block = 10
-    worker._group_spec_types = (FullAttentionSpec, MambaSpec)
+    worker._group_spec_types = (AttentionSpec, MambaSpec)
+    worker._group_is_scratch = (False,) * len(worker._group_spec_types)
     worker.kv_cache_config = make_kv_cache_config(block_size=16, mamba_enabled=True)
 
     with pytest.raises(AssertionError, match="unpairable SSM state slots"):
@@ -999,8 +1004,9 @@ def test_mismatched_physical_per_logical_fails_with_prefix_caching(
     )
     worker._has_mamba = True
     worker._group_spec_types = tuple(
-        type(g.kv_cache_spec) for g in worker.kv_cache_config.kv_cache_groups
+        type(uniform_spec(g)) for g in worker.kv_cache_config.kv_cache_groups
     )
+    worker._group_is_scratch = (False,) * len(worker._group_spec_types)
 
     local_block_ids = (local_fa_blocks, ssm_blocks)
     remote_block_ids = (remote_fa_blocks, ssm_blocks)
@@ -1159,6 +1165,7 @@ def _make_mock_worker_for_desc_ids(
     worker._transfer_layer_group_ids = ()
     worker._has_mamba = has_mamba
     worker._group_spec_types = group_spec_types
+    worker._group_is_scratch = (False,) * len(group_spec_types)
     worker.block_len_per_layer = block_len_per_layer or [100]
     worker._conv_decomp = None
     worker._is_csa_linear = False
@@ -1189,7 +1196,7 @@ def test_shared_nixl_region_broadcasts_every_group_block_table():
     worker = _make_mock_worker_for_desc_ids(
         num_regions=3,
         has_mamba=False,
-        group_spec_types=(FullAttentionSpec,) * 3,
+        group_spec_types=(AttentionSpec,) * 3,
         block_len_per_layer=[100] * 3,
     )
     worker.region_group_ids = [0, bw._SHARED_REGION_GROUP_ID, 2]
@@ -1226,12 +1233,12 @@ def test_nixl_region_sort_preserves_pipeline_layer_order():
 def test_get_block_descs_ids_hybrid_ssm():
     """Test _compute_desc_ids uses per-group strides for hybrid
     FA+SSM when ratio=1 (no kernel block size mismatch)."""
-    from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
     worker = _make_mock_worker_for_desc_ids(
         num_regions=2,
         has_mamba=True,
-        group_spec_types=(FullAttentionSpec, MambaSpec),
+        group_spec_types=(AttentionSpec, MambaSpec),
         block_len_per_layer=[100],
     )
 
@@ -1251,12 +1258,12 @@ def test_get_block_descs_ids_hybrid_ssm():
 @pytest.mark.cpu_test
 def test_get_block_descs_ids_selects_attention_regions_by_group():
     """Each attention group's blocks address only that group's regions."""
-    from vllm.v1.kv_cache_interface import FullAttentionSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec
 
     worker = _make_mock_worker_for_desc_ids(
         num_regions=3,
         has_mamba=False,
-        group_spec_types=(FullAttentionSpec, FullAttentionSpec),
+        group_spec_types=(AttentionSpec, AttentionSpec),
         block_len_per_layer=[100, 100, 100],
     )
     worker.region_group_ids = [0, 0, 1]
@@ -1284,12 +1291,12 @@ def test_get_block_descs_ids_selects_attention_regions_by_group():
 @pytest.mark.cpu_test
 def test_get_block_descs_ids_uses_per_region_pool_capacity():
     """Independent host and device pools use cumulative descriptor offsets."""
-    from vllm.v1.kv_cache_interface import FullAttentionSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec
 
     worker = _make_mock_worker_for_desc_ids(
         num_regions=2,
         has_mamba=False,
-        group_spec_types=(FullAttentionSpec, FullAttentionSpec),
+        group_spec_types=(AttentionSpec, AttentionSpec),
         block_len_per_layer=[100, 100],
     )
     worker.region_group_ids = [0, 1]
@@ -1310,7 +1317,7 @@ def test_get_block_descs_ids_uses_per_region_pool_capacity():
 def test_get_block_descs_ids_kernel_block_mismatch():
     """Test _compute_desc_ids uses different strides for FA
     (kernel blocks) vs SSM (logical blocks) when ratio > 1."""
-    from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
     ratio = 4
     logical_blocks = 100
@@ -1319,7 +1326,7 @@ def test_get_block_descs_ids_kernel_block_mismatch():
     worker = _make_mock_worker_for_desc_ids(
         num_regions=2,
         has_mamba=True,
-        group_spec_types=(FullAttentionSpec, MambaSpec),
+        group_spec_types=(AttentionSpec, MambaSpec),
         block_len_per_layer=[100],
     )
 
@@ -1341,12 +1348,12 @@ def test_get_block_descs_ids_hetero_block_size_hybrid():
     """With a block-size ratio, FA desc ids are ratio-expanded while SSM
     desc ids keep the unexpanded logical stride (state blocks are never
     sub-split)."""
-    from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
     worker = _make_mock_worker_for_desc_ids(
         num_regions=2,
         has_mamba=True,
-        group_spec_types=(FullAttentionSpec, MambaSpec),
+        group_spec_types=(AttentionSpec, MambaSpec),
         block_len_per_layer=[100],
     )
 
@@ -1385,10 +1392,11 @@ def test_map_block_ids_for_block_size_ratio_hybrid():
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
     )
-    from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
     worker = MagicMock(spec=NixlConnectorWorker)
-    worker._group_spec_types = (FullAttentionSpec, MambaSpec)
+    worker._group_spec_types = (AttentionSpec, MambaSpec)
+    worker._group_is_scratch = (False,) * len(worker._group_spec_types)
     _bind_worker_method(worker, "get_mapped_blocks")
     _bind_worker_method(worker, "_map_block_ids_for_block_size_ratio")
 
@@ -1402,7 +1410,8 @@ def test_map_block_ids_for_block_size_ratio_hybrid():
     assert remote == [list(range(30, 40)), [42]]
 
     # Attention-only full prefix hit: empty local list is preserved.
-    worker._group_spec_types = (FullAttentionSpec,)
+    worker._group_spec_types = (AttentionSpec,)
+    worker._group_is_scratch = (False,) * len(worker._group_spec_types)
     local, remote = worker._map_block_ids_for_block_size_ratio([[]], [[30, 31]], 4)
     assert local == []
 
@@ -2076,7 +2085,6 @@ def _make_hybrid_mla_kv_cache_config(num_blocks: int = 4):
     from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
     from vllm.v1.kv_cache_interface import (
         KVCacheConfig,
-        KVCacheGroupSpec,
         KVCacheTensor,
         MambaSpec,
         MLAAttentionSpec,
@@ -2111,9 +2119,9 @@ def _make_hybrid_mla_kv_cache_config(num_blocks: int = 4):
             for prefix in ("mla", "kda_a", "kda_b")
         ],
         kv_cache_groups=[
-            KVCacheGroupSpec(["mla.0", "mla.1"], mla_spec),
-            KVCacheGroupSpec(["kda_a.0", "kda_a.1"], kda_spec),
-            KVCacheGroupSpec(["kda_b.0", "kda_b.1"], kda_spec),
+            make_kv_cache_group(["mla.0", "mla.1"], mla_spec),
+            make_kv_cache_group(["kda_a.0", "kda_a.1"], kda_spec),
+            make_kv_cache_group(["kda_b.0", "kda_b.1"], kda_spec),
         ],
     )
 
@@ -2148,12 +2156,12 @@ def test_nixl_keeps_device_block_count_with_hisparse_host_pool(kernel_block_size
             ),
         ],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["mla.host"],
                 spec,
                 host_resident=True,
             ),
-            KVCacheGroupSpec(["mla.device"], spec),
+            make_kv_cache_group(["mla.device"], spec),
         ],
     )
     vllm_config = create_vllm_config(block_size=16)
@@ -2223,7 +2231,7 @@ def test_register_kv_caches_hybrid_mla_dual_purpose_regions():
     )
 
     kv_cache_config = _make_hybrid_mla_kv_cache_config()
-    unified_page = kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes
+    unified_page = uniform_spec(kv_cache_config.kv_cache_groups[0]).page_size_bytes
     vllm_config = create_vllm_config(block_size=12)
     # The engine rewrites this global value to the smallest scheduler-group
     # block size. NIXL must retain the transferable groups' 12-token geometry.
@@ -2335,6 +2343,7 @@ def test_push_write_hybrid_mla_replicates_attention():
     worker._has_mamba = True
     worker._is_csa_linear = False
     worker._group_spec_types = (MLAAttentionSpec, MambaSpec)
+    worker._group_is_scratch = (False,) * len(worker._group_spec_types)
     worker.transfer_topo = MagicMock()
     worker.transfer_topo.tp_ratio.return_value = -2
     remote_info = MagicMock()

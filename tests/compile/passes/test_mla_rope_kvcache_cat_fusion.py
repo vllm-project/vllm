@@ -149,7 +149,7 @@ class MLARoPEKVCacheCatTestModel(torch.nn.Module):
 
         # Initialize attn MetadataBuilder
         self.builder = self.attn_backend.get_builder_cls()(
-            kv_cache_spec=self.mla_attn.get_kv_cache_spec(vllm_config),
+            kv_cache_spec=self.mla_attn.get_kv_cache_config(vllm_config).spec,
             layer_names=[self.mla_attn.layer_name],
             vllm_config=vllm_config,
             device=device,

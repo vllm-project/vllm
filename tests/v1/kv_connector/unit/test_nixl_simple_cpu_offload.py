@@ -13,6 +13,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from tests.v1.kv_connector.unit.offloading_connector.utils import make_kv_cache_group
 from tests.v1.kv_connector.unit.utils import (
     create_model_runner_output,
     create_request,
@@ -32,12 +33,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector i
 )
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheTensor,
-    SlidingWindowSpec,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
@@ -141,9 +141,9 @@ def _make_kv_cache_config(
     """
     fa_layers = ["layer0", "layer2"]
     groups = [
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             fa_layers,
-            FullAttentionSpec(
+            AttentionSpec(
                 block_size=BLOCK_SIZE,
                 num_kv_heads=NUM_KV_HEADS,
                 head_size=HEAD_SIZE,
@@ -165,15 +165,16 @@ def _make_kv_cache_config(
     if swa_enabled:
         sw_layers = ["layer1", "layer3"]
         groups.append(
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 sw_layers,
-                SlidingWindowSpec(
+                AttentionSpec(
                     block_size=BLOCK_SIZE,
                     num_kv_heads=NUM_KV_HEADS,
                     head_size=HEAD_SIZE,
                     dtype=DTYPE,
-                    sliding_window=128,
                 ),
+                SlidingWindowManager,
+                SlidingWindowManager.Config(sliding_window=128),
             )
         )
         tensors.append(

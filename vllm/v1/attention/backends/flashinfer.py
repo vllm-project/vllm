@@ -92,7 +92,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     KVQuantMode,
     is_quantized_kv_cache,
-    iter_layer_specs,
 )
 from vllm.v1.utils import CpuGpuBuffer
 
@@ -1152,7 +1151,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if vllm_config.parallel_config.decode_context_parallel_size > 1:
             return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
-        kv_specs = iter_layer_specs(kv_cache_spec)
+        kv_specs = (kv_cache_spec,)
         num_qo_heads = vllm_config.model_config.get_num_attention_heads(
             vllm_config.parallel_config
         )

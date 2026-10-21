@@ -325,18 +325,18 @@ class DeepseekV41ModelState(DefaultModelState):
         model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     ) -> dict[str, Any]:
         if self._replay is None:
-            specs = [group.kv_cache_spec for group in kv_cache_config.kv_cache_groups]
+            groups = kv_cache_config.kv_cache_groups
             self._replay = (
-                max(spec.prefix_replay_tokens for spec in specs),
+                max(group.prefix_replay_tokens for group in groups),
                 torch.tensor(
-                    [i for i, spec in enumerate(specs) if spec.prefix_cacheable],
+                    [i for i, group in enumerate(groups) if group.prefix_cacheable],
                     dtype=torch.int32,
                     device=self.device,
                 ),
             )
             if self.decoder_replay_layers is not None:
                 self._kept_slot_mappings = torch.zeros(
-                    len(specs),
+                    len(groups),
                     self.max_num_tokens,
                     dtype=torch.int64,
                     device=self.device,
@@ -529,8 +529,12 @@ class DeepseekV41ModelState(DefaultModelState):
         )
         if self._replay_attn_groups is None:
             self._replay_attn_groups = (
-                self._copy_attn_groups(attn_groups, layers.metadata_prefixes),
-                self._copy_attn_groups(attn_groups, {layers.first_swa_prefix}),
+                self._copy_attn_groups(
+                    attn_groups, kv_cache_config, layers.metadata_prefixes
+                ),
+                self._copy_attn_groups(
+                    attn_groups, kv_cache_config, {layers.first_swa_prefix}
+                ),
             )
         replay_groups, first_swa_groups = self._replay_attn_groups
         attn_metadata = super().prepare_attn(
@@ -673,12 +677,15 @@ class DeepseekV41ModelState(DefaultModelState):
         return True, agreed[1]
 
     def _copy_attn_groups(
-        self, attn_groups: list[list[AttentionGroup]], prefixes: set[str]
+        self,
+        attn_groups: list[list[AttentionGroup]],
+        kv_cache_config: KVCacheConfig,
+        prefixes: set[str],
     ) -> list[list[AttentionGroup]]:
         """Copies of the groups holding any of ``prefixes``, with builders of their
         own like a microbatch's: a builder keeps the metadata it built."""
         own_groups = []
-        for groups in attn_groups:
+        for groups, kv_cache_group in zip(attn_groups, kv_cache_config.kv_cache_groups):
             copies = []
             for group in groups:
                 if prefixes.isdisjoint(group.layer_names):
@@ -688,6 +695,7 @@ class DeepseekV41ModelState(DefaultModelState):
                     self.vllm_config,
                     self.device,
                     group.kernel_block_size,
+                    kv_cache_group=kv_cache_group,
                 )
                 copies.append(copy)
             own_groups.append(copies)

@@ -57,7 +57,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     get_base_request_id,
 )
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.outputs import KVConnectorOutput
 
 from .utils import create_request, expand_strided_descs, make_nixl_push_scheduler
@@ -399,7 +399,8 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         # Single non-hybrid attention group, matching the stub block id lists.
         w._has_mamba = False
         w._is_csa_linear = False
-        w._group_spec_types = (FullAttentionSpec,)
+        w._group_spec_types = (AttentionSpec,)
+        w._group_is_scratch = (False,)
         w._engine_ttl = 0.0
         w._engine_last_active = {}
         w._engine_by_address = {}

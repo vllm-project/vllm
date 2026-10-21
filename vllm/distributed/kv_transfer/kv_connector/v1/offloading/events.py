@@ -33,11 +33,7 @@ from vllm.v1.core.kv_cache_utils import (
     resolve_block_hashes,
     to_event_extra_keys,
 )
-from vllm.v1.kv_cache_interface import (
-    KVCacheGroupSpec,
-    get_kv_cache_spec_kind,
-    get_kv_cache_spec_sliding_window,
-)
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 from vllm.v1.kv_offload.base import (
     Medium,
     OffloadingEvent,
@@ -69,10 +65,9 @@ class OffloadingEventGroupSpec(NamedTuple):
 def get_offloading_event_group_spec(
     kv_cache_group: KVCacheGroupSpec,
 ) -> OffloadingEventGroupSpec:
-    kv_cache_spec = kv_cache_group.kv_cache_spec
     return OffloadingEventGroupSpec(
-        kv_cache_spec_kind=get_kv_cache_spec_kind(kv_cache_spec).value,
-        kv_cache_spec_sliding_window=get_kv_cache_spec_sliding_window(kv_cache_spec),
+        kv_cache_spec_kind=kv_cache_group.kind.value,
+        kv_cache_spec_sliding_window=kv_cache_group.sliding_window,
     )
 
 

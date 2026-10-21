@@ -43,7 +43,7 @@ from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
-from vllm.v1.kv_cache_interface import KVCacheConfig, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.topk_topp_sampler import (
     empty_exponential_noise_like,
@@ -1333,11 +1333,11 @@ class SpecDecodeBaseProposer:
         draft_attn_layer_names = set(all_attn_layers) - target_attn_layer_names
         for name in draft_attn_layer_names:
             all_attn_layers[name].is_draft_layer = True
-        # Filter to only layers that have KV cache specs.
+        # Filter to only layers that have a KV cache.
         self._draft_attn_layer_names = {
             name
             for name in draft_attn_layer_names
-            if all_attn_layers[name].get_kv_cache_spec(self.vllm_config) is not None
+            if all_attn_layers[name].get_kv_cache_config(self.vllm_config) is not None
         }
 
         # Even if the target model is multimodal, we can also use
@@ -1723,15 +1723,15 @@ class SpecDecodeBaseProposer:
 
         # Find which kv_cache_group the draft layers belong to
         self.validate_same_kv_cache_group(kv_cache_config)
-        kv_cache_spec = None
+        draft_group = None
         for gid, group in enumerate(kv_cache_config.kv_cache_groups):
             if self._draft_attn_layer_names & set(group.layer_names):
                 self.kv_cache_gid = gid
-                kv_cache_spec = group.kv_cache_spec
+                draft_group = group
                 break
 
         attention_groups: dict[tuple[str, str], AttentionGroup] = {}
-        if kv_cache_spec is not None:
+        if draft_group is not None:
             # _draft_attn_layer_names is a set; iterate in sorted order so
             # that attention_groups (and anything derived from its first
             # element) is deterministic across processes.
@@ -1739,11 +1739,7 @@ class SpecDecodeBaseProposer:
                 attn_backend = all_attn_layers[layer_name].get_attn_backend()
                 backend_key = attn_backend.full_cls_name()
                 if backend_key not in attention_groups:
-                    layer_kv_cache_spec = kv_cache_spec
-                    if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
-                        layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[
-                            layer_name
-                        ]
+                    layer_kv_cache_spec = draft_group.kv_cache_specs[layer_name]
 
                     kernel_block_size = (
                         kernel_block_sizes[self.kv_cache_gid]
@@ -1761,6 +1757,7 @@ class SpecDecodeBaseProposer:
                         self.vllm_config,
                         self.device,
                         kernel_block_size=kernel_block_size,
+                        kv_cache_group=draft_group,
                     )
                     attention_groups[backend_key] = attn_group
                 else:

@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.v1.core.utils import full_layer, new_kv_cache_group, new_kv_cache_spec
 from vllm.platforms import Platform
 from vllm.v1.core.kv_cache_config_builder import (
     KVCacheConfigBuilder,
@@ -15,7 +16,7 @@ from vllm.v1.core.kv_cache_planning import (
     DefaultKVCacheConfigBuilder,
     get_kv_cache_groups_from_builder,
 )
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheGroupSpec
 
 
 def _make_vllm_config(supports_grouping: bool = False) -> MagicMock:
@@ -49,7 +50,7 @@ class _GroupedModel:
     """A test model class with a ``get_kv_cache_groups`` classmethod."""
 
     @classmethod
-    def get_kv_cache_groups(cls, vllm_config, kv_cache_spec):
+    def get_kv_cache_groups(cls, vllm_config, layer_configs):
         return []
 
 
@@ -57,10 +58,8 @@ class _PartialGroupedModel:
     """A test model class whose grouping omits layers."""
 
     @classmethod
-    def get_kv_cache_groups(cls, vllm_config, kv_cache_spec):
-        from vllm.v1.kv_cache_interface import KVCacheGroupSpec
-
-        return [KVCacheGroupSpec(["a"], kv_cache_spec["a"])]
+    def get_kv_cache_groups(cls, vllm_config, layer_configs):
+        return [KVCacheGroupSpec.from_layers({"a": layer_configs["a"]})]
 
 
 class TestPlatformHookResolution:
@@ -130,8 +129,8 @@ class TestModelGroupingPriority:
 class TestCoreChecksGrouping:
     """Core checks the grouping whether a model or a platform produced it."""
 
-    _SPEC = FullAttentionSpec(
-        block_size=16, num_kv_heads=1, head_size=128, dtype="float16"
+    _LAYER = full_layer(
+        AttentionSpec(block_size=16, num_kv_heads=1, head_size=128, dtype="float16")
     )
 
     def test_model_grouping_is_checked(self):
@@ -142,29 +141,32 @@ class TestCoreChecksGrouping:
         )
         with pytest.raises(AssertionError, match="miss layers"):
             get_kv_cache_groups_from_builder(
-                DefaultKVCacheConfigBuilder(), cfg, {"a": self._SPEC, "b": self._SPEC}
+                DefaultKVCacheConfigBuilder(), cfg, {"a": self._LAYER, "b": self._LAYER}
             )
 
     @pytest.mark.parametrize(
         ("groups", "match"),
         [
-            ([KVCacheGroupSpec(["a"], _SPEC)], "miss layers"),
+            ([new_kv_cache_group(["a"], _LAYER)], "miss layers"),
             (
-                [KVCacheGroupSpec(["a", "b"], _SPEC), KVCacheGroupSpec(["b"], _SPEC)],
+                [
+                    new_kv_cache_group(["a", "b"], _LAYER),
+                    new_kv_cache_group(["b"], _LAYER),
+                ],
                 "overlaps",
             ),
         ],
     )
     def test_platform_grouping_is_checked(self, groups, match):
         class FixedGroupsBuilder(DefaultKVCacheConfigBuilder):
-            def get_kv_cache_groups(self, vllm_config, kv_cache_spec):
+            def get_kv_cache_groups(self, vllm_config, layer_configs):
                 return groups
 
         with pytest.raises(AssertionError, match=match):
             get_kv_cache_groups_from_builder(
                 FixedGroupsBuilder(),
                 _make_vllm_config(),
-                {"a": self._SPEC, "b": self._SPEC},
+                {"a": self._LAYER, "b": self._LAYER},
             )
 
 
@@ -188,30 +190,27 @@ class TestProjectionPreservesGroupMetadata:
 
     def test_partial_projection_preserves_metadata(self):
         from vllm.v1.core.kv_cache_planning import _project_kv_cache_groups_to_worker
-        from vllm.v1.kv_cache_interface import (
-            FullAttentionSpec,
-            KVCacheGroupRole,
-        )
+        from vllm.v1.kv_cache_interface import KVCacheGroupRole
 
-        spec = FullAttentionSpec(
-            block_size=16, num_kv_heads=1, head_size=128, dtype="float16"
+        layer = full_layer(
+            AttentionSpec(block_size=16, num_kv_heads=1, head_size=128, dtype="float16")
         )
-        group = MagicMock()
-        group.layer_names = ["layer1", "layer2", "layer3"]
-        group.kv_cache_spec = spec
-        group.is_eagle_group = False
-        group.host_resident = True
-        group.enable_kv_transfer = False
-        group.role = KVCacheGroupRole.HISPARSE_SOURCE
+        group = new_kv_cache_group(
+            ["layer1", "layer2", "layer3"],
+            layer,
+            host_resident=True,
+            enable_kv_transfer=False,
+            role=KVCacheGroupRole.HISPARSE_INDEXER,
+        )
 
         projected = _project_kv_cache_groups_to_worker(
-            [group], {"layer1": spec, "layer2": spec}
+            [group], {"layer1": layer, "layer2": layer}
         )
         assert len(projected) == 1
         p = projected[0]
         assert p.host_resident is True
         assert p.enable_kv_transfer is False
-        assert p.role is KVCacheGroupRole.HISPARSE_SOURCE
+        assert p.role is KVCacheGroupRole.HISPARSE_INDEXER
         assert p.layer_names == ["layer1", "layer2"]
 
 
@@ -228,23 +227,16 @@ class TestBytesPerBlockProbe:
             _pool_bytes_per_block,
             _pool_bytes_per_block_from_builder,
         )
-        from vllm.v1.kv_cache_interface import (
-            FullAttentionSpec,
-            KVCacheGroupSpec,
-        )
 
-        spec = FullAttentionSpec(
+        spec = AttentionSpec(
             block_size=16, num_kv_heads=1, head_size=128, dtype=torch.float16
         )
         vc = VllmConfig(
             model_config=ModelConfig(max_model_len=100),
             cache_config=CacheConfig(block_size=16),
         )
-        resolve_kv_cache_layout(vc, [["BLHNC"]], [spec])
-        groups = [
-            KVCacheGroupSpec(["a"], spec),
-            KVCacheGroupSpec(["b"], spec),
-        ]
+        resolve_kv_cache_layout(vc, [["BLHNC"]], [full_layer(spec)])
+        groups = [new_kv_cache_group([name], spec) for name in "ab"]
 
         pure_c = _pool_bytes_per_block(vc, groups)
         vc.cache_config.num_gpu_blocks_override = 500
@@ -261,11 +253,7 @@ class TestBytesPerBlockProbe:
         """A placement with one allocation per group cannot be sized from one
         backing; the builder must declare its per-block bytes."""
         from vllm.v1.core.kv_cache_planning import _pool_bytes_per_block_from_builder
-        from vllm.v1.kv_cache_interface import (
-            KVCacheConfig,
-            KVCacheGroupSpec,
-            KVCacheTensor,
-        )
+        from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor
 
         class PerGroupAllocationBuilder(DefaultKVCacheConfigBuilder):
             def get_kv_cache_config_from_groups(self, vllm_config, groups, num_blocks):
@@ -285,7 +273,7 @@ class TestBytesPerBlockProbe:
 
         vc = _make_vllm_config()
         vc.cache_config.num_gpu_blocks_override = None
-        groups = [KVCacheGroupSpec([name], MagicMock()) for name in "ab"]
+        groups = [new_kv_cache_group([name], new_kv_cache_spec()) for name in "ab"]
         builder = PerGroupAllocationBuilder()
         if declares_pool_bytes:
             assert _pool_bytes_per_block_from_builder(builder, vc, groups) == 96

@@ -26,11 +26,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     TransferRegion,
 )
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
 )
 
+from .offloading_connector.utils import make_kv_cache_group
 from .test_mooncake_connector import FakeMooncakeWrapper, patch_worker_dependencies
 from .utils import (
     create_request,
@@ -47,9 +47,9 @@ from .utils import (
 @pytest.mark.parametrize(
     "swa_enabled,expected_blocks_per_sw",
     [
-        # SWA enabled: FullAttentionSpec (0) + SlidingWindowSpec (2048/16=128+1)
+        # SWA enabled: full attention (0) + sliding window (2048/16=128+1)
         (True, [0, 128 + 1]),
-        # SWA disabled: only FullAttentionSpec (0)
+        # SWA disabled: only AttentionSpec (0)
         (False, [0]),
     ],
 )
@@ -505,18 +505,18 @@ def test_worker_is_hma_required_multiple_full_attention_groups():
         num_blocks=100,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer0"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=4,
                     head_size=16,
                     dtype=torch.float16,
                 ),
             ),
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer1"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=2 * block_size,
                     num_kv_heads=4,
                     head_size=16,

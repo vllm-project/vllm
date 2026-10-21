@@ -14,17 +14,17 @@ from vllm.benchmarks.forward.main import run_case
 from vllm.benchmarks.forward.profile import summarize
 from vllm.benchmarks.forward.shapes import jitter_kv_lens, parse_case
 from vllm.platforms import current_platform
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 
 
 def _group(block_size: int, replay: int = 0, dcp_sharded: bool = False):
     return SimpleNamespace(
-        kv_cache_spec=SimpleNamespace(
-            block_size=block_size,
-            prefix_replay_tokens=replay,
-            dcp_sharded=dcp_sharded,
-        )
+        block_size=block_size,
+        prefix_replay_tokens=replay,
+        dcp_sharded=dcp_sharded,
+        manager_config=FullAttentionManager.Config(),
     )
 
 

@@ -25,6 +25,7 @@ from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -297,7 +298,9 @@ def _kv_cache_config_with_ssu(
     return KVCacheConfig(
         num_blocks=1,
         kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(layer_names=["l0"], kv_cache_spec=spec)],
+        kv_cache_groups=[
+            KVCacheGroupSpec.from_layers({"l0": MambaManager.layer_config(spec)})
+        ],
     )
 
 

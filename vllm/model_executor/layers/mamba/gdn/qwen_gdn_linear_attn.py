@@ -80,7 +80,8 @@ from vllm.v1.attention.backends.gdn_attn import (
     FLASHINFER_GDN_CHECKPOINT_ALIGNMENT,
     GDNAttentionMetadata,
 )
-from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+from vllm.v1.kv_cache_interface import KVCacheLayerConfig
 from vllm.v1.worker.workspace import current_workspace_manager
 
 # Optional ROCm AITER Triton kernels for the GDN decode path.
@@ -719,17 +720,24 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     def get_prefill_checkpoint_alignment(self) -> int | None:
         return self._checkpoint_alignment
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
-        spec = super().get_kv_cache_spec(vllm_config)
-        if not self._exports_checkpoints or not isinstance(spec, MambaSpec):
-            return spec
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig | None:
+        layer_config = super().get_kv_cache_config(vllm_config)
+        if not self._exports_checkpoints or layer_config is None:
+            return layer_config
+        config = layer_config.manager_config
+        assert isinstance(config, MambaManager.Config)
         # FlashInfer emits states at one stride for the whole batch, the gcd of
         # the offsets; keeping every offset on the prefix-cache grid keeps that
         # stride a multiple of the grid, which bounds the states emitted.
         return replace(
-            spec,
-            num_prefill_checkpoint_blocks=1,
-            prefill_checkpoint_alignment=get_mamba_prefill_checkpoint_grid(vllm_config),
+            layer_config,
+            manager_config=replace(
+                config,
+                num_prefill_checkpoint_blocks=1,
+                prefill_checkpoint_alignment=get_mamba_prefill_checkpoint_grid(
+                    vllm_config
+                ),
+            ),
         )
 
     @functools.cached_property

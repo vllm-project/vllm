@@ -76,14 +76,13 @@ from vllm.v1.core.kv_cache_utils import (
     maybe_convert_block_hash,
     resolve_kv_cache_block_sizes,
 )
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheSpec,
+    KVCacheGroupSpec,
     MambaSpec,
     MLAAttentionSpec,
-    SlidingWindowMLASpec,
-    UniformTypeKVCacheSpecs,
     group_kernel_blocks,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
@@ -1548,8 +1547,12 @@ class MooncakeStoreWorker:
             return False
 
         # Subclasses may use different sharding or cache-lifetime semantics.
+        group = self._kv_cache_groups[0]
         return (
-            type(self._kv_cache_groups[0].kv_cache_spec) is FullAttentionSpec
+            group.manager_cls is FullAttentionManager
+            and all(
+                type(spec) is AttentionSpec for spec in group.kv_cache_specs.values()
+            )
             and str(extra_config.get("enable_cross_layers_blocks", "False")).lower()
             != "true"
         )
@@ -1631,9 +1634,7 @@ class MooncakeStoreWorker:
         token_dbs: list[ChunkedTokenDatabase] = []
         for group_idx, group in enumerate(self._kv_cache_groups):
             hash_block_size = (
-                self.hash_block_size
-                if group.kv_cache_spec.prefix_cacheable
-                else group.kv_cache_spec.block_size
+                self.hash_block_size if group.prefix_cacheable else group.block_size
             )
             group_tp_rank = self.tp_rank
             if layout_cls is None:
@@ -1648,7 +1649,7 @@ class MooncakeStoreWorker:
                 assert self.store_tp_size is not None
                 store_layout = layout_cls(
                     group_metadata,
-                    group.kv_cache_spec.block_size,
+                    group.block_size,
                     hash_block_size,
                     local_tp_size=self.tp_size,
                     store_tp_size=self.store_tp_size,
@@ -1658,7 +1659,7 @@ class MooncakeStoreWorker:
             token_dbs.append(
                 ChunkedTokenDatabase(
                     group_metadata,
-                    group.kv_cache_spec.block_size,
+                    group.block_size,
                     hash_block_size=hash_block_size,
                     store_layout=store_layout,
                 )
@@ -1672,22 +1673,15 @@ class MooncakeStoreWorker:
             return None
         return torch.cuda.use_mem_pool(self._mem_pool)
 
-    def _spec_tp_replication_factor(self, spec: KVCacheSpec) -> int:
+    def _group_tp_replication_factor(self, group: KVCacheGroupSpec) -> int:
         if self.dcp_size > 1:
             return 1
-        inner_specs = (
-            tuple(spec.kv_cache_specs.values())
-            if isinstance(spec, UniformTypeKVCacheSpecs)
-            else (spec,)
-        )
+        inner_specs = group.kv_cache_specs.values()
         # Any rank-specific state makes the whole packed value rank-specific.
         if any(isinstance(inner, MambaSpec) for inner in inner_specs):
             return 1
         # A pure MLA packed value is replicated on every TP rank.
-        if all(
-            isinstance(inner, (MLAAttentionSpec, SlidingWindowMLASpec))
-            for inner in inner_specs
-        ):
+        if all(isinstance(inner, MLAAttentionSpec) for inner in inner_specs):
             return self.tp_size
         return max(1, self.tp_size // self.num_kv_head)
 
@@ -1698,8 +1692,7 @@ class MooncakeStoreWorker:
         ``tp_size // num_kv_head``.
         """
         return tuple(
-            self._spec_tp_replication_factor(group.kv_cache_spec)
-            for group in self._kv_cache_groups
+            self._group_tp_replication_factor(group) for group in self._kv_cache_groups
         )
 
     def _init_lookup_key_prefixes(self) -> None:
@@ -1898,8 +1891,7 @@ class MooncakeStoreWorker:
                 supports_group_ids=self._supports_group_ids,
                 record_operation=self._record_kv_connector_operation,
                 group_participates=[
-                    group.kv_cache_spec.prefix_cacheable
-                    for group in self._kv_cache_groups
+                    group.prefix_cacheable for group in self._kv_cache_groups
                 ],
             )
             self.kv_send_thread.start()
@@ -1919,8 +1911,7 @@ class MooncakeStoreWorker:
                 record_operation=self._record_kv_connector_operation,
                 request_queue=self.recv_request_queue,
                 group_participates=[
-                    group.kv_cache_spec.prefix_cacheable
-                    for group in self._kv_cache_groups
+                    group.prefix_cacheable for group in self._kv_cache_groups
                 ],
                 is_hma_required=self._is_hma_required,
             )
@@ -2115,7 +2106,7 @@ class MooncakeStoreWorker:
         fine_grained = self.coord.enable_partial_hash_hits
         lookup_masks = None if fine_grained else self.coord.lookup_mask(token_len)
         for g_idx, db in enumerate(self.token_dbs):
-            if not self._kv_cache_groups[g_idx].kv_cache_spec.prefix_cacheable:
+            if not self._kv_cache_groups[g_idx].prefix_cacheable:
                 continue
             spec_block_size = db.block_size
             key_prefixes = self._lookup_key_prefixes[g_idx]
@@ -2125,8 +2116,8 @@ class MooncakeStoreWorker:
                 group_hashes: Sequence[BlockHash] = block_hashes
             else:
                 lookup_mask = lookup_masks[g_idx]  # type: ignore[index]
-                group_hashes = self.coord.block_hashes_for_spec(
-                    block_hashes, self._kv_cache_groups[g_idx].kv_cache_spec
+                group_hashes = self.coord.block_hashes_for_block_size(
+                    block_hashes, self._kv_cache_groups[g_idx].block_size
                 )
                 max_chunks = min(len(group_hashes), cdiv(token_len, spec_block_size))
                 mask_limit = (
@@ -2227,7 +2218,7 @@ class MooncakeStoreWorker:
         boundaries = []
         hit_boundary_hash_idx = hit_length // self.hash_block_size - 1
         for group_id, db in enumerate(self.token_dbs):
-            if not self._kv_cache_groups[group_id].kv_cache_spec.prefix_cacheable:
+            if not self._kv_cache_groups[group_id].prefix_cacheable:
                 # Scratch groups are never stored, so they have no tail key.
                 continue
             chunk_id = cdiv(hit_length, db.block_size) - 1

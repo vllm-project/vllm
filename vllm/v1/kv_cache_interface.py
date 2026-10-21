@@ -3,16 +3,14 @@
 
 from __future__ import annotations
 
-import copy
 import math
-from collections import Counter
-from collections.abc import Collection, Sequence
-from dataclasses import dataclass, field, fields, replace
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from enum import Enum, IntEnum
 from fractions import Fraction
 from functools import cached_property
 from math import prod
-from typing import TYPE_CHECKING, Self, TypeVar
+from typing import TYPE_CHECKING, ClassVar, Self
 
 import torch
 
@@ -21,16 +19,13 @@ from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_layout import _DIM_B, _DIM_L, KVCacheLayout
-from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.attention.backend import MultipleOf
+    from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
 
 logger = init_logger(__name__)
-
-_SpecT = TypeVar("_SpecT", bound="KVCacheSpec")
-
 
 # ---------------------------------------------------------------------------
 # KV cache quantization mode
@@ -138,28 +133,6 @@ def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
     return get_kv_quant_mode(kv_cache_dtype) != KVQuantMode.NONE
 
 
-def replace_as(
-    spec: KVCacheSpec,
-    target_cls: type[_SpecT],
-    *,
-    drop: Collection[str] = (),
-    **changes,
-) -> _SpecT:
-    """``dataclasses.replace``, but rebuilding *spec* as *target_cls*
-      e.g. ``SlidingWindowSpec`` -> ``FullAttentionSpec``
-
-    Every field of *spec* must exist on *target_cls* unless named in *drop*;
-    fields only *target_cls* has keep their default values.
-    """
-    kwargs = {
-        f.name: getattr(spec, f.name)
-        for f in fields(spec)
-        if f.init and f.name not in drop
-    }
-    kwargs.update(changes)
-    return target_cls(**kwargs)
-
-
 def kv_cache_uses_per_token_head_scales(kv_cache_dtype: str) -> bool:
     """Return True if *kv_cache_dtype* needs per-token-head scales."""
     return get_kv_quant_mode(kv_cache_dtype).is_per_token_head
@@ -184,8 +157,24 @@ class SparseCacheRole(str, Enum):
 
 
 @dataclass(frozen=True)
+class ManagerConfig:
+    """Allocation policy of a ``SingleTypeKVCacheManager``.
+
+    Each manager subclasses this as its nested ``Config``, so a config also
+    names its manager. Layers whose configs compare equal may share a block
+    table.
+    """
+
+    manager_cls: ClassVar[type[SingleTypeKVCacheManager]]
+
+
+@dataclass(frozen=True)
 class KVCacheSpec:
-    """A base class for specifying the KV cache format of one layer."""
+    """The tensor layout of one layer's KV cache.
+
+    Allocation policy (windows, recycling, prefix caching) lives on the
+    layer's ``SingleTypeKVCacheManager.Config``, see ``KVCacheLayerConfig``.
+    """
 
     # number of tokens in a block
     block_size: int
@@ -196,10 +185,6 @@ class KVCacheSpec:
     """Required byte alignment between physical blocks, including packed layers.
     ``MultipleOf(n)``: whole kernel blocks, when blocks are split into kernel
     blocks of up to ``n`` tokens."""
-
-    is_draft: bool = field(default=False, kw_only=True, compare=False)
-    """Whether a draft model owns this layer; excluded from equality so it never
-    affects grouping."""
 
     def __post_init__(self):
         alignment = self.block_stride_alignment
@@ -217,16 +202,6 @@ class KVCacheSpec:
         if kernel_block_size == self.block_size:
             return 1
         return self.copy_with_new_block_size(kernel_block_size).page_size_bytes
-
-    @property
-    def prefix_cacheable(self) -> bool:
-        """Whether this spec's group participates in prefix caching."""
-        return True
-
-    @property
-    def prefix_replay_tokens(self) -> int:
-        """DeepSeek-V4.1 only: bounded replay. Currently only for DSV41 SWA."""
-        return 0
 
     @property
     def num_heads(self) -> int:
@@ -259,56 +234,9 @@ class KVCacheSpec:
             return kernel_block_size // self.tokens_per_state
         return 1
 
-    @property
-    def block_table_token_alignment(self) -> int | None:
-        return 128
-
-    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        """The maximum possible memory usage of this KV cache in bytes.
-
-        Returns:
-            The KV cache size in bytes
-
-        """
-        raise NotImplementedError
-
-    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
-        """The number of block table entries needed per request, i.e. the row
-        length of the worker-side block table for this cache group.
-
-        Args:
-            vllm_config: The vllm config.
-            max_len: The maximum sequence length to size for, including the
-                encoder length for encoder-decoder models.
-
-        """
-        return cdiv(max_len, self.block_size)
-
     def copy_with_new_block_size(self, block_size: int) -> Self:
         """Create a new KVCacheSpec from self but replacing the block size."""
         return replace(self, block_size=block_size)
-
-    @classmethod
-    def merge(cls, specs: list[Self]) -> Self:
-        """Merge a list of KVCacheSpec objects into a single KVCacheSpec object."""
-        if not all(spec == specs[0] for spec in specs[1:]):
-            raise AssertionError(
-                "All layers in the same KV cache group must be the same."
-            )
-        return copy.deepcopy(specs[0])
-
-    def is_uniform_with_collection(
-        self, kv_cache_specs: dict[str, KVCacheSpec]
-    ) -> bool:
-        """Whether this KVCacheSpec is uniform with all specs of all layers."""
-        uniform_type_base_spec = KVCacheSpecRegistry.get_uniform_type_base_spec(self)
-        assert uniform_type_base_spec is not None, (
-            f"Unsupported KV cache spec type: {type(self)}. "
-            "Please register it using @register_kv_cache_spec decorator."
-        )
-        return all(
-            isinstance(spec, uniform_type_base_spec) for spec in kv_cache_specs.values()
-        )
 
     @property
     def has_layer_views(self) -> bool:
@@ -317,15 +245,6 @@ class KVCacheSpec:
         Specs without a per-layer shape keep the raw backing tensor and lay it
         out themselves. They also have no attention module of their own, so
         they take no part in attention-backend or kernel-block selection.
-        """
-        return True
-
-    @property
-    def uses_slot_mapping(self) -> bool:
-        """Whether the worker computes a per-token slot mapping for this spec.
-
-        Specs that address their pages themselves (raw storage, ring buffers)
-        take no slot mapping row.
         """
         return True
 
@@ -468,65 +387,14 @@ def create_kv_cache_views(
 
 
 @dataclass(frozen=True, kw_only=True)
-class HiSparseHotSpec(KVCacheSpec):
-    """Ephemeral per-request HiSparse hot-cache allocation."""
-
-    page_size: int
-    blocks_per_request: int
-
-    @property
-    def prefix_cacheable(self) -> bool:
-        return False
-
-    @property
-    def page_size_bytes(self) -> int:
-        return self.page_size
-
-    @property
-    def block_table_token_alignment(self) -> int | None:
-        return None
-
-    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        return self.blocks_per_request * self.page_size
-
-    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
-        return self.blocks_per_request
-
-    @property
-    def has_layer_views(self) -> bool:
-        return False
-
-    @property
-    def uses_slot_mapping(self) -> bool:
-        return False
-
-
-@dataclass(frozen=True, kw_only=True)
-class HiSparseResidentSpec(KVCacheSpec):
-    """Reclaimable GPU-resident pages for host-backed HiSparse KV."""
+class HiSparsePageSpec(KVCacheSpec):
+    """Raw pages HiSparse lays out itself (hot and GPU-resident caches)."""
 
     page_size: int
 
     @property
-    def prefix_cacheable(self) -> bool:
-        return False
-
-    @property
     def page_size_bytes(self) -> int:
         return self.page_size
-
-    def max_admission_blocks_per_request(
-        self, max_in_flight_tokens: int, max_model_len: int
-    ) -> int:
-        num_tokens = min(max_in_flight_tokens, max_model_len)
-        return cdiv(num_tokens, self.block_size)
-
-    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        max_blocks = self.max_admission_blocks_per_request(
-            max_in_flight_tokens=vllm_config.max_in_flight_tokens,
-            max_model_len=vllm_config.model_config.max_model_len,
-        )
-        return max_blocks * self.page_size
 
     @property
     def has_layer_views(self) -> bool:
@@ -592,116 +460,8 @@ class AttentionSpec(KVCacheSpec):
         """
         return self.unpadded_page_size_bytes
 
-    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
-        parallel_config = vllm_config.parallel_config
-        kv_shard_count = (
-            parallel_config.decode_context_parallel_size if self.dcp_sharded else 1
-        )
-        return cdiv(max_len, self.block_size * kv_shard_count)
 
-
-@dataclass(frozen=True, kw_only=True)
-class FullAttentionSpec(AttentionSpec):
-    """When hybrid allocator is disabled and the model contains both full
-    attention layers and sliding window attention layers, sliding
-    window attention are regarded as full attention in KV cache manager
-    (blocks are allocated for all tokens), while computed as sliding window
-    attention in model runner.
-    In this case, we use FullAttentionSpec and record the sliding window size.
-    """
-
-    sliding_window: int | None = None
-    """
-    Default to None for not using sliding window attention.
-    """
-    attention_chunk_size: int | None = None
-
-    non_causal: bool = False
-    """
-    Whether the layer attends non-causally (e.g. Prefix LM). Carried on the
-    spec so the engine core, which collects specs from all workers before the
-    scheduler is built, can adjust scheduling policy (chunked prefill / prefix
-    caching) regardless of tensor-parallel layout. It does not affect the KV
-    cache layout itself.
-    """
-
-    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        max_model_len = vllm_config.model_config.max_model_len
-        dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
-        if self.dcp_sharded and dcp_world_size > 1:
-            max_model_len = cdiv(max_model_len, dcp_world_size)
-        return cdiv(max_model_len, self.block_size) * self.page_size_bytes
-
-    @classmethod
-    def merge_window_sizes(cls, window_sizes: set[int]) -> int | None:
-        if len(window_sizes) == 0:
-            return None
-        elif len(window_sizes) == 1:
-            return window_sizes.pop()
-        else:
-            raise ValueError(
-                "All attention layers in the same KV cache group must have the "
-                "same window size."
-            )
-
-    @classmethod
-    def merge(cls, specs: list[Self]) -> Self:
-        """Merge a list of FullAttentionSpec objects into a single
-        FullAttentionSpec object.
-        """
-        assert all(isinstance(spec, FullAttentionSpec) for spec in specs), (
-            "All attention layers in the same KV cache group must be FullAttentionSpec."
-        )
-
-        sliding_window = set(
-            spec.sliding_window for spec in specs if spec.sliding_window is not None
-        )
-        attention_chunk_size = set(
-            spec.attention_chunk_size
-            for spec in specs
-            if spec.attention_chunk_size is not None
-        )
-        assert not any(isinstance(spec, MLAAttentionSpec) for spec in specs), (
-            "MLAAttentionSpec should be merged in MLAAttentionSpec.merge"
-        )
-        merged_spec = cls(
-            block_size=specs[0].block_size,
-            block_stride_alignment=specs[0].block_stride_alignment,
-            num_kv_heads=specs[0].num_kv_heads,
-            head_size=specs[0].head_size,
-            head_size_v=specs[0].head_size_v,
-            dtype=specs[0].dtype,
-            kv_quant_mode=specs[0].kv_quant_mode,
-            dcp_sharded=specs[0].dcp_sharded,
-            max_tp_shards=specs[0].max_tp_shards,
-            page_size_padded=specs[0].page_size_padded,
-            num_head_slots=specs[0].num_head_slots,
-            state_content_bytes=specs[0].state_content_bytes,
-            tokens_per_state=specs[0].tokens_per_state,
-            sliding_window=cls.merge_window_sizes(sliding_window),
-            attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
-            # If any layer in the group is non-causal, treat the group as
-            # non-causal so the engine core disables incompatible scheduling.
-            non_causal=any(spec.non_causal for spec in specs),
-        )
-        for spec in specs:
-            for f in fields(AttentionSpec):
-                if not f.compare:
-                    continue
-                assert getattr(spec, f.name) == getattr(merged_spec, f.name), (
-                    "All attention layers in the same KV cache group must have "
-                    "the same attention spec."
-                )
-        assert (merged_spec.sliding_window is not None) + (
-            merged_spec.attention_chunk_size is not None
-        ) <= 1, (
-            "Model with both sliding window layers and chunked local attention "
-            "layers is not supported."
-        )
-        return merged_spec
-
-
-def _apply_alignment_padding(spec: MLAAttentionSpec | SlidingWindowMLASpec):
+def _apply_alignment_padding(spec: MLAAttentionSpec):
     if spec.alignment is None:
         return
     actual_page_size = spec.real_page_size_bytes
@@ -711,7 +471,7 @@ def _apply_alignment_padding(spec: MLAAttentionSpec | SlidingWindowMLASpec):
 
 
 @dataclass(frozen=True, kw_only=True)
-class MLAAttentionSpec(FullAttentionSpec):
+class MLAAttentionSpec(AttentionSpec):
     # TODO(Lucas/Chen): less hacky way to do this
     cache_dtype_str: str | None = None
     topk_buffer_width: int | None = None
@@ -728,66 +488,11 @@ class MLAAttentionSpec(FullAttentionSpec):
     head_size_v: int = 0
 
     def __post_init__(self):
+        assert self.model_version in (None, "deepseek_v4"), (
+            f"Unsupported model version: {self.model_version}"
+        )
         super().__post_init__()
         _apply_alignment_padding(self)
-
-    @classmethod
-    def merge(cls, specs: list[Self]) -> Self:
-        assert all(isinstance(spec, MLAAttentionSpec) for spec in specs), (
-            "All attention layers in the same KV cache group must be MLAAttentionSpec."
-        )
-        cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
-        topk_buffer_width_set = {spec.topk_buffer_width for spec in specs}
-        tokens_per_state_set = set(spec.tokens_per_state for spec in specs)
-        model_version_set = set(spec.model_version for spec in specs)
-        cache_role_set = {spec.cache_role for spec in specs}
-        index_group_leader_set = {spec.is_index_group_leader for spec in specs}
-        block_stride_alignment_set = {spec.block_stride_alignment for spec in specs}
-        assert (
-            len(cache_dtype_str_set) == 1
-            and len(topk_buffer_width_set) == 1
-            and len(tokens_per_state_set) == 1
-            and len(model_version_set) == 1
-            and len(cache_role_set) == 1
-            and len(index_group_leader_set) == 1
-            and len(block_stride_alignment_set) == 1
-        ), (
-            "All attention layers in the same KV cache group must use the same "
-            "quantization method, top-k buffer width, tokens per state, "
-            "model version, cache role, "
-            "index-sharing role, and block stride alignment."
-        )
-        merged_spec = cls(
-            block_size=specs[0].block_size,
-            num_kv_heads=specs[0].num_kv_heads,
-            head_size=specs[0].head_size,
-            dtype=specs[0].dtype,
-            kv_quant_mode=specs[0].kv_quant_mode,
-            dcp_sharded=specs[0].dcp_sharded,
-            max_tp_shards=specs[0].max_tp_shards,
-            page_size_padded=specs[0].page_size_padded,
-            num_head_slots=specs[0].num_head_slots,
-            state_content_bytes=specs[0].state_content_bytes,
-            cache_dtype_str=cache_dtype_str_set.pop(),
-            topk_buffer_width=topk_buffer_width_set.pop(),
-            tokens_per_state=tokens_per_state_set.pop(),
-            model_version=model_version_set.pop(),
-            cache_role=cache_role_set.pop(),
-            is_index_group_leader=index_group_leader_set.pop(),
-            block_stride_alignment=block_stride_alignment_set.pop(),
-            non_causal_multi_token_decode=any(
-                spec.non_causal_multi_token_decode for spec in specs
-            ),
-        )
-        for spec in specs:
-            for f in fields(AttentionSpec):
-                if not f.compare:
-                    continue
-                assert getattr(spec, f.name) == getattr(merged_spec, f.name), (
-                    "All attention layers in the same KV cache group must have "
-                    "the same attention spec."
-                )
-        return merged_spec
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -797,294 +502,12 @@ class HiddenStateCacheSpec(MLAAttentionSpec):
     pass
 
 
-@dataclass(frozen=True, kw_only=True)
-class RSWASpec(FullAttentionSpec):
-    """KV cache spec for Reference Sliding Window Attention (R-SWA).
-
-    Prefill (image + text prompt) tokens are always globally visible.
-    Only the last ``rswa_window`` generated tokens are kept in the KV cache;
-    gap blocks (between the prefill tail and the current decode window) are
-    evicted during each decode step to bound memory at
-    O(prefix_blocks + window_blocks).
-    """
-
-    rswa_window: int
-
-    @classmethod
-    def merge(cls, specs: list[RSWASpec]) -> RSWASpec:
-        assert all(isinstance(spec, RSWASpec) for spec in specs), (
-            "All attention layers in the same KV cache group must be RSWASpec."
-        )
-        rswa_windows = {spec.rswa_window for spec in specs}
-        assert len(rswa_windows) == 1, (
-            f"All R-SWA layers must share the same rswa_window, got {rswa_windows}"
-        )
-        # Delegate common field merging to the parent, then reattach rswa_window.
-        base = FullAttentionSpec.merge(specs)  # type: ignore[arg-type]
-        return cls(
-            block_size=base.block_size,
-            block_stride_alignment=base.block_stride_alignment,
-            num_kv_heads=base.num_kv_heads,
-            head_size=base.head_size,
-            head_size_v=base.head_size_v,
-            dtype=base.dtype,
-            kv_quant_mode=base.kv_quant_mode,
-            dcp_sharded=base.dcp_sharded,
-            max_tp_shards=base.max_tp_shards,
-            page_size_padded=base.page_size_padded,
-            num_head_slots=base.num_head_slots,
-            state_content_bytes=base.state_content_bytes,
-            tokens_per_state=base.tokens_per_state,
-            sliding_window=base.sliding_window,
-            attention_chunk_size=base.attention_chunk_size,
-            non_causal=base.non_causal,
-            rswa_window=rswa_windows.pop(),
-        )
-
-
-@dataclass(frozen=True, kw_only=True)
-class ChunkedLocalAttentionSpec(AttentionSpec):
-    attention_chunk_size: int
-
-    def max_admission_blocks_per_request(
-        self, max_in_flight_tokens: int, max_model_len: int
-    ) -> int:
-        """Per-request admission cap, in blocks.
-
-        Single source of truth for both startup pool sizing
-        (`max_memory_usage_bytes`) and the runtime admission gate, so requests
-        admitted by startup can also be admitted at runtime.
-
-        `max_in_flight_tokens` is the max tokens scheduled but not yet settled
-        (one batch per concurrent step); see `VllmConfig.max_in_flight_tokens`.
-        """
-        # During chunked prefill, we hold KV for at most one chunk window plus
-        # the in-flight tokens, since frees happen on the processed-token basis.
-        num_tokens = min(
-            self.attention_chunk_size + max_in_flight_tokens, max_model_len
-        )
-        return cdiv(num_tokens, self.block_size)
-
-    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        max_blocks = self.max_admission_blocks_per_request(
-            max_in_flight_tokens=vllm_config.max_in_flight_tokens,
-            max_model_len=vllm_config.model_config.max_model_len,
-        )
-        return max_blocks * self.page_size_bytes
-
-    def is_uniform_with_collection(
-        self, kv_cache_specs: dict[str, KVCacheSpec]
-    ) -> bool:
-        return all(
-            isinstance(spec, ChunkedLocalAttentionSpec)
-            and spec.attention_chunk_size == self.attention_chunk_size
-            for spec in kv_cache_specs.values()
-        )
-
-
-@dataclass(frozen=True, kw_only=True)
-class SlidingWindowSpec(AttentionSpec):
-    sliding_window: int
-    # The trailing edge of the window is extended by ``extra_retained_tokens``
-    # so that those extra trailing tokens' blocks are retained (but not
-    # attended). This is needed for multi-module spec decoding which can
-    # re-prefill the last num_spec_prefill_tokens - 1 tokens from the end
-    # of the sequence, and thus needs to delay freeing/caching of blocks.
-    extra_retained_tokens: int = 0
-
-    @property
-    def num_retained_tokens(self) -> int:
-        """Tokens below a request's first scheduled position that must stay
-        readable. The worker nulls a step's block-table entries wholly below
-        that many tokens.
-        """
-        return self.sliding_window - 1 + self.extra_retained_tokens
-
-    def max_admission_blocks_per_request(
-        self, max_in_flight_tokens: int, max_model_len: int
-    ) -> int:
-        """Per-request admission cap, in blocks.
-
-        Single source of truth for both startup pool sizing
-        (`max_memory_usage_bytes`) and the runtime admission gate. Per-request
-        real-held blocks plateau at this bound because
-        `SlidingWindowManager.remove_skipped_blocks` runs from `allocate_slots`
-        before each chunk's `get_num_blocks_to_allocate`.
-
-        `max_in_flight_tokens` is the max tokens scheduled but not yet settled
-        (one batch per concurrent step); see `VllmConfig.max_in_flight_tokens`.
-        """
-        # During chunked prefill, we hold KV for the last `sliding_window-1`
-        # computed tokens plus the in-flight tokens (frees happen on the
-        # processed-token basis); never more than `max_model_len`. An additional
-        # `extra_retained_tokens` trailing tokens are kept alive below the
-        # window for multi-module spec decoding, and must be accounted here too.
-        num_tokens = min(
-            self.sliding_window - 1 + self.extra_retained_tokens + max_in_flight_tokens,
-            max_model_len,
-        )
-        # +1 because the sliding window may not start from the beginning of
-        # the block. E.g. block size 4 and num_token 4 needs two blocks
-        # [XXCD][EF] to store the 6-token window [CDEF].
-        return cdiv(num_tokens, self.block_size) + 1
-
-    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        assert (
-            not self.dcp_sharded
-            or vllm_config.parallel_config.decode_context_parallel_size == 1
-        ), "DCP not support sliding window."
-        max_blocks = self.max_admission_blocks_per_request(
-            max_in_flight_tokens=vllm_config.max_in_flight_tokens,
-            max_model_len=vllm_config.model_config.max_model_len,
-        )
-        return max_blocks * self.page_size_bytes
-
-    def is_uniform_with_collection(
-        self, kv_cache_specs: dict[str, KVCacheSpec]
-    ) -> bool:
-        return all(
-            isinstance(spec, SlidingWindowSpec)
-            and spec.sliding_window == self.sliding_window
-            for spec in kv_cache_specs.values()
-        )
-
-
-@dataclass(frozen=True, kw_only=True)
-class CircularBufferSpec(AttentionSpec):
-    """One block per request holding the raw keys of the token group that
-    is still being compressed.
-
-    ``block_size`` is the ring capacity. It must exceed the compression ratio
-    by the speculative lookahead: a speculative step stores all of its rows,
-    drafts included, before acceptance is known, while the next step still
-    reads the open group's committed keys from the ring.
-    """
-
-    @property
-    def block_table_token_alignment(self) -> int | None:
-        return None
-
-    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        # The ring occupies one block per request for its whole lifetime.
-        del vllm_config
-        return self.page_size_bytes
-
-    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
-        del vllm_config, max_len
-        return 1
-
-    def is_uniform_with_collection(
-        self, kv_cache_specs: dict[str, KVCacheSpec]
-    ) -> bool:
-        return all(
-            isinstance(spec, CircularBufferSpec) for spec in kv_cache_specs.values()
-        )
-
-    @property
-    def prefix_cacheable(self) -> bool:
-        return False
-
-    @property
-    def uses_slot_mapping(self) -> bool:
-        return False
-
-
-@dataclass(frozen=True, kw_only=True)
-class SlidingWindowMLASpec(SlidingWindowSpec):
-    """Sliding window attention with MLA cache format."""
-
-    cache_dtype_str: str | None = None
-    # DeepseekV4-only: see MLAAttentionSpec.model_version.
-    alignment: int | None = None  # Default to None for no padding.
-    model_version: str | None = None
-    bounded_replay: bool = False
-
-    # MLA stores a single latent vector per state; there is no separate V.
-    head_size_v: int = 0
-
-    def __post_init__(self):
-        assert self.model_version in (None, "deepseek_v4"), (
-            f"Unsupported model version: {self.model_version}"
-        )
-        super().__post_init__()
-        _apply_alignment_padding(self)
-
-    @property
-    def prefix_cacheable(self) -> bool:
-        return not self.bounded_replay
-
-    @property
-    def prefix_replay_tokens(self) -> int:
-        return self.sliding_window if self.bounded_replay else 0
-
-    @classmethod
-    def merge(cls, specs: list[Self]) -> Self:
-        assert all(isinstance(spec, SlidingWindowMLASpec) for spec in specs), (
-            "All attention layers in the same KV cache group must be "
-            "SlidingWindowMLASpec."
-        )
-        cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
-        tokens_per_state_set = set(spec.tokens_per_state for spec in specs)
-        model_version_set = set(spec.model_version for spec in specs)
-        sliding_window_set = set(spec.sliding_window for spec in specs)
-        extra_retained_set = set(spec.extra_retained_tokens for spec in specs)
-        bounded_replay_set = set(spec.bounded_replay for spec in specs)
-        block_stride_alignment_set = {spec.block_stride_alignment for spec in specs}
-        assert len({spec.dcp_sharded for spec in specs}) == 1
-        assert len({spec.max_tp_shards for spec in specs}) == 1
-        assert (
-            len(cache_dtype_str_set) == 1
-            and len(tokens_per_state_set) == 1
-            and len(model_version_set) == 1
-            and len(sliding_window_set) == 1
-            and len(extra_retained_set) == 1
-            and len(bounded_replay_set) == 1
-            and len(block_stride_alignment_set) == 1
-        ), (
-            "All attention layers in the same KV cache group must use the same "
-            "quantization method, tokens per state, model version, sliding "
-            "window size, retained token count, and replay policy."
-        )
-        return cls(
-            block_size=specs[0].block_size,
-            block_stride_alignment=block_stride_alignment_set.pop(),
-            num_kv_heads=specs[0].num_kv_heads,
-            head_size=specs[0].head_size,
-            dtype=specs[0].dtype,
-            dcp_sharded=specs[0].dcp_sharded,
-            max_tp_shards=specs[0].max_tp_shards,
-            page_size_padded=specs[0].page_size_padded,
-            num_head_slots=specs[0].num_head_slots,
-            state_content_bytes=specs[0].state_content_bytes,
-            sliding_window=sliding_window_set.pop(),
-            extra_retained_tokens=extra_retained_set.pop(),
-            cache_dtype_str=cache_dtype_str_set.pop(),
-            tokens_per_state=tokens_per_state_set.pop(),
-            model_version=model_version_set.pop(),
-            bounded_replay=bounded_replay_set.pop(),
-        )
-
-    def is_uniform_with_collection(
-        self, kv_cache_specs: dict[str, KVCacheSpec]
-    ) -> bool:
-        return all(
-            isinstance(spec, SlidingWindowMLASpec)
-            and spec.sliding_window == self.sliding_window
-            and spec.bounded_replay == self.bounded_replay
-            for spec in kv_cache_specs.values()
-        )
-
-
 @dataclass(frozen=True)
 class MambaSpec(KVCacheSpec):
     shapes: tuple[tuple[int, ...], ...]
     dtypes: tuple[torch.dtype, ...]
     page_size_padded: int | None = None
     mamba_type: MambaAttentionBackendEnum = MambaAttentionBackendEnum.MAMBA2
-    mamba_cache_mode: str = "none"
-    num_speculative_blocks: int = 0
-    num_prefill_checkpoint_blocks: int = 0
-    prefill_checkpoint_alignment: int | None = None
     num_heads: int = 1
     tokens_per_state: int = -1
     # False: the state is sharded across TP ranks (e.g. GDN). True: every TP
@@ -1112,43 +535,6 @@ class MambaSpec(KVCacheSpec):
             assert self.page_size_padded >= page_size
             return self.page_size_padded
         return page_size
-
-    @property
-    def block_table_token_alignment(self) -> int | None:
-        return None
-
-    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        if vllm_config.cache_config.mamba_cache_mode == "align":
-            return self.page_size_bytes * (
-                2 + self.num_speculative_blocks + self.num_prefill_checkpoint_blocks
-            )
-        else:
-            return self.page_size_bytes * (1 + self.num_speculative_blocks)
-
-    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
-        # Mamba state is replicated across DCP/PCP ranks, never sharded, so
-        # no CP scaling applies.
-        if vllm_config.cache_config.mamba_cache_mode == "align":
-            # Block table rows are position-indexed over the full sequence
-            # even though only 2 + num_speculative_blocks state blocks are
-            # resident at a time (earlier states are nulled out by
-            # remove_skipped_blocks), so the row length must cover max_len
-            # rather than max_memory_usage_bytes.
-            return cdiv(max_len, self.block_size) + self.num_speculative_blocks
-        return cdiv(self.max_memory_usage_bytes(vllm_config), self.page_size_bytes)
-
-    def is_uniform_with_collection(
-        self, kv_cache_specs: dict[str, KVCacheSpec]
-    ) -> bool:
-        return all(
-            isinstance(spec, MambaSpec)
-            and spec.num_speculative_blocks == self.num_speculative_blocks
-            and spec.num_prefill_checkpoint_blocks == self.num_prefill_checkpoint_blocks
-            and spec.prefill_checkpoint_alignment == self.prefill_checkpoint_alignment
-            and spec.page_size_bytes == self.page_size_bytes
-            and spec.tp_replicated == self.tp_replicated
-            for spec in kv_cache_specs.values()
-        )
 
 
 def get_mamba_prefill_checkpoint_position(
@@ -1190,267 +576,6 @@ def is_mamba_prefill_checkpoint_valid(
     )
 
 
-@dataclass(frozen=True)
-class EncoderOnlyAttentionSpec(AttentionSpec):
-    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        # Encoder-only layers do not need KV cache
-        return 0
-
-
-@dataclass(frozen=True)
-class CrossAttentionSpec(AttentionSpec):
-    """KV cache spec for cross-attention layers in encoder-decoder models."""
-
-    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        # For cross-attention, we need to cache encoder states
-        # Get encoder length (e.g., 1500 for Whisper).
-        max_encoder_len = vllm_config.scheduler_config.max_num_encoder_input_tokens
-        return cdiv(max_encoder_len, self.block_size) * self.page_size_bytes
-
-
-@dataclass(frozen=True)
-class SinkFullAttentionSpec(FullAttentionSpec):
-    sink_len: int | None = None
-
-    @classmethod
-    def merge(cls, specs: list[Self]) -> Self:
-        """Merge a list of FullAttentionSpec objects into a single
-        FullAttentionSpec object.
-        """
-        assert all(isinstance(spec, FullAttentionSpec) for spec in specs), (
-            "All attention layers in the same KV cache group must be FullAttentionSpec."
-        )
-
-        sliding_window = set(
-            spec.sliding_window for spec in specs if spec.sliding_window is not None
-        )
-        attention_chunk_size = set(
-            spec.attention_chunk_size
-            for spec in specs
-            if spec.attention_chunk_size is not None
-        )
-        assert not any(isinstance(spec, MLAAttentionSpec) for spec in specs), (
-            "MLAAttentionSpec should be merged in MLAAttentionSpec.merge"
-        )
-        merged_spec = cls(
-            block_size=specs[0].block_size,
-            num_kv_heads=specs[0].num_kv_heads,
-            head_size=specs[0].head_size,
-            head_size_v=specs[0].head_size_v,
-            sink_len=specs[0].sink_len,
-            block_stride_alignment=specs[0].block_stride_alignment,
-            dtype=specs[0].dtype,
-            kv_quant_mode=specs[0].kv_quant_mode,
-            dcp_sharded=specs[0].dcp_sharded,
-            max_tp_shards=specs[0].max_tp_shards,
-            page_size_padded=specs[0].page_size_padded,
-            num_head_slots=specs[0].num_head_slots,
-            state_content_bytes=specs[0].state_content_bytes,
-            sliding_window=cls.merge_window_sizes(sliding_window),
-            attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
-            non_causal=any(spec.non_causal for spec in specs),
-        )
-        for spec in specs:
-            for f in fields(AttentionSpec):
-                if not f.compare:
-                    continue
-                assert getattr(spec, f.name) == getattr(merged_spec, f.name), (
-                    "All attention layers in the same KV cache group must have "
-                    "the same attention spec."
-                )
-        assert (merged_spec.sliding_window is not None) + (
-            merged_spec.attention_chunk_size is not None
-        ) <= 1, (
-            "Model with both sliding window layers and chunked local attention "
-            "layers is not supported."
-        )
-        return merged_spec
-
-
-@dataclass(frozen=True)
-class UniformTypeKVCacheSpecs(KVCacheSpec):
-    """A KV cache spec for multiple layers with the same type of attention. Here,
-    same types means always need the same number of token slots. For example,
-    sliding window attentions with different window sizes are not the same type
-    and should not be merged into one UniformTypeKVCacheSpecs.
-    """
-
-    kv_cache_specs: dict[str, KVCacheSpec]
-
-    def __post_init__(self):
-        super().__post_init__()
-        if self.kv_cache_specs:
-            object.__setattr__(self, "dcp_sharded", self.first_spec.dcp_sharded)
-
-    @property
-    def prefix_cacheable(self) -> bool:
-        return all(spec.prefix_cacheable for spec in self.kv_cache_specs.values())
-
-    @property
-    def prefix_replay_tokens(self) -> int:
-        return max(spec.prefix_replay_tokens for spec in self.kv_cache_specs.values())
-
-    @property
-    def first_spec(self) -> KVCacheSpec:
-        """Return the first spec in the group."""
-        return next(iter(self.kv_cache_specs.values()))
-
-    @property
-    def page_size_bytes(self) -> int:
-        return sum(spec.page_size_bytes for spec in self.kv_cache_specs.values())
-
-    @property
-    def block_table_token_alignment(self) -> int | None:
-        return self.first_spec.block_table_token_alignment
-
-    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        max_num_pages = max(
-            cdiv(spec.max_memory_usage_bytes(vllm_config), spec.page_size_bytes)
-            for spec in self.kv_cache_specs.values()
-        )
-        return max_num_pages * self.page_size_bytes
-
-    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
-        # Metadata builders are constructed from the per-layer spec, so the base
-        # cdiv(max_len, block_size) would drop its DCP sharding and size the
-        # block table wider than those builders expect.
-        widths = {
-            spec.max_num_blocks_per_req(vllm_config, max_len)
-            for spec in self.kv_cache_specs.values()
-        }
-        assert len(widths) == 1, (
-            "All layers in the same KV cache group must need the same number "
-            f"of block table entries, got {sorted(widths)}."
-        )
-        return next(iter(widths))
-
-    @classmethod
-    def is_uniform_type(cls, kv_cache_specs: dict[str, KVCacheSpec]) -> bool:
-        """Whether all layers have the same type of KV cache spec.
-
-        Uses the registry to determine grouping base classes, so custom specs
-        that inherit from FullAttentionSpec are treated as full attention.
-        """
-        block_sizes = set(spec.block_size for spec in kv_cache_specs.values())
-        if len(block_sizes) > 1:
-            # Different block sizes, not uniform.
-            return False
-        if len({spec.dcp_sharded for spec in kv_cache_specs.values()}) > 1:
-            return False
-        first_spec = next(iter(kv_cache_specs.values()))
-        return first_spec.is_uniform_with_collection(kv_cache_specs)
-
-    @classmethod
-    def from_specs(cls, kv_cache_specs: dict[str, KVCacheSpec]) -> Self | None:
-        """Return a SameTypeKVCacheSpecs object if all layers have the same type
-        of KV cache spec. Return None if not.
-        """
-        if cls.is_uniform_type(kv_cache_specs):
-            block_size = next(iter(kv_cache_specs.values())).block_size
-            return cls(block_size=block_size, kv_cache_specs=kv_cache_specs)
-        else:
-            return None
-
-    def get_max_layers_per_page_size(self) -> int:
-        """Max number of layers sharing a page size. For a balanced bucket
-        this equals the number of repetitions of the layer pattern."""
-        return Counter(
-            spec.page_size_bytes for spec in self.kv_cache_specs.values()
-        ).most_common(1)[0][1]
-
-    def max_memory_usage_pages(self, vllm_config: VllmConfig) -> int:
-        return max(
-            cdiv(spec.max_memory_usage_bytes(vllm_config), spec.page_size_bytes)
-            for spec in self.kv_cache_specs.values()
-        )
-
-    @property
-    def uses_slot_mapping(self) -> bool:
-        return self.first_spec.uses_slot_mapping
-
-
-def iter_layer_specs(kv_cache_spec: KVCacheSpec) -> Collection[KVCacheSpec]:
-    """The per-layer specs a KV cache group spec covers.
-
-    ``UniformTypeKVCacheSpecs`` groups keep one spec per layer; every other
-    spec describes its group on its own. Returns the layer specs either way so
-    callers do not have to special-case the wrapper.
-    """
-    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-        return kv_cache_spec.kv_cache_specs.values()
-    return (kv_cache_spec,)
-
-
-def is_full_attention_spec(kv_cache_spec: KVCacheSpec) -> bool:
-    """Whether a KV cache group spec is (or wraps) full attention.
-
-    ``UniformTypeKVCacheSpecs`` is not itself a ``FullAttentionSpec``, so a bare
-    isinstance check misses groups that carry the wrapper -- DeepSeek-V4's MLA
-    layers, or any model taking the ``UniformTypeKVCacheSpecs.from_specs`` path.
-
-    Every layer must be full attention: a group holding a recycling
-    (sliding-window) layer has no stable slot layout, so callers that key data
-    by slot cannot use it.
-    """
-    layer_specs = iter_layer_specs(kv_cache_spec)
-    return len(layer_specs) > 0 and all(
-        isinstance(spec, FullAttentionSpec) for spec in layer_specs
-    )
-
-
-def get_kv_cache_spec_kind(kv_cache_spec: KVCacheSpec) -> KVCacheSpecKind:
-    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-        inner_kinds = {
-            get_kv_cache_spec_kind(spec)
-            for spec in kv_cache_spec.kv_cache_specs.values()
-        }
-        if len(inner_kinds) == 1:
-            return next(iter(inner_kinds))
-        # A group is only formed when all members share one registered
-        # uniform_type_base_spec, so UNKNOWN would discard what the merge
-        # already established.
-        base_specs = {
-            KVCacheSpecRegistry.get_uniform_type_base_spec(spec)
-            for spec in kv_cache_spec.kv_cache_specs.values()
-        }
-        if len(base_specs) == 1 and next(iter(base_specs)) is FullAttentionSpec:
-            return KVCacheSpecKind.FULL_ATTENTION
-        return KVCacheSpecKind.UNKNOWN
-    # Keep subclass checks before base classes so specialized specs keep their
-    # more precise kind.
-    if isinstance(kv_cache_spec, SlidingWindowMLASpec):
-        return KVCacheSpecKind.SLIDING_WINDOW_MLA
-    if isinstance(kv_cache_spec, MLAAttentionSpec):
-        return KVCacheSpecKind.MLA_ATTENTION
-    if isinstance(kv_cache_spec, SinkFullAttentionSpec):
-        return KVCacheSpecKind.SINK_FULL_ATTENTION
-    if isinstance(kv_cache_spec, FullAttentionSpec):
-        return KVCacheSpecKind.FULL_ATTENTION
-    if isinstance(kv_cache_spec, ChunkedLocalAttentionSpec):
-        return KVCacheSpecKind.CHUNKED_LOCAL_ATTENTION
-    if isinstance(kv_cache_spec, SlidingWindowSpec):
-        return KVCacheSpecKind.SLIDING_WINDOW
-    if isinstance(kv_cache_spec, MambaSpec):
-        return KVCacheSpecKind.MAMBA
-    if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
-        return KVCacheSpecKind.ENCODER_ONLY_ATTENTION
-    if isinstance(kv_cache_spec, CrossAttentionSpec):
-        return KVCacheSpecKind.CROSS_ATTENTION
-    return KVCacheSpecKind.UNKNOWN
-
-
-def get_kv_cache_spec_sliding_window(kv_cache_spec: KVCacheSpec) -> int | None:
-    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-        inner_windows = {
-            get_kv_cache_spec_sliding_window(spec)
-            for spec in kv_cache_spec.kv_cache_specs.values()
-        }
-        return next(iter(inner_windows)) if len(inner_windows) == 1 else None
-    if isinstance(kv_cache_spec, SlidingWindowSpec):
-        return kv_cache_spec.sliding_window
-    return None
-
-
 @dataclass
 class KVCacheTensor:
     """A class for specifying how the workers should initialize the KV cache.
@@ -1477,20 +602,54 @@ class KVCacheTensor:
 
 class KVCacheGroupRole(str, Enum):
     DEFAULT = "default"
-    HISPARSE_SOURCE = "hisparse_source"
     HISPARSE_INDEXER = "hisparse_indexer"
+
+
+@dataclass(frozen=True)
+class KVCacheLayerConfig:
+    """What one layer needs from the KV cache: the manager that allocates its
+    blocks, that manager's policy, and the layer's tensor layout."""
+
+    manager_config: ManagerConfig
+    spec: KVCacheSpec
+    is_draft: bool = field(default=False, kw_only=True, compare=False)
+    """Whether a draft model owns this layer; excluded from equality so it never
+    affects grouping."""
+
+    @property
+    def manager_cls(self) -> type[SingleTypeKVCacheManager]:
+        return self.manager_config.manager_cls
+
+    def replace_spec(self, **changes) -> KVCacheLayerConfig:
+        return replace(self, spec=replace(self.spec, **changes))
+
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        blocks = self.manager_cls.max_blocks_per_request(
+            self.manager_config,
+            self.spec.block_size,
+            self.spec.dcp_sharded,
+            vllm_config,
+        )
+        return blocks * self.spec.page_size_bytes
 
 
 @dataclass
 class KVCacheGroupSpec:
-    """Represents a group of model layers that share the same KV cache block table.
-    These layers are regarded as one layer in the KV cache manager.
+    """A group of model layers that share one KV cache block table.
+
+    The layers share a manager and its policy, the block size and the DCP
+    sharding, and are regarded as one layer by the KV cache manager. Their
+    cache layouts may differ.
     """
 
-    # The names of model layers in this group
-    layer_names: list[str]
-    # The KV cache spec of this manager layer
-    kv_cache_spec: KVCacheSpec
+    # The cache layout of each model layer in the group
+    kv_cache_specs: dict[str, KVCacheSpec]
+    # The allocation policy, which names the manager allocating the blocks
+    manager_config: ManagerConfig
+    # Tokens per block of the group's block table
+    block_size: int
+    # Whether DCP shards the group's token positions across ranks
+    dcp_sharded: bool = False
     # Whether this group holds draft layers and takes the EAGLE last-block drop.
     is_eagle_group: bool = False
     # Host groups use the dedicated HiSparse pool; others share the device pool.
@@ -1500,6 +659,96 @@ class KVCacheGroupSpec:
     # source group after a connector load.
     enable_kv_transfer: bool = True
     role: KVCacheGroupRole = KVCacheGroupRole.DEFAULT
+
+    @classmethod
+    def from_layers(
+        cls,
+        layer_configs: Mapping[str, KVCacheLayerConfig],
+        **kwargs,
+    ) -> KVCacheGroupSpec:
+        """A group of layers sharing a manager policy and block size."""
+        first = next(iter(layer_configs.values()))
+        assert all(
+            lc.manager_config == first.manager_config
+            and lc.spec.block_size == first.spec.block_size
+            and lc.spec.dcp_sharded == first.spec.dcp_sharded
+            for lc in layer_configs.values()
+        ), "Layers in a KV cache group must share a manager policy and block size."
+        return cls(
+            {name: lc.spec for name, lc in layer_configs.items()},
+            first.manager_config,
+            first.spec.block_size,
+            first.spec.dcp_sharded,
+            **kwargs,
+        )
+
+    @property
+    def layer_names(self) -> list[str]:
+        return list(self.kv_cache_specs)
+
+    @property
+    def page_size_bytes(self) -> int:
+        """Bytes one block of the group occupies across all its layers."""
+        return sum(spec.page_size_bytes for spec in self.kv_cache_specs.values())
+
+    @property
+    def manager_cls(self) -> type[SingleTypeKVCacheManager]:
+        return self.manager_config.manager_cls
+
+    @property
+    def block_table_key(self) -> tuple:
+        """Groups with equal keys allocate blocks identically and can be looked
+        up together."""
+        return self.manager_config, self.block_size, self.dcp_sharded
+
+    @property
+    def prefix_cacheable(self) -> bool:
+        return self.manager_cls.prefix_cacheable(self.manager_config)
+
+    @property
+    def prefix_replay_tokens(self) -> int:
+        return self.manager_cls.prefix_replay_tokens(self.manager_config)
+
+    @property
+    def uses_slot_mapping(self) -> bool:
+        return self.manager_cls.uses_slot_mapping
+
+    @property
+    def block_table_token_alignment(self) -> int | None:
+        return self.manager_cls.block_table_token_alignment
+
+    @property
+    def is_full_attention(self) -> bool:
+        """Whether every token keeps its KV for the request's lifetime."""
+        return self.manager_cls.is_full_attention
+
+    @property
+    def sliding_window(self) -> int | None:
+        return self.manager_cls.attention_window(self.manager_config)
+
+    @property
+    def kind(self) -> KVCacheSpecKind:
+        return self.manager_cls.kv_cache_kind(self.kv_cache_specs.values())
+
+    def max_blocks_per_request(self, vllm_config: VllmConfig) -> int:
+        """Blocks one request at ``max_model_len`` holds in this group."""
+        return self.manager_cls.max_blocks_per_request(
+            self.manager_config, self.block_size, self.dcp_sharded, vllm_config
+        )
+
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        return self.max_blocks_per_request(vllm_config) * self.page_size_bytes
+
+    def max_num_blocks_per_req(
+        self, vllm_config: VllmConfig, max_len: int | None = None
+    ) -> int:
+        """The row length of the worker-side block table for this group, sized
+        for ``max_len`` tokens (default: ``max_model_len``)."""
+        if max_len is None:
+            max_len = vllm_config.model_config.max_model_len
+        return self.manager_cls.max_num_blocks_per_req(
+            self.manager_config, self.block_size, self.dcp_sharded, vllm_config, max_len
+        )
 
 
 @dataclass
@@ -1516,7 +765,7 @@ class KVCacheConfig:
     For models with only one type of attention, there is only one group that
     contains all layers.
     For models with multiple types of attention, there will be multiple groups,
-    see `_get_kv_cache_config_uniform_page_size` for more details.
+    see `_get_kv_cache_groups_uniform_page_size` for more details.
     """
     prefix_cache_retention_interval: int | None = None
     """Resolved retention policy for local prefix-cache checkpoints."""
@@ -1553,7 +802,7 @@ class KVCacheConfig:
         return tuple(
             group_id
             for group_id in self.transfer_group_ids
-            if self.kv_cache_groups[group_id].kv_cache_spec.prefix_cacheable
+            if self.kv_cache_groups[group_id].prefix_cacheable
         )
 
     @cached_property
@@ -1611,7 +860,7 @@ class KVCacheConfig:
         return any(
             isinstance(spec, MambaSpec)
             for group in self.kv_cache_groups
-            for spec in iter_layer_specs(group.kv_cache_spec)
+            for spec in group.kv_cache_specs.values()
         )
 
     @property
@@ -1623,7 +872,7 @@ class KVCacheConfig:
                 continue
             kv_cache_precisions.update(
                 (spec.dtype, spec.kv_quant_mode)
-                for spec in iter_layer_specs(group.kv_cache_spec)
+                for spec in group.kv_cache_specs.values()
                 if isinstance(spec, AttentionSpec)
             )
         return len(kv_cache_precisions) > 1

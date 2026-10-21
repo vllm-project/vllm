@@ -45,10 +45,14 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import get_attn_backend
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
+    KVCacheLayerConfig,
     KVCacheSpec,
-    SlidingWindowSpec,
     get_kv_quant_mode,
 )
 
@@ -603,7 +607,7 @@ class Attention(nn.Module, AttentionLayerBase):
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig | None:
         # Block size may get updated after model loading, refresh it
         block_size = vllm_config.cache_config.block_size
         # Encoder-only attention is prefill-only and keeps no autoregressive KV
@@ -637,14 +641,13 @@ class Attention(nn.Module, AttentionLayerBase):
             shared_page = vllm_config.cache_config.skip_page_size_padded
             # The backend owns its packing
             kv_cache_spec = self.attn_backend.customize_spec(
-                SlidingWindowSpec(
+                AttentionSpec(
                     block_size=1,
                     num_kv_heads=self.num_kv_heads,
                     head_size=self.head_size,
                     head_size_v=self.head_size_v,
                     dtype=self.kv_cache_torch_dtype,
                     kv_quant_mode=quant_mode,
-                    sliding_window=self.sliding_window,
                 )
             )
             sw_per_token = kv_cache_spec.real_page_size_bytes
@@ -656,18 +659,20 @@ class Attention(nn.Module, AttentionLayerBase):
                 block_size,
                 kv_cache_spec,
             )
-            return SlidingWindowSpec(
+            spec = AttentionSpec(
                 block_size=sw_block_size,
                 num_kv_heads=self.num_kv_heads,
                 head_size=self.head_size,
                 head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,
                 kv_quant_mode=quant_mode,
-                sliding_window=self.sliding_window,
                 page_size_padded=shared_page,
             )
+            return SlidingWindowManager.layer_config(
+                spec, sliding_window=self.sliding_window
+            )
         else:
-            return FullAttentionSpec(
+            spec = AttentionSpec(
                 block_size=block_size,
                 num_kv_heads=self.num_kv_heads,
                 head_size=self.head_size,
@@ -675,6 +680,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 dtype=self.kv_cache_torch_dtype,
                 kv_quant_mode=quant_mode,
             )
+            return FullAttentionManager.layer_config(spec)
 
 
 def get_attention_context(

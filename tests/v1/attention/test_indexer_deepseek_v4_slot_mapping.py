@@ -33,6 +33,7 @@ from vllm.v1.attention.backends.mla.indexer import (
 from vllm.v1.attention.backends.mla.sparse_utils import (
     ConvertReqIndexToGlobalIndexKernel,
 )
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     compute_layer_kv_cache_shape_bytes,
@@ -560,7 +561,13 @@ def test_indexer_builder_deepseek_v4_compressed_slot_mapping_uses_num_states():
         tokens_per_state=4,
     )
     vllm_config = create_vllm_config(max_model_len=1024)
-    max_num_blocks = kv_cache_spec.max_num_blocks_per_req(vllm_config, 1024)
+    max_num_blocks = FullAttentionManager.max_num_blocks_per_req(
+        FullAttentionManager.Config(),
+        kv_cache_spec.block_size,
+        kv_cache_spec.dcp_sharded,
+        vllm_config,
+        1024,
+    )
     block_table_width = get_block_table_width(max_num_blocks, kv_cache_spec.block_size)
     builder = DeepseekV32IndexerMetadataBuilder(
         kv_cache_spec=kv_cache_spec,
@@ -641,7 +648,13 @@ def test_indexer_prefill_budget_matches_compressed_workspace(compress_ratio):
         tokens_per_state=compress_ratio,
     )
     vllm_config = create_vllm_config(max_model_len=max_model_len)
-    max_num_blocks = kv_cache_spec.max_num_blocks_per_req(vllm_config, max_model_len)
+    max_num_blocks = FullAttentionManager.max_num_blocks_per_req(
+        FullAttentionManager.Config(),
+        kv_cache_spec.block_size,
+        kv_cache_spec.dcp_sharded,
+        vllm_config,
+        max_model_len,
+    )
     block_table_width = get_block_table_width(max_num_blocks, kv_cache_spec.block_size)
     builder = DeepseekV32IndexerMetadataBuilder(
         kv_cache_spec=kv_cache_spec,

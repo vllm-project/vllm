@@ -81,17 +81,13 @@ from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import make_zmq_path
 from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    CircularBufferSpec,
-    FullAttentionSpec,
     KVCacheLayout,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
-    SlidingWindowMLASpec,
-    UniformTypeKVCacheSpecs,
-    iter_layer_specs,
 )
 from vllm.v1.worker.utils import select_common_block_size
 
@@ -244,7 +240,7 @@ class NixlBaseConnectorWorker:
                 # attention group spans all of them.
                 fa_region_ids = (
                     np.asarray(self._scratch_region_indices, dtype=np.int32)
-                    if spec_type is CircularBufferSpec
+                    if self._group_is_scratch[i]
                     else np.arange(self.num_regions, dtype=np.int32)
                 )[:, None]
                 all_descs.append(
@@ -638,30 +634,24 @@ class NixlBaseConnectorWorker:
 
         self.kv_cache_config = kv_cache_config
         transfer_block_sizes = [
-            group.kv_cache_spec.block_size
+            group.block_size
             for group in kv_cache_config.transfer_groups
-            if get_representative_spec_type(group.kv_cache_spec)
-            not in (MambaSpec, CircularBufferSpec)
+            if get_representative_spec_type(group) is not MambaSpec
+            and not issubclass(group.manager_cls, CircularBufferManager)
         ]
         self.block_size = (
             math.lcm(*transfer_block_sizes)
             if transfer_block_sizes
             else cast(int, vllm_config.cache_config.block_size)
         )
-        # Per-layer specs, unwrapping UniformTypeKVCacheSpecs group wrappers.
-        self._layer_specs: dict[str, KVCacheSpec] = {}
-        for group in kv_cache_config.transfer_groups:
-            group_spec = group.kv_cache_spec
-            if isinstance(group_spec, UniformTypeKVCacheSpecs):
-                self._layer_specs.update(group_spec.kv_cache_specs)
-            else:
-                self._layer_specs.update(dict.fromkeys(group.layer_names, group_spec))
+        self._layer_specs: dict[str, KVCacheSpec] = {
+            name: spec
+            for group in kv_cache_config.transfer_groups
+            for name, spec in group.kv_cache_specs.items()
+        }
         self._is_hma_required = (
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
-            and any(
-                not isinstance(spec, FullAttentionSpec)
-                for spec in self._layer_specs.values()
-            )
+            and any(not g.is_full_attention for g in kv_cache_config.transfer_groups)
         )
 
         # ---- Model state (derived from model config) ----
@@ -674,7 +664,7 @@ class NixlBaseConnectorWorker:
             isinstance(spec, MambaSpec) for spec in self._layer_specs.values()
         )
         self._is_csa_linear = any(
-            get_representative_spec_type(group.kv_cache_spec) is CircularBufferSpec
+            issubclass(group.manager_cls, CircularBufferManager)
             for group in kv_cache_config.kv_cache_groups
         )
         self._ple_group_index: int | None = None
@@ -685,7 +675,7 @@ class NixlBaseConnectorWorker:
                 if group.layer_names
                 and all(
                     isinstance(spec, MambaSpec) and spec.tp_replicated
-                    for spec in iter_layer_specs(group.kv_cache_spec)
+                    for spec in group.kv_cache_specs.values()
                 )
             ]
             if len(ple_groups) > 1 or any(
@@ -989,9 +979,12 @@ class NixlBaseConnectorWorker:
         self._physical_blocks_per_logical_kv_block = 1
         self._sync_block_size_with_kernel()
 
-        # Unwrap UniformTypeKVCacheSpecs to get the representative spec type
         self._group_spec_types = tuple(
-            get_representative_spec_type(g.kv_cache_spec)
+            get_representative_spec_type(g)
+            for g in self.kv_cache_config.transfer_groups
+        )
+        self._group_is_scratch = tuple(
+            issubclass(g.manager_cls, CircularBufferManager)
             for g in self.kv_cache_config.transfer_groups
         )
         # Per-region MLA flag, 1:1 with block_len_per_layer. True -> REPLICATE
@@ -1555,7 +1548,7 @@ class NixlBaseConnectorWorker:
             and not self._has_mamba
         )
         if route_packed_layers and any(
-            not isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+            not isinstance(spec, MLAAttentionSpec)
             for spec in self._layer_specs.values()
         ):
             raise NotImplementedError("PP push with packed KV caches requires MLA")
@@ -1613,9 +1606,7 @@ class NixlBaseConnectorWorker:
                 if isinstance(layer_spec, MambaSpec)
                 else logical_num_blocks * self._physical_blocks_per_logical_kv_block
             )
-            is_mla_region = isinstance(
-                layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec)
-            )
+            is_mla_region = isinstance(layer_spec, MLAAttentionSpec)
             logger.debug(
                 "Registering layer %s with cache shape: %s", layer_name, cache.shape
             )
@@ -1780,7 +1771,7 @@ class NixlBaseConnectorWorker:
                     elif region_index not in self._ssm_region_indices:
                         self._ssm_region_indices.append(region_index)
                 elif (
-                    isinstance(layer_spec, CircularBufferSpec)
+                    self._group_is_scratch[group_index]
                     and region_index not in self._scratch_region_indices
                 ):
                     self._scratch_region_indices.append(region_index)
@@ -3623,8 +3614,8 @@ class NixlBaseConnectorWorker:
         # Mamba blocks have no logical<>physical discrepancy (block-size=1)
         physical_block_ids = []
         for i, group in enumerate(block_ids):
-            spec = self.kv_cache_config.transfer_groups[i].kv_cache_spec
-            if _is_ssm_spec(get_representative_spec_type(spec)):
+            transfer_group = self.kv_cache_config.transfer_groups[i]
+            if _is_ssm_spec(get_representative_spec_type(transfer_group)):
                 physical_block_ids.append(group)
             else:
                 physical_block_ids.append(

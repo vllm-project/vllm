@@ -18,13 +18,12 @@ from vllm.v1.core.sched.output import (
     NewRequestData,
     SchedulerOutput,
 )
-from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    CrossAttentionSpec,
-    KVCacheSpec,
-    MambaSpec,
-    UniformTypeKVCacheSpecs,
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
+    CrossAttentionManager,
+    MambaManager,
 )
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 from vllm.v1.request import Request
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
@@ -33,7 +32,7 @@ logger = init_logger(__name__)
 
 def _reserved_block_count(
     num_tokens: int,
-    kvcache_spec: KVCacheSpec,
+    group: KVCacheGroupSpec,
     *,
     num_lookahead_tokens: int,
     max_model_len: int,
@@ -45,37 +44,37 @@ def _reserved_block_count(
     `KVCacheManager.allocate_slots` reserves: the token range plus
     `num_lookahead_tokens`, where the speculator writes the KV of its drafts.
     """
-    if isinstance(kvcache_spec, UniformTypeKVCacheSpecs):
-        kvcache_spec = kvcache_spec.first_spec
-    if isinstance(kvcache_spec, CircularBufferSpec):
+    block_size = group.block_size
+    config = group.manager_config
+    if isinstance(config, CircularBufferManager.Config):
         # Circular caches keep one physical ring block for the request lifetime.
         return 1
-    if isinstance(kvcache_spec, CrossAttentionSpec):
+    if isinstance(config, CrossAttentionManager.Config):
         # Cross-attention blocks cover the encoder sequence only.
-        return cdiv(max_encoder_len, kvcache_spec.block_size)
+        return cdiv(max_encoder_len, block_size)
     num_speculative_blocks = 0
-    if isinstance(kvcache_spec, MambaSpec):
+    if isinstance(config, MambaManager.Config):
         # MambaManager appends speculative running-state blocks in every cache
         # mode; align mode sizes from the uncapped, lookahead-free token range.
-        num_speculative_blocks = kvcache_spec.num_speculative_blocks
-        if kvcache_spec.mamba_cache_mode == "align":
-            return cdiv(num_tokens, kvcache_spec.block_size) + num_speculative_blocks
+        num_speculative_blocks = config.num_speculative_blocks
+        if config.mamba_cache_mode == "align":
+            return cdiv(num_tokens, block_size) + num_speculative_blocks
     num_tokens = min(num_tokens + num_lookahead_tokens, max_model_len)
-    return cdiv(num_tokens, kvcache_spec.block_size) + num_speculative_blocks
+    return cdiv(num_tokens, block_size) + num_speculative_blocks
 
 
 def _warmup_block_counter(
     model_runner: GPUModelRunner,
-) -> Callable[[int, KVCacheSpec], int]:
+) -> Callable[[int, KVCacheGroupSpec], int]:
     """Bind `_reserved_block_count` to `model_runner`'s reservation policy."""
     num_lookahead_tokens = model_runner.vllm_config.num_lookahead_tokens
     max_model_len = model_runner.max_model_len
     max_encoder_len = getattr(model_runner.model_state, "max_encoder_len", 0)
 
-    def block_count(num_tokens: int, kvcache_spec: KVCacheSpec) -> int:
+    def block_count(num_tokens: int, group: KVCacheGroupSpec) -> int:
         return _reserved_block_count(
             num_tokens,
-            kvcache_spec,
+            group,
             num_lookahead_tokens=num_lookahead_tokens,
             max_model_len=max_model_len,
             max_encoder_len=max_encoder_len,
@@ -107,19 +106,18 @@ def run_mixed_prefill_decode_warmup(
 
     kv_cache_groups = model_runner.kv_cache_config.kv_cache_groups
     block_count = _warmup_block_counter(model_runner)
-    kv_cache_specs = [g.kv_cache_spec for g in kv_cache_groups]
     decode_prefill_block_counts = [
-        block_count(decode_prompt_len, s) for s in kv_cache_specs
+        block_count(decode_prompt_len, s) for s in kv_cache_groups
     ]
     decode_block_counts = [
         block_count(decode_prompt_len + decode_scheduled_tokens, s)
-        for s in kv_cache_specs
+        for s in kv_cache_groups
     ]
     decode_block_deltas = [
         decode - prefill
         for decode, prefill in zip(decode_block_counts, decode_prefill_block_counts)
     ]
-    prefill_block_counts = [block_count(prefill_len, s) for s in kv_cache_specs]
+    prefill_block_counts = [block_count(prefill_len, s) for s in kv_cache_groups]
     required_blocks = sum(decode_block_counts) + sum(prefill_block_counts)
     if model_runner.kv_cache_config.num_blocks <= required_blocks:
         logger.warning(
@@ -296,9 +294,8 @@ def _warmup_kernels(
 
     # Compute per-request block counts for each KV cache group.
     block_count = _warmup_block_counter(model_runner)
-    kv_cache_specs = [g.kv_cache_spec for g in kv_cache_groups]
-    prefill_block_counts = [block_count(prompt_len, s) for s in kv_cache_specs]
-    decode_block_counts = [block_count(decode_len, s) for s in kv_cache_specs]
+    prefill_block_counts = [block_count(prompt_len, s) for s in kv_cache_groups]
+    decode_block_counts = [block_count(decode_len, s) for s in kv_cache_groups]
     max_blocks_per_req = sum(decode_block_counts)
 
     num_reqs = min(
@@ -413,7 +410,7 @@ def _warmup_kernels(
                 after = req_computed[i] + num_tokens
                 deltas = [
                     block_count(after, spec) - held
-                    for spec, held in zip(kv_cache_specs, req_blocks[i])
+                    for spec, held in zip(kv_cache_groups, req_blocks[i])
                 ]
                 cached_req_data.new_block_ids.append(
                     tuple(_alloc_blocks(n) for n in deltas) if any(deltas) else None

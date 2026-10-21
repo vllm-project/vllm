@@ -33,11 +33,7 @@ from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import make_zmq_path
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    MambaSpec,
-    SlidingWindowSpec,
-)
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -95,15 +91,11 @@ class NixlBaseConnectorScheduler:
         self._is_hma_required = (
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
             # Also handle unlikely SW-only model case instead of checking num_groups>1.
-            and any(
-                not isinstance(g.kv_cache_spec, FullAttentionSpec)
-                for g in kv_cache_config.transfer_groups
-            )
+            and any(not g.is_full_attention for g in kv_cache_config.transfer_groups)
         )
         self._has_mamba = kv_cache_config.has_mamba_layers
         self._bounded_replay = any(
-            g.kv_cache_spec.prefix_replay_tokens > 0
-            for g in kv_cache_config.kv_cache_groups
+            g.prefix_replay_tokens > 0 for g in kv_cache_config.kv_cache_groups
         )
 
         logger.info("Initializing NIXL Scheduler %s", engine_id)
@@ -141,8 +133,8 @@ class NixlBaseConnectorScheduler:
         # Gather Sliding Window sizes for each kv cache group (if any) in number of
         # blocks per KV cache group. This is used to clip the local attention window.
         sw_sizes_tokens: list[tuple[int, int]] = [
-            (g.kv_cache_spec.sliding_window, g.kv_cache_spec.block_size)
-            if isinstance(g.kv_cache_spec, SlidingWindowSpec)
+            (g.sliding_window, g.block_size)
+            if g.sliding_window is not None
             else (0, self.block_size)
             for g in kv_cache_config.transfer_groups
         ]
@@ -156,8 +148,8 @@ class NixlBaseConnectorScheduler:
         # Trailing scratch slots that mamba managers co-allocate per request
         # for speculative decoding; None for non-SSM groups.
         self._ssm_spec_blocks = [
-            g.kv_cache_spec.num_speculative_blocks
-            if isinstance(g.kv_cache_spec, MambaSpec)
+            g.manager_config.num_speculative_blocks
+            if isinstance(g.manager_config, MambaManager.Config)
             else None
             for g in kv_cache_config.transfer_groups
         ]

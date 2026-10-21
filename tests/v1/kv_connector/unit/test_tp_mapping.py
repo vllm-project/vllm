@@ -22,7 +22,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
     NixlConnectorWorker,
 )
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
 # ======================================================================
 # Test fixtures / helpers
@@ -35,7 +35,7 @@ def _compute_mapping(
     remote_tp_size: int = 1,
     is_mla: bool = False,
     num_kv_heads: int = 8,
-    group_spec_types: tuple[type, ...] = (FullAttentionSpec,),
+    group_spec_types: tuple[type, ...] = (AttentionSpec,),
     dcp_size: int = 1,
     remote_dcp_size: int = 1,
     head_sharded_kv_heads: int | None = None,
@@ -186,6 +186,7 @@ def _make_mock_worker_for_splits(group_spec_types):
     """
     worker = object.__new__(NixlConnectorWorker)
     worker._group_spec_types = group_spec_types
+    worker._group_is_scratch = (False,) * len(group_spec_types)
     worker.transfer_topo = SimpleNamespace(virtually_split_kv_in_blocks=False)
     worker.block_len_per_layer = []
     worker.num_regions = 0
@@ -208,7 +209,7 @@ class TestBuildSrcSplitHandles:
             remote_tp_size=remote_tp_size,
         )
 
-        worker = _make_mock_worker_for_splits((FullAttentionSpec,))
+        worker = _make_mock_worker_for_splits((AttentionSpec,))
         # One region of 8 dense 1024-byte blocks as a single strided run.
         src_blocks_data = np.array([(0x2000, 1024, 0, 1024, 8)], dtype=np.uint64)
         num_descs = 8
@@ -242,7 +243,7 @@ class TestMambaPlanSplitHandles:
             rank_offset_factor=0,
         )
 
-        worker = _make_mock_worker_for_splits((FullAttentionSpec, MambaSpec))
+        worker = _make_mock_worker_for_splits((AttentionSpec, MambaSpec))
         # 2 FA runs + 1 SSM run of one block each: (addr, len, dev, stride, count)
         src_blocks_data = np.array(
             [
@@ -285,7 +286,7 @@ class TestMambaPlanSplitHandles:
             rank_offset_factor=0,
         )
 
-        worker = _make_mock_worker_for_splits((FullAttentionSpec, MambaSpec))
+        worker = _make_mock_worker_for_splits((AttentionSpec, MambaSpec))
         # 2 FA blocks x ratio 2 sub-blocks (one run of 2 per block) + 1 SSM desc
         # (never expanded).
         src_blocks_data = np.array(
@@ -314,7 +315,7 @@ class TestMambaPlanSplitHandles:
             rank_offset_factor=0,
         )
 
-        worker = _make_mock_worker_for_splits((FullAttentionSpec, MambaSpec))
+        worker = _make_mock_worker_for_splits((AttentionSpec, MambaSpec))
         src_blocks_data = np.array(
             [(1000, 100, 0, 100, 2), (3000, 400, 0, 400, 1)],
             dtype=np.uint64,

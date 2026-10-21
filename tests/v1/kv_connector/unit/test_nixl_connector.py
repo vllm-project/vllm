@@ -23,6 +23,8 @@ import ray
 import torch
 
 from tests.v1.attention.utils import dense_kv_cache_views
+from tests.v1.core.utils import new_kv_cache_group, uniform_spec
+from tests.v1.kv_connector.unit.offloading_connector.utils import make_kv_cache_group
 from vllm import LLM
 from vllm.config import KVTransferConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.utils import (
@@ -64,14 +66,12 @@ from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.platforms.interface import Platform
 from vllm.sampling_params import SamplingParams
+from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    CircularBufferSpec,
-    FullAttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheLayout,
     KVQuantMode,
     MLAAttentionSpec,
@@ -438,9 +438,9 @@ def test_kv_transfer_handshake(dist_init):
         # Prefill connector will register KV cache to populate proper handshake
         # metadata.
         kv_cache_groups = [
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer0", "layer1", "layer2"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=4,
                     head_size=16,
@@ -455,7 +455,7 @@ def test_kv_transfer_handshake(dist_init):
             vllm_config, KVConnectorRole.WORKER, kv_cache_config
         )
         kv_cache_spec = cast(
-            AttentionSpec, kv_cache_config.kv_cache_groups[0].kv_cache_spec
+            AttentionSpec, uniform_spec(kv_cache_config.kv_cache_groups[0])
         )
         raw = torch.zeros(
             kv_cache_spec.page_size_bytes * kv_cache_config.num_blocks * 3,
@@ -560,7 +560,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         # Mock register_kv_caches attributes needed for tests that do not call it.
         self.src_xfer_handles_by_block_size = {self.block_size: 1}
         self.src_blocks_data = np.empty((0, 5), dtype=np.uint64)
-        rep_spec = self.kv_cache_config.kv_cache_groups[0].kv_cache_spec
+        rep_spec = uniform_spec(self.kv_cache_config.kv_cache_groups[0])
         test_shape = compute_layer_kv_cache_shape_bytes(rep_spec, 1)
         self.transfer_topo = TransferTopology(
             tp_rank=self.tp_rank,
@@ -1545,7 +1545,7 @@ class TestNixlHandshake:
         )
 
         def set_specs(num_kv_heads: int) -> None:
-            spec = FullAttentionSpec(
+            spec = AttentionSpec(
                 block_size=worker.block_size,
                 num_kv_heads=num_kv_heads,
                 head_size=64,
@@ -1821,9 +1821,9 @@ class TestNixlHandshake:
             num_blocks=1,
             kv_cache_tensors=[],
             kv_cache_groups=[
-                KVCacheGroupSpec(
+                make_kv_cache_group(
                     ["layer0"],
-                    FullAttentionSpec(
+                    AttentionSpec(
                         block_size=block_size,
                         num_kv_heads=max(1, num_kv_heads // local_tp),
                         head_size=16,
@@ -2724,7 +2724,7 @@ def test_register_kv_caches(
         num_heads = 4
         head_size = 16
 
-        kv_cache_spec = FullAttentionSpec(
+        kv_cache_spec = AttentionSpec(
             block_size=block_size,
             num_kv_heads=num_heads,
             head_size=head_size,
@@ -2738,7 +2738,7 @@ def test_register_kv_caches(
             num_blocks=num_blocks,
             kv_cache_tensors=[],
             kv_cache_groups=[
-                KVCacheGroupSpec(
+                make_kv_cache_group(
                     ["layer0", "layer1", "layer2", "layer3"], kv_cache_spec
                 )
             ],
@@ -2875,12 +2875,14 @@ def _dsv4_mla_spec(record_bytes: int, alignment: int, tokens_per_state: int):
             (_dsv4_mla_spec(528, 512, 2), 2),
             (_dsv4_mla_spec(528, 512, 2), 2),
             (
-                CircularBufferSpec(
-                    block_size=8,
-                    num_kv_heads=1,
-                    head_size=8448,
-                    head_size_v=0,
-                    dtype=torch.uint8,
+                CircularBufferManager.layer_config(
+                    AttentionSpec(
+                        block_size=8,
+                        num_kv_heads=1,
+                        head_size=8448,
+                        head_size_v=0,
+                        dtype=torch.uint8,
+                    )
                 ),
                 2,
             ),
@@ -2902,7 +2904,11 @@ def test_register_packed_dsv4_mla_cache_as_single_region(
     ):
         mock_backends.return_value = [TritonAttentionBackend]
         num_blocks = 2
-        specs = [spec for spec, _ in groups]
+        specs = [getattr(layer, "spec", layer) for layer, _ in groups]
+        is_ring = [
+            getattr(layer, "manager_cls", None) is CircularBufferManager
+            for layer, _ in groups
+        ]
         group_layers = [
             [f"group{group_idx}.layer{idx}" for idx in range(num_layers)]
             for group_idx, (_, num_layers) in enumerate(groups)
@@ -2911,8 +2917,8 @@ def test_register_packed_dsv4_mla_cache_as_single_region(
             num_blocks=num_blocks,
             kv_cache_tensors=[],
             kv_cache_groups=[
-                KVCacheGroupSpec(layer_names, spec)
-                for layer_names, spec in zip(group_layers, specs)
+                make_kv_cache_group(layer_names, layer)
+                for layer_names, (layer, _) in zip(group_layers, groups)
             ],
         )
         vllm_config = create_vllm_config(attention_backend="TRITON_ATTN")
@@ -2954,8 +2960,8 @@ def test_register_packed_dsv4_mla_cache_as_single_region(
         # its own region.
         ring_pages = [
             (cache.data_ptr(), spec.page_size_bytes)
-            for layer_names, spec in zip(group_layers, specs)
-            if isinstance(spec, CircularBufferSpec)
+            for layer_names, spec, ring in zip(group_layers, specs, is_ring)
+            if ring
             for cache in (kv_caches[name] for name in layer_names)
             if cache.data_ptr() != raw.data_ptr()
         ]
@@ -3122,13 +3128,13 @@ def test_sleep_unregisters_and_restores_kv_caches(dist_init):
     vllm_config = create_vllm_config(block_size=block_size)
     vllm_config.cache_config.kv_cache_layout = "BLHNC"
     vllm_config.kv_transfer_config.kv_buffer_device = "cpu"
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=block_size, num_kv_heads=4, head_size=16, dtype=torch.float16
     )
     kv_cache_config = KVCacheConfig(
         num_blocks=2,
         kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(["layer0"], spec)],
+        kv_cache_groups=[new_kv_cache_group(["layer0"], spec)],
     )
     raw = torch.zeros(spec.page_size_bytes * 2, dtype=torch.int8)
     (cache,) = dense_kv_cache_views(
@@ -3606,8 +3612,8 @@ class TestPeerReplacement:
             {"old-req": [10, 11], "healthy-req": [12]}
         )
         self.nixl.invalid_remote_agents.add("old")
-        self.transport.check_xfer_state.side_effect = (
-            lambda h: "ERR" if h == 10 else "PROC"
+        self.transport.check_xfer_state.side_effect = lambda h: (
+            "ERR" if h == 10 else "PROC"
         )
         old_handle = self.worker.dst_xfer_side_handles["old"][0]
 
@@ -3617,8 +3623,8 @@ class TestPeerReplacement:
         self.worker.start_load_kv(self._request("old", req_id="blocked"))
         self.transport.make_prepped_xfer.assert_not_called()
 
-        self.transport.check_xfer_state.side_effect = (
-            lambda h: "DONE" if h == 11 else "PROC"
+        self.transport.check_xfer_state.side_effect = lambda h: (
+            "DONE" if h == 11 else "PROC"
         )
         result = self.worker.get_transfer_results()
         assert (
@@ -3695,8 +3701,8 @@ class TestPeerReplacement:
     def test_invalid_peer_empty_recv_is_reported_only_when_awaited(self, awaiting_kvs):
         self._fail_old_peer()
         self.worker._recving_transfers["old-req"].append(11)
-        self.transport.check_xfer_state.side_effect = (
-            lambda h: "PROC" if h == 11 else "ERR"
+        self.transport.check_xfer_state.side_effect = lambda h: (
+            "PROC" if h == 11 else "ERR"
         )
         self.worker.get_transfer_results()
         self.transport.make_prepped_xfer.reset_mock()
@@ -4768,7 +4774,7 @@ def test_compatibility_hash_validation(
     )
     decode_worker = decode_connector.connector_worker
     kv_cache_spec = cast(
-        AttentionSpec, kv_cache_config.kv_cache_groups[0].kv_cache_spec
+        AttentionSpec, uniform_spec(kv_cache_config.kv_cache_groups[0])
     )
     shape = compute_layer_kv_cache_shape_bytes(
         kv_cache_spec, kv_cache_config.num_blocks
@@ -4900,7 +4906,7 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
     decode_worker = decode_connector.connector_worker
 
     backend = get_current_attn_backend(local_vllm_config)
-    probe_spec = decode_worker.kv_cache_config.kv_cache_groups[0].kv_cache_spec
+    probe_spec = uniform_spec(decode_worker.kv_cache_config.kv_cache_groups[0])
     test_shape = compute_layer_kv_cache_shape_bytes(probe_spec, 1)
     decode_worker.transfer_topo = TransferTopology(
         tp_rank=decode_worker.tp_rank,

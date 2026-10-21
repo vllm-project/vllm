@@ -17,6 +17,7 @@ import torch
 import zmq.asyncio
 
 from tests.v1.attention.utils import dense_kv_cache_views
+from tests.v1.kv_connector.unit.offloading_connector.utils import make_kv_cache_group
 from vllm import envs
 from vllm.config import KVTransferConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import (
@@ -50,9 +51,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import
     RegisterWorkerPayload,
 )
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheLayout,
     MLAAttentionSpec,
 )
@@ -159,14 +159,14 @@ def _make_test_kv_cache_config() -> KVCacheConfig:
         num_blocks=0,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 [
                     "model.layers.0.self_attn",
                     "model.layers.1.self_attn",
                     "model.layers.0.mla_attn",
                     "model.layers.1.eagle_attn",
                 ],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=4,
                     head_size=64,
@@ -196,15 +196,15 @@ def _make_packed_mla_kv_cache_config(
     )
     if num_groups == 1:
         groups = [
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["model.layers.0.mla_attn", "model.layers.1.indexer"],
                 spec,
             )
         ]
     else:
         groups = [
-            KVCacheGroupSpec(["model.layers.0.mla_attn"], spec),
-            KVCacheGroupSpec(["model.layers.1.indexer"], spec),
+            make_kv_cache_group(["model.layers.0.mla_attn"], spec),
+            make_kv_cache_group(["model.layers.1.indexer"], spec),
         ]
     return KVCacheConfig(
         num_blocks=num_blocks,
@@ -1866,7 +1866,7 @@ async def test_worker_get_finished_timeout(monkeypatch):
 )
 def test_register_kv_caches(layout: KVCacheLayout, separate_kv_head_groups: bool):
     """Tests the memory registration logic with the underlying Mooncake engine."""
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=maybe_update_block_size(16),
         num_kv_heads=4,
         head_size=64,
@@ -1947,7 +1947,7 @@ def test_register_noncontiguous_packed_allows_matching_pp():
     A remote PP mismatch is rejected at send time, once the peer PP size is
     known. Rejecting every local PP>1 layout at startup is too strict.
     """
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=maybe_update_block_size(16),
         num_kv_heads=4,
         head_size=64,
@@ -2616,7 +2616,7 @@ def _register_sliced_packed_mla(
         num_blocks=num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec([_layer_name(i) for i in layer_idxs], spec),
+            make_kv_cache_group([_layer_name(i) for i in layer_idxs], spec),
         ],
     )
     backing = torch.zeros((num_blocks, page * len(layer_idxs)), dtype=torch.uint8)
@@ -2650,7 +2650,7 @@ def test_sliced_packed_mla_registers_each_layer_view():
             num_blocks=4,
             kv_cache_tensors=[],
             kv_cache_groups=[
-                KVCacheGroupSpec(
+                make_kv_cache_group(
                     [_layer_name(i) for i in layer_idxs],
                     MLAAttentionSpec(
                         block_size=maybe_update_block_size(16),
@@ -2936,7 +2936,7 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
 
 
 def test_sleep_unregisters_and_restores_kv_caches():
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=maybe_update_block_size(16),
         num_kv_heads=4,
         head_size=64,

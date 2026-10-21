@@ -12,7 +12,8 @@ from collections.abc import Iterator
 
 import torch
 
-from vllm.benchmarks.forward.batch import BenchBatch, kv_block_size
+from vllm.benchmarks.forward.batch import BenchBatch
+from vllm.v1.core.kv_cache_utils import resolve_dcp_kv_block_size
 
 
 def _tensors(kv_cache) -> Iterator[torch.Tensor]:
@@ -57,7 +58,7 @@ def touched_kv_views(
     scheduled_tokens = [batch.expected[req_id][0] for req_id in batch.req_ids]
     views = []
     for group, ranges in zip(kv_cache_groups, batch.group_block_ranges):
-        block_size = kv_block_size(group.kv_cache_spec, dcp_size)
+        block_size = resolve_dcp_kv_block_size(group, dcp_size)
         for name in group.layer_names:
             layer = static_forward_context[name]
             for tensor in _tensors(getattr(layer, "kv_cache", None)):

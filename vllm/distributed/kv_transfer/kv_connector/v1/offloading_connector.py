@@ -62,7 +62,7 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         return tuple(
             group_id
             for group_id, group in enumerate(self._kv_cache_config.kv_cache_groups)
-            if group.kv_cache_spec.prefix_cacheable and group_id not in offloaded
+            if group.prefix_cacheable and group_id not in offloaded
         )
 
     @property

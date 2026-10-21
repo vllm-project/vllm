@@ -22,6 +22,10 @@ import numpy as np
 import pytest
 import torch
 
+from tests.v1.kv_connector.unit.offloading_connector.utils import (
+    make_kv_cache_group,
+    make_kv_cache_group_from_specs,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlAgentMetadata,
@@ -32,9 +36,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_worker import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
     NixlPushConnectorWorker,
 )
+from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheLayout,
     KVCacheTensor,
     MLAAttentionSpec,
@@ -152,7 +156,7 @@ def _make_packed_mla_view_worker(
             offset=offset,
         )
         tensors.append(tensor)
-        groups.append(KVCacheGroupSpec([name], spec))
+        groups.append(make_kv_cache_group([name], spec))
         (caches[name],) = create_kv_cache_views(
             raw, spec, num_blocks, KVCacheLayout.BLHNC, tensor
         )
@@ -382,7 +386,6 @@ def _register_overlaid_mla_worker(
     )
     from vllm.v1.kv_cache_interface import (
         KVCacheConfig,
-        KVCacheGroupSpec,
         KVCacheTensor,
         MLAAttentionSpec,
     )
@@ -403,7 +406,7 @@ def _register_overlaid_mla_worker(
         "layer.0": backing[:, :view_size],
         "layer.1": backing[:, :view_size],
     }
-    groups = [KVCacheGroupSpec([layer_name], spec) for layer_name in caches]
+    groups = [make_kv_cache_group([layer_name], spec) for layer_name in caches]
 
     worker_cls = NixlPushConnectorWorker if push_pp else NixlConnectorWorker
     worker = object.__new__(worker_cls)
@@ -470,6 +473,7 @@ def _register_overlaid_mla_worker(
     worker.pcp_size = 1
     worker.kv_buffer_device = "cuda"
     worker._layer_specs = {name: spec for name in caches}
+    worker._group_is_scratch = (False,) * len(groups)
     worker.kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=[
@@ -589,7 +593,6 @@ def _make_mla_hybrid_worker(
     from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
     from vllm.v1.kv_cache_interface import (
         KVCacheConfig,
-        KVCacheGroupSpec,
         KVCacheTensor,
         MambaSpec,
         MLAAttentionSpec,
@@ -624,9 +627,9 @@ def _make_mla_hybrid_worker(
             for prefix in ("mla", "kda_a", "kda_b")
         ],
         kv_cache_groups=[
-            KVCacheGroupSpec(["mla.0", "mla.1"], mla_spec),
-            KVCacheGroupSpec(["kda_a.0", "kda_a.1"], kda_spec),
-            KVCacheGroupSpec(["kda_b.0", "kda_b.1"], kda_spec),
+            make_kv_cache_group(["mla.0", "mla.1"], mla_spec),
+            make_kv_cache_group(["kda_a.0", "kda_a.1"], kda_spec),
+            make_kv_cache_group(["kda_b.0", "kda_b.1"], kda_spec),
         ],
     )
 
@@ -699,7 +702,6 @@ def test_nixl_keeps_packed_sparse_mla_manager_block():
     from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
     from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseBackend
     from vllm.v1.attention.backends.mla.indexer import Glm5NextIndexerBackend
-    from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 
     specs = {
         "mla": MLAAttentionSpec(
@@ -724,7 +726,7 @@ def test_nixl_keeps_packed_sparse_mla_manager_block():
         compilation_config=SimpleNamespace(static_forward_context=layers),
     )
     worker.kv_cache_config = KVCacheConfig(
-        2, [], [KVCacheGroupSpec(list(specs), UniformTypeKVCacheSpecs(1152, specs))]
+        2, [], [make_kv_cache_group_from_specs(specs)]
     )
 
     worker._sync_block_size_with_kernel()
@@ -1236,18 +1238,15 @@ def _make_csa_linear_ple_worker(
     )
     from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
     from vllm.v1.kv_cache_interface import (
-        CircularBufferSpec,
-        FullAttentionSpec,
+        AttentionSpec,
         KVCacheConfig,
-        KVCacheGroupSpec,
         KVCacheTensor,
         MambaSpec,
         MLAAttentionSpec,
-        UniformTypeKVCacheSpecs,
     )
 
     main_kv_specs = {
-        f"main_kv.{index}": FullAttentionSpec(
+        f"main_kv.{index}": AttentionSpec(
             block_size=4,
             num_kv_heads=1,
             head_size=16,
@@ -1266,7 +1265,7 @@ def _make_csa_linear_ple_worker(
         for index in range(2)
     }
     compressor_state_specs = {
-        f"compressor_state.{index}": CircularBufferSpec(
+        f"compressor_state.{index}": AttentionSpec(
             block_size=2,
             num_kv_heads=1,
             head_size=32,
@@ -1298,10 +1297,8 @@ def _make_csa_linear_ple_worker(
         )
     }
 
-    def group(specs):
-        uniform = UniformTypeKVCacheSpecs.from_specs(specs)
-        assert uniform is not None
-        return KVCacheGroupSpec(list(specs), uniform)
+    def group(specs, manager_cls=None):
+        return make_kv_cache_group_from_specs(specs, manager_cls)
 
     tensor_regions: tuple[tuple[str, ...], ...]
     if scratch_aliases == "compressed":
@@ -1341,9 +1338,9 @@ def _make_csa_linear_ple_worker(
         ],
         kv_cache_groups=[
             group(compressed_sparse_specs),
-            group(compressor_state_specs),
-            KVCacheGroupSpec(["mamba.sharded"], sharded_mamba_spec),
-            KVCacheGroupSpec(["mamba.ple"], ple_spec),
+            group(compressor_state_specs, CircularBufferManager),
+            make_kv_cache_group(["mamba.sharded"], sharded_mamba_spec),
+            make_kv_cache_group(["mamba.ple"], ple_spec),
         ],
     )
 
@@ -1571,12 +1568,10 @@ def _make_ring_worker():
         NixlConnectorWorker,
     )
     from vllm.v1.kv_cache_interface import (
-        CircularBufferSpec,
+        AttentionSpec,
         KVCacheConfig,
-        KVCacheGroupSpec,
         KVCacheTensor,
         MLAAttentionSpec,
-        UniformTypeKVCacheSpecs,
     )
 
     paged_specs = {
@@ -1586,7 +1581,7 @@ def _make_ring_worker():
         for index in range(2)
     }
     ring_specs = {
-        f"ring.{index}": CircularBufferSpec(
+        f"ring.{index}": AttentionSpec(
             block_size=6,
             num_kv_heads=1,
             head_size=32,
@@ -1596,10 +1591,8 @@ def _make_ring_worker():
         for index in range(2)
     }
 
-    def group(specs):
-        uniform = UniformTypeKVCacheSpecs.from_specs(specs)
-        assert uniform is not None
-        return KVCacheGroupSpec(list(specs), uniform)
+    def group(specs, manager_cls=None):
+        return make_kv_cache_group_from_specs(specs, manager_cls)
 
     # Both rings overlay the second paged region, so the scratch group must
     # address only that region while the paged group spans both.
@@ -1618,7 +1611,7 @@ def _make_ring_worker():
             for region_index, layer_names in enumerate(tensor_regions)
             for layer_name in layer_names
         ],
-        kv_cache_groups=[group(paged_specs), group(ring_specs)],
+        kv_cache_groups=[group(paged_specs), group(ring_specs, CircularBufferManager)],
     )
 
     vllm_config = create_vllm_config(block_size=4)

@@ -19,8 +19,16 @@ import torch
 
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.sched.output import KVConnectorBlockState, SchedulerOutput
-from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
-from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpecs
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    MambaManager,
+)
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheGroupSpec,
+    KVCacheLayerConfig,
+    KVCacheSpec,
+)
 
 moriio_connector = importlib.import_module(
     "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector"
@@ -113,14 +121,47 @@ def _gdn_split_info(conv_rows=3, key_dim=4, value_dim=8, dtype_size=2):
     )
 
 
-def _mamba_spec(num_states: int = 2, *, num_speculative_blocks: int = 0):
+def _mamba_spec(num_states: int = 2):
     shapes = tuple((1, 1) for _ in range(num_states))
     return moriio_connector.MambaSpec(
         block_size=16,
         shapes=shapes,
         dtypes=(torch.float32,) * num_states,
-        mamba_cache_mode="align",
-        num_speculative_blocks=num_speculative_blocks,
+    )
+
+
+def _attn_group(
+    name: str = "attn",
+    *,
+    enable_kv_transfer: bool = True,
+    specs: dict[str, KVCacheSpec] | None = None,
+) -> KVCacheGroupSpec:
+    if specs is None:
+        specs = {
+            name: AttentionSpec(
+                block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
+            )
+        }
+    config = FullAttentionManager.Config()
+    return KVCacheGroupSpec.from_layers(
+        {n: KVCacheLayerConfig(config, s) for n, s in specs.items()},
+        enable_kv_transfer=enable_kv_transfer,
+    )
+
+
+def _mamba_group(
+    spec=None,
+    *,
+    name: str = "mamba",
+    num_speculative_blocks: int = 0,
+    enable_kv_transfer: bool = True,
+) -> KVCacheGroupSpec:
+    config = MambaManager.Config(
+        mamba_cache_mode="align", num_speculative_blocks=num_speculative_blocks
+    )
+    layer = KVCacheLayerConfig(config, spec or _mamba_spec())
+    return KVCacheGroupSpec.from_layers(
+        {name: layer}, enable_kv_transfer=enable_kv_transfer
     )
 
 
@@ -182,13 +223,12 @@ def test_split_block_groups_ignores_transfer_disabled_group():
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
     )
     config = SimpleNamespace(
         kv_cache_groups=[
-            SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=object()),
-            SimpleNamespace(enable_kv_transfer=False, kv_cache_spec=object()),
-            SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=mamba_spec),
+            _attn_group("attn0"),
+            _attn_group("attn1", enable_kv_transfer=False),
+            _mamba_group(mamba_spec),
         ],
     )
     config.transfer_groups = tuple(
@@ -236,9 +276,9 @@ def test_scheduler_rejects_multiple_attention_groups_with_mamba():
     """A drafter owning its own transfer group is refused, with a hint."""
     config = SimpleNamespace(
         kv_cache_groups=[
-            SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=object()),
-            SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=object()),
-            SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=_mamba_spec()),
+            _attn_group("attn0"),
+            _attn_group("attn1"),
+            _mamba_group(),
         ],
     )
     config.transfer_groups = tuple(config.kv_cache_groups)
@@ -265,9 +305,9 @@ def test_scheduler_rejects_incompatible_mamba_groups():
     object.__setattr__(incompatible, "page_size_padded", 4096)
     config = SimpleNamespace(
         kv_cache_groups=[
-            SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=object()),
-            SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=_mamba_spec()),
-            SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=incompatible),
+            _attn_group(),
+            _mamba_group(name="mamba0"),
+            _mamba_group(incompatible, name="mamba1"),
         ]
     )
     config.transfer_groups = tuple(config.kv_cache_groups)
@@ -279,8 +319,8 @@ def test_scheduler_rejects_incompatible_mamba_groups():
 def test_scheduler_rejects_mamba_group_without_two_states():
     config = SimpleNamespace(
         kv_cache_groups=[
-            SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=object()),
-            SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=_mamba_spec(1)),
+            _attn_group(),
+            _mamba_group(_mamba_spec(1)),
         ],
     )
     config.transfer_groups = tuple(config.kv_cache_groups)
@@ -293,8 +333,8 @@ def test_scheduler_rejects_mamba_group_without_two_states():
 def test_scheduler_rejects_non_dspark_speculative_hybrid(read_mode):
     config = SimpleNamespace(
         kv_cache_groups=[
-            SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=object()),
-            SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=_mamba_spec()),
+            _attn_group(),
+            _mamba_group(),
         ],
     )
     config.transfer_groups = tuple(config.kv_cache_groups)
@@ -309,13 +349,12 @@ def test_scheduler_rejects_non_dspark_speculative_hybrid(read_mode):
         )
 
 
-def _dspark_wrapped_attention_config(*, dcp_sharded: bool = True):
-    """Mamba first, so a wrapped full-attention group at index 1 has to be found.
-
-    A bare ``isinstance(FullAttentionSpec)`` misses the wrapper and leaves
-    ``_full_attn_group_idx`` at its initial 0, which is the Mamba group.
+def _dspark_multi_layer_attention_config(*, dcp_sharded: bool = True):
+    """Mamba first, so a multi-layer full-attention group at index 1 has to be
+    found; otherwise ``_full_attn_group_idx`` stays at its initial 0, which is
+    the Mamba group.
     """
-    full = FullAttentionSpec(
+    full = AttentionSpec(
         block_size=4,
         num_kv_heads=1,
         head_size=1,
@@ -324,16 +363,8 @@ def _dspark_wrapped_attention_config(*, dcp_sharded: bool = True):
     )
     config = SimpleNamespace(
         kv_cache_groups=[
-            SimpleNamespace(
-                enable_kv_transfer=True,
-                kv_cache_spec=_mamba_spec(num_speculative_blocks=2),
-            ),
-            SimpleNamespace(
-                enable_kv_transfer=True,
-                kv_cache_spec=UniformTypeKVCacheSpecs(
-                    block_size=4, kv_cache_specs={"target": full, "draft": full}
-                ),
-            ),
+            _mamba_group(num_speculative_blocks=2),
+            _attn_group(specs={"target": full, "draft": full}),
         ],
     )
     config.transfer_groups = tuple(config.kv_cache_groups)
@@ -345,10 +376,10 @@ def _dspark_wrapped_attention_config(*, dcp_sharded: bool = True):
 @pytest.mark.parametrize(
     "dcp_size,dcp_sharded,expected_tail", [(1, True, 4), (4, True, 1), (4, False, 4)]
 )
-def test_scheduler_accepts_dspark_with_wrapped_full_attention(
+def test_scheduler_accepts_dspark_with_multi_layer_full_attention(
     dcp_size, dcp_sharded, expected_tail, read_mode
 ):
-    config = _dspark_wrapped_attention_config(dcp_sharded=dcp_sharded)
+    config = _dspark_multi_layer_attention_config(dcp_sharded=dcp_sharded)
     vllm_config = _gate_vllm_config(
         read_mode=read_mode,
         speculative_config=_spec_config("dspark"),
@@ -364,9 +395,8 @@ def test_scheduler_accepts_dspark_with_wrapped_full_attention(
     assert scheduler._max_decode_tail_blocks == expected_tail
 
     # A first decode step reserves padded target rows AND drafter lookahead.
-    spec = config.transfer_groups[1].kv_cache_spec
     manager = FullAttentionManager(
-        spec,
+        config.transfer_groups[1],
         block_pool=BlockPool(32, enable_caching=False, hash_block_size=4),
         enable_caching=False,
         kv_cache_group_id=1,
@@ -393,7 +423,7 @@ def test_scheduler_accepts_dspark_with_wrapped_full_attention(
 
 @pytest.mark.usefixtures("restore_moriio_role")
 def test_hybrid_write_clamps_attention_and_excludes_scratch_slots():
-    config = _dspark_wrapped_attention_config()
+    config = _dspark_multi_layer_attention_config()
     config.select_transfer_block_ids = lambda blocks: tuple(blocks)
     sched = moriio_connector.MoRIIOConnectorScheduler(
         _gate_vllm_config(read_mode=False, dcp_size=2), "engine", config
@@ -405,7 +435,7 @@ def test_hybrid_write_clamps_attention_and_excludes_scratch_slots():
 
 @pytest.mark.usefixtures("restore_moriio_role")
 def test_hybrid_write_resolves_current_state_instead_of_cached_block_ids():
-    config = _dspark_wrapped_attention_config()
+    config = _dspark_multi_layer_attention_config()
     config.select_transfer_block_ids = lambda blocks: tuple(blocks)
     sched = moriio_connector.MoRIIOConnectorScheduler(
         _gate_vllm_config(read_mode=False, dcp_size=2), "engine", config
@@ -427,7 +457,7 @@ def test_hybrid_write_resolves_current_state_instead_of_cached_block_ids():
 def test_hybrid_write_notifies_grouped_slots_or_releases_a_complete_local_hit(
     external_tokens,
 ):
-    config = _dspark_wrapped_attention_config()
+    config = _dspark_multi_layer_attention_config()
     config.select_transfer_block_ids = lambda blocks: tuple(blocks)
     sched = moriio_connector.MoRIIOConnectorScheduler(
         _gate_vllm_config(read_mode=False), "engine", config
@@ -464,20 +494,22 @@ def test_hybrid_write_notifies_grouped_slots_or_releases_a_complete_local_hit(
 
 @pytest.mark.usefixtures("restore_moriio_role")
 def test_hybrid_write_keeps_separate_draft_groups_and_their_block_spans():
-    config = _dspark_wrapped_attention_config()
+    config = _dspark_multi_layer_attention_config()
     # A disabled cache is absent from the wire. Target and draft may have
     # different token spans, and neither can borrow the other's block IDs.
-    draft = SimpleNamespace(
-        enable_kv_transfer=True,
-        kv_cache_spec=FullAttentionSpec(
-            block_size=4,
-            num_kv_heads=1,
-            head_size=2,
-            dtype=torch.float32,
-            dcp_sharded=False,
-        ),
+    draft = _attn_group(
+        "draft_only",
+        specs={
+            "draft_only": AttentionSpec(
+                block_size=4,
+                num_kv_heads=1,
+                head_size=2,
+                dtype=torch.float32,
+                dcp_sharded=False,
+            )
+        },
     )
-    disabled = SimpleNamespace(enable_kv_transfer=False, kv_cache_spec=object())
+    disabled = _attn_group("disabled", enable_kv_transfer=False)
     config.kv_cache_groups.insert(1, disabled)
     config.kv_cache_groups.append(draft)
     config.transfer_groups = tuple(
@@ -518,7 +550,7 @@ def test_hybrid_write_keeps_separate_draft_groups_and_their_block_spans():
 def test_hybrid_write_request_finished_defers_free_only_with_blocks_to_send(
     blocks, delay_free
 ):
-    config = _dspark_wrapped_attention_config()
+    config = _dspark_multi_layer_attention_config()
     config.select_transfer_block_ids = lambda blocks: tuple(blocks)
     sched = moriio_connector.MoRIIOConnectorScheduler(
         _gate_vllm_config(read_mode=False, dcp_size=2), "engine", config
@@ -542,7 +574,7 @@ def test_hybrid_write_request_finished_defers_free_only_with_blocks_to_send(
 def test_hybrid_write_build_meta_saves_current_state_on_the_final_chunk():
     """Chunked prefill must not ship block ids cached at admission: align-mode
     state slots move between chunks without appending a block."""
-    config = _dspark_wrapped_attention_config()
+    config = _dspark_multi_layer_attention_config()
     config.select_transfer_block_ids = lambda blocks: tuple(blocks)
     sched = moriio_connector.MoRIIOConnectorScheduler(
         _gate_vllm_config(read_mode=False, dcp_size=2), "engine", config
@@ -1019,8 +1051,8 @@ def _make_register_worker(caches, geoms, *, disable_hma: bool = True):
     worker._is_mla_cache_layer = lambda _n: False
     worker._get_layer_transfer_geometry = lambda n, remote_num_blocks=None: geoms[n]
     worker._iter_layer_registration_regions = lambda n: [(caches[n], caches[n].nbytes)]
-    worker._moriio_handshake_listener = (
-        lambda _m, ready_event, *_a, **_k: ready_event.set()
+    worker._moriio_handshake_listener = lambda _m, ready_event, *_a, **_k: (
+        ready_event.set()
     )
     return worker
 

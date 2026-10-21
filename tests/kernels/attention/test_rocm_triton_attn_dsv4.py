@@ -1746,7 +1746,7 @@ def test_dsv4_adaptive_mla_swa_metadata_graph_replay(monkeypatch) -> None:
     )
     from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadata
     from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
-    from vllm.v1.kv_cache_interface import MLAAttentionSpec, SlidingWindowMLASpec
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
     device = torch.device("cuda")
     num_reqs = 3
@@ -1783,12 +1783,11 @@ def test_dsv4_adaptive_mla_swa_metadata_graph_replay(monkeypatch) -> None:
         cache_dtype_str="fp8_ds_mla",
         model_version="deepseek_v4",
     )
-    swa_spec = SlidingWindowMLASpec(
+    swa_spec = MLAAttentionSpec(
         block_size=block_size,
         num_kv_heads=1,
         head_size=HEAD_DIM,
         dtype=torch.bfloat16,
-        sliding_window=window_size,
         cache_dtype_str="fp8_ds_mla",
         model_version="deepseek_v4",
     )
@@ -1995,7 +1994,7 @@ def test_dsv41_adaptive_mla_swa_metadata_graph_replay(monkeypatch) -> None:
     )
     from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadata
     from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
-    from vllm.v1.kv_cache_interface import MLAAttentionSpec, SlidingWindowMLASpec
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
     device = torch.device("cuda")
     num_reqs = 3
@@ -2032,12 +2031,11 @@ def test_dsv41_adaptive_mla_swa_metadata_graph_replay(monkeypatch) -> None:
         cache_dtype_str="fp8_ds_mla",
         model_version="deepseek_v4",
     )
-    swa_spec = SlidingWindowMLASpec(
+    swa_spec = MLAAttentionSpec(
         block_size=block_size,
         num_kv_heads=1,
         head_size=HEAD_DIM,
         dtype=torch.uint8,
-        sliding_window=32,
         cache_dtype_str="fp8_ds_mla",
         model_version="deepseek_v4",
     )

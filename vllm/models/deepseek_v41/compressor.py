@@ -27,7 +27,8 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.kv_cache_interface import CircularBufferSpec, KVCacheSpec
+from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayerConfig
 
 
 class CompressorBackend(AttentionBackend):
@@ -101,7 +102,7 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        assert isinstance(self.kv_cache_spec, CircularBufferSpec)
+        assert isinstance(self.kv_cache_spec, AttentionSpec)
         self.capacity = self.kv_cache_spec.block_size
         self.pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
         max_num_batched_tokens = (
@@ -226,15 +227,16 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
         # [B, H=1, N, C] -> [B, N, C]
         self.kv_cache = kv_cache.squeeze(1)
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
         del vllm_config
-        return CircularBufferSpec(
+        spec = AttentionSpec(
             block_size=self.block_size,
             num_kv_heads=1,
             head_size=self.state_dim,
             head_size_v=0,
             dtype=self.dtype,
         )
+        return CircularBufferManager.layer_config(spec)
 
     def forward(self): ...
 

@@ -130,7 +130,10 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         group_ids = [
             gid
             for gid, group in enumerate(groups)
-            if isinstance(group.kv_cache_spec, HiddenStateCacheSpec)
+            if any(
+                isinstance(spec, HiddenStateCacheSpec)
+                for spec in group.kv_cache_specs.values()
+            )
         ]
         if len(group_ids) == 1:
             return group_ids[0]
@@ -148,7 +151,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         kv_cache_config: "KVCacheConfig | None",
         cache_kv_group_id: int,
     ) -> int:
-        """Block size of the hidden-states group, read from its own spec.
+        """Block size of the hidden-states group.
 
         cache_config.block_size is bumped to a common multiple for hybrid
         verifiers; the page-aligned hidden-states group keeps a smaller one.
@@ -156,7 +159,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         if kv_cache_config is None:
             return vllm_config.cache_config.block_size
         cache_group = kv_cache_config.kv_cache_groups[cache_kv_group_id]
-        return cache_group.kv_cache_spec.block_size
+        return cache_group.block_size
 
     def __init__(
         self,

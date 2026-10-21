@@ -17,16 +17,16 @@ import torch
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     MambaSpec,
     is_mamba_prefill_checkpoint_valid,
 )
 from vllm.v1.request import Request
 
-from .utils import create_requests
+from .utils import create_requests, new_kv_cache_group
 
 pytestmark = pytest.mark.cpu_test
 
@@ -89,21 +89,23 @@ def _make_hybrid_kv_cache_manager(
         num_blocks=10000,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full_layer"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=ATTN_BLOCK_SIZE,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba_layer"],
-                MambaSpec(
-                    block_size=MAMBA_BLOCK_SIZE,
-                    shapes=((1, 1),),
-                    dtypes=(torch.float32,),
+                MambaManager.layer_config(
+                    MambaSpec(
+                        block_size=MAMBA_BLOCK_SIZE,
+                        shapes=((1, 1),),
+                        dtypes=(torch.float32,),
+                    ),
                     mamba_cache_mode="align",
                     num_speculative_blocks=NUM_SPEC,
                     num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,

@@ -64,7 +64,7 @@ if TYPE_CHECKING:
     from vllm.tasks import ScoreType
     from vllm.tokenizers import TokenizerLike
     from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-    from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec
+    from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheLayerConfig
     from vllm.v1.worker.encoder_cudagraph_defs import (
         EncoderCudaGraphCaptureInputs,
         EncoderCudaGraphConfig,
@@ -687,7 +687,7 @@ class SupportsKVCacheGrouping(Protocol):
     def get_kv_cache_groups(
         cls,
         vllm_config: "VllmConfig",
-        kv_cache_spec: dict[str, "KVCacheSpec"],
+        layer_configs: dict[str, "KVCacheLayerConfig"],
     ) -> list["KVCacheGroupSpec"]:
         """Split the model's layers into logical KV cache groups."""
         ...

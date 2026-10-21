@@ -32,6 +32,7 @@ from vllm.models.kimi_k3.amd.ops.kda_chunk import (
 )
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import MambaSpec
 
 pytestmark = pytest.mark.skipif(
@@ -80,6 +81,11 @@ def _builder(
             block_size=block_size,
             shapes=((16, 64),),
             dtypes=(torch.float16,),
+        ),
+        layer_names=["layer.0"],
+        vllm_config=vllm_config,
+        device=torch.device("cuda"),
+        kv_cache_manager_config=MambaManager.Config(
             mamba_cache_mode=mamba_cache_mode,
             num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,
             prefill_checkpoint_alignment=(
@@ -87,9 +93,6 @@ def _builder(
             ),
             num_speculative_blocks=num_spec,
         ),
-        layer_names=["layer.0"],
-        vllm_config=vllm_config,
-        device=torch.device("cuda"),
     )
     vllm_config.cache_config.hash_block_size = prefix_match_unit or block_size
     vllm_config.cache_config.cache_hit_alignment_tokens = (
@@ -473,11 +476,14 @@ def test_checkpoint_metadata_skips_unaligned_offset() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _spec_for(monkeypatch, **attrs) -> MambaSpec:
-    """Run the layer's `get_kv_cache_spec` over a stubbed base spec."""
-    base = MambaSpec(block_size=BLOCK_SIZE, shapes=((16, 64),), dtypes=(torch.float16,))
+def _manager_config_for(monkeypatch, **attrs) -> MambaManager.Config:
+    """Run the layer's `get_kv_cache_config` over a stubbed base config."""
+    base = MambaManager.layer_config(
+        MambaSpec(block_size=BLOCK_SIZE, shapes=((16, 64),), dtypes=(torch.float16,)),
+        mamba_cache_mode="align",
+    )
     monkeypatch.setattr(
-        GatedDeltaNetAttention, "get_kv_cache_spec", lambda self, cfg: base
+        GatedDeltaNetAttention, "get_kv_cache_config", lambda self, cfg: base
     )
     layer = KimiK3DeltaAttention.__new__(KimiK3DeltaAttention)
     for name, value in dict(
@@ -489,17 +495,20 @@ def _spec_for(monkeypatch, **attrs) -> MambaSpec:
         setattr(layer, name, attrs.get(name, value))
     vllm_config = create_vllm_config(model_name="Qwen/Qwen3.5-0.8B")
     vllm_config.cache_config.mamba_cache_mode = "align"
-    return layer.get_kv_cache_spec(vllm_config)
+    manager_config = layer.get_kv_cache_config(vllm_config).manager_config
+    assert isinstance(manager_config, MambaManager.Config)
+    return manager_config
 
 
 def test_opt_in_publishes_chunk_walk_alignment(monkeypatch) -> None:
-    # The scheduler learns the kernel's granularity only from the spec, so
+    # The scheduler learns the kernel's granularity only from the manager
+    # config, so
     # reserving a block without publishing the alignment would hash a state
     # that is never written.
-    spec = _spec_for(monkeypatch)
+    config = _manager_config_for(monkeypatch)
 
-    assert spec.num_prefill_checkpoint_blocks == 1
-    assert spec.prefill_checkpoint_alignment == KDA_CHECKPOINT_ALIGNMENT
+    assert config.num_prefill_checkpoint_blocks == 1
+    assert config.prefill_checkpoint_alignment == KDA_CHECKPOINT_ALIGNMENT
 
 
 @pytest.mark.parametrize(
@@ -512,16 +521,16 @@ def test_opt_in_publishes_chunk_walk_alignment(monkeypatch) -> None:
     ],
 )
 def test_paths_that_cannot_export_stay_opted_out(monkeypatch, attr, value) -> None:
-    spec = _spec_for(monkeypatch, **{attr: value})
+    config = _manager_config_for(monkeypatch, **{attr: value})
 
-    assert spec.num_prefill_checkpoint_blocks == 0
-    assert spec.prefill_checkpoint_alignment is None
+    assert config.num_prefill_checkpoint_blocks == 0
+    assert config.prefill_checkpoint_alignment is None
 
 
 def test_speculative_decoding_does_not_opt_out(monkeypatch) -> None:
     # num_spec reaches the kernels as a wider conv row and an interleaved
     # batch, both of which the layer handles.
-    spec = _spec_for(monkeypatch, num_spec=8)
+    config = _manager_config_for(monkeypatch, num_spec=8)
 
-    assert spec.num_prefill_checkpoint_blocks == 1
-    assert spec.prefill_checkpoint_alignment == KDA_CHECKPOINT_ALIGNMENT
+    assert config.num_prefill_checkpoint_blocks == 1
+    assert config.prefill_checkpoint_alignment == KDA_CHECKPOINT_ALIGNMENT
