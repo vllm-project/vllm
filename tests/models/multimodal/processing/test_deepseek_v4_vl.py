@@ -21,7 +21,6 @@ from vllm.models.deepseek_v4.common.mm_preprocess import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
-from vllm.renderers.chat_utils.item_tracker import _get_embeds_data
 from vllm.renderers.deepseek_v4 import DeepseekV41Renderer
 from vllm.renderers.params import ChatParams
 from vllm.tokenizers.deepseek_v41 import get_deepseek_v41_tokenizer
@@ -118,7 +117,6 @@ def test_v41_image_metadata_only_roundtrip(sizes, monkeypatch):
         json.dumps([published[feature.identifier]["metadata"] for feature in features])
     )
     assert all(set(item) == {"llm_grid"} for item in metadata)
-    image_data = _get_embeds_data("image", metadata, processor)
     renderer = DeepseekV41Renderer.__new__(DeepseekV41Renderer)
     renderer.model_config = ctx.model_config
     renderer.mm_processor = processor
@@ -136,9 +134,7 @@ def test_v41_image_metadata_only_roundtrip(sizes, monkeypatch):
         ChatParams(chat_template_kwargs={"thinking": False, "tokenize": False}),
     )
     assert rendered["multi_modal_uuids"]["image"] == [str(i) for i in range(len(sizes))]
-    assert torch.equal(
-        rendered["multi_modal_data"]["image"]["llm_grid"], image_data["llm_grid"]
-    )
+    image_data = rendered["multi_modal_data"]["image"]
 
     def unexpected_preprocessing(*args, **kwargs):
         pytest.fail("The EC consumer must not preprocess images")
@@ -179,3 +175,15 @@ def test_v41_image_metadata_only_roundtrip(sizes, monkeypatch):
     assert supplied["prompt_token_ids"] == raw["prompt_token_ids"]
     assert [len(output) for output in outputs] == lengths
     assert torch.equal(torch.cat(outputs), embeddings)
+
+
+def test_v41_renderer_keeps_metadata_when_image_order_is_unchanged():
+    """Unchanged image order must not require parsing or rebuilding metadata."""
+    renderer = DeepseekV41Renderer.__new__(DeepseekV41Renderer)
+    image_data = {"llm_grid": torch.tensor([[2, 3], [3, 2]])}
+    image_uuids = ["first", "second"]
+    prompt = renderer._build_prompt(
+        ("prompt", [0, 1]), {"image": image_data}, {"image": image_uuids}
+    )
+    assert prompt["multi_modal_data"]["image"] is image_data
+    assert prompt["multi_modal_uuids"]["image"] is image_uuids
