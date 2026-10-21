@@ -1167,6 +1167,13 @@ class FlashAttentionImpl(AttentionImpl):
         self.supports_quant_query_input = flash_attn_supports_quant_query_input() and (
             not uses_sm90_fa4_fp8_kv_dequant
         )
+        if uses_sm90_fa4_fp8_kv_dequant and self.dcp_world_size > 1:
+            # DCP context attention is non-causal, which the SM90 FP8 MMA
+            # kernel rejects at dispatch time.
+            raise NotImplementedError(
+                "FA4 SM90 FP8 KV cache does not support decode context "
+                "parallelism; use an unquantized KV cache."
+            )
 
         dcp_a2a = (
             vllm_config is not None
