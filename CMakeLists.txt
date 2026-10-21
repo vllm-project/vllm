@@ -1291,53 +1291,27 @@ endif()
 #
 
 #
-# The softplus-sqrt topk kernels are instantiated per (gating dtype,
-# topk_indices dtype) in their own translation unit, generated from the single
-# variant list in generate_topk_softplus_sqrt.py. Instantiating the full cross
-# product in one file serializes ~100 s of device code generation onto a single
-# core, which made it the critical path of a whole-ROCm build.
-#
-set(TOPK_SOFTPLUS_SQRT_GEN_SCRIPT
-  ${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/generate_topk_softplus_sqrt.py)
-file(MD5 ${TOPK_SOFTPLUS_SQRT_GEN_SCRIPT} TOPK_SOFTPLUS_SQRT_GEN_SCRIPT_HASH)
-message(STATUS "softplus-sqrt topk generation script hash: ${TOPK_SOFTPLUS_SQRT_GEN_SCRIPT_HASH}")
-
-file(GLOB TOPK_SOFTPLUS_SQRT_GEN_SRC RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
-  "csrc/moe/topk_softplus_sqrt_launch_*.cu")
-if (NOT TOPK_SOFTPLUS_SQRT_GEN_SRC
-    OR NOT DEFINED CACHE{TOPK_SOFTPLUS_SQRT_GEN_SCRIPT_HASH}
-    OR NOT $CACHE{TOPK_SOFTPLUS_SQRT_GEN_SCRIPT_HASH} STREQUAL ${TOPK_SOFTPLUS_SQRT_GEN_SCRIPT_HASH})
-  execute_process(
-    COMMAND ${CMAKE_COMMAND} -E env
-    PYTHONPATH=$ENV{PYTHONPATH}
-      ${Python_EXECUTABLE} ${TOPK_SOFTPLUS_SQRT_GEN_SCRIPT}
-    RESULT_VARIABLE topk_softplus_sqrt_generation_result
-    OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/topk_softplus_sqrt_generation.log
-    ERROR_FILE ${CMAKE_CURRENT_BINARY_DIR}/topk_softplus_sqrt_generation.log
-  )
-
-  if (NOT topk_softplus_sqrt_generation_result EQUAL 0)
-    message(FATAL_ERROR "softplus-sqrt topk generation failed."
-                        " Result: \"${topk_softplus_sqrt_generation_result}\""
-                        "\nCheck the log for details: "
-                        "${CMAKE_CURRENT_BINARY_DIR}/topk_softplus_sqrt_generation.log")
-  else()
-    set(TOPK_SOFTPLUS_SQRT_GEN_SCRIPT_HASH ${TOPK_SOFTPLUS_SQRT_GEN_SCRIPT_HASH}
-        CACHE STRING "Last run softplus-sqrt topk generate script hash" FORCE)
-    message(STATUS "softplus-sqrt topk generation completed successfully.")
-  endif()
-  file(GLOB TOPK_SOFTPLUS_SQRT_GEN_SRC RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
-    "csrc/moe/topk_softplus_sqrt_launch_*.cu")
-else()
-  message(STATUS "softplus-sqrt topk generation script has not changed, skipping generation.")
-endif()
+# The softplus-sqrt topk kernels are instantiated one translation unit per
+# (gating dtype, topk_indices dtype) pair, in topk_softplus_sqrt_<dtype>_<idx>.cu,
+# so that ninja generates the device code for each pair in parallel instead of
+# serializing ~100 s of it onto a single core.
+set(VLLM_TOPK_SOFTPLUS_SQRT_SRC
+  "csrc/moe/topk_softplus_sqrt_f32_int32.cu"
+  "csrc/moe/topk_softplus_sqrt_f32_uint32.cu"
+  "csrc/moe/topk_softplus_sqrt_f32_int64.cu"
+  "csrc/moe/topk_softplus_sqrt_f16_int32.cu"
+  "csrc/moe/topk_softplus_sqrt_f16_uint32.cu"
+  "csrc/moe/topk_softplus_sqrt_f16_int64.cu"
+  "csrc/moe/topk_softplus_sqrt_bf16_int32.cu"
+  "csrc/moe/topk_softplus_sqrt_bf16_uint32.cu"
+  "csrc/moe/topk_softplus_sqrt_bf16_int64.cu")
 
 set(VLLM_MOE_EXT_SRC
   "csrc/moe/torch_bindings.cpp"
   "csrc/moe/moe_align_sum_kernels.cu"
   "csrc/moe/topk_softmax_kernels.cu"
   "csrc/moe/topk_softplus_sqrt_kernels.cu"
-  ${TOPK_SOFTPLUS_SQRT_GEN_SRC})
+  ${VLLM_TOPK_SOFTPLUS_SQRT_SRC})
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_MOE_EXT_SRC
@@ -1517,21 +1491,32 @@ elseif(VLLM_GPU_LANG STREQUAL "HIP")
   # and the wave32 kernel are both instantiated unless the build tells us which
   # one is reachable. The wavefront size is fixed per GPU family: CDNA (gfx9xx)
   # is wave64, RDNA (gfx10xx and later) is wave32. Instantiate only the arm that
-  # the targeted archs can select.
+  # the targeted archs can select, and only for the units that instantiate the
+  # kernel (not for the whole extension).
+  set(TOPK_WAVE_ONLY_DEFINE "")
   set(_MOE_WAVE64_ARCHS ${VLLM_GPU_ARCHES})
   list(FILTER _MOE_WAVE64_ARCHS INCLUDE REGEX "^gfx9")
   set(_MOE_WAVE32_ARCHS ${VLLM_GPU_ARCHES})
   list(FILTER _MOE_WAVE32_ARCHS EXCLUDE REGEX "^gfx9")
   if(_MOE_WAVE64_ARCHS AND NOT _MOE_WAVE32_ARCHS)
     message(STATUS "topk softplus-sqrt: wave64 only (CDNA archs: ${VLLM_GPU_ARCHES})")
-    target_compile_definitions(_moe_C_stable_libtorch PRIVATE
-      VLLM_TOPK_SOFTPLUS_SQRT_WAVE64_ONLY)
+    set(TOPK_WAVE_ONLY_DEFINE VLLM_TOPK_SOFTPLUS_SQRT_WAVE64_ONLY)
   elseif(_MOE_WAVE32_ARCHS AND NOT _MOE_WAVE64_ARCHS)
     message(STATUS "topk softplus-sqrt: wave32 only (RDNA archs: ${VLLM_GPU_ARCHES})")
-    target_compile_definitions(_moe_C_stable_libtorch PRIVATE
-      VLLM_TOPK_SOFTPLUS_SQRT_WAVE32_ONLY)
+    set(TOPK_WAVE_ONLY_DEFINE VLLM_TOPK_SOFTPLUS_SQRT_WAVE32_ONLY)
   else()
     message(STATUS "topk softplus-sqrt: both wavefront sizes (archs: ${VLLM_GPU_ARCHES})")
+  endif()
+  if (TOPK_WAVE_ONLY_DEFINE)
+    # The hipified copies under CMAKE_CURRENT_BINARY_DIR are what the HIP build
+    # actually compiles, so the definition has to be set on both spellings.
+    set(_TOPK_WAVE_ONLY_SRC ${VLLM_TOPK_SOFTPLUS_SQRT_SRC})
+    foreach (_topk_src ${VLLM_TOPK_SOFTPLUS_SQRT_SRC})
+      string(REGEX REPLACE "\\.cu$" ".hip" _topk_hip "${_topk_src}")
+      list(APPEND _TOPK_WAVE_ONLY_SRC "${CMAKE_CURRENT_BINARY_DIR}/${_topk_hip}")
+    endforeach()
+    set_source_files_properties(${_TOPK_WAVE_ONLY_SRC} PROPERTIES
+      COMPILE_DEFINITIONS ${TOPK_WAVE_ONLY_DEFINE})
   endif()
 endif()
 
