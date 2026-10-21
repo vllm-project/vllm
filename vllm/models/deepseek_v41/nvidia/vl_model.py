@@ -26,6 +26,7 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsEagle3,
+    SupportsEncoderCudaGraph,
     SupportsMultiModal,
     SupportsPP,
 )
@@ -40,19 +41,18 @@ from vllm.models.deepseek_v4.common.vision import (
     DeepseekV4ViT,
     run_dp_sharded_vision_tower,
 )
+from vllm.models.deepseek_v4.common.vl_model import stream_language_model_first
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from ..common.mm_preprocess import (
-    IMAGE,
-    IMAGE_END,
-    IMAGE_NEW_LINE,
     IMAGE_PLACEHOLDER,
-    IMAGE_START,
     DeepseekV4VLDummyInputsBuilder,
     DeepseekV4VLMultiModalProcessor,
     DeepseekV4VLProcessingInfo,
 )
+from ..common.vl_cudagraph import DeepseekV4VLEncoderCudaGraphMixin
+from ..decoder_replay_layers import DecoderReplayLayers
 from .model import (
     DeepseekV41LLMForCausalLM,
     _linear_scale_param_name,
@@ -115,11 +115,20 @@ def _make_deepseek_v4_vl_weights_mapper(
     info=DeepseekV4VLProcessingInfo,
     dummy_inputs=DeepseekV4VLDummyInputsBuilder,
 )
-class DeepseekV41ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsEagle3):
+class DeepseekV41ForCausalLM(
+    nn.Module,
+    DeepseekV4VLEncoderCudaGraphMixin,
+    SupportsMultiModal,
+    SupportsEncoderCudaGraph,
+    SupportsPP,
+    SupportsEagle3,
+):
     """Multimodal entry point for DeepSeek-V4.1 checkpoints with a vision tower.
 
     ``SupportsEagle3`` (aux hidden-state plumbing for MTP/DSpark drafters)
     delegates through ``language_model`` via the protocol defaults.
+    ``SupportsEncoderCudaGraph`` (ViT CUDA graph capture/replay) is
+    implemented by ``DeepseekV4VLEncoderCudaGraphMixin``.
     """
 
     supports_encoder_tp_data = True
@@ -195,29 +204,6 @@ class DeepseekV41ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Supports
             types=kwargs.pop("types"),
             resolve_bindings={"p": self.config.vision_patch_size},
         )
-
-    def _encode_image(
-        self,
-        patches: torch.Tensor,
-        n_vit_h: int,
-        n_vit_w: int,
-    ) -> torch.Tensor:
-        # Aligner rows in reading order, one per IMAGE slot.
-        return self.aligner(self.vision(patches, n_vit_h, n_vit_w), n_vit_h, n_vit_w)
-
-    def _build_image_span(
-        self, image_embeds: torch.Tensor, types: torch.Tensor
-    ) -> torch.Tensor:
-        """Full image span: aligner rows at IMAGE slots, the learned
-        delimiter vectors at IMAGE_START/IMAGE_NEW_LINE/IMAGE_END."""
-        types = types.to(image_embeds.device)
-        span = image_embeds.new_empty(types.numel(), image_embeds.shape[-1])
-        dtype = image_embeds.dtype
-        span[types == IMAGE_START] = self.image_start.to(dtype)
-        span[types == IMAGE_END] = self.image_end.to(dtype)
-        span[types == IMAGE_NEW_LINE] = self.image_newline.to(dtype)
-        span[types == IMAGE] = image_embeds
-        return span
 
     def _process_image_input(
         self,
@@ -297,6 +283,10 @@ class DeepseekV41ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Supports
     def token_lookback_depth(self) -> int:
         return self.language_model.token_lookback_depth
 
+    @property
+    def decoder_replay_layers(self) -> DecoderReplayLayers | None:
+        return self.language_model.decoder_replay_layers
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -328,12 +318,9 @@ class DeepseekV41ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Supports
         return self.language_model.get_mtp_target_hidden_states()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # Map HF names into this wrapper's namespace up front and sort, so
-        # the "language_model." group reaches the child loader as one
-        # contiguous block (AutoWeightsLoader delegates per contiguous group,
-        # and the child's load_weights finalizes fused expert weights, which
-        # must not run on a partially loaded model).
-        mapped = sorted(self.hf_to_vllm_mapper.apply(weights), key=lambda x: x[0])
+        # The child finalizes in load_weights, so its weights must reach it as
+        # one contiguous group.
+        mapped = stream_language_model_first(self.hf_to_vllm_mapper.apply(weights))
         loader = AutoWeightsLoader(self)
         loaded_params = loader.load_weights(mapped)
         # The child's load_weights already ran its post-load finalization.

@@ -104,7 +104,7 @@ def test_overlaid_zeroer_dedups_segments_with_max_span():
     zeroed no matter which group owns it."""
     from unittest.mock import MagicMock
 
-    from vllm.v1.core.kv_cache_utils import get_kv_cache_config_from_groups
+    from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
     from vllm.v1.kv_cache_interface import (
         KVCacheGroupSpec,
         KVCacheLayout,

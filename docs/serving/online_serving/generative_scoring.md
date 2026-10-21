@@ -62,3 +62,10 @@ Here, each item is appended to the query to form prompts like `"Is this city the
       "usage": {"prompt_tokens": 45, "total_tokens": 48, "completion_tokens": 3}
     }
     ```
+
+## Cache salting
+
+The optional `cache_salt` request field is applied to every item's prompt. With
+prefix caching enabled, requests with different salts do not share cached prefix
+blocks. See [Cache Salting](../../usage/security.md#cache-salting) for how to choose
+and manage salts.

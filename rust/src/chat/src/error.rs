@@ -17,10 +17,14 @@ pub enum Error {
     MissingChatTemplate,
     #[error("chat template error: {0}")]
     ChatTemplate(String),
+    #[error("{message}")]
+    ChatTemplateThrown { message: String },
     #[error("{0}")]
     InvalidReasoningEffort(String),
     #[error("{message}")]
     InvalidReasoningControl { message: String },
+    #[error("chat role `{role}` is not supported by this chat renderer")]
+    UnsupportedChatRole { role: String },
     #[error("multimodal input is not supported by this chat renderer")]
     UnsupportedMultimodalRenderer,
     #[error("unsupported multimodal content: {0}")]
@@ -60,6 +64,11 @@ pub enum Error {
         #[source]
         error: BoxedError,
     },
+    #[error("failed to initialize request output parser")]
+    OutputParserInitialization {
+        #[source]
+        error: BoxedError,
+    },
     #[error(
         "gpt_oss uses native Harmony output parsing; generic {kind} parser override `{selection}` is not supported"
     )]
@@ -87,8 +96,11 @@ pub enum Error {
     ToolChoiceRequiresTools,
     #[error("tool_choice function `{name}` was not found in the available tools")]
     ToolChoiceFunctionNotFound { name: String },
-    #[error("failed to build structural tag: {message}")]
-    StructuralTag { message: String },
+    #[error("failed to build output grammar")]
+    OutputGrammar {
+        #[source]
+        error: BoxedError,
+    },
     #[error(transparent)]
     Text(#[from] vllm_text::Error),
     #[error(transparent)]
@@ -102,11 +114,13 @@ impl Error {
     pub fn is_request_validation_error(&self) -> bool {
         match self {
             Self::PromptTooLong { .. }
+            | Self::ChatTemplateThrown { .. }
             | Self::InvalidReasoningEffort(_)
             | Self::InvalidReasoningControl { .. }
             | Self::DuplicateToolName { .. }
             | Self::ToolChoiceRequiresTools
-            | Self::ToolChoiceFunctionNotFound { .. } => true,
+            | Self::ToolChoiceFunctionNotFound { .. }
+            | Self::UnsupportedChatRole { .. } => true,
             Self::Text(error) => error.is_request_validation_error(),
             Self::UnsupportedMultimodalRenderer
             | Self::UnsupportedMultimodalContent(_)

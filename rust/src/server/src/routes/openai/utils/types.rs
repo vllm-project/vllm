@@ -271,6 +271,10 @@ pub struct Tool {
     #[serde(default = "default_function_tool_type")]
     pub tool_type: String,
     pub function: Function,
+    /// Tool-level form of [`Function::defer_loading`]; the function-level value
+    /// takes precedence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub defer_loading: Option<bool>,
 }
 
 fn default_function_tool_type() -> String {
@@ -286,6 +290,9 @@ pub struct Function {
     pub parameters: Value,
     /// Whether to enable strict schema adherence (OpenAI structured outputs).
     pub strict: Option<bool>,
+    /// Whether the schema is loaded on demand via tool search (vLLM extension,
+    /// mirroring the OpenAI Responses and Anthropic Messages field).
+    pub defer_loading: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -410,9 +417,17 @@ impl ToolReference {
 // Chat Messages
 // ============================================================================
 
+/// One chat message, tagged by `role`.
+///
+/// The derived serde impls use `remote = "Self"` and cover only the standard
+/// roles; the trait impls below dispatch on the role tag and handle
+/// [`ChatMessage::Custom`] separately. A `#[serde(untagged)]` fallback variant
+/// would also accept malformed standard messages, such as a `tool` message
+/// without `tool_call_id`, and replace their field errors with serde's generic
+/// untagged-enum error.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(tag = "role")]
+#[serde(tag = "role", remote = "Self")]
 pub enum ChatMessage {
     #[serde(rename = "system")]
     System {
@@ -447,6 +462,67 @@ pub enum ChatMessage {
         tools: Option<Vec<Tool>>,
         name: Option<String>,
     },
+    /// Message with a role outside the OpenAI set, such as `root`. Chat
+    /// templates receive the role string unchanged.
+    #[serde(skip)]
+    Custom {
+        role: String,
+        content: MessageContent,
+    },
+}
+
+/// Role tags of the standard [`ChatMessage`] variants.
+const STANDARD_CHAT_ROLES: &[&str] = &[
+    "system",
+    "user",
+    "assistant",
+    "tool",
+    "function",
+    "developer",
+];
+
+/// Wire shape of [`ChatMessage::Custom`].
+#[derive(Deserialize, Serialize)]
+struct CustomChatMessage<R, C> {
+    role: R,
+    content: C,
+}
+
+impl Serialize for ChatMessage {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Custom { role, content } => {
+                CustomChatMessage { role, content }.serialize(serializer)
+            }
+            _ => Self::serialize(self, serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ChatMessage {
+    /// Dispatch on the role tag: standard roles keep their derived errors,
+    /// and any other string role becomes [`ChatMessage::Custom`].
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        let is_custom = value
+            .get("role")
+            .and_then(Value::as_str)
+            .is_some_and(|role| !STANDARD_CHAT_ROLES.contains(&role));
+
+        if is_custom {
+            let CustomChatMessage { role, content } =
+                CustomChatMessage::deserialize(value).map_err(serde::de::Error::custom)?;
+            Ok(Self::Custom { role, content })
+        } else {
+            Self::deserialize(value).map_err(serde::de::Error::custom)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]

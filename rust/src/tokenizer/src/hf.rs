@@ -554,6 +554,50 @@ mod tests {
         }
     }
 
+    /// Added tokens store raw text, including whitespace that the GPT-2 byte
+    /// table never emits, so a byte-level decode must pass it through verbatim,
+    /// along with characters the table does emit in the same token (`é`).
+    #[test]
+    fn added_tokens_with_raw_whitespace_decode_verbatim() {
+        const OPEN: &str = "<parameter name=\"";
+        const CLOSE: &str = "\n</parameter>";
+        const MIXED: &str = "\ncafé";
+
+        let mut value = ordinary_test_tokenizer_json(false, false);
+        value["added_tokens"] = json!(
+            [OPEN, CLOSE, MIXED]
+                .iter()
+                .enumerate()
+                .map(|(i, content)| {
+                    json!({
+                        "id": 256 + i,
+                        "content": content,
+                        "single_word": false,
+                        "lstrip": false,
+                        "rstrip": false,
+                        "normalized": false,
+                        "special": false
+                    })
+                })
+                .collect::<Vec<_>>()
+        );
+        let dir = tempdir().expect("create temp dir");
+        let path = write_tokenizer_json(dir.path(), "tokenizer.json", &value);
+        let text = format!("{OPEN}city\">\nParis{CLOSE}{MIXED}");
+
+        let fastokens = HuggingFaceTokenizer::new_fastokens(&path).expect("load fastokens wrapper");
+        assert!(matches!(
+            fastokens.backend,
+            super::Backend::FastokensByteLevel(_)
+        ));
+        let hf = HuggingFaceTokenizer::new_hf(&path).expect("load hf wrapper");
+        for wrapper in [fastokens, hf] {
+            let ids = wrapper.encode(&text, false).expect("encode");
+            assert!((256..=258).all(|id| ids.contains(&id)), "ids={ids:?}");
+            assert_eq!(wrapper.decode(&ids, true).expect("decode"), text);
+        }
+    }
+
     #[test]
     fn hf_vocab_size_counts_added_tokens() {
         let mut tokenizer = tiny_bpe_tokenizer();

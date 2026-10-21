@@ -8,6 +8,7 @@ change to them is what these tests catch.
 
 import asyncio
 import importlib.util
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -27,6 +28,7 @@ def proxy():
     spec = importlib.util.spec_from_file_location("disagg_epd_proxy_retry", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -48,7 +50,7 @@ def test_maybe_prefill_leaves_the_caller_body_untouched(proxy, monkeypatch):
     """
     served = [{"remote_block_ids": [1, 2]}, {}]
 
-    async def _stage(req_data, p_url, req_id):
+    async def _stage(req_data, p_url, req_id, dp_rank=None):
         assert "kv_transfer_params" not in req_data
         return _Response(served.pop(0))
 
@@ -83,6 +85,82 @@ class _EncoderSession:
 
     async def post(self, url, data=None, headers=None):
         return _EncoderResponse(self._replies.pop(0))
+
+
+@pytest.mark.parametrize("second_type", ["image_url", "audio_url", "input_audio"])
+@pytest.mark.parametrize("transfer", ["example", "nixl", "mooncake"])
+def test_partial_audio_metadata_falls_back_with_all_transfers(
+    proxy, monkeypatch, second_type, transfer
+):
+    """Never mix metadata-only audio with raw media, or lose EC identities."""
+    import copy
+
+    seen = []
+    reported = {}
+
+    class Session:
+        async def post(self, url, data=None, headers=None):
+            body = msgspec.json.decode(data)
+            seen.append(body)
+            item = body["messages"][0]["content"][0]
+            mm_hash = item["uuid"] + "-processed"
+            entry: dict[str, Any] = {
+                "metadata": {"audio_feature_lengths": [100]} if len(seen) == 1 else {},
+                "item_indices": [0],
+            }
+            if transfer == "nixl":
+                entry.update(peer_host="encoder", peer_port=1234, size_bytes=4096)
+            reported[mm_hash] = entry
+            return _EncoderResponse({mm_hash: entry})
+
+    second = (
+        {"type": second_type, "input_audio": {"data": "large", "format": "wav"}}
+        if second_type == "input_audio"
+        else {"type": second_type, second_type: {"url": "large"}}
+    )
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "audio_url",
+                        "audio_url": {"url": "small"},
+                        "uuid": "user-audio",
+                    },
+                    second,
+                ],
+            }
+        ],
+        "mm_processor_kwargs": {"sampling_rate": 16000},
+    }
+    original = copy.deepcopy(body)
+    monkeypatch.setattr(proxy, "encode_session", Session())
+    monkeypatch.setattr(proxy, "NO_REWRITE", False)
+    consumer = "tcp://consumer:1" if transfer == "mooncake" else None
+    prepared, _, _ = asyncio.run(
+        proxy.prepare_for_decode(body, "r", ["http://encoder"], "", consumer)
+    )
+    assert body == original
+    assert prepared["mm_processor_kwargs"] == body["mm_processor_kwargs"]
+    content = prepared["messages"][0]["content"]
+    assert [item["type"] for item in content] == ["audio_url", second_type]
+    assert content[0]["uuid"] == "user-audio"
+    for item, encoded in zip(content, seen):
+        assert item == encoded["messages"][0]["content"][0]
+    params = prepared["ec_transfer_params"]
+    for mm_hash, entry in reported.items():
+        assert params[mm_hash] == entry
+    if transfer == "mooncake":
+        assert params["ec_items"] == [
+            {
+                "mm_hash": mm_hash,
+                "transfer_id": encoded["ec_transfer_params"]["ec_items"][0][
+                    "transfer_id"
+                ],
+            }
+            for mm_hash, encoded in zip(reported, seen)
+        ]
 
 
 @pytest.mark.parametrize("no_rewrite", [False, True])
@@ -222,7 +300,7 @@ def test_a_decode_retry_does_not_inherit_the_previous_handles(proxy, monkeypatch
         _EncoderSession([{"encoder-side-hash": handle}, {}]),
     )
 
-    async def _no_prefill(req_data, p_url, req_id):
+    async def _no_prefill(req_data, p_url, req_id, dp_rank=None):
         return req_data
 
     monkeypatch.setattr(proxy, "maybe_prefill", _no_prefill)
@@ -280,6 +358,7 @@ def test_raw_media_keeps_encoder_transfer_identity(proxy, monkeypatch):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("prefill", [False, True])
+@pytest.mark.parametrize("dynamic", [False, True])
 @pytest.mark.parametrize(
     "request_options",
     [
@@ -293,7 +372,7 @@ def test_raw_media_keeps_encoder_transfer_identity(proxy, monkeypatch):
     ],
 )
 async def test_http_roundtrip_preserves_payload_and_response_bytes(
-    proxy, monkeypatch, stream, prefill, request_options
+    proxy, monkeypatch, stream, prefill, dynamic, request_options
 ):
     """Preserve media and scheduling context across HTTP hops and retries."""
     seen: dict[str, list[dict]] = {"encode": [], "prefill": [], "decode": []}
@@ -307,6 +386,10 @@ async def test_http_roundtrip_preserves_payload_and_response_bytes(
 
     async def backend(request):
         stage = request.match_info["stage"]
+        if dynamic:
+            consumer = "prefill" if prefill else "decode"
+            expected_rank = "0" if stage == consumer else None
+            assert request.headers.get("X-data-parallel-rank") == expected_rank
         assert request.content_type == "application/json"
         body = await request.json()
         seen[stage].append(body)
@@ -354,6 +437,10 @@ async def test_http_roundtrip_preserves_payload_and_response_bytes(
         monkeypatch.setattr(proxy.app.state, "ec_consumer_dp_size", 1, raising=False)
         monkeypatch.setattr(proxy, "DECODE_RETRIES", 1)
         monkeypatch.setattr(proxy, "NO_REWRITE", False)
+        target_app = proxy.app
+        if dynamic:
+            monkeypatch.setenv("ADMIN_API_KEY", "test-key")
+            target_app = proxy.build_app(proxy.EPDProxyConfig(probe_interval=0))
         item = {"type": "image_url", "image_url": {"url": "data:image/png;base64,YWJj"}}
         body = {
             "model": "test",
@@ -377,9 +464,37 @@ async def test_http_roundtrip_preserves_payload_and_response_bytes(
         await proxy.on_startup()
         try:
             async with httpx.AsyncClient(
-                transport=httpx.ASGITransport(app=proxy.app), base_url="http://proxy"
+                transport=httpx.ASGITransport(app=target_app), base_url="http://proxy"
             ) as client:
+                if dynamic:
+                    registrations = [("encode", "encode")]
+                    registrations += (
+                        [("prefill", "prefill"), ("decode", "decode")]
+                        if prefill
+                        else [("prefill_decode", "decode")]
+                    )
+                    for role, stage in registrations:
+                        consumer = "prefill" if prefill else "decode"
+                        registered = await client.post(
+                            "/instances",
+                            headers={"X-API-Key": "test-key"},
+                            json={
+                                "role": role,
+                                "url": str(server.make_url(f"/{stage}")),
+                                "dp_size": 2 if stage == consumer else 1,
+                            },
+                        )
+                        assert registered.status_code == 200
                 response = await client.post("/v1/chat/completions", json=body)
+                if dynamic:
+                    removed = await client.delete(
+                        "/instances",
+                        headers={"X-API-Key": "test-key"},
+                        params={"url": str(server.make_url("/decode"))},
+                    )
+                    assert removed.json() == {"removed": True}
+                    unavailable = await client.post("/v1/chat/completions", json=body)
+                    assert unavailable.status_code == 503
             assert response.status_code == 200
             assert response.content == expected
             assert response.headers["content-type"].startswith(
@@ -470,7 +585,11 @@ def test_video_audio_fallback(proxy, monkeypatch, no_rewrite, transfer):
     original = copy.deepcopy(body)
     # Collector indices describe two processed features from one video item.
     video_metadata = collect_ec_item_metadata(
-        [SimpleNamespace(identifier=key, data=None) for key in ("video", "audio")], None
+        [
+            SimpleNamespace(identifier=key, modality=key, data=None)
+            for key in ("video", "audio")
+        ],
+        SimpleNamespace(fields_for=lambda _: set()),
     )
     if transfer == "handle":
         video_metadata["audio"]["transfer_id"] = "reservation"

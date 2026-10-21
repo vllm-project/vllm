@@ -1,0 +1,152 @@
+meta:
+  title: "Qwen3-14B"
+  slug: "qwen3-14b"
+  provider: "Qwen"
+  description: "Qwen3 14B dense model with hybrid thinking/non-thinking modes, validated for Intel Xeon 6 CPU serving."
+  date_added: 2026-08-17
+  date_updated: 2026-09-12
+  tasks:
+    - text
+  performance_headline: "Validated on Intel Xeon 6 CPU with BF16 serving"
+  related_recipes:
+    - "Qwen/Qwen3-4B"
+    - "Qwen/Qwen3-32B"
+  hardware:
+    xeon6: verified
+
+model:
+  model_id: "Qwen/Qwen3-14B"
+  min_vllm_version: "0.8.5"
+  architecture: dense
+  parameter_count: "14B"
+  active_parameters: "14B"
+  context_length: 40960
+  base_args: []
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "Enable automatic tool choice with the Hermes parser"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "hermes"
+  reasoning:
+    description: "Enable Qwen3 thinking mode with the Qwen3 reasoning parser"
+    args:
+      - "--reasoning-parser"
+      - "qwen3"
+  long_context:
+    description: "YaRN RoPE scaling to the model card's validated 131,072-token context. Static YaRN holds the scaling factor constant regardless of input length, so leave this off unless you actually serve long prompts — it can cost quality below 32K."
+    args:
+      - "--hf-overrides"
+      - '{"max_position_embeddings":131072,"rope_parameters":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768}}'
+      - "--max-model-len"
+      - "131072"
+
+opt_in_features:
+  - reasoning
+  - long_context
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 34
+    description: "Full precision BF16"
+    supported_hardware:
+      - xeon6
+  fp8:
+    model_id: "Qwen/Qwen3-14B-FP8"
+    precision: fp8
+    vram_minimum_gb: 17
+    description: "Qwen official FP8 checkpoint"
+  awq:
+    model_id: "Qwen/Qwen3-14B-AWQ"
+    precision: int4
+    vram_minimum_gb: 10
+    description: "Qwen official AWQ 4-bit checkpoint"
+    supported_hardware:
+      - xeon6
+    extra_args:
+      - "--quantization"
+      - "awq"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+hardware_overrides: {}
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  Qwen3-14B is a Qwen3 dense model with hybrid thinking and non-thinking modes.
+  Intel Xeon 6 CPU serving was validated with BF16.
+
+  ## Prerequisites
+
+  - Hardware: Intel Xeon 6 CPUs
+  - vLLM >= 0.8.5
+
+  ### pip (Intel Xeon 6 CPUs)
+
+  Follow the [CPU pre-built wheels](https://docs.vllm.ai/en/latest/getting_started/installation/cpu/#pre-built-wheels)
+  installation instructions.
+
+  ### Docker (Intel Xeon 6 CPUs)
+
+  ```bash
+  docker pull vllm/vllm-openai-cpu:latest-x86_64
+  ```
+
+  ## Intel Xeon 6
+
+  Choose tensor parallelism based on the system topology; the recipe does not
+  prescribe a fixed TP/DP layout or hard-code NUMA node IDs.
+
+  ```bash
+  vllm serve Qwen/Qwen3-14B
+  ```
+
+  Docker:
+
+  ```bash
+  docker run \
+    --privileged --ipc=host -p 8000:8000 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai-cpu:latest-x86_64 Qwen/Qwen3-14B \
+    --tensor-parallel-size 1 \
+    --enable-auto-tool-choice \
+    --tool-call-parser hermes
+  ```
+
+  ## Configuration Notes
+
+  - TP/DP values and explicit CPU bindings are intentionally not prescribed.
+  - The `qwen3` reasoning parser is available in vLLM 0.9.0 and later.
+
+  ## Runtime and Platform Tuning
+
+  The following settings are intentionally not prescribed as portable CPU model
+  defaults because they depend on the workload, hardware, or runtime environment:
+
+  - `--max-num-batched-tokens`: scheduler/throughput tuning.
+  - `--max-num-seqs`: concurrency and scheduler-capacity tuning.
+  - `--gpu-memory-utilization`: platform memory-budget tuning.
+  - `--no-enable-prefix-caching`: workload/benchmark cache-policy tuning.
+  - `VLLM_ENGINE_ITERATION_TIMEOUT_S`: operational runtime timeout.
+
+  These settings may still appear in validated hardware-specific overrides. Tune
+  them at deployment time based on platform resources, workload shape, and
+  latency/throughput goals.
+
+  ## References
+
+  - [Model card](https://huggingface.co/Qwen/Qwen3-14B)
+  - [vLLM CPU installation](https://docs.vllm.ai/en/latest/getting_started/installation/cpu/)

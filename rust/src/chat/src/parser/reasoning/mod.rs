@@ -8,10 +8,10 @@ use std::sync::{Arc, LazyLock};
 pub use vllm_parser::reasoning::{
     CohereCmdReasoningParser, DeepSeekR1ReasoningParser, DeepSeekV3ReasoningParser,
     DeepSeekV4ReasoningParser, DeepSeekV41ReasoningParser, Glm45ReasoningParser,
-    Glm47ReasoningParser, KimiK2ReasoningParser, KimiReasoningParser, MiniMaxM2ReasoningParser,
-    MiniMaxM3ReasoningParser, NemotronV3ReasoningParser, Qwen3ReasoningParser, ReasoningDelta,
-    ReasoningError, ReasoningParser, SeedOssReasoningParser, Step3ReasoningParser,
-    Step3p5ReasoningParser,
+    Glm47ReasoningParser, KimiK2ReasoningParser, KimiReasoningParser, MiMoReasoningParser,
+    MiniMaxM2ReasoningParser, MiniMaxM3ReasoningParser, NemotronV3ReasoningParser,
+    Qwen3ReasoningParser, ReasoningDelta, ReasoningError, ReasoningParser, SeedOssReasoningParser,
+    Step3ReasoningParser, Step3p5ReasoningParser,
 };
 use vllm_tokenizer::DynTokenizer;
 
@@ -28,6 +28,7 @@ pub mod names {
     pub const GLM47: &str = "glm47";
     pub const KIMI: &str = "kimi";
     pub const KIMI_K2: &str = "kimi_k2";
+    pub const MIMO: &str = "mimo";
     pub const MINIMAX_M2: &str = "minimax_m2";
     pub const MINIMAX_M3: &str = "minimax_m3";
     pub const NEMOTRON_V3: &str = "nemotron_v3";
@@ -69,6 +70,7 @@ impl ReasoningParserFactory {
             .register_parser::<Glm47ReasoningParser>(names::GLM47)
             .register_parser::<KimiReasoningParser>(names::KIMI)
             .register_parser::<KimiK2ReasoningParser>(names::KIMI_K2)
+            .register_parser::<MiMoReasoningParser>(names::MIMO)
             .register_parser::<MiniMaxM2ReasoningParser>(names::MINIMAX_M2)
             .register_parser::<MiniMaxM3ReasoningParser>(names::MINIMAX_M3)
             .register_parser::<NemotronV3ReasoningParser>(names::NEMOTRON_V3)
@@ -84,6 +86,7 @@ impl ReasoningParserFactory {
             .register_pattern("deepseek_v4", names::DEEPSEEK_V4)
             .register_pattern("deepseek-v3", names::DEEPSEEK_V3)
             .register_pattern("qwq", names::DEEPSEEK_R1)
+            .register_pattern("mimo-v2", names::MIMO)
             .register_pattern("qwen3", names::QWEN3)
             .register_pattern("glm-5", names::GLM47)
             .register_pattern("glm-4.7", names::GLM47)
