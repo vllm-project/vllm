@@ -55,6 +55,14 @@ CUSTOM_ALL_REDUCE_MAX_SIZES = {
     },
 }
 
+# Max size for each world size on MI200 (gfx90a), where the custom all-reduce
+# copies its input in under graph capture. At TP=4, RCCL overtakes it from
+# about 4 MiB on MI250X (about 3 MB on MI210); at TP=2/8 it stays ahead to the
+# default 8 MiB.
+GFX90A_CUSTOM_ALL_REDUCE_MAX_SIZES = {
+    4: 4 * MiB,  # 4 MB
+}
+
 SYMM_MEM_ALL_REDUCE_MAX_SIZES = {
     "9.0": {
         2: 64 * MiB,  # 64 MB
