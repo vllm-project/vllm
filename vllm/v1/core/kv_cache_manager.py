@@ -381,6 +381,7 @@ class KVCacheManager:
         full_sequence_must_fit: bool = False,
         reserved_blocks: int = 0,
         has_scheduled_reqs: bool = True,
+        transition_blocks: int = 0,
         skip_zeroing_group_ids: tuple[int, ...] = (),
     ) -> KVCacheBlocks | None:
         """Add slots for a request with new tokens to append.
@@ -412,6 +413,8 @@ class KVCacheManager:
                 made if it fits within (free blocks - reserved_blocks). Used to gate
                 async KV-connector loads so their initial allocation cannot consume
                 blocks an already in-flight (prefilling) sequence is relying on.
+            transition_blocks: Remaining physical block demand through the
+                running request's next transition, checked on new allocations.
             has_scheduled_reqs: Whether any requests are already scheduled to run
                 this step, controls whether watermark is applied.
             skip_zeroing_group_ids: Groups whose external-token blocks will be
@@ -574,6 +577,10 @@ class KVCacheManager:
         # additional watermark of headroom for waiting/preempted admissions.
         available_blocks = self.block_pool.get_num_free_blocks() - reserved_blocks
         required_blocks = num_blocks_to_allocate + watermark_blocks
+        if num_blocks_to_allocate > 0:
+            required_blocks = (
+                max(num_blocks_to_allocate, transition_blocks) + watermark_blocks
+            )
         if required_blocks > available_blocks:
             # Cannot allocate new blocks
             return None
