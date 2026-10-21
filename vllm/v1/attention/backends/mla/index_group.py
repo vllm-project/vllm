@@ -59,10 +59,11 @@ class SparseMLAIndexGroup:
     def set_logical_topk_ready(self, layer_index: int) -> None:
         if layer_index != 0 or not self.has_indexer:
             return
-        # In piecewise cudagraph mode an event recorded inside a captured
-        # segment is graph-local and any eager wait on it raises
-        # cudaErrorInvalidValue. HiSparse's copy stream falls back to
-        # wait_stream there instead, so skip the record as well.
+        # In piecewise cudagraph mode the consumer converts on the side stream
+        # from an eager break; an event recorded inside a captured segment is
+        # graph-local and any eager wait on it raises cudaErrorInvalidValue.
+        # The convert side falls back to wait_stream there instead (and never
+        # touches this event), so skip the record as well.
         if in_piecewise_cudagraph():
             return
         self.logical_topk_ready.record(current_stream())
@@ -137,7 +138,10 @@ class SparseMLAIndexGroup:
         valid_topk_counts = self.valid_topk_counts[:num_tokens]
         compute_stream = current_stream()
         if layer_index == 0:
-            self.side_stream.wait_stream(compute_stream)
+            if self.has_indexer and not in_piecewise_cudagraph():
+                self.side_stream.wait_event(self.logical_topk_ready)
+            else:
+                self.side_stream.wait_stream(compute_stream)
             with self.side_stream:
                 triton_convert_req_index_to_global_index(
                     req_id_per_token,
