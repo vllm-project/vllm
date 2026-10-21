@@ -13,6 +13,8 @@ from vllm.model_executor.models.granite_speech import (
     GraniteSpeechConformerAttention,
 )
 
+pytestmark = pytest.mark.skip_global_cleanup
+
 
 def _make_config() -> PretrainedConfig:
     return PretrainedConfig(
