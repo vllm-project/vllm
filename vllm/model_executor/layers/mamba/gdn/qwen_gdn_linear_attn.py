@@ -6,6 +6,7 @@ import functools
 import itertools
 import math
 import os
+from collections.abc import Callable
 from dataclasses import replace
 from typing import Literal
 
@@ -108,6 +109,19 @@ logger = init_logger(__name__)
 
 MAX_FUSED_GDN_MTP_TOKENS = 8
 FUSED_GDN_STATE_DTYPES = (torch.float32, torch.bfloat16)
+
+
+def supports_fused_mtp_decode() -> bool:
+    """ROCm runs the Triton port; elsewhere the CUDA op must be built."""
+    return current_platform.is_rocm() or hasattr(
+        torch.ops._C, "fused_gdn_decode_post_conv_mtp"
+    )
+
+
+def fused_mtp_decode_impl() -> Callable[..., torch.Tensor]:
+    if current_platform.is_rocm():
+        return fused_gdn_decode_post_conv_mtp_triton
+    return ops.fused_gdn_decode_post_conv_mtp
 
 
 def _aiter_flydsl_unsupported_reasons(
@@ -762,10 +776,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 "layout, BF16 convolution cache, BF16 or FP32 recurrent "
                 "state, and a GPU with compute capability 8.0+"
             )
-        # ROCm has no build of the CUDA kernel and uses its Triton port instead.
-        if not current_platform.is_rocm() and not hasattr(
-            torch.ops._C, "fused_gdn_decode_post_conv_mtp"
-        ):
+        if not supports_fused_mtp_decode():
             return "torch.ops._C.fused_gdn_decode_post_conv_mtp is not built"
         return None
 
@@ -2048,12 +2059,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         assert num_accepted_tokens is not None
 
         num_requests = attn_metadata.num_spec_decodes
-        fused_mtp_decode = (
-            fused_gdn_decode_post_conv_mtp_triton
-            if current_platform.is_rocm()
-            else ops.fused_gdn_decode_post_conv_mtp
-        )
-        fused_mtp_decode(
+        fused_mtp_decode_impl()(
             mixed_qkv=mixed_qkv,
             a=a,
             b=b,
@@ -2117,10 +2123,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             and self.num_v_heads // self.num_k_heads in (1, 2, 3, 4, 8)
             and state_indices is not None
             and state_indices.size(1) <= MAX_FUSED_GDN_MTP_TOKENS
-            and (
-                current_platform.is_rocm()
-                or hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp")
-            )
+            and supports_fused_mtp_decode()
         )
 
     def _rms_norm_gated_cuda(

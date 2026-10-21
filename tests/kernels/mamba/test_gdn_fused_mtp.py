@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import types
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -160,9 +160,7 @@ def _build_layer(
     ],
 )
 def test_fused_mtp_head_ratio_guard(num_v_heads: int, expected: bool) -> None:
-    if not current_platform.is_rocm() and not hasattr(
-        torch.ops._C, "fused_gdn_decode_post_conv_mtp"
-    ):
+    if not qwen_gdn_linear_attn.supports_fused_mtp_decode():
         pytest.skip("fused GDN decode MTP op is not built")
 
     layer = types.SimpleNamespace(
@@ -370,17 +368,12 @@ def test_fused_model_path_matches_reference(
     )
     context.no_compile_layers = {PREFIX: fused_layer}
     fused_out = torch.zeros_like(output_gate)
-    # ROCm runs the Triton port of the CUDA op.
-    fused_owner, fused_name = (
-        (qwen_gdn_linear_attn, "fused_gdn_decode_post_conv_mtp_triton")
-        if current_platform.is_rocm()
-        else (qwen_gdn_linear_attn.ops, "fused_gdn_decode_post_conv_mtp")
-    )
+    fused_mock = MagicMock(wraps=qwen_gdn_linear_attn.fused_mtp_decode_impl())
     with (
         patch.object(qwen_gdn_linear_attn, "get_forward_context", return_value=context),
         patch.object(
-            fused_owner, fused_name, wraps=getattr(fused_owner, fused_name)
-        ) as fused_mock,
+            qwen_gdn_linear_attn, "fused_mtp_decode_impl", return_value=fused_mock
+        ),
     ):
         torch.ops.vllm.qwen_gdn_attention_core_fused_norm_packed(
             mixed_qkvz.clone(),
