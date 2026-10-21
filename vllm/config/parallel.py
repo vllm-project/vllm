@@ -196,6 +196,22 @@ class ParallelConfig:
     cannot support it (`tensor_parallel_size` must be > 1, `max_num_seqs` at
     least `tensor_parallel_size`, and `max_logprobs` non-negative). Models opt in
     by implementing `compute_logits_local`."""
+    enable_sequence_parallel: bool = False
+    """Enable model-level sequence parallelism: keeps the residual at
+    local-chunk size [N/tp, H] via explicit all_gather/reduce_scatter
+    around attention and dense MLP blocks, instead of all_reduce. Does
+    not require torch.compile."""
+    sequence_parallel_min_tokens: int = 256
+    """Minimum token count of a forward call (full batch size, before
+    per-rank sharding) to activate sequence parallelism for that call.
+    Below this, SP-marked layers fall back to plain tensor parallelism
+    (all_reduce), avoiding collective overhead on small (e.g. decode)
+    batches. 0 means SP is always active whenever enabled."""
+    enable_async_tp: bool = False
+    """Enable async tensor parallelism: fused AllGather+GEMM and
+    GEMM+ReduceScatter ops (via torch.distributed._symmetric_memory) for
+    attention and dense MLP linear layers. Shares
+    sequence_parallel_min_tokens."""
     enable_ep_weight_filter: bool = False
     """Skip non-local expert weights during model loading when expert
     parallelism is active.  Each rank only reads its own expert shard from
@@ -791,6 +807,10 @@ class ParallelConfig:
             or self.use_sequence_parallel_moe
             or (self.enable_expert_parallel and self.prefill_context_parallel_size > 1)
         )
+
+    @property
+    def use_sequence_parallel(self) -> bool:
+        return self.enable_sequence_parallel and self.tensor_parallel_size > 1
 
     @property
     def use_batched_dp_moe(self) -> bool:
