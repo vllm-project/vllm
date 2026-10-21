@@ -258,6 +258,9 @@ pub struct Config {
     pub default_chat_template_kwargs: Option<HashMap<String, Value>>,
     /// Whether requests may supply their own chat template.
     pub trust_request_chat_template: bool,
+    /// Whether request-level tools are left out of the prompt when
+    /// `tool_choice` is `none`.
+    pub exclude_tools_when_tool_choice_none: bool,
     /// Maximum number of input items allowed per prompt for each modality.
     /// Unspecified modalities are unlimited.
     pub limit_mm_per_prompt: MmLimitPerPrompt,
