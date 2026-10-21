@@ -3,6 +3,7 @@
 import multiprocessing
 from collections.abc import Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
+from itertools import chain
 from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
@@ -343,12 +344,15 @@ class StructuredOutputManager:
                 return ConstraintBounds(i + 1, i + 1)
         return ConstraintBounds(1, 1)
 
-    def validate_tokens(self, request: "Request", spec_tokens: list[int]) -> list[int]:
-        """Return the longest unconstrained or grammar-valid prefix of `spec_tokens`."""
+    def trim_spec_tokens(self, request: "Request", spec_tokens: list[int]) -> list[int]:
+        """Trim structured-output padding and grammar-invalid suffixes."""
         if not request.use_structured_output:
+            # Synchronous unstructured decoding uses -1 values as scheduler-side
+            # markers for speculative slots, so preserve their length.
             return spec_tokens
 
         spec_tokens = strip_speculative_padding(spec_tokens)
+
         grammar_start, _ = self._get_constraint_bounds(request, spec_tokens)
         if grammar_start >= len(spec_tokens):
             return spec_tokens
@@ -359,9 +363,11 @@ class StructuredOutputManager:
         grammar = structured_req.grammar
         if TYPE_CHECKING:
             assert isinstance(grammar, StructuredOutputGrammar)
+        if grammar.is_terminated():
+            return spec_tokens[:grammar_start]
         prefix = spec_tokens[:grammar_start]
-        validated = grammar.validate_tokens(spec_tokens[grammar_start:])
-        return prefix + validated
+        len_validated = len(grammar.validate_tokens(spec_tokens[grammar_start:]))
+        return prefix + spec_tokens[grammar_start : grammar_start + len_validated + 1]
 
     def grammar_bitmask(
         self,
@@ -433,7 +439,7 @@ class StructuredOutputManager:
         else:
             # Fallback to serial filling of bitmasks for small-batch-size cases
             for grammar_idx, req_id in enumerate(structured_output_request_ids):
-                cumulative_index = grammar_idx * mask_stride
+                base_index = grammar_idx * mask_stride
                 request = requests[req_id]
                 structured_output_request = request.structured_output_request
 
@@ -444,62 +450,43 @@ class StructuredOutputManager:
                     assert isinstance(grammar, StructuredOutputGrammar)
 
                 req_tokens = scheduled_spec_decode_tokens.get(req_id, list())
+                unpadded_tokens = strip_speculative_padding(req_tokens)
                 grammar_start, constraint_start = self._get_constraint_bounds(
-                    request, strip_speculative_padding(req_tokens)
+                    request, unpadded_tokens
                 )
                 # Rows before constraint_start are still reasoning.
                 masked_ids = (
                     self._masked_reasoning_ends(request) if constraint_start else ()
                 )
+                # Diffusion LLMs don't sample a bonus token after the
+                # scheduled positions, so skip its bitmask in that case.
+                tokens_to_mask = (
+                    chain(req_tokens, (-1,))
+                    if not (is_diffusion and req_tokens)
+                    else req_tokens
+                )
+
                 state_advancements = 0
-                seen_padding = False
-                # Row filled from the last valid grammar state before a draft
-                # was rejected; later rows reuse it rather than unconstraining.
-                failed_index: int | None = None
-                bitmask = self._grammar_bitmask
-                for i, token in enumerate(req_tokens):
-                    if failed_index is not None:
-                        bitmask[cumulative_index].copy_(bitmask[failed_index])
-                        cumulative_index += 1
+                padding_or_grammar_invalid = False
+                for i, token in enumerate(tokens_to_mask):
+                    if padding_or_grammar_invalid:
+                        self._fill_bitmasks(((grammar, base_index + i, False, ()),))
                         continue
-                    apply_bitmask = not seen_padding and i >= constraint_start
-                    reasoning = not seen_padding and i < constraint_start
-                    row_masked = masked_ids if reasoning else ()
+
+                    apply_bitmask = i >= constraint_start
+                    row_masked = masked_ids if i < constraint_start else ()
                     self._fill_bitmasks(
-                        ((grammar, cumulative_index, apply_bitmask, row_masked),)
+                        ((grammar, base_index + i, apply_bitmask, row_masked),)
                     )
                     if token == -1:
-                        seen_padding = True
-                    elif not seen_padding and i >= grammar_start:
+                        padding_or_grammar_invalid = True
+                    elif i >= grammar_start:
                         if not grammar.is_terminated() and grammar.accept_tokens(
                             req_id, [token]
                         ):
                             state_advancements += 1
                         else:
-                            failed_index = cumulative_index
-                            logger.error(
-                                "Unexpected: grammar terminated or rejected draft "
-                                "token %s for request %s during bitmask fill.",
-                                token,
-                                req_id,
-                            )
-                    cumulative_index += 1
-
-                # Diffusion LLMs don't sample a bonus token after the
-                # scheduled positions, so skip its bitmask in that case.
-                if not (is_diffusion and req_tokens):
-                    if failed_index is not None:
-                        bitmask[cumulative_index].copy_(bitmask[failed_index])
-                    else:
-                        bonus_apply = not seen_padding and constraint_start <= len(
-                            req_tokens
-                        )
-                        bonus_reasoning = not seen_padding and not bonus_apply
-                        bonus_masked = masked_ids if bonus_reasoning else ()
-                        self._fill_bitmasks(
-                            ((grammar, cumulative_index, bonus_apply, bonus_masked),)
-                        )
-                    cumulative_index += 1
+                            padding_or_grammar_invalid = True
 
                 if state_advancements > 0:
                     grammar.rollback(state_advancements)
