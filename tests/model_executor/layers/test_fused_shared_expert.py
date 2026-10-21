@@ -225,12 +225,10 @@ def get_fse_test_model_config(
             quantization_config=quantization_config,
         )
         return config, DeepseekV4Model
-    if model_type == "qwen3_next":
+    if model_type in ("qwen3_next", "qwen3_5", "alice_ai"):
         from transformers import Qwen3NextConfig
 
-        from vllm.model_executor.models.qwen3_next import Qwen3NextModel
-
-        config = Qwen3NextConfig(
+        common = dict(
             vocab_size=256,
             hidden_size=128,
             num_hidden_layers=2,
@@ -248,53 +246,17 @@ def get_fse_test_model_config(
             layer_types=["full_attention", "full_attention"],
             quantization_config=quantization_config,
         )
-        return config, Qwen3NextModel
-    if model_type == "qwen3_5":
-        from vllm.model_executor.models.qwen3_5 import Qwen3_5Model
+        if model_type == "qwen3_next":
+            from vllm.model_executor.models.qwen3_next import Qwen3NextModel
 
-        config = Qwen3_5MoeTextConfig(
-            vocab_size=256,
-            hidden_size=128,
-            num_hidden_layers=2,
-            num_attention_heads=1,
-            num_key_value_heads=1,
-            head_dim=128,
-            linear_key_head_dim=64,
-            linear_value_head_dim=64,
-            linear_num_key_heads=1,
-            linear_num_value_heads=1,
-            moe_intermediate_size=32,
-            shared_expert_intermediate_size=32,
-            num_experts_per_tok=1,
-            num_experts=2,
-            layer_types=["full_attention", "full_attention"],
-            quantization_config=quantization_config,
-        )
-        return config, Qwen3_5Model
-    if model_type == "alice_ai":
-        from transformers import Qwen3NextConfig
+            return Qwen3NextConfig(**common), Qwen3NextModel
+        if model_type == "qwen3_5":
+            from vllm.model_executor.models.qwen3_5 import Qwen3_5Model
 
+            return Qwen3_5MoeTextConfig(**common), Qwen3_5Model
         from vllm.model_executor.models.alice_ai import AliceAIModel
 
-        config = Qwen3NextConfig(
-            vocab_size=256,
-            hidden_size=128,
-            num_hidden_layers=2,
-            num_attention_heads=1,
-            num_key_value_heads=1,
-            head_dim=128,
-            linear_key_head_dim=64,
-            linear_value_head_dim=64,
-            linear_num_key_heads=1,
-            linear_num_value_heads=1,
-            linear_conv_kernel_dim=4,
-            moe_intermediate_size=32,
-            shared_expert_intermediate_size=32,
-            num_experts_per_tok=1,
-            num_experts=2,
-            layer_types=["full_attention", "full_attention"],
-            quantization_config=quantization_config,
-        )
+        config = Qwen3NextConfig(**common, linear_conv_kernel_dim=4)
         # AliceAI requires the AttnRes grouping metadata.
         config.block_attn_res_block_size = 1
         return config, AliceAIModel
@@ -352,12 +314,10 @@ def get_fse_test_model_config(
         config.first_k_dense_replace = 0
         config.num_nextn_predict_layers = 1
         return config, Glm4MoeLiteModel
-    if model_type == "deepseek_v2":
+    if model_type in ("deepseek_v2", "deepseek_v32"):
         from transformers import DeepseekV2Config
 
-        from vllm.model_executor.models.deepseek_v2 import DeepseekV2Model
-
-        config = DeepseekV2Config(
+        common = dict(
             vocab_size=256,
             hidden_size=128,
             intermediate_size=32,
@@ -379,36 +339,15 @@ def get_fse_test_model_config(
             v_head_dim=0,
             quantization_config=quantization_config,
         )
-        # Needed to build the DeepSeek-V2 MTP draft model in this test.
-        config.num_nextn_predict_layers = 1
-        return config, DeepseekV2Model
-    if model_type == "deepseek_v32":
-        from transformers import DeepseekV2Config
+        config = DeepseekV2Config(**common)
+        if model_type == "deepseek_v2":
+            from vllm.model_executor.models.deepseek_v2 import DeepseekV2Model
 
+            # Needed to build the DeepSeek-V2 MTP draft model in this test.
+            config.num_nextn_predict_layers = 1
+            return config, DeepseekV2Model
         from vllm.models.deepseek_v32.amd.model import DeepseekV32Model
 
-        config = DeepseekV2Config(
-            vocab_size=256,
-            hidden_size=128,
-            intermediate_size=32,
-            num_hidden_layers=2,
-            num_attention_heads=1,
-            num_key_value_heads=1,
-            head_dim=128,
-            first_k_dense_replace=0,
-            n_routed_experts=2,
-            n_shared_experts=1,
-            num_experts_per_tok=1,
-            n_group=1,
-            topk_group=1,
-            moe_intermediate_size=32,
-            q_lora_rank=None,
-            kv_lora_rank=0,
-            qk_nope_head_dim=0,
-            qk_rope_head_dim=0,
-            v_head_dim=0,
-            quantization_config=quantization_config,
-        )
         config.index_topk = 1
         config.num_nextn_predict_layers = 1
         return config, DeepseekV32Model
@@ -552,9 +491,18 @@ def test_resolve_layer_fused_shared_expert_passes_module_prefixes(
     ]
 
 
-def test_resolve_layer_fused_shared_expert_rejects_incompatible_quantization(
+@pytest.mark.parametrize(
+    ("reason", "enable_ep"),
+    [
+        ("shared experts are excluded", False),
+        ("expert parallelism is enabled", True),
+    ],
+)
+def test_resolve_layer_fused_shared_expert_logs_skip_reason(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    reason: str,
+    enable_ep: bool,
 ) -> None:
     monkeypatch.setattr(
         fused_moe_utils.rocm_aiter_ops,
@@ -564,14 +512,20 @@ def test_resolve_layer_fused_shared_expert_rejects_incompatible_quantization(
     monkeypatch.setattr(
         fused_moe_utils,
         "is_shared_expert_quant_fse_compatible",
-        lambda *_, **__: (False, "shared experts are excluded"),
+        lambda *_, **__: (False, reason),
+    )
+    monkeypatch.setattr(
+        "vllm.config.get_current_vllm_config_or_none",
+        lambda: SimpleNamespace(
+            parallel_config=SimpleNamespace(enable_expert_parallel=enable_ep)
+        ),
     )
     _print_warning_once.cache_clear()
 
     assert not fused_moe_utils.resolve_layer_fused_shared_expert(
-        ExpertsInt8Config(), "model.layers.0.mlp"
+        ExpertsInt8Config(), "model.layers.0.mlp", disable_under_ep=enable_ep
     )
-    assert "shared experts are excluded" in caplog.text
+    assert reason in caplog.text
 
 
 def test_deepseek_v4_shared_expert_fse_uses_mtp_quantization_config_prefix(
@@ -999,6 +953,29 @@ def test_deepseek_v4_shared_expert_mapper_fallback() -> None:
         assert _redirect_shared_expert_name(mapped, frozenset(), 4) == expected
 
 
+class _FakeMoE(nn.Module):
+    def __init__(self, enabled: bool) -> None:
+        super().__init__()
+        self.is_fused_shared_expert_enabled = enabled
+
+
+def _make_fake_moe_model(
+    layer_names: list[str], enabled: list[bool], use_dict: bool
+) -> nn.Module:
+    layers = []
+    for flag in enabled:
+        layer = nn.Module()
+        layer.mlp = _FakeMoE(flag)
+        layers.append(layer)
+    model = nn.Module()
+    model.layers = (
+        nn.ModuleDict(dict(zip(layer_names, layers, strict=True)))
+        if use_dict
+        else nn.ModuleList(layers)
+    )
+    return model
+
+
 def test_fused_shared_expert_layers_matches_container_index_space() -> None:
     """The fused-layer set follows the module tree, not a hard-coded offset.
 
@@ -1006,29 +983,10 @@ def test_fused_shared_expert_layers_matches_container_index_space() -> None:
     while ``nn.ModuleDict`` MTP layers (GLM4, DeepSeek) are keyed by absolute
     layer index. Both must redirect without a per-loader offset.
     """
-
-    class MoE(nn.Module):
-        def __init__(self, enabled: bool) -> None:
-            super().__init__()
-            self.is_fused_shared_expert_enabled = enabled
-
-    class Layer(nn.Module):
-        def __init__(self, enabled: bool) -> None:
-            super().__init__()
-            self.mlp = MoE(enabled)
-
-    class ListModel(nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-            self.layers = nn.ModuleList([Layer(True), Layer(False)])
-
-    class DictModel(nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-            self.layers = nn.ModuleDict({"28": Layer(False), "29": Layer(True)})
-
-    list_layers = get_fused_shared_expert_layers(ListModel(), MoE)
-    dict_layers = get_fused_shared_expert_layers(DictModel(), MoE)
+    list_model = _make_fake_moe_model(["0", "1"], [True, False], use_dict=False)
+    dict_model = _make_fake_moe_model(["28", "29"], [False, True], use_dict=True)
+    list_layers = get_fused_shared_expert_layers(list_model, _FakeMoE)
+    dict_layers = get_fused_shared_expert_layers(dict_model, _FakeMoE)
     assert list_layers == frozenset({0})
     assert dict_layers == frozenset({29})
 
@@ -1055,6 +1013,32 @@ def test_fused_shared_expert_layers_matches_container_index_space() -> None:
     assert not redirected("layers.28.mlp.shared_expert.down_proj.weight", dict_layers)
 
 
+def test_mixed_fused_shared_experts_rejected_with_nixl_ep_all2all() -> None:
+    """Mixed FSE must be rejected when the all2all backend shares one buffer.
+
+    ``NixlEPAll2AllManager`` keeps a single process-wide buffer that is
+    initialized once from the first MoE layer's ``num_experts_per_rank`` and
+    ignores later geometries. A mixed model has fused layers with
+    ``n_routed + n_shared`` experts and non-fused layers with ``n_routed``, so
+    reusing that buffer would silently map experts to the wrong slots.
+    Construction must fail cleanly instead of running the untested mixed path.
+    """
+    model = _make_fake_moe_model(["0", "1"], [True, False], use_dict=False)
+
+    vllm_config = VllmConfig()
+    vllm_config.parallel_config.enable_expert_parallel = True
+    vllm_config.parallel_config.data_parallel_size = 2
+    vllm_config.parallel_config.all2all_backend = "nixl_ep"
+
+    with (
+        set_current_vllm_config(vllm_config),
+        pytest.raises(
+            NotImplementedError, match="Mixed per-layer shared-expert fusion"
+        ),
+    ):
+        get_fused_shared_expert_layers(model, _FakeMoE)
+
+
 def _assert_mtp_fused_shared_expert_redirect(
     mtp: nn.Module, ckpt_prefix: str, moe: nn.Module, n_routed_experts: int
 ) -> None:
@@ -1075,6 +1059,30 @@ def _assert_mtp_fused_shared_expert_redirect(
         moe.experts.routed_experts.w2_weight[n_routed_experts][:128, :16].float(),
         packed_down.float(),
     )
+
+
+def _build_mtp_model(
+    mtp_cls: Any,
+    vllm_config: VllmConfig,
+    config: object,
+    *,
+    with_text_config: bool = False,
+    with_target_model: bool = False,
+) -> nn.Module:
+    draft_model_config: dict[str, object] = {"hf_config": config}
+    if with_text_config:
+        draft_model_config["hf_text_config"] = config
+    speculative_config: dict[str, object] = {
+        "draft_model_config": SimpleNamespace(**draft_model_config),
+        "method": "mtp",
+        "parallel_drafting": False,
+        "enable_adaptive_verification": False,
+        "use_dspark": lambda: False,
+    }
+    if with_target_model:
+        speculative_config["target_model_config"] = vllm_config.model_config
+    vllm_config.speculative_config = SimpleNamespace(**speculative_config)
+    return mtp_cls(vllm_config=vllm_config)
 
 
 @pytest.mark.parametrize(
@@ -1277,112 +1285,60 @@ def test_models_fse_init(
             )
             mtp = None
             if model_type == "deepseek_v4" and use_fse and not exclude:
-                from vllm.models.deepseek_v4.amd.mtp import (
-                    DeepSeekV4MTP,
-                )
+                from vllm.models.deepseek_v4.amd.mtp import DeepSeekV4MTP
 
-                vllm_config.speculative_config = SimpleNamespace(
-                    draft_model_config=SimpleNamespace(hf_config=config),
-                    method="mtp",
-                    parallel_drafting=False,
-                    enable_adaptive_verification=False,
-                    use_dspark=lambda: False,
-                )
-                mtp = DeepSeekV4MTP(vllm_config=vllm_config)
+                mtp = _build_mtp_model(DeepSeekV4MTP, vllm_config, config)
             glm4_mtp = None
             if model_type == "glm4_moe" and use_fse and not exclude:
                 from vllm.model_executor.models.glm4_moe_mtp import Glm4MoeMTP
 
-                vllm_config.speculative_config = SimpleNamespace(
-                    draft_model_config=SimpleNamespace(hf_config=config),
-                    method="mtp",
-                    parallel_drafting=False,
-                    enable_adaptive_verification=False,
-                    use_dspark=lambda: False,
-                )
-                glm4_mtp = Glm4MoeMTP(vllm_config=vllm_config)
+                glm4_mtp = _build_mtp_model(Glm4MoeMTP, vllm_config, config)
             glm4_lite_mtp = None
             if model_type == "glm4_moe_lite" and use_fse and not exclude:
                 from vllm.model_executor.models.glm4_moe_lite_mtp import (
                     Glm4MoeLiteMTP,
                 )
 
-                vllm_config.speculative_config = SimpleNamespace(
-                    draft_model_config=SimpleNamespace(hf_config=config),
-                    method="mtp",
-                    parallel_drafting=False,
-                    enable_adaptive_verification=False,
-                    use_dspark=lambda: False,
-                )
-                glm4_lite_mtp = Glm4MoeLiteMTP(vllm_config=vllm_config)
+                glm4_lite_mtp = _build_mtp_model(Glm4MoeLiteMTP, vllm_config, config)
             ds_v32_mtp = None
             if model_type == "deepseek_v32" and use_fse and not exclude:
                 from vllm.models.deepseek_v32.amd.mtp import DeepseekV32MTP
 
-                vllm_config.speculative_config = SimpleNamespace(
-                    draft_model_config=SimpleNamespace(hf_config=config),
-                    method="mtp",
-                    parallel_drafting=False,
-                    enable_adaptive_verification=False,
-                    use_dspark=lambda: False,
-                )
-                ds_v32_mtp = DeepseekV32MTP(vllm_config=vllm_config)
+                ds_v32_mtp = _build_mtp_model(DeepseekV32MTP, vllm_config, config)
             glm5_mtp = None
             if model_type == "glm5_next" and use_fse and not exclude:
                 from vllm.models.glm5next.common.mtp import Glm5NextMTP
 
-                vllm_config.speculative_config = SimpleNamespace(
-                    draft_model_config=SimpleNamespace(
-                        hf_config=config, hf_text_config=config
-                    ),
-                    method="mtp",
-                    parallel_drafting=False,
-                    enable_adaptive_verification=False,
-                    use_dspark=lambda: False,
+                glm5_mtp = _build_mtp_model(
+                    Glm5NextMTP, vllm_config, config, with_text_config=True
                 )
-                glm5_mtp = Glm5NextMTP(vllm_config=vllm_config)
             ds_mtp = None
             if model_type == "deepseek_v2" and use_fse and not exclude:
                 from vllm.model_executor.models.deepseek_mtp import DeepSeekMTP
 
-                vllm_config.speculative_config = SimpleNamespace(
-                    draft_model_config=SimpleNamespace(hf_config=config),
-                    method="mtp",
-                    parallel_drafting=False,
-                    enable_adaptive_verification=False,
-                    use_dspark=lambda: False,
-                )
-                ds_mtp = DeepSeekMTP(vllm_config=vllm_config)
+                ds_mtp = _build_mtp_model(DeepSeekMTP, vllm_config, config)
             qwen3_mtp = None
             if model_type == "qwen3_next" and use_fse and not exclude:
                 from vllm.model_executor.models.qwen3_next_mtp import Qwen3NextMTP
 
-                vllm_config.speculative_config = SimpleNamespace(
-                    draft_model_config=SimpleNamespace(
-                        hf_config=config, hf_text_config=config
-                    ),
-                    target_model_config=vllm_config.model_config,
-                    method="mtp",
-                    parallel_drafting=False,
-                    enable_adaptive_verification=False,
-                    use_dspark=lambda: False,
+                qwen3_mtp = _build_mtp_model(
+                    Qwen3NextMTP,
+                    vllm_config,
+                    config,
+                    with_text_config=True,
+                    with_target_model=True,
                 )
-                qwen3_mtp = Qwen3NextMTP(vllm_config=vllm_config)
             qwen3_5_mtp = None
             if model_type == "qwen3_5" and use_fse and not exclude:
                 from vllm.model_executor.models.qwen3_5_mtp import Qwen3_5MoeMTP
 
-                vllm_config.speculative_config = SimpleNamespace(
-                    draft_model_config=SimpleNamespace(
-                        hf_config=config, hf_text_config=config
-                    ),
-                    target_model_config=vllm_config.model_config,
-                    method="mtp",
-                    parallel_drafting=False,
-                    enable_adaptive_verification=False,
-                    use_dspark=lambda: False,
+                qwen3_5_mtp = _build_mtp_model(
+                    Qwen3_5MoeMTP,
+                    vllm_config,
+                    config,
+                    with_text_config=True,
+                    with_target_model=True,
                 )
-                qwen3_5_mtp = Qwen3_5MoeMTP(vllm_config=vllm_config)
         if per_layer_fse:
             expected_policy = {
                 "layers.0.mlp": bool(fse_enabled and not exclude),
@@ -1559,26 +1515,13 @@ def test_models_fse_init(
         if aiter_fse_enabled and shared_expert_precision == "mixed" and not exclude:
             warning.assert_called_once()
             assert "different quantization configurations" in warning.call_args.args[1]
-        if glm4_mtp is not None:
-            assert glm4_mtp.fused_shared_expert_layers == (
-                frozenset({config.num_hidden_layers}) if fse_enabled else frozenset()
-            )
-        if ds_mtp is not None:
-            assert ds_mtp.fused_shared_expert_layers == (
-                frozenset({config.num_hidden_layers}) if fse_enabled else frozenset()
-            )
-        if glm4_lite_mtp is not None:
-            assert glm4_lite_mtp.fused_shared_expert_layers == (
-                frozenset({config.num_hidden_layers}) if fse_enabled else frozenset()
-            )
-        if ds_v32_mtp is not None:
-            assert ds_v32_mtp.fused_shared_expert_layers == (
-                frozenset({config.num_hidden_layers}) if fse_enabled else frozenset()
-            )
-        if glm5_mtp is not None:
-            assert glm5_mtp.fused_shared_expert_layers == (
-                frozenset({config.num_hidden_layers}) if fse_enabled else frozenset()
-            )
+        for mtp_model in (glm4_mtp, ds_mtp, glm4_lite_mtp, ds_v32_mtp, glm5_mtp):
+            if mtp_model is not None:
+                assert mtp_model.fused_shared_expert_layers == (
+                    frozenset({config.num_hidden_layers})
+                    if fse_enabled
+                    else frozenset()
+                )
         if aiter_fse_enabled and exclude:
             if model_type == "deepseek_v4_cpu":
                 # CPU has no FSE path, so the resolver never warns.

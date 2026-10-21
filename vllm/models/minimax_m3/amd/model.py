@@ -1484,6 +1484,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         # Checkpoint experts use w1=gate, w2=down, w3=up. When fusing the shared
         # expert, include the appended slot (id == num_local_experts).
         n_shared = getattr(self.config, "n_shared_experts", 0) or 0
+        # NOTE: global despite per-layer FSE; non-fused layers skip the extras.
         num_experts = self.config.num_local_experts + (
             n_shared if self.fused_shared_expert_layers else 0
         )
@@ -1536,6 +1537,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             # captured by the dense gate_up_proj mapping.
             if (
                 ".shared_experts." in name
+                and bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())
                 and extract_layer_index(name) in self.fused_shared_expert_layers
             ):
                 sid = self.config.num_local_experts

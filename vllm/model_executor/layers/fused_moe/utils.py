@@ -91,6 +91,7 @@ def resolve_layer_fused_shared_expert(
     fse_requested = bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())
 
     # TODO: should it be disabled for all models?
+    skip_reason: str | None = None
     if fse_requested and disable_under_ep:
         from vllm.config import get_current_vllm_config_or_none
 
@@ -100,17 +101,19 @@ def resolve_layer_fused_shared_expert(
         )
         if parallel_config is not None and parallel_config.enable_expert_parallel:
             fse_requested = False
+            skip_reason = "expert parallelism is enabled"
 
-    fse_compatible, fse_reason = (
-        is_shared_expert_quant_fse_compatible(
+    if fse_requested:
+        fse_compatible, fse_reason = is_shared_expert_quant_fse_compatible(
             quant_config,
             f"{prefix}.experts",
             f"{prefix}.{shared_expert_name}",
             moe_backend=moe_backend,
         )
-        if fse_requested
-        else (True, None)
-    )
+        if not fse_compatible:
+            skip_reason = fse_reason or "unknown reason"
+    else:
+        fse_compatible = True
     is_fused_shared_expert_enabled = fse_requested and fse_compatible
 
     # In online shared_expert quantization is used, register it to
@@ -146,14 +149,14 @@ def resolve_layer_fused_shared_expert(
                     quant_key_str,
                     target_pattern,
                 )
-    if fse_requested and not is_fused_shared_expert_enabled:
+    if skip_reason is not None:
         # Keep the full per-layer reason at debug level; the warning below is
         # deduplicated by cause so a long model logs it once.
-        logger.debug("Skipping shared-expert fusion at %s: %s", prefix, fse_reason)
+        logger.debug("Skipping shared-expert fusion at %s: %s", prefix, skip_reason)
         logger.warning_once(
             "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled but "
             "cannot be enabled - skipping shared-expert fusion: %s.",
-            _normalize_skip_reason(fse_reason or "unknown reason"),
+            _normalize_skip_reason(skip_reason),
         )
     return is_fused_shared_expert_enabled
 

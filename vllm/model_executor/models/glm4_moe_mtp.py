@@ -31,6 +31,7 @@ import torch
 import torch.nn as nn
 from transformers import PreTrainedConfig
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.model_executor.layers.fused_moe import (
     MoERunner,
@@ -260,6 +261,7 @@ class Glm4MoeMTP(nn.Module, Glm4MixtureOfExperts):
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
         fused_shared_expert_layers = self.fused_shared_expert_layers
+        # NOTE: global despite per-layer FSE; non-fused layers skip the extras.
         num_experts = self.config.n_routed_experts
         if fused_shared_expert_layers and self.config.n_shared_experts:
             num_experts += self.config.n_shared_experts
@@ -287,6 +289,7 @@ class Glm4MoeMTP(nn.Module, Glm4MixtureOfExperts):
 
             is_fusion_moe_shared_experts_layer = (
                 "mlp.shared_experts" in name
+                and bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())
                 and extract_layer_index(name) in fused_shared_expert_layers
             )
 

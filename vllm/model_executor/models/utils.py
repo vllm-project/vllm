@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 from torch.nn.modules.module import register_module_module_registration_hook
 
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config_or_none
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -514,7 +514,8 @@ def get_fused_shared_expert_layers(
     an ``nn.ModuleList``, and absolute for ``nn.ModuleDict`` MTP layers keyed by
     layer index. No loader needs to hard-code an offset.
 
-    Also rejects mixed fusion when EPLB is enabled and logs the resolved policy.
+    Also rejects mixed fusion when EPLB is enabled or the ``nixl_ep`` all2all
+    backend is selected, and logs the resolved policy.
     """
     fused_layers: set[int] = set()
     moe_layers: set[int] = set()
@@ -532,11 +533,25 @@ def get_fused_shared_expert_layers(
     # `EplbModelState`s keyed by model config. The uniformity requirement is
     # therefore stage/model-local by design: mixed within a stage is rejected,
     # mixed across PP stages (or main vs draft) is allowed.
-    if enable_eplb and 0 < len(fused_layers) < len(moe_layers):
-        raise NotImplementedError(
-            "Mixed per-layer shared-expert fusion within a pipeline "
-            "stage/model is not supported with EPLB"
+    if 0 < len(fused_layers) < len(moe_layers):
+        if enable_eplb:
+            raise NotImplementedError(
+                "Mixed per-layer shared-expert fusion within a pipeline "
+                "stage/model is not supported with EPLB"
+            )
+        # These backends size one shared buffer from the first MoE layer's
+        # geometry (all2all.py NixlEPAll2AllManager._init_buffer/get_handle).
+        vllm_config = get_current_vllm_config_or_none()
+        all2all_backend = (
+            vllm_config.parallel_config.all2all_backend
+            if vllm_config is not None
+            else None
         )
+        if all2all_backend == "nixl_ep":
+            raise NotImplementedError(
+                "Mixed per-layer shared-expert fusion is not supported with "
+                f"all2all_backend={all2all_backend!r}"
+            )
 
     if fused_layers:
         logger.info(

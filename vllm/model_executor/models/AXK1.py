@@ -840,6 +840,7 @@ class AXK1Model(nn.Module):
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
+            # NOTE: global despite per-layer FSE; non-fused layers skip the extras.
             num_experts=self.config.n_routed_experts
             + (
                 (self.config.n_shared_experts or 0)
@@ -861,6 +862,7 @@ class AXK1Model(nn.Module):
 
             is_fusion_moe_shared_experts_layer = (
                 "mlp.shared_experts" in name
+                and bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())
                 and extract_layer_index(name) in self.fused_shared_expert_layers
             )
 
