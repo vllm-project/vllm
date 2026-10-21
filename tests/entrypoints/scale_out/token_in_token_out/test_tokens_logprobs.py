@@ -1,15 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import io
 import json
 from unittest.mock import MagicMock
 
+import numpy as np
+import pybase64 as base64
 import pytest
 from pydantic import ValidationError
 
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateLogProb
-from vllm.entrypoints.scale_out.token_in_token_out.serving import ServingTokens
-from vllm.logprobs import Logprob
+from vllm.entrypoints.scale_out.token_in_token_out.serving import (
+    ServingTokens,
+    _create_flat_logprobs,
+)
+from vllm.logprobs import FlatLogprobs, Logprob
 
 
 def test_top_logprobs_alternatives_have_own_token_ids():
@@ -173,3 +179,24 @@ def test_text_logprobs_clamp_a_nan_logprob():
     assert entry.logprob == -9999.0
     assert entry.top_logprobs[0].logprob == -9999.0
     json.dumps(result.model_dump(), allow_nan=False)
+
+
+def test_flat_logprobs_are_2d_npy_arrays():
+    """One [num_tokens, k + 1] .npy per field, sampled first, values not clamped."""
+    flat = FlatLogprobs()
+    flat.append_fast([7, 7, 8], [-0.5, -0.5, -1.5], iter([1, 1, 2]), [None] * 3)
+    flat.append_fast(
+        [9, 4, 5], [float("-inf"), -0.1, -2.0], iter([0, 1, 2]), [None] * 3
+    )
+    result = _create_flat_logprobs(flat)
+    arrays = {
+        name: np.load(io.BytesIO(base64.b64decode(getattr(result, name))))
+        for name in ("token_ids", "logprobs", "ranks")
+    }
+    assert arrays["token_ids"].tolist() == [[7, 7, 8], [9, 4, 5]]
+    assert arrays["logprobs"].dtype == np.float32
+    assert arrays["logprobs"][0].tolist() == pytest.approx([-0.5, -0.5, -1.5])
+    assert np.isneginf(arrays["logprobs"][1, 0])
+    assert arrays["ranks"].tolist() == [[1, 1, 2], [0, 1, 2]]
+    # A chunk without tokens has no row to send; None keeps chunks concatenable.
+    assert _create_flat_logprobs(FlatLogprobs()) is None

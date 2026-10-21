@@ -10,6 +10,7 @@ from collections.abc import Sequence as GenericSequence
 from typing import Any
 
 import msgspec
+import numpy as np
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
@@ -39,7 +40,7 @@ from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import GenerationError
 from vllm.inputs import EngineInput, TokensPrompt, mm_input
 from vllm.logger import init_logger
-from vllm.logprobs import Logprob
+from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     MultiModalKwargsItems,
@@ -58,6 +59,7 @@ from .mm_features import (
     placeholder_ranges_from_engine_input,
 )
 from .protocol import (
+    GenerateFlatLogProbs,
     GenerateLogProb,
     GenerateLogProbs,
     GenerateLogProbsContent,
@@ -83,6 +85,24 @@ def _clamp_logprob(logprob: float) -> float:
     would otherwise fail ``JSONResponse`` or reach the client as ``null``.
     """
     return -9999.0 if math.isnan(logprob) else max(logprob, -9999.0)
+
+
+def _create_flat_logprobs(logprobs: FlatLogprobs) -> GenerateFlatLogProbs | None:
+    num_tokens = len(logprobs)
+    if num_tokens == 0:
+        return None
+    width = len(logprobs.token_ids) // num_tokens
+    assert len(logprobs.token_ids) == num_tokens * width
+    shape = (num_tokens, width)
+    return GenerateFlatLogProbs(
+        token_ids=numpy2base64(
+            np.array(logprobs.token_ids, dtype=np.int32).reshape(shape)
+        ),
+        logprobs=numpy2base64(
+            np.array(logprobs.logprobs, dtype=np.float32).reshape(shape)
+        ),
+        ranks=numpy2base64(np.array(logprobs.ranks, dtype=np.int32).reshape(shape)),
+    )
 
 
 def _logprob_token(
@@ -332,6 +352,10 @@ class ServingTokens(GenerateBaseServing):
 
         if self.force_no_detokenize:
             sampling_params.detokenize = False
+        elif request.output_mode == "tokens" and not request.is_sampling_param_provided(
+            "detokenize"
+        ):
+            sampling_params.detokenize = bool(sampling_params.stop)
         sampling_params.output_kind = (
             RequestOutputKind.DELTA if request.stream else RequestOutputKind.FINAL_ONLY
         )
@@ -417,22 +441,24 @@ class ServingTokens(GenerateBaseServing):
             out_logprobs = output.logprobs
 
             # This is top_logprobs in completions API
+            logprobs: GenerateLogProbs | ChatCompletionLogProbs | None = None
+            flat_logprobs: GenerateFlatLogProbs | None = None
             if sampling_params.logprobs is not None:
                 assert out_logprobs is not None, "Did not output logprobs"
-                logprobs: GenerateLogProbs | ChatCompletionLogProbs | None
                 if text_mode:
                     logprobs = self._create_text_logprobs(
                         token_ids=token_ids,
                         top_logprobs=out_logprobs,
                         tokenizer=tokenizer,
                     )
+                elif sampling_params.flat_logprobs:
+                    assert isinstance(out_logprobs, FlatLogprobs)
+                    flat_logprobs = _create_flat_logprobs(out_logprobs)
                 else:
                     logprobs = self._create_tokens_logprobs(
                         token_ids=token_ids,
                         top_logprobs=out_logprobs,
                     )
-            else:
-                logprobs = None
 
             routed_experts_b64 = (
                 numpy2base64(output.routed_experts)
@@ -459,7 +485,9 @@ class ServingTokens(GenerateBaseServing):
                     GenerateTextChoice(text=output.text, **choice_fields)
                 )
             else:
-                tokens_choices.append(GenerateTokensChoice(**choice_fields))
+                tokens_choices.append(
+                    GenerateTokensChoice(flat_logprobs=flat_logprobs, **choice_fields)
+                )
             num_generated_tokens += len(output.token_ids)
 
         assert final_res.prompt_token_ids is not None
@@ -589,23 +617,25 @@ class ServingTokens(GenerateBaseServing):
                     ):
                         continue
 
+                    logprobs: GenerateLogProbs | ChatCompletionLogProbs | None = None
+                    flat_logprobs: GenerateFlatLogProbs | None = None
                     if sampling_params.logprobs is not None:
                         out_logprobs = output.logprobs
                         assert out_logprobs is not None, "Did not output logprobs"
-                        logprobs: GenerateLogProbs | ChatCompletionLogProbs | None
                         if text_mode:
                             logprobs = self._create_text_logprobs(
                                 token_ids=delta_token_ids,
                                 top_logprobs=out_logprobs,
                                 tokenizer=tokenizer,
                             )
+                        elif sampling_params.flat_logprobs:
+                            assert isinstance(out_logprobs, FlatLogprobs)
+                            flat_logprobs = _create_flat_logprobs(out_logprobs)
                         else:
                             logprobs = self._create_tokens_logprobs(
                                 token_ids=delta_token_ids,
                                 top_logprobs=out_logprobs,
                             )
-                    else:
-                        logprobs = None
 
                     routed_experts_b64 = (
                         numpy2base64(output.routed_experts)
@@ -639,7 +669,11 @@ class ServingTokens(GenerateBaseServing):
                     else:
                         chunk = GenerateTokensStreamResponse(
                             request_id=request_id,
-                            choices=[GenerateTokensStreamChoice(**choice_fields)],
+                            choices=[
+                                GenerateTokensStreamChoice(
+                                    flat_logprobs=flat_logprobs, **choice_fields
+                                )
+                            ],
                         )
 
                     if prompt_token_ids is not None:

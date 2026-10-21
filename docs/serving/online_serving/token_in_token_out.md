@@ -23,7 +23,7 @@ A full client is in [examples/scale_out/token_generation_client.py](../../../exa
 | Field | Notes |
 | --- | --- |
 | `token_ids` | Required `list[int]`: the already-templated prompt. Non-empty, no negative IDs. |
-| `sampling_params` | Required. Any [SamplingParams](../../api/README.md#inference-parameters) field, e.g. `max_tokens`, `temperature`, `logprobs`, `stop_token_ids`. Without `max_tokens`, the server applies its own default (as on the OpenAI endpoints), not 16. |
+| `sampling_params` | Required. Any [SamplingParams](../../api/README.md#inference-parameters) field, e.g. `max_tokens`, `temperature`, `logprobs`, `stop_token_ids`. Without `max_tokens`, the server applies its own default (as on the OpenAI endpoints), not 16. Without `detokenize`, a `tokens` request detokenizes only when it has `stop` strings, since nothing else in its response needs the text; send `detokenize: true` to keep it. `flat_logprobs: true` returns logprobs as arrays, see [Flat logprobs](#flat-logprobs). |
 | `output_mode` | `"tokens"` (default) or `"text"`, see [Output modes](#output-modes). |
 | `stream`, `stream_options` | SSE chunks ending with `data: [DONE]`. |
 | `return_token_ids` | Echo the final prompt IDs as `prompt_token_ids`. |
@@ -37,7 +37,8 @@ A full client is in [examples/scale_out/token_generation_client.py](../../../exa
 | `token_ids` | Generated token IDs. |
 | `finish_reason` | `stop`, `length` or `abort`. |
 | `stop_reason` | Stop token ID or string; `null` on EOS, length and abort. |
-| `logprobs` | `{"content": [{"token_id", "logprob", "rank", "top_logprobs": [...]}]}`, one entry per token, sampled token first. `token_id` is an integer, not the older `"token_id:<id>"` string. Needs `sampling_params.logprobs`. |
+| `logprobs` | `{"content": [{"token_id", "logprob", "rank", "top_logprobs": [...]}]}`, one entry per token, sampled token first. `token_id` is an integer, not the older `"token_id:<id>"` string. Needs `sampling_params.logprobs`. `null` with `flat_logprobs`. |
+| `flat_logprobs` | The same logprobs as `[num_tokens, k + 1]` arrays, see [Flat logprobs](#flat-logprobs). Needs `sampling_params.flat_logprobs` and `output_mode: "tokens"`. |
 | `weight_versions`, `routed_experts`, `sampling_mask` | Optional, see [Weight versions](#weight-versions); the last two need `--enable-return-routed-experts` / `--return-sampling-mask`. |
 
 The top level adds `request_id`, `usage`, `prompt_token_ids` and `prompt_logprobs`. Stream chunks carry the same per-choice fields for the new tokens.
@@ -86,6 +87,32 @@ print(response["choices"][0]["token_ids"])
 ### Logprobs
 
 With `output_mode: "tokens"`, logprobs are `GenerateLogProbs` with an integer `token_id` and `rank` per entry and no `token` or `bytes` (see [Generate Output Logprobs](renderer.md#generate-output-logprobs)). With `output_mode: "text"`, they are `ChatCompletionLogProbs` carrying the decoded token strings and their UTF-8 `bytes` for the sampled token and every entry in `top_logprobs`; a server started with `--return-tokens-as-token-ids` returns `token_id:N` placeholders there instead, as `/v1/completions` does.
+
+### Flat logprobs
+
+With `output_mode: "tokens"` and `sampling_params.flat_logprobs: true`, every choice carries `flat_logprobs` instead of `logprobs`: `token_ids`, `logprobs` and `ranks`, each a base64-encoded `.npy` of shape `[num_tokens, k + 1]` (int32, float32, int32). Column 0 is the sampled token, then the top-k in rank order, which repeat the sampled token when it ranks among them (where `logprobs.content` lists it once). The logprobs are the engine's float32 values, not clamped, so `-inf` stays `-inf`; a rank of 0 means the engine reported none. With `stream: true`, each chunk's arrays cover its own tokens, and a chunk with no tokens (the finish chunk after an abort) carries `null`, so the chunks concatenate along axis 0. The server builds these straight from its internal buffers, so a request with `logprobs: 8` or `logprobs: 20` costs about what `logprobs: 0` does; the object form is several times more expensive per token.
+
+```python
+import base64
+import io
+
+import httpx
+import numpy as np
+
+choice = httpx.post(
+    "http://localhost:8000/inference/v1/generate",
+    json={
+        "token_ids": [151644, 872, 198],
+        "sampling_params": {"max_tokens": 32, "logprobs": 8, "flat_logprobs": True},
+    },
+).json()["choices"][0]
+arrays = {
+    name: np.load(io.BytesIO(base64.b64decode(value)))
+    for name, value in choice["flat_logprobs"].items()
+}
+sampled_logprobs = arrays["logprobs"][:, 0]  # one per generated token
+top_k_ids = arrays["token_ids"][:, 1:]
+```
 
 ### Errors
 
