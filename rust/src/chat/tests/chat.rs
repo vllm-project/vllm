@@ -10,10 +10,10 @@ use futures::StreamExt as _;
 use tokio::time::timeout;
 use vllm_chat::{
     AssistantBlockKind, AssistantContentBlock, AssistantMessageExt as _, ChatBackend, ChatEvent,
-    ChatLlm, ChatMessage, ChatRenderer, ChatRequest, ChatRole, ChatTextBackend, ChatTool,
-    ChatToolChoice, DefaultChatOutputProcessor, DynChatOutputProcessor, DynChatRenderer,
-    FinishReason, GenerationPromptMode, NewChatOutputProcessorOptions, ParserSelection,
-    RenderedPrompt, SamplingParams,
+    ChatLlm, ChatMessage, ChatRenderer, ChatRequest, ChatRequestProcessor, ChatRole,
+    ChatTextBackend, ChatTool, ChatToolChoice, DefaultChatOutputProcessor, DynChatOutputProcessor,
+    DynChatRenderer, FinishReason, GenerationPromptMode, NewChatOutputProcessorOptions,
+    ParserSelection, RenderedPrompt, ResolvedToolContext, SamplingParams,
 };
 use vllm_engine_core_client::protocol::logprobs::{
     Logprobs, MaybeWireLogprobs, PositionLogprobs, TokenLogprob,
@@ -239,6 +239,10 @@ impl ChatRenderer for FakeChatBackend {
         }
 
         let mut prompt = String::new();
+        if !request.tools().is_empty() {
+            let names = request.tools().iter().map(|tool| tool.name.as_str());
+            prompt.push_str(&format!("tools: {}\n", names.collect::<Vec<_>>().join(",")));
+        }
         for message in &request.messages {
             prompt.push_str(message.role().as_str());
             prompt.push_str(": ");
@@ -297,6 +301,7 @@ fn sample_tool_request(request_id: &str) -> ChatRequest {
             "required": ["city"],
         }),
         strict: None,
+        defer_loading: None,
     }];
     request.tool_context = vllm_chat::ResolvedToolContext::new(
         &request.messages,
@@ -1616,4 +1621,48 @@ async fn chat_rejects_tool_requests_when_tool_parser_is_disabled() {
     let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
     chat.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn processor_excludes_request_tools_for_tool_choice_none_when_configured() {
+    let tool = |name: &str| ChatTool {
+        name: name.to_string(),
+        description: None,
+        parameters: serde_json::json!({"type": "object"}),
+        strict: None,
+        defer_loading: None,
+    };
+    let render = async |tool_choice, exclude| {
+        let mut request = sample_request("exclude-tools");
+        request.messages.insert(
+            0,
+            ChatMessage::developer("Dynamic tools.", Some(vec![tool("lookup")])),
+        );
+        request.tool_context = ResolvedToolContext::new(
+            &request.messages,
+            vec![tool("get_weather")],
+            Some(tool_choice),
+            true,
+        )
+        .unwrap();
+        let processor = ChatRequestProcessor::render_only(Arc::new(FakeChatBackend::new()))
+            .with_exclude_tools_when_tool_choice_none(exclude);
+        let text_request = processor.prepare_for_tokenization(request).await.unwrap();
+        let Prompt::Text(prompt) = text_request.prompt else {
+            panic!("expected a text prompt");
+        };
+        prompt.lines().next().unwrap().to_string()
+    };
+
+    // Like Python, tools stay in the prompt for `none` unless the server opts out.
+    assert_eq!(
+        render(ChatToolChoice::None, false).await,
+        "tools: get_weather,lookup"
+    );
+    // Opting out drops request-level tools only; message-scoped ones belong to the history.
+    assert_eq!(render(ChatToolChoice::None, true).await, "tools: lookup");
+    assert_eq!(
+        render(ChatToolChoice::Auto, true).await,
+        "tools: get_weather,lookup"
+    );
 }

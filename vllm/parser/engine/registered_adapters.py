@@ -19,6 +19,7 @@ from vllm.parser.inkling import InklingParser
 from vllm.parser.kimi_k2 import KimiK2Parser
 from vllm.parser.mimo import MiMoParser
 from vllm.parser.minimax_m2 import MinimaxM2Parser
+from vllm.parser.minimax_m3 import MinimaxM3Parser
 from vllm.parser.mistral import MistralParser
 from vllm.parser.nemotron_v3 import NemotronV3Parser
 from vllm.parser.plamo3 import Plamo3Parser
@@ -45,6 +46,11 @@ from vllm.parser.step3p5 import Step3p5Parser
     MinimaxM2ParserReasoningAdapter,
     MinimaxM2ParserToolAdapter,
 ) = make_adapters(MinimaxM2Parser)
+
+(
+    MinimaxM3ParserReasoningAdapter,
+    MinimaxM3ParserToolAdapter,
+) = make_adapters(MinimaxM3Parser)
 
 (
     Gemma4ParserReasoningAdapter,

@@ -15,10 +15,10 @@ from pydantic import (
 
 import vllm.envs as envs
 from vllm.config.utils import replace
-from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
+from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.sampling_params import StructuredOutputsParams
 
 logger = init_logger(__name__)
@@ -32,6 +32,8 @@ TopLogprobsParam: TypeAlias = Annotated[
     int,
     BeforeValidator(lambda v: 0 if v is None else v, json_schema_input_type=int | None),
 ]
+
+MMPayload: TypeAlias = Literal["tensors", "none"]
 
 _CACHE_SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
 _MAX_CACHE_SALT_LENGTH = 128
@@ -54,6 +56,17 @@ def validate_cache_salt(cache_salt: object) -> None:
             "not contain '@', '/', '\\\\', or NUL.",
             parameter="cache_salt",
         )
+
+
+def resolve_return_mm_kwargs_alias(data: Any) -> Any:
+    """Map the deprecated `return_mm_kwargs=False` onto `mm_payload="none"`."""
+    if (
+        isinstance(data, dict)
+        and data.get("return_mm_kwargs") is False
+        and "mm_payload" not in data
+    ):
+        data = {**data, "mm_payload": "none"}
+    return data
 
 
 def validate_request_mm_kwargs(
@@ -230,7 +243,11 @@ def validate_structural_tag_response_format(
 
 
 def validate_structural_tag_payload(payload: Any, *, parameter: str) -> None:
-    from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+    from vllm.sampling_params import (
+        SamplingParams,
+        StructuredOutputsParams,
+        check_json_nesting,
+    )
     from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
 
     if isinstance(payload, str) and not payload:
@@ -239,6 +256,9 @@ def validate_structural_tag_payload(payload: Any, *, parameter: str) -> None:
             parameter=parameter,
         )
 
+    if isinstance(payload, str):
+        # Raised here so the error is not reported as a malformed tag below
+        check_json_nesting(payload, structural_tag=True)
     try:
         validate_xgrammar_grammar(
             SamplingParams(
