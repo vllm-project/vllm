@@ -136,3 +136,47 @@ def test_dsa_row_table_pads_and_follows_the_step():
     # computed once a step, shared by every sparse-attention layer
     md["mla"].slot_mapping[0] = 5
     assert w.dsa_rows(step, ("mla", "ic", "tail"))[0, ROW_SLOT] == 70
+
+
+def _mtp_config(tp: int, k: int | None, method: str = "mtp", **sc):
+    from types import SimpleNamespace
+
+    from .kit import make_vllm_config
+
+    spec_cfg = None
+    if k is not None:
+        spec_cfg = SimpleNamespace(method=method, num_speculative_tokens=k, **sc)
+    return make_vllm_config(
+        parallel={"tensor_parallel_size": tp}, speculative_config=spec_cfg
+    )
+
+
+@pytest.mark.parametrize(
+    "tp, k, widths",
+    [(8, 5, (6,)), (4, 3, (4, 8)), (4, 1, (2, 4, 8)), (2, 1, (2, 4)), (8, 7, (8,))],
+)
+def test_mtp_verify_widths(tp, k, widths, monkeypatch):
+    monkeypatch.setattr(spec, "refusal_reasons", lambda cfg: [])
+    cfg = spec.specialized_decode_config(_mtp_config(tp, k))
+    assert cfg is not None
+    assert (cfg.widths, cfg.tokens, cfg.tpr) == (widths, widths, k + 1)
+    reasons = spec.speculative_reasons(_mtp_config(tp, k))
+    assert not [r for r in reasons if "drafts" in r], reasons
+
+
+def test_mtp_refusals():
+    # a TP2 verify step of one request is wider than its 4-row cap
+    assert any("drafts" in r for r in spec.speculative_reasons(_mtp_config(2, 5)))
+    eagle = spec.features_in_use(_mtp_config(8, 3, "eagle"))
+    assert spec.Feature.SPECULATIVE_DECODING in eagle
+    assert spec.Feature.SPECULATIVE_DECODING not in spec.features_in_use(
+        _mtp_config(8, 3)
+    )
+    adaptive = _mtp_config(8, 3, enable_adaptive_verification=True)
+    assert any("adaptive" in r for r in spec.speculative_reasons(adaptive))
+    assert spec.mtp_tokens(_mtp_config(8, None)) == 1
+
+
+@pytest.mark.parametrize("tpr, ring", [(1, 4), (2, 8), (5, 8), (6, 16), (8, 16)])
+def test_tail_ring_matches_vllm(tpr, ring):
+    assert spec.tail_ring(tpr) == ring

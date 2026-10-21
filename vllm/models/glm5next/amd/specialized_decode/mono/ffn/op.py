@@ -158,9 +158,11 @@ class FlashFfnRuntime:
         max_pools: int = 0,
         dsa_fp8: tuple[bool, bool, bool] = (True, True, True),
         kv_fp8: bool = False,
+        tpr: int = 1,
     ) -> None:
         self.width, self.rank, self.npes = width, rank, npes
         self.kv_fp8 = kv_fp8
+        self.tpr = tpr
         self.kda, self.dsa, self.max_pools = kda, dsa, max_pools
         self.dsa_fp8 = dsa_fp8
         self.launch, self.sc, self.sy = build_flash_ffn_kernel(
@@ -177,6 +179,7 @@ class FlashFfnRuntime:
             max_pools=max_pools,
             dsa_fp8=dsa_fp8,
             kv_fp8=kv_fp8,
+            tpr=tpr,
         )
         dev = torch.device("cuda", torch.accelerator.current_device_index())
         self.peer = PeerBuffers(self.sy["_bytes"], rank, npes, group)
@@ -319,7 +322,8 @@ class FlashFfnOp:
         """``attn_part``: this rank's unreduced attention output [S, HIDDEN];
         ``residual`` [S, HC, HIDDEN], ``post`` [S, HC, 1], ``comb`` [S, HC, HC]: the
         attention pre's state. A KDA op takes the previous layer's output, its
-        state, and ``state_idx`` int32 [S] (not positive: padding) instead. A
+        state, and ``state_idx`` int32 [S] (not positive: padding; a verify step
+        appends the S / tpr requests' accepted-token counts) instead. A
         sparse-attention op takes the previous layer's output, its caches, the
         step's ``rows`` int32 [S, ROW_WORDS] and the int32 block tables of the MLA
         cache and of the index cache (default: the MLA one).
@@ -357,7 +361,9 @@ class FlashFfnOp:
         if self.kda is not None:
             if state is None or state_idx is None:
                 raise ValueError("a KDA launch needs its state and state indices")
-            _check("state_idx", state_idx, (S,), torch.int32)
+            # a verify step appends every request's accepted-token count
+            n_idx = S if rt.tpr == 1 else S + S // rt.tpr
+            _check("state_idx", state_idx, (n_idx,), torch.int32)
             k = self.kda
             kda_args = [
                 *map(p, (k.hc_fn, k.hc_scale, k.hc_base, k.g_norm, k.w_in, k.w_fb)),

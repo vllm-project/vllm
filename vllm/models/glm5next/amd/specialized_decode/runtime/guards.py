@@ -10,7 +10,7 @@ import torch
 
 from vllm.platforms import current_platform
 
-from .spec import GRID, is_dsa, is_kda, kernel_layers
+from .spec import GRID, is_dsa, kernel_layers
 from .weights import experts_backend_reason
 
 if TYPE_CHECKING:
@@ -31,8 +31,6 @@ def model_refusals(backbone: nn.Module) -> list[str]:
             reasons.append(f"layer {idx}: sequence-parallel layer")
         if not hasattr(layer.self_attn, "o_proj"):
             reasons.append(f"layer {idx}: needs the attention's o_proj")
-        if is_kda(layer) and getattr(layer.self_attn, "num_spec", None):
-            reasons.append(f"layer {idx}: KDA with speculative decoding")
         if is_dsa(layer) and getattr(layer.self_attn, "indexer", None) is None:
             reasons.append(f"layer {idx}: sparse attention without its indexer")
     if not current_platform.is_rocm():

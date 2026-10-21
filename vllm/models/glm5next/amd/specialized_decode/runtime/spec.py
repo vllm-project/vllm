@@ -14,6 +14,7 @@ import enum
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from vllm.models.glm5next.amd.specialized_decode.mono.config import KPOOL
 from vllm.models.glm5next.amd.specialized_decode.mono.ffn.layout import POLL_STAGES
 
 if TYPE_CHECKING:
@@ -25,6 +26,8 @@ WIDTHS = (2, 4, 8)
 TP_MAX_WIDTH = {2: 4}
 # step token counts the kernels take (a step pads up to the next width)
 STEP_TOKENS = (1, 2, 4, 8)
+# whole-layer launches take at most this many rows
+MAX_ROWS = 8
 # one persistent launch: 256 CTAs, every one resident
 GRID = 256
 NUMERICS = (
@@ -80,7 +83,7 @@ class Feature(enum.Enum):
     LORA = "LoRA"
     KV_CONNECTOR = "KV transfer connector"
     ROUTED_EXPERT_CAPTURE = "routed-expert capture"
-    SPECULATIVE_DECODING = "speculative decoding"
+    SPECULATIVE_DECODING = "speculative decoding other than MTP"
     SLEEP_MODE = "sleep mode"
     CPU_WEIGHT_OFFLOAD = "CPU weight offload"
     WEIGHT_UPDATES = "weight updates"
@@ -89,12 +92,14 @@ class Feature(enum.Enum):
 
 @dataclass(frozen=True)
 class DecodeConfig:
-    """The deployment's specialized decode: built launch widths (rows) and the step
-    token counts that run the kernels."""
+    """The deployment's specialized decode: built launch widths (rows), the step
+    token counts that run the kernels, and the rows a request owns (1, or with MTP
+    a verify step's token and its drafts)."""
 
     tp_size: int
     widths: tuple[int, ...] = WIDTHS
     tokens: tuple[int, ...] = STEP_TOKENS
+    tpr: int = 1
     # a kernel wait expires (and the engine fail-stops) only when a peer is this
     # late: a rank seconds behind (a host stall) is waited out, as vLLM's own
     # collectives do, and a stalled peer still stops the engine inside vLLM's
@@ -104,6 +109,52 @@ class DecodeConfig:
 
     def width_for(self, tokens: int) -> int | None:
         return next((w for w in sorted(self.widths) if w >= tokens), None)
+
+
+def mtp_tokens(vllm_config: VllmConfig) -> int:
+    """Rows a request in a verify step: its token and its MTP drafts (1 without)."""
+    sc = vllm_config.speculative_config
+    if sc is None or getattr(sc, "method", None) != "mtp":
+        return 1
+    return 1 + sc.num_speculative_tokens
+
+
+def tail_ring(tpr: int) -> int:
+    """The kpool tail ring vLLM sizes for ``tpr - 1`` drafts (``Glm5NextTailCache``)."""
+    span = -(-(KPOOL + tpr - 1) // KPOOL)
+    return KPOOL * (1 << (span - 1).bit_length())
+
+
+def step_tokens(vllm_config: VllmConfig) -> tuple[int, ...]:
+    """The step token counts the kernels take: decode steps, or with MTP whole
+    verify steps of at most the TP size's row cap."""
+    t = mtp_tokens(vllm_config)
+    if t == 1:
+        return STEP_TOKENS
+    tp = vllm_config.parallel_config.tensor_parallel_size
+    cap = min(TP_MAX_WIDTH.get(tp, MAX_ROWS), MAX_ROWS)
+    return tuple(r * t for r in STEP_TOKENS if r * t <= cap)
+
+
+def speculative_reasons(vllm_config: VllmConfig) -> list[str]:
+    """MTP runs as uniform verify steps; anything else speculative is refused."""
+    sc = vllm_config.speculative_config
+    if sc is None or getattr(sc, "method", None) != "mtp":
+        return []
+    reasons = []
+    if not step_tokens(vllm_config):
+        reasons.append(
+            f"MTP with {sc.num_speculative_tokens} drafts: one request's verify step "
+            "is wider than the kernel's rows at this TP size"
+        )
+    if getattr(sc, "enable_adaptive_verification", False):
+        reasons.append("adaptive verification (non-uniform verify steps)")
+    dynamic = getattr(sc, "uses_dynamic_speculative_decoding", None)
+    if callable(dynamic) and dynamic():
+        reasons.append("dynamic speculative decoding")
+    if getattr(vllm_config.cache_config, "use_kda_recoverssm", False):
+        reasons.append("KDA RecoverSSM (needs the per-draft state slots)")
+    return reasons
 
 
 def kernel_layers(hf: Any) -> list[int]:
@@ -137,7 +188,10 @@ def features_in_use(vllm_config: VllmConfig) -> list[Feature]:
         Feature.ROUTED_EXPERT_CAPTURE: (
             vllm_config.aux_output_config.enable_return_routed_experts
         ),
-        Feature.SPECULATIVE_DECODING: vllm_config.speculative_config is not None,
+        Feature.SPECULATIVE_DECODING: (
+            vllm_config.speculative_config is not None
+            and getattr(vllm_config.speculative_config, "method", None) != "mtp"
+        ),
         Feature.SLEEP_MODE: mc.enable_sleep_mode,
         Feature.CPU_WEIGHT_OFFLOAD: (
             offload.uva.cpu_offload_gb > 0 or offload.prefetch.offload_group_size > 0
@@ -148,8 +202,11 @@ def features_in_use(vllm_config: VllmConfig) -> list[Feature]:
     return [f for f, on in used.items() if on]
 
 
-def graph_reasons(vllm_config: VllmConfig, tokens: tuple[int, ...]) -> list[str]:
-    """Graph modes and capture sizes the decision cannot be baked into."""
+def graph_reasons(
+    vllm_config: VllmConfig, tokens: tuple[int, ...], tpr: int = 1
+) -> list[str]:
+    """Graph modes and capture sizes the decision cannot be baked into (verify
+    steps: vLLM rounds decode graphs up to whole requests itself)."""
     from vllm import envs
     from vllm.config.compilation import CompilationMode, CUDAGraphMode
 
@@ -167,7 +224,7 @@ def graph_reasons(vllm_config: VllmConfig, tokens: tuple[int, ...]) -> list[str]
         bad = [
             s
             for s in cc.cudagraph_capture_sizes or ()
-            if s <= max(tokens) and s not in tokens
+            if tpr == 1 and s <= max(tokens) and s not in tokens
         ]
         if bad:
             reasons.append(
@@ -196,7 +253,10 @@ def refusal_reasons(vllm_config: VllmConfig) -> list[str]:
     if not vllm_config.use_v2_model_runner:
         reasons.append("needs Model Runner V2")
     reasons += [f.value for f in features_in_use(vllm_config)]
-    reasons += graph_reasons(vllm_config, STEP_TOKENS)
+    reasons += speculative_reasons(vllm_config)
+    tokens = step_tokens(vllm_config)
+    if tokens:
+        reasons += graph_reasons(vllm_config, tokens, mtp_tokens(vllm_config))
     if getattr(hf, "model_type", None) != "glm5_next_text":
         reasons.append("needs glm5_next")
     else:
@@ -229,7 +289,12 @@ def specialized_decode_config(vllm_config: VllmConfig) -> DecodeConfig | None:
             + "; ".join(reasons)
             + "."
         )
-    return DecodeConfig(tp_size=vllm_config.parallel_config.tensor_parallel_size)
+    tp = vllm_config.parallel_config.tensor_parallel_size
+    tpr = mtp_tokens(vllm_config)
+    if tpr == 1:
+        return DecodeConfig(tp_size=tp)
+    tokens = step_tokens(vllm_config)
+    return DecodeConfig(tp_size=tp, widths=tokens, tokens=tokens, tpr=tpr)
 
 
 # the kernels' poll stages, in the order of the error words

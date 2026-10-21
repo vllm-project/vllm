@@ -26,7 +26,7 @@ class _Kda:
     """One KDA layer's random attention weights (every rank builds the same) and
     this rank's shard, in vLLM's post-load layouts."""
 
-    def __init__(self, rank: int, tp: int, device) -> None:
+    def __init__(self, rank: int, tp: int, device, tpr: int = 1) -> None:
         from vllm.models.glm5next.amd.specialized_decode.mono.config import (
             HC_MULT,
             HIDDEN,
@@ -71,7 +71,8 @@ class _Kda:
         self.conv_w = torch.cat([sh(conv[i], P) for i in range(3)]).contiguous()
         self.a_log = sh(self.a_log_full, H).contiguous()
         self.dt_bias = sh(self.dt_full, P).contiguous()
-        self.conv0 = rnd(SLOTS, 3 * P, 3).bfloat16()
+        # a verify step's conv state keeps one more column a draft token
+        self.conv0 = rnd(SLOTS, 3 * P, 2 + tpr).bfloat16()
         self.rec0 = rnd(SLOTS, H, D, D, scale=0.05)
 
     def weights(self):
@@ -102,9 +103,11 @@ def _seam(k: _Kda, x, res, post, comb):
     return _vllm_seam(lay, x, res, post, comb)
 
 
-def _kda_reference(k: _Kda, proj, gates, conv, rec, idx, dim_first):
+def _kda_reference(k: _Kda, proj, gates, conv, rec, idx, dim_first, tpr=1, acc=None):
     """The decode ops of vLLM on the kernel's own projection and gate rows; update
-    ``conv`` and ``rec`` in place and return the gated-RMSNorm output [S, P]."""
+    ``conv`` and ``rec`` in place and return the gated-RMSNorm output [S, P]. With
+    ``tpr`` > 1 they are vLLM's spec-decode calls: ``idx`` [S] is the requests'
+    state slots row by row, ``acc`` their accepted-token counts."""
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
         causal_conv1d_update,
@@ -117,18 +120,24 @@ def _kda_reference(k: _Kda, proj, gates, conv, rec, idx, dim_first):
     from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 
     S, P, H, D = proj.shape[0], k.P, k.H, KDA_DIM
+    cu = torch.arange(0, S + 1, tpr, dtype=torch.int32, device=proj.device)
+    spec = dict(
+        conv_state_indices=idx.view(-1, tpr)[:, 0].contiguous(),
+        num_accepted_tokens=acc,
+        query_start_loc=cu,
+        max_query_len=tpr,
+    )
     qkv = causal_conv1d_update(
         proj[:, : 3 * P].contiguous(),
         conv if dim_first else conv.transpose(-1, -2),
         k.conv_w,
         None,
         "silu",
-        conv_state_indices=idx,
+        **(spec if tpr > 1 else dict(conv_state_indices=idx)),
     )
     q, kk, v = (t.reshape(1, S, H, D) for t in qkv.split(P, dim=-1))
     beta = proj[:, 3 * P : 3 * P + H].reshape(1, S, H).contiguous()
     g1 = gates[:, :P].reshape(1, S, H, D).contiguous()
-    cu = torch.arange(S + 1, dtype=torch.int32, device=proj.device)
     o, _ = fused_recurrent_kda(
         q=q.contiguous(),
         k=kk.contiguous(),
@@ -138,7 +147,8 @@ def _kda_reference(k: _Kda, proj, gates, conv, rec, idx, dim_first):
         initial_state=rec,
         use_qk_l2norm_in_kernel=True,
         cu_seqlens=cu,
-        ssm_state_indices=idx,
+        ssm_state_indices=idx.view(-1, tpr) if tpr > 1 else idx,
+        num_accepted_tokens=acc,
         sigmoid_beta=True,
         a_log=k.a_log.view(1, 1, H, 1),
         g_bias=k.dt_bias,
@@ -160,7 +170,7 @@ def _box(rt, name, n, packed=False):
     return words[: 2 * n : 2].contiguous().view(torch.float32)
 
 
-def _check(rank: int, tp: int, device, dim_first: bool) -> None:
+def _check(rank: int, tp: int, device, dim_first: bool, tpr: int = 1) -> None:
     import torch.distributed as dist
 
     from vllm.distributed import get_tp_group
@@ -176,12 +186,13 @@ def _check(rank: int, tp: int, device, dim_first: bool) -> None:
         FlashKdaState,
     )
 
-    lay, kda = _Layer(rank, tp, device), _Kda(rank, tp, device)
+    lay, kda = _Layer(rank, tp, device), _Kda(rank, tp, device, tpr)
     if not dim_first:
         kda.conv0 = kda.conv0.transpose(1, 2).contiguous()
     n_in = FlashShard(tp).kda_in_rows
     group = get_tp_group().cpu_group
-    for S in ROWS:
+    rows = ROWS if tpr == 1 else [r * tpr for r in (1, 2, 4) if r * tpr <= 8]
+    for S in rows:
         rt = FlashFfnRuntime(
             S,
             rank,
@@ -193,6 +204,7 @@ def _check(rank: int, tp: int, device, dim_first: bool) -> None:
             False,
             kda=True,
             conv_dim_first=dim_first,
+            tpr=tpr,
         )
         op = FlashFfnOp(rt, lay.weights(), 0, kda.weights())
         g = lay.g
@@ -203,11 +215,21 @@ def _check(rank: int, tp: int, device, dim_first: bool) -> None:
             torch.randn(S, HC_MULT, HC_MULT, generator=g, device=device), -1
         )
         idx = torch.arange(1, S + 1, dtype=torch.int32, device=device)
-        idx[-1] = -1
-        live = S - 1
+        nreq = S // tpr
+        # the last request pads (when there is more than one)
+        pad = nreq > 1 or tpr == 1
+        if pad:
+            idx[S - tpr :] = -1
+        live = S - tpr if pad else S
+        acc = None
+        if tpr > 1:
+            acc = torch.randint(
+                1, tpr + 1, (nreq,), generator=g, device=device, dtype=torch.int32
+            )
+        kidx = idx if tpr == 1 else torch.cat([idx, acc])
         state = FlashKdaState(kda.conv0.clone(), kda.rec0.clone())
         dist.barrier(group)
-        outs = [t.clone() for t in op.launch(x, res, post, comb, state, idx)]
+        outs = [t.clone() for t in op.launch(x, res, post, comb, state, kidx)]
         torch.accelerator.synchronize()
         assert not rt.words.any(), f"S={S}: expired waits {rt.words.tolist()}"
         y, r2, p2, c2 = outs
@@ -235,7 +257,15 @@ def _check(rank: int, tp: int, device, dim_first: bool) -> None:
         # short conv + gated delta rule + gated RMSNorm, and both state updates
         conv, rec = kda.conv0.clone(), kda.rec0.clone()
         o_ref = _kda_reference(
-            kda, proj.bfloat16(), gates.bfloat16(), conv, rec, idx, dim_first
+            kda,
+            proj.bfloat16(),
+            gates.bfloat16(),
+            conv,
+            rec,
+            idx,
+            dim_first,
+            tpr,
+            acc,
         )
         o_in = _box(rt, "o_in", S * kda.P, packed=True).view(S, kda.P)
         assert _rel(o_in[:live], o_ref[:live]) < 2e-2, (
@@ -245,7 +275,8 @@ def _check(rank: int, tp: int, device, dim_first: bool) -> None:
         assert _rel(state.rec_state, rec) < 1e-3, (
             f"S={S}: recurrent state {_rel(state.rec_state, rec)}"
         )
-        assert torch.equal(state.rec_state[S:], kda.rec0[S:]), "untouched slots"
+        top = int(idx.max()) + 1
+        assert torch.equal(state.rec_state[top:], kda.rec0[top:]), "untouched slots"
 
         # FFN seam on the TP sum of every rank's o_proj partial
         o_all = [torch.empty_like(o_in) for _ in range(tp)]
@@ -256,7 +287,9 @@ def _check(rank: int, tp: int, device, dim_first: bool) -> None:
             x_attn += (o_all[r].float() @ w_o.T).bfloat16().float()
         v_r, v_p, v_c, v_x = _vllm_seam(lay, x_attn.bfloat16(), ra, pa, ca)
         assert _rel(r2[:live], v_r[:live]) < 1e-3, f"S={S}: R'' {_rel(r2, v_r)}"
-        assert _rel(p2[:live], v_p[:live]) < 1e-4 and _rel(c2[:live], v_c[:live]) < 1e-4
+        ep, ec = _rel(p2[:live], v_p[:live]), _rel(c2[:live], v_c[:live])
+        # as the sparse-attention test: the seam sums partials in a different order
+        assert ep < 1e-3 and ec < 1e-3, f"S={S}: post {ep}, comb {ec}"
 
         a = rt.scratch[rt.sc["a"] :].view(torch.int32)[: S * HIDDEN : 2]
         k_in = a.contiguous().view(torch.bfloat16).view(S, HIDDEN)
@@ -266,13 +299,17 @@ def _check(rank: int, tp: int, device, dim_first: bool) -> None:
         assert torch.equal(routed[:live], order[:live].int().sort(-1).values)
         assert _rel(y[:live], ref[:live]) < 5e-3, f"S={S}: MoE {_rel(y, ref)}"
 
+        if not pad:
+            dist.barrier(group)
+            rt.close()
+            continue
         # a non-finite padding row stays in its own row
         bad = x.clone()
         bad[-1] = float("nan")
         state_bad = FlashKdaState(kda.conv0.clone(), kda.rec0.clone())
         dist.barrier(group)
         rt.advance_step()
-        z = [t.clone() for t in op.launch(bad, res, post, comb, state_bad, idx)]
+        z = [t.clone() for t in op.launch(bad, res, post, comb, state_bad, kidx)]
         torch.accelerator.synchronize()
         for got, want in zip(z, outs):
             assert torch.equal(got[:-1], want[:-1]), f"S={S}: a NaN row leaked"
@@ -285,7 +322,7 @@ def _check(rank: int, tp: int, device, dim_first: bool) -> None:
             state.conv_state.copy_(kda.conv0)
             state.rec_state.copy_(kda.rec0)
             rt.advance_step()
-            res_g = op.launch(x, res, post, comb, state, idx)
+            res_g = op.launch(x, res, post, comb, state, kidx)
         for i in range(REPLAYS):
             graph.replay()
             if i % 100 == 99 or i == REPLAYS - 1:

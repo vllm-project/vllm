@@ -87,6 +87,7 @@ from vllm.models.glm5next.amd.specialized_decode.mono.ffn.layout import (
     QB_TILE,
     QKV_TILE,
     ROW_BT,
+    ROW_IBT,
     ROW_POOL_SLOT,
     ROW_POS,
     ROW_SLOT,
@@ -166,6 +167,7 @@ def build_flash_ffn_kernel(
     max_pools: int = 0,
     dsa_fp8: tuple[bool, bool, bool] = (True, True, True),
     kv_fp8: bool = False,
+    tpr: int = 1,
 ):
     """Return the ``@flyc.jit`` launcher of one rank's FFN layer for S rows; with
     ``kda`` the whole KDA decoder layer (attention-side mHC, projections, short conv,
@@ -177,6 +179,12 @@ def build_flash_ffn_kernel(
     ``kv_fp8``: the MLA latent cache holds e4m3 bytes over vLLM's per-tensor
     ``k_scale`` (written as vLLM's ``concat_and_cache_mla`` does, read back
     dequantized to bf16 for the attention).
+
+    ``tpr`` > 1 is a speculative verify step: every request owns ``tpr``
+    consecutive rows (its token and the drafts after it, in position order). KDA
+    then walks a request's rows as one chain, as vLLM's spec-decode conv and
+    recurrent kernels do: ``state_idx`` holds every row's state slot, then a
+    request's accepted-token count; the conv state has ``2 + tpr`` columns.
 
     ``poll_timeout_us`` bounds every mailbox wait in time. An expired wait
     stores 1 into its stage's error word (``poll_err_addr``) and, with TP peers,
@@ -192,6 +200,11 @@ def build_flash_ffn_kernel(
     assert not kda or S <= 8
     assert not (kda and dsa)
     assert not dsa or (S <= 8 and max_pools % POOLS_PER_TASK == 0)
+    assert tpr >= 1 and S % tpr == 0
+    # kpool tail ring slots a request: vLLM's ``Glm5NextTailCache`` size for
+    # tpr - 1 draft tokens (KPOOL without speculative decoding)
+    TAIL_RING = KPOOL * (1 << ((KPOOL + tpr - 1 + KPOOL - 1) // KPOOL - 1).bit_length())
+    NREQ = S // tpr
     W = npes
     SH = FlashShard(W)
     P, H, N_IN = SH.kda_proj, SH.kda_heads, SH.kda_in_rows
@@ -252,7 +265,7 @@ def build_flash_ffn_kernel(
     WORK_WORDS = OUT_OFF + OUT_WORDS
     assert WORK_WORDS <= 32768, "keep static LDS below the MI355X per-workgroup budget"
 
-    order = stage_tasks(S, expert_inter, W, kda, dsa)
+    order = stage_tasks(S, expert_inter, W, kda, dsa, tpr)
     base, acc = {}, 0
     for name, n in order:
         base[name] = acc % G
@@ -1306,15 +1319,19 @@ def build_flash_ffn_kernel(
                 gpu.barrier()
 
         # ===================== 5. short conv + gated delta rule + gated RMSNorm
-        # One task a (row, head). A row whose state index is not positive (padding)
-        # writes no state and outputs zeros.
+        # One task a (request, head); it walks the request's ``tpr`` rows in order
+        # (one row without speculative decoding), carrying the conv window and the
+        # recurrent state, as vLLM's spec-decode kernels do. A row whose state
+        # index is not positive (padding) writes no state and outputs zeros.
         QO, KO, VO, G1O, G2O, OO = 0, KD, 2 * KD, 3 * KD, 4 * KD, 5 * KD
+        # conv state columns: the 3 taps, plus one a draft token
+        STATE_LEN = CONV_TAPS - 1 + tpr - 1
 
         def conv_at(ch, j):
-            """Element of channel ``ch``, tap ``j`` in a conv state slot, laid out
-            [3P, taps] (dim first) or [taps, 3P]."""
+            """Element of channel ``ch``, column ``j`` in a conv state slot, laid out
+            [3P, columns] (dim first) or [columns, 3P]."""
             if const_expr(conv_dim_first):
-                return ch * (CONV_TAPS - 1) + j
+                return ch * STATE_LEN + j
             return j * (3 * P) + ch
 
         def run_kda():
@@ -1323,104 +1340,156 @@ def build_flash_ffn_kernel(
             r_dtb = _rsrc(dt_bias)
             r_won = _rsrc(w_on)
             r_idx = _rsrc(state_idx)
-            for t in range(start("kda"), S * H, G):
+
+            def row_idx(row):
+                return _uniform(
+                    fx.Int32(bo.buffer_load(r_idx, row, vec_width=1, dtype=T.i32))
+                )
+
+            for t in range(start("kda"), NREQ * H, G):
                 t = fx.Int32(t)
                 stamp("kda")
-                s = t // H
+                s0 = (t // H) * tpr
                 h = t % H
-                idx = _uniform(
-                    fx.Int32(bo.buffer_load(r_idx, s, vec_width=1, dtype=T.i32))
+                # the window starts at the request's last accepted token: column
+                # (accepted - 1) of the conv state, recurrent slot of that row
+                if const_expr(tpr == 1):
+                    off = fx.Int32(0)
+                else:
+                    acc_n = row_idx(S + t // H)
+                    off = fx.min(fx.max(acc_n - 1, fx.Int32(0)), fx.Int32(tpr - 1))
+                cidx = row_idx(s0)
+                cvalid = cidx > 0
+                r_cs = _rsrc(
+                    conv_state
+                    + fx.Int64(fx.max(cidx, fx.Int32(0))) * conv_stride * fx.Int64(2)
                 )
-                valid = idx > 0
-                slot = fx.Int64(fx.max(idx, fx.Int32(0)))
-                r_cs = _rsrc(conv_state + slot * conv_stride * fx.Int64(2))
-                if tid < 3 * KD:
-                    ch = (tid // KD) * P + h * KD + tid % KD
-                    x = getf_many([(mb("proj"), s * N_IN + ch)])[0]
-                    st = [ld_bf16(r_cs, conv_at(ch, j)) for j in range(CONV_TAPS - 1)]
-                    cw = [ld_f32(r_cw, ch * CONV_TAPS + j) for j in range(CONV_TAPS)]
-                    a = cw[CONV_TAPS - 1] * x
-                    for j in range_constexpr(CONV_TAPS - 1):
-                        a = a + cw[j] * st[j]
-                    lds_st(xs, tid, bf16_round(div(a, 1.0 + _exp(-a))))
-                    if valid:
-                        for j in range_constexpr(CONV_TAPS - 1):
-                            nxt = st[j + 1] if j + 1 < CONV_TAPS - 1 else x
-                            bo.buffer_store(
-                                fx.Float32(nxt).to(fx.BFloat16), r_cs, conv_at(ch, j)
-                            )
-                if tid < 2 * KD:
-                    g = getf_many(
-                        [(mb("gates"), s * 2 * P + (tid // KD) * P + h * KD + tid % KD)]
-                    )[0]
-                    lds_st(xs, G1O + tid, g)
-                if tid == 0:
-                    lds_st(misc, 0, getf_many([(mb("proj"), s * N_IN + 3 * P + h)])[0])
-                gpu.barrier()
-                if wave < 2:
-                    a0 = lds_ld(xs, wave * KD + lane)
-                    a1 = lds_ld(xs, wave * KD + lane + 64)
-                    ss = wave_sum(a0 * a0 + a1 * a1)
-                    if lane == 0:
-                        lds_st(misc, 1 + wave, ss)
-                gpu.barrier()
-                rq = _rsq(lds_ld(misc, 1) + L2_EPS) * (KD**-0.5)
-                rk = _rsq(lds_ld(misc, 2) + L2_EPS)
-                beta = sigmoid(lds_ld(misc, 0))
+                # every thread loads (the last conv channel past 3 * KD) so the
+                # window values exist outside the stores' branches
+                tc = fx.min(tid, fx.Int32(3 * KD - 1))
+                ch = (tc // KD) * P + h * KD + tc % KD
+                win = [ld_bf16(r_cs, conv_at(ch, off + j)) for j in range(3)]
+                keep = [win[1], win[2]]
+                cw = [ld_f32(r_cw, ch * CONV_TAPS + j) for j in range(CONV_TAPS)]
                 amp = _exp(ld_f32(r_a_log, h))
                 vr = tid // 4
                 k0 = (tid % 4) * 32
-                r_rs = _rsrc(
-                    rec_state
-                    + (slot * rec_stride + fx.Int64(h * KD * KD)) * fx.Int64(4)
+                rd = fx.Int64(fx.max(row_idx(s0 + off), fx.Int32(0)))
+                r_rd = _rsrc(
+                    rec_state + (rd * rec_stride + fx.Int64(h * KD * KD)) * fx.Int64(4)
                 )
                 hv = []
                 for q in range_constexpr(8):
                     w4 = fx.Vector(
                         bo.buffer_load(
-                            r_rs, vr * KD + k0 + 4 * q, vec_width=4, dtype=T.f32
+                            r_rd, vr * KD + k0 + 4 * q, vec_width=4, dtype=T.f32
                         )
                     )
                     hv += [w4[e] for e in range(4)]
-                kk = [lds_ld(xs, KO + k0 + i) * rk for i in range(32)]
-                dot = fx.Float32(0.0)
-                for i in range_constexpr(32):
-                    g = lds_ld(xs, G1O + k0 + i) + ld_f32(r_dtb, h * KD + k0 + i)
-                    hv[i] = hv[i] * _exp(div(KDA_LOWER_BOUND, 1.0 + _exp(-(amp * g))))
-                    dot = dot + hv[i] * kk[i]
-                for off in (1, 2):
-                    dot = _xred(dot, off, lambda a, b: a + b)
-                vn = beta * (lds_ld(xs, VO + vr) - dot)
-                o = fx.Float32(0.0)
-                for i in range_constexpr(32):
-                    hv[i] = hv[i] + vn * kk[i]
-                    o = o + hv[i] * (lds_ld(xs, QO + k0 + i) * rq)
-                for off in (1, 2):
-                    o = _xred(o, off, lambda a, b: a + b)
-                if valid:
-                    for q in range_constexpr(8):
-                        bo.buffer_store(
-                            fx.Vector.from_elements(hv[4 * q : 4 * q + 4], fx.Float32),
-                            r_rs,
-                            vr * KD + k0 + 4 * q,
+                xin = []
+                for j in range_constexpr(tpr):
+                    s = s0 + j
+                    idx = row_idx(s)
+                    valid = idx > 0
+                    x = getf_many([(mb("proj"), s * N_IN + ch)])[0]
+                    a = cw[CONV_TAPS - 1] * x
+                    for i in range_constexpr(CONV_TAPS - 1):
+                        a = a + cw[i] * win[i]
+                    act = bf16_round(div(a, 1.0 + _exp(-a)))
+                    if tid < 3 * KD:
+                        lds_st(xs, tid, act)
+                    win = [win[1], win[2], x]
+                    xin.append(x)
+                    if tid < 2 * KD:
+                        g = getf_many(
+                            [
+                                (
+                                    mb("gates"),
+                                    s * 2 * P + (tid // KD) * P + h * KD + tid % KD,
+                                )
+                            ]
+                        )[0]
+                        lds_st(xs, G1O + tid, g)
+                    if tid == 0:
+                        lds_st(
+                            misc, 0, getf_many([(mb("proj"), s * N_IN + 3 * P + h)])[0]
                         )
-                if tid % 4 == 0:
-                    lds_st(xs, OO + vr, valid.select(bf16_round(o), fx.Float32(0.0)))
-                gpu.barrier()
-                if wave == 0:
-                    e0 = 2 * lane
-                    o0 = lds_ld(xs, OO + e0)
-                    o1 = lds_ld(xs, OO + e0 + 1)
-                    rstd = _rsq(wave_sum(o0 * o0 + o1 * o1) * (1.0 / KD) + O_NORM_EPS)
-                    y0 = o0 * rstd * ld_f32(r_won, e0) * sigmoid(lds_ld(xs, G2O + e0))
-                    y1 = (
-                        o1
-                        * rstd
-                        * ld_f32(r_won, e0 + 1)
-                        * sigmoid(lds_ld(xs, G2O + e0 + 1))
-                    )
-                    put(mb("o_in"), (s * P + h * KD + e0) // 2, bf16_pair(y0, y1))
-                gpu.barrier()
+                    gpu.barrier()
+                    if wave < 2:
+                        a0 = lds_ld(xs, wave * KD + lane)
+                        a1 = lds_ld(xs, wave * KD + lane + 64)
+                        ss = wave_sum(a0 * a0 + a1 * a1)
+                        if lane == 0:
+                            lds_st(misc, 1 + wave, ss)
+                    gpu.barrier()
+                    rq = _rsq(lds_ld(misc, 1) + L2_EPS) * (KD**-0.5)
+                    rk = _rsq(lds_ld(misc, 2) + L2_EPS)
+                    beta = sigmoid(lds_ld(misc, 0))
+                    kk = [lds_ld(xs, KO + k0 + i) * rk for i in range(32)]
+                    dot = fx.Float32(0.0)
+                    for i in range_constexpr(32):
+                        g = lds_ld(xs, G1O + k0 + i) + ld_f32(r_dtb, h * KD + k0 + i)
+                        hv[i] = hv[i] * _exp(
+                            div(KDA_LOWER_BOUND, 1.0 + _exp(-(amp * g)))
+                        )
+                        dot = dot + hv[i] * kk[i]
+                    for o_ in (1, 2):
+                        dot = _xred(dot, o_, lambda a_, b_: a_ + b_)
+                    vn = beta * (lds_ld(xs, VO + vr) - dot)
+                    o = fx.Float32(0.0)
+                    for i in range_constexpr(32):
+                        hv[i] = hv[i] + vn * kk[i]
+                        o = o + hv[i] * (lds_ld(xs, QO + k0 + i) * rq)
+                    for o_ in (1, 2):
+                        o = _xred(o, o_, lambda a_, b_: a_ + b_)
+                    if valid:
+                        r_rs = _rsrc(
+                            rec_state
+                            + (fx.Int64(idx) * rec_stride + fx.Int64(h * KD * KD))
+                            * fx.Int64(4)
+                        )
+                        for q in range_constexpr(8):
+                            bo.buffer_store(
+                                fx.Vector.from_elements(
+                                    hv[4 * q : 4 * q + 4], fx.Float32
+                                ),
+                                r_rs,
+                                vr * KD + k0 + 4 * q,
+                            )
+                    if tid % 4 == 0:
+                        lds_st(
+                            xs, OO + vr, valid.select(bf16_round(o), fx.Float32(0.0))
+                        )
+                    gpu.barrier()
+                    if wave == 0:
+                        e0 = 2 * lane
+                        o0 = lds_ld(xs, OO + e0)
+                        o1 = lds_ld(xs, OO + e0 + 1)
+                        rstd = _rsq(
+                            wave_sum(o0 * o0 + o1 * o1) * (1.0 / KD) + O_NORM_EPS
+                        )
+                        y0 = (
+                            o0
+                            * rstd
+                            * ld_f32(r_won, e0)
+                            * sigmoid(lds_ld(xs, G2O + e0))
+                        )
+                        y1 = (
+                            o1
+                            * rstd
+                            * ld_f32(r_won, e0 + 1)
+                            * sigmoid(lds_ld(xs, G2O + e0 + 1))
+                        )
+                        put(mb("o_in"), (s * P + h * KD + e0) // 2, bf16_pair(y0, y1))
+                    gpu.barrier()
+                # the window after the request: the two newest history columns, then
+                # every row's input (vLLM keeps the drafts until acceptance is known)
+                if cvalid:
+                    if tid < 3 * KD:
+                        for j, v in enumerate(keep + xin):
+                            bo.buffer_store(
+                                fx.Float32(v).to(fx.BFloat16), r_cs, conv_at(ch, j)
+                            )
 
         # ===================== 6. o_proj partial -> every peer's attention region
         # One task a 16-row tile of the row-major [HIDDEN, K] weight; the FFN seam
@@ -1656,127 +1725,148 @@ def build_flash_ffn_kernel(
             r_gkv = _rsrc(tv["g_kv"])
             r_lnw, r_lnb = _rsrc(tv["ln_w"]), _rsrc(tv["ln_b"])
             r_ape = _rsrc(tv["ape"])
-            for t in range(start("cache"), S, G):
-                s = fx.Int32(t)
-                stamp("cache")
-                pos = row_word(s, ROW_POS)
-                slot = row_word(s, ROW_SLOT)
-                pslot = row_word(s, ROW_POOL_SLOT)
-                tslot = row_word(s, ROW_TAIL_SLOT)
-                g = ld_bf16(r_gkv, tid)
-                d = fx.min(tid, INDEX_DIM - 1)
-                lk = tid < INDEX_DIM
-                lnw, lnb = ld_f32(r_lnw, d), ld_f32(r_lnb, d)
-                kv, kraw, graw = getf_many(
-                    [
-                        (mb("kva"), s * KV_LORA + tid),
-                        (mb("ik"), s * INDEX_DIM + d),
-                        (mb("ig"), s * INDEX_DIM + d),
-                    ]
-                )
-                rstd = _rsq(block_sum(kv * kv) * (1.0 / KV_LORA) + EPS)
-                row_off = fx.Int64(slot // KVB) * KVE + fx.Int64((slot % KVB) * KV_LORA)
-                if const_expr(kv_fp8):
-                    # vLLM's write: the bf16 normed row / k_scale, to e4m3 (round
-                    # to nearest even, saturating at 448), four values a thread
-                    lds_st(xs, KVX + tid, bf16_round(kv * rstd * g))
-                    gpu.barrier()
-                    ks = ld_f32(_rsrc(tv["k_scale"]), 0)
-                    e4 = [
-                        fx.min(
-                            fx.max(div(lds_ld(xs, KVX + tid * 4 + i), ks), -FP8_MAX),
-                            FP8_MAX,
-                        )
-                        for i in range(4)
-                    ]
-                    if (slot >= 0) & (tid < KV_LORA // 4):
-                        bo.buffer_store(
-                            fp8_pack4(*e4), _rsrc(tv["kv_cache"] + row_off), tid
-                        )
-                else:
-                    if slot >= 0:
-                        bo.buffer_store(
-                            fx.Float32(kv * rstd * g).to(fx.BFloat16),
-                            _rsrc(tv["kv_cache"] + row_off * fx.Int64(2)),
-                            tid,
-                        )
-                mean = block_sum(lk.select(kraw, fx.Float32(0.0))) * (1.0 / INDEX_DIM)
-                cen = lk.select(kraw - mean, fx.Float32(0.0))
-                var = block_sum(cen * cen) * (1.0 / INDEX_DIM)
-                kn = bf16_round(cen * _rsq(var + INDEX_EPS) * lnw + lnb)
-                phase = fx.max(pos, 0) % KPOOL
-                # vLLM's caches can be views of pools past 4 GB: a 64-bit block base
-                r_tail = _rsrc(
-                    tv["tail_cache"]
-                    + fx.Int64(fx.max(tslot, 0) // KPOOL)
-                    * fx.Int64(TAIL_BLK)
-                    * fx.Int64(2)
-                )
-                tbase = fx.Int32(0)
-                complete = (pos >= 0) & (pslot >= 0) & (phase == KPOOL - 1)
-                if complete:
-                    if lk:
-                        sj, kj = [], []
-                        for j in range_constexpr(KPOOL - 1):
-                            ring = tbase + j * INDEX_DIM + d
-                            sj.append(ld_bf16(r_tail, ring + TAIL_GATE))
-                            kj.append(ld_bf16(r_tail, ring))
-                        sj.append(graw)
-                        kj.append(kn)
-                        sj = [
-                            sj[j] + ld_f32(r_ape, j * INDEX_DIM + d)
-                            for j in range(KPOOL)
+            # a request's rows in position order: a draft that completes a pool
+            # takes the earlier drafts' (k, gate) from this task, older tokens from
+            # the ring; its own then goes to ring slot pos % TAIL_RING
+            for tq in range(start("cache"), NREQ, G):
+                s0 = fx.Int32(tq) * tpr
+                kns, grs = [], []
+                for jr in range_constexpr(tpr):
+                    s = s0 + jr
+                    stamp("cache")
+                    pos = row_word(s, ROW_POS)
+                    slot = row_word(s, ROW_SLOT)
+                    pslot = row_word(s, ROW_POOL_SLOT)
+                    tslot = row_word(s, ROW_TAIL_SLOT)
+                    g = ld_bf16(r_gkv, tid)
+                    d = fx.min(tid, INDEX_DIM - 1)
+                    lk = tid < INDEX_DIM
+                    lnw, lnb = ld_f32(r_lnw, d), ld_f32(r_lnb, d)
+                    kv, kraw, graw = getf_many(
+                        [
+                            (mb("kva"), s * KV_LORA + tid),
+                            (mb("ik"), s * INDEX_DIM + d),
+                            (mb("ig"), s * INDEX_DIM + d),
                         ]
-                        mx = sj[0]
-                        for j in range_constexpr(1, KPOOL):
-                            mx = fx.max(mx, sj[j])
-                        num = fx.Float32(0.0)
-                        den = fx.Float32(0.0)
-                        for j in range_constexpr(KPOOL):
-                            p = _exp(sj[j] - mx)
-                            den = den + p
-                            num = num + kj[j] * p
-                        lds_st(xs, d, bf16_round(div(num, den)))
-                    gpu.barrier()
-                    if wave == 0:
-                        x0, x1 = fwht128(lds_ld(xs, lane), lds_ld(xs, lane + 64))
-                        q0, q1, kscale = ue8m0_quant(bf16_round(x0), bf16_round(x1))
-                        lds_st(xs, INDEX_DIM + lane, q0)
-                        lds_st(xs, INDEX_DIM + lane + 64, q1)
-                        if lane == 0:
-                            lds_st(misc, 0, kscale)
-                    gpu.barrier()
-                    r_icache = _rsrc(
-                        tv["idx_cache"] + fx.Int64(pslot // IPB) * fx.Int64(IBB)
                     )
-                    poff = pslot % IPB
-                    if tid < INDEX_DIM // 4:
-                        d4 = tid * 4
-                        word = fp8_pack4(
-                            *[lds_ld(xs, INDEX_DIM + d4 + j) for j in range(4)]
+                    rstd = _rsq(block_sum(kv * kv) * (1.0 / KV_LORA) + EPS)
+                    row_off = fx.Int64(slot // KVB) * KVE + fx.Int64(
+                        (slot % KVB) * KV_LORA
+                    )
+                    if const_expr(kv_fp8):
+                        # vLLM's write: the bf16 normed row / k_scale, to e4m3
+                        # (round to nearest even, saturating at 448), four a thread
+                        lds_st(xs, KVX + tid, bf16_round(kv * rstd * g))
+                        gpu.barrier()
+                        ks = ld_f32(_rsrc(tv["k_scale"]), 0)
+                        e4 = [
+                            fx.min(
+                                fx.max(
+                                    div(lds_ld(xs, KVX + tid * 4 + i), ks), -FP8_MAX
+                                ),
+                                FP8_MAX,
+                            )
+                            for i in range(4)
+                        ]
+                        if (slot >= 0) & (tid < KV_LORA // 4):
+                            bo.buffer_store(
+                                fp8_pack4(*e4), _rsrc(tv["kv_cache"] + row_off), tid
+                            )
+                    else:
+                        if slot >= 0:
+                            bo.buffer_store(
+                                fx.Float32(kv * rstd * g).to(fx.BFloat16),
+                                _rsrc(tv["kv_cache"] + row_off * fx.Int64(2)),
+                                tid,
+                            )
+                    mean = block_sum(lk.select(kraw, fx.Float32(0.0))) * (
+                        1.0 / INDEX_DIM
+                    )
+                    cen = lk.select(kraw - mean, fx.Float32(0.0))
+                    var = block_sum(cen * cen) * (1.0 / INDEX_DIM)
+                    kn = bf16_round(cen * _rsq(var + INDEX_EPS) * lnw + lnb)
+                    kns.append(kn)
+                    grs.append(graw)
+                    ppos = fx.max(pos, 0)
+                    phase = ppos % KPOOL
+                    # vLLM's caches can be views of pools past 4 GB: a 64-bit base
+                    r_tail = _rsrc(
+                        tv["tail_cache"]
+                        + fx.Int64(fx.max(tslot, 0) // TAIL_RING)
+                        * fx.Int64(TAIL_BLK)
+                        * fx.Int64(2)
+                    )
+                    complete = (pos >= 0) & (pslot >= 0) & (phase == KPOOL - 1)
+                    if complete:
+                        if lk:
+                            sj, kj = [], []
+                            for i in range_constexpr(KPOOL - 1):
+                                back = KPOOL - 1 - i
+                                if const_expr(jr - back >= 0):
+                                    sj.append(grs[jr - back])
+                                    kj.append(kns[jr - back])
+                                else:
+                                    ring = ((ppos - back) % TAIL_RING) * INDEX_DIM + d
+                                    sj.append(ld_bf16(r_tail, ring + TAIL_GATE))
+                                    kj.append(ld_bf16(r_tail, ring))
+                            sj.append(graw)
+                            kj.append(kn)
+                            sj = [
+                                sj[i] + ld_f32(r_ape, i * INDEX_DIM + d)
+                                for i in range(KPOOL)
+                            ]
+                            mx = sj[0]
+                            for i in range_constexpr(1, KPOOL):
+                                mx = fx.max(mx, sj[i])
+                            num = fx.Float32(0.0)
+                            den = fx.Float32(0.0)
+                            for i in range_constexpr(KPOOL):
+                                p = _exp(sj[i] - mx)
+                                den = den + p
+                                num = num + kj[i] * p
+                            lds_st(xs, d, bf16_round(div(num, den)))
+                        gpu.barrier()
+                        if wave == 0:
+                            x0, x1 = fwht128(lds_ld(xs, lane), lds_ld(xs, lane + 64))
+                            q0, q1, kscale = ue8m0_quant(bf16_round(x0), bf16_round(x1))
+                            lds_st(xs, INDEX_DIM + lane, q0)
+                            lds_st(xs, INDEX_DIM + lane + 64, q1)
+                            if lane == 0:
+                                lds_st(misc, 0, kscale)
+                        gpu.barrier()
+                        r_icache = _rsrc(
+                            tv["idx_cache"] + fx.Int64(pslot // IPB) * fx.Int64(IBB)
                         )
-                        # 16-pool x 16-byte tiles (a block holds 16 n pools)
-                        byte = (
-                            (poff // 16) * (16 * INDEX_DIM)
-                            + (d4 // 16) * 256
-                            + (poff % 16) * 16
-                            + d4 % 16
-                        )
-                        bo.buffer_store(word, r_icache, byte // 4)
+                        poff = pslot % IPB
+                        if tid < INDEX_DIM // 4:
+                            d4 = tid * 4
+                            word = fp8_pack4(
+                                *[lds_ld(xs, INDEX_DIM + d4 + j) for j in range(4)]
+                            )
+                            # 16-pool x 16-byte tiles (a block holds 16 n pools)
+                            byte = (
+                                (poff // 16) * (16 * INDEX_DIM)
+                                + (d4 // 16) * 256
+                                + (poff % 16) * 16
+                                + d4 % 16
+                            )
+                            bo.buffer_store(word, r_icache, byte // 4)
+                        if tid == 0:
+                            bo.buffer_store(
+                                lds_ld(misc, 0),
+                                r_icache,
+                                IPB * INDEX_DIM // 4 + poff,
+                            )
+                    if (pos >= 0) & (tslot >= 0) & lk:
+                        e = (ppos % TAIL_RING) * INDEX_DIM + d
+                        bo.buffer_store(kn.to(fx.BFloat16), r_tail, e)
+                        bo.buffer_store(graw.to(fx.BFloat16), r_tail, e + TAIL_GATE)
+                    fx.memory_fence(
+                        ordering=fx.AtomicOrdering.Release, syncscope="agent"
+                    )
+                    gpu.barrier()
                     if tid == 0:
-                        bo.buffer_store(
-                            lds_ld(misc, 0),
-                            r_icache,
-                            IPB * INDEX_DIM // 4 + poff,
-                        )
-                if (pos >= 0) & (tslot >= 0) & lk:
-                    e = tbase + phase * INDEX_DIM + d
-                    bo.buffer_store(kn.to(fx.BFloat16), r_tail, e)
-                    bo.buffer_store(graw.to(fx.BFloat16), r_tail, e + TAIL_GATE)
-                fx.memory_fence(ordering=fx.AtomicOrdering.Release, syncscope="agent")
-                gpu.barrier()
-                if tid == 0:
-                    put(mb("kv_ready"), s, fx.Int32(1))
+                        put(mb("kv_ready"), s, fx.Int32(1))
 
         # ======================= q_b (FP8 or bf16): two 16-row tiles a task
         def dsa_q_b(tv, t32):
@@ -1943,7 +2033,7 @@ def build_flash_ffn_kernel(
                 first = start_at(base["iscore"] + s * (G // S))
                 if first < n_tiles:
                     stamp("iscore")
-                    bt = row_word(s, ROW_BT)
+                    bt = row_word(s, ROW_IBT)
                     # the row's FP8 query -> LDS words h * 32 .., weights -> misc
                     NQW = INDEX_HEADS * QW8 // THREADS
                     qv = poll(

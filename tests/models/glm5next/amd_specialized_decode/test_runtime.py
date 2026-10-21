@@ -284,3 +284,21 @@ def test_fault_spec(monkeypatch):
     monkeypatch.setenv(abi.FAULT_INJECT_ENV, "rank=1")
     with pytest.raises(ValueError, match="rank=R,step=N,us=D"):
         abi.fault_spec()
+
+
+@pytest.mark.parametrize(
+    "tokens, max_query_len, runs",
+    [
+        (8, 4, True),  # two requests, each its token and three drafts
+        (4, 4, True),
+        (6, 4, False),  # not whole requests
+        (8, 5, False),  # a query longer than a request's rows
+    ],
+)
+def test_verify_steps_route_by_whole_requests(tokens, max_query_len, runs):
+    from vllm.models.glm5next.amd.specialized_decode.runtime import routing
+
+    cfg = spec.DecodeConfig(tp_size=4, widths=(4, 8), tokens=(4, 8), tpr=4)
+    md = kit.decode_metadata(["a", "b"], max_query_len=max_query_len)
+    reason = routing.step_reason(kit.forward_context(md), tokens, cfg, ["a", "b"])
+    assert (reason is None) == runs, reason

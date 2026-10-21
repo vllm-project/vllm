@@ -162,14 +162,17 @@ class _Dsa:
 
 
 class _Caches:
-    """Random caches for S requests of up to MAX_LEN tokens, the block table, and
-    the step's row table."""
+    """Random caches for S / tpr requests of up to MAX_LEN tokens, the block table,
+    and the step's row table: ``tpr`` rows a request (an MTP verify step: its
+    token and drafts at consecutive positions); the last request pads when there
+    is more than one."""
 
     def __init__(
         self,
         S: int,
         device,
         seed: int,
+        tpr: int = 1,
         kv_fp8: bool = False,
         max_len: int = MAX_LEN,
         lens: tuple[int, ...] = LENS,
@@ -179,12 +182,18 @@ class _Caches:
             KV_LORA,
         )
         from vllm.models.glm5next.amd.specialized_decode.mono.ffn.layout import (
+            ROW_BT,
+            ROW_IBT,
             ROW_WORDS,
         )
+        from vllm.models.glm5next.amd.specialized_decode.runtime.spec import tail_ring
 
         g = torch.Generator(device=device).manual_seed(seed)
         per = max_len // BLOCK
-        nb = 1 + S * per
+        R = S // tpr
+        ring = tail_ring(tpr)
+        self.tpr, self.ring = tpr, ring
+        nb = 1 + R * per
         ipb = BLOCK // 4
         self.ipb = ipb
         self.kv = torch.randn(nb, BLOCK, KV_LORA, generator=g, device=device).bfloat16()
@@ -208,23 +217,26 @@ class _Caches:
         flat[:, ipb * INDEX_DIM :] = scales.view(torch.uint8).view(nb, -1)
         self.idx = idx
         self.tail = torch.randn(
-            S + 1, 2, 4, INDEX_DIM, generator=g, device=device
+            R + 1, 2, ring, INDEX_DIM, generator=g, device=device
         ).bfloat16()
         perm = torch.randperm(nb - 1, generator=g, device=device) + 1
-        self.bt = perm[: S * per].view(S, per).int().contiguous()
-        lens = list(lens[: S - 1]) + [0]
+        self.bt = perm[: R * per].view(R, per).int().contiguous()
+        lens = list(lens[: R - 1]) + [0] if R > 1 else [lens[0]]
         self.lens = lens
         rows = torch.full((S, ROW_WORDS), -1, dtype=torch.int32, device=device)
-        for r, n in enumerate(lens):
-            rows[r, 4] = r
-            if n == 0:
-                continue
-            pos = n - 1
-            blk = int(self.bt[r, pos // BLOCK])
-            rows[r, 0] = pos
-            rows[r, 1] = blk * BLOCK + pos % BLOCK
-            rows[r, 2] = blk * ipb + (pos // 4) % ipb if pos % 4 == 3 else -1
-            rows[r, 3] = (r + 1) * 4 + pos % 4
+        for q, n in enumerate(lens):
+            for j in range(tpr):
+                r = q * tpr + j
+                rows[r, ROW_BT] = q
+                rows[r, ROW_IBT] = q
+                if n == 0:
+                    continue
+                pos = n - tpr + j
+                blk = int(self.bt[q, pos // BLOCK])
+                rows[r, 0] = pos
+                rows[r, 1] = blk * BLOCK + pos % BLOCK
+                rows[r, 2] = blk * ipb + (pos // 4) % ipb if pos % 4 == 3 else -1
+                rows[r, 3] = (q + 1) * ring + pos % ring
         self.rows = rows
 
     def caches(self):
@@ -269,7 +281,7 @@ def _e4m3(x: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
     return e4m3.view(torch.uint8)
 
 
-def _check(rank: int, tp: int, device, fp8, kv_fp8: bool = False) -> None:
+def _check(rank: int, tp: int, device, fp8, tpr: int = 1, kv_fp8: bool = False) -> None:
     import torch.distributed as dist
     import torch.nn.functional as F
 
@@ -302,7 +314,10 @@ def _check(rank: int, tp: int, device, fp8, kv_fp8: bool = False) -> None:
     H = dsa.H
     group = get_tp_group().cpu_group
     max_pools = MAX_LEN // 4
-    for S in ROWS if tp > 2 else ROWS[:2]:
+    sizes = ROWS if tp > 2 else ROWS[:2]
+    if tpr > 1:
+        sizes = [r * tpr for r in (1, 2, 4) if r * tpr <= 8]
+    for S in sizes:
         rt = FlashFfnRuntime(
             S,
             rank,
@@ -315,6 +330,7 @@ def _check(rank: int, tp: int, device, fp8, kv_fp8: bool = False) -> None:
             dsa=True,
             max_pools=max_pools,
             dsa_fp8=fp8,
+            tpr=tpr,
             kv_fp8=kv_fp8,
         )
         op = FlashFfnOp(rt, lay.weights(), 0, dsa=dsa.weights())
@@ -325,9 +341,11 @@ def _check(rank: int, tp: int, device, fp8, kv_fp8: bool = False) -> None:
         comb = torch.softmax(
             torch.randn(S, HC_MULT, HC_MULT, generator=g, device=device), -1
         )
-        cache = _Caches(S, device, seed=10 + S, kv_fp8=kv_fp8)
+        cache = _Caches(S, device, seed=10 + S, tpr=tpr, kv_fp8=kv_fp8)
         before = cache.clone()
-        rows, live = cache.rows, S - 1
+        rows = cache.rows
+        # the last request pads, unless it is the only one
+        live = S if tpr > 1 and tpr == S else S - tpr
         pos = rows[:, 0].long()
         dist.barrier(group)
         outs = [
@@ -399,22 +417,24 @@ def _check(rank: int, tp: int, device, fp8, kv_fp8: bool = False) -> None:
         n = live
         pool_slot = torch.tensor(
             [
-                int(cache.bt[r, int(pos[r]) // BLOCK]) * cache.ipb
+                int(cache.bt[r // tpr, int(pos[r]) // BLOCK]) * cache.ipb
                 + (int(pos[r]) // 4) % cache.ipb
                 for r in range(n)
             ],
             dtype=torch.int32,
             device=device,
         )
+        # one row of [requests, tpr] a request, its tokens in position order
+        nq = n // tpr
         kpool_decode_update_and_maybe_write_cache_batched(
             ref.idx,
             ref.tail,
-            rows[:n, 3:4].contiguous(),
-            k_ref[:n].view(n, 1, INDEX_DIM),
-            ig[:n].bfloat16().view(n, 1, INDEX_DIM),
+            rows[:n, 3].reshape(nq, tpr).contiguous(),
+            k_ref[:n].view(nq, tpr, INDEX_DIM),
+            ig[:n].bfloat16().view(nq, tpr, INDEX_DIM),
             dsa.ape,
-            pool_slot.view(n, 1),
-            rows[:n, 0:1].contiguous(),
+            pool_slot.view(nq, tpr),
+            rows[:n, 0].reshape(nq, tpr).contiguous(),
             4,
             INDEX_DIM,
             round_scale=True,
@@ -472,7 +492,7 @@ def _check(rank: int, tp: int, device, fp8, kv_fp8: bool = False) -> None:
                 continue
             npool = L // 4
             p = torch.arange(npool, device=device)
-            blk = cache.bt[r, (p * 4) // BLOCK].long()
+            blk = cache.bt[r // tpr, (p * 4) // BLOCK].long()
             off = p % cache.ipb
             k8 = vals[blk, off]  # [P, 128]
             dots = torch.relu(k8 @ q8[r].T)  # [P, 32]
@@ -504,7 +524,7 @@ def _check(rank: int, tp: int, device, fp8, kv_fp8: bool = False) -> None:
                 assert not o_in[r].float().abs().max() > 0, f"S={S}: padding row output"
                 continue
             toks = torch.arange(L, device=device) if L <= TOPK_TOKENS else sel[r].long()
-            blk = cache.bt[r, toks // BLOCK].long()
+            blk = cache.bt[r // tpr, toks // BLOCK].long()
             kvr = cache.deq(cache.kv[blk, toks % BLOCK])  # [T, 512]
             sc = torch.einsum("hl,tl->ht", q_lat[r].float(), kvr) * MLA_SCALE
             o_lat = (torch.softmax(sc, -1) @ kvr).bfloat16().float()

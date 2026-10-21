@@ -70,8 +70,10 @@ POOLS_PER_TASK = 256
 # split attention: one task 64 selected keys x 8 heads (one head a wave)
 SPLIT_KEYS = 64
 N_SPLIT = TOPK_TOKENS // SPLIT_KEYS
-# per-step row table of a sparse-attention launch (int32 [S, ROW_WORDS])
-ROW_POS, ROW_SLOT, ROW_POOL_SLOT, ROW_TAIL_SLOT, ROW_BT = range(5)
+# per-step row table of a sparse-attention launch (int32 [S, ROW_WORDS]); a row's
+# MLA block-table row (its request) and index-cache block-table row (its request,
+# or the row itself when vLLM's indexer flattens a verify step)
+ROW_POS, ROW_SLOT, ROW_POOL_SLOT, ROW_TAIL_SLOT, ROW_BT, ROW_IBT = range(6)
 ROW_WORDS = 8
 # entries of a sparse-attention layer's int64 argument table
 DSA_TAB = (
@@ -229,11 +231,19 @@ def layout(
 
 
 def stage_tasks(
-    samples: int, inter: int, npes: int = 1, kda: bool = False, dsa: bool = False
+    samples: int,
+    inter: int,
+    npes: int = 1,
+    kda: bool = False,
+    dsa: bool = False,
+    tpr: int = 1,
 ):
     """``(stage name, task count)`` pairs in execution order. ``iscore`` is sized
-    per row at run time; its count here only places the next stage."""
+    per row at run time; its count here only places the next stage. With ``tpr``
+    tokens a request (speculative verify), ``kda`` and ``cache`` walk a request's
+    rows in order, one task a request (and head)."""
     shard = FlashShard(npes)
+    requests = samples // tpr
     attention = []
     if dsa:
         H = shard.mla_heads
@@ -242,7 +252,7 @@ def stage_tasks(
             ("agate", samples),
             ("qkv_a", N_QKV),
             ("qnorm", samples),
-            ("cache", samples),
+            ("cache", requests),
             ("q_b", H * NOPE_DIM // QB_TILE),
             ("index_q", INDEX_HEADS),
             ("uk", H * KV_LORA // UK_TILE),
@@ -258,7 +268,7 @@ def stage_tasks(
             ("agate", samples),
             ("inproj", (shard.kda_in_rows + IN_TILE - 1) // IN_TILE),
             ("fgb", 2 * shard.kda_proj // FGB_TILE),
-            ("kda", samples * shard.kda_heads),
+            ("kda", requests * shard.kda_heads),
             ("oproj", HIDDEN // O_TILE),
         ]
     return attention + [
