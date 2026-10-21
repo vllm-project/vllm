@@ -116,6 +116,16 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
         extra = kv_transfer_config.kv_connector_extra_config
         return extra.get("key_namespace", "auto") == "auto"
 
+    @classmethod
+    def requests_sliding_window_replay(
+        cls, kv_transfer_config: KVTransferConfig
+    ) -> bool:
+        # Store only compressed KV (e.g. DeepSeek-V4's C4/C128 latents and
+        # indexer); recomputing the hit's last window rebuilds the SWA cache
+        # and compressor states, which would otherwise be many tiny objects.
+        extra = kv_transfer_config.kv_connector_extra_config
+        return bool(extra.get("rebuild_sliding_window", True))
+
     def __init__(
         self,
         vllm_config: VllmConfig,
