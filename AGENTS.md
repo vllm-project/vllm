@@ -157,3 +157,5 @@ vulnerability process.
 - **Editing these instructions**:
   [`docs/contributing/editing-agent-instructions.md`](docs/contributing/editing-agent-instructions.md)
   — Rules for modifying AGENTS.md or any domain-specific guide it references.
+- **Rust frontend (`rust/`)**: [`rust/AGENTS.md`](rust/AGENTS.md)
+  — Crate ownership, design principles, Python parity, and testing conventions.
