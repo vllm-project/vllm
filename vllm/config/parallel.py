@@ -660,6 +660,18 @@ class ParallelConfig:
         seconds = self.cpu_distributed_timeout_seconds
         return timedelta(seconds=seconds) if seconds is not None else None
 
+    @property
+    def effective_cpu_distributed_timeout(self) -> timedelta | None:
+        """The timeout cpu groups operate with right now: the configured
+        value, except under FT before steady state, where group timeouts
+        are deferred because uneven rank startup would trip them."""
+        if self.enable_fault_tolerance:
+            from vllm.distributed.utils import steady_state_entered
+
+            if not steady_state_entered():
+                return None
+        return self.cpu_distributed_timeout
+
     def get_next_dp_init_port(self) -> int:
         """We might need to initialize process groups in multiple
         processes that is related to data parallelism,
@@ -725,14 +737,11 @@ class ParallelConfig:
 
         from vllm.distributed.utils import (
             stateless_init_torch_distributed_process_group,
-            steady_state_entered,
         )
 
         # Under FT, startup-created groups get no configured timeout: uneven
         # rank startup would trip it. The sentinel applies it after startup.
-        timeout = self.cpu_distributed_timeout
-        if self.enable_fault_tolerance and not steady_state_entered():
-            timeout = None
+        timeout = self.effective_cpu_distributed_timeout
 
         max_retries = 5
         last_exc: Exception | None = None
