@@ -147,6 +147,33 @@ def test_glm_mtp_layer_recycles_post_final_norm_hidden(
     assert torch.allclose(expected_post, eager_post, atol=1e-5)
 
 
+@pytest.mark.parametrize(
+    "architecture",
+    ["Glm4MoeMTPModel", "Glm4MoeLiteMTPModel", "GlmOcrMTPModel"],
+)
+def test_model_returns_tuple_recognizes_glm_moe_mtp(architecture):
+    # These GLM MTP models now return (logits_hidden, feedback_hidden); the
+    # proposer only unpacks the tuple when model_returns_tuple() recognizes the
+    # draft architecture. If it isn't in the allowlist, the proposer treats the
+    # tuple as a single tensor and indexes it, raising at runtime.
+    from types import SimpleNamespace
+
+    from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
+
+    proposer = object.__new__(SpecDecodeBaseProposer)
+    proposer.method = "mtp"
+    proposer.draft_model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(architectures=[architecture])
+    )
+    assert proposer.model_returns_tuple() is True
+
+    # A single-tensor MTP architecture must still report False.
+    proposer.draft_model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(architectures=["SomeSingleTensorMTPModel"])
+    )
+    assert proposer.model_returns_tuple() is False
+
+
 def _create_mtp_proposer(num_speculative_tokens: int) -> EagleProposer:
     """Create an MTP proposer with unified model configuration."""
     model_config = ModelConfig(
@@ -230,9 +257,16 @@ def test_mtp_load_model_unified(mock_get_model, mock_get_layers, mock_get_pp_gro
     assert proposer.model.model.embed_tokens == target_model.model.embed_tokens
 
 
-@pytest.mark.parametrize("num_speculative_tokens", [1])
-def test_mtp_propose(num_speculative_tokens, monkeypatch):
-    """Test that MTP's forward method returns hidden states directly."""
+@pytest.mark.parametrize("num_speculative_tokens", [1, 2])
+@pytest.mark.parametrize("returns_tuple", [False, True])
+def test_mtp_propose(num_speculative_tokens, returns_tuple, monkeypatch):
+    """Validate the MTP proposer consumes the draft model output, including the
+    (logits_hidden, feedback_hidden) tuple returned by GLM/DeepSeek-style MTP.
+
+    returns_tuple=True exercises the tuple path (model_returns_tuple() True): the
+    proposer must unpack it at every draft step (num_speculative_tokens 1 and 2)
+    rather than index the tuple as a single tensor.
+    """
     device = torch.device(DEVICE_TYPE)
     batch_size = 2
     seq_lens = [5, 3]
@@ -245,9 +279,16 @@ def test_mtp_propose(num_speculative_tokens, monkeypatch):
     # Mock the MTP model to verify it returns hidden states directly
     model_mock = mock.MagicMock()
 
+    def _ret(x):
+        # GLM/DeepSeek MTP return (logits_hidden, feedback_hidden); for the GLM
+        # post-final-norm contract both positions are the same tensor.
+        return (x, x) if returns_tuple else x
+
     # MTP returns hidden states directly
     if num_speculative_tokens == 1:
-        model_mock.return_value = torch.zeros(total_tokens, hidden_size, device=device)
+        model_mock.return_value = _ret(
+            torch.zeros(total_tokens, hidden_size, device=device)
+        )
     else:
         # Multiple forward passes for multi-token speculation
         forward_returns = []
@@ -256,7 +297,7 @@ def test_mtp_propose(num_speculative_tokens, monkeypatch):
                 h_states = torch.zeros(total_tokens, hidden_size, device=device)
             else:
                 h_states = torch.zeros(batch_size, hidden_size, device=device)
-            forward_returns.append(h_states)
+            forward_returns.append(_ret(h_states))
         model_mock.side_effect = forward_returns
 
     # Mock compute_logits
@@ -278,6 +319,17 @@ def test_mtp_propose(num_speculative_tokens, monkeypatch):
 
     proposer.model = model_mock
     proposer._draft_attn_layer_names = {"layer.0"}
+    # Attention-backend compatibility (the num_speculative_tokens > 1 type check)
+    # is out of scope here: the model is mocked, so the per-group attn metadata is
+    # itself a mock. Disable the check to exercise the multi-step proposer logic.
+    proposer.allowed_attn_types = None
+    # Multi-step drafting (num_speculative_tokens > 1) reads block_size to build
+    # per-step slot mappings; match the mocked attention metadata's block size.
+    proposer.block_size = 16
+    if returns_tuple:
+        # GLM/DeepSeek-style MTP architectures report a tuple return; force it
+        # here so the proposer takes the unpacking path for the mocked model.
+        monkeypatch.setattr(proposer, "model_returns_tuple", lambda: True)
 
     # Prepare inputs
     batch_spec = BatchSpec(seq_lens=seq_lens, query_lens=seq_lens)
