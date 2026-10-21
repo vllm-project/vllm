@@ -38,7 +38,7 @@ def _ctx(rank, tp=1, dcp=1, pcp=1, interleave=1, total=None, heads=2):
 
 def _full_spec(num_kv_heads: int = 2, **kwargs) -> FullAttentionSpec:
     # block_size=4, head_dim=64, int8
-    return TritonAttentionBackend.customize_spec(
+    spec = TritonAttentionBackend.customize_spec(
         FullAttentionSpec(
             block_size=4,
             num_kv_heads=num_kv_heads,
@@ -47,6 +47,8 @@ def _full_spec(num_kv_heads: int = 2, **kwargs) -> FullAttentionSpec:
             **kwargs,
         )
     )
+    assert isinstance(spec, FullAttentionSpec)
+    return spec
 
 
 def _mla_spec(**kwargs) -> MLAAttentionSpec:

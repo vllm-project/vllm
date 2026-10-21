@@ -20,6 +20,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (
     SimpleCPUOffloadConnector,
 )
+from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.engine import core as engine_core_module
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
@@ -144,10 +145,12 @@ def test_ring_scratch_group_is_accepted_and_never_offloaded() -> None:
         kv_cache_config=_make_ring_kv_cache_config(),
     )
     scheduler = connector.scheduler_manager
+    assert scheduler is not None
     assert scheduler.fa_gidx == 0
     cpu_groups = scheduler.cpu_kv_cache_config.kv_cache_groups
     assert [g.kv_cache_spec.prefix_cacheable for g in cpu_groups] == [True, False]
     # Only the paged group takes part in CPU-side hit lookup.
+    assert isinstance(scheduler.cpu_coordinator, HybridKVCacheCoordinator)
     attention_groups = scheduler.cpu_coordinator.attention_groups
     assert [g.group_ids for g in attention_groups] == [[0]]
 
