@@ -375,9 +375,11 @@ def FusedMoEFactory(
         shared_expert_prefix=shared_expert_prefix,
         activation=moe_activation,
         device=vllm_config.device_config.device,
-        routing_method=router.routing_method_type,  # Not ideal
+        routing_method=router.kernel_routing_method_type,
         has_hash_routing=hash_indices_table is not None,
-        require_decomposed_backend=expert_substitution is not None,
+        require_decomposed_backend=(
+            expert_substitution is not None or not router.supports_monolithic_kernels
+        ),
         swiglu_limit=swiglu_limit,
         swiglu_alpha=swiglu_alpha,
         swiglu_beta=swiglu_beta,
@@ -433,9 +435,10 @@ def FusedMoEFactory(
         swiglu_limit=swiglu_limit,
         swiglu_alpha=swiglu_alpha,
         swiglu_beta=swiglu_beta,
-        # TODO get from router? needs to be truncated?
-        e_score_correction_bias=e_score_correction_bias,
+        # TODO needs to be truncated?
+        e_score_correction_bias=router.prepare_monolithic_bias(e_score_correction_bias),
         apply_router_weight_on_input=apply_router_weight_on_input,
+        hash_indices_table=hash_indices_table,
         **routed_experts_args if routed_experts_args is not None else {},
     )
 

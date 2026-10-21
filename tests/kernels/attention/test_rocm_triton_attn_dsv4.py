@@ -1989,8 +1989,8 @@ def test_dsv41_adaptive_mla_swa_metadata_graph_replay(monkeypatch) -> None:
     """Replay V4.1 ROCm decode after device-only query reallocation."""
     from tests.v1.attention.utils import create_vllm_config
     from vllm.models.deepseek_v41.amd.rocm import (
-        DeepseekV4ROCMAiterSparseSWAMetadataBuilder,
         DeepseekV41ROCMAiterMLASparseMetadataBuilder,
+        DeepseekV41ROCMAiterSparseSWAMetadataBuilder,
         compute_global_topk_ragged_indices_and_indptr,
     )
     from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadata
@@ -2044,7 +2044,7 @@ def test_dsv41_adaptive_mla_swa_metadata_graph_replay(monkeypatch) -> None:
     mla_builder = DeepseekV41ROCMAiterMLASparseMetadataBuilder(
         mla_spec, ["c2a"], vllm_config, device
     )
-    swa_builder = DeepseekV4ROCMAiterSparseSWAMetadataBuilder(
+    swa_builder = DeepseekV41ROCMAiterSparseSWAMetadataBuilder(
         swa_spec, ["c2a"], vllm_config, device
     )
     assert (
