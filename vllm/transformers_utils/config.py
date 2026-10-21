@@ -14,6 +14,7 @@ import huggingface_hub
 import torch
 import transformers.configuration_utils as hf_configuration_utils
 from huggingface_hub import constants
+from huggingface_hub.utils import HFValidationError, validate_repo_id
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from transformers import GenerationConfig, PreTrainedConfig
 from transformers.configuration_utils import ALLOWED_LAYER_TYPES
@@ -52,6 +53,46 @@ MISTRAL_CONFIG_NAME = "params.json"
 
 logger = init_logger(__name__)
 
+CONFIG_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
+    "total_num_kv_heads": (
+        "n_head_kv",  # Falcon
+        "num_kv_heads",
+        "num_key_value_heads",  # LLaMA-2
+        "multi_query_group_num",  # ChatGLM
+        "num_attention_groups",  # Step3p5
+    ),
+    "num_experts": (
+        "num_experts",  # Jamba
+        "moe_num_experts",  # Dbrx
+        "n_routed_experts",  # DeepSeek
+        "num_local_experts",  # Mixtral
+    ),
+    "num_experts_per_token": (
+        "num_experts_per_tok",
+        "num_experts_per_token",
+        "top_k_experts",
+        "moe_topk",  # Hunyuan
+        "moe_top_k",
+        "top_k",
+    ),
+    "moe_intermediate_size": (
+        "moe_intermediate_size",
+        "intermediate_size",
+    ),
+    "num_shared_experts": (
+        "n_shared_experts",  # DeepSeek, Docs, GLM
+        "moe_num_shared_experts",  # Aria, Ernie
+    ),
+}
+"""HF config fields that models spell differently, keyed by the name vLLM uses.
+
+`ModelArchConfigConvertorBase` reads a scalar from these; a caller that needs the
+raw value (a per-layer `list`, say) passes the aliases to `getattr_iter` itself."""
+
+_ST_TRANSFORMER_MODULE_TYPES = {
+    "sentence_transformers.models.Transformer",
+    "sentence_transformers.base.modules.transformer.Transformer",
+}
 _ST_POOLING_MODULE_TYPES = {
     "sentence_transformers.models.Pooling",
     "sentence_transformers.sentence_transformer.modules.pooling.Pooling",
@@ -79,43 +120,29 @@ class LazyConfigDict(dict):
 
 
 _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
-    afmoe="AfmoeConfig",
-    axk1="AXK1Config",
     bagel="BagelConfig",
     bailing_moe_v3_vl="BailingMoeV3VLConfig",
+    beam="BeamConfig",
     chatglm="ChatGLMConfig",
-    modernvbert="ColModernVBertConfig",
-    colpali="ColPaliConfig",
+    ultravbert="ColUltraVBertConfig",
     colqwen3="ColQwen3Config",
     ops_colqwen3="OpsColQwen3Config",
     qwen3_vl_nemotron_embed="Qwen3VLNemotronEmbedConfig",
-    cosmos3_omni="Cosmos3Config",
-    cosmos3_edge="Cosmos3EdgeConfig",
-    diffusion_gemma="DiffusionGemmaConfig",
     deepseek_vl_v2="DeepseekVLV2Config",
     deepseek_v32="DeepseekV3Config",
-    deepseek_v4="DeepseekV4Config",
     dots3_note="Dots3NoteConfig",
     k3_dspark="K3DSparkConfig",
     funaudiochat="FunAudioChatConfig",
-    granite4_vision="Granite4VisionConfig",
-    hyperclovax="HyperCLOVAXConfig",
-    hy_v3="HYV3Config",
     hy_v4="HYV4Config",
+    hyperclovax="HyperCLOVAXConfig",  # Upstream class, hub remote code is broken
     isaac="IsaacConfig",
     kimi_k2="DeepseekV3Config",  # Kimi K2 uses same architecture as DeepSeek V3
     kimi_linear="KimiLinearConfig",
     kimi_vl="KimiVLConfig",
-    kimi_k25="KimiK25Config",
-    muse_glimmer="MuseGlimmerConfig",
-    muse_glimmer_text="MuseGlimmerTextConfig",
-    muse_glimmer_vision="MuseGlimmerVisionConfig",
-    muse_glimmer_assistant="MuseGlimmerAssistantConfig",
+    kimi_k25="Kimi_K25Config",  # Upstream class, hub remote code uses old schema
     kimi_k3="KimiK3Config",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
     RefinedWebModel="RWConfig",  # For tiiuae/falcon-7b(-instruct)
-    mlp_speculator="MLPSpeculatorConfig",
-    medusa="MedusaConfig",
     midashenglm="MiDashengLMConfig",
     minimax_m3_vl="MiniMaxM3Config",
     minimax_m3_mtp="MiniMaxM3MTPConfig",
@@ -123,29 +150,23 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     moss_transcribe_diarize="MossTranscribeDiarizeConfig",
     eagle="EAGLEConfig",
     speculators="SpeculatorsConfig",
-    nemotron="NemotronConfig",
-    olmo_hybrid="OlmoHybridConfig",
     openvla="OpenVLAConfig",
     ovis="OvisConfig",
     ultravox="UltravoxConfig",
     step3_vl="Step3VLConfig",
     step3_text="Step3TextConfig",
-    step3p5="Step3p5Config",
-    qianfan_ocr="QianfanOCRConfig",
+    step3p5="Step3p7TextConfig",  # Upstream class, hub remote code fails validation
+    step5="Step5Config",
+    step5_vl="Step5VLConfig",
     qwen3_asr="Qwen3ASRConfig",
-    qwen3_next="Qwen3NextConfig",
-    qwen3_5="Qwen3_5Config",
-    qwen3_5_text="Qwen3_5TextConfig",
-    qwen3_5_moe="Qwen3_5MoeConfig",
-    qwen3_5_moe_text="Qwen3_5MoeTextConfig",
-    lfm2_moe="Lfm2MoeConfig",
     **{"unlimited-ocr": "UnlimitedOCRConfig"},
+    unlimited_ocr="UnlimitedOCRConfig",
     **{"deepseek_v41": "DeepseekV41Config"},
     inkling_mm_model="InklingMMConfig",
     inkling_model="InklingModelConfig",
 )
 
-_SPECULATIVE_DECODING_CONFIGS: set[str] = {"eagle", "speculators", "medusa"}
+_SPECULATIVE_DECODING_CONFIGS: set[str] = {"eagle", "speculators"}
 
 # Checkpoints whose config.json has no model_type, only remote code in auto_map
 _ARCHITECTURE_TO_MODEL_TYPE: dict[str, str] = {
@@ -161,14 +182,6 @@ _PATCH_HF_VALIDATE_ROPE: set[str] = {"sarvam_mla"}
 # shared ones. `laguna` gets them injected by `convert_rope_params_to_dict`;
 # `gemma4_text` ships them in the checkpoint itself.
 _PATCH_HF_NESTED_ROPE_VALIDATION: set[str] = {"laguna", "gemma4_text"}
-
-# Model types whose checkpoints declare `layer_types` entries that upstream
-# transformers has not added to `ALLOWED_LAYER_TYPES` yet, so its strict config
-# validation rejects them (e.g.  GLM-5.2 `glm_moe_dsa` use
-# `deepseek_sparse_attention`). Extend the allowed set for these model types.
-_PATCH_HF_ALLOWED_LAYER_TYPES: dict[str, tuple[str, ...]] = {
-    "glm_moe_dsa": ("deepseek_sparse_attention",),
-}
 
 _CONFIG_ATTRS_MAPPING: dict[str, str] = {
     "llm_config": "text_config",
@@ -202,7 +215,10 @@ def is_rope_parameters_nested(rope_parameters: dict[str, Any]) -> bool:
     # Cannot be nested if rope_parameters is empty
     if not rope_parameters:
         return False
-    return set(rope_parameters.keys()).issubset(ALLOWED_LAYER_TYPES)
+    # DeepSeek-V4 nests by rope type ("main", "compress") instead
+    return set(rope_parameters.keys()).issubset(
+        {*ALLOWED_LAYER_TYPES, "main", "compress"}
+    )
 
 
 @contextmanager
@@ -314,24 +330,6 @@ def _patch_hf_transformers_nested_rope_validation() -> None:
     )
 
 
-def _patch_hf_transformers_allowed_layer_types(
-    extra_layer_types: tuple[str, ...],
-) -> None:
-    """Extend transformers' ``ALLOWED_LAYER_TYPES`` so its strict config
-    validation accepts layer types (e.g. ``deepseek_sparse_attention``) that a
-    checkpoint declares but upstream transformers has not registered yet.
-    """
-    import transformers.configuration_utils as hf_configuration_utils
-
-    missing = tuple(
-        layer_type
-        for layer_type in extra_layer_types
-        if layer_type not in hf_configuration_utils.ALLOWED_LAYER_TYPES
-    )
-    if missing:
-        hf_configuration_utils.ALLOWED_LAYER_TYPES += missing
-
-
 class HFConfigParser(ConfigParserBase):
     def parse(
         self,
@@ -378,9 +376,6 @@ class HFConfigParser(ConfigParserBase):
 
         if model_type in _PATCH_HF_NESTED_ROPE_VALIDATION:
             _patch_hf_transformers_nested_rope_validation()
-
-        if extra_layer_types := _PATCH_HF_ALLOWED_LAYER_TYPES.get(model_type):
-            _patch_hf_transformers_allowed_layer_types(extra_layer_types)
 
         if model_type == "vlm":
             # HyperCLOVAX remote code registers this alias in a bare
@@ -850,6 +845,19 @@ def maybe_override_with_speculators(
 
     # Override model and tokenizer with the verifier model from config
     verifier_model = speculators_config["verifier"]["name_or_path"]
+    verifier_error = (
+        "Speculators verifier must name a remote model repository. "
+        "Select local verifiers explicitly with --model and --speculative-config."
+    )
+    if not isinstance(verifier_model, str):
+        raise ValueError(verifier_error)
+    try:
+        validate_repo_id(verifier_model)
+    except HFValidationError as exc:
+        raise ValueError(verifier_error) from exc
+    verifier_path = Path(verifier_model)
+    if verifier_path.exists() or verifier_path.is_symlink():
+        raise ValueError(verifier_error)
     model = tokenizer = verifier_model
 
     return model, tokenizer, speculative_config
@@ -1346,6 +1354,88 @@ def try_get_dense_modules(
         return None
 
 
+@cache
+def get_sentence_transformers_chat_template_kwargs(
+    model: str | Path,
+    revision: str | None = None,
+) -> dict[str, Any] | None:
+    """Get the saved chat template settings of a Sentence Transformers
+    CrossEncoder whose single Transformer module declares the `message`
+    modality.
+
+    Sentence Transformers formats the pairs of such checkpoints as
+    `query`/`document` messages with the saved chat template.
+
+    Args:
+        model: Local checkpoint path or Hugging Face model ID.
+        revision: Model revision to inspect.
+
+    Returns:
+        The saved `processing_kwargs.chat_template` (possibly empty), or
+        `None` if the checkpoint does not declare the `message` modality.
+
+    Raises:
+        ValueError: If the saved chat template settings are unsupported.
+
+    """
+    try:
+        st_config = get_hf_file_to_dict(
+            "config_sentence_transformers.json", model, revision
+        )
+        if not isinstance(st_config, dict) or (
+            st_config.get("model_type") != "CrossEncoder"
+        ):
+            return None
+        modules = get_hf_file_to_dict("modules.json", model, revision)
+        transformer_config = get_hf_file_to_dict(
+            "sentence_bert_config.json", model, revision
+        )
+    except Exception:
+        logger.debug("Failed to read the Sentence Transformers config", exc_info=True)
+        return None
+
+    if isinstance(modules, dict):
+        modules = modules.get("modules")
+    if not (
+        isinstance(modules, list)
+        and len(modules) == 1
+        and isinstance(modules[0], dict)
+        and modules[0].get("type") in _ST_TRANSFORMER_MODULE_TYPES
+        and not modules[0].get("path")
+        and isinstance(transformer_config, dict)
+        and transformer_config.get("transformer_task") == "sequence-classification"
+        and isinstance(
+            modality_config := transformer_config.get("modality_config"), dict
+        )
+        and "message" in modality_config
+    ):
+        return None
+
+    processing_kwargs = transformer_config.get("processing_kwargs") or {}
+    chat_template_kwargs = (
+        processing_kwargs.get("chat_template") or {}
+        if isinstance(processing_kwargs, dict)
+        else None
+    )
+    if not isinstance(chat_template_kwargs, dict):
+        raise ValueError(
+            "The Sentence Transformers processing_kwargs.chat_template must be "
+            "a JSON object."
+        )
+    chat_template_kwargs = dict(chat_template_kwargs)
+    # vLLM does not restore the template suffix after truncation.
+    chat_template_kwargs.pop("restore_suffix", None)
+    if not isinstance(chat_template_kwargs.get("chat_template", ""), str):
+        raise ValueError(
+            "The Sentence Transformers chat template name must be a string."
+        )
+    if reserved := {"tokenize", "tools"} & chat_template_kwargs.keys():
+        raise ValueError(
+            f"Unsupported Sentence Transformers chat template settings: {reserved}"
+        )
+    return chat_template_kwargs
+
+
 def _read_safetensors_metadata_in_dir(local_dir: Path) -> dict[str, Any]:
     return {
         param_name: info
@@ -1353,6 +1443,30 @@ def _read_safetensors_metadata_in_dir(local_dir: Path) -> dict[str, Any]:
         if file_path.is_file()
         for param_name, info in parse_safetensors_file_metadata(file_path).items()
     }
+
+
+def _read_safetensors_metadata_in_repo(
+    model: str,
+    *,
+    revision: str | None = None,
+) -> dict[str, Any]:
+    api = hf_api()
+    try:
+        filenames = [
+            filename
+            for filename in api.list_repo_files(model, revision=revision)
+            if filename.endswith(".safetensors")
+        ]
+        return {
+            param_name: asdict(info)
+            for filename in filenames
+            for param_name, info in api.parse_safetensors_file_metadata(
+                model, filename, revision=revision
+            ).tensors.items()
+        }
+    except Exception as e:
+        logger.debug("Could not read safetensors headers for %s: %s", model, e)
+        return {}
 
 
 def get_safetensors_params_metadata(
@@ -1372,6 +1486,12 @@ def get_safetensors_params_metadata(
             for param_name, info in file_mt.tensors.items()
         }
 
+    # `get_safetensors_metadata` only looks for `model.safetensors` and its
+    # index, so older checkpoints naming their weights differently land here
+    # even though their headers are perfectly readable.
+    if metadata := _read_safetensors_metadata_in_repo(model, revision=revision):
+        return metadata
+
     # Hub fetch failed (e.g. 429, network unreachable). Fall back to the
     # local HF cache: weights may already be cached from a prior run, and
     # weight loading itself uses the same cache.
@@ -1390,7 +1510,15 @@ def get_safetensors_params_metadata(
             str(e),
         )
         return {}
-    return _read_safetensors_metadata_in_dir(Path(local_dir))
+
+    metadata = _read_safetensors_metadata_in_dir(Path(local_dir))
+    if not metadata:
+        logger.warning_once(
+            "Could not retrieve safetensors metadata for %s "
+            "(Hub fetch failed and the cached snapshot holds no weights yet).",
+            model,
+        )
+    return metadata
 
 
 @cache

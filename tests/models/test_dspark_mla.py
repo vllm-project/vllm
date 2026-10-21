@@ -242,7 +242,14 @@ def test_v41_dspark_loads_linear_scales(
         linear_scale_name=scale_name,
         pad_shared_expert=False,
         model=SimpleNamespace(
-            layers=[SimpleNamespace(ffn=SimpleNamespace(use_native_mega_moe=False))],
+            layers=[
+                SimpleNamespace(
+                    ffn=SimpleNamespace(
+                        use_native_mega_moe=False,
+                        experts=SimpleNamespace(has_fused_shared_experts=False),
+                    )
+                )
+            ],
             confidence_head=None,
         ),
         named_parameters=lambda: [(runtime_name, param)],
@@ -251,8 +258,6 @@ def test_v41_dspark_loads_linear_scales(
     draft._remap_dspark_name = lambda name: (
         dspark.DSparkDeepseekV4ForCausalLM._remap_dspark_name(draft, name)
     )
-    monkeypatch.setattr(dspark, "get_tensor_model_parallel_world_size", lambda: 4)
-    monkeypatch.setattr(dspark, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(
         dspark, "fused_moe_make_expert_params_mapping", lambda *a, **kw: []
     )
@@ -264,6 +269,55 @@ def test_v41_dspark_loads_linear_scales(
     assert loaded == {runtime_name}
     assert shards == [() if shard_id is None else (shard_id,)]
     torch.testing.assert_close(param, checkpoint_scale)
+
+
+def test_dsv4_dspark_fused_moe_expert_mapping_includes_redundant_experts(
+    monkeypatch,
+):
+    from vllm.models.deepseek_v4.nvidia import dspark
+
+    captured: dict[str, int] = {}
+
+    def capture_expert_mapping(*args, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    draft = SimpleNamespace(
+        config=SimpleNamespace(
+            num_attention_heads=4,
+            n_routed_experts=8,
+            expert_dtype="fp4",
+        ),
+        quant_config=None,
+        pad_shared_expert=False,
+        model=SimpleNamespace(
+            layers=[
+                SimpleNamespace(
+                    ffn=SimpleNamespace(
+                        use_native_mega_moe=False,
+                        use_mega_moe=False,
+                        n_redundant_experts=4,
+                    )
+                )
+            ],
+            confidence_head=None,
+        ),
+        named_parameters=lambda: [],
+        process_weights_after_loading=lambda: None,
+    )
+    draft._remap_dspark_name = lambda name: (
+        dspark.DSparkDeepseekV4ForCausalLM._remap_dspark_name(draft, name)
+    )
+    monkeypatch.setattr(
+        dspark,
+        "fused_moe_make_expert_params_mapping",
+        capture_expert_mapping,
+    )
+
+    dspark.DSparkDeepseekV4ForCausalLM.load_weights(draft, [])
+
+    assert captured["num_experts"] == 8
+    assert captured["num_redundant_experts"] == 4
 
 
 def test_dsv4_context_wkv_weights_are_duplicated_by_draft_layer():
@@ -336,3 +390,37 @@ def test_dsv4_context_kv_uses_one_stacked_wkv_projection(monkeypatch):
     assert torch.equal(calls[1][1], stacked_output.view(2, 3, 4)[:, 2] + 2)
     assert calls[0][3] is slot_mappings[0]
     assert calls[1][3] is slot_mappings[2]
+
+
+@pytest.mark.cpu_test
+def test_k3_dspark_mla_kv_cache_spec_groups_with_target_mla():
+    """The draft's MLA layers must share a KV cache group with the target's."""
+    from vllm.model_executor.layers.attention.mla_attention import MLAAttention
+    from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
+    from vllm.v1.core.kv_cache_planning import _get_kv_cache_groups_uniform_page_size
+
+    vllm_config = SimpleNamespace(
+        model_config=None, cache_config=SimpleNamespace(block_size=64)
+    )
+    target_attn = SimpleNamespace(
+        topk_buffer_width=None,
+        kv_cache_dtype="fp8",
+        head_size=576,
+        sliding_window=None,
+        indexer=None,
+        non_causal_multi_token_decode=False,
+        attn_backend=SimpleNamespace(get_name=lambda: "ROCM_AITER_MLA"),
+        _uses_flat_kv_cache=lambda: False,
+    )
+    draft_attn = SimpleNamespace(
+        kv_cache_dtype="fp8", head_size=576, non_causal_multi_token_decode=True
+    )
+    target_spec = MLAAttention.get_kv_cache_spec(target_attn, vllm_config)
+    draft_spec = MultiHeadLatentAttention.get_kv_cache_spec(draft_attn, vllm_config)
+
+    kv_cache_spec = {f"model.layers.{i}.attn": target_spec for i in range(24)}
+    kv_cache_spec |= {f"draft.layers.{i}.attn": draft_spec for i in range(5)}
+
+    groups = _get_kv_cache_groups_uniform_page_size(kv_cache_spec)
+    assert len(groups) == 1
+    assert len(groups[0].layer_names) == 29
