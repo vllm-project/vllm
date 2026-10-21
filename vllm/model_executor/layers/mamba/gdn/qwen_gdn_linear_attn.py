@@ -889,8 +889,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         in_proj_ba has only 2 * num_v_heads / tp output features, so as its own
         GEMM it costs a full launch (often with a split-K reduction) per layer
         and token. Its rows are appended to in_proj_qkvz's weight, zero-padded
-        so that each row of the fused output stays 16-byte aligned, and the
-        forward slices the qkvz and ba parts out of one GEMM output. Both
+        to a multiple of 16 rows, and the forward slices the qkvz and ba parts
+        out of one GEMM output. The padding keeps the fused output's row stride
+        divisible by 16 like an unfused qkvz output, so Triton kernels that read
+        these views (the spec-decode conv, for one) keep the stride
+        specialization that warmup and graph capture compiled. Both
         layers keep their weights as views of the fused tensor, so the weight
         loaders keep writing to the right rows.
         """
@@ -899,7 +902,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         qkvz_w = self.in_proj_qkvz.weight
         ba_w = self.in_proj_ba.weight
         n_qkvz, n_ba = qkvz_w.shape[0], ba_w.shape[0]
-        n_pad = -(n_qkvz + n_ba) % (16 // qkvz_w.element_size())
+        n_pad = -(n_qkvz + n_ba) % 16
         fused = torch.cat(
             [qkvz_w.data, ba_w.data, ba_w.data.new_zeros(n_pad, ba_w.shape[1])]
         )

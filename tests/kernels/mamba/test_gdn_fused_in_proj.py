@@ -69,7 +69,7 @@ def test_fused_projection_matches_separate(default_vllm_config, on_cuda) -> None
 
     assert layer.in_proj_fused_split == (N_QKVZ, N_BA)
     fused = layer.in_proj_qkvz.weight
-    assert fused.shape == (104, HIDDEN)  # 96 + 6 fp32 rows padded to 16-byte rows
+    assert fused.shape == (112, HIDDEN)  # 96 + 6 rows padded to a multiple of 16
     assert torch.count_nonzero(fused[N_QKVZ + N_BA :]) == 0
     # in_proj_ba keeps a view of its rows, so weight loading still lands there
     ba_w = layer.in_proj_ba.weight
@@ -89,7 +89,7 @@ def test_fused_projection_matches_separate(default_vllm_config, on_cuda) -> None
 
     # Idempotent.
     layer.process_weights_after_loading(torch.float32)
-    assert layer.in_proj_qkvz.weight.shape == (104, HIDDEN)
+    assert layer.in_proj_qkvz.weight.shape == (112, HIDDEN)
 
 
 class _OtherMethod(UnquantizedLinearMethod):
