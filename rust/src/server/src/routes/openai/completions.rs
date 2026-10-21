@@ -272,6 +272,7 @@ async fn completion_chunk_stream(
     ));
     let mut visible_text_len = 0_u32;
     let mut first_chunk = true;
+    let mut deferred_prompt_logprobs_error: Option<ApiError> = None;
     let mut continuous_usage = ContinuousUsage::default();
 
     /// Yield a chunk with optional continuous usage attached.
@@ -303,12 +304,19 @@ async fn completion_chunk_stream(
                 if let Some(prompt) = echo.as_ref() {
                     visible_text_len = text_len(prompt);
                     let logprobs = if prompt_only && requested_logprobs.is_some() {
-                        Some(prompt_only_logprobs_to_openai(
+                        match prompt_only_logprobs_to_openai(
                             prompt_logprobs.as_ref(),
                             prompt,
                             prompt_token_ids.as_ref(),
                             return_tokens_as_token_ids,
-                        )?)
+                        ) {
+                            Ok(logprobs) => Some(logprobs),
+                            // A terminal engine error takes precedence over missing logprobs.
+                            Err(error) => {
+                                deferred_prompt_logprobs_error = Some(error);
+                                continue;
+                            }
+                        }
                     } else {
                         None
                     };
@@ -340,11 +348,13 @@ async fn completion_chunk_stream(
                 finished,
             }) => {
                 let delta = decoded.text;
-                // Prompt-only streaming already emitted the echoed prompt in the Start chunk.
-                // The one generated token is only used to drive the engine to a finished event,
-                // so hide its delta and forward only the terminal finish/usage metadata.
+                // The engine generates one token to finish prompt-only requests; hide it.
                 if prompt_only {
                     if let Some(finished) = finished {
+                        if let Some(error) = deferred_prompt_logprobs_error.take() {
+                            completion_finish_reason_to_openai(&finished.finish_reason)?;
+                            return Err(error);
+                        }
                         if enable_log_requests {
                             info!(
                                 stream = true,
@@ -383,6 +393,10 @@ async fn completion_chunk_stream(
                     continue;
                 }
                 let delta_text_len = text_len(&delta);
+                // Terminal engine errors may arrive without logprobs.
+                if let Some(finished) = &finished {
+                    completion_finish_reason_to_openai(&finished.finish_reason)?;
+                }
                 let logprobs = if requested_logprobs.is_some() {
                     let decoded_logprobs = logprobs.as_ref().ok_or_else(|| {
                         server_error!(
@@ -601,7 +615,7 @@ mod tests {
     };
 
     use super::{
-        ApiServerOptions, CompletionSseChunk, CompletionStreamResponse, ResponseOptions,
+        ApiError, ApiServerOptions, CompletionSseChunk, CompletionStreamResponse, ResponseOptions,
         StreamResponseEnvelope, collect_completion, completion_chunk_stream, final_chunk,
     };
 
@@ -1202,6 +1216,46 @@ mod tests {
             }
             CompletionSseChunk::Usage(_) => panic!("expected final chunk"),
         }
+    }
+
+    #[tokio::test]
+    async fn completion_chunk_stream_rejects_missing_prompt_logprobs() {
+        let stream = stream::iter(vec![
+            Ok(DecodedTextEvent::Start {
+                prompt_token_ids: vec![1, 2].into(),
+                prompt_logprobs: None,
+            }),
+            Ok(decoded_delta(
+                "",
+                vec![],
+                None,
+                Some(Finished {
+                    usage: Default::default(),
+                    finish_reason: FinishReason::Length,
+                    kv_transfer_params: None,
+                    ec_transfer_params: None,
+                    sampling_mask: None,
+                    timestamps: Default::default(),
+                }),
+            )),
+        ]);
+        let chunks = completion_chunk_stream(
+            stream,
+            "cmpl-1".to_string(),
+            "model".to_string(),
+            1,
+            ApiServerOptions::default(),
+            ResponseOptions {
+                prompt_only: true,
+                echo: Some("hello".to_string()),
+                requested_logprobs: Some(1),
+                ..Default::default()
+            },
+        )
+        .collect::<Vec<_>>()
+        .await;
+        assert_eq!(chunks.len(), 1);
+        assert!(matches!(&chunks[0], Err(ApiError::ServerError { .. })));
     }
 
     #[tokio::test]
