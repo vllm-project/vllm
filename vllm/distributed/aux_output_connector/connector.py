@@ -42,7 +42,7 @@ class AuxRequestOutput:
     routed_experts_rows: np.ndarray
     """Routed expert IDs per token, or zero-width rows when disabled."""
     indexer_rows: np.ndarray | None = None
-    """Token TopK IDs per source layer, or None when disabled."""
+    """Raw TopK indices per source layer, or None when disabled."""
 
 
 class AuxOutputSchedulerConnector:
