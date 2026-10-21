@@ -6,12 +6,15 @@ from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
+from fastapi import FastAPI
 
 from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.generate.base.protocol import StreamOptions
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.scale_out.token_in_token_out.api_router import router
 from vllm.entrypoints.scale_out.token_in_token_out.mm_features import (
     placeholder_ranges_from_engine_input,
 )
@@ -339,6 +342,39 @@ async def test_serve_tokens_rejects_invalid_shm_handle_before_engine_handoff():
     validated_item, validated_hash = cache.validate_input_item.call_args.args
     assert validated_hash == "image_A"
     assert validated_item["address"].data == 224
+    engine.generate.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("kwargs_data", [None, {"image": [None]}])
+async def test_generate_rejects_unresolved_features_before_engine(stream, kwargs_data):
+    engine = _mock_engine()
+    serving = _build_serving_tokens(engine)
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params={"max_tokens": 1},
+        model=MODEL_NAME,
+        stream=stream,
+        features=MultiModalFeatures(
+            mm_hashes={"image": ["missing-image"]},
+            mm_placeholders={"image": [PlaceholderRangeInfo(offset=1, length=1)]},
+            kwargs_data=kwargs_data,
+        ),
+    )
+
+    app = FastAPI()
+    app.include_router(router)
+    app.state.serving_tokens = serving
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/inference/v1/generate", json=request.model_dump(mode="json")
+        )
+
+    assert response.status_code == 400
+    assert "payload data or metadata" in response.json()["error"]["message"]
     engine.generate.assert_not_called()
 
 
