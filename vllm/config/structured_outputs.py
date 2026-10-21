@@ -19,9 +19,10 @@ class StructuredOutputsConfig:
 
     backend: StructuredOutputsBackend = "auto"
     """Which engine will be used for structured outputs (e.g. JSON schema,
-    regex, etc) by default. With "auto", we will make opinionated choices
-    based on request contents and what the backend libraries currently support,
-    so the behavior is subject to change in each release."""
+    regex, etc) by default. With "auto", one backend is chosen for every request
+    from the tokenizer (guidance for Tekken-based Mistral tokenizers, xgrammar
+    otherwise), without falling back per request, and the choice is subject to
+    change in each release."""
     disable_any_whitespace: bool = False
     """If `True`, json output will always be compact without any whitespace.
     If `False`, the model may generate whitespace between JSON fields,

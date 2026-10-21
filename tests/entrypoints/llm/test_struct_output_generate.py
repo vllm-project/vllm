@@ -21,6 +21,7 @@ from vllm.sampling_params import (
     SamplingParams,
     StructuredOutputsParams,
 )
+from vllm.utils.mistral import is_mistral_tokenizer
 
 SAMPLE_REGEX = (
     r"((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.){3}"
@@ -835,8 +836,14 @@ def test_structured_output_auto_mode(
             "that fits this schema: "
             f"{unsupported_json_schema}. Make the response as short as possible."
         )
-        # This would fail with the default of "xgrammar", but in "auto"
-        # we will handle fallback automatically.
+        tokenizer = runner.llm.get_tokenizer()
+        if not (is_mistral_tokenizer(tokenizer) and tokenizer.is_tekken):
+            # `auto` selects xgrammar from the tokenizer and does not fall back
+            # to another backend for a schema xgrammar cannot enforce.
+            with pytest.raises(VLLMValidationError, match="not supported by xgrammar"):
+                runner.llm.generate(prompts, sampling_params=sampling_params)
+            return
+        # Tekken Mistral tokenizers select guidance, which enforces the schema.
         outputs = runner.llm.generate(
             prompts, sampling_params=sampling_params, use_tqdm=True
         )
