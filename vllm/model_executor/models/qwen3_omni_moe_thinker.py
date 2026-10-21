@@ -1159,13 +1159,6 @@ class Qwen3MoeLLMForCausalLM(Qwen3MoeForCausalLM):
         )
 
 
-class Qwen3OmniMoeThinkerMultiModalDataParser(Qwen2_5OmniThinkerMultiModalDataParser):
-    # Keep the existing raw-media fallback for vision inputs.
-    embedding_fields = {
-        "audio": Qwen2_5OmniThinkerMultiModalDataParser.embedding_fields["audio"],
-    }
-
-
 class Qwen3OmniMoeThinkerProcessingInfo(
     Qwen2AudioProcessingInfo, Qwen2_5_VLProcessingInfo
 ):
@@ -1192,7 +1185,7 @@ class Qwen3OmniMoeThinkerProcessingInfo(
         return feature_extractor
 
     def get_data_parser(self):
-        return Qwen3OmniMoeThinkerMultiModalDataParser(
+        return Qwen2_5OmniThinkerMultiModalDataParser(
             spatial_merge_size=self.get_hf_config().vision_config.spatial_merge_size,
             target_sr=self.get_feature_extractor().sampling_rate,
             target_channels=self.get_target_channels(),
