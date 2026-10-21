@@ -8,6 +8,7 @@ Run `pytest tests/kernels/moe/test_fused_topk.py`.
 import pytest
 import torch
 
+import vllm._custom_ops as ops
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     fused_topk_bias,
 )
@@ -275,3 +276,99 @@ def test_fused_topk_bias_nan_inf_clamp(
             f"Row {row} has non-finite weights {topk_weights[row].tolist()} "
             f"(bad_value={bad_value}, scoring_func={scoring_func})"
         )
+
+
+def _tie_heavy_logits(
+    num_tokens: int, num_experts: int, dtype: torch.dtype
+) -> torch.Tensor:
+    """Small integer logits, so most scores tie exactly with other experts.
+
+    Row 0 is constant (every expert ties) and, with more than one row,
+    row 1 is NaN (every score is clamped to 0 and ties).
+    """
+    logits = torch.randint(-2, 3, (num_tokens, num_experts), device="cuda").to(dtype)
+    logits[0] = 1.0
+    if num_tokens > 1:
+        logits[1] = float("nan")
+    return logits
+
+
+def _run_topk_kernel(
+    gating_output: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    scoring_func: str,
+    bias: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    num_tokens = gating_output.shape[0]
+    device = gating_output.device
+    topk_weights = torch.empty(num_tokens, topk, dtype=torch.float32, device=device)
+    topk_ids = torch.empty(num_tokens, topk, dtype=torch.int32, device=device)
+    token_expert_indices = torch.empty_like(topk_ids)
+    kernel = ops.topk_softmax if scoring_func == "softmax" else ops.topk_sigmoid
+    kernel(
+        topk_weights,
+        topk_ids,
+        token_expert_indices,
+        gating_output,
+        renormalize,
+        e_score_correction_bias=bias,
+    )
+    return topk_weights, topk_ids, token_expert_indices
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="This test is skipped on non-CUDA platform.",
+)
+@pytest.mark.parametrize("num_tokens", [1, 7, 128, 2048])
+@pytest.mark.parametrize("num_experts", [128, 256, 512])
+@pytest.mark.parametrize("topk", [8, 10])
+@pytest.mark.parametrize("renormalize", [True, False])
+@pytest.mark.parametrize("scoring_func", ["softmax", "sigmoid"])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("logits_kind", ["normal", "ties"])
+def test_fused_topk_without_bias_matches_bias_path(
+    num_tokens: int,
+    num_experts: int,
+    topk: int,
+    renormalize: bool,
+    scoring_func: str,
+    dtype: torch.dtype,
+    logits_kind: str,
+):
+    """Rows that one full warp owns select without a bias by redux.sync on
+    SM80+. A zero bias gives the same choice scores but keeps the shuffle
+    butterfly, so the two launches must agree bit for bit, including the
+    lowest-index tie rule and the renormalized weights.
+    """
+    torch.manual_seed(0)
+    if logits_kind == "ties":
+        gating_output = _tie_heavy_logits(num_tokens, num_experts, dtype)
+    else:
+        gating_output = torch.randn(
+            (num_tokens, num_experts), dtype=dtype, device="cuda"
+        )
+    zero_bias = torch.zeros(num_experts, dtype=torch.float32, device="cuda")
+
+    weights, ids, token_expert_indices = _run_topk_kernel(
+        gating_output, topk, renormalize, scoring_func, bias=None
+    )
+    ref_weights, ref_ids, ref_token_expert_indices = _run_topk_kernel(
+        gating_output, topk, renormalize, scoring_func, bias=zero_bias
+    )
+
+    assert torch.equal(ids, ref_ids)
+    assert torch.equal(weights.view(torch.int32), ref_weights.view(torch.int32))
+    assert torch.equal(token_expert_indices, ref_token_expert_indices)
+
+    if logits_kind == "ties":
+        # Equal logits give equal scores, so a stable sort fixes the tie order.
+        scores = (
+            torch.softmax(gating_output.float(), dim=-1)
+            if scoring_func == "softmax"
+            else torch.sigmoid(gating_output.float())
+        )
+        scores = torch.nan_to_num(scores, nan=0.0, posinf=0.0)
+        expected_ids = torch.sort(scores, dim=-1, descending=True, stable=True)[1]
+        assert torch.equal(ids, expected_ids[:, :topk].to(torch.int32))
