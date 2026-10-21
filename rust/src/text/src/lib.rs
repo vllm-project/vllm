@@ -103,7 +103,6 @@ impl TextRequestProcessor {
         prompt: Prompt,
         add_special_tokens: bool,
         prompt_truncation: Option<PromptTruncation>,
-        max_output_tokens: Option<u32>,
     ) -> Result<Vec<u32>> {
         let tokenizer = self.backend.tokenizer();
         let mut prompt_token_ids = match prompt {
@@ -113,8 +112,7 @@ impl TextRequestProcessor {
             Prompt::TokenIds(token_ids) => token_ids,
         };
         if let Some(prompt_truncation) = prompt_truncation {
-            let input_budget = self.max_model_len.saturating_sub(max_output_tokens.unwrap_or(0));
-            prompt_truncation.apply(&mut prompt_token_ids, input_budget)?;
+            prompt_truncation.apply(&mut prompt_token_ids, self.max_model_len)?;
         }
         Ok(prompt_token_ids)
     }
@@ -131,7 +129,6 @@ impl TextRequestProcessor {
             take(&mut request.prompt),
             request.add_special_tokens,
             request.prompt_truncation.take(),
-            request.sampling_params.max_tokens,
         )?;
         request.prompt = Prompt::TokenIds(prompt_token_ids);
         match &request.prompt {
@@ -147,7 +144,6 @@ impl TextRequestProcessor {
             request.prompt,
             request.add_special_tokens,
             request.prompt_truncation,
-            request.sampling_params.max_tokens,
         )
     }
 
@@ -163,7 +159,6 @@ impl TextRequestProcessor {
             take(&mut request.prompt),
             request.add_special_tokens,
             request.prompt_truncation,
-            request.sampling_params.max_tokens,
         )?;
         let tokenizer = self.backend.tokenizer();
         let sampling_hints = self.backend.sampling_hints()?;
@@ -342,5 +337,35 @@ mod tests {
             processor.prepare(request).unwrap().generate_request.prompt_token_ids,
             vec![3, 4, 5]
         );
+    }
+
+    /// `truncate_prompt_tokens=-1` keeps `max_model_len - 1` prompt tokens
+    /// whether or not `max_tokens` is set, and generation gets the one token
+    /// left. Without `max_tokens`, truncating to the full context used to fail
+    /// the request as too long.
+    #[test]
+    fn auto_truncation_leaves_one_output_token() {
+        let processor = TextRequestProcessor::new(Arc::new(TestTextBackend), 10);
+        for max_tokens in [None, Some(5)] {
+            let request = TextRequest {
+                prompt: Prompt::TokenIds((0..15).collect()),
+                prompt_truncation: Some(PromptTruncation {
+                    limit: PromptTruncationLimit::InputBudget,
+                    side: TruncationSide::Left,
+                }),
+                sampling_params: SamplingParams {
+                    max_tokens,
+                    ..SamplingParams::default()
+                },
+                ..TextRequest::for_test()
+            };
+
+            let generate_request = processor.prepare(request).unwrap().generate_request;
+            assert_eq!(
+                generate_request.prompt_token_ids,
+                (6..15).collect::<Vec<_>>()
+            );
+            assert_eq!(generate_request.sampling_params.max_tokens, 1);
+        }
     }
 }
