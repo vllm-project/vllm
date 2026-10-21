@@ -4,6 +4,7 @@
 
 from collections.abc import Iterable
 from itertools import islice
+from typing import cast
 
 import torch
 from torch import nn
@@ -82,6 +83,7 @@ from .low_latency_gemm import enable_qwen4_exp_low_latency_gemm
 from .ops.sequence_parallel import sp_reduce_scatter, sp_shard
 from .ple_layer import Qwen4ExpPLELayer
 from .qsa import Qwen4ExpQSAAttention
+from .specialized_decode.hooks import SpecializedDecodeMixin
 
 # Transformers v5.18 renamed `qwen_sparse_attention` to `indexed_attention`
 # TODO: Delete qwen_... once Transformers 5.18.0 is the minimum required version.
@@ -649,6 +651,7 @@ class Qwen4ExpModel(nn.Module):
 
 class Qwen4ExpForCausalLM(
     nn.Module,
+    SpecializedDecodeMixin,
     HasInnerState,
     SupportsHCSP,
     SupportsLoRA,
@@ -682,6 +685,7 @@ class Qwen4ExpForCausalLM(
         self.quant_config = vllm_config.quant_config
         self.config = config
         self.scheduler_config = vllm_config.scheduler_config
+        self.init_specialized_decode(vllm_config)
         self.model = Qwen4ExpModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
@@ -711,6 +715,11 @@ class Qwen4ExpForCausalLM(
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
+        step = self.plan_specialized_decode(input_ids, positions, intermediate_tensors)
+        if step is not None:
+            return self.run_specialized_decode(
+                step, input_ids, positions, inputs_embeds, kwargs
+            )
         return self.model(
             input_ids,
             positions,
@@ -846,6 +855,7 @@ class Qwen4ExpForCausalLM(
         )
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
+        self.after_specialized_decode_step()
         return self.logits_processor(self.lm_head, hidden_states)
 
     def get_mtp_target_hidden_states(self) -> torch.Tensor | None:
@@ -1037,6 +1047,12 @@ class Qwen4ExpForConditionalGeneration(
     ) -> torch.Tensor | IntermediateTensors:
         if intermediate_tensors is not None:
             inputs_embeds = None
+        lm = cast(Qwen4ExpForCausalLM, self.language_model)
+        step = lm.plan_specialized_decode(input_ids, positions, intermediate_tensors)
+        if step is not None:
+            return lm.run_specialized_decode(
+                step, input_ids, positions, inputs_embeds, kwargs
+            )
         if inputs_embeds is not None and get_pp_group().is_first_rank:
             deepstack_input_embeds = self._get_deepstack_input_embeds(
                 inputs_embeds.size(0)
