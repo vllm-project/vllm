@@ -251,8 +251,9 @@ class WeightCacheDaemon:
         self.seed_token = seed_token
         # Fingerprint before loading: process_weights_after_loading may
         # mutate hf_config.quantization_config.
-        self.cache_config = WeightCacheKey.from_model_config(
+        self.cache_key = WeightCacheKey.from_model_config(
             self.model_config,
+            cache_config=vllm_config.cache_config,
             tp_size=self.tp_size,
             tp_rank=self.tp_rank,
             pp_size=self.pp_size,
@@ -575,15 +576,15 @@ class WeightCacheDaemon:
             send_msg(conn, {"status": "error", "message": f"Unknown command {cmd!r}"})
 
     def _handle_get_state(self, conn: socket.socket, request: dict) -> None:
-        client_config = request.get("cache_config")
-        if not isinstance(client_config, WeightCacheKey):
-            send_msg(conn, {"status": "error", "message": "Missing cache_config"})
+        client_key = request.get("cache_key")
+        if not isinstance(client_key, WeightCacheKey):
+            send_msg(conn, {"status": "error", "message": "Missing cache_key"})
             return
-        mismatched = self.cache_config.mismatched_fields(client_config)
+        mismatched = self.cache_key.mismatched_fields(client_key)
         if (
             request.get("is_reload", False)
             and "rope_parameters_hash" in mismatched
-            and client_config.rope_parameters_hash == self.loaded_rope_parameters_hash
+            and client_key.rope_parameters_hash == self.loaded_rope_parameters_hash
         ):
             mismatched.remove("rope_parameters_hash")
         if mismatched:
