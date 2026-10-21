@@ -32,6 +32,168 @@ def _make_model_runner_output(
     )
 
 
+@pytest.mark.parametrize(
+    ("max_num_seqs", "pp_size", "batch_sizes"),
+    [(8, 2, [4, 4]), (7, 2, [4, 3]), (7, 4, [2, 2, 2, 1])],
+)
+@pytest.mark.parametrize("num_spec_tokens", [None, 3])
+def test_pp_balances_decodes_without_limiting_prefill(
+    max_num_seqs, pp_size, batch_sizes, num_spec_tokens
+):
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        use_v2_model_runner=True,
+        max_num_seqs=max_num_seqs,
+        num_speculative_tokens=num_spec_tokens,
+        speculative_method="ngram_gpu" if num_spec_tokens else None,
+    )
+    # Exercise PP scheduling on CPU without distributed/model validation.
+    scheduler.use_pp = True
+    scheduler.decode_stagger = pp_size
+    requests = create_requests(num_requests=max_num_seqs)
+    for request in requests:
+        scheduler.add_request(request)
+
+    prefill = scheduler.schedule()
+    assert len(prefill.num_scheduled_tokens) == max_num_seqs
+    scheduler.update_from_output(prefill, _make_model_runner_output(prefill))
+    for _ in range(pp_size - 1):
+        assert not scheduler.schedule().num_scheduled_tokens
+
+    scheduled_ids: set[str] = set()
+    for batch_size in batch_sizes:
+        output = scheduler.schedule()
+        batch_ids = set(output.num_scheduled_tokens)
+        assert len(batch_ids) == batch_size
+        assert set(output.num_scheduled_tokens.values()) == {1 + (num_spec_tokens or 0)}
+        assert batch_ids.isdisjoint(scheduled_ids)
+        scheduled_ids.update(batch_ids)
+    assert scheduled_ids == {request.request_id for request in requests}
+
+
+@pytest.mark.parametrize("prefill_tokens", [6, 8])
+def test_pp_decode_limit_does_not_block_prefill_chunks(prefill_tokens):
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        use_v2_model_runner=True,
+        max_num_seqs=4,
+        long_prefill_token_threshold=2,
+    )
+    scheduler.use_pp = True
+    scheduler.decode_stagger = 2
+    for request in create_requests(num_requests=3, num_tokens=2):
+        scheduler.add_request(request)
+    prefill = scheduler.schedule()
+    scheduler.update_from_output(prefill, _make_model_runner_output(prefill))
+
+    (chunked,) = create_requests(
+        num_requests=1, num_tokens=prefill_tokens, req_ids=["chunked"]
+    )
+    scheduler.add_request(chunked)
+    assert scheduler.schedule().num_scheduled_tokens == {"chunked": 2}
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"0": 1, "1": 1, "chunked": 2}
+    # Make all three decodes eligible again, with the prompt chunk last.
+    scheduler.current_step += 1
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"0": 1, "1": 1, "chunked": 2}
+    assert chunked.is_prefill_chunk == (prefill_tokens == 8)
+
+
+def test_pp_decode_limit_skips_waiting_decodes_but_admits_prefill():
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        use_v2_model_runner=True,
+        max_num_seqs=6,
+    )
+    scheduler.use_pp = True
+    scheduler.decode_stagger = 2
+    (running,) = create_requests(num_requests=1, req_ids=["running"])
+    scheduler.add_request(running)
+    output = scheduler.schedule()
+    scheduler.update_from_output(output, _make_model_runner_output(output))
+    scheduler.schedule()
+
+    waiting = create_requests(num_requests=3)
+    for request in waiting:
+        request.append_output_token_ids(1)
+        request.num_computed_tokens = request.num_prompt_tokens
+        scheduler.add_request(request)
+    (prefill,) = create_requests(num_requests=1, req_ids=["prefill"])
+    scheduler.add_request(prefill)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {
+        "running": 1,
+        "0": 1,
+        "1": 1,
+        "prefill": prefill.num_prompt_tokens,
+    }
+    assert waiting[-1].status == RequestStatus.WAITING
+    assert scheduler.schedule().num_scheduled_tokens == {waiting[-1].request_id: 1}
+
+
+def test_pp_priority_preemption_releases_decode_slot(monkeypatch):
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        use_v2_model_runner=True,
+        max_num_seqs=3,
+        long_prefill_token_threshold=2,
+        scheduling_policy="priority",
+    )
+    scheduler.use_pp = True
+    scheduler.decode_stagger = 3
+    low, high = create_requests(num_requests=2, num_tokens=2)
+    (prefill,) = create_requests(num_requests=1, num_tokens=6, req_ids=["prefill"])
+    for request in [low, prefill, high]:
+        scheduler.add_request(request)
+    output = scheduler.schedule()
+    model_output = _make_model_runner_output(output)
+    model_output.sampled_token_ids[model_output.req_id_to_index["prefill"]] = []
+    scheduler.update_from_output(output, model_output)
+    low.priority = 1
+    scheduler.running = [low, prefill, high]
+    scheduler.current_step += 2
+
+    allocate_slots = scheduler.kv_cache_manager.allocate_slots
+    failed_once = False
+
+    def allocate_with_preemption(request, *args, **kwargs):
+        nonlocal failed_once
+        if request is prefill and not failed_once:
+            failed_once = True
+            return None
+        return allocate_slots(request, *args, **kwargs)
+
+    monkeypatch.setattr(
+        scheduler.kv_cache_manager, "allocate_slots", allocate_with_preemption
+    )
+    output = scheduler.schedule()
+    assert low.status == RequestStatus.PREEMPTED
+    assert output.num_scheduled_tokens == {"prefill": 2, high.request_id: 1}
+
+
+@pytest.mark.parametrize(
+    ("async_scheduling", "use_v2", "pp_size", "decode_stagger"),
+    [(False, True, 2, 2), (True, False, 2, 2), (True, True, 1, 1), (True, True, 2, 1)],
+)
+def test_pp_decode_limit_leaves_other_scheduling_modes_unchanged(
+    async_scheduling, use_v2, pp_size, decode_stagger
+):
+    scheduler = create_scheduler(
+        async_scheduling=async_scheduling,
+        use_v2_model_runner=use_v2,
+        max_num_seqs=4,
+    )
+    scheduler.use_pp = pp_size > 1
+    if async_scheduling:
+        scheduler.decode_stagger = decode_stagger
+    for request in create_requests(num_requests=4):
+        scheduler.add_request(request)
+    prefill = scheduler.schedule()
+    scheduler.update_from_output(prefill, _make_model_runner_output(prefill))
+    assert len(scheduler.schedule().num_scheduled_tokens) == 4
+
+
 @pytest.mark.parametrize("max_tokens", [1, 2, 3, 5])
 def test_stop_by_max_tokens(max_tokens: int):
     scheduler = create_scheduler(async_scheduling=True)
