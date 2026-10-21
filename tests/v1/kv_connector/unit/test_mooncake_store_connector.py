@@ -243,6 +243,7 @@ def test_capacity_only_scheduler_allows_mamba_none_mode(
         meta = store_scheduler.build_connector_meta(SchedulerOutput.make_empty())
 
     mock_client.return_value.lookup.assert_not_called()
+    assert isinstance(meta, MooncakeStoreConnectorMetadata)
     assert meta.requests == []
 
 
@@ -287,6 +288,7 @@ def test_scheduler_role_initializes_store_scheduler_only():
     block_pool = MagicMock()
 
     connector.bind_gpu_block_pool(block_pool)
+    assert isinstance(mock_scheduler.return_value, MagicMock)
     mock_scheduler.return_value.bind_gpu_block_pool.assert_called_once_with(block_pool)
 
 
@@ -308,7 +310,7 @@ def test_scheduler_reports_mooncake_cache_source():
     # Mooncake Store is an external cache service. Its internal memory and
     # local-storage policy is intentionally hidden behind that stable label.
     assert connector.get_external_cache_hit_sources(
-        None,  # type: ignore[arg-type]
+        None,
         32,
     ) == {CacheHitSource.EXTERNAL_UNSPECIFIED: 32}
 
@@ -607,6 +609,7 @@ def test_update_connector_output_and_take_events():
     connector.update_connector_output(output)
 
     assert connector._kv_cache_events is kv_events
+    assert isinstance(connector.connector_scheduler, MagicMock)
     connector.connector_scheduler.update_connector_output.assert_called_once_with(
         output
     )
