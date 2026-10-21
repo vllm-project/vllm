@@ -190,7 +190,12 @@ if _SDK_AVAILABLE:
 
         try:
             chat_request = handler.to_chat_completion_request(request)
-            result = await render_handler.render_chat_request(chat_request)
+            # Derender mode returns no citations: the position-to-source
+            # map can't go over JSON.
+            result = await render_handler.render_chat_request(
+                chat_request,
+                engine_chat_template_kwargs=handler._engine_chat_template_kwargs,
+            )
         except Exception as e:
             logger.exception("Error in /cohere/v2/chat/render: %s", e)
             return _error_response(create_error_response(e), raw_request)
