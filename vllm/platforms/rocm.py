@@ -715,12 +715,9 @@ class RocmPlatform(Platform):
         # TODO: Make this explicit in the selector in a future PR.
         if is_encoder_decoder and AttentionBackendEnum.ROCM_ATTN in backend_priorities:
             backend_priorities.remove(AttentionBackendEnum.ROCM_ATTN)
-        # On gfx1201 and gfx1100, TRITON_ATTN (with its tuned launch configs)
-        # is faster than ROCM_ATTN, including where ROCM_ATTN uses its HIP
-        # paged-attention decode kernel. An fp8_e5m2 KV cache keeps ROCM_ATTN:
-        # Attention quantizes the query only for fp8/fp8_e4m3 caches and
-        # rejects fp8_e5m2 for backends that take an fp8 query, as TRITON_ATTN
-        # does on gfx1201 (gfx1100 keeps the same rule; fp8_e5m2 is untested).
+        # On gfx1201 and gfx1100, prefer TRITON_ATTN over ROCM_ATTN. An
+        # fp8_e5m2 KV cache keeps ROCM_ATTN: Attention rejects fp8_e5m2 for
+        # backends that take an fp8 query, as TRITON_ATTN does on gfx1201.
         if (
             (on_gfx1201() or on_gfx1100())
             and AttentionBackendEnum.ROCM_ATTN in backend_priorities

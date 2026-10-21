@@ -51,19 +51,12 @@ if current_platform.is_rocm():
 # 2D launch for batches with prefill tokens: padded head size -> one config per
 # max_seqlen_q band (<= 64, 65-4095, >= 4096), each (BLOCK_M, TILE_SIZE, num_warps,
 # num_stages), or None for the default launch.
-# gfx1201: the default BLOCK_M=16 gives each program only 16 / GQA query rows, too
-# few for prefill; taller Q blocks are ~2x faster for prefill, chunked prefill and
-# mixed batches (synthetic sweep over head_dim 64-512, GQA 1-16, KV heads 1-8, block
-# size 16/528, bf16 and fp8 query).
 _GFX1201_2D_CONFIGS = {
     64: (None, (64, 64, 4, 1), (128, 64, 8, 1)),
     128: (None, (64, 32, 4, 1), (128, 32, 8, 2)),
     256: (None, (32, 32, 4, 1), (128, 32, 8, 1)),
     512: (None, (64, 16, 8, 1), (64, 16, 8, 1)),
 }
-# gfx1100: per band, the best geomean speedup with at most 1% of batches below 0.97x
-# and none below 0.8x (synthetic sweep over head_dim 64-512, GQA 1-16, KV heads 1-8,
-# block size 16/528, bf16).
 _GFX1100_2D_CONFIGS = {
     64: ((16, 32, 2, 1), (32, 32, 2, 1), (128, 64, 8, 1)),
     128: (None, (64, 32, 4, 1), (128, 32, 8, 1)),
@@ -84,12 +77,11 @@ _GFX1100_2D_DECODE_CONFIGS = {
     256: (16, 4, 1),
     512: (32, 8, 1),
 }
-# Split-KV (3D) decode. vLLM splits every request into 16 segments, so the kernel
-# runs requests x KV heads x 16 programs: too few to fill the GPU for small batches
-# (1 request x 2 KV heads = 32 programs), and many tiny ones for larger batches.
-# gfx1201 (32 CUs): padded head sizes whose segment count follows the batch.
+# Split-KV (3D) decode: the segment count per request follows requests x KV heads
+# instead of vLLM's fixed 16.
+# gfx1201: padded head sizes whose segment count follows the batch.
 _GFX1201_3D_HEADS = (64, 128, 256)
-# gfx1100 (48 CUs): padded head size -> (T, (TILE_SIZE, num_warps, num_stages)), with
+# gfx1100: padded head size -> (T, (TILE_SIZE, num_warps, num_stages)), with
 # next_pow2(T / (requests x KV heads)) segments.
 _GFX1100_3D_CONFIGS = {
     64: (512, (16, 2, 1)),
@@ -98,7 +90,7 @@ _GFX1100_3D_CONFIGS = {
     512: (64, (32, 8, 1)),
 }
 # gfx1100 sliding-window decode: padded head size -> requests x KV heads from which
-# the 2D launch is faster than split-KV.
+# a split-KV batch runs as 2D.
 _GFX1100_SW_2D_MIN_FILL = {64: 32, 512: 8}
 
 
@@ -151,7 +143,7 @@ def _gfx1201_split_kv_launch(head_size_padded, sliding_window, fp8_query, segmen
 
 def _gfx1100_split_kv_segments(head_size_padded, grid_fill, sliding_window):
     """gfx1100: next_pow2(T / (requests x KV heads)) segments, x8 for sliding
-    windows >= 512 (segments outside the window are idle), at most 128."""
+    windows >= 512, at most 128."""
     target, _ = _GFX1100_3D_CONFIGS[head_size_padded]
     segments = triton.next_power_of_2(triton.cdiv(target, grid_fill))
     if sliding_window >= 512:
@@ -1104,9 +1096,9 @@ def unified_attention(
         launch_num_stages = 2
 
     # gfx1201: prefill / chunked-prefill / mixed launch. It sets BLOCK_Q, so it comes
-    # before the grid size and the 2D/3D choice. A decode-heavy mixed batch with few Q
-    # heads per KV head would pad every decode sequence to BLOCK_Q rows; it keeps the
-    # default, as do configs with TILE_SIZE < 32 for an fp8 query.
+    # before the grid size and the 2D/3D choice. The default launch is kept for
+    # batches with BLOCK_Q > 16 and an average query below 16 tokens, and for configs
+    # with TILE_SIZE < 32 when the query is fp8.
     rdna_prefill_tile = None
     if (
         is_gfx1201
@@ -1207,9 +1199,8 @@ def unified_attention(
         )
 
     # gfx1201 decode: switch to the 2D kernel at half the threshold
-    # (64 // num_kv_heads sequences instead of 128 // num_kv_heads). Split-KV
-    # cuts short contexts into tiny segments, so 2D is faster earlier; short
-    # multi-token queries and fp8 KV caches keep the full threshold.
+    # (64 // num_kv_heads sequences instead of 128 // num_kv_heads). Multi-token
+    # queries and fp8 KV caches keep the full threshold.
     if (
         is_gfx1201
         and max_seqlen_q == 1
@@ -1256,8 +1247,8 @@ def unified_attention(
     # default launch (vLLM then always runs 2D).
     if (is_gfx1201 or is_gfx1100) and not is_batch_invariant:
         grid_fill = num_seqs * num_kv_heads
-        # gfx1100 sliding-window decode: move a split-KV batch to 2D from this
-        # requests x KV heads (2D is faster there); it then gets the 2D tuning below.
+        # gfx1100 sliding-window decode: a split-KV batch runs as 2D from this
+        # requests x KV heads, and then gets the 2D tuning below.
         sw_2d_fill = _GFX1100_SW_2D_MIN_FILL.get(head_size_padded)
         if (
             use_3d
