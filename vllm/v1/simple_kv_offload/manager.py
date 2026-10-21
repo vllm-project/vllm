@@ -766,7 +766,6 @@ class SimpleCPUOffloadScheduler:
 
             if is_full_table:
                 state.block_ids = tuple([] for _ in range(num_groups))
-                state.num_stored_blocks = [0] * num_groups
 
             if block_id_groups:
                 for g in range(min(num_groups, len(block_id_groups))):
