@@ -9,8 +9,9 @@
 ## Current acceptance
 
 原始记录位于 `benchmarks/programmable_kv_cache/results/acceptance-2026-10-19/`。
-任务 7.5/7.9/11.4 及本地 PR 描述 8.4 已完成，整体为 78/82。
-按用户要求收尾，已确认本任务队列和模型进程退出；策略消融、低压力预测、在线重复、profile 和最终验收汇总保持未完成。
+任务 7.4/7.5/7.9/11.4 及本地 PR 描述 8.4 已完成，整体为 79/82。
+用户已在收尾后重新指定 GPU 0/2，只执行新实验；显式和组件矩阵、低压力预测及其修复验证已完成，
+在线重复、profile 和最终验收汇总继续执行。
 
 | 数据 | 已验证范围 |
 | --- | --- |
@@ -28,6 +29,22 @@
 
 [本地 PR 描述](../../../docs/programmable-kvc/pr-description.md) 已整理当前实现、已测结果和未完成验收，
 并包含重复工作边界、AI 使用说明及人工审阅/测试要求；未发布到远端。
+
+GPU 0/2 的新记录位于 `benchmarks/programmable_kv_cache/results/acceptance-2026-10-20-gpu02/`。
+
+| 数据 | 已验证范围 |
+| --- | --- |
+| `forecast-regression-before-fix.json`、`forecast-fix-comparison.json` | 长预测在低压力下产生无加载的存出和命中损失；修复后两轮零搬运、恢复完整命中，中位耗时减少 4.10% |
+| `long-forecast-{before,after}-fix.log`、`forecast-guard-related.log` | 修复前两个失败行为复现；修复后 11 个针对性和 681 个完整相关检查通过 |
+| `mypy-forecast-guard.log`、`hooks-forecast-guard.log` | 修复后全量 Python 3.12 类型和默认 hooks 通过 |
+| `pressure-direct/`、`direct-preparation-audit.json` | 显式 movement/composed 各一轮，完整工作量与 GPU 审计通过；区分混合组覆盖与调用者归因歧义 |
+| `direct-shutdown-classification.json` | 最后请求与计时结束后，主动退出阶段的 EngineDeadError；原日志保留 |
+| `component-comparison.json`、五个 `pressure-*/matrix.json` | 五个单项/成对策略组全部完成，保留负面结果、逻辑 missing、物理搬运、CPU 与 32 个家族尾延迟 |
+| `frozen-source{,-before-forecast-guard}.json`、`forecast-fix-comparison.json` | 本轮仅改变 `ToolWaitPolicy` 的当前压力判断，前后策略源码与记录提交对齐 |
+| `verl-identity.json`、`health-checks.jsonl` | 实际依赖提交/源文件身份和约十分钟一次的轻量检查，检查自身的只读 RPC 单列 |
+
+原生/主策略重复性能证据仍来自 GPU 0/3；新组不与其混算收益。
+本轮未补跑 priority-only 无效轮或 native/quota/完整策略参考组。
 
 ## October 19 optimization round
 

@@ -59,7 +59,7 @@
 - [x] 7.1 Add a reproducible multi-round shared-prefix rollout workload with controllable pressure, pauses, branches, and resume predictions.
 - [x] 7.2 Add the agreed open-source workload integration and RL weight-version correctness coverage.
 - [x] 7.3 Add and run the two-engine Mooncake example, proving actual destination cache hits after request-free preparation.
-- [ ] 7.4 Run native/router-directive/local-policy/composed-policy comparisons and labeled oracle experiments; save raw measurements and commands.
+- [x] 7.4 Run native/router-directive/local-policy/composed-policy comparisons and labeled oracle experiments; save raw measurements and commands.
 - [x] 7.5 Run relevant model evaluations and measure overhead, regressions, admission delay, fairness, transfer volume, and failure recovery.
 - [x] 7.6 Add and run a direct-hint controller without local policies, covering request-free retention, movement, query, and release.
 - [x] 7.7 Add and run session/branch/range/shared-prefix workflows, asserting logical cleanup and independent retention lifetimes.
@@ -243,3 +243,19 @@ guarded-forecast GPU runs passed at 180.59/183.15 s with zero transfers and
 same-pair pre-fix runs. The remaining new arms are running.
 The old negative measurements remain preserved, and tasks remain unchecked
 until the relevant new measurements and final reconciliation are complete.
+
+Task 7.4 is complete within the user's requested continuation scope: retain
+the matched GPU 0/3 native/quota/cooperative and labeled pressure forecasts;
+add GPU 0/2 cache-fit forecasts, explicit movement/composed directives and all
+five single/paired local-policy arms. Their full-work fingerprints and GPU
+audits passed; commands and negative results are retained. The excluded
+priority-only replay remains invalid and was not rerun. No GPU 0/2 native
+reference was added, and no cross-pair speedup is claimed. These omissions
+remain unvalidated measurement limits.
+
+Current progress is **79/82**. Repeated actual live comparisons, independent
+CPU/GPU profiling and final reconciliation remain under 10.5, 11.3 and 10.6.
+The actual live native/quota/cooperative runs use the same initial workload
+configuration but may generate different trajectories; they are not equal-work
+replay speedups. The verl dependency remains clean at
+`fbb4b3a8bf636f290c9c59fc346f756849e9c241`.

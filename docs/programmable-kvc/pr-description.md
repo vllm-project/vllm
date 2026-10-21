@@ -1,8 +1,8 @@
 # Add application-directed programmable KV cache control
 
-Local PR description at the October 20 wrap-up. Implementation and the tests
-reported below are committed. Full acceptance remains incomplete; GPU experiments
-are stopped at the user's request while the allocated GPUs remain occupied.
+Local PR description during the October 20 GPU 0/2 continuation. Implementation
+and the tests reported below are committed. Full acceptance remains incomplete;
+new actual live repetitions and independent profiling are running.
 This document has not been published to the remote PR.
 
 ## Purpose
@@ -32,7 +32,8 @@ Reproduction commands and capability limits are in [the benchmark guide](../../b
 ## Test Result
 
 The following primary comparisons are complete. Remaining acceptance is explicitly
-listed below and is not represented as passing. No experiment queue is active.
+listed below and is not represented as passing. Completed comparisons and new
+GPU 0/2 measurements are separated by source version and hardware allocation.
 
 Qwen3.8-27B BF16, TP=2, GPUs 0/3 (A100 80GB PCIe), `gpu_memory_utilization=0.5`, actual KV 12.12 GiB/card, concurrency 64, batch token budget 4096 and max context 16384. Compilation/CUDA graphs are enabled; no fixed KV-byte override or profiler is used for ordinary timing.
 
@@ -56,19 +57,31 @@ Pressure forecast diagnostics preserve the same inputs, output lengths and actua
 
 Related offline CPU regression: 1,999 passed. The updated HTTP/benchmark regression file: 40 passed, overlapping the broad suite. Actual GPU buffer/CPU/Mooncake checks: 56 passed, one ROCm-specific skip. These overlapping counts are not summed.
 
-The selected runtime is unchanged from the previous tested normal-cost MOVE implementation. Failed and incomplete harness attempts, forced-pressure cache-fit regressions, and the unselected COPY-backup candidate remain in the evidence index. Instrumented runs are excluded from ordinary throughput comparisons.
+The main GPU 0/3 measurements and initial GPU 0/2 forecast diagnostics use the
+previous normal-cost MOVE implementation. Fix `3fe298ed64` subsequently requires
+current referenced occupancy before pause-aware MOVE. Two inaccurate 30 s
+cache-fit forecasts had written 3.49/1.90 GB with zero loads and lost cached
+tokens. The fix restores zero movement and all 8,084,608 cached tokens in two
+targeted GPU runs, reducing median elapsed time from 189.64 to 181.87 s.
+Eleven targeted checks, 681 complete related checks, full mypy-3.12 and default
+hooks passed. Earlier throughput percentages are not new measurements of this
+guarded source. Failed attempts and negative candidates remain in the evidence
+index; instrumented runs are excluded from ordinary throughput comparisons.
 
 Final-runtime recovery, real parameter update/rollback, and capacity partial/retry/fallback passed. Both CPU and Mooncake paired 128-question evaluations score 124/128 for recomputation and preparation, with zero answer mismatches and zero length cuts; cached tokens are 0/784 per question. Final result records and pending transfers are empty. Functional runs use eager TP=2 and utilization 0.45 to accommodate two engines; they are excluded from performance ratios.
 
 One direct-priority replay completed its model/control work but failed a predeclared process-log coverage limit (11.072 s gap, allowed maximum 10 s); its timing is excluded. Process ownership sampling is now one second, with the same rejection boundary and regression coverage. Same-sampling references and the rejected arm's repeat remain unexecuted.
 
-OpenSpec is **78/82**. Four acceptance tasks remain open: **7.4** direct/component
-comparisons; **10.5** complete repeated replay/live and cache-fit forecast matrices;
-**11.3** independent CPU/GPU profiling and analysis; **10.6** final acceptance
-reconciliation. Completing this local description satisfies documentation task
-8.4 without closing those gates. Main and follow-up controllers have exited and
-will not automatically resume. Detailed executed evidence and the stop boundary
-are in [the acceptance report](acceptance-report-2026-10-20.md).
+OpenSpec is **79/82**. New GPU 0/2 direct movement/composed and all five
+single/paired local-policy arms passed equal-work and GPU checks. Each diagnostic
+arm ran once; no same-pair native/quota/full replay reference or rejected
+priority-only replay was added, following the user's no-rerun instruction.
+There are no cross-pair speedup claims. Three acceptance tasks remain open:
+**10.5** actual live repetitions and their analysis; **11.3** independent CPU/GPU
+profiling and analysis; **10.6** final acceptance reconciliation. Preparing this
+local description does not close those gates or publish the update. The queue
+is running only the remaining new experiments. Detailed executed evidence
+is in [the acceptance report](acceptance-report-2026-10-20.md).
 
 Acceptance is scoped to this local model/hardware/layout. Native Mooncake uses complete primary boundaries and PCP=DCP=1; CPU control uses one block per chunk. CPU Share, cold Retain/delete, SimpleCPU control, KVCR request-free actions and mixed-owner envelopes are not advertised. Real Dynamo/llm-d and a full trainer/optimizer run are outside this delivery.
 
