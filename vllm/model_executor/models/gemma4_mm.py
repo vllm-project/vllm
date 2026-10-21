@@ -1319,22 +1319,36 @@ class Gemma4ForConditionalGeneration(
         return mm_input_by_modality
 
     @staticmethod
+    def _encoder_chunk_item_bytes(
+        patches_per_item: int,
+        hidden_size: int,
+        intermediate_size: int,
+    ) -> int:
+        """Upper bound on the encoder activation one item adds to a chunk.
+
+        Since transformers 5.10.1 the patch embedder looks positions up
+        with `F.embedding`, so no `position_embedding_size`-wide
+        one-hot is allocated. What scales with the chunk is the encoder:
+        the MLP's gate/up/activation outputs (3 x intermediate, bf16) and
+        a few hidden-size tensors (residual, norm, projections), linear in
+        patches, plus the bidirectional attention mask, which is
+        `(chunk, 1, patches, patches)` bool and is copied to the
+        activation dtype inside SDPA (3 bytes per patch pair). The two
+        terms peak at different points of a layer, so their sum is an
+        upper bound.
+        """
+        per_patch = 2 * (3 * intermediate_size + 4 * hidden_size)
+        return patches_per_item * per_patch + 3 * patches_per_item**2
+
+    @staticmethod
     def _encoder_chunk(
         patches_per_item: int,
         free_bytes: int,
         total_bytes: int,
-        position_embedding_size: int,
+        hidden_size: int,
+        intermediate_size: int,
     ) -> int:
-        """Max chunk size whose F.one_hot transient fits in the budget.
-
-        The dominant transient inside HF's `Gemma4VisionPatchEmbedder.
-        _position_embeddings` is
-        `F.one_hot(clamped_positions, num_classes=position_embedding_size)`
-        with shape `(chunk, patches, 2, position_embedding_size)`,
-        int64, plus its simultaneous cast to the position embedding
-        table dtype. That, not the encoder residual stream, sets peak
-        memory.
-        """
+        """Max chunk size whose encoder activations fit in the budget."""
         if patches_per_item <= 0:
             return 1
         # Half of currently-free, capped at 10% of total so we leave room
@@ -1342,12 +1356,10 @@ class Gemma4ForConditionalGeneration(
         budget = min(free_bytes // 2, total_bytes // 10)
         if budget <= 0:
             return 1
-        # F.one_hot allocates (chunk, patches, 2, pos_emb_size) int64
-        # (the inner 2 is the (x, y) coordinate axis, 8 is sizeof(int64)).
-        # Outer 2x covers the int64 buffer and its concurrent bf16 cast
-        # plus the matmul output that live alongside it at peak.
-        cost = patches_per_item * 4 * position_embedding_size * 8
-        return max(1, budget // cost) if cost > 0 else 1
+        cost = Gemma4ForConditionalGeneration._encoder_chunk_item_bytes(
+            patches_per_item, hidden_size, intermediate_size
+        )
+        return max(1, budget // cost)
 
     def _normalize_pixel_values(
         self, pixel_values: torch.Tensor, dtype: torch.dtype
@@ -1602,7 +1614,11 @@ class Gemma4ForConditionalGeneration(
                 max_batch_size = min(
                     len(items),
                     self._encoder_chunk(
-                        patches, free, total, vision_cfg.position_embedding_size
+                        patches,
+                        free,
+                        total,
+                        vision_cfg.hidden_size,
+                        vision_cfg.intermediate_size,
                     ),
                 )
 
@@ -1742,7 +1758,8 @@ class Gemma4ForConditionalGeneration(
                 pixel_values.shape[1],
                 free,
                 total,
-                vision_cfg.position_embedding_size,
+                vision_cfg.hidden_size,
+                vision_cfg.intermediate_size,
             ),
         )
 
