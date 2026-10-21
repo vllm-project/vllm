@@ -43,7 +43,10 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
 )
 from vllm.entrypoints.serve.engine.protocol import UsageInfo
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.entrypoints.serve.utils.tool_calls_utils import resolve_finish_reason
+from vllm.entrypoints.serve.utils.tool_calls_utils import (
+    maybe_filter_parallel_tool_calls,
+    resolve_finish_reason,
+)
 from vllm.logger import init_logger
 from vllm.outputs import CompletionOutput
 from vllm.parser import Parser, ParserManager
