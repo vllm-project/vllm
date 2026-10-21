@@ -73,11 +73,12 @@ steps:
   - tests/models/test_deepseek_v41_decoder_replay_layers.py
   - tests/models/test_deepseek_v41_replay_batch.py
   - tests/models/test_deepseek_v41_pcp.py
+  - tests/models/test_deepseek_v41_pipeline.py
   - tests/models/transformers/test_layer_registry_e2e.py
   - tests/models/test_deepseek_v41_replay_start.py
   - tests/models/test_deepseek_v4_vl_stream_weights.py
   commands:
-    - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py models/test_deepseek_v4_vl_rocm.py models/transformers/test_layer_registry_e2e.py models/test_deepseek_v41_replay_start.py models/test_deepseek_v41_decoder_replay_layers.py models/test_deepseek_v41_replay_batch.py models/test_deepseek_v41_pcp.py models/test_deepseek_v4_vl_stream_weights.py
+    - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py models/test_deepseek_v4_vl_rocm.py models/transformers/test_layer_registry_e2e.py models/test_deepseek_v41_replay_start.py models/test_deepseek_v41_decoder_replay_layers.py models/test_deepseek_v41_replay_batch.py models/test_deepseek_v41_pcp.py models/test_deepseek_v41_pipeline.py models/test_deepseek_v4_vl_stream_weights.py
   mirror:
     amd:
       label: ":amd: (MI355) Basic Models (Other)"
@@ -100,9 +101,25 @@ steps:
       - tests/models/test_deepseek_v4_rocm_wo_a.py
       - tests/models/test_deepseek_v4_rocm_compressor_gemm_fusion.py
       - tests/models/test_dsv41_mono_decode.py
+      - tests/models/test_deepseek_v4_vl_stream_weights.py
       commands:
-      - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py models/test_deepseek_v4_vl_rocm.py models/transformers/test_layer_registry_e2e.py models/test_deepseek_v41_replay_start.py models/test_deepseek_v41_decoder_replay_layers.py models/test_deepseek_v41_replay_batch.py models/test_deepseek_v41_amd_replay_forward.py models/test_deepseek_v4_dspark_rocm.py models/test_deepseek_v4_rocm_wo_a.py models/test_deepseek_v4_rocm_compressor_gemm_fusion.py models/test_dsv41_mono_decode.py
+      - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py models/test_deepseek_v4_vl_rocm.py models/transformers/test_layer_registry_e2e.py models/test_deepseek_v41_replay_start.py models/test_deepseek_v41_decoder_replay_layers.py models/test_deepseek_v41_replay_batch.py models/test_deepseek_v41_amd_replay_forward.py models/test_deepseek_v4_dspark_rocm.py models/test_deepseek_v4_rocm_wo_a.py models/test_deepseek_v4_rocm_compressor_gemm_fusion.py models/test_dsv41_mono_decode.py models/test_deepseek_v4_vl_stream_weights.py
       - VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'not distributed'
+
+- label: ":amd: (MI355) MiniMax M3 MonoKernel"
+  key: minimax-m3-monokernel-mi355
+  dind: false
+  timeout_in_minutes: 20
+  device: mi355_4
+  num_devices: 4
+  working_dir: "/vllm-workspace/tests"
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/models/minimax_m3/amd/
+  - tests/models/minimax_m3/amd_specialized_decode/
+  commands:
+  - pytest -v -s models/minimax_m3/amd_specialized_decode
 
 - label: ":nvidia: (B200) Inkling"
   key: inkling-unit-tests-b200
@@ -164,7 +181,7 @@ steps:
       # cuda.bindings.driver), so it is deliberately left out here.
       - pytest -v -s models/kimi_k3
 
-- label: ":nvidia: (4xB200) Kimi K3 Prefix Cache"
+- label: ":nvidia: (4xB200) [Nightly] Kimi K3 Prefix Cache"
   key: kimi-k3-prefix-cache-4xb200
   # Nightly only: 4-GPU B200 pods wait hours behind smaller jobs on per-PR runs.
   optional: true
@@ -205,6 +222,7 @@ steps:
   source_file_dependencies:
   - vllm/models/glm5next/
   - tests/models/glm5next/
+  - vllm/model_executor/layers/mamba/checkpoint.py
   commands:
     - pytest -v -s models/glm5next
   mirror:
@@ -227,6 +245,7 @@ steps:
   - vllm/models/qwen4_exp/
   - vllm/config/compilation.py
   - vllm/v1/attention/backends/short_conv_attn.py
+  - vllm/model_executor/layers/mamba/checkpoint.py
   - tests/models/qwen4_exp/
   commands:
     - pytest -v -s models/qwen4_exp/test_hc_ops.py models/qwen4_exp/test_qsa_prepare.py models/qwen4_exp/test_qsa_reference.py
@@ -297,6 +316,25 @@ steps:
   source_file_dependencies:
   - docker/Dockerfile.rocm_base
   - vllm/models/deepseek_v41/amd/
+  - tests/models/test_dsv41_mono_numerics.py
+  - tests/models/test_dsv41_mono_layers.py
+  commands:
+  - pytest -v -s tests/models/test_dsv41_mono_numerics.py
+  - pytest -v -s tests/models/test_dsv41_mono_layers.py
+
+- label: ':amd: (MI300) DeepSeek-V4.1 gfx942 Mono Decode Layers'
+  key: dsv41-mono-decode-layers-gfx942-amd
+  dind: false
+  device: mi300_4
+  num_devices: 4
+  timeout_in_minutes: 40
+  working_dir: /vllm-workspace/
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - docker/Dockerfile.rocm_base
+  - vllm/models/deepseek_v41/amd/
+  - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
   - tests/models/test_dsv41_mono_numerics.py
   - tests/models/test_dsv41_mono_layers.py
   commands:
