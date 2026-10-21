@@ -74,6 +74,20 @@ class DispatchPooler(Pooler):
     def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
         return self.poolers_by_task[task].get_pooling_updates(task)
 
+    def replace_classifier(
+        self,
+        new_classifier: ClassifierFn,
+    ) -> None:
+        """Replaces the classifier to the LoRA-wrapped version."""
+        for task, pooler in self.poolers_by_task.items():
+            if task not in {"classify"}:
+                # Now LoRA only supports classification tasks,
+                # so we only replace the classifier for "classify" task.
+                continue
+            head = getattr(pooler, "head", None)
+            if head is not None and hasattr(head, "classifier"):
+                head.classifier = new_classifier
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -184,6 +198,11 @@ class BOSEOSFilter(Pooler):
         for i, (prompt_len, token_ids) in enumerate(
             zip(pooling_metadata.prompt_lens, prompt_token_ids)
         ):
+            # Late chunking returns one row per chunk, with special tokens
+            # already included in the means. Skip BOS/EOS row removal for these
+            # requests; ordinary token outputs still use the filtering below.
+            if pooling_metadata.pooling_params[i].late_chunking_params is not None:
+                continue
             pooled_data = pooled_outputs[i]
             assert (
                 isinstance(pooled_data, torch.Tensor)

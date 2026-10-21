@@ -30,6 +30,7 @@ from vllm.config import (
     PassConfig,
     VllmConfig,
 )
+from vllm.config.cache import CacheDType
 from vllm.config.utils import Range
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.attention import Attention
@@ -310,6 +311,9 @@ class QKRoPEStaticQKVCacheTestModel(QKRoPEKVCacheTestModel):
 @pytest.mark.parametrize("is_neox", [True, False])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+# ROCM_ATTN layers switched to the interleaved V cache (by the QK-norm fusion)
+# must still get the same cache from the fused op as from the unfused write.
+@pytest.mark.parametrize("interleaved_v", [False, True])
 @pytest.mark.skipif(
     not is_aiter_found_and_supported(),
     reason="Only test on ROCm with AITER installed and supported",
@@ -324,9 +328,12 @@ def test_rope_kvcache_fusion(
     block_size: int,
     is_neox: bool,
     dtype: torch.dtype,
-    kv_cache_dtype: str,
+    kv_cache_dtype: CacheDType,
+    interleaved_v: bool,
     monkeypatch: pytest.MonkeyPatch,
 ):
+    if interleaved_v and attn_backend != AttentionBackendEnum.ROCM_ATTN:
+        pytest.skip("Only ROCM_ATTN has an interleaved V cache")
     torch.set_default_device("cuda")
     torch.set_default_dtype(dtype)
     torch.manual_seed(0)
@@ -368,6 +375,8 @@ def test_rope_kvcache_fusion(
             dtype=dtype,
             device=torch.get_default_device(),
         )
+        if interleaved_v:
+            model.attn.impl.set_interleaved_v_cache()
 
         fusion_pass = RopeKVCacheFusionPass(vllm_config)
         passes = [
@@ -468,7 +477,7 @@ def test_rope_static_qquant_kvcache_fusion(
     block_size: int,
     is_neox: bool,
     dtype: torch.dtype,
-    kv_cache_dtype: str,
+    kv_cache_dtype: CacheDType,
     monkeypatch: pytest.MonkeyPatch,
 ):
     torch.set_default_device("cuda")

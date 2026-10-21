@@ -18,7 +18,7 @@ use crate::error::{Error, Result, bail_multimodal, multimodal};
 pub(super) enum KwargValue {
     /// Tensor with row-major flat data and shape.
     Tensor { wire: WireTensor },
-    /// Non-tensor kwarg value that is shared or copied as-is.
+    /// Non-tensor kwarg value preserved in protocol form.
     Passthrough(ProtocolKwargValue),
 }
 
@@ -150,7 +150,17 @@ impl KwargValue {
     /// Batched fields use their first axis as media-item index and drop that
     /// axis in the per-feature value, matching vLLM's batched-field semantics.
     pub(super) fn batched_wire_value_at(&self, index: usize) -> Result<ProtocolKwargValue> {
-        self.wire_value_range(index, index + 1, true)
+        match self {
+            Self::Passthrough(ProtocolKwargValue::List(values)) => values
+                .get(index)
+                .cloned()
+                .ok_or_else(|| multimodal!("batched passthrough has no item at index {index}")),
+            Self::Passthrough(value) if index == 0 => Ok(value.clone()),
+            Self::Passthrough(_) => Err(multimodal!(
+                "scalar batched passthrough has no item at index {index}"
+            )),
+            Self::Tensor { .. } => self.wire_value_range(index, index + 1, true),
+        }
     }
 
     /// Convert one media item's flat tensor range directly to wire bytes.
@@ -334,6 +344,41 @@ mod tests {
             raw_view,
             [3.0_f32, 4.0].into_iter().flat_map(f32::to_ne_bytes).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn batched_passthrough_value_at_selects_media_item() {
+        let image_sizes = KwargValue::from_model_specific(
+            ModelSpecificValue::TupleVec(vec![(384, 736), (512, 512)]),
+            ModelDtype::BFloat16,
+        )
+        .unwrap();
+
+        assert_eq!(
+            image_sizes.batched_wire_value_at(1).unwrap(),
+            ProtocolKwargValue::List(vec![
+                ProtocolKwargValue::Int(512),
+                ProtocolKwargValue::Int(512),
+            ])
+        );
+        assert!(image_sizes.batched_wire_value_at(2).is_err());
+
+        let token_counts = KwargValue::from_model_specific(
+            ModelSpecificValue::IntVec(vec![276, 400]),
+            ModelDtype::BFloat16,
+        )
+        .unwrap();
+        assert_eq!(
+            token_counts.batched_wire_value_at(1).unwrap(),
+            ProtocolKwargValue::Int(400)
+        );
+
+        let scalar = KwargValue::Passthrough(ProtocolKwargValue::Int(7));
+        assert_eq!(
+            scalar.batched_wire_value_at(0).unwrap(),
+            ProtocolKwargValue::Int(7)
+        );
+        assert!(scalar.batched_wire_value_at(1).is_err());
     }
 
     #[test]
