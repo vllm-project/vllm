@@ -216,12 +216,17 @@ def test_qwen4_exp_model_state_prepares_ngram_context() -> None:
     model_state.ngram_context = torch.empty((8, 3), dtype=torch.int32)
     model_state.ngram_context_offsets = torch.arange(-3, 0, dtype=torch.int64)
     model_state.ple_query_start_loc = torch.empty(9, dtype=torch.int32)
+    staged_calls = []
+    model_state.host_staged_ple = [
+        SimpleNamespace(stage_host_lookup=lambda *args: staged_calls.append(args))
+    ]
 
     input_batch = SimpleNamespace(
         num_reqs=2,
         num_reqs_after_padding=3,
         idx_mapping=torch.tensor([1, 0]),
         query_start_loc=torch.tensor([0, 2, 3, 3], dtype=torch.int32),
+        input_ids=torch.tensor([5, 6, 7], dtype=torch.int32),
     )
     req_states = SimpleNamespace(
         num_computed_tokens=SimpleNamespace(gpu=torch.tensor([3, 1])),
@@ -242,6 +247,11 @@ def test_qwen4_exp_model_state_prepares_ngram_context() -> None:
     expected_context = torch.full((8, 3), 99, dtype=torch.int32)
     expected_context[:2] = torch.tensor([[99, 99, 20], [1, 2, 3]])
     torch.testing.assert_close(model_inputs["ngram_context"], expected_context)
+    # Host-staged PLE rows are staged from the same inputs the forward reads.
+    assert len(staged_calls) == 1
+    assert staged_calls[0][0] is input_batch.input_ids
+    assert staged_calls[0][1] is model_inputs["query_start_loc"]
+    assert staged_calls[0][2] is model_inputs["ngram_context"]
 
     # Retain the views to detect reallocations as the request layout changes.
     query_start_loc = model_inputs["query_start_loc"]

@@ -13,6 +13,8 @@ from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.gpu.states import RequestState
 
+from .ngram_embedding import Qwen4ExpNGramEmbedding
+
 
 class Qwen4ExpModelState(MambaHybridModelState):
     """Add rollback-safe PLE n-gram context to the model inputs."""
@@ -63,6 +65,14 @@ class Qwen4ExpModelState(MambaHybridModelState):
             dtype=torch.int32,
             device=self.device,
         )
+        # Host-staged PLE tables (no UVA) need this step's rows copied in
+        # before the forward, outside any CUDA graph.
+        self.host_staged_ple = [
+            module
+            for module in model.modules()
+            if isinstance(module, Qwen4ExpNGramEmbedding)
+            and module.ngram_embedding.stages_before_forward
+        ]
 
     def _prepare_ngram_context(
         self,
@@ -106,9 +116,14 @@ class Qwen4ExpModelState(MambaHybridModelState):
         query_start_loc[: num_reqs_padded + 1].copy_(input_batch.query_start_loc)
         # Represent unused capacity as trailing zero-length requests.
         query_start_loc[num_reqs_padded + 1 :].copy_(input_batch.query_start_loc[-1])
+        ngram_context = self._prepare_ngram_context(input_batch, req_states)
+        for ple_embedding in self.host_staged_ple:
+            ple_embedding.stage_host_lookup(
+                input_batch.input_ids, query_start_loc, ngram_context
+            )
         model_inputs.update(
             query_start_loc=query_start_loc,
-            ngram_context=self._prepare_ngram_context(input_batch, req_states),
+            ngram_context=ngram_context,
         )
         return model_inputs
 

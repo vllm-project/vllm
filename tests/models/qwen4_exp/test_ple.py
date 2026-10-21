@@ -16,6 +16,7 @@ from transformers import Qwen4ExpTextConfig
 import vllm.model_executor.layers.vocab_parallel_embedding as embedding_module
 import vllm.model_executor.parameter as parameter_module
 import vllm.models.qwen4_exp.common.ngram_embedding as ngram_embedding_module
+import vllm.models.qwen4_exp.nvidia.ngram_embedding as nvidia_ngram_embedding_module
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm.config import SpeculativeConfig, VllmConfig
 from vllm.config.compilation import CUDAGraphMode
@@ -52,6 +53,7 @@ from vllm.models.qwen4_exp.nvidia.ngram_embedding import (
     Qwen4ExpPLEFp8EmbeddingMethod,
     Qwen4ExpPLENvFp4EmbeddingMethod,
     Qwen4ExpPLEPinnedHostEmbedding,
+    Qwen4ExpPLEStagedHostEmbedding,
     Qwen4ExpPLEUnquantizedEmbeddingMethod,
 )
 from vllm.models.qwen4_exp.nvidia.ple_layer import Qwen4ExpPLELayer
@@ -343,7 +345,9 @@ def test_ngram_embedding_loads_fp8_shards_and_global_scale() -> None:
     )
 
 
-def _make_nvfp4_ngram_embedding(monkeypatch, *, rank=0, device="cpu", pinned=False):
+def _make_nvfp4_ngram_embedding(
+    monkeypatch, *, rank=0, device="cpu", pinned=False, staged=False
+):
     _mock_etp_group(monkeypatch, world_size=2, rank=rank)
     monkeypatch.setattr(
         parameter_module, "get_tensor_model_parallel_rank", lambda: rank
@@ -352,6 +356,8 @@ def _make_nvfp4_ngram_embedding(monkeypatch, *, rank=0, device="cpu", pinned=Fal
         parameter_module, "get_tensor_model_parallel_world_size", lambda: 2
     )
     cls = Qwen4ExpPLEPinnedHostEmbedding if pinned else Qwen4ExpPLEDeviceEmbedding
+    if staged:
+        cls = Qwen4ExpPLEStagedHostEmbedding
     with torch.device(device):
         embedding = cls(
             8,
@@ -497,6 +503,150 @@ def test_nvfp4_ple_cuda_lookup_and_graph_replay(monkeypatch, pinned):
         atol=0,
         rtol=0,
     )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_staged_nvfp4_ple_stages_outside_and_decodes_inside_graph(monkeypatch):
+    # Rank 1 exercises both the vocab offset and out-of-shard masking.
+    rank = 1
+    module, tensors, codes, scales = _make_nvfp4_ngram_embedding(
+        monkeypatch, rank=rank, device="cuda", staged=True
+    )
+    module.load_weights(iter(tensors))
+    layer = module.ngram_embedding
+    layer.embedding_method.process_weights_after_loading(layer)
+    assert layer.weight.device.type == "cpu"
+    assert layer.weight_scale.device.type == "cpu"
+
+    layer.stage_lookup(torch.tensor([[3, 4], [7, 0]], device="cuda"))
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(3):
+            layer.finalize_prefetch(total_tokens=2)
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        output = layer.finalize_prefetch(total_tokens=2)
+    for new_ids in ([[3, 4], [7, 0]], [[4, 3], [0, 7]]):
+        ids = torch.tensor(new_ids, device="cuda")
+        # Staging runs before the replay, outside the captured graph.
+        layer.stage_lookup(ids)
+        graph.replay()
+        cpu_ids = ids.cpu()
+        expected = _reference_nvfp4_ple(codes, scales)[cpu_ids]
+        expected[(cpu_ids < rank * 4) | (cpu_ids >= (rank + 1) * 4)] = 0
+        torch.testing.assert_close(output.cpu(), expected.flatten(-2), atol=0, rtol=0)
+
+
+def _make_staged_embedding(
+    monkeypatch: pytest.MonkeyPatch, *, rank: int, device: str, fp8: bool
+) -> tuple[Qwen4ExpPLEStagedHostEmbedding, torch.Tensor]:
+    """Build a two-way ETP staged embedding holding rank ``rank``'s rows."""
+    _mock_etp_group(monkeypatch, world_size=2, rank=rank)
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_rank", lambda: rank
+    )
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_world_size", lambda: 2
+    )
+    method = (
+        Qwen4ExpPLEFp8EmbeddingMethod()
+        if fp8
+        else Qwen4ExpPLEUnquantizedEmbeddingMethod()
+    )
+    with torch.device(device):
+        embedding = Qwen4ExpPLEStagedHostEmbedding(
+            8,
+            4,
+            params_dtype=torch.bfloat16,
+            padding_size=2,
+            prefix="test.ple_embedding.ngram_embedding",
+            embedding_method=method,
+            num_ngram_heads=2,
+            max_total_tokens=3,
+        )
+    table = (torch.arange(32).reshape(8, 4) + 1).to(embedding.weight.dtype)
+    embedding.weight.data.copy_(table[rank * 4 : (rank + 1) * 4])
+    return embedding, table
+
+
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param(
+            "cuda",
+            marks=pytest.mark.skipif(
+                not torch.cuda.is_available(), reason="CUDA is required"
+            ),
+        ),
+    ],
+)
+@pytest.mark.parametrize("fp8", [False, True], ids=["bf16", "fp8"])
+@pytest.mark.parametrize("rank", [0, 1])
+def test_staged_host_embedding_stages_owned_rows(
+    monkeypatch: pytest.MonkeyPatch, device: str, fp8: bool, rank: int
+) -> None:
+    """Staging gathers the owned rows from host memory, zeroing the rest."""
+    embedding, table = _make_staged_embedding(
+        monkeypatch, rank=rank, device=device, fp8=fp8
+    )
+    assert embedding.weight.device.type == "cpu"
+    for ids in ([[3, 4], [7, 0], [4, 3]], [[1, 6]]):
+        ngram_ids = torch.tensor(ids, device=device)
+        embedding.stage_lookup(ngram_ids)
+        output = embedding.finalize_prefetch(total_tokens=ngram_ids.shape[0])
+
+        cpu_ids = ngram_ids.cpu()
+        expected = table[cpu_ids].float()
+        expected[(cpu_ids < rank * 4) | (cpu_ids >= (rank + 1) * 4)] = 0
+        assert output.device.type == torch.device(device).type
+        assert output.dtype == table.dtype
+        torch.testing.assert_close(
+            output.cpu().float(), expected.flatten(-2), atol=0, rtol=0
+        )
+
+
+def test_ngram_embedding_stages_host_rows_without_uva(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """cpu_offload falls back to the host-staged table when UVA is unavailable."""
+    _mock_etp_group(monkeypatch)
+    monkeypatch.setattr(embedding_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        embedding_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
+    monkeypatch.setattr(
+        nvidia_ngram_embedding_module,
+        "get_current_vllm_config",
+        lambda: SimpleNamespace(engram_config=SimpleNamespace(cpu_offload=True)),
+    )
+    monkeypatch.setattr(
+        nvidia_ngram_embedding_module, "is_uva_available", lambda: False
+    )
+    config = Qwen4ExpTextConfig(
+        ngram_size=3,
+        heads_per_ngram=1,
+        ngram_vocab_size_base=5,
+        make_ngram_vocab_size_divisible_by=8,
+        split_ngram_parts=2,
+        ple_embed_dim=6,
+        eos_token_id=0,
+        vocab_size=64,
+    )
+    module = Qwen4ExpNGramEmbedding(
+        config,
+        embedding_dim=config.ple_embed_dim,
+        ple_dense_layer_id=0,
+        max_total_tokens=4,
+        data_parallel_rank=0,
+        prefix="test.ple_embedding",
+        params_dtype=torch.bfloat16,
+    )
+
+    assert type(module.ngram_embedding) is Qwen4ExpPLEStagedHostEmbedding
+    assert module.ngram_embedding.weight.device.type == "cpu"
 
 
 @pytest.mark.parametrize(("dp_rank", "local_tokens"), [(0, 2), (1, 3)])
@@ -1388,6 +1538,7 @@ def test_ngram_prefetch_ids_outlive_start_prefetch() -> None:
     prefetched: list[torch.Tensor] = []
     module.ngram_embedding = SimpleNamespace(
         supports_prefetch=True,
+        stages_before_forward=False,
         start_prefetch=lambda ids: prefetched.append(weak_ref_tensor(ids)),
     )
     expected = _reference_ngram_ids(input_ids, query_start_loc, ngram_context, **params)
