@@ -913,14 +913,14 @@ def test_hisparse_inflight_host_import_reserves_remaining_gpu_pages():
     assert required == 4
 
 
-@pytest.mark.parametrize("host_num_blocks,admitted", [(5, False), (6, True)])
+@pytest.mark.parametrize("host_num_blocks,admitted", [(7, False), (8, True)])
 def test_hisparse_async_admission_requires_full_prompt_host_pages(
     host_num_blocks, admitted, tmp_path
 ):
     """An async load is admitted only if its whole prompt's host pages fit.
 
-    The in-flight prefill's host page is not free, so the waiting request's
-    four prompt pages need six host blocks including the null block.
+    The in-flight prefill's three prompt pages stay reserved, so the waiting
+    request's four prompt pages need eight host blocks including the null block.
     """
     from .utils import create_scheduler, mock_kv
 
@@ -959,9 +959,8 @@ def test_hisparse_admitted_async_loads_can_finish_with_nothing_running(tmp_path)
 
     Waiting requests keep their blocks and are never preempted, so two imports
     that each hold a host page while together needing more than the pool has
-    left would never be scheduled again. HiSparse relies on full-ISL admission:
-    a load is admitted only if its whole prompt's host pages fit, so the newest
-    admitted load can always finish and free host blocks for the others.
+    left would never be scheduled again. A load is admitted only if its whole
+    prompt's host pages fit beside the pages earlier imports still need.
     """
     from .utils import create_scheduler, mock_kv
 
@@ -974,13 +973,14 @@ def test_hisparse_admitted_async_loads_can_finish_with_nothing_running(tmp_path)
         max_model_len=128,
         use_kv_connector=mock_kv(matched_tokens=HISPARSE_BLOCK_SIZE, is_async=True),
     )
-    # One null block plus three usable host blocks.
-    manager = make_hisparse_kv_cache_manager(32, 4)
+    # One null block plus four usable host blocks: once first imports one page,
+    # three are free, enough for second's prompt but not beside first's rest.
+    manager = make_hisparse_kv_cache_manager(32, 5)
     scheduler.kv_cache_manager = manager
     scheduler.kv_cache_config = manager.kv_cache_config
     assert scheduler.scheduler_reserve_full_isl
     first = make_request(
-        "first", list(range(3 * HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
+        "first", list(range(4 * HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
     )
     second = make_request(
         "second",
@@ -992,12 +992,11 @@ def test_hisparse_admitted_async_loads_can_finish_with_nothing_running(tmp_path)
         scheduler.add_request(request)
         scheduler.schedule()
     admitted = {r.request_id for r in scheduler._inflight_prefills}
+    assert admitted == {"first"}
 
     scheduler.finished_recving_kv_req_ids.update(admitted)
-    num_scheduled_tokens = 0
-    for _ in range(4):
-        num_scheduled_tokens += scheduler.schedule().total_num_scheduled_tokens
-    assert num_scheduled_tokens > 0
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens.get("first", 0) > 0
 
 
 @pytest.mark.parametrize(

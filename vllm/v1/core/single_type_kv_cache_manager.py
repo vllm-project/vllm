@@ -2220,6 +2220,20 @@ class HiSparseSourceManager(FullAttentionManager):
     # The host tier keeps prefixes the device groups have already lost.
     retains_longer_hit = True
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._admission_pages: dict[str, int] = {}
+        # A waiting import holds host pages and is never preempted, so the rest
+        # of its full sequence stays reserved against later admissions.
+        self._import_pages: dict[str, int] = {}
+
+    def _reserved_import_pages(self, request_id: str) -> int:
+        return sum(
+            max(pages - len(self.req_to_blocks.get(other_id, ())), 0)
+            for other_id, pages in self._import_pages.items()
+            if other_id != request_id
+        )
+
     @property
     def records_new_block_ids(self) -> bool:
         return False
@@ -2275,9 +2289,15 @@ class HiSparseSourceManager(FullAttentionManager):
             num_local_computed_tokens,
             num_tokens_main_model,
         )
+        available = self.block_pool.get_num_free_blocks()
+        if apply_admission_cap:
+            self._admission_pages[request_id] = cdiv(
+                num_tokens_main_model, self.block_size
+            )
+            available -= self._reserved_import_pages(request_id)
         # Host blocks come from a private pool, so they never count against
         # the GPU pool. Use the same admission sentinel as Mamba instead.
-        if required > self.block_pool.get_num_free_blocks():
+        if required > available:
             assert self.coordinator is not None
             assert self.coordinator.gpu_pool is not None
             return self.coordinator.gpu_pool.num_gpu_blocks + 1
@@ -2298,6 +2318,9 @@ class HiSparseSourceManager(FullAttentionManager):
         self.coordinator.record_pending_host_import(
             request_id, num_local_computed_tokens + num_external_computed_tokens
         )
+        admission_pages = self._admission_pages.pop(request_id, None)
+        if admission_pages is not None:
+            self._import_pages[request_id] = admission_pages
         super().allocate_external_computed_blocks(
             request_id,
             num_local_computed_tokens,
@@ -2339,6 +2362,8 @@ class HiSparseSourceManager(FullAttentionManager):
     def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
         assert self.coordinator is not None
         self.coordinator.free(request_id)
+        self._admission_pages.pop(request_id, None)
+        self._import_pages.pop(request_id, None)
         return super().pop_blocks_for_free(request_id)
 
 
