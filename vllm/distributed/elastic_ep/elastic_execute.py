@@ -418,9 +418,27 @@ class ElasticEPScalingExecutor:
         Handing the teardown to a background thread is not enough either, since
         it then runs while the new transport is being set up, which faulted the
         GPU with a write to a read-only page.
+
+        Those measurements all predate the expert arena registration fix, and
+        two of the three places that refusal shows up turned out not to need
+        their workaround once the arena stopped being deregistered under a live
+        reader. The fault reason quoted above is the same one the arena controls
+        produced, so this may be the third. Until a run says otherwise the
+        retirement is opt in, which is why `VLLM_EEP_GROUP_RETIRE` gates it.
+
+        **If the experiment says the retirement is still needed, this default
+        has to be inverted before any of this goes upstream.** Destroying
+        replaced groups promptly is correct behaviour on its own, so the open
+        question is only whether it is load bearing, not whether it belongs.
         """
         live = sum(1 for group in groups if group is not None)
         if not live:
+            return
+        if os.getenv("VLLM_EEP_GROUP_RETIRE") != "1":
+            logger.info(
+                "[Elastic EP] Left %d stale group(s) alive, retirement is off",
+                live,
+            )
             return
         started = time.perf_counter()
         self._destroy_retired_groups(groups)

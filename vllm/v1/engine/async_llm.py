@@ -216,6 +216,9 @@ class AsyncLLM(EngineClient):
         self._client_count = client_count
 
         self.output_handler: asyncio.Task | None = None
+        # Set once shutdown() is under way, so the output handler can tell a
+        # dead engine core apart from an engine core that was asked to stop.
+        self._shutting_down = False
         try:
             # Start output handler eagerly if we are in the asyncio eventloop.
             asyncio.get_running_loop()
@@ -304,6 +307,9 @@ class AsyncLLM(EngineClient):
 
     def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown, cleaning up the background proc and IPC."""
+        # Before the engine core goes, because the output handler reads it on
+        # the event loop while this runs in an executor thread.
+        self._shutting_down = True
         shutdown_prometheus()
 
         if renderer := getattr(self, "renderer", None):
@@ -938,6 +944,15 @@ class AsyncLLM(EngineClient):
                     logger.info(
                         "[Elastic EP] Retired rank stopped receiving EngineCore outputs"
                     )
+                    output_processor.propagate_error(e)
+                    return
+                if self._shutting_down and isinstance(e, EngineDeadError):
+                    # shutdown() stops the engine core before it cancels this
+                    # task, and the launcher runs it in an executor so the loop
+                    # keeps going in between. A read in flight then finds the
+                    # core already gone, which is the shutdown working rather
+                    # than failing.
+                    logger.info("Engine core stopped before the output handler")
                     output_processor.propagate_error(e)
                     return
                 logger.exception("AsyncLLM output_handler failed.")
