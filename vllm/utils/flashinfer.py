@@ -71,24 +71,63 @@ def _flashinfer_nvcc_path() -> str | None:
     return shutil.which(os.path.join(cuda_home, "bin", "nvcc"))
 
 
-def is_flashinfer_jit_usable() -> bool:
-    """Check package/toolchain prerequisites for FlashInfer attention JIT.
-
-    FlashInfer's JIT-cache wheel supplies precompiled modules. Otherwise,
-    its runtime JIT needs both nvcc and ninja. The separate cubin package only
-    supplies TRTLLM-gen cubins and is not sufficient for attention JIT modules.
-    This prerequisite check does not verify per-kernel artifacts for every
-    active GPU architecture; the selector uses it to decide whether the
-    FlashInfer path is eligible, not to guarantee a particular kernel loads.
-    """
-    if importlib.util.find_spec("flashinfer") is None:
+def _has_compatible_flashinfer_jit_cache_provider() -> bool:
+    """Return whether an installed provider advertises kernels for this GPU."""
+    if importlib.util.find_spec("flashinfer_jit_cache") is None:
         return False
-    # flashinfer-jit-cache ships no SM75 kernels, so SM75 needs the JIT.
-    if importlib.util.find_spec(
-        "flashinfer_jit_cache"
-    ) is not None and not current_platform.is_device_capability(75):
+    try:
+        providers = importlib.import_module(
+            "flashinfer_jit_cache"
+        ).get_jit_cache_providers()
+    except (AttributeError, ImportError, ModuleNotFoundError, RuntimeError, ValueError):
+        return False
+
+    providers = tuple(providers)
+    if not providers:
+        return False
+
+    try:
+        device_capability = current_platform.get_device_capability()
+    except (NotImplementedError, RuntimeError):
+        device_capability = None
+    if device_capability is None:
+        # Some platforms cannot expose a capability before device setup. Require
+        # the provider to advertise both modules and architectures, but note
+        # that this cannot establish a match to the active device.
+        return any(
+            provider.modules and provider.cuda_architectures for provider in providers
+        )
+
+    device_architecture = f"sm{device_capability.to_int()}"
+    return any(
+        architecture == device_architecture
+        for provider in providers
+        if provider.modules and provider.cuda_architectures
+        for architecture in provider.cuda_architectures
+    )
+
+
+def is_flashinfer_jit_usable() -> bool:
+    """Check whether FlashInfer attention JIT has a usable build or AOT path.
+
+    FlashInfer's runtime JIT needs both nvcc and ninja. The jit-cache shim
+    alone does not provide kernels; a provider must advertise at least one
+    module for the active GPU architecture. The separate cubin package only
+    supplies TRTLLM-gen cubins and is not sufficient for attention JIT modules.
+    This check does not verify per-kernel artifacts; it decides eligibility,
+    not whether every specific kernel can load.
+    """
+    if not has_flashinfer():
+        return False
+
+    if _flashinfer_nvcc_path() is not None and shutil.which("ninja") is not None:
         return True
-    return _flashinfer_nvcc_path() is not None and shutil.which("ninja") is not None
+
+    # flashinfer-jit-cache ships no SM75 kernels, so SM75 needs the JIT.
+    if current_platform.is_device_capability(75):
+        return False
+
+    return _has_compatible_flashinfer_jit_cache_provider()
 
 
 @functools.cache

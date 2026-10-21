@@ -3,6 +3,7 @@
 import importlib.util
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -61,15 +62,105 @@ def test_has_flashinfer_requires_ninja(
 
 
 @pytest.mark.parametrize(
-    ("flashinfer", "jit_cache", "cubin", "nvcc", "ninja", "sm75", "expected"),
+    (
+        "flashinfer",
+        "jit_cache",
+        "cubin",
+        "nvcc",
+        "ninja",
+        "sm75",
+        "capability_unavailable",
+        "provider_arch",
+        "provider_modules",
+        "expected",
+    ),
     [
-        (True, True, False, False, False, False, True),
-        (True, True, False, False, False, True, False),
-        (True, False, False, True, True, False, True),
-        (True, False, False, True, False, False, False),
-        (True, False, False, False, True, False, False),
-        (True, False, True, False, False, False, False),
-        (False, True, False, False, False, False, False),
+        # A shim by itself, even alongside FlashInfer cubins, has no kernels.
+        (True, True, True, False, False, False, False, None, None, False),
+        # A provider does not substitute for has_flashinfer()'s cubin/JIT check.
+        (
+            True,
+            True,
+            False,
+            False,
+            False,
+            False,
+            False,
+            "sm120",
+            "attention_module",
+            False,
+        ),
+        # Cubins plus a provider for the active architecture enables the AOT path.
+        (
+            True,
+            True,
+            True,
+            False,
+            False,
+            False,
+            False,
+            "sm120",
+            "attention_module",
+            True,
+        ),
+        # A provider with no modules is not usable.
+        (True, True, True, False, False, False, False, "sm120", None, False),
+        # A suffixed provider is not accepted without a matching active target.
+        (
+            True,
+            True,
+            True,
+            False,
+            False,
+            False,
+            False,
+            "sm120a",
+            "attention_module",
+            False,
+        ),
+        # A provider built for another architecture cannot enable the backend.
+        (
+            True,
+            True,
+            True,
+            False,
+            False,
+            False,
+            False,
+            "sm90a",
+            "attention_module",
+            False,
+        ),
+        # If capability is unavailable, non-empty provider metadata is the fallback.
+        (
+            True,
+            True,
+            True,
+            False,
+            False,
+            False,
+            True,
+            "sm120a",
+            "attention_module",
+            True,
+        ),
+        (True, True, True, False, False, False, True, "sm120", None, False),
+        # Runtime compilation remains a valid path without an AOT provider.
+        (True, False, False, True, True, False, False, None, None, True),
+        # The SM75 guard still rejects the jit-cache path without a compiler.
+        (
+            True,
+            True,
+            True,
+            False,
+            False,
+            True,
+            False,
+            "sm75",
+            "attention_module",
+            False,
+        ),
+        (False, True, True, False, False, False, False, None, None, False),
     ],
 )
 def test_is_flashinfer_jit_usable(
@@ -80,27 +171,34 @@ def test_is_flashinfer_jit_usable(
     nvcc: bool,
     ninja: bool,
     sm75: bool,
+    capability_unavailable: bool,
+    provider_arch: str | None,
+    provider_modules: str | None,
     expected: bool,
 ):
+    from vllm.platforms.interface import DeviceCapability
+
+    providers = (
+        (
+            SimpleNamespace(
+                modules={provider_modules} if provider_modules else set(),
+                cuda_architectures={provider_arch},
+            ),
+        )
+        if provider_arch
+        else ()
+    )
+
     monkeypatch.setattr(
         fi.importlib.util,
         "find_spec",
-        lambda name: (
-            object()
-            if name in ("flashinfer", "flashinfer_jit_cache", "flashinfer_cubin")
-            and (
-                (name == "flashinfer" and flashinfer)
-                or (name == "flashinfer_jit_cache" and jit_cache)
-                or (name == "flashinfer_cubin" and cubin)
-            )
-            else None
-        ),
+        lambda name: object()
+        if (name == "flashinfer" and flashinfer)
+        or (name == "flashinfer_jit_cache" and jit_cache)
+        else None,
     )
-    monkeypatch.setattr(
-        fi.current_platform,
-        "is_device_capability",
-        lambda capability: sm75 and capability == 75,
-    )
+    monkeypatch.setattr(fi, "has_flashinfer_cubin", lambda: cubin)
+    fi.has_flashinfer.cache_clear()
     monkeypatch.setattr(
         fi,
         "_flashinfer_nvcc_path",
@@ -111,5 +209,25 @@ def test_is_flashinfer_jit_usable(
         "which",
         lambda name: "/usr/bin/ninja" if name == "ninja" and ninja else None,
     )
+    monkeypatch.setattr(
+        fi.current_platform,
+        "is_device_capability",
+        lambda capability: sm75 and capability == 75,
+    )
+    monkeypatch.setattr(
+        fi.current_platform,
+        "get_device_capability",
+        lambda: None
+        if capability_unavailable
+        else DeviceCapability(7, 5)
+        if sm75
+        else DeviceCapability(12, 0),
+    )
+    monkeypatch.setattr(
+        fi.importlib,
+        "import_module",
+        lambda name: SimpleNamespace(get_jit_cache_providers=lambda: providers),
+    )
 
     assert fi.is_flashinfer_jit_usable() is expected
+    fi.has_flashinfer.cache_clear()
