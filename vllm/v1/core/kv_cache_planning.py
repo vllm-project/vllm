@@ -1205,13 +1205,20 @@ def get_kv_cache_groups_from_builder(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
 ) -> list[KVCacheGroupSpec]:
-    """Group the layers with the builder and check the result.
+    """Group the layers with the builder, check the result and tag EAGLE groups.
 
     Core checks every grouping, whether it comes from the default grouping, a
     model's ``SupportsKVCacheGrouping`` or a platform builder.
     """
     groups = builder.get_kv_cache_groups(vllm_config, kv_cache_spec)
     _check_exact_partition(groups, kv_cache_spec)
+    spec_config = vllm_config.speculative_config
+    if spec_config is not None and spec_config.use_eagle_block_drop():
+        draft_layer_names = {
+            name for name, spec in kv_cache_spec.items() if spec.is_draft
+        }
+        for group in groups:
+            group.is_eagle_group = not draft_layer_names.isdisjoint(group.layer_names)
     return groups
 
 
@@ -1531,11 +1538,6 @@ def get_kv_cache_configs(
     )
     spec_config = vllm_config.speculative_config
     if spec_config is not None and spec_config.use_eagle_block_drop():
-        draft_layer_names = {
-            name for name, spec in merged_kv_cache_specs.items() if spec.is_draft
-        }
-        for group in global_kv_cache_groups:
-            group.is_eagle_group = not draft_layer_names.isdisjoint(group.layer_names)
         _warn_if_unannotated_eagle_mamba(spec_config, global_kv_cache_groups)
 
     # If original_max_model_len was -1, automatically
