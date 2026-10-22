@@ -37,12 +37,12 @@ chunk-by-chunk while an n-gram at position ``p`` needs the token ids at
 import ctypes
 import mmap
 import os
+import platform
 import tempfile
 import weakref
 from contextlib import ExitStack
 
 import numpy as np
-import psutil
 import torch
 from torch import nn
 
@@ -75,6 +75,7 @@ from vllm.models.deepseek_v41.common.ops.query_quant import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.cpu_resource_utils import get_available_memory
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
@@ -783,14 +784,6 @@ def gather_errors(group: GroupCoordinator, error: str | None) -> str:
     )
 
 
-def _fits_cumem(num_bytes: int) -> bool:
-    if not current_platform.is_cuda():
-        return False
-    from vllm.models.deepseek_v41.nvidia.ops import engram_host_table
-
-    return engram_host_table.fits_on_numa_node(num_bytes)
-
-
 def _shm_shortfall(num_bytes: int) -> str | None:
     """Why /dev/shm cannot hold a table of this size, or None if it can."""
     if not os.path.isdir(SHM_PATH):
@@ -800,13 +793,38 @@ def _shm_shortfall(num_bytes: int) -> str | None:
     except Exception as exc:
         return describe_error(exc)
     # tmpfs pages beyond available host memory are faulted in by the OOM killer.
-    available = psutil.virtual_memory().available
+    available = get_available_memory()
     if num_bytes > available:
         return (
             f"{num_bytes / 2**30:.1f} GiB exceeds the "
             f"{available / 2**30:.1f} GiB of available host memory"
         )
     return None
+
+
+def _allow_any_numa_node(address: int, num_bytes: int) -> None:
+    """Let a mapping's pages spill to any NUMA node despite --numa-bind.
+
+    mbind(MPOL_LOCAL) overrides the task's membind for this range: pages still
+    go to the faulting CPU's node first, then to any other node.
+    """
+    sys_mbind = {"aarch64": 235, "x86_64": 237}.get(platform.machine())
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.syscall.restype = ctypes.c_long
+    if sys_mbind is None or libc.syscall(
+        ctypes.c_long(sys_mbind),
+        ctypes.c_void_p(address),
+        ctypes.c_ulong(num_bytes),
+        ctypes.c_int(4),  # MPOL_LOCAL
+        None,
+        ctypes.c_ulong(0),
+        ctypes.c_uint(0),
+    ):
+        logger.warning_once(
+            "Engram mbind(MPOL_LOCAL) failed; /dev/shm tables follow the "
+            "process memory policy: %s",
+            os.strerror(ctypes.get_errno()),
+        )
 
 
 class DPSharedEngramStorage:
@@ -878,6 +896,7 @@ class DPSharedEngramStorage:
             try:
                 owner = np.frombuffer(mapping, dtype=np.uint8)
                 pointer = owner.ctypes.data
+                _allow_any_numa_node(pointer, num_bytes)
                 tensor = torch.from_numpy(owner)
                 result = torch.cuda.cudart().cudaHostRegister(pointer, num_bytes, 0)
                 if result.value != 0:
@@ -942,10 +961,9 @@ def can_share_engram_tables(layout: EngramLayout, block_size: int = 32) -> bool:
     )
     group = get_engram_dp_group()
     assert group is not None
-    # Only the leader allocates, so every replica follows its check.
-    error = None
-    if group.rank_in_group == 0 and not _fits_cumem(num_bytes):
-        error = _shm_shortfall(num_bytes)
+    # Only the leader allocates, so every replica follows its check. /dev/shm
+    # must fit even where cuMem will, since it is the fallback.
+    error = _shm_shortfall(num_bytes) if group.rank_in_group == 0 else None
     error = group.broadcast_object(error)
     if error is not None:
         logger.warning_once(

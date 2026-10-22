@@ -391,7 +391,7 @@ def _check_cumem_host_table(failure):
     import on any rank falls back to /dev/shm on all of them."""
     from vllm.models.deepseek_v41.nvidia.ops import engram_host_table
 
-    if not engram_host_table.fits_on_numa_node(0):
+    if not engram_host_table.fabric_host_memory_supported():
         return
 
     group = get_engram_dp_group()

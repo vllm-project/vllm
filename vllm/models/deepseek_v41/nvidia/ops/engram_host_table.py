@@ -118,14 +118,6 @@ def fabric_host_memory_supported() -> bool:
     return True
 
 
-def fits_on_numa_node(num_bytes: int) -> bool:
-    """Whether a table of this size can live on this GPU's host NUMA node."""
-    if not fabric_host_memory_supported():
-        return False
-    total = get_memory_node_info(_gpu_numa_node()).total_memory
-    return num_bytes <= total * (1 - NUMA_RESERVE_FRACTION)
-
-
 def _create_table(num_bytes: int) -> tuple[list, ExportedHostTable]:
     """Allocate and export a table on this GPU's host NUMA node.
 
