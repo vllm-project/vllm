@@ -571,6 +571,7 @@ class EngineArgs:
     enable_elastic_ep: bool = ParallelConfig.enable_elastic_ep
     elastic_ep_max_dp_size: int = ParallelConfig.elastic_ep_max_dp_size
     elastic_ep_auto_bootstrap: bool = False
+    elastic_ep_initial_dp_size: int | None = None
     enable_dbo: bool = ParallelConfig.enable_dbo
     ubatch_size: int = ParallelConfig.ubatch_size
     dbo_decode_token_threshold: int = ParallelConfig.dbo_decode_token_threshold
@@ -872,6 +873,21 @@ class EngineArgs:
     kda_decode_backend: Literal["auto", "native", "flashinfer", "triton"] | None = None
 
     def __post_init__(self):
+        if self.elastic_ep_auto_bootstrap:
+            if self.elastic_ep_initial_dp_size is None:
+                raise ValueError(
+                    "--elastic-ep-auto-bootstrap requires --elastic-ep-initial-dp-size."
+                )
+            if self.data_parallel_size != ParallelConfig.data_parallel_size:
+                raise ValueError(
+                    "--data-parallel-size cannot be used with "
+                    "--elastic-ep-auto-bootstrap; use --elastic-ep-initial-dp-size."
+                )
+        elif self.elastic_ep_initial_dp_size is not None:
+            raise ValueError(
+                "--elastic-ep-initial-dp-size requires --elastic-ep-auto-bootstrap."
+            )
+
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
         # CompilationConfig object
@@ -1228,8 +1244,23 @@ class EngineArgs:
             "-pcp",
             **parallel_kwargs["prefill_context_parallel_size"],
         )
-        parallel_group.add_argument(
-            "--data-parallel-size", "-dp", **parallel_kwargs["data_parallel_size"]
+        dp_size_group = parallel_group.add_mutually_exclusive_group()
+        # A typed string default distinguishes an explicit size of 1 from omission.
+        dp_size_group.add_argument(
+            "--data-parallel-size",
+            "-dp",
+            **{
+                **parallel_kwargs["data_parallel_size"],
+                "default": str(ParallelConfig.data_parallel_size),
+            },
+        )
+        dp_size_group.add_argument(
+            "--elastic-ep-initial-dp-size",
+            type=int,
+            default=None,
+            help="Initial DP world size for --elastic-ep-auto-bootstrap. "
+            "Leave unchanged for append joiners; their actual DP size is resolved "
+            "through rank zero's handshake. Cannot be used with --data-parallel-size.",
         )
         parallel_group.add_argument(
             "--data-parallel-rank",
@@ -1329,8 +1360,8 @@ class EngineArgs:
             action=argparse.BooleanOptionalAction,
             default=False,
             help="Resolve initial or joining external EP startup from the DP rank "
-            "and rank zero's handshake. --data-parallel-size declares the initial "
-            "world size and need not change for append joiners.",
+            "and rank zero's handshake. Requires --elastic-ep-initial-dp-size "
+            "instead of --data-parallel-size.",
         )
         parallel_group.add_argument(
             "--dbo-decode-token-threshold",

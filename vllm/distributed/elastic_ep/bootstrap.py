@@ -68,9 +68,9 @@ class ExternalElasticEPBootstrapServer:
 def prepare_external_elastic_ep_launch(args: "EngineArgs") -> ExternalElasticEPLaunch:
     """Resolve initial or append startup before constructing the engine config.
 
-    The declared DP size is the initial world size. Nonzero ranks discover
-    their actual size through rank zero's existing handshake. This neither
-    commits membership nor makes the process eligible to serve.
+    The initial DP size is launch intent, separate from runtime geometry.
+    Nonzero ranks discover their actual size through rank zero's existing
+    handshake. This neither commits membership nor authorizes serving.
     """
     if (
         not args.enable_elastic_ep
@@ -88,10 +88,15 @@ def prepare_external_elastic_ep_launch(args: "EngineArgs") -> ExternalElasticEPL
             "Automatic Elastic EP bootstrap requires external MP DP with an "
             "explicit rank, one local DP rank and API server, EP and EPLB enabled"
         )
-    initial_size = args.data_parallel_size
+    initial_size = args.elastic_ep_initial_dp_size
     maximum_size = args.elastic_ep_max_dp_size
     rank = args.data_parallel_rank
-    if initial_size <= 1 or maximum_size is None or maximum_size < initial_size:
+    if (
+        initial_size is None
+        or initial_size <= 1
+        or maximum_size is None
+        or maximum_size < initial_size
+    ):
         raise ValueError("Automatic bootstrap requires 1 < initial DP size <= max DP")
     if not 0 <= rank < min(maximum_size, 2**16):
         raise ValueError("Automatic bootstrap rank must be below max DP size")
