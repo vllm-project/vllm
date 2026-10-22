@@ -4639,6 +4639,7 @@ def cpu_fused_moe(
     act: str,
     isa: str,
     skip_weighted: bool = False,
+    expert_map: torch.Tensor | None = None,
 ) -> None:
     torch.ops._C.cpu_fused_moe(
         out,
@@ -4652,6 +4653,7 @@ def cpu_fused_moe(
         skip_weighted,
         act,
         isa,
+        expert_map,
     )
 
 
