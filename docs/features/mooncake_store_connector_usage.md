@@ -53,14 +53,13 @@ Create a JSON configuration file (e.g., `mooncake_config.json`):
 - `mode`: Topology selection. `"embedded"` (default, PR-40900 baseline) has each
   vLLM rank contribute `global_segment_size` to the pool in-process.
   `"standalone-store"` makes ranks pure requesters — an external
-  `mooncake_client` process owns the CPU pool and (optionally) the SSD tier.
+  Store provider owns the memory pool and (optionally) the SSD tier.
 - `protocol`: Use `"rdma"` for best performance. `"tcp"` works as a fallback.
   `"nvlink"` is used by the opt-in [EGM deployment](#standalone-egm-over-nvlink).
 - `global_segment_size`: CPU memory contributed to the distributed pool (per
   GPU). Must be `> 0` in `embedded` mode and `0` in `standalone-store` mode.
 - `local_buffer_size`: Private buffer for this node's own operations (per GPU).
-  The default is 4 GiB. Zero is allowed only for a `standalone-store` NVLink
-  requester with `enable_offload: false` and the `NVLINK` custom KV memory pool.
+  Must be greater than zero in the vLLM config. The default is 4 GiB.
 - `enable_offload`: When `true`, vLLM allocates a DirectIO staging buffer so
   large prefills do not exceed the owner's SSD-write budget. Set this together
   with the matching `--enable_offload=true` flag on `mooncake_master` and on
@@ -239,10 +238,10 @@ the vLLM JSON config.
 ### Standalone EGM over NVLink
 
 Extended GPU Memory (EGM) lets a separate Mooncake provider contribute
-Grace host memory to a shared KV Store over the NVLink fabric. vLLM requesters
-save and load KV blocks through `MooncakeStoreConnector`; attention still uses
-the local GPU KV cache. EGM is **disabled by default**. The existing RDMA/TCP
-examples above continue to use their normal host-memory pools and local buffers.
+Grace host memory to a shared KV Store over the NVLink fabric. This recipe
+combines that provider with the existing `MooncakeStoreConnector` and NVLink
+allocator. vLLM saves and loads KV blocks through the Store; attention still
+uses the local GPU KV cache. Only the provider opts into EGM pool ownership.
 
 This recipe uses a provider on one OS node and vLLM requesters on another node
 in the same supported NVLink fabric and IMEX domain. A same-node run does not
@@ -255,10 +254,10 @@ validate the cross-node EGM path.
   Mooncake's [NVLink prerequisites](https://github.com/kvcache-ai/Mooncake/blob/main/docs/source/getting_started/supported-protocols.md)
   and your platform's IMEX setup instructions before starting the Store.
 - Install a Mooncake SDK built with Store support, `USE_CUDA=ON` and
-  `USE_MNNVL=ON`, including the EGM Store API and `NVLinkAllocator`. The API used
-  here is from Mooncake revision
-  [`8c19b728`](https://github.com/kvcache-ai/Mooncake/commit/8c19b728).
-  Follow its [build instructions](https://github.com/kvcache-ai/Mooncake/blob/8c19b728/docs/source/getting_started/build.md);
+  `USE_MNNVL=ON`, including the
+  [EGM Store API](https://github.com/kvcache-ai/Mooncake/blob/8c19b728/docs/source/api-reference/python/mooncake-store.md)
+  and `NVLinkAllocator`. Follow Mooncake's
+  [build instructions](https://github.com/kvcache-ai/Mooncake/blob/8c19b728/docs/source/getting_started/build.md);
   installing an arbitrary wheel does not establish EGM support.
 - This recipe uses Mooncake's classic C++ backend and manual NVLink transport
   selection. In every provider and requester shell, set:
@@ -270,11 +269,11 @@ validate the cross-node EGM path.
     unset MC_USE_TENT MC_USE_TEV1 MC_USE_NVLINK_IPC
     ```
 
-- Keep `enable_offload: false`: this zero-buffer path does not provide an SSD
-  or DFS staging buffer. It applies to the KV connector, not the cross-encoder
-  cache. Embedded EGM ownership inside vLLM and sleep/wake with NVLink are not
-  covered by this recipe. The custom pool is incompatible with sleep mode and
-  the CuMem allocator.
+- Keep `enable_offload: false` for this memory-only example. SSD/DFS tiering,
+  cross-encoder caching and embedded EGM ownership inside vLLM are outside its
+  scope. The example selects the existing `custom_mem_pool: "NVLINK"` option
+  for GPU KV allocation; that option is incompatible with sleep mode and the
+  CuMem allocator.
 - Use the same model revision, tokenizer, dtype, cache layout, block size,
   hash algorithm, tensor-parallel configuration, tenant and `cache_prefix` on
   the instances sharing KV. Start with a dense model and TP=1. Validate other
@@ -302,8 +301,10 @@ CUDA_VISIBLE_DEVICES=0 .venv/bin/python \
 The [provider example](../../examples/disaggregated/mooncake_store/egm_provider.py)
 owns the EGM allocation and stays alive until SIGINT or SIGTERM. Its dictionary
 `setup()` explicitly enables `enable_egm_store_pool`, contributes nonzero
-`global_segment_size`, uses `local_buffer_size=0`, and selects
-`egm_numa_nodes="auto"`. Adjust `--size-gib` to the host-memory budget. It prints
+`global_segment_size`, and selects `egm_numa_nodes="auto"`. The example uses
+`local_buffer_size=0` because this storage-only provider does not need an SDK
+client staging buffer. The separate requester retains its own local buffer.
+Adjust `--size-gib` to the host-memory budget. It prints
 `EGM provider ready` only after successful setup; this confirms initialization,
 not successful transfers from a remote requester.
 
@@ -317,7 +318,7 @@ On the requester node, create `mooncake_egm_requester.json`:
   "metadata_server": "P2PHANDSHAKE",
   "master_server_address": "192.0.2.10:50051",
   "global_segment_size": 0,
-  "local_buffer_size": 0,
+  "local_buffer_size": "4GB",
   "protocol": "nvlink",
   "device_name": "",
   "enable_offload": false
@@ -332,9 +333,11 @@ export MOONCAKE_CONFIG_PATH="${PWD}/mooncake_egm_requester.json"
 
 The requester uses the existing positional Store `setup()` API. Do not put
 `enable_egm_store_pool` or `egm_numa_nodes` in the vLLM JSON: only the external
-provider owns and configures EGM capacity. Zero local buffer does not remove
-the GPU KV cache; `custom_mem_pool: "NVLINK"` allocates that cache using
-Mooncake's fabric-exportable allocator.
+provider owns and configures EGM capacity. Keep the requester's ordinary
+positive `local_buffer_size`: vLLM requires it, and it is independent of the
+provider's EGM capacity and the GPU KV cache. The existing default is 4 GiB per
+rank. Retaining this SDK client buffer does not add CPU staging to the
+connector's registered GPU multi-buffer transfers to memory replicas.
 
 Start instance A on requester GPU 0:
 
@@ -464,7 +467,7 @@ Strict isolation requires a Mooncake master started with `--enable_multi_tenants
 - `lookup_async` (bool): Run the external prefix-cache lookup on a background thread so it never blocks the scheduler step. The request is held until the in-flight lookup completes, then resumed on a later step. Default: `false`.
 - `lookup_rpc_port` (int): Custom port for the ZMQ lookup RPC socket. Default: `0`.
 - `custom_mem_pool` (str): Optional Mooncake allocator for the GPU KV cache.
-  `"NVLINK"` is required by the [zero-buffer EGM requester](#standalone-egm-over-nvlink);
+  `"NVLINK"` is used in the [EGM deployment example](#standalone-egm-over-nvlink);
   `"BAREX"` selects the BAR-exposed allocator. Unset by default. Both are
   incompatible with sleep mode and the CuMem allocator.
 - `cache_prefix` (str): Namespace prepended to every store key. Lets separate deployments share one Mooncake master without polluting each other — instances configured with different prefixes never see each other's cached blocks, even for identical prompts. All instances that should share a prefix cache must use the same value. Default: `""` (no prefix; keys are byte-identical to the unprefixed format).

@@ -1412,11 +1412,6 @@ class MooncakeStoreWorker:
 
         # Initialize MooncakeDistributedStore with its own TransferEngine
         store_config = MooncakeStoreConfig.load_from_config()
-        if (
-            store_config.local_buffer_size == 0
-            and str(extra_config.get("custom_mem_pool") or "").upper() != "NVLINK"
-        ):
-            raise ValueError("local_buffer_size=0 requires custom_mem_pool='NVLINK'")
         # Validate and create the custom memory pool before initializing the
         # store so failures cannot leak a partially initialized store handle.
         self._mem_pool = self._create_mem_pool(extra_config, model_config)
@@ -1424,12 +1419,7 @@ class MooncakeStoreWorker:
         self.store = MooncakeDistributedStore()
         local_ip = get_ip()
         local_hostname = rdma_utils.get_requester_local_hostname(local_ip)
-        setup_mooncake_store(
-            self.store,
-            store_config,
-            local_hostname,
-            allow_bufferless=store_config.local_buffer_size == 0,
-        )
+        setup_mooncake_store(self.store, store_config, local_hostname)
 
         preferred_segment = rdma_utils.get_configured_preferred_segment(extra_config)
         self.preferred_segment = preferred_segment

@@ -40,17 +40,8 @@ class MooncakeStoreConfig:
     def __post_init__(self) -> None:
         if self.mode not in ("embedded", "standalone-store"):
             raise ValueError(f"unknown Mooncake mode: {self.mode!r}")
-        if self.local_buffer_size < 0:
-            raise ValueError("local_buffer_size must be >= 0")
-        if self.local_buffer_size == 0 and not (
-            self.mode == "standalone-store"
-            and self.protocol == "nvlink"
-            and not self.enable_offload
-        ):
-            raise ValueError(
-                "local_buffer_size=0 requires standalone-store mode, "
-                "protocol='nvlink', and enable_offload=false"
-            )
+        if self.local_buffer_size <= 0:
+            raise ValueError("local_buffer_size must be > 0")
         if self.mode == "embedded" and self.global_segment_size == 0:
             raise ValueError("embedded mode requires global_segment_size > 0")
         if self.mode == "standalone-store" and self.global_segment_size != 0:
@@ -133,17 +124,9 @@ def _parse_size(value: Any) -> int:
 
 
 def setup_mooncake_store(
-    store: Any,
-    config: MooncakeStoreConfig,
-    local_hostname: str,
-    *,
-    allow_bufferless: bool = False,
+    store: Any, config: MooncakeStoreConfig, local_hostname: str
 ) -> None:
     """Initialize a native Store, preserving explicit tenant configuration."""
-    if config.local_buffer_size == 0 and not allow_bufferless:
-        raise ValueError(
-            "local_buffer_size=0 is only supported by the NVLINK KV Store requester"
-        )
     setup_kwargs: dict[str, str] = {}
     if config.tenant_id != DEFAULT_TENANT_ID:
         setup_kwargs["tenant_id"] = config.tenant_id
