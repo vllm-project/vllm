@@ -14,8 +14,6 @@
  * limitations under the License.
  */
 
-#pragma once
-
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -3837,49 +3835,100 @@ void paged_attention_custom_launcher_navi(
       break;                                                                \
   }
 
-// ---------------------------------------------------------------------------
-// Fixed-head-size entry points.
-//
-// Instantiating these kernels is by far the most expensive part of the ROCm
-// build: the device backend emits code for every (dtype, kv-cache dtype, head
-// size, block size, alibi, out dtype, v-cache layout) combination. To let ninja
-// compile them in parallel instead of serializing ~10 min onto a single core,
-// the instantiations are spread over one translation unit per (dtype, kv-cache
-// dtype, head size) combination, see attention_paged_attn_*.cu.
-// ---------------------------------------------------------------------------
+#define CALL_CUSTOM_LAUNCHER_BLK_HEAD(T, KVT, KV_DTYPE, MFMA_TYPE) \
+  switch (head_size) {                                             \
+    case 64:                                                       \
+      CALL_CUSTOM_LAUNCHER_BLK(T, KVT, KV_DTYPE, 64, MFMA_TYPE);   \
+      break;                                                       \
+    case 128:                                                      \
+      CALL_CUSTOM_LAUNCHER_BLK(T, KVT, KV_DTYPE, 128, MFMA_TYPE);  \
+      break;                                                       \
+    default:                                                       \
+      TORCH_CHECK(false, "Unsupported head size: ", head_size);    \
+      break;                                                       \
+  }
 
-// Parameter list shared by paged_attention() and every entry point defined in
-// attention_paged_attn_*.cu. The names must match what CALL_CUSTOM_LAUNCHER*
-// expect to find in scope.
-#define ATTN_PARAMS                                                            \
-  torch::Tensor &out, torch::Tensor &exp_sums, torch::Tensor &max_logits,      \
-      torch::Tensor &tmp_out, torch::Tensor &query, torch::Tensor &key_cache,  \
-      torch::Tensor &value_cache, int64_t num_kv_heads, double scale,          \
-      torch::Tensor &block_tables, torch::Tensor &seq_lens,                    \
-      const std::optional<torch::Tensor>&query_start_loc, int64_t max_seq_len, \
-      const std::optional<torch::Tensor>&alibi_slopes, torch::Tensor &k_scale, \
-      torch::Tensor &v_scale,                                                  \
-      const std::optional<torch::Tensor>&fp8_out_scale, int64_t block_size,    \
-      bool is_navi, bool use_interleaved_v_cache
+bool is_navi_gpu() {
+  static bool is_cached = false;
+  static bool result;
 
-#define ATTN_FWD                                                              \
-  out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,          \
-      num_kv_heads, scale, block_tables, seq_lens, query_start_loc,           \
-      max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale, block_size, \
-      is_navi, use_interleaved_v_cache
+  if (!is_cached) {
+    int device_id;
+    hipDeviceProp_t deviceProp;
+    hipGetDevice(&device_id);
+    hipGetDeviceProperties(&deviceProp, device_id);
 
-// Declare/define one fixed-head-size entry point. A definition in one of the
-// attention_paged_attn_*.cu files is reachable only if attention_dispatch.cu
-// names it in one of its ATTN_HEAD_SWITCH() calls (CMakeLists.txt fails if one
-// is missing).
-#define ATTN_ENTRY(fn) void fn(ATTN_PARAMS)
+    std::string arch = deviceProp.gcnArchName;
+    result = arch.find("gfx11") == 0 || arch.find("gfx12") == 0;
+    is_cached = true;
+  }
 
-// Instantiate one entry point (one per attention_paged_attn_*.cu file), for
-// every supported block size. Kept as an alias of CALL_CUSTOM_LAUNCHER_BLK so
-// the block-size switch has a single definition; the head-size switch lives in
-// attention_dispatch.cu.
-#define ATTN_LAUNCH(T, KVT, KV_DTYPE, HEAD_SIZE, MFMA_TYPE) \
-  CALL_CUSTOM_LAUNCHER_BLK(T, KVT, KV_DTYPE, HEAD_SIZE, MFMA_TYPE)
+  return result;
+}
+
+// clang-format off
+void paged_attention(
+    torch::Tensor& out,         // [num_seqs, num_heads, head_size]
+    torch::Tensor& exp_sums,    // [num_seqs, num_heads, max_num_partitions]
+    torch::Tensor& max_logits,  // [num_seqs, num_heads, max_num_partitions]
+    torch::Tensor& tmp_out,     // [num_seqs, num_heads, max_num_partitions, head_size]
+    torch::Tensor& query,       // [num_seqs, num_heads, head_size]
+    torch::Tensor& key_cache,   // [num_blocks, num_heads, head_size/x, block_size, x]
+    torch::Tensor& value_cache, // [num_blocks, num_heads, head_size, block_size]
+    int64_t num_kv_heads, 
+    double scale,
+    torch::Tensor& block_tables, // [num_seqs, max_num_blocks_per_seq]
+    torch::Tensor& seq_lens, // [num_seqs]
+    const std::optional<torch::Tensor>& query_start_loc, // [num_seqs]
+    int64_t block_size, int64_t max_seq_len,
+    const std::optional<torch::Tensor>& alibi_slopes,
+    const std::string& kv_cache_dtype, torch::Tensor& k_scale,
+    torch::Tensor& v_scale,
+    const std::optional<torch::Tensor>& fp8_out_scale,
+    const std::string& mfma_type,
+    bool use_interleaved_v_cache) {
+  // clang-format on
+  bool is_navi = is_navi_gpu();
+  const int head_size = query.size(2);
+  if (kv_cache_dtype == "auto") {
+    if (query.dtype() == at::ScalarType::Half) {
+      CALL_CUSTOM_LAUNCHER_BLK_HEAD(
+          _Float16, _Float16, vllm::Fp8KVCacheDataType::kAuto, MFMAType::F16);
+    } else if (query.dtype() == at::ScalarType::BFloat16) {
+      CALL_CUSTOM_LAUNCHER_BLK_HEAD(__hip_bfloat16, __hip_bfloat16,
+                                    vllm::Fp8KVCacheDataType::kAuto,
+                                    MFMAType::F16);
+    } else {
+      TORCH_CHECK(false, "Unsupported data type: ", query.dtype());
+    }
+  } else if (kv_cache_dtype == "fp8" || kv_cache_dtype == "fp8_e4m3") {
+    if (query.dtype() == at::ScalarType::Half) {
+      if (mfma_type == "fp8") {
+        CALL_CUSTOM_LAUNCHER_BLK_HEAD(_Float16, uint8_t,
+                                      vllm::Fp8KVCacheDataType::kFp8E4M3,
+                                      MFMAType::Fp8);
+      } else {
+        CALL_CUSTOM_LAUNCHER_BLK_HEAD(_Float16, uint8_t,
+                                      vllm::Fp8KVCacheDataType::kFp8E4M3,
+                                      MFMAType::F16);
+      }
+    } else if (query.dtype() == at::ScalarType::BFloat16) {
+      if (mfma_type == "fp8") {
+        CALL_CUSTOM_LAUNCHER_BLK_HEAD(__hip_bfloat16, uint8_t,
+                                      vllm::Fp8KVCacheDataType::kFp8E4M3,
+                                      MFMAType::Fp8);
+      } else {
+        CALL_CUSTOM_LAUNCHER_BLK_HEAD(__hip_bfloat16, uint8_t,
+                                      vllm::Fp8KVCacheDataType::kFp8E4M3,
+                                      MFMAType::F16);
+      }
+    } else {
+      TORCH_CHECK(false, "Unsupported data type: ", query.dtype());
+    }
+  } else {
+    TORCH_CHECK(false, "Unsupported KV cache dtype: ", kv_cache_dtype);
+  }
+}
 
 #undef WARP_SIZE
 #undef MAX

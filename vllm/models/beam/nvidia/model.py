@@ -11,14 +11,20 @@ selection.
 
 import math
 from collections.abc import Iterable
+from functools import partial
 from typing import cast
 
 import torch
 from torch import nn
 
 from vllm.config import VllmConfig
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.distributed import (
+    get_pp_group,
+    get_tensor_model_parallel_world_size,
+    get_tp_group,
+)
 from vllm.model_executor.layers.fused_moe import MoERunner
+from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -44,6 +50,11 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.beam import BeamConfig
 
 from .activation import beam_softcap_logits
+from .allreduce import (
+    BeamAllReduceWorkspace,
+    beam_allreduce_norm_residual_norm,
+    beam_finalize_allreduce_norm_residual_norm,
+)
 from .attention import BeamAttention, use_merged_qkv_gate
 from .layernorm import RMSNorm, beam_norm_residual_norm, beam_rms_norm
 from .moe import BeamMLP, BeamSparseMoeBlock
@@ -69,6 +80,7 @@ class BeamDecoderLayer(nn.Module):
         self,
         vllm_config: VllmConfig,
         prefix: str = "",
+        allreduce_workspace: BeamAllReduceWorkspace | None = None,
     ) -> None:
         super().__init__()
         config = cast(BeamConfig, vllm_config.model_config.hf_config)
@@ -76,9 +88,14 @@ class BeamDecoderLayer(nn.Module):
         quant_config = vllm_config.quant_config
         self.layer_id = extract_layer_index(prefix)
         self.rms_norm_eps = config.rms_norm_eps
+        fuse_attention_reduce = allreduce_workspace is not None
 
         self.self_attn = BeamAttention(
-            config, cache_config, quant_config, prefix=f"{prefix}.self_attn"
+            config,
+            cache_config,
+            quant_config,
+            prefix=f"{prefix}.self_attn",
+            reduce_results=not fuse_attention_reduce,
         )
 
         if config.mlp_layer_types[self.layer_id] == "dense":
@@ -88,10 +105,38 @@ class BeamDecoderLayer(nn.Module):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
+                reduce_results=allreduce_workspace is None,
             )
         else:
             self.mlp = BeamSparseMoeBlock(
-                vllm_config=vllm_config, prefix=f"{prefix}.mlp"
+                vllm_config=vllm_config,
+                prefix=f"{prefix}.mlp",
+                reduce_results=allreduce_workspace is None,
+            )
+
+        fused_boundary = (
+            partial(beam_allreduce_norm_residual_norm, workspace=allreduce_workspace)
+            if allreduce_workspace is not None
+            else beam_norm_residual_norm
+        )
+        self.attention_boundary = (
+            fused_boundary if fuse_attention_reduce else beam_norm_residual_norm
+        )
+        fuse_mlp_reduce = allreduce_workspace is not None and (
+            isinstance(self.mlp, BeamMLP)
+            or self.mlp.experts.moe_config.skip_final_all_reduce
+        )
+        self.mlp_boundary = (
+            fused_boundary if fuse_mlp_reduce else beam_norm_residual_norm
+        )
+        self.finalize_boundary = None
+        if fuse_mlp_reduce and isinstance(self.mlp, BeamSparseMoeBlock):
+            assert allreduce_workspace is not None
+            self.mlp.defer_finalize(allreduce_workspace.max_tokens)
+            self.finalize_boundary = partial(
+                beam_finalize_allreduce_norm_residual_norm,
+                workspace=allreduce_workspace,
+                routed_scale=self.mlp.experts.routed_scaling_factor,
             )
 
         self.input_layernorm = RMSNorm(config.hidden_size)
@@ -114,7 +159,7 @@ class BeamDecoderLayer(nn.Module):
             else normalized_states
         )
         x = self.self_attn(positions, x)
-        hidden_states, x = beam_norm_residual_norm(
+        hidden_states, x = self.attention_boundary(
             x,
             hidden_states,
             self.post_attention_layernorm.weight,
@@ -125,7 +170,11 @@ class BeamDecoderLayer(nn.Module):
         )
         assert x is not None
         x = self.mlp(x)
-        return beam_norm_residual_norm(
+        boundary = self.mlp_boundary
+        if isinstance(x, UnfinalizedMoEOutput):
+            assert self.finalize_boundary is not None
+            boundary = self.finalize_boundary
+        return boundary(
             x,
             hidden_states,
             self.post_feedforward_layernorm.weight,
@@ -203,9 +252,23 @@ class BeamModel(nn.Module, EagleModelMixin):
             )
         else:
             self.embed_tokens = PPMissingLayer()
+        tp_group = get_tp_group()
+        self.allreduce_workspace = BeamAllReduceWorkspace.create(
+            tp_group.cpu_group,
+            config.hidden_size,
+            max(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                vllm_config.scheduler_config.max_num_seqs,
+            ),
+            vllm_config.model_config.dtype,
+        )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: BeamDecoderLayer(vllm_config=vllm_config, prefix=prefix),
+            lambda prefix: BeamDecoderLayer(
+                vllm_config=vllm_config,
+                prefix=prefix,
+                allreduce_workspace=self.allreduce_workspace,
+            ),
             prefix=f"{prefix}.layers",
         )
         self.norm = (

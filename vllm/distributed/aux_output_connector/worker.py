@@ -476,13 +476,11 @@ class AuxOutputWorkerConnector:
 
     def _make_output(self, token_start: int, rows: np.ndarray) -> AuxRequestOutput:
         if self._indexer is None:
-            return AuxRequestOutput(token_start=token_start, routed_experts_rows=rows)
+            return AuxRequestOutput(token_start=token_start, routed_rows=rows)
         n = len(rows)
-        routed_experts_rows = rows[:, : self._r3_nbytes].copy()
+        routed_rows = rows[:, : self._r3_nbytes].copy()
         if self._capturer is not None:
-            routed_experts_rows = routed_experts_rows.view(self._r3_dtype).reshape(
-                n, *self._r3_shape
-            )
+            routed_rows = routed_rows.view(self._r3_dtype).reshape(n, *self._r3_shape)
         indexer = (
             rows[:, self._r3_nbytes :]
             .copy()
@@ -491,7 +489,7 @@ class AuxOutputWorkerConnector:
         )
         return AuxRequestOutput(
             token_start=token_start,
-            routed_experts_rows=routed_experts_rows,
+            routed_rows=routed_rows,
             indexer_rows=indexer,
         )
 
