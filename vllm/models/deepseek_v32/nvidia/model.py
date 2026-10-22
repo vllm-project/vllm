@@ -406,6 +406,12 @@ class DeepseekV32Model(torch.nn.Module):
                     name_mapped = name.replace(weight_name, param_name)
                     if is_pp_missing_parameter(name_mapped, self):
                         continue
+                    if name_mapped not in params_dict and name_mapped.endswith(
+                        "w13_input_scale"
+                    ):
+                        # MegaMoE NVFP4 quantizes the dispatch per token and
+                        # keeps no w1/w3 input scale.
+                        continue
                     param = params_dict[name_mapped]
                     weight_loader = typing.cast(
                         Callable[..., bool], param.weight_loader
