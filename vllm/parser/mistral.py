@@ -79,6 +79,28 @@ _THINK_END_TEXT = "</think>"
 
 _OPEN_BRACE = "{"
 
+# mistral-common grammar fragments that allow text before forced tool calls.
+_TEXT_BEFORE_TOOL_CALLS = (
+    ("body: content? fcalls\n", "body: fcalls\n"),
+    ("fcalls: content? {{ fcall }}\n", "fcalls: {{ fcall }}\n"),
+)
+
+
+@functools.cache
+def _forced_tool_call_template(template: str) -> str:
+    """Remove the optional text before tool calls from a grammar template."""
+    forced_template = template
+    for old, new in _TEXT_BEFORE_TOOL_CALLS:
+        if forced_template.count(old) == 1:
+            forced_template = forced_template.replace(old, new)
+    if forced_template == template:
+        logger.warning(
+            "Found no optional text before tool calls to remove in "
+            "mistral-common's grammar template, so a forced tool choice may "
+            "not be enforced to start with a call."
+        )
+    return forced_template
+
 
 class StreamingState(Enum):
     """Streaming parsing state for pre-v11 tool call extraction."""
@@ -363,6 +385,9 @@ class MistralParser(ParserEngine):
             or request.response_format is not None
             and request.response_format.type == "structural_tag"
         )
+        is_required_or_named = request.tool_choice == "required" or isinstance(
+            request.tool_choice, ChatCompletionNamedToolChoiceParam
+        )
 
         if (
             not is_mistral_tokenizer(self.model_tokenizer)
@@ -382,10 +407,6 @@ class MistralParser(ParserEngine):
             # json_schema response_format is cleared here (the tool schema is
             # the sole structured-output constraint), mirroring the base
             # ToolParser; a structural_tag response_format is left untouched.
-            req_tool_choice = request.tool_choice
-            is_required_or_named = req_tool_choice == "required" or isinstance(
-                req_tool_choice, ChatCompletionNamedToolChoiceParam
-            )
             response_format = getattr(request, "response_format", None)
             response_format_overridable = response_format is None or (
                 response_format.type in ("text", "json_object", "json_schema")
@@ -408,7 +429,15 @@ class MistralParser(ParserEngine):
             return request
 
         json_schema: dict[str, Any] | None = None
-        if request.structured_outputs is not None:
+        if is_required_or_named:
+            # A forced call must not get a JSON alternative.
+            if request.structured_outputs is not None:
+                logger.warning_once(
+                    "structured outputs are ignored because tool_choice "
+                    "forces tool call."
+                )
+            request.response_format = None
+        elif request.structured_outputs is not None:
             if request.structured_outputs.json_object is not None:
                 json_schema = _DEFAULT_JSON_SCHEMA
             elif request.structured_outputs.json is not None:
@@ -444,6 +473,8 @@ class MistralParser(ParserEngine):
 
         # Rendering grammar is cached in mistral-common given tools, template and mode.
         template = grammar_factory.select_jinja_template()
+        if is_required_or_named:
+            template = _forced_tool_call_template(template)
 
         mistral_tools = (
             [MistralTool.from_openai(tool.model_dump()) for tool in request.tools]
@@ -452,6 +483,7 @@ class MistralParser(ParserEngine):
         )
 
         tool_choice: MistralToolChoice
+        parallel_tool_calls = request.parallel_tool_calls
         match request.tool_choice:
             case "none" | "auto" | "required":
                 tool_choice = MistralToolChoiceEnum(request.tool_choice)
@@ -465,6 +497,8 @@ class MistralParser(ParserEngine):
                         "function": {"name": request.tool_choice.function.name},
                     }
                 )
+                # A named tool is called exactly once.
+                parallel_tool_calls = False
 
         match tool_choice, json_schema is not None:
             case MistralToolChoiceEnum.none, True:
@@ -477,7 +511,7 @@ class MistralParser(ParserEngine):
                     mode=tool_choice,
                     tools=mistral_tools,
                     json_schema=json_schema,
-                    parallel_tool_calls=request.parallel_tool_calls,
+                    parallel_tool_calls=parallel_tool_calls,
                     json_only=False,
                 )
 

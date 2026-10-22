@@ -281,6 +281,55 @@ async def test_tool_call_auto_or_required(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tool_choice, expected_finish_reason",
+    [
+        pytest.param("required", "tool_calls", id="required"),
+        pytest.param(
+            {"type": "function", "function": {"name": "get_current_weather"}},
+            "stop",
+            id="named",
+        ),
+    ],
+)
+async def test_tool_call_forced_on_unrelated_prompt(
+    client: openai.AsyncOpenAI,
+    server_config: ServerConfig,
+    tool_choice: str | dict,
+    expected_finish_reason: str,
+) -> None:
+    """A forced tool choice answers with the call alone, even on an unrelated prompt."""
+    _requires_tool_parser(server_config)
+    if _is_pre_v11(server_config):
+        pytest.skip(f"Skipping: {server_config['model']} has no tool call grammar")
+
+    models = await client.models.list()
+    model_name: str = models.data[0].id
+    chat_completion = await client.chat.completions.create(
+        messages=ensure_system_prompt(MESSAGES_WITHOUT_TOOLS, server_config),
+        temperature=0,
+        max_completion_tokens=100,
+        model=model_name,
+        tools=[WEATHER_TOOL],
+        tool_choice=tool_choice,
+        logprobs=False,
+        seed=SEED,
+    )
+
+    choice = chat_completion.choices[0]
+    tool_calls = choice.message.tool_calls
+
+    assert choice.finish_reason == expected_finish_reason
+    assert not (choice.message.content or "").strip()
+    assert tool_calls is not None and len(tool_calls) >= 1
+    assert all(tc.function.name == "get_current_weather" for tc in tool_calls)
+    if isinstance(tool_choice, dict):
+        assert len(tool_calls) == 1
+    for tc in tool_calls:
+        assert isinstance(json.loads(tc.function.arguments), dict)
+
+
+@pytest.mark.asyncio
 async def test_tool_call_none_with_tools(
     client: openai.AsyncOpenAI, server_config: ServerConfig
 ) -> None:
