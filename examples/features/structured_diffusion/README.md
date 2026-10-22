@@ -73,3 +73,39 @@ thought in its prompt, so the answer slots condition on it. The noise draws
 of a decision share one thought. `diagnostics.thought` returns the text, its
 length in tokens, whether the model closed the channel itself and the
 generation time.
+
+## Nemotron Labs Diffusion
+
+The same `/v1/systemone` gateway can serve Nemotron Labs Diffusion 3B/8B with
+`--backend nemotron`; the [OpenAPI schema](systemone-openapi.yaml) lists the
+request shapes. This backend uses mask-token answer slots instead of random
+noise, one masked forward after prefill, and exact candidate logprobs. It does
+not reorder options or questions. Text/JSON state and choice, Noul and Score
+answers are supported; thinking, images and multiple samples are not.
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve nvidia/Nemotron-Labs-Diffusion-8B \
+    --served-model-name nemotron --diffusion-config '{"canvas_length": 32}' \
+    --max-logprobs 128 --enable-prefix-caching
+python examples/features/structured_diffusion/structured_server.py --backend nemotron \
+    --upstream http://127.0.0.1:8000 --model nemotron \
+    --tokenizer nvidia/Nemotron-Labs-Diffusion-8B --canvas 32
+```
+
+A direct read sets `diffusion_read_only` and a `diffusion_seed_canvas` of
+exactly the served canvas length, with the mask token (`100`) at the answer
+positions, and requests the candidates with `logprob_token_ids` (up to 128).
+It needs `temperature=0`, default `top_p`/`top_k` and `max_tokens` no larger
+than the canvas; `diffusion_pinned`, a narrower `diffusion_canvas_length` and
+`diffusion_max_steps` other than 1 are not supported. Other requests are
+rejected with HTTP 400 before they reach a worker.
+
+Verify a running gateway with:
+
+```bash
+python examples/features/structured_diffusion/nemotron_smoke.py --url http://localhost:8011
+```
+
+The smoke check validates answer shapes and finite, normalized probabilities for
+all three primitives, a 100-alternative choice and a 12-question request. It is
+not an accuracy benchmark.
