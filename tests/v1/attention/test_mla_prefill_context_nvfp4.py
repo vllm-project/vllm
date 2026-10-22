@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Chunked-context MLA prefill with an nvfp4_ds_mla KV cache.
+"""Chunked-context MLA prefill with an nvfp4_ds_mla or dense-MLA nvfp4 KV cache.
 
 ``MLACommonBaseImpl._compute_prefill_context`` gathers each chunk's context KV
-into a BF16 workspace. For nvfp4_ds_mla it must use the NVFP4 upconvert gather
-(the generic one rejects the dtype) and pass the chunk starts through, so a
+into a BF16 workspace. For both dtypes it must use the NVFP4 upconvert gather
+(the generic one rejects them), pass the chunk starts through, so a
 continuation chunk reads from its start rather than from the request's first
-token.
+token, and pass nvfp4's k_scale.
 
 The reference runs the same method on a BF16 cache that holds the dequantized
 values, through the generic gather, which applies ``seq_starts`` itself. Every
@@ -140,12 +140,14 @@ def _build_prefill_metadata(
     )
 
 
+@pytest.mark.parametrize("kv_cache_dtype", ["nvfp4_ds_mla", "nvfp4"])
 @torch.inference_mode()
-def test_nvfp4_prefill_context_matches_dequantized_cache() -> None:
+def test_nvfp4_prefill_context_matches_dequantized_cache(kv_cache_dtype: str) -> None:
     torch.manual_seed(0)
     device = torch.device("cuda")
     # The sparse MLA builders, the only ones that accept nvfp4_ds_mla, hand this
-    # path a BF16 query and a BF16 workspace.
+    # path a BF16 query and a BF16 workspace; nvfp4 does the same without FP8
+    # prefill.
     q_data_type = torch.bfloat16
 
     num_reqs = len(_CONTEXT_LENS)
@@ -160,7 +162,8 @@ def test_nvfp4_prefill_context_matches_dequantized_cache() -> None:
     nvfp4_cache = torch.zeros(
         (num_blocks, _BLOCK_SIZE, _NVFP4_ENTRY), dtype=torch.uint8, device=device
     )
-    scale = torch.ones(1, dtype=torch.float32, device=device)
+    # nvfp4 stores x / k_scale; nvfp4_ds_mla and the BF16 reference ignore it.
+    scale = torch.full((1,), 0.25, dtype=torch.float32, device=device)
     for req, context_len in enumerate(_CONTEXT_LENS):
         if context_len == 0:
             continue
@@ -173,7 +176,7 @@ def test_nvfp4_prefill_context_matches_dequantized_cache() -> None:
             torch.randn(context_len, _QK_ROPE, device=device, dtype=torch.bfloat16),
             nvfp4_cache,
             slots + pos % _BLOCK_SIZE,
-            kv_cache_dtype="nvfp4_ds_mla",
+            kv_cache_dtype=kv_cache_dtype,
             scale=scale,
         )
 
@@ -187,6 +190,8 @@ def test_nvfp4_prefill_context_matches_dequantized_cache() -> None:
         block_table=torch.arange(num_blocks, dtype=torch.int32, device=device)[None],
         workspace_starts=torch.zeros(1, dtype=torch.int32, device=device),
         batch_size=1,
+        kv_cache_dtype=kv_cache_dtype,
+        scale=scale,
     )
     bf16_cache = bf16_cache.view(num_blocks, _BLOCK_SIZE, _ENTRY)
 
@@ -202,7 +207,7 @@ def test_nvfp4_prefill_context_matches_dequantized_cache() -> None:
 
     backend = _RecordingPrefillBackend()
     out, lse = cast(
-        MLACommonBaseImpl, _Impl(kv_b_proj, "nvfp4_ds_mla")
+        MLACommonBaseImpl, _Impl(kv_b_proj, kv_cache_dtype)
     )._compute_prefill_context(
         q,
         nvfp4_cache,

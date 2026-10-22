@@ -387,3 +387,192 @@ def test_flashinfer_mla_decode_workspace_supports_autotune():
             max_seq_len=max_seq_len,
             bmm1_scale=SCALE,
         )
+
+
+@pytest.mark.parametrize("bs", [1, 3])
+@pytest.mark.parametrize("block_size", [32, 64])
+@pytest.mark.parametrize("spec_decode", [False, True])
+@pytest.mark.parametrize("kv_magnitude", [1.0, 0.05])
+@pytest.mark.parametrize("dcp", [1, 2])
+@requires_sm10x
+def test_flashinfer_mla_nvfp4_cake_decode(
+    bs: int, block_size: int, spec_decode: bool, kv_magnitude: float, dcp: int
+):
+    """The NVFP4 MLA cache feeds FlashInfer's Cake decode.
+
+    The cache is written by ``concat_and_cache_mla`` with a non-unit
+    ``k_scale`` and read back by the independent
+    ``cp_gather_and_upconvert_nvfp4_kv_cache`` for the reference, which attends with
+    the decoded NVFP4 query the kernel consumes. A wrong cache view, scale
+    mapping or output scaling is then far outside the E4M3 P/V error.
+    ``spec_decode`` sends the packed causal batch FlashInferMLAImpl builds for
+    speculative decoding: ragged query lengths under the ``1 + k`` bound.
+    ``kv_magnitude`` 0.05 puts the cache's block scales below 2^-3, which Cake's
+    wide route (more than 48 rows per request, rejected by FlashInferMLAImpl)
+    would zero. ``dcp`` 2 splits the cache over two decode context parallel
+    ranks as vLLM lays it out and merges the ranks' outputs by their LSE.
+    """
+    from vllm.v1.attention.backends.mla.flashinfer_mla import (
+        _cake_nvfp4_mla_decode_unsupported_reason,
+        cake_nvfp4_mla_decode,
+    )
+    from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
+    from vllm.v1.attention.ops.dcp import _lse_weighted_combine
+
+    reason = _cake_nvfp4_mla_decode_unsupported_reason()
+    if reason is not None:
+        pytest.skip(reason)
+
+    from flashinfer.experimental.cake_mla_nvfp4_paged_decode import cake_backend
+    from flashinfer.mla import quantize_mla_nvfp4_query
+
+    from vllm import _custom_ops as ops
+    from vllm.utils.torch_utils import nvfp4_mla_kv_cache_full_dim
+
+    torch.set_default_device("cuda")
+    torch.manual_seed(42)
+    # Kimi-K3 at TP8 has 12 heads per GPU, gathered from every DCP rank; spec
+    # decode keeps 12 to stay within Cake's 48 rows per request.
+    num_heads = 12 if spec_decode else 12 * dcp
+    k_scale = 0.25
+    max_q_len = 4 if spec_decode else 1
+    q_lens = [3, 1, 2][:bs] if spec_decode else [1] * bs
+    total_q = sum(q_lens)
+
+    _, kv, block_tables, seq_lens, max_seq_len = _make_decode_inputs(
+        bs, block_size, torch.bfloat16
+    )
+    seq_lens = seq_lens.clamp(min=max_q_len)
+    if spec_decode and bs > 1:
+        # A short request makes the causal mask hide a large share of its keys.
+        seq_lens[0] = max_q_len + 2
+    num_blocks = kv.shape[0]
+    num_slots = num_blocks * block_size
+    kv = kv.view(num_slots, QK_HEAD_DIM) * kv_magnitude
+    scale = torch.tensor([k_scale], dtype=torch.float32)
+    cache = torch.zeros(
+        num_blocks,
+        block_size,
+        nvfp4_mla_kv_cache_full_dim(QK_HEAD_DIM),
+        dtype=torch.uint8,
+    )
+    ops.concat_and_cache_mla(
+        kv[:, :KV_LORA_RANK].contiguous(),
+        kv[:, KV_LORA_RANK:].contiguous(),
+        cache,
+        torch.arange(num_slots, dtype=torch.int64),
+        "nvfp4",
+        scale,
+    )
+    dequant = torch.empty(num_slots, QK_HEAD_DIM, dtype=torch.bfloat16)
+    ops.cp_gather_and_upconvert_nvfp4_kv_cache(
+        cache,
+        dequant,
+        torch.arange(num_blocks, dtype=torch.int32).view(1, -1),
+        torch.zeros(1, dtype=torch.int32),
+        1,
+        kv_cache_dtype="nvfp4",
+        scale=scale,
+    )
+    dequant = dequant.float()
+    # NVFP4 NoPE + FP8 RoPE round trip of the source latent.
+    assert (dequant - kv.float()).norm() / kv.float().norm() < 0.15
+    dequant = dequant.view(num_blocks, block_size, QK_HEAD_DIM)
+
+    caches = [cache]
+    if dcp > 1:
+        # vLLM's DCP layout: token p is on rank p % dcp at local index p // dcp of
+        # the same block table; the other ranks get slot -1 for it.
+        caches = [torch.zeros_like(cache) for _ in range(dcp)]
+        for i, seq_len in enumerate(seq_lens.tolist()):
+            pos = torch.arange(seq_len)
+            src = block_tables[i, pos // block_size] * block_size + pos % block_size
+            local = pos // dcp
+            dst = block_tables[i, local // block_size] * block_size + local % block_size
+            for rank, rank_cache in enumerate(caches):
+                ops.concat_and_cache_mla(
+                    kv[src, :KV_LORA_RANK].contiguous(),
+                    kv[src, KV_LORA_RANK:].contiguous(),
+                    rank_cache,
+                    torch.where(pos % dcp == rank, dst, -1),
+                    "nvfp4",
+                    scale,
+                )
+
+    q = torch.randn(total_q, num_heads, QK_HEAD_DIM, dtype=torch.bfloat16)
+    if spec_decode:
+        query = q
+        packed = {
+            "cum_seq_lens_q": torch.tensor([0, *q_lens]).cumsum(0, dtype=torch.int32),
+            "max_q_len": max_q_len,
+        }
+    else:
+        query = q.view(bs, 1, num_heads, QK_HEAD_DIM)
+        packed = {}
+    lead = (total_q, num_heads)
+    outs, lses = [], []
+    for rank, rank_cache in enumerate(caches):
+        dcp_args = {}
+        if dcp > 1:
+            dcp_args = {"cp_world": dcp, "cp_rank": rank, "kv_len_global": seq_lens}
+        out, lse = cake_nvfp4_mla_decode(
+            query,
+            rank_cache,
+            block_tables,
+            get_dcp_local_seq_lens(seq_lens, dcp, rank),
+            sm_scale=SCALE,
+            k_scale=k_scale,
+            max_seq_len=-(-max_seq_len // dcp),
+            return_lse=True,
+            **packed,
+            **dcp_args,
+        )
+        assert out.shape == (*query.shape[:-1], KV_LORA_RANK)
+        assert lse is not None
+        outs.append(out.reshape(total_q, num_heads, KV_LORA_RANK).float())
+        lses.append(lse.reshape(lead))
+    out, lse = _lse_weighted_combine(
+        torch.stack(outs), torch.stack(lses), return_lse=True
+    )
+
+    q_nope, q_sf, q_rope, q_scale = quantize_mla_nvfp4_query(
+        q,
+        k_scale,
+        k_scale,
+        out=cake_backend.mla_nvfp4_query_buffers(
+            torch.empty(
+                cake_backend.query_workspace_bytes(total_q * num_heads),
+                dtype=torch.uint8,
+            ),
+            lead,
+        ),
+    )
+    e2m1 = torch.tensor(
+        [0, 0.5, 1, 1.5, 2, 3, 4, 6, -0.0, -0.5, -1, -1.5, -2, -3, -4, -6]
+    )
+    codes = torch.stack((q_nope & 0xF, q_nope >> 4), dim=-1).flatten(-2).long()
+    q_ref = (
+        torch.cat(
+            (e2m1[codes] * q_sf.float().repeat_interleave(16, dim=-1), q_rope.float()),
+            dim=-1,
+        )
+        * q_scale[..., None]
+    )
+
+    out_ref = torch.empty(total_q, num_heads, KV_LORA_RANK)
+    lse_ref = torch.empty(total_q, num_heads)
+    row = 0
+    for i, q_len in enumerate(q_lens):
+        seq_len = int(seq_lens[i])
+        k = dequant[block_tables[i]].view(-1, QK_HEAD_DIM)[:seq_len]
+        for t in range(q_len):
+            # Bottom-right causal: token t sees the request's keys up to itself.
+            visible = k[: seq_len - q_len + 1 + t]
+            logits = q_ref[row] @ visible.T * SCALE
+            lse_ref[row] = torch.logsumexp(logits, dim=-1)
+            out_ref[row] = torch.softmax(logits, dim=-1) @ visible[:, :KV_LORA_RANK]
+            row += 1
+
+    rel_err = (out - out_ref).norm() / out_ref.norm()
+    assert rel_err < 0.05, f"relative L2 error {rel_err:.4f}"
+    torch.testing.assert_close(lse, lse_ref, atol=1e-3, rtol=0)

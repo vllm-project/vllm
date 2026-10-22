@@ -217,6 +217,7 @@ def test_masked_mha_routing_is_dimension_specific():
     [
         ("auto", KVQuantMode.NONE),
         ("fp8_ds_mla", KVQuantMode.FP8_PER_TENSOR),
+        ("nvfp4", KVQuantMode.NVFP4),
     ],
 )
 @pytest.mark.parametrize(
@@ -237,6 +238,8 @@ def test_mla_kv_cache_spec_uses_layer_cache_dtype(
     rope_dim: int,
     row_bytes: int,
 ):
+    if cache_dtype == "nvfp4" and (sm120 or rope_dim != 64):
+        pytest.skip("nvfp4 is dense MLA with RoPE; these rows vary sparse impls")
     from vllm.v1.attention.backends.mla.flashinfer_mla_sparse_sm120 import (
         FlashInferMLASparseSM120Impl,
     )
@@ -270,6 +273,12 @@ def test_mla_kv_cache_spec_uses_layer_cache_dtype(
     if cache_dtype == "fp8_ds_mla":
         assert spec.state_content_bytes == row_bytes
         assert spec.page_size_bytes == 64 * row_bytes
+    elif cache_dtype == "nvfp4":
+        backend = pytest.importorskip(
+            "vllm.v1.attention.backends.mla.flashinfer_mla"
+        ).FlashInferMLABackend
+        # 256 B FP4 NoPE + 64 B FP8 RoPE + 32 B FP8 block scales per token.
+        assert backend.customize_spec(spec).page_size_bytes == 64 * 352
 
 
 @pytest.mark.cpu_test

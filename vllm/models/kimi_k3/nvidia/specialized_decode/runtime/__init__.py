@@ -110,6 +110,8 @@ def unsupported(vllm_config) -> str | None:
             spec is not None and spec.enable_adaptive_verification,
             "adaptive verification",
         ),
+        # The MLA core writes and decodes 576-byte FP8 cache records.
+        (vllm_config.cache_config.cache_dtype == "nvfp4", "the nvfp4 KV cache"),
         # KdaSplit keeps a BF16 conv state and an FP32 recurrent state in place; it
         # maintains neither other cache dtypes nor ReplaySSM / RecoverSSM records.
         (
