@@ -4649,6 +4649,26 @@ steps:
   - pytest -v -s tests/models/test_dsv41_mono_numerics.py
   - pytest -v -s tests/models/test_dsv41_mono_layers.py
 
+- label: ":amd: (MI355) Muse Spark Specialized Decode"
+  timeout_in_minutes: 60
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_8
+  num_gpus: 8
+  optional: true
+  working_dir: "/vllm-workspace/"
+  source_file_dependencies:
+  - docker/Dockerfile.rocm_base
+  - vllm/models/muse_spark/
+  - vllm/transformers_utils/configs/muse_spark.py
+  - vllm/v1/worker/gpu/model_states/
+  - vllm/v1/attention/backends/rocm_aiter_fa.py
+  - vllm/third_party/flash_linear_attention/ops/kda.py
+  - tests/models/muse_spark/
+  commands:
+  # test_runtime is CPU-only and runs in Basic Models (Other).
+  - pytest -v -s tests/models/muse_spark/amd_specialized_decode --ignore=tests/models/muse_spark/amd_specialized_decode/test_runtime.py
+
 - label: ":amd: (MI355) Quantization Kernels Shard %N"
   timeout_in_minutes: 120
   parallelism: 6
@@ -4805,8 +4825,9 @@ steps:
   - tests/models/test_vision.py
   - tests/models/test_deepseek_v4_vl_rocm.py
   - tests/models/test_deepseek_v4_vl_stream_weights.py
+  - tests/models/muse_spark/
   commands:
-  - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py models/test_deepseek_v4_vl_rocm.py models/test_deepseek_v4_vl_stream_weights.py
+  - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py models/test_deepseek_v4_vl_rocm.py models/test_deepseek_v4_vl_stream_weights.py models/muse_spark/amd_specialized_decode/test_runtime.py
   - VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'not distributed'
   - pytest -v -s models/test_vision.py::test_simple_mrope_vision_model_spatial_merge
 

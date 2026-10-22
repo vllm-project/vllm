@@ -5,6 +5,7 @@
 import functools
 import math
 from collections.abc import Iterable
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
@@ -80,6 +81,11 @@ from .ops.router_bf16x3 import (
     split_fp32_to_bf16x3,
     supports_router_bf16x3,
 )
+from .specialized_decode.hooks import SpecializedDecodeMixin
+from .specialized_decode.runtime import specialized_decode_config
+
+if TYPE_CHECKING:
+    from .specialized_decode.runtime.decode import Step
 
 logger = init_logger(__name__)
 
@@ -573,6 +579,19 @@ class MuseSpark1xAttention(nn.Module):
             self.attn_temperature_tuning_q_scale,
         )
 
+    def _split_qkv(
+        self, qkv: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        """Views ``(q, k, v, o_gate)`` of a qkv block (o_gate None without one)."""
+        if self.use_o_gate:
+            q, k, v, og = qkv.split(
+                [self.q_size, self.kv_size, self.kv_size, self.q_size], dim=-1
+            )
+        else:
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            og = None
+        return q, k, v, og
+
     def _qk_norm_rope_kv_insert(
         self, qkv: torch.Tensor, positions: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
@@ -597,13 +616,7 @@ class MuseSpark1xAttention(nn.Module):
                 self.rms_norm_eps,
             )
 
-        if self.use_o_gate:
-            q, k, v, og = qkv.split(
-                [self.q_size, self.kv_size, self.kv_size, self.q_size], dim=-1
-            )
-        else:
-            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-            og = None
+        q, k, v, og = self._split_qkv(qkv)
         if self.fused_qk_norm_rope_kv_insert:
             return q, k, v, og
 
@@ -625,22 +638,34 @@ class MuseSpark1xAttention(nn.Module):
             q, k = self.rotary_emb.forward_cuda(positions, q, k)
         return q, k, v, og
 
-    def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+    def front(
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
-        """Attention over an input the caller has already normalized."""
+        """qkv_proj, then the fused QK-norm / RoPE / KV insert in place (the fused
+        path only): the qkv block [T, q | k | v | o_gate] with q and k normalized
+        and rotated and this step's K / V in the cache. The specialized decode
+        runs it, then ``attend`` or its own attention core."""
+        assert self.fused_qk_norm_rope_kv_insert
         qkv, _ = self.qkv_proj(hidden_states)
+        self._qk_norm_rope_kv_insert(qkv, positions)
+        return qkv
 
-        q, k, v, og = self._qk_norm_rope_kv_insert(qkv, positions)
-
+    def attend(self, qkv: torch.Tensor, gate: bool = True) -> torch.Tensor:
+        """The attention over a ``front`` block: o_proj's input, the gated core
+        (``gate``), or the attention output before the output norm and o_gate
+        [T, num_heads * head_dim] (the specialized decode applies them)."""
+        assert self.fused_qk_norm_rope_kv_insert
+        q, _, _, og = self._split_qkv(qkv)
         # Withhold k/v so the attention layer does not rewrite the KV cache.
-        if self.fused_qk_norm_rope_kv_insert:
-            attn_output = self.attn(q, None, None)
-        else:
-            attn_output = self.attn(q, k, v)
+        attn_output = self.attn(q, None, None)
+        if gate:
+            attn_output = self._o_norm_gate(attn_output, og)
+        return attn_output.view(-1, self.num_heads * self.head_dim)
 
+    def _o_norm_gate(
+        self, attn_output: torch.Tensor, og: torch.Tensor | None
+    ) -> torch.Tensor:
+        """The output norm and o_gate, as configured."""
         if self.fuse_o_norm_gate:
             assert og is not None
             attn_output = attn_output.reshape(-1, self.num_heads, self.head_dim)
@@ -664,8 +689,27 @@ class MuseSpark1xAttention(nn.Module):
                 if attn_output.dim() == 2:
                     attn_output = attn_output.view(-1, self.num_heads, self.head_dim)
                 attn_output = og.sigmoid() * attn_output
+        return attn_output
 
-        attn_output = attn_output.view(-1, self.num_heads * self.head_dim)
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        skip_o_proj: bool = False,
+    ) -> torch.Tensor:
+        """Attention over an input the caller has already normalized. With
+        ``skip_o_proj`` (the specialized decode) it returns o_proj's input, the
+        gated core [T, num_heads * head_dim]: the decode kernel runs o_proj and
+        its all-reduce."""
+        if self.fused_qk_norm_rope_kv_insert:
+            attn_output = self.attend(self.front(positions, hidden_states))
+        else:
+            qkv, _ = self.qkv_proj(hidden_states)
+            q, k, v, og = self._qk_norm_rope_kv_insert(qkv, positions)
+            attn_output = self._o_norm_gate(self.attn(q, k, v), og)
+            attn_output = attn_output.view(-1, self.num_heads * self.head_dim)
+        if skip_o_proj:
+            return attn_output
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -911,6 +955,7 @@ class MuseSpark1xModel(LlamaModel):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
+        step: "Step | None" = None,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -931,7 +976,8 @@ class MuseSpark1xModel(LlamaModel):
         for idx, layer in enumerate(
             self.layers[self.start_layer : self.end_layer], start=self.start_layer
         ):
-            x = layer(positions, x)
+            kernel = step.layer(idx) if step is not None else None
+            x = (kernel or layer)(positions, x)
             if not self.fuse_across_layers and isinstance(x, MuseSpark1xResidualStream):
                 x = norm_then_gated_residual(x)
             if idx + 1 in self.aux_hidden_state_layers:
@@ -963,7 +1009,9 @@ class MuseSpark1xModel(LlamaModel):
         return output
 
 
-class MuseSpark1xForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
+class MuseSpark1xForCausalLM(
+    LlamaForCausalLM, SupportsLoRA, MixtureOfExperts, SpecializedDecodeMixin
+):
     model_cls = MuseSpark1xModel
     decoder_layer_cls = MuseSpark1xDecoderLayer
     supported_quantization_configs: tuple[type[QuantizationConfig], ...] = (
@@ -985,6 +1033,9 @@ class MuseSpark1xForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
         prefix: str = "",
         layer_type: type[MuseSpark1xDecoderLayer] | None = None,
     ):
+        # Every refusal of the specialized decode, before any weight is
+        # allocated (LlamaForCausalLM.__init__ allocates). None: the stock decode.
+        decode_config = specialized_decode_config(vllm_config)
         config = vllm_config.model_config.hf_text_config
         gated_delta_net = getattr(config, "gated_delta_net", None)
         if gated_delta_net is not None and getattr(gated_delta_net, "enable", False):
@@ -1005,6 +1056,7 @@ class MuseSpark1xForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
             layer_type = self.decoder_layer_cls
 
         super().__init__(vllm_config=vllm_config, prefix=prefix, layer_type=layer_type)
+        self.init_specialized_decode(decode_config)
 
         # qkv_proj fuses Q+K+V+OG, so LoRA must treat it as one module.
         self.packed_modules_mapping = {  # type: ignore[misc]
@@ -1093,10 +1145,24 @@ class MuseSpark1xForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
                 moe.n_redundant_experts = self.num_redundant_experts
                 moe.experts.update_expert_map()
 
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
+        step = self.plan_specialized_decode(positions, intermediate_tensors)
+        return self.model(
+            input_ids, positions, intermediate_tensors, inputs_embeds, step=step
+        )
+
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
+        # the specialized decode's fail-stop poll: once a step on every TP rank
+        self.after_specialized_decode_step()
         hidden_states = hidden_states.to(self.lm_head.weight.dtype)
         logits = self.logits_processor(self.lm_head, hidden_states)
         if logits is None:
@@ -1151,6 +1217,12 @@ class MuseSpark1xForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
             n_gates,
         )
         return loaded
+
+    def process_weights_after_loading(self) -> None:
+        # Runs after every load, --load-format dummy included, whose loader never
+        # calls load_weights (and so never materializes the residual constants).
+        self.refuse_weight_reload()
+        self.materialize_for_specialized_decode()
 
 
 __all__ = [
