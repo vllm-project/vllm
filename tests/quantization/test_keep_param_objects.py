@@ -13,6 +13,7 @@ from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.modelopt import (
+    ModelOptFp8Config,
     ModelOptMxFp8Config,
     ModelOptNvFp4Config,
 )
@@ -105,6 +106,17 @@ NVFP4 = dict(is_checkpoint_nvfp4_serialized=True, kv_cache_quant_algo=None)
 
 CASES: list[Callable] = [
     lambda: _linear(Fp8Config(weight_block_size=[128, 128])),
+    # A partial trailing 128-block is padded in post-processing (GLM-style).
+    lambda: _linear(
+        ModelOptFp8Config(
+            quant_method="FP8_PB_WO",
+            is_checkpoint_fp8_serialized=True,
+            kv_cache_quant_method=None,
+            exclude_modules=[],
+        ),
+        output_size=SIZE + 64,
+    ),
+    lambda: _linear(ModelOptMxFp8Config.from_config({"quant_method": "mxfp8"})),
     _online_linear,
     lambda: _moe(None),
     lambda: _moe(Fp8Config(weight_block_size=[128, 128])),
@@ -115,6 +127,8 @@ CASES: list[Callable] = [
 ]
 IDS = [
     "fp8-block-linear",
+    "modelopt-fp8-pb-wo-linear",
+    "modelopt-mxfp8-linear",
     "online-mxfp4-linear",
     "unquantized-moe",
     "fp8-block-moe",
