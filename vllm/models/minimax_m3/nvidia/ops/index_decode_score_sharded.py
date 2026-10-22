@@ -472,7 +472,10 @@ def minimax_m3_index_decode_score_sharded_cutedsl(
     use_pdl: bool = False,
     prefetch_history: bool = False,
 ) -> None:
-    """Write local maxima for all heads over interleaved token shards."""
+    """Write local maxima for all heads over interleaved token shards.
+
+    History prefetch requires metadata fenced by a non-PDL cache writer.
+    """
     if idx_q.dtype != torch.float8_e4m3fn or index_kv_shard.dtype != idx_q.dtype:
         raise TypeError("sharded index decode score supports FP8 E4M3 only")
     total_tokens, num_heads, head_dim = idx_q.shape
@@ -553,6 +556,18 @@ def _index_k_publish_candidates_kernel(
 
 
 @triton.jit
+def _index_k_load_tagged_word(ptr):
+    return tl.inline_asm_elementwise(
+        "ld.relaxed.sys.u64 $0, [$1];",
+        "=l,l",
+        [ptr],
+        dtype=tl.uint64,
+        is_pure=False,
+        pack=1,
+    )
+
+
+@triton.jit
 def _index_k_merge_candidates_kernel(
     recv_ptr,
     valid_ptr,
@@ -564,6 +579,8 @@ def _index_k_merge_candidates_kernel(
     recv_stride_src,
     recv_stride_h,
     recv_stride_t,
+    expected_generations,
+    TAGGED: tl.constexpr,
     W: tl.constexpr,
     INIT: tl.constexpr,
     LOCAL: tl.constexpr,
@@ -574,23 +591,41 @@ def _index_k_merge_candidates_kernel(
     t = tl.program_id(0)
     h = tl.program_id(1)
     row = recv_ptr + h * recv_stride_h + t * recv_stride_t
-    ready = row + tl.arange(0, W) * recv_stride_src + 32
-    seen = tl.atomic_add(ready, 0, sem="acquire", scope="sys")
-    pending = tl.sum((seen != 1).to(tl.int32), 0)
-    spins = 0
-    while (pending > 0) & (spins < SPIN):
+    k = tl.arange(0, W * 16)
+    source = row + k // 16 * recv_stride_src + k % 16
+    if TAGGED:
+        counter = expected_generations + h * (recv_stride_h // recv_stride_t) + t
+        generation = tl.load(counter).to(tl.uint32) + 1
+        generation = tl.where(generation == 0, 1, generation).to(tl.uint32)
+        pending, spins = 1, 0
+        score_words = tl.full((W * 16,), 0, tl.uint64)
+        id_words = tl.full((W * 16,), 0, tl.uint64)
+        while (pending > 0) & (spins < SPIN):
+            score_words = _index_k_load_tagged_word(source)
+            id_words = _index_k_load_tagged_word(source + 16)
+            matches = ((score_words >> 32) == generation) & (
+                (id_words >> 32) == generation
+            )
+            pending = tl.sum((~matches).to(tl.int32), 0)
+            spins += 1
+        ids = id_words.to(tl.int32)
+        scores = score_words.to(tl.uint32).to(tl.float32, bitcast=True)
+    else:
+        ready = row + tl.arange(0, W) * recv_stride_src + 32
         seen = tl.atomic_add(ready, 0, sem="acquire", scope="sys")
         pending = tl.sum((seen != 1).to(tl.int32), 0)
-        spins += 1
+        spins = 0
+        while (pending > 0) & (spins < SPIN):
+            seen = tl.atomic_add(ready, 0, sem="acquire", scope="sys")
+            pending = tl.sum((seen != 1).to(tl.int32), 0)
+            spins += 1
+        ids = tl.load(source + 16)
+        scores = tl.load(source).to(tl.float32, bitcast=True)
     if pending > 0:
         tl.atomic_add(err_ptr, 1)
         tl.inline_asm_elementwise(
             "trap; mov.u32 $0, 0;", "=r", [], dtype=tl.int32, is_pure=False, pack=1
         )
-    k = tl.arange(0, W * 16)
-    source = row + k // 16 * recv_stride_src + k % 16
-    ids = tl.load(source + 16)
-    scores = tl.load(source).to(tl.float32, bitcast=True)
     nvalid = tl.minimum(tl.load(valid_ptr + t * valid_stride), MAX_TILES)
     valid = (ids >= 0) & (ids < nvalid)
     scores = tl.where(scores == scores, scores, -float("inf"))
@@ -640,7 +675,10 @@ def _index_k_merge_candidates_kernel(
         tl.where(selected == 0x7FFFFFFF, -1, selected),
     )
     tl.debug_barrier()
-    tl.atomic_xchg(ready, 0, sem="release", scope="sys")
+    if TAGGED:
+        tl.store(counter, generation)
+    else:
+        tl.atomic_xchg(ready, 0, sem="release", scope="sys")
     if launch_pdl:
         # Do not let the next layer reuse scratch before this publisher exits.
         tl.extra.cuda.gdc_wait()
@@ -729,6 +767,7 @@ def minimax_m3_index_select_publish_candidates(
     local_blocks: int,
     spin_limit: int = 1 << 26,
     use_pdl: bool = False,
+    generations: torch.Tensor | None = None,
 ) -> None:
     """Select local Top16 directly into each head owner's receive slot."""
     from vllm.third_party.fmha_sm100.jit import get_sparse_topk_module
@@ -747,6 +786,7 @@ def minimax_m3_index_select_publish_candidates(
         local_blocks,
         spin_limit,
         use_pdl,
+        generations,
         torch.cuda.current_stream().cuda_stream,
     )
 
@@ -761,12 +801,20 @@ def minimax_m3_index_merge_candidates(
     local_blocks: int,
     spin_limit: int = 1 << 26,
     use_pdl: bool = False,
+    expected_generations: torch.Tensor | None = None,
 ) -> None:
     """Merge duplicate blocks by max, force init/local blocks, and sort Top16 IDs."""
     world, heads, capacity, row_size = recv_slot.shape
     tokens, out_heads, topk = output.shape
     assert world in SUPPORTED_TP and out_heads == heads
-    assert topk == TOPK and row_size == CANDIDATE_ROW_SIZE and tokens <= capacity
+    tagged = expected_generations is not None
+    assert topk == TOPK and tokens <= capacity
+    assert row_size == (2 * TOPK if tagged else CANDIDATE_ROW_SIZE)
+    assert recv_slot.dtype == (torch.int64 if tagged else torch.int32)
+    if expected_generations is not None:
+        assert expected_generations.shape == (heads, capacity)
+        assert expected_generations.dtype == torch.int32
+        assert expected_generations.is_contiguous()
     assert recv_slot.stride(-1) == output.stride(-1) == 1
     assert num_valid_pages.shape == (tokens,)
     _index_k_merge_candidates_kernel[(tokens, heads)](
@@ -780,6 +828,8 @@ def minimax_m3_index_merge_candidates(
         recv_slot.stride(0),
         recv_slot.stride(1),
         recv_slot.stride(2),
+        expected_generations,
+        TAGGED=tagged,
         W=world,
         INIT=init_blocks,
         LOCAL=local_blocks,
