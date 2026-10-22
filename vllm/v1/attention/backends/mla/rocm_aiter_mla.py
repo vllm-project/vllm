@@ -1836,9 +1836,12 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 asm_selected=self._asm_dcp_verify,
             )
 
+        # forward_mqa serves Gluon verify first, and Gluon needs the flat
+        # page indices this route skips.
         use_triton_verify = (
             self._use_triton_verify
             and causal
+            and not use_gluon_verify
             and max_qo_len > AiterMLAHelper._ASM_PADDED_MAX_PS_QLEN
         )
         triton_verify_num_kv_splits = 0
