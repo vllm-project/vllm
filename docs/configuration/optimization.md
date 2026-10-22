@@ -511,3 +511,16 @@ If you observe that GPU utilization is lower than expected, CPU contention may b
 vLLM supports multiple attention backends optimized for different hardware and use cases. The backend is automatically selected based on your GPU architecture, model type, and configuration, but you can also manually specify one for optimal performance.
 
 For detailed information on available backends, their feature support, and how to configure them, see the [Attention Backend Feature Support](../design/attention_backends.md) documentation.
+
+## MiniMax M3 indexer context parallelism
+
+With `--attention-config '{"indexer_cache_sharding":"on"}'`, the MSA backend
+can shard FP8 index K over single-node NVLink TP2 or TP4 with 128-token pages.
+Prefill defaults to gathering index K and scoring the local query heads.
+To score local K and exchange Top16 candidates instead, use
+`--attention-config '{"indexer_cache_sharding":"on","indexer_prefill_cp":"local_score"}'`.
+Set `indexer_prefill_cp` to `gather` for the comparison path on the same cache layout.
+Both paths preserve logical 128-token block IDs; decode and main attention are
+unchanged. The local prefill path uses the Triton scorer, bounds temporary scores
+to 256 queries and the batch context length, and exchanges candidates with NCCL.
+There is no automatic path selection; compare full-model performance for your workload.

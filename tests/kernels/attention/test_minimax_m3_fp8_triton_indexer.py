@@ -141,3 +141,53 @@ def test_bf16_query_against_fp8_cache_decode_topk_matches_bf16() -> None:
         return {int(b) for b in idx[0, 0].tolist() if b >= 0}
 
     _check_selection(select(keys), select(keys.to(torch.float8_e4m3fn)))
+
+
+@pytest.mark.skipif(not FP8_CUDA_SUPPORTED, reason="CUDA FP8 support required")
+@pytest.mark.parametrize("tp", [2, 4])
+@torch.inference_mode()
+def test_prefill_shard_scores_preserve_causal_block_max(tp: int) -> None:
+    """Interleaved shards reproduce full scores for shared prefixes and tail pages."""
+    torch.manual_seed(12)
+    query_lens = [65, 3]
+    lengths = [259, 130]
+    cu = torch.tensor([0, 65, 68], dtype=torch.int32, device="cuda")
+    seq = torch.tensor(lengths, dtype=torch.int32, device="cuda")
+    prefix = seq - torch.tensor(query_lens, device="cuda")
+    table = torch.tensor([[3, 0, 2], [3, 1, 0]], dtype=torch.int32, device="cuda")
+    query = torch.randint(-2, 3, (68, 4, 128), device="cuda").to(torch.float8_e4m3fn)
+    cache = torch.randint(-2, 3, (4, 128, 128), device="cuda").to(torch.float8_e4m3fn)
+    reference = torch.full((tp, 4, 68, 16), -float("inf"), device="cuda")
+    for req, (length, query_len) in enumerate(zip(lengths, query_lens)):
+        start = sum(query_lens[:req])
+        for token in range(query_len):
+            position = length - query_len + token
+            for block in range(position // 128 + 1):
+                keys = cache[table[req, block]].float()
+                dots = keys @ query[start + token].float().T
+                dots[
+                    torch.arange(128, device="cuda") + block * 128 > position
+                ] = -float("inf")
+                for rank in range(tp):
+                    reference[rank, :, start + token, block] = dots[rank::tp].amax(
+                        dim=0
+                    )
+    partial = []
+    for rank in range(tp):
+        out = torch.full_like(reference[rank], -float("inf"))
+        minimax_m3_index_score(
+            query,
+            cache[:, rank::tp].contiguous(),
+            table,
+            cu,
+            seq,
+            prefix,
+            max(query_lens),
+            max(lengths),
+            4,
+            rank=rank,
+            tp=tp,
+            score_out=out,
+        )
+        partial.append(out)
+    torch.testing.assert_close(torch.stack(partial), reference, rtol=0, atol=0)

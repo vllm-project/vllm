@@ -119,6 +119,12 @@ class AttentionConfig:
     selected at startup and stays fixed for the engine. MSA supports FP8
     index K on single-node NVLink TP2 and TP4."""
 
+    indexer_prefill_cp: Literal["gather", "local_score"] = "gather"
+    """MiniMax M3 MSA prefill execution with a TP-sharded index cache.
+    "gather" reconstructs index K before scoring (default). "local_score"
+    scores local K for all index heads and exchanges Top16 candidates.
+    This changes execution only; the startup cache layout stays fixed."""
+
     indexer_sparse_logits: bool | None = None
     """DeepSeek V4.1 two-level indexer: score only the candidate blocks with
     DeepGEMM's sparse MQA-logits kernels instead of computing dense logits over

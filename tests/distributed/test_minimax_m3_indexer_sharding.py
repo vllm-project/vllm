@@ -43,7 +43,7 @@ def _indexer_sharding(monkeypatch, tp_size, pp_size, rank, distributed_init_port
             block_size=128,
             max_model_len=4096,
             max_num_seqs=4,
-            max_num_batched_tokens=256,
+            max_num_batched_tokens=512,
             hf_config_override={
                 "sparse_attention_config": {
                     "sparse_num_index_heads": 4,
@@ -148,7 +148,7 @@ def _check_indexer_forwards(config, device, rank, comm):
                     indexer_kv_dtype="fp8",
                     index_k_shard=world if sharded else 1,
                     topk_indices_buffer=torch.empty(
-                        (256, local_heads, 16), dtype=torch.int32, device=device
+                        (512, local_heads, 16), dtype=torch.int32, device=device
                     ),
                 )
                 for layer in range(5)
@@ -186,7 +186,10 @@ def _check_indexer_forwards(config, device, rank, comm):
                 rtol=0,
                 atol=0,
             )
-        if metadata[1].prefill_msa is not None:
+        if (
+            metadata[1].prefill_msa is not None
+            and metadata[1].prefill_msa.local_chunks is None
+        ):
             nd = metadata[1].num_decode_tokens
             torch.testing.assert_close(
                 metadata[1].unified_scores[nd:],
@@ -202,6 +205,7 @@ def _check_indexer_forwards(config, device, rank, comm):
         BatchSpec(seq_lens=[128, 2306], query_lens=[4, 4]),
         BatchSpec(seq_lens=[128, 2307], query_lens=[8, 8]),
         BatchSpec(seq_lens=[2305, 2561, 2624, 2720], query_lens=[1, 1, 64, 96]),
+        BatchSpec(seq_lens=[2691], query_lens=[259]),
         BatchSpec(seq_lens=[129, 2305], query_lens=[1, 1]),
     ]
     for batch in batches:
@@ -212,7 +216,7 @@ def _check_indexer_forwards(config, device, rank, comm):
         common.block_table_tensor = torch.randperm(num_pages, device=device)[
             common.block_table_tensor.long()
         ].int()
-        if batch.query_lens[-1] > 8:
+        if len(batch.query_lens) > 1 and batch.query_lens[-1] > 8:
             # Shared prefix pages must retain each request's logical order.
             common.block_table_tensor[-1, :8] = common.block_table_tensor[-2, :8]
         common.positions = torch.cat(
@@ -268,6 +272,14 @@ def _check_indexer_forwards(config, device, rank, comm):
                 graph.replay()
             check(metadata, queries, num_tokens)
         else:
+            builders[1].prefill_local_score = True
+            metadata[1] = builders[1].build(0, common)
+            assert metadata[1].prefill_msa.local_scores.shape[0] <= 256
+            # Reuse scratch across layers and steps, then return to gather.
+            for _ in range(3):
+                run(True, metadata, queries)
+            check(metadata, queries, num_tokens)
+            builders[1].prefill_local_score = False
             pages = torch.tensor([num_pages - 1, 0, 7, 0], device=device)
             gathered = [
                 msa.gather_prefill_pages(impl.index_cache.kv_cache, pages, comm)
@@ -285,7 +297,7 @@ def _check_indexer_forwards(config, device, rank, comm):
 )
 @pytest.mark.parametrize("tp_size", [2, 4])
 def test_msa_indexer_tp_matches_replicated(monkeypatch, tp_size):
-    """Real TP score/TopK, prefill gather, and mailbox reuse under graph replay."""
+    """Real TP score/TopK, both prefill paths, and decode graph replay."""
     if torch.accelerator.device_count() < tp_size:
         pytest.skip(f"Requires {tp_size} GPUs")
     if not all(
