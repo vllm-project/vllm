@@ -304,7 +304,7 @@ class GatedResidual(nn.Module):
                 self.input_mix_weight_up.weight,
                 self.config.rms_norm_eps,
                 self.hc_count,
-                self.lora_rank,
+                self.hc_lowrank,
                 _TWO_STAGE_MAX_M,
             )
 
