@@ -58,7 +58,7 @@ from vllm.models.muse_spark.common.ops.fused_rmsnorm import (
     fused_norm_residual_norm_fwd,
     supports_norm_residual_norm,
 )
-from vllm.platforms.rocm import on_gfx950
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.third_party.flash_linear_attention.ops.kda import (
     rms_norm_gated,
@@ -85,6 +85,16 @@ logger = init_logger(__name__)
 
 # Below this the fp32 Triton router GEMM is at least as fast in serving.
 _ROUTER_BF16X3_MIN_TOKENS = 16
+
+
+def _supports_router_bf16x3_device() -> bool:
+    if not current_platform.is_rocm():
+        return False
+
+    # Importing a foreign platform can reload torch extension libraries.
+    from vllm.platforms.rocm import on_gfx950
+
+    return on_gfx950()
 
 
 def norm_residual_then_norm(
@@ -281,7 +291,7 @@ class MuseSpark1xMoE(nn.Module):
         weight = self.router.weight.data
         # Configs are tuned and validated on gfx950 only.
         if (
-            on_gfx950()
+            _supports_router_bf16x3_device()
             and weight.dtype == torch.float32
             and supports_router_bf16x3(*weight.shape)
         ):

@@ -4,6 +4,8 @@
 """MuseSpark1x text config normalization and the DSpark draft config."""
 
 import json
+import subprocess
+import sys
 from typing import Any
 
 import pytest
@@ -32,6 +34,25 @@ TEXT: dict[str, Any] = {
     "metap": {"use_metap": True, "metap_mode": "mup", "base_width": 256},
     "gated_delta_net": {"conv_size": 4, "future_unknown_key": 2},
 }
+
+
+def test_muse_import_does_not_load_foreign_platform():
+    # Use a fresh interpreter: importing ROCm on CPU can reload the _C
+    # extension and abort due to duplicate torch operator registrations.
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import sys
+from vllm.platforms import current_platform
+from vllm.models.muse_spark.common.dspark import MuseSparkDSparkForCausalLM
+
+assert current_platform.is_rocm() or "vllm.platforms.rocm" not in sys.modules
+""",
+        ],
+        check=True,
+    )
 
 
 def test_text_config_eos_default():

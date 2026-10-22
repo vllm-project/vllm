@@ -248,7 +248,7 @@ def test_router_weight_reload_refolds_and_preserves_planes(monkeypatch) -> None:
     moe.router_output_multiplier = 0.25
     moe._router_multiplier_folded = False
     moe.moe_router = SimpleNamespace(router_output_multiplier=0.25)
-    monkeypatch.setattr(amd_model, "on_gfx950", lambda: True)
+    monkeypatch.setattr(amd_model, "_supports_router_bf16x3_device", lambda: True)
     monkeypatch.setattr(amd_model, "supports_router_bf16x3", lambda *args: True)
 
     weight_ptr = moe.router.weight.data_ptr()
