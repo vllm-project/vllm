@@ -391,7 +391,7 @@ def _check_cumem_host_table(failure):
     import on any rank falls back to /dev/shm on all of them."""
     from vllm.models.deepseek_v41.nvidia.ops import engram_host_table
 
-    if not engram_host_table.host_table_fits(0):
+    if not engram_host_table.fits_on_numa_node(0):
         return
 
     group = get_engram_dp_group()
@@ -400,7 +400,7 @@ def _check_cumem_host_table(failure):
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(engram_host_table, "CHUNK_BYTES", 2 << 20)
         if failure == "create" and group.rank_in_group == 0:
-            patch.setattr(engram_host_table, "NODE_RESERVE", 1.0)
+            patch.setattr(engram_host_table, "NUMA_RESERVE_FRACTION", 1.0)
         if failure == "import" and group.rank_in_group == 1:
             patch.setattr(
                 engram_host_table.cu,

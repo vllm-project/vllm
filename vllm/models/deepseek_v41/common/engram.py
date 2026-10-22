@@ -783,15 +783,16 @@ def gather_errors(group: GroupCoordinator, error: str | None) -> str:
     )
 
 
-def _fits_cumem_host_table(num_bytes: int) -> bool:
+def _fits_cumem(num_bytes: int) -> bool:
     if not current_platform.is_cuda():
         return False
-    from vllm.models.deepseek_v41.nvidia.ops.engram_host_table import host_table_fits
+    from vllm.models.deepseek_v41.nvidia.ops import engram_host_table
 
-    return host_table_fits(num_bytes)
+    return engram_host_table.fits_on_numa_node(num_bytes)
 
 
-def _shm_capacity_error(num_bytes: int) -> str | None:
+def _shm_shortfall(num_bytes: int) -> str | None:
+    """Why /dev/shm cannot hold a table of this size, or None if it can."""
     if not os.path.isdir(SHM_PATH):
         return f"{SHM_PATH} is not mounted"
     try:
@@ -819,30 +820,29 @@ class DPSharedEngramStorage:
         weight_bytes = num_rows * dim
         num_bytes = weight_bytes + weight_bytes // block_size
 
-        def split(storage: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-            weight = storage[:weight_bytes].view(torch.float8_e4m3fn).view(-1, dim)
-            return weight, storage[weight_bytes:].view(-1, dim // block_size)
+        def split_table(table: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+            weight = table[:weight_bytes].view(torch.float8_e4m3fn).view(-1, dim)
+            return weight, table[weight_bytes:].view(-1, dim // block_size)
 
-        tables = None
+        views = None
         if current_platform.is_cuda():
             from vllm.models.deepseek_v41.nvidia.ops import engram_host_table
 
-            tables = engram_host_table.share_host_table(num_bytes, group)
-        self.backing = "/dev/shm" if tables is None else "cuMem"
-        if tables is None:
-            storage = self._allocate_shm(num_bytes)
-            tables = storage, get_accelerator_view_from_cpu_tensor(storage)
-        self.weight, self.weight_scale_inv = split(tables[0])
-        self._views = split(tables[1])
+            views = engram_host_table.share_host_table(num_bytes, group)
+        self.backing = "/dev/shm" if views is None else "cuMem"
+        if views is None:
+            host = self._allocate_shm(num_bytes)
+            views = host, get_accelerator_view_from_cpu_tensor(host)
+        host, gpu = views
+        self.weight, self.weight_scale_inv = split_table(host)
+        self._views = split_table(gpu)
 
     def _allocate_shm(self, num_bytes: int) -> torch.Tensor:
         """Map and register one /dev/shm file across a node-local DP group."""
         group = self.group
         with ExitStack() as stack:
             backing_file = path = error = None
-            if group.rank_in_group == 0 and not (
-                error := _shm_capacity_error(num_bytes)
-            ):
+            if group.rank_in_group == 0 and not (error := _shm_shortfall(num_bytes)):
                 try:
                     backing_file = stack.enter_context(
                         tempfile.NamedTemporaryFile(prefix="vllm_engram_", dir=SHM_PATH)
@@ -944,8 +944,8 @@ def can_share_engram_tables(layout: EngramLayout, block_size: int = 32) -> bool:
     assert group is not None
     # Only the leader allocates, so every replica follows its check.
     error = None
-    if group.rank_in_group == 0 and not _fits_cumem_host_table(num_bytes):
-        error = _shm_capacity_error(num_bytes)
+    if group.rank_in_group == 0 and not _fits_cumem(num_bytes):
+        error = _shm_shortfall(num_bytes)
     error = group.broadcast_object(error)
     if error is not None:
         logger.warning_once(
@@ -1145,7 +1145,7 @@ class ParallelEngramEmbedding(nn.Module):
             )
 
     @property
-    def _small_host_pages(self) -> bool:
+    def _uses_small_host_pages(self) -> bool:
         """Whether the GPU maps this host table with pages too small for its TLB."""
         if self._shared_memory is not None:
             return self._shared_memory.backing == "/dev/shm"
@@ -1180,7 +1180,7 @@ class ParallelEngramEmbedding(nn.Module):
         ids_stride_t, ids_stride_h = indices.stride()
         sort_min_rows, _ = _engram_lookup_thresholds(indices.device)
         sort = (
-            self._small_host_pages
+            self._uses_small_host_pages
             and sort_min_rows is not None
             and rows >= sort_min_rows
         )

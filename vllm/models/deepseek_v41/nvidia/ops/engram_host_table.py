@@ -23,82 +23,90 @@ from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
 
-FABRIC = cu.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_FABRIC
+FABRIC_HANDLE = cu.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_FABRIC
 # Tables are created in chunks, so the creator can stop before draining its node.
 CHUNK_BYTES = 2 << 30
-# Share of the NUMA node left to other allocations.
-NODE_RESERVE = 0.05
+# Fraction of the NUMA node left to other allocations.
+NUMA_RESERVE_FRACTION = 0.05
 
 
-class SharedHostTable(NamedTuple):
-    """What a peer needs to map a host table: its node, layout and handles."""
+class ExportedHostTable(NamedTuple):
+    """What a peer needs to map a table: its NUMA node, layout and handles."""
 
-    numa_id: int
+    numa_node: int
     num_bytes: int
-    size: int
+    padded_bytes: int
     chunk_bytes: int
-    handles: list[bytes]
+    fabric_handles: list[bytes]
 
-    def chunks(self) -> list[tuple[int, int]]:
+    def chunk_ranges(self) -> list[tuple[int, int]]:
         return [
-            (offset, min(self.chunk_bytes, self.size - offset))
-            for offset in range(0, self.size, self.chunk_bytes)
+            (offset, min(self.chunk_bytes, self.padded_bytes - offset))
+            for offset in range(0, self.padded_bytes, self.chunk_bytes)
         ]
 
 
-def _check(result: tuple):
-    err, *rest = result
-    if err != cu.CUresult.CUDA_SUCCESS:
-        raise RuntimeError(f"CUDA driver call failed: {err}")
-    return rest[0] if rest else None
+def _call_driver(fn, *args):
+    """Call a CUDA driver API and return its result, raising on failure."""
+    error, *result = fn(*args)
+    if error != cu.CUresult.CUDA_SUCCESS:
+        raise RuntimeError(f"{fn.__name__} failed: {error.name}")
+    return result[0] if result else None
 
 
-def _host_numa_id() -> int:
-    attr = cu.CUdevice_attribute.CU_DEVICE_ATTRIBUTE_HOST_NUMA_ID
-    return _check(
-        cu.cuDeviceGetAttribute(attr, torch.accelerator.current_device_index())
+def _gpu_numa_node() -> int:
+    return _call_driver(
+        cu.cuDeviceGetAttribute,
+        cu.CUdevice_attribute.CU_DEVICE_ATTRIBUTE_HOST_NUMA_ID,
+        torch.accelerator.current_device_index(),
     )
 
 
-def _host_prop(numa_id: int) -> cu.CUmemAllocationProp:
+def _host_allocation_prop(numa_node: int) -> cu.CUmemAllocationProp:
     prop = cu.CUmemAllocationProp()
     prop.type = cu.CUmemAllocationType.CU_MEM_ALLOCATION_TYPE_PINNED
     prop.location.type = cu.CUmemLocationType.CU_MEM_LOCATION_TYPE_HOST_NUMA
-    prop.location.id = numa_id
-    prop.requestedHandleTypes = FABRIC
+    prop.location.id = numa_node
+    prop.requestedHandleTypes = FABRIC_HANDLE
     return prop
 
 
-def _granularity(prop: cu.CUmemAllocationProp) -> int:
-    return _check(cu.cuMemGetAllocationGranularity(prop, 0))
+def _allocation_granularity(prop: cu.CUmemAllocationProp) -> int:
+    return _call_driver(cu.cuMemGetAllocationGranularity, prop, 0)
 
 
-def _export(handle) -> bytes:
-    return bytes(_check(cu.cuMemExportToShareableHandle(handle, FABRIC, 0)).data)
+def _export_fabric_handle(handle) -> bytes:
+    exported = _call_driver(cu.cuMemExportToShareableHandle, handle, FABRIC_HANDLE, 0)
+    return bytes(exported.data)
 
 
-def _read_write(location_type, location_id: int) -> cu.CUmemAccessDesc:
-    desc = cu.CUmemAccessDesc()
-    desc.location.type = location_type
-    desc.location.id = location_id
-    desc.flags = cu.CUmemAccess_flags.CU_MEM_ACCESS_FLAGS_PROT_READWRITE
-    return desc
+def _release(handles: list) -> None:
+    for handle in handles:
+        cu.cuMemRelease(handle)
 
 
-def _unmap(ptr: int, size: int, chunks: list[tuple[int, int]]) -> None:
-    for offset, length in chunks:
-        cu.cuMemUnmap(ptr + offset, length)
-    cu.cuMemAddressFree(ptr, size)
+def _read_write_access(location_type, location_id: int) -> cu.CUmemAccessDesc:
+    access = cu.CUmemAccessDesc()
+    access.location.type = location_type
+    access.location.id = location_id
+    access.flags = cu.CUmemAccess_flags.CU_MEM_ACCESS_FLAGS_PROT_READWRITE
+    return access
+
+
+def _unmap(address: int, size: int, ranges: list[tuple[int, int]]) -> None:
+    for offset, length in ranges:
+        cu.cuMemUnmap(address + offset, length)
+    cu.cuMemAddressFree(address, size)
 
 
 @cache
-def host_tables_supported() -> bool:
+def fabric_host_memory_supported() -> bool:
     """Whether host-NUMA cuMem allocations can export FABRIC handles here."""
     try:
-        prop = _host_prop(_host_numa_id())
-        handle = _check(cu.cuMemCreate(_granularity(prop), prop, 0))
+        prop = _host_allocation_prop(_gpu_numa_node())
+        handle = _call_driver(cu.cuMemCreate, _allocation_granularity(prop), prop, 0)
         try:
-            _export(handle)
+            _export_fabric_handle(handle)
         finally:
             cu.cuMemRelease(handle)
     except Exception as exc:
@@ -111,99 +119,111 @@ def host_tables_supported() -> bool:
     return True
 
 
-def host_table_fits(num_bytes: int) -> bool:
+def fits_on_numa_node(num_bytes: int) -> bool:
     """Whether a table of this size can live on this GPU's host NUMA node."""
-    if not host_tables_supported():
+    if not fabric_host_memory_supported():
         return False
-    total = get_memory_node_info(_host_numa_id()).total_memory
-    return num_bytes <= total * (1 - NODE_RESERVE)
+    total = get_memory_node_info(_gpu_numa_node()).total_memory
+    return num_bytes <= total * (1 - NUMA_RESERVE_FRACTION)
 
 
-def create_host_table(num_bytes: int) -> tuple[list, SharedHostTable]:
+def _create_table(num_bytes: int) -> tuple[list, ExportedHostTable]:
     """Allocate and export a table on this GPU's host NUMA node.
 
     Stops once the node would drop below its reserve. The kernel compacts to
     find 2M pages and fails the chunk, rather than OOM-killing, if it cannot.
     """
-    numa_id = _host_numa_id()
-    prop = _host_prop(numa_id)
-    size = round_up(num_bytes, _granularity(prop))
-    table = SharedHostTable(numa_id, num_bytes, size, CHUNK_BYTES, [])
-    reserve = get_memory_node_info(numa_id).total_memory * NODE_RESERVE
+    numa_node = _gpu_numa_node()
+    prop = _host_allocation_prop(numa_node)
+    padded_bytes = round_up(num_bytes, _allocation_granularity(prop))
+    table = ExportedHostTable(numa_node, num_bytes, padded_bytes, CHUNK_BYTES, [])
+    reserve = get_memory_node_info(numa_node).total_memory * NUMA_RESERVE_FRACTION
     handles: list = []
     try:
-        for offset, length in table.chunks():
-            handles.append(_check(cu.cuMemCreate(length, prop, 0)))
-            if get_memory_node_info(numa_id).available_memory < reserve:
+        for offset, length in table.chunk_ranges():
+            handles.append(_call_driver(cu.cuMemCreate, length, prop, 0))
+            if get_memory_node_info(numa_node).available_memory < reserve:
                 raise MemoryError(
-                    f"NUMA node {numa_id} fell below its {reserve / 2**30:.1f} GiB "
-                    f"reserve after {(offset + length) / 2**30:.1f} of "
-                    f"{size / 2**30:.1f} GiB"
+                    f"NUMA node {numa_node} fell below its "
+                    f"{reserve / 2**30:.1f} GiB reserve after "
+                    f"{(offset + length) / 2**30:.1f} of "
+                    f"{padded_bytes / 2**30:.1f} GiB"
                 )
-        table.handles.extend(map(_export, handles))
+        table.fabric_handles.extend(map(_export_fabric_handle, handles))
     except BaseException:
-        for handle in handles:
-            cu.cuMemRelease(handle)
+        _release(handles)
         raise
     return handles, table
 
 
-def map_host_table(
-    table: SharedHostTable, handles: list
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Map a table on this rank, importing its handles unless given.
+def _import_table(table: ExportedHostTable) -> list:
+    handles: list = []
+    try:
+        for exported in table.fabric_handles:
+            handles.append(
+                _call_driver(cu.cuMemImportFromShareableHandle, exported, FABRIC_HANDLE)
+            )
+    except BaseException:
+        _release(handles)
+        raise
+    return handles
 
-    Consumes the handles. Returns CPU and GPU uint8 views of the table; either
-    keeps the mapping alive.
+
+def _map_table(
+    table: ExportedHostTable, handles: list
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Map a table's allocations and release their handles.
+
+    Returns CPU and GPU uint8 views; either keeps the mapping alive.
     """
     device = torch.accelerator.current_device_index()
-    chunks = table.chunks()
-    ptr = None
+    ranges = table.chunk_ranges()
+    address = None
     num_mapped = 0
     try:
-        if not handles:
-            for exported in table.handles:
-                handles.append(
-                    _check(cu.cuMemImportFromShareableHandle(exported, FABRIC))
-                )
-        ptr = int(_check(cu.cuMemAddressReserve(table.size, 0, 0, 0)))
-        for (offset, length), handle in zip(chunks, handles):
-            _check(cu.cuMemMap(ptr + offset, length, 0, handle, 0))
+        address = int(_call_driver(cu.cuMemAddressReserve, table.padded_bytes, 0, 0, 0))
+        for (offset, length), handle in zip(ranges, handles):
+            _call_driver(cu.cuMemMap, address + offset, length, 0, handle, 0)
             num_mapped += 1
         access = [
-            _read_write(cu.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE, device),
-            _read_write(
-                cu.CUmemLocationType.CU_MEM_LOCATION_TYPE_HOST_NUMA, table.numa_id
+            _read_write_access(
+                cu.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE, device
+            ),
+            _read_write_access(
+                cu.CUmemLocationType.CU_MEM_LOCATION_TYPE_HOST_NUMA, table.numa_node
             ),
         ]
-        _check(cu.cuMemSetAccess(ptr, table.size, access, len(access)))
+        _call_driver(
+            cu.cuMemSetAccess, address, table.padded_bytes, access, len(access)
+        )
     except BaseException:
-        if ptr is not None:
-            _unmap(ptr, table.size, chunks[:num_mapped])
+        if address is not None:
+            _unmap(address, table.padded_bytes, ranges[:num_mapped])
         raise
     finally:
         # The mappings keep the allocations alive.
-        for handle in handles:
-            cu.cuMemRelease(handle)
+        _release(handles)
 
-    owner = (ctypes.c_uint8 * table.num_bytes).from_address(ptr)
-    finalizer = weakref.finalize(owner, _unmap, ptr, table.size, chunks)
+    host_buffer = (ctypes.c_uint8 * table.num_bytes).from_address(address)
+    finalizer = weakref.finalize(
+        host_buffer, _unmap, address, table.padded_bytes, ranges
+    )
     finalizer.atexit = False  # type: ignore[misc]
-    # Torch retains this object, so the GPU view keeps the owner alive too.
+    # Torch retains this object, so the GPU view keeps the buffer alive too.
     # Name the device: an index-less "cuda" makes torch copy the table.
-    gpu = torch.as_tensor(
+    gpu_view = torch.as_tensor(
         SimpleNamespace(
             __cuda_array_interface__={
                 "shape": (table.num_bytes,),
                 "typestr": "|u1",
-                "data": (ptr, False),
+                "data": (address, False),
                 "version": 3,
             },
-            owner=owner,
+            owner=host_buffer,
         ),
         device=torch.device("cuda", device),
     )
-    return torch.frombuffer(owner, dtype=torch.uint8), gpu
+    return torch.frombuffer(host_buffer, dtype=torch.uint8), gpu_view
 
 
 def share_host_table(
@@ -216,16 +236,16 @@ def share_host_table(
     """
     handles: list = []
     table = error = None
-    if group.rank_in_group == 0 and host_tables_supported():
+    if group.rank_in_group == 0 and fabric_host_memory_supported():
         try:
-            handles, table = create_host_table(num_bytes)
+            handles, table = _create_table(num_bytes)
         except Exception as exc:
             error = describe_error(exc)
     table, error = group.broadcast_object((table, error))
     if table is not None:
         views = None
         try:
-            views = map_host_table(table, handles)
+            views = _map_table(table, handles or _import_table(table))
         except Exception as exc:
             error = describe_error(exc)
         if not (error := gather_errors(group, error)):
