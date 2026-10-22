@@ -52,9 +52,9 @@ results behind the choices here.
 import time
 from collections.abc import Callable
 from contextlib import nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from math import prod
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, TypeAlias, cast
 
 import torch
 
@@ -153,6 +153,20 @@ def _host_unregister(cudart: CudaRTLibrary, base: int) -> bool:
     return code == 0
 
 
+def _host_alloc_request(pool: "_InitState", nbytes: int, pool_total: int | None) -> str:
+    """What the failed host allocation was for, with the pool geometry."""
+    geometry = f"{pool._num_slots} slots ({pool._lanes} lane(s) x K={pool._ring_depth})"
+    if pool_total is None:
+        return (
+            f"regrow one receive slot of its {geometry} pool to {nbytes} "
+            "bytes, exactly (the other slots keep their size)"
+        )
+    return (
+        f"build its receive pool: {geometry} x {nbytes} bytes = "
+        f"{pool_total} bytes per worker, exactly"
+    )
+
+
 @dataclass(frozen=True)
 class _ReceivePoolConfig:
     """Validated receive-pool settings recorded before the plan is known."""
@@ -161,6 +175,58 @@ class _ReceivePoolConfig:
     stages_in_flight: int
     ring_depth: int
     buffer_presize: int
+
+
+@dataclass
+class _InitCandidate:
+    """The per-init state one ``init_transfer_engine`` attempt builds.
+
+    Its fields are the engine attributes an init (re)writes, under the same
+    names, so the init helpers fill a candidate exactly as they would fill the
+    engine. ``_commit_init`` copies every field onto the engine once the whole
+    attempt has succeeded; a failed attempt is dropped, so the active state
+    needs no restoring and a field added here cannot be missed by one.
+    """
+
+    # Driver-supplied total consumer count (init_info.num_consumers).
+    _num_consumers_override: int
+    _router: "RdtRouter | None" = None
+    # The bake (_bake): name -> (dtype name, shape), name -> module plan, and
+    # the names whose copy fired.
+    _name_meta: dict[str, tuple[str, list[int]]] = field(default_factory=dict)
+    _name_to_plan: "dict[str, list[_Scatter]]" = field(default_factory=dict)
+    _live_names: set[str] = field(default_factory=set)
+    _cached_plan: "_CallPlan | None" = None
+    # The receive pool (_size_pool) and its slots (_preregister_at_init).
+    _pool_geometry: tuple[StagingDevice, int, int] | None = None
+    _staging_device: StagingDevice = "gpu"
+    _stages_in_flight: int = 1
+    _ring_depth: int = 1
+    _lanes: int = 1
+    _buffer_presize: int = 0
+    _dest_buffers: list[dict[torch.dtype, torch.Tensor]] = field(
+        default_factory=lambda: [{}]
+    )
+    _lane_cursors: list[int] = field(default_factory=lambda: [0])
+    _targets_cache: dict[tuple[int, int], tuple[int, list[torch.Tensor]]] = field(
+        default_factory=dict
+    )
+    # (slot, old tensor) pairs a re-init grow replaced, released on commit.
+    _retired_slots: list[tuple[int, torch.Tensor]] = field(default_factory=list)
+    # The post-processing worker's per-slot handshake (_ensure_proc_worker).
+    _slot_read_done: list[Any] = field(default_factory=list)
+    _slot_queued: list[int] = field(default_factory=list)
+    _slot_done: list[int] = field(default_factory=list)
+    _slot_cv: Any = None
+
+    @property
+    def _num_slots(self) -> int:
+        return self._lanes * self._ring_depth
+
+
+# What an init helper reads and writes: the attempt's candidate, or the
+# engine's own (active) state when a caller drives the helper directly.
+_InitState: TypeAlias = "_InitCandidate | ShardedRDTWeightTransferEngine"
 
 
 @dataclass
@@ -539,106 +605,43 @@ class ShardedRDTWeightTransferEngine(
         check_ray_rdt_version(init_info.staging_device)
         pool_config = self._configure_ring(init_info)
 
-        # Re-init prepares routing, baked state, and receive buffers in place.
-        # Keep the active state transactional through pre-registration and
-        # worker setup: a failed candidate must not leave its plan, tensors, or
-        # routing active.
-        old_num_consumers_override = self._num_consumers_override
-        old_router = self._router
-        old_name_to_plan = self._name_to_plan
-        old_name_to_plan_contents = dict(old_name_to_plan)
-        old_name_meta = self._name_meta
-        old_name_meta_contents = dict(old_name_meta)
-        old_live_names = self._live_names
-        old_live_names_contents = set(old_live_names)
-        old_cached_plan = self._cached_plan
-        old_pool_settings = (
-            self._pool_geometry,
-            self._staging_device,
-            self._stages_in_flight,
-            self._ring_depth,
-            self._lanes,
-            self._buffer_presize,
-        )
-        old_dest_buffers = self._dest_buffers
-        old_dest_slots = list(old_dest_buffers)
-        old_dest_slot_contents = [dict(slot) for slot in old_dest_slots]
-        old_lane_cursors = self._lane_cursors
-        old_lane_cursor_contents = list(old_lane_cursors)
-        old_targets_cache = self._targets_cache
-        old_targets_cache_contents = dict(old_targets_cache)
-        old_worker_refs = (
-            self._slot_read_done,
-            self._slot_queued,
-            self._slot_done,
-            self._slot_cv,
-        )
-        old_worker_contents = tuple(list(values) for values in old_worker_refs[:3])
+        # Re-init prepares routing, baked state and receive buffers in a
+        # candidate, off the engine: it becomes the active state only once
+        # pre-registration and the worker start have succeeded, so a failed
+        # attempt leaves the active plan, tensors and routing untouched and
+        # releases only the slots it built itself.
+        candidate = _InitCandidate(_num_consumers_override=init_info.num_consumers)
         try:
-            self._num_consumers_override = init_info.num_consumers
-            self._resolve_producers(init_info)
+            self._resolve_producers(init_info, candidate)
 
             # A pure dry run: the trainer's gather cache is empty at init, so
             # nothing can (or does) get pulled -- we only record how each slice
             # is fetched and where it lands, then restore the model.
-            self._bake(init_info)
-            plan = self._build_static_plan(init_info)
-            self._size_pool(pool_config, plan)
-            self._cached_plan = plan
+            self._bake(init_info, candidate)
+            candidate._cached_plan = self._build_static_plan(init_info, candidate)
+            self._size_pool(pool_config, candidate._cached_plan, candidate)
             # Register ALL NIXL memory now, while the fabric is idle: dma-buf
             # GPUDirect registration concurrent with in-flight RDMA intermittently
             # fails (ibv_reg_mr 'Bad address'), which bites under M:N fan-in. Sizes
             # come from the static plan, so this is exact.
-            self._preregister_at_init()
+            self._preregister_at_init(candidate)
             # Start the background post-processing worker (pull/process pipelining).
-            self._ensure_proc_worker()
+            self._ensure_proc_worker(candidate)
         except Exception:
-            # The restore below drops every slot this attempt built; give their
-            # host memory back first. Slots a re-init grow replaced are restored,
-            # not released, so they stay page-locked and NIXL-registered.
-            self._release_attempt_slots(old_dest_slot_contents)
-            self._retired_slots = []
-            old_name_to_plan.clear()
-            old_name_to_plan.update(old_name_to_plan_contents)
-            old_name_meta.clear()
-            old_name_meta.update(old_name_meta_contents)
-            old_live_names.clear()
-            old_live_names.update(old_live_names_contents)
-            old_dest_buffers[:] = old_dest_slots
-            for slot, contents in zip(old_dest_slots, old_dest_slot_contents):
-                slot.clear()
-                slot.update(contents)
-            old_lane_cursors[:] = old_lane_cursor_contents
-            old_targets_cache.clear()
-            old_targets_cache.update(old_targets_cache_contents)
-            for values, contents in zip(old_worker_refs[:3], old_worker_contents):
-                values[:] = contents
-            self._num_consumers_override = old_num_consumers_override
-            self._router = old_router
-            self._name_to_plan = old_name_to_plan
-            self._name_meta = old_name_meta
-            self._live_names = old_live_names
-            self._cached_plan = old_cached_plan
-            (
-                self._pool_geometry,
-                self._staging_device,
-                self._stages_in_flight,
-                self._ring_depth,
-                self._lanes,
-                self._buffer_presize,
-            ) = old_pool_settings
-            self._dest_buffers = old_dest_buffers
-            self._lane_cursors = old_lane_cursors
-            self._targets_cache = old_targets_cache
-            (
-                self._slot_read_done,
-                self._slot_queued,
-                self._slot_done,
-                self._slot_cv,
-            ) = old_worker_refs
+            # Give the host memory of the slots this attempt built back. Slots a
+            # re-init grow replaced are still the active pool's, so they stay
+            # page-locked and NIXL-registered.
+            self._release_attempt_slots(candidate)
             raise
+        self._commit_init(candidate)
         # Committed: the slots a re-init grow replaced left the pool for good.
         self._release_retired_slots()
+
+    def _commit_init(self, candidate: "_InitCandidate") -> None:
+        """Make a successful attempt's candidate the active state: every field
+        the dataclass lists, so nothing is copied by hand."""
+        for f in fields(candidate):
+            setattr(self, f.name, getattr(candidate, f.name))
 
     def _configure_ring(
         self, init_info: ShardedRDTWeightTransferInitInfo
@@ -663,14 +666,23 @@ class ShardedRDTWeightTransferEngine(
         )
         return config
 
-    def _size_pool(self, config: "_ReceivePoolConfig", plan: "_CallPlan") -> None:
-        """Apply an LxK receive-pool geometry after the static plan is known.
+    def _size_pool(
+        self,
+        config: "_ReceivePoolConfig",
+        plan: "_CallPlan",
+        state: "_InitState | None" = None,
+    ) -> None:
+        """Lay out an LxK receive-pool geometry, after the static plan is known,
+        into ``state`` (the engine itself when omitted).
 
         Once the post-processing worker exists, re-init may reuse the pool only
         for the exact ``(staging_device, L, K)`` tuple. The compatibility check
-        precedes every pool-field mutation, so rejection leaves buffers, events,
-        counters, cursors, and active geometry unchanged.
+        precedes every pool-field write, so rejection leaves buffers, events,
+        counters, cursors, and active geometry unchanged. A matching geometry
+        reuses the active slots (the same tensors, in new slot dicts, so
+        pre-registration finds them registered) and the lane cursors.
         """
+        into: _InitState = self if state is None else state
         lanes = max(1, min(config.stages_in_flight, plan.num_streams))
         geometry = (config.staging_device, lanes, config.ring_depth)
         worker_exists = self._proc_thread is not None or bool(self._slot_read_done)
@@ -692,18 +704,19 @@ class ShardedRDTWeightTransferEngine(
         reuse_pool = (
             self._pool_geometry == geometry and len(self._dest_buffers) == num_slots
         )
-        self._staging_device = config.staging_device
-        self._stages_in_flight = config.stages_in_flight
-        self._ring_depth = config.ring_depth
-        self._lanes = lanes
-        self._buffer_presize = config.buffer_presize
+        into._staging_device = config.staging_device
+        into._stages_in_flight = config.stages_in_flight
+        into._ring_depth = config.ring_depth
+        into._lanes = lanes
+        into._buffer_presize = config.buffer_presize
+        into._targets_cache = {}
         if reuse_pool:
-            self._targets_cache.clear()
+            into._lane_cursors = list(self._lane_cursors)
+            into._dest_buffers = [dict(slot) for slot in self._dest_buffers]
         else:
-            self._targets_cache = {}
-            self._lane_cursors = [0] * lanes
-            self._dest_buffers = [{} for _ in range(num_slots)]
-        self._pool_geometry = geometry
+            into._lane_cursors = [0] * lanes
+            into._dest_buffers = [{} for _ in range(num_slots)]
+        into._pool_geometry = geometry
 
         lowered = (
             f", lowered to {lanes} (the plan's {plan.num_streams} stage stream(s))"
@@ -728,9 +741,14 @@ class ShardedRDTWeightTransferEngine(
         """The contiguous K-slot block owned by one lane."""
         return range(lane * self._ring_depth, (lane + 1) * self._ring_depth)
 
-    def _resolve_producers(self, init_info: ShardedRDTWeightTransferInitInfo) -> None:
+    def _resolve_producers(
+        self,
+        init_info: ShardedRDTWeightTransferInitInfo,
+        state: "_InitState | None" = None,
+    ) -> None:
         """Work out this worker's consumer identity, build the router, and bind
-        EVERY producer actor.
+        EVERY producer actor; the router lands in ``state`` (the engine itself
+        when omitted).
 
         Pull routing is M:N: each chunk goes to ONE producer holding every name
         in it (see ``RdtRouter``), so one producer serves a whole pull. All
@@ -754,7 +772,8 @@ class ShardedRDTWeightTransferEngine(
                 "init_info.trainer_actor_names."
             )
 
-        consumer_id = self._resolve_consumer_id(init_info)
+        into: _InitState = self if state is None else state
+        consumer_id = self._resolve_consumer_id(init_info, state)
         name_owner_class = list(init_info.name_owner_class or [])
         if name_owner_class and len(name_owner_class) != len(init_info.names):
             raise RuntimeError(
@@ -763,7 +782,7 @@ class ShardedRDTWeightTransferEngine(
             )
         router = RdtRouter(
             len(producer_names),
-            self._num_consumers(),
+            self._num_consumers(state),
             list(init_info.owner_sets) or None,
             name_owner_class or None,
             list(init_info.names),
@@ -771,7 +790,7 @@ class ShardedRDTWeightTransferEngine(
             # Carve the block per deployment so every replica's worker w pulls
             # each name from the same producer, which is what lets that producer
             # serve all of them from one slot.
-            workers_per_replica=self._workers_per_replica(init_info),
+            workers_per_replica=self._workers_per_replica(init_info, state),
         )
         router.validate()
 
@@ -811,7 +830,7 @@ class ShardedRDTWeightTransferEngine(
             actors.append(actor)
             methods.append(getattr(actor, init_info.produce_method_name))
         router.bind(actors, methods, consumer_id)
-        self._router = router
+        into._router = router
         logger.info(
             "Sharded RDT engine (consumer %d) bound to all %d producers "
             "(batched method %r, %d owner class(es))",
@@ -821,15 +840,24 @@ class ShardedRDTWeightTransferEngine(
             len(init_info.owner_sets) or 1,
         )
 
-    def _workers_per_replica(self, init_info: ShardedRDTWeightTransferInitInfo) -> int:
+    def _workers_per_replica(
+        self,
+        init_info: ShardedRDTWeightTransferInitInfo,
+        state: "_InitState | None" = None,
+    ) -> int:
         """Consumers per inference deployment, assuming a uniform fleet.
 
         Read by this worker's consumer id and by the router's block carve, which
         must not disagree, so it is derived once here.
         """
-        return max(1, self._num_consumers() // max(1, int(init_info.num_replicas or 1)))
+        replicas = max(1, int(init_info.num_replicas or 1))
+        return max(1, self._num_consumers(state) // replicas)
 
-    def _resolve_consumer_id(self, init_info: ShardedRDTWeightTransferInitInfo) -> int:
+    def _resolve_consumer_id(
+        self,
+        init_info: ShardedRDTWeightTransferInitInfo,
+        state: "_InitState | None" = None,
+    ) -> int:
         """This worker's DISTINCT index in 0..C-1 across the whole fleet.
 
         Within one engine that is ``_global_worker_index()``. But a fleet of
@@ -841,14 +869,17 @@ class ShardedRDTWeightTransferEngine(
         """
         replica_rank = max(0, int(init_info.replica_rank or 0))
         return (
-            replica_rank * self._workers_per_replica(init_info)
+            replica_rank * self._workers_per_replica(init_info, state)
             + self._global_worker_index()
         )
 
     def _build_static_plan(
-        self, init_info: ShardedRDTWeightTransferInitInfo
+        self,
+        init_info: ShardedRDTWeightTransferInitInfo,
+        state: "_InitState | None" = None,
     ) -> "_CallPlan":
-        """Build the chunk/free plan once. It never changes across syncs, so
+        """Build the chunk/free plan once, from the bake in ``state`` (the
+        engine itself when omitted). It never changes across syncs, so
         ``update_weights`` needs no per-sync names."""
         if not init_info.group_lens:
             raise ValueError(
@@ -860,7 +891,7 @@ class ShardedRDTWeightTransferEngine(
                 f"init_info.group_lens sums to {sum(init_info.group_lens)} "
                 f"but {len(init_info.names)} names were given."
             )
-        plan = self._build_call_plan(init_info.names, init_info.group_lens)
+        plan = self._build_call_plan(init_info.names, init_info.group_lens, state)
         logger.info(
             "[RDT-PLAN] pre-built static call plan at init: %d chunks in %d "
             "stage stream(s)",
@@ -869,57 +900,65 @@ class ShardedRDTWeightTransferEngine(
         )
         return plan
 
-    def _preregister_at_init(self) -> None:
+    def _preregister_at_init(self, state: "_InitState | None" = None) -> None:
         """Register every NIXL buffer this worker will use at init, before any
         transfer runs, so nothing registers during the sync-0 RDMA churn.
 
-        Both sides are sized from the static plan: receive buffers are all LxK
-        pool slots at the largest chunk's ``pack_bytes``, and each bound producer
-        is asked to pre-register a serve ring at the max bytes this consumer will
-        pull from it. A no-op when this worker has no chunks."""
-        plan = self._cached_plan
+        Both sides are sized from the static plan in ``state`` (the engine itself
+        when omitted): receive buffers are all LxK pool slots at the largest
+        chunk's ``pack_bytes``, and each bound producer is asked to pre-register
+        a serve ring at the max bytes this consumer will pull from it. A no-op
+        when this worker has no chunks."""
+        into: _InitState = self if state is None else state
+        plan = into._cached_plan
         if plan is None or not plan.chunks:
             return
         # (a) consumer receive buffers — every slot in every active lane.
         max_pack = max(c.pack_bytes for c in plan.chunks)
-        alloc = buffer_alloc_bytes(max_pack, self._buffer_presize)
-        for slot in range(self._num_slots):
-            buffer = self._dest_buffers[slot].get(torch.uint8)
+        alloc = buffer_alloc_bytes(max_pack, into._buffer_presize)
+        for slot in range(into._num_slots):
+            buffer = into._dest_buffers[slot].get(torch.uint8)
             if buffer is None or buffer.numel() < alloc:
-                self._dest_buffers[slot][torch.uint8] = self._alloc_receive_buffer(
-                    alloc, pool_total=self._num_slots * alloc
+                into._dest_buffers[slot][torch.uint8] = self._alloc_receive_buffer(
+                    alloc, state=into, pool_total=into._num_slots * alloc
                 )
-                if buffer is not None and self._staging_device == "host":
-                    self._retired_slots.append((slot, buffer))
+                if buffer is not None and into._staging_device == "host":
+                    into._retired_slots.append((slot, buffer))
 
         # (b) producer serve rings — max bytes this consumer pulls from each
         # bound producer, plus the per-producer plan digest a producer sharing
         # one ring across deployments checks them against.
-        assert self._router is not None
-        serve_bytes = [0] * self._router.num_producers
-        per_owner_keys: list[list] = [[] for _ in range(self._router.num_producers)]
+        router = into._router
+        assert router is not None
+        serve_bytes = [0] * router.num_producers
+        per_owner_keys: list[list] = [[] for _ in range(router.num_producers)]
         for c in plan.chunks:
             serve_bytes[c.owner] = max(serve_bytes[c.owner], c.pack_bytes)
             per_owner_keys[c.owner].append(c.keys)
         digests = [_plan_digest(keys) for keys in per_owner_keys]
         import ray
 
-        refs = self._router.reserve_serve_buffers(serve_bytes, digests)
+        refs = router.reserve_serve_buffers(serve_bytes, digests)
         if refs:
             ray.get(refs)  # block until every serve ring is registered
         logger.info(
             "[RDT-PLAN] pre-registered %d receive slots (%.0f MiB each) + serve "
             "rings on %d producer(s) %s",
-            self._num_slots,
+            into._num_slots,
             alloc / (1 << 20),
             len(refs),
             [nb // (1 << 20) for nb in serve_bytes],
         )
 
     def _alloc_receive_buffer(
-        self, nbytes: int, *, pool_total: int | None = None
+        self,
+        nbytes: int,
+        *,
+        state: "_InitState | None" = None,
+        pool_total: int | None = None,
     ) -> torch.Tensor:
-        """Allocate and register one receive buffer in the selected staging mode.
+        """Allocate and register one receive buffer in the staging mode of the
+        pool in ``state`` (the engine's active pool when omitted).
 
         This is the sole allocation seam for init preregistration, which sizes
         every slot to ``nbytes`` and passes the exact ``pool_total`` the failure
@@ -927,7 +966,8 @@ class ShardedRDTWeightTransferEngine(
         omits it because only one slot is regrown while the others keep their
         size, so the message names that slot's bytes alone.
         """
-        if self._staging_device == "gpu":
+        pool: _InitState = self if state is None else state
+        if pool._staging_device == "gpu":
             buffer = torch.empty(nbytes, dtype=torch.uint8, device=self.device)
             register_nixl_memory(buffer)
             return buffer
@@ -937,26 +977,11 @@ class ShardedRDTWeightTransferEngine(
         except Exception as error:
             raise HostStagingAllocationError(
                 "staging_device='host' could not "
-                f"{self._host_alloc_request(nbytes, pool_total)}; each slot "
+                f"{_host_alloc_request(pool, nbytes, pool_total)}; each slot "
                 "is pageable host memory page-locked whole with "
                 "cudaHostRegister and registered with NIXL, with no "
                 f"pinned-allocator rounding or caching: {error}"
             ) from error
-
-    def _host_alloc_request(self, nbytes: int, pool_total: int | None) -> str:
-        """What the failed host allocation was for, with the pool geometry."""
-        geometry = (
-            f"{self._num_slots} slots ({self._lanes} lane(s) x K={self._ring_depth})"
-        )
-        if pool_total is None:
-            return (
-                f"regrow one receive slot of its {geometry} pool to {nbytes} "
-                "bytes, exactly (the other slots keep their size)"
-            )
-        return (
-            f"build its receive pool: {geometry} x {nbytes} bytes = "
-            f"{pool_total} bytes per worker, exactly"
-        )
 
     def _release_host_slot(self, buffer: torch.Tensor) -> None:
         """Give one host slot back: NIXL deregistration, then
@@ -1020,18 +1045,17 @@ class ShardedRDTWeightTransferEngine(
         for key in stale:
             del self._targets_cache[key]
 
-    def _release_attempt_slots(
-        self, kept: list[dict[torch.dtype, torch.Tensor]]
-    ) -> None:
+    def _release_attempt_slots(self, candidate: "_InitCandidate") -> None:
         """Release the host slots a failed init attempt built: every tensor in
-        the pool that is not among ``kept``, the contents the rollback restores.
+        the candidate's pool that the active pool does not hold. The ones it
+        does hold were reused from it and stay registered with it.
         """
-        if self._staging_device != "host":
+        if candidate._staging_device != "host":
             return
-        kept_ids = {id(buffer) for contents in kept for buffer in contents.values()}
-        for buffers in self._dest_buffers:
+        active = {id(buffer) for slot in self._dest_buffers for buffer in slot.values()}
+        for buffers in candidate._dest_buffers:
             for buffer in buffers.values():
-                if id(buffer) not in kept_ids:
+                if id(buffer) not in active:
                     self._release_host_slot(buffer)
 
     def _release_retired_slots(self) -> None:
@@ -1065,13 +1089,15 @@ class ShardedRDTWeightTransferEngine(
         pc = self.parallel_config
         return pc.data_parallel_index * pc.world_size + pc.rank  # world_size = TP*PP
 
-    def _num_consumers(self) -> int:
+    def _num_consumers(self, state: "_InitState | None" = None) -> int:
         """Total inference-worker count. Prefers the driver-supplied
         ``init_info.num_consumers`` (authoritative -- the driver knows the whole
-        fleet); else ``world_size_across_dp``, the same stride
-        ``_global_worker_index`` indexes with, so the two agree at any pp."""
-        if self._num_consumers_override > 0:
-            return self._num_consumers_override
+        fleet), read from ``state`` (the engine itself when omitted); else
+        ``world_size_across_dp``, the same stride ``_global_worker_index``
+        indexes with, so the two agree at any pp."""
+        into: _InitState = self if state is None else state
+        if into._num_consumers_override > 0:
+            return into._num_consumers_override
         return self.parallel_config.world_size_across_dp
 
     def start_weight_update(self) -> None:
@@ -1138,6 +1164,7 @@ class ShardedRDTWeightTransferEngine(
         names: list[str],
         sink: "BakeSink",
         device: torch.device,
+        name_meta: dict[str, tuple[str, list[int]]],
     ) -> list[tuple[str, torch.Tensor]]:
         """Zero-storage lazies for ``names``, dtype/shape from the init metadata,
         all feeding the bake's recording sink."""
@@ -1146,8 +1173,8 @@ class ShardedRDTWeightTransferEngine(
                 name,
                 FakeRDTTensor(
                     name=name,
-                    shape=torch.Size(self._name_meta[name][1]),
-                    dtype=_dtype_from_name(self._name_meta[name][0]),
+                    shape=torch.Size(name_meta[name][1]),
+                    dtype=_dtype_from_name(name_meta[name][0]),
                     device=device,
                     sink=sink,
                 ),
@@ -1269,8 +1296,13 @@ class ShardedRDTWeightTransferEngine(
 
     # ---------------- Bake (dry run, at init) / replay ----------------
 
-    def _bake(self, init_info: ShardedRDTWeightTransferInitInfo) -> None:
-        """Bake the replay plan once, as a self-driven meta dry run.
+    def _bake(
+        self,
+        init_info: ShardedRDTWeightTransferInitInfo,
+        state: "_InitState | None" = None,
+    ) -> None:
+        """Bake the replay plan once, as a self-driven meta dry run, into
+        ``state`` (the engine itself when omitted).
 
         Puts the params on meta, then drives ``model.load_weights`` over
         ``init_info.names`` through the model's ORIGINAL loaders (the stamps
@@ -1291,12 +1323,15 @@ class ShardedRDTWeightTransferEngine(
         )
         from vllm.model_executor.model_loader.reload.utils import get_layer_size
 
+        into: _InitState = self if state is None else state
         names, dtype_names, shapes = (
             init_info.names,
             init_info.dtype_names,
             init_info.shapes,
         )
-        self._name_meta = {n: (d, s) for n, d, s in zip(names, dtype_names, shapes)}
+        into._name_meta = {n: (d, s) for n, d, s in zip(names, dtype_names, shapes)}
+        into._name_to_plan = {}
+        into._live_names = set()
         if not names:
             return
 
@@ -1312,7 +1347,9 @@ class ShardedRDTWeightTransferEngine(
             # the single load pass runs the loaders on meta and records via the
             # fake's copy_ — with no inline _layerwise_process, no deferral.
             self._install_recording_stamps(model, recorder)
-            model.load_weights(self._build_fake_weights(names, recorder, self.device))
+            model.load_weights(
+                self._build_fake_weights(names, recorder, self.device, into._name_meta)
+            )
             # Keep only fully-loaded modules (copied numel >= loadable size, the
             # test online_process_loader uses): a partial module leaves unwritten
             # regions that finalize would init, so baking it scatters garbage.
@@ -1327,22 +1364,22 @@ class ShardedRDTWeightTransferEngine(
                 for c in copies:
                     # Every name of the module shares ONE list, so identity
                     # dedups them back to one module at plan time.
-                    self._name_to_plan[c.src[0]] = copies
+                    into._name_to_plan[c.src[0]] = copies
             self._restore_after_dry_run(model)
 
         # Names whose copy_ fired during the bake. Names not in here no-op for
         # this worker (e.g. foreign-EP experts) and are skipped; live names that
         # did not bake fail the plan build.
-        self._live_names = set(recorder.copied_names)
+        into._live_names = set(recorder.copied_names)
 
-        n_groups = len({id(g) for g in self._name_to_plan.values()})
+        n_groups = len({id(g) for g in into._name_to_plan.values()})
         logger.info(
             "Sharded RDT dry-run baked %d/%d names into %d leaf modules "
             "(%d live) in %.3fs",
-            len(self._name_to_plan),
+            len(into._name_to_plan),
             len(names),
             n_groups,
-            len(self._live_names),
+            len(into._live_names),
             time.perf_counter() - _t0,
         )
 
@@ -1436,24 +1473,32 @@ class ShardedRDTWeightTransferEngine(
 
     # ---------------- Background post-processing (pull/process pipeline) -------
 
-    def _ensure_proc_worker(self) -> None:
+    def _ensure_proc_worker(self, state: "_InitState | None" = None) -> None:
         """Lazily create the per-slot events, the background CUDA stream, the work
-        queue, and the single processing thread. Idempotent."""
+        queue, and the single processing thread. Idempotent: a running worker
+        keeps its per-slot handshake, which ``state`` (the engine itself when
+        omitted) carries over; a new worker's handshake is sized for the pool in
+        ``state``."""
+        into: _InitState = self if state is None else state
         if self._proc_thread is not None:
+            into._slot_read_done = self._slot_read_done
+            into._slot_queued = self._slot_queued
+            into._slot_done = self._slot_done
+            into._slot_cv = self._slot_cv
             return
         import queue
         import threading
 
-        self._slot_read_done = [torch.Event() for _ in range(self._num_slots)]
+        into._slot_read_done = [torch.Event() for _ in range(into._num_slots)]
         # Generation handshake for the events above: the RPC thread counts items
         # queued per slot, this thread counts records, and a pull may synchronize()
         # only once done[slot] has caught up with queued[slot]. Without it the
         # synchronize can bind to a stale record and pass, letting the next RDMA
         # overwrite a slot under a pending scatter. See the doc's "The slot
         # generation handshake".
-        self._slot_queued = [0] * self._num_slots
-        self._slot_done = [0] * self._num_slots
-        self._slot_cv = threading.Condition()
+        into._slot_queued = [0] * into._num_slots
+        into._slot_done = [0] * into._num_slots
+        into._slot_cv = threading.Condition()
         self._proc_stream = torch.cuda.Stream(device=self.device)
         self._proc_queue = queue.Queue()
         self._proc_error = None
@@ -1556,25 +1601,35 @@ class ShardedRDTWeightTransferEngine(
         self._proc_queue.put(item)
 
     def _chunk_module_scatters(
-        self, modules: "list[list[_Scatter]]"
+        self,
+        modules: "list[list[_Scatter]]",
+        state: "_InitState | None" = None,
     ) -> "list[tuple[int, list[_Scatter]]]":
         """Cut the modules' copies into one chunk per distinct owner class
         present, ascending by class index, as ``(class_idx, scatters)`` pairs.
 
         A chunk is one packed pull, so every name in it must share a producer —
         which is exactly what an owner class is. The cut is a pure function of
-        the bake and the ownership table. Copy order within a chunk is bake
-        order, and a module's copies may span chunks (materialize/quant fire on
-        its first/last chunk; see ``_build_call_plan``)."""
-        assert self._router is not None
+        the bake and the ownership table (the router in ``state``, the engine's
+        when omitted). Copy order within a chunk is bake order, and a module's
+        copies may span chunks (materialize/quant fire on its first/last chunk;
+        see ``_build_call_plan``)."""
+        router = (self if state is None else state)._router
+        assert router is not None
         by_class: dict[int, list[_Scatter]] = {}
         for copies in modules:
             for c in copies:
-                by_class.setdefault(self._router.class_of(c.src[0]), []).append(c)
+                by_class.setdefault(router.class_of(c.src[0]), []).append(c)
         return [(ci, by_class[ci]) for ci in sorted(by_class)]
 
-    def _build_call_plan(self, names: list[str], group_lens: list[int]) -> "_CallPlan":
-        """Build the STATIC plan for one whole-sync call.
+    def _build_call_plan(
+        self,
+        names: list[str],
+        group_lens: list[int],
+        state: "_InitState | None" = None,
+    ) -> "_CallPlan":
+        """Build the STATIC plan for one whole-sync call from the bake and
+        router in ``state`` (the engine's own when omitted).
 
         Pure — no pulls, no engine state touched — so the result is cached and
         reused every sync. Three passes:
@@ -1589,7 +1644,8 @@ class ShardedRDTWeightTransferEngine(
              instead of by runtime counters.
           3. Assemble ``_Chunk``s: dedup keys and precompute the packed layout.
         """
-        router = self._router
+        baked: _InitState = self if state is None else state
+        router = baked._router
         assert router is not None, "init_transfer_engine() must run before planning"
 
         # --- pass 1: gather groups -> per-owner-class scatter chunks -----------
@@ -1605,9 +1661,9 @@ class ShardedRDTWeightTransferEngine(
             modules: list[list[_Scatter]] = []
             seen: set[int] = set()
             for n in gnames:
-                mod = self._name_to_plan.get(n)
+                mod = baked._name_to_plan.get(n)
                 if mod is None:
-                    if n in self._live_names:
+                    if n in baked._live_names:
                         unbaked.append(n)
                 elif id(mod) not in seen:
                     seen.add(id(mod))
@@ -1618,7 +1674,7 @@ class ShardedRDTWeightTransferEngine(
                 # tolerate a signal that arrives before the publish).
                 pre_free.append(gi)
                 continue
-            for _ci, scatters in self._chunk_module_scatters(modules):
+            for _ci, scatters in self._chunk_module_scatters(modules, state):
                 raw_chunks.append(scatters)
                 raw_groups.append(gi)
             free_at.setdefault(len(raw_chunks) - 1, []).append(gi)

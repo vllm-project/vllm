@@ -251,15 +251,19 @@ def _host_pool_engine(staging_device: str = "host") -> ShardedRDTWeightTransferE
 
 def _stub_init(engine, monkeypatch, plan: _CallPlan, *, fail: Exception | None):
     """Stub bake and routing so ``init_transfer_engine`` exercises the pool,
-    pre-registration and (optionally) a failure right after it."""
+    pre-registration and (optionally) a failure right after it. The stubs
+    write the init candidate the engine hands them, as the real helpers do."""
     engine.parallel_config = SimpleNamespace(enable_eplb=False)
-    engine._num_consumers_override = 0
     monkeypatch.setattr(engine_module, "check_ray_rdt_version", lambda _device: None)
-    monkeypatch.setattr(engine, "_resolve_producers", lambda _info: None)
-    monkeypatch.setattr(engine, "_bake", lambda _info: None)
-    monkeypatch.setattr(engine, "_build_static_plan", lambda _info: plan)
+    monkeypatch.setattr(
+        engine,
+        "_resolve_producers",
+        lambda _info, state: setattr(state, "_router", engine._router),
+    )
+    monkeypatch.setattr(engine, "_bake", lambda _info, state: None)
+    monkeypatch.setattr(engine, "_build_static_plan", lambda _info, state: plan)
 
-    def ensure_proc_worker():
+    def ensure_proc_worker(_state):
         if fail is not None:
             raise fail
 
