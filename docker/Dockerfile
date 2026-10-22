@@ -506,6 +506,9 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     if [ "$(printf '%s\n' 12.9 "$CUDA_VERSION" | sort -V | head -n1)" = 12.9 ]; then \
         DEEPEP_ARCH_LIST="$DEEPEP_ARCH_LIST 10.3a"; \
     fi && \
+    if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
+        DEEPEP_ARCH_LIST="$DEEPEP_ARCH_LIST 10.7a"; \
+    fi && \
     export TORCH_CUDA_ARCH_LIST="$DEEPEP_ARCH_LIST" && \
     /tmp/install_python_libraries.sh \
         --workspace /tmp/ep_kernels_workspace \
@@ -757,6 +760,7 @@ RUN PYTHON_VERSION_STR=$(echo ${PYTHON_VERSION} | sed 's/\.//g') && \
 # Install Python and system dependencies
 RUN apt-get update -y \
     && apt-get install -y --no-install-recommends \
+        ca-certificates \
         software-properties-common \
         curl \
         sudo \
