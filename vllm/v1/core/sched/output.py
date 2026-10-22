@@ -312,6 +312,11 @@ class SchedulerOutput:
     # Kept for out-of-tree schedulers and workers.
     num_common_prefix_blocks: list[int] = field(default_factory=list)
 
+    # Whether no scheduled request can use the drafts proposed after this step
+    # (non-final prefill chunks, or requests sure to reach max_tokens), so the
+    # drafter can skip proposing them.
+    skip_drafts: bool = False
+
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
         return cls(
