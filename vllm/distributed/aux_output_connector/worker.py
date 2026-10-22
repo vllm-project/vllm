@@ -13,6 +13,12 @@ import numpy as np
 import torch
 
 from vllm.config import VllmConfig
+from vllm.distributed.aux_output_connector.artifacts import (
+    AuxOutputBuffer,
+    aux_output_keys,
+    materialize_aux_output,
+    publish_aux_output,
+)
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputConnectorMetadata,
     AuxRequestOutput,
@@ -20,12 +26,6 @@ from vllm.distributed.aux_output_connector.connector import (
 from vllm.distributed.aux_output_connector.memory import (
     get_available_host_memory,
     validate_shm_budget,
-)
-from vllm.distributed.aux_output_connector.routed_experts import (
-    RoutedExpertsBuffer,
-    materialize_routed_experts,
-    publish_routed_experts,
-    routed_experts_keys,
 )
 from vllm.distributed.aux_output_connector.store import (
     BackgroundBlockObjectStore,
@@ -148,7 +148,7 @@ class AuxOutputWorkerConnector:
             else 0
         )
         self._store: BackgroundBlockObjectStore | None = None
-        self._buffer: RoutedExpertsBuffer | None = None
+        self._buffer: AuxOutputBuffer | None = None
         self._requests: dict[str, _WorkerRequestState] = {}
         self._generation = 0
         self._step_metadata: AuxOutputConnectorMetadata | None = None
@@ -218,7 +218,7 @@ class AuxOutputWorkerConnector:
             BlockObjectStore(max_bytes=max_bytes, object_nbytes=block_nbytes),
             max_pending_batches=2 * vllm_config.scheduler_config.max_num_seqs,
         )
-        self._buffer = RoutedExpertsBuffer(
+        self._buffer = AuxOutputBuffer(
             dtype,
             shape_per_token,
             hash_block_size,
@@ -384,7 +384,7 @@ class AuxOutputWorkerConnector:
                         raise RuntimeError(
                             "AuxOutput replay boundary has no KV block hash"
                         )
-                    prefix = materialize_routed_experts(
+                    prefix = materialize_aux_output(
                         store,
                         [state.aux_output_keys[block_index]],
                         shape_per_token=buffer.shape_per_token,
@@ -416,7 +416,7 @@ class AuxOutputWorkerConnector:
             )
             if emit_start < stored_end:
                 first_block = emit_start // block_size
-                stored = materialize_routed_experts(
+                stored = materialize_aux_output(
                     store,
                     state.aux_output_keys[first_block : stored_end // block_size],
                     shape_per_token=buffer.shape_per_token,
@@ -476,7 +476,7 @@ class AuxOutputWorkerConnector:
             if ready:
                 ready_batches.append((state.aux_output_keys, ready))
         if ready_batches or retain_keys or release_keys:
-            publish_routed_experts(
+            publish_aux_output(
                 store,
                 batches=ready_batches,
                 block_size=buffer.block_size,
@@ -551,7 +551,7 @@ class AuxOutputWorkerConnector:
                     namespace += "/" + self._indexer.profile.profile_id
                     if self._capturer is not None:
                         namespace += f"/r3-{self._r3_shape}-{self._r3_dtype.name}"
-                keys = routed_experts_keys(block_hashes, namespace)
+                keys = aux_output_keys(block_hashes, namespace)
                 state.aux_output_keys.extend(keys)
                 retained_keys.extend(keys)
                 block_batches.append((state, []))
