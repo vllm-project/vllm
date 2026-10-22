@@ -37,6 +37,7 @@ chunk-by-chunk while an n-gram at position ``p`` needs the token ids at
 import ctypes
 import mmap
 import os
+import sys
 import tempfile
 import weakref
 from contextlib import ExitStack
@@ -906,6 +907,8 @@ def can_share_engram_tables(layout: EngramLayout, block_size: int = 32) -> bool:
 
 def _allocate_huge_page_storage(num_bytes: int) -> torch.Tensor | None:
     """Register prefaulted huge pages, or return None for pinned-memory fallback."""
+    if sys.platform != "linux":
+        return None
     try:
         mapping = mmap.mmap(-1, num_bytes, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
         mapping.madvise(mmap.MADV_HUGEPAGE)
@@ -1305,7 +1308,7 @@ def _engram_select_rows(
 ) -> None:
     """Copy one token window out of a rank-major gathered buffer.
 
-    Both gathers land rank-major ([rank][token][local width]); this walks the
+    Both gathers land rank-major (`[rank][token][local width]`); this walks the
     window the rank keeps and lays its ranks out side by side as width.
     """
     if output.numel() == 0:
@@ -1410,6 +1413,9 @@ class EngramBatch(nn.Module):
             dtype=torch.uint8,
             device=device,
         )
+        # Same allocator as the send buffer: NCCL hangs this all-to-all when its
+        # buffers mix the cumem pool and the caching allocator.
+        self.exchanged_rows = torch.empty_like(self.packed_rows)
         width = table.n_hash_cols * table.dim
         self.fp8_values = torch.empty(
             len(layers), max_tokens, width, dtype=torch.uint8, device=device
@@ -1477,7 +1483,7 @@ class EngramBatch(nn.Module):
                 )
             group = get_engram_dp_group()
             assert group is not None
-            sent, rows = rows, torch.empty_like(rows)
+            sent, rows = rows, self.exchanged_rows[: rows.shape[0]]
             torch.distributed.all_to_all_single(rows, sent, group=group.device_group)
         table = self.layers[0].embed_tokens
         heads = table.n_hash_cols
