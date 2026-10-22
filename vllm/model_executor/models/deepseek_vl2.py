@@ -7,6 +7,7 @@
 import functools
 import math
 from collections.abc import Hashable, Iterable, Mapping, Sequence
+from contextlib import nullcontext
 from typing import Annotated, Any, Literal, TypeAlias
 
 import torch
@@ -442,7 +443,13 @@ class DeepseekVLV2ForCausalLM(
         except ImportError as e:
             raise ImportError("Please install timm") from e
 
-        with set_default_torch_dtype(torch.float16):
+        # Skipped towers are built under a meta default device, but timm's
+        # constructor calls .item(), which meta tensors do not support.
+        on_meta = torch.get_default_device().type == "meta"
+        with (
+            set_default_torch_dtype(torch.float16),
+            torch.device("cpu") if on_meta else nullcontext(),
+        ):
             model = timm.create_model(
                 "vit_so400m_patch14_siglip_384.webli",
                 pretrained=False,
@@ -450,6 +457,8 @@ class DeepseekVLV2ForCausalLM(
                 dynamic_img_size=True,
                 dynamic_img_pad=True,
             )
+        if on_meta:
+            model = model.to("meta")
 
         if get_tensor_model_parallel_world_size() > 1:
             model = self.patch_vit_for_tp(model, quant_config)
