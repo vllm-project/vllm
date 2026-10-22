@@ -165,7 +165,7 @@ def test_replay_graph_matches_eager(monkeypatch, moe_backend, ids_dtype):
     # Mocking it true would capture into the cuMem pool, which breaks on ROCm.
     cfg.use_cumem_cudagraph_pool = False
     cfg.scheduler_config = MagicMock(max_num_seqs=2, max_num_batched_tokens=64)
-    cfg.cache_config.use_kda_recoverssm = False
+    cfg.cache_config.use_recoverssm = False
     cfg.model_config.hf_config = MagicMock(hc_mult=HC, hidden_size=HIDDEN)
     cfg.model_config.dtype = torch.float32
     cfg.kernel_config.moe_backend = moe_backend

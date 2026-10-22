@@ -92,7 +92,7 @@ class MambaHybridModelState(DefaultModelState):
         # columns and the running state_idx are kept GPU-resident.
         self._align_mode = self.cache_config.mamba_cache_mode == "align"
         self.recoverssm = (
-            RecoverSSMState() if self.cache_config.use_kda_recoverssm else None
+            RecoverSSMState() if self.cache_config.use_recoverssm else None
         )
         if self._align_mode:
             self._mamba_state_idx_gpu = torch.zeros(
