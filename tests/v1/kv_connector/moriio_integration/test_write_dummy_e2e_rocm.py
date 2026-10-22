@@ -54,6 +54,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -505,6 +506,9 @@ def _server(
 
 # Ports handed to a server of this test session, so later picks avoid them.
 _HANDED_OUT: set[int] = set()
+# Prefill and decode start in parallel threads, so picking a port and recording
+# it must be one step.
+_HANDED_OUT_LOCK = threading.Lock()
 # MoRIIO binds ``port + tp_rank`` (times the DP rank) on every rank, so a
 # handshake or notify port needs a free block, not one free port.
 _PORT_BLOCK = 8
@@ -520,21 +524,23 @@ def _bindable(port: int) -> bool:
 
 
 def _open_port() -> int:
-    while True:
-        port = get_open_port()
-        if port not in _HANDED_OUT:
-            _HANDED_OUT.add(port)
-            return port
+    with _HANDED_OUT_LOCK:
+        while True:
+            port = get_open_port()
+            if port not in _HANDED_OUT:
+                _HANDED_OUT.add(port)
+                return port
 
 
 def _open_port_block(size: int = _PORT_BLOCK) -> int:
     """First port of ``size`` consecutive free ports no other server got."""
-    while True:
-        base = get_open_port()
-        block = range(base, base + size)
-        if _HANDED_OUT.isdisjoint(block) and all(_bindable(p) for p in block):
-            _HANDED_OUT.update(block)
-            return base
+    with _HANDED_OUT_LOCK:
+        while True:
+            base = get_open_port()
+            block = range(base, base + size)
+            if _HANDED_OUT.isdisjoint(block) and all(_bindable(p) for p in block):
+                _HANDED_OUT.update(block)
+                return base
 
 
 def _moriio_config(
