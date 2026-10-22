@@ -503,7 +503,7 @@ class GenerateChoiceBase(BaseModel):
     # `None` if (a) the request was aborted before any forward pass,
     # or (b) `enable_return_routed_experts` is off server-side.
     routed_experts: str | None = None
-    # Ordered keys of published raw R3 objects, returned on the terminal response.
+    # Ordered keys of published auxiliary objects, returned on the terminal response.
     aux_output_keys: list[str] | None = None
     sampling_mask: list[list[int]] | None = None
     # Contiguous weight version spans over output-token indexes.

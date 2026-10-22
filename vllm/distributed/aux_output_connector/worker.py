@@ -36,7 +36,6 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 
 if TYPE_CHECKING:
-    from vllm.distributed.aux_output_connector.mooncake import MooncakeBlockObjectStore
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.worker.gpu.input_batch import InputBatch
 
@@ -122,13 +121,16 @@ class AuxOutputWorkerConnector:
             kv_cache_config, vllm_config
         )
         block_nbytes = hash_block_size * prod(shape_per_token) * dtype.itemsize
-        store: ShmBlockObjectStore | MooncakeBlockObjectStore
+        max_pending_batches = 2 * vllm_config.scheduler_config.max_num_seqs
         if self._return_keys:
             from vllm.distributed.aux_output_connector.mooncake import (
                 create_mooncake_block_store,
             )
 
-            store = create_mooncake_block_store(object_nbytes=block_nbytes)
+            self._store = BackgroundBlockObjectStore(
+                create_mooncake_block_store(object_nbytes=block_nbytes),
+                max_pending_batches=max_pending_batches,
+            )
         else:
             max_bytes = vllm_config.aux_output_config.max_bytes
             if max_bytes is None:
@@ -136,11 +138,10 @@ class AuxOutputWorkerConnector:
                 max_bytes = (
                     kv_cache_config.num_blocks * hashes_per_kv_block * block_nbytes
                 )
-            store = ShmBlockObjectStore(max_bytes=max_bytes, object_nbytes=block_nbytes)
-        self._store = BackgroundBlockObjectStore(
-            store,
-            max_pending_batches=2 * vllm_config.scheduler_config.max_num_seqs,
-        )
+            self._store = BackgroundBlockObjectStore(
+                ShmBlockObjectStore(max_bytes=max_bytes, object_nbytes=block_nbytes),
+                max_pending_batches=max_pending_batches,
+            )
         self._buffer = RoutedExpertsBuffer(
             dtype,
             shape_per_token,
@@ -303,6 +304,7 @@ class AuxOutputWorkerConnector:
                     keys,
                     shape_per_token=buffer.shape_per_token,
                     dtype=buffer.dtype,
+                    token_start=emit_start // block_size * block_size,
                 )[emit_start % block_size :]
                 if stored_end < token_end:
                     rows = np.concatenate(
@@ -336,6 +338,7 @@ class AuxOutputWorkerConnector:
             [key],
             shape_per_token=buffer.shape_per_token,
             dtype=buffer.dtype,
+            token_start=block_start,
         )
         if len(rows) < token_start - block_start:
             raise ValueError("Auxiliary prefix does not cover loaded KV")
@@ -369,6 +372,7 @@ class AuxOutputWorkerConnector:
                 block_size=buffer.block_size,
                 retain_keys=retain_keys,
                 release_keys=release_keys,
+                mooncake=self._return_keys,
             )
         for _, blocks in ready_batches:
             for _, rows in blocks:

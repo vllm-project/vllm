@@ -6,13 +6,12 @@ from __future__ import annotations
 
 import queue
 import threading
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
-    from vllm.distributed.aux_output_connector.mooncake import MooncakeBlockObjectStore
-    from vllm.distributed.aux_output_connector.shm import ShmBlockObjectStore
+    from vllm.distributed.aux_output_connector.mooncake import RoutingArrayDtype
 
 
 @dataclass(frozen=True)
@@ -21,6 +20,19 @@ class BlockObject:
 
     key: str
     payload: bytes
+
+
+class BlockObjectStore(Protocol):
+    def put(
+        self,
+        objects: list[BlockObject],
+        *,
+        retain_keys: Iterable[str] = (),
+        release_keys: Iterable[str] = (),
+    ) -> None: ...
+
+    def get_concatenated(self, keys: list[str]) -> bytes: ...
+    def close(self) -> None: ...
 
 
 class BlockObjectStoreError(RuntimeError):
@@ -32,7 +44,7 @@ class BackgroundBlockObjectStore:
 
     def __init__(
         self,
-        store: ShmBlockObjectStore | MooncakeBlockObjectStore,
+        store: BlockObjectStore,
         *,
         max_pending_batches: int,
     ) -> None:
@@ -75,7 +87,7 @@ class BackgroundBlockObjectStore:
 
     def put(
         self,
-        objects: list[BlockObject],
+        objects: Sequence[BlockObject],
         *,
         retain_keys: Iterable[str] = (),
         release_keys: Iterable[str] = (),
@@ -86,15 +98,33 @@ class BackgroundBlockObjectStore:
             return
         if self._closed:
             raise RuntimeError("auxiliary output store is closed")
-        self._queue.put((objects, retains, releases))
+        self._queue.put((list(objects), retains, releases))
         self._raise_if_failed()
 
     def flush(self) -> None:
         self._queue.join()
         self._raise_if_failed()
 
-    def get_concatenated(self, keys: list[str]) -> bytes:
+    def get_concatenated(
+        self,
+        keys: list[str],
+        *,
+        shape_per_token: tuple[int, ...] | None = None,
+        dtype: RoutingArrayDtype | None = None,
+        token_start: int | None = None,
+    ) -> bytes:
+        from vllm.distributed.aux_output_connector.mooncake import (
+            MooncakeBlockObjectStore,
+        )
+
         self.flush()
+        if isinstance(self._store, MooncakeBlockObjectStore):
+            return self._store.get_concatenated(
+                keys,
+                shape_per_token=shape_per_token,
+                dtype=dtype,
+                token_start=token_start,
+            )
         return self._store.get_concatenated(keys)
 
     def close(self) -> None:
