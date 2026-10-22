@@ -847,12 +847,18 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                         else "This AITER build also lacks segmented MLA decode."
                     )
                 )
+        # The group's cache dtype can differ from cache_config.cache_dtype
+        # (a speculative kv_cache_dtype override, kv_cache_dtype_skip_layers).
+        # Use the group's original format: decode normalizes E5M2 to "fp8".
+        kv_cache_dtype = getattr(kv_cache_spec, "cache_dtype_str", None)
+        if kv_cache_dtype is None:
+            kv_cache_dtype = vllm_config.cache_config.cache_dtype
         self._supports_segmented_dcp_verify = (
             supports_segmented_dcp_verify
             and _segmented_mla_fits_lds(
                 self.num_heads * self.dcp_world_size,
                 kv_cache_spec.block_size,
-                is_quantized_kv_cache(vllm_config.cache_config.cache_dtype),
+                is_quantized_kv_cache(kv_cache_dtype),
             )
         )
         self._use_triton_dcp_verify = (
@@ -866,10 +872,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 device
             ).multi_processor_count
 
-        # Use the group's original format: decode normalizes E5M2 to "fp8".
-        kv_cache_dtype = getattr(kv_cache_spec, "cache_dtype_str", None)
-        if kv_cache_dtype is None:
-            kv_cache_dtype = vllm_config.cache_config.cache_dtype
         self._supports_fused_dcp_prefill = _supports_fused_dcp_prefill_config(
             kv_cache_dtype,
             self.q_data_type,
@@ -978,7 +980,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # pad has to be applied here explicitly.
         if self._asm_dcp_verify:
             self._num_attention_heads = self._asm_dcp_verify_heads
-        kv_cache_dtype_str = getattr(vllm_config.cache_config, "cache_dtype", "auto")
+        kv_cache_dtype_str = kv_cache_dtype
         if kv_cache_dtype_str in ("fp8", "fp8_e4m3", "fp8_e5m2"):
             kv_cache_dtype_str = "fp8"
             kv_dtype = dtypes.fp8

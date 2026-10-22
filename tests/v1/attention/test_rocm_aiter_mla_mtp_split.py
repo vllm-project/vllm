@@ -970,20 +970,23 @@ def test_builder_init_sizes_decode_metadata_and_filters_dcp_maps(
         device=torch.device("cpu"),
     )
 
+    fp8_group = group_cache_dtype != "auto"
+    q_dtype = dtypes.fp8 if fp8_group else torch.bfloat16
+    kv_dtype = dtypes.fp8 if fp8_group else dtypes.bf16
     assert info_calls == [
         {
             "max_batch_size": config.scheduler_config.max_num_seqs,
             "max_qo_len": qlen,
             "num_attention_heads": AiterMLAHelper.get_actual_mla_num_heads(num_heads),
-            "q_dtype": dtypes.fp8,
-            "kv_dtype": dtypes.fp8,
+            "q_dtype": q_dtype,
+            "kv_dtype": kv_dtype,
             "is_sparse": False,
             "fast_mode": True,
         }
         for qlen in range(1, builder.reorder_batch_threshold + 1)
     ]
-    assert builder._mla_q_dtype == dtypes.fp8
-    assert builder._mla_kv_dtype == dtypes.fp8
+    assert builder._mla_q_dtype == q_dtype
+    assert builder._mla_kv_dtype == kv_dtype
 
     builder.dcp_world_size = 2
     chunk = object()
