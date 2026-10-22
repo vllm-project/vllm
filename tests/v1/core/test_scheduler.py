@@ -37,6 +37,7 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     PlaceholderRange,
 )
+from vllm.outputs import RequestError
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.utils.hashing import sha256
@@ -4608,6 +4609,10 @@ def test_grammar_compile_error_finishes_only_request(async_grammar: bool):
     assert output.request_id == request.request_id
     assert output.finish_reason == FinishReason.ERROR
     assert output.stop_reason is None
+    assert output.error == RequestError(
+        code="validation_error",
+        message="Invalid structured outputs: forced FSM compilation error",
+    )
 
     healthy_request = create_requests(num_requests=1, req_ids=["healthy-request"])[0]
     scheduler.add_request(healthy_request)
@@ -4649,7 +4654,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.finished_req_ids = set()
     scheduler.finished_req_ids_dict = None
     scheduler.aux_output_connector = None
-    scheduler.grammar_compile_error_reqs = set()
+    scheduler.grammar_compile_error_reqs = {}
     scheduler.encoder_cache_mismatch_reqs = set()
     scheduler.vllm_config = Mock()
     scheduler.return_sampling_mask = False
