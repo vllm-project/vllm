@@ -558,7 +558,8 @@ def parse_chat_message_content_part(
         if modality == "prompt_embeds":
             # Chat templates don't know about the "prompt_embeds" modality,
             # emit a unique sentinel as text so the template renders it inline.
-            return {"type": "text", "text": cast(str, prompt_embeds_placeholder)}
+            assert prompt_embeds_placeholder is not None
+            return {"type": "text", "text": prompt_embeds_placeholder}
         result = {"type": modality}
         result.update(_collect_extra_fields(cast(dict[str, Any], part)))
         return result
