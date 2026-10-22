@@ -4,13 +4,26 @@
 
 import ctypes as C
 import time
-from typing import TextIO, cast
+from collections.abc import Callable, Sequence
+from typing import Any, Literal, TextIO, cast
+
+CheckpointOperation = Literal["Lock", "Checkpoint", "Restore", "Unlock"]
+_OPERATIONS: tuple[CheckpointOperation, ...] = (
+    "Lock",
+    "Checkpoint",
+    "Restore",
+    "Unlock",
+)
 
 
-def cycle(pids, invoke, boundary=lambda op: None):
+def cycle(
+    pids,
+    invoke: Callable[[int, CheckpointOperation], Any],
+    boundary: Callable[[CheckpointOperation], None] = lambda op: None,
+):
     if not pids or len(set(pids)) != len(pids):
         raise ValueError("Expected distinct target PIDs")
-    for op in ("Lock", "Checkpoint", "Restore", "Unlock"):
+    for op in _OPERATIONS:
         for pid in pids:
             invoke(pid, op)
         boundary(op)
@@ -34,7 +47,7 @@ class DirectDriver:
             raise RuntimeError(f"cuInit: {rc}")
         self.lib.cuCheckpointProcessGetState.argtypes = [C.c_int, C.POINTER(C.c_int)]
         self.lib.cuGetErrorName.argtypes = [C.c_int, C.POINTER(C.c_char_p)]
-        for op in ("Lock", "Checkpoint", "Restore", "Unlock"):
+        for op in _OPERATIONS:
             getattr(self.lib, "cuCheckpointProcess" + op).argtypes = [
                 C.c_int,
                 C.c_void_p,
@@ -45,7 +58,7 @@ class DirectDriver:
         rc = self.lib.cuCheckpointProcessGetState(pid, C.byref(state))
         return {"rc": rc, "value": state.value}
 
-    def invoke(self, pid, op):
+    def invoke(self, pid, op: CheckpointOperation):
         """Return a result without writing to the helper protocol stream."""
         before = self.state(pid)
         args = LockArgs(10000) if op == "Lock" else None
@@ -68,7 +81,7 @@ class DirectDriver:
             time_s=elapsed,
         )
 
-    def __call__(self, pid, op):
+    def __call__(self, pid, op: CheckpointOperation):
         row = self.invoke(pid, op)
         self.emit(**row)
         if row["rc"] or row["after"] != {
@@ -78,7 +91,7 @@ class DirectDriver:
             raise RuntimeError(str(row))
 
 
-def _run_parallel_stage(pids, op, invoke):
+def _run_parallel_stage(pids, op: CheckpointOperation, invoke):
     """Run one stage in the helper; never emit partial protocol responses."""
     from concurrent.futures import ThreadPoolExecutor
 
@@ -134,10 +147,10 @@ class Driver:
         finally:
             sel.close()
 
-    def __call__(self, pid, op):
+    def __call__(self, pid, op: CheckpointOperation):
         self.run_stage([pid], op)
 
-    def run_stage(self, pids, op):
+    def run_stage(self, pids, op: CheckpointOperation):
         import json
 
         for pid in pids:
@@ -195,7 +208,7 @@ class CudaProcessCheckpoint:
         self.pids = []
         self.failed = False
 
-    def _run(self, operations):
+    def _run(self, operations: Sequence[CheckpointOperation]):
         if self.failed:
             raise RuntimeError("CUDA process checkpoint failed; restart required")
         try:
