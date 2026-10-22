@@ -775,6 +775,7 @@ async def test_derender_completion_prompt_logprobs_passthrough(client):
         tid = gr["token_ids"][0]
         (text,) = convert_ids_list_to_tokens(tok, [tid])
         entry = choice["prompt_logprobs"][1][str(tid)]
+        assert plp[1] is not None
         assert choice["prompt_logprobs"][0] is None
         assert entry["decoded_token"] == text
         assert entry["logprob"] == plp[1][str(tid)]["logprob"]
