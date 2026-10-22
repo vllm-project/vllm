@@ -1,0 +1,115 @@
+meta:
+  title: "PLaMo 3 NICT 31B Base"
+  slug: "plamo-3-nict-31b-base"
+  provider: "Preferred Networks"
+  description: "Largest PLaMo 3 NICT Japanese/English base model with interleaved sliding-window and full attention."
+  date_added: 2026-06-03
+  date_updated: 2026-09-13
+  tasks:
+    - text
+  performance_headline: "31B-class PLaMo 3 base checkpoint for high-quality bilingual generation"
+  related_recipes: []
+
+model:
+  model_id: "pfnet/plamo-3-nict-31b-base"
+  min_vllm_version: "0.12.0"
+  architecture: dense
+  parameter_count: "32B"
+  active_parameters: "32B"
+  context_length: 4096
+  base_args:
+    - "--trust-remote-code"
+    - "--max-model-len"
+    - "4096"
+  base_env: {}
+
+features: {}
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 77
+    description: "BF16 base checkpoint. Fits on H100/H200-class GPUs for 4K context; use TP=2 if extra cache headroom is needed."
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+  - multi_node_tp_pp
+
+hardware_overrides: {}
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  [PLaMo 3 NICT 31B Base](https://huggingface.co/pfnet/plamo-3-nict-31b-base)
+  is the largest PLaMo 3 NICT base model from Preferred Networks and NICT.
+  It is pretrained on Japanese and English data with a hybrid attention stack
+  combining sliding-window and full-attention layers.
+
+  This is a base checkpoint. Use completion-style prompts as-is, or fine-tune
+  it before deploying instruction-following or chat-style workflows.
+
+  ## Prerequisites
+
+  - **Hardware:** H100/H200 80 GB for 4K context; use TP=2 for extra KV-cache headroom
+  - **vLLM:** >= 0.12.0
+  - **License:** gated Hugging Face access under the PLaMo community license
+
+  ### Install vLLM
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend=auto
+  hf auth login
+  ```
+
+  ## Launching the Server
+
+  ```bash
+  vllm serve pfnet/plamo-3-nict-31b-base \
+    --trust-remote-code \
+    --max-model-len 4096
+  ```
+
+  With tensor parallelism for more KV-cache headroom:
+
+  ```bash
+  vllm serve pfnet/plamo-3-nict-31b-base \
+    --trust-remote-code \
+    --max-model-len 4096 \
+    --tensor-parallel-size 2
+  ```
+
+  ## Client Usage
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
+  resp = client.completions.create(
+      model="pfnet/plamo-3-nict-31b-base",
+      prompt="The future of artificial intelligence technology is ",
+      max_tokens=128,
+      temperature=0.7,
+  )
+  print(resp.choices[0].text)
+  ```
+
+  ## Troubleshooting
+
+  - **Out of memory on 80 GB GPUs:** add `--tensor-parallel-size 2` or lower
+    `--max-model-len`.
+  - **Gated repo errors:** accept the PLaMo community license on Hugging Face and
+    run `hf auth login`.
+  - **Repetitive or low-quality completions:** adjust sampling for free-form
+    generation, or fine-tune the model for chat or assistant workloads.
+
+  ## References
+
+  - [Model card](https://huggingface.co/pfnet/plamo-3-nict-31b-base)
+  - [vLLM PLaMo3 support](https://docs.vllm.ai/en/stable/models/supported_models.html)

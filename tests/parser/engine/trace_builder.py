@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import functools
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -39,11 +40,14 @@ from vllm.parser.engine.registered_adapters import (
     GraniteThinkingParser,
     InklingParser,
     KimiK2Parser,
+    MiMoParser,
     MinimaxM2Parser,
+    MinimaxM3Parser,
     NemotronV3Parser,
     Plamo3Parser,
     Qwen3Parser,
     SeedOssParser,
+    Step3p5Parser,
 )
 
 # ── Data structures ──────────────────────────────────────────────────
@@ -356,7 +360,12 @@ def _qwen3_tool_segments(tc: ToolCallSpec) -> list[tuple[str, bool]]:
     ]
 
 
-def _qwen3_segments(scenario: Scenario) -> list[tuple[str, bool]]:
+def _qwen3_segments(
+    scenario: Scenario,
+    tool_segments: Callable[[ToolCallSpec], list[tuple[str, bool]]] = (
+        _qwen3_tool_segments
+    ),
+) -> list[tuple[str, bool]]:
     segs: list[tuple[str, bool]] = []
     if scenario.reasoning is not None:
         segs.append((scenario.reasoning, False))
@@ -369,7 +378,7 @@ def _qwen3_segments(scenario: Scenario) -> list[tuple[str, bool]]:
         segs.append((scenario.content, False))
     if scenario.tool_calls:
         for tc in scenario.tool_calls:
-            segs.extend(_qwen3_tool_segments(tc))
+            segs.extend(tool_segments(tc))
     return segs
 
 
@@ -389,6 +398,9 @@ def _build_qwen3(
     parser_cls: type = Qwen3Parser,
     strip_trailing_ws: bool = False,
     validate: bool = True,
+    tool_segments: Callable[[ToolCallSpec], list[tuple[str, bool]]] = (
+        _qwen3_tool_segments
+    ),
 ) -> Sample:
     expected_reasoning: str | None
     if scenario.reasoning is not None:
@@ -403,7 +415,7 @@ def _build_qwen3(
         sample_id=f"{name}-{scenario.id}",
         description=scenario.description,
         vocab=_QWEN3_VOCAB,
-        segments=_qwen3_segments(scenario),
+        segments=_qwen3_segments(scenario, tool_segments),
         expected_reasoning=expected_reasoning,
         expected_content=_qwen3_expected_content(scenario),
         expected_tool_calls=_expected_tc(scenario),
@@ -412,6 +424,44 @@ def _build_qwen3(
     if validate:
         _validate_sample(sample, parser_cls)
     return sample
+
+
+# ── MiMo (compact Qwen3 XML, no newlines between tags) ───────────────
+
+
+def _mimo_tool_segments(tc: ToolCallSpec) -> list[tuple[str, bool]]:
+    parts = [f"<function={tc.name}>"]
+    for key, value in tc.arguments.items():
+        parts.append(f"<parameter={key}>{_qwen3_arg_value(value)}</parameter>")
+    parts.append("</function>")
+    return [
+        ("<tool_call>", True),
+        ("".join(parts), False),
+        ("</tool_call>", True),
+    ]
+
+
+def _build_mimo(scenario: Scenario, validate: bool = True) -> Sample:
+    return _build_qwen3(
+        scenario,
+        name="mimo",
+        parser_cls=MiMoParser,
+        validate=validate,
+        tool_segments=_mimo_tool_segments,
+    )
+
+
+# ── Step-3.5 (Qwen3 XML, trailing reasoning whitespace stripped) ────
+
+
+def _build_step3p5(scenario: Scenario, validate: bool = True) -> Sample:
+    return _build_qwen3(
+        scenario,
+        name="step3p5",
+        parser_cls=Step3p5Parser,
+        strip_trailing_ws=True,
+        validate=validate,
+    )
 
 
 # ── MiniMax M2 (XML invoke format, starts in REASONING) ──────────────
@@ -487,6 +537,66 @@ def _build_minimax_m2(scenario: Scenario, validate: bool = True) -> Sample:
     )
     if validate:
         _validate_sample(sample, MinimaxM2Parser)
+    return sample
+
+
+# ── MiniMax M3 (namespaced XML elements, no reasoning) ───────────────
+
+_MINIMAX_M3_NS = "]<]minimax[>["
+
+
+def _minimax_m3_value(value: Any) -> str:
+    """Render a value the way the M3 chat template's ``to_xml`` does."""
+    ns = _MINIMAX_M3_NS
+    if isinstance(value, dict):
+        return "".join(
+            f"{ns}<{key}>{_minimax_m3_value(item)}{ns}</{key}>"
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return "".join(
+            f"{ns}<item>{_minimax_m3_value(item)}{ns}</item>" for item in value
+        )
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _minimax_m3_segments(scenario: Scenario) -> list[tuple[str, bool]]:
+    ns = _MINIMAX_M3_NS
+    segs: list[tuple[str, bool]] = []
+    if scenario.content:
+        # The tool parser receives reasoning-stripped content.
+        segs.append((scenario.content, False))
+    if scenario.tool_calls:
+        invokes = "".join(
+            f'{ns}<invoke name="{tc.name}">'
+            f"{_minimax_m3_value(tc.arguments)}{ns}</invoke>\n"
+            for tc in scenario.tool_calls
+        )
+        segs.append((f"{ns}<tool_call>\n{invokes}{ns}</tool_call>", False))
+    return segs
+
+
+def _minimax_m3_expected_content(scenario: Scenario) -> str | None:
+    if scenario.tool_calls and not (scenario.content or "").strip():
+        return None
+    return scenario.content
+
+
+def _build_minimax_m3(scenario: Scenario, validate: bool = True) -> Sample:
+    sample = _make_sample(
+        sample_id=f"minimax_m3-{scenario.id}",
+        description=scenario.description,
+        vocab={},
+        segments=_minimax_m3_segments(scenario),
+        expected_reasoning=None,
+        expected_content=_minimax_m3_expected_content(scenario),
+        expected_tool_calls=_expected_tc(scenario),
+        tools=_expected_tools(scenario),
+    )
+    if validate:
+        _validate_sample(sample, MinimaxM3Parser)
     return sample
 
 
@@ -1226,12 +1336,15 @@ _BUILDERS: dict[str, Any] = {
     "gemma4": _build_gemma4,
     "granite": _build_granite,
     "minimax_m2": _build_minimax_m2,
+    "minimax_m3": _build_minimax_m3,
     "nemotron_v3": _build_nemotron_v3,
     "granite_thinking_parser": _build_granite_thinking,
     "seed_oss": _build_seed_oss,
     "glm47_moe": _build_glm47_moe,
     "kimi_k2": _build_kimi_k2,
     "qwen3": _build_qwen3,
+    "mimo": _build_mimo,
+    "step3p5": _build_step3p5,
     "inkling": _build_inkling,
     "plamo3": _build_plamo3,
 }

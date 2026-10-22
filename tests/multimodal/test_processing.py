@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
+from collections.abc import Sequence
 from contextlib import nullcontext
 from copy import deepcopy
 from types import SimpleNamespace
@@ -868,7 +869,7 @@ def test_limit_mm_per_prompt_apply(model_id, num_images, limit, is_valid):
     ],
 )
 def test_budget_caps_prevent_dummy_input_validation_failure(
-    model_id, user_limit, supported_limit
+    model_id, user_limit, supported_limit, monkeypatch
 ):
     limit_mm_per_prompt = {"image": user_limit}
 
@@ -878,7 +879,9 @@ def test_budget_caps_prevent_dummy_input_validation_failure(
     )
 
     processor = MULTIMODAL_REGISTRY.create_processor(model_config)
-    processor.info.get_supported_mm_limits = lambda: {"image": supported_limit}
+    monkeypatch.setattr(
+        processor.info, "get_supported_mm_limits", lambda: {"image": supported_limit}
+    )
 
     # This is what budget.py uses to derive mm_counts
     allowed = processor.info.allowed_mm_limits
@@ -936,7 +939,7 @@ def test_hf_processor_init_kwargs(
     )
 
     processor = ctx.get_hf_processor(
-        DummyProcessor,  # type: ignore[arg-type]
+        DummyProcessor,
         **inference_kwargs,
     )
     assert processor.a == expected_kwargs["a"]
@@ -967,7 +970,7 @@ def test_hf_processor_call_kwargs(
         tokenizer=None,
     )
 
-    processor = ctx.get_hf_processor(DummyProcessor)  # type: ignore[arg-type]
+    processor = ctx.get_hf_processor(DummyProcessor)
 
     result = ctx.call_hf_processor(processor, {}, inference_kwargs)
     assert result == expected_kwargs
@@ -1439,7 +1442,7 @@ def test_get_merged_mm_kwargs_treats_empty_scopes_as_absent_before_routing(
         mm_device_do_normalize=False,
     )
     model_config = SimpleNamespace(get_multimodal_config=lambda: mm_config)
-    ctx = InputProcessingContext(model_config, tokenizer=None)  # type: ignore[arg-type]
+    ctx = InputProcessingContext(model_config, tokenizer=None)
 
     merged = ctx.get_merged_mm_kwargs(
         inference_kwargs,
@@ -1479,7 +1482,7 @@ def test_get_merged_mm_kwargs_merges_before_routing():
         mm_device_do_normalize=False,
     )
     model_config = SimpleNamespace(get_multimodal_config=lambda: mm_config)
-    ctx = InputProcessingContext(model_config, tokenizer=None)  # type: ignore[arg-type]
+    ctx = InputProcessingContext(model_config, tokenizer=None)
 
     merged = ctx.get_merged_mm_kwargs(
         {
@@ -1541,7 +1544,10 @@ def test_processor_inputs_hashes_scope_kwargs_by_modality():
             "video": [np.zeros((2, 8, 8, 3), dtype=np.uint8)],
         }
     )
-    mm_uuid_items = {"image": ["image-uuid"], "video": ["video-uuid"]}
+    mm_uuid_items: dict[str, Sequence[str | None]] = {
+        "image": ["image-uuid"],
+        "video": ["video-uuid"],
+    }
 
     def get_hashes(video_frames: int, image_size: int, video_size: int):
         return ProcessorInputs(
@@ -1621,7 +1627,7 @@ def test_processor_inputs_hashes_distinguish_kwargs_shapes(left, right):
     [(None, 491520, 491520), (True, 491520, 8192), (True, 128, 128), (False, 128, 128)],
 )
 def test_dummy_inputs_scheduler_budget(
-    chunked_prefill, max_model_len, expected_seq_len
+    chunked_prefill, max_model_len, expected_seq_len, monkeypatch
 ):
     ctx = build_model_context(
         "llava-hf/llava-v1.6-mistral-7b-hf",
@@ -1634,11 +1640,9 @@ def test_dummy_inputs_scheduler_budget(
         ctx.model_config,
         tokenizer=ctx.tokenizer,
     )
-    processor.apply = lambda *args, **kwargs: {"prompt_token_ids": [7]}
-
-    kwargs = {}
+    scheduler_config = None
     if chunked_prefill is not None:
-        kwargs["scheduler_config"] = SchedulerConfig(
+        scheduler_config = SchedulerConfig(
             max_model_len=max_model_len,
             is_encoder_decoder=False,
             max_num_batched_tokens=8192,
@@ -1646,5 +1650,10 @@ def test_dummy_inputs_scheduler_budget(
             enable_chunked_prefill=chunked_prefill,
         )
 
-    result = processor.get_dummy_mm_inputs({"image": 1}, **kwargs)
+    monkeypatch.setattr(
+        processor, "apply", lambda *args, **kwargs: {"prompt_token_ids": [7]}
+    )
+    result = processor.get_dummy_mm_inputs(
+        {"image": 1}, scheduler_config=scheduler_config
+    )
     assert len(result["prompt_token_ids"]) == expected_seq_len
