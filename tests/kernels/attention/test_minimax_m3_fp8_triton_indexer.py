@@ -145,19 +145,31 @@ def test_bf16_query_against_fp8_cache_decode_topk_matches_bf16() -> None:
 
 @pytest.mark.skipif(not FP8_CUDA_SUPPORTED, reason="CUDA FP8 support required")
 @pytest.mark.parametrize("tp", [2, 4])
+@pytest.mark.parametrize("long_context", [False, True])
 @torch.inference_mode()
-def test_prefill_shard_scores_preserve_causal_block_max(tp: int) -> None:
+def test_prefill_shard_scores_preserve_causal_block_max(
+    tp: int, long_context: bool
+) -> None:
     """Interleaved shards reproduce full scores for shared prefixes and tail pages."""
     torch.manual_seed(12)
-    query_lens = [65, 3]
-    lengths = [259, 130]
-    cu = torch.tensor([0, 65, 68], dtype=torch.int32, device="cuda")
+    query_lens = [3, 1] if long_context else [65, 3]
+    lengths = [32771, 32641] if long_context else [259, 130]
+    total_q = sum(query_lens)
+    cu = torch.tensor([0, query_lens[0], total_q], dtype=torch.int32, device="cuda")
     seq = torch.tensor(lengths, dtype=torch.int32, device="cuda")
     prefix = seq - torch.tensor(query_lens, device="cuda")
-    table = torch.tensor([[3, 0, 2], [3, 1, 0]], dtype=torch.int32, device="cuda")
-    query = torch.randint(-2, 3, (68, 4, 128), device="cuda").to(torch.float8_e4m3fn)
-    cache = torch.randint(-2, 3, (4, 128, 128), device="cuda").to(torch.float8_e4m3fn)
-    reference = torch.full((tp, 4, 68, 16), -float("inf"), device="cuda")
+    blocks = (max(lengths) + PAGE - 1) // PAGE
+    table = torch.stack([torch.randperm(blocks, device="cuda") for _ in lengths]).int()
+    table[1, 0] = table[0, 0]
+    query = torch.randint(-2, 3, (total_q, 4, 128), device="cuda").to(
+        torch.float8_e4m3fn
+    )
+    cache = torch.randint(-2, 3, (blocks, 128, 128), device="cuda").to(
+        torch.float8_e4m3fn
+    )
+    reference = torch.full(
+        (tp, 4, total_q, (blocks + 15) // 16 * 16), -float("inf"), device="cuda"
+    )
     for req, (length, query_len) in enumerate(zip(lengths, query_lens)):
         start = sum(query_lens[:req])
         for token in range(query_len):
