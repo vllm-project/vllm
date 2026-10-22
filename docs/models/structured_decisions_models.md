@@ -164,6 +164,30 @@ the request lists them, a `noul` labels its options `yes` and `no`, and a
 | options per `choice` | 26 |
 | levels per `score` | 10 |
 
+#### Joint reads
+
+With `"joint": true`, a diffusion model reads several questions from one canvas in
+one denoising step: the prompt numbers the questions, and each answer is read at
+its slot in a `number: answer` line. A one-question request is read per
+question, as without `joint`.
+
+Questions that do not fit the served canvas (`--diffusion-config
+'{"canvas_length": N}'`) are split, in order, into the fewest even runs that
+fit. Each run is one engine request and counts once for admission.
+
+The response adds a `joint` object, `null` when each question was read on its own:
+
+```json
+"joint": {"canvases": [{"questions": ["urgent", "bucket", "tone"], "width": 16, "slots": [2, 6, 11]}]}
+```
+
+- Answers can differ from per-question reads, since the slots see each other
+  and the question order.
+- `usage.output_tokens` counts each canvas once, up to its last slot.
+- Joint reads take the same limits as per-question reads: 64 questions per
+  request, no thinking, and each prompt plus its canvas within `max_model_len`.
+- `/v1/decisions` takes the same `joint` field as a vLLM extension.
+
 #### Request fields
 
 | field | meaning |
@@ -173,10 +197,11 @@ the request lists them, a `noul` labels its options `yes` and `no`, and a
 | `instructions` | optional context placed ahead of the questions |
 | `chat_template_kwargs` | passed to the chat template, for example `{"enable_thinking": false}` |
 | `cache_salt` | optional [prefix-cache salt](../usage/security.md#cache-salting) applied to every question |
-| `images`, `audio`, `videos` | optional media URLs or data URLs, for models that take them ([Clef-Flash](#clef-flash), images/video; [Clef-Omni](#clef-omni); [Decision 3.0](#decision-30), images/video; [Liquid d1](#liquid-d1), images only) |
+| `joint` | optional boolean, default `false`; see [Joint reads](#joint-reads). DiffusionGemma only, other models return 400 |
+| `images`, `audio`, `videos` | optional media URLs or data URLs, for models that take them ([Clef-Flash](#clef-flash), images/video; [Clef-Omni](#clef-omni); [Decision 3.0](#decision-30), images/video; DiffusionGemma, images only, with or without `joint`; [Liquid d1](#liquid-d1), images only) |
 
-A question with any field other than `type`, `instructions` and `criteria` is
-rejected with a 400.
+Unknown top-level fields, and question fields other than `type`,
+`instructions` and `criteria`, are rejected with a 400.
 
 When [tracing](../../examples/observability/opentelemetry/README.md) is enabled
 with `--otlp-traces-endpoint`, the HTTP `traceparent` and `tracestate` headers are
