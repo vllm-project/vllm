@@ -540,6 +540,113 @@ def test_json_schema_response_format_missing_schema():
         )
 
 
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"type": "string", "minLength": -1},
+        {"type": "array", "minItems": -1},
+        {"type": "object", "required": "name"},
+        {"properties": {"name": {"type": "not-a-json-type"}}},
+        None,
+    ],
+)
+def test_json_schema_rejects_invalid_keyword_values(stream, schema):
+    """A well-shaped response_format can still contain an invalid schema."""
+    with pytest.raises(VLLMValidationError, match="JSON Schema"):
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": "hello"}],
+            stream=stream,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"name": "test", "schema": schema},
+            },
+        )
+
+
+def test_json_schema_nesting_is_bounded_before_meta_schema_validation():
+    schema: dict[str, Any] = {"type": "string"}
+    for _ in range(65):
+        schema = {"type": "array", "items": schema}
+    with pytest.raises(VLLMValidationError, match="nested too deeply"):
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[],
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"name": "test", "schema": schema},
+            },
+        )
+
+
+@pytest.mark.parametrize("as_model", [False, True])
+def test_json_schema_preserves_unicode_patterns_and_literals(as_model):
+    from vllm.entrypoints.generate.base.protocol import JsonSchemaResponseFormat
+
+    schema = {
+        "type": "object",
+        "properties": {"name": {"type": "string", "pattern": r"^[\p{L}]+$"}},
+        "required": ["name"],
+        "additionalProperties": False,
+    }
+    inner = {"name": "test", "schema": schema}
+    if as_model:
+        inner = JsonSchemaResponseFormat(**inner)
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "hello"}],
+        response_format={"type": "json_schema", "json_schema": inner},
+    )
+    assert request.response_format is not None
+    assert request.response_format.type == "json_schema"
+    assert request.response_format.json_schema is not None
+    assert request.response_format.json_schema.json_schema == schema
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_invalid_json_schema_returns_400_before_handler(stream):
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from vllm.entrypoints.serve.exception_handling.register import (
+        init_exception_handler,
+    )
+
+    app = FastAPI()
+    app.state.args = SimpleNamespace(log_error_stack=False)
+    init_exception_handler(app)
+    reached_handler = False
+
+    @app.post("/v1/chat/completions")
+    def completions(request: ChatCompletionRequest):
+        nonlocal reached_handler
+        reached_handler = True
+        return {"accepted": True}
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": MODEL_NAME,
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream": stream,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "test",
+                        "schema": {"type": "string", "minLength": -1},
+                    },
+                },
+            },
+        )
+    assert response.status_code == 400
+    assert response.json()["error"]["param"] == "response_format"
+    assert not reached_handler
+
+
 @pytest.mark.asyncio
 async def test_online_renderer_rejects_mm_processor_kwargs_by_default():
     model_config = MockModelConfig()
