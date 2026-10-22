@@ -15,7 +15,7 @@ from vllm.entrypoints.pooling.classify.protocol import ClassificationRequest
 from vllm.entrypoints.pooling.embed.protocol import EmbeddingRequest
 from vllm.entrypoints.pooling.pooling.protocol import PoolingRequest
 from vllm.exceptions import VLLMValidationError
-from vllm.pooling_params import LateChunkingParams
+from vllm.pooling_params import LateChunkingParams, LateInteractionParams
 
 EMBEDDING_MODELS = [
     EmbedModelInfo("intfloat/multilingual-e5-small", is_matryoshka=False),
@@ -228,6 +228,31 @@ def test_late_chunk_size_maximum_survives_wire_round_trip():
         msgspec.msgpack.decode(msgspec.msgpack.encode(params), type=PoolingParams)
         == params
     )
+
+
+@pytest.mark.parametrize("mode", ["", "cache_query ", "score-doc", "score_docs"])
+def test_late_interaction_rejects_unknown_mode(mode):
+    with pytest.raises(VLLMValidationError, match="cache_query.*score_doc"):
+        LateInteractionParams(mode=mode, query_key="k", query_uses=1)
+
+
+@pytest.mark.parametrize("query_uses", [None, 0, -1, True, 1.5, "2"])
+def test_late_interaction_cache_query_rejects_bad_use_count(query_uses):
+    with pytest.raises(VLLMValidationError, match="positive integer"):
+        LateInteractionParams(mode="cache_query", query_key="k", query_uses=query_uses)
+
+
+def test_late_interaction_valid_shapes_survive_wire_round_trip():
+    for params in (
+        LateInteractionParams(mode="cache_query", query_key="k", query_uses=3),
+        LateInteractionParams(mode="score_doc", query_key="k"),
+    ):
+        assert (
+            msgspec.msgpack.decode(
+                msgspec.msgpack.encode(params), type=LateInteractionParams
+            )
+            == params
+        )
 
 
 def _late_chunking_model_config():
