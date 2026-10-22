@@ -95,7 +95,7 @@ class EPLBConfig:
     """The policy type for expert parallel load balancing (EPLB)."""
 
     l2_algorithm: str = ""
-    """MoE Load Balancer routing expression for the L2 stage, which decides
+    """EvenMoE routing expression for the L2 stage, which decides
     which *replica* of a logical expert each token goes to. Empty leaves vLLM's
     built-in choice in place. Defaults to ``$VLLM_MLB_L2_ALGORITHM``."""
 
@@ -655,7 +655,7 @@ class ParallelConfig:
                 # framework that decides it by assumption will switch off a
                 # policy that had work to do.
                 logger.warning(
-                    "Disabling MoE Load Balancer L2 routing (%r): %s. Routing "
+                    "Disabling EvenMoE L2 routing (%r): %s. Routing "
                     "is unchanged by this -- the policy could only have "
                     "reproduced it -- but the per-layer routing boundary and "
                     "any load collective it needed are now skipped.",

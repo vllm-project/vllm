@@ -5,7 +5,7 @@
 These run on CPU and need no distributed group: the placement contract is a
 pure function of the load statistics and the topology.
 
-They are skipped unless the ``moe-load-balancer`` package is importable.
+They are skipped unless the ``evenmoe`` package is importable.
 """
 
 import numpy as np
@@ -14,7 +14,7 @@ import torch
 
 from vllm.distributed.eplb.policy import EPLB_POLICIES, DefaultEplbPolicy
 
-pytest.importorskip("moe_load_balancer")
+pytest.importorskip("evenmoe")
 
 from vllm.distributed.eplb.policy.mlb import MlbEplbPolicy  # noqa: E402
 

@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""vLLM-owned glue for the framework-decoupled MoE Load Balancer (MLB).
+"""vLLM-owned glue for EvenMoE (the framework-decoupled MoE Load Balancer).
 
-MLB (``moe-load-balancer``) implements expert-placement and token-routing
+EvenMoE (``evenmoe``; MLB below) implements expert-placement and token-routing
 policies once, framework-neutrally, and each serving framework keeps a thin
 adapter.  This module is that adapter for vLLM's L1 placement slot: it
 translates :class:`AbstractEplbPolicy` arguments into an MLB
@@ -11,7 +11,7 @@ back into the ``physical_to_logical_map`` vLLM expects.
 
 Enable with ``--eplb-config '{"policy": "mlb", "use_async": false}'``.
 The MLB placement algorithm is selected with ``VLLM_MLB_L1_ALGORITHM``
-(default ``auto``); see ``moe_load_balancer`` for the supported names.
+(default ``auto``); see ``evenmoe`` for the supported names.
 
 Note that ``use_async`` must be disabled: vLLM's async rearrangement path is
 validated only against the built-in policy (see ``EPLBConfig``), and MLB's
@@ -48,7 +48,7 @@ def _algorithm() -> str:
 
 
 class MlbEplbPolicy(AbstractEplbPolicy):
-    """Delegate expert placement to the MoE Load Balancer core."""
+    """Delegate expert placement to the EvenMoE core."""
 
     @classmethod
     def wants_per_rank_weight(cls) -> bool:
@@ -73,9 +73,9 @@ class MlbEplbPolicy(AbstractEplbPolicy):
             )
         except ImportError as exc:  # pragma: no cover - depends on environment
             raise ImportError(
-                "EPLB policy 'mlb' requires the moe-load-balancer package. "
-                "Install it into this environment with "
-                "`pip install -e /path/to/moe_load_balancer --no-deps`."
+                "EPLB policy 'mlb' requires the evenmoe package (formerly "
+                "moe-load-balancer). Install it into this environment with "
+                "`pip install -e /path/to/evenmoe --no-deps`."
             ) from exc
 
         algorithm = _algorithm()

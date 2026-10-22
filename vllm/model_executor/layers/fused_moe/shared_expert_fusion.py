@@ -222,7 +222,7 @@ def _l2_pipeline_needs_dispatched_shared_expert() -> bool:
     if not algorithm:
         return False
     try:
-        from moe_load_balancer.core.routing_pipeline import RoutingPipeline
+        from evenmoe.core.routing_pipeline import RoutingPipeline
 
         caps = RoutingPipeline.from_value(algorithm).capabilities
     except Exception:

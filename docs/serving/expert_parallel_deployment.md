@@ -155,8 +155,8 @@ Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. T
 | `log_balancedness` | Log balancedness metrics (avg tokens per expert ÷ max tokens per expert) | `false` |
 | `num_redundant_experts` | Additional global experts per EP rank beyond equal distribution | `0` |
 | `use_async` | Use non-blocking EPLB for reduced latency overhead | `true` |
-| `policy` | The policy type for expert parallel load balancing: `"default"` (built-in) or `"mlb"` (MoE Load Balancer, see below) | `"default"` |
-| `l2_algorithm` | MoE Load Balancer replica-routing expression (only with `policy: "mlb"`); empty keeps vLLM's built-in replica choice | `""` |
+| `policy` | The policy type for expert parallel load balancing: `"default"` (built-in) or `"mlb"` (EvenMoE, formerly MoE Load Balancer; see below) | `"default"` |
+| `l2_algorithm` | EvenMoE replica-routing expression (only with `policy: "mlb"`); empty keeps vLLM's built-in replica choice | `""` |
 | `init_placement_path` | Load a saved expert placement at start-up instead of the trivial layout | `null` |
 | `save_placement_path` | Save the expert placement to this path after every rearrangement | `null` |
 | `communicator` | Backend for expert weight transfers: `"torch_nccl"`, `"torch_gloo"`, `"pynccl"`, `"nixl"`,  or `null` (auto) | `null` |
@@ -180,10 +180,10 @@ vllm serve Qwen/Qwen3-30B-A3B \
             --eplb-config.log_balancedness true
     ```
 
-### MoE Load Balancer policy
+### EvenMoE (MoE Load Balancer) policy
 
 `policy: "mlb"` delegates expert placement, and optionally per-token replica routing, to the
-[MoE Load Balancer](https://github.com/xutizhou/moe_load_balancer) (`moe_load_balancer`), a
+[EvenMoE](https://github.com/ai-dynamo/evenmoe) (`evenmoe`, formerly the MoE Load Balancer), a
 framework-neutral library of expert-parallel load-balancing policies. vLLM imports it lazily, so
 nothing changes unless the policy is selected; install it into the serving environment first.
 

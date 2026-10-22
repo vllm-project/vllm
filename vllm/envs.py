@@ -2084,7 +2084,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # placement it was recorded under) to <path>.rearr<NNN>.pt at every
     # rearrangement step, from EP rank 0. Observation only; off by default.
     "VLLM_EPLB_DUMP_LOAD_PATH": lambda: os.getenv("VLLM_EPLB_DUMP_LOAD_PATH"),
-    # MoE Load Balancer (--eplb-config policy="mlb") integration knobs.
+    # EvenMoE, formerly MoE Load Balancer (--eplb-config policy="mlb") knobs.
     # L1 = expert placement algorithm run at each rearrangement ("auto" picks
     # the balancer's default for the model's expert-group layout); L2 = the
     # per-token replica routing expression, e.g. "static", "lplb",

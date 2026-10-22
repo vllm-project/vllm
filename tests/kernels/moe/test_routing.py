@@ -1168,7 +1168,7 @@ def test_policy_resolved_ids_stay_valid_and_fully_recorded():
 
     # Pin every expert to the replica nearest rank 3 -- a decision the built-in
     # hash would not make, so a fallback would be visible.
-    mlb_vllm = pytest.importorskip("moe_load_balancer.adapters.vllm")
+    mlb_vllm = pytest.importorskip("evenmoe.adapters.vllm")
     nearest_replica_table = mlb_vllm.nearest_replica_table
 
     defaults = nearest_replica_table(

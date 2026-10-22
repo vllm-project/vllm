@@ -566,7 +566,7 @@ class EplbState:
         if pending_init_p2l is not None:
             self._install_initial_placement(model_state, pending_init_p2l)
 
-        # Optional: hand L2 replica choice to the MoE Load Balancer.  A no-op
+        # Optional: hand L2 replica choice to EvenMoE.  A no-op
         # unless an L2 algorithm is configured, in which case vLLM's fused
         # mapping kernel is bypassed at the routing boundary.
         #
@@ -584,7 +584,7 @@ class EplbState:
                 caps = l2_pipeline_capabilities(l2_algorithm)
                 if caps is not None and not caps.supports_concurrent_microbatches:
                     raise ValueError(
-                        f"MoE Load Balancer L2 routing {l2_algorithm!r} is "
+                        f"EvenMoE L2 routing {l2_algorithm!r} is "
                         "incompatible with DBO: it keeps one solver state per "
                         "layer, and concurrent micro-batches would clobber each "
                         "other. Disable DBO, or select a policy that declares "
