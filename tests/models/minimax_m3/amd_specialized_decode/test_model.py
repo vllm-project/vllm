@@ -23,6 +23,7 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 LAYERS = 5
 SPARSE = (3, 4)
@@ -188,20 +189,16 @@ def _randomize(worker):
 
 
 def _requests():
-    g = torch.Generator().manual_seed(SEED)
+    set_random_seed(SEED)
+    requests = []
     for n in BATCHES:
         prompts = [
-            {
-                "prompt_token_ids": torch.randint(
-                    VOCAB, (int(size),), generator=g
-                ).tolist()
-            }
-            for size in torch.randint(16, 48, (n,), generator=g)
+            {"prompt_token_ids": torch.randint(VOCAB, (int(size),)).tolist()}
+            for size in torch.randint(16, 48, (n,))
         ]
-        traces = [
-            torch.randint(VOCAB, (STEPS,), generator=g).tolist() for _ in range(n)
-        ]
-        yield n, prompts, traces
+        traces = [torch.randint(VOCAB, (STEPS,)).tolist() for _ in range(n)]
+        requests.append((n, prompts, traces))
+    return requests
 
 
 def _decode(llm, capture=False):
@@ -498,13 +495,14 @@ def _epoch(worker):
 
 
 def _spec_requests():
-    g = torch.Generator().manual_seed(SEED + 1)
-    for n in SPEC_BATCHES:
-        sizes = torch.randint(16, 48, (n,), generator=g)
-        yield [
-            {"prompt_token_ids": torch.randint(VOCAB, (int(k),), generator=g).tolist()}
-            for k in sizes
+    set_random_seed(SEED + 1)
+    return [
+        [
+            {"prompt_token_ids": torch.randint(VOCAB, (int(k),)).tolist()}
+            for k in torch.randint(16, 48, (n,))
         ]
+        for n in SPEC_BATCHES
+    ]
 
 
 def test_eagle3_verify_steps_match_native(vllm_runner, model_dir, draft_dir, capfd):
@@ -547,7 +545,7 @@ def test_eagle3_verify_steps_match_native(vllm_runner, model_dir, draft_dir, cap
         llm.collective_rpc(_arm_late_fault, args=(2, 500_000))
         outputs = None
         with pytest.raises(EngineDeadError):
-            outputs = llm.generate(next(_spec_requests()), greedy)
+            outputs = llm.generate(_spec_requests()[0], greedy)
         assert outputs is None
 
     native_rows = []
