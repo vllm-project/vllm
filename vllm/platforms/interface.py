@@ -1038,6 +1038,33 @@ class Platform:
             attn_page_size_1_token = backend_cls.customize_spec(
                 attn_spec
             ).page_size_bytes
+            # A drafter whose attention layers hold more KV per token than the
+            # target's (e.g. an EAGLE head with more KV heads) sets the common
+            # page; size the block for it too (lcm, as for the skip layers
+            # above), or every Mamba page is later padded up to the drafter's.
+            spec_config = vllm_config.speculative_config
+            if (
+                spec_config is not None
+                and (draft_config := spec_config.draft_model_config) is not None
+                and not draft_config.use_mla
+            ):
+                draft_parallel_config = (
+                    spec_config.draft_parallel_config or parallel_config
+                )
+                draft_spec = FullAttentionSpec(
+                    block_size=1,
+                    num_kv_heads=draft_config.get_num_kv_heads(draft_parallel_config),
+                    head_size=draft_config.get_head_size(),
+                    dtype=kv_cache_dtype,
+                    kv_quant_mode=kv_quant_mode,
+                )
+                draft_page_size_1_token = backend_cls.customize_spec(
+                    draft_spec
+                ).page_size_bytes
+                if draft_page_size_1_token > attn_page_size_1_token:
+                    attn_page_size_1_token = lcm(
+                        attn_page_size_1_token, draft_page_size_1_token
+                    )
 
         # Compute mamba page size
         model_cls, _ = ModelRegistry.resolve_model_cls(

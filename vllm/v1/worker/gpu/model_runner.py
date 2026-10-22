@@ -69,6 +69,7 @@ from vllm.tasks import SupportedTask
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, async_tensor_h2d
+from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -157,6 +158,7 @@ from vllm.v1.worker.gpu.shutdown import free_before_shutdown
 from vllm.v1.worker.gpu.spec_decode import init_speculator
 from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     AdaptiveVerificationManager,
+    check_varlen_verify_graph_support,
     maybe_create_adaptive_verification_manager,
     resolve_adaptive_cudagraph_mode,
 )
@@ -511,14 +513,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.vllm_config._check_supports_watermarking(custom_sampler=True)
                 self.sampler, self.rejection_sampler = custom
             elif self.speculative_config is not None:
-                self.rejection_sampler = RejectionSampler(
-                    self.sampler,
-                    self.speculative_config,
-                    self.device,
-                    watermark_key=speculative_target_watermark_key(
-                        self.vllm_config.watermark_config
-                    ),
-                )
+                self.rejection_sampler = self._build_rejection_sampler()
             self.prompt_logprobs_worker = PromptLogprobsWorker(
                 self.max_num_reqs,
                 self.device,
@@ -563,6 +558,46 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def dp_rank(self) -> int:
         # Not cached: elastic EP rewrites parallel_config in place on reconfigure.
         return self.parallel_config.data_parallel_rank
+
+    def _use_varlen_verify_graphs(
+        self,
+        target_attn_layer_names: set[str] | None,
+        additional_attn_cg_support: tuple[AttentionCGSupport, str | None],
+    ) -> bool:
+        """Whether decode graphs are captured for variable query lengths."""
+        if self.adaptive_verification is not None:
+            return True
+        if self.speculator is None or not self.speculator.uses_varlen_verify_graphs:
+            return False
+        if not self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+            return False
+        check_varlen_verify_graph_support(
+            attn_groups=self.attn_groups,
+            vllm_config=self.vllm_config,
+            max_query_len=self.decode_query_len,
+            reason="A speculative method with a variable verify width",
+            remedy="Use a backend that does.",
+            target_layer_names=target_attn_layer_names,
+            additional_attn_cg_support=additional_attn_cg_support,
+        )
+        return True
+
+    def _build_rejection_sampler(self) -> RejectionSampler:
+        """The speculator's own verifier if it supplies one, else the chain one."""
+        assert self.sampler is not None
+        assert self.speculative_config is not None
+        if self.speculator is not None:
+            custom = self.speculator.make_rejection_sampler(self.sampler)
+            if custom is not None:
+                return custom
+        return RejectionSampler(
+            self.sampler,
+            self.speculative_config,
+            self.device,
+            watermark_key=speculative_target_watermark_key(
+                self.vllm_config.watermark_config
+            ),
+        )
 
     def get_model(self) -> nn.Module:
         return self.model
@@ -746,7 +781,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         piecewise_capture_available = bool(
             envs.VLLM_USE_BREAKABLE_CUDAGRAPH or has_compiled_submodule(self.model)
         )
-        if self.adaptive_verification is not None:
+        varlen_verify_graphs = self._use_varlen_verify_graphs(
+            target_attn_layer_names, additional_attn_cg_support
+        )
+        if varlen_verify_graphs:
             self.compilation_config.cudagraph_mode = resolve_adaptive_cudagraph_mode(
                 self.compilation_config.cudagraph_mode,
                 piecewise_capture_available=piecewise_capture_available,
@@ -767,7 +805,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cudagraph_mode,
             decode_query_len=self.decode_query_len,
             lora_capture_cases=self.lora_capture_cases,
-            varlen_decode=self.adaptive_verification is not None,
+            varlen_decode=varlen_verify_graphs,
             ubatch_runner=self.ubatch_runner,
         )
         if self.cache_config.kv_sharing_fast_prefill and self.pcp_manager is None:
@@ -1910,6 +1948,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         attn_metadata = None
         slot_mappings_by_layer = None
+        verify_inputs = False
         ubatch_state: UBatchState | None = None
         if batch_desc.num_ubatches > 1:
             assert self.ubatch_runner is not None
@@ -1927,6 +1966,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mappings, self.kv_cache_config
             )
             assert block_tables is not None
+            verify_inputs = self.speculator is not None
             attn_groups = self.attn_groups
             if dummy_run and is_profile and not valid_dummy_state_slots:
                 # Mamba layers take a cheap warmup path with no metadata;
@@ -1990,6 +2030,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # values above.
             **self.model_state.prepare_inputs(input_batch, self.req_states),
         }
+        if verify_inputs:
+            assert self.speculator is not None
+            # Positions (as the model takes them) and slot mappings exist;
+            # the forward has not run.
+            self.speculator.prepare_verify_inputs(
+                input_batch, model_inputs, dummy_run=dummy_run
+            )
         if not self.is_first_pp_rank:
             # Update for non-first PP ranks.
             if not requires_raw_input_tokens(self.model):
@@ -2163,6 +2210,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         sampler_output, num_sampled, num_rejected = self.sample(
             hidden_states, input_batch, grammar_output
         )
+        if self.speculator is not None:
+            self.speculator.post_accept(
+                input_batch, sampler_output, num_sampled, num_rejected
+            )
 
         if self.pp_handler is not None:
             # Broadcast to non-last PP ranks (handles spec decode multi-token).
