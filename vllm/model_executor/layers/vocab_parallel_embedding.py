@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -34,6 +35,13 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 
 DEFAULT_VOCAB_PADDING_SIZE = 64
+
+
+@functools.cache
+def _pad_single_row_lm_head() -> bool:
+    # On GB10 (sm_121), cuBLAS runs a one-row BF16 lm_head as a GEMV that reads
+    # the weight at ~175 GB/s; with two rows it uses a GEMM at ~235 GB/s.
+    return current_platform.is_cuda() and current_platform.is_device_capability(121)
 
 
 class UnquantizedEmbeddingMethod(QuantizeMethodBase):
@@ -80,6 +88,9 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
             current_platform.is_cuda_alike() or current_platform.is_xpu()
         ):
             return linear_batch_invariant(x, layer.weight, bias)
+        if x.dim() == 2 and x.shape[0] == 1 and _pad_single_row_lm_head():
+            x = torch.cat([x, x.new_zeros(x.shape)])
+            return dispatch_unquantized_gemm()(layer, x, layer.weight, bias)[:1]
         return dispatch_unquantized_gemm()(layer, x, layer.weight, bias)
 
     def embedding(self, layer: torch.nn.Module, input_: torch.Tensor) -> torch.Tensor:
