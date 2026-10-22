@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from functools import cached_property
 from typing import cast
 
 import torch
@@ -11,6 +12,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
+from vllm.models.kimi_k3.amd.mono_moe_decode import MonoLatentMoE
 
 logger = init_logger(__name__)
 
@@ -100,6 +102,39 @@ class ROCmLatentMoERunner(MoERunner):
         return self._maybe_reduce_final_output(
             shared_output, trunc_size, output_is_reduced=False
         )
+
+    @cached_property
+    def _mono(self) -> MonoLatentMoE:
+        return MonoLatentMoE(self)
+
+    def _forward_impl(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        shared_experts_input: torch.Tensor | None,
+        input_ids: torch.Tensor | None = None,
+    ):
+        """Small decode batches: one launch runs routing, the routed experts and
+        the shared expert, so the shared expert is not forked to the aux stream.
+        Everything else takes the base runner's multi-kernel path.
+
+        Both the stock ``forward`` and the sharded latent tail enter here
+        through ``_forward_entry``.
+        """
+        if not self._mono.eligible(hidden_states, router_logits, shared_experts_input):
+            return super()._forward_impl(
+                hidden_states, router_logits, shared_experts_input, input_ids
+            )
+        assert shared_experts_input is not None
+        self.routed_experts._ensure_moe_quant_config_init()
+        with self._sequence_parallel_context():
+            hidden_states, router_logits = self._maybe_dispatch(
+                hidden_states, router_logits
+            )
+            fused_out, shared_out = self._mono.forward(
+                hidden_states, router_logits, shared_experts_input
+            )
+            return self._maybe_combine(shared_out, fused_out)
 
     def forward(
         self,
