@@ -320,6 +320,11 @@ class AsyncKVChecksumOutput(AsyncModelRunnerOutput):
         self.kv_checksums.add_to_output(output)
         return output
 
+    def get_kv_connector_output(self) -> KVConnectorOutput | None:
+        if isinstance(self.output, AsyncModelRunnerOutput):
+            return self.output.get_kv_connector_output()
+        return self.output.kv_connector_output
+
 
 def async_copy_to_np(x: torch.Tensor) -> np.ndarray:
     return x.to("cpu", non_blocking=True, copy=True).numpy()
