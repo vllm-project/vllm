@@ -1071,6 +1071,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_options: Configurable options per modality (optional)
 
         """
+        mm_counts = self._pair_dummy_mm_counts(mm_counts)
         builder = self.dummy_inputs
         dummy_text = builder.get_dummy_text(mm_counts)
         dummy_mm_data = builder.get_dummy_mm_data(seq_len, mm_counts, mm_options)
@@ -1090,6 +1091,17 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             prompt=dummy_prompt,
             mm_data_items=dummy_mm_items,
         )
+
+    def _pair_dummy_mm_counts(self, mm_counts: Mapping[str, int]) -> Mapping[str, int]:
+        """Add the companion items required by the effective mm kwargs.
+
+        Called by ``get_dummy_inputs`` before building the dummy data. Callers
+        such as the encoder profiler request a single modality at a time (e.g.
+        ``{"video": 1}``). When the model's mm kwargs make a modality depend on
+        another one, the companion items must be present as well, otherwise
+        the HF processor rejects the dummy input. The default is a no-op.
+        """
+        return mm_counts
 
     def get_dummy_mm_inputs(
         self,

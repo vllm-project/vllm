@@ -32,6 +32,7 @@ from vllm.distributed.ec_transfer.ec_connector.utils import (
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import LruKeyReplicatedSenderCache
 from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.multimodal.utils import get_use_audio_in_video
 from vllm.renderers.chat_utils import parse_chat_messages, parse_chat_messages_async
 
 from ....multimodal.utils import random_audio, random_video
@@ -41,6 +42,31 @@ MODELS = [
     "Qwen/Qwen2.5-Omni-3B",
     "Qwen/Qwen3-Omni-30B-A3B-Instruct",
 ]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected"),
+    [
+        ({}, False),
+        ({"use_audio_in_video": True}, True),
+        ({"use_audio_in_video": False}, False),
+        ({"videos_kwargs": {"use_audio_in_video": True}}, True),
+        ({"videos_kwargs": {"use_audio_in_video": False}}, False),
+        # The HF video scope wins over the shared flat namespace.
+        (
+            {
+                "use_audio_in_video": False,
+                "videos_kwargs": {"use_audio_in_video": True},
+            },
+            True,
+        ),
+    ],
+)
+def test_get_use_audio_in_video_prefers_video_scope(
+    kwargs: dict, expected: bool
+) -> None:
+    """`use_audio_in_video` must resolve from the flat and scoped forms alike."""
+    assert get_use_audio_in_video(kwargs) is expected
 
 
 def create_mm_data(num_videos: int) -> dict[str, list]:
@@ -289,3 +315,96 @@ def test_audio_in_video_metadata_only(
     )
     assert raw_delta == remote_delta
     torch.testing.assert_close(raw_positions, remote_positions)
+
+
+@pytest.mark.parametrize("model_id", MODELS)
+def test_engine_level_use_audio_in_video(model_id: str) -> None:
+    """`--mm-processor-kwargs` must reach the prompt updates, not just HF.
+
+    The flag is configured on the engine, so the request passes no
+    `hf_processor_mm_kwargs`. The HF processor interleaves audio into the video
+    placeholder, and the processor must derive the audio placeholders from it
+    instead of also emitting the standalone audio update.
+    """
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"audio": 1, "image": 0, "video": 1},
+        mm_processor_kwargs={"use_audio_in_video": True},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    video_token_id = processor.info.get_hf_config().video_token_id
+
+    mm_data = create_mm_data(1)
+    engine_ids = processor(
+        [video_token_id],
+        mm_items=processor.info.parse_mm_data(mm_data),
+    )["prompt_token_ids"]
+
+    request_ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"audio": 1, "image": 0, "video": 1},
+    )
+    request_ids = MULTIMODAL_REGISTRY.create_processor(request_ctx.model_config)(
+        [video_token_id],
+        mm_items=processor.info.parse_mm_data(mm_data),
+        hf_processor_mm_kwargs={"use_audio_in_video": True},
+    )["prompt_token_ids"]
+
+    assert engine_ids == request_ids
+
+
+@pytest.mark.parametrize("model_id", MODELS)
+def test_videos_kwargs_scoped_use_audio_in_video(model_id: str) -> None:
+    """The scoped `videos_kwargs` form must behave like the flat one.
+
+    `use_audio_in_video` is an HF `videos_kwargs` key, so configuring it inside
+    that scope must not be silently ignored by the placeholder logic.
+    """
+    mm_data = create_mm_data(1)
+    limit = {"audio": 1, "image": 0, "video": 1}
+
+    flat_ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt=limit,
+        mm_processor_kwargs={"use_audio_in_video": True},
+    )
+    scoped_ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt=limit,
+        mm_processor_kwargs={"videos_kwargs": {"use_audio_in_video": True}},
+    )
+
+    def run(ctx):
+        processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+        video_token_id = processor.info.get_hf_config().video_token_id
+        return processor(
+            [video_token_id],
+            mm_items=processor.info.parse_mm_data(mm_data),
+        )["prompt_token_ids"]
+
+    assert run(scoped_ctx) == run(flat_ctx)
+
+
+@pytest.mark.parametrize("model_id", MODELS)
+def test_encoder_profiler_pairs_dummy_audio_with_video(model_id: str) -> None:
+    """The encoder profiler requests dummy input for one modality at a time.
+
+    With `use_audio_in_video` in effect, the HF processor rejects a video
+    without its paired audio track, so the dummy counts must be completed with
+    the companion audio item.
+    """
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"audio": 1, "image": 0, "video": 1},
+        mm_processor_kwargs={"use_audio_in_video": True},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    assert processor._pair_dummy_mm_counts({"video": 1}) == {
+        "audio": 1,
+        "video": 1,
+    }
+
+    dummy_inputs = processor.get_dummy_mm_inputs({"video": 1})
+    assert len(dummy_inputs["mm_kwargs"]["video"]) == 1
+    assert len(dummy_inputs["mm_kwargs"]["audio"]) == 1
