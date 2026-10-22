@@ -24,12 +24,14 @@ from vllm.models.kimi_k3.amd.specialized_decode.runtime.decode import (
 )
 from vllm.models.kimi_k3.amd.specialized_decode.runtime.guards import (
     cache_reasons,
+    mla_weight_reasons,
     weight_reasons,
 )
 
 
 def _vllm_config(**over) -> SimpleNamespace:
-    """A supported config: TP8, DCP8, 7 speculative tokens, FULL graphs, MRV2.
+    """A supported config: TP8, DCP8 (interleave 1), 7 speculative tokens, an fp8
+    KV cache, FULL graphs, MRV2.
     ``over`` sets dotted paths, e.g. ``{"parallel_config.data_parallel_size": 2}``."""
     spec = SimpleNamespace(
         num_speculative_tokens=7,
@@ -46,6 +48,7 @@ def _vllm_config(**over) -> SimpleNamespace:
             enable_expert_parallel=False,
             enable_eplb=False,
             decode_context_parallel_size=8,
+            cp_kv_cache_interleave_size=1,
             prefill_context_parallel_size=1,
             use_ubatching=False,
         ),
@@ -64,7 +67,10 @@ def _vllm_config(**over) -> SimpleNamespace:
             ),
         ),
         cache_config=SimpleNamespace(
-            mamba_cache_dtype="auto", use_replayssm=False, use_kda_recoverssm=False
+            cache_dtype="fp8",
+            mamba_cache_dtype="auto",
+            use_replayssm=False,
+            use_kda_recoverssm=False,
         ),
         lora_config=None,
         kv_transfer_config=None,
@@ -90,13 +96,26 @@ def _vllm_config(**over) -> SimpleNamespace:
     return c
 
 
+@pytest.fixture(autouse=True)
+def fp4_bmm(monkeypatch):
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_FP4BMM", "1")
+
+
 @pytest.fixture
 def on_mi355x(monkeypatch):
     monkeypatch.setattr(runtime, "platform_reasons", lambda: [])
 
 
-@pytest.mark.parametrize("k, want", [(7, (8,)), (3, (4, 8)), (1, (2, 4, 6, 8))])
-def test_widths_are_whole_requests_up_to_eight_rows(k, want):
+@pytest.mark.parametrize(
+    "k, want",
+    [
+        (7, (8, 16)),
+        (3, (4, 8, 12, 16)),
+        (1, tuple(range(2, 17, 2))),
+        (15, (16,)),
+    ],
+)
+def test_widths_are_whole_requests_up_to_max_rows(k, want):
     assert DecodeConfig(q=k + 1).widths == want
 
 
@@ -141,21 +160,46 @@ def test_supported_config_is_accepted(on_mi355x):
     assert specialized_decode_config(_vllm_config()) == DecodeConfig(q=8)
 
 
+@pytest.mark.parametrize("dcp", [1, 8])
+@pytest.mark.parametrize("interleave", [1, 16])
+def test_any_interleave_is_accepted(on_mi355x, dcp, interleave):
+    """M1a writes the slots vLLM maps, M1b masks a request's empty shards."""
+    cfg = _vllm_config(
+        **{
+            "parallel_config.decode_context_parallel_size": dcp,
+            "parallel_config.cp_kv_cache_interleave_size": interleave,
+        }
+    )
+    assert specialized_decode_config(cfg) == DecodeConfig(q=8, interleave=interleave)
+
+
+@pytest.mark.parametrize(
+    "over, env, why",
+    [
+        ({"cache_config.cache_dtype": "auto"}, "1", "an fp8 KV cache"),
+        ({}, "0", "VLLM_ROCM_USE_AITER_FP4BMM=1"),
+    ],
+)
+def test_mla_without_m1_runs_vllm_ops(on_mi355x, monkeypatch, over, env, why):
+    """What only M1 needs is no refusal: the MLA layers run vLLM's ops, K2."""
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_FP4BMM", env)
+    cfg = _vllm_config(**over)
+    assert runtime.unsupported(cfg) == []
+    reasons = runtime.m1_reasons(cfg)
+    assert len(reasons) == 1 and why in reasons[0]
+    assert specialized_decode_config(cfg) == DecodeConfig(q=8, m1=False)
+
+
 @pytest.mark.parametrize(
     "over, reason",
     [
-        (
-            {
-                "parallel_config.tensor_parallel_size": 4,
-                "parallel_config.decode_context_parallel_size": 4,
-            },
-            "TP 4",
-        ),
+        ({"parallel_config.tensor_parallel_size": 4}, "TP 4"),
         ({"parallel_config.pipeline_parallel_size": 2}, "pipeline parallelism"),
-        ({"parallel_config.decode_context_parallel_size": 2}, "decode context"),
+        ({"parallel_config.decode_context_parallel_size": 2}, "other than 1 or 8"),
+        ({"parallel_config.decode_context_parallel_size": 4}, "other than 1 or 8"),
         ({"kv_transfer_config": object()}, "KV transfer connectors"),
         ({"speculative_config": None}, "without speculative decoding"),
-        ({"speculative_config.num_speculative_tokens": 8}, "more than 7"),
+        ({"speculative_config.num_speculative_tokens": 16}, "more than 15"),
         ({"speculative_config.enable_adaptive_verification": True}, "adaptive"),
         ({"speculative_config.dynamic": True}, "dynamic speculative"),
         ({"cache_config.mamba_cache_dtype": "float32"}, "KDA cache dtypes"),
@@ -201,6 +245,17 @@ def test_cache_refusal_names_the_cache():
     assert len(reasons) == 2 and all(r.startswith("layers.5.attn:") for r in reasons)
 
 
+def test_cache_refusal_checks_the_mla_cache():
+    pytest.importorskip("flydsl")
+    ok = torch.zeros(4, 16, 576, dtype=torch.uint8)
+    assert cache_reasons({"layers.3.attn": ok}) == []
+    strided = torch.zeros(4, 32, 576, dtype=torch.uint8)[:, ::2]
+    bf16 = torch.zeros(4, 16, 576, dtype=torch.bfloat16)
+    for bad in (strided, bf16):
+        reasons = cache_reasons({"layers.3.attn": bad})
+        assert len(reasons) == 1 and reasons[0].startswith("layers.3.attn:")
+
+
 def _kda_metadata(**md):
     """One request of 4 tokens unless overridden."""
     m = SimpleNamespace(
@@ -236,6 +291,38 @@ def test_steps_need_metadata():
     assert step_reason(None, "kda", 4) == "no metadata"
 
 
+@pytest.mark.parametrize(
+    "mla, why",
+    [
+        ({}, None),
+        (None, "no MLA decode metadata"),
+        ({"decode": None}, "no MLA decode metadata"),
+        ({"num_prefills": 1}, "MLA: not pure decode"),
+        ({"num_decode_tokens": 2}, "MLA: not pure decode"),
+        ({"decode": SimpleNamespace(max_qo_len=2)}, "MLA: not uniform"),
+        (
+            {"decode": SimpleNamespace(max_qo_len=4, use_gluon_verify=True)},
+            "MLA: Gluon decode",
+        ),
+        (
+            {"decode": SimpleNamespace(max_qo_len=4, use_gluon_decode=True)},
+            "MLA: Gluon decode",
+        ),
+    ],
+)
+def test_steps_check_the_mla_decode(mla, why):
+    """One request of 4 tokens: the MLA layers' metadata must agree."""
+    md = _kda_metadata()
+    if mla is not None:
+        a = SimpleNamespace(
+            decode=SimpleNamespace(max_qo_len=4), num_prefills=0, num_decode_tokens=4
+        )
+        for k, v in mla.items():
+            setattr(a, k, v)
+        md["mla"] = a
+    assert step_reason(md, "kda", 4, "mla") == why
+
+
 class _Kernel:
     def launch(self, step, positions, hidden_states, residual, prefix_delta):
         return "kernel", step.width
@@ -246,7 +333,7 @@ def _decode(monkeypatch, mode=CUDAGraphMode.FULL, md=None):
     KV cache, under a forward context of ``mode``."""
     decode = object.__new__(SpecializedDecode)
     decode.config = DecodeConfig(q=4)
-    decode.runner = SimpleNamespace(kda_prefix="kda")
+    decode.runner = SimpleNamespace(kda_prefix="kda", mla_prefix="")
     decode.kernels = {w: {1: _Kernel(), 2: _Kernel()} for w in (4, 8)}
     decode._kv = (1, 2)
     monkeypatch.setattr(SpecializedDecode, "_kv_key", lambda self: (1, 2))
@@ -316,3 +403,90 @@ def test_weight_views_reject_every_mismatch():
     assert "layer 5: routed_scaling_factor 2.0" in reasons
     assert any(r.startswith("layer 5: MoE backend must be") for r in reasons)
     assert moe.E == 896
+
+
+def test_attend_hands_m1a_padded_query_to_forward_mqa():
+    from vllm.models.kimi_k3.amd.specialized_decode.runtime import mla
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAHelper
+
+    pad = AiterMLAHelper.get_mla_padded_q
+    q = torch.randn(4, 96, 8)
+    padded = pad(96, q, target_heads=128)  # what M1a writes
+    other = torch.randn(4, 96, 8)
+    seen = {}
+
+    def forward_mqa(q, kv, md, attn):
+        assert q.shape[1] == 96
+        seen["q"] = AiterMLAHelper.get_mla_padded_q(96, q, target_heads=128)
+        seen["other"] = AiterMLAHelper.get_mla_padded_q(96, other, target_heads=128)
+        return None, None
+
+    impl = SimpleNamespace(_decode_num_heads=96, forward_mqa=forward_mqa)
+    wrapper = SimpleNamespace(mla_attn=SimpleNamespace(impl=impl))
+    mla.attend(wrapper, padded, torch.zeros(4, dtype=torch.uint8), None)
+    assert seen["q"] is padded  # no copy
+    assert torch.equal(seen["other"], pad(96, other, target_heads=128))
+    assert AiterMLAHelper.get_mla_padded_q is pad  # restored
+
+
+def test_qkv_gate_weights_split_the_merged_gate():
+    """KimiK3MergedQKVGateLinear (vLLM's) stacks [q_a | kv_a | gate]: M1a
+    reads the two row slices in place."""
+    from vllm.models.kimi_k3.amd.specialized_decode.runtime import mla
+
+    w = torch.randn(2112 + 1536, 8)
+    wrapper = SimpleNamespace(
+        fused_qkv_a_proj=SimpleNamespace(weight=w), g_proj=None,
+        _qkv_gate_fused=True, q_lora_rank=1536, qk_rope_head_dim=64,
+        mla_attn=SimpleNamespace(kv_lora_rank=512),
+    )  # fmt: skip
+    qkv, g = mla.qkv_gate_weights(wrapper)
+    assert qkv.shape == (2112, 8) and g.shape == (1536, 8)
+    assert qkv.is_contiguous() and g.is_contiguous()
+    assert g.data_ptr() == w[2112:].data_ptr()
+    wrapper._qkv_gate_fused = False
+    assert mla.qkv_gate_weights(wrapper) == (w, None)
+    gw = torch.randn(1536, 8)
+    wrapper.g_proj = SimpleNamespace(weight=gw)
+    assert mla.qkv_gate_weights(wrapper) == (w, gw)
+
+
+def test_m1c_falls_back_where_its_splits_dont_share_out():
+    """M1c's KV splits share out evenly over a width's requests or the width
+    runs the asm decode: qlen 4's 80 splits over 12 rows (3 requests) don't."""
+    pytest.importorskip("flydsl")
+    from vllm.models.kimi_k3.amd.specialized_decode.runtime.layers import (
+        m1c_at,
+        m1c_splits,
+    )
+
+    k3 = SimpleNamespace(m1c=True, num_spec=3)
+    assert [w for w in (4, 8, 12, 16) if m1c_at(k3, w)] == [4, 8, 16]
+    assert m1c_splits(k3, 8) == 80 and m1c_splits(k3, 12) == 0
+    k7 = SimpleNamespace(m1c=True, num_spec=7)
+    assert all(m1c_at(k7, w) for w in (8, 16))
+    off = SimpleNamespace(m1c=False, num_spec=3)
+    assert not m1c_at(off, 4) and m1c_splits(off, 4) == 0
+
+
+def test_mla_weight_views_fall_back_per_model():
+    """An MLA layer M1 cannot read is no weight refusal: mla_weight_reasons
+    names it, and the MLA layers run vLLM's ops."""
+    no_latent = SimpleNamespace(use_latent_moe=False, shared_experts=None)
+    config = _k3_text_config()
+    ffn = [i for i, kind in runtime.layer_kinds(config).items() if kind == "ffn"]
+    w = SimpleNamespace(
+        num_heads=16, q_lora_rank=1536, qk_nope_head_dim=128, qk_rope_head_dim=64,
+        v_head_dim=128, mla_attn=SimpleNamespace(kv_lora_rank=512),
+    )  # fmt: skip
+    layers = [
+        SimpleNamespace(mlp=no_latent, self_attn=SimpleNamespace(mla_attn=w))
+    ] * 93
+    model = SimpleNamespace(config=config, layers=layers, start_layer=0, end_layer=93)
+    assert not any("MLA" in r for r in weight_reasons(model))
+    reasons = mla_weight_reasons(model)
+    assert ffn and len(reasons) == len(ffn)
+    assert (
+        reasons[0] == f"layer {ffn[0]}: MLA heads/q_lora/kv_lora/nope/rope/v "
+        "(16, 1536, 512, 128, 64, 128)"
+    )

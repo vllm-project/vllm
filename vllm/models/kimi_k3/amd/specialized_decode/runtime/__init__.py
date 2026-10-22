@@ -19,8 +19,13 @@ logger = init_logger(__name__)
 
 AUTO, SPECIALIZED = "auto", "latency_specialized"
 TP = 8
-# a launch's x rows fit one CTA's LDS
-MAX_TOKENS = 8
+DCP = TP  # the MLA layers' KV shards: one a TP rank
+DCP_SIZES = (1, DCP)  # M1's builds: the whole KV a rank, or DCP over the TP group
+# the kernels' rows: the MoE route table's token bitmaps (scratch and peer memory
+# are sized for it)
+MAX_TOKENS = 64
+# a served step's rows: at 32 and 64 rows the kernels lose to vLLM's decode
+MAX_ROWS = 16
 WHOLE, FFN = "whole", "ffn"
 # Kimi-K3's text shapes the kernels are written for (hidden size, routed experts,
 # KDA heads, KDA head dim, KDA short-conv width)
@@ -31,14 +36,18 @@ K3_SHAPES = (7168, 896, 96, 128, 4)
 class DecodeConfig:
     # rows a request verifies: num_speculative_tokens + 1
     q: int
+    # the MLA layers run M1 (else vLLM's attention ops, then K2; ``m1_reasons``)
+    m1: bool = True
+    # the DCP KV cache interleave (AITER's decode path, M1a's query pad)
+    interleave: int = 1
 
     @property
     def widths(self) -> tuple[int, ...]:
-        """The rows a launch serves: whole requests, at most MAX_TOKENS rows. Every
-        uniform verify step up to MAX_TOKENS rows is one of them, so an eager step
+        """The rows a launch serves: whole requests, at most MAX_ROWS rows. Every
+        uniform verify step up to MAX_ROWS rows is one of them, so an eager step
         never pads; a FULL replay pads whole requests the way vLLM's stock decode
         does."""
-        return tuple(range(self.q, MAX_TOKENS + 1, self.q))
+        return tuple(range(self.q, MAX_ROWS + 1, self.q))
 
 
 def decode_backend(vllm_config) -> str:
@@ -70,14 +79,44 @@ def specialized_decode_config(vllm_config) -> DecodeConfig | None:
             "Kimi-K3 specialized decode: PIECEWISE-only CUDA graphs capture every "
             "decode step as stock; use FULL decode graphs"
         )
+    m1 = m1_reasons(vllm_config)
+    if m1:
+        logger.info(
+            "Kimi-K3 specialized decode: the MLA layers run vLLM's attention ops, "
+            "then K2 (M1 needs %s)",
+            "; ".join(m1),
+        )
     spec = vllm_config.speculative_config
-    return DecodeConfig(q=spec.num_speculative_tokens + 1)
+    return DecodeConfig(
+        q=spec.num_speculative_tokens + 1,
+        m1=not m1,
+        interleave=vllm_config.parallel_config.cp_kv_cache_interleave_size,
+    )
+
+
+def m1_reasons(vllm_config) -> list[str]:
+    """Why the MLA layers cannot run M1 (empty: they can). Not a refusal: those
+    layers run vLLM's attention ops instead, then K2."""
+    import vllm.envs as envs
+
+    cc = vllm_config.cache_config
+    checks = (
+        # M1a writes the MLA layers' fp8 KV and hands AITER an fp8 query
+        (not cc.cache_dtype.startswith("fp8"), "an fp8 KV cache"),
+        # M1 runs W_UK / W_UV as AITER's MXFP4 bmms
+        (
+            not envs.VLLM_ROCM_USE_AITER_FP4BMM,
+            "AITER's MXFP4 bmms (VLLM_ROCM_USE_AITER_FP4BMM=1)",
+        ),
+    )
+    return [why for bad, why in checks if bad]
 
 
 def unsupported(vllm_config) -> list[str]:
     """Every reason this deployment cannot run the specialized decode (empty: it
     can). Config only: the loaded weights are checked when the executor is built.
-    Default-deny: every feature below is refused, the kernels serve none of them."""
+    Default-deny: every feature below is refused, the kernels serve none of them.
+    What only M1 needs is not refused (``m1_reasons``)."""
     from vllm.config import CompilationMode
     from vllm.model_executor.layers.mamba.mamba_utils import (
         MambaStateDtypeCalculator,
@@ -96,8 +135,8 @@ def unsupported(vllm_config) -> list[str]:
         (pc.enable_expert_parallel, "expert parallelism"),
         (pc.enable_eplb, "EPLB"),
         (
-            pc.decode_context_parallel_size not in (1, pc.tensor_parallel_size),
-            "decode context parallelism other than 1 or TP",
+            pc.decode_context_parallel_size not in DCP_SIZES,
+            f"decode context parallelism other than 1 or {DCP} (over the TP group)",
         ),
         (pc.prefill_context_parallel_size != 1, "prefill context parallelism"),
         # the kernels read one batch's attention metadata per step
@@ -118,8 +157,8 @@ def unsupported(vllm_config) -> list[str]:
         # the kernels serve spec-verify steps of whole uniform requests only
         (spec is None, "decoding without speculative decoding"),
         (
-            spec is not None and spec.num_speculative_tokens + 1 > MAX_TOKENS,
-            f"more than {MAX_TOKENS - 1} speculative tokens",
+            spec is not None and spec.num_speculative_tokens + 1 > MAX_ROWS,
+            f"more than {MAX_ROWS - 1} speculative tokens",
         ),
         (
             spec is not None and spec.enable_adaptive_verification,
