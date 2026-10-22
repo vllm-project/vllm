@@ -28,7 +28,8 @@ class RopeState:
 
     With `linear_prefill_positions`, every request is text-only, so the
     kernel computes the positions from the token index and no per-request
-    prefill positions are staged.
+    prefill positions are staged. With `text_only_requests`, the same holds
+    for each request flagged as having no multimodal features.
     """
 
     def __init__(
@@ -39,6 +40,7 @@ class RopeState:
         max_model_len: int,
         device: torch.device,
         linear_prefill_positions: bool = False,
+        text_only_requests: bool = False,
     ):
         self.num_dims = num_dims
         self.max_num_reqs = max_num_reqs
@@ -49,6 +51,8 @@ class RopeState:
 
         self.prefill_positions: StagedWriteTensor | None = None
         self.prefill_delta: UvaBackedTensor | None = None
+        # Per-request flag, 1 for requests without multimodal features.
+        self.text_only: UvaBackedTensor | None = None
         if not linear_prefill_positions:
             # NOTE(woosuk): This tensor can be extremely large (e.g., several GBs)
             # wasting a lot of CPU memory.
@@ -59,6 +63,8 @@ class RopeState:
                 uva_instead_of_gpu=True,
             )
             self.prefill_delta = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
+            if text_only_requests:
+                self.text_only = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
         self.positions = torch.zeros(
             (num_dims, max_num_tokens + 1), dtype=torch.int64, device=device
         )
@@ -78,6 +84,11 @@ class RopeState:
             return
         assert self.prefill_positions is not None
         assert self.prefill_delta is not None
+        if self.text_only is not None:
+            self.text_only.np[req_idx] = not mm_features
+            if not mm_features:
+                self.prefill_delta.np[req_idx] = 0
+                return
         mrope_model = cast(SupportsMRoPE, model)
         prefill_positions, delta = mrope_model.get_mrope_input_positions(
             prefill_token_ids, mm_features
@@ -95,6 +106,8 @@ class RopeState:
         assert self.prefill_delta is not None
         self.prefill_positions.apply_write()
         self.prefill_delta.copy_to_uva()
+        if self.text_only is not None:
+            self.text_only.copy_to_uva()
 
     def get_positions(self, num_tokens: int) -> torch.Tensor:
         return self.positions[:, :num_tokens]
@@ -126,10 +139,11 @@ class RopeState:
         num_computed_tokens: torch.Tensor,
     ) -> None:
         num_reqs = idx_mapping.shape[0]
-        # The kernel does not read the staged buffers in linear mode; the
-        # output tensor stands in for them.
+        # The kernel does not read the buffers a mode lacks; the output
+        # tensor stands in for them.
         prefill_positions = self.positions
         prefill_delta = self.positions
+        text_only = self.text_only.gpu if self.text_only is not None else self.positions
         if not self.linear_prefill_positions:
             assert self.prefill_positions is not None
             assert self.prefill_delta is not None
@@ -142,6 +156,7 @@ class RopeState:
             self.num_dims * self.max_model_len,
             self.max_model_len,
             prefill_delta,
+            text_only,
             idx_mapping,
             query_start_loc,
             prefill_lens,
@@ -149,6 +164,7 @@ class RopeState:
             BLOCK_SIZE=1024,
             NUM_DIMS=self.num_dims,
             LINEAR_PREFILL=self.linear_prefill_positions,
+            HAS_TEXT_ONLY=self.text_only is not None,
         )
 
 
@@ -165,19 +181,19 @@ def get_rope_state(
         return None
 
     assert isinstance(model, SupportsMRoPE)
-    # Without multimodal ingress every request is text-only, so an opted-in
-    # model's positions are sequential in every channel. This excludes
-    # --enable-mm-embeds, which keeps multimodal ingress enabled.
-    linear_prefill_positions = (
-        model.supports_linear_text_mrope and not model_config.supports_multimodal_inputs
-    )
+    # An opted-in model's text-only requests have sequential positions in
+    # every channel. Without multimodal ingress every request is text-only;
+    # --enable-mm-embeds keeps multimodal ingress enabled.
+    linear_text = model.supports_linear_text_mrope
+    supports_mm = model_config.supports_multimodal_inputs
     return RopeState(
         num_dims=model_config.mrope_num_dims,
         max_num_reqs=max_num_reqs,
         max_num_tokens=max_num_tokens,
         max_model_len=max_model_len,
         device=device,
-        linear_prefill_positions=linear_prefill_positions,
+        linear_prefill_positions=linear_text and not supports_mm,
+        text_only_requests=linear_text and supports_mm,
     )
 
 
@@ -189,6 +205,7 @@ def _prepare_rope_positions_kernel(
     prefill_positions_stride0,
     prefill_positions_stride1,
     prefill_delta_ptr,
+    text_only_ptr,
     idx_mapping_ptr,
     query_start_loc_ptr,
     prefill_lens_ptr,
@@ -196,6 +213,7 @@ def _prepare_rope_positions_kernel(
     BLOCK_SIZE: tl.constexpr,
     NUM_DIMS: tl.constexpr,
     LINEAR_PREFILL: tl.constexpr,
+    HAS_TEXT_ONLY: tl.constexpr,
 ):
     batch_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
@@ -210,6 +228,10 @@ def _prepare_rope_positions_kernel(
 
     if not LINEAR_PREFILL:
         delta = tl.load(prefill_delta_ptr + req_state_idx)
+        if HAS_TEXT_ONLY:
+            # Text-only requests staged no positions; their delta is 0.
+            text_only = tl.load(text_only_ptr + req_state_idx)
+            is_prefill = is_prefill & (text_only == 0)
 
     for i in range(0, query_len, BLOCK_SIZE):
         block = i + tl.arange(0, BLOCK_SIZE)

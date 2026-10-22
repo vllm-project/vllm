@@ -75,6 +75,24 @@ def test_linear_mode_skips_host_positions_and_rejects_multimodal_inputs():
         state.init_prefill_positions(0, model, [1, 2, 3], mm_features=[IMAGE])
 
 
+def test_text_only_requests_skip_host_positions():
+    model = _MRoPEModel()
+    state = _rope_state(text_only_requests=True)
+    text_only, delta = state.text_only, state.prefill_delta
+    assert text_only is not None and delta is not None
+
+    # A reused slot: a multimodal request first, then a text-only one.
+    state.init_prefill_positions(0, model, [1, 2, 3], mm_features=[IMAGE])
+    assert model.num_calls == 1
+    assert text_only.np[0] == 0
+    assert delta.np[0] == _MRoPEModel.MM_DELTA
+
+    state.init_prefill_positions(0, model, [1, 2, 3, 4], mm_features=[])
+    assert model.num_calls == 1
+    assert text_only.np[0] == 1
+    assert delta.np[0] == 0
+
+
 def _batch_positions(
     state: RopeState,
     model: _MRoPEModel,
@@ -118,13 +136,16 @@ def _batch_positions(
     return outs
 
 
-def test_linear_positions_match_staged_positions():
+@pytest.mark.parametrize("linear", [True, False])
+def test_computed_positions_match_staged_positions(linear):
+    """Without multimodal ingress (linear mode) every request is text-only;
+    with it, text-only and multimodal requests share the batch."""
     prompt_lens = [100, 1500, 9, 777]
-    has_mm = [False] * len(prompt_lens)
+    has_mm = [not linear and i % 2 == 1 for i in range(len(prompt_lens))]
     staged = _batch_positions(_rope_state(), _MRoPEModel(), prompt_lens, has_mm)
     model = _MRoPEModel()
-    state = _rope_state(linear_prefill_positions=True)
+    state = _rope_state(linear_prefill_positions=linear, text_only_requests=not linear)
     computed = _batch_positions(state, model, prompt_lens, has_mm)
-    assert model.num_calls == 0
+    assert model.num_calls == sum(has_mm)
     for ref, out in zip(staged, computed):
         torch.testing.assert_close(out, ref, rtol=0, atol=0)
