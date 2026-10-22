@@ -121,10 +121,9 @@ RUN TORCH_VER=$(python3 -c "import torch; print(torch.__version__)") \
 RUN rm -f "${SITE_PACKAGES}/torch/.kpack/torch_gfx90a:xnack+.kpack" \
          "${SITE_PACKAGES}/torch/.kpack/torch_gfx90a:xnack-.kpack"
 
-# ROCm 10.1 ships amdsmi as an in-place package with no setup.py/pyproject.toml.
-# Its loader find libamd_smi.so a predetermined location, so must be used
-# in-place instead of copying it into $SITE_PACKAGES.
-ENV PYTHONPATH=$SITE_PACKAGES/_rocm_sdk_core/share/amd_smi
+# Use a Python .pth file in our site-packages to ensure the amdsmi package that
+# ships with ROCm 10.1 can always be found.
+RUN echo "${SITE_PACKAGES}/_rocm_sdk_core/share/amd_smi" > "${SITE_PACKAGES}/amd_smi.pth"
 
 # TheRock runtime fixes
 RUN if [ -f "${SITE_PACKAGES}/rocm_sdk/__init__.py" ]; then \
