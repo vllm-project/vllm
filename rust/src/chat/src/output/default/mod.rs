@@ -5,7 +5,7 @@
 
 mod unified;
 
-use std::sync::Once;
+use std::sync::{Arc, Once};
 
 use futures::StreamExt as _;
 use tracing::info;
@@ -13,14 +13,19 @@ use vllm_parser::output_grammar::{BuiltOutputGrammar, OutputGrammarContext};
 use vllm_parser::unified::{CombinedParser, UnifiedParser};
 use vllm_text::tokenizer::DynTokenizer;
 use xgrammar_structural_tag::ToolChoice;
+use xgrammar_structural_tag::format::Format;
 
 use self::unified::unified_event_stream;
+use super::structural_tag::answer_format;
 use super::structured::structured_chat_event_stream;
 use crate::error::Result;
 use crate::output::{ChatOutputProcessor, DynChatEventStream, DynDecodedTextEventStream};
 use crate::parser::reasoning::{ReasoningParser, ReasoningParserFactory};
 use crate::parser::tool::{ToolParser, ToolParserFactory};
-use crate::parser::unified::UnifiedParserFactory;
+use crate::parser::unified::{
+    BeamUnifiedParser, HfTemplateError, HfUnifiedParser, ResponseTemplate, UnifiedParserFactory,
+    names,
+};
 use crate::parser::{ParserSelection, ToolStrictLevel};
 use crate::request::{ChatRequest, ChatTool};
 use crate::{Error, Result as ChatResult};
@@ -33,7 +38,7 @@ use crate::{Error, Result as ChatResult};
 /// assembling final structured chat events.
 pub struct DefaultChatOutputProcessor {
     parser: Box<dyn UnifiedParser>,
-    parallel_tool_calls: bool,
+    max_tool_calls: Option<usize>,
     /// Request facts the initialized parser needs to build its output grammar.
     /// Absent for the plain-text-only processor, which never builds one.
     grammar_inputs: Option<GrammarInputs>,
@@ -46,6 +51,11 @@ struct GrammarInputs {
     tools: Vec<ChatTool>,
     tool_choice: ToolChoice,
     tool_strict_level: ToolStrictLevel,
+    parallel_tool_calls: bool,
+    /// The request's structured-output constraint, normalized for composition
+    /// into the output grammar. The original stays on the request until an
+    /// output grammar replaces it.
+    answer: Option<Format>,
 }
 
 impl DefaultChatOutputProcessor {
@@ -62,13 +72,50 @@ impl DefaultChatOutputProcessor {
         tokenizer: DynTokenizer,
         tool_call_parser: &ParserSelection,
         reasoning_parser: &ParserSelection,
-        tool_strict_level: ToolStrictLevel,
+        tool_strict_level: Option<ToolStrictLevel>,
     ) -> ChatResult<Self> {
+        Self::with_response_template(
+            request,
+            model_id,
+            tokenizer,
+            &Err(HfTemplateError::Missing),
+            tool_call_parser,
+            reasoning_parser,
+            tool_strict_level,
+        )
+    }
+
+    /// Like [`Self::new`], additionally providing the model's `response_template`
+    /// for the `hf` parser, or why it is unavailable.
+    pub fn with_response_template(
+        request: &mut ChatRequest,
+        model_id: &str,
+        tokenizer: DynTokenizer,
+        response_template: &std::result::Result<Arc<ResponseTemplate>, HfTemplateError>,
+        tool_call_parser: &ParserSelection,
+        reasoning_parser: &ParserSelection,
+        tool_strict_level: Option<ToolStrictLevel>,
+    ) -> ChatResult<Self> {
+        let tool_name = tool_call_parser.resolve_tool_name(model_id);
+        let reasoning_name = reasoning_parser.resolve_reasoning_name(model_id);
+        // `hf` is opt-in: `Auto` never selects it, but a usable template is worth a hint.
+        let auto = [tool_call_parser, reasoning_parser]
+            .iter()
+            .any(|selection| matches!(selection, ParserSelection::Auto));
+        if auto && tool_name.is_none() && reasoning_name.is_none() && response_template.is_ok() {
+            RESPONSE_TEMPLATE_HINT_ONCE.call_once(|| {
+                info!(
+                    "the model ships a response_template; pass `--tool-call-parser hf \
+                     --reasoning-parser hf` to parse with it"
+                );
+            });
+        }
         let parser = if let Some(parser) = Self::resolve_optional_unified_parser(
             request.tools(),
             tokenizer.clone(),
-            tool_call_parser.resolve_tool_name(model_id),
-            reasoning_parser.resolve_reasoning_name(model_id),
+            response_template,
+            tool_name,
+            reasoning_name,
         )? {
             parser
         } else {
@@ -90,14 +137,18 @@ impl DefaultChatOutputProcessor {
         if parser.preserve_special_tokens() {
             request.decode_options.skip_special_tokens = false;
         }
+        let tool_strict_level =
+            tool_strict_level.unwrap_or_else(|| parser.default_tool_strict_level());
 
         Ok(Self {
             parser,
-            parallel_tool_calls: request.parallel_tool_calls(),
+            max_tool_calls: request.max_tool_calls(),
             grammar_inputs: Some(GrammarInputs {
                 tools: request.tools().to_vec(),
                 tool_choice: request.tool_choice().into(),
                 tool_strict_level,
+                parallel_tool_calls: request.parallel_tool_calls(),
+                answer: request.sampling_params.structured_outputs.as_ref().and_then(answer_format),
             }),
         })
     }
@@ -110,7 +161,7 @@ impl DefaultChatOutputProcessor {
     pub fn plain_text_only() -> Self {
         Self {
             parser: Box::new(CombinedParser::plain_text_only()),
-            parallel_tool_calls: true,
+            max_tool_calls: None,
             grammar_inputs: None,
         }
     }
@@ -141,6 +192,7 @@ impl DefaultChatOutputProcessor {
     fn resolve_optional_unified_parser(
         tools: &[ChatTool],
         tokenizer: DynTokenizer,
+        response_template: &std::result::Result<Arc<ResponseTemplate>, HfTemplateError>,
         tool_name: Option<&str>,
         reasoning_name: Option<&str>,
     ) -> ChatResult<Option<Box<dyn UnifiedParser>>> {
@@ -157,7 +209,20 @@ impl DefaultChatOutputProcessor {
             });
         }
 
-        let parser = factory.create(parser_name, tools, tokenizer)?;
+        // Parsers driven by the model's template are built from it, never by
+        // their registry constructors.
+        let template = || {
+            response_template.clone().map_err(|error| Error::ParserInitialization {
+                kind: "unified",
+                name: parser_name.to_string(),
+                error: Box::new(error),
+            })
+        };
+        let parser: Box<dyn UnifiedParser> = match parser_name {
+            names::HF => Box::new(HfUnifiedParser::new(template()?, tools, tokenizer)),
+            names::BEAM => Box::new(BeamUnifiedParser::new(template()?, tools, tokenizer)),
+            _ => factory.create(parser_name, tools, tokenizer)?,
+        };
 
         UNIFIED_PARSER_LOG_ONCE.call_once(|| info!(parser_name, "using unified parser"));
         Ok(Some(parser))
@@ -186,6 +251,7 @@ impl DefaultChatOutputProcessor {
 static TOOL_PARSER_LOG_ONCE: Once = Once::new();
 static REASONING_PARSER_LOG_ONCE: Once = Once::new();
 static UNIFIED_PARSER_LOG_ONCE: Once = Once::new();
+static RESPONSE_TEMPLATE_HINT_ONCE: Once = Once::new();
 
 impl ChatOutputProcessor for DefaultChatOutputProcessor {
     fn initialize(&mut self, prompt_token_ids: &[u32]) -> Result<()> {
@@ -205,7 +271,8 @@ impl ChatOutputProcessor for DefaultChatOutputProcessor {
                 tools: &inputs.tools,
                 tool_choice: &inputs.tool_choice,
                 tool_strict_level: inputs.tool_strict_level,
-                parallel_tool_calls: self.parallel_tool_calls,
+                parallel_tool_calls: inputs.parallel_tool_calls,
+                answer: inputs.answer.as_ref(),
             })
             .map_err(|error| Error::OutputGrammar {
                 error: Box::new(error),
@@ -220,7 +287,7 @@ impl ChatOutputProcessor for DefaultChatOutputProcessor {
     /// 2. [`structured_chat_event_stream`] — final block assembly
     fn process(self: Box<Self>, decoded: DynDecodedTextEventStream) -> Result<DynChatEventStream> {
         let parsed = unified_event_stream(decoded, self.parser);
-        let structured = structured_chat_event_stream(parsed, self.parallel_tool_calls);
+        let structured = structured_chat_event_stream(parsed, self.max_tool_calls);
 
         Ok(structured.boxed())
     }
@@ -230,10 +297,19 @@ impl ChatOutputProcessor for DefaultChatOutputProcessor {
 mod tests {
     use std::sync::Arc;
 
+    use futures::{StreamExt as _, stream};
+    use thiserror_ext::AsReport as _;
+    use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
+    use vllm_parser::output_grammar::BuiltOutputGrammar;
+    use vllm_text::output::{DecodedTextEvent, Finished};
+    use vllm_text::{DecodedText, SampledDelta};
     use vllm_tokenizer::test_utils::TestTokenizer;
+    use xgrammar_structural_tag::format::Format;
 
     use super::DefaultChatOutputProcessor;
+    use crate::event::{AssistantMessageExt as _, ChatEvent};
     use crate::output::ChatOutputProcessor;
+    use crate::parser::unified::{HfTemplateError, ResponseTemplate};
     use crate::parser::{ParserSelection, ToolStrictLevel};
     use crate::request::{ChatRequest, ChatTool, ChatToolChoice, ResolvedToolContext};
 
@@ -245,35 +321,45 @@ mod tests {
         )
     }
 
+    /// The output grammar for one `search` tool with `strict` under `parser`.
+    fn search_grammar(
+        parser: &str,
+        level: Option<ToolStrictLevel>,
+        strict: Option<bool>,
+        choice: ChatToolChoice,
+    ) -> Option<BuiltOutputGrammar> {
+        let tools = vec![ChatTool {
+            name: "search".to_string(),
+            description: None,
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": { "query": { "type": "string" } },
+                "required": ["query"]
+            }),
+            strict,
+            defer_loading: None,
+        }];
+        let mut request = ChatRequest {
+            tool_context: ResolvedToolContext::new(&[], tools, Some(choice), true).unwrap(),
+            ..ChatRequest::for_test()
+        };
+        let mut processor = DefaultChatOutputProcessor::new(
+            &mut request,
+            "other-model",
+            tokenizer(),
+            &ParserSelection::Explicit(parser.to_string()),
+            &ParserSelection::None,
+            level,
+        )
+        .unwrap();
+        processor.initialize(&[]).unwrap();
+        processor.build_output_grammar().unwrap()
+    }
+
     #[test]
     fn output_grammar_preserves_tool_strict_level() {
-        let build = |level, strict, choice| {
-            let tools = vec![ChatTool {
-                name: "search".to_string(),
-                description: None,
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": { "query": { "type": "string" } },
-                    "required": ["query"]
-                }),
-                strict,
-            }];
-            let mut request = ChatRequest {
-                tool_context: ResolvedToolContext::new(&[], tools, Some(choice), true).unwrap(),
-                ..ChatRequest::for_test()
-            };
-            let mut processor = DefaultChatOutputProcessor::new(
-                &mut request,
-                "other-model",
-                tokenizer(),
-                &ParserSelection::Explicit("qwen3_coder".to_string()),
-                &ParserSelection::None,
-                level,
-            )
-            .unwrap();
-            processor.initialize(&[]).unwrap();
-            processor.build_output_grammar().unwrap()
-        };
+        let build =
+            |level, strict, choice| search_grammar("qwen3_coder", Some(level), strict, choice);
 
         assert!(build(ToolStrictLevel::Auto, None, ChatToolChoice::Auto).is_none());
         let envelope = build(ToolStrictLevel::Function, None, ChatToolChoice::Auto).unwrap();
@@ -284,6 +370,125 @@ mod tests {
         assert!(build(ToolStrictLevel::Parameter, None, ChatToolChoice::None).is_none());
     }
 
+    #[tokio::test]
+    async fn tool_choice_none_drops_tool_calls_parsed_by_unified_parsers() {
+        let tools = vec![ChatTool {
+            name: "search".to_string(),
+            description: None,
+            parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+            defer_loading: None,
+        }];
+        let run = async |tool_choice| {
+            let mut request = ChatRequest {
+                tool_context: ResolvedToolContext::new(&[], tools.clone(), Some(tool_choice), true)
+                    .unwrap(),
+                ..ChatRequest::for_test()
+            };
+            let gemma4 = ParserSelection::Explicit("gemma4".to_string());
+            let mut processor = DefaultChatOutputProcessor::new(
+                &mut request,
+                "other-model",
+                tokenizer(),
+                &gemma4,
+                &gemma4,
+                None,
+            )
+            .unwrap();
+            processor.initialize(&[]).unwrap();
+            let decoded = stream::iter([Ok(DecodedTextEvent::TextDelta {
+                decoded: DecodedText::unattributed(
+                    "Sure.<|tool_call>call:search{query:<|\"|>vllm<|\"|>}<tool_call|>",
+                ),
+                sampled: SampledDelta::default(),
+                finished: Some(Box::new(Finished {
+                    usage: vllm_llm::TokenUsage::default(),
+                    finish_reason: crate::FinishReason::Stop(None),
+                    kv_transfer_params: None,
+                    ec_transfer_params: None,
+                    sampling_mask: None,
+                    timestamps: Default::default(),
+                })),
+            })]);
+            let events =
+                Box::new(processor).process(decoded.boxed()).unwrap().collect::<Vec<_>>().await;
+            let Some(Ok(ChatEvent::Done { message, .. })) = events.last() else {
+                panic!("expected done");
+            };
+            let names = message.tool_calls().map(|call| call.name.clone()).collect::<Vec<_>>();
+            (message.text(), names)
+        };
+
+        assert_eq!(
+            run(ChatToolChoice::Auto).await,
+            ("Sure.".to_string(), vec!["search".to_string()])
+        );
+        // Python's parser engine parses the call and drops it: neither a tool
+        // call nor its markup reaches the response.
+        assert_eq!(
+            run(ChatToolChoice::None).await,
+            ("Sure.".to_string(), vec![])
+        );
+    }
+
+    #[test]
+    fn unset_tool_strict_level_falls_back_to_the_parser_default() {
+        let build = |parser, level| search_grammar(parser, level, None, ChatToolChoice::Auto);
+
+        // GLM-4.7 constrains auto tool calls unless the level is set explicitly.
+        let function = build("glm47", Some(ToolStrictLevel::Function));
+        assert_eq!(build("glm47", None), function);
+        assert!(function.is_some());
+        assert!(build("glm47", Some(ToolStrictLevel::Auto)).is_none());
+        // Other parsers default to `auto`.
+        assert!(build("qwen3_coder", None).is_none());
+    }
+
+    #[test]
+    fn answer_constraint_keeps_optional_tool_calls() {
+        let tools = vec![ChatTool {
+            name: "search".to_string(),
+            description: None,
+            parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+            defer_loading: None,
+        }];
+        let schema = serde_json::json!({"type": "object"});
+        let build = |structured_outputs| {
+            let mut request = ChatRequest {
+                tool_context: ResolvedToolContext::new(
+                    &[],
+                    tools.clone(),
+                    Some(ChatToolChoice::Auto),
+                    true,
+                )
+                .unwrap(),
+                ..ChatRequest::for_test()
+            };
+            request.sampling_params.structured_outputs = structured_outputs;
+            let mut processor = DefaultChatOutputProcessor::new(
+                &mut request,
+                "other-model",
+                tokenizer(),
+                &ParserSelection::Explicit("qwen3_coder".to_string()),
+                &ParserSelection::None,
+                None,
+            )
+            .unwrap();
+            processor.initialize(&[]).unwrap();
+            processor.build_output_grammar().unwrap()
+        };
+
+        // Non-strict `auto` alone needs no grammar; with an answer constraint
+        // the grammar holds the answer or a call.
+        assert!(build(None).is_none());
+        let built = build(Some(StructuredOutputsParams::json(schema.clone()))).unwrap();
+        let Format::Or(branches) = built.format else {
+            panic!("expected the calls or the answer, got {:?}", built.format);
+        };
+        assert_eq!(branches.elements.last(), Some(&Format::json_schema(schema)));
+    }
+
     #[test]
     fn tool_grammar_honors_parallel_call_policy() {
         for parallel in [false, true] {
@@ -292,6 +497,7 @@ mod tests {
                 description: None,
                 parameters: serde_json::json!({"type": "object"}),
                 strict: Some(true),
+                defer_loading: None,
             }];
             let mut request = ChatRequest {
                 tool_context: ResolvedToolContext::new(
@@ -309,7 +515,7 @@ mod tests {
                 tokenizer(),
                 &ParserSelection::Explicit("qwen3_coder".to_string()),
                 &ParserSelection::None,
-                ToolStrictLevel::Auto,
+                None,
             )
             .unwrap();
             processor.initialize(&[]).unwrap();
@@ -333,7 +539,7 @@ mod tests {
             tokenizer(),
             &selection,
             &selection,
-            ToolStrictLevel::Auto,
+            None,
         )
         .unwrap();
     }
@@ -348,7 +554,7 @@ mod tests {
             tokenizer(),
             &ParserSelection::Auto,
             &ParserSelection::Auto,
-            ToolStrictLevel::Auto,
+            None,
         )
         .unwrap();
     }
@@ -366,7 +572,7 @@ mod tests {
                 tokenizer(),
                 tool,
                 reasoning,
-                ToolStrictLevel::Auto,
+                None,
             )
             .unwrap();
         }
@@ -381,13 +587,113 @@ mod tests {
             tokenizer(),
             &ParserSelection::Auto,
             &ParserSelection::Explicit("gemma4".to_string()),
-            ToolStrictLevel::Auto,
+            None,
         ) {
             Ok(_) => panic!("expected mixed Gemma4 parser selection to fail"),
             Err(error) => error,
         };
 
-        expect_test::expect!["unified parsing requires the tool and reasoning selections to resolve to the same parser; resolved tool=qwen3_xml, reasoning=gemma4"]
+        expect_test::expect!["unified parsing requires the tool and reasoning selections to resolve to the same parser; resolved tool=qwen3_json, reasoning=gemma4"]
+            .assert_eq(&format!("{error}"));
+    }
+
+    type TemplateResult = Result<Arc<ResponseTemplate>, HfTemplateError>;
+
+    fn loaded_template() -> TemplateResult {
+        Ok(Arc::new(
+            ResponseTemplate::from_json(&serde_json::json!({
+                "start_anchor": "<|turn>model\n",
+                "fields": {
+                    "thinking": {"open": "<|channel>thought\n", "close": "<channel|>"},
+                    "content": {"close": "<turn|>"},
+                },
+            }))
+            .unwrap(),
+        ))
+    }
+
+    fn invalid_template() -> TemplateResult {
+        let error = ResponseTemplate::from_json(&serde_json::json!({"fields": {"content": {}}}))
+            .unwrap_err();
+        Err(error)
+    }
+
+    /// Build a processor for `model_id`, returning whether it keeps special
+    /// tokens (only parsers that need them, such as `hf`, turn this on).
+    fn keeps_special_tokens(
+        model_id: &str,
+        template: &TemplateResult,
+        tool: &ParserSelection,
+        reasoning: &ParserSelection,
+    ) -> crate::Result<bool> {
+        let mut request = ChatRequest::for_test();
+        DefaultChatOutputProcessor::with_response_template(
+            &mut request,
+            model_id,
+            tokenizer(),
+            template,
+            tool,
+            reasoning,
+            None,
+        )?;
+        Ok(!request.decode_options.skip_special_tokens)
+    }
+
+    #[test]
+    fn explicit_hf_uses_the_model_response_template() {
+        let hf = ParserSelection::Explicit("hf".to_string());
+        assert!(keeps_special_tokens("other-model", &loaded_template(), &hf, &hf).unwrap());
+    }
+
+    #[test]
+    fn explicit_hf_without_usable_template_fails() {
+        let hf = ParserSelection::Explicit("hf".to_string());
+        let error = |template| {
+            keeps_special_tokens("other-model", &template, &hf, &hf)
+                .unwrap_err()
+                .to_report_string()
+        };
+        expect_test::expect!["failed to initialize unified parser `hf`: the model's tokenizer_config.json provides no response_template"]
+            .assert_eq(&error(Err(HfTemplateError::Missing)));
+        expect_test::expect!["failed to initialize unified parser `hf`: invalid response_template: response_template must define 'start_anchor' or 'start_anchor_pattern'."]
+            .assert_eq(&error(invalid_template()));
+    }
+
+    #[test]
+    fn explicit_beam_uses_the_model_response_template() {
+        let beam = ParserSelection::Explicit("beam".to_string());
+        crate::parser::validate_parser_overrides(&beam, &beam).unwrap();
+        assert!(keeps_special_tokens("other-model", &loaded_template(), &beam, &beam).unwrap());
+
+        let error =
+            keeps_special_tokens("other-model", &Err(HfTemplateError::Missing), &beam, &beam)
+                .unwrap_err()
+                .to_report_string();
+        expect_test::expect!["failed to initialize unified parser `beam`: the model's tokenizer_config.json provides no response_template"]
+            .assert_eq(&error);
+    }
+
+    #[test]
+    fn auto_never_selects_hf() {
+        let auto = ParserSelection::Auto;
+        // Without a matching parser, parsing stays disabled even with a usable template.
+        assert!(!keeps_special_tokens("other-model", &loaded_template(), &auto, &auto).unwrap());
+        // An unusable template is not consulted unless `hf` is selected.
+        assert!(!keeps_special_tokens("other-model", &invalid_template(), &auto, &auto).unwrap());
+        keeps_special_tokens("google/gemma-4-27b-it", &invalid_template(), &auto, &auto).unwrap();
+    }
+
+    #[test]
+    fn hf_requires_matching_parser_selections() {
+        let error = keeps_special_tokens(
+            "other-model",
+            &loaded_template(),
+            &ParserSelection::Explicit("hf".to_string()),
+            &ParserSelection::None,
+        )
+        .unwrap_err();
+
+        expect_test::expect!["unified parsing requires the tool and reasoning selections to resolve to the same parser; resolved tool=hf, reasoning=none"]
             .assert_eq(&format!("{error}"));
     }
 }

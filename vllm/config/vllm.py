@@ -53,6 +53,7 @@ from .scheduler import SchedulerConfig
 from .speculative import EagleModelTypes, NgramGPUTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
 from .utils import SupportsHash, config, get_field, replace
+from .watchdog_config import WatchdogConfig
 from .watermarking import WatermarkConfig
 from .weight_transfer import WeightTransferConfig
 
@@ -60,6 +61,7 @@ if TYPE_CHECKING:
     from transformers import PreTrainedConfig
 
     from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+    from vllm.sampling_params import BeamSearchParams, SamplingParams
     from vllm.v1.kv_cache_interface import KVCacheConfig
 else:
     PreTrainedConfig = Any
@@ -70,14 +72,10 @@ else:
 
 logger = init_logger(__name__)
 
-# TODO(rocm): These models are either unsupported by MRV2 or slower with
-# MRV2 on AMD GPUs.
-ROCM_DEFAULT_MRV1_ARCHITECTURES = frozenset(
-    {"DeepseekV32ForCausalLM", "DeepseekV4ForCausalLM", "GlmMoeDsaForCausalLM"}
-)
-
 DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
     {
+        "AliceAIForCausalLM",
+        "BeamForCausalLM",
         "DeepseekV32MTPModel",
         "DeepseekV32ForCausalLM",
         "DeepseekV4ForCausalLM",
@@ -102,6 +100,8 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
         "Qwen4ExpForCausalLM",
         "Qwen4ExpForConditionalGeneration",
         "Qwen4ExpMTP",
+        "Step5ForCausalLM",
+        "Step5ForConditionalGeneration",
     }
 )
 
@@ -144,12 +144,10 @@ class OptimizationLevel(IntEnum):
 PerformanceMode = Literal["balanced", "interactivity", "throughput"]
 
 IS_QUANTIZED = False
-IS_DENSE = False
 # The optimizations that depend on these properties currently set to False
 # in all cases.
 # if model_config is not None:
 #     IS_QUANTIZED = lambda c: c.model_config.is_quantized()
-#     IS_DENSE = lambda c: not c.model_config.is_model_moe()
 # See https://github.com/vllm-project/vllm/issues/25689.
 
 
@@ -258,8 +256,6 @@ OPTIMIZATION_LEVEL_00 = {
             "fuse_act_quant": False,
             "fuse_allreduce_rms": False,
             "fuse_attn_quant": False,
-            "enable_sp": False,
-            "fuse_gemm_comms": False,
             "fuse_act_padding": False,
             "fuse_mla_dual_rms_norm": False,
             "fuse_rope_kvcache": False,
@@ -281,8 +277,6 @@ OPTIMIZATION_LEVEL_01 = {
             "fuse_act_quant": enable_act_fusion,
             "fuse_allreduce_rms": False,
             "fuse_attn_quant": False,
-            "enable_sp": False,
-            "fuse_gemm_comms": False,
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
             "fuse_rope_kvcache": False,
@@ -304,8 +298,6 @@ OPTIMIZATION_LEVEL_02 = {
             "fuse_act_quant": enable_act_fusion,
             "fuse_allreduce_rms": enable_allreduce_rms_fusion,
             "fuse_attn_quant": IS_QUANTIZED,
-            "enable_sp": IS_DENSE,
-            "fuse_gemm_comms": IS_DENSE,
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
@@ -327,8 +319,6 @@ OPTIMIZATION_LEVEL_03 = {
             "fuse_act_quant": enable_act_fusion,
             "fuse_allreduce_rms": enable_allreduce_rms_fusion,
             "fuse_attn_quant": IS_QUANTIZED,
-            "enable_sp": IS_DENSE,
-            "fuse_gemm_comms": IS_DENSE,
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
@@ -454,6 +444,9 @@ class VllmConfig:
 
     weight_transfer_config: WeightTransferConfig | None = None
     """The configurations for weight transfer during RL training."""
+
+    watchdog_config: WatchdogConfig = Field(default_factory=WatchdogConfig)
+    """Configuration for the stack-dump watchdog."""
 
     shutdown_timeout: int = Field(default=0, ge=0)
     """Shutdown grace period for in-flight requests. Shutdown will be delayed for
@@ -640,13 +633,15 @@ class VllmConfig:
         speculative_config = self.speculative_config
         if speculative_config is None:
             return 0
-        if speculative_config.use_dflash():
-            # DFlash requires an extra lookahead slot since it uses in-fill-style
-            # decoding instead of standard next-token sampling, so it has a query
-            # for the last sampled token plus queries for each draft token.
+        dspark_fill_in = speculative_config.use_dspark() and not getattr(
+            speculative_config.draft_model_config.hf_config, "sample_from_anchor", True
+        )
+        if speculative_config.use_dflash() or dspark_fill_in:
+            # Fill-in drafting uses a bonus query plus one query per draft token.
+            # DSpark's anchor-sampling layout does not need the extra slot.
             return self.num_speculative_tokens + 1
         if speculative_config.use_eagle() or speculative_config.uses_draft_model():
-            # DSpark (covered by use_eagle) drafts a block of num_speculative_tokens
+            # Anchor-sampling DSpark drafts a block of num_speculative_tokens
             # query tokens in which the anchor itself is the first prediction
             # position (no separate bonus query), so it needs exactly
             # num_speculative_tokens lookahead slots.
@@ -698,6 +693,21 @@ class VllmConfig:
         return 1 + self.num_speculative_tokens
 
     @property
+    def use_cumem_cudagraph_pool(self) -> bool:
+        """Whether CUDA graphs go to the cuMem pool that sleep offloads."""
+        from vllm.platforms import current_platform
+
+        model_config = self.model_config
+        return (
+            model_config is not None
+            and model_config.sleep_mode_offload_cudagraph
+            and model_config.enable_sleep_mode
+            and model_config.sleep_mode_backend == "cumem"
+            and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            and current_platform.is_cuda_alike()
+        )
+
+    @property
     def use_v2_model_runner(self) -> bool:
         if self.attention_config.hisparse_config is not None:
             if envs.VLLM_USE_V2_MODEL_RUNNER is False:
@@ -718,30 +728,6 @@ class VllmConfig:
         use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
         if use_v2_model_runner is not None:
             return use_v2_model_runner
-
-        from vllm.platforms import current_platform
-
-        model_config = self.model_config
-        if model_config is not None and current_platform.is_rocm():
-            architectures = getattr(model_config, "architectures", ())
-            if any(arch in ROCM_DEFAULT_MRV1_ARCHITECTURES for arch in architectures):
-                # This default is a speed preference, not a claim that V1 can
-                # serve the config, so it yields where V1 cannot. It yields by
-                # falling through to the checks below, not by selecting V2.
-                v1_unsupported = self._get_v1_model_runner_unsupported_features()
-                if not v1_unsupported:
-                    logger.warning_once(
-                        "Defaulting to V1 model runner on ROCm for model "
-                        "architectures: %s",
-                        ", ".join(architectures),
-                    )
-                    return False
-                logger.warning_once(
-                    "Skipping the ROCm V1 model runner default for %s: V1 does "
-                    "not support %s.",
-                    ", ".join(architectures),
-                    ", ".join(v1_unsupported),
-                )
 
         if not HAS_TRITON:
             logger.warning_once(
@@ -770,9 +756,11 @@ class VllmConfig:
         if draft_config is None:
             return False
         return bool(
-            {"DFlash2DraftModel", "LiLiCorrDraftModel"}.intersection(
-                draft_config.architectures or []
-            )
+            {
+                "DFlash2DraftModel",
+                "DFlash2BeamDraftModel",
+                "LiLiCorrDraftModel",
+            }.intersection(draft_config.architectures or [])
         )
 
     def _dflash_needs_multi_kv_group(self) -> bool:
@@ -810,9 +798,6 @@ class VllmConfig:
             or model.dtype != torch.bfloat16
             or model.quantization is not None
             or not current_platform.is_cuda()
-            # Sequence parallelism / async TP are torch.compile passes.
-            or self.compilation_config.pass_config.enable_sp
-            or self.compilation_config.pass_config.fuse_gemm_comms
         ):
             return False
         family = bi._get_tuned_matmul_arch_family(
@@ -1080,6 +1065,28 @@ class VllmConfig:
         )
         self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
+    def _maybe_disable_dynamic_sd_for_v1(self) -> None:
+        speculative_config = self.speculative_config
+        # V2 truncates drafts centrally. V1 requires proposer support.
+        if (
+            speculative_config is None
+            or not speculative_config.uses_dynamic_speculative_decoding()
+            or self.use_v2_model_runner
+            or speculative_config.method
+            in ("ngram", "eagle", "eagle3", "mtp", "draft_model", "dflash")
+        ):
+            return
+
+        logger.warning_once(
+            "Dynamic speculative decoding is not supported with the '%s' "
+            "speculative method on Model Runner V1. "
+            "Disabling num_speculative_tokens_per_batch_size "
+            "and falling back to static num_speculative_tokens=%d.",
+            speculative_config.method,
+            speculative_config.num_speculative_tokens,
+        )
+        speculative_config.num_speculative_tokens_per_batch_size = None
+
     def _maybe_disable_dynamic_sd_for_data_parallel(self) -> None:
         speculative_config = self.speculative_config
         if (
@@ -1224,6 +1231,21 @@ class VllmConfig:
         ):
             return
 
+        if self.model_config is not None and self.model_config.enable_sleep_mode:
+            # Lazy import to avoid circular dependencies
+            from vllm.distributed.kv_transfer.kv_connector.factory import (
+                KVConnectorFactory,
+            )
+
+            connector_cls = KVConnectorFactory.get_connector_class(
+                self.kv_transfer_config
+            )
+            if not connector_cls.supports_sleep_mode(self.kv_transfer_config):
+                raise ValueError(
+                    f"{self.kv_transfer_config.kv_connector} does not support "
+                    "sleep mode."
+                )
+
         # PyTorch's expandable_segments allocator uses CUDA VMM, which can
         # remap a virtual address range to different physical pages over the
         # engine's lifetime. KV connectors that pin KV cache memory (e.g.
@@ -1265,9 +1287,15 @@ class VllmConfig:
             return
         if not self.use_v2_model_runner:
             raise ValueError("sampling distribution replay requires Model Runner V2")
-        if self.speculative_config is not None:
+        speculative_config = self.speculative_config
+        if (
+            speculative_config is not None
+            and speculative_config.enable_adaptive_verification
+        ):
             raise ValueError(
-                "sampling distribution replay does not support speculative decoding"
+                "sampling distribution replay with speculative decoding "
+                "requires fixed verification boundaries; disable adaptive "
+                "verification"
             )
         if model_config.is_diffusion:
             raise ValueError(
@@ -1291,15 +1319,22 @@ class VllmConfig:
         if not self.use_v2_model_runner:
             raise ValueError("trace replay requires Model Runner V2")
 
-    def _check_watermarking_unsupported(
+    def _check_supports_watermarking(
         self,
+        config: "SamplingParams | BeamSearchParams | None" = None,
         *,
-        beam_search: bool = False,
         custom_sampler: bool = False,
-    ) -> None:
+    ) -> bool:
         watermark_config = getattr(self, "watermark_config", None)
         if watermark_config is None:
-            return
+            if config is not None and config.watermarking is True:
+                logger.warning_once(
+                    "Watermarking is enabled for this request, but the engine has no "
+                    "watermark configuration. This and subsequent requests will run "
+                    "without watermarking.",
+                    scope="global",
+                )
+            return False
         if self.speculative_config is not None:
             speculative_config = self.speculative_config
             if speculative_config.draft_sample_method != "probabilistic":
@@ -1314,15 +1349,26 @@ class VllmConfig:
                 )
             if (
                 speculative_config.parallel_drafting
-                and speculative_config.method != "dspark"
+                and speculative_config.method not in ("dflash", "dspark")
             ):
                 raise ValueError(
                     "Parallel speculative drafting is not supported with watermarking."
                 )
-            if speculative_config.method not in ("dspark", "eagle", "eagle3", "mtp"):
+            if speculative_config.method not in (
+                "dflash",
+                "dspark",
+                "eagle",
+                "eagle3",
+                "mtp",
+            ):
                 raise ValueError(
-                    "Watermarking supports only autoregressive model-based "
-                    "speculative decoding."
+                    "Watermarking supports only dflash, dspark, eagle, eagle3 and "
+                    "mtp speculative decoding."
+                )
+            if self._is_dflash_candidate_draft():
+                raise ValueError(
+                    "Watermarking does not support DFlash2 and LiLiCorr "
+                    "candidate-head drafters yet."
                 )
             if (
                 not watermark_config.allow_target_only_watermarking
@@ -1344,13 +1390,6 @@ class VllmConfig:
                     "share of output tokens supplied by accepted drafts.",
                     scope="global",
                 )
-            if watermark_config.deduplicate_contexts != "none":
-                logger.warning_once(
-                    "Context deduplication is not supported with speculative "
-                    "decoding and will not be applied to accepted drafts, "
-                    "rejection-recovery tokens, or bonus tokens.",
-                    scope="global",
-                )
             if watermark_config.algorithm == "dual_key_gumbel" and (
                 watermark_config.alpha != get_field(WatermarkConfig, "alpha").default
             ):
@@ -1361,12 +1400,44 @@ class VllmConfig:
                     watermark_config.alpha,
                     scope="global",
                 )
-        if beam_search:
-            raise ValueError("Beam search is not supported with watermarking.")
         if custom_sampler:
             raise ValueError(
                 "Model-specific custom samplers are not supported with watermarking."
             )
+        if config is None:
+            return True
+        if config.watermarking is False:
+            return False
+
+        from vllm.sampling_params import BeamSearchParams, SamplingParams
+
+        if isinstance(config, BeamSearchParams):
+            logger.warning_once(
+                "Watermarking is enabled, but beam search cannot be watermarked. "
+                "This and subsequent beam search requests will run without "
+                "watermarking.",
+                scope="global",
+            )
+            return False
+        if not isinstance(config, SamplingParams):
+            raise TypeError(f"Unsupported watermarking config: {type(config).__name__}")
+        if config.trace_decode_token_ids is not None:
+            logger.warning_once(
+                "Watermarking is enabled, but trace replay cannot be watermarked. "
+                "This and subsequent trace replay requests will run without "
+                "watermarking.",
+                scope="global",
+            )
+            return False
+        if config.temperature == 0:
+            logger.warning_once(
+                "Watermarking is enabled, but greedy decoding "
+                "(temperature=0) cannot be watermarked. This and subsequent "
+                "greedy requests will use ordinary greedy sampling.",
+                scope="global",
+            )
+            return False
+        return True
 
     def _resolve_and_verify_engram_config(self) -> None:
         """Resolve defaults and validate n-gram embedding settings."""
@@ -1398,6 +1469,24 @@ class VllmConfig:
         self.engram_config.verify_parallel_config(self.parallel_config)
         logger.info_once("Resolved Engram configuration: %s", str(self.engram_config))
 
+    def _reject_mismatched_float_kv_cache(self) -> None:
+        """Reject an explicit float16/bfloat16 KV dtype that differs from the model."""
+        cache_dtype = self.cache_config.cache_dtype
+        if self.model_config is None or cache_dtype not in ("float16", "bfloat16"):
+            return
+        model_dtype = str(self.model_config.dtype).removeprefix("torch.")
+        if model_dtype == cache_dtype:
+            return
+        allowed = (
+            f"`auto` or `{model_dtype}`"
+            if model_dtype in ("float16", "bfloat16")
+            else "`auto`"
+        )
+        raise ValueError(
+            f'kv_cache_dtype="{cache_dtype}" is incompatible with '
+            f'dtype="{model_dtype}". Please set `--kv-cache-dtype` to {allowed}.'
+        )
+
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
         # To give each torch profile run a unique instance name.
@@ -1428,9 +1517,10 @@ class VllmConfig:
             logger.info_once("Performance mode set to '%s'.", self.performance_mode)
 
         self.try_verify_and_update_config()
+        self._reject_mismatched_float_kv_cache()
         self._resolve_and_verify_engram_config()
 
-        self._check_watermarking_unsupported()
+        self._check_supports_watermarking()
         # Models may have supplied their own DCP defaults above; anything still
         # unset falls back to the stock ones.
         self.parallel_config.set_dcp_defaults()
@@ -1519,8 +1609,6 @@ class VllmConfig:
                 self.quant_config.use_deep_gemm = False
                 logger.warning_once(
                     "Auto-disabled DeepGemm for model_type=%s on Blackwell. "
-                    "DeepGemm E8M0 scale format causes accuracy degradation "
-                    "for this architecture. Falling back to CUTLASS. "
                     "To disable DeepGemm globally, set VLLM_USE_DEEP_GEMM=0.",
                     model_type,
                 )
@@ -1537,34 +1625,36 @@ class VllmConfig:
             and self.parallel_config.all2all_backend == "deepep_high_throughput"
         )
 
+        # Async scheduling incompatibilities specific to the V1 model runner.
+        v1_async_sched_incompat: str | None = None
+        if not self.use_v2_model_runner:
+            spec_config = self.speculative_config
+            if spec_config is not None and (
+                spec_config.method not in get_args(EagleModelTypes)
+                and spec_config.method not in get_args(NgramGPUTypes)
+                and spec_config.method not in ("draft_model", "dspark", "dflash")
+            ):
+                v1_async_sched_incompat = (
+                    f"{spec_config.method}-based speculative decoding"
+                )
+            elif spec_config is not None and spec_config.disable_padded_drafter_batch:
+                v1_async_sched_incompat = "disable_padded_drafter_batch=True"
+            elif self.parallel_config.pipeline_parallel_size > 1:
+                v1_async_sched_incompat = "pipeline parallelism"
+
         if self.scheduler_config.async_scheduling:
             # Async scheduling explicitly enabled, hard fail any incompatibilities.
-            # Currently, async scheduling only support eagle speculative
-            # decoding.
             if uses_rocm_deepep_ht_dbo:
                 raise ValueError(
                     "Async scheduling is not compatible with ROCm DeepEP "
                     "high-throughput DBO. Please use --no-async-scheduling or "
                     "select a different all2all backend."
                 )
-            if self.speculative_config is not None:
-                if (
-                    self.speculative_config.method not in get_args(EagleModelTypes)
-                    and self.speculative_config.method not in get_args(NgramGPUTypes)
-                    and self.speculative_config.method != "draft_model"
-                    and self.speculative_config.method != "dspark"
-                    and self.speculative_config.method != "dflash"
-                ):
-                    raise ValueError(
-                        "Currently, async scheduling is only supported "
-                        "with EAGLE/MTP/Draft Model/NGram GPU/DSpark/DFlash "
-                        "kind of speculative decoding"
-                    )
-                if self.speculative_config.disable_padded_drafter_batch:
-                    raise ValueError(
-                        "Async scheduling is not compatible with "
-                        "disable_padded_drafter_batch=True."
-                    )
+            if v1_async_sched_incompat is not None:
+                raise ValueError(
+                    "Async scheduling is not supported by the V1 model runner "
+                    f"with {v1_async_sched_incompat}."
+                )
             if not executor_supports_async_sched:
                 raise ValueError(
                     f"`{executor_backend}` does not support async scheduling yet."
@@ -1581,29 +1671,6 @@ class VllmConfig:
                     "Disabling asynchronous scheduling by default for pooling model."
                 )
                 self.scheduler_config.async_scheduling = False
-            elif (
-                self.speculative_config is not None
-                and self.speculative_config.method not in get_args(EagleModelTypes)
-                and self.speculative_config.method not in get_args(NgramGPUTypes)
-                and self.speculative_config.method != "draft_model"
-                and self.speculative_config.method != "dspark"
-                and self.speculative_config.method != "dflash"
-            ):
-                logger.warning_once(
-                    "Async scheduling not supported with %s-based "
-                    "speculative decoding and will be disabled.",
-                    self.speculative_config.method,
-                )
-                self.scheduler_config.async_scheduling = False
-            elif (
-                self.speculative_config is not None
-                and self.speculative_config.disable_padded_drafter_batch
-            ):
-                logger.warning_once(
-                    "Async scheduling is not compatible with "
-                    "disable_padded_drafter_batch=True and will be disabled.",
-                )
-                self.scheduler_config.async_scheduling = False
             elif not executor_supports_async_sched:
                 logger.warning_once(
                     "Async scheduling will be disabled because it is not supported "
@@ -1618,13 +1685,11 @@ class VllmConfig:
                     "DP+EP generation accuracy."
                 )
                 self.scheduler_config.async_scheduling = False
-            elif (
-                self.parallel_config.pipeline_parallel_size > 1
-                and not self.use_v2_model_runner
-            ):
+            elif v1_async_sched_incompat is not None:
                 logger.warning_once(
                     "Async scheduling is disabled because the V1 model runner "
-                    "does not support it with pipeline parallelism."
+                    "does not support it with %s.",
+                    v1_async_sched_incompat,
                 )
                 self.scheduler_config.async_scheduling = False
             else:
@@ -1642,18 +1707,6 @@ class VllmConfig:
                 self.parallel_config.disable_nccl_for_dp_synchronization = True
             else:
                 self.parallel_config.disable_nccl_for_dp_synchronization = False
-
-        if (
-            self.speculative_config is not None
-            and self.scheduler_config.async_scheduling
-            and self.model_config is not None
-            and not self.model_config.disable_cascade_attn
-        ):
-            logger.warning_once(
-                "Disabling cascade attention (not yet compatible with "
-                "async speculative decoding).",
-            )
-            self.model_config.disable_cascade_attn = True
 
         if (
             self.observability_config.per_request_spec_decode_metrics != "none"
@@ -1713,26 +1766,6 @@ class VllmConfig:
                 "This is equivalent to setting -cc.mode=none"
             )
             self.compilation_config.mode = CompilationMode.NONE
-
-        # TODO: This is a stopgap that turns sequence parallelism / async TP
-        # off under batch invariance. Make the sequence-parallel reduce-scatter
-        # path batch-invariant instead so they can stay enabled (#56370).
-        # Sequence parallelism / async TP rewrite all_reduce + rms_norm into a
-        # reduce-scatter whose reduction order depends on the batch, so they
-        # are not batch-invariant. Decide this before the breakable-CUDA-graph
-        # default below, which declines to auto-enable when they are on.
-        pass_config = self.compilation_config.pass_config
-        if envs.VLLM_BATCH_INVARIANT and (
-            pass_config.enable_sp or pass_config.fuse_gemm_comms
-        ):
-            logger.warning_once(
-                "Disabling sequence parallelism and async TP "
-                "(pass_config.enable_sp / fuse_gemm_comms) when "
-                "VLLM_BATCH_INVARIANT is enabled: the reduce-scatter path "
-                "is not batch-invariant (see vllm-project/vllm#56370)."
-            )
-            pass_config.enable_sp = False
-            pass_config.fuse_gemm_comms = False
 
         breakable_cudagraph_enabled = self._maybe_enable_breakable_cudagraph()
 
@@ -1804,7 +1837,18 @@ class VllmConfig:
             )
 
         self._maybe_disable_dynamic_sd_for_data_parallel()
+        self._maybe_disable_dynamic_sd_for_v1()
         self._maybe_override_dynamic_sd_cudagraph_mode()
+
+        if (
+            self.attention_config.sparse_mla_prefill_workspace_factor is None
+            and self.model_config is not None
+        ):
+            # Resolved once: KV cache auto-fit can lower max_model_len later, and
+            # factor * max_model_len must stay within the workspace reserved at init.
+            self.attention_config.sparse_mla_prefill_workspace_factor = (
+                5 if self.model_config.max_model_len <= 256 * 1024 else 2
+            )
 
         if (
             self.attention_config.hisparse_config is None
@@ -1821,6 +1865,20 @@ class VllmConfig:
             if self.parallel_config.decode_context_parallel_size > 1:
                 raise ValueError(
                     "HiSparse does not support decode context parallelism."
+                )
+            if self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL:
+                raise ValueError(
+                    "HiSparse does not support cudagraph_mode=FULL; use "
+                    "FULL_AND_PIECEWISE (the default), which captures FULL graphs "
+                    "for decode batches."
+                )
+            if not self.scheduler_config.scheduler_reserve_full_isl:
+                # Without it, async loads admitted against free host blocks can
+                # each wait on host pages the others hold, and waiting requests
+                # are never preempted to free them.
+                raise ValueError(
+                    "HiSparse requires --scheduler-reserve-full-isl; remove "
+                    "--no-scheduler-reserve-full-isl."
                 )
             if self.model_config is not None and not hasattr(
                 self.model_config.hf_config, "index_topk"
@@ -1849,38 +1907,6 @@ class VllmConfig:
         self._normalize_piecewise_cudagraph_mode(
             breakable_cudagraph_enabled=breakable_cudagraph_enabled
         )
-
-        # async tp is built on top of sequence parallelism and requires it.
-        pass_config = self.compilation_config.pass_config
-        if pass_config.fuse_gemm_comms:
-            pass_config.enable_sp = True
-        if pass_config.enable_sp:
-            if self.parallel_config.tensor_parallel_size == 1:
-                logger.warning_once("Sequence Parallelism requires TP>1, disabling")
-                pass_config.enable_sp = False
-                pass_config.fuse_gemm_comms = False
-            else:
-                if pass_config.sp_min_token_num is None:
-                    from vllm.compilation.passes.fusion.sequence_parallelism import (
-                        get_sequence_parallelism_threshold,
-                    )
-
-                    tp_size = self.parallel_config.tensor_parallel_size
-                    hidden_size = self.model_config.get_hidden_size()
-                    assert isinstance(self.model_config.dtype, torch.dtype)
-                    element_size = self.model_config.dtype.itemsize
-                    pass_config.sp_min_token_num = get_sequence_parallelism_threshold(
-                        hidden_size, tp_size, element_size
-                    )
-
-                if pass_config.sp_min_token_num is None:
-                    logger.warning_once(
-                        "Model hidden_size too small for the SP "
-                        "threshold heuristic, disabling. To force SP, "
-                        "set pass_config.sp_min_token_num manually."
-                    )
-                    pass_config.enable_sp = False
-                    pass_config.fuse_gemm_comms = False
 
         from vllm.utils.torch_utils import HAS_OPAQUE_TYPE
 
@@ -2020,11 +2046,15 @@ class VllmConfig:
         # After the platform hook, which has the last word on async scheduling.
         if (
             self.diffusion_config is not None
-            and self.scheduler_config.async_scheduling
             and self.scheduler_config.scheduler_cls is None
         ):
+            scheduler_name = (
+                "DiffusionAsyncScheduler"
+                if self.scheduler_config.async_scheduling
+                else "DiffusionScheduler"
+            )
             self.scheduler_config.scheduler_cls = (
-                "vllm.v1.core.sched.diffusion_scheduler.DiffusionAsyncScheduler"
+                f"vllm.v1.core.sched.diffusion_scheduler.{scheduler_name}"
             )
 
         self._normalize_piecewise_cudagraph_mode(
@@ -2110,81 +2140,45 @@ class VllmConfig:
             data_parallel_size=effective_dp_size,
         )
 
-        if self.compilation_config.pass_config.enable_sp:
-            # With pipeline parallelism, native rms norm tracing errors due to
-            # incorrect residual shape.
-            # Use custom rms norm to unblock. In the future,
-            # the pass will operate on higher-level IR to avoid the issue.
-            # TODO: https://github.com/vllm-project/vllm/issues/27894
-            if self.compilation_config.mode != CompilationMode.VLLM_COMPILE:
-                logger.warning_once(
-                    "Sequence parallelism is enabled, but running in wrong "
-                    "vllm compile mode: %s.",
-                    self.compilation_config.mode,
-                )
-
-            if self.parallel_config.pipeline_parallel_size > 1:
-                if "-rms_norm" not in self.compilation_config.custom_ops:
-                    self.compilation_config.custom_ops.append("+rms_norm")
-                else:
-                    logger.warning_once(
-                        "Sequence parallelism not supported with "
-                        "native rms_norm when using %s, "
-                        "this will likely lead to an error.",
-                        "pipeline parallelism",
-                    )
-
         # final check of cudagraph mode after all possible updates
-        if current_platform.is_cuda_alike():
-            if (
-                self.compilation_config.cudagraph_mode.has_full_cudagraphs()
-                and self.model_config is not None
-                and not self.model_config.disable_cascade_attn
-                and not self.compilation_config.cudagraph_mode.has_piecewise_cudagraphs()  # noqa: E501
-            ):
-                logger.warning_once(
-                    "No piecewise cudagraph for executing cascade attention. "
-                    "Will fall back to eager execution if a batch runs into "
-                    "cascade attentions."
-                )
-
-            if self.compilation_config.cudagraph_mode.requires_piecewise_compilation():
-                assert (
-                    self.compilation_config.mode == CompilationMode.VLLM_COMPILE
-                    or envs.VLLM_USE_BREAKABLE_CUDAGRAPH
-                ), (
-                    "Compilation mode should be CompilationMode.VLLM_COMPILE "
-                    "when cudagraph_mode piecewise cudagraphs is used, "
-                    f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
-                )
         if (
-            self.model_config
-            and envs.VLLM_BATCH_INVARIANT
-            and not self.model_config.disable_cascade_attn
+            current_platform.is_cuda_alike()
+            and self.compilation_config.cudagraph_mode.requires_piecewise_compilation()
         ):
-            self.model_config.disable_cascade_attn = True
-            logger.warning_once(
-                "Disabling cascade attention when VLLM_BATCH_INVARIANT is enabled.",
+            assert (
+                self.compilation_config.mode == CompilationMode.VLLM_COMPILE
+                or envs.VLLM_USE_BREAKABLE_CUDAGRAPH
+            ), (
+                "Compilation mode should be CompilationMode.VLLM_COMPILE "
+                "when cudagraph_mode piecewise cudagraphs is used, "
+                f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
             )
 
         if self.parallel_config.use_ubatching:
             a2a_backend = self.parallel_config.all2all_backend
-            assert a2a_backend in [
-                "deepep_low_latency",
-                "deepep_high_throughput",
-                "nixl_ep",
-            ], (
-                "Microbatching currently only supports the deepep_low_latency, "
-                "deepep_high_throughput, and nixl_ep all2all backends. "
-                f"{a2a_backend} is not supported. To fix use "
-                "--all2all-backend=deepep_low_latency, "
-                "--all2all-backend=deepep_high_throughput, or "
-                "--all2all-backend=nixl_ep and install the matching kernels."
+            if current_platform.is_rocm():
+                supported_backends = [
+                    "deepep_low_latency",
+                    "deepep_high_throughput",
+                    "nixl_ep",
+                    # The naive DP/EP prepare/finalize runs its all-gather /
+                    # reduce-scatter on the comm stream under DBO.
+                    "allgather_reducescatter",
+                ]
+            else:
+                # CUDA and other platforms.
+                supported_backends = [
+                    "deepep_low_latency",
+                    "deepep_high_throughput",
+                    "nixl_ep",
+                ]
+            assert a2a_backend in supported_backends, (
+                "Microbatching currently only supports the "
+                f"{', '.join(supported_backends)} all2all backends on this "
+                f"platform. {a2a_backend} is not supported. To fix use one of "
+                f"{', '.join('--all2all-backend=' + b for b in supported_backends)}"
+                " and install the matching kernels."
             )
-
-            if not self.model_config.disable_cascade_attn:
-                self.model_config.disable_cascade_attn = True
-                logger.warning_once("Disabling cascade attention when DBO is enabled.")
 
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
@@ -2204,10 +2198,10 @@ class VllmConfig:
         self._verify_aux_output_compatibility()
 
         # Hybrid KV cache manager (HMA) runtime rules:
-        # - Explicit enable (--no-disable-kv-cache-manager): error if runtime
+        # - Explicit enable (--enable-hybrid-kv-cache-manager): error if runtime
         #   disables it
         # - No preference: auto-disable for unsupported features or connector configs
-        # - Explicit disable (--disable-kv-cache-manager): always respect it
+        # - Explicit disable (--disable-hybrid-kv-cache-manager): always respect it
         need_disable_hybrid_kv_cache_manager = False
         # logger should only print warning message for hybrid models. As we
         # can't know whether the model is hybrid or not now, so we don't log
@@ -2268,7 +2262,7 @@ class VllmConfig:
             raise ValueError(
                 "Hybrid KV cache manager was explicitly enabled but is not "
                 "supported in this configuration. Consider omitting the "
-                "--no-disable-hybrid-kv-cache-manager flag to let vLLM decide"
+                "--enable-hybrid-kv-cache-manager flag to let vLLM decide"
                 " automatically."
             )
 
@@ -2310,40 +2304,22 @@ class VllmConfig:
                 custom_ops.append("+quant_fp8")
 
         self._verify_kv_transfer_compat()
+        if self.use_cumem_cudagraph_pool:
+            # NCCL graph registration pins the offloaded pool; workers inherit this.
+            value = os.environ.setdefault("NCCL_GRAPH_REGISTER", "0")
+            if value != "0":
+                logger.warning(
+                    "NCCL_GRAPH_REGISTER=%s pins the CUDA graph pool during sleep.",
+                    value,
+                )
         # Log the custom passes that are enabled
         self.compilation_config.pass_config.log_enabled_passes()
-
-    def update_sizes_for_sequence_parallelism(self, possible_sizes: list) -> list:
-        # remove the sizes that not multiple of tp_size when
-        # enable sequence parallelism
-        removed_sizes = [
-            size
-            for size in possible_sizes
-            if size % self.parallel_config.tensor_parallel_size != 0
-        ]
-        if removed_sizes:
-            logger.warning(
-                "Batch sizes %s are removed because they are not "
-                "multiple of tp_size %d when "
-                "sequence parallelism is enabled",
-                removed_sizes,
-                self.parallel_config.tensor_parallel_size,
-            )
-
-        return [
-            size
-            for size in possible_sizes
-            if size % self.parallel_config.tensor_parallel_size == 0
-        ]
 
     def _set_max_num_scheduled_tokens(self):
         """In most cases, the scheduler may schedule a batch with as many tokens as the
         worker is configured to handle.
         """
         if self.speculative_config is not None:
-            scheduled_token_delta = (
-                self.speculative_config.max_num_new_slots_for_drafting
-            )
             max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
             if self.scheduler_config.max_num_scheduled_tokens is None:
                 self.scheduler_config.max_num_scheduled_tokens = max_num_batched_tokens
@@ -2367,12 +2343,34 @@ class VllmConfig:
                     " num_speculative_tokens.",
                 )
 
-            if max_num_batched_tokens <= scheduled_token_delta:
+            # num_lookahead_tokens is at least every method's per-request draft
+            # slots, and covers the DFlash/DSpark draft pass's query rows.
+            if max_num_batched_tokens <= self.num_lookahead_tokens:
                 raise ValueError(
                     "VllmConfig does not have enough slots to schedule a token and"
                     " support the speculative decoding settings."
-                    f" Got {max_num_batched_tokens=} and {scheduled_token_delta=}."
+                    f" Got {max_num_batched_tokens=} and"
+                    f" num_lookahead_tokens={self.num_lookahead_tokens}."
                 )
+            spec = self.speculative_config
+            if spec.use_dflash() or spec.use_dspark():
+                max_num_active_seqs = (
+                    self.scheduler_config.max_num_active_seqs
+                    or self.scheduler_config.max_num_seqs
+                )
+                max_draft_seqs = max_num_batched_tokens // self.num_lookahead_tokens
+                if max_draft_seqs < max_num_active_seqs:
+                    logger.warning_once(
+                        "The %s draft pass needs %d query tokens per request within "
+                        "max_num_batched_tokens=%d. Overriding max_num_active_seqs "
+                        "from %d to %d.",
+                        spec.method,
+                        self.num_lookahead_tokens,
+                        max_num_batched_tokens,
+                        max_num_active_seqs,
+                        max_draft_seqs,
+                    )
+                    self.scheduler_config.max_num_active_seqs = max_draft_seqs
 
     def _set_cudagraph_sizes(self):
         """VLLM defines the default candidate list of batch sizes for CUDA graph
@@ -2583,16 +2581,6 @@ class VllmConfig:
                 # de-duplicate and sort the sizes
                 cudagraph_capture_sizes = sorted(set(cudagraph_capture_sizes))
 
-            if (
-                self.parallel_config.tensor_parallel_size > 1
-                and self.compilation_config.pass_config.enable_sp
-            ):
-                # Sequence parallelism only captures TP-divisible sizes, so a
-                # wider non-divisible decode batch cannot be captured under SP.
-                cudagraph_capture_sizes = self.update_sizes_for_sequence_parallelism(
-                    cudagraph_capture_sizes
-                )
-
             # user-specific compilation_config.max_cudagraph_capture_size get
             # truncated to valid_max_size when they are inconsistent.
             valid_max_size = (
@@ -2681,37 +2669,6 @@ class VllmConfig:
                         "Max num batched tokens below allreduce-rms fusion threshold, "
                         "allreduce-rms fusion will be enabled for all num_tokens."
                     )
-
-        # Add the compile ranges for sequence parallelism
-        if compilation_config.pass_config.enable_sp:
-            pass_config = compilation_config.pass_config
-
-            # Calculate min_token_num if not explicitly provided
-            # User override works regardless of hidden_size
-            if pass_config.sp_min_token_num is None:
-                from vllm.compilation.passes.fusion.sequence_parallelism import (
-                    get_sequence_parallelism_threshold,
-                )
-
-                tp_size = self.parallel_config.tensor_parallel_size
-                hidden_size = self.model_config.get_hidden_size()
-                assert isinstance(self.model_config.dtype, torch.dtype)
-                element_size = self.model_config.dtype.itemsize
-                pass_config.sp_min_token_num = get_sequence_parallelism_threshold(
-                    hidden_size, tp_size, element_size
-                )
-
-            min_token_num = pass_config.sp_min_token_num
-            max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
-            if min_token_num is not None and (
-                max_num_batched_tokens is not None
-                and min_token_num < max_num_batched_tokens
-                and min_token_num > 1
-            ):
-                # Add endpoint at min_token_num - 1 to ensure SP applies
-                # starting from min_token_num
-                # This creates ranges: [1, min-1] (no SP), [min, max] (SP applies)
-                computed_compile_ranges_endpoints.append(min_token_num - 1)
 
         if compilation_config.pass_config.fuse_rope_kvcache:
             max_token_num = (
@@ -3042,12 +2999,6 @@ class VllmConfig:
         unsupported: list[str] = []
         speculative_config = self.speculative_config
 
-        if (
-            self.compilation_config.pass_config.enable_sp
-            and self.parallel_config.tensor_parallel_size > 1
-        ):
-            unsupported.append("sequence parallelism")
-
         # V2 does not implement the external_launcher (torchrun) PP-output
         # broadcast that V1 uses to keep all ranks in sync (broadcast_pp_output).
         if (
@@ -3057,15 +3008,7 @@ class VllmConfig:
             unsupported.append("pipeline parallelism with external_launcher")
 
         if speculative_config is not None:
-            if speculative_config.method in (
-                # https://github.com/vllm-project/vllm/pull/40704
-                "ngram",
-                "ngram_gpu",
-                "suffix",
-                "medusa",
-                "mlp_speculator",
-                "custom_class",
-            ):
+            if speculative_config.method in ("suffix", "custom_class"):
                 unsupported.append(f"speculative method '{speculative_config.method}'")
 
             # V2 EagleSpeculator does not support parallel_drafting (for P-Eagle).
@@ -3077,11 +3020,13 @@ class VllmConfig:
             ):
                 unsupported.append("parallel drafting for EAGLE speculative decoding")
 
+            # The V2 draft-model speculator has no token mapping between the
+            # draft and target vocabularies (TLI is TBD in #47172).
+            if getattr(speculative_config, "use_heterogeneous_vocab", False):
+                unsupported.append("heterogeneous-vocabulary draft models")
+
         if self.parallel_config.use_ubatching:
             unsupported.extend(self._get_dbo_unsupported_features())
-
-        if self.cache_config.mamba_cache_mode == "all":
-            unsupported.append("mamba cache mode 'all'")
 
         return unsupported
 
@@ -3112,6 +3057,16 @@ class VllmConfig:
                 unsupported.append("dspark speculative decoding")
             if self.speculative_config.enable_adaptive_verification:
                 unsupported.append("adaptive draft verification")
+            if self.speculative_config.draft_lm_head_quantization is not None:
+                unsupported.append("draft lm_head quantization")
+
+        # The attention-free Parse MTP draft requires the V2 speculator.
+        if self.speculative_config:
+            draft_config = self.speculative_config.draft_model_config
+            if draft_config is not None and "ParseAuxMTPModel" in (
+                draft_config.architectures or []
+            ):
+                unsupported.append("Parse 3.5 MTP")
 
         # Mixed sliding/full DFlash drafts need multiple KV groups (V2 only).
         if self._dflash_needs_multi_kv_group():
@@ -3128,6 +3083,12 @@ class VllmConfig:
 
         if self.parallel_config.enable_batch_sharded_sampling:
             unsupported.append("batch-sharded sampling")
+
+        if self.model_config is not None and self.model_config.architecture in (
+            "Step5ForCausalLM",
+            "Step5ForConditionalGeneration",
+        ):
+            unsupported.append("Step5")
 
         return unsupported
 
@@ -3453,35 +3414,47 @@ class VllmConfig:
         if not self.cache_config.use_replayssm:
             self.cache_config.use_kda_recoverssm = False
             return self
-        self.cache_config.use_kda_recoverssm = self.num_speculative_tokens > 0
+
+        kda_architectures = (
+            "KimiLinearForCausalLM",
+            "KimiK3ForConditionalGeneration",
+        )
+        is_kda_model = (
+            self.model_config is not None
+            and self.model_config.architecture in kda_architectures
+        )
+        self.cache_config.use_kda_recoverssm = (
+            self.num_speculative_tokens > 0 and is_kda_model
+        )
+        use_mamba_replayssm_spec = (
+            self.num_speculative_tokens > 0 and not self.cache_config.use_kda_recoverssm
+        )
 
         if self.model_config is not None and not self.model_config.supports_replayssm:
             raise ValueError(
                 "--use-replayssm is not supported for architecture "
                 f"{self.model_config.architecture!r}"
             )
+        if (
+            self.mamba_config.backend == MambaBackendEnum.FLASHINFER
+            and self.cache_config.replayssm_buffer_len > 16
+        ):
+            raise ValueError(
+                "FlashInfer ReplaySSM requires --replayssm-buffer-len <= 16"
+            )
         if self.cache_config.use_kda_recoverssm:
-            if self.model_config is not None and self.model_config.architecture not in (
-                "KimiLinearForCausalLM",
-                "KimiK3ForConditionalGeneration",
-            ):
-                raise ValueError("RecoverSSM is only supported for Kimi-K3 KDA")
             if self.mamba_config.enable_stochastic_rounding:
                 raise ValueError(
                     "RecoverSSM supports bfloat16/float32 "
                     "SSM state caches, not --enable-mamba-cache-stochastic-"
                     "rounding, which requires an explicit float16 cache"
                 )
-            if self.cache_config.mamba_cache_mode not in ("none", "align"):
-                raise ValueError(
-                    "RecoverSSM supports only none and align Mamba cache modes"
-                )
             if (
                 self.cache_config.mamba_cache_mode == "align"
                 and not self.use_v2_model_runner
             ):
                 raise ValueError(
-                    "RecoverSSM with align mode requires VLLM_USE_V2_MODEL_RUNNER=1"
+                    "RecoverSSM with prefix caching requires VLLM_USE_V2_MODEL_RUNNER=1"
                 )
             if self.parallel_config.pipeline_parallel_size > 1:
                 raise ValueError(
@@ -3489,16 +3462,30 @@ class VllmConfig:
                 )
             if self.mamba_config.backend != MambaBackendEnum.TRITON:
                 raise ValueError("RecoverSSM requires --mamba-backend triton")
-        elif self.cache_config.mamba_cache_mode == "all":
-            raise ValueError(
-                "--use-replayssm supports prefix caching only in align mode; "
-                "pass --mamba-cache-mode align"
-            )
+        elif use_mamba_replayssm_spec:
+            if self.cache_config.mamba_cache_mode != "none":
+                raise ValueError(
+                    "FlashInfer ReplaySSM speculative decoding does not support "
+                    "prefix caching; use --disable-prefix-caching"
+                )
+            query_len = 1 + self.num_speculative_tokens
+            if self.cache_config.replayssm_buffer_len < query_len:
+                raise ValueError(
+                    "FlashInfer ReplaySSM speculative decoding requires "
+                    "--replayssm-buffer-len >= 1 + num_speculative_tokens "
+                    f"({query_len}); got "
+                    f"{self.cache_config.replayssm_buffer_len}"
+                )
+            if self.mamba_config.backend != MambaBackendEnum.FLASHINFER:
+                raise ValueError(
+                    "Mamba2 ReplaySSM speculative decoding requires "
+                    "--mamba-backend flashinfer"
+                )
         elif self.mamba_config.backend == MambaBackendEnum.FLASHINFER:
             if self.cache_config.mamba_cache_mode == "align":
                 raise ValueError(
-                    "FlashInfer ReplaySSM does not support "
-                    "--mamba-cache-mode align yet; use none"
+                    "FlashInfer ReplaySSM does not support prefix caching yet; "
+                    "use --disable-prefix-caching"
                 )
         elif self.mamba_config.backend != MambaBackendEnum.TRITON:
             raise ValueError(
