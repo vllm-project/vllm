@@ -760,3 +760,30 @@ def test_replayssm_origin_resets_on_resume_from_preemption():
 
     idx = input_batch.req_id_to_index["replay-req"]
     assert int(input_batch.replayssm_decode_base[idx]) == req.num_tokens
+
+
+def test_num_accepted_tokens_survives_skipped_step():
+    """Hybrid spec decode reads the recurrent state from slot
+    num_accepted_tokens - 1. A running request skipped for one step is
+    removed and re-added, and must keep the count from its last step."""
+    input_batch = InputBatch(
+        max_num_reqs=2,
+        max_model_len=MAX_PROMPT_SIZE + NUM_OUTPUT_TOKENS,
+        max_num_batched_tokens=MAX_PROMPT_SIZE + NUM_OUTPUT_TOKENS,
+        device=torch.device("cpu"),
+        vocab_size=VOCAB_SIZE,
+        block_sizes=[16],
+        max_num_blocks_per_req=[64],
+        num_spec_tokens=2,
+    )
+    req = _make_token_request("spec-req")
+    input_batch.add_request(req)
+    assert int(input_batch.num_accepted_tokens_cpu[0]) == 1
+
+    # The runner saves the count when the request leaves the batch.
+    req.num_accepted_tokens = 3
+    input_batch.remove_request(req.req_id)
+    input_batch.condense()
+    input_batch.add_request(req)
+    idx = input_batch.req_id_to_index["spec-req"]
+    assert int(input_batch.num_accepted_tokens_cpu[idx]) == 3

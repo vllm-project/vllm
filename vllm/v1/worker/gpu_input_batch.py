@@ -61,6 +61,10 @@ class CachedRequestState:
     # running request dropped from the persistent batch for a step keeps it;
     # None means "(re)computed from scratch": anchor at the current length.
     replayssm_decode_base: int | None = None
+    # Tokens accepted in the last spec-decode step, saved while the request
+    # is out of the persistent batch. Hybrid models read the recurrent state
+    # from slot num_accepted_tokens - 1, so a skipped step must not reset it.
+    num_accepted_tokens: int = 1
 
     # for pooling models
     pooling_params: PoolingParams | None = None
@@ -483,8 +487,9 @@ class InputBatch:
         else:
             raise NotImplementedError("Unrecognized request type")
 
-        # Speculative decoding: by default 1 token is generated.
-        self.num_accepted_tokens_cpu[req_index] = 1
+        # Speculative decoding: 1 for new/resumed requests; a running request
+        # that was skipped for a step keeps its count.
+        self.num_accepted_tokens_cpu[req_index] = request.num_accepted_tokens
 
         # Add request lora ID
         if request.lora_request:
