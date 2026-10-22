@@ -831,8 +831,12 @@ class DotsOCRForCausalLM(
         # Document pages are usually large, so padding tiny images up to 64
         # tokens costs little.
         min_budget = 64
-        # Max: capped by max_num_batched_tokens
+        # Max: 512. Budgets grow by 2x, so an image just above a budget is
+        # padded by up to ~2x. Measured on RTX 3090/4090 and A100, padding to
+        # budgets above 512 costs more than the graph saves, so larger batches
+        # fall back to eager. Override with encoder_cudagraph_token_budgets.
         max_budget = min(
+            512,
             vllm_config.scheduler_config.max_num_batched_tokens,
             vllm_config.model_config.max_model_len,
         )
