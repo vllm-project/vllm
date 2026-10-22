@@ -427,11 +427,13 @@ def test_executor_oom_latches_rows_reclaims_kv_and_allows_healthy_siblings(
     assert len(server.registry) == 0
 
 
-@pytest.mark.parametrize("option", ["prefix", "async", "tp4", "pp2", "embeddings"])
+@pytest.mark.parametrize(
+    "option", ["prefix", "async", "tp4", "pp2", "embeddings", "head_quant"]
+)
 def test_unsupported_placement_fails_before_connecting(option):
     settings = make_config()
     settings.speculative_config.remote_draft = RemoteDraftConfig(
-        endpoint="tcp://127.0.0.1:1"
+        endpoint="tcp://127.0.0.1:1", startup_timeout_ms=10
     )
     if option == "prefix":
         settings.cache_config.enable_prefix_caching = True
@@ -441,8 +443,10 @@ def test_unsupported_placement_fails_before_connecting(option):
         settings.parallel_config.tensor_parallel_size = 4
     elif option == "pp2":
         settings.parallel_config.pipeline_parallel_size = 2
-    else:
+    elif option == "embeddings":
         settings.model_config.enable_prompt_embeds = True
+    else:
+        settings.speculative_config.draft_lm_head_quantization = "fp8"
     with pytest.raises(ValueError, match="remote drafter"):
         remote.RemoteSpeculator(settings, torch.device("cpu"))
 

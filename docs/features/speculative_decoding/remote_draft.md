@@ -85,5 +85,5 @@ target/draft device assignments and checkpoint/schema identities. The example's
 5000 ms budget is explicit; it does not establish that the 100 ms default is
 suitable for long prefills. EAGLE3 currently accepts GPT-OSS and Qwen3 targets;
 see [own-KV MTP contracts](remote_mtp.md) for the experimental MTP families.
-Prefix caching, input streaming, async scheduling, multimodal input and LoRA are
-rejected for this backend. Native local speculation retains its own support.
+Prefix caching, input streaming, async scheduling, multimodal input, LoRA and
+`draft_lm_head_quantization` are rejected for this backend. Native local speculation retains its own support.

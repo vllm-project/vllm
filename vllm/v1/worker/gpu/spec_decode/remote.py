@@ -126,6 +126,8 @@ class RemoteSpeculator(BaseSpeculator):
             unsupported.append("prompt embeddings are unsupported")
         if getattr(config, "watermark_config", None) is not None:
             unsupported.append("watermarking is unsupported")
+        if config.speculative_config.draft_lm_head_quantization is not None:
+            unsupported.append("draft_lm_head_quantization is unsupported")
         if config.speculative_config.enable_adaptive_verification:
             unsupported.append("adaptive verification is unsupported")
         if unsupported:
