@@ -158,6 +158,8 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
+    # Experimental gfx950 MiMo FP8 blockscale SwiGLU/down-projection mono kernel.
+    VLLM_ROCM_MIMO_MONO_MLP: bool = False
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
@@ -1400,6 +1402,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Pad the fp8 weights to 256 bytes for ROCm
     "VLLM_ROCM_FP8_PADDING": lambda: bool(int(os.getenv("VLLM_ROCM_FP8_PADDING", "1"))),
+    "VLLM_ROCM_MIMO_MONO_MLP": lambda: (
+        os.getenv("VLLM_ROCM_MIMO_MONO_MLP", "False").lower() in ("true", "1")
+    ),
     # Pad the weights for the moe kernel
     "VLLM_ROCM_MOE_PADDING": lambda: bool(int(os.getenv("VLLM_ROCM_MOE_PADDING", "1"))),
     # Whether to use the shuffled kv cache layout
