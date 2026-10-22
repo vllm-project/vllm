@@ -1112,8 +1112,14 @@ class MixtureOfExperts(Protocol):
         """
         self.expert_weights = []
         for layer_idx, layer in enumerate(self.moe_layers):
-            # Register the expert weights.
-            self.expert_weights.append(list(layer.get_expert_weights()))
+            # Register the expert weights. EPLB only moves bytes, so 1-byte
+            # dtypes NCCL lacks (e.g. E8M0, FP4x2) go as uint8 views.
+            self.expert_weights.append(
+                [
+                    w.view(torch.uint8) if w.element_size() == 1 else w
+                    for w in layer.get_expert_weights()
+                ]
+            )
             layer.set_eplb_state(
                 moe_layer_idx=layer_idx,
                 expert_load_view=expert_load_view,
