@@ -636,13 +636,13 @@ class Scheduler(SchedulerInterface):
 
         # DP prefill balancing: on a throttled (non-cadence-aligned) step, defer
         # all prefill compute unless saturated. The DP prefill delayer applies
-        # its own bounds.
-        defer_prefills = throttle_prefills and (
-            self.dp_prefill_delayer
-            or (
-                not self.prefill_capacity_bound
-                and any(not r.is_prefill_chunk for r in self.running)
-            )
+        # its own bounds. Only a rank with a decode to run is held: a rank left
+        # with nothing to schedule while its DP peers step hangs the engine
+        # (V2 model runner with speculative decoding).
+        defer_prefills = (
+            throttle_prefills
+            and (self.dp_prefill_delayer or not self.prefill_capacity_bound)
+            and any(not r.is_prefill_chunk for r in self.running)
         )
 
         # `long_prefill_token_threshold` exists to stop a long prefill from
