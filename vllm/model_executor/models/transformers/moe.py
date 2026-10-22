@@ -194,6 +194,8 @@ class MoEMixin(MixtureOfExperts, Base):
     num_local_physical_experts: int
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
+        if vllm_config.model_config.hf_config.model_type == "aria":
+            self.check_version("5.18.0", "Aria")
         # Skip MixtureOfExperts.__init__ and call the next class in MRO
         super(MixtureOfExperts, self).__init__(vllm_config=vllm_config, prefix=prefix)
 

@@ -347,7 +347,6 @@ _SEQUENCE_CLASSIFICATION_MODELS = {
 
 _MULTIMODAL_MODELS = {
     # [Decoder-only]
-    "AriaForConditionalGeneration": ("aria", "AriaForConditionalGeneration"),
     "AudioFlamingo3ForConditionalGeneration": (
         "audioflamingo3",
         "AudioFlamingo3ForConditionalGeneration",
@@ -745,6 +744,10 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
     "Starcoder2ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "VaultGemmaForCausalLM": ("transformers", "TransformersForCausalLM"),
     # Multimodal models
+    "AriaForConditionalGeneration": (
+        "transformers",
+        "TransformersMultiModalMoEForCausalLM",
+    ),
     "Emu3ForConditionalGeneration": (
         "transformers",
         "TransformersMultiModalForCausalLM",
