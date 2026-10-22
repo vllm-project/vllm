@@ -157,7 +157,7 @@ variants:
           - "w2_weight"
           - "--load-format"
           - "fastsafetensors"
-          - "--no-enable-flashinfer-autotune"
+          - "--disable-flashinfer-autotune"
           - "--moe-backend"
           - "flashinfer_trtllm"
   w4a8:

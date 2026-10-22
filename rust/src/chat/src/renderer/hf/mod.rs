@@ -1287,12 +1287,21 @@ mod tests {
             .chat_options
             .template_kwargs
             .insert("enable_thinking".to_string(), Value::Bool(true));
+        request.chat_options.template_kwargs.extend([
+            ("reasoning_effort".to_string(), Value::Null),
+            ("mode".to_string(), Value::String("auto".to_string())),
+        ]);
 
         let renderer = HfChatRenderer::new(
-            Some("{{ enable_thinking }}|{{ default_only }}".to_string()),
+            Some(
+                "{{ enable_thinking }}|{{ default_only }}|{{ reasoning_effort is none }}|{{ mode }}"
+                    .to_string(),
+            ),
             HashMap::from([
                 ("enable_thinking".to_string(), Value::Bool(false)),
                 ("default_only".to_string(), Value::String("x".to_string())),
+                ("reasoning_effort".to_string(), Value::String("medium".to_string())),
+                ("mode".to_string(), Value::String("strict".to_string())),
             ]),
             ChatTemplateContentFormatOption::Auto,
         )
@@ -1300,7 +1309,7 @@ mod tests {
 
         let rendered = renderer.render(&request).unwrap().prompt;
 
-        assert_eq!(rendered, Prompt::Text("True|x".to_string()));
+        assert_eq!(rendered, Prompt::Text("True|x|True|auto".to_string()));
     }
 
     #[test]
