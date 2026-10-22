@@ -403,3 +403,16 @@ def test_encoder_cudagraph_mixed_width_images_pack_by_padded_width():
     assert selected[ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG] == (70,)
     selected = model.select_encoder_cudagraph_items(mm_kwargs, [0, 1])
     assert selected[ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG] == (280,)
+
+
+@pytest.mark.parametrize(
+    "mm_processor_kwargs",
+    [{"max_soft_tokens": 560}, {"images_kwargs": {"max_soft_tokens": 560}}],
+)
+def test_encoder_cudagraph_config_respects_max_soft_tokens(mm_processor_kwargs):
+    model = _gemma4_for_encoder_cudagraph()
+    model.config.text_config = SimpleNamespace(hidden_size=8)
+    model.multimodal_config = SimpleNamespace(mm_processor_kwargs=mm_processor_kwargs)
+
+    config = model.get_encoder_cudagraph_config()
+    assert config.capture_axes == ((70, 140, 280, 560),)
