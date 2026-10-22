@@ -45,6 +45,8 @@ class DecoderReplayLayers:
     every row. ``metadata_prefixes`` are the attention metadata keys the layers
     read, so the replay batch builds only those. ``first_swa_prefix`` keys the
     first replay layer's SWA metadata, built with the batch's window starts.
+    ``has_early_aux`` tells whether layers before the replay layers capture aux
+    hidden states, which the forward holds across the replay layers.
     """
 
     def __init__(
@@ -54,12 +56,14 @@ class DecoderReplayLayers:
         write_batch_kv: Callable[..., None],
         metadata_prefixes: set[str],
         first_swa_prefix: str,
+        has_early_aux: Callable[[], bool] = lambda: False,
     ) -> None:
         self.window = window
         self.run_layers = run_layers
         self.write_batch_kv = write_batch_kv
         self.metadata_prefixes = metadata_prefixes
         self.first_swa_prefix = first_swa_prefix
+        self.has_early_aux = has_early_aux
         # Set by the model state every step; None runs the layers on the batch.
         self.replay_batch: ReplayBatch | None = None
         # Set by the model state with replay graphs: PIECEWISE model graphs of
