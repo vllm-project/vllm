@@ -509,7 +509,7 @@ mod tests {
     async fn unified_stream_parses_formatted_tool_call_without_latch() {
         use vllm_parser::tool::{HermesToolParser, ToolParser as _};
 
-        let hermes = HermesToolParser::create(&[]).unwrap();
+        let hermes = HermesToolParser::create(&[], Arc::new(TestTokenizer::new())).unwrap();
         let parser = vllm_parser::unified::CombinedParser::new(None, Some(hermes));
 
         // Regression guard: a formatted call (space before the outer `}`) must not

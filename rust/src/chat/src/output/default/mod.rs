@@ -123,6 +123,7 @@ impl DefaultChatOutputProcessor {
             let tool_parser = if tool_parsing_enabled {
                 Some(Self::resolve_tool_parser(
                     request.tools(),
+                    tokenizer.clone(),
                     model_id,
                     tool_call_parser,
                 )?)
@@ -168,6 +169,7 @@ impl DefaultChatOutputProcessor {
 
     fn resolve_tool_parser(
         tools: &[ChatTool],
+        tokenizer: DynTokenizer,
         model_id: &str,
         selection: &ParserSelection,
     ) -> ChatResult<Box<dyn ToolParser>> {
@@ -183,7 +185,7 @@ impl DefaultChatOutputProcessor {
             ParserSelection::Explicit(name) => name.as_str(),
         };
 
-        let parser = factory.create(parser_name, tools)?;
+        let parser = factory.create(parser_name, tools, tokenizer)?;
 
         TOOL_PARSER_LOG_ONCE.call_once(|| info!(parser_name, "using tool parser"));
         Ok(parser)

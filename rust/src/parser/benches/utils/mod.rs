@@ -14,6 +14,8 @@ use tool_parser::traits::ToolParser as ExternalToolParser;
 pub(super) use unified::{attributed_chunks, feed_unified_parser};
 use vllm_parser::tool::test_utils::collect_stream;
 use vllm_parser::tool::{Tool, ToolParser};
+use vllm_tokenizer::DynTokenizer;
+use vllm_tokenizer::test_utils::TestTokenizer;
 
 pub(super) fn openai_tools(tools: &[Tool]) -> Vec<OpenAiTool> {
     tools
@@ -28,6 +30,11 @@ pub(super) fn openai_tools(tools: &[Tool]) -> Vec<OpenAiTool> {
             },
         })
         .collect()
+}
+
+/// A tokenizer for parsers that do not resolve any tokens.
+pub(super) fn test_tokenizer() -> DynTokenizer {
+    std::sync::Arc::new(TestTokenizer::new())
 }
 
 pub(super) fn feed_parser(parser: &mut dyn ToolParser, chunks: &[&str]) -> (String, usize) {
