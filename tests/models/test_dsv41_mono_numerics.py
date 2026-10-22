@@ -391,6 +391,10 @@ def _check_layers(rank: int, tp: int, device) -> None:
     e, sh = moe.experts.routed_experts, moe.shared_experts
     u8 = lambda t: t.view(torch.uint8)  # noqa: E731
     runner = DSV41MonoLayer(tp, rank, get_tp_group().cpu_group, device)
+    # the tuned builds' reference (``MonoBuild.generic``): at TP2 the ratio-2
+    # steps take the tuned paths, 12 rows the small-width ones, 36 a partial
+    # last token tile; their outputs must match the generic builds' bit for bit
+    generic = DSV41MonoLayer(tp, rank, get_tp_group().cpu_group, device, generic=True)
     gw, bias = moe.gate.weight.float(), moe.gate.e_score_correction_bias.float()
 
     def top6(x):
@@ -399,7 +403,7 @@ def _check_layers(rank: int, tp: int, device) -> None:
         return sc.topk(6, dim=1).indices.sort(1).values
 
     steps = []  # each case's launches, on fixed buffers, for the replay stress
-    for ratio, R, T in ((1, 1, 6), (2, 8, 6)):
+    for ratio, R, T in ((1, 1, 6), (2, 2, 6), (2, 6, 6), (2, 8, 6)):
         with set_current_vllm_config(VllmConfig()):
             rope = build_deepseek_v4_rope(
                 cfg, head_dim=HEAD_DIM, rope_head_dim=ROPE,
@@ -462,10 +466,14 @@ def _check_layers(rank: int, tp: int, device) -> None:
         q8, qs = mxfp8_e4m3_quantize(qr)
         q = rocm_mxfp8_block32_gemm(q8, qs, wq_b, wq_b_s, bf).view(M, H, HEAD_DIM)
         swa2d = s["swa_cache"].view(s["swa_cache"].shape[0], -1)
+        swa_pre = s["swa_cache"].clone()
         q_roped = torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
             q, kv, swa2d, s["slot_mapping"], s["positions"], cos_sin, H,
             cfg.rms_norm_eps, SWA_BLOCK, False, False, True, False,
         )  # fmt: skip
+        swa_ref = s["swa_cache"].clone()
+        # the step's rows are new: the reference's insert changed the cache
+        assert not torch.equal(swa_pre.view(torch.uint8), swa_ref.view(torch.uint8))
         attn = torch.empty(M, H, HEAD_DIM, dtype=bf, device=device)
         rocm_aiter_ops.triton_sparse_mla_fwd(
             q_roped, s["swa_cache"], attn, HEAD_DIM**-0.5, swa_ptr, swa_ind,
@@ -483,15 +491,32 @@ def _check_layers(rank: int, tp: int, device) -> None:
         out = moe_out(xf)
 
         # ---- the whole layer: K1 + K2
-        o = runner.forward(
-            mw, x0, res0, post0, comb0, pre0, s["positions"], s["slot_mapping"],
-            s["swa_cache"], s["swa_indices"], s["swa_lens"], s["token_to_req"],
-            topk_indices=s["topk"], comp_cache=s["comp_cache"],
-            comp_block_table=s["comp_block_table"],
-        )  # fmt: skip
-        off = scratch_layout(M, tp)["normed"][0]
-        normed = runner.scratch(M)[off : off + M * HIDDEN * 2].view(bf).view(M, HIDDEN)
         tag = f"ratio {ratio}, {R} x {T}"
+        res_of = {}
+        swa_of = {}
+        for r in (generic, runner) if runner.tuned(M, ratio) else (runner,):
+            # each runner inserts the step's rows itself, into the cache as it
+            # was before the reference's insert
+            s["swa_cache"].copy_(swa_pre)
+            o = r.forward(
+                mw, x0, res0, post0, comb0, pre0, s["positions"], s["slot_mapping"],
+                s["swa_cache"], s["swa_indices"], s["swa_lens"], s["token_to_req"],
+                topk_indices=s["topk"], comp_cache=s["comp_cache"],
+                comp_block_table=s["comp_block_table"],
+            )  # fmt: skip
+            off = scratch_layout(M, tp, tuned=r.tuned(M, ratio))["normed"][0]
+            normed = r.scratch(M, r.tuned(M, ratio))[off : off + M * HIDDEN * 2]
+            mid = (r.res_mid, r.post_a, r.comb_a, r.pre_a)
+            res_of[r] = [t.clone() for t in (*o, normed, *(t[:M] for t in mid))]
+            swa_of[r] = s["swa_cache"].clone()
+        if generic in res_of:
+            assert all(map(torch.equal, res_of[runner], res_of[generic])), tag
+        # the SWA records K1 writes: every runner's cache, byte for byte,
+        # equals the one the reference's insert leaves (a K1 that skipped or
+        # misplaced an insert fails here, whatever its attention then reads)
+        for r, got in swa_of.items():
+            assert torch.equal(got.view(torch.uint8), swa_ref.view(torch.uint8)), tag
+        normed = normed.view(bf).view(M, HIDDEN)
         assert _cos(runner.res_mid[:M], res) > 0.99999, tag
         for got, want in (
             (runner.post_a, post),
@@ -518,6 +543,9 @@ def _check_layers(rank: int, tp: int, device) -> None:
         # ---- the FFN launch, from the same unreduced wo_b output
         f = runner.ffn(mw, part, res, post, comb, attn_pre)
         torch.testing.assert_close(f[1], res2, rtol=2**-8, atol=1e-6)
+        # the FFN launch is a generic build: it writes the generic scratch
+        off = scratch_layout(M, tp)["normed"][0]
+        normed = runner.scratch(M)[off : off + M * HIDDEN * 2].view(bf).view(M, HIDDEN)
         torch.testing.assert_close(normed, xf, rtol=2**-7, atol=1e-6)
         # TODO: back to 0.9999 / 0.015 with the one above (ROCm/aiter#6548)
         assert _cos(f[0], out) > 0.9998 and _rel(f[0], out) < 0.02, tag

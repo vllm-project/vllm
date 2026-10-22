@@ -46,12 +46,33 @@ def rcp_pow2(code):
     return ((254 - code) << 23).bitcast(fx.Float32)
 
 
-def scale_index(row, col, cols):
+def scale_index(row, col, cols, sm=False):
     """Byte of e8m0 scale (row, col) in aiter's ``shuffle_scale`` layout:
-    ``view(rows/32, 2, 16, cols/8, 2, 4).permute(0, 3, 5, 2, 4, 1)``."""
-    r32, a, b = row // 32, (row // 16) % 2, row % 16
-    c8, d, e = col // 8, (col // 4) % 2, col % 4
+    ``view(rows/32, 2, 16, cols/8, 2, 4).permute(0, 3, 5, 2, 4, 1)`` (``sm``:
+    in shifts and masks, ``udiv``)."""
+    r32, a, b = udiv(row, 32, sm), umod(udiv(row, 16, sm), 2, sm), umod(row, 16, sm)
+    c8, d, e = udiv(col, 8, sm), umod(udiv(col, 4, sm), 2, sm), umod(col, 4, sm)
     return ((((r32 * (cols // 8) + c8) * 4 + e) * 16 + b) * 2 + d) * 2 + a
+
+
+def udiv(x, d, unsigned=True):
+    """``x // d`` by a constant ``d > 0`` as a shift (``d`` a power of two, any
+    sign) or an unsigned division (``x >= 0``), where a traced ``//`` is a
+    signed floor division with its fix-ups. ``unsigned`` false: ``//``."""
+    if isinstance(x, int) or not unsigned:
+        return x // d
+    if d & (d - 1) == 0:
+        return x >> (d.bit_length() - 1)
+    return fx.Int32(fx.Uint32(x) // d)
+
+
+def umod(x, d, unsigned=True):
+    """``x % d`` as a mask or an unsigned remainder (``udiv``)."""
+    if isinstance(x, int) or not unsigned:
+        return x % d
+    if d & (d - 1) == 0:
+        return x & (d - 1)
+    return fx.Int32(fx.Uint32(x) % d)
 
 
 def fp4_tile_load(r_w, base, rg, k, st, at):

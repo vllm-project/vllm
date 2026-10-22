@@ -196,6 +196,7 @@ class DSV41MonoLayer:
         topk: int = TOPK,
         ug_groups: int = 2,
         swa_width: int = WINDOW,
+        generic: bool = False,
     ):
         _ensure_writable_flydsl_cache()
         from .common.peer_memory import PeerBuffer
@@ -215,9 +216,10 @@ class DSV41MonoLayer:
         # rows) or the DSpark draft's, which has a runner of its own
         self.experts, self.topk, self.ug_groups = experts, topk, ug_groups
         self.swa_width = swa_width
+        self.generic = generic  # every build generic (``MonoBuild.generic``)
         self.d = Dims(tp)
         dev = self.device = torch.device(device)
-        self._scratch: dict[int, torch.Tensor] = {}
+        self._scratch: dict[tuple[int, bool], torch.Tensor] = {}
         # [epoch, -, -, -, a mark per CTA, the MoE's counters]
         self.epoch = torch.zeros(EPOCH_WORDS, dtype=torch.int32, device=dev)
         self.q = torch.zeros(
@@ -249,11 +251,12 @@ class DSV41MonoLayer:
         )
         self._kernels: dict = {}
 
-    def scratch(self, tokens: int) -> torch.Tensor:
+    def scratch(self, tokens: int, tuned: bool = False) -> torch.Tensor:
         """Step width ``tokens``'s scratch: a width's layout has memory of its own
-        (``layer.scratch_layout``). Allocated at the width's first step, which is
-        eager: vLLM runs every graph's batch eagerly before capturing it."""
-        buf = self._scratch.get(tokens)
+        (``layer.scratch_layout``), and so has a tuned build's. Allocated at the
+        width's first step, which is eager: vLLM runs every graph's batch
+        eagerly before capturing it."""
+        buf = self._scratch.get((tokens, tuned))
         if buf is None:
             if torch.cuda.is_current_stream_capturing():
                 raise RuntimeError(
@@ -261,11 +264,13 @@ class DSV41MonoLayer:
                     "a CUDA graph capture"
                 )
             buf = torch.zeros(
-                scratch_bytes(tokens, self.tp, self.experts, self.topk, self.ug_groups),
+                scratch_bytes(
+                    tokens, self.tp, self.experts, self.topk, self.ug_groups, tuned
+                ),
                 dtype=torch.uint8,
                 device=self.device,
             )
-            self._scratch[tokens] = buf
+            self._scratch[(tokens, tuned)] = buf
         return buf
 
     def first_pre_mix(self, tokens: int) -> torch.Tensor:
@@ -274,6 +279,19 @@ class DSV41MonoLayer:
     @staticmethod
     def supports(tokens: int) -> bool:
         return 1 <= tokens <= MAX_TOKENS
+
+    def tuned(self, tokens: int, ratio: int) -> bool:
+        """Whether this runner's layer builds are tuned (``MonoBuild.tuned``)."""
+        return MonoBuild(
+            tokens,
+            self.tp,
+            ratio,
+            experts=self.experts,
+            topk=self.topk,
+            ug_groups=self.ug_groups,
+            swa_width=self.swa_width,
+            generic=self.generic,
+        ).tuned
 
     def kernels(self, tokens: int, ratio: int, fold: bool = True, index: bool = False):
         key = (tokens, ratio, fold, index)
@@ -289,6 +307,7 @@ class DSV41MonoLayer:
                 topk=self.topk,
                 ug_groups=self.ug_groups,
                 swa_width=self.swa_width,
+                generic=self.generic,
             )
             # On gfx942, keylist.launch writes an index source's keys between
             # vLLM's indexer and K2 (forward), so its K2 is the one without
@@ -356,6 +375,7 @@ class DSV41MonoLayer:
         index = select is not None
         assert not index or ratio
         k1, k2 = self.kernels(M, ratio, fold, index)
+        scratch = self.scratch(M, self.tuned(M, ratio))
         st = torch.cuda.current_stream()
         if outs is None:
             outs = self._outs(M, residual)
@@ -427,7 +447,7 @@ class DSV41MonoLayer:
             self.klen.data_ptr(),
             self.normed.data_ptr(),
             self.qr.data_ptr(),
-            self.scratch(M).data_ptr(),
+            scratch.data_ptr(),
             self.epoch.data_ptr(),
             self.tl1.data_ptr() if self.timeline else 0,
             st,
@@ -503,7 +523,7 @@ class DSV41MonoLayer:
             w.sw2.data_ptr(),
             w.sw2_s.data_ptr(),
             out.data_ptr(),
-            self.scratch(M).data_ptr(),
+            scratch.data_ptr(),
             self.peer.local,
             self.peer.addresses.data_ptr(),
             self.rank,
