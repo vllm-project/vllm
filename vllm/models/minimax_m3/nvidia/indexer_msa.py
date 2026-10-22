@@ -80,6 +80,8 @@ NUM_SLOT_SETS = 3
 TOPK = 16
 PREFILL_CHUNK_SIZE = 1024
 PREFILL_SCORE_BYTES = 32 << 20
+PREFILL_FMHA_CHUNK_SIZE = 8192
+PREFILL_FMHA_SCRATCH_BYTES = 256 << 20
 SPIN_LIMIT = 1 << 26
 # Speculative methods whose drafter does not reuse the target's sparse layers.
 _SPEC_METHODS = (None, "eagle", "eagle3", "ngram", "suffix", "draft_model")
@@ -107,6 +109,7 @@ class MiniMaxM3IndexerMSAPrefillChunk:
     cu_seqlens_q: torch.Tensor
     seq_lens: torch.Tensor
     prefix_lens: torch.Tensor
+    plan: dict | None = None
 
 
 @dataclass
@@ -122,6 +125,7 @@ class MiniMaxM3IndexerMSAPrefillMetadata:
     gather_pages: torch.Tensor | None = None
     local_chunks: list[MiniMaxM3IndexerMSAPrefillChunk] | None = None
     local_scores: torch.Tensor | None = None
+    local_valid: torch.Tensor | None = None
     candidate_buffers: torch.Tensor | None = None
 
 
@@ -320,6 +324,7 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                     )
             local_chunks = None
             local_scores = None
+            local_valid = None
             candidate_buffers = None
             if self.prefill_local_score:
                 local_chunks = []
@@ -330,11 +335,39 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                     PREFILL_CHUNK_SIZE,
                     max(64, PREFILL_SCORE_BYTES // (heads * score_cols * 4) // 64 * 64),
                 )
+                if self.index_k_tp == 2:
+                    from vllm.third_party.fmha_sm100.api import (
+                        fmha_index_score_sharded_plan,
+                    )
+
+                    chunk_size = min(
+                        PREFILL_FMHA_CHUNK_SIZE,
+                        max(
+                            128,
+                            PREFILL_FMHA_SCRATCH_BYTES
+                            // (heads * score_cols * 5)
+                            // 128
+                            * 128,
+                        ),
+                    )
                 start = 0
                 for request, query_len in enumerate(side_qo.tolist()):
                     prefix_len = int(side_kv[request]) - query_len
                     for offset in range(0, query_len, chunk_size):
                         size = min(chunk_size, query_len - offset)
+                        chunk_plan = None
+                        if self.index_k_tp == 2:
+                            chunk_plan = fmha_index_score_sharded_plan(
+                                torch.tensor([size], dtype=torch.int32),
+                                torch.tensor(
+                                    [prefix_len + offset + size], dtype=torch.int32
+                                ),
+                                heads,
+                                qo_offset=torch.tensor(
+                                    [prefix_len + offset], dtype=torch.int32
+                                ),
+                                device=seq_lens.device,
+                            )
                         local_chunks.append(
                             MiniMaxM3IndexerMSAPrefillChunk(
                                 start=start + offset,
@@ -351,6 +384,7 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                                     lo + request : lo + request + 1
                                 ]
                                 + offset,
+                                plan=chunk_plan,
                             )
                         )
                     start += query_len
@@ -361,6 +395,8 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                     dtype=torch.float32,
                     device=seq_lens.device,
                 )
+                if self.index_k_tp == 2:
+                    local_valid = torch.empty_like(local_scores, dtype=torch.uint8)
                 candidate_buffers = torch.empty(
                     2,
                     heads,
@@ -380,6 +416,7 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                 gather_pages=gather_pages,
                 local_chunks=local_chunks,
                 local_scores=local_scores,
+                local_valid=local_valid,
                 candidate_buffers=candidate_buffers,
             )
 
@@ -626,20 +663,35 @@ def prefill_local_score(
         query = index_q[chunk.start : chunk.end]
         tokens = query.shape[0]
         scores = metadata.local_scores[:tokens]
-        minimax_m3_index_score(
-            query,
-            kv,
-            chunk.block_table,
-            chunk.cu_seqlens_q,
-            chunk.seq_lens,
-            chunk.prefix_lens,
-            tokens,
-            chunk.max_seq_len,
-            heads,
-            rank=comm.rank,
-            tp=comm.world,
-            score_out=scores.transpose(0, 1),
-        )
+        if chunk.plan is not None:
+            from vllm.third_party.fmha_sm100.api import fmha_index_score_sharded
+
+            assert metadata.local_valid is not None
+            fmha_index_score_sharded(
+                query,
+                kv,
+                chunk.block_table,
+                chunk.plan,
+                rank=comm.rank,
+                max_score=scores,
+                valid_score=metadata.local_valid[:tokens],
+                sm_scale=1.0,
+            )
+        else:
+            minimax_m3_index_score(
+                query,
+                kv,
+                chunk.block_table,
+                chunk.cu_seqlens_q,
+                chunk.seq_lens,
+                chunk.prefix_lens,
+                tokens,
+                chunk.max_seq_len,
+                heads,
+                rank=comm.rank,
+                tp=comm.world,
+                score_out=scores.transpose(0, 1),
+            )
         chunk_send = send[:, chunk.start : chunk.end]
         candidates = chunk_send[..., TOPK : 2 * TOPK].transpose(0, 1)
         valid_pages = num_valid_pages[chunk.start : chunk.end]
