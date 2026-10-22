@@ -256,6 +256,10 @@ class DeepGemmMegaMoEExperts(nn.Module):
 
     """
 
+    # Weight loaders write each checkpoint shard straight into the kernel layout
+    # and there is no post-load processing, so layerwise reload loads in place.
+    reload_in_place = True
+
     _symm_buffers: ClassVar[dict[tuple, Any]] = {}
     _synchronized_ep_groups: ClassVar[set[tuple[int, int]]] = set()
 

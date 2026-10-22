@@ -1460,3 +1460,29 @@ def test_online_quantize_reload(
         mul_perp = llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0]
         add_perp = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
         assert add_perp < mul_perp
+
+
+class _InPlaceReloadLayer(torch.nn.Module):
+    reload_in_place = True
+
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.zeros(2, 4), requires_grad=False)
+        self.weight.weight_loader = lambda param, loaded: param.data[0].copy_(loaded)
+
+
+def test_reload_in_place_layer_writes_live_storage(default_vllm_config):
+    """Opted-in layers keep their live tensors: no meta staging, no deferred copy."""
+    model = torch.nn.Sequential(_InPlaceReloadLayer())
+    layer = model[0]
+    live = layer.weight
+    record_metadata_for_reloading(model)
+    initialize_layerwise_reload(model)
+    assert layer.weight is live and not live.is_meta
+
+    layer.weight.weight_loader(layer.weight, torch.ones(4))
+    assert torch.equal(live[0], torch.ones(4))
+
+    finalize_layerwise_reload(model, default_vllm_config.model_config)
+    assert layer.weight is live
+    assert torch.equal(live, torch.tensor([[1.0] * 4, [0.0] * 4]))

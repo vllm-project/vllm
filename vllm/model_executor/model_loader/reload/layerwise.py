@@ -105,6 +105,11 @@ def initialize_layerwise_reload(model: torch.nn.Module):
         if info.can_load():
             continue
 
+        # Loaders write the final kernel layout into the live tensors and nothing
+        # post-processes them: load in place, without staging or a dry-run count.
+        if getattr(layer, "reload_in_place", False):
+            continue
+
         # Save current tensors for later copying
         info.kernel_tensors = get_layer_params_buffers(layer)
         # snapshot now: restore_layer_on_meta drops alias buffers from the live set
