@@ -100,7 +100,7 @@ def draft_server(model: str, log_path: Path):
                 assert process.returncode == 0, f"draft server failed: {log_path}"
 
 
-@pytest.mark.parametrize("transport", ["inline"])
+@pytest.mark.parametrize("transport", ["inline", "cuda_ipc"])
 def test_remote_mtp_matches_target_and_uses_drafts(
     vllm_runner, monkeypatch, tmp_path, transport
 ):

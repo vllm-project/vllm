@@ -42,9 +42,7 @@ def test_malformed_endpoint_rejected(endpoint):
         RemoteDraftConfig(endpoint=endpoint)
 
 
-@pytest.mark.parametrize(
-    "transport", ["cuda_ipc", "pinned_host", "zmq", "carrier_pigeon"]
-)
+@pytest.mark.parametrize("transport", ["pinned_host", "zmq", "carrier_pigeon"])
 def test_unimplemented_transport_rejected(transport):
     with pytest.raises(ValidationError):
         RemoteDraftConfig(endpoint="unix:///x.sock", transport=transport)
@@ -53,3 +51,12 @@ def test_unimplemented_transport_rejected(transport):
 def test_nonpositive_timeout_rejected():
     with pytest.raises(ValidationError):
         RemoteDraftConfig(endpoint="unix:///x.sock", request_timeout_ms=0)
+
+
+def test_cuda_ipc_requires_unix_socket():
+    assert (
+        RemoteDraftConfig(endpoint="unix:///x.sock", transport="cuda_ipc").transport
+        == "cuda_ipc"
+    )
+    with pytest.raises(ValidationError, match="UNIX socket"):
+        RemoteDraftConfig(endpoint="tcp://127.0.0.1:9999", transport="cuda_ipc")

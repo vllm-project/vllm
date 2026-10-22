@@ -90,6 +90,14 @@ class RemoteSpeculator(BaseSpeculator):
                     raise ValueError(
                         "remote feature schema differs from checkpoint contract"
                     )
+                # Reserve transport memory before the worker profiles free GPU
+                # memory and assigns the remaining budget to the target KV cache.
+                self._session.prepare_cuda_ipc(self.device)
+                if self._session.cuda_ipc_reserved_bytes:
+                    logger.info(
+                        "Remote drafter CUDA IPC arena: %d bytes",
+                        self._session.cuda_ipc_reserved_bytes,
+                    )
             except Exception as exc:
                 self.close()
                 error = f"{type(exc).__name__}: {exc}"
@@ -498,8 +506,19 @@ class RemoteSpeculator(BaseSpeculator):
                 raise ValueError(
                     f"unexpected remote feature shape for {slot.kind}: {tensor.shape}"
                 )
+            device = (
+                self.device
+                if self._session is not None
+                and self._session.selected_transport == "cuda_ipc"
+                and slot.kind
+                in (
+                    TargetFeatureKind.LAST_HIDDEN_STATES.value,
+                    TargetFeatureKind.AUX_HIDDEN_STATES.value,
+                )
+                else torch.device("cpu")
+            )
             result[slot.kind] = tensor.to(
-                device="cpu", dtype=getattr(torch, slot.dtype)
+                device=device, dtype=getattr(torch, slot.dtype)
             )
         return result
 

@@ -363,13 +363,23 @@ def limit_shortfalls(hello: Hello, limits: RemoteServerLimits) -> list[str]:
 
 
 def inline_feature_frame_rejections(
-    hello: Hello, schema: TargetFeatureSchema, limits: RemoteServerLimits
+    hello: Hello,
+    schema: TargetFeatureSchema,
+    limits: RemoteServerLimits,
+    *,
+    cuda_ipc: bool = False,
 ) -> list[str]:
     """Check each inline slot against its declared maximum encoded byte size."""
     max_tokens = hello.max_num_batched_tokens or limits.max_feature_tokens
     max_sequences = hello.max_num_seqs or limits.max_batch_size
     reasons = []
     for index, slot in enumerate(schema.slots):
+        if (
+            cuda_ipc
+            and not slot.per_sequence
+            and slot.dtype in ("float16", "bfloat16", "float32", "float64")
+        ):
+            continue
         rows = max_sequences if slot.per_sequence else max_tokens
         try:
             # Slot IDs grow throughout a session; reserve their full wire width.
@@ -382,7 +392,11 @@ def inline_feature_frame_rejections(
 
 
 def inline_receive_budgets(
-    hello: Hello, schema: TargetFeatureSchema, limits: RemoteServerLimits
+    hello: Hello,
+    schema: TargetFeatureSchema,
+    limits: RemoteServerLimits,
+    *,
+    cuda_ipc: bool = False,
 ) -> tuple[int, int]:
     """Maximum encoded data frame and bytes preceding one control message."""
     rows = hello.max_num_seqs or limits.max_batch_size
@@ -392,7 +406,11 @@ def inline_receive_budgets(
     slot_id = (1 << 64) - 1
     sizes = [check_data_frame_size(slot_id, "int64", (rows,))] * 4
     sizes.extend(
-        check_data_frame_size(
+        1024
+        if cuda_ipc
+        and not slot.per_sequence
+        and slot.dtype.startswith(("float", "bfloat"))
+        else check_data_frame_size(
             slot_id,
             slot.dtype,
             (rows if slot.per_sequence else tokens, *slot.trailing_shape),

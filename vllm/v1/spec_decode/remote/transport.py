@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Copy-based stream transport shared by the control and data planes.
+"""Framed stream transport shared by the control and data planes.
 
 This is the ``inline`` transport: control frames carry encoded
 MessageEnvelopes and data frames carry raw tensor bytes tagged with a slot
-index, multiplexed on one stream connection. It needs only the standard
-library and msgspec, and is correct rather than fast; zero-copy transports
-(CUDA IPC, pinned-host ring) replace only the data-plane half and keep the
-control plane as is.
+index, multiplexed on one stream connection. With negotiated ``cuda_ipc``,
+floating feature frames carry opaque CUDA memory/event descriptors instead
+of tensor bytes. Integer metadata and results remain inline. Wire framing
+and validation need only the standard library and msgspec.
 
 Frame layout: ``kind:u8 | length:u32 big-endian | body``. Data-plane
 payloads are in native byte order, which is acceptable because remote
@@ -24,13 +24,24 @@ import socket
 import struct
 import sys
 import time
+import zlib
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 import msgspec
 
+from vllm.v1.spec_decode.remote.cuda_ipc import (
+    CudaIpcDescriptor,
+    validate_descriptor,
+)
+
+if TYPE_CHECKING:
+    import torch
+
 INLINE_TRANSPORT = "inline"
+CUDA_IPC_TRANSPORT = "cuda_ipc"
 
 FRAME_CONTROL = 0x01
 FRAME_DATA = 0x02
@@ -71,13 +82,25 @@ class DataFrame(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     """One tensor on the data plane.
 
     ``dtype`` is the torch dtype name (``"int32"``, ``"bfloat16"``) and
-    ``payload`` holds the contiguous row-major bytes in native byte order.
+    ``payload`` holds the contiguous row-major bytes in native byte order,
+    or is empty when ``cuda_ipc`` identifies a live CUDA buffer lease.
     """
 
     slot: int
     dtype: str
     shape: tuple[int, ...]
     payload: bytes
+    cuda_ipc: CudaIpcDescriptor | None = None
+
+
+@dataclass(frozen=True)
+class DeviceFeature:
+    """A validated feature copied into receiver-owned CUDA storage."""
+
+    slot: int
+    dtype: str
+    shape: tuple[int, ...]
+    tensor: "torch.Tensor"
 
 
 @dataclass(frozen=True)
@@ -161,6 +184,8 @@ def frame_to_ints(frame: DataFrame) -> list[int]:
 def validate_integer_frame(frame: DataFrame) -> None:
     """Validate an integer frame's dtype and payload size without decoding it."""
     _int_typecode(frame.dtype)
+    if frame.cuda_ipc is not None:
+        raise TransportError("integer metadata must use inline payloads")
     validate_frame(frame)
 
 
@@ -170,16 +195,38 @@ def validate_frame(frame: DataFrame) -> None:
         itemsize = _DTYPE_ITEMSIZE[frame.dtype]
     except KeyError:
         raise TransportError(f"unknown dtype {frame.dtype!r} in data frame") from None
-    if any(size < 0 for size in frame.shape):
+    if frame.slot < 0 or len(frame.shape) > 8 or any(size < 0 for size in frame.shape):
         raise TransportError(
             f"data frame {frame.slot} has negative shape {frame.shape}"
         )
     expected = math.prod(frame.shape) * itemsize
+    if expected > MAX_FRAME_BYTES:
+        raise TransportError(f"data frame {frame.slot} exceeds the byte limit")
+    if frame.cuda_ipc is not None:
+        if frame.payload or frame.dtype in _INT_TYPECODES:
+            raise TransportError("CUDA IPC requires a floating tensor without payload")
+        try:
+            validate_descriptor(frame.cuda_ipc, frame.dtype, frame.shape)
+        except (ValueError, RuntimeError) as e:
+            raise TransportError(f"invalid CUDA IPC descriptor: {e}") from e
+        return
     if len(frame.payload) != expected:
         raise TransportError(
             f"data frame {frame.slot} has {len(frame.payload)} payload bytes, "
             f"expected {expected} for {frame.dtype} shape {frame.shape}"
         )
+
+
+def frame_checksum(frames: Sequence[DataFrame | None]) -> int:
+    """Checksum inline bytes or immutable IPC lease metadata."""
+    value = 0
+    for frame in frames:
+        if frame is not None:
+            data = frame.payload
+            if frame.cuda_ipc is not None:
+                data = _frame_encoder.encode(frame)
+            value = zlib.crc32(data, value)
+    return value & 0x7FFFFFFF
 
 
 def _int_typecode(dtype: str) -> tuple[str, int]:

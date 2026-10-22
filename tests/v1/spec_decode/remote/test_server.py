@@ -18,6 +18,7 @@ import torch
 from vllm.v1.spec_decode.remote import server as server_module
 from vllm.v1.spec_decode.remote import transport as transport_module
 from vllm.v1.spec_decode.remote.capabilities import TargetFeatureKind
+from vllm.v1.spec_decode.remote.cuda_ipc import CudaIpcDescriptor
 from vllm.v1.spec_decode.remote.protocol import (
     AdvanceAndPropose,
     CancelBatch,
@@ -53,9 +54,11 @@ from vllm.v1.spec_decode.remote.transport import (
     FRAME_DATA,
     ConnectionClosed,
     DataFrame,
+    DeviceFeature,
     Listener,
     connect,
     decode_data_frame,
+    frame_checksum,
     frame_to_ints,
     ints_to_frame,
 )
@@ -82,6 +85,129 @@ def key(sequence_id: int, generation: int = 0, verifier: str = VERIFIER):
         sequence_id=sequence_id,
         generation=generation,
     )
+
+
+@pytest.mark.parametrize("fence", ["cleanup", "shutdown"])
+@pytest.mark.parametrize("while_waiting", [False, True])
+def test_fenced_teardown_quarantines_receiver_without_retiring_owners(
+    monkeypatch, fence, while_waiting
+):
+    adapter = FakeDraftAdapter(vocab_size=VOCAB)
+    server = RemoteDraftServer(adapter)
+    conn, receiver = Mock(), Mock()
+    server._connections.add(conn)
+    owned = key(1)
+    close_adapter = Mock(wraps=adapter.close_sequences)
+    monkeypatch.setattr(adapter, "close_sequences", close_adapter)
+    turn = server.adapter_turn
+
+    def fenced_turn(**kwargs):
+        setattr(server, f"_{fence}_failed", True)
+        return turn(**kwargs)
+
+    def run(session):
+        session.session_id = "closing-session"
+        session.ipc_receiver = receiver
+        server.registry.open(owned, owner=session.session_id)
+        adapter.open_sequence(owned)
+        if while_waiting:
+            monkeypatch.setattr(server, "adapter_turn", fenced_turn)
+        else:
+            setattr(server, f"_{fence}_failed", True)
+
+    monkeypatch.setattr(server_module._ServerSession, "run", run)
+    server._serve_connection(conn)
+    receiver.quarantine.assert_called_once_with()
+    receiver.close.assert_not_called()
+    close_adapter.assert_not_called()
+    assert server.registry.get(owned) is not None
+    assert adapter.prefix(owned) == []
+    conn.close.assert_called_once_with()
+    assert conn not in server._connections
+
+
+@pytest.mark.parametrize("stage", ["prefill", "propose"])
+def test_fatal_feature_import_latches_health_and_quarantines_receiver(
+    monkeypatch, stage
+):
+    adapter = FakeDraftAdapter(vocab_size=VOCAB)
+    server = RemoteDraftServer(adapter)
+    client = None
+    receiver = Mock()
+
+    def fail_import(session, frames, **kwargs):
+        session.ipc_receiver = receiver
+        raise RuntimeError("CUDA error: an illegal memory access was encountered")
+
+    try:
+        client = RawClient(server.start("tcp://127.0.0.1:0"))
+        client.hello()
+        client.ready(key(1))
+        monkeypatch.setattr(
+            server_module._ServerSession, "_resolve_features", fail_import
+        )
+        if stage == "prefill":
+            assert client.open(key(2)).status is OK
+            reply = client.prefill(key(2), [4], offset=0)
+        else:
+            reply = client.propose(0, [key(1)], [4])
+        assert reply.status is SpeculatorStatusCode.INTERNAL_ERROR
+        assert not client.call(Ping(nonce=42)).healthy
+        assert server.wait(0)
+        assert not server.healthy
+    finally:
+        if client is not None:
+            client.conn.close()
+        server.stop()
+    receiver.quarantine.assert_called_once_with()
+    receiver.close.assert_not_called()
+
+
+@pytest.mark.parametrize("failure_stage", ["ipc", "adapter"])
+def test_cleanup_failure_releases_connection_and_preserves_failed_owners(
+    monkeypatch, failure_stage
+):
+    adapter = FakeDraftAdapter(vocab_size=VOCAB)
+    server = RemoteDraftServer(adapter)
+    conn = Mock()
+    server._connections.add(conn)
+    owned, other = key(1), key(2)
+    receiver = Mock()
+    failure = RuntimeError(f"injected {failure_stage} cleanup failure")
+    if failure_stage == "ipc":
+        receiver.close.side_effect = failure
+    close_sequences = adapter.close_sequences
+
+    def close_with_failure(keys):
+        close_sequences(keys)
+        if failure_stage == "adapter":
+            raise failure
+
+    close_adapter = Mock(side_effect=close_with_failure)
+    monkeypatch.setattr(adapter, "close_sequences", close_adapter)
+    report_error = Mock()
+    monkeypatch.setattr(server_module.logger, "exception", report_error)
+
+    def run(session):
+        session.session_id = "closing-session"
+        session.ipc_receiver = receiver
+        for sequence, owner in ((owned, session.session_id), (other, "other-session")):
+            assert server.registry.open(sequence, owner=owner).status == OK
+            adapter.open_sequence(sequence)
+
+    monkeypatch.setattr(server_module._ServerSession, "run", run)
+    server._serve_connection(conn)
+
+    receiver.close.assert_called_once_with()
+    close_adapter.assert_called_once_with((owned,))
+    assert (server.registry.get(owned) is not None) == (failure_stage == "adapter")
+    assert adapter.prefix(owned) is None
+    assert server.registry.get(other) is not None
+    assert adapter.prefix(other) == []
+    conn.close.assert_called_once_with()
+    assert conn not in server._connections
+    report_error.assert_called_once()
+    assert server._cleanup_failed == (failure_stage == "adapter")
 
 
 @pytest.mark.parametrize(
@@ -420,6 +546,87 @@ def test_hello_ack_reports_adapter_capabilities(server, adapter, client):
     assert ack.feature_schema == adapter.feature_schema()
     assert ack.limits == DEFAULT_LIMITS
     assert ack.feature_schema.slots[0].kind == TargetFeatureKind.TOKEN_IDS.value
+
+
+@pytest.mark.parametrize("fail_import", [False, True])
+def test_cuda_ipc_prefill_ack_requires_completed_import(
+    tmp_path, monkeypatch, fail_import
+):
+    observed: list[DataFrame | DeviceFeature | None] = []
+
+    class CudaAdapter(FakeDraftAdapter):
+        def cuda_ipc_device(self):
+            return torch.device("cuda:0")
+
+        def prefill(self, key, inputs):
+            observed.extend(inputs.features)
+
+    adapter = CudaAdapter(
+        vocab_size=VOCAB,
+        feature_schema=TargetFeatureSchema(
+            1, (FeatureSlot("last_hidden_states", "float32", (2,)),)
+        ),
+    )
+    received = torch.tensor([[1.0, 2.0]])
+    receiver = Mock()
+    copy_budgets = []
+
+    def receive(*args, deadline):
+        copy_budgets.append(deadline - time.monotonic())
+        if fail_import:
+            raise RuntimeError("copy completion unknown")
+        return received
+
+    receiver.receive.side_effect = receive
+    monkeypatch.setattr(server_module, "CudaIpcReceiver", Mock(return_value=receiver))
+    server = RemoteDraftServer(adapter)
+    server.start(f"unix://{tmp_path}/draft.sock")
+    client = RawClient(server.endpoint)
+    try:
+        ack = client.hello(supported_transports=("cuda_ipc",))
+        assert isinstance(ack, HelloAck)
+        assert ack.selected_transport == "cuda_ipc"
+        sequence = key(1)
+        assert client.open(sequence).status is OK
+        descriptor = CudaIpcDescriptor(
+            buffer_id=1,
+            generation=1,
+            device_uuid="GPU-00000000-0000-0000-0000-000000000000",
+            memory_handle=b"m" * 64,
+            ready_event_handle=b"e" * 64,
+            nbytes=8,
+            capacity_bytes=8,
+        )
+        feature = DataFrame(100, "float32", (1, 2), b"", descriptor)
+        message = PrefillChunk(sequence, 0, 1, True, 100, frame_checksum([feature]))
+        if fail_import:
+            with pytest.raises(ConnectionClosed):
+                client.call(message, frames=(feature,))
+            assert observed == []
+        else:
+            reply = client.call(message, frames=(feature,))
+            assert reply.status is OK
+            assert len(observed) == 1 and isinstance(observed[0], DeviceFeature)
+            assert observed[0].tensor is received
+        assert receiver.receive.call_count == 1
+        assert receiver.receive.call_args.args == (descriptor, "float32", (1, 2))
+        assert len(copy_budgets) == 1 and 0 < copy_budgets[0] <= 1
+    finally:
+        client.close()
+        server.stop()
+    receiver.close.assert_called_once_with()
+
+
+def test_duplicate_wire_slots_close_connection(client):
+    client.hello()
+    frame = ints_to_frame(5, [1])
+    client.conn.send_data(frame)
+    client.conn.send_data(frame)
+    _, reply = client.recv()
+    assert isinstance(reply, ErrorReply)
+    assert "duplicate data slot" in reply.detail
+    with pytest.raises(ConnectionClosed):
+        client.recv()
 
 
 @pytest.mark.parametrize(
@@ -1075,14 +1282,17 @@ def test_ping_answers_while_the_adapter_is_busy(server, adapter, client):
 
 
 @pytest.mark.parametrize(
-    "failure", ["queue_full", "adapter", "malformed_result", "draft_budget"]
+    "failure",
+    ["queue_full", "adapter", "malformed_result", "draft_budget", "feature_import"],
 )
 def test_slow_error_reply_does_not_block_another_session_cleanup(
     server, adapter, client, monkeypatch, failure
 ):
     client.hello()
     failed_key = key(80)
-    if failure != "queue_full":
+    if failure == "feature_import":
+        assert client.open(failed_key).status is OK
+    elif failure != "queue_full":
         client.ready(failed_key)
     other = RawClient(server.endpoint)
     other.hello(verifier_instance_id="verifier-b")
@@ -1094,6 +1304,17 @@ def test_slow_error_reply_does_not_block_another_session_cleanup(
             max_feature_tokens=DEFAULT_LIMITS.max_feature_tokens,
             max_sequences=1,
             max_model_len=DEFAULT_LIMITS.max_model_len,
+        )
+    elif failure == "feature_import":
+        resolve = server_module._ServerSession._resolve_features
+
+        def fail_import(session, frames, **kwargs):
+            if session.session_id == client.session_id:
+                raise RuntimeError("injected feature import failure")
+            return resolve(session, frames, **kwargs)
+
+        monkeypatch.setattr(
+            server_module._ServerSession, "_resolve_features", fail_import
         )
     else:
         propose = adapter.advance_and_propose
@@ -1129,16 +1350,18 @@ def test_slow_error_reply_does_not_block_another_session_cleanup(
 
     def reject():
         try:
-            replies.append(
-                client.open(failed_key)
-                if failure == "queue_full"
-                else client.propose(
+            if failure == "queue_full":
+                reply = client.open(failed_key)
+            elif failure == "feature_import":
+                reply = client.prefill(failed_key, [1, 2, 3], offset=0)
+            else:
+                reply = client.propose(
                     0,
                     [failed_key],
                     recovery=[1],
                     num_speculative_tokens=0 if failure == "draft_budget" else None,
                 )
-            )
+            replies.append(reply)
         except Exception as error:
             errors.append(error)
 

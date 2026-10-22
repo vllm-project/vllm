@@ -82,7 +82,7 @@ SpeculativeMethod = Literal[
 ]
 RejectionSampleMethod = Literal["standard", "synthetic", "block", "fly"]
 DraftSampleMethod = Literal["greedy", "probabilistic"]
-RemoteDraftTransport = Literal["auto", "inline"]
+RemoteDraftTransport = Literal["auto", "inline", "cuda_ipc"]
 RemoteDraftFailurePolicy = Literal["error", "target_only"]
 
 
@@ -101,9 +101,9 @@ class RemoteDraftConfig:
     "unix:///path" or "tcp://host:port". The server is unauthenticated, so
     prefer a UNIX socket or a loopback address."""
     transport: RemoteDraftTransport = "auto"
-    """Data-plane transport for target features and draft results. The initial
-    runtime supports the copy-based "inline" transport; "auto" currently
-    selects it. Zero-copy transports will be exposed when implemented."""
+    """Data-plane transport. "auto" selects copy-based "inline". Explicit
+    "cuda_ipc" moves CUDA features directly between same-host GPUs and
+    requires a UNIX socket; small metadata and results remain inline."""
     failure_policy: RemoteDraftFailurePolicy = "target_only"
     """What to do when the remote speculator fails or times out.
     "target_only" (production default) keeps decoding without speculation
@@ -124,6 +124,8 @@ class RemoteDraftConfig:
         if not self.endpoint.strip():
             raise ValueError("remote_draft.endpoint must not be empty")
         parse_endpoint(self.endpoint)
+        if self.transport == "cuda_ipc" and not self.endpoint.startswith("unix://"):
+            raise ValueError("remote_draft cuda_ipc requires a UNIX socket")
         return self
 
 

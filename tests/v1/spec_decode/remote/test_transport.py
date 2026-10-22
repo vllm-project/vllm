@@ -15,6 +15,7 @@ import msgspec
 import pytest
 
 from vllm.v1.spec_decode.remote import transport
+from vllm.v1.spec_decode.remote.cuda_ipc import CudaIpcDescriptor
 from vllm.v1.spec_decode.remote.transport import (
     FRAME_CONTROL,
     FRAME_DATA,
@@ -33,6 +34,57 @@ from vllm.v1.spec_decode.remote.transport import (
     parse_endpoint,
     validate_frame,
 )
+
+
+def ipc_descriptor(**overrides):
+    fields = dict(
+        buffer_id=1,
+        generation=1,
+        device_uuid="GPU-00000000-0000-0000-0000-000000000000",
+        memory_handle=b"m" * 64,
+        ready_event_handle=b"e" * 64,
+        nbytes=8,
+        capacity_bytes=8,
+    )
+    fields.update(overrides)
+    return CudaIpcDescriptor(**fields)
+
+
+def test_ipc_descriptor_round_trip_and_inline_backward_compatibility():
+    old = {"slot": 0, "dtype": "int32", "shape": [1], "payload": b"\0" * 4}
+    assert decode_data_frame(msgspec.msgpack.encode(old)).cuda_ipc is None
+    frame = DataFrame(1, "float32", (1, 2), b"", ipc_descriptor())
+    decoded = decode_data_frame(msgspec.msgpack.encode(frame))
+    validate_frame(decoded)
+    assert decoded == frame
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"payload": b"\0" * 8},
+        {"dtype": "int32"},
+        {"shape": (2, 2)},
+        {"cuda_ipc": ipc_descriptor(memory_handle=b"short")},
+        {"cuda_ipc": ipc_descriptor(capacity_bytes=4)},
+        {"cuda_ipc": ipc_descriptor(generation=0)},
+    ],
+)
+def test_invalid_ipc_frames_are_rejected_before_device_access(fields):
+    frame = dict(
+        slot=1, dtype="float32", shape=(1, 2), payload=b"", cuda_ipc=ipc_descriptor()
+    )
+    frame.update(fields)
+    with pytest.raises(TransportError):
+        validate_frame(DataFrame(**frame))
+
+
+def test_ipc_descriptor_disallows_unrecognized_fields():
+    frame = DataFrame(1, "float32", (1, 2), b"", ipc_descriptor())
+    raw = msgspec.msgpack.decode(msgspec.msgpack.encode(frame))
+    raw["cuda_ipc"]["python_object"] = "not allowed"
+    with pytest.raises(TransportError, match="unknown field"):
+        decode_data_frame(msgspec.msgpack.encode(raw))
 
 
 @pytest.fixture
@@ -124,6 +176,13 @@ def test_listen_resolves_ephemeral_port():
         assert not listener.endpoint.endswith(":0")
     finally:
         listener.close()
+
+
+def test_closed_listener_accept_reports_connection_closed():
+    listener = listen("tcp://127.0.0.1:0")
+    listener.close()
+    with pytest.raises(ConnectionClosed, match="listener closed"):
+        listener.accept(timeout=0.1)
 
 
 @pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="unix sockets unavailable")

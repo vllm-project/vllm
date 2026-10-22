@@ -47,7 +47,7 @@ from vllm.v1.spec_decode.remote.server import (
     StandaloneProposalResult,
 )
 from vllm.v1.spec_decode.remote.session import frame_to_tensor, tensor_to_frame
-from vllm.v1.spec_decode.remote.transport import DataFrame, frame_to_ints
+from vllm.v1.spec_decode.remote.transport import DataFrame, DeviceFeature, frame_to_ints
 
 Features = list[torch.Tensor | None]
 
@@ -130,6 +130,10 @@ class TargetConditionedDraftAdapter(StandaloneDraftAdapter):
 
     def draft_checkpoint_fingerprint(self) -> str:
         return self._fingerprint
+
+    def cuda_ipc_device(self) -> torch.device | None:
+        device = getattr(self.executor, "device", None)
+        return device if device is not None and device.type == "cuda" else None
 
     def open_sequence(self, key: SequenceKey) -> None:
         if not self.planner.open(key):
@@ -294,7 +298,9 @@ class TargetConditionedDraftAdapter(StandaloneDraftAdapter):
                 step.append(
                     None
                     if tensor is None
-                    else tensor[torch.tensor([i for i, _ in planned])]
+                    else tensor[
+                        torch.tensor([i for i, _ in planned], device=tensor.device)
+                    ]
                 )
                 continue
             segments = [source[j] for _, source in planned]
@@ -305,7 +311,7 @@ class TargetConditionedDraftAdapter(StandaloneDraftAdapter):
         return step
 
 
-def _tensors(frames: Sequence[DataFrame | None]) -> Features:
+def _tensors(frames: Sequence[DataFrame | DeviceFeature | None]) -> Features:
     return [None if frame is None else frame_to_tensor(frame) for frame in frames]
 
 

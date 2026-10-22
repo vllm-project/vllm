@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from tests.v1.spec_decode.remote.runtime_fixtures import (
+    VOCAB,
     K,
     KVDigestExecutor,
     digest_row,
@@ -18,7 +19,14 @@ from tests.v1.spec_decode.remote.runtime_fixtures import (
 from tests.v1.spec_decode.remote.runtime_fixtures import (
     cpu_parallel_state as cpu_parallel_state,
 )
+from tests.v1.spec_decode.remote.test_session import (
+    _CudaFeature,
+    _IpcDraftAdapter,
+    fake_cuda_runtime,
+)
+from tests.v1.spec_decode.remote.test_session import cuda_runtime as cuda_runtime
 from vllm.config.speculative import RemoteDraftConfig
+from vllm.v1.spec_decode.remote.cuda_ipc import CudaIpcError
 from vllm.v1.spec_decode.remote.runtime.adapter import TargetConditionedDraftAdapter
 from vllm.v1.spec_decode.remote.runtime.schema import create_runtime_contract
 from vllm.v1.spec_decode.remote.server import RemoteDraftServer
@@ -99,6 +107,46 @@ def verifier(request):
     server.stop()
 
 
+@pytest.fixture
+def ipc_verifier(tmp_path, request):
+    runtime = request.getfixturevalue("cuda_runtime")
+    settings = make_config()
+    contract = create_runtime_contract(settings)
+    adapter = _IpcDraftAdapter(
+        contract.schema,
+        vocab_size=VOCAB,
+        draft_checkpoint_fingerprint=contract.draft_fingerprint,
+    )
+    server = RemoteDraftServer(
+        adapter,
+        target_fingerprint=contract.target_fingerprint,
+        tokenizer_fingerprint=contract.tokenizer_fingerprint,
+    )
+    server.start(f"unix://{tmp_path}/draft.sock")
+    settings.speculative_config.remote_draft = RemoteDraftConfig(
+        endpoint=server.endpoint, transport="cuda_ipc", request_timeout_ms=5000
+    )
+    instance = remote.RemoteSpeculator(settings, torch.device("cuda:0"))
+    try:
+        assert instance._session is not None
+        assert instance._session.selected_transport == "cuda_ipc"
+        yield instance, runtime, settings, server
+    finally:
+        instance.close()
+        server.stop()
+
+
+def test_ipc_features_do_not_materialize_hidden_states_on_host(ipc_verifier):
+    instance, _, _, _ = ipc_verifier
+    batch = inputs(["a"], [[1, 2]], [[0, 1]], [2])
+    hidden = _CudaFeature((2, 16))
+    features = instance._features(batch, hidden, None, torch.tensor([[3]]))
+    assert features["last_hidden_states"].device.type == "cuda"
+    assert features["token_ids"].tolist() == [1, 2]
+    assert features["positions"].tolist() == [0, 1]
+    assert features["next_prefill_tokens"].tolist() == [[3]]
+
+
 def inputs(ids, tokens, positions, prefill, slots=None):
     count = len(ids)
     slots = slots if slots is not None else list(range(count))
@@ -153,7 +201,7 @@ def propose(verifier, batch, sampled, rejected, recovery, lookahead=None, **kwar
         batch,
         {},
         {},
-        torch.zeros(batch.num_tokens, 16),
+        kwargs.pop("hidden_states", torch.zeros(batch.num_tokens, 16)),
         kwargs.pop("aux_hidden_states", None),
         torch.tensor(sampled),
         torch.tensor(rejected),
@@ -472,14 +520,49 @@ def _tp_proposal_worker(rank, settings, rendezvous, output_dir, failure):
     )
     with set_current_vllm_config(settings):
         initialize_model_parallel(tensor_model_parallel_size=2, backend="gloo")
-        instance = remote.RemoteSpeculator(settings, torch.device("cpu"))
+        patch = pytest.MonkeyPatch()
+        ipc = failure.startswith("ipc_")
+        runtime = fake_cuda_runtime(patch) if ipc else None
+        device = torch.device("cuda:0" if ipc else "cpu")
+        instance = remote.RemoteSpeculator(settings, device)
         try:
             batch = inputs(["tp"], [[1]], [[0]], [1])
-            tokens = propose(instance, batch, [1], [0], [2]).tolist()
+            hidden = (
+                {"hidden_states": _CudaFeature((batch.num_tokens, 16))} if ipc else {}
+            )
+            tokens = None
+            if failure != "ipc_prefill":
+                tokens = propose(instance, batch, [1], [0], [2], **hidden).tolist()
             with pytest.raises(RuntimeError, match="greedy target sampling") as invalid:
-                propose(instance, batch, [1], [0], [2], temperature=torch.ones(4))
+                propose(
+                    instance, batch, [1], [0], [2], temperature=torch.ones(4), **hidden
+                )
             error = None
-            if failure == "fatal":
+            if ipc:
+
+                def fail_copy(*args):
+                    raise CudaIpcError("opaque CUDA failure", cuda_error_code=700)
+
+                patch.setattr(runtime, "copy", fail_copy)
+                if failure == "ipc_dispatch":
+                    assert tokens is not None
+                    batch = inputs(["tp"], [[2, *tokens[0]]], [[1, 2, 3, 4]], [0])
+                with pytest.raises(RuntimeError, match="opaque CUDA failure") as caught:
+                    propose(
+                        instance,
+                        batch,
+                        [1],
+                        [0 if failure == "ipc_prefill" else 3],
+                        [3],
+                        hidden_states=_CudaFeature((batch.num_tokens, 16)),
+                    )
+                error = str(caught.value)
+                if rank == 0:
+                    assert instance._session is not None
+                    assert not instance._session.connected
+                    assert not instance._session.maybe_reconnect()
+            elif failure == "fatal":
+                assert tokens is not None
                 batch = inputs(["tp"], [[2, *tokens[0]]], [[1, 2, 3, 4]], [0])
                 with pytest.raises(RuntimeError, match="proposal failed") as caught:
                     propose(instance, batch, [1], [3], [3])
@@ -499,6 +582,7 @@ def _tp_proposal_worker(rank, settings, rendezvous, output_dir, failure):
             instance.close()
             destroy_model_parallel()
             destroy_distributed_environment()
+            patch.undo()
 
 
 @pytest.mark.parametrize("failure", ["fatal", "close"])
@@ -536,6 +620,37 @@ def test_tp_processes_share_rank_zero_tokens_and_terminal_outcomes(
     assert not server.healthy
     assert executor.pool.num_free_blocks < executor.pool.num_blocks - 1
     assert len(server.registry) == 1
+
+
+@pytest.mark.parametrize("policy", ["target_only", "error"])
+@pytest.mark.parametrize("phase", ["prefill", "dispatch"])
+def test_tp_processes_share_fatal_ipc_export_errors(
+    ipc_verifier, tmp_path, policy, phase
+):
+    import json
+
+    instance, _, settings, server = ipc_verifier
+    instance.close()
+    settings.parallel_config.tensor_parallel_size = 2
+    settings.speculative_config.remote_draft.failure_policy = policy
+    torch.multiprocessing.spawn(
+        _tp_proposal_worker,
+        args=(
+            settings,
+            f"file://{tmp_path / 'tp-store'}",
+            str(tmp_path),
+            f"ipc_{phase}",
+        ),
+        nprocs=2,
+        join=True,
+    )
+    results = [
+        json.loads((tmp_path / f"rank-{rank}.json").read_text()) for rank in range(2)
+    ]
+    assert results[0] == results[1]
+    assert "opaque CUDA failure" in results[0]["error"]
+    assert results[0]["tokens"] == ([[3, 4, 5]] if phase == "dispatch" else None)
+    assert server.adapter.proposed_batches == ([0] if phase == "dispatch" else [])
 
 
 @pytest.mark.parametrize(
