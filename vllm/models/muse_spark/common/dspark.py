@@ -16,6 +16,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.weight_utils import set_cached_tensor
 from vllm.model_executor.models.qwen3_dflash import DFlashQwen3Model
 from vllm.model_executor.models.qwen3_dspark import (
     DSparkConfidenceHead,
@@ -158,13 +159,11 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
         layers_attn = [layer.self_attn for layer in self.layers]
         attn0 = layers_attn[0]
         self._context_pre_norms = tuple(attn.pre_qkv_proj_norm for attn in layers_attn)
-        self._stacked_kv_weight = torch.stack(
-            [
-                attn.qkv_proj.weight[attn.q_size : attn.q_size + 2 * attn.kv_size]
-                for attn in layers_attn
-            ],
-            dim=0,
-        )
+        kv = [
+            attn.qkv_proj.weight[attn.q_size : attn.q_size + 2 * attn.kv_size]
+            for attn in layers_attn
+        ]
+        set_cached_tensor(self, "_stacked_kv_weight", torch.stack(kv, dim=0))
         self._num_attn_layers = len(layers_attn)
         self._kv_size = attn0.kv_size
         self._head_dim = attn0.head_dim
