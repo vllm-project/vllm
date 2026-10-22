@@ -28,7 +28,7 @@ model:
   active_parameters: "2.5B"
   context_length: 262144
   base_args: []
-  base_env: {VLLM_USE_RUST_FRONTEND: "0"}
+  base_env: {}
   rust_frontend: unsupported
 
 features:
@@ -85,7 +85,7 @@ guide: |
   BF16:
 
   ```bash
-  VLLM_USE_RUST_FRONTEND=0 vllm serve RecursiveSI/flint --served-model-name flint \
+  vllm serve RecursiveSI/flint --served-model-name flint \
     --enable-auto-tool-choice --tool-call-parser glm47 --reasoning-parser glm47 \
     --exclude-tools-when-tool-choice-none
   ```
@@ -93,7 +93,7 @@ guide: |
   NVFP4 (requires `gguf>=0.19.0`):
 
   ```bash
-  VLLM_USE_RUST_FRONTEND=0 vllm serve RecursiveSI/flint-nvfp4-gguf \
+  vllm serve RecursiveSI/flint-nvfp4-gguf \
     --hf-config-path RecursiveSI/flint --tokenizer RecursiveSI/flint \
     --served-model-name flint \
     --enable-auto-tool-choice --tool-call-parser glm47 --reasoning-parser glm47 \

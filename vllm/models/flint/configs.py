@@ -48,7 +48,6 @@ class FlintConfig(PreTrainedConfig):
         norm_topk_prob: bool = True,
         router_score_function: str = "sigmoid",
         mlp_only_layers: list[int] | None = None,
-        head_dtype: str = "float32",
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -87,7 +86,6 @@ class FlintConfig(PreTrainedConfig):
         self.router_score_function = router_score_function
         self.mlp_only_layers = mlp_only_layers or []
         # The reference implementation computes the LM head in fp32.
-        self.head_dtype = head_dtype
         super().__init__(tie_word_embeddings=tie_word_embeddings, **kwargs)
 
 

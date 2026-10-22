@@ -40,7 +40,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import make_attention_sink
-from vllm.model_executor.models.interfaces import MixtureOfExperts, SupportsPP
+from vllm.model_executor.models.interfaces import SupportsPP
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -593,7 +593,7 @@ class FlintModel(nn.Module):
         return hidden_states
 
 
-class FlintForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
+class FlintForCausalLM(nn.Module, SupportsPP):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_stacked={
             ".q_proj": (".qkv_proj", "q"),
@@ -653,22 +653,6 @@ class FlintForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
-
-        self.moe_layers = [
-            layer.mlp.experts
-            for layer in self.model.layers[
-                self.model.start_layer : self.model.end_layer
-            ]
-            if isinstance(layer.mlp, FlintSparseMoeBlock)
-        ]
-        self.num_moe_layers = len(self.moe_layers)
-        self.num_expert_groups = 1
-        self.num_shared_experts = 1
-        self.num_logical_experts = config.num_experts
-        self.num_physical_experts = config.num_experts
-        self.num_local_physical_experts = config.num_experts
-        self.num_routed_experts = config.num_experts
-        self.num_redundant_experts = 0
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
