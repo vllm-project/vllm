@@ -39,7 +39,6 @@ from vllm.distributed.weight_transfer.m2n_common import (
     M2NTransferRoute,
     M2NTransferWave,
     M2NWireParam,
-    Placements,
     build_m2n_param_routes,
     build_m2n_transfer_routes,
     build_m2n_transfer_waves,
@@ -98,13 +97,10 @@ class M2NTrainerInitInfo(TrainerInitInfo):
     """Trainer ranks + all inference workers."""
     num_trainer_ranks: int = 1
     dst_mesh_dims: tuple[int, int] | None = None
-    """How the inference ranks are laid out: axis 0 replicates and axis 1
-    shards. The trainer declares it so both sides describe the destination
-    identically; defaults to a flat `(num_workers, 1)`, which is all a
-    replicated destination needs.
-
-    TODO: Carry a destination mesh/layout per parameter before supporting mixed
-    generator TP/DP layouts whose dense and expert weights need different meshes."""
+    """Optional fixed inference mesh. Omitted keeps the legacy flat mesh unless
+    ``auto_dst_mesh`` is enabled."""
+    auto_dst_mesh: bool = False
+    """Resolve a destination mesh per parameter instead of fixing one mesh."""
     nccl_unique_id_b64: str | None = field(default=None, repr=False)
     """Optional UID for the NCCL data plane; TCP remains the metadata plane."""
     nccl_unique_ids_b64: list[str] | None = field(default=None, repr=False)
@@ -115,10 +111,15 @@ class M2NTrainerInitInfo(TrainerInitInfo):
 
     @property
     def destination_mesh_dims(self) -> tuple[int, int]:
-        """`dst_mesh_dims`, or a flat mesh over every inference worker."""
+        """Concrete mesh used to describe the destination rank interval."""
         if self.dst_mesh_dims is not None:
             return cast(tuple[int, int], tuple(self.dst_mesh_dims))
         return (self.world_size - self.num_trainer_ranks, 1)
+
+    @property
+    def destination_mesh_constraint(self) -> tuple[int, int] | None:
+        """Fixed mesh constraint, or ``None`` for per-parameter planning."""
+        return None if self.auto_dst_mesh else self.destination_mesh_dims
 
     def __post_init__(self) -> None:
         """Reject rank counts or destination meshes that cannot form a group."""
@@ -136,6 +137,12 @@ class M2NTrainerInitInfo(TrainerInitInfo):
                 f"least one worker in world_size {self.world_size}"
             )
         num_workers = self.world_size - self.num_trainer_ranks
+        if not isinstance(self.auto_dst_mesh, bool):
+            raise TypeError("`auto_dst_mesh` must be a bool")
+        if self.auto_dst_mesh and self.dst_mesh_dims is not None:
+            raise ValueError(
+                "`auto_dst_mesh=True` cannot be combined with `dst_mesh_dims`"
+            )
         if self.dst_mesh_dims is not None:
             dims = tuple(self.dst_mesh_dims)
             try:
@@ -247,8 +254,7 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         self._wire_params: list[M2NWireParam] = []
         self._source_digest = ""
         self._destination_commit_token = ""
-        self._dst_mesh: M2NMesh | None = None
-        self._dst_placements: list[Placements | None] = []
+        self._destination_mesh_constraint: tuple[int, int] | None = None
         self._metadata_group: StatelessProcessGroup | None = None
         self._num_trainer_ranks = 0
         self._trainer_rank = -1
@@ -353,22 +359,21 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
 
             # The worker resolves its rank-local destinations, and every rank
             # commits the same ordered plan before constructing NCCL.
-            self._dst_mesh = M2NMesh(
+            destination_interval = M2NMesh(
                 init_info.destination_mesh_dims, init_info.num_trainer_ranks
             )
+            self._destination_mesh_constraint = init_info.destination_mesh_constraint
             self._destination_plan, commit_token = agree_destination_plan(
                 metadata_group,
                 source_digest=plan_digest,
                 params=self._wire_params,
                 metas=self._metas,
-                dst_mesh=self._dst_mesh,
+                dst_mesh=destination_interval,
+                dst_mesh_constraint=self._destination_mesh_constraint,
                 local_plan=None,
                 local_error=None,
                 source_topology=self._source_topology,
             )
-            self._dst_placements = [
-                destination.placements for destination in self._destination_plan
-            ]
             self._destination_commit_token = commit_token
             assert self._source_topology is not None
             self._routes = build_m2n_transfer_routes(
@@ -465,8 +470,7 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         except BaseException:
             self._destination_plan = []
             self._destination_commit_token = ""
-            self._dst_placements = []
-            self._dst_mesh = None
+            self._destination_mesh_constraint = None
             self._routes = ()
             self._param_routes = ()
             self._transfer_waves = ()
@@ -630,9 +634,9 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         """Return the authenticated static plan as JSON-safe run metadata."""
         if not self._destination_commit_token or not self._destination_plan:
             raise RuntimeError("nccl_m2n transfer plan is not initialized")
-        assert self._dst_mesh is not None
         assert self._source_topology is not None
         mode_counts: dict[str, int] = {}
+        mesh_counts: dict[tuple[int, int], int] = {}
         logical_bytes_by_mode: dict[str, int] = {}
         receiver_bytes_by_mode: dict[str, int] = {}
         for meta, destination in zip(self._metas, self._destination_plan, strict=True):
@@ -640,9 +644,14 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
             element_size = torch.empty((), dtype=meta.dtype).element_size()
             logical_bytes = math.prod(meta.shape) * element_size
             receiver_bytes = (
-                math.prod(destination.local_shape) * element_size * self._dst_mesh.size
+                math.prod(destination.local_shape)
+                * element_size
+                * math.prod(destination.mesh_dims)
             )
             mode_counts[mode] = mode_counts.get(mode, 0) + 1
+            mesh_counts[destination.mesh_dims] = (
+                mesh_counts.get(destination.mesh_dims, 0) + 1
+            )
             logical_bytes_by_mode[mode] = (
                 logical_bytes_by_mode.get(mode, 0) + logical_bytes
             )
@@ -655,7 +664,15 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
             "wire_schema_version": M2N_WIRE_SCHEMA_VERSION,
             "source_digest": self._source_digest,
             "destination_commit_token": self._destination_commit_token,
-            "destination_mesh_dims": list(self._dst_mesh.dims),
+            "destination_mesh_constraint": (
+                None
+                if self._destination_mesh_constraint is None
+                else list(self._destination_mesh_constraint)
+            ),
+            "destination_mesh_counts": [
+                {"dims": list(dims), "parameter_count": count}
+                for dims, count in mesh_counts.items()
+            ],
             "source_group_count": len(self._source_topology.groups),
             "parameter_count": len(self._metas),
             "transfer_communicators": [
@@ -688,7 +705,7 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         }
 
     def _worker_init_info(self, init_info: M2NTrainerInitInfo) -> dict[str, Any]:
-        """Handshake payload: rendezvous, both meshes, and the transfer plan."""
+        """Handshake payload: rendezvous, layouts, and the transfer plan."""
         payload: dict[str, Any] = {
             "schema_version": M2N_WIRE_SCHEMA_VERSION,
             "master_address": init_info.master_address,
@@ -697,7 +714,11 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
             "nccl_unique_ids_b64": init_info.nccl_unique_ids_b64,
             "rank_offset": init_info.num_trainer_ranks,
             "world_size": init_info.world_size,
-            "dst_mesh_dims": list(init_info.destination_mesh_dims),
+            "dst_mesh_dims": (
+                None
+                if init_info.destination_mesh_constraint is None
+                else list(init_info.destination_mesh_constraint)
+            ),
             "source_digest": self._source_digest,
             "source_topology": (
                 None
@@ -981,6 +1002,7 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         assert self._source_topology is not None
         source = cast(M2NWeightSource, self.source)
         m2n = self._m2n
+        source_group_size = len(self._source_topology.groups[0])
 
         joined_routes = {
             route_index
@@ -1005,7 +1027,6 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
                     group_index = self._source_topology.param_groups[param_index]
                     route_index = self._param_routes[param_index]
                     if route_index in joined_routes:
-                        route = self._routes[route_index]
                         meta = self._metas[param_index]
                         communicator = self._route_communicators.get(route_index)
                         stream = self._route_streams.get(route_index)
@@ -1045,9 +1066,13 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
                                 meta.source_layout.mesh,
                                 meta.source_layout.placements,
                             )
+                            destination = self._destination_plan[param_index]
                             dst_mesh, dst_placements = resolve_layout(
-                                route.dst_mesh,
-                                self._dst_placements[param_index],
+                                M2NMesh(
+                                    destination.mesh_dims,
+                                    source_group_size,
+                                ),
+                                destination.placements,
                             )
                             raw_pointer_args = {}
                             if isinstance(buffer, int):
@@ -1128,8 +1153,7 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         self._source_topology = None
         self._destination_plan = []
         self._destination_commit_token = ""
-        self._dst_placements = []
-        self._dst_mesh = None
+        self._destination_mesh_constraint = None
         self._m2n = None
         # Keep stream wrappers alive until communicator abort and handle
         # destruction have completed.
@@ -1153,8 +1177,7 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         self._metadata_group = None
         self._destination_plan = []
         self._destination_commit_token = ""
-        self._dst_placements = []
-        self._dst_mesh = None
+        self._destination_mesh_constraint = None
         self._m2n = None
 
         first_error: BaseException | None = None

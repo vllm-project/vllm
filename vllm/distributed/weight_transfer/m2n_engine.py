@@ -35,9 +35,7 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferUpdateInfo,
 )
 from vllm.distributed.weight_transfer.m2n_common import (
-    DESTINATION_SHARD_AXIS,
     M2N_WIRE_SCHEMA_VERSION,
-    MESH_NDIMS,
     M2NDestinationMode,
     M2NLayout,
     M2NMesh,
@@ -45,7 +43,6 @@ from vllm.distributed.weight_transfer.m2n_common import (
     M2NSourceTopology,
     M2NTransferRoute,
     M2NWireParam,
-    Placements,
     build_m2n_param_routes,
     build_m2n_transfer_routes,
     build_m2n_transfer_waves,
@@ -122,9 +119,8 @@ class M2NWeightTransferInitInfo(WeightTransferInitInfo):
     """First worker rank, i.e. the number of trainer ranks."""
     world_size: int
     """Trainer ranks + all inference workers."""
-    dst_mesh_dims: list[int]
-    """The inference mesh, starting at `rank_offset`. Declared rather than
-    derived so both sides describe the destination identically."""
+    dst_mesh_dims: list[int] | None = None
+    """Optional fixed inference mesh; ``None`` selects per-parameter meshes."""
     source_digest: str
     """SHA-256 of the ordered, versioned source parameter plan."""
     params: list[dict[str, Any]]
@@ -180,17 +176,32 @@ class M2NWeightTransferInitInfo(WeightTransferInitInfo):
                 f"rank interval [{self.rank_offset}, {self.world_size}); got "
                 f"{self.worker_rank_offset}"
             )
-        dst = tuple(self.dst_mesh_dims)
-        try:
-            dst_mesh = M2NMesh(cast(tuple[int, int], dst), self.rank_offset)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"invalid `dst_mesh_dims` {dst}: {exc}") from exc
-        num_workers = self.world_size - self.rank_offset
-        if dst_mesh.size != num_workers:
-            raise ValueError(
-                f"`dst_mesh_dims` {dst} must be {MESH_NDIMS} dims covering the "
-                f"{num_workers} inference workers"
-            )
+        if self.dst_mesh_dims is not None:
+            dst = tuple(self.dst_mesh_dims)
+            try:
+                dst_mesh = M2NMesh(cast(tuple[int, int], dst), self.rank_offset)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"invalid `dst_mesh_dims` {dst}: {exc}") from exc
+            num_workers = self.world_size - self.rank_offset
+            if dst_mesh.size != num_workers:
+                raise ValueError(
+                    f"`dst_mesh_dims` {dst} must cover the {num_workers} "
+                    "inference workers"
+                )
+
+    @property
+    def destination_mesh_dims(self) -> tuple[int, int]:
+        """Concrete mesh used to describe the destination rank interval."""
+        if self.dst_mesh_dims is not None:
+            return cast(tuple[int, int], tuple(self.dst_mesh_dims))
+        return (self.world_size - self.rank_offset, 1)
+
+    @property
+    def destination_mesh_constraint(self) -> tuple[int, int] | None:
+        """Fixed mesh constraint, or ``None`` for per-parameter planning."""
+        if self.dst_mesh_dims is None:
+            return None
+        return cast(tuple[int, int], tuple(self.dst_mesh_dims))
 
     @property
     def nccl_unique_id_bytes(self) -> bytes | None:
@@ -345,10 +356,8 @@ class M2NWeightTransferEngine(
         self._m2n: Any = None
         self._handle: Any = None
         self._metas: list[M2NParamMeta] = []
-        self._dst_mesh: M2NMesh | None = None
         self._parameter_destinations: list[M2NDestination] = []
         self._uses_load_weights = False
-        self._destination_shard_index: int | None = None
         self._staging_pool: M2NStagingPool | None = None
         self._staged_targets: dict[int, ShardedWeightTarget] = {}
         self._next_parameter_index = 0
@@ -386,7 +395,7 @@ class M2NWeightTransferEngine(
                 source_topology,
                 num_trainer_ranks=init_info.rank_offset,
                 world_size=init_info.world_size,
-                dst_mesh_dims=cast(tuple[int, int], tuple(init_info.dst_mesh_dims)),
+                dst_mesh_dims=init_info.destination_mesh_dims,
             )
             self._param_routes = build_m2n_param_routes(self._routes, len(wire_params))
         except Exception as exc:
@@ -403,31 +412,27 @@ class M2NWeightTransferEngine(
         )
 
         num_workers = init_info.world_size - init_info.rank_offset
-        agreement_mesh = M2NMesh(
-            (num_workers, 1),
-            init_info.rank_offset,
-        )
+        agreement_mesh = M2NMesh(init_info.destination_mesh_dims, init_info.rank_offset)
 
         local_wire_plan: list[M2NWireDestination] | None = None
         destination_error: str | None = None
         try:
-            self._dst_mesh = M2NMesh(
-                cast(tuple[int, int], tuple(init_info.dst_mesh_dims)),
-                init_info.rank_offset,
-            )
+            local_worker_rank = metadata_group.rank - init_info.rank_offset
+            if not 0 <= local_worker_rank < num_workers:
+                raise ValueError(
+                    f"metadata rank {metadata_group.rank} is outside destination "
+                    f"ranks [{init_info.rank_offset}, {init_info.world_size})"
+                )
             self._prepare_destination_plan(
-                metadata_rank=metadata_group.rank,
+                local_worker_rank=local_worker_rank,
                 num_workers=num_workers,
+                dst_mesh_dims=init_info.destination_mesh_constraint,
             )
-            agreement_mesh = self._dst_mesh
-            assert self._destination_shard_index is not None
-            shard_axis_size = self._dst_mesh.dims[DESTINATION_SHARD_AXIS]
             local_wire_plan = [
                 M2NWireDestination.from_destination(
                     destination,
                     dtype_name=wire_param.dtype_name,
-                    destination_shard_index=self._destination_shard_index,
-                    shard_axis_size=shard_axis_size,
+                    local_worker_rank=local_worker_rank,
                 )
                 for wire_param, destination in zip(
                     wire_params, self._parameter_destinations
@@ -445,6 +450,7 @@ class M2NWeightTransferEngine(
                 source_topology=source_topology,
                 metas=self._metas,
                 dst_mesh=agreement_mesh,
+                dst_mesh_constraint=init_info.destination_mesh_constraint,
                 local_plan=local_wire_plan,
                 local_error=destination_error,
             )
@@ -536,10 +542,8 @@ class M2NWeightTransferEngine(
 
     def _clear_destination_plan(self) -> None:
         self._clear_update_bindings()
-        self._dst_mesh = None
         self._parameter_destinations = []
         self._uses_load_weights = False
-        self._destination_shard_index = None
         self._staging_pool = None
 
     def _prepare_source_plan(
@@ -579,26 +583,15 @@ class M2NWeightTransferEngine(
     def _prepare_destination_plan(
         self,
         *,
-        metadata_rank: int,
+        local_worker_rank: int,
         num_workers: int,
+        dst_mesh_dims: tuple[int, int] | None,
     ) -> None:
         """Resolve and validate this worker's destination plan."""
-        if self._dst_mesh is None:
-            raise RuntimeError("destination planning requires a destination mesh")
-        if self._dst_mesh.size != num_workers:
-            raise ValueError(
-                f"`dst_mesh_dims` {self._dst_mesh.dims} must cover the "
-                f"{num_workers} inference workers"
-            )
-        local_worker_rank = metadata_rank - self._dst_mesh.start_rank
         if not 0 <= local_worker_rank < num_workers:
             raise ValueError(
-                f"metadata rank {metadata_rank} is outside destination ranks "
-                f"[{self._dst_mesh.start_rank}, "
-                f"{self._dst_mesh.start_rank + num_workers})"
+                f"local worker rank {local_worker_rank} must be in [0, {num_workers})"
             )
-        shard_axis_size = self._dst_mesh.dims[DESTINATION_SHARD_AXIS]
-        self._destination_shard_index = local_worker_rank % shard_axis_size
         # A quantized weight loader may dequantize / transpose / requantize, and
         # under PP a rank's local shape is not the checkpoint shape split over
         # the shard axis. Both disable raw and semantic sharded destinations, so
@@ -615,10 +608,10 @@ class M2NWeightTransferEngine(
             [m.name for m in self._metas],
             [m.dtype for m in self._metas],
             [m.shape for m in self._metas],
-            num_workers=self._dst_mesh.size,
-            shard_axis_size=shard_axis_size,
+            num_workers=num_workers,
+            local_worker_rank=local_worker_rank,
+            dst_mesh_dims=dst_mesh_dims,
             allow_direct=allow_direct,
-            destination_shard_index=self._destination_shard_index,
             allow_full_fallback=[meta.allow_full_fallback for meta in self._metas],
         )
         self._uses_load_weights = any(
@@ -811,7 +804,6 @@ class M2NWeightTransferEngine(
                 # same cross-communicator launch order.
                 for index in wave.issue_indices:
                     route_index = self._param_routes[index]
-                    route = self._routes[route_index]
                     comm = self._model_update_groups[route_index]
                     stream = self._route_streams[route_index]
                     meta = self._metas[index]
@@ -823,9 +815,8 @@ class M2NWeightTransferEngine(
                         self._reshard(
                             comm,
                             stream,
-                            route.dst_mesh,
                             meta,
-                            destination.placements,
+                            destination,
                             buffer,
                         )
                         processed += 1
@@ -850,9 +841,8 @@ class M2NWeightTransferEngine(
                     self._reshard(
                         comm,
                         stream,
-                        route.dst_mesh,
                         meta,
-                        destination.placements,
+                        destination,
                         buffer,
                     )
 
@@ -963,22 +953,23 @@ class M2NWeightTransferEngine(
         self,
         comm: Any,
         stream: torch.cuda.Stream,
-        route_dst_mesh: M2NMesh,
         src_meta: M2NParamMeta,
-        dst_placements: Placements | None,
+        destination: M2NDestination,
         dst_buffer: torch.Tensor,
     ) -> None:
         """Reshard one parameter from its trainer layout into a worker buffer.
 
-        `dst_placements` describes the buffer's logical placement over the
-        worker mesh; `dst_buffer` is this rank's physical storage.
+        ``destination`` carries this parameter's agreed mesh and placement;
+        ``dst_buffer`` is this rank's physical storage.
         """
         m2n = self._m2n
         src_mesh, resolved_src_placements = resolve_layout(
             src_meta.source_layout.mesh, src_meta.source_layout.placements
         )
+        source_group_size = len(self._source_topology.groups[0])
         dst_mesh, resolved_dst_placements = resolve_layout(
-            route_dst_mesh, dst_placements
+            M2NMesh(destination.mesh_dims, source_group_size),
+            destination.placements,
         )
         m2n.reshard(
             None,
