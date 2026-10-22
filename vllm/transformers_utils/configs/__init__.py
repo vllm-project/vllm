@@ -14,6 +14,7 @@ from __future__ import annotations
 import importlib
 
 _CLASS_TO_MODULE: dict[str, str] = {
+    "Alpamayo2SuperConfig": "vllm.transformers_utils.configs.alpamayo2_super",
     "BagelConfig": "vllm.transformers_utils.configs.bagel",
     "BailingMoeV3TextConfig": "vllm.transformers_utils.configs.bailing_moe_v3_vl",
     "BailingMoeV3VisionConfig": "vllm.transformers_utils.configs.bailing_moe_v3_vl",
@@ -24,7 +25,6 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "ColQwen3Config": "vllm.transformers_utils.configs.colqwen3",
     "OpsColQwen3Config": "vllm.transformers_utils.configs.colqwen3",
     "Qwen3VLNemotronEmbedConfig": "vllm.transformers_utils.configs.colqwen3",
-    "Alpamayo2SuperConfig": "vllm.transformers_utils.configs.alpamayo2_super",
     "DeepseekVLV2Config": "vllm.transformers_utils.configs.deepseek_vl2",
     "DeepseekV41Config": "vllm.transformers_utils.configs.deepseek_v41",
     "Dots3NoteConfig": "vllm.transformers_utils.configs.dots3_note",
@@ -80,6 +80,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
 }
 
 __all__ = [
+    "Alpamayo2SuperConfig",
     "BagelConfig",
     "BailingMoeV3TextConfig",
     "BailingMoeV3VisionConfig",
@@ -90,7 +91,6 @@ __all__ = [
     "ColQwen3Config",
     "OpsColQwen3Config",
     "Qwen3VLNemotronEmbedConfig",
-    "Alpamayo2SuperConfig",
     "DeepseekVLV2Config",
     "DeepseekV3Config",
     "Dots3NoteConfig",
