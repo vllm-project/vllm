@@ -223,6 +223,10 @@ def ref_moe_forward(
             act = F.silu(gate) * up
         elif activation == "gelu":
             act = F.gelu(gate) * up
+        elif activation == "swigluoai":
+            gate = gate.clamp(max=7.0)
+            up = up.clamp(-7.0, 7.0)
+            act = gate * torch.sigmoid(1.702 * gate) * (up + 1)
         else:
             raise ValueError(f"Unknown activation: {activation}")
         output[expert_mask] = act @ w2_f[expert_idx].T
@@ -904,6 +908,7 @@ def test_aiter_fused_moe_mi350_mxfp4_w4a16_accuracy():
         case.w2_ref,
         case.topk_weights,
         case.topk_ids,
+        activation="swigluoai",
     )
     out = rocm_aiter_fused_experts(
         hidden_states=case.hidden_states,

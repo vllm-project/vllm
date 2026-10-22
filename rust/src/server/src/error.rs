@@ -99,24 +99,27 @@ impl IntoResponse for ApiError {
 /// Everything else stays an internal 500.
 pub fn text_submit_error(context: &'static str, error: vllm_text::Error) -> ApiError {
     if error.is_request_validation_error() {
-        return invalid_request!("{error}");
+        return invalid_request!(param = error.param(), "{error}");
     }
     server_error!("{}: {}", context, error.to_report_string())
 }
 
-/// Like [`text_submit_error`], for the chat pipeline (which both wraps the
-/// text errors and raises its own prompt-length variant).
+/// Like [`text_submit_error`], for the chat pipeline, which wraps the text
+/// errors.
 pub fn chat_submit_error(context: &'static str, error: vllm_chat::Error) -> ApiError {
     if error.is_request_validation_error() {
-        return invalid_request!("{error}");
+        return invalid_request!(param = error.param(), "{error}");
     }
     server_error!("{}: {}", context, error.to_report_string())
 }
 
-/// Classify an engine-reported request failure: a retryable error (e.g. a
-/// paused engine's rejection) maps to HTTP 503, anything else to a 500.
+/// Classify an engine-reported request failure: a validation error (e.g. a
+/// constraint the structured-output backend cannot compile) maps to HTTP 400,
+/// a retryable error (e.g. a paused engine's rejection) to 503, anything else
+/// to a 500.
 pub fn engine_error(error: Option<&RequestError>) -> ApiError {
     match error {
+        Some(error) if error.is_validation_error() => invalid_request!("{}", error.message),
         Some(error) if error.retryable => ApiError::ServiceUnavailable {
             message: error.message.clone(),
         },
@@ -156,18 +159,30 @@ mod tests {
             {"error":{"message":"Generation is paused.","type":"ServiceUnavailableError","param":null,"code":503}}"#]].assert_eq(&rendered);
     }
 
+    /// Reported like Python's renderer length check, whose message clients
+    /// match to detect context-window overflows.
     #[test]
     fn prompt_too_long_maps_to_invalid_request() {
-        let error = vllm_text::Error::PromptTooLong {
-            max_model_len: 8192,
-            prompt_len: 9000,
-        };
-        let api_error = text_submit_error("failed to submit completion request", error);
-        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
-        let response = api_error.to_error_response();
-        assert_eq!(response.error.error_type, "BadRequestError");
-        assert!(response.error.message.contains("8192"));
-        assert!(response.error.message.contains("9000"));
+        let errors = [
+            vllm_text::Error::PromptTooLong {
+                max_model_len: 8192,
+                prompt_len: 9000,
+            },
+            vllm_text::Error::PromptFillsContext {
+                max_model_len: 8192,
+            },
+        ];
+        let response = errors
+            .into_iter()
+            .map(|error| {
+                let api_error = text_submit_error("failed to submit completion request", error);
+                assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+                serde_json::to_string(&api_error.to_error_response()).unwrap()
+            })
+            .join("\n");
+        expect![[r#"
+            {"error":{"message":"This model's maximum context length is 8192 tokens. However, your prompt contains 9000 input tokens, which exceeds this limit even without any output tokens. Please reduce the length of the input prompt.","type":"BadRequestError","param":"input_tokens","code":400}}
+            {"error":{"message":"This model's maximum context length is 8192 tokens. However, your prompt fills it with 8192 input tokens, leaving no room for output tokens. Please reduce the length of the input prompt.","type":"BadRequestError","param":"input_tokens","code":400}}"#]].assert_eq(&response);
     }
 
     #[test]
@@ -222,6 +237,10 @@ mod tests {
         });
         let api_error = chat_submit_error("failed to submit chat request", error);
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            api_error.to_error_response().error.param.as_deref(),
+            Some("input_tokens")
+        );
     }
 
     #[test]
