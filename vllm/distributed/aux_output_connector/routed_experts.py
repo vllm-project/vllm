@@ -6,14 +6,18 @@ from __future__ import annotations
 
 from collections.abc import Hashable, Iterable, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
+from vllm.distributed.aux_output_connector.mooncake import (
+    AuxBlock,
+    RoutingArray,
+)
+from vllm.distributed.aux_output_connector.shm import ShmBlockObjectStore
 from vllm.distributed.aux_output_connector.store import (
     BackgroundBlockObjectStore,
     BlockObject,
-    BlockObjectStore,
 )
 
 
@@ -167,28 +171,38 @@ def routed_experts_keys(
 
 
 def materialize_routed_experts(
-    store: BackgroundBlockObjectStore | BlockObjectStore,
+    store: BackgroundBlockObjectStore | ShmBlockObjectStore,
     aux_output_keys: list[str],
     *,
     shape_per_token: tuple[int, ...],
     dtype: np.dtype[Any],
+    token_start: int | None = None,
 ) -> np.ndarray:
     if not aux_output_keys:
         raise ValueError("routed-experts auxiliary output key list must not be empty")
-    payload = store.get_concatenated(aux_output_keys)
+    if isinstance(store, BackgroundBlockObjectStore):
+        payload = store.get_concatenated(
+            aux_output_keys,
+            shape_per_token=shape_per_token,
+            dtype=dtype,
+            token_start=token_start,
+        )
+    else:
+        payload = store.get_concatenated(aux_output_keys)
     return np.frombuffer(payload, dtype=dtype).reshape((-1, *shape_per_token))
 
 
 def publish_routed_experts(
-    store: BackgroundBlockObjectStore | BlockObjectStore,
+    store: BackgroundBlockObjectStore | ShmBlockObjectStore,
     *,
     batches: Sequence[tuple[Sequence[str], list[tuple[int, np.ndarray]]]],
     block_size: int,
     retain_keys: Sequence[str] = (),
     release_keys: Sequence[str] = (),
+    mooncake: bool = False,
 ) -> None:
     """Publish immutable full R3 blocks."""
-    objects = []
+    objects: list[BlockObject] = []
     for aux_output_keys, blocks in batches:
         for block_start, array in blocks:
             if block_start < 0 or block_start % block_size:
@@ -206,14 +220,10 @@ def publish_routed_experts(
                 raise ValueError(
                     "auxiliary output block length does not match hash block size"
                 )
-            objects.append(
-                BlockObject(
-                    key=aux_output_keys[block_index],
-                    payload=array.tobytes(order="C"),
-                )
-            )
-    store.put(
-        objects,
-        retain_keys=retain_keys,
-        release_keys=release_keys,
-    )
+            key = aux_output_keys[block_index]
+            if mooncake:
+                payload = AuxBlock(int(block_start), cast(RoutingArray, array)).encode()
+            else:
+                payload = array.tobytes(order="C")
+            objects.append(BlockObject(key, payload))
+    store.put(objects, retain_keys=retain_keys, release_keys=release_keys)

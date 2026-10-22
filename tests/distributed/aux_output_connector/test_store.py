@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+import sys
 import threading
-from contextlib import nullcontext
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -10,6 +12,7 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 import torch
+from safetensors.numpy import load, save
 
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputConnectorMetadata,
@@ -17,21 +20,29 @@ from vllm.distributed.aux_output_connector.connector import (
     AuxRequestOutput,
     PackedBlockHashes,
 )
+from vllm.distributed.aux_output_connector.mooncake import (
+    R3_HEADER_RESERVE,
+    AuxBlock,
+    MooncakeBlockObjectStore,
+    MooncakeOutputPublisher,
+    create_mooncake_block_store,
+)
 from vllm.distributed.aux_output_connector.routed_experts import (
     RoutedExpertsBuffer,
     materialize_routed_experts,
     publish_routed_experts,
     routed_experts_keys,
 )
+from vllm.distributed.aux_output_connector.shm import ShmBlockObjectStore
 from vllm.distributed.aux_output_connector.store import (
     BackgroundBlockObjectStore,
     BlockObject,
-    BlockObjectStore,
     BlockObjectStoreError,
 )
 from vllm.distributed.aux_output_connector.worker import (
     AuxOutputWorkerConnector,
 )
+from vllm.distributed.mooncake_store import MooncakeStoreConfig
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.gpu import async_utils
@@ -42,6 +53,654 @@ pytestmark = pytest.mark.cpu_test
 _SHAPE = (3, 2)
 _DTYPE = np.dtype("uint8")
 _BLOCK_SIZE = 4
+
+
+@pytest.mark.parametrize("dtype", ["u1", "<u2", ">u2"])
+@pytest.mark.parametrize("start", [0, 3, 2**64 - 5])
+def test_aux_codec_owns_canonical_contiguous_rows(dtype: str, start: int):
+    rows = np.arange(48, dtype=dtype).reshape(8, 3, 2)[::2]
+    expected = rows.copy()
+    raw = AuxBlock(start, rows).encode()
+    rows.fill(0)
+    block = AuxBlock.decode(raw)
+    assert block.token_start == start
+    assert block.num_rows == 4
+    assert block.routed_experts.flags.c_contiguous
+    assert not block.routed_experts.flags.writeable
+    assert block.routed_experts.dtype.str in ("|u1", "<u2")
+    np.testing.assert_array_equal(block.routed_experts, expected)
+    assert len(raw) - expected.nbytes <= R3_HEADER_RESERVE
+    np.testing.assert_array_equal(load(raw)["routed_experts"], expected)
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        None,
+        {"version": "1"},
+        {"version": "2", "token_start": "0"},
+        {"version": "1", "token_start": "-1"},
+        {"version": "1", "token_start": "not-a-position"},
+        {"version": "1", "token_start": str(2**64 - 1)},
+    ],
+)
+def test_aux_codec_rejects_invalid_metadata(metadata: dict[str, str] | None):
+    raw = save({"routed_experts": np.zeros((1, 3, 2), dtype=np.uint8)}, metadata)
+    with pytest.raises(ValueError):
+        AuxBlock.decode(raw)
+
+
+@pytest.mark.parametrize(
+    "change", ["header_size", "short_header", "short_body", "trailing"]
+)
+def test_aux_codec_rejects_invalid_safetensors(change: str):
+    raw = AuxBlock(0, np.zeros((1, 3, 2), dtype=np.uint8)).encode()
+    invalid = {
+        "header_size": b"\xff" * 8 + raw[8:],
+        "short_header": raw[:10],
+        "short_body": raw[:-1],
+        "trailing": raw + b"x",
+    }[change]
+    with pytest.raises(ValueError):
+        AuxBlock.decode(invalid)
+
+
+def test_aux_codec_accepts_external_safetensors_and_rejects_extra_fields():
+    rows = np.arange(24, dtype=np.uint16).reshape(4, 3, 2)
+    fields = {"routed_experts": rows}
+    metadata = {"version": "1", "token_start": "12"}
+    block = AuxBlock.decode(save(fields, metadata))
+    assert block.token_start == 12
+    np.testing.assert_array_equal(block.routed_experts, rows)
+    fields["hidden_states"] = rows
+    with pytest.raises(ValueError, match="Unsupported auxiliary fields"):
+        AuxBlock.decode(save(fields, metadata))
+
+
+@pytest.mark.parametrize(
+    "dtype,shape,start",
+    [
+        ("i1", (1, 3, 2), 0),
+        ("u4", (1, 3, 2), 0),
+        ("u1", (1, 3), 0),
+        ("u1", (0, 3, 2), 0),
+        ("u1", (1, 0, 2), 0),
+        ("u1", (1, 3, 2), -1),
+        ("u1", (1, 3, 2), 2**64),
+    ],
+)
+def test_aux_codec_rejects_invalid_input(
+    dtype: str, shape: tuple[int, ...], start: int
+):
+    with pytest.raises(ValueError):
+        AuxBlock(start, np.zeros(shape, dtype=dtype)).encode()
+    with pytest.raises(ValueError):
+        AuxBlock.decode(
+            save(
+                {"routed_experts": np.zeros(shape, dtype=dtype)},
+                {"version": "1", "token_start": str(start)},
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "shape,dtype,start",
+    [((2, 3), _DTYPE, 0), (_SHAPE, np.dtype("u2"), 0), (_SHAPE, _DTYPE, 1)],
+)
+def test_mooncake_reads_check_expected_routing_profile_and_range(
+    remote_store, shape, dtype, start
+):
+    remote_store.put(
+        [
+            BlockObject(
+                "block", AuxBlock(0, np.zeros((4, *_SHAPE), dtype=_DTYPE)).encode()
+            )
+        ]
+    )
+    with pytest.raises(ValueError):
+        remote_store.get_concatenated(
+            ["block"], shape_per_token=shape, dtype=dtype, token_start=start
+        )
+
+
+def test_mooncake_requires_encoded_capacity():
+    with pytest.raises(ValueError, match="encoded"):
+        MooncakeBlockObjectStore(
+            Mock(), object_nbytes=4, max_batch_bytes=R3_HEADER_RESERVE + 3
+        )
+
+
+@pytest.mark.parametrize("aux_config", ["separate", "shared", "missing", "offload"])
+def test_mooncake_aux_configuration_is_explicit(monkeypatch, tmp_path, aux_config):
+    """Aux selects its own configuration without changing KV's default entry."""
+    kv_path, aux_path = tmp_path / "kv.json", tmp_path / "aux.json"
+    kv_path.write_text(
+        json.dumps({"master_server_address": "kv:50051", "enable_offload": True})
+    )
+    aux_path.write_text(
+        json.dumps(
+            {
+                "master_server_address": "aux:50051",
+                "metadata_server": "P2PHANDSHAKE",
+                "mode": "standalone-store",
+                "global_segment_size": 0,
+                "local_buffer_size": 4096,
+                "tenant_id": "rl",
+                "enable_offload": aux_config == "offload",
+            }
+        )
+    )
+    monkeypatch.setenv("MOONCAKE_CONFIG_PATH", str(kv_path))
+    name = "VLLM_AUX_OUTPUT_MOONCAKE_CONFIG_PATH"
+    monkeypatch.delenv(name, raising=False)
+    if aux_config != "missing":
+        monkeypatch.setenv(name, str(kv_path if aux_config == "shared" else aux_path))
+    native = Mock()
+    native.setup.return_value = 0
+    factory = Mock(return_value=native)
+    monkeypatch.setitem(
+        sys.modules, "mooncake.store", SimpleNamespace(MooncakeDistributedStore=factory)
+    )
+    kv_config = MooncakeStoreConfig.load_from_config()
+    assert kv_config.master_server_address == "kv:50051"
+    assert kv_config.enable_offload
+    if aux_config == "missing":
+        with pytest.raises(ValueError, match=name):
+            create_mooncake_block_store(object_nbytes=24)
+        factory.assert_not_called()
+        return
+    store = create_mooncake_block_store(object_nbytes=24)
+    publisher = MooncakeOutputPublisher(
+        AuxRequestOutput(0, np.zeros((1, *_SHAPE), dtype=_DTYPE)), _BLOCK_SIZE
+    )
+    calls = native.setup.call_args_list
+    assert len(calls) == 2 and calls[0] == calls[1]
+    assert calls[0].args[6] == ("kv:50051" if aux_config == "shared" else "aux:50051")
+    if aux_config != "shared":
+        assert calls[0].args[1:6] == ("P2PHANDSHAKE", 0, 4096, "rdma", "")
+        assert calls[0].kwargs == {"tenant_id": "rl"}
+    publisher.close()
+    store.close()
+
+
+@pytest.fixture
+def remote_store(monkeypatch, request):
+    remote: dict[str, bytes] = {}
+    native = Mock()
+
+    def put(keys: list[str], values: list[bytes]) -> int:
+        for key, value in zip(keys, values, strict=True):
+            remote.setdefault(key, value)
+        return 0
+
+    native.put_batch.side_effect = put
+    native.get_buffer.side_effect = remote.get
+    native.batch_get_buffer.side_effect = lambda keys: [remote.get(k) for k in keys]
+    store = MooncakeBlockObjectStore(
+        native,
+        object_nbytes=getattr(request, "param", _BLOCK_SIZE) * int(np.prod(_SHAPE)),
+        max_batch_bytes=1024,
+    )
+    monkeypatch.setattr(
+        "vllm.distributed.aux_output_connector.mooncake.create_mooncake_block_store",
+        lambda **kwargs: store,
+    )
+    return store
+
+
+@pytest.mark.parametrize("remote_store", [2, 4, 8], indirect=True)
+@pytest.mark.parametrize("start,end", [(0, 18), (1, 7), (4, 8), (16, 17), (18, 18)])
+def test_mooncake_output_keys_contain_exact_accepted_rows(remote_store, start, end):
+    """Configured hash granularity determines key ranges, not output metadata."""
+    block_size = remote_store.object_nbytes // int(np.prod(_SHAPE))
+    rows = np.arange(108, dtype=np.uint8).reshape(18, *_SHAPE)
+    keys = [f"block-{i}" for i in range(16 // block_size)]
+    remote_store.put(
+        [
+            BlockObject(
+                key,
+                AuxBlock(
+                    i * block_size, rows[i * block_size : (i + 1) * block_size]
+                ).encode(),
+            )
+            for i, key in enumerate(keys)
+        ]
+    )
+    output = AuxRequestOutput(
+        start, rows[max(start, 16) :], keys[start // block_size :]
+    )
+    publisher = MooncakeOutputPublisher(output, block_size)
+    request = _SchedulerRequest("request", [], num_tokens=end + 1, finished=True)
+    result = publisher.take_output(request, output)
+    assert result is not None
+    assert remote_store.get_concatenated(result) == rows[start:end].tobytes()
+    if start == 0 and end == 18:
+        assert result[: len(keys)] == keys
+    publisher.close()
+
+
+def test_mooncake_worker_and_publisher_reuse_prefix_and_finalize_tail(remote_store):
+    worker = _make_worker(2)
+    worker._store.close()
+    worker._store = BackgroundBlockObjectStore(remote_store, max_pending_batches=2)
+    worker._return_keys = True
+    hashes = [b"a" * 32, b"b" * 32]
+    rows = np.arange(60, dtype=np.uint8).reshape(10, *_SHAPE)
+    first = _metadata(0, [_request_metadata("first", 0, 8, 0, hashes)], {})
+    output = _process_output(worker, first, rows[:8], ["first"], np.array([0]))
+    assert len(output["first"].rows) == 0
+    assert len(output["first"].block_keys) == 2
+    second = _metadata(0, [_request_metadata("second", 8, 2, 0, hashes)], {"first": []})
+    output = _process_output(worker, second, rows[8:], ["second"], np.array([0]))
+    publisher = MooncakeOutputPublisher(output["second"], _BLOCK_SIZE)
+    keys = publisher.take_output(
+        _SchedulerRequest("second", [], num_tokens=11, finished=True), output["second"]
+    )
+    assert remote_store.get_concatenated(keys) == rows.tobytes()
+    worker.close()
+
+
+@pytest.mark.parametrize("prompt_length", [6, 8, 9])
+def test_mooncake_pd_reads_only_boundary_and_reuses_shared_blocks(
+    remote_store, prompt_length
+):
+    """D reads only its boundary, preserving shared first-writer values."""
+    rows = np.arange(72, dtype=np.uint8).reshape(12, *_SHAPE)
+    source = rows[:prompt_length].copy()
+    # P's boundary differs from recomputation; published full blocks win.
+    source[prompt_length - 1] = 200
+    hashes = [b"a" * 32, b"b" * 32, b"c" * 32]
+    full_end = prompt_length // _BLOCK_SIZE * _BLOCK_SIZE
+    source_keys = [f"prefill-{i}" for i in range(0, prompt_length, _BLOCK_SIZE)]
+    source_keys[: full_end // _BLOCK_SIZE] = routed_experts_keys(
+        hashes[: full_end // _BLOCK_SIZE], "0"
+    )
+    objects = [
+        BlockObject(key, AuxBlock(i, source[i : i + _BLOCK_SIZE]).encode())
+        for key, i in zip(source_keys, range(0, prompt_length, _BLOCK_SIZE))
+    ]
+    remote_store.put(objects)
+    worker = _make_worker(1)
+    worker._store.close()
+    worker._store = BackgroundBlockObjectStore(remote_store, max_pending_batches=2)
+    worker._return_keys = True
+    step = _metadata(
+        0,
+        [_request_metadata("decode", prompt_length - 1, 13 - prompt_length, 0, hashes)],
+        {},
+    )
+    if (prompt_length - 1) % _BLOCK_SIZE:
+        step.metadata.remote_tails["decode"] = source_keys[
+            (prompt_length - 1) // _BLOCK_SIZE
+        ]
+    remote_store._store.put_batch.reset_mock()
+    output = _process_output(
+        worker, step, rows[prompt_length - 1 :], ["decode"], np.array([0])
+    )["decode"]
+    calls = remote_store._store.batch_get_buffer.call_args_list
+    boundary = (prompt_length - 1) // _BLOCK_SIZE
+    assert [call.args[0] for call in calls] == (
+        [[source_keys[boundary]]] if (prompt_length - 1) % _BLOCK_SIZE else []
+    )
+    published = {
+        key
+        for call in remote_store._store.put_batch.call_args_list
+        for key in call.args[0]
+    }
+    assert not published.intersection(source_keys[:boundary])
+    expected = rows.copy()
+    expected[:full_end] = source[:full_end]
+    assert remote_store.get_concatenated(output.block_keys) == expected.tobytes()
+    assert remote_store.get_concatenated(source_keys) == source.tobytes()
+    # No handoff manifest on the next request: D's own cache is self-contained.
+    step = _metadata(0, [_request_metadata("local", 8, 4, 0, hashes)], {"decode": []})
+    output = _process_output(worker, step, rows[8:], ["local"], np.array([0]))["local"]
+    assert remote_store.get_concatenated(output.block_keys) == expected.tobytes()
+    worker.close()
+
+
+@pytest.mark.parametrize("prefix", [None, {"block_size": 8, "keys": ["full"]}])
+def test_remote_kv_requires_r3_handoff_manifest(prefix):
+    connector = _make_connector()
+    request = _SchedulerRequest(
+        "decode",
+        [b"a" * 32],
+        num_tokens=7,
+        num_output_tokens=0,
+        num_computed_tokens=6,
+        prefill_stats=SimpleNamespace(
+            num_local_cached_tokens=4, num_external_cached_tokens=2
+        ),
+    )
+    scheduled = SimpleNamespace(num_scheduled_tokens={"decode": 1})
+    request.kv_transfer_params = {"aux_output_prefix": prefix}
+    with pytest.raises(ValueError, match="aux_output_prefix"):
+        connector.build_connector_meta(scheduled, {"decode": request})
+    connector = _make_connector()
+    request.kv_transfer_params = {
+        "aux_output_prefix": {"block_size": _BLOCK_SIZE, "keys": ["full", "tail"]}
+    }
+    metadata = connector.build_connector_meta(scheduled, {"decode": request})
+    assert metadata.remote_tails == {"decode": "tail"}
+
+
+@pytest.mark.parametrize("start", [4, 8])
+def test_aligned_external_kv_hit_needs_no_aux_handoff(start):
+    connector = _make_connector()
+    request = _SchedulerRequest(
+        "offload",
+        [],
+        num_tokens=start + 1,
+        num_computed_tokens=start,
+        prefill_stats=SimpleNamespace(num_external_cached_tokens=start),
+    )
+    scheduled = SimpleNamespace(num_scheduled_tokens={"offload": 1})
+    metadata = connector.build_connector_meta(scheduled, {"offload": request})
+    assert not metadata.remote_tails
+    assert "offload" in metadata.requests
+
+
+def test_mooncake_pd_missing_tail_fails_closed(remote_store):
+    worker = _make_worker(1)
+    worker._store.close()
+    worker._store = BackgroundBlockObjectStore(remote_store, max_pending_batches=2)
+    worker._return_keys = True
+    step = _metadata(0, [_request_metadata("decode", 1, 1, 0, [])], {})
+    step.metadata.remote_tails["decode"] = "missing-tail"
+    with pytest.raises(BlockObjectStoreError, match="missing-tail"):
+        _process_output(
+            worker,
+            step,
+            np.zeros((1, *_SHAPE), dtype=_DTYPE),
+            ["decode"],
+            np.array([0]),
+        )
+    worker.close()
+
+
+def test_mooncake_decode_crosses_blocks_and_clips_terminal_output(remote_store):
+    """Late full-block keys must not duplicate bytes accepted in earlier steps."""
+    rows = np.arange(60, dtype=np.uint8).reshape(10, *_SHAPE)
+    connector = AuxOutputSchedulerConnector(_BLOCK_SIZE)
+    request = _SchedulerRequest("request", [], num_tokens=4)
+    assert (
+        connector.take_output(request, {"request": AuxRequestOutput(0, rows[:3], [])})
+        is None
+    )
+    remote_store.put([BlockObject("block-0", AuxBlock(0, rows[:4]).encode())])
+    request.num_tokens = 6
+    assert (
+        connector.take_output(
+            request, {"request": AuxRequestOutput(3, rows[4:5], ["block-0"])}
+        )
+        is None
+    )
+    remote_store.put([BlockObject("block-1", AuxBlock(4, rows[4:8]).encode())])
+    request.num_tokens = 10
+    request.finished = True
+    keys = connector.take_output(
+        request, {"request": AuxRequestOutput(5, rows[8:], ["block-1"])}
+    )
+    assert remote_store.get_concatenated(keys) == rows[:9].tobytes()
+    connector.close()
+    remote_store._store.close.assert_called_once_with()
+
+
+def test_mooncake_preemption_keeps_already_accepted_output(remote_store):
+    """Re-prefill recreates Worker state without replacing already accepted R3."""
+    rows = np.arange(42, dtype=_DTYPE).reshape(7, *_SHAPE)
+    worker = _make_worker(1)
+    worker._store.close()
+    worker._store = BackgroundBlockObjectStore(remote_store, max_pending_batches=2)
+    worker._return_keys = True
+    connector = AuxOutputSchedulerConnector(_BLOCK_SIZE)
+    request = _SchedulerRequest(
+        "request", [b"a" * 32], num_tokens=6, num_output_tokens=0
+    )
+    requests = {request.request_id: request}
+    metadata = connector.build_connector_meta(
+        _step_output(["request"], [0], [6]), requests
+    )
+    output = _process_output(
+        worker,
+        metadata,
+        rows[:6],
+        ["request"],
+        np.array([0]),
+        token_starts=(0,),
+        num_tokens=(6,),
+    )
+    request.num_tokens = 7
+    request.num_output_tokens = 1
+    assert connector.take_output(request, output) is None
+    connector.request_finished(request)
+    worker.begin_step(
+        connector.build_connector_meta(_step_output([], [], []), requests)
+    )
+    assert "request" not in worker._requests
+
+    request.num_preemptions = 1
+    metadata = connector.build_connector_meta(
+        _step_output(["request"], [0], [7]), requests
+    )
+    replay = rows.copy()
+    replay[:6] = 200
+    output = _process_output(
+        worker,
+        metadata,
+        replay,
+        ["request"],
+        np.array([0]),
+        token_starts=(0,),
+        num_tokens=(7,),
+    )
+    request.num_tokens = 8
+    request.num_output_tokens = 2
+    request.finished = True
+    result = connector.take_output(request, output)
+    assert remote_store.get_concatenated(result) == rows.tobytes()
+    connector.request_finished(request)
+    worker.close()
+    connector.close()
+
+
+def test_mooncake_string_stop_delivers_keys_before_engine_abort(remote_store):
+    """API-side termination must retain R3 from every accepted step."""
+    from tokenizers import Tokenizer, models
+    from transformers import TokenizersBackend
+
+    from vllm.sampling_params import SamplingParams
+    from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
+    from vllm.v1.engine.output_processor import OutputProcessor
+
+    tokenizer = TokenizersBackend(
+        tokenizer_object=Tokenizer(
+            models.WordLevel({"hello": 0, "!": 1, "[UNK]": 2}, unk_token="[UNK]")
+        )
+    )
+    processor = OutputProcessor(tokenizer, log_stats=False)
+    params = SamplingParams(stop=["!"], max_tokens=10)
+    processor.add_request(
+        EngineCoreRequest(
+            request_id="request",
+            external_req_id="request",
+            prompt_token_ids=[0],
+            mm_features=None,
+            sampling_params=params,
+            pooling_params=None,
+            arrival_time=0,
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+        ),
+        None,
+    )
+    connector = AuxOutputSchedulerConnector(_BLOCK_SIZE)
+    request = _SchedulerRequest("request", [], num_tokens=2, sampling_params=params)
+    rows = np.arange(12, dtype=_DTYPE).reshape(2, *_SHAPE)
+    for index, token in enumerate([0, 1]):
+        request.num_tokens = index + 2
+        keys = connector.take_output(
+            request, {"request": AuxRequestOutput(index, rows[index : index + 1], [])}
+        )
+        assert keys is not None
+        result = processor.process_outputs(
+            [
+                EngineCoreOutput(
+                    request_id="request", new_token_ids=[token], aux_output_keys=keys
+                )
+            ]
+        )
+        completion = result.request_outputs[0].outputs[0]
+        if index == 0:
+            assert completion.aux_output_keys is None
+    assert not request.is_finished()
+    assert result.request_outputs[0].finished
+    assert result.reqs_to_abort == ["request"]
+    assert remote_store.get_concatenated(completion.aux_output_keys) == rows.tobytes()
+    request.finished = True
+    connector.request_finished(request)
+    connector.close()
+
+
+def test_mooncake_batches_preserve_order_and_request_release_keeps_objects():
+    """The writer deduplicates keys and leaves remote retention to the deployment."""
+    remote: dict[str, bytes] = {}
+    native = Mock()
+
+    def put(keys: list[str], values: list[bytes]) -> int:
+        for key, value in zip(keys, values, strict=True):
+            remote.setdefault(key, value)
+        return 0
+
+    native.put_batch.side_effect = put
+    native.batch_get_buffer.side_effect = lambda keys: [remote.get(k) for k in keys]
+    store = BackgroundBlockObjectStore(
+        MooncakeBlockObjectStore(
+            native, object_nbytes=4, max_batch_bytes=2 * (R3_HEADER_RESERVE + 4)
+        ),
+        max_pending_batches=2,
+    )
+    rows = np.arange(10, dtype=np.uint8).reshape(-1, 1, 1)
+    a, b, c = (
+        BlockObject(key, AuxBlock(start, rows[start:stop]).encode())
+        for key, start, stop in (("a", 0, 4), ("b", 4, 8), ("c", 8, 10))
+    )
+    store.put([a, b, a, c], retain_keys=("a", "b", "c"))
+    store.put([], release_keys=("a", "b", "c"))
+    assert store.get_concatenated(["a", "b", "c"]) == rows.tobytes()
+    assert [call.args for call in native.put_batch.call_args_list] == [
+        (["a", "b"], [a.payload, b.payload]),
+        (["c"], [c.payload]),
+    ]
+    assert [call.args[0] for call in native.batch_get_buffer.call_args_list] == [
+        ["a", "b"],
+        ["c"],
+    ]
+    native.remove.assert_not_called()
+    store.close()
+    native.close.assert_called_once_with()
+
+
+def test_mooncake_missing_object_does_not_return_partial_output():
+    native = Mock()
+    rows = np.zeros((4, 1, 1), dtype=np.uint8)
+    native.batch_get_buffer.return_value = [
+        AuxBlock(0, rows).encode(),
+        None,
+    ]
+    store = MooncakeBlockObjectStore(
+        native, object_nbytes=4, max_batch_bytes=2 * (R3_HEADER_RESERVE + 4)
+    )
+    with pytest.raises(BlockObjectStoreError, match="unavailable: missing"):
+        store.get_concatenated(["present", "missing"])
+
+
+def test_mooncake_republishing_a_key_keeps_its_original_bytes(remote_store):
+    first = np.zeros((1, *_SHAPE), dtype=np.uint8)
+    other = np.ones_like(first)
+    remote_store.put([BlockObject("shared", AuxBlock(0, first).encode())])
+    remote_store.put([BlockObject("shared", AuxBlock(0, other).encode())])
+    assert remote_store.get_concatenated(["shared"]) == first.tobytes()
+
+
+def test_mooncake_failure_propagates_through_background_writer():
+    native = Mock()
+    native.put_batch.return_value = -800
+    store = BackgroundBlockObjectStore(
+        MooncakeBlockObjectStore(
+            native, object_nbytes=4, max_batch_bytes=2 * (R3_HEADER_RESERVE + 4)
+        ),
+        max_pending_batches=1,
+    )
+    with suppress(BlockObjectStoreError):
+        store.put(
+            [
+                BlockObject(
+                    "a", AuxBlock(0, np.zeros((4, 1, 1), dtype=np.uint8)).encode()
+                )
+            ]
+        )
+    with pytest.raises(BlockObjectStoreError, match="publication failed"):
+        store.get_concatenated(["a"])
+    with pytest.raises(BlockObjectStoreError, match="publication failed"):
+        store.close()
+    native.close.assert_called_once_with()
+
+
+def test_mooncake_partial_keys_survive_step_flush_and_request_id_reuse(remote_store):
+    rows = np.arange(12, dtype=np.uint8).reshape(2, *_SHAPE)
+    output = AuxRequestOutput(np.int64(0), rows[:1], [])
+    publisher = MooncakeOutputPublisher(output, _BLOCK_SIZE)
+    request = _SchedulerRequest(
+        "reused", [], num_tokens=2, sampling_params=SimpleNamespace(stop=["!"])
+    )
+    first = publisher.take_output(request, output)
+    request.num_tokens = 3
+    request.finished = True
+    second = publisher.take_output(request, AuxRequestOutput(np.int64(1), rows[1:], []))
+    assert first[0].rsplit("/", 1)[0] == second[0].rsplit("/", 1)[0]
+    assert remote_store.get_concatenated(first + second) == rows.tobytes()
+    request.num_tokens = 2
+    third = publisher.take_output(request, output)
+    assert third[0].rsplit("/", 1)[0] != first[0].rsplit("/", 1)[0]
+    publisher.close()
+
+
+def test_mooncake_worker_reset_advances_key_generation(remote_store):
+    worker = _make_worker(1)
+    worker._store.close()
+    worker._store = BackgroundBlockObjectStore(remote_store, max_pending_batches=2)
+    worker._return_keys = True
+    hashes = [b"a" * 32]
+    rows = np.arange(24, dtype=np.uint8).reshape(4, *_SHAPE)
+    keys = []
+    for generation in (0, 1):
+        step = _metadata(
+            generation, [_request_metadata("request", 0, 4, 0, hashes)], {}
+        )
+        output = _process_output(
+            worker, step, rows + generation, ["request"], np.array([0])
+        )
+        key = output["request"].block_keys[0]
+        assert key == f"vllm-artifact/{generation}/{hashes[0].hex()}"
+        keys.append(key)
+    assert remote_store.get_concatenated([keys[0]]) == rows.tobytes()
+    assert remote_store.get_concatenated([keys[1]]) == (rows + 1).tobytes()
+    worker.close()
+
+
+def test_mooncake_boundary_failure_does_not_deliver_keys(remote_store):
+    rows = np.zeros((1, *_SHAPE), dtype=np.uint8)
+    output = AuxRequestOutput(0, rows, [])
+    publisher = MooncakeOutputPublisher(output, _BLOCK_SIZE)
+    request = _SchedulerRequest("failed", [], num_tokens=2, finished=True)
+    remote_store._store.put_batch.side_effect = None
+    remote_store._store.put_batch.return_value = -800
+    with pytest.raises(BlockObjectStoreError, match="publication failed"):
+        publisher.take_output(request, output)
+    publisher.discard(request.request_id)
+    publisher.close()
 
 
 def test_background_store_publishes_without_blocking_caller():
@@ -92,8 +751,11 @@ class _SchedulerRequest:
     num_computed_tokens: int = 0
     num_in_flight_tokens: int = 0
     finished: bool = False
+    prefill_stats: SimpleNamespace | None = None
+    num_preemptions: int = 0
+    kv_transfer_params: dict | None = None
     sampling_params: SimpleNamespace = field(
-        default_factory=lambda: SimpleNamespace(routed_experts_prompt_start=0)
+        default_factory=lambda: SimpleNamespace(routed_experts_prompt_start=0, stop=[])
     )
 
     @property
@@ -184,6 +846,7 @@ def _make_worker(
         max_concurrent_batches,
     )
     worker._requests = {}
+    worker._return_keys = False
     worker._generation = 0
     worker._step_metadata = None
     worker._pending_outputs = []
@@ -532,7 +1195,7 @@ def _make_store(
     max_bytes: int = 1 << 20,
     object_nbytes: int = 4,
 ):
-    return BlockObjectStore(
+    return ShmBlockObjectStore(
         max_bytes=max_bytes,
         object_nbytes=object_nbytes,
     )
@@ -565,8 +1228,16 @@ def test_publish_routed_experts_publishes_full_blocks():
     store.close()
 
 
-def test_worker_data_plane_publishes_blocks_and_reuses_prefix():
+@pytest.mark.parametrize("backend", ["shm", "mooncake"])
+def test_worker_data_plane_publishes_blocks_and_reuses_prefix(backend, remote_store):
     worker = _make_worker(2)
+    if backend == "mooncake":
+        worker._return_keys = True
+        worker._store.close()
+        worker._store = BackgroundBlockObjectStore(
+            remote_store,
+            max_pending_batches=2,
+        )
 
     hashes = [b"a" * 32, b"b" * 32, b"c" * 32]
     logical = np.arange(10 * 3 * 2, dtype=np.uint8).reshape(10, 3, 2)
@@ -577,7 +1248,13 @@ def test_worker_data_plane_publishes_blocks_and_reuses_prefix():
     )
     output = _process_output(worker, first, logical[:8], ["first"], np.array([0]))
     assert output is not None
-    np.testing.assert_array_equal(output["first"].rows, logical[:8])
+    if backend == "mooncake":
+        assert output["first"].rows.size == 0
+        assert remote_store.get_concatenated(output["first"].block_keys) == (
+            logical[:8].tobytes()
+        )
+    else:
+        np.testing.assert_array_equal(output["first"].rows, logical[:8])
 
     second = _metadata(
         generation=0,
@@ -586,7 +1263,13 @@ def test_worker_data_plane_publishes_blocks_and_reuses_prefix():
     )
     output = _process_output(worker, second, logical[8:], ["second"], np.array([0]))
     assert output is not None
-    np.testing.assert_array_equal(output["second"].rows, logical)
+    if backend == "mooncake":
+        assert remote_store.get_concatenated(output["second"].block_keys) == (
+            logical[:8].tobytes()
+        )
+        np.testing.assert_array_equal(output["second"].rows, logical[8:])
+    else:
+        np.testing.assert_array_equal(output["second"].rows, logical)
     worker.close()
 
 

@@ -498,6 +498,7 @@ class ServingTokens(GenerateBaseServing):
                 stop_reason=output.stop_reason,
                 token_ids=as_list(output.token_ids),
                 routed_experts=routed_experts_b64,
+                aux_output_keys=output.aux_output_keys,
                 sampling_mask=sampling_mask,
                 weight_versions=output.weight_versions,
             )
@@ -733,6 +734,7 @@ class ServingTokens(GenerateBaseServing):
                         token_ids=as_list(delta_token_ids),
                         routed_experts=routed_experts_b64,
                         sampling_mask=sampling_mask,
+                        aux_output_keys=output.aux_output_keys,
                         weight_versions=output.weight_versions,
                     )
                     chunk: GenerateTokensStreamResponse | GenerateTextStreamResponse

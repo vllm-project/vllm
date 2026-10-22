@@ -149,6 +149,10 @@ pub struct EngineCoreOutput {
     /// when a paused engine rejects a request.
     #[serde(default)]
     pub error: Option<Box<RequestError>>,
+    /// Ordered keys of auxiliary-output objects published for this output's
+    /// rows by a keys-only backend; the frontend returns them on completion.
+    #[serde(default)]
+    pub aux_output_keys: Option<Vec<String>>,
 }
 
 /// A request-level error that does not mark the engine as unhealthy.
@@ -582,6 +586,7 @@ mod tests {
                             spec_decode_metrics: None,
                             prompt_token_id_logprobs: None,
                             error: None,
+                            aux_output_keys: None,
                         },
                     ],
                     scheduler_stats: None,

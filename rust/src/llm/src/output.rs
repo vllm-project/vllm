@@ -67,6 +67,8 @@ pub struct CollectedGenerateOutput {
     pub weight_versions: Option<Vec<WeightVersionSpan>>,
     /// Routed-expert rows for the whole request.
     pub routed_experts: Option<WireNdArray>,
+    /// Ordered keys of the request's published auxiliary-output objects.
+    pub aux_output_keys: Option<Vec<String>>,
 }
 
 /// Prompt-scoped metadata emitted only once on the first [`GenerateOutput`] for
@@ -190,6 +192,9 @@ pub struct GenerateOutput {
     pub weight_versions: Option<Vec<WeightVersionSpan>>,
     /// Routed-expert rows for the whole request, set on terminal outputs only.
     pub routed_experts: Option<Box<WireNdArray>>,
+    /// Ordered keys of the request's published auxiliary-output objects, set
+    /// on terminal outputs only.
+    pub aux_output_keys: Option<Vec<String>>,
     /// Snapshot of engine lifecycle timestamps after this output.
     ///
     /// Every output carries a snapshot because text decoding may finish the
@@ -251,6 +256,7 @@ impl GenerateOutput {
         self.spec_decode_metrics = next.spec_decode_metrics;
         self.weight_versions = next.weight_versions;
         self.routed_experts = next.routed_experts;
+        self.aux_output_keys = next.aux_output_keys;
         self.timestamps = next.timestamps;
     }
 }
@@ -282,6 +288,7 @@ impl GenerateOutput {
             spec_decode_metrics: None,
             weight_versions: None,
             routed_experts: None,
+            aux_output_keys: None,
             timestamps: RequestTimestamps::default(),
         }
     }
@@ -302,6 +309,8 @@ pub struct GenerateOutputStream {
     num_output_tokens: usize,
     /// Routed-expert rows received so far, concatenated on the terminal output.
     routed_experts_chunks: Vec<WireNdArray>,
+    /// Auxiliary-output keys received so far, returned on the terminal output.
+    aux_output_keys: Option<Vec<String>>,
     /// Removes this request's external→internal tracking edge on drop. Held for
     /// its `Drop` side effect only; never read directly.
     _request_guard: RequestGuard,
@@ -327,6 +336,7 @@ impl GenerateOutputStream {
             weight_version_starts: Vec::new(),
             num_output_tokens: 0,
             routed_experts_chunks: Vec::new(),
+            aux_output_keys: None,
             _request_guard: request_guard,
         }
     }
@@ -371,6 +381,9 @@ impl GenerateOutputStream {
         let raw = raw.output;
         if let Some(rows) = raw.routed_experts {
             self.routed_experts_chunks.push(*rows);
+        }
+        if let Some(keys) = raw.aux_output_keys {
+            self.aux_output_keys.get_or_insert_default().extend(keys);
         }
 
         // Populate the one-time prompt info on the first output.
@@ -422,6 +435,11 @@ impl GenerateOutputStream {
         } else {
             None
         };
+        let aux_output_keys = if finish_reason.is_some() {
+            self.aux_output_keys.take()
+        } else {
+            None
+        };
 
         let output = GenerateOutput {
             request_id: raw.request_id,
@@ -436,6 +454,7 @@ impl GenerateOutputStream {
             spec_decode_metrics: raw.spec_decode_metrics,
             weight_versions,
             routed_experts,
+            aux_output_keys,
             timestamps: self.request_metrics.timestamps(),
         };
 
@@ -594,6 +613,7 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                         spec_decode_metrics: None,
                         weight_versions: None,
                         routed_experts: None,
+                        aux_output_keys: None,
                     });
                 }
 
@@ -610,6 +630,7 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                     collected.spec_decode_metrics = output.spec_decode_metrics.map(|value| *value);
                     collected.weight_versions = output.weight_versions;
                     collected.routed_experts = output.routed_experts.map(|value| *value);
+                    collected.aux_output_keys = output.aux_output_keys;
                     if let Some(mask) = collected.sampling_mask.as_ref()
                         && mask.rows.len() != collected.token_ids.len()
                     {
