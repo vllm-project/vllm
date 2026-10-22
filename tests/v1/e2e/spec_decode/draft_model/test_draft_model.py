@@ -203,9 +203,11 @@ def test_draft_model_engine_args_tensor_parallelism():
     )
     target_config: VllmConfig = engine_args.create_engine_config()
     assert target_config.parallel_config.tensor_parallel_size == 2
+    assert target_config.quant_config is not None
     assert target_config.quant_config.get_name() == "fp8"
 
     speculative_config = target_config.speculative_config
+    assert speculative_config is not None
     draft_config: VllmConfig = replace(
         target_config,
         quant_config=None,
@@ -255,6 +257,7 @@ def _apply_draft_moe_backend(vllm_config: VllmConfig) -> VllmConfig:
     """Replicate SpecDecodeBaseProposer._create_draft_vllm_config logic
     so we can test it without instantiating a full proposer."""
     spec_cfg = vllm_config.speculative_config
+    assert spec_cfg is not None
     if spec_cfg.moe_backend is not None:
         return replace(
             vllm_config,
@@ -293,6 +296,7 @@ def test_draft_model_moe_backend_override(monkeypatch: pytest.MonkeyPatch):
     )
     tgt_config: VllmConfig = engine_args.create_engine_config()
     assert tgt_config.kernel_config.moe_backend == target_moe_backend
+    assert tgt_config.speculative_config is not None
     assert tgt_config.speculative_config.moe_backend == "triton"
 
     draft_config = _apply_draft_moe_backend(tgt_config)
@@ -317,6 +321,7 @@ def test_draft_model_moe_backend_inherits_target(monkeypatch: pytest.MonkeyPatch
     )
     tgt_config: VllmConfig = engine_args.create_engine_config()
     assert tgt_config.kernel_config.moe_backend == target_moe_backend
+    assert tgt_config.speculative_config is not None
     assert tgt_config.speculative_config.moe_backend is None
 
     draft_config = _apply_draft_moe_backend(tgt_config)
@@ -338,6 +343,7 @@ def test_draft_model_moe_backend_default_auto():
     )
     tgt_config: VllmConfig = engine_args.create_engine_config()
     assert tgt_config.kernel_config.moe_backend == "auto"
+    assert tgt_config.speculative_config is not None
     assert tgt_config.speculative_config.moe_backend is None
 
     draft_config = _apply_draft_moe_backend(tgt_config)

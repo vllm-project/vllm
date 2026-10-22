@@ -429,9 +429,10 @@ class SpeculativeConfig:
     """Attention backend to use for the draft model. When `None`, the backend is
     automatically selected. Useful when the drafter requires a different attention
     backend (e.g. DFlash needs a backend that supports non-causal attention)."""
-    kv_cache_dtype: CacheDType | None = None
+    kv_cache_dtype: CacheDType | str | None = None
     """KV cache dtype for the draft model. When `None`, the draft inherits the
-    target model's `--kv-cache-dtype`."""
+    target model's `--kv-cache-dtype`. Custom dtypes registered by platform
+    backends are accepted."""
     max_model_len: int | None = Field(default=None, ge=1)
     """The maximum model length of the draft model. Used when testing the
     ability to skip speculation for some sequences."""
@@ -687,6 +688,18 @@ class SpeculativeConfig:
     @staticmethod
     def hf_config_override(hf_config: PreTrainedConfig) -> PreTrainedConfig:
         initial_architecture = hf_config.architectures[0]
+        if initial_architecture == "RadioMBartPrefixForCausalLM" and getattr(
+            getattr(hf_config, "decoder", None), "causal_vision_prefix", False
+        ):
+            hf_config.model_type = "mtp"
+            hf_config.update(
+                {
+                    "architectures": ["ParseAuxMTPModel"],
+                    "n_predict": 1,
+                    "num_nextn_predict_layers": 1,
+                }
+            )
+            return hf_config
         use_v32_mtp = hf_config.model_type in ("deepseek_v32", "glm_moe_dsa")
         if hf_config.model_type == "dots3_note":
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
@@ -1113,6 +1126,15 @@ class SpeculativeConfig:
                     "index_share_for_mtp_iteration": share_mtp_indices,
                 }
             )
+        if hf_config.model_type == "muse_glimmer_assistant":
+            # Non-causal DFlash drafter sharing Muse Glimmer's vocabulary
+            hf_config.update(
+                {
+                    "dflash_config": {"causal": False}
+                    | (getattr(hf_config, "dflash_config", None) or {}),
+                    "vocab_size": getattr(hf_config, "vocab_size", 202048),
+                }
+            )
 
         return hf_config
 
@@ -1497,6 +1519,11 @@ class SpeculativeConfig:
                 n_predict = getattr(
                     self.draft_model_config.hf_config, "n_predict", None
                 )
+                if (
+                    "ParseAuxMTPModel" in self.draft_model_config.architectures
+                    and self.num_speculative_tokens not in (None, 1)
+                ):
+                    raise ValueError("Parse 3.5 has only one trained MTP step")
                 if self.use_dspark():
                     if self.num_speculative_tokens is None:
                         # DSpark's parallel width is independent of MTP stages.
