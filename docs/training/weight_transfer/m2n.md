@@ -52,7 +52,14 @@ single-source-group transfer uses one communicator and does not require it.
    its staging buffers, every transfer stream is ordered after the model
    loader's current CUDA stream so asynchronous loads cannot race with reuse.
 
-### Destination resolution
+### Destination resolution and layouts
+
+With `auto_dst_mesh=True`, each parameter resolves its own 2-D destination
+mesh over the same ordered set of inference workers. A semantic target uses
+its declared shard count, a recognized TP loader uses its `tp_size`, and
+replicated parameters and full fallback use `(num_workers, 1)`. This changes
+the mesh and placements passed to `m2n.reshard()` for that parameter; it does
+not create another communicator or change transfer scheduling.
 
 A parameter uses one collectively agreed destination mode:
 
@@ -68,8 +75,9 @@ the source permits it. Otherwise initialization fails before the data-plane
 communicator is created.
 
 `plan_summary()` reports the agreed communicator membership and ordered transfer
-waves using source-manifest parameter indices. It also reports how many
-parameters and logical bytes use each destination mode, and the aggregate
+waves using source-manifest parameter indices. It also reports the optional
+fixed destination-mesh constraint, parameter counts for each resolved
+destination mesh, destination-mode counts and logical bytes, and the aggregate
 receiver payload implied by the plan.
 
 ## Configuration
@@ -117,6 +125,22 @@ engine = WeightTransferTrainerFactory.trainer_init(
 engine.send_weights()
 ```
 
+Automatic destination layout planning is opt-in. Existing callers that omit
+both options keep the legacy flat `(num_inference_workers, 1)` destination
+mesh. An explicit `dst_mesh_dims=(replica_count, shard_count)` keeps fixed-mesh
+behavior.
+
+```python
+init_info = M2NTrainerInitInfo(
+    ...,
+    auto_dst_mesh=True,
+)
+```
+
+`auto_dst_mesh=True` cannot be combined with explicit `dst_mesh_dims`.
+Automatic planning may factor the inference workers differently for each
+parameter, but every mesh covers the same ordered worker set.
+
 `send_weights()` drives the whole round — `start_weight_update`,
 `update_weights`, `finish_weight_update`. Rank 0 coordinates the worker RPCs
 and trainer round control, while every source-group member submits its local
@@ -152,7 +176,8 @@ parameter belongs to exactly one canonical group. Source groups are non-empty
 and pairwise disjoint, so a trainer rank belongs to at most one group. Each
 parameter may use its own mesh and placements over its assigned group's ordered
 ranks, and the source-mesh size must equal that group size. Every declared group
-must own at least one parameter.
+must own at least one parameter. All source groups must contain the same number
+of ranks.
 vLLM does not infer trainer ownership from parameter names or from the
 inference pipeline topology.
 
@@ -182,10 +207,9 @@ See [`examples/rl/rlhf_m2n.py`](../../../examples/rl/rlhf_m2n.py) for a runnable
 
 ## Limitations
 
-- All parameters currently target the same inference-worker mesh. The source
-  and transfer-route contracts preserve room for per-parameter destination
-  meshes over the same worker subset, but per-parameter destination-mesh
-  selection is not implemented yet.
+- Destination meshes are 2-D and may use a different factorization for each
+  parameter. Every destination mesh covers the same ordered inference-worker
+  set; per-parameter worker subsets and rank permutations are not supported.
 - vLLM validates tensor-rank and dtype support while agreeing on the complete
   plan; the installed M2N runtime validates them again for each reshard.
 - Each source mesh is 1-D or 2-D and uses communicator-local ranks starting at
