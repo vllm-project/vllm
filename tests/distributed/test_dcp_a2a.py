@@ -53,7 +53,12 @@ def _packed_a2a_reference(
         .contiguous()
         .float()
     )
-    lses = cp_attn_lse.view(B, world_size, h_per_rank).permute(1, 0, 2).contiguous()
+    lses = (
+        cp_attn_lse.view(B, world_size, h_per_rank)
+        .permute(1, 0, 2)
+        .contiguous()
+        .float()
+    )
     return _lse_weighted_combine(
         outputs,
         lses,
