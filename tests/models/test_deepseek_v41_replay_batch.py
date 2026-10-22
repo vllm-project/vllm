@@ -4,7 +4,7 @@
 
 from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -16,8 +16,12 @@ from vllm.forward_context import (
     ForwardContext,
     override_forward_context,
 )
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsCapturer,
+)
 from vllm.models.deepseek_v41.decoder_replay_layers import DecoderReplayLayers
 from vllm.models.deepseek_v41.nvidia.model_state import DeepseekV41ModelState
+from vllm.sampling_params import SamplingParams
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
@@ -63,6 +67,7 @@ def state(monkeypatch):
     cfg.scheduler_config.max_num_seqs = 16
     cfg.scheduler_config.max_num_batched_tokens = 1024
     cfg.parallel_config.data_parallel_size = 1
+    cfg.parallel_config.prefill_context_parallel_size = 1
     cfg.aux_output_config.enable_return_routed_experts = False
     cfg.compilation_config.fast_moe_cold_start = False
     cfg.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
@@ -173,6 +178,31 @@ def test_replay_batch_keeps_each_request_window(state):
     assert context.dp_metadata is None and context.is_padding is None
 
 
+def test_replay_context_restores_tp_routing_rows(state):
+    """Capture uses the compact replay batch's size, not the outer batch's."""
+    batch = _input_batch(QUERY_LENS, SEQ_LENS, PREFILLING)
+    replay, _ = _prepare(state, batch, CUDAGraphMode.NONE)
+    context = replay.forward_context
+    assert context.is_padding is None and context.dp_metadata is None
+    count = len(REPLAY_ROWS)
+    assert context.batch_descriptor.num_tokens == count
+    capturer = RoutedExpertsCapturer.__new__(RoutedExpertsCapturer)
+    capturer.dp_rank, capturer.tp_size = 0, 2
+    capturer.device_buffer = torch.full((401, 1, 2), -1, device=DEVICE)
+    expected = torch.tensor(REPLAY_ROWS, device=DEVICE)[:, None].expand(-1, 2)
+    gathered = torch.cat((expected, torch.full((1, 2), -1, device=DEVICE)))
+    with (
+        override_forward_context(context),
+        patch(
+            "vllm.model_executor.layers.fused_moe.routed_experts_capturer.get_tp_group"
+        ) as group,
+    ):
+        group.return_value.all_gather.return_value = gathered
+        capturer.capture(0, gathered[: (count + 1) // 2])
+    torch.testing.assert_close(capturer.device_buffer[:count, 0], expected)
+    assert (capturer.device_buffer[count:] == -1).all()
+
+
 def test_replay_batch_keeps_device_decode_boundaries(state):
     """Adaptive verification resizes decodes on the GPU (CPU [2, 2], device
     [1, 3]): their rows stay and the boundaries shift only by trimmed rows."""
@@ -186,14 +216,70 @@ def test_replay_batch_keeps_device_decode_boundaries(state):
 
 
 def test_prompt_logprobs_requests_keep_their_rows(state):
-    """Every prompt row of a prompt-logprobs request is read, so it never
-    trims; the other prefills still do."""
-    state._keeps_rows_np[1] = True
-    batch = _input_batch([1, 300, 300], [500, 300, 300], PREFILLING)
-    replay, build = _prepare(state, batch, CUDAGraphMode.NONE)
-    assert replay is not None
-    assert replay.rows.tolist() == [0, *range(1, 301), *range(601 - WINDOW, 601)]
-    assert build.batch.max_query_len == 300
+    """Keep the whole scoring chunk, even before its scoring offset, while
+    generation still trims and can reuse the scoring request's slot."""
+    layers = state.decoder_replay_layers
+    layers.trim_threshold = WINDOW + 1
+    layers.run_layers = lambda hidden: (hidden + 1,)
+    for prompt_logprobs, start in (
+        (0, None),
+        (-1, None),
+        (None, 0),
+        (None, 200),
+        (0, 0),
+    ):
+        params = SamplingParams(
+            prompt_logprobs=prompt_logprobs,
+            prompt_logprob_start=start or 0,
+            prompt_logprob_token_ids=(
+                np.ones((299 - start, 1), dtype=np.int32) if start is not None else None
+            ),
+        )
+        for cg_mode in (CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE):
+            for chunk_size, offset in ((300, 0), (150, 0), (150, 150)):
+                # Request slots deliberately differ from their batch positions.
+                batch = replace(
+                    _input_batch(
+                        [1, chunk_size, 300],
+                        [500, offset + chunk_size, 300],
+                        PREFILLING,
+                    ),
+                    idx_mapping_np=np.array([3, 7, 9], dtype=np.int32),
+                    idx_mapping=torch.tensor(
+                        [3, 7, 9], dtype=torch.int32, device=DEVICE
+                    ),
+                )
+                state.add_request(
+                    7, SimpleNamespace(replay_start=0, sampling_params=params)
+                )
+                replay, build = _prepare(state, batch, cg_mode)
+                assert replay is not None
+                end = 1 + chunk_size
+                rows = [*range(end), *range(end + 300 - WINDOW, end + 300)]
+                assert replay.rows.tolist() == rows
+                assert build.batch.query_start_loc.tolist() == [0, 1, end, end + WINDOW]
+                assert build.batch.max_query_len == chunk_size
+                torch.testing.assert_close(build.batch.positions, batch.positions[rows])
+
+                # Check values, not just shapes: discarded rows are zero-filled.
+                hidden = torch.arange(
+                    1, batch.num_tokens * 2 + 1, device=DEVICE
+                ).reshape(-1, 2)
+                (actual,) = layers._run(hidden)
+                expected = torch.zeros_like(hidden)
+                expected[rows] = hidden[rows] + 1
+                torch.testing.assert_close(actual, expected)
+
+                state.add_request(
+                    7, SimpleNamespace(replay_start=0, sampling_params=SamplingParams())
+                )
+                replay, _ = _prepare(state, batch, cg_mode)
+                assert replay is not None
+                assert replay.rows.tolist() == [
+                    0,
+                    *range(end - WINDOW, end),
+                    *range(end + 300 - WINDOW, end + 300),
+                ]
 
 
 @pytest.mark.parametrize("cg_mode", [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE])
@@ -205,7 +291,7 @@ def test_aux_output_requests_keep_every_routing_row(state, cg_mode):
             index,
             SimpleNamespace(
                 replay_start=0,
-                sampling_params=SimpleNamespace(prompt_logprobs=None),
+                sampling_params=SamplingParams(),
             ),
         )
     batch = _input_batch(QUERY_LENS, SEQ_LENS, PREFILLING)
@@ -346,6 +432,7 @@ def test_zero_prefix_window_warms_gather_and_skips_pad(monkeypatch):
     cfg.scheduler_config.max_num_seqs = 16
     cfg.scheduler_config.max_num_batched_tokens = 1024
     cfg.parallel_config.data_parallel_size = 1
+    cfg.parallel_config.prefill_context_parallel_size = 1
     cfg.compilation_config.fast_moe_cold_start = False
     cfg.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
     layers = SimpleNamespace(window=WINDOW, replay_batch=None, metadata_prefixes=set())

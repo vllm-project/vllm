@@ -352,6 +352,12 @@ class Gemma4Config(VerifyAndUpdateConfig):
                         "for all layers to avoid mixed FA3/FA4 penalty.",
                         head_dims,
                     )
+        elif current_platform.is_xpu():
+            logger.info(
+                "Gemma4 model has heterogeneous head dimensions %s. Leaving the "
+                "attention backend choice to the XPU platform.",
+                head_dims,
+            )
         elif vllm_config.attention_config.backend is None:
             vllm_config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
             logger.info(
@@ -992,7 +998,7 @@ class Qwen4ExpForConditionalGenerationConfig(Qwen3_5ForConditionalGenerationConf
         parallel_config = vllm_config.parallel_config
         # MoE SP also enables HC SP without the explicit HC flag.
         if (
-            current_platform.is_cuda()
+            current_platform.is_cuda_alike()
             and parallel_config.use_sequence_parallel_moe
             and parallel_config.pipeline_parallel_size != 1
         ):
