@@ -147,6 +147,21 @@ def has_compiled_submodule(model: nn.Module) -> bool:
     )
 
 
+def varlen_descriptor_rungs(
+    num_tokens: int, max_query_len: int, max_num_reqs: int
+) -> list[tuple[int, int]]:
+    """(num_reqs, honest max_query_len) rungs for a varlen capture size."""
+    return [
+        (r, max(1, min(max_query_len, num_tokens - r + 1)))
+        for r in sorted(
+            {
+                max(1, -(-num_tokens // max_query_len)),
+                min(num_tokens, max_num_reqs),
+            }
+        )
+    ]
+
+
 class CudaGraphManager:
     def __init__(
         self,
@@ -308,14 +323,20 @@ class CudaGraphManager:
             # Varlen decode graphs take any mix of 1..decode_query_len tokens per
             # request, worst case 1 token per request (or max_num_reqs)
             if capture_varlen_decode and num_tokens <= max_decode_tokens:
-                desc = BatchExecutionDescriptor(
-                    cg_mode=decode_mode,
-                    num_tokens=num_tokens,
-                    num_reqs=min(num_tokens, self.max_num_reqs),
-                    max_query_len=self.decode_query_len,
-                    num_active_loras=num_active_loras,
-                )
-                descs_by_mode[decode_mode].append(desc)
+                _maxq = self.decode_query_len
+                for _r, _maxq_rung in varlen_descriptor_rungs(
+                    num_tokens, _maxq, self.max_num_reqs
+                ):
+                    desc = BatchExecutionDescriptor(
+                        cg_mode=decode_mode,
+                        num_tokens=num_tokens,
+                        num_reqs=_r,
+                        max_query_len=_maxq_rung,
+                        num_active_loras=num_active_loras,
+
+                    )
+                    if desc not in descs_by_mode[decode_mode]:
+                        descs_by_mode[decode_mode].append(desc)
             # Capture uniform decode specfifc graphs if required
             #  (i.e. separate decode routine)
             elif separate_decode_routine and decode_mode and not self.varlen_decode:

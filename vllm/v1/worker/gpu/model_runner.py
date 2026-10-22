@@ -694,6 +694,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.vllm_config,
                 self.device,
                 draft_layer_names=draft_attn_layer_names,
+                # The runner-resolved decode width is the authoritative bound for
+                # device-ragged adaptive decode (num_speculative_steps +
+                # num_new_sampled_tokens_per_step; a model-state property not
+                # visible on SpeculativeConfig).
+                decode_query_len=self.decode_query_len,
+                target_attn_layer_names=target_attn_layer_names,
             )
         additional_attn_cg_support = self.model_state.get_additional_cg_support()
         attn_cg_support = attn_cg_support.narrow(*additional_attn_cg_support)

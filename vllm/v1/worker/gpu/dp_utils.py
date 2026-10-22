@@ -79,6 +79,8 @@ def sync_cudagraph_and_dp_padding(
     max_query_lens_across_dp = tensor[3]
     allow_ubatching_across_dp = tensor[4]
     num_reqs_across_dp = tensor[5]
+    # Ladder descriptors bind on num_reqs; ranks must agree on the bound.
+    synced_num_reqs = int(num_reqs_across_dp.max())
 
     # If ranks disagree on the uniform token count, or its 0 (means None) set to None
     synced_uniform_token_count: int | None = int(uniform_token_counts_across_dp[0])
