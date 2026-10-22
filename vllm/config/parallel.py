@@ -5,6 +5,7 @@ import os
 import socket
 from collections.abc import Callable
 from datetime import timedelta
+from functools import cache
 from typing import TYPE_CHECKING, Any, Literal, Self, overload
 
 import regex as re
@@ -17,7 +18,7 @@ from vllm.config.fault_tolerance import FaultToleranceConfig
 from vllm.config.utils import config
 from vllm.distributed.utils import cpu_all_reduce_
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.network_utils import get_open_ports_list
 
 if TYPE_CHECKING:
@@ -57,7 +58,72 @@ All2AllBackend = Literal[
     "flashinfer_nvlink_two_sided",
     "flashinfer_nvlink_one_sided",
     "passthrough",
+    "auto",
 ]
+
+
+@cache
+def _is_gb200_or_gb300() -> bool:
+    """Whether this is a GB200 or GB300."""
+    if not current_platform.is_cuda():
+        return False
+    if current_platform.get_cpu_architecture() != CpuArchEnum.ARM:
+        # Corner case to distinguish x86 HGX B200/B300 from ARM GB200/GB300
+        return False
+    try:
+        return current_platform.is_device_capability_family(100)
+    except Exception:
+        return False
+
+
+def _resolve_all2all_backend(
+    requested: All2AllBackend, enable_expert_parallel: bool, data_parallel_size: int
+) -> All2AllBackend:
+    """Pick the all2all backend, resolving "auto" against the deployment.
+
+    Args:
+        requested: The configured backend, or "auto" to choose one here.
+        enable_expert_parallel: Whether expert parallelism is on.
+        data_parallel_size: Number of data-parallel ranks.
+
+    Returns:
+        A concrete backend; never "auto".
+
+    """
+    if requested in ("pplx", "naive"):
+        logger.warning(
+            "The '%s' all2all backend has been removed. "
+            "Falling back to 'allgather_reducescatter'.",
+            requested,
+        )
+        return "allgather_reducescatter"
+
+    if requested == "auto":
+        if not (
+            enable_expert_parallel and _is_gb200_or_gb300() and data_parallel_size >= 8
+        ):
+            return "allgather_reducescatter"
+        requested = "flashinfer_nvlink_one_sided"
+
+    if requested == "flashinfer_nvlink_one_sided":
+        if not enable_expert_parallel:
+            logger.debug(
+                "Expert parallel is disabled; using the "
+                "'allgather_reducescatter' all2all backend instead of "
+                "'flashinfer_nvlink_one_sided'."
+            )
+            return "allgather_reducescatter"
+        # Deferred so the ~3s FlashInfer import stays off non-EP paths.
+        from vllm.utils.flashinfer import has_flashinfer_nvlink_one_sided
+
+        if not has_flashinfer_nvlink_one_sided():
+            logger.warning_once(
+                "FlashInfer trtllm_moe_alltoall is unavailable; falling "
+                "back to the 'allgather_reducescatter' all2all backend."
+            )
+            return "allgather_reducescatter"
+
+    return requested
 
 
 @config
@@ -217,8 +283,12 @@ class ParallelConfig:
       with 4 experts and 2 ranks, rank 0 will have experts [0, 2] and rank 1
       will have experts [1, 3]. This strategy can help improve load balancing
       for grouped expert models with no redundant experts."""
-    all2all_backend: All2AllBackend = "allgather_reducescatter"
+    all2all_backend: All2AllBackend = "auto"
     """All2All backend for MoE expert parallel communication. Available options:
+
+    - "auto": "flashinfer_nvlink_one_sided" on GB200/GB300 running expert
+      parallelism with at least 8 data-parallel ranks, "allgather_reducescatter"
+      otherwise
 
     - "allgather_reducescatter": All2all based on allgather and reducescatter
     - "deepep_high_throughput": Use deepep high-throughput kernels
@@ -534,13 +604,11 @@ class ParallelConfig:
                 "The FT system assumes one AsyncMPClient manages all engines."
             )
 
-        if self.all2all_backend in ["pplx", "naive"]:
-            logger.warning(
-                "The '%s' all2all backend has been removed. "
-                "Falling back to 'allgather_reducescatter'.",
-                self.all2all_backend,
-            )
-            self.all2all_backend = "allgather_reducescatter"
+        self.all2all_backend = _resolve_all2all_backend(
+            self.all2all_backend,
+            enable_expert_parallel=self.enable_expert_parallel,
+            data_parallel_size=self.data_parallel_size,
+        )
 
         if self.data_parallel_size_local > self.data_parallel_size:
             raise ValueError(
