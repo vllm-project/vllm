@@ -304,6 +304,9 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages():
     worker._prepared_transfer_regions = {}
     worker._layout_by_peer = OrderedDict()
     worker._acked_layout_peers = set()
+    worker._has_mamba = kv_cache_config.has_mamba_layers
+    worker._sd_conv_regions = set()
+    worker._sd_pair_occurrence = {}
     worker.use_mla = False
     worker.engine = SimpleNamespace(batch_register_memory=lambda *_: 0)
     worker.is_kv_consumer = True
@@ -625,6 +628,7 @@ def test_logical_to_kernel_block_ids_expands_fa_not_gdn():
     worker.shutdown = noop_shutdown
     worker._physical_blocks_per_logical_kv_block = 17
     worker.kv_cache_config = make_hybrid_gdn_kv_cache_config(block_size=544)
+    worker._has_mamba = worker.kv_cache_config.has_mamba_layers
 
     block_ids = [[2], [2]]
     kernel_block_ids = worker._logical_to_kernel_block_ids(block_ids)
@@ -1236,3 +1240,87 @@ def test_gdn_conv_sub_projection_regions_align_across_het_tp(monkeypatch):
                 ) == (True, (d_rank % 2) * d_len, 0, d_len)
     finally:
         get_conv_state_layout.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# SD-layout GDN conv row x segment resharding (Qwen3.6 default layout).
+# These tests validate sd_conv_row_segment_descriptors() against the
+# byte-exact reference formula verified on real hardware (Qwen3.6-35B,
+# all four TP shapes, 500-problem GSM8K full runs).
+# ---------------------------------------------------------------------------
+
+
+def test_sd_conv_p2d1_exact_once():
+    """P TP2 -> D TP1: 9 descriptors per producer rank cover the D conv
+    region (3 rows x 16384 B) exactly once."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
+        sd_conv_row_segment_descriptors,
+    )
+
+    cov = [[0] * 16384 for _ in range(3)]
+    for r in (0, 1):
+        s, d, lens = sd_conv_row_segment_descriptors(
+            0x10000, 0x20000, 7, 7, 49152, 49152, 24576, 49152, +2, r, 0
+        )
+        assert len(s) == 9
+        for src_addr, dst_addr, ln in zip(s, d, lens):
+            rel = dst_addr - 0x20000 - 7 * 49152
+            row, off = divmod(rel, 16384)
+            for x in range(off, off + ln):
+                cov[row][x] += 1
+    assert all(c == 1 for row in cov for c in row)
+
+
+def test_sd_conv_d1p2_exact_once():
+    """D TP1 -> P TP2 (reverse): each P rank page covered exactly once."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
+        sd_conv_row_segment_descriptors,
+    )
+
+    for r in (0, 1):
+        cov = [[0] * 8192 for _ in range(3)]
+        s, d, lens = sd_conv_row_segment_descriptors(
+            0x10000, 0x20000, 7, 7, 49152, 49152, 49152, 24576, -2, 0, r
+        )
+        assert len(s) == 9
+        for src_addr, dst_addr, ln in zip(s, d, lens):
+            rel = dst_addr - 0x20000 - 7 * 49152
+            row, off = divmod(rel, 8192)
+            for x in range(off, off + ln):
+                cov[row][x] += 1
+        assert all(c == 1 for row in cov for c in row)
+
+
+def test_sd_conv_matches_reference_permute_formula():
+    """Dst layout must equal the hardware-verified permute formula:
+    D row j = [q0|q1|k0|k1|v0|v1] where P rank r sends q_r, k_r, v_r."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
+        sd_conv_row_segment_descriptors,
+    )
+
+    # P rank1 dst for row 0: q1 at 2048, k1 at 6144, v1 at 12288
+    s, d, lens = sd_conv_row_segment_descriptors(
+        0x10000, 0x20000, 0, 0, 49152, 49152, 24576, 49152, +2, 1, 0
+    )
+    dst_offs = [x - 0x20000 for x in d[:3]]
+    assert dst_offs == [2048, 6144, 12288]
+
+    # P rank0 dst for row 0: q0 at 0, k0 at 4096, v0 at 8192
+    s, d, lens = sd_conv_row_segment_descriptors(
+        0x10000, 0x20000, 0, 0, 49152, 49152, 24576, 49152, +2, 0, 0
+    )
+    dst_offs = [x - 0x20000 for x in d[:3]]
+    assert dst_offs == [0, 4096, 8192]
+
+
+def test_sd_conv_non_divisible_falls_back():
+    """Rows not splitting into 1:1:2 -> empty lists (caller falls back
+    to the whole-region copy, matching #53078 behavior)."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
+        sd_conv_row_segment_descriptors,
+    )
+
+    s, d, lens = sd_conv_row_segment_descriptors(
+        0x10000, 0x20000, 0, 0, 20, 40, 10, 20, +2, 0, 0
+    )
+    assert s == [] and d == [] and lens == []

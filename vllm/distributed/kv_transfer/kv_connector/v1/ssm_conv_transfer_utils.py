@@ -233,3 +233,84 @@ def compute_physical_blocks_per_logical(
 
     """
     return math.ceil((ssm_sizes[0] + ssm_sizes[1]) / block_len)
+
+
+def sd_conv_row_segment_descriptors(
+    src_base: int,
+    dst_base: int,
+    local_block_id: int,
+    remote_block_id: int,
+    local_block_len: int,
+    remote_block_len: int,
+    local_kv_bl: int,
+    remote_kv_bl: int,
+    tp_ratio: int,
+    local_tp_rank: int,
+    remote_tp_rank: int,
+) -> tuple[list[int], list[int], list[int]]:
+    """Expand one whole-conv-region copy into per-row per-segment
+    descriptors.
+
+    Args mirror the sender loop in MooncakeConnector:
+      tp_ratio > 0: local (producer) is the SMALL side; shard_idx selects
+        this producer rank slice inside each consumer-side segment.
+      tp_ratio < 0: local (producer) is the LARGE side; shard_idx selects
+        the remote consumer rank slice.
+
+    Returns (srcs, dsts, lens); empty lists if the 1:1:2 row split is not
+    exactly representable (caller falls back to the whole-region copy).
+    """
+    assert tp_ratio != 1, "SD expansion only applies to heterogeneous TP"
+    abs_ratio = abs(tp_ratio)
+    if local_kv_bl < remote_kv_bl:
+        row_small = local_kv_bl // 3
+        row_large = remote_kv_bl // 3
+    else:
+        row_small = remote_kv_bl // 3
+        row_large = local_kv_bl // 3
+    if row_small % 4 != 0 or row_large % 4 != 0:
+        return [], [], []
+    seg_small = (row_small // 4, row_small // 4, row_small // 2)
+    seg_large_start = (0, row_large // 4, row_large // 2)
+
+    shard_idx = local_tp_rank % tp_ratio if tp_ratio > 0 else remote_tp_rank % abs_ratio
+
+    srcs = []
+    dsts = []
+    lens = []
+    for row in range(3):
+        seg_acc = 0
+        for seg in range(3):
+            cell = seg_small[seg]
+            large_off = seg_large_start[seg] + shard_idx * cell
+            if tp_ratio > 0:
+                src = (
+                    src_base
+                    + local_block_id * local_block_len
+                    + row * row_small
+                    + seg_acc
+                )
+                dst = (
+                    dst_base
+                    + remote_block_id * remote_block_len
+                    + row * row_large
+                    + large_off
+                )
+            else:
+                src = (
+                    src_base
+                    + local_block_id * local_block_len
+                    + row * row_large
+                    + large_off
+                )
+                dst = (
+                    dst_base
+                    + remote_block_id * remote_block_len
+                    + row * row_small
+                    + seg_acc
+                )
+            srcs.append(src)
+            dsts.append(dst)
+            lens.append(cell)
+            seg_acc += cell
+    return srcs, dsts, lens

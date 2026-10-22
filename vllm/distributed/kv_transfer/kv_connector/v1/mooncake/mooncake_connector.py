@@ -48,6 +48,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.stats import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
     derive_mamba_conv_split,
+    sd_conv_row_segment_descriptors,
 )
 from vllm.distributed.parallel_state import (
     get_pp_group,
@@ -1265,6 +1266,7 @@ class MooncakeConnectorWorker:
             self.rpc_port,
         )
 
+        self._has_mamba = kv_cache_config.has_mamba_layers
         self._remote_agents: dict[EngineId, dict[int, dict[int, str]]] = {}
         self._pending_bootstrap_queries: dict[str, asyncio.Event] = {}
         self.side_channel_port: int = 0  # we will bind it in register_kv_caches()
@@ -1840,6 +1842,7 @@ class MooncakeConnectorWorker:
         err_reqs: list[ReqId] = []
         err_msg: str | None = None
         remote_session = f"{agent_meta.remote_hostname}:{agent_meta.remote_port}"
+        self._sd_pair_occurrence: dict[tuple[int, str], int] = {}
 
         for d_req_id, send_meta in ready_reqs:
             _, remote_block_ids_per_group = agent_meta.req_blocks[d_req_id]
@@ -1984,9 +1987,50 @@ class MooncakeConnectorWorker:
                     transfer_len=transfer_len,
                 )
 
+                tp_ratio_for_loop = _get_tp_ratio(
+                    self.tp_size, agent_meta.remote_tp_size
+                )
+                sd_occurrence = self._sd_pair_occurrence.get(
+                    (id(local_regions), local_region.layer_name), 0
+                )
+                self._sd_pair_occurrence[
+                    (id(local_regions), local_region.layer_name)
+                ] = sd_occurrence + 1
+                is_sd_conv = (
+                    self._has_mamba
+                    and tp_ratio_for_loop != 1
+                    and (local_region.layer_name, sd_occurrence)
+                    in self._sd_conv_regions
+                    and min(local_region.kv_block_len, remote_region.kv_block_len)
+                    <= 65536
+                    and min(local_region.kv_block_len, remote_region.kv_block_len)
+                    * abs(tp_ratio_for_loop)
+                    == max(local_region.kv_block_len, remote_region.kv_block_len)
+                )
                 for group_local_block_id, group_remote_block_id in zip(
                     group_local_block_ids, group_remote_block_ids
                 ):
+                    if is_sd_conv:
+                        for lb, rb in zip(group_local_block_id, group_remote_block_id):
+                            seg_srcs, seg_dsts, seg_lens = (
+                                sd_conv_row_segment_descriptors(
+                                    local_region.base_addr,
+                                    remote_region.base_addr,
+                                    lb,
+                                    rb,
+                                    local_region.block_len,
+                                    remote_region.block_len,
+                                    local_region.kv_block_len,
+                                    remote_region.kv_block_len,
+                                    tp_ratio_for_loop,
+                                    self.tp_rank,
+                                    agent_meta.remote_tp_rank,
+                                )
+                            )
+                            src_ptrs.extend(seg_srcs)
+                            dst_ptrs.extend(seg_dsts)
+                            lengths.extend(seg_lens)
+                        continue
                     if can_coalesce:
                         src_ptrs.append(
                             local_region.base_addr
@@ -2071,6 +2115,8 @@ class MooncakeConnectorWorker:
         seen_storage_ptrs: set[int] = set()
         self.block_len_per_layer = []
         self.kv_block_len_per_layer = []
+        self._sd_conv_regions: set[tuple[str, int]] = set()
+        self._sd_occurrence_counter: dict[str, int] = {}
         self.registered_layer_names = []
         self.registered_layer_indices = []
         self.registered_group_indices = []
@@ -2134,7 +2180,18 @@ class MooncakeConnectorWorker:
                         (offset, size) for offset, size in split.local_conv_offsets
                     ]
                 else:
+                    # SD layout (state_len, conv_dim): sub-projections
+                    # interleave across rows, so the region cannot be split
+                    # by projection. Record this (layer_name, occurrence)
+                    # as an SD conv region; the sender loop expands its
+                    # descriptors row-by-row/segment-by-segment instead.
                     region_entries = [(0, conv_bytes)]
+                    self._sd_conv_regions.add(
+                        (layer_name, self._sd_occurrence_counter.get(layer_name, 0))
+                    )
+                self._sd_occurrence_counter[layer_name] = (
+                    self._sd_occurrence_counter.get(layer_name, 0) + 1
+                )
                 state_offset = conv_bytes
                 shape: tuple[int, ...]
                 dtype: torch.dtype
