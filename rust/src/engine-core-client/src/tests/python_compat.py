@@ -125,7 +125,7 @@ class EngineCoreOutput(
     spec_decode_metrics: object | None = None
     prompt_token_id_logprobs: object | None = None
     error: RequestError | None = None
-    indexer_rows: object | None = None
+    indexer_topk: object | None = None
 
 
 class ExtendedEngineCoreOutput(EngineCoreOutput):
