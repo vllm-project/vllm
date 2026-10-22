@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from .base import BaseRenderer
-from .params import ChatParams, TokenizeParams, merge_kwargs
+from .params import ChatParams, TokenizeParams, merge_kwargs, recursively_merge_kwargs
 from .registry import RendererRegistry, renderer_from_config
 
 __all__ = [
@@ -12,4 +12,5 @@ __all__ = [
     "ChatParams",
     "TokenizeParams",
     "merge_kwargs",
+    "recursively_merge_kwargs",
 ]
