@@ -920,22 +920,24 @@ class EngineCore:
         self.reset_encoder_cache()
 
     def _finish_pause(self, clear_cache: bool) -> None:
-        # A completed pause promises an idle device: nothing else waits on
-        # the last dummy batch an idle DP rank launches.
-        self.model_executor.collective_rpc("synchronize_device")
-        if clear_cache:
-            self._reset_caches()
-        if self._checkpoint_state == CheckpointState.PREPARING:
-            # The drain is complete. A failure leaves the engine FAILED
-            # instead of serving.
-            try:
+        # The drain of a checkpoint prepare is complete. A failure leaves the
+        # engine FAILED instead of serving, as nothing waits on this pause.
+        preparing = self._checkpoint_state == CheckpointState.PREPARING
+        try:
+            # A completed pause promises an idle device: nothing else waits on
+            # the last dummy batch an idle DP rank launches.
+            self.model_executor.collective_rpc("synchronize_device")
+            if clear_cache:
+                self._reset_caches()
+            if preparing:
                 self.release_kv_cache_memory()
                 self.collective_rpc("checkpoint_prepare")
                 self.collective_rpc("synchronize_device")
-            except Exception as e:
-                self._fail_checkpoint(e)
-            else:
                 self._checkpoint_state = CheckpointState.PREPARED
+        except Exception as e:
+            if not preparing:
+                raise
+            self._fail_checkpoint(e)
 
     def pause_scheduler(
         self, mode: PauseMode = "abort", clear_cache: bool = True
