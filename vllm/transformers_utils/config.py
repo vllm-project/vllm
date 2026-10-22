@@ -815,6 +815,10 @@ def maybe_override_with_speculators(
         Tuple of (resolved_model, resolved_tokenizer, speculative_config)
 
     """
+    # A single local file (e.g. a .gguf checkpoint) has no speculators config.
+    if os.path.isfile(model):
+        return model, tokenizer, vllm_speculative_config
+
     kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
     config_dict, _ = PreTrainedConfig.get_config_dict(
         model,

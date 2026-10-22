@@ -49,6 +49,7 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.flashinfer import (
     FlashInferImpl,
@@ -79,9 +80,11 @@ from .ops.qkv_fused import flint_qkv_fused
 def _flint_kernels(
     quant_config: QuantizationConfig | None, parallel: ParallelConfig | None = None
 ) -> bool:
-    """Flint's kernels serve the BF16 and NVFP4 checkpoints on a single GPU
-    (TP=1, and for the MoE no EP/EPLB); other configurations use vLLM's stock
-    layers."""
+    """Flint's kernels serve the BF16 and NVFP4 checkpoints on a single SM100
+    GPU (TP=1, and for the MoE no EP/EPLB); other configurations use vLLM's
+    stock layers."""
+    if not current_platform.is_device_capability_family(100):
+        return False
     if get_tensor_model_parallel_world_size() != 1 or not (
         quant_config is None or isinstance(quant_config, ModelOptNvFp4Config)
     ):
