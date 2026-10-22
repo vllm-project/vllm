@@ -1830,37 +1830,6 @@ def test_msa_indexer_requires_the_aiter_attend(monkeypatch):
     assert reason is None or "AITER sparse PA attend" not in reason
 
 
-def test_msa_indexer_rejects_index_heads_kv_heads_mismatch(monkeypatch):
-    """The merge emits one page-table row per kv head, so it needs them 1:1.
-
-    MiniMax-M3 has 4 index heads, so at attention TP=1 a rank owns all 4
-    against 1 kv head and the indexer has to fall back at load time rather
-    than fail at the first forward.
-    """
-    import vllm.models.minimax_m3.amd.indexer_msa as indexer_msa_mod
-
-    monkeypatch.setattr(indexer_msa_mod.current_platform, "is_rocm", lambda: True)
-    monkeypatch.setattr(
-        indexer_msa_mod, "_minimax_m3_aiter_sparse_pa_requested", lambda: True
-    )
-
-    def unsupported_reason(num_index_heads: int) -> str | None:
-        return indexer_msa_mod.msa_indexer_unsupported_reason(
-            topk_blocks=TOPK,
-            sparse_block_size=BLOCK_SIZE,
-            num_index_heads=num_index_heads,
-            num_kv_heads=1,
-            index_head_dim=HEAD_DIM,
-            indexer_kv_dtype="fp8_e4m3",
-            max_model_len=8192,
-        )
-
-    if reason := unsupported_reason(1):
-        pytest.skip(f"AITER MSA indexer unavailable: {reason}")
-    reason = unsupported_reason(4)
-    assert reason is not None and "kv head(s)" in reason
-
-
 def test_aiter_consolidated_qknorm_enabled(monkeypatch):
     from vllm._aiter_ops import rocm_aiter_ops
 

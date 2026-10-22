@@ -101,6 +101,26 @@ def _score_buffer(
     return torch.empty((heads, rows, width), dtype=torch.float32, device=device)
 
 
+_CP_SCORE: dict[tuple[int, int, int, int, int, str, int], torch.Tensor] = {}
+
+
+def _cp_score_buffer(
+    heads: int,
+    rows: int,
+    max_seq_len: int,
+    block_size: int,
+    device: torch.device,
+    world: int,
+) -> torch.Tensor:
+    """The CP score buffer, allocated once and shared by every layer."""
+    key = (heads, rows, max_seq_len, block_size, world, device.type, device.index or 0)
+    if key not in _CP_SCORE:
+        _CP_SCORE[key] = _score_buffer(
+            heads, rows, max_seq_len, block_size, device, world=world
+        )
+    return _CP_SCORE[key]
+
+
 class MiniMaxM3IndexerMSABackend(MiniMaxM3IndexerBackend):
     """Indexer side-cache backend selecting the MSA builder."""
 
@@ -319,13 +339,13 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
         # Every rank scores every index head over its own shard, so the score
         # buffer carries the full head count; only what survives the merge is
         # this rank's own run.
-        self._cp_score = _score_buffer(
+        self._cp_score = _cp_score_buffer(
             self.num_index_heads,
             max_rows,
             self.cp_max_seq_len,
             self.block_size,
             device,
-            world=self.cp_world,
+            self.cp_world,
         )
         # The candidates never surface as a tensor here: the selector writes
         # them into a peer's buffer and reads its own back within one launch,
