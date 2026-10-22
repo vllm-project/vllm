@@ -217,8 +217,10 @@ steps:
   commands:
     - pytest -v -s models/step5
 
-- label: ":nvidia: (4xB200) MiniMax-M3 Feature Matrix"
+- label: ":nvidia: (4xB200) [Nightly] MiniMax-M3 Feature Matrix"
   key: minimax-m3-feature-matrix-4xb200
+  # Nightly only: 4-GPU B200 pods wait hours behind smaller jobs on per-PR runs.
+  optional: true
   timeout_in_minutes: 40
   device: b200-k8s
   num_devices: 4
