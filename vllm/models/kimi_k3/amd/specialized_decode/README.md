@@ -1,6 +1,7 @@
-# Kimi-K3 specialized decode (MI355X)
+# Kimi-K3 specialized decode (MI355X, MI325X)
 
-An opt-in decode path for Kimi-K3 at TP8 on MI355X (gfx950), following RFC #60904.
+An opt-in decode path for Kimi-K3 at TP8 on MI355X (gfx950) and MI325X (gfx942),
+following RFC #60904.
 A pure spec-verify step of at most 8 rows runs each MoE decoder layer as persistent
 FlyDSL MonoKernels (256 CTAs, all resident), in "layer mode", inside the stock
 layer loop. The TP all-reduces run in-kernel over peer memory.
@@ -9,11 +10,12 @@ layer loop. The TP all-reduces run in-kernel over peer memory.
   gated RMSNorm), then K2.
 - **FFN layers** (MLA): vLLM's AttnRes and MLA up to o_proj's input, then K2.
 - **K2**: o_proj + all-reduce + MLP AttnRes, then the latent MoE (router,
-  top-16, MXFP4 experts, shared experts, latent all-reduce + RMSNorm, up_proj,
+  top-16, routed experts, shared experts, latent all-reduce + RMSNorm, up_proj,
   final all-reduce).
 
 The kernels read vLLM's loaded weights and KDA states in place. Nothing is copied
-or re-quantized.
+or re-quantized for them. The routed experts are the MXFP4 checkpoint on MI355X,
+and on MI325X the packed-int4 requant vLLM's own MoE uses there.
 
 ## Enabling
 
@@ -23,13 +25,20 @@ VLLM_USE_V2_MODEL_RUNNER=1 vllm serve <Kimi-K3> -tp 8 \
   --additional-config '{"decode_backend": "latency_specialized"}'
 ```
 
+On MI325X, add vLLM's int4 requant of the routed experts:
+`--quantization-config '{"moe": {"weight": "int4_per_group_32"}}'`. vLLM's MLA
+there serves DSpark with decode context parallel 1, a BF16 KV cache and
+`"attention_backend": "TRITON_MLA"` for the draft.
+
 There are no other options. `decode_backend=auto` (the default) runs vLLM's decode.
 
 ## Supported deployments
 
-TP8 on MI355X with all 256 CUs, decode context parallel 1 or 8, speculative
-decoding with at most 7 speculative tokens, Model Runner V2, BF16 conv / FP32
-recurrent KDA states.
+TP8 on MI355X with all 256 CUs, or on MI325X (304 CUs; 256 run the kernels) with
+the int4 expert requant, decode context parallel 1 or 8, speculative decoding with
+at most 7 speculative tokens, Model Runner V2, BF16 conv / FP32 recurrent KDA
+states. The kernels run on any gfx942 with 304 CUs, but Kimi-K3 at TP8 holds
+about 200 GiB of weights a rank, more than an MI300X has, with or without them.
 
 KV transfer support is limited to built-in MoRIIO READ and WRITE consumers.
 Keep the producer on `decode_backend=auto` and use matching cache layouts.
@@ -42,10 +51,12 @@ If you request the specialized decode for anything else, startup fails with one
   routed-expert capture, sleep mode, CPU weight offload, weight updates,
   no speculative decoding,
   adaptive verification, dynamic speculative decoding, ReplaySSM / RecoverSSM,
-  the V1 model runner, `STOCK_TORCH_COMPILE`, another model's shapes, another GPU.
+  the V1 model runner, `STOCK_TORCH_COMPILE`, another model's shapes, another
+  GPU, a partitioned GPU, an `ARCH` other than the GPU's, gfx942 without the
+  int4 expert requant.
 - **Loaded weights, when the model state builds the executor:** each kernel
   layer's weight shapes and dtypes, and the MoE backend (`AITER_MXFP4_BF16`, K3
-  SiTU).
+  SiTU; on gfx942 its packed-int4 experts and their layout).
 - **KV caches, at every bind:** the KDA state dtypes and layout.
 
 Every TP rank agrees on each verdict before anything collective runs.
@@ -83,6 +94,18 @@ a follow-up.
 `tests/models/kimi_k3/amd_specialized_decode/test_engine_fault.py` stalls a rank in
 a served model and checks that the engine stops.
 
+## gfx942
+
+The kernels compile for the GPU FlyDSL targets (the `ARCH` environment variable
+overrides it; startup refuses an `ARCH` other than the GPU's). gfx942 runs the
+same launches, CTAs and mailboxes as gfx950; the gfx950 code is unchanged.
+
+| | gfx950 (MI355X) | gfx942 (MI325X) |
+| --- | --- | --- |
+| routed experts | MXFP4 as loaded; MXFP4 latent and intermediate | packed int4 (vLLM's requant, aiter's a16wi4 layout); bf16 latent and intermediate |
+| LDS | 160 KB: whole token rows | 64 KB: token rows a K window at a time, the latent and the intermediate in K phases |
+| MFMA | 16x16x32 bf16; permlane swaps | two 16x16x16 bf16; `shuffle_xor` |
+
 ## Layout
 
 Everything lives in this folder. The model files only call in: `linear.py`
@@ -106,7 +129,7 @@ mono/            kernel source
     layer.py     K2
     attention/   kda.py (K1), back.py
     stages/      moe.py, gemv.py
-    common/      device ops, mailbox sync, MX helpers, plan / build keys
-                 (adapted from ROCm/ATOM atom/mono, MIT)
+    common/      device ops, mailbox sync, MX / int4 helpers, plan / build keys,
+                 the target arch (adapted from ROCm/ATOM atom/mono, MIT)
     abi.py       the error-word layout
 ```
