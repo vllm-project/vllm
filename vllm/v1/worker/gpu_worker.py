@@ -62,6 +62,10 @@ from vllm.distributed.weight_transfer import (
 )
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.layers.quantization.online.lm_head import (
+    restore_quantized_lm_heads,
+    share_source_lm_heads,
+)
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.weight_checksum import (
     compute_tensor_digests,
@@ -509,6 +513,18 @@ class Worker(WorkerBase):
             # Set random seed.
             set_random_seed(self.model_config.seed)
 
+            # cuBLAS(Lt) asks CUDA for its handle memory directly. When torch's own
+            # cudaMalloc fails, torch frees its unused cache and retries, but a cuBLAS
+            # request never triggers that because torch doesn't see it. Profiling can
+            # grow torch's cache until the GPU is full, and the first cuBLAS call would
+            # then fail even though torch holds idle memory it could have given back.
+            # Create the handles now, before the snapshot, so they count as baseline
+            # like the NCCL buffers. mm uses cuBLAS; linear with a bias uses cuBLASLt.
+            x = torch.ones(16, 16, dtype=self.model_config.dtype, device=self.device)
+            torch.mm(x, x)
+            torch.nn.functional.linear(x, x, x[0])
+            del x
+
             # Now take memory snapshot after NCCL is initialized
             gc.collect()
             torch.accelerator.empty_cache()
@@ -891,6 +907,18 @@ class Worker(WorkerBase):
             self.model_runner, "_init_kv_zero_meta"
         ):
             self.model_runner._init_kv_zero_meta()
+
+    def get_simple_cpu_offload_num_cpu_blocks(self) -> int | None:
+        from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (  # noqa: E501
+            _find_simple_cpu_offload_connector,
+        )
+
+        if not has_kv_transfer_group():
+            return None
+        connector = _find_simple_cpu_offload_connector(get_kv_transfer_group())
+        if connector is None:
+            return None
+        return connector.get_aligned_num_cpu_blocks()
 
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> CompilationTimes:
@@ -1532,12 +1560,19 @@ class Worker(WorkerBase):
                 "active. Call finish_weight_update first."
             )
 
+        draft_model = self.get_draft_model() if is_draft else None
         try:
             if is_draft:
                 self._set_draft_weight_update_target()
+            if draft_model is not None:
+                # Load through the unquantized target head, as without
+                # draft_lm_head_quantization; finish re-derives the copies.
+                share_source_lm_heads(draft_model)
             self.weight_transfer_engine.start_weight_update()
         except BaseException:
             self.weight_transfer_engine.reset_weight_update_target()
+            if draft_model is not None:
+                restore_quantized_lm_heads(draft_model, refresh=False)
             raise
         self._weight_update_active = True
         self._weight_update_is_draft = is_draft
@@ -1577,6 +1612,10 @@ class Worker(WorkerBase):
             except BaseException:
                 self._weight_update_active = False
                 self.weight_transfer_engine.reset_weight_update_target()
+                if self._weight_update_is_draft and (
+                    (draft_model := self.get_draft_model()) is not None
+                ):
+                    restore_quantized_lm_heads(draft_model, refresh=False)
                 raise
 
     def finish_weight_update(self) -> None:
@@ -1593,6 +1632,10 @@ class Worker(WorkerBase):
             self.weight_transfer_engine.finish_weight_update()
             self.weight_transfer_engine.reset_weight_update_target()
             self._weight_update_active = False
+            if self._weight_update_is_draft and (
+                (draft_model := self.get_draft_model()) is not None
+            ):
+                restore_quantized_lm_heads(draft_model)
 
         # Weight transfer bypasses GPUModelRunner.reload_weights().
         if not self._weight_update_is_draft:
