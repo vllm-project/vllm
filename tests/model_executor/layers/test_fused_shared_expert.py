@@ -1294,6 +1294,10 @@ def single_rank_parallel_state(monkeypatch: pytest.MonkeyPatch):
         (True, [r"re:.*\.shared_experts?\..*"]),
     ],
 )
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="AITER fused shared experts only exist on ROCm",
+)
 def test_models_fse_init(
     model_type: str,
     shared_expert_precision: str,
