@@ -32,8 +32,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _llm(backend: str, num_gpu_blocks: int | None = None) -> LLM:
-    recoverssm = backend != "off"
+def _llm(recoverssm: bool, num_gpu_blocks: int | None = None) -> LLM:
     return LLM(
         MODEL,
         trust_remote_code=True,
@@ -48,7 +47,6 @@ def _llm(backend: str, num_gpu_blocks: int | None = None) -> LLM:
         num_gpu_blocks_override=num_gpu_blocks,
         mamba_ssm_cache_dtype="bfloat16",
         use_replayssm=recoverssm,
-        additional_config={"kda_recoverssm_backend": backend} if recoverssm else {},
         speculative_config={
             "method": "dspark",
             "model": DRAFT,
@@ -64,13 +62,13 @@ def _shutdown(llm: LLM) -> None:
     cleanup_dist_env_and_memory()
 
 
-@pytest.mark.parametrize("backend", ["off", "triton", "cute"])
-def test_recoverssm_decode_preemption_and_abort(backend: str) -> None:
+@pytest.mark.parametrize("recoverssm", [False, True])
+def test_recoverssm_decode_preemption_and_abort(recoverssm: bool) -> None:
     params = SamplingParams(max_tokens=MAX_TOKENS, temperature=0, ignore_eos=True)
 
     # The attention block size, and the KV pool blocks one decoding request
     # holds (its Mamba state blocks and one attention block).
-    llm = _llm(backend)
+    llm = _llm(recoverssm)
     try:
         cache_config = llm.llm_engine.vllm_config.cache_config
         block_size = cache_config.block_size
@@ -97,7 +95,7 @@ def test_recoverssm_decode_preemption_and_abort(backend: str) -> None:
 
     # Room for every request's first blocks, and 2 spare: decoding into a
     # second attention block preempts all but two of them.
-    llm = _llm(backend, NUM_REQUESTS * blocks_per_request + 2)
+    llm = _llm(recoverssm, NUM_REQUESTS * blocks_per_request + 2)
     try:
         outputs = llm.generate(prompts, params)
         assert [len(o.outputs[0].token_ids) for o in outputs] == [MAX_TOKENS] * len(

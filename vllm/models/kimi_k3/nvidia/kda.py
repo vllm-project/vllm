@@ -304,49 +304,6 @@ def resolve_kda_spec_decode_backend(
     return "native"
 
 
-def resolve_kda_recoverssm_backend(
-    backend: str,
-    *,
-    head_dim: int,
-    window: int,
-    conv_width: int,
-    has_conv_bias: bool,
-    activation_dtype: torch.dtype,
-    conv_state_dtype: torch.dtype,
-    state_dtype: torch.dtype,
-    conv_weight_dtype: torch.dtype,
-    lower_bound: float | None,
-) -> str:
-    """The KDA RecoverSSM verify and commit kernels: "cute" (SM10x tensor
-    cores, with the short convolution fused into the verify) or "triton"."""
-    if backend not in ("auto", "cute", "triton"):
-        raise ValueError(f"Unsupported KDA RecoverSSM backend: {backend}")
-    if backend == "triton":
-        return "triton"
-    reason = cute_recoverssm_unsupported_reason(
-        head_dim=head_dim,
-        window=window,
-        conv_width=conv_width,
-        has_conv_bias=has_conv_bias,
-        activation_dtype=activation_dtype,
-        conv_state_dtype=conv_state_dtype,
-        state_dtype=state_dtype,
-        conv_weight_dtype=conv_weight_dtype,
-        lower_bound=lower_bound,
-    )
-    if reason is None:
-        logger.info_once("Using the CuTe KDA RecoverSSM verify and commit.")
-        return "cute"
-    if backend == "cute":
-        raise RuntimeError(f"The CuTe KDA RecoverSSM kernels cannot run: {reason}")
-    logger.info_once(
-        "Using the Triton KDA RecoverSSM verify and commit: the CuTe kernels "
-        "cannot run (%s).",
-        reason,
-    )
-    return "triton"
-
-
 def resolve_kda_decode_backend(
     backend: str,
     num_heads: int,
@@ -787,10 +744,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 vllm_config.model_config.dtype,
                 self.conv1d.weight.device,
             )
-            backend = resolve_kda_recoverssm_backend(
-                additional_config.get("kda_recoverssm_backend", "auto")
-                if isinstance(additional_config, dict)
-                else "auto",
+            reason = cute_recoverssm_unsupported_reason(
                 head_dim=self.head_dim,
                 window=self.spec_query_len,
                 conv_width=self.conv_size,
@@ -801,7 +755,14 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 conv_weight_dtype=self.conv1d.weight.dtype,
                 lower_bound=self.gate_lower_bound,
             )
-            if backend == "cute":
+            if reason is not None:
+                logger.info_once(
+                    "Using the Triton KDA RecoverSSM verify and commit: the CuTe "
+                    "kernels cannot run (%s).",
+                    reason,
+                )
+            else:
+                logger.info_once("Using the CuTe KDA RecoverSSM verify and commit.")
                 self.recoverssm_verify = CuteRecoverSSMVerify(
                     num_heads=self.local_num_heads,
                     window=self.spec_query_len,
