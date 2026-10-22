@@ -1716,7 +1716,7 @@ setup(
         "tensorizer": ["tensorizer==2.10.1"],
         "fastsafetensors": ["fastsafetensors >= 0.3.3"],
         "instanttensor": ["instanttensor >= 0.2.2"],
-        "runai": ["runai-model-streamer[s3,gcs,azure] >= 0.15.7"],
+        "runai": ["runai-model-streamer[s3,gcs,azure] >= 0.17.0"],
         "audio": [
             "av",
             "scipy",
