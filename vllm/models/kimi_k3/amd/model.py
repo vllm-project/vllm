@@ -319,30 +319,21 @@ class KimiK3ForConditionalGeneration(
             values=metadata | {"pixel_values": pixel_values}
         )
 
-    def _project_encoder_features(self, image_features: torch.Tensor) -> torch.Tensor:
-        projector_dtype = next(self.mm_projector.parameters()).dtype
-        if image_features.dtype != projector_dtype:
-            image_features = image_features.to(projector_dtype)
-        output = self.mm_projector(image_features)
-        return output.reshape(-1, output.shape[-1])
-
     def encoder_cudagraph_forward(
         self,
         values: dict[str, torch.Tensor],
         path: str = "default",
     ) -> torch.Tensor:
-        pixel_values = values.pop("pixel_values")
-        merge_gather_idx = values.pop("merge_gather_idx", None)
-        if merge_gather_idx is not None and hasattr(self, "merger_projector"):
-            hidden_states = self.vision_tower(
-                pixel_values, None, encoder_metadata=values
-            )
-            output = self.merger_projector(hidden_states, merge_gather_idx)
-            return output.reshape(-1, output.shape[-1])
-        if merge_gather_idx is not None:
-            values["merge_gather_idx"] = merge_gather_idx
-        image_features = self.vision_tower(pixel_values, None, encoder_metadata=values)
-        return self._project_encoder_features(image_features)
+        metadata = {
+            k: v
+            for k, v in values.items()
+            if k not in ("pixel_values", "merge_gather_idx")
+        }
+        hidden_states = self.vision_tower(
+            values["pixel_values"], None, encoder_metadata=metadata
+        )
+        output = self.merger_projector(hidden_states, values["merge_gather_idx"])
+        return output.reshape(-1, output.shape[-1])
 
     def encoder_eager_forward(
         self,
@@ -350,21 +341,12 @@ class KimiK3ForConditionalGeneration(
         path: str = "default",
     ) -> torch.Tensor:
         pixel_values = self._get_pixel_values(mm_kwargs)
-        grid_thws = self._get_grid_thws(mm_kwargs)
-        if hasattr(self, "merger_projector"):
-            metadata = self.vision_tower.prepare_encoder_cudagraph_metadata(
-                grid_thws,
-                max_batch_size=len(grid_thws),
-                device=pixel_values.device,
-            )
-            merge_gather_idx = metadata.pop("merge_gather_idx")
-            hidden_states = self.vision_tower(
-                pixel_values, None, encoder_metadata=metadata
-            )
-            output = self.merger_projector(hidden_states, merge_gather_idx)
-            return output.reshape(-1, output.shape[-1])
-        image_features = self.vision_tower(pixel_values, grid_thws)
-        return self._project_encoder_features(torch.cat(image_features))
+        values = self.vision_tower.prepare_encoder_cudagraph_metadata(
+            self._get_grid_thws(mm_kwargs),
+            max_batch_size=None,
+            device=pixel_values.device,
+        )
+        return self.encoder_cudagraph_forward(values | {"pixel_values": pixel_values})
 
     def _maybe_ignore_quant_config(
         self, quant_config: QuantizationConfig | None

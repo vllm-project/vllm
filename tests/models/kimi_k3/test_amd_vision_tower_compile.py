@@ -767,3 +767,20 @@ def test_replay_without_compile(tiny_k3_dir, vllm_compile_config):
 
     assert _graph_stats(mgr) == (hits + 1, misses)
     _assert_close(out, _eager(model, mm_kwargs, [64])[0])
+
+
+def test_cudagraph_forward_leaves_its_inputs_untouched(encoder_stack):
+    model, _ = encoder_stack
+    capture = model.prepare_encoder_cudagraph_capture_inputs(
+        token_budget=64,
+        max_batch_size=1,
+        max_frames_per_batch=0,
+        device=model.device,
+        dtype=torch.bfloat16,
+    )
+    keys = set(capture.values)
+
+    with torch.inference_mode():
+        model.encoder_cudagraph_forward(capture.values)
+
+    assert set(capture.values) == keys
