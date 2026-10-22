@@ -58,7 +58,10 @@ from typing import TYPE_CHECKING, Any, TypeAlias, cast
 import torch
 
 from vllm.config.weight_transfer import WeightTransferConfig
-from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
+from vllm.distributed.device_communicators.cuda_wrapper import (
+    CudaRTLibrary,
+    cudaError_t,
+)
 from vllm.distributed.weight_transfer.base import (
     WeightTransferEngine,
     WeightTransferInitInfo,
@@ -71,6 +74,7 @@ from vllm.distributed.weight_transfer.sharded_rdt_common import (
     check_ray_rdt_version,
     deregister_nixl_memory,
     register_nixl_memory,
+    validate_int,
     validate_sharded_rdt_settings,
 )
 from vllm.distributed.weight_transfer.sharded_rdt_fake import (
@@ -118,7 +122,7 @@ def _alloc_page_locked_slot(
         cudart.cudaGetLastError()
         raise RuntimeError(
             f"cudaHostRegister({size} bytes) returned CUDA error {code}: "
-            f"{cudart.cudaGetErrorString(code)}"
+            f"{_cuda_error_text(cudart, code)}"
         )
     try:
         register_nixl_memory(buffer)
@@ -147,22 +151,27 @@ def _host_unregister(cudart: CudaRTLibrary, base: int) -> bool:
             "cudaHostUnregister(%#x) returned CUDA error %d: %s",
             base,
             code,
-            cudart.cudaGetErrorString(code),
+            _cuda_error_text(cudart, code),
         )
     return code == 0
 
 
+def _cuda_error_text(cudart: CudaRTLibrary, code: int) -> str:
+    """``cudaGetErrorString`` for a raw code: the wrapper's ``cudaHost*`` calls
+    return plain ints while its ``cudaGetErrorString`` is typed on
+    ``cudaError_t``, a ``ctypes.c_int`` the runtime accepts an int for."""
+    return cudart.cudaGetErrorString(cast(cudaError_t, code))
+
+
 def _host_alloc_request(pool: "_InitState", nbytes: int, pool_total: int | None) -> str:
-    """What the failed host allocation was for, with the pool geometry."""
+    """The failed host allocation with its pool geometry: the whole pool at
+    init, or one regrown slot (``pool_total`` None) in ``_issue_pull``."""
     geometry = f"{pool._num_slots} slots ({pool._lanes} lane(s) x K={pool._ring_depth})"
     if pool_total is None:
-        return (
-            f"regrow one receive slot of its {geometry} pool to {nbytes} "
-            "bytes, exactly (the other slots keep their size)"
-        )
+        return f"regrow one slot of its {geometry} pool to {nbytes} bytes"
     return (
-        f"build its receive pool: {geometry} x {nbytes} bytes = "
-        f"{pool_total} bytes per worker, exactly"
+        f"build its receive pool: {geometry} x {nbytes} bytes = {pool_total} "
+        "bytes per worker"
     )
 
 
@@ -976,10 +985,9 @@ class ShardedRDTWeightTransferEngine(
         except Exception as error:
             raise HostStagingAllocationError(
                 "staging_device='host' could not "
-                f"{_host_alloc_request(pool, nbytes, pool_total)}; each slot "
-                "is pageable host memory page-locked whole with "
-                "cudaHostRegister and registered with NIXL, with no "
-                f"pinned-allocator rounding or caching: {error}"
+                f"{_host_alloc_request(pool, nbytes, pool_total)}, exactly (each "
+                "slot is page-locked whole with cudaHostRegister and registered "
+                f"with NIXL; no pinned-allocator rounding or caching): {error}"
             ) from error
 
     def _release_host_slot(self, buffer: torch.Tensor) -> None:
@@ -1135,7 +1143,9 @@ class ShardedRDTWeightTransferEngine(
         The chunk/free plan is STATIC across syncs — a pure function of the baked
         plan and the driver's group partition — so it was built once at init and
         every sync just re-runs the pipeline over its self-describing chunks. The
-        update carries only the sync index used to tag free signals.
+        update carries only the sync index used to tag free signals: an int at
+        or above -1 (-1 means untagged); anything else is a malformed payload
+        and fails the sync before a signal goes out.
 
         Assumes each baked module's source names fall within one gather group,
         which the per-layer / pre / post partition guarantees (a leaf module's
@@ -1144,6 +1154,7 @@ class ShardedRDTWeightTransferEngine(
         pipeline already freed, which parks the pull until the producer's stall
         watchdog fires.
         """
+        validate_int("sync_idx", update_info.sync_idx, minimum=-1)
         self._sync_idx = update_info.sync_idx if update_info.sync_idx >= 0 else None
         if self._router is None:
             raise RuntimeError(
@@ -2036,30 +2047,28 @@ def _stage_components(
 
 
 def _check_streams(chunks: "list[_Chunk]", groups: list[int]) -> None:
-    """Refuse streams that split an owner, gather group, or leaf module."""
+    """Refuse streams that split a leaf module's loading.
+
+    A module's chunks must run in one stream so its materialize-first,
+    quant-last order holds. Owners and gather groups need no check here:
+    ``_stage_components`` merges every co-owner of a gather group into one
+    component and ``_build_call_plan`` gives each component one stream, so by
+    construction no trainer rank and no gather group ever spans two streams.
+    """
     if len(chunks) != len(groups):
         raise ValueError("chunks and groups must be parallel")
 
-    seen: dict[str, dict[Any, tuple[int, str]]] = {
-        "trainer rank": {},
-        "gather group": {},
-        "module loading": {},
-    }
-    for chunk, group in zip(chunks, groups):
-        members = [
-            ("trainer rank", chunk.owner, str(chunk.owner)),
-            ("gather group", group, str(group)),
-        ]
-        members.extend(
-            ("module loading", id(sc.layer), repr(sc.src[0])) for sc in chunk.scatters
-        )
-        for kind, key, label in members:
-            stream, _ = seen[kind].setdefault(key, (chunk.stream, label))
+    seen: dict[int, tuple[int, str]] = {}
+    for chunk in chunks:
+        for sc in chunk.scatters:
+            stream, label = seen.setdefault(
+                id(sc.layer), (chunk.stream, repr(sc.src[0]))
+            )
             if stream != chunk.stream:
                 raise RuntimeError(
-                    f"Sharded RDT plan: the {kind} {label} spans stage streams "
-                    f"{stream} and {chunk.stream}, so parallel pulls would "
-                    "break its order."
+                    f"Sharded RDT plan: the module loading {label} spans stage "
+                    f"streams {stream} and {chunk.stream}, so parallel pulls "
+                    "would break its order."
                 )
 
 

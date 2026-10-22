@@ -487,6 +487,19 @@ class TestSyncIndexPlumbing:
         self._worker(calls).receive_weights(ShardedRDTWeightTransferUpdateInfo())
         assert calls == [(0, None), (1, None)]
 
+    @pytest.mark.parametrize("sync_idx", ["4", 4.0, True, None, -2])
+    def test_worker_rejects_a_malformed_update_index(self, sync_idx):
+        """A payload whose index is not an int at or above -1 fails the sync
+        with an error that names the field and the value, before any free
+        signal goes out; -1 is the untagged default, so it is not malformed."""
+        calls: list[tuple[int, int | None]] = []
+        with pytest.raises(ValueError) as excinfo:
+            self._worker(calls).receive_weights(
+                ShardedRDTWeightTransferUpdateInfo(sync_idx=sync_idx)
+            )
+        assert f"sync_idx={sync_idx!r}" in str(excinfo.value)
+        assert calls == []
+
     @staticmethod
     def _trainer(*, is_sender):
         class _RecordingUpdates(RecordingClient):

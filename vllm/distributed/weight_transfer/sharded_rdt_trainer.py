@@ -905,6 +905,10 @@ class ShardedRDTTrainerWeightTransferEngine(
         # Set by trainer_init from the server-name all-gather; retained so a
         # restarted consumer can be re-initialized without another collective.
         self._server_names: list[str] | None = None
+        # Index of the sync in flight, counted up at the start of every
+        # send_weights: the producers tag their frees with it (begin_sync) and
+        # the workers echo it in their update. -1 before the first sync.
+        self._sync_idx = -1
 
     def _rpc(self, method: str, *args: Any) -> Any:
         """Call one of the server actor's methods and block for the result.
@@ -1284,7 +1288,7 @@ class ShardedRDTTrainerWeightTransferEngine(
         assert self.source is not None
         # Every rank calls send_weights once per sync, so every rank's count
         # agrees; the workers tag their free signals with it.
-        self._sync_idx = getattr(self, "_sync_idx", -1) + 1
+        self._sync_idx += 1
         if live_consumer_ids is None:
             live_ids = list(range(self._init_info.num_consumers))
             live_count = len(live_ids)
@@ -1339,7 +1343,7 @@ class ShardedRDTTrainerWeightTransferEngine(
         # The live IDS ride along with the count: the free barrier needs only
         # the count, but the slot-sharing rendezvous needs to know WHICH
         # consumers are live.
-        self._rpc("begin_sync", live_count, live_ids, getattr(self, "_sync_idx", None))
+        self._rpc("begin_sync", live_count, live_ids, self._sync_idx)
         # Every owner reaches a group in the same (metadata) order, so their
         # shared gathers line up.
         groups = self._iter_owned_groups()

@@ -56,30 +56,25 @@ StagingDevice = Literal["gpu", "host"]
 
 
 def validate_staging_device(value: object) -> None:
-    """Validate the receive-buffer location carried in the init handshake."""
+    """Reject a receive-buffer location outside ``STAGING_DEVICES``."""
     if value not in STAGING_DEVICES:
         raise ValueError(
             f"staging_device={value!r}: must be one of {', '.join(STAGING_DEVICES)}"
         )
 
 
-def validate_positive_int(
-    name: str, value: object, *, allow_zero: bool = False
-) -> None:
-    """Validate an integer geometry/count setting without accepting booleans."""
-    lower_bound = 0 if allow_zero else 1
-    if isinstance(value, bool) or not isinstance(value, int) or value < lower_bound:
-        relation = ">= 0" if allow_zero else ">= 1"
-        raise ValueError(f"{name}={value!r}: must be an integer {relation}")
+def validate_int(name: str, value: object, *, minimum: int) -> None:
+    """Reject a non-int (bools included) or an int below ``minimum``."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise ValueError(f"{name}={value!r}: must be an integer >= {minimum}")
 
 
 def validate_nonnegative_real(name: str, value: object) -> None:
-    """Validate a finite, non-negative real setting without accepting booleans."""
+    """Reject a non-number (bools included), NaN, an infinity or a negative."""
     if (
         isinstance(value, bool)
         or not isinstance(value, Real)
-        or not math.isfinite(float(value))
-        or value < 0
+        or not 0 <= float(value) < math.inf
     ):
         raise ValueError(f"{name}={value!r}: must be a finite number >= 0")
 
@@ -95,11 +90,11 @@ def validate_sharded_rdt_settings(
 ) -> None:
     """Validate the typed settings shared by trainer and worker init."""
     validate_staging_device(staging_device)
-    validate_positive_int("stages_in_flight", stages_in_flight)
-    validate_positive_int("num_rdt_buffers", num_rdt_buffers)
+    validate_int("stages_in_flight", stages_in_flight, minimum=1)
+    validate_int("num_rdt_buffers", num_rdt_buffers, minimum=1)
     validate_nonnegative_real("buffer_presize_gb", buffer_presize_gb)
-    validate_positive_int(
-        "num_consumers", num_consumers, allow_zero=allow_zero_consumers
+    validate_int(
+        "num_consumers", num_consumers, minimum=0 if allow_zero_consumers else 1
     )
 
 

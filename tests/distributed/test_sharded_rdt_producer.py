@@ -399,6 +399,7 @@ def _loop_engine(server, n_groups, *, lookahead):
             rank=0, num_consumers=1, gather_lookahead=lookahead
         ),
     )
+    e._sync_idx = 0  # what send_weights has counted up before it runs the loop
     e._server = server
     e._rpc = lambda method, *a: getattr(server, method)(*a)
     e._meta = e.source.metadata

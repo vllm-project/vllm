@@ -1182,27 +1182,14 @@ class TestStreamInvariants:
             [0, 1],
         )
 
-    def test_an_owner_in_two_streams_is_refused(self):
+    def test_owner_and_group_splits_are_left_to_the_plan_builder(self):
+        """``_stage_components`` merges every co-owner of a gather group into
+        one component and ``_build_call_plan`` gives each component one
+        stream, so an owner or a group in two streams cannot come out of the
+        builder; the check guards only the module-loading order."""
         a, b = _FakeLayer("a"), _FakeLayer("b")
-        with pytest.raises(
-            RuntimeError,
-            match="trainer rank 0 spans stage streams 0 and 1",
-        ):
-            _check_streams(
-                [self._chunk(0, 0, a), self._chunk(0, 1, b)],
-                [0, 1],
-            )
-
-    def test_a_group_in_two_streams_is_refused(self):
-        a, b = _FakeLayer("a"), _FakeLayer("b")
-        with pytest.raises(
-            RuntimeError,
-            match="gather group 5 spans stage streams 0 and 1",
-        ):
-            _check_streams(
-                [self._chunk(0, 0, a), self._chunk(1, 1, b)],
-                [5, 5],
-            )
+        _check_streams([self._chunk(0, 0, a), self._chunk(0, 1, b)], [0, 1])
+        _check_streams([self._chunk(0, 0, a), self._chunk(1, 1, b)], [5, 5])
 
     def test_a_module_in_two_streams_is_refused(self):
         layer = _FakeLayer("a")
