@@ -127,10 +127,18 @@ def _filter_prompt_embeds_by_template(
             return {key: normalize_placeholders(item) for key, item in value.items()}
         return value
 
+    visible_markers: list[tuple[int, torch.Tensor]] = []
+    for marker, tensor in zip(markers, prompt_embeds_tensors, strict=True):
+        occurrences = rendered.count(marker)
+        if occurrences > 1:
+            raise ValueError(
+                f"Chat template rendered prompt_embeds placeholder {marker!r} "
+                f"{occurrences} times; each placeholder must appear at most once."
+            )
+        if occurrences == 1:
+            visible_markers.append((rendered.index(marker), tensor))
     visible_tensors = [
-        tensor
-        for marker, tensor in zip(markers, prompt_embeds_tensors, strict=True)
-        if marker in rendered
+        tensor for _, tensor in sorted(visible_markers, key=lambda item: item[0])
     ]
     normalized_conversation = normalize_placeholders(copy.deepcopy(conversation))
     return visible_tensors, normalized_conversation

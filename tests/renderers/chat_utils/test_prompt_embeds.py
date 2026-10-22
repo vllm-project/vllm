@@ -30,6 +30,7 @@ from vllm.renderers.chat_utils.chat_message import (
 from vllm.renderers.chat_utils.content_parser import (
     _ENABLE_PROMPT_EMBEDS_ERROR,
     MODALITY_PLACEHOLDERS_MAP,
+    PROMPT_EMBEDS_PLACEHOLDER_ID_PREFIX,
     PROMPT_EMBEDS_PLACEHOLDER_TOKEN,
 )
 from vllm.renderers.hf import (
@@ -40,6 +41,7 @@ from vllm.renderers.hf import (
     _build_prompt_embeds_updates,
     _ensure_prompt_embeds_placeholder_token,
     _expand_prompt_embeds_placeholders,
+    _filter_prompt_embeds_by_template,
 )
 
 # Cover distinct tokenizer families:
@@ -240,6 +242,70 @@ async def test_reasoning_embeds_render_before_content(
         ) + tokenizer.encode("</think>", add_special_tokens=False)
     finally:
         renderer.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+async def test_content_embeds_render_before_reasoning(tokenizer, is_async):
+    """Embeddings are paired with placeholders in rendered order."""
+    reasoning = torch.full((2, _MOCK_HIDDEN_SIZE), 1.0)
+    content = torch.full((3, _MOCK_HIDDEN_SIZE), 2.0)
+    request = ChatCompletionRequest(
+        messages=[
+            {
+                "role": "assistant",
+                "content": [{"type": "prompt_embeds", "data": _encode_tensor(content)}],
+                "reasoning": {
+                    "type": "prompt_embeds",
+                    "data": _encode_tensor(reasoning),
+                },
+            }
+        ],
+    )
+    mc = _make_mock_model_config()
+    mc.renderer_num_workers = 1
+    mc.supports_multimodal_inputs = False
+    mc.hf_config = SimpleNamespace(model_type="gpt2", use_unified_vision_chunk=False)
+    renderer = HfRenderer(
+        SimpleNamespace(
+            model_config=mc,
+            parallel_config=SimpleNamespace(_api_process_rank=0),
+        ),
+        tokenizer,
+    )
+    template = (
+        "{% for m in messages %}"
+        "{% for p in m['content'] %}{{ p['text'] }}{% endfor %}"
+        "<think>{{ m['reasoning'] }}</think>{% endfor %}"
+    )
+    params = ChatParams(
+        chat_template=template,
+        chat_template_content_format="openai",
+        chat_template_kwargs={"tokenize": True},
+    )
+    try:
+        render = (
+            renderer.render_messages_async if is_async else renderer.render_messages
+        )
+        _, prompt = await _maybe_await(render, request.messages, params)
+        mask = torch.tensor(prompt["prompt_is_token_ids"])
+        assert torch.equal(
+            prompt["prompt_embeds"][~mask], torch.cat([content, reasoning])
+        )
+    finally:
+        renderer.shutdown()
+
+
+def test_filter_prompt_embeds_rejects_repeated_placeholder():
+    marker = f"{PROMPT_EMBEDS_PLACEHOLDER_ID_PREFIX}0__"
+    tensor = torch.ones((1, _MOCK_HIDDEN_SIZE))
+
+    with pytest.raises(ValueError, match="each placeholder must appear at most once"):
+        _filter_prompt_embeds_by_template(
+            [{"role": "assistant", "content": marker}],
+            [tensor],
+            marker + marker,
+        )
 
 
 @pytest.mark.asyncio
