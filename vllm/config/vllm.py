@@ -3380,18 +3380,24 @@ class VllmConfig:
     def validate_nvfp4_kv_cache_with_mla(self) -> "VllmConfig":
         if self.model_config is None:
             return self
-        # The ds_mla layouts are MLA-only by construction; the plain nvfp4
-        # layout (head_size//2 + head_size//16) does not apply to MLA.
+        cache_dtype = self.cache_config.cache_dtype
+        # The ds_mla layouts are MLA-only by construction and plain nvfp4 is
+        # the dense (FlashInfer MLA) page-segmented layout; the other nvfp4
+        # layouts (head_size//2 + head_size//16) do not apply to MLA.
+        sparse_mla = (
+            getattr(self.model_config.hf_text_config, "index_topk", None) is not None
+        )
         if (
-            self.cache_config.cache_dtype.startswith("nvfp4")
-            and not self.cache_config.cache_dtype.endswith("_ds_mla")
+            cache_dtype.startswith("nvfp4")
+            and not cache_dtype.endswith("_ds_mla")
             and self.model_config.use_mla
+            and (cache_dtype != "nvfp4" or sparse_mla)
         ):
             raise ValueError(
-                "nvfp4 KV cache is not supported with MLA (Multi-head Latent "
-                "Attention) backends. Please use a different --kv-cache-dtype "
-                "(e.g., 'fp8', 'auto', or 'nvfp4_ds_mla' with a sparse MLA "
-                "backend) for MLA models such as DeepSeek."
+                f"{cache_dtype} KV cache is not supported with this MLA "
+                "(Multi-head Latent Attention) model. Please use a different "
+                "--kv-cache-dtype (e.g., 'nvfp4' for dense MLA, 'fp8', 'auto', "
+                "or 'nvfp4_ds_mla' with a sparse MLA backend)."
             )
         return self
 

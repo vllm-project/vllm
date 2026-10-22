@@ -241,6 +241,8 @@ class CacheConfig:
     to fp8.
     "nvfp4_4over6" uses the NVFP4 layout and selects between max/6 and max/4
     scales per 16 values by minimizing squared reconstruction error.
+    On dense MLA models, "nvfp4" stores the latent as NVFP4 and the RoPE dims as
+    fp8 (FLASHINFER_MLA on SM100/SM103).
     """
     is_attention_free: bool = False
     """Whether the model is attention-free. This is primarily set in

@@ -549,6 +549,83 @@ def nvfp4_kv_cache_full_dim(head_size: int) -> int:
     return head_size // 2 + head_size // 16
 
 
+def nvfp4_mla_kv_cache_full_dim(head_size: int, rope_dim: int = 64) -> int:
+    """Packed last dim for the NVFP4 MLA KV cache (page-segmented layout).
+
+    The NoPE dims (``head_size - rope_dim``) are stored as packed fp4 plus
+    one fp8-e4m3 block scale per 16 elements; the RoPE dims are stored as
+    fp8-e4m3 (no block scales).
+
+    For DeepSeek MLA (head_size=576, rope_dim=64):
+    ``512 // 2 + 64 + 512 // 16 = 256 + 64 + 32 = 352``.
+    """
+    nope_dim = head_size - rope_dim
+    return nope_dim // 2 + rope_dim + nope_dim // 16
+
+
+def nvfp4_mla_kv_cache_split_views(
+    kv_cache: torch.Tensor, rope_dim: int = 64
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Split an NVFP4 MLA KV cache into zero-copy NoPE, RoPE and scale views.
+
+    The MLA NVFP4 page layout is *page-segmented*: each page stores
+    ``block_size`` fixed-width token data records followed by a per-page
+    block of linear (non-swizzled) scale factors:
+
+        page = [tok_0 data | ... | tok_{B-1} data | tok_0 SFs | ... |
+                tok_{B-1} SFs]
+
+    Each token data record is ``(head_size - rope_dim) // 2`` packed-fp4 NoPE
+    bytes (even element in the low nibble) followed by ``rope_dim`` fp8-e4m3
+    RoPE bytes, and each token has ``(head_size - rope_dim) // 16`` fp8-e4m3
+    NoPE scales, stored linearly. These are the ``ckv_cache`` /
+    ``kpe_cache`` / ``ckv_sf_cache`` operands of FlashInfer's Cake NVFP4 MLA
+    decode.
+
+    Args:
+        kv_cache: uint8 tensor of shape ``(num_pages, block_size, full_dim)``,
+            where ``full_dim = nvfp4_mla_kv_cache_full_dim(head_size,
+            rope_dim)``.
+        rope_dim: number of RoPE dims stored as fp8 (default 64).
+
+    Returns:
+        ``(nope, rope, scale)``: a uint8 ``(num_pages, block_size, nope_dim //
+        2)`` view and float8_e4m3fn ``(num_pages, block_size, rope_dim)`` and
+        ``(num_pages, block_size, nope_dim // 16)`` views
+        (``torch.as_strided``).
+
+    """
+    assert kv_cache.dim() == 3, f"MLA NVFP4 KV cache must be 3D, got {kv_cache.dim()}D"
+    assert kv_cache.dtype == torch.uint8
+
+    num_pages = kv_cache.shape[0]
+    block_size = kv_cache.shape[-2]
+    full_dim = kv_cache.shape[-1]
+
+    # full_dim = nope_dim // 2 + rope_dim + nope_dim // 16
+    #          = 9 * nope_dim / 16 + rope_dim
+    nope_dim = (full_dim - rope_dim) * 16 // 9
+    data_dim = nope_dim // 2 + rope_dim
+    scale_dim = nope_dim // 16
+    assert data_dim + scale_dim == full_dim
+
+    page_bytes = kv_cache.stride(0)
+    base = kv_cache.storage_offset()
+
+    def view(width: int, token_stride: int, offset: int) -> torch.Tensor:
+        return torch.as_strided(
+            kv_cache,
+            (num_pages, block_size, width),
+            (page_bytes, token_stride, 1),
+            storage_offset=base + offset,
+        )
+
+    nope = view(nope_dim // 2, data_dim, 0)
+    rope = view(rope_dim, data_dim, nope_dim // 2).view(torch.float8_e4m3fn)
+    scale = view(scale_dim, scale_dim, block_size * data_dim).view(torch.float8_e4m3fn)
+    return nope, rope, scale
+
+
 def nvfp4_split_data_scale(
     kv_side: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:

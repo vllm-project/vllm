@@ -18,7 +18,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_up
-from vllm.utils.torch_utils import get_dtype_size
+from vllm.utils.torch_utils import get_dtype_size, nvfp4_mla_kv_cache_full_dim
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_layout import _DIM_B, _DIM_L, KVCacheLayout
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
@@ -730,6 +730,21 @@ class MLAAttentionSpec(FullAttentionSpec):
     def __post_init__(self):
         super().__post_init__()
         _apply_alignment_padding(self)
+
+    @property
+    def state_content_size_bytes(self) -> int:
+        if (
+            self.state_content_bytes is None
+            and self.kv_quant_mode.is_nvfp4
+            and self.dtype == torch.uint8
+        ):
+            # Page-segmented NVFP4 MLA record: packed-fp4 NoPE + e4m3 RoPE, then
+            # one e4m3 block scale per 16 NoPE elements (352 B at 576/512), which
+            # the generic (head_size + head_size_v) * dtype sizing cannot express.
+            # Keyed on the spec, not set via state_content_bytes, so the spec that
+            # platforms/interface.py builds to align hybrid block sizes is right too.
+            return nvfp4_mla_kv_cache_full_dim(self.head_size)
+        return super().state_content_size_bytes
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:

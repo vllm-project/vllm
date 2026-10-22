@@ -1115,6 +1115,16 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
             return
         from vllm import _custom_ops as ops
 
+        if kv_cache_dtype == "nvfp4":
+            ops.concat_and_cache_mla_nvfp4(
+                kv_c_normed,
+                k_pe.squeeze(1),
+                kv_cache,
+                slot_mapping.flatten(),
+                scale=k_scale,
+            )
+            return
+
         ops.concat_and_cache_mla(
             kv_c_normed,
             k_pe.squeeze(1),
