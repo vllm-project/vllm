@@ -67,6 +67,7 @@ from .device import (
 )
 from .gemv import RED, gemv_loads, gemv_mfmas, lds_row, row_sum, rows_loads, rows_store
 from .plan import (
+    COPIES,
     DATA,
     HALF,
     HEAD_DIM,
@@ -79,7 +80,10 @@ from .plan import (
     Dims,
     back_scratch,
     cdiv,
+    flag_copy,
+    flag_stride,
     front_end,
+    on_copy,
     tile_rows,
     token_tiles,
 )
@@ -104,6 +108,7 @@ class BackBuild:
     tp: int
     ratio: int  # 0: window only; 1 / 2: top-k over a compressed cache
     timeline: bool = False
+    tuned: bool = False  # a tuned build's paths (``layer.MonoBuild.tuned``)
 
 
 def plus(t0, v):
@@ -139,11 +144,16 @@ def p_row(d: Dims, s: int) -> int:
 
 
 @traced
-def publish(c, region, i):
-    """This CTA's stores visible device-wide, then the flag pair (region, i)."""
+def publish(c, region, i, stride=0):
+    """This CTA's stores visible device-wide, then the flag pair (region, i);
+    a tuned build with ``stride``: each of its copies, ``stride`` pairs apart
+    (``plan.COPIES``; thread j stores copy j)."""
     rocdl.s_waitcnt(vmcnt=0)
     gpu.barrier()
-    if c["tid"] == 0:
+    if const_expr(c["tuned"] and stride):
+        if c["tid"] < COPIES:
+            c["mb"].put(region, c["tid"] * stride + i, fx.Int32(1))
+    elif c["tid"] == 0:
         c["mb"].put(region, i, fx.Int32(1))
 
 
@@ -610,7 +620,7 @@ def stage_combine(c, unit):
             t * (d.q_rows // 32) + (h * HEAD_DIM + d0) // 32,
             cache_modifier=CM_DEV,
         )
-    publish(c, c["crdy"], t * hg_n + hg)
+    publish(c, c["crdy"], t * hg_n + hg, flag_stride(s * hg_n))
 
 
 # ---------------------------------------------------------------- wo_a / wo_b
@@ -764,6 +774,7 @@ def back_context(key, lds, args: dict, scratch, tag, layout=None) -> dict:
         "xsl": gml.xsl.ptr,
         "d": d,
         "ratio": key.ratio,
+        "tuned": key.tuned,
         "mb": Mailbox(tag),
         "nchunk": back_plan(key)[0],
         "sl": {"q": spl.q.ptr, "raw": spl.raw.ptr, "p": spl.p.ptr, "st": spl.st.ptr},
@@ -870,9 +881,11 @@ def run_back(c, key, bid):
         gpu.barrier()
     stamp(c, 8)
     # wo_a: every token tile of its group's XO rows, the next tile's in flight
+    hpc = heads // COMB_HEADS
+    ccopy = flag_copy(c, bid, flag_stride(s * hpc))
     if has_woa:
         grp = woa_t // (woa_tasks // groups)
-        await_flags(c, c["crdy"], s, lambda u: u * (heads // COMB_HEADS) + grp)
+        await_flags(c, c["crdy"], s, lambda u: on_copy(ccopy, u * hpc) + grp)
         stamp(c, 9)
         xo = (
             c["xo"],
@@ -892,13 +905,14 @@ def run_back(c, key, bid):
                 regs = rows_loads(c, *xo, *tiles[ti + 1])
             stage_woa(c, woa_t, ops, t0, n)
         stamp(c, 10)
-        publish(c, c["ardy"], woa_t)
+        publish(c, c["ardy"], woa_t, woa_tasks)
     stamp(c, 3)
     # wo_b
     if const_expr(not early_wob):
         ops1, ops2 = wob_weights()
     stamp(c, 11)
-    await_flags(c, c["ardy"], woa_tasks, lambda u: u)
+    acopy = flag_copy(c, bid, woa_tasks)
+    await_flags(c, c["ardy"], woa_tasks, lambda u: on_copy(acopy, u))
     stamp(c, 12)
     x8b = (
         c["x8b"],
