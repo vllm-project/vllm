@@ -62,6 +62,11 @@ logger = init_logger(__name__)
 # successful dispatch.
 _MAX_CONSECUTIVE_DISPATCH_ERRORS = 5
 
+# Cap on how long a data-plane fault waits for inflight WRITEs to drain
+# before disconnecting: the peer frees their destination blocks on
+# DisconnectMsg, but a stuck transfer must not hold the session open.
+_PEER_FAULT_DRAIN_S = 10.0
+
 
 class SessionPollResult(NamedTuple):
     """Result of one P2PSession.poll() tick.
@@ -136,6 +141,10 @@ class P2PSession:
         # Consecutive non-protocol dispatch errors. Reset on success.
         self._dispatch_error_count: int = 0
 
+        # First cause recorded by _mark_dead; see death_reason.
+        self._death_reason: str | None = None
+        self._peer_fault_at: float | None = None
+
         now = time.monotonic()
         self._connected_at: float | None = None
         self._last_activity_at: float = now
@@ -190,6 +199,20 @@ class P2PSession:
             or self._client.has_active_loads
             or self._server.has_inflight_transfers
         )
+
+    @property
+    def death_reason(self) -> str:
+        """Why the connection died, for the manager's peer-down log.
+
+        A connection the control transport marked dead itself (heartbeat
+        timeout, socket closed) has no recorded cause.
+        """
+        return self._death_reason or "control connection lost"
+
+    @property
+    def data_plane_fault(self) -> str | None:
+        """The transport's peer fault, if one was reported (see server role)."""
+        return self._server.peer_fault
 
     @property
     def last_activity_at(self) -> float:
@@ -264,10 +287,9 @@ class P2PSession:
         """Flush any aggregated symmetric-P2P lookups for this peer.
 
         Called once per scheduler step from the manager's
-        ``on_schedule_end()``. Send-gating is handled inside the
-        client's ``_send`` callback (queues until ConnectAckMsg).
+        ``on_schedule_end()``. Probes wait for ConnectAckMsg before sending.
         """
-        self._client.flush_pending_lookups()
+        self._client.flush_pending_lookups(send_ready=self._send_ready)
 
     def serve_external_requests(self, parent: ParentManager) -> None:
         """Resolve inbound peer lookups against the tiering manager.
@@ -323,11 +345,25 @@ class P2PSession:
                 self.peer_id,
                 envs.VLLM_P2P_HANDSHAKE_TIMEOUT_S,
             )
-            self._conn.mark_dead()
+            self._mark_dead("handshake timed out")
 
         loads = self._client.collect_results()
         stores = self._server.collect_results()
         self._server.drain_pending_aborts()
+        self._escalate_peer_fault()
+
+        # Drain buffered replies and completed transfers before expiring a peer.
+        expired_lookup = self._client.get_expired_lookup()
+        if expired_lookup is not None:
+            req_id, elapsed = expired_lookup
+            logger.warning(
+                "P2PSession %s: lookup response timed out for kv_request_id=%s "
+                "after %.1fs without progress; disconnecting peer session",
+                self.peer_id,
+                req_id,
+                elapsed,
+            )
+            self._disconnect("lookup response timed out")
 
         new_fetch_ids = self._new_fetch_ids
         self._new_fetch_ids = []
@@ -421,10 +457,47 @@ class P2PSession:
             self.peer_id,
             reason,
         )
+        self._disconnect(f"protocol error: {reason}")
+
+    def _escalate_peer_fault(self) -> None:
+        """Disconnect once a data-plane peer fault's inflight WRITEs drain.
+
+        See "Failure model" in data/base.py: the fault ends the session
+        through the same reap as a control-plane failure.
+        """
+        fault = self._server.peer_fault
+        if fault is None or self._conn is None or not self._conn.alive:
+            return
+        now = time.monotonic()
+        if self._peer_fault_at is None:
+            self._peer_fault_at = now
+            logger.warning(
+                "P2PSession %s: data plane faulted (%s); disconnecting once "
+                "inflight transfers drain",
+                self.peer_id,
+                fault,
+            )
+        if (
+            self._server.has_inflight_transfers
+            and now - self._peer_fault_at < _PEER_FAULT_DRAIN_S
+        ):
+            return
+        self._disconnect(f"data plane: {fault}")
+
+    def _disconnect(self, reason: str) -> None:
+        """Best-effort DisconnectMsg, then mark the connection dead."""
         if self._conn is not None:
             with contextlib.suppress(Exception):
                 self._conn.send({TYPE_KEY: DisconnectMsg.TYPE})
-            self._conn.mark_dead()
+        self._mark_dead(reason)
+
+    def _mark_dead(self, reason: str) -> None:
+        """Mark the connection dead, recording the first cause."""
+        if self._conn is None:
+            return
+        if self._death_reason is None:
+            self._death_reason = reason
+        self._conn.mark_dead()
 
     def _dispatch_message(self, msg: dict) -> None:
         # Drop messages buffered before disconnect: a poll batch can
@@ -492,8 +565,7 @@ class P2PSession:
             hits = msg[LookupRespMsg.HITS]
             self._client.on_lookup_resp(kv_request_id, keys, hits)
         elif msg_type == DisconnectMsg.TYPE:
-            if self._conn is not None:
-                self._conn.mark_dead()
+            self._mark_dead("peer disconnected")
         else:
             logger.warning(
                 "P2PSession %s: unknown message type %r", self.peer_id, msg_type
@@ -545,8 +617,7 @@ class P2PSession:
             )
         except ValueError as exc:
             logger.error("P2PSession %s: rejecting peer connect: %s", self.peer_id, exc)
-            if self._conn is not None:
-                self._conn.mark_dead()
+            self._mark_dead(f"rejected peer connect: {exc}")
             return
 
         # ConnectAckMsg is deferred to _poll_registration once the
@@ -574,8 +645,7 @@ class P2PSession:
                 self.peer_id,
                 exc,
             )
-            if self._conn is not None:
-                self._conn.mark_dead()
+            self._mark_dead(f"peer registration failed: {exc}")
             return
         if self._conn is not None and self._conn.alive:
             self._conn.send(
@@ -649,4 +719,4 @@ class P2PSession:
                 self.peer_id,
                 msg.get(TYPE_KEY),
             )
-            self._conn.mark_dead()
+            self._mark_dead(f"send of {msg.get(TYPE_KEY)} failed")

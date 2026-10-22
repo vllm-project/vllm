@@ -12,6 +12,15 @@ import pytest
 import pytest_asyncio
 
 from tests.utils import RemoteLaunchRenderServer
+from vllm.entrypoints.anthropic.protocol import (
+    AnthropicCountTokensRequest,
+    AnthropicMessagesRequest,
+)
+from vllm.entrypoints.anthropic.serving import (
+    AnthropicServingMessages,
+    DisabledThinkingEffortResolver,
+)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.scale_out.render.api_router import router
@@ -42,6 +51,99 @@ def _build_serving_render() -> ServingRender:
     serving.online_renderer.parser = None
     serving._check_model = AsyncMock(return_value=None)
     return serving
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    "configured_effort, thinking, expected_effort",
+    [
+        ("auto", {"type": "disabled"}, "low"),
+        ("high", {"type": "disabled"}, "high"),
+        ("none", {"type": "disabled"}, "none"),
+        ("high", None, "medium"),
+    ],
+)
+async def test_render_messages_resolves_disabled_thinking(
+    configured_effort, thinking, expected_effort
+):
+    serving = _build_serving_render()
+    serving._merge_inline_system = False
+    serving.online_renderer.model_config = serving.model_config
+    serving._disabled_thinking_effort_resolver = DisabledThinkingEffortResolver(
+        serving.online_renderer, configured_effort
+    )
+
+    async def render_chat(request, **kwargs):
+        if configured_effort == "auto" and request.reasoning_effort == "none":
+            raise ValueError("This renderer does not support reasoning_effort=none")
+        return [], [{"prompt_token_ids": [7, 8, 9]}]
+
+    serving.online_renderer.render_chat = AsyncMock(side_effect=render_chat)
+    request = AnthropicMessagesRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "Hello"}],
+        max_tokens=12,
+        thinking=thinking,
+        output_config={"effort": "medium"},
+    )
+
+    response = await serving.render_messages_request(request)
+
+    assert response.token_ids == [7, 8, 9]
+    rendered_request = serving.online_renderer.render_chat.await_args.args[0]
+    assert rendered_request.reasoning_effort == expected_effort
+    assert serving.online_renderer.render_chat.await_count == (
+        2 if configured_effort == "auto" else 1
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_scale_out_reuses_token_counting_effort_probe():
+    from vllm.entrypoints.scale_out.factories import init_scale_out_state
+
+    renderer = MagicMock()
+    renderer.model_config.is_encoder_decoder = False
+    renderer.model_config.get_diff_sampling_param.return_value = {}
+    renderer.chat_template = None
+
+    async def render_chat(request, raw_request=None, **kwargs):
+        if request.reasoning_effort == "none":
+            raise ValueError("unsupported none")
+        return [], [{"prompt_token_ids": [7, 8, 9]}]
+
+    renderer.render_chat = AsyncMock(side_effect=render_chat)
+    messages = AnthropicServingMessages.__new__(AnthropicServingMessages)
+    messages._merge_inline_system = False
+    messages.disabled_thinking_effort_resolver = DisabledThinkingEffortResolver(
+        renderer
+    )
+    messages.render_chat_request = renderer.render_chat
+    state = SimpleNamespace(
+        anthropic_serving_messages=messages,
+        online_renderer=renderer,
+        online_derenderer=MagicMock(),
+        openai_serving_models=MagicMock(),
+        tool_server=None,
+    )
+    init_scale_out_state(state, MagicMock(), MagicMock(), None)
+    # Exercise conversion through both handlers without sampling or generation.
+    state.serving_render.render_chat_request = renderer.render_chat
+    fields = dict(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "Hello"}],
+        thinking={"type": "disabled"},
+    )
+    count = await messages.count_tokens(AnthropicCountTokensRequest(**fields))
+    assert count.input_tokens == 3
+    _, (rendered,) = await state.serving_render.render_messages_request(
+        AnthropicMessagesRequest(**fields, max_tokens=12)
+    )
+    assert rendered["prompt_token_ids"] == [7, 8, 9]
+    assert [
+        call.args[0].reasoning_effort for call in renderer.render_chat.await_args_list
+    ] == ["none", "low", "low"]
 
 
 @pytest.mark.asyncio
@@ -115,6 +217,7 @@ async def test_render_responses_returns_generate_request_without_stored_state():
     assert response.priority == 3
     assert response.kv_transfer_params == {"do_remote_prefill": True}
     assert response.ec_transfer_params == {"remote": True}
+    assert response.sampling_params.extra_args is None
     serving.online_renderer.render_responses.assert_awaited_once_with(
         request,
         previous_messages=None,
@@ -122,6 +225,85 @@ async def test_render_responses_returns_generate_request_without_stored_state():
         tool_server=serving.tool_server,
         skip_mm_cache=True,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_render_chat_hoists_transfer_params_out_of_extra_args():
+    serving = _build_serving_render()
+    serving.online_renderer.render_chat = AsyncMock(
+        return_value=([], [{"prompt_token_ids": [7, 8, 9]}])
+    )
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "Test prompt"}],
+        kv_transfer_params={"do_remote_prefill": True},
+        ec_transfer_params={"remote": True},
+        vllm_xargs={"foo": 1},
+    )
+
+    response = await serving.render_chat_request(request)
+
+    assert response.kv_transfer_params == {"do_remote_prefill": True}
+    assert response.ec_transfer_params == {"remote": True}
+    assert response.sampling_params.extra_args == {"foo": 1}
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_render_completion_hoists_transfer_params_for_every_prompt():
+    serving = _build_serving_render()
+    serving.online_renderer.render_completion = AsyncMock(
+        return_value=[
+            {"prompt_token_ids": [7, 8, 9]},
+            {"prompt_token_ids": [4, 5]},
+        ]
+    )
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt=["a", "b"],
+        kv_transfer_params={"do_remote_prefill": True},
+        ec_transfer_params={"remote": True},
+    )
+
+    responses = await serving.render_completion_request(request)
+
+    assert len(responses) == 2
+    for response in responses:
+        assert response.kv_transfer_params == {"do_remote_prefill": True}
+        assert response.ec_transfer_params == {"remote": True}
+        assert response.sampling_params.extra_args is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("return_token_ids", [None, True])
+async def test_render_forwards_return_token_ids(return_token_ids):
+    """The engine only returns prompt_token_ids which derender needs to
+    answer `return_token_ids` when the GenerateRequest asks for them."""
+    serving = _build_serving_render()
+    serving.online_renderer.render_chat = AsyncMock(
+        return_value=([], [{"prompt_token_ids": [7, 8, 9]}])
+    )
+    serving.online_renderer.render_completion = AsyncMock(
+        return_value=[{"prompt_token_ids": [7, 8, 9]}]
+    )
+
+    chat = await serving.render_chat_request(
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": "Test prompt"}],
+            return_token_ids=return_token_ids,
+        )
+    )
+    (completion,) = await serving.render_completion_request(
+        CompletionRequest(
+            model=MODEL_NAME, prompt="a", return_token_ids=return_token_ids
+        )
+    )
+
+    assert chat.return_token_ids == return_token_ids
+    assert completion.return_token_ids == return_token_ids
 
 
 @pytest.mark.asyncio
