@@ -8,7 +8,12 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.config import CompilationMode, CUDAGraphMode, KVTransferConfig
+from vllm.config import (
+    CompilationMode,
+    CUDAGraphMode,
+    KVTransferConfig,
+    SpeculativeConfig,
+)
 from vllm.models.kimi_k3.amd.specialized_decode import runtime
 from vllm.models.kimi_k3.amd.specialized_decode.runtime import (
     FFN,
@@ -141,15 +146,44 @@ def test_supported_config_is_accepted(on_mi355x):
     assert specialized_decode_config(_vllm_config()) == DecodeConfig(q=8)
 
 
+@pytest.fixture
+def supported_vllm_config(tmp_path, monkeypatch, on_mi355x):
+    from tests.v1.attention.utils import create_vllm_config
+    from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
+
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    KimiLinearConfig(
+        architectures=["KimiLinearForCausalLM"],
+        hidden_size=7168,
+        num_experts=896,
+        attn_res_block_size=12,
+        linear_attn_config={
+            "kda_layers": [1],
+            "full_attn_layers": [2],
+            "num_heads": 96,
+            "head_dim": 128,
+            "short_conv_kernel_size": 4,
+        },
+    ).save_pretrained(tmp_path)
+    config = create_vllm_config(
+        model_name=str(tmp_path), tensor_parallel_size=8, dtype=torch.bfloat16
+    )
+    config.additional_config = {"decode_backend": "latency_specialized"}
+    config.speculative_config = SpeculativeConfig(
+        method="ngram", num_speculative_tokens=7
+    )
+    return config
+
+
 @pytest.mark.parametrize("read_mode", [False, True])
 @pytest.mark.parametrize("backend", ["rdma", "xgmi"])
-def test_moriio_consumer_is_supported(read_mode, backend):
-    config = KVTransferConfig(
+def test_moriio_consumer_is_supported(supported_vllm_config, read_mode, backend):
+    supported_vllm_config.kv_transfer_config = KVTransferConfig(
         kv_connector="MoRIIOConnector",
         kv_role="kv_consumer",
         kv_connector_extra_config={"read_mode": read_mode, "backend": backend},
     )
-    assert runtime.supports_kv_transfer(config)
+    assert specialized_decode_config(supported_vllm_config) == DecodeConfig(q=8)
 
 
 @pytest.mark.parametrize(
@@ -162,8 +196,8 @@ def test_moriio_consumer_is_supported(read_mode, backend):
         {"kv_role": "kv_both"},
     ],
 )
-def test_unsupported_kv_transfer_is_refused(overrides):
-    config = KVTransferConfig(
+def test_unsupported_kv_transfer_is_refused(supported_vllm_config, overrides):
+    supported_vllm_config.kv_transfer_config = KVTransferConfig(
         **(
             {
                 "kv_connector": "MoRIIOConnector",
@@ -173,7 +207,8 @@ def test_unsupported_kv_transfer_is_refused(overrides):
             | overrides
         )
     )
-    assert not runtime.supports_kv_transfer(config)
+    with pytest.raises(ValueError, match="KV transfer connectors"):
+        specialized_decode_config(supported_vllm_config)
 
 
 @pytest.mark.parametrize(
