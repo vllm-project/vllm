@@ -7,6 +7,7 @@ import concurrent.futures
 import fnmatch
 import glob
 import hashlib
+import inspect
 import json
 import os
 import sys
@@ -1293,10 +1294,13 @@ def runai_safetensors_weights_iterator(
             else "cpu"
         )
 
+        # runai-model-streamer<0.17.0 has no `owned` and reuses its buffers
+        owned = "owned" in inspect.signature(streamer.stream_files).parameters
         streamer.stream_files(
             hf_weights_files,
             device=device,
             is_distributed=is_distributed,
+            **({"owned": True} if owned else {}),
         )
         total_tensors = sum(
             len(tensors_meta)
@@ -1313,7 +1317,7 @@ def runai_safetensors_weights_iterator(
         )
 
         for name, tensor in tensor_iter:
-            yield name, tensor.clone()
+            yield name, tensor if owned else tensor.clone()
 
 
 def fastsafetensors_weights_iterator(
