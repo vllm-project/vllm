@@ -113,14 +113,30 @@ class KdaSplit:
     state comes from slot[b, accepted - 1] and token t's state goes to slot[b, t] if
     > 0; conv slot[b, 0] holds [dim, q + 2] with taps at accepted - 1 ..., rewritten to
     [c_accepted, c_accepted + 1, x_0, ..., x_q-1]. Token t's F_B row is MMA column t;
-    CTA t % C normalizes token t."""
+    CTA t % C normalizes token t.
 
-    def __init__(self, heads, batch, gate_mode, has_bias, schedule=(0, 0, 0), tokens=1):
+    ``low_rank_gate`` (GLM-5.3-Flash): the output-gate operand is the [batch, 128]
+    low-rank activation g_a, and an extra last tensor is the [heads x 128, 128] up
+    projection; each CTA's gate warp projects the gates of its value partition's
+    features (FP32, every token) while the main warps update the state, and sends
+    them to the tokens' normalizing CTAs."""
+
+    def __init__(
+        self,
+        heads,
+        batch,
+        gate_mode,
+        has_bias,
+        schedule=(0, 0, 0),
+        tokens=1,
+        low_rank_gate=False,
+    ):
         # The gate stage sends decays for tokens 2 * quarter + column (at most 8), while
         # the decay barrier expects 512 bytes per token: more tokens would never arrive.
         if not 1 <= tokens <= 8:
             raise ValueError(f"KdaSplit supports 1-8 tokens per request; got {tokens}")
         self.heads, self.gate_mode, self.has_bias = heads, gate_mode, has_bias
+        self.low_rank_gate = low_rank_gate
         early, lanes, self.occupancy, cluster, evict = (*schedule, 0, 0)[:5]
         self.early, self.staged = bool(early), early >= 2
         self.gate_staged, self.tokens = early == 3, tokens
@@ -187,26 +203,39 @@ class KdaSplit:
             if cutlass.const_expr(owned > 1):  # one output barrier per owned token
                 barrier = smem.allocate(8 * owned, 8)
                 barrier = cute.recast_ptr(barrier, dtype=cutlass.Uint64)
+            gate_out = None
+            if cutlass.const_expr(self.low_rank_gate):  # one barrier per owned token
+                shared_gate = alloc(smem, Float32, 128 * T)
+                gate_out = smem.allocate(8 * owned, 8)
+                gate_out = cute.recast_ptr(gate_out, dtype=cutlass.Uint64)
             if cutlass.const_expr(self.staged):
                 staged = alloc(smem, Float32, (self.rows, 128), align=128)
                 state_barrier = smem.allocate(cutlass.Uint64, 8)
-            gate_rows = None
+            gate_rows = ring = None
             if cutlass.const_expr(self.gate_staged):  # [copy, lane] 16-byte slots
-                gate_rows = alloc(smem, Uint32, (self.rows // 2, 32, 4), align=128)
+                gate_rows = ring = alloc(
+                    smem, Uint32, (self.rows // 2, 32, 4), align=128
+                )
+            if cutlass.const_expr(self.low_rank_gate and not self.gate_staged):
+                depth = min(4, self.rows // 16)
+                ring = alloc(smem, Uint32, (8 * depth, 32, 4), align=128)
             if cutlass.const_expr(self.trigger_at_entry):
                 cute.arch.griddepcontrol_launch_dependents()
             if cutlass.const_expr(not self.early):
-                self.setup(barrier, gate_barrier, partition, thread)
+                self.setup(barrier, gate_barrier, partition, thread, gate_out)
                 cute.arch.cluster_wait()
             if thread >= 128:
                 if cutlass.const_expr(self.early):
                     cute.arch.cluster_arrive_relaxed()
                 coords = (head, token, value_base, lane)
                 self.gate_warp(args, shared_decay, gate_barrier, coords, gate_rows)
+                if cutlass.const_expr(self.low_rank_gate):
+                    targets = (shared_gate, gate_out)
+                    self.output_gate(gate, args[-1], targets, coords, ring)
 
             if thread < 128:
                 if cutlass.const_expr(self.early):  # thread 0 arms; barrier 1 orders it
-                    self.setup(barrier, gate_barrier, partition, thread)
+                    self.setup(barrier, gate_barrier, partition, thread, gate_out)
                 # 64-bit page bases (slot x page stride passes Int32), 32-bit offsets.
                 page = lambda s: state[Int64(s), None, None, None]
                 state_page = page(slot)
@@ -262,10 +291,12 @@ class KdaSplit:
                                 inputs[3 * u + 2] = x[advance(token, u), channel]
                     if cutlass.const_expr(self.early):  # converted at first use
                         betas.append(beta[row, head])
-                        gates.append(gate[row, qk_channel])
+                        if cutlass.const_expr(not self.low_rank_gate):
+                            gates.append(gate[row, qk_channel])
                     else:
                         betas.append(Float32(beta[row, head]))
-                        gates.append(Float32(gate[row, qk_channel]))
+                        if cutlass.const_expr(not self.low_rank_gate):
+                            gates.append(Float32(gate[row, qk_channel]))
                 cute.arch.griddepcontrol_launch_dependents()
 
                 vs, squares, qks = [], [], []
@@ -287,7 +318,8 @@ class KdaSplit:
                     k = accum[3 * t + 1] * act(3 * t + 1, accum[3 * t + 1])
                     v = accum[3 * t + 2] * act(3 * t + 2, accum[3 * t + 2])
                     betas[t] = act(3 * T + t, Float32(betas[t]))
-                    gates[t] = act(4 * T + t, Float32(gates[t]))
+                    if cutlass.const_expr(not self.low_rank_gate):
+                        gates[t] = act(4 * T + t, Float32(gates[t]))
                     shared_q[advance(thread, 128 * t)] = q
                     shared_k[advance(thread, 128 * t)] = k
                     vs.append(v)
@@ -402,7 +434,12 @@ class KdaSplit:
                             sums[g] = warp_sum((s0 + s2) + (s1 + s3), 8)
                         sumsq = (sums[0] + sums[2]) + (sums[1] + sums[3])
                         rstd = cute.math.rsqrt(sumsq * (1.0 / 128) + eps, fastmath=True)
-                        result = raw_o * rstd * nw * gates[t]
+                        if cutlass.const_expr(self.low_rank_gate):
+                            wait(advance(gate_out, t // self.cluster))
+                            g = shared_gate[advance(thread, 128 * t)]
+                        else:
+                            g = gates[t]
+                        result = raw_o * rstd * nw * g
                         output[advance(token, t), qk_channel] = BFloat16(result)
                         if cutlass.const_expr(t == 0):
                             for section in cutlass.range_constexpr(2):
@@ -673,6 +710,58 @@ class KdaSplit:
                     for rank in cutlass.range_constexpr(self.cluster):
                         store_async_dsmem(pointer, decay, barrier, rank)
 
+    @cute.jit
+    def output_gate(self, g_a, weight, targets, coords, ring):
+        """sigmoid(g_a @ weight.T) of the partition's features and every token, tiles
+        of 16 features as MMA rows (token columns, as in the F_B projection), to the
+        tokens' normalizing CTAs. Each lane cp.asyncs its own weight fragments through
+        a ring of up to four tiles in ``ring`` ([copy, lane] 16-byte words)."""
+        (shared_gate, gate_out), (head, token, value_base, lane) = targets, coords
+        group, quarter = lane >> 2, lane & 3
+        tiles: cutlass.Constexpr = self.rows // 16
+        depth: cutlass.Constexpr = min(4, tiles)
+        if cutlass.const_expr(self.tokens > 1):
+            token += group % self.tokens
+
+        def fetch(tile):
+            row = head * 128 + value_base + 16 * tile + group
+            for chunk in cutlass.range_constexpr(4):
+                for half in cutlass.range_constexpr(2):
+                    slot = ring[((tile % depth) * 4 + chunk) * 2 + half, lane, None]
+                    source = at(weight, row + 8 * half, 32 * chunk + 8 * quarter)
+                    copy_g2s(slot.iterator, source)
+            cute.arch.cp_async_commit_group()
+
+        for tile in cutlass.range_constexpr(depth):
+            fetch(tile)
+        pairs = [
+            load_activation_bf16x8(at(g_a, token, 32 * c + 8 * quarter))
+            for c in range(4)
+        ]
+        ar = [pairs[c // 2][2 * (c % 2) : 2 * (c % 2) + 2] for c in range(8)]
+        for tile in cutlass.range_constexpr(tiles):
+            cute.arch.cp_async_wait_group(min(depth, tiles - tile) - 1)
+            wr = cute.make_rmem_tensor((1, 8, 4), Uint32)
+            for chunk in cutlass.range_constexpr(4):
+                copy = ((tile % depth) * 4 + chunk) * 2
+                low = smem_words(ring[copy, lane, None].iterator)
+                high = smem_words(ring[copy + 1, lane, None].iterator)
+                self.split_pairs(wr, 0, chunk, low, high)
+            acc = zeros(4, Float32)
+            for chunk in cutlass.range_constexpr(8):
+                wa = tuple(wr[0, chunk, e] for e in range(4))
+                mma_into(acc, wa, ar[chunk], bf16=True)
+            if cutlass.const_expr(tile + depth < tiles):  # the slots are in acc now
+                fetch(tile + depth)
+            for column in cutlass.range_constexpr(min(2, self.tokens)):
+                t = 2 * quarter + column
+                owner, bar = t % self.cluster, gate_out + t // self.cluster
+                for e in cutlass.range_constexpr(2):
+                    feature = value_base + 16 * tile + group + 8 * e
+                    value = sigmoid(acc[2 * e + column], self.fast_math)
+                    dst = shared_gate.iterator + (t * 128 + feature)
+                    push_float(dst, value, bar, owner, when=t < self.tokens)
+
     @staticmethod
     def split_pairs(wr, tile, chunk, low, high):
         """16 bytes of rows r and r + 8 hold the A fragments of chunks 2c and 2c + 1."""
@@ -682,14 +771,20 @@ class KdaSplit:
             wr[tile, c, 1], wr[tile, c, 3] = high[2 * h : 2 * h + 2]
 
     @cute.jit
-    def setup(self, barrier, gate_barrier, partition, thread):
-        """Thread 0 arms the output (leader) and decay barriers; the CTA arrives on the
-        cluster barrier peers wait on before their sends."""
+    def setup(self, barrier, gate_barrier, partition, thread, gate_out=None):
+        """Thread 0 arms the output (leader), decay and (``gate_out``) low-rank gate
+        barriers; the CTA arrives on the cluster barrier peers wait on before their
+        sends."""
         tokens, cluster = self.tokens, self.cluster
         owned = [(barrier, partition == 0, 512)]  # token t's outputs: CTA t % cluster
         if cutlass.const_expr(tokens > 1):
             owned = [
                 (barrier + k, partition + k * cluster < tokens, 512)
+                for k in range(-(-tokens // cluster))
+            ]
+        if cutlass.const_expr(gate_out is not None):
+            owned += [
+                (gate_out + k, partition + k * cluster < tokens, 512)
                 for k in range(-(-tokens // cluster))
             ]
         for bar, cta, size in (*owned, (gate_barrier, True, 512 * tokens)):

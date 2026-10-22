@@ -493,6 +493,10 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         )
 
         self._workspace_buffer: torch.Tensor | None = None
+        # An optional caller-owned TRTLLM-Gen multi-CTA KV counter buffer (zeroed
+        # once; the kernel resets its counters) for up to the given query tokens.
+        # Without one, FlashInfer zero-fills a fresh buffer on every call.
+        self.kv_counter: tuple[torch.Tensor, int] | None = None
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
 
@@ -634,6 +638,8 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
             if needs_empty_query_guard:
                 topk_lens = prepare_sparse_mla_safe_lengths(topk_indices, seq_lens)
             extra_kwargs["sparse_mla_top_k_lens"] = topk_lens
+        if self.kv_counter is not None and query.shape[0] <= self.kv_counter[1]:
+            extra_kwargs["multi_ctas_kv_counter_buffer"] = self.kv_counter[0]
 
         kernel_out = trtllm_batch_decode_with_kv_cache_mla(
             query=query,

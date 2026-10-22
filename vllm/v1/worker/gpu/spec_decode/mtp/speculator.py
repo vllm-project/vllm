@@ -33,7 +33,19 @@ class MTPSpeculator(TargetDependentARSpeculator):
             and hasattr(draft_model.model, "set_skip_topk")
             and hasattr(draft_model.model, "compact_topk_indices")
         )
+        # Steps 1+ skip the indexer, so its caches need no decode metadata.
+        self.topk_cache_layers: set[str] = set()
+        if self.share_mtp_topk_indices:
+            layers = getattr(draft_model.model, "topk_cache_layers", None)
+            self.topk_cache_layers = layers() if layers is not None else set()
+        # Draft prefill outputs are sampled only at each request's last token.
+        set_prefill_rows = getattr(draft_model.model, "set_prefill_rows", None)
+        if set_prefill_rows is not None:
+            set_prefill_rows(self.last_token_indices)
         return draft_model
+
+    def draft_decode_reads(self, layer_names: list[str]) -> bool:
+        return not set(layer_names) <= self.topk_cache_layers
 
     def on_prefill_begin(self, num_reqs: int) -> None:
         # Step 0 computes its own top-k. Unconditional, so a step that died
