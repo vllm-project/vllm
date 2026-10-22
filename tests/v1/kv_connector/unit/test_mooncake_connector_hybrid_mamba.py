@@ -240,7 +240,14 @@ def test_register_kv_caches_scales_attention_len_to_kernel_block(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_build_transfer_params_uses_non_overlapping_physical_pages():
+@pytest.mark.parametrize(
+    ("local_blocks", "remote_blocks", "ratio"),
+    [([2], [5], 4), ([3, 2], [6, 5], 2)],
+    ids=["single_logical_block", "descending_logical_blocks"],
+)
+async def test_build_transfer_params_uses_non_overlapping_physical_pages(
+    local_blocks, remote_blocks, ratio
+):
     kv_cache_config = make_hybrid_gdn_kv_cache_config(block_size=16)
     worker = object.__new__(MooncakeConnectorWorker)
     worker.shutdown = noop_shutdown
@@ -266,7 +273,6 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages():
         for layer_name in group.layer_names
     }
 
-    ratio = 4
     worker._physical_blocks_per_logical_kv_block = ratio
     fa_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
     physical_page_bytes = fa_spec.page_size_bytes // ratio
@@ -297,13 +303,14 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages():
         )
     ]
 
-    local_logical_block = 2
-    remote_logical_block = 5
+    local_logical_block = min(local_blocks)
+    remote_logical_block = min(remote_blocks)
+    num_kernel_blocks = len(local_blocks) * ratio
     transfer_id = "xfer-physical-attention-pages"
     send_meta = SendBlockMeta(
         p_req_id="p-physical-attention-pages",
         transfer_id=transfer_id,
-        local_block_ids=[[local_logical_block], []],
+        local_block_ids=[local_blocks, []],
         ready=asyncio.Event(),
     )
     xfer_meta = MooncakeXferMetadata(
@@ -314,7 +321,7 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages():
         req_blocks={
             "d-physical-attention-pages": (
                 transfer_id,
-                [[remote_logical_block], []],
+                [remote_blocks, []],
             )
         },
         kv_caches_base_addr=[],
@@ -343,7 +350,7 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages():
     assert dst_ptrs == [
         remote_base_addr + remote_logical_block * ratio * physical_page_bytes
     ]
-    assert lengths == [ratio * physical_page_bytes]
+    assert lengths == [num_kernel_blocks * physical_page_bytes]
 
     def split_contiguous_blocks(src_ids, dst_ids):
         return [[block_id] for block_id in src_ids], [
@@ -371,17 +378,17 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages():
     expected_src_ptrs = [
         fa_cache.data_ptr()
         + (local_logical_block * ratio + offset) * physical_page_bytes
-        for offset in range(ratio)
+        for offset in range(num_kernel_blocks)
     ]
     expected_dst_ptrs = [
         remote_base_addr + (remote_logical_block * ratio + offset) * physical_page_bytes
-        for offset in range(ratio)
+        for offset in range(num_kernel_blocks)
     ]
     assert err_reqs == []
     assert err_msg is None
     assert src_ptrs == expected_src_ptrs
     assert dst_ptrs == expected_dst_ptrs
-    assert lengths == [physical_page_bytes] * ratio
+    assert lengths == [physical_page_bytes] * num_kernel_blocks
     assert all(
         next_ptr - ptr == physical_page_bytes
         for ptr, next_ptr in zip(src_ptrs, src_ptrs[1:])
@@ -444,7 +451,8 @@ def test_register_kv_caches_deduplicates_shared_backing_memory(monkeypatch):
         connector.connector_worker = None
 
 
-def test_hybrid_gdn_transfer_params_preserve_group_identity(monkeypatch):
+@pytest.mark.parametrize("descending", [False, True])
+def test_hybrid_gdn_transfer_params_preserve_group_identity(monkeypatch, descending):
     monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector",
@@ -471,8 +479,8 @@ def test_hybrid_gdn_transfer_params_preserve_group_identity(monkeypatch):
                 p_req_id="p-hybrid-gdn",
                 transfer_id=transfer_id,
                 local_block_ids=[
-                    [10, 11],
-                    [NULL_BLOCK_ID, 4],
+                    [11, 10] if descending else [10, 11],
+                    [NULL_BLOCK_ID, 5, 4] if descending else [NULL_BLOCK_ID, 4],
                 ],
                 ready=asyncio.Event(),
             )
@@ -492,8 +500,8 @@ def test_hybrid_gdn_transfer_params_preserve_group_identity(monkeypatch):
                 "d-hybrid-gdn": (
                     transfer_id,
                     [
-                        [30, 31],
-                        [NULL_BLOCK_ID, 7],
+                        [31, 30] if descending else [30, 31],
+                        [NULL_BLOCK_ID, 8, 7] if descending else [NULL_BLOCK_ID, 7],
                     ],
                 )
             },
@@ -553,7 +561,7 @@ def test_hybrid_gdn_transfer_params_preserve_group_identity(monkeypatch):
             0x6000 + 7 * block_len,
             0x2000 + 30 * block_len,
         ]
-        assert lengths == [block_len, 2 * block_len]
+        assert lengths == [block_len * (2 if descending else 1), 2 * block_len]
 
         worker.shutdown()
         worker.shutdown = noop_shutdown

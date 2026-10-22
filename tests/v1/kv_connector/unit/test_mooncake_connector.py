@@ -3,6 +3,7 @@
 
 import asyncio
 import contextlib
+import ctypes
 import errno
 import socket
 import threading
@@ -40,6 +41,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     _coalesce_contiguous_transfer_regions,
     _compute_sender_transfer_plan,
     _has_opaque_packed_row,
+    _normalize_paired_block_order,
     _pp_mismatch_hides_packed_layers,
     _validate_asymmetric_region_lengths,
     get_mooncake_bootstrap_addr,
@@ -2600,6 +2602,80 @@ def test_coalesce_keeps_a_run_inside_its_starting_row():
 
 def _layer_name(idx: int) -> str:
     return f"model.layers.{idx}.mla_attn"
+
+
+@pytest.mark.parametrize(
+    ("source", "destination", "expected_source", "expected_destination"),
+    [
+        ([], [], [], []),
+        ([2], [12], [2], [12]),
+        ([2, 3, 4], [12, 13, 14], [2, 3, 4], [12, 13, 14]),
+        ([4, 3, 2], [14, 13, 12], [2, 3, 4], [12, 13, 14]),
+        (
+            [9, 8, 7, 20, 21, 30, 29],
+            [109, 108, 107, 120, 121, 130, 129],
+            [7, 8, 9, 20, 21, 29, 30],
+            [107, 108, 109, 120, 121, 129, 130],
+        ),
+        ([6, 4, 5], [106, 104, 105], [6, 4, 5], [106, 104, 105]),
+        ([3, 2, 1], [11, 12, 13], [3, 2, 1], [11, 12, 13]),
+        ([3, 2, 1], [13, 11, 10], [3, 1, 2], [13, 10, 11]),
+        ([3, 2, 2, 1], [13, 12, 12, 11], [2, 3, 1, 2], [12, 13, 11, 12]),
+    ],
+)
+def test_normalize_paired_block_order(
+    source, destination, expected_source, expected_destination
+):
+    """Normalize only joint -1 runs, retaining duplicates and original inputs."""
+    original_source, original_destination = source.copy(), destination.copy()
+    src, dst = _normalize_paired_block_order(source, destination)
+    assert src == expected_source and dst == expected_destination
+    assert source == original_source and destination == original_destination
+    assert sorted(zip(src, dst)) == sorted(zip(source, destination))
+    if source == expected_source and destination == expected_destination:
+        assert src is source and dst is destination
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("remote_ids", "stride", "num_descs"),
+    [([5, 4, 3], 16, 1), ([3, 4, 5], 16, 3), ([5, 4, 3], 20, 3)],
+    ids=["descending", "opposite_directions", "partial_page"],
+)
+async def test_descending_transfer_preserves_bytes_after_prefix_truncation(
+    remote_ids, stride, num_descs
+):
+    """Coalescing must preserve paired copies and leave padding untouched."""
+    source = torch.arange(8 * stride, dtype=torch.uint8).reshape(8, stride)
+    destination = torch.full_like(source, 255)
+    expected = destination.clone()
+    local_ids = [7, 3, 2, 1]
+    for src_id, dst_id in zip(local_ids[-len(remote_ids) :], remote_ids):
+        expected[dst_id, :16] = source[src_id, :16]
+    local_region = _region(source.data_ptr(), block_len=stride, kv_block_len=16)
+    remote_region = _region(destination.data_ptr(), block_len=stride, kv_block_len=16)
+    send_meta = SendBlockMeta(
+        p_req_id="p-descending",
+        transfer_id="descending",
+        local_block_ids=[local_ids],
+        ready=asyncio.Event(),
+    )
+    meta = _xfer_meta([remote_region], {"d-descending": ("descending", [remote_ids])})
+    with mooncake_register_worker(_make_test_kv_cache_config()) as (worker, _):
+        src, dst, lengths, errors, message = await worker._build_transfer_params(
+            [("d-descending", send_meta)], meta, [local_region], [remote_region]
+        )
+        assert not errors and message is None
+        for src_ptr, dst_ptr, length in zip(src, dst, lengths):
+            ctypes.memmove(dst_ptr, src_ptr, length)
+
+    assert torch.equal(destination, expected)
+    assert local_ids == [7, 3, 2, 1]
+    assert sum(lengths) == 48
+    assert len(lengths) == num_descs
+    if num_descs == 1:
+        assert src == [source.data_ptr() + stride]
+        assert dst == [destination.data_ptr() + 3 * stride]
 
 
 def _register_sliced_packed_mla(
