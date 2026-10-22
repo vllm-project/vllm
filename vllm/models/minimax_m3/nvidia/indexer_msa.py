@@ -120,6 +120,7 @@ class MiniMaxM3IndexerMSAPrefillMetadata:
     gather_pages: torch.Tensor | None = None
     local_chunks: list[MiniMaxM3IndexerMSAPrefillChunk] | None = None
     local_scores: torch.Tensor | None = None
+    candidate_buffers: torch.Tensor | None = None
 
 
 @dataclass
@@ -313,6 +314,7 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                     )
             local_chunks = None
             local_scores = None
+            candidate_buffers = None
             if self.prefill_local_score:
                 local_chunks = []
                 start = 0
@@ -345,6 +347,14 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                     dtype=torch.float32,
                     device=seq_lens.device,
                 )
+                candidate_buffers = torch.empty(
+                    2,
+                    self.num_index_heads * self.index_k_tp,
+                    num_prefill_tokens,
+                    2 * TOPK + 1,
+                    dtype=torch.int32,
+                    device=seq_lens.device,
+                )
             prefill = MiniMaxM3IndexerMSAPrefillMetadata(
                 plan=plan,
                 cu_seqlens_q=(query_start_loc[lo : hi + 1] - query_start_loc[lo]).to(
@@ -356,6 +366,7 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                 gather_pages=gather_pages,
                 local_chunks=local_chunks,
                 local_scores=local_scores,
+                candidate_buffers=candidate_buffers,
             )
 
         return MiniMaxM3IndexerMSAMetadata(
@@ -584,16 +595,19 @@ def prefill_local_score(
     init_blocks: int,
     local_blocks: int,
 ) -> None:
-    """Score bounded query chunks, exchange candidates, and merge at head owners."""
+    """Score bounded query chunks, then exchange their candidates once per layer."""
     from vllm.models.minimax_m3.nvidia.ops.index_decode_score_sharded import (
         minimax_m3_index_merge_candidates,
     )
     from vllm.third_party.fmha_sm100.api import sparse_topk_select
 
     assert metadata.local_chunks is not None and metadata.local_scores is not None
+    assert metadata.candidate_buffers is not None
+    total_tokens, heads, _ = index_q.shape
+    send, received = metadata.candidate_buffers.unbind(0)
     for chunk in metadata.local_chunks:
         query = index_q[chunk.start : chunk.end]
-        tokens, heads, _ = query.shape
+        tokens = query.shape[0]
         scores = metadata.local_scores[:tokens]
         scores.fill_(_SCORE_SENTINEL)
         minimax_m3_index_score(
@@ -625,25 +639,21 @@ def prefill_local_score(
         )
         values = scores.gather(-1, candidates.clamp_min(0).long())
         values.masked_fill_(candidates < 0, _SCORE_SENTINEL)
-        send = torch.empty(
-            (heads, tokens, 2 * TOPK + 1), dtype=torch.int32, device=query.device
-        )
-        send[..., :TOPK].copy_(values.transpose(0, 1).view(torch.int32))
-        send[..., TOPK : 2 * TOPK].copy_(candidates.transpose(0, 1))
-        send[..., -1].fill_(1)
-        send = send.view(comm.world, comm.hpr, tokens, 2 * TOPK + 1)
-        received = torch.empty_like(send)
-        torch.distributed.all_to_all_single(
-            received, send, group=comm.group.device_group
-        )
-        minimax_m3_index_merge_candidates(
-            received,
-            valid_pages,
-            output[chunk.start : chunk.end],
-            comm.errors,
-            init_blocks=init_blocks,
-            local_blocks=local_blocks,
-        )
+        chunk_send = send[:, chunk.start : chunk.end]
+        chunk_send[..., :TOPK].copy_(values.transpose(0, 1).view(torch.int32))
+        chunk_send[..., TOPK : 2 * TOPK].copy_(candidates.transpose(0, 1))
+    send[..., -1].fill_(1)
+    send = send.view(comm.world, comm.hpr, total_tokens, 2 * TOPK + 1)
+    received = received.view_as(send)
+    torch.distributed.all_to_all_single(received, send, group=comm.group.device_group)
+    minimax_m3_index_merge_candidates(
+        received,
+        num_valid_pages,
+        output,
+        comm.errors,
+        init_blocks=init_blocks,
+        local_blocks=local_blocks,
+    )
 
 
 def _max_decode_query_len(vllm_config: VllmConfig) -> int:
