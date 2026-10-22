@@ -61,6 +61,15 @@ class DummyDraftModelSpeculatorConfig(DraftModelSpeculatorConfig):
     speculator_class = _qualname(DummySpeculator)
 
 
+class OptionsSpeculatorConfig(DummySpeculatorConfig):
+    supported_options = frozenset({"speculator_options"})
+
+    @classmethod
+    def apply_options(cls, spec: SpeculativeConfig) -> None:
+        if (spec.speculator_options or {}).keys() - {"seed"}:
+            raise ValueError("unknown option")
+
+
 class NoSpeculatorClassConfig(SpeculatorConfig):
     pass
 
@@ -120,6 +129,23 @@ def test_custom_speculator_inherits_builtin_config(register):
     register("my_draft", DummyDraftModelSpeculatorConfig)
     with pytest.raises(ValueError, match="without speculative model"):
         _custom_spec_config("my_draft")
+
+
+def test_speculator_options(register):
+    register("dummy", DummySpeculatorConfig)
+    register("with_options", OptionsSpeculatorConfig)
+
+    spec_config = _custom_spec_config("with_options", speculator_options={"seed": 1})
+    assert spec_config.speculator_options == {"seed": 1}
+    other_seed = _custom_spec_config("with_options", speculator_options={"seed": 2})
+    assert spec_config.compute_hash() != other_seed.compute_hash()
+
+    with pytest.raises(ValueError, match="unknown option"):
+        _custom_spec_config("with_options", speculator_options={"nope": 1})
+    # Only speculators that support options accept them.
+    for method in ("dummy", "ngram"):
+        with pytest.raises(ValueError, match="speculator_options is not supported"):
+            _custom_spec_config(method, speculator_options={"seed": 1})
 
 
 def test_register_speculative_method(register):

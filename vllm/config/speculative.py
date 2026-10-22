@@ -102,6 +102,7 @@ _METHOD_SPECIFIC_OPTIONS = (
     "dspark_draft_topk",
     "index_share_for_mtp_iteration",
     "xpress_topc",
+    "speculator_options",
 )
 
 # RoPE types for which get_rope uses max_position_embeddings only to size the
@@ -658,6 +659,10 @@ class SpeculativeConfig:
     vocabulary. Takes precedence over ``xpress_topc`` in the draft
     checkpoint's config, which is used when this is unset."""
 
+    speculator_options: dict[str, Any] | None = None
+    """Options for a custom speculator, interpreted by its `SpeculatorConfig`,
+    which must list `"speculator_options"` in its `supported_options`."""
+
     fly_window_size: int | None = Field(default=None, ge=1)
     """Number of subsequent native acceptance decisions checked by FLy.
     If unset, defaults to ``min(6, num_speculative_tokens - 1)``."""
@@ -699,6 +704,8 @@ class SpeculativeConfig:
 
         # A custom speculator may compile a different draft model graph.
         factors.append(self.method)
+        if self.speculator_options:
+            factors.append(sorted(self.speculator_options.items()))
         factors.extend(self.speculator_config.hash_factors())
 
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
