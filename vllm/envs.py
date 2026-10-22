@@ -1378,7 +1378,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
         in ("true", "1")
     ),
     # Whether to use aiter fusion shared experts ops.
-    # By default is disabled.
+    # By default is disabled, except for GLM-5.x MXFP4 on gfx950 at TP4/TP8
+    # (see GlmMoeDsaForCausalLM in vllm/model_executor/models/config.py).
     "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "False").lower()
         in ("true", "1")

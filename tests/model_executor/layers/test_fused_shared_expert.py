@@ -3,6 +3,7 @@
 
 import importlib
 import inspect
+import os
 import sys
 from copy import deepcopy
 from types import ModuleType, SimpleNamespace
@@ -15,7 +16,12 @@ from torch import nn
 from transformers import Qwen3_5MoeTextConfig
 
 import vllm.config as vllm_config_module
-from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.config import (
+    KernelConfig,
+    ParallelConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
 from vllm.config.quantization import QuantizationConfigArgs
 from vllm.model_executor.layers.fused_moe import utils as fused_moe_utils
 from vllm.model_executor.layers.fused_moe.layer import determine_expert_counts
@@ -1021,6 +1027,64 @@ def test_glm5_next_fuses_shared_experts_only_in_tuned_setups(
     else:
         warning.assert_called_once()
         assert warning.call_args.args[1] == reason
+
+
+@pytest.mark.parametrize(
+    ("env", "gpu", "quant", "tp", "ep", "expected"),
+    [
+        (None, "gfx950", "mxfp4", 4, False, "1"),
+        (None, "gfx950", "mxfp4", 8, False, "1"),
+        ("0", "gfx950", "mxfp4", 4, False, "0"),
+        (None, "cuda", "mxfp4", 4, False, None),
+        (None, "gfx942", "mxfp4", 4, False, None),
+        (None, "gfx950", "mxfp4", 2, False, None),
+        (None, "gfx950", "mxfp4", 4, True, None),
+        (None, "gfx950", "mxfp4_a16", 4, False, None),
+        (None, "gfx950", "fp8", 4, False, None),
+    ],
+)
+def test_glm_moe_dsa_defaults_fused_shared_experts_where_aiter_is_tuned(
+    monkeypatch: pytest.MonkeyPatch,
+    env: str | None,
+    gpu: str,
+    quant: str,
+    tp: int,
+    ep: bool,
+    expected: str | None,
+) -> None:
+    """GLM-5.x turns the flag on only when it is unset and AITER has tuned
+    MXFP4 configs for the per-rank fused shared-expert shape."""
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.models.config import GlmMoeDsaForCausalLM
+
+    name = "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS"
+    # setenv first so monkeypatch also removes the value the hook writes.
+    monkeypatch.setenv(name, env or "")
+    if env is None:
+        monkeypatch.delenv(name)
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: gpu != "cuda")
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: gpu == "gfx950")
+    monkeypatch.setattr(rocm_aiter_ops, "is_fused_moe_enabled", lambda: True)
+    monkeypatch.setattr(rocm_aiter_ops, "refresh_env_variables", lambda: None)
+    quant_config = deepcopy(_QUARK_FSE_CONFIG)
+    if quant == "mxfp4_a16":
+        quant_config["global_quant_config"]["input_tensors"] = None
+    elif quant == "fp8":
+        quant_config = {"quant_method": "fp8", "weight_block_size": [128, 128]}
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(quantization_config=quant_config)
+        ),
+        cache_config=SimpleNamespace(cache_dtype="fp8"),
+        kernel_config=KernelConfig(),
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=tp, enable_expert_parallel=ep
+        ),
+    )
+
+    GlmMoeDsaForCausalLM.verify_and_update_config(cast(VllmConfig, config))
+
+    assert os.environ.get(name) == expected
 
 
 def test_glm5_next_fused_shared_expert_loads_into_the_shared_slot() -> None:
