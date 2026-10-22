@@ -214,6 +214,32 @@ def test_staged_write_inflight(uva_target, dtype):
 
 
 @pytest.mark.skipif(not is_uva_available(), reason="UVA is not available.")
+@pytest.mark.parametrize("uva_target", [False, True])
+def test_staged_write_rejected_input_stages_nothing(uva_target):
+    """A write whose contents fail to convert leaves earlier staged writes intact."""
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    with torch.accelerator.device_index(device.index):
+        state = StagedWriteTensor(
+            (2, 8), torch.int32, device, uva_instead_of_gpu=uva_target
+        )
+
+        def failing_contents():
+            yield 7
+            raise RuntimeError("boom")
+
+        state.stage_write(0, 1, [1, 2, 3])
+        with pytest.raises(TypeError):
+            state.stage_write(1, 0, [4, 5.5])
+        with pytest.raises(RuntimeError, match="boom"):
+            state.stage_write(1, 0, failing_contents())
+        state.stage_write(1, 2, range(4, 6))
+        state.apply_write()
+        torch.accelerator.synchronize()
+
+    assert state.gpu.tolist() == [[0, 1, 2, 3, 0, 0, 0, 0], [0, 0, 4, 5, 0, 0, 0, 0]]
+
+
+@pytest.mark.skipif(not is_uva_available(), reason="UVA is not available.")
 @pytest.mark.parametrize("device", DEVICES)
 def test_non_pinned_cpu_tensor(device):
     # Non-pinned CPU tensors are internally copied into a pinned buffer,
