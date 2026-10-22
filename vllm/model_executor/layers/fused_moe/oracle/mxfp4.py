@@ -1574,22 +1574,16 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         )
 
     if mxfp4_backend == Mxfp4MoeBackend.AITER_MEGA_MOE:
-        from vllm._aiter_ops import rocm_aiter_ops
+        from vllm.model_executor.layers.fused_moe.experts.aiter_mega_moe import (
+            shuffle_aiter_mega_moe_weights,
+        )
 
-        # MegaMoEV2 takes w1 and w3 stacked, not gate/up interleaved.
-        num_experts = w13_weight.shape[0]
         return (
-            rocm_aiter_ops.shuffle_weight_a16w4(w13_weight.data, 16, True),
-            rocm_aiter_ops.shuffle_weight_a16w4(w2_weight.data, 16, False),
-            rocm_aiter_ops.shuffle_scale_a16w4(
-                w13_weight_scale.data.view(-1, w13_weight_scale.shape[-1]),
-                num_experts,
-                True,
-            ),
-            rocm_aiter_ops.shuffle_scale_a16w4(
-                w2_weight_scale.data.view(-1, w2_weight_scale.shape[-1]),
-                num_experts,
-                False,
+            *shuffle_aiter_mega_moe_weights(
+                w13_weight.data,
+                w2_weight.data,
+                w13_weight_scale.data,
+                w2_weight_scale.data,
             ),
             w13_bias,
             w2_bias,

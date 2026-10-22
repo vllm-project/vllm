@@ -47,6 +47,7 @@ from vllm.model_executor.models.utils import maybe_prefix
 
 from .model import (
     DeepseekV4DecoderLayer,
+    fuse_mega_moe_shared_experts,
 )
 
 logger = init_logger(__name__)
@@ -478,6 +479,9 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
             self.model.confidence_head = None
         logger.info_once("DSpark draft model loaded: %d params", len(loaded_params))
         return loaded_params
+
+    def process_weights_after_loading(self) -> None:
+        fuse_mega_moe_shared_experts(self)
 
     def _remap_dspark_name(self, name: str) -> str | None:
         """Map a checkpoint ``mtp.{i}.*`` name to this model's parameter path.

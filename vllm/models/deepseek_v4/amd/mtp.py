@@ -43,7 +43,11 @@ from vllm.models.deepseek_v4.quant_config import align_mtp_quant_config
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from .model import DeepseekV4DecoderLayer, DeepseekV4ForCausalLM
+from .model import (
+    DeepseekV4DecoderLayer,
+    DeepseekV4ForCausalLM,
+    fuse_mega_moe_shared_experts,
+)
 
 logger = init_logger(__name__)
 
@@ -514,6 +518,9 @@ class DeepSeekV4MTP(nn.Module):
                 )
         logger.info_once("MTP draft model loaded: %d params", len(loaded_params))
         return loaded_params
+
+    def process_weights_after_loading(self) -> None:
+        fuse_mega_moe_shared_experts(self)
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
         """Rewrite the weight name to match the format of the original model.

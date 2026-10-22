@@ -17,6 +17,7 @@ class FusedMoERouter(ABC):
     def __init__(self, eplb_state: EplbLayerState | None = None):
         self._routing_replay_out: torch.Tensor | None = None
         self.eplb_state = eplb_state
+        self.num_fused_shared_experts = 0
         # Deepseek V4.1 vision checkpoints carry a second per-expert routing
         # bias for image sentinel tokens; attached by model code when present.
         self.bias_vl: torch.Tensor | None = None
