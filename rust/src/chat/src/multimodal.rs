@@ -19,9 +19,10 @@ use std::sync::Arc;
 use itertools::{Either, izip};
 use llm_multimodal::{
     AsyncMultiModalTracker, AudioClip, AudioPreProcessor, EncoderFieldLayouts, FieldLayout,
-    ImageFrame, MediaConnector, MediaConnectorConfig, MediaContentPart, Modality, ModelMetadata,
-    ModelProcessorSpec, PreProcessorConfig, PreprocessedEncoderInputs, PromptReplacement,
-    Tokenizer as TokenResolver, TrackedMedia, VideoClip, VisionPreProcessor,
+    FrameSampling, ImageFrame, MediaConnector, MediaConnectorConfig, MediaContentPart,
+    MediaItemInfo, Modality, ModelMetadata, ModelProcessorSpec, PreProcessorConfig,
+    PreprocessedEncoderInputs, PromptReplacement, Tokenizer as TokenResolver, TrackedMedia,
+    VideoClip, VisionPreProcessor,
 };
 use serde::{Deserialize, Serialize};
 use thiserror_ext::AsReport as _;
@@ -219,6 +220,26 @@ impl ResolvedMultimodalSpec {
         Ok(self
             .raw
             .prompt_replacements_for(&context.metadata(), preprocessed, self.modality)?)
+    }
+
+    /// Prompt replacements given the media items' decoder-side facts (e.g.
+    /// how a video's frames were sampled) and the config the modality was
+    /// preprocessed with. Specs without a media-aware hook ignore both and
+    /// behave exactly like [`Self::prompt_replacements_for`].
+    fn prompt_replacements_with_media(
+        &self,
+        context: &MultimodalModelContext,
+        preprocessed: &PreprocessedEncoderInputs,
+        media: &[MediaItemInfo],
+        preprocessor_config: &PreProcessorConfig,
+    ) -> Result<Vec<PromptReplacement>> {
+        Ok(self.raw.prompt_replacements_with_media(
+            &context.metadata(),
+            preprocessed,
+            self.modality,
+            media,
+            preprocessor_config,
+        )?)
     }
 }
 
@@ -878,6 +899,22 @@ impl MultimodalModelInfo {
         Ok(features)
     }
 
+    /// The resolved video spec's sampling policy for the media tracker: how
+    /// the connector picks a clip's frames, and the frame rate a request
+    /// without `fps` is sampled at — both read from the video preprocessor
+    /// config where the model's reference processor reads them (e.g.
+    /// GLM-5.3-Flash keeps 32 evenly-spread frames and resamples at the
+    /// configured `fps`). `None` when the model has no video lane; the
+    /// tracker then keeps its connector defaults.
+    fn video_sampling_policy(&self) -> Option<(FrameSampling, Option<f32>)> {
+        let video = self.video.as_ref()?;
+        let config = &video.config;
+        Some((
+            video.spec.raw.video_frame_sampling_with(Some(config)),
+            video.spec.raw.default_video_sample_fps_with(Some(config)),
+        ))
+    }
+
     /// Fetch all connector-backed media parts and split them per modality,
     /// preserving their request-order UUID metadata.
     #[tracing::instrument(
@@ -888,6 +925,11 @@ impl MultimodalModelInfo {
     )]
     async fn fetch_media(&self, media_parts: Vec<MediaContentPart>) -> Result<FetchedMedia> {
         let mut tracker = AsyncMultiModalTracker::new(Arc::clone(&self.media_connector));
+        if let Some((sampling, default_fps)) = self.video_sampling_policy() {
+            tracker = tracker
+                .with_video_frame_sampling(sampling)
+                .with_default_video_sample_fps(default_fps);
+        }
         for part in media_parts {
             tracker.push_part(part)?;
         }
@@ -1074,6 +1116,93 @@ mod tests {
 
     pub(super) fn qwen3_vl_info() -> MultimodalModelInfo {
         test_info("qwen3_vl", qwen3_vl_config(), qwen3_vl_tokenizer())
+    }
+
+    pub(super) const GLM53_IMAGE_ID: u32 = 154854;
+    pub(super) const GLM53_VIDEO_ID: u32 = 154855;
+    pub(super) const GLM53_BEGIN_ID: u32 = 154830;
+    pub(super) const GLM53_END_ID: u32 = 154831;
+
+    pub(super) fn glm53_flash_tokenizer() -> TestTokenizer {
+        TestTokenizer::new()
+            .with_regular_token("<|image|>", GLM53_IMAGE_ID)
+            .with_regular_token("<|video|>", GLM53_VIDEO_ID)
+            .with_regular_token("<|begin_of_image|>", GLM53_BEGIN_ID)
+            .with_regular_token("<|end_of_image|>", GLM53_END_ID)
+    }
+
+    pub(super) fn glm53_flash_video_config() -> PreProcessorConfig {
+        PreProcessorConfig::from_value(serde_json::json!({
+            "do_resize": true,
+            "patch_size": 14,
+            "merge_size": 2,
+            "temporal_patch_size": 2,
+            "patch_expand_factor": 1,
+            "min_image_tokens": 16,
+            "max_image_tokens": 240_000,
+            "fps": 1
+        }))
+        .unwrap()
+    }
+
+    pub(super) fn glm53_flash_info(video_config: PreProcessorConfig) -> MultimodalModelInfo {
+        let context = MultimodalModelContext {
+            model_id: "zai-org/GLM-5.3-Flash".to_string(),
+            model_type: Some("glm53_flash".to_string()),
+            config: serde_json::json!({
+                "model_type": "glm53_flash",
+                "image_token_id": GLM53_IMAGE_ID,
+            }),
+            tokenizer: TokenizerResolver(Arc::new(glm53_flash_tokenizer())),
+        };
+        MultimodalModelInfo::from_loaded(
+            context,
+            PreProcessorConfig::default(),
+            video_config,
+            PreProcessorConfig::default(),
+            HashMap::new(),
+        )
+        .unwrap()
+        .expect("GLM-5.3-Flash multimodal support")
+    }
+
+    #[test]
+    fn video_sampling_policy_comes_from_the_video_spec() {
+        // GLM-5.3-Flash: the loader keeps 32 evenly-spread frames, then the
+        // processor resamples at the video config's `fps` (default 2.0).
+        let info = glm53_flash_info(glm53_flash_video_config());
+        assert_eq!(
+            info.video_sampling_policy(),
+            Some((
+                FrameSampling::UpToThenRate {
+                    max_frames: 32,
+                    rate_max_frames: 2048
+                },
+                Some(1.0)
+            ))
+        );
+        let info = glm53_flash_info(PreProcessorConfig::default());
+        assert_eq!(
+            info.video_sampling_policy(),
+            Some((
+                FrameSampling::UpToThenRate {
+                    max_frames: 32,
+                    rate_max_frames: 2048
+                },
+                Some(2.0)
+            ))
+        );
+
+        // Qwen3-VL declares its family's even-rounded rule and no rate, so a
+        // request without `fps` keeps the connector default.
+        assert_eq!(
+            qwen3_vl_info().video_sampling_policy(),
+            Some((FrameSampling::EvenRounded, None))
+        );
+
+        // A model without a video lane leaves the tracker at connector
+        // defaults.
+        assert_eq!(llama4_info().video_sampling_policy(), None);
     }
 
     #[test]

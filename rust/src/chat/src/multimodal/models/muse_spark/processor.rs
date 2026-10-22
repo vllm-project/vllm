@@ -42,14 +42,14 @@ pub const MUSE_SPARK_IMAGE_STD: [f64; 3] = [0.5; 3];
 pub const RGBA_BACKGROUND_COLOR: [u8; 3] = [255, 255, 255];
 
 const DEFAULT_PATCH_SIZE: usize = 14;
-const DEFAULT_PATCH_TEMPORAL: usize = 2;
+pub(super) const DEFAULT_PATCH_TEMPORAL: usize = 2;
 const DEFAULT_DOWNSAMPLE_FACTOR: usize = 2;
 const DEFAULT_MIN_NUM_TOKENS: usize = 1;
 const DEFAULT_MAX_NUM_IMAGE_TOKENS: usize = 4096;
 const DEFAULT_MAX_NUM_VIDEO_TOKENS: usize = 4096;
 const DEFAULT_VIDEO_DOWNSAMPLE_FACTOR: usize = 2;
-const DEFAULT_NUM_FRAMES_PER_VIDEO: usize = 600;
-const DEFAULT_SAMPLING_FPS: f64 = 2.0;
+pub(super) const DEFAULT_NUM_FRAMES_PER_VIDEO: usize = 600;
+pub(super) const DEFAULT_SAMPLING_FPS: f64 = 2.0;
 const DEFAULT_FRAME_FACTOR: usize = 2;
 const DEFAULT_MAX_NUM_TOKENS_PER_FRAME: usize = 256;
 
