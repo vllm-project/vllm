@@ -744,9 +744,6 @@ async def test_text_mode_stream_matches_non_stream(client, tokenizer, messages):
             {"sampling_params": {"detokenize": False}}, "detokenize", id="no-detok"
         ),
         pytest.param({"output_mode": "bogus"}, "output_mode", id="unsupported"),
-        pytest.param(
-            {"output_mode": "derender", "stream": True}, "stream", id="derender-stream"
-        ),
     ],
 )
 async def test_text_mode_invalid_requests_return_400(client, overrides, expected):

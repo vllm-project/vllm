@@ -18,6 +18,7 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     DerenderCompletionRequest,
     DerenderCompletionStreamRequest,
     GenerateDerenderResponse,
+    GenerateDerenderStreamResponse,
     GenerateRequest,
     GenerateResponse,
     GenerateStreamResponse,
@@ -274,6 +275,19 @@ def test_text_response_and_chunk_dispatch_on_output_mode():
     )
     assert isinstance(response, GenerateTextResponse)
     assert isinstance(chunk, GenerateTextStreamResponse)
+
+
+def test_derender_chunk_dispatches_and_derender_stream_request_rejects_it():
+    chunk = {
+        "output_mode": "derender",
+        "choices": [{"index": 0, "delta": {"content": "hi"}}],
+    }
+    parsed = TypeAdapter(GenerateStreamResponse).validate_python(chunk)
+    assert isinstance(parsed, GenerateDerenderStreamResponse)
+    with pytest.raises(ValidationError, match="output_mode"):
+        DerenderChatStreamRequest.model_validate(
+            {"stream": True, "generate_chunk": chunk}
+        )
 
 
 def test_text_response_requires_text_on_every_choice():

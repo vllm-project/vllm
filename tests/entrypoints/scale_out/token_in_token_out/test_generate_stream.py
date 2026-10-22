@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
 import json
 from dataclasses import dataclass, field
 from typing import Any
@@ -9,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from vllm.config.multimodal import MultiModalConfig
-from vllm.entrypoints.generate.base.protocol import StreamOptions
+from vllm.entrypoints.generate.base.protocol import DeltaMessage, StreamOptions
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.scale_out.token_in_token_out.mm_features import (
@@ -19,10 +20,12 @@ from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
     encode_mm_kwargs_item,
 )
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+    GenerateDerenderStreamResponse,
     GenerateRequest,
     GenerateTextResponse,
     GenerateTokensResponse,
     MultiModalFeatures,
+    ParseContext,
     PlaceholderRangeInfo,
 )
 from vllm.entrypoints.scale_out.token_in_token_out.serving import ServingTokens
@@ -1563,3 +1566,292 @@ async def test_stream_text_mode_usage_chunk_echoes_output_mode():
     assert usage_chunk["output_mode"] == "text"
     assert usage_chunk["choices"] == []
     assert usage_chunk["usage"]["completion_tokens"] == 1
+
+
+class _StubParser:
+    """Echoes text as content. From the first "~" on it holds text back until
+    the finished step, like a parser buffering a partial tool call."""
+
+    def __init__(self, *args, **kwargs):
+        self.held = ""
+        self.history_tool_call_cnt = 0
+
+    def parse_delta(self, delta_text, finished=False, **kwargs):
+        if self.held or "~" in delta_text:
+            self.held += delta_text
+            if not finished:
+                return None
+            delta_text, self.held = self.held, ""
+        return DeltaMessage(content=delta_text)
+
+    def set_history_tool_call_count(self, count):
+        self.history_tool_call_cnt = count
+
+
+def _derender_serving(engine, parser_cls=_StubParser):
+    """Serving whose derenderer builds real stream processors around
+    `parser_cls`, or plain ones when it is None."""
+    serving = _build_serving_tokens(engine)
+    derenderer = serving.online_derenderer
+    derenderer.parser = parser_cls
+    derenderer.renderer = MagicMock()
+    derenderer.model_config = engine.model_config
+    derenderer.make_stream_processor = functools.partial(
+        OnlineDerenderer.make_stream_processor, derenderer
+    )
+    return serving
+
+
+def _derender_request(parse_context=None, n=1, **kwargs):
+    return GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=10, n=n),
+        model=MODEL_NAME,
+        stream=True,
+        output_mode="derender",
+        parse_context=parse_context or ParseContext(),
+        **kwargs,
+    )
+
+
+@pytest.mark.asyncio
+async def test_stream_derender_flushes_on_finish_only_output():
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output("req-1", token_ids=[10], text="a")
+        yield _make_request_output("req-1", token_ids=[11], text="~")
+        yield _make_request_output(
+            "req-1", token_ids=[], text="b", finish_reason="stop", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _derender_serving(engine)
+
+    parsed = await _collect_sse(await serving.serve_tokens(_derender_request()))
+    choices = [c["choices"][0] for c in parsed[:-1]]
+
+    assert {c["output_mode"] for c in parsed[:-1]} == {"derender"}
+    assert [c["delta"] for c in choices] == [
+        {"role": "assistant", "content": "a"},
+        {},
+        {"content": "~b"},
+    ]
+    assert [c["token_ids"] for c in choices] == [[10], [11], []]
+    assert [c["finish_reason"] for c in choices] == [None, None, "stop"]
+
+
+@pytest.mark.asyncio
+async def test_stream_derender_abort_without_tokens_sends_empty_delta():
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1", token_ids=[], finish_reason="abort", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _derender_serving(engine)
+
+    parsed = await _collect_sse(await serving.serve_tokens(_derender_request()))
+
+    assert len(parsed) == 2
+    assert parsed[0]["choices"][0]["delta"] == {"role": "assistant"}
+    assert parsed[0]["choices"][0]["finish_reason"] == "abort"
+
+
+@pytest.mark.asyncio
+async def test_stream_derender_hidden_reasoning_drops_metadata():
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1",
+            token_ids=[10],
+            text="a",
+            logprobs=[{10: Logprob(logprob=-0.1)}],
+        )
+        yield _make_request_output(
+            "req-1",
+            token_ids=[11],
+            text="b",
+            finish_reason="stop",
+            finished=True,
+            logprobs=[{11: Logprob(logprob=-0.2)}],
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _derender_serving(engine)
+    request = _derender_request(ParseContext(include_reasoning=False))
+    request.sampling_params.logprobs = 1
+
+    parsed = await _collect_sse(await serving.serve_tokens(request))
+
+    for chunk in parsed[:-1]:
+        choice = chunk["choices"][0]
+        assert choice["logprobs"] is None
+        assert choice["token_ids"] is None
+        assert choice["sampling_mask"] is None
+    assert parsed[0]["choices"][0]["delta"]["content"] == "a"
+
+
+@pytest.mark.asyncio
+async def test_stream_derender_n2_has_independent_state():
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output("req-1", token_ids=[10], text="~a", index=0)
+        yield _make_request_output("req-1", token_ids=[20], text="x", index=1)
+        yield _make_request_output(
+            "req-1", token_ids=[11], text="b", index=0, finish_reason="stop"
+        )
+        yield _make_request_output(
+            "req-1", token_ids=[21], text="y", index=1, finish_reason="stop"
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _derender_serving(engine)
+
+    parsed = await _collect_sse(await serving.serve_tokens(_derender_request(n=2)))
+    choices = [c["choices"][0] for c in parsed[:-1]]
+
+    # Choice 0 buffers, choice 1 doesn't, so each has its own parser.
+    assert [(c["index"], c["delta"]) for c in choices] == [
+        (0, {"role": "assistant"}),
+        (1, {"role": "assistant", "content": "x"}),
+        (0, {"content": "~ab"}),
+        (1, {"content": "y"}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stream_derender_without_parser_streams_text_as_content():
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output("req-1", token_ids=[10], text="a~")
+        yield _make_request_output(
+            "req-1", token_ids=[11], text="b", finish_reason="stop", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _derender_serving(engine, parser_cls=None)
+
+    parsed = await _collect_sse(await serving.serve_tokens(_derender_request()))
+    choices = [c["choices"][0] for c in parsed[:-1]]
+
+    assert [c["delta"] for c in choices] == [
+        {"role": "assistant", "content": "a~"},
+        {"content": "b"},
+    ]
+    assert [c["finish_reason"] for c in choices] == [None, "stop"]
+
+
+def test_make_stream_processor_seeds_history_tool_call_count():
+    """Without the seed, deterministic tool call IDs restart at 0."""
+    serving = _derender_serving(_mock_engine())
+
+    processor = serving.online_derenderer.make_stream_processor(
+        ParseContext().to_chat_request(), 3
+    )
+
+    assert processor.parser.history_tool_call_cnt == 3
+
+
+class _RejectingParser(_StubParser):
+    def __init__(self, *args, **kwargs):
+        raise ValueError("unsupported tools")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("parser_cls", "parse_context"),
+    [
+        pytest.param(
+            _StubParser,
+            ParseContext(
+                tool_choice={"type": "function", "function": {"name": "missing"}}
+            ),
+            id="named-tool-missing",
+        ),
+        pytest.param(_RejectingParser, ParseContext(), id="parser-rejects"),
+    ],
+)
+async def test_stream_derender_invalid_request_fails_before_engine(
+    parser_cls, parse_context
+):
+    engine = _mock_engine()
+    serving = _derender_serving(engine, parser_cls=parser_cls)
+
+    response = await serving.serve_tokens(_derender_request(parse_context))
+
+    assert isinstance(response, ErrorResponse)
+    assert response.error.code == 400
+    engine.generate.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stream_derender_requires_parse_context_with_parser():
+    engine = _mock_engine()
+    serving = _derender_serving(engine)
+    request = _derender_request()
+    request.parse_context = None
+
+    response = await serving.serve_tokens(request)
+
+    assert isinstance(response, ErrorResponse)
+    assert response.error.code == 400
+    engine.generate.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "abort_error",
+    [None, RuntimeError("engine dead")],
+    ids=["abort-ok", "abort-fails"],
+)
+async def test_stream_derender_parser_failure_aborts_engine(abort_error):
+    """The engine is aborted, and the client still gets the error event and
+    [DONE] when the abort itself fails."""
+    engine = _mock_engine()
+    engine.abort.side_effect = abort_error
+
+    class _RaisingParser(_StubParser):
+        def parse_delta(self, delta_text, finished=False, **kwargs):
+            raise RuntimeError("boom")
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output("req-1", token_ids=[10], text="a")
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _derender_serving(engine, parser_cls=_RaisingParser)
+
+    chunks = [c async for c in await serving.serve_tokens(_derender_request())]
+
+    assert any('"code": 500' in c for c in chunks)
+    assert chunks[-1] == "data: [DONE]\n\n"
+    engine.abort.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_stream_derender_chunk_has_no_null_delta_keys():
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1", token_ids=[10], text="a", finish_reason="stop", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _derender_serving(engine)
+
+    response = await serving.serve_tokens(_derender_request())
+    chunks = [c async for c in response]
+
+    assert '"delta":{"role":"assistant","content":"a"}' in chunks[0]
+    assert (
+        GenerateDerenderStreamResponse.model_validate_json(chunks[0][len("data: ") :])
+        .choices[0]
+        .delta.content
+        == "a"
+    )

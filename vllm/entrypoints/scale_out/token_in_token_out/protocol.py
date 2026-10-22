@@ -11,12 +11,14 @@ from pydantic import (
     NonNegativeInt,
     PrivateAttr,
     Tag,
+    field_serializer,
     field_validator,
     model_validator,
 )
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.generate.base.protocol import (
+    DeltaMessage,
     PerRequestMetrics,
     StreamOptions,
     validate_cache_salt,
@@ -309,8 +311,8 @@ class GenerateRequest(BaseModel):
             "strings. 'derender' returns the parsed assistant message and "
             "needs `parse_context` when the server has a parser. 'text' and "
             "'derender' need a server that loads a tokenizer and "
-            "sampling_params.detokenize to be true. 'derender' does not "
-            "support `stream`."
+            "sampling_params.detokenize to be true. With `stream`, "
+            "'derender' returns a parsed chat `delta` per chunk."
         ),
     )
     parse_context: ParseContext | None = Field(
@@ -556,6 +558,19 @@ class GenerateTextStreamChoice(GenerateStreamChoiceBase):
     logprobs: ChatCompletionLogProbs | None = None
 
 
+class GenerateDerenderStreamChoice(GenerateStreamChoiceBase):
+    delta: DeltaMessage
+    """Parsed delta since the previous chunk of this choice."""
+
+    logprobs: ChatCompletionLogProbs | None = None
+    """Logprobs with decoded token strings and `bytes`. None when reasoning
+    is hidden by `include_reasoning=false`."""
+
+    @field_serializer("delta")
+    def _serialize_delta(self, delta: DeltaMessage) -> dict[str, Any]:
+        return delta.model_dump(exclude_none=True)
+
+
 class GenerateStreamResponseBase(BaseModel):
     request_id: str = Field(
         default_factory=lambda: f"{random_uuid()}",
@@ -579,6 +594,11 @@ class GenerateTokensStreamResponse(GenerateStreamResponseBase):
 class GenerateTextStreamResponse(GenerateStreamResponseBase):
     output_mode: Literal["text"] = "text"
     choices: list[GenerateTextStreamChoice]
+
+
+class GenerateDerenderStreamResponse(GenerateStreamResponseBase):
+    output_mode: Literal["derender"] = "derender"
+    choices: list[GenerateDerenderStreamChoice]
 
 
 class GenerateDerenderChoice(GenerateChoiceBase):
@@ -657,7 +677,8 @@ GenerateResponse: TypeAlias = Annotated[
 ]
 GenerateStreamResponse: TypeAlias = Annotated[
     Annotated[GenerateTokensStreamResponse, Tag("tokens")]
-    | Annotated[GenerateTextStreamResponse, Tag("text")],
+    | Annotated[GenerateTextStreamResponse, Tag("text")]
+    | Annotated[GenerateDerenderStreamResponse, Tag("derender")],
     Discriminator(output_mode_or_tokens),
 ]
 
