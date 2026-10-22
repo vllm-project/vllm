@@ -297,8 +297,16 @@ class LoggingStatLogger(StatLoggerBase):
         ]
 
         if self.last_scheduler_stats.num_skipped_waiting_reqs > 0:
-            log_parts.append("Deferred: %d reqs")
+            deferred_by_reason = self.last_scheduler_stats.num_deferred_reqs_by_reason
+            log_parts.append("Deferred: %d reqs (%s)")
             log_args.append(self.last_scheduler_stats.num_skipped_waiting_reqs)
+            log_args.append(
+                ", ".join(
+                    f"{reason} {num_reqs}"
+                    for reason, num_reqs in deferred_by_reason.items()
+                    if num_reqs
+                )
+            )
 
         kv_fetch = self.last_scheduler_stats.num_kv_fetch_reqs_by_stage
         if any(kv_fetch.values()):
@@ -412,6 +420,10 @@ class AggregatedLoggingStatLogger(LoggingStatLogger, AggregateStatLoggerBase):
             total_kv_fetch = self.last_scheduler_stats.num_kv_fetch_reqs_by_stage
             for stage, num_reqs in engine_kv_fetch.items():
                 total_kv_fetch[stage] = total_kv_fetch.get(stage, 0) + num_reqs
+            engine_deferred = last_scheduler_stats.num_deferred_reqs_by_reason
+            total_deferred = self.last_scheduler_stats.num_deferred_reqs_by_reason
+            for reason, num_reqs in engine_deferred.items():
+                total_deferred[reason] = total_deferred.get(reason, 0) + num_reqs
             self.last_scheduler_stats.kv_cache_usage += (
                 last_scheduler_stats.kv_cache_usage
             )

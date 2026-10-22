@@ -62,6 +62,11 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
+from vllm.v1.metrics.stats import (
+    DEFERRED_BLOCKED,
+    DEFERRED_REASONS,
+    DEFERRED_STALE_OUTPUT,
+)
 from vllm.v1.outputs import (
     DraftTokenIds,
     ECConnectorOutput,
@@ -2852,6 +2857,36 @@ def test_scheduler_stats_waiting_queues():
     assert stats.num_running_reqs == 2  # 2 were scheduled
     assert stats.num_waiting_reqs == 1  # 1 waiting on capacity
     assert stats.num_skipped_waiting_reqs == 2  # 2 blocked by constraints
+
+
+def test_scheduler_stats_deferred_by_reason():
+    """Deferred waiting requests are attributed to the constraint that deferred
+    them, so a sustained backlog can be traced to its cause."""
+    scheduler = create_scheduler(max_num_batched_tokens=100)
+
+    requests = create_requests(num_requests=3, num_tokens=50)
+    # Blocked before the scheduling scan ever reaches it.
+    requests[0].status = RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR
+    # Scanned, then deferred because deliverable stale output is in flight.
+    requests[1].num_stale_output_tokens = 1
+    for request in requests:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+
+    assert len(output.scheduled_new_reqs) == 1
+    assert scheduler.deferred_waiting == {
+        requests[0]: DEFERRED_BLOCKED,
+        requests[1]: DEFERRED_STALE_OUTPUT,
+    }
+
+    stats = scheduler.make_stats()
+    assert stats is not None
+    assert stats.num_skipped_waiting_reqs == 2
+    assert stats.num_deferred_reqs_by_reason == dict.fromkeys(DEFERRED_REASONS, 0) | {
+        DEFERRED_BLOCKED: 1,
+        DEFERRED_STALE_OUTPUT: 1,
+    }
 
 
 def _assert_right_scheduler_output(
