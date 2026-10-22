@@ -234,6 +234,8 @@ class PaliGemmaMultiModalProcessor(BaseMultiModalProcessor[PaliGemmaProcessingIn
 class PaliGemmaForConditionalGeneration(
     nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP
 ):
+    mm_prefix_bidirectional_prompt = True
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",

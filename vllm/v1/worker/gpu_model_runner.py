@@ -2346,9 +2346,16 @@ class GPUModelRunner(
             _span_pad_modulus = getattr(
                 self.model, "mm_prefix_span_leading_pad_modulus", 0
             )
+            _bidirectional_prompt = getattr(
+                self.model, "mm_prefix_bidirectional_prompt", False
+            )
             for req_id in self.input_batch.req_ids:
                 image_doc_ranges = []
                 req_state = self.requests[req_id]
+                if _bidirectional_prompt:
+                    req_idx = self.input_batch.req_id_to_index[req_id]
+                    req_doc_ranges[req_idx] = [(0, req_state.num_prompt_tokens - 1)]
+                    continue
                 for mm_feature in req_state.mm_features:
                     if mm_feature.modality == "audio":
                         continue

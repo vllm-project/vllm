@@ -209,6 +209,11 @@ class DefaultModelState(ModelState):
                 req_ids=input_batch.req_ids,
                 mm_features=self.encoder_cache.mm_features,
                 sliding_window=self.model_config.get_sliding_window(),
+                bidirectional_prompt_lens=(
+                    input_batch.prefill_len_np
+                    if getattr(self.model, "mm_prefix_bidirectional_prompt", False)
+                    else None
+                ),
             )
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
