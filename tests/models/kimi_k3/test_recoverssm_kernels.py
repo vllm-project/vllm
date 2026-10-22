@@ -335,9 +335,9 @@ def test_cute_verify_pad_slot_id():
 
 
 @torch.inference_mode()
-def test_cute_verify_rejects_mismatched_tensors():
-    """A compiled CuTe kernel would reinterpret a wrong dtype or layout: the
-    host side rejects them (and declines a misaligned page)."""
+def test_cute_verify_rejects_unsupported_state_pages():
+    """The CuTe verify rejects a state page the TMA cannot stream and declines a
+    misaligned one (the caller then runs the Triton verify)."""
     heads, window, batch = 16, 5, 2
     _, query_start, mixed_qkv, raw_gate, raw_beta = _inputs(
         batch, heads, window, False, 0, 0
@@ -361,10 +361,6 @@ def test_cute_verify_rejects_mismatched_tensors():
         conv_weight=torch.zeros(3 * heads * D, 4, device=DEVICE),
         out=torch.empty(tokens, heads * D, device=DEVICE, dtype=torch.bfloat16),
     )
-    with pytest.raises(ValueError, match="conv_weight"):
-        verify(**{**args, "conv_weight": args["conv_weight"].bfloat16()})
-    with pytest.raises(ValueError, match="state"):
-        verify(**{**args, "state": state.float()})
     # Padded value rows: the state TMA reads K-element rows back to back.
     padded = torch.zeros(*state.shape[:-1], D + 8, device=DEVICE, dtype=torch.bfloat16)[
         ..., :D

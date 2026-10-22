@@ -11,10 +11,8 @@
   KDA layers in one launch (``cutedsl/commit.py``), replacing the Triton fold of
   ``KDARecoverSSMCommitContext.commit``.
 
-A compiled CuTe kernel accepts any tensor without checking it against the
-signature it was compiled for, so every entry point checks dtypes and layouts
-before launching. The kernels compile when the KV cache is bound, before CUDA
-graph capture; nothing compiles under capture.
+The kernels compile when the KV cache is bound, before CUDA graph capture;
+nothing compiles under capture.
 """
 
 from collections.abc import Sequence
@@ -42,7 +40,6 @@ MAX_WINDOW = 8
 
 def cute_recoverssm_unsupported_reason(
     *,
-    num_heads: int,
     head_dim: int,
     window: int,
     conv_width: int,
@@ -58,18 +55,12 @@ def cute_recoverssm_unsupported_reason(
         current_platform.is_cuda() and current_platform.is_device_capability_family(100)
     ):
         return "it needs SM10x tensor cores (tcgen05)"
-    try:
-        import cutlass  # noqa: F401
-    except ImportError:
-        return "the CuTe DSL (nvidia-cutlass-dsl) is not installed"
     if head_dim != K or conv_width != CONV_WIDTH:
         return f"it needs head_dim {K} and a width-{CONV_WIDTH} convolution"
     if has_conv_bias:
         return "it does not apply a convolution bias"
     if not 1 <= window <= MAX_WINDOW:
         return f"it verifies 1 to {MAX_WINDOW} tokens per step"
-    if num_heads < 1:
-        return "the layer has no local heads"
     if lower_bound is None:
         return "it needs a bounded KDA gate (gate_lower_bound)"
     if (activation_dtype, conv_state_dtype, state_dtype) != (torch.bfloat16,) * 3:
@@ -152,19 +143,18 @@ def _compile_verify(
     )
 
 
-def _check(
-    name: str, tensor: torch.Tensor, dtype: torch.dtype, shape: tuple[int, ...]
-) -> None:
-    if tensor.dtype != dtype or tuple(tensor.shape) != shape or tensor.stride(-1) != 1:
-        raise ValueError(
-            f"KDA RecoverSSM CuTe kernel: {name} must be a {shape} {dtype} tensor "
-            f"with a unit last stride; got {tensor.dtype} shape "
-            f"{tuple(tensor.shape)} strides {tensor.stride()}"
-        )
-
-
 def _aligned(*tensors: torch.Tensor) -> bool:
     return all(tensor.data_ptr() % 16 == 0 for tensor in tensors)
+
+
+def _check_state_strides(state: torch.Tensor) -> None:
+    # The state streams in by TMA: K-element rows of contiguous heads, slots a
+    # multiple of 16 bytes apart.
+    if state.stride()[1:] != (K * K, K, 1) or state.stride(0) * 2 % 16:
+        raise ValueError(
+            f"KDA RecoverSSM CuTe verify: state strides {state.stride()} need "
+            "contiguous heads and 16-byte aligned slots"
+        )
 
 
 class CuteRecoverSSMVerify:
@@ -185,8 +175,7 @@ class CuteRecoverSSMVerify:
         self.conv_weight_dtype = conv_weight_dtype
         self.device = device
         # Each launch takes one ticket per work item and leaves the counter
-        # zeroed for the next one. A layer's verifies run one after another on
-        # one stream (dual-batch overlap is not supported with RecoverSSM).
+        # zeroed for the next one.
         self.counter = torch.zeros(1, dtype=torch.int32, device=device)
         self._compiled: dict[bool, Any] = {}
         # Page and parameter layouts already checked (fixed per KV cache).
@@ -236,55 +225,30 @@ class CuteRecoverSSMVerify:
 
         Returns False without launching when a tensor does not start on a
         16-byte boundary (the kernels assume it, e.g. for an odd token offset
-        into the projection rows): the caller then runs the Triton verify.
-        Raises on any other mismatch with the compiled signature."""
+        into the projection rows): the caller then runs the Triton verify."""
         correction, key_gate = records.correction, records.key_gate
         static = (A_log, dt_bias, state, correction, key_gate, conv_state, conv_weight)
-        key = tuple((t.data_ptr(), tuple(t.shape), t.stride(), t.dtype) for t in static)
+        key = tuple((t.data_ptr(), t.stride()) for t in static)
         if key not in self._checked:
-            self._check_static(*static)
+            _check_state_strides(state)
             if not _aligned(*static):
                 return False
             self._checked.add(key)
-
-        H, Q = self.num_heads, self.window
-        tokens = mixed_qkv.shape[0]
-        batch = state_indices.shape[0]
-        dynamic = (
-            ("mixed_qkv", mixed_qkv, torch.bfloat16, (tokens, 3 * H * K)),
-            ("raw_gate", raw_gate, torch.bfloat16, (tokens, H * K)),
-            ("raw_beta", raw_beta, torch.bfloat16, (tokens, H)),
-            ("out", out, torch.bfloat16, (tokens, H * K)),
-            ("query_start_loc", query_start_loc, torch.int32, (batch + 1,)),
-            ("state_indices", state_indices, torch.int32, (batch,)),
-        )
-        for name, tensor, dtype, shape in dynamic:
-            _check(name, tensor, dtype, shape)
-        _check(
-            "num_accepted_tokens",
-            num_accepted_tokens[:batch],
-            torch.int32,
-            (batch,),
-        )
-        if tokens > batch * Q:
-            raise ValueError("KDA RecoverSSM CuTe verify: more tokens than slots")
-        if batch > records.max_num_reqs:
-            raise ValueError("KDA RecoverSSM CuTe verify: more requests than records")
-        if not _aligned(*(t for _, t, _, _ in dynamic), num_accepted_tokens):
+        if not _aligned(
+            mixed_qkv,
+            raw_gate,
+            raw_beta,
+            out,
+            query_start_loc,
+            state_indices,
+            num_accepted_tokens,
+        ):
             return False
-        if batch == 0 or tokens == 0:
-            return True
         warp_specialized = self.conv_dim_first and self._bulk_copy_aligned(
             mixed_qkv, raw_gate, conv_state, conv_weight
         )
-        compiled = self._compiled.get(warp_specialized)
-        if compiled is None:
-            raise RuntimeError(
-                "KDA RecoverSSM CuTe verify launched before compile() (it must "
-                "not compile under CUDA graph capture)"
-            )
         # TVM-FFI launch on the current stream, straight from the torch tensors.
-        compiled(
+        self._compiled[warp_specialized](
             mixed_qkv,
             raw_gate,
             raw_beta,
@@ -304,42 +268,6 @@ class CuteRecoverSSMVerify:
             NULL_BLOCK_ID,
         )
         return True
-
-    def _check_static(
-        self,
-        A_log: torch.Tensor,
-        dt_bias: torch.Tensor,
-        state: torch.Tensor,
-        correction: torch.Tensor,
-        key_gate: torch.Tensor,
-        conv_state: torch.Tensor,
-        conv_weight: torch.Tensor,
-    ) -> None:
-        H, Q = self.num_heads, self.window
-        slots, rows = state.shape[0], correction.shape[0]
-        conv_len = Q + CONV_WIDTH - 2
-        conv_shape = (slots, 3 * H * K, conv_len)
-        if not self.conv_dim_first:
-            conv_shape = (slots, conv_len, 3 * H * K)
-        for name, tensor, dtype, shape in (
-            ("A_log", A_log, torch.float32, (H,)),
-            ("dt_bias", dt_bias, torch.float32, (H * K,)),
-            ("state", state, torch.bfloat16, (slots, H, K, K)),
-            ("correction", correction, torch.float32, (rows, H, Q, K)),
-            ("key_gate", key_gate, torch.bfloat16, (rows, H, Q, 2 * K)),
-            ("conv_state", conv_state, torch.bfloat16, conv_shape),
-            ("conv_weight", conv_weight, self.conv_weight_dtype, (3 * H * K, 4)),
-        ):
-            _check(name, tensor, dtype, shape)
-        # The state streams in by TMA: K-element rows of contiguous heads, slots
-        # a multiple of 16 bytes apart.
-        if state.stride()[1:] != (K * K, K, 1) or state.stride(0) * 2 % 16:
-            raise ValueError(
-                f"KDA RecoverSSM CuTe verify: state strides {state.stride()} need "
-                "contiguous heads and 16-byte aligned slots"
-            )
-        if not (correction.is_contiguous() and key_gate.is_contiguous()):
-            raise ValueError("KDA RecoverSSM CuTe verify: records must be contiguous")
 
     def _bulk_copy_aligned(
         self,
@@ -425,39 +353,20 @@ class CuteRecoverSSMStateCommit:
         self.context = context
 
     @staticmethod
-    def unsupported_reason(
-        states: Sequence[torch.Tensor],
-        corrections: Sequence[torch.Tensor],
-        key_gates: Sequence[torch.Tensor],
-        A_log: torch.Tensor,
-        dt_bias: torch.Tensor,
-        window: int,
-        lower_bound: float | None,
-    ) -> str | None:
-        state = states[0]
-        _, heads, value_dim, key_dim = state.shape
-        if (value_dim, key_dim) != (K, K) or not 1 <= window <= MAX_WINDOW:
-            return f"it needs {K} x {K} heads and 1 to {MAX_WINDOW} tokens"
-        if lower_bound is None or (A_log.dtype, dt_bias.dtype) != (torch.float32,) * 2:
-            return "it needs a bounded gate and float32 gate parameters"
-        for tensors, dtype, inner in (
-            (states, torch.bfloat16, (K * K, K, 1)),
-            (corrections, torch.float32, (window * K, K, 1)),
-            (key_gates, torch.bfloat16, (window * 2 * K, 2 * K, 1)),
-        ):
-            for tensor in tensors:
-                # Pages are bulk-copied 16 bytes at a time.
-                if (
-                    tensor.dtype != dtype
-                    or tensor.stride()[1:] != inner
-                    or tensor.stride(0) * tensor.element_size() % 16
-                    or not _aligned(tensor)
-                ):
-                    return (
-                        f"a {tensor.dtype} page view with strides "
-                        f"{tensor.stride()} is not a 16-byte aligned {dtype} one "
-                        f"with inner strides {inner}"
-                    )
+    def unsupported_reason(states: Sequence[torch.Tensor]) -> str | None:
+        """Why the CuTe commit cannot fold these state pages (None: it can). The
+        rest of its inputs are those of the CuTe verify."""
+        for state in states:
+            # Pages are bulk-copied 16 bytes at a time.
+            if (
+                state.stride()[1:] != (K * K, K, 1)
+                or state.stride(0) * state.element_size() % 16
+                or not _aligned(state)
+            ):
+                return (
+                    f"a state page view with strides {state.stride()} is not a "
+                    "16-byte aligned one with contiguous heads"
+                )
         return None
 
     def __call__(self, state_indices: torch.Tensor, batch: int, align: bool) -> None:

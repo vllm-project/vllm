@@ -307,7 +307,6 @@ def resolve_kda_spec_decode_backend(
 def resolve_kda_recoverssm_backend(
     backend: str,
     *,
-    num_heads: int,
     head_dim: int,
     window: int,
     conv_width: int,
@@ -325,7 +324,6 @@ def resolve_kda_recoverssm_backend(
     if backend == "triton":
         return "triton"
     reason = cute_recoverssm_unsupported_reason(
-        num_heads=num_heads,
         head_dim=head_dim,
         window=window,
         conv_width=conv_width,
@@ -793,7 +791,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 additional_config.get("kda_recoverssm_backend", "auto")
                 if isinstance(additional_config, dict)
                 else "auto",
-                num_heads=self.local_num_heads,
                 head_dim=self.head_dim,
                 window=self.spec_query_len,
                 conv_width=self.conv_size,

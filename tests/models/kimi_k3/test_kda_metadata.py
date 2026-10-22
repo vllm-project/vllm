@@ -150,12 +150,7 @@ def _make_builder(
     )
     if use_recoverssm:
         assert isinstance(builder, KimiK3KDAMetadataBuilder)
-        # A layer with bound pages, and a commit context over them.
-        state = torch.empty(1)
-        vllm_config.compilation_config.static_forward_context["layer.0"] = (
-            SimpleNamespace(kv_cache=(state, state), recoverssm_verify=None)
-        )
-        builder.recoverssm_context = Mock(checkpoints=[state])
+        builder.recoverssm_context = Mock()
     return builder
 
 
@@ -1137,38 +1132,3 @@ def test_recoverssm_layer_keeps_records_outside_kv_cache(
     assert records.correction.dtype == torch.float32
     assert records.key_gate.shape == (5, 4, 3, 64)
     assert records.key_gate.dtype == torch.bfloat16
-
-
-def test_recoverssm_context_follows_rebound_kv_cache():
-    """The commit context holds the layers' page addresses: a re-bound KV cache
-    gets a new one."""
-    batch = BatchSpec(seq_lens=[40], query_lens=[3])
-    common_attn_metadata = create_common_attn_metadata(
-        batch, BLOCK_SIZE, DEVICE
-    ).replace(is_prefilling=torch.tensor([False]))
-    builder = _make_builder(
-        KimiK3KDAMetadataBuilder,
-        num_speculative_tokens=2,
-        full_cuda_graph=False,
-        use_recoverssm=True,
-    )
-
-    def build():
-        return builder.build(
-            0,
-            common_attn_metadata,
-            num_decode_draft_tokens_cpu=torch.tensor([2], dtype=torch.int32),
-            num_accepted_tokens=torch.ones(1, dtype=torch.int32),
-        )
-
-    context = builder.recoverssm_context
-    assert build().recoverssm_context is context
-    layer = builder.vllm_config.compilation_config.static_forward_context["layer.0"]
-    layer.kv_cache = (torch.empty(1), torch.empty(1))
-    rebuilt = Mock()
-    with patch(
-        "vllm.models.kimi_k3.nvidia.ops.recoverssm.KDARecoverSSMCommitContext.create",
-        return_value=rebuilt,
-    ) as create:
-        assert build().recoverssm_context is rebuilt
-    create.assert_called_once()

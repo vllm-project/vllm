@@ -257,7 +257,7 @@ def test_kda_recoverssm_derivation_is_revalidated():
             backend=MambaBackendEnum.TRITON,
             enable_stochastic_rounding=False,
         ),
-        parallel_config=SimpleNamespace(pipeline_parallel_size=1, enable_dbo=False),
+        parallel_config=SimpleNamespace(pipeline_parallel_size=1),
         kv_transfer_config=None,
         use_v2_model_runner=True,
     )
@@ -266,15 +266,13 @@ def test_kda_recoverssm_derivation_is_revalidated():
     assert config.cache_config.use_replayssm
     assert config.cache_config.use_kda_recoverssm
 
-    # Only Model Runner V2 commits the accepted tokens, with or without
-    # prefix caching.
-    for mamba_cache_mode in ("align", "none"):
-        config.cache_config.mamba_cache_mode = mamba_cache_mode
+    config.cache_config.mamba_cache_mode = "align"
+    VllmConfig.validate_mamba_cached_kernel(config)
+    config.use_v2_model_runner = False
+    with pytest.raises(ValueError, match="VLLM_USE_V2_MODEL_RUNNER=1"):
         VllmConfig.validate_mamba_cached_kernel(config)
-        config.use_v2_model_runner = False
-        with pytest.raises(ValueError, match="VLLM_USE_V2_MODEL_RUNNER=1"):
-            VllmConfig.validate_mamba_cached_kernel(config)
-        config.use_v2_model_runner = True
+    config.use_v2_model_runner = True
+    config.cache_config.mamba_cache_mode = "none"
 
     config.model_config.architecture = "NemotronHForCausalLM"
     config.mamba_config.backend = MambaBackendEnum.FLASHINFER
@@ -282,10 +280,6 @@ def test_kda_recoverssm_derivation_is_revalidated():
     assert not config.cache_config.use_kda_recoverssm
 
     config.model_config.architecture = "KimiLinearForCausalLM"
-    config.parallel_config.enable_dbo = True
-    with pytest.raises(ValueError, match="enable-dbo"):
-        VllmConfig.validate_mamba_cached_kernel(config)
-    config.parallel_config.enable_dbo = False
     config.parallel_config.pipeline_parallel_size = 2
     with pytest.raises(ValueError, match="pipeline_parallel_size=1"):
         VllmConfig.validate_mamba_cached_kernel(config)
@@ -311,7 +305,7 @@ def _replayssm_config(
             backend=MambaBackendEnum.TRITON if is_kda else MambaBackendEnum.FLASHINFER,
             enable_stochastic_rounding=False,
         ),
-        parallel_config=SimpleNamespace(pipeline_parallel_size=1, enable_dbo=False),
+        parallel_config=SimpleNamespace(pipeline_parallel_size=1),
         kv_transfer_config=kv_transfer_config,
         use_v2_model_runner=True,
     )

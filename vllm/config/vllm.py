@@ -3451,18 +3451,17 @@ class VllmConfig:
                     "SSM state caches, not --enable-mamba-cache-stochastic-"
                     "rounding, which requires an explicit float16 cache"
                 )
-            if not self.use_v2_model_runner:
-                # Only Model Runner V2 folds the accepted tokens into the state
-                # after sampling (commit_recoverssm_state).
-                raise ValueError("RecoverSSM requires VLLM_USE_V2_MODEL_RUNNER=1")
+            if (
+                self.cache_config.mamba_cache_mode == "align"
+                and not self.use_v2_model_runner
+            ):
+                raise ValueError(
+                    "RecoverSSM with prefix caching requires VLLM_USE_V2_MODEL_RUNNER=1"
+                )
             if self.parallel_config.pipeline_parallel_size > 1:
                 raise ValueError(
                     "RecoverSSM currently requires pipeline_parallel_size=1"
                 )
-            if self.parallel_config.enable_dbo:
-                # Micro-batches would run a layer's verifies concurrently, on
-                # the same verify record rows.
-                raise ValueError("RecoverSSM does not support --enable-dbo")
             if self.mamba_config.backend != MambaBackendEnum.TRITON:
                 raise ValueError("RecoverSSM requires --mamba-backend triton")
         elif use_mamba_replayssm_spec:

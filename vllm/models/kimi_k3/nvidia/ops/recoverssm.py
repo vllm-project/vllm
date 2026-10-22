@@ -618,30 +618,6 @@ class KDARecoverSSMRecords:
             torch.empty((*shape, 2 * head_dim), dtype=dtype, device=device),
         )
 
-    @property
-    def max_num_reqs(self) -> int:
-        return self.correction.shape[0]
-
-    def check(
-        self, num_heads: int, spec_query_len: int, head_dim: int, dtype: torch.dtype
-    ) -> None:
-        shape = (self.max_num_reqs, num_heads, spec_query_len)
-        if (
-            self.correction.shape != (*shape, head_dim)
-            or self.key_gate.shape != (*shape, 2 * head_dim)
-            or self.correction.dtype != torch.float32
-            or self.key_gate.dtype != dtype
-            or not self.correction.is_contiguous()
-            or not self.key_gate.is_contiguous()
-        ):
-            raise ValueError(
-                "KDA RecoverSSM records need contiguous float32 corrections "
-                f"{(*shape, head_dim)} and {dtype} keys / gates "
-                f"{(*shape, 2 * head_dim)}; got {self.correction.dtype} "
-                f"{tuple(self.correction.shape)} and {self.key_gate.dtype} "
-                f"{tuple(self.key_gate.shape)}"
-            )
-
 
 def kda_recoverssm_verify(
     q: torch.Tensor,
@@ -680,7 +656,6 @@ def kda_recoverssm_verify(
     ):
         raise ValueError("KDA RecoverSSM checkpoint shape is incompatible")
     correction_cache, kg_cache = records.correction, records.key_gate
-    records.check(num_heads, spec_query_len, key_dim, k.dtype)
     if A_log.shape != (num_heads,) or dt_bias.numel() != num_heads * key_dim:
         raise ValueError("KDA RecoverSSM gate parameters are incompatible")
     if not A_log.is_contiguous() or not dt_bias.is_contiguous():
@@ -688,8 +663,6 @@ def kda_recoverssm_verify(
     batch = state_indices.shape[0]
     if query_start_loc.shape[0] != batch + 1:
         raise ValueError("KDA RecoverSSM query metadata is incompatible")
-    if batch > records.max_num_reqs:
-        raise ValueError("KDA RecoverSSM batch exceeds its verify record rows")
     if total_tokens > batch * spec_query_len:
         raise ValueError(
             "KDA RecoverSSM speculative decode input exceeds its activation capacity"
@@ -841,20 +814,6 @@ class KDARecoverSSMCommitContext:
                 raise ValueError(
                     "KDA RecoverSSM layers need matching checkpoint layout"
                 )
-        records_ref = layers[0].recoverssm_records
-        for layer in layers:
-            records = layer.recoverssm_records
-            records.check(
-                num_heads, spec_query_len, key_dim, records_ref.key_gate.dtype
-            )
-            if (
-                records.max_num_reqs < max_num_reqs
-                or records.correction.device != state_ref.device
-            ):
-                raise ValueError(
-                    f"KDA RecoverSSM records need {max_num_reqs} rows on "
-                    f"{state_ref.device}"
-                )
         if any(param.shape != (num_heads,) for param in A_log):
             raise ValueError("KDA RecoverSSM A_log shape is incompatible")
         if any(param.shape != (num_heads, key_dim) for param in dt_bias):
@@ -936,15 +895,7 @@ class KDARecoverSSMCommitContext:
                 CuteRecoverSSMStateCommit,
             )
 
-            reason = CuteRecoverSSMStateCommit.unsupported_reason(
-                checkpoints,
-                correction_caches,
-                kg_caches,
-                context.A_log,
-                context.dt_bias,
-                spec_query_len,
-                context.lower_bound,
-            )
+            reason = CuteRecoverSSMStateCommit.unsupported_reason(checkpoints)
             if reason is None:
                 context.state_commit = CuteRecoverSSMStateCommit(context)
             else:
