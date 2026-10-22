@@ -724,17 +724,20 @@ def sparse_attn_indexer(
                         q_slice_cast, q_scale_slice, weights[row_start:row_end]
                     )
                     row_ends = cu_seqlen_ke - cu_seqlen_ks
-                    logits = as_fp32_logits(
-                        fp8_fp4_mqa_logits(
-                            (q_slice_cast, q_scale_slice),
-                            (k_quant_cast, k_scale_cast),
-                            chunk_weights,
-                            cu_seqlen_ks,
-                            cu_seqlen_ke,
-                            chunk.max_seqlen_k,
-                        ),
-                        row_ends,
+                    logits = fp8_fp4_mqa_logits(
+                        (q_slice_cast, q_scale_slice),
+                        (k_quant_cast, k_scale_cast),
+                        chunk_weights,
+                        cu_seqlen_ks,
+                        cu_seqlen_ke,
+                        chunk.max_seqlen_k,
                     )
+                    # top_k_per_row_prefill reads BF16 logits directly; the
+                    # candidate-block selection and the DCP merge need FP32.
+                    if candidate_blocks is not None or (
+                        deinterleave_idx is None and dcp_world_size > 1
+                    ):
+                        logits = as_fp32_logits(logits, row_ends)
                 num_rows = logits.shape[0]
                 if candidate_blocks is not None:
                     # Two-level selection (v4.1): the candidate source
