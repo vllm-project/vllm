@@ -109,7 +109,7 @@ def _run(x, router, fw, shared, decode_max: int | None = None):
 
 @torch.inference_mode()
 def test_dequant_exact():
-    """The bf16x2 E2M1 * E4M3 decode is exact for every (code, scale) pair."""
+    """The E2M1 * E4M3 decode is exact for every (code, scale) pair."""
     import triton
     import triton.language as tl
 
@@ -132,7 +132,8 @@ def test_dequant_exact():
     padded_s = torch.zeros(512, dtype=torch.uint8, device="cuda")
     padded_w[:n] = words
     padded_s[:n] = scales.repeat_interleave(2)
-    padded_out = torch.empty(512 * 8, dtype=torch.bfloat16, device="cuda")
+    out_dtype = torch.bfloat16 if moe._DEQUANT_BF16 else torch.float16
+    padded_out = torch.empty(512 * 8, dtype=out_dtype, device="cuda")
     kernel[(1,)](padded_w, padded_s, padded_out, N=512)
     ref = dequantize_nvfp4(
         block.repeat(scales.numel()).view(-1, 8),

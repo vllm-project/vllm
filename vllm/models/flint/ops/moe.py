@@ -38,6 +38,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     swizzle_blockscale,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, tldevice, triton
 from vllm.utils.torch_utils import aux_stream, current_stream
 
@@ -51,27 +52,43 @@ BF16_DECODE_MAX_TOKENS = 12
 # Largest token count routed by the router GEMV kernel (cuBLAS above).
 ROUTE_GEMV_MAX_TOKENS = 64
 
-# Eight E2M1 codes of one int32 word -> eight bf16 (code value * scale): the
-# hardware E2M1x2 -> BF16x2 conversion (exact) then a BF16x2 multiply by the
-# E4M3 block scale (exact: E2M1 * E4M3 has at most 5 significant bits).
+
+def _ptxas_has_bf16x2_e2m1() -> bool:
+    # cvt.rn.bf16x2.e2m1x2 needs PTX ISA 9.2 (ptxas >= 13.2); some images run
+    # Triton with an older system ptxas.
+    if not current_platform.is_cuda():
+        return False
+    from triton.backends.nvidia.compiler import get_ptxas
+
+    major, minor = map(int, get_ptxas(100).version.split(".")[:2])
+    return (major, minor) >= (13, 2)
+
+
+# Eight E2M1 codes of one int32 word -> eight bf16 or fp16 (code value *
+# scale): the hardware E2M1x2 conversion then a multiply by the E4M3 block
+# scale. Both are exact in either type: E2M1 * E4M3 has at most 6 significant
+# bits and lies in [2^-10, 2688]. BF16 is faster (its fp32 widening is free),
+# FP16 assembles with older ptxas.
+_DEQUANT_BF16 = tl.constexpr(_ptxas_has_bf16x2_e2m1())
+_DEQUANT_T = "bf16" if _DEQUANT_BF16 else "f16"
 _DEQUANT_ASM = tl.constexpr(
-    """{
+    f"""{{
 .reg .b8 b0, b1, b2, b3;
 .reg .b32 p0, p1, p2, p3;
-mov.b32 {b0, b1, b2, b3}, $8;
-cvt.rn.bf16x2.e2m1x2 p0, b0;
-cvt.rn.bf16x2.e2m1x2 p1, b1;
-cvt.rn.bf16x2.e2m1x2 p2, b2;
-cvt.rn.bf16x2.e2m1x2 p3, b3;
-mul.rn.bf16x2 p0, p0, $9;
-mul.rn.bf16x2 p1, p1, $9;
-mul.rn.bf16x2 p2, p2, $9;
-mul.rn.bf16x2 p3, p3, $9;
-mov.b32 {$0, $1}, p0;
-mov.b32 {$2, $3}, p1;
-mov.b32 {$4, $5}, p2;
-mov.b32 {$6, $7}, p3;
-}"""
+mov.b32 {{b0, b1, b2, b3}}, $8;
+cvt.rn.{_DEQUANT_T}x2.e2m1x2 p0, b0;
+cvt.rn.{_DEQUANT_T}x2.e2m1x2 p1, b1;
+cvt.rn.{_DEQUANT_T}x2.e2m1x2 p2, b2;
+cvt.rn.{_DEQUANT_T}x2.e2m1x2 p3, b3;
+mul.rn.{_DEQUANT_T}x2 p0, p0, $9;
+mul.rn.{_DEQUANT_T}x2 p1, p1, $9;
+mul.rn.{_DEQUANT_T}x2 p2, p2, $9;
+mul.rn.{_DEQUANT_T}x2 p3, p3, $9;
+mov.b32 {{$0, $1}}, p0;
+mov.b32 {{$2, $3}}, p1;
+mov.b32 {{$4, $5}}, p2;
+mov.b32 {{$6, $7}}, p3;
+}}"""
 )
 
 
@@ -96,15 +113,16 @@ def _silu(g):
 @triton.jit
 def _dequant8(q, s):
     """int32 words of E2M1 codes + per-word E4M3 scales (uint8), same shape ->
-    eight bf16 tensors (code j of each word, value * scale, exact)."""
-    s = s.to(tl.float8e4nv, bitcast=True).to(tl.float32).to(tl.bfloat16)
+    eight bf16 or fp16 tensors (code j of each word, value * scale, exact)."""
+    dt = tl.bfloat16 if _DEQUANT_BF16 else tl.float16
+    s = s.to(tl.float8e4nv, bitcast=True).to(tl.float32).to(dt)
     s = s.to(tl.uint16, bitcast=True).to(tl.uint32)
     s = (s | (s << 16)).to(tl.int32, bitcast=True)
     return tl.inline_asm_elementwise(
         _DEQUANT_ASM,
         "=h,=h,=h,=h,=h,=h,=h,=h,r,r",
         [q, s],
-        dtype=(tl.bfloat16,) * 8,
+        dtype=(dt,) * 8,
         is_pure=True,
         pack=1,
     )
@@ -113,7 +131,7 @@ def _dequant8(q, s):
 @triton.jit
 def _dequant_rows(q, s, BN: tl.constexpr, BK: tl.constexpr):
     """[BN, BK / 8] int32 code words + per-word E4M3 scales -> [BN, BK] bf16
-    (value * scale, exact), K in natural order."""
+    or fp16 (value * scale, exact), K in natural order."""
     o = _dequant8(q, s)
     w = tl.join(
         tl.join(tl.join(o[0], o[4]), tl.join(o[2], o[6])),
