@@ -37,6 +37,7 @@ import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig, get_current_vllm_config
+from vllm.config.kernel import NATIVE_MEGA_MOE_BACKENDS
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -57,6 +58,9 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
     fused_moe_make_expert_params_mapping,
+)
+from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
+    fused_topk_bias,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     is_model_fused_shared_expert_compatible,
@@ -297,6 +301,7 @@ class DeepseekV2MoE(nn.Module):
         reduce_results: bool = True,
         prefix: str = "",
         apply_routed_scale_to_output: bool = False,
+        allow_mega_moe: bool = False,
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -342,8 +347,19 @@ class DeepseekV2MoE(nn.Module):
 
         self.is_rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
 
+        vllm_config = get_current_vllm_config()
+        self.use_mega_moe = (
+            vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
+        )
+        if self.use_mega_moe and not allow_mega_moe:
+            raise NotImplementedError(
+                f"moe_backend={vllm_config.kernel_config.moe_backend!r} is only "
+                "supported for the DSA models (DeepSeek-V3.2, GLM-5.x) so far."
+            )
+
         self.is_fused_shared_expert_enabled = False
-        if config.n_shared_experts is not None:
+        # MegaMoE runs the shared expert as a separate MLP (see _init_mega_moe).
+        if config.n_shared_experts is not None and not self.use_mega_moe:
             self.is_fused_shared_expert_enabled = resolve_layer_fused_shared_expert(
                 quant_config, prefix
             )
@@ -370,6 +386,10 @@ class DeepseekV2MoE(nn.Module):
                 reduce_results=False,
                 prefix=f"{prefix}.shared_experts",
             )
+
+        if self.use_mega_moe:
+            self._init_mega_moe(vllm_config, config, quant_config, prefix)
+            return
 
         self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
@@ -408,6 +428,100 @@ class DeepseekV2MoE(nn.Module):
                 self.gate.e_score_correction_bias.data.to(self.gate.out_dtype)
             )
 
+    def _init_mega_moe(
+        self,
+        vllm_config: VllmConfig,
+        config: DeepseekV2Config | DeepseekV3Config,
+        quant_config: QuantizationConfig | None,
+        prefix: str,
+    ) -> None:
+        """DeepGEMM FP8xFP8 MegaMoE for the routed experts: one kernel
+        dispatches across the EP group, runs the expert GEMMs and combines.
+
+        Routing (``scoring_func`` + ``e_score_correction_bias``, renormalized,
+        times ``routed_scaling_factor``) runs before the kernel; the shared
+        expert runs as a separate MLP. Works with data and prefill context
+        parallelism: every EP rank calls the kernel once per layer per step.
+        """
+        from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
+            MegaMoEActivation,
+        )
+        from vllm.models.glm5next.nvidia.mega_moe import Glm5NextMegaMoEExperts
+
+        parallel_config = vllm_config.parallel_config
+        if not parallel_config.enable_expert_parallel:
+            raise NotImplementedError(
+                "DeepGEMM MegaMoE requires expert parallel. Enable it with "
+                "--enable-expert-parallel, or pick a different moe backend."
+            )
+        if self.tp_size != 1:
+            raise NotImplementedError(
+                "DeepGEMM MegaMoE requires tensor_parallel_size=1 "
+                "(data or prefill context parallel with expert parallel)."
+            )
+        if self.is_sequence_parallel:
+            raise NotImplementedError(
+                "DeepGEMM MegaMoE does not support sequence-parallel MoE."
+            )
+        if (getattr(config, "n_group", 1) or 1) > 1 or (
+            getattr(config, "topk_group", 1) or 1
+        ) > 1:
+            raise NotImplementedError("DeepGEMM MegaMoE requires one expert group.")
+        weight_block_size = getattr(quant_config, "weight_block_size", None)
+        if weight_block_size is None:
+            raise NotImplementedError(
+                "DeepGEMM MegaMoE requires a block-FP8 checkpoint "
+                "(quantization_config.weight_block_size)."
+            )
+        if self.gate.e_score_correction_bias is None:
+            raise NotImplementedError(
+                "DeepGEMM MegaMoE requires noaux_tc routing (e_score_correction_bias)."
+            )
+        if self.n_physical_experts % self.ep_size != 0:
+            raise ValueError(
+                f"n_physical_experts={self.n_physical_experts} must be divisible "
+                f"by ep_size={self.ep_size}."
+            )
+        self.mega_top_k = config.num_experts_per_tok
+        self.mega_renormalize = config.norm_topk_prob
+        self.mega_scoring_func = getattr(config, "scoring_func", "softmax")
+        ep_rank = get_ep_group().rank_in_group
+        self.experts = Glm5NextMegaMoEExperts(
+            vllm_config,
+            num_experts=self.n_physical_experts,
+            num_local_experts=self.n_local_physical_experts,
+            experts_start_idx=ep_rank * self.n_local_physical_experts,
+            num_logical_experts=self.n_logical_experts,
+            top_k=self.mega_top_k,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.moe_intermediate_size,
+            weight_block_size=tuple(weight_block_size),
+            activation=MegaMoEActivation("swiglu"),
+            shared_experts=None,
+            prefix=f"{prefix}.experts",
+        )
+
+    def finalize_mega_moe_weights(self) -> None:
+        if self.use_mega_moe:
+            self.experts.requantize_block_fp8()
+
+    def _forward_mega_moe(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        router_logits = self.gate(hidden_states)
+        if isinstance(router_logits, tuple):
+            router_logits = router_logits[0]
+        bias = self.gate.e_score_correction_bias
+        topk_weights, topk_ids = fused_topk_bias(
+            hidden_states=hidden_states,
+            gating_output=router_logits,
+            scoring_func=self.mega_scoring_func,
+            e_score_correction_bias=bias.data if bias is not None else None,
+            topk=self.mega_top_k,
+            renormalize=self.mega_renormalize,
+            indices_type=torch.int64,
+            routed_scaling_factor=self.routed_scaling_factor,
+        )
+        return self.experts(hidden_states, topk_weights, topk_ids, self.shared_experts)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -415,6 +529,8 @@ class DeepseekV2MoE(nn.Module):
     ) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
+        if self.use_mega_moe:
+            return self._forward_mega_moe(hidden_states).view(num_tokens, hidden_dim)
 
         # Chunk the hidden states so they aren't replicated across TP ranks.
         # This avoids duplicate computation in self.experts.
@@ -2008,3 +2124,39 @@ class DeepseekV3ForCausalLM(DeepseekV2ForCausalLM):
 
 class GlmMoeDsaForCausalLM(DeepseekV2ForCausalLM):
     pass
+
+
+def mega_moe_routed_experts_prefix(mlps: Iterable[nn.Module]) -> str:
+    """Submodule of ``mlp.experts`` that holds the routed expert weights:
+    MegaMoE registers them on the experts module itself."""
+    use_mega_moe = any(getattr(mlp, "use_mega_moe", False) for mlp in mlps)
+    return "" if use_mega_moe else "routed_experts"
+
+
+def finalize_mega_moe_weights(mlps: Iterable[nn.Module]) -> None:
+    """Requantize the block-FP8 shards loaded into MegaMoE experts; call from
+    the model's ``process_weights_after_loading``."""
+    for mlp in mlps:
+        if isinstance(mlp, DeepseekV2MoE):
+            mlp.finalize_mega_moe_weights()
+
+
+def reject_mega_moe_reload(model: nn.Module, model_config) -> None:
+    """Refuse a layerwise reload (in-place reload, weight transfer) of a model
+    with MegaMoE experts, after putting its previous weights back.
+
+    The reload replays block-FP8 shards into the experts, but nothing
+    requantizes them until it calls the model's process_weights_after_loading.
+    """
+    from vllm.model_executor.model_loader.reload import finalize_layerwise_reload
+
+    # TODO: Remove once vllm-project/vllm#57733 lands.
+    if any(
+        isinstance(m, DeepseekV2MoE) and m.use_mega_moe and m.experts.w13_weight.is_meta
+        for m in model.modules()
+    ):
+        finalize_layerwise_reload(model, model_config)
+        raise NotImplementedError(
+            "DeepGEMM MegaMoE does not support layerwise weight reload or weight "
+            "transfer yet"
+        )
