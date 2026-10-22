@@ -18,6 +18,7 @@ from vllm.config.kernel import (
     PASSTHROUGH_ALL2ALL_BACKEND,
     bind_passthrough_all2all_backend,
 )
+from vllm.config.quantization import QuantizationConfigArgs
 from vllm.model_executor.layers.fused_moe import modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.experts.aiter_mega_moe import (
     AiterMegaMoEExperts,
@@ -32,10 +33,15 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
+from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
+from vllm.model_executor.layers.quantization.utils.config_utils import (
+    is_shared_expert_quant_fse_compatible,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Dynamic,
     kMxfp4Static,
 )
+from vllm.models.deepseek_v41.quant_config import DeepseekV4FP8Config
 
 NUM_EXPERTS, TOPK, HIDDEN, INTER = 384, 6, 7168, 3072
 
@@ -144,6 +150,37 @@ def test_aiter_mega_moe_reports_its_constraints(mega_moe_host, monkeypatch):
 
     monkeypatch.setattr(vllm.utils.import_utils, "has_mori", lambda: False)
     assert "missing MoRI" in _support_reason(_ep_moe_config())
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "moe_backend, targets, fused",
+    [
+        ("aiter_mega_moe", None, False),
+        ("aiter_mega_moe", {"*shared_experts*": "mxfp8"}, False),
+        ("aiter_mega_moe", {"*shared_experts*": "mxfp4"}, True),
+        ("aiter", {"*shared_experts*": "mxfp4"}, False),
+    ],
+)
+def test_mega_moe_shared_expert_fusion_requires_mxfp4_target(
+    moe_backend, targets, fused
+):
+    quant_config = DeepseekV4FP8Config(
+        is_checkpoint_fp8_serialized=True, weight_block_size=[128, 128]
+    )
+    quant_config._resolved_expert_dtype = "fp4"
+    quant_config.packed_modules_mapping = {"gate_up_proj": ["w1", "w3"]}
+    if targets is not None:
+        quant_config.online_quantization_config = OnlineQuantizationConfig(
+            QuantizationConfigArgs(targets=targets)
+        )
+    compatible, _ = is_shared_expert_quant_fse_compatible(
+        quant_config,
+        "model.layers.3.ffn.experts",
+        "model.layers.3.ffn.shared_experts",
+        moe_backend=moe_backend,
+    )
+    assert compatible is fused
 
 
 def test_layers_share_one_runtime_and_bind_their_own_weights(monkeypatch):

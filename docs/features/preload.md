@@ -61,7 +61,7 @@ Normally the first serving engine pays for the pass, and on a large MoE model it
 dominates what is left of the startup time once the weights come from the
 daemon.
 
-Unless FlashInfer autotune is disabled (`--no-enable-flashinfer-autotune`),
+Unless FlashInfer autotune is disabled (`--disable-flashinfer-autotune`),
 `vllm preload` pays it at preload time: each daemon runs the autotune pass in
 place — profiling dummy runs against the shard it already holds — after
 loading and before binding its socket, then writes the cache:
@@ -81,9 +81,10 @@ vllm preload --model /path/to/model --tensor-parallel-size 4
 3. Before serving anything, the engine and daemon compare a fingerprint of the
    cached weights: checkpoint content (hashed from safetensors metadata, so
    identical weights in different directories still match), model
-   architecture, TP/DP size/rank, dtype, quantization method and config, model
-   revision, and vLLM version. On any mismatch the engine falls back to disk
-   loading (unless `fallback` is disabled).
+   architecture, TP/DP size/rank, dtype, quantization method and config, text
+   RoPE parameters, model revision, KV cache dtype and quantization skip layers,
+   and vLLM version. On any mismatch the engine falls back to disk loading
+   (unless `fallback` is disabled).
 4. The engine also verifies the daemon's GPU UUID matches its own device, so a
    stale socket cannot serve weights for the wrong GPU.
 

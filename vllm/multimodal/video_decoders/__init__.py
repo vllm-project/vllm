@@ -23,6 +23,8 @@ _BACKEND_OPTION_DEFAULTS: dict[str, dict[str, Any]] = {
     },
     PYNVVIDEOCODEC_VIDEO_BACKEND: {
         "hw_decoders": PYNVVIDEOCODEC_DEFAULT_HW_DECODERS,
+        "max_width": None,
+        "max_height": None,
     },
     "deepstream": {
         "pool_size": None,

@@ -182,6 +182,7 @@ pub(super) fn prepare_chat_request(
             logprob_token_ids,
             structured_outputs,
             skip_reading_prefix_cache: None,
+            routed_experts_prompt_start: None,
             vllm_xargs: merge_kv_transfer_params(
                 merge_ec_transfer_params(request.vllm_xargs, request.ec_transfer_params.as_ref()),
                 request.kv_transfer_params.as_ref(),
@@ -680,6 +681,39 @@ mod tests {
                 .error
                 .message
                 .contains("json cannot be an empty string")
+        );
+    }
+
+    #[test]
+    fn prepare_chat_request_rejects_deeply_nested_json_schema() {
+        let schema = (1..65).fold(
+            json!({"type": "string"}),
+            |items, _| json!({"type": "array", "items": items}),
+        );
+        let request: ChatCompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hello"}],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "answer", "schema": schema},
+            },
+        }))
+        .expect("parse response_format");
+
+        let error = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.status_code(), StatusCode::BAD_REQUEST);
+        assert!(
+            error
+                .to_error_response()
+                .error
+                .message
+                .contains("The JSON schema is nested too deeply")
         );
     }
 

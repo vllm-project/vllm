@@ -68,8 +68,8 @@ endif()
 # requirements.txt files and should be kept consistent.  The ROCm torch
 # versions are derived from docker/Dockerfile.rocm
 #
-set(TORCH_SUPPORTED_VERSION_CUDA "2.13.0")
-set(TORCH_SUPPORTED_VERSION_ROCM "2.13.0")
+set(TORCH_SUPPORTED_VERSION_CUDA "2.14.0")
+set(TORCH_SUPPORTED_VERSION_ROCM "2.14.0")
 # TORCH_NIGHTLY=1 builds run against unpinned nightly wheels, so the supported-
 # version check would always warn. Only treat it as a nightly build when the
 # value is exactly "1" (the bootstrap exports TORCH_NIGHTLY=0 by default, which
@@ -415,6 +415,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/cuda_view.cu"
     "csrc/cuda_utils_kernels.cu"
     "csrc/activation_kernels.cu"
+    "csrc/muse_spark_mul_tanh_soft_cap_kernel.cu"
     "csrc/ngram_embedding_kernels.cu"
     "csrc/vocab_parallel_embedding_kernels.cu"
     "csrc/quantization/activation_kernels.cu"
@@ -423,6 +424,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/quantization/w8a8/fp8/per_token_group_quant.cu"
     "csrc/quantization/gptq/q_gemm.cu"
     "csrc/pos_encoding_kernels.cu"
+    "csrc/fused_muse_spark_qknorm_rope_kv_insert_kernel.cu"
     "csrc/fused_qknorm_rope_kernel.cu"
     "csrc/fused_minimax_m3_qknorm_rope_kv_insert_kernel.cu"
     "csrc/layernorm_kernels.cu"
@@ -440,6 +442,11 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/custom_all_reduce.cu"
     "csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu"
     "csrc/fused_kimi_k3_mla_key_concat_kv_cache_kernel.cu")
+
+  if(VLLM_GPU_LANG STREQUAL "CUDA")
+    list(APPEND VLLM_STABLE_EXT_SRC
+      "csrc/fused_qknorm_rope_cache_kernel.cu")
+  endif()
 
   if(VLLM_GPU_LANG STREQUAL "CUDA" AND
      DEFINED CMAKE_CUDA_COMPILER_VERSION AND
@@ -1112,6 +1119,11 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       "9.0a;10.0f;12.0f" "${CUDA_ARCHS}")
     cuda_archs_loose_intersection(FUSED_GDN_DECODE_ARCHS
       "8.0;8.6;8.9;9.0a;10.0f;11.0f;12.0f" "${CUDA_ARCHS}")
+  else()
+    # The fused GDN decode kernel needs only cp.async and BF16 math. Only the
+    # family-specific targets (10.0f, 11.0f, 12.0f) need CUDA >= 13.0.
+    cuda_archs_loose_intersection(FUSED_GDN_DECODE_ARCHS
+      "8.0;8.6;8.9;9.0a" "${CUDA_ARCHS}")
   endif()
   if(FUSED_KDA_DECODE_ARCHS)
     set(FUSED_KDA_DECODE_SRC
@@ -1136,6 +1148,26 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     list(APPEND VLLM_STABLE_EXT_SRC "${FUSED_GDN_DECODE_SRC}")
     message(STATUS
       "Building fused GDN decode for archs: ${FUSED_GDN_DECODE_ARCHS}")
+  endif()
+
+  # Beam's kernels use NVLink multicast and thread-block clusters. Their norms
+  # must not contract into FMAs to keep the FP32 boundary exact.
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    cuda_archs_loose_intersection(BEAM_KERNEL_ARCHS
+      "9.0a;10.0f;10.3f" "${CUDA_ARCHS}")
+  else()
+    cuda_archs_loose_intersection(BEAM_KERNEL_ARCHS
+      "9.0a;10.0a;10.3a" "${CUDA_ARCHS}")
+  endif()
+  if(BEAM_KERNEL_ARCHS)
+    set(BEAM_KERNEL_SRCS "csrc/beam/allreduce_norm.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${BEAM_KERNEL_SRCS}"
+      CUDA_ARCHS "${BEAM_KERNEL_ARCHS}")
+    set_property(SOURCE ${BEAM_KERNEL_SRCS} APPEND PROPERTY
+      COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:CUDA>:--fmad=false>")
+    list(APPEND VLLM_STABLE_EXT_SRC "${BEAM_KERNEL_SRCS}")
+    message(STATUS "Building Beam kernels for archs: ${BEAM_KERNEL_ARCHS}")
   endif()
 
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
@@ -1239,6 +1271,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       target_compile_definitions(_C_stable_libtorch PRIVATE
         VLLM_ENABLE_KIMI_K3_ATTN_RES=1)
     endif()
+    if(BEAM_KERNEL_ARCHS)
+      target_compile_definitions(_C_stable_libtorch PRIVATE
+        VLLM_ENABLE_BEAM_KERNELS=1)
+    endif()
     # Needed by CUTLASS kernels
     target_compile_definitions(_C_stable_libtorch PRIVATE
       CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
@@ -1287,7 +1323,8 @@ set(VLLM_MOE_EXT_SRC
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_MOE_EXT_SRC
     "csrc/moe/moe_wna16.cu"
-    "csrc/moe/grouped_topk_kernels.cu")
+    "csrc/moe/grouped_topk_kernels.cu"
+    "csrc/moe/fused_globalize_align_block_size.cu")
 endif()
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
