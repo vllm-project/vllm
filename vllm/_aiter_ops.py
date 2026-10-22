@@ -2105,6 +2105,45 @@ _GFX950_DSV4_NATIVE_MAX_COLUMNS = 1024 * 1024
 _GFX950_DSA_AITER_MIN_PREFILL_SEQ_LEN = 32 * 1024
 
 
+def _flat_sigmoid_bias_topk_is_profitable(
+    gating_output: "torch.Tensor",
+    correction_bias: "torch.Tensor",
+    topk_weights: "torch.Tensor",
+    topk_ids: "torch.Tensor",
+    num_expert_group: int,
+    topk_group: int,
+) -> bool:
+    """Replace the grouped kernel with a register-resident Triton top-k when
+    the grouping eliminates nothing and the step runs under a CUDA graph.
+
+    The Triton kernel wins on device time (1.67x-2.15x on gfx942 under graph
+    replay) but loses eagerly, where it is a Triton launch from Python against
+    a single C++ dispatch -- measured at -1.8% to -3.5% end-to-end throughput
+    with --enforce-eager. The forward-context check mirrors
+    vllm/models/deepseek_v41/amd/ops/sparse_indexer.py.
+    """
+    from vllm.config import CUDAGraphMode
+    from vllm.forward_context import get_forward_context
+    from vllm.model_executor.layers.fused_moe.router.rocm_sigmoid_bias_flat_topk import (  # noqa: E501
+        can_use_sigmoid_bias_flat_topk,
+    )
+
+    try:
+        if get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.NONE:
+            return False
+    except AssertionError:
+        # No forward context (direct calls, unit tests): keep AITER.
+        return False
+    return can_use_sigmoid_bias_flat_topk(
+        gating_output,
+        correction_bias,
+        topk_weights,
+        topk_ids,
+        num_expert_group,
+        topk_group,
+    )
+
+
 class rocm_aiter_ops:
     """ROCm AITER operations wrapper for AMD GPU acceleration in vLLM.
 
@@ -3661,6 +3700,27 @@ class rocm_aiter_ops:
     ) -> None:
         if correction_bias.dtype != gating_output.dtype:
             correction_bias = correction_bias.to(gating_output.dtype)
+        if _flat_sigmoid_bias_topk_is_profitable(
+            gating_output,
+            correction_bias,
+            topk_weights,
+            topk_ids,
+            num_expert_group,
+            topk_group,
+        ):
+            from vllm.model_executor.layers.fused_moe.router.rocm_sigmoid_bias_flat_topk import (  # noqa: E501
+                sigmoid_bias_flat_topk,
+            )
+
+            sigmoid_bias_flat_topk(
+                gating_output,
+                correction_bias,
+                topk_weights,
+                topk_ids,
+                need_renorm,
+                routed_scaling_factor,
+            )
+            return
         torch.ops.vllm.rocm_aiter_biased_grouped_topk(
             gating_output,
             correction_bias,

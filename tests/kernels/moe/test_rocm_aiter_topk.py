@@ -385,3 +385,304 @@ def test_rocm_aiter_topk_gating_torch_compile_compatibility():
     w1, i1 = _sort_routing(w1, i1)
     assert torch.allclose(w0, w1, rtol=1e-2, atol=1e-2)
     assert torch.equal(i0, i1)
+
+
+# ---------------------------------------------------------------------------
+# Triton sigmoid+bias top-k for the case where the grouping stage eliminates
+# nothing (topk_group >= num_expert_group). The kernel documents itself as an
+# in-place equivalent of aiter.biased_grouped_topk for that case, so every
+# test below compares it against exactly that, through the same wrapper
+# production uses.
+# ---------------------------------------------------------------------------
+
+from vllm._aiter_ops import rocm_aiter_ops  # noqa: E402
+from vllm.model_executor.layers.fused_moe.router.rocm_sigmoid_bias_flat_topk import (  # noqa: E402, E501
+    can_use_sigmoid_bias_flat_topk,
+    sigmoid_bias_flat_topk,
+)
+
+
+def _routing_inputs(token, expert, topk, gating_dtype, bias_dtype, seed=0):
+    gen = torch.Generator(device="cuda").manual_seed(seed)
+    gating = torch.randn(
+        token, expert, generator=gen, device="cuda", dtype=torch.float32
+    ).to(gating_dtype)
+    bias = (
+        torch.randn(expert, generator=gen, device="cuda", dtype=torch.float32)
+        .to(bias_dtype)
+        .contiguous()
+    )
+    weights = torch.empty(token, topk, dtype=torch.float32, device="cuda")
+    ids = torch.empty(token, topk, dtype=torch.int32, device="cuda")
+    return gating, bias, weights, ids
+
+
+def _aiter_reference(gating, bias, topk, renormalize, scale_factor, groups=1):
+    weights = torch.empty(
+        gating.shape[0], topk, dtype=torch.float32, device=gating.device
+    )
+    ids = torch.empty(gating.shape[0], topk, dtype=torch.int32, device=gating.device)
+    b = bias if bias.dtype == gating.dtype else bias.to(gating.dtype)
+    rocm_aiter_ops.biased_grouped_topk(
+        gating,
+        b,
+        weights,
+        ids,
+        groups,
+        groups,
+        renormalize,
+        routed_scaling_factor=scale_factor,
+    )
+    return weights, ids
+
+
+def _assert_matches_aiter(
+    token,
+    expert,
+    topk,
+    gating_dtype,
+    bias_dtype,
+    renormalize,
+    scale_factor=1.0,
+    seed=0,
+    groups=1,
+):
+    gating, bias, weights, ids = _routing_inputs(
+        token, expert, topk, gating_dtype, bias_dtype, seed=seed
+    )
+    ref_weights, ref_ids = _aiter_reference(
+        gating, bias, topk, renormalize, scale_factor, groups=groups
+    )
+    sigmoid_bias_flat_topk(gating, bias, weights, ids, renormalize, scale_factor)
+    torch.accelerator.synchronize()
+
+    assert torch.equal(
+        torch.sort(ref_ids, dim=-1).values, torch.sort(ids, dim=-1).values
+    )
+    torch.testing.assert_close(ref_weights, weights, atol=2e-3, rtol=2e-3)
+
+
+@pytest.mark.parametrize(
+    "token,expert,topk",
+    [
+        (1, 256, 8),
+        (8, 384, 8),
+        (32, 256, 8),
+        (128, 384, 8),
+        (6, 64, 6),  # Moonlight-16B-A3B / Kimi-VL-A3B
+        (3, 257, 8),  # prime expert count, one past a power of two
+        (7, 131, 5),  # prime experts, prime topk, odd token count
+        (13, 1021, 31),  # largest prime under the expert bound, odd topk
+        (1, 2, 1),  # degenerate minimum
+        (5, 65, 3),  # one past a power of two, odd topk
+    ],
+)
+@pytest.mark.parametrize("gating_dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("renormalize", [True, False])
+def test_flat_topk_matches_aiter(token, expert, topk, gating_dtype, renormalize):
+    """Single declared group: the plain degenerate case."""
+    _assert_matches_aiter(
+        token,
+        expert,
+        topk,
+        gating_dtype,
+        gating_dtype,
+        renormalize,
+        seed=token + expert,
+    )
+
+
+@pytest.mark.parametrize("groups", [1, 2, 4, 8])
+@pytest.mark.parametrize("renormalize", [True, False])
+def test_flat_topk_matches_aiter_with_uneliminating_groups(groups, renormalize):
+    """topk_group == num_expert_group > 1 selects every group, so the masked
+    top-k degenerates to a plain top-k. FusedTopKBiasRouter reaches AITER this
+    way: it synthesises a divisor that fits an AITER kernel rather than using
+    the model's own group count, so this is a real production shape, not a
+    synthetic one."""
+    _assert_matches_aiter(
+        64,
+        64,
+        6,
+        torch.bfloat16,
+        torch.float32,
+        renormalize,
+        seed=groups * 17,
+        groups=groups,
+    )
+
+
+@pytest.mark.parametrize("token,expert,topk", [(8, 384, 8), (128, 384, 8), (7, 131, 5)])
+@pytest.mark.parametrize("renormalize", [True, False])
+def test_flat_topk_casts_bias_like_aiter(token, expert, topk, renormalize):
+    """A bf16 gating output next to an fp32 correction bias is the common
+    router layout, and rocm_aiter_ops.biased_grouped_topk casts the bias to the
+    gating dtype before dispatching."""
+    _assert_matches_aiter(
+        token,
+        expert,
+        topk,
+        torch.bfloat16,
+        torch.float32,
+        renormalize,
+        seed=token * 3,
+    )
+
+
+@pytest.mark.parametrize("scale_factor", [1.0, 2.446, 2.827])
+def test_flat_topk_honours_routed_scaling(scale_factor):
+    """Moonlight-16B-A3B uses 2.446 and Kimi-K2 2.827."""
+    _assert_matches_aiter(
+        8,
+        64,
+        6,
+        torch.bfloat16,
+        torch.float32,
+        True,
+        scale_factor=scale_factor,
+        seed=11,
+    )
+
+
+@pytest.mark.parametrize(
+    "case,expected",
+    [
+        ("single_group", True),
+        ("uneliminating_groups", True),
+        ("real_grouping", False),
+        ("no_correction_bias", False),
+        ("noncontiguous_bias", False),
+        ("too_many_tokens", False),
+        ("bias_size_mismatch", False),
+    ],
+)
+def test_flat_topk_gate(case, expected):
+    """The kernel ignores group structure, so the gate must refuse any shape
+    where the grouping would actually eliminate an expert, and anything it
+    cannot load."""
+    gating, bias, weights, ids = _routing_inputs(
+        8, 256, 8, torch.bfloat16, torch.bfloat16
+    )
+    kwargs = dict(
+        gating_output=gating,
+        correction_bias=bias,
+        topk_weights=weights,
+        topk_ids=ids,
+        num_expert_group=1,
+        topk_group=1,
+    )
+
+    if case == "uneliminating_groups":
+        kwargs.update(num_expert_group=8, topk_group=8)
+    elif case == "real_grouping":
+        kwargs.update(num_expert_group=8, topk_group=4)
+    elif case == "no_correction_bias":
+        kwargs.update(correction_bias=None)
+    elif case == "noncontiguous_bias":
+        strided = torch.empty(512, device="cuda", dtype=torch.bfloat16)[::2]
+        assert not strided.is_contiguous()
+        kwargs.update(correction_bias=strided)
+    elif case == "too_many_tokens":
+        big, bias2, w2, i2 = _routing_inputs(
+            129, 256, 8, torch.bfloat16, torch.bfloat16
+        )
+        kwargs.update(
+            gating_output=big, correction_bias=bias2, topk_weights=w2, topk_ids=i2
+        )
+    elif case == "bias_size_mismatch":
+        kwargs.update(correction_bias=bias[:-1].contiguous())
+
+    assert can_use_sigmoid_bias_flat_topk(**kwargs) is expected
+
+
+@pytest.mark.parametrize(
+    "mode_name,expected",
+    [("NONE", False), ("PIECEWISE", True), ("FULL", True)],
+)
+def test_flat_topk_dispatches_only_under_cudagraph(monkeypatch, mode_name, expected):
+    """The kernel wins on device time but loses on launch overhead, so the
+    wrapper only substitutes it when the step runs under a CUDA graph."""
+    import vllm.forward_context as fc
+    from vllm._aiter_ops import _flat_sigmoid_bias_topk_is_profitable
+    from vllm.config import CUDAGraphMode
+
+    class _Ctx:
+        def __init__(self, mode):
+            self.cudagraph_runtime_mode = mode
+
+    mode = getattr(CUDAGraphMode, mode_name)
+    monkeypatch.setattr(fc, "get_forward_context", lambda m=mode: _Ctx(m))
+    gating, bias, weights, ids = _routing_inputs(
+        8, 256, 8, torch.bfloat16, torch.bfloat16
+    )
+    assert (
+        _flat_sigmoid_bias_topk_is_profitable(gating, bias, weights, ids, 1, 1)
+        is expected
+    )
+
+
+def test_flat_topk_falls_back_without_forward_context():
+    """Direct calls outside a forward pass must not reach the Triton path."""
+    from vllm._aiter_ops import _flat_sigmoid_bias_topk_is_profitable
+
+    gating, bias, weights, ids = _routing_inputs(
+        8, 256, 8, torch.bfloat16, torch.bfloat16
+    )
+    assert (
+        _flat_sigmoid_bias_topk_is_profitable(gating, bias, weights, ids, 1, 1) is False
+    )
+
+
+@pytest.mark.parametrize(
+    "groups,topk_group,mode_name,substituted",
+    [
+        (1, 1, "FULL", True),
+        (2, 2, "FULL", True),
+        (8, 4, "FULL", False),  # a group is eliminated -> AITER
+        (1, 1, "NONE", False),  # eager -> AITER
+    ],
+)
+def test_biased_grouped_topk_substitutes_only_when_expected(
+    monkeypatch, groups, topk_group, mode_name, substituted
+):
+    """End of the wiring: rocm_aiter_ops.biased_grouped_topk is the single
+    call site both routers reach, so this asserts the substitution happens
+    there and only for the intended shapes."""
+    import vllm.forward_context as fc
+    from vllm.config import CUDAGraphMode
+    from vllm.model_executor.layers.fused_moe.router import (
+        rocm_sigmoid_bias_flat_topk as K,
+    )
+
+    class _Ctx:
+        def __init__(self, mode):
+            self.cudagraph_runtime_mode = mode
+
+    mode = getattr(CUDAGraphMode, mode_name)
+    monkeypatch.setattr(fc, "get_forward_context", lambda: _Ctx(mode))
+
+    calls: list[int] = []
+    orig = K.sigmoid_bias_flat_topk
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return orig(*args, **kwargs)
+
+    monkeypatch.setattr(K, "sigmoid_bias_flat_topk", counted)
+
+    gating, bias, weights, ids = _routing_inputs(
+        8, 64, 6, torch.bfloat16, torch.float32
+    )
+    rocm_aiter_ops.biased_grouped_topk(
+        gating,
+        bias,
+        weights,
+        ids,
+        groups,
+        topk_group,
+        True,
+        routed_scaling_factor=1.0,
+    )
+    torch.accelerator.synchronize()
+    assert bool(calls) is substituted
+    assert torch.isfinite(weights).all()
