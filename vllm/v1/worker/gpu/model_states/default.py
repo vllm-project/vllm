@@ -64,7 +64,14 @@ class DefaultModelState(ModelState):
             self.model_config, model, self.rope_state, encoder_cache
         )
 
+        # Prompt lengths for models whose PrefixLM block is the whole prompt.
+        self.mm_prefix_prompt_lens: dict[str, int] | None = (
+            {} if self.model_config.mm_prefix_whole_prompt else None
+        )
+
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
+        if self.mm_prefix_prompt_lens is not None:
+            self.mm_prefix_prompt_lens[new_req_data.req_id] = new_req_data.prompt_len
         if self.rope_state is not None:
             assert new_req_data.prefill_token_ids is not None
             # `prompt_embeds` is a passthrough modality with no grid info, but
@@ -82,6 +89,8 @@ class DefaultModelState(ModelState):
             self.prompt_embeds_state.add_request(req_index, new_req_data)
 
     def remove_request(self, req_id: str) -> None:
+        if self.mm_prefix_prompt_lens is not None:
+            self.mm_prefix_prompt_lens.pop(req_id, None)
         if self.prompt_embeds_state is not None:
             self.prompt_embeds_state.remove_request(req_id)
 
@@ -209,6 +218,7 @@ class DefaultModelState(ModelState):
                 req_ids=input_batch.req_ids,
                 mm_features=self.encoder_cache.mm_features,
                 sliding_window=self.model_config.get_sliding_window(),
+                prompt_lens=self.mm_prefix_prompt_lens,
             )
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,

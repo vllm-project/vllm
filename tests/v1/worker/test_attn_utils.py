@@ -23,6 +23,7 @@ from tests.v1.attention.utils import (
     dense_kv_cache_views,
 )
 from vllm.config.compilation import CompilationConfig, CUDAGraphMode
+from vllm.multimodal.inputs import PlaceholderRange
 from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, MultipleOf
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.binding import allocate_hisparse_kv_caches
@@ -40,6 +41,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.gpu import attn_utils
 from vllm.v1.worker.gpu.attn_utils import (
     FastPrefillHelper,
+    compute_mm_prefix_ranges,
     get_attn_cg_support,
     get_query_lens_mismatch_unsupported_backend,
 )
@@ -883,3 +885,27 @@ def test_packed_token_cache_cannot_be_split():
     packed = torch.zeros(3, 1, 2048, 1152, dtype=torch.uint8)[:, :, :1024]
     with pytest.raises(ValueError, match="cannot be split"):
         map_kv_caches_to_kernel_blocks({"layer.0": packed}, [group])
+
+
+def test_mm_prefix_ranges_span_the_whole_prompt_with_prompt_lens():
+    """PaliGemma-style PrefixLM: every prompt token, not just the image, is
+    one bidirectional block."""
+    image = SimpleNamespace(
+        modality="image", mm_position=PlaceholderRange(offset=0, length=256)
+    )
+    mm_features: dict[str, Any] = {"img": [image]}
+    req_ids = ["img", "text"]
+
+    assert compute_mm_prefix_ranges(req_ids, mm_features) == {
+        0: [(0, 255)],
+        1: [],
+    }
+    assert compute_mm_prefix_ranges(
+        req_ids, mm_features, prompt_lens={"img": 260, "text": 5}
+    ) == {0: [(0, 259)], 1: [(0, 4)]}
+    # A prompt longer than the sliding window keeps its image span.
+    assert compute_mm_prefix_ranges(
+        req_ids, mm_features, sliding_window=258, prompt_lens={"img": 260, "text": 5}
+    ) == {0: [(0, 255)], 1: [(0, 4)]}
+    # Dummy requests (profiling, CUDA graph capture) have no prompt length.
+    assert compute_mm_prefix_ranges(["dummy"], {}, prompt_lens={}) == {0: []}

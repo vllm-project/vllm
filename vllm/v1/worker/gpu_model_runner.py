@@ -2373,6 +2373,15 @@ class GPUModelRunner(
                         ):
                             continue
                         image_doc_ranges.append(r)
+                # PaliGemma-style PrefixLM: the whole prompt is one block,
+                # unless it does not fit in the sliding window.
+                num_prompt_tokens = req_state.num_prompt_tokens
+                if self.model_config.mm_prefix_whole_prompt and (
+                    _clamps_in_kernel
+                    or _bidi_sw is None
+                    or num_prompt_tokens <= _bidi_sw
+                ):
+                    image_doc_ranges = [(0, num_prompt_tokens - 1)]
                 req_idx = self.input_batch.req_id_to_index[req_id]
                 req_doc_ranges[req_idx] = image_doc_ranges
 

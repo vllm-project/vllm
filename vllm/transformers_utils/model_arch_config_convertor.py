@@ -363,6 +363,19 @@ class ModelArchConfigConvertorBase:
             return False
         return self.hf_config.model_type in MM_PREFIX_LM_MODELS
 
+    def mm_prefix_whole_prompt(self, supports_multimodal: bool = True) -> bool:
+        """Whether the bidirectional block spans the whole prompt.
+
+        PaliGemma marks every prompt token (image, BOS, prefix text and the
+        trailing newline) with ``token_type_ids == 0``, and Transformers makes
+        that whole prefix one bidirectional block. Other PrefixLM models only
+        attend bidirectionally within each image span.
+        """
+        return (
+            self.is_mm_prefix_lm(supports_multimodal)
+            and self.hf_config.model_type == "paligemma"
+        )
+
     def rswa_window(self) -> int | None:
         value = getattr(self.hf_config, "rswa_window", None)
         if value is None:
@@ -451,6 +464,7 @@ class ModelArchConfigConvertorBase:
             is_mm_prefix_lm=self.is_mm_prefix_lm(supports_multimodal),
             rswa_window=self.rswa_window(),
             derived_max_model_len_and_key=self.derive_max_model_len_and_key(),
+            mm_prefix_whole_prompt=self.mm_prefix_whole_prompt(supports_multimodal),
         )
 
         return model_arch_config

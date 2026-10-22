@@ -587,21 +587,32 @@ def compute_mm_prefix_ranges(
     req_ids: list[str],
     mm_features: dict[str, list[MultiModalFeatureSpec]],
     sliding_window: int | None = None,
+    prompt_lens: dict[str, int] | None = None,
 ) -> dict[int, list[tuple[int, int]]]:
     """Compute PrefixLM bidirectional ranges for multimodal tokens.
 
-    Ranges exceeding sliding_window are skipped to prevent early tokens
-    from attending across the entire image span.
+    With ``prompt_lens``, a request's range is its whole prompt instead of its
+    image spans, unless the prompt does not fit in sliding_window. Ranges
+    exceeding sliding_window are skipped to prevent early tokens from
+    attending across the entire image span.
     """
     req_doc_ranges: dict[int, list[tuple[int, int]]] = {}
     for req_idx, req_id in enumerate(req_ids):
-        image_doc_ranges = []
-        for mm_feature in mm_features.get(req_id, ()):
-            if mm_feature.modality not in ("image", "video"):
-                continue
-            for r in mm_feature.mm_position.extract_embeds_range():
-                if sliding_window is not None and (r[1] - r[0] + 1) > sliding_window:
-                    continue
-                image_doc_ranges.append(r)
-        req_doc_ranges[req_idx] = image_doc_ranges
+        prompt_len = prompt_lens.get(req_id) if prompt_lens is not None else None
+        if prompt_len is not None and (
+            sliding_window is None or prompt_len <= sliding_window
+        ):
+            ranges = [(0, prompt_len - 1)]
+        else:
+            ranges = [
+                r
+                for mm_feature in mm_features.get(req_id, ())
+                if mm_feature.modality in ("image", "video")
+                for r in mm_feature.mm_position.extract_embeds_range()
+            ]
+        req_doc_ranges[req_idx] = [
+            r
+            for r in ranges
+            if sliding_window is None or (r[1] - r[0] + 1) <= sliding_window
+        ]
     return req_doc_ranges
