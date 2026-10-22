@@ -40,7 +40,11 @@ def test_nano_nemotron_vl_lora_mapping_includes_vision_and_audio():
 
     assert mapping.language_model == ["language_model"]
     assert mapping.tower_model == ["vision_model", "sound_encoder.encoder"]
-    assert mapping.connector == ["mlp1", "sound_encoder.projection"]
+    assert mapping.connector == [
+        "mlp1",
+        "sound_encoder.projection",
+        "vision_final_layernorm",
+    ]
 
 
 def test_nano_nemotron_vl_maps_radio_lora_names():
