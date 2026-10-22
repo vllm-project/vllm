@@ -153,8 +153,8 @@ vllm serve Qwen/Qwen3-30B-A3B \
     --eplb-config '{"communicator":"pynccl","use_async":false}' \
     --enable-elastic-ep \
     --elastic-ep-auto-bootstrap \
+    --elastic-ep-initial-dp-size 2 \
     --elastic-ep-max-dp-size 4 \
-    --data-parallel-size 2 \
     --data-parallel-size-local 1 \
     --data-parallel-rank "${DP_RANK}" \
     --data-parallel-address "${DP_MASTER_ADDRESS}" \
@@ -166,10 +166,16 @@ To grow to DP4, send `POST /scale_elastic_ep` with
 `{"new_data_parallel_size": 4}` concurrently to both existing API servers.
 These requests wait for the resize: launch ranks 2 and 3 with the same command
 while the requests are pending, rather than waiting for their responses first.
-Leave `--data-parallel-size 2` unchanged: in automatic mode it declares the
-**initial** world size. Both joiners discover the target size 4 through rank
-zero's existing scale handshake. Do not set `VLLM_ELASTIC_EP_SCALE_UP_LAUNCH`;
-automatic bootstrap selects the launch path.
+Leave `--elastic-ep-initial-dp-size 2` unchanged. It declares only the initial
+world size, not the current topology. Both joiners discover target size 4
+through rank zero's existing scale handshake before constructing their engine
+configuration.
+
+Automatic bootstrap requires `--elastic-ep-initial-dp-size` and rejects an
+explicit `--data-parallel-size` (including `-dp` or a configuration-file value).
+The initial-size option requires `--elastic-ep-auto-bootstrap`; it is not used
+by manual launches. Do not set `VLLM_ELASTIC_EP_SCALE_UP_LAUNCH`; automatic
+bootstrap selects the launch path.
 
 Initial ranks form the complete initial world without synthetic resize requests.
 Discovery reserves a rank for one process and one handshake; the subsequent

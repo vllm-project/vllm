@@ -51,7 +51,9 @@ TP_SIZE = int(os.getenv("TP_SIZE", "1"))
         {"data_parallel_rank": None},
         {"data_parallel_rank": -1},
         {"data_parallel_rank": 4},
-        {"data_parallel_size": 1},
+        {"elastic_ep_initial_dp_size": 0},
+        {"elastic_ep_initial_dp_size": 1},
+        {"elastic_ep_initial_dp_size": 5},
         {"data_parallel_hybrid_lb": True},
         {"data_parallel_size_local": 2},
         {"data_parallel_backend": "ray"},
@@ -61,7 +63,8 @@ TP_SIZE = int(os.getenv("TP_SIZE", "1"))
 )
 def test_external_elastic_ep_auto_bootstrap_rejects_unsupported_launch(options):
     arguments: dict[str, Any] = dict(
-        data_parallel_size=2,
+        elastic_ep_auto_bootstrap=True,
+        elastic_ep_initial_dp_size=2,
         data_parallel_rank=0,
         elastic_ep_max_dp_size=4,
         enable_elastic_ep=True,
@@ -124,7 +127,8 @@ def test_external_elastic_ep_auto_bootstrap_uses_native_scale_handshake(
     server.start()
     try:
         args = EngineArgs(
-            data_parallel_size=initial_size,
+            elastic_ep_auto_bootstrap=True,
+            elastic_ep_initial_dp_size=initial_size,
             data_parallel_rank=rank,
             data_parallel_address="127.0.0.1",
             data_parallel_rpc_port=port,
@@ -138,7 +142,7 @@ def test_external_elastic_ep_auto_bootstrap_uses_native_scale_handshake(
             ),
         )
         launch = prepare_external_elastic_ep_launch(args)
-        assert args.data_parallel_size == initial_size
+        assert args.elastic_ep_initial_dp_size == initial_size
         assert launch.data_parallel_size == target_size
         assert launch.scale_up
         assert args.enable_fault_tolerance is enable_fault_tolerance
@@ -195,7 +199,8 @@ def test_external_elastic_ep_auto_bootstrap_preserves_executor_launch_arguments(
 ):
     """Bootstrap selects DP startup, not the model executor's node geometry."""
     args = EngineArgs(
-        data_parallel_size=2,
+        elastic_ep_auto_bootstrap=True,
+        elastic_ep_initial_dp_size=2,
         data_parallel_size_local=1,
         data_parallel_rank=0,
         tensor_parallel_size=2,
@@ -228,7 +233,8 @@ def test_external_elastic_ep_auto_bootstrap_preserves_initial_rank_connection(
     rank_identity = (1).to_bytes(2, "little")
     responder = ExternalElasticEPBootstrapServer(2, [0, 1], scale_up=False)
     args = EngineArgs(
-        data_parallel_size=2,
+        elastic_ep_auto_bootstrap=True,
+        elastic_ep_initial_dp_size=2,
         data_parallel_rank=1,
         data_parallel_address="127.0.0.1",
         data_parallel_rpc_port=port,
@@ -404,8 +410,6 @@ class ExternalLBServerManager:
         server_args = self.base_server_args.copy()
         server_args.extend(
             [
-                "--data-parallel-size",
-                str(dp_size),
                 "--data-parallel-rank",
                 str(rank),
                 "--data-parallel-size-local",
@@ -420,7 +424,15 @@ class ExternalLBServerManager:
         )
 
         if self.auto_bootstrap:
-            server_args.append("--elastic-ep-auto-bootstrap")
+            server_args.extend(
+                [
+                    "--elastic-ep-auto-bootstrap",
+                    "--elastic-ep-initial-dp-size",
+                    str(self.dp_size),
+                ]
+            )
+        else:
+            server_args.extend(["--data-parallel-size", str(dp_size)])
 
         env_dict = {
             "VLLM_SERVER_DEV_MODE": "1",
@@ -635,7 +647,7 @@ def test_external_lb_elastic_ep_scale_up(
             _wait_for_scale_requests_to_start(scale_requests)
             server_manager.start_rank(
                 rank=2,
-                dp_size=2 if auto_bootstrap else 3,
+                dp_size=None if auto_bootstrap else 3,
                 elastic_ep_scale_up_launch=not auto_bootstrap,
             )
 
@@ -643,7 +655,11 @@ def test_external_lb_elastic_ep_scale_up(
                 response = request.result(timeout=600)
                 assert response.status_code == 200, response.text
 
-        for server, _ in server_manager.servers:
+        for server, launch_args in server_manager.servers:
+            if auto_bootstrap:
+                assert "--data-parallel-size" not in launch_args
+                initial_size_index = launch_args.index("--elastic-ep-initial-dp-size")
+                assert launch_args[initial_size_index + 1] == "2"
             parallel_config = _get_parallel_config(server)
             assert parallel_config["data_parallel_size"] == 3
             assert parallel_config["enable_fault_tolerance"] is enable_fault_tolerance
