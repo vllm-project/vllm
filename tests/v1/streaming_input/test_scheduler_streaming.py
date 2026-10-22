@@ -450,7 +450,7 @@ class TestStreamingScheduler(unittest.TestCase):
                 prompt_token_ids=list(token_ids),
                 sampling_params=SamplingParams(max_tokens=16),
                 pooling_params=None,
-                block_hasher=get_request_block_hasher(hash_block_size, sha256, True),
+                block_hasher=get_request_block_hasher(hash_block_size, sha256, 1),
                 resumable=True,
             )
 

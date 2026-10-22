@@ -396,7 +396,7 @@ def test_scheduler_publishes_lookahead_blocks_at_allocation():
             prompt_token_ids=prompt_token_ids,
             sampling_params=SamplingParams(max_tokens=3, ignore_eos=True),
             pooling_params=None,
-            block_hasher=get_request_block_hasher(block_size, sha256, True),
+            block_hasher=get_request_block_hasher(block_size, sha256, 1),
         )
 
     def num_cached_tokens(prompt_token_ids: list[int]) -> int:
@@ -439,7 +439,7 @@ def test_finished_request_publishes_block_ending_at_last_sampled_token():
         prompt_token_ids=[0, 1, 2],
         sampling_params=SamplingParams(max_tokens=2, ignore_eos=True),
         pooling_params=None,
-        block_hasher=get_request_block_hasher(block_size, sha256, True),
+        block_hasher=get_request_block_hasher(block_size, sha256, 1),
     )
     scheduler.add_request(request)
 
@@ -462,7 +462,7 @@ def test_finished_request_publishes_block_ending_at_last_sampled_token():
         prompt_token_ids=[0, 1, 2, 3, 4, 5],
         sampling_params=SamplingParams(max_tokens=1),
         pooling_params=None,
-        block_hasher=get_request_block_hasher(block_size, sha256, True),
+        block_hasher=get_request_block_hasher(block_size, sha256, 1),
     )
     _, num_tokens, _ = scheduler.kv_cache_manager.get_computed_blocks(probe)
     assert num_tokens == 4

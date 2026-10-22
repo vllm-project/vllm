@@ -1757,7 +1757,8 @@ class Scheduler(SchedulerInterface):
             session.num_prompt_tokens : keep_end
         ]
         del session._all_token_ids[keep_end:]
-        # A lookahead hash also covers the tokens after its block.
+        # A lookahead hash also covers the tokens after its block. Streaming is
+        # unsupported: a block cached with the discarded token keeps its hash.
         num_hashed_tokens = keep_end - self.num_hash_lookahead_tokens
         del session.block_hashes[max(num_hashed_tokens, 0) // self.hash_block_size :]
         session._output_token_ids.clear()

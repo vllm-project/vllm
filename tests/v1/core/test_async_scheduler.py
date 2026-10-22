@@ -701,7 +701,7 @@ def test_stale_output_does_not_republish_preempted_lookahead_blocks():
         prompt_token_ids=list(range(9)),
         sampling_params=SamplingParams(max_tokens=4, ignore_eos=True),
         pooling_params=None,
-        block_hasher=get_request_block_hasher(block_size, sha256, True),
+        block_hasher=get_request_block_hasher(block_size, sha256, 1),
     )
     scheduler.add_request(request)
 
@@ -729,7 +729,7 @@ def test_stale_output_does_not_republish_preempted_lookahead_blocks():
         prompt_token_ids=list(range(9)),
         sampling_params=SamplingParams(max_tokens=1),
         pooling_params=None,
-        block_hasher=get_request_block_hasher(block_size, sha256, True),
+        block_hasher=get_request_block_hasher(block_size, sha256, 1),
     )
     assert scheduler.kv_cache_manager.get_computed_blocks(probe)[1] == 0
 

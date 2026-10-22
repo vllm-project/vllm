@@ -363,17 +363,17 @@ def test_internal_checkpoint_metadata_targets_last_aligned_boundary(
     (
         "seq_len",
         "disable_eagle_block_drop",
-        "lookahead_hashing",
+        "num_hash_lookahead_tokens",
         "prefix_match_unit",
         "expected_offset",
     ),
     [
-        (100, False, False, 16, 80),
-        (100, True, False, 16, 96),
-        (100, False, True, 16, 96),
-        (100, False, False, 8, None),
-        (96, False, False, 16, 80),
-        (96, True, False, 16, 80),
+        (100, False, 0, 16, 80),
+        (100, True, 0, 16, 96),
+        (100, False, 1, 16, 96),
+        (100, False, 0, 8, None),
+        (96, False, 0, 16, 80),
+        (96, True, 0, 16, 80),
     ],
 )
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
@@ -381,7 +381,7 @@ def test_spec_internal_checkpoint_metadata_targets_replay_boundary(
     monkeypatch: pytest.MonkeyPatch,
     seq_len: int,
     disable_eagle_block_drop: bool,
-    lookahead_hashing: bool,
+    num_hash_lookahead_tokens: int,
     prefix_match_unit: int,
     expected_offset: int | None,
 ) -> None:
@@ -389,7 +389,7 @@ def test_spec_internal_checkpoint_metadata_targets_replay_boundary(
     monkeypatch.setattr(
         mamba_checkpoint,
         "get_num_hash_lookahead_tokens",
-        lambda *_: lookahead_hashing,
+        lambda *_: num_hash_lookahead_tokens,
     )
     device = torch.device("cuda")
     batch = BatchSpec(seq_lens=[seq_len], query_lens=[seq_len])
