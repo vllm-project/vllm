@@ -1185,6 +1185,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "MuseGlimmerForCausalLM": _HfExamplesInfo(
         "meta-models/Muse-Glimmer-30B",
     ),
+    "MuseSparkForConditionalGeneration": _HfExamplesInfo(
+        "meta-models/Muse-Spark-1.2-816B-A42B-open",
+        is_available_online=False,
+    ),
     "NVLM_D": _HfExamplesInfo("nvidia/NVLM-D-72B", trust_remote_code=True),
     "Llama_Nemotron_Nano_VL": _HfExamplesInfo(
         "nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1",
@@ -1369,6 +1373,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         max_model_len=4096,
         hf_overrides={"architectures": ["Qwen3ASRForcedAlignerForTokenClassification"]},
     ),
+    "RadioMBartPrefixForCausalLM": _HfExamplesInfo(
+        "nvidia/Nemotron-3.5-Parse",
+        trust_remote_code=True,
+    ),
     "RForConditionalGeneration": _HfExamplesInfo("YannQi/R-4B", trust_remote_code=True),
     "SkyworkR1VChatModel": _HfExamplesInfo(
         "Skywork/Skywork-R1V-38B",
@@ -1537,6 +1545,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         use_original_num_layers=True,  # DSpark has >1 draft block
         trust_remote_code=True,
         # FIXME: Investigate the NVML failure in CI.
+        is_available_online=False,
+    ),
+    "MuseSparkDSparkModel": _HfExamplesInfo(
+        "meta-models/Muse-Spark-1.2-816B-A42B-open",
+        speculative_model="meta-models/Muse-Spark-1.2-816B-A42B-open",
         is_available_online=False,
     ),
     "Qwen3DSparkModel": _HfExamplesInfo(
@@ -1808,6 +1821,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "FreedomIntelligence/openPangu-Ultra-MoE-718B-V1.1",
         trust_remote_code=True,
         is_available_online=False,
+    ),
+    "ParseAuxMTPModel": _HfExamplesInfo(
+        "nvidia/Nemotron-3.5-Parse",
+        speculative_model="nvidia/Nemotron-3.5-Parse",
+        speculative_method="mtp",
+        trust_remote_code=True,
     ),
     "Qwen3NextMTP": _HfExamplesInfo("Qwen/Qwen3-Next-80B-A3B-Instruct"),
     "Qwen3_5MTP": _HfExamplesInfo(
