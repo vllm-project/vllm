@@ -482,15 +482,15 @@ def _has_native_fp8() -> bool:
     if not torch.cuda.is_available():
         return False
     if current_platform.is_rocm():
-        from vllm.platforms.rocm import on_mi3xx
+        from vllm.platforms.rocm import get_cdna_version
 
-        return on_mi3xx()
+        return get_cdna_version() in (3, 4)
     return current_platform.has_device_capability(89)
 
 
 @pytest.mark.skipif(
     not _has_native_fp8(),
-    reason="e4m3 conversion requires CUDA SM89+ or ROCm MI3xx.",
+    reason="e4m3 conversion requires CUDA SM89+ or ROCm CDNA3/4.",
 )
 @pytest.mark.parametrize("num_tokens", [1, 7, 64, 513])
 @pytest.mark.parametrize("block_size", [16, 64])
@@ -601,7 +601,7 @@ def test_sparse_full_fp8_index(num_tokens, block_size, index_k_scale):
 
 @pytest.mark.skipif(
     not _has_native_fp8(),
-    reason="e4m3 conversion requires CUDA SM89+ or ROCm MI3xx.",
+    reason="e4m3 conversion requires CUDA SM89+ or ROCm CDNA3/4.",
 )
 def test_sparse_fp8_index_rejects_foreign_flavour():
     # The other e4m3 flavour has no convert on this device (gfx942 traps on

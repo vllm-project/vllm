@@ -116,7 +116,6 @@ class MiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
     ) -> None:
         super().__init__()
         if indexer_kv_dtype in ("fp8", "fp8_e4m3"):
-            # e4m3fnuz on gfx942, e4m3fn elsewhere.
             cache_dtype = current_platform.fp8_dtype()
         elif indexer_kv_dtype == "bf16":
             cache_dtype = torch.bfloat16

@@ -315,7 +315,6 @@ def _insert_index_cache_kernel(
     mask = (slot >= 0) & (offs_d < HEAD_DIM)
     value = tl.load(src, mask=offs_d < HEAD_DIM, other=0.0)
     if FP8_MAX > 0:
-        # Saturate like the fused writer; e4m3 has no infinity.
         value = tl.clamp(value.to(tl.float32), -FP8_MAX, FP8_MAX)
     # The side cache carries its own dtype (bf16, or e4m3 for the fp8 indexer),
     # so convert rather than leaning on the store's implicit cast.
@@ -343,7 +342,6 @@ def minimax_m3_insert_index_cache(
     head_dim = index_k.shape[1]
     fp8_max = 0.0
     if index_cache.element_size() == 1:
-        # get_fp8_min_max() returns 224 for fnuz, 448 for fn.
         fp8_max = get_fp8_min_max()[1]
     _insert_index_cache_kernel[(index_k.shape[0],)](
         index_k,
