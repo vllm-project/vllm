@@ -8,7 +8,7 @@ import torch
 from torch import nn
 from transformers import Glm5NextTextConfig
 
-from vllm.config import ParallelConfig, VllmConfig, get_current_vllm_config
+from vllm.config import ModelConfig, ParallelConfig, VllmConfig, get_current_vllm_config
 from vllm.config.kernel import NATIVE_MEGA_MOE_BACKENDS
 from vllm.distributed import (
     get_ep_group,
@@ -60,6 +60,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.reload import finalize_layerwise_reload
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
@@ -1248,6 +1249,7 @@ class Glm5NextForCausalLM(
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        _reject_mega_moe_reload(self, self.model_config)
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 
@@ -1353,6 +1355,10 @@ class Glm5NextForConditionalGeneration(
         # Glm5NextForCausalLM does not implement make_empty_intermediate_tensors,
         # so pipeline parallelism is gated off (consistent with the text-only
         # model) and we intentionally do not alias it here.
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        _reject_mega_moe_reload(self, self.model_config)
+        return super().load_weights(weights)
 
     def process_weights_after_loading(self) -> None:
         self.language_model.process_weights_after_loading()
@@ -1485,6 +1491,25 @@ def _mega_moe_fused_shared_experts(model: nn.Module, name: str) -> nn.Module | N
         return None
     experts = getattr(mlp, "experts", None)
     return experts if getattr(experts, "has_fused_shared_experts", False) else None
+
+
+def _reject_mega_moe_reload(model: nn.Module, model_config: ModelConfig) -> None:
+    """Refuse a layerwise reload (in-place reload, weight transfer) of a model
+    with MegaMoE experts, after putting its previous weights back.
+
+    The reload replays block-FP8 shards into the experts, but nothing
+    requantizes them until it calls the model's process_weights_after_loading.
+    """
+    # TODO: Remove once vllm-project/vllm#57733 lands.
+    if any(
+        isinstance(m, Glm5NextMoE) and m.use_mega_moe and m.experts.w13_weight.is_meta
+        for m in model.modules()
+    ):
+        finalize_layerwise_reload(model, model_config)
+        raise NotImplementedError(
+            "GLM-5.3 MegaMoE does not support layerwise weight reload or weight "
+            "transfer yet"
+        )
 
 
 def _fused_shared_expert_name(name: str, n_routed_experts: int) -> str:
