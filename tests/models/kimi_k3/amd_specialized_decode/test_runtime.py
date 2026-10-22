@@ -12,7 +12,10 @@ from vllm.config import (
     CompilationMode,
     CUDAGraphMode,
     KVTransferConfig,
+    ModelConfig,
+    ParallelConfig,
     SpeculativeConfig,
+    VllmConfig,
 )
 from vllm.models.kimi_k3.amd.specialized_decode import runtime
 from vllm.models.kimi_k3.amd.specialized_decode.runtime import (
@@ -148,7 +151,6 @@ def test_supported_config_is_accepted(supported_vllm_config):
 
 @pytest.fixture
 def supported_vllm_config(tmp_path, monkeypatch, on_mi355x):
-    from tests.v1.attention.utils import create_vllm_config
     from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
@@ -165,14 +167,17 @@ def supported_vllm_config(tmp_path, monkeypatch, on_mi355x):
             "short_conv_kernel_size": 4,
         },
     ).save_pretrained(tmp_path)
-    config = create_vllm_config(
-        model_name=str(tmp_path), tensor_parallel_size=8, dtype=torch.bfloat16
+    return VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path), dtype=torch.bfloat16, max_model_len=1024, seed=0
+        ),
+        # Config-only tests do not need executor auto-detection of local GPUs.
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=8, distributed_executor_backend="mp"
+        ),
+        additional_config={"decode_backend": "latency_specialized"},
+        speculative_config=SpeculativeConfig(method="ngram", num_speculative_tokens=7),
     )
-    config.additional_config = {"decode_backend": "latency_specialized"}
-    config.speculative_config = SpeculativeConfig(
-        method="ngram", num_speculative_tokens=7
-    )
-    return config
 
 
 @pytest.mark.parametrize("read_mode", [False, True])
