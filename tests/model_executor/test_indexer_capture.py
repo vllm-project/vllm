@@ -26,7 +26,6 @@ def _sink(source, tokens=3):
     return IndexerCaptureSink(
         source,
         torch.empty((tokens, source.width), dtype=torch.int32),
-        torch.zeros(tokens, dtype=torch.bool),
     )
 
 
@@ -51,7 +50,6 @@ def test_raw_selection_preserves_order_padding_and_source_mapping(
         decode_indexer(sink.rows.numpy(), AuxOutputProfile("weights", (source,))),
         consumed.numpy()[:, None],
     )
-    assert sink.valid.all()
 
 
 def test_pool_encoding_preserves_short_causal_rows_and_unsorted_pools():
@@ -116,7 +114,6 @@ def test_step5_prefill_groups_and_decode_flat_rows_have_identical_layout():
         ]
     )
     prefill.capture_regions(consumed[:, 0], group=0)
-    assert not prefill.valid.any()
     prefill.capture_regions(consumed[:, 1], group=1)
     decode.capture_regions(consumed.reshape(4, 3))
     assert torch.equal(prefill.rows, decode.rows)
@@ -172,20 +169,20 @@ def test_capture_snapshots_survive_shared_buffer_reuse(monkeypatch):
     )
     capture = IndexerCapturer(model, config)
     shared = torch.tensor([[3, 1], [4, 2]], dtype=torch.int32)
-    capture.begin_step()
     assert first.indexer_capture is not None
     first.indexer_capture.capture(shared)
     shared.add_(10)
     assert second.indexer_capture is not None
     second.indexer_capture.capture(shared)
     snapshot = capture.snapshot(2)
-    validity = snapshot.valid
-    capture.begin_step()
     shared.zero_()
     first.indexer_capture.capture(shared)
-    assert validity.all()
+    shared.add_(20)
+    second.indexer_capture.capture(shared)
     next_snapshot = capture.snapshot(2)
-    assert not next_snapshot.valid[:, 1].any()
+    assert torch.equal(
+        next_snapshot.rows, torch.tensor([[0, 0, 20, 20], [0, 0, 20, 20]])
+    )
     with pytest.raises(AssertionError, match="not consumed"):
         capture.snapshot(2)
     capture.release_snapshot(next_snapshot.slot)

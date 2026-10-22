@@ -794,13 +794,14 @@ class HYV4MLAAttention(nn.Module):
         """
         if self.indexer is not None and self.is_sparse and not self.skip_topk:
             self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
-        if self.indexer_capture is not None:
-            assert self.topk_indices_buffer is not None
-            self.indexer_capture.capture(
-                self.topk_indices_buffer[
-                    : len(hidden_states), : self.indexer.topk_tokens
-                ]
-            )
+            if self.indexer_capture is not None:
+                assert self.topk_indices_buffer is not None
+                self.indexer_capture.capture(
+                    self.topk_indices_buffer[
+                        : len(hidden_states), : self.indexer.topk_tokens
+                    ]
+                )
+
         if self.is_sparse:
             self.mla_attn.impl.record_logical_topk_ready()  # type: ignore[attr-defined]
         out.copy_(

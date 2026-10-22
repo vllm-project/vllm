@@ -194,7 +194,6 @@ def _make_worker(
         SimpleNamespace(
             profile=indexer_profile,
             profile_metadata=indexer_profile.to_dict(),
-            begin_step=lambda: None,
             release_snapshot=lambda slot: None,
             close=lambda: None,
         )
@@ -424,7 +423,6 @@ def _process_output(
     if worker._indexer is not None:
         worker._indexer.snapshot = lambda n: SimpleNamespace(
             rows=torch.from_numpy(indexer_rows[:n].copy()),
-            valid=torch.ones((n, 1), dtype=torch.bool),
             slot=0,
         )
     metadata = step.metadata if isinstance(step, _WorkerStep) else step

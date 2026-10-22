@@ -75,9 +75,7 @@ class PendingAuxOutput:
     num_sampled: np.ndarray | None = None
     num_rejected: np.ndarray | None = None
     indexer_gpu: torch.Tensor | None = None
-    indexer_valid_gpu: torch.Tensor | None = None
     indexer: np.ndarray | None = None
-    indexer_valid: np.ndarray | None = None
     indexer_snapshot_slot: int | None = None
 
     def enqueue_cpu_copy(
@@ -101,8 +99,6 @@ class PendingAuxOutput:
                 self.routed_experts = copy_rows(self.routed_experts_gpu)
         if self.indexer_gpu is not None:
             self.indexer = copy_rows(self.indexer_gpu)
-            assert self.indexer_valid_gpu is not None
-            self.indexer_valid = copy_rows(self.indexer_valid_gpu)
 
     def process_output(self) -> dict[str, AuxRequestOutput]:
         return self.connector.process_output(self)
@@ -183,12 +179,9 @@ class AuxOutputWorkerConnector:
             max_num_batched_tokens + hash_block_size - 1
         ) // hash_block_size + max_seqs
         staging_blocks = self._max_concurrent_batches * max_step_blocks + max_seqs
-        indexer_sources = self._indexer.valid.shape[1] if self._indexer else 0
         staging_bytes = (
             staging_blocks * block_nbytes
-            + self._max_concurrent_batches
-            * max_num_batched_tokens
-            * (bytes_per_token + indexer_sources)
+            + self._max_concurrent_batches * max_num_batched_tokens * bytes_per_token
         )
         if self._indexer is not None:
             # The combined byte record is assembled after the D2H copy.
@@ -247,7 +240,6 @@ class AuxOutputWorkerConnector:
                 else None
             ),
             indexer_gpu=snapshot.rows if snapshot else None,
-            indexer_valid_gpu=snapshot.valid if snapshot else None,
             indexer_snapshot_slot=snapshot.slot if snapshot else None,
         )
         with self._lock:
@@ -296,9 +288,7 @@ class AuxOutputWorkerConnector:
 
         routed_experts = pending.routed_experts
         if self._indexer is not None:
-            assert pending.indexer is not None and pending.indexer_valid is not None
-            if not pending.indexer_valid.all():
-                raise RuntimeError("Indexer capture missed source layers or token rows")
+            assert pending.indexer is not None
             parts = []
             if routed_experts is not None:
                 parts.append(
@@ -475,8 +465,6 @@ class AuxOutputWorkerConnector:
         deferred to that step's process_output.
         """
         self._step_metadata = metadata
-        if self._indexer is not None:
-            self._indexer.begin_step()
         if self._buffer is None or metadata is None:
             return
         assert not metadata.requests.keys() & metadata.finished_requests, (

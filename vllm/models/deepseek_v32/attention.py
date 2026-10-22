@@ -553,13 +553,14 @@ class DeepseekV32Attention(MLAAttention):
                 skip_topk_buffer_clear=True,
                 topk_backend=self.indexer.indexer_op.topk_backend,
             )
-        if self.indexer_capture is not None:
-            assert self.topk_indices_buffer is not None
-            self.indexer_capture.capture(
-                self.topk_indices_buffer[
-                    : len(q_c), : self.indexer_capture.source.width
-                ]
-            )
+            if self.indexer_capture is not None:
+                assert self.topk_indices_buffer is not None
+                self.indexer_capture.capture(
+                    self.topk_indices_buffer[
+                        : len(q_c), : self.indexer_capture.source.width
+                    ]
+                )
+
         self.impl.record_logical_topk_ready()  # type: ignore[attr-defined]
 
         attn_metadata, _, kv_cache, layer_slot_mapping = get_attention_context(

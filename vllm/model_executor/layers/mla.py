@@ -233,12 +233,15 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
 
         if self.indexer and self.is_sparse and not self.skip_topk:
             self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
-        capture = getattr(self, "indexer_capture", None)
-        if capture is not None:
-            assert self.topk_indices_buffer is not None
-            capture.capture(
-                self.topk_indices_buffer[: len(hidden_states), : capture.source.width]
-            )
+            capture = getattr(self, "indexer_capture", None)
+            if capture is not None:
+                assert self.topk_indices_buffer is not None
+                capture.capture(
+                    self.topk_indices_buffer[
+                        : len(hidden_states), : capture.source.width
+                    ]
+                )
+
         if self.is_sparse:
             self.mla_attn.impl.record_logical_topk_ready()  # type: ignore[attr-defined]
 
