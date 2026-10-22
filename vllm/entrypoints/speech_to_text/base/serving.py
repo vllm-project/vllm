@@ -562,6 +562,16 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             )
 
         if (
+            self.model_cls.supports_diarized_transcription
+            and request.build_vad_config().enabled
+        ):
+            # VAD drops silence before the model sees the audio, which would
+            # shift the speaker timestamps the model emits.
+            return self.create_error_response(
+                f"VAD is not supported for diarization model {request.model}"
+            )
+
+        if (
             request.response_format in {"verbose_json", "diarized_json"}
             and request.stream
         ):
