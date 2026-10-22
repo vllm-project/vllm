@@ -440,9 +440,8 @@ impl MultimodalModelInfo {
 
         let media_connector = Arc::new(MediaConnector::new(
             // The connector finishes the build (forcing its redirect policy
-            // and DNS resolver). TLS resolves to native-tls: reqwest's
-            // `native-tls` feature wins its default backend selection over
-            // llm-multimodal's provider-less `rustls` feature.
+            // and DNS resolver). llm-multimodal enables no reqwest TLS
+            // backend; this workspace's `native-tls` feature provides it.
             reqwest_0_13::Client::builder(),
             MediaConnectorConfig::default(),
         )?);
