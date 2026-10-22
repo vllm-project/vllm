@@ -579,6 +579,34 @@ def test_hisparse_rejects_non_cuda(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    "connector,expect_warning",
+    [
+        ("NixlConnector", False),
+        ("NixlPullConnector", False),
+        ("MooncakeStoreConnector", False),
+        ("MultiConnector", False),
+        ("NixlPushConnector", True),
+        ("OffloadingConnector", True),
+    ],
+)
+def test_hisparse_connector_warning(
+    monkeypatch, caplog_vllm, connector, expect_warning
+):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
+    VllmConfig(
+        attention_config=AttentionConfig(hisparse_config=HiSparseConfig()),
+        kv_transfer_config=KVTransferConfig(kv_connector=connector, kv_role="kv_both"),
+        scheduler_config=SchedulerConfig(
+            max_model_len=2048,
+            is_encoder_decoder=False,
+            disable_hybrid_kv_cache_manager=False,
+        ),
+    )
+    assert ("HiSparse host-resident KV" in caplog_vllm.text) == expect_warning
+
+
+@pytest.mark.parametrize(
     "kv_transfer_config",
     [
         KVTransferConfig(

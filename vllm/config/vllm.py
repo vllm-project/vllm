@@ -1902,6 +1902,7 @@ class VllmConfig:
                 not in (
                     None,
                     "NixlConnector",
+                    "NixlPullConnector",
                     "MooncakeStoreConnector",
                     "MultiConnector",
                 )
