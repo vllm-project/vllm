@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     CUDA_VISIBLE_DEVICES: str | None = None
     VLLM_ENGINE_READY_TIMEOUT_S: int = 600
     VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT: float = 30.0
+    VLLM_CHAT_TEMPLATE_FUEL: int = 500000
     VLLM_API_KEY: str | None = None
     VLLM_DEBUG_LOG_API_SERVER_RESPONSE: bool = False
     S3_ACCESS_KEY_ID: str | None = None
@@ -152,7 +153,6 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_FP4BMM: bool = False
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
-    VLLM_ROCM_AITER_MEGA_MOE_FUSE_SHARED_EXPERTS: bool = False
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
@@ -305,6 +305,7 @@ if TYPE_CHECKING:
     VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
+    VLLM_COHERE2_ATTN_MOE_DUAL_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool | None = None
     VLLM_LOG_MODEL_INSPECTION: bool = False
@@ -814,6 +815,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Set to 0 to disable the timeout.
     "VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT": lambda: float(
         os.environ.get("VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT", "30")
+    ),
+    # Maximum template instructions (MiniJinja fuel) for rendering a
+    # request-supplied chat template (--trust-request-chat-template) in the
+    # Rust frontend; the server's own template has no limit. Set to 0 to
+    # disable the limit.
+    "VLLM_CHAT_TEMPLATE_FUEL": lambda: int(
+        os.environ.get("VLLM_CHAT_TEMPLATE_FUEL", "500000")
     ),
     # API key for vLLM API server
     "VLLM_API_KEY": lambda: os.environ.get("VLLM_API_KEY", None),
@@ -1368,12 +1376,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is disabled.
     "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "False").lower()
-        in ("true", "1")
-    ),
-    # Fuse DeepSeek-V4's shared expert into AITER MegaMoE (requantized to
-    # MXFP4). By default is disabled.
-    "VLLM_ROCM_AITER_MEGA_MOE_FUSE_SHARED_EXPERTS": lambda: (
-        os.getenv("VLLM_ROCM_AITER_MEGA_MOE_FUSE_SHARED_EXPERTS", "False").lower()
         in ("true", "1")
     ),
     # Whether to use aiter triton kernels for gemm ops.
@@ -2120,6 +2122,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD": lambda: int(
         os.getenv("VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD", "1024")
     ),
+    # Cohere2 MoE runs the MLP/MoE of its parallel blocks on a side CUDA stream,
+    # overlapping it with attention, for batches of at most this many tokens.
+    # Larger batches and piecewise CUDA graphs (prefill / mixed batches) run
+    # the MLP inline. Set to 0 to disable the dual stream.
+    "VLLM_COHERE2_ATTN_MOE_DUAL_STREAM_TOKEN_THRESHOLD": lambda: int(
+        os.getenv("VLLM_COHERE2_ATTN_MOE_DUAL_STREAM_TOKEN_THRESHOLD", "256")
+    ),
     # Format for saving torch.compile cache artifacts
     # - "binary": saves as binary file
     #     Safe for multiple vllm serve processes accessing the same torch compile cache.
@@ -2366,6 +2375,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_MODEL_REDIRECT_PATH",
         "VLLM_HOST_IP",
         "VLLM_RAY_BUNDLE_INDICES",
+        "VLLM_CHAT_TEMPLATE_FUEL",
         "VLLM_ELASTIC_EP_SCALE_UP_LAUNCH",
         "VLLM_FORCE_AOT_LOAD",
         "S3_ACCESS_KEY_ID",
