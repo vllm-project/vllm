@@ -3,17 +3,17 @@
 """The specialized decode executor over the stock Kimi K3 backbone: one routing
 decision per step, then every layer's prepared providers in one loop."""
 
-from collections.abc import Mapping
 from functools import partial
 from typing import Any, NamedTuple
 
 import torch
 
+from vllm.config import CUDAGraphMode
 from vllm.distributed import get_tp_group
 from vllm.distributed import tensor_model_parallel_all_reduce as all_reduce
-from vllm.forward_context import get_forward_context
-from vllm.models.common.specialized_decode import Step
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import round_up
 
 from ..cutedsl.attn_res.prepared import PreparedAttnRes
 from ..cutedsl.common.embedding import PreparedEmbedding
@@ -25,12 +25,11 @@ from ..cutedsl.moe.prepared import MoEScratch, PreparedMoE
 from ..cutedsl.moe.small_batch import chain as small_batch_chain
 from ..cutedsl.moe.tail_runtime import MoeTailBox, PreparedTail
 from ..cutedsl.oproj.prepared import OprojMailbox
-from ..spec import PREPARED_MAX, tokens_per_request
 from .prefetch import PrefetchController
-from .providers import Attention, pack_front
+from .providers import BATCHES, PREPARED_MAX, Attention, pack_front
 
 
-class StepPlan(NamedTuple):
+class Step(NamedTuple):
     q: int  # tokens per request
     metadata: list  # per layer
     slot_mapping: Any
@@ -66,26 +65,28 @@ def is_uniform_verify(md, q, b):
     return full and not md.num_decodes and tokens == md.num_spec_decodes * q
 
 
-class KimiK3Kernel:
+def caches_of(attention):
+    cache = getattr(attention, "kv_cache", ())
+    return [cache] if isinstance(cache, torch.Tensor) else list(cache)
+
+
+class SpecializedDecode:
     """Built once the weights are loaded; owns every prepared provider, the
     mailboxes and the decode buffers. Reads the backbone, never modifies it."""
 
-    def __init__(self, vllm_config, backbone, widths: tuple[int, ...]):
-        self.backbone = backbone
-        self.buffers: dict[str, torch.Tensor] = {}
-        extra = vllm_config.additional_config
-        # Verify steps decode q tokens per request at M = requests * q tokens; the
-        # widths already round each capture size up to whole requests.
-        self.batches, self.q = tuple(widths), tokens_per_request(vllm_config)
-        self.queries = (1, self.q) if self.q > 1 else (1,)
+    def __init__(self, backbone, config):
+        self.backbone, self.buffers = backbone, {}
+        q = config.q
+        # Verify steps decode q tokens per request at M = requests * q tokens; FULL
+        # verify graphs round each capture size up to whole requests.
+        rounded = {round_up(s, q) for s in config.capture_sizes}
+        verify = {m for m in rounded if m <= PREPARED_MAX}
+        self.batches, self.q = tuple(sorted({*BATCHES, *verify})), q
+        self.queries = (1, q) if q > 1 else (1,)
         # The longest sequence the deployment serves bounds the MLA split count.
-        self.max_context = vllm_config.model_config.max_model_len
-        self.mla_core = (
-            extra.get("mla_core", "auto") if isinstance(extra, dict) else ("auto")
-        )
+        self.max_context, self.mla_core = config.max_context, config.mla_core
         # Decode context parallel over the TP ranks: MLA KV is sequence-sharded.
-        self.dcp = vllm_config.parallel_config.decode_context_parallel_size
-        self.dcp_box, self.mla_layers = None, 0
+        self.dcp, self.dcp_box, self.mla_layers = config.dcp, None, 0
         group = get_tp_group()
         self.tp, self.rank = group.world_size, group.rank_in_group
         self.group = group.device_group
@@ -94,12 +95,6 @@ class KimiK3Kernel:
         layers = backbone.layers[backbone.start_layer : backbone.end_layer]
         self.layers = layers = tuple(layers)
         self.build_providers()
-        self.cache_layers = tuple(layer_name(d.self_attn) for d in layers)
-        self.cache_kinds = {
-            name: self.attention[d.layer_idx].kind
-            for name, d in zip(self.cache_layers, layers)
-        }
-        self.caches: dict[int, list] = {}
         self.embedding = PreparedEmbedding(backbone.embed_tokens, self.tp, self.rank)
         self.before = {
             d.layer_idx: PreparedAttnRes.for_target(d, has_delta=d is not layers[0])
@@ -181,14 +176,12 @@ class KimiK3Kernel:
             )
             self.feed_forward[index] = moe
 
-    def bind_caches(self, caches: Mapping[str, Any]) -> None:
-        """Compile each layer's cores for its bound KV cache layout and keep the
-        layer's tensors for every launch (the profiling cache, then the real one)."""
-        for name, layer in zip(self.cache_layers, self.layers):
-            cache = caches[name]
-            tensors = [cache] if isinstance(cache, torch.Tensor) else list(cache)
-            self.caches[layer.layer_idx] = tensors
-            self.attention[layer.layer_idx].prepare_layout(tensors)
+    def prepare_kv(self):
+        """Compile each layer's cores for its bound KV cache layout (the profiling
+        cache, then the real one)."""
+        for layer in self.layers:
+            caches = caches_of(layer.self_attn)
+            self.attention[layer.layer_idx].prepare_layout(caches)
 
     def embed_input_ids(self, ids):
         rows = ids.shape[0] if ids.ndim == 1 and ids.is_contiguous() else 0
@@ -197,34 +190,44 @@ class KimiK3Kernel:
         table = self.backbone.embed_tokens.weight
         return self.embedding.run(ids, table.new_empty((ids.shape[0], table.shape[1])))
 
-    def step_plan(self, width: int) -> StepPlan | None:
-        """Every layer's metadata for a step of ``width`` rows, or None when the
-        prepared providers do not serve it.
+    def plan(self, positions, intermediate_tensors):
+        """This step's decode plan, or None to run the stock forward instead.
 
-        None for steps with prompt rows (prefills, chunked prefills, fresh
-        prompts), and for speculative steps whose requests do not all verify q
-        tokens (partial drafts, verify rows mixed with plain decode rows).
+        Steps that run the stock forward:
+        - pipeline-parallel stage inputs (``intermediate_tensors``);
+        - token counts without prepared providers (above 64 or not in ``batches``);
+        - steps outside a CUDA graph capture (profiling, warmup and the warmup run
+          before each capture), so every stock kernel runs before its capture;
+        - PIECEWISE steps, keyed by token count alone and so captured as stock;
+        - steps with prompt rows (prefills, chunked prefills, fresh prompts);
+        - speculative steps whose requests do not all verify q tokens (partial
+          drafts, verify rows mixed with plain decode rows).
 
-        Every predicate is the same on all TP ranks: the mailboxes of the
-        specialized decode need every rank to take the same path.
+        Every predicate is the same on all TP ranks: the mailboxes of the specialized
+        decode need every rank to take the same path.
         """
+        b = positions.shape[0]
+        if intermediate_tensors is not None or b not in self.batches:
+            return None
+        if not torch.cuda.is_current_stream_capturing():
+            return None
+        if not is_forward_context_available():
+            return None
         context = get_forward_context()
+        if context.cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE:
+            return None
         by_layer = context.attn_metadata
         rows: list[Any] = list(by_layer.values()) if isinstance(by_layer, dict) else []
         q = self.q if any(getattr(md, "num_spec_decodes", 0) for md in rows) else 1
-        if width % q:
+        if b % q:
             return None
-        metadata = [
-            decode_metadata(d.self_attn, context, q, width) for d in self.layers
-        ]
+        metadata = [decode_metadata(d.self_attn, context, q, b) for d in self.layers]
         if any(md is None for md in metadata):
             return None
-        return StepPlan(q, metadata, context.slot_mapping)
+        return Step(q, metadata, context.slot_mapping)
 
-    def run(self, step: Step, input_ids, inputs_embeds, **kwargs):
+    def run(self, step, input_ids, inputs_embeds):
         """Normalized hidden states (and the aux streams) of a planned step."""
-        plan = self.step_plan(step.kernel_width)
-        assert plan is not None
         x = inputs_embeds
         if x is None:
             x = self.embed_input_ids(input_ids)
@@ -232,13 +235,12 @@ class KimiK3Kernel:
         # The stock aux streams: the AttnRes prefix entering each aux layer.
         aux_out = [torch.empty_like(x) for _ in self.aux_layers]
         aux = dict(zip(self.aux_layers, aux_out))
-        b, q, slots = x.shape[0], plan.q, plan.slot_mapping
+        b, q, slots = x.shape[0], step.q, step.slot_mapping
         prefix, blocks = self.prefix[:b], self.blocks[:b]
         first, second = self.hidden[0][:b], self.hidden[1][:b]
         hidden, pre_ready = x, False
-        for layer, md in zip(self.layers, plan.metadata):
-            index = layer.layer_idx
-            caches = self.caches[index]
+        for layer, md in zip(self.layers, step.metadata):
+            index, caches = layer.layer_idx, caches_of(layer.self_attn)
             if not pre_ready:
                 self.before[index].run(hidden, prefix, blocks, first, aux.get(index))
             self.attention[index].run(
