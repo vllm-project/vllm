@@ -56,6 +56,7 @@ from pydantic import (
     PrivateAttr,
     ValidationError,
     field_serializer,
+    field_validator,
     model_validator,
 )
 
@@ -212,6 +213,31 @@ def _resolve_named_tool_choice(tool_name: str, tools: list[Any]) -> str:
     )
 
 
+# OpenAI's response allows only in_memory / 24h; older request SDKs sent "in-memory"
+PromptCacheRetention = Literal["in_memory", "24h"]
+
+
+class PromptCacheOptions(OpenAIBaseModel):
+    """OpenAI prompt_cache_options; defined here because openai>=2.25 lacks it"""
+
+    mode: Literal["implicit", "explicit"] = "implicit"
+    ttl: Literal["30m"] = "30m"
+    comparison_response_id: str | None = None
+
+
+class PromptCacheOptionsParam(PromptCacheOptions):
+    """Request-side variant; prewarm is request-only in OpenAI's schema."""
+
+    prewarm: bool | None = None
+
+    def to_response(self) -> PromptCacheOptions:
+        return PromptCacheOptions(
+            mode=self.mode,
+            ttl=self.ttl,
+            comparison_response_id=self.comparison_response_id,
+        )
+
+
 class ResponsesRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/responses/create
@@ -297,6 +323,27 @@ class ResponsesRequest(OpenAIBaseModel):
             "A key that was used to read from or write to the prompt cache."
             "Note: This field has not been implemented yet "
             "and vLLM will ignore it."
+        ),
+    )
+    prompt_cache_options: PromptCacheOptionsParam | None = Field(
+        default=None,
+        description=(
+            "Prompt-caching options. Accepted and echoed in the response; "
+            "vLLM does not act on them."
+        ),
+    )
+    prompt_cache_retention: PromptCacheRetention | None = Field(
+        default=None,
+        description=(
+            "Prompt cache retention policy. Accepted and echoed in the "
+            "response; vLLM does not act on it."
+        ),
+    )
+    safety_identifier: str | None = Field(
+        default=None,
+        description=(
+            "Stable identifier for the end user. Accepted and echoed in the "
+            "response; vLLM does not act on it."
         ),
     )
 
@@ -421,6 +468,11 @@ class ResponsesRequest(OpenAIBaseModel):
         ),
     )
     # --8<-- [end:responses-extra-params]
+
+    @field_validator("prompt_cache_retention", mode="before")
+    @classmethod
+    def _normalize_prompt_cache_retention(cls, value: object) -> object:
+        return "in_memory" if value == "in-memory" else value
 
     def build_chat_params(
         self,
@@ -827,7 +879,11 @@ class ResponsesResponse(OpenAIBaseModel):
     max_tool_calls: int | None = None
     previous_response_id: str | None = None
     prompt: ResponsePrompt | None = None
+    prompt_cache_options: PromptCacheOptions | None = None
+    prompt_cache_key: str | None = None
+    prompt_cache_retention: PromptCacheRetention | None = None
     reasoning: Reasoning | None = None
+    safety_identifier: str | None = None
     service_tier: Literal["auto", "default", "flex", "scale", "priority"]
     status: ResponseStatus
     text: ResponseTextConfig | None = None
@@ -943,8 +999,16 @@ class ResponsesResponse(OpenAIBaseModel):
             max_tool_calls=request.max_tool_calls,
             previous_response_id=request.previous_response_id,
             prompt=request.prompt,
+            prompt_cache_key=request.prompt_cache_key,
+            prompt_cache_options=(
+                request.prompt_cache_options.to_response()
+                if request.prompt_cache_options is not None
+                else None
+            ),
+            prompt_cache_retention=request.prompt_cache_retention,
             reasoning=request.reasoning,
             service_tier=request.service_tier,
+            safety_identifier=request.safety_identifier,
             presence_penalty=sampling_params.presence_penalty,
             frequency_penalty=sampling_params.frequency_penalty,
             status=status,
