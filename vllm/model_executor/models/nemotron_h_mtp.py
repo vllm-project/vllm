@@ -12,7 +12,6 @@ from transformers import NemotronHConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.config.parallel import ParallelConfig
-from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -41,8 +40,6 @@ from .nemotron_h import (
     NemotronHAttentionDecoderLayer,
     NemotronHMoEDecoderLayer,
 )
-
-logger = init_logger(__name__)
 
 
 class NemotronHMTPAttentionDecoderLayer(NemotronHAttentionDecoderLayer):
@@ -372,15 +369,7 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant):
             prefix=maybe_prefix(prefix, "mtp"),
         )
 
-        # The MTP block has no LM head of its own: the checkpoint's `lm_head.*`
-        # is the target's, so the drafter always takes the target's module
-        # after loading (load_eagle_model) and follows its weight updates.
         self.lm_head: ParallelLMHead | None = None
-        logger.warning_once(
-            "NemotronHMTP shares the target embedding and LM head; checkpoint "
-            "embedding and lm_head weights are ignored, including any distinct "
-            "draft LM head."
-        )
 
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
 
