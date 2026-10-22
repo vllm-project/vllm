@@ -38,3 +38,40 @@ def test_finalize_requantizes_mega_moe_layers_only():
     finalize_mega_moe_weights([mega, fused, nn.Identity()])
     assert mega.requantized == 1
     assert fused.requantized == 0
+
+
+def test_finalize_skips_experts_loaded_as_is():
+    moe = _FakeMoE(True)
+    moe.experts = SimpleNamespace()  # NVFP4/BF16 experts: no requantization
+    finalize_mega_moe_weights([moe])
+
+
+class _FakeQuantConfig:
+    def __init__(self, name: str, algos: dict[str, str] | None = None):
+        self.name, self.algos = name, algos or {}
+
+    def get_name(self) -> str:
+        return self.name
+
+    def _resolve_quant_algo(self, prefix: str) -> str | None:
+        return self.algos.get(prefix)
+
+
+def test_mega_moe_weight_format():
+    from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
+        MEGA_MOE_BF16,
+        MEGA_MOE_NVFP4,
+    )
+
+    select = deepseek_v2.DeepseekV2MoE._mega_moe_weight_format
+    prefix = "model.layers.3.mlp"
+    assert select(None, prefix) is MEGA_MOE_BF16
+    assert select(_FakeQuantConfig("modelopt_fp4"), prefix) is MEGA_MOE_NVFP4
+    mixed = _FakeQuantConfig("modelopt_mixed", {f"{prefix}.experts": "NVFP4"})
+    assert select(mixed, prefix) is MEGA_MOE_NVFP4
+    # Excluded from quantization (e.g. a BF16 MTP layer).
+    assert select(mixed, "model.layers.78.mlp") is MEGA_MOE_BF16
+    # Block FP8 experts keep the requantizing path.
+    assert select(_FakeQuantConfig("fp8"), prefix) is None
+    fp8_mixed = _FakeQuantConfig("modelopt_mixed", {f"{prefix}.experts": "FP8_PB"})
+    assert select(fp8_mixed, prefix) is None
