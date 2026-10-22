@@ -9,8 +9,10 @@ import torch
 import torch.nn as nn
 
 import vllm.envs as envs
-from vllm.config import VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config.kernel import MEGA_MOE_BACKENDS
 from vllm.distributed import (
+    get_pcp_group,
     get_pp_group,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
@@ -144,10 +146,6 @@ class DeepseekV4MoE(DeepseekV4MoEBase):
 
 def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
     """Pick the ROCm sparse-MLA implementation for DeepSeek V4.1."""
-    if vllm_config.parallel_config.prefill_context_parallel_size > 1:
-        raise NotImplementedError(
-            "DeepSeek-V4.1 PCP currently supports NVIDIA CUDA only."
-        )
     backend = vllm_config.attention_config.backend
     if backend is not None and backend not in (
         AttentionBackendEnum.ROCM_FLASHMLA_SPARSE_DSV4,
@@ -165,6 +163,33 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
             "Use ROCM_FLASHMLA_SPARSE_DSV41 instead."
         )
     return DeepseekV41ROCMAiterMLAAttention
+
+
+def _validate_pcp_config(vllm_config: VllmConfig) -> None:
+    parallel_config = vllm_config.parallel_config
+    if parallel_config.prefill_context_parallel_size <= 1:
+        return
+    if vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+        raise NotImplementedError(
+            "DeepSeek-V4.1 PCP on ROCm currently requires eager execution with "
+            "-cc.cudagraph_mode=NONE."
+        )
+    if (
+        parallel_config.pipeline_parallel_size != 1
+        or parallel_config.data_parallel_size != 1
+        or parallel_config.decode_context_parallel_size != 1
+        or parallel_config.use_ubatching
+        or vllm_config.speculative_config is not None
+        or vllm_config.kv_transfer_config is not None
+        or vllm_config.cache_config.enable_prefix_caching
+        or vllm_config.kernel_config.moe_backend in MEGA_MOE_BACKENDS
+        or vllm_config.kernel_config.monokernel
+    ):
+        raise NotImplementedError(
+            "DeepSeek-V4.1 PCP on ROCm currently requires PP=DP=DCP=1, with no "
+            "microbatching, speculative decoding, KV transfer, prefix caching, "
+            "MegaMoE, or monokernel."
+        )
 
 
 def _use_sequence_parallel(vllm_config: VllmConfig) -> bool:
@@ -493,6 +518,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.config = config
         self.quant_config = quant_config
         self.parallel_config = vllm_config.parallel_config
+        _validate_pcp_config(vllm_config)
         self.use_mega_moe = False
         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
         if self.use_mega_moe and not vllm_config.parallel_config.enable_expert_parallel:
@@ -752,6 +778,13 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 )
             hidden_states = sp_shard(hidden_states)
             input_ids = sp_shard(input_ids)
+
+        if (
+            input_ids is not None
+            and self.parallel_config.prefill_context_parallel_size > 1
+            and not self.parallel_config.enable_expert_parallel
+        ):
+            input_ids = get_pcp_group().all_gather(input_ids, dim=0)
 
         residual, post_mix, res_mix = None, None, None
         pre_mix: torch.Tensor | None = None

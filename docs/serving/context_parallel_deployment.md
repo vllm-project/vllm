@@ -16,6 +16,28 @@ Depending on the use case, there are two possible strategies:
 
 Both approaches are under active development.
 
+### DeepSeek-V4.1-Flash on ROCm
+
+ROCm supports eager prefill context parallelism for the text-only
+DeepSeek-V4.1-Flash model with Model Runner V2 and the
+`ROCM_FLASHMLA_SPARSE_DSV41` attention backend:
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=1 \
+vllm serve deepseek-ai/DeepSeek-V4.1-Flash \
+  --language-model-only \
+  --tensor-parallel-size 1 \
+  --prefill-context-parallel-size 2 \
+  --attention-backend ROCM_FLASHMLA_SPARSE_DSV41 \
+  --no-enable-prefix-caching \
+  --enforce-eager
+```
+
+This configuration requires PP=DP=DCP=1 and does not support microbatching,
+speculative decoding, KV transfer, prefix caching, MegaMoE, the ROCm
+monokernel, LoRA, or multimodal inputs. CUDA/HIP graph support is not enabled
+for this path. TP and PCP multiply, so TP=2 with PCP=2 requires four GPUs.
+
 ## Decode Context Parallel
 
 Due to the auto-regressive nature of decoding, every decoding step needs to compute a small amount of query tokens w.r.t. a large number of key/value tokens stored in the paged KV cache. The core of decode context parallel is how to shard the KV cache across GPUs.

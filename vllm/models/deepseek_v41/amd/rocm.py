@@ -594,6 +594,10 @@ def _gfx942_monokernel() -> bool:
 
 
 class DeepseekV41ROCMAiterMLASparseBackend(DeepseekV4SparseMLABackend):
+    @classmethod
+    def supports_pcp(cls) -> bool:
+        return True
+
     @staticmethod
     def get_name() -> str:
         return "ROCM_FLASHMLA_SPARSE_DSV41"
@@ -608,6 +612,10 @@ class DeepseekV41ROCMAiterMLASparseBackend(DeepseekV4SparseMLABackend):
 
 
 class DeepseekV41ROCMAiterSparseSWABackend(DeepseekSparseSWABackend):
+    @classmethod
+    def supports_pcp(cls) -> bool:
+        return True
+
     @staticmethod
     def get_builder_cls() -> type["DeepseekV41ROCMAiterSparseSWAMetadataBuilder"]:
         return DeepseekV41ROCMAiterSparseSWAMetadataBuilder
@@ -757,7 +765,8 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if (
-            self.indexer is None
+            self.use_pcp
+            or self.indexer is None
             or self._prepare_and_attn_fn == self._prepare_and_attn_eager
             or not current_platform.enable_multi_stream_overlap(
                 self.aux_stream_list, get_forward_context().attn_metadata
