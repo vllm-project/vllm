@@ -850,6 +850,15 @@ class GPUModelRunner(
         # None in the first PP rank. The rest are set after load_model.
         self.intermediate_tensors: IntermediateTensors | None = None
 
+        # KV fake quant reads token positions (sink handling) from this buffer.
+        from vllm.model_executor.layers.attention.kv_fake_quant import (
+            set_kv_fake_quant_positions,
+        )
+
+        set_kv_fake_quant_positions(
+            self.mrope_positions.gpu[0] if self.uses_mrope else self.positions
+        )
+
         # OPTIMIZATION: Cache the arange tensors rather than creating them
         # every step. Keep in int64 to avoid overflow with long context.
         # - arange_np: immutable [0, 1, 2, ...] used as source for batched computation
