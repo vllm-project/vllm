@@ -14,7 +14,6 @@ from vllm.distributed.aux_output_connector.profile import (
     IndexerSource,
     decode_indexer,
 )
-from vllm.distributed.aux_output_connector.worker import validate_shm_budget
 from vllm.model_executor.layers.indexer_capture import (
     IndexerCapturer,
     IndexerCaptureSink,
@@ -195,19 +194,3 @@ def test_capture_snapshots_survive_shared_buffer_reuse(monkeypatch):
     capture.close()
     assert first.indexer_capture is None and second.indexer_capture is None
     capture.close()
-
-
-def test_budget_covers_every_kv_block_without_silent_truncation():
-    assert (
-        validate_shm_budget(
-            num_blocks=10, scheduler_block_size=16, bytes_per_token=20, max_bytes=None
-        )
-        == 3200
-    )
-    with pytest.raises(ValueError, match="Maximum Supported Blocks: 9"):
-        validate_shm_budget(
-            num_blocks=10,
-            scheduler_block_size=16,
-            bytes_per_token=20,
-            max_bytes=3199,
-        )

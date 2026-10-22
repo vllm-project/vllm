@@ -10,13 +10,16 @@ from threading import Lock
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-import psutil
 import torch
 
 from vllm.config import VllmConfig
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputConnectorMetadata,
     AuxRequestOutput,
+)
+from vllm.distributed.aux_output_connector.memory import (
+    get_available_host_memory,
+    validate_shm_budget,
 )
 from vllm.distributed.aux_output_connector.routed_experts import (
     RoutedExpertsBuffer,
@@ -43,28 +46,6 @@ if TYPE_CHECKING:
 
 
 logger = init_logger(__name__)
-
-
-def validate_shm_budget(
-    *,
-    num_blocks: int,
-    scheduler_block_size: int,
-    bytes_per_token: int,
-    max_bytes: int | None,
-) -> int:
-    required = num_blocks * scheduler_block_size * bytes_per_token
-    if max_bytes is not None and max_bytes < required:
-        supported = max_bytes // (scheduler_block_size * bytes_per_token)
-        gib = 1024**3
-        raise ValueError(
-            f"Required AuxOutput SHM: {required / gib:.3f} GiB; "
-            f"Allowed AuxOutput SHM: {max_bytes / gib:.3f} GiB. "
-            f"Current KV Blocks: {num_blocks}; Maximum Supported Blocks: {supported}. "
-            "Increase aux_output_config.max_bytes "
-            "or reduce KV blocks using gpu_memory_utilization or "
-            "kv_cache_memory_bytes. Host staging and runtime memory are additional."
-        )
-    return required if max_bytes is None else max_bytes
 
 
 @dataclass
@@ -195,63 +176,44 @@ class AuxOutputWorkerConnector:
         scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
             kv_cache_config, vllm_config
         )
-        hashes_per_kv_block = scheduler_block_size // hash_block_size
-        block_nbytes = hash_block_size * int(np.prod(shape_per_token)) * dtype.itemsize
-        max_bytes = vllm_config.aux_output_config.max_bytes
+        bytes_per_token = int(np.prod(shape_per_token)) * dtype.itemsize
+        block_nbytes = hash_block_size * bytes_per_token
+        max_seqs = vllm_config.scheduler_config.max_num_seqs
+        max_step_blocks = (
+            max_num_batched_tokens + hash_block_size - 1
+        ) // hash_block_size + max_seqs
+        staging_blocks = self._max_concurrent_batches * max_step_blocks + max_seqs
+        indexer_sources = self._indexer.valid.shape[1] if self._indexer else 0
+        staging_bytes = (
+            staging_blocks * block_nbytes
+            + self._max_concurrent_batches
+            * max_num_batched_tokens
+            * (bytes_per_token + indexer_sources)
+        )
         if self._indexer is not None:
-            max_bytes = validate_shm_budget(
-                num_blocks=kv_cache_config.num_blocks,
-                scheduler_block_size=scheduler_block_size,
-                bytes_per_token=shape_per_token[0],
-                max_bytes=max_bytes,
-            )
-        elif max_bytes is None:
-            max_bytes = kv_cache_config.num_blocks * hashes_per_kv_block * block_nbytes
-        if self._indexer is not None:
-            max_seqs = vllm_config.scheduler_config.max_num_seqs
-            max_step_blocks = (
-                max_num_batched_tokens + hash_block_size - 1
-            ) // hash_block_size + max_seqs
-            staging_blocks = (
-                vllm_config.max_concurrent_batches * max_step_blocks + max_seqs
-            )
-            staging_bytes = (
-                staging_blocks * block_nbytes
-                + vllm_config.max_concurrent_batches
-                * max_num_batched_tokens
-                * shape_per_token[0]
-            )
-            metadata_bytes = (max_bytes // block_nbytes) * 512
-            available = psutil.virtual_memory().available
-            reserve = max(512 << 20, available // 20)
-            local_output_workers = max(
+            # The combined byte record is assembled after the D2H copy.
+            staging_bytes += max_num_batched_tokens * bytes_per_token
+        logger.info(
+            "AuxOutput payload: R3=%d B/token, indexer=%d B/token; "
+            "scheduler block=%d tokens, SHM object=%d tokens (%d B)",
+            self._r3_nbytes,
+            self._indexer.profile.fixed_bytes_per_token if self._indexer else 0,
+            scheduler_block_size,
+            hash_block_size,
+            block_nbytes,
+        )
+        max_bytes = validate_shm_budget(
+            num_blocks=kv_cache_config.num_blocks,
+            scheduler_block_size=scheduler_block_size,
+            hash_block_size=hash_block_size,
+            bytes_per_token=bytes_per_token,
+            max_bytes=vllm_config.aux_output_config.max_bytes,
+            available_host_bytes=get_available_host_memory(),
+            staging_bytes=staging_bytes,
+            local_output_workers=max(
                 1, vllm_config.parallel_config.data_parallel_size_local
-            )
-            host_required = (
-                local_output_workers * (max_bytes + staging_bytes + metadata_bytes)
-                + reserve
-            )
-            logger.info(
-                "AuxOutput per output worker: R3=%d B/token, indexer=%d B/token, "
-                "block=%d B, SHM=%d B, host staging=%d B, metadata estimate=%d B, "
-                "runtime reserve=%d B; local output workers=%d",
-                self._r3_nbytes,
-                self._indexer.profile.fixed_bytes_per_token,
-                block_nbytes,
-                max_bytes,
-                staging_bytes,
-                metadata_bytes,
-                reserve,
-                local_output_workers,
-            )
-            if host_required > available:
-                raise ValueError(
-                    f"AuxOutput needs approximately {host_required / 1024**3:.3f} GiB "
-                    f"of host memory including staging and reserve, but only "
-                    f"{available / 1024**3:.3f} GiB is available. Increase host memory "
-                    "or reduce KV cache capacity/aux_output_config.max_bytes "
-                    "while retaining enough SHM for every KV block."
-                )
+            ),
+        )
         self._store = BackgroundBlockObjectStore(
             BlockObjectStore(max_bytes=max_bytes, object_nbytes=block_nbytes),
             max_pending_batches=2 * vllm_config.scheduler_config.max_num_seqs,

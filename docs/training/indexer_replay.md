@@ -140,11 +140,30 @@ Per output worker, minimum persistent capacity is:
 KV_blocks * Scheduler_block_size * (R3_bytes_per_token + Indexer_bytes_per_token)
 ```
 
-`max_bytes` smaller than this capacity fails at startup, with the current and
-maximum supported KV-block counts. Increase the host budget, use compact
-encoding, or reduce KV-cache capacity. The diagnostic also estimates host
-staging, metadata, runtime reserve and local DP output workers. TP workers
-participate in capture, but only the output rank creates the SHM Store.
+Before creating the Store, startup queries system available RAM and the remaining
+container cgroup memory, using the smaller value. The Store uses anonymous shared
+`mmap`, so `/dev/shm` mount free space is not its capacity limit; see the
+[Linux tmpfs documentation](https://www.kernel.org/doc/html/latest/filesystems/tmpfs.html).
+The check reserves runtime headroom, accounts for staging and estimated metadata,
+and divides the remaining budget across local DP output workers. It then rounds
+down to complete SHM objects and infers the maximum GPU KV block count. The same
+check applies when only routed-expert return is enabled.
+
+If the arenas cannot fit or a configured `aux_output_config.max_bytes` cannot
+cover all KV blocks, startup fails with required/available SHM and a block limit.
+Use the reported `--num-gpu-blocks-override N` (Python:
+`num_gpu_blocks_override=N`) or a smaller positive count. Unset
+`aux_output_config.max_bytes` so the arena follows the chosen KV block count, or
+resize it within the reported host budget. A smaller `--max-model-len` may be
+needed to fit the resulting KV capacity.
+
+Alternatively, reduce `--kv-cache-memory-bytes` or `--gpu-memory-utilization`.
+An explicit KV memory byte budget takes precedence over utilization; no linear
+conversion from CPU RAM to a GPU utilization percentage is assumed. If staging
+alone exhausts the budget, the error asks for more RAM/container memory or smaller
+`--max-num-batched-tokens`/`--max-num-seqs` instead of suggesting zero blocks.
+This is a startup estimate, not an atomic host-memory reservation; concurrent
+allocations and later output accumulation can change the available memory.
 GPU capture buffers and the bounded concurrent snapshot pool are allocated
 inside model-load memory profiling, before KV capacity is planned.
 
