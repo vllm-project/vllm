@@ -30,8 +30,8 @@ from vllm.models.kimi_k3.amd.specialized_decode.runtime.guards import (
 
 
 def _vllm_config(**over) -> SimpleNamespace:
-    """A supported config: TP8, DCP8 (interleave 1), 7 speculative tokens, an fp8
-    KV cache, FULL graphs, MRV2.
+    """A supported config: TP8, DCP8 (interleave 1), 7 speculative tokens,
+    max_num_seqs 1, an fp8 KV cache, FULL graphs, MRV2.
     ``over`` sets dotted paths, e.g. ``{"parallel_config.data_parallel_size": 2}``."""
     spec = SimpleNamespace(
         num_speculative_tokens=7,
@@ -81,6 +81,7 @@ def _vllm_config(**over) -> SimpleNamespace:
         ),
         weight_transfer_config=None,
         speculative_config=spec,
+        scheduler_config=SimpleNamespace(max_num_seqs=1),
         use_v2_model_runner=True,
         compilation_config=SimpleNamespace(
             mode=CompilationMode.VLLM_COMPILE,
@@ -215,6 +216,62 @@ def test_mla_without_m1_runs_vllm_ops(on_mi355x, monkeypatch, over, env, why):
 def test_refusals(on_mi355x, over, reason):
     reasons = runtime.unsupported(_vllm_config(**over))
     assert len(reasons) == 1 and reason in reasons[0], reasons
+
+
+def _step(dcp: int, seqs: int, k: int) -> SimpleNamespace:
+    return _vllm_config(
+        **{
+            "parallel_config.decode_context_parallel_size": dcp,
+            "scheduler_config.max_num_seqs": seqs,
+            "speculative_config.num_speculative_tokens": k,
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "dcp, seqs, k",
+    [
+        *[(8, s, k) for s, k in [(1, 1), (1, 3), (1, 7), (1, 15), (2, 1), (2, 3)]],
+        *[(8, s, k) for s, k in [(2, 7), (4, 1), (4, 3), (8, 1)]],
+        *[(1, s, k) for s, k in [(1, 3), (1, 7), (2, 3), (2, 7)]],
+    ],
+)
+def test_served_steps_are_accepted(on_mi355x, dcp, seqs, k):
+    assert runtime.unsupported(_step(dcp, seqs, k)) == []
+
+
+@pytest.mark.parametrize(
+    "dcp, seqs, k, reason",
+    [
+        (8, 3, 1, "max_num_seqs 3 at 1"),
+        (8, 16, 1, "max_num_seqs 16 at 1"),
+        (8, 4, 7, "max_num_seqs 4 at 7"),
+        (8, 8, 3, "max_num_seqs 8 at 3"),
+        (8, 256, 7, "max_num_seqs 256 at 7"),
+        (1, 2, 15, "max_num_seqs 2 at 15"),
+        # 3 requests at qlen 4 (12 rows): M1c's 80 splits do not share out
+        (1, 4, 3, "DCP1 runs M1c only"),
+        # no M1c at qlen 2 / 16: AITER's asm decode
+        (1, 1, 1, "DCP1 runs M1c only"),
+        (1, 8, 1, "DCP1 runs M1c only"),
+        (1, 1, 15, "DCP1 runs M1c only"),
+    ],
+)
+def test_unserved_steps_are_refused(on_mi355x, dcp, seqs, k, reason):
+    reasons = runtime.unsupported(_step(dcp, seqs, k))
+    assert len(reasons) == 1 and reason in reasons[0], reasons
+
+
+def test_dcp1_without_m1_is_refused(on_mi355x):
+    """DCP1 runs M1c, which needs M1 (at DCP8 vLLM's ops run instead)."""
+    cfg = _vllm_config(
+        **{
+            "parallel_config.decode_context_parallel_size": 1,
+            "cache_config.cache_dtype": "auto",
+        }
+    )
+    reasons = runtime.unsupported(cfg)
+    assert len(reasons) == 1 and "DCP1 without M1 (an fp8 KV cache)" in reasons[0]
 
 
 def test_every_refusal_is_reported_at_once(monkeypatch):

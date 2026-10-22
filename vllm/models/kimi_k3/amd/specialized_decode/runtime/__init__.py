@@ -26,6 +26,10 @@ DCP_SIZES = (1, DCP)  # M1's builds: the whole KV a rank, or DCP over the TP gro
 MAX_TOKENS = 64
 # a served step's rows: at 32 and 64 rows the kernels lose to vLLM's decode
 MAX_ROWS = 16
+# the served max_num_seqs: a full step of each is one of the widths (MAX_ROWS)
+MAX_SEQS = (1, 2, 4, 8)
+# M1c's qlens: DCP1 runs only them (AITER's asm decode at DCP1 is not served)
+M1C_QLENS = (4, 8)
 WHOLE, FFN = "whole", "ffn"
 # Kimi-K3's text shapes the kernels are written for (hidden size, routed experts,
 # KDA heads, KDA head dim, KDA short-conv width)
@@ -95,8 +99,8 @@ def specialized_decode_config(vllm_config) -> DecodeConfig | None:
 
 
 def m1_reasons(vllm_config) -> list[str]:
-    """Why the MLA layers cannot run M1 (empty: they can). Not a refusal: those
-    layers run vLLM's attention ops instead, then K2."""
+    """Why the MLA layers cannot run M1 (empty: they can). At DCP8 not a refusal:
+    those layers run vLLM's attention ops instead, then K2 (``step_reasons``)."""
     import vllm.envs as envs
 
     cc = vllm_config.cache_config
@@ -116,7 +120,7 @@ def unsupported(vllm_config) -> list[str]:
     """Every reason this deployment cannot run the specialized decode (empty: it
     can). Config only: the loaded weights are checked when the executor is built.
     Default-deny: every feature below is refused, the kernels serve none of them.
-    What only M1 needs is not refused (``m1_reasons``)."""
+    What only M1 needs is not refused at DCP8 (``m1_reasons``)."""
     from vllm.config import CompilationMode
     from vllm.model_executor.layers.mamba.mamba_utils import (
         MambaStateDtypeCalculator,
@@ -198,7 +202,44 @@ def unsupported(vllm_config) -> list[str]:
         )
     if getattr(mc.hf_text_config, "attn_res_block_size", None) is None:
         reasons.append("models without AttnRes")
-    return reasons + platform_reasons()
+    platform = platform_reasons()
+    if spec is not None and spec.num_speculative_tokens + 1 <= MAX_ROWS:
+        reasons += step_reasons(vllm_config, check_m1c=not platform)
+    return reasons + platform
+
+
+def m1c_serves(q: int, seqs: int) -> bool:
+    """M1c runs every step of 1 .. ``seqs`` requests at qlen ``q``: its KV splits
+    share out evenly over the requests (``layers.m1c_at``)."""
+    if q not in M1C_QLENS:
+        return False
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import mla_attn
+
+    return all(mla_attn.splits(q) % n == 0 for n in range(1, seqs + 1))
+
+
+def step_reasons(vllm_config, check_m1c: bool = True) -> list[str]:
+    """The (max_num_seqs, speculative tokens) pairs served: a full step fits one
+    launch, and at DCP1 every step runs M1c (``check_m1c``: M1c's geometry needs
+    the kernels' modules, so only on a supported platform)."""
+    k = vllm_config.speculative_config.num_speculative_tokens
+    seqs = vllm_config.scheduler_config.max_num_seqs
+    if seqs not in MAX_SEQS or seqs * (k + 1) > MAX_ROWS:
+        return [
+            f"max_num_seqs {seqs} at {k} speculative tokens (max_num_seqs 1, 2, 4 "
+            f"or 8 with max_num_seqs x (k + 1) <= {MAX_ROWS})"
+        ]
+    if vllm_config.parallel_config.decode_context_parallel_size != 1:
+        return []
+    m1 = m1_reasons(vllm_config)
+    if m1:
+        return ["DCP1 without M1 (" + "; ".join(m1) + ")"]
+    if check_m1c and not m1c_serves(k + 1, seqs):
+        return [
+            f"DCP1 at {k} speculative tokens, max_num_seqs {seqs} (DCP1 runs M1c "
+            "only: 3 or 7 speculative tokens, max_num_seqs 1 or 2; use DCP8)"
+        ]
+    return []
 
 
 def text_shapes(text) -> tuple:

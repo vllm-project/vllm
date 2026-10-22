@@ -17,7 +17,7 @@ import torch
 from vllm.distributed import get_dcp_group, get_tp_group
 from vllm.models.kimi_k3.amd.specialized_decode.mono.abi import PEER_HEAD
 from vllm.models.kimi_k3.amd.specialized_decode.mono.common.plan import HEALTH_WORDS
-from vllm.models.kimi_k3.amd.specialized_decode.runtime import MAX_TOKENS
+from vllm.models.kimi_k3.amd.specialized_decode.runtime import M1C_QLENS, MAX_TOKENS
 from vllm.models.kimi_k3.amd.specialized_decode.runtime.peer import PeerBuffer
 
 
@@ -90,7 +90,7 @@ class MonoRunner:
     def m1c(self) -> bool:
         """DCP1 at qlen 4 / 8 (M1b in K2): M1a writes a bf16 query, K2's launch
         runs the decode attention (M1c) first, its M1b merging the KV splits."""
-        return self.dcp == 1 and self.num_spec + 1 in (4, 8) and self.fuse_m1b
+        return self.dcp == 1 and self.num_spec + 1 in M1C_QLENS and self.fuse_m1b
 
     def step_begin(self) -> None:
         """Once a forward, before its first mono launch (a graph captures it)."""
