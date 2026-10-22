@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""vLLM-owned glue for MLB's L2 token-routing layer.
+"""vLLM-owned glue for EvenMoE's L2 token-routing layer.
 
 vLLM's built-in replica choice is a Knuth hash of the token index, fused into
 the same Triton kernel that records expert load
-(``fused_moe/router/base_router.py``).  When an MLB routing algorithm is
-selected the kernel is kept: MLB supplies the per-expert replica shares it
+(``fused_moe/router/base_router.py``).  When an EvenMoE routing algorithm is
+selected the kernel is kept: EvenMoE supplies the per-expert replica shares it
 solved for, and the kernel samples from them instead of hashing.  Recording,
 the record gate and the padding mask therefore stay where vLLM put them, with
 nothing reimplemented alongside.
 
-Enable with ``VLLM_MLB_L2_ALGORITHM``, e.g. ``lplb``, ``dynamic``, ``static``.
+Enable with ``VLLM_EVENMOE_L2_ALGORITHM``, e.g. ``lplb``, ``dynamic``, ``static``.
 Unset (the default) leaves vLLM's fused kernel in charge, so this module costs
 nothing when it is not used.
 
@@ -20,7 +20,7 @@ silently degrading:
 * **Waterfill / shared-expert routing.**  On vLLM's CUDA path the shared expert
   is a per-rank replicated MLP that never enters EP dispatch, so there is no
   destination-rank decision to write back.
-* **DBO (dual-batch overlap).**  MLB's ``RoutingRequest`` carries a single
+* **DBO (dual-batch overlap).**  EvenMoE's ``RoutingRequest`` carries a single
   token count and its policies keep one solver state per layer, so two
   concurrently-executing micro-batches would clobber each other.
 """
@@ -41,18 +41,18 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-ALGORITHM_ENV = "VLLM_MLB_L2_ALGORITHM"
+ALGORITHM_ENV = "VLLM_EVENMOE_L2_ALGORITHM"
 
-_runtime: MlbRoutingRuntime | None = None
+_runtime: EvenMoeRoutingRuntime | None = None
 
 
-def mlb_l2_algorithm() -> str:
-    """Configured MLB routing expression, or "" when MLB routing is off."""
-    return envs.VLLM_MLB_L2_ALGORITHM
+def evenmoe_l2_algorithm() -> str:
+    """Configured EvenMoE routing expression, or "" when EvenMoE routing is off."""
+    return envs.VLLM_EVENMOE_L2_ALGORITHM
 
 
 class VllmRoutingCollectives:
-    """Expose vLLM's EP process group through MLB's generic transport API.
+    """Expose vLLM's EP process group through EvenMoE's generic transport API.
 
     Validated to be CUDA-graph capturable: vLLM routes EP collectives through
     pynccl, and capture happens inside vLLM's own ``graph_capture()`` context.
@@ -95,9 +95,9 @@ def _algorithm_places_with_ultraep(algorithm: str) -> bool:
 
 
 def _current_stage() -> str | None:
-    """Map vLLM's current batch onto MLB's routing stage.
+    """Map vLLM's current batch onto EvenMoE's routing stage.
 
-    SGLang hands MLB a discrete ForwardMode (EXTEND / DECODE / IDLE / ...).
+    SGLang hands EvenMoE a discrete ForwardMode (EXTEND / DECODE / IDLE / ...).
     vLLM has no equivalent: with continuous batching and chunked prefill a
     single batch routinely mixes prefill and decode tokens, so a clean
     "prefill" stage does not exist.  Only decode is provable -- every request
@@ -180,7 +180,7 @@ def _dp_token_counts() -> torch.Tensor | None:
     return getattr(dp_metadata, "num_tokens_across_dp_cpu", None)
 
 
-class MlbRoutingRuntime:
+class EvenMoeRoutingRuntime:
     """Holds the MoELoadBalancer instance and the placement geometry."""
 
     def __init__(
@@ -233,7 +233,7 @@ class MlbRoutingRuntime:
         # Injected when an engine-scoped integration owns the balancer, so L1
         # and L2 are served by one instance rather than two that cannot see
         # each other.
-        self._mlb: Any = (
+        self._evenmoe: Any = (
             balancer
             if balancer is not None
             else MoELoadBalancer.from_algorithm(
@@ -244,25 +244,25 @@ class MlbRoutingRuntime:
                 collectives=VllmRoutingCollectives(),
             )
         )
-        # MLB declares what the framework has to prepare for the selected
+        # EvenMoE declares what the framework has to prepare for the selected
         # policy, so none of the work below is done unconditionally: `lplb`
         # needs placement state refreshed on commit, `static` needs a per-rank
         # dispatch table, and only a pipeline with a post-TopK policy wants the
         # routing boundary at all.
-        caps = self._mlb.routing_capabilities
+        caps = self._evenmoe.routing_capabilities
         self.requires_post_topk_routing = caps.requires_post_topk_routing
         self.requires_placement_state = caps.requires_placement_state
         self.requires_rank_dispatch_map = caps.requires_rank_dispatch_map
         # Whether a policy in this pipeline picks the shared expert's rank.
         # The router still has to have somewhere to put that answer -- it only
         # asks when its layer was built with the EP shared-expert layout
-        # (VLLM_FUSE_SHARED_EXPERTS). getattr, because an older MLB has no
+        # (VLLM_FUSE_SHARED_EXPERTS). getattr, because an older EvenMoE has no
         # such field.
         self.routes_shared_expert = getattr(caps, "routes_shared_expert", False)
         # A policy whose answer depends only on the committed placement does
         # not need the per-forward call at all: bake the answer into a map the
         # fused kernel already knows how to read, and the boundary disappears.
-        # getattr, because an older MLB has no such field.
+        # getattr, because an older EvenMoE has no such field.
         self.dispatch_fixed_by_placement = getattr(
             caps, "dispatch_fixed_by_placement", False
         )
@@ -273,15 +273,15 @@ class MlbRoutingRuntime:
         # shared-expert decisions computed and then thrown away, and the stale
         # ones from the previous layer read in their place -- with no symptom
         # beyond a quality regression. Checked here rather than trusted: the
-        # default above protects against an MLB too old to have the field, but
+        # default above protects against an EvenMoE too old to have the field, but
         # not against one old enough to have it and set it wrong.
         if self.routes_shared_expert and self.dispatch_fixed_by_placement:
             raise ValueError(
-                f"MLB routing pipeline {algorithm!r} reports both "
+                f"EvenMoE routing pipeline {algorithm!r} reports both "
                 "routes_shared_expert and dispatch_fixed_by_placement. A "
                 "shared-expert rank is a per-batch decision, so it cannot be "
                 "baked in at placement-commit time; one of the two is wrong. "
-                "An MLB predating the fix to dispatch_fixed_by_placement "
+                "An EvenMoE predating the fix to dispatch_fixed_by_placement "
                 "reports this for any pipeline containing waterfill."
             )
         # Declared by the pipeline rather than inferred from "has a post-TopK
@@ -297,7 +297,7 @@ class MlbRoutingRuntime:
         )
         self.graph_stability = getattr(caps, "graph_stability", "stable")
         logger.info(
-            "MLB L2 routing enabled (algorithm=%s, ep_size=%d, logical=%d, "
+            "EvenMoE L2 routing enabled (algorithm=%s, ep_size=%d, logical=%d, "
             "physical=%d, caps: post_topk=%s placement_state=%s "
             "rank_dispatch_map=%s)",
             algorithm,
@@ -313,7 +313,7 @@ class MlbRoutingRuntime:
         #
         # LPLB's LP solve needs global_logical_count: how many tokens each
         # logical expert received across all EP ranks.  The naive path inside
-        # MLB does count_logical_experts(topk_ids) + EP all_reduce per layer
+        # EvenMoE does count_logical_experts(topk_ids) + EP all_reduce per layer
         # per forward, which is 40 NCCL collectives per step -- and NCCL
         # cannot be captured in a CUDA graph.
         #
@@ -336,12 +336,12 @@ class MlbRoutingRuntime:
         # and LPLB answers with identity dispatch without ever reading the
         # count -- so keeping these buffers would buy a per-layer count kernel
         # plus one collective per step for a result that is thrown away.
-        # Leaving them None also makes MLB decline to gather the count itself
+        # Leaving them None also makes EvenMoE decline to gather the count itself
         # (needs_global_logical_count), so nothing downstream pays for it.
-        # MLB_KEEP_ZERO_REDUNDANCY_COUNTS=1 restores the ungated behaviour so the
+        # EVENMOE_KEEP_ZERO_REDUNDANCY_COUNTS=1 restores the ungated behaviour so the
         # cost of that discarded work can be measured against this, rather than
         # only argued for.
-        keep_degenerate = envs.MLB_KEEP_ZERO_REDUNDANCY_COUNTS
+        keep_degenerate = envs.EVENMOE_KEEP_ZERO_REDUNDANCY_COUNTS
         if self.consumes_global_logical_count and (
             self._max_replicas > 1 or keep_degenerate
         ):
@@ -360,7 +360,7 @@ class MlbRoutingRuntime:
         # Reduced by the dummy path so the collective stays symmetric.
         self._count_scratch: torch.Tensor | None = None
 
-        # MLB_FRESH_COUNTS=1 withholds the pre-computed count so MLB gathers it
+        # EVENMOE_FRESH_COUNTS=1 withholds the pre-computed count so EvenMoE gathers it
         # itself, per layer per forward. That is what the SGLang adapter does and
         # what LPLB's published numbers were measured against; the count here is
         # one step stale so the collective can live outside the CUDA graph.
@@ -369,18 +369,18 @@ class MlbRoutingRuntime:
         # consecutive chunks can differ sharply -- so a measured LPLB regression
         # cannot be attributed to the algorithm without checking this. Read once:
         # replica_shares runs per layer per forward.
-        self._fresh_counts = envs.MLB_FRESH_COUNTS
+        self._fresh_counts = envs.EVENMOE_FRESH_COUNTS
 
         # Diagnostic capture of the LP's inputs and output. Off unless a
         # directory is named; bounded so a long run cannot fill the disk.
-        self._dump_lp_dir = envs.MLB_DUMP_LP
-        self._dump_lp_left = envs.MLB_DUMP_LP_N
+        self._dump_lp_dir = envs.EVENMOE_DUMP_LP
+        self._dump_lp_left = envs.EVENMOE_DUMP_LP_N
         # Skip the opening calls: the first steps legitimately carry zeros
         # while the one-step-stale pipeline fills, and sampling only those
         # would mistake a warm-up transient for steady state.
-        self._dump_lp_skip = envs.MLB_DUMP_LP_SKIP
+        self._dump_lp_skip = envs.EVENMOE_DUMP_LP_SKIP
 
-        # MLB_TIME_L2=<n> times n route_tokens calls with a device sync on each
+        # EVENMOE_TIME_L2=<n> times n route_tokens calls with a device sync on each
         # side. The sync makes the number meaningful and the measurement
         # invasive, so it is off unless asked for -- diagnostic only.
         # Set by replica_shares when a policy answers with ids; read by
@@ -396,19 +396,19 @@ class MlbRoutingRuntime:
         # None for every other L1 policy, and before the first solve.
         #
         # The candidate table and quota must come from the same solve: the
-        # quota indexes replicas by column against MLB's own candidate
+        # quota indexes replicas by column against EvenMoE's own candidate
         # ordering, which is not guaranteed to be the same table -- same
         # width, even -- as vLLM's own logical_to_physical_map, independently
         # rebuilt from physical_to_logical_map through compute_logical_maps.
-        # So route with MLB's own table for this policy, not vLLM's.
+        # So route with EvenMoE's own table for this policy, not vLLM's.
         self._ultraep_rank_quota_prefix: torch.Tensor | None = None
         self._ultraep_logical_to_physical: torch.Tensor | None = None
         self._ultraep_replica_counts: torch.Tensor | None = None
-        self._time_l2 = envs.MLB_TIME_L2
-        # MLB_TIME_REFRESH=<n> times n fast refreshes -- the placement solve and
+        self._time_l2 = envs.EVENMOE_TIME_L2
+        # EVENMOE_TIME_REFRESH=<n> times n fast refreshes -- the placement solve and
         # the weight commit separately -- with a device sync on each, then
-        # reports and disarms. Same shape as MLB_TIME_L2 above.
-        self._time_refresh = envs.MLB_TIME_REFRESH
+        # reports and disarms. Same shape as EVENMOE_TIME_L2 above.
+        self._time_refresh = envs.EVENMOE_TIME_REFRESH
         # How UltraEP's fast refresh lands re-solved replica weight. Upstream
         # UltraEP does this with a one-sided weight_sync (masters stay put,
         # replica slots are refilled from the owning master); the movers below
@@ -421,7 +421,7 @@ class MlbRoutingRuntime:
         #              which also handles the one case the others do not: the
         #              first refresh after a checkpointed placement, when the
         #              masters themselves move
-        # MLB_ULTRAEP_MOVER (default direct). `auto` and `symm` try symmetric
+        # EVENMOE_ULTRAEP_MOVER (default direct). `auto` and `symm` try symmetric
         # memory first, but only after every EP rank has agreed it can (see
         # _symm_setup): a per-rank try/except around the collective rendezvous
         # let some ranks fall back while the others waited in it, and the
@@ -431,13 +431,13 @@ class MlbRoutingRuntime:
         # back to back) symm is within 1-2%
         # of direct, so direct is the default and symm an explicit choice.
         # Every mover leaves a layer whose masters move to generic.
-        self._ultraep_mover = envs.MLB_ULTRAEP_MOVER
+        self._ultraep_mover = envs.EVENMOE_ULTRAEP_MOVER
         self._ultraep_mover_warned = False
         self._symm_hdl: Any = None
         self._symm_buf: torch.Tensor | None = None
         self._symm_layout: list[tuple[int, int, torch.dtype, tuple[int, ...]]] = []
         self._symm_expert_nbytes = 0
-        # MLB_ULTRAEP_LAGGED_APPLY (default 0): with 1 the plan solved on this
+        # EVENMOE_ULTRAEP_LAGGED_APPLY (default 0): with 1 the plan solved on this
         # forward lands (routing snapshot + weights) on the layer's next
         # forward, which keeps the plan's device->host copy off the critical
         # path -- no per-layer GPU sync -- at the price of one step of
@@ -449,7 +449,7 @@ class MlbRoutingRuntime:
         # normal) on Blackwell for +0.05 of steady imbalance, and on Hopper it
         # buys nothing and costs the same balance. Off by default; set 1 for
         # interval-1 deployments with Blackwell-class step times.
-        self._ultraep_lagged = envs.MLB_ULTRAEP_LAGGED_APPLY
+        self._ultraep_lagged = envs.EVENMOE_ULTRAEP_LAGGED_APPLY
         self._ultraep_pending: dict[int, tuple[Any, ...]] = {}
         self._ultraep_pending_host: dict[int, torch.Tensor] = {}
         self._solve_us: list[float] = []
@@ -466,7 +466,7 @@ class MlbRoutingRuntime:
         # on top of it. Making memory match a placement the solve decided is
         # the framework adapter's job and stays here: the solve produces an
         # explicit before/after map pair and hands it to EplbState's own P2P
-        # mover (_commit_placement_weights). MLB supplies the placement
+        # mover (_commit_placement_weights). EvenMoE supplies the placement
         # algorithm and nothing else -- no policy brings its own weight
         # mover, and no second component re-derives placement from raw
         # routing to agree with this one by construction.
@@ -474,7 +474,7 @@ class MlbRoutingRuntime:
         self._ultraep_expert_buffer: Any = None
         self._ultraep_communicator: Any = None
         self._ultraep_num_local_physical: int | None = None
-        # Layers whose MLB-side placement tables have actually been written by
+        # Layers whose EvenMoE-side placement tables have actually been written by
         # a refresh. Allocation of the quota tensor is not the same event: the
         # bootstrap solve allocates it whole, layer contents arrive one refresh
         # at a time. See the guard in _snapshot.
@@ -493,7 +493,7 @@ class MlbRoutingRuntime:
         # placement to noise and keeps it there. It bites only where batches
         # are genuinely small: a prefill-shaped step is orders of magnitude
         # above either threshold.
-        self._ultraep_min_representative_tokens = envs.MLB_ULTRAEP_REFRESH_MIN_TOKENS
+        self._ultraep_min_representative_tokens = envs.EVENMOE_ULTRAEP_REFRESH_MIN_TOKENS
         # Parsed, not compared as a string. `algorithm` is the whole L2
         # expression, so an equality test here silently misses every
         # composition that merely *contains* ultraep -- `ultraep+waterfill`
@@ -545,7 +545,7 @@ class MlbRoutingRuntime:
         self._ultraep_communicator = communicator
         self._ultraep_num_local_physical = self.num_physical_experts // self.ep_size
 
-        interval = envs.MLB_ULTRAEP_REFRESH_INTERVAL
+        interval = envs.EVENMOE_ULTRAEP_REFRESH_INTERVAL
         self._ultraep_refresh_gate = RefreshGate(interval)
         logger.info(
             "UltraEP fast refresh enabled (interval=%d representative "
@@ -568,7 +568,7 @@ class MlbRoutingRuntime:
         in the eager forward).
 
         One EP collective for all 40 layers combined replaces the 40 per-layer
-        collectives that MLB's _global_logical_count would otherwise issue.
+        collectives that EvenMoE's _global_logical_count would otherwise issue.
         Running outside the graph means NCCL is never captured -- graphs only
         see the LP solve kernels reading from _logical_count_global.
         """
@@ -638,7 +638,7 @@ class MlbRoutingRuntime:
         # left to solve, so the LP is skipped outright and the rest see only the
         # experts they do not host.
         # vLLM pads the candidate map to MAX_EXPERT_REDUNDANCY + 1 (1024)
-        # columns whatever the configured redundancy, and MLB answers with a
+        # columns whatever the configured redundancy, and EvenMoE answers with a
         # table the same width as the candidates it was given. The kernel scans
         # that table with a compile-time loop, so handing over the padded width
         # would have made a share-table answer impossible to compile. Every
@@ -669,13 +669,13 @@ class MlbRoutingRuntime:
         # single-replica counts, candidates pointing at slots that hold other
         # experts. Routing through that is worse than not routing at all: it
         # sends tokens to the wrong expert instead of falling back. So the
-        # MLB-side tables are used only for layers a refresh has actually
+        # EvenMoE-side tables are used only for layers a refresh has actually
         # written; every other layer takes the framework's own candidates, which
         # is the same path a non-UltraEP policy takes and is always consistent
         # with physical_to_logical_map.
         if quota is not None and layer_id in self._ultraep_committed_layers:
             # The quota's replica columns are only meaningful against the
-            # candidate table MLB solved them from -- not vLLM's own
+            # candidate table EvenMoE solved them from -- not vLLM's own
             # candidates, independently rebuilt from physical_to_logical_map
             # and not guaranteed to share its width, let alone its ordering.
             assert self._ultraep_logical_to_physical is not None
@@ -701,7 +701,7 @@ class MlbRoutingRuntime:
     def _rebuild_default_replicas(self) -> None:
         """Synthesize the per-rank default replica table vLLM does not keep.
 
-        Only `static` replica routing reads it (MLB reports that through
+        Only `static` replica routing reads it (EvenMoE reports that through
         ``requires_rank_dispatch_map``), and it is recomputed only when a
         placement is committed -- never per forward.
         """
@@ -802,7 +802,7 @@ class MlbRoutingRuntime:
         self._rebuild_default_replicas()
 
     def announce_initial_placement(self) -> None:
-        """Tell MLB about the placement the model just loaded with.
+        """Tell EvenMoE about the placement the model just loaded with.
 
         The contract is "after initial weight loading **and** after each
         committed update"; SGLang does the first half in
@@ -814,14 +814,14 @@ class MlbRoutingRuntime:
             return
         num_layers = self._logical_to_physical_map.shape[0]
         self._commit_layers(range(num_layers))
-        logger.info("MLB: announced initial placement for %d layers", num_layers)
+        logger.info("EvenMoE: announced initial placement for %d layers", num_layers)
 
     def _commit_layers(self, layer_ids) -> None:
-        """Hand MLB the committed placement of the given layers."""
+        """Hand EvenMoE the committed placement of the given layers."""
         from evenmoe.core.types import PlacementSnapshot
 
         for layer_id in layer_ids:
-            self._mlb.on_placement_committed(
+            self._evenmoe.on_placement_committed(
                 PlacementSnapshot(
                     layer_id=layer_id,
                     num_logical_experts=self.num_logical_experts,
@@ -863,7 +863,7 @@ class MlbRoutingRuntime:
         here.  Refreshing all 40 layers stalled the worker for ~102 s, long
         enough for the peer's collective to time out and kill it.  SGLang
         avoids this by passing the framework's own ``update_layer_ids``
-        (``ModelRunner._notify_mlb_placement_committed``); vLLM does not track
+        (``ModelRunner._notify_evenmoe_placement_committed``); vLLM does not track
         them, so Glue diffs the maps before committing and passes the result.
         """
         # The nearest-replica table is *this* side's derived state, not the
@@ -885,7 +885,7 @@ class MlbRoutingRuntime:
             return
         self._commit_layers(changed_layer_ids)
         logger.info(
-            "MLB: refreshed placement state for %d/%d layers",
+            "EvenMoE: refreshed placement state for %d/%d layers",
             len(changed_layer_ids),
             self._logical_to_physical_map.shape[0],
         )
@@ -897,13 +897,13 @@ class MlbRoutingRuntime:
         layer_state: EplbLayerState,
         num_unpadded_tokens: torch.Tensor | None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-        """Ask MLB to route.
+        """Ask EvenMoE to route.
 
         Returns ``(replica_shares, physical_ids)``. Every replica policy
         resolves its own ids now, so the first element is always ``None`` --
         kept in the return shape because the caller's fused kernel still has a
         share-table mode (``HAS_REPLICA_PROB``) it did not stop supporting,
-        even though nothing on the MLB side asks for it any more.
+        even though nothing on the EvenMoE side asks for it any more.
         """
         shares = self.replica_shares(
             topk_ids, topk_weights, layer_state, num_unpadded_tokens
@@ -923,7 +923,7 @@ class MlbRoutingRuntime:
         Reads what the pipeline just decided rather than running it again:
         ``resolve_routing`` has already crossed the routing boundary for this
         layer, and Waterfill's answer came back in the same decision. Calling
-        MLB twice would double the only per-layer cost this integration has.
+        EvenMoE twice would double the only per-layer cost this integration has.
 
         None means "no policy answered", which the caller reads as "this
         rank" -- the placement the replicated MLP had.
@@ -946,7 +946,7 @@ class MlbRoutingRuntime:
 
         Gated on ``_ultraep_rank_quota_prefix`` already being allocated:
         those whole-model buffers are only created by ``plan_placement()``'s
-        slow-path solve (see ``mlb_runtime.py``'s ``plan_placement``), which
+        slow-path solve (see ``evenmoe_runtime.py``'s ``plan_placement``), which
         still owns this model's *initial* placement. This refresh writes
         only a per-layer slice into buffers that solve already allocated; it
         does nothing before that first solve has run.
@@ -960,8 +960,8 @@ class MlbRoutingRuntime:
         separate "pending" representation could go stale relative to what
         this just wrote.
 
-        The placement solve is this file's own (MLB's L1, through
-        ``self._mlb.plan_placement``); physically moving weight data to match
+        The placement solve is this file's own (EvenMoE's L1, through
+        ``self._evenmoe.plan_placement``); physically moving weight data to match
         it is ``_commit_placement_weights`` below, over ``EplbState``'s own P2P
         mover. The bridge between the two is explicit and is the solve's actual
         output: the before/after physical-to-logical map pair. No second
@@ -1064,7 +1064,7 @@ class MlbRoutingRuntime:
         if self._time_refresh:
             torch.accelerator.synchronize()
             _ts = time.perf_counter()
-        plan = self._mlb.plan_placement(request)
+        plan = self._evenmoe.plan_placement(request)
         if self._time_refresh:
             torch.accelerator.synchronize()
             self._solve_us.append((time.perf_counter() - _ts) * 1e6)
@@ -1107,7 +1107,7 @@ class MlbRoutingRuntime:
         self._timed_commit(layer_id, placement_change[0], placement_change[1])
 
     def _timed_commit(self, layer_id: int, old_np: Any, new_np: Any) -> None:
-        """``_commit_placement_weights``, wrapped in the MLB_TIME_REFRESH timing
+        """``_commit_placement_weights``, wrapped in the EVENMOE_TIME_REFRESH timing
         when it is armed: host issue time and device completion time of each
         commit, reported once with the solve times and then disarmed. Shared by
         the same-forward and the next-forward (lagged) apply paths."""
@@ -1136,7 +1136,7 @@ class MlbRoutingRuntime:
             idle = [d for m, d in self._commit_us if m == 0]
             moving = [(m, d) for m, d in self._commit_us if m > 0]
             logger.info(
-                "MLB refresh cost over %d refreshes: solve median=%.0f us "
+                "EvenMoE refresh cost over %d refreshes: solve median=%.0f us "
                 "p90=%.0f us | commits that moved nothing: n=%d median=%.0f us "
                 "| commits that moved slots: n=%d median slots=%.0f "
                 "median=%.0f us p90=%.0f us max=%.0f us",
@@ -1152,7 +1152,7 @@ class MlbRoutingRuntime:
                 max([d for _, d in moving], default=0.0),
             )
             logger.info(
-                "MLB commit host-vs-device: host median=%.0f us | "
+                "EvenMoE commit host-vs-device: host median=%.0f us | "
                 "device-complete median=%.0f us -- if the host figure is "
                 "well below the device one, the device is the binding "
                 "constraint and shaving host work changes nothing",
@@ -1298,7 +1298,7 @@ class MlbRoutingRuntime:
             if not self._ultraep_mover_warned:
                 self._ultraep_mover_warned = True
                 logger.info(
-                    "MLB weight sync: layer %d moves master slots (placement not "
+                    "EvenMoE weight sync: layer %d moves master slots (placement not "
                     "on the fixed-master layout); the generic mover handles it and "
                     "the fast path takes over from the next refresh",
                     layer_id,
@@ -1365,7 +1365,7 @@ class MlbRoutingRuntime:
         The decision to use symmetric memory is collective. Each rank first
         judges locally whether it can take part -- the module imports, and the
         EP group either sits on one host or runs on Blackwell-class devices
-        (taken as a multi-node NVLink fabric; ``MLB_ULTRAEP_MOVER=symm`` skips
+        (taken as a multi-node NVLink fabric; ``EVENMOE_ULTRAEP_MOVER=symm`` skips
         that heuristic) -- and the verdicts are combined with an all-reduce
         (min) over the EP group, so every rank either enters the rendezvous or
         none does. Without that step a rank whose handle exchange failed fell
@@ -1405,7 +1405,7 @@ class MlbRoutingRuntime:
         )
         if int(verdict.item()) == 0:
             logger.info(
-                "MLB weight sync: %s; using the direct send/recv mover on every rank",
+                "EvenMoE weight sync: %s; using the direct send/recv mover on every rank",
                 reason or "another EP rank cannot use symmetric memory",
             )
             self._ultraep_mover = "direct"
@@ -1432,7 +1432,7 @@ class MlbRoutingRuntime:
             hdl = symm.rendezvous(buf, group=ep.device_group)
         except Exception as exc:
             logger.warning(
-                "MLB weight sync: symmetric-memory rendezvous failed (%s); using "
+                "EvenMoE weight sync: symmetric-memory rendezvous failed (%s); using "
                 "the direct send/recv mover",
                 exc,
             )
@@ -1442,7 +1442,7 @@ class MlbRoutingRuntime:
         self._symm_expert_nbytes = off
         self._symm_buf, self._symm_hdl = buf, hdl
         logger.info(
-            "MLB weight sync: symmetric-memory mover ready "
+            "EvenMoE weight sync: symmetric-memory mover ready "
             "(%d replica slot(s) x %d MiB, 2 sets, %d tensors per expert)",
             n_rep,
             off >> 20,
@@ -1530,14 +1530,14 @@ class MlbRoutingRuntime:
         num_unpadded_tokens: torch.Tensor | None,
         routed_scaling_factor: float = 1.0,
     ) -> torch.Tensor | None:
-        """Ask MLB to route this layer, recording resolved ids as a side effect.
+        """Ask EvenMoE to route this layer, recording resolved ids as a side effect.
 
         Always returns ``None``: every replica policy resolves its own ids
         (``self._last_physical_ids``) rather than answering with a share table
         for this method to hand back. The resolved ids are what
         ``resolve_routing`` reads after this call returns.
 
-        ``routed_scaling_factor`` is plumbed but left at its default: MLB only
+        ``routed_scaling_factor`` is plumbed but left at its default: EvenMoE only
         reads it when it materializes a shared-expert decision into expanded
         ids, which is SGLang's contract. vLLM takes back the *rank* and builds
         the extra top-k column itself, applying 1/routed_scaling_factor as that
@@ -1554,7 +1554,7 @@ class MlbRoutingRuntime:
         layer_id = layer_state.moe_layer_idx
         if layer_id is None:
             raise RuntimeError(
-                "MLB routing requires EplbLayerState.moe_layer_idx; the layer "
+                "EvenMoE routing requires EplbLayerState.moe_layer_idx; the layer "
                 "was registered by a path that does not set it."
             )
 
@@ -1599,7 +1599,7 @@ class MlbRoutingRuntime:
         if self._ultraep_expert_weights is not None:
             self._ultraep_fast_refresh(layer_id, topk_ids, num_unpadded_tokens)
 
-        # Pass the PREVIOUS step's global count to MLB.  The stable tensor
+        # Pass the PREVIOUS step's global count to EvenMoE.  The stable tensor
         # slice has a fixed GPU address, so it is safe to use inside a
         # captured CUDA graph: on replay the LP solve reads whatever value
         # finalize_step_counts deposited before the graph was launched.
@@ -1617,7 +1617,7 @@ class MlbRoutingRuntime:
             torch.accelerator.synchronize()
             _t0 = time.perf_counter()
 
-        decision = self._mlb.route_tokens(
+        decision = self._evenmoe.route_tokens(
             to_routing_request(
                 layer_id=layer_id,
                 logical_topk_ids=topk_ids,
@@ -1636,7 +1636,7 @@ class MlbRoutingRuntime:
                 import statistics
 
                 logger.info(
-                    "MLB L2 solve cost: n=%d  median=%.0f us  p90=%.0f us  "
+                    "EvenMoE L2 solve cost: n=%d  median=%.0f us  p90=%.0f us  "
                     "mean=%.0f us",
                     len(self._l2_us),
                     statistics.median(self._l2_us),
@@ -1646,7 +1646,7 @@ class MlbRoutingRuntime:
                 self._l2_us.clear()
                 self._time_l2 = 0
 
-        # MLB_DUMP_LP=<dir> captures what the solve was given and what it
+        # EVENMOE_DUMP_LP=<dir> captures what the solve was given and what it
         # returned, so the achievable headroom can be computed offline instead
         # of inferred from end-to-end throughput. Diagnostic only. Unconditional
         # on which policy is active -- global_count/candidates/counts come from
@@ -1700,7 +1700,7 @@ class MlbRoutingRuntime:
         return None
 
 
-class VllmMlbIntegration:
+class VllmEvenMoeIntegration:
     """One balancer per engine, serving both placement and routing.
 
     SGLang gives an engine a single MoELoadBalancer and lets L1 and L2 share
@@ -1722,7 +1722,7 @@ class VllmMlbIntegration:
         self.algorithm = algorithm
         self._balancer_kwargs: dict | None = None
         self._balancer = None if algorithm else MoELoadBalancer()
-        self.routing: MlbRoutingRuntime | None = None
+        self.routing: EvenMoeRoutingRuntime | None = None
 
     def balancer(self):
         """The single MoELoadBalancer this engine uses."""
@@ -1740,7 +1740,7 @@ class VllmMlbIntegration:
                 )
         return self._balancer
 
-    def bind_routing(self, **kwargs) -> MlbRoutingRuntime:
+    def bind_routing(self, **kwargs) -> EvenMoeRoutingRuntime:
         """Create the routing runtime against this engine's balancer."""
         from evenmoe import MoELoadBalancer
 
@@ -1753,24 +1753,24 @@ class VllmMlbIntegration:
         self._balancer = MoELoadBalancer.from_algorithm(
             self.algorithm, **self._balancer_kwargs
         )
-        self.routing = MlbRoutingRuntime(
+        self.routing = EvenMoeRoutingRuntime(
             self.algorithm, balancer=self._balancer, **kwargs
         )
         return self.routing
 
 
-_integration: VllmMlbIntegration | None = None
+_integration: VllmEvenMoeIntegration | None = None
 
 
-def get_mlb_integration() -> VllmMlbIntegration:
+def get_evenmoe_integration() -> VllmEvenMoeIntegration:
     """The engine's integration, created on first use."""
     global _integration
     if _integration is None:
-        _integration = VllmMlbIntegration(mlb_l2_algorithm())
+        _integration = VllmEvenMoeIntegration(evenmoe_l2_algorithm())
     return _integration
 
 
-def set_mlb_integration(integration: VllmMlbIntegration | None) -> None:
+def set_evenmoe_integration(integration: VllmEvenMoeIntegration | None) -> None:
     global _integration, _runtime
     _integration = integration
     _runtime = None if integration is None else integration.routing
@@ -1807,7 +1807,7 @@ def l2_inapplicable_reason(algorithm: str, num_redundant_experts: int) -> str | 
     Answered from the env switch rather than from a built layer because this
     runs during configuration validation, before any model exists. A layer
     that then turns out not to be fusible (uneven split, EP disabled) simply
-    never asks MLB for a shared-expert rank -- the router checks its own
+    never asks EvenMoE for a shared-expert rank -- the router checks its own
     geometry before it calls.
     """
     if not algorithm:
@@ -1836,7 +1836,7 @@ def plan_placement(request):
     """Run L1 through the engine's balancer and hand back vLLM's one map."""
     from evenmoe.adapters.vllm import to_vllm_physical_to_logical
 
-    integration = get_mlb_integration()
+    integration = get_evenmoe_integration()
     plan = integration.balancer().plan_placement(request)
     # UltraEP is the only L1 policy that publishes this; every other plan's
     # metadata simply lacks the key, so this stays a no-op for them. Routing
@@ -1851,7 +1851,7 @@ def plan_placement(request):
     #
     # Stashed here rather than after the caller commits the weight move: no
     # forward can observe this quota paired with the placement it belongs to
-    # before that commit happens, because MlbEplbPolicy requires synchronous
+    # before that commit happens, because EvenMoeEplbPolicy requires synchronous
     # (use_async=False) rearrangement -- nothing else runs on this thread
     # between this return and register_logical_maps(). An async L1 path would
     # need this to move to the commit step instead.
@@ -1865,7 +1865,7 @@ def plan_placement(request):
         # All three come from the same plan whose physical_to_logical_map the
         # caller commits next, so every layer's tables are consistent with the
         # placement as of this moment. Say so: `_snapshot` routes a layer
-        # against MLB's tables only once it appears here, and leaving the set
+        # against EvenMoE's tables only once it appears here, and leaving the set
         # empty left this solve's routing unused until something else added the
         # layer. Nothing was observably wrong -- RefreshGate refreshes on a
         # layer's first call whatever the interval, so every layer was added on
@@ -1899,7 +1899,7 @@ def _reject_graphs_with_rearranging_placement_state(rearranges: bool) -> None:
     changes the layout, so a short benchmark can pass and a long serving run
     can fault. That is worth failing loudly for.
 
-    Both escapes keep MLB routing available: pin the placement (leave
+    Both escapes keep EvenMoE routing available: pin the placement (leave
     rearrangement off, which is how the reported LPLB numbers were measured),
     or run eager.
     """
@@ -1916,7 +1916,7 @@ def _reject_graphs_with_rearranging_placement_state(rearranges: bool) -> None:
     if compilation.cudagraph_mode.name == "NONE":
         return
     raise ValueError(
-        "VLLM_MLB_L2_ALGORITHM keeps per-layer solver state, and EPLB "
+        "VLLM_EVENMOE_L2_ALGORITHM keeps per-layer solver state, and EPLB "
         "rearrangement can change that state's layout. LPLB replaces its "
         "tensors on such a change, which a captured CUDA graph cannot follow "
         "-- replay then reads freed memory (Xid 43). Either disable "
@@ -1926,7 +1926,7 @@ def _reject_graphs_with_rearranging_placement_state(rearranges: bool) -> None:
     )
 
 
-def init_mlb_routing(
+def init_evenmoe_routing(
     *,
     algorithm: str,
     ep_size: int,
@@ -1940,7 +1940,7 @@ def init_mlb_routing(
     expert_weights: Any | None = None,
     expert_buffer: Any | None = None,
     communicator: Any | None = None,
-) -> MlbRoutingRuntime | None:
+) -> EvenMoeRoutingRuntime | None:
     """Create the routing runtime for a configured L2 algorithm.
 
     ``algorithm`` comes from ``EPLBConfig.l2_algorithm``, which has already
@@ -1960,7 +1960,7 @@ def init_mlb_routing(
     global _runtime
     if not algorithm:
         return None
-    integration = get_mlb_integration()
+    integration = get_evenmoe_integration()
     integration.algorithm = algorithm
     _runtime = integration.bind_routing(
         ep_size=ep_size,
@@ -1982,11 +1982,11 @@ def init_mlb_routing(
     return _runtime
 
 
-def get_mlb_routing() -> MlbRoutingRuntime | None:
+def get_evenmoe_routing() -> EvenMoeRoutingRuntime | None:
     return _runtime
 
 
-def reset_mlb_routing() -> None:
+def reset_evenmoe_routing() -> None:
     """Test hook. Releases the engine's integration along with the runtime."""
     global _runtime, _integration
     _runtime = None

@@ -571,10 +571,10 @@ class EplbState:
         # mapping kernel is bypassed at the routing boundary.
         #
         # Read from the config rather than the environment: EPLBConfig resolves
-        # $VLLM_MLB_L2_ALGORITHM once and clears it for placements the policy
+        # $VLLM_EVENMOE_L2_ALGORITHM once and clears it for placements the policy
         # cannot act on, so by here the answer already accounts for redundancy.
-        from vllm.distributed.eplb.mlb_runtime import (
-            init_mlb_routing,
+        from vllm.distributed.eplb.evenmoe_runtime import (
+            init_evenmoe_routing,
             l2_pipeline_capabilities,
         )
 
@@ -592,7 +592,7 @@ class EplbState:
                         "eplb_config.l2_algorithm also removes the conflict."
                     )
             ep_group = get_ep_group()
-            routing = init_mlb_routing(
+            routing = init_evenmoe_routing(
                 algorithm=l2_algorithm,
                 ep_size=ep_group.world_size,
                 ep_rank=ep_group.rank_in_group,
@@ -606,7 +606,7 @@ class EplbState:
                 # for its own periodic rearrangement. A policy that re-plans
                 # placement mid-run has to move weight to match it, and that is
                 # this file's machinery, not something a policy brings its own
-                # copy of -- see MlbRoutingRuntime._commit_placement_weights.
+                # copy of -- see EvenMoeRoutingRuntime._commit_placement_weights.
                 expert_buffer=expert_buffer,
                 communicator=communicator,
                 # A step interval that the run can actually reach means the
@@ -686,9 +686,9 @@ class EplbState:
         # graph; we all_reduce and move to _lplb_global_count here (outside
         # the graph, one collective for all layers).  This gives LP solve a
         # stable, up-to-date input without any NCCL inside the capture stream.
-        from vllm.distributed.eplb.mlb_runtime import get_mlb_routing
+        from vllm.distributed.eplb.evenmoe_runtime import get_evenmoe_routing
 
-        routing = get_mlb_routing()
+        routing = get_evenmoe_routing()
         if routing is not None:
             # Deliver any placement changes the async worker committed since the
             # last forward, on this thread, before anything routes against them.
@@ -1207,9 +1207,9 @@ class EplbState:
                         # Weights have moved and the live maps are updated, so
                         # a pluggable routing policy may now rebuild any
                         # placement-derived state.
-                        from vllm.distributed.eplb.mlb_runtime import get_mlb_routing
+                        from vllm.distributed.eplb.evenmoe_runtime import get_evenmoe_routing
 
-                        routing = get_mlb_routing()
+                        routing = get_evenmoe_routing()
                         if routing is not None:
                             routing.on_placement_committed(changed_layer_ids)
 
@@ -1510,7 +1510,7 @@ class EplbLayerState:
     Index of this layer among the model's MoE layers.
 
     The built-in mapping kernel is stateless and does not need it, but a
-    pluggable routing policy (see ``mlb_runtime``) keys its per-layer state by
+    pluggable routing policy (see ``evenmoe_runtime``) keys its per-layer state by
     it.  Recording it here is free: ``set_layer_state`` already receives it.
 
     Note that the layer state deliberately does *not* carry

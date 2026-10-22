@@ -169,9 +169,9 @@ def test_matching_the_collective_does_not_publish_zero_counts():
     """
     import torch
 
-    from vllm.distributed.eplb.mlb_runtime import MlbRoutingRuntime
+    from vllm.distributed.eplb.evenmoe_runtime import EvenMoeRoutingRuntime
 
-    rt = MlbRoutingRuntime.__new__(MlbRoutingRuntime)
+    rt = EvenMoeRoutingRuntime.__new__(EvenMoeRoutingRuntime)
     rt._logical_count_local = torch.zeros(2, 8)
     rt._logical_count_global = torch.zeros(2, 8)
     rt._logical_count_ready = False

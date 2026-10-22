@@ -292,19 +292,19 @@ if TYPE_CHECKING:
     VLLM_DEEPEP_V2_RDMA_GBS: float = 0.0
     VLLM_DEEPEP_V2_NVLINK_GBS: float = 0.0
     VLLM_EPLB_DUMP_LOAD_PATH: str | None = None
-    VLLM_MLB_L1_ALGORITHM: str = ""
-    VLLM_MLB_L2_ALGORITHM: str = ""
-    MLB_ULTRAEP_MOVER: str = "direct"
-    MLB_ULTRAEP_LAGGED_APPLY: bool = False
-    MLB_ULTRAEP_REFRESH_INTERVAL: int = 64
-    MLB_ULTRAEP_REFRESH_MIN_TOKENS: int = 512
-    MLB_KEEP_ZERO_REDUNDANCY_COUNTS: bool = False
-    MLB_FRESH_COUNTS: bool = False
-    MLB_DUMP_LP: str | None = None
-    MLB_DUMP_LP_N: int = 120
-    MLB_DUMP_LP_SKIP: int = 0
-    MLB_TIME_L2: int = 0
-    MLB_TIME_REFRESH: int = 0
+    VLLM_EVENMOE_L1_ALGORITHM: str = ""
+    VLLM_EVENMOE_L2_ALGORITHM: str = ""
+    EVENMOE_ULTRAEP_MOVER: str = "direct"
+    EVENMOE_ULTRAEP_LAGGED_APPLY: bool = False
+    EVENMOE_ULTRAEP_REFRESH_INTERVAL: int = 64
+    EVENMOE_ULTRAEP_REFRESH_MIN_TOKENS: int = 512
+    EVENMOE_KEEP_ZERO_REDUNDANCY_COUNTS: bool = False
+    EVENMOE_FRESH_COUNTS: bool = False
+    EVENMOE_DUMP_LP: str | None = None
+    EVENMOE_DUMP_LP_N: int = 120
+    EVENMOE_DUMP_LP_SKIP: int = 0
+    EVENMOE_TIME_L2: int = 0
+    EVENMOE_TIME_REFRESH: int = 0
     VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE: bool = False
     VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL: bool = False
     VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE: bool = True
@@ -1650,7 +1650,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # after that rank's routed slots, so a shared-expert token has exactly one
     # owning rank -- the invariant DeepEP's `expert_id // experts_per_rank`
     # rank derivation relies on. This is what gives a load balancer something
-    # to decide (MLB's Waterfill L2 picks that rank); with the shared expert
+    # to decide (EvenMoE's Waterfill L2 picks that rank); with the shared expert
     # replicated per rank there is no choice to make.
     #
     # Distinct from VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS, which fuses the
@@ -2084,32 +2084,32 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # placement it was recorded under) to <path>.rearr<NNN>.pt at every
     # rearrangement step, from EP rank 0. Observation only; off by default.
     "VLLM_EPLB_DUMP_LOAD_PATH": lambda: os.getenv("VLLM_EPLB_DUMP_LOAD_PATH"),
-    # EvenMoE, formerly MoE Load Balancer (--eplb-config policy="mlb") knobs.
+    # EvenMoE, formerly MoE Load Balancer (--eplb-config policy="evenmoe") knobs.
     # L1 = expert placement algorithm run at each rearrangement ("auto" picks
     # the balancer's default for the model's expert-group layout); L2 = the
     # per-token replica routing expression, e.g. "static", "lplb",
     # "static+waterfill", "ultraep+waterfill". Empty keeps vLLM's built-in
     # behaviour. The L2 value is also the default of eplb_config.l2_algorithm.
-    "VLLM_MLB_L1_ALGORITHM": lambda: os.getenv("VLLM_MLB_L1_ALGORITHM", "").strip(),
-    "VLLM_MLB_L2_ALGORITHM": lambda: os.getenv("VLLM_MLB_L2_ALGORITHM", "").strip(),
+    "VLLM_EVENMOE_L1_ALGORITHM": lambda: os.getenv("VLLM_EVENMOE_L1_ALGORITHM", "").strip(),
+    "VLLM_EVENMOE_L2_ALGORITHM": lambda: os.getenv("VLLM_EVENMOE_L2_ALGORITHM", "").strip(),
     # How UltraEP's fast refresh moves re-solved replica weights between EP
     # ranks: "direct" (pairwise send/recv over the EPLB communicator),
     # "symm" (one-sided puts through torch symmetric memory; needs one host
     # or a multi-node NVLink fabric) or "auto" (symm when every rank agrees
     # it can, otherwise direct).
-    "MLB_ULTRAEP_MOVER": lambda: os.getenv("MLB_ULTRAEP_MOVER", "direct").strip(),
+    "EVENMOE_ULTRAEP_MOVER": lambda: os.getenv("EVENMOE_ULTRAEP_MOVER", "direct").strip(),
     # 1: a plan solved on one forward lands on the layer's next forward, which
     # avoids a per-layer device sync at the price of one step of staleness.
-    "MLB_ULTRAEP_LAGGED_APPLY": lambda: (
-        os.getenv("MLB_ULTRAEP_LAGGED_APPLY", "0").strip() != "0"
+    "EVENMOE_ULTRAEP_LAGGED_APPLY": lambda: (
+        os.getenv("EVENMOE_ULTRAEP_LAGGED_APPLY", "0").strip() != "0"
     ),
     # Re-solve placement and quota every N representative batches; a batch is
     # representative when it routes at least MIN_TOKENS tokens.
-    "MLB_ULTRAEP_REFRESH_INTERVAL": lambda: int(
-        os.getenv("MLB_ULTRAEP_REFRESH_INTERVAL", "64")
+    "EVENMOE_ULTRAEP_REFRESH_INTERVAL": lambda: int(
+        os.getenv("EVENMOE_ULTRAEP_REFRESH_INTERVAL", "64")
     ),
-    "MLB_ULTRAEP_REFRESH_MIN_TOKENS": lambda: int(
-        os.getenv("MLB_ULTRAEP_REFRESH_MIN_TOKENS", "512")
+    "EVENMOE_ULTRAEP_REFRESH_MIN_TOKENS": lambda: int(
+        os.getenv("EVENMOE_ULTRAEP_REFRESH_MIN_TOKENS", "512")
     ),
     # Diagnostics, off by default. KEEP_ZERO_REDUNDANCY_COUNTS keeps the
     # per-step logical count collective with no redundant experts (where the
@@ -2119,15 +2119,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # DUMP_LP_N calls after skipping DUMP_LP_SKIP into that directory;
     # TIME_L2 / TIME_REFRESH time N routing calls / N refreshes with device
     # syncs and log a summary once.
-    "MLB_KEEP_ZERO_REDUNDANCY_COUNTS": lambda: (
-        os.getenv("MLB_KEEP_ZERO_REDUNDANCY_COUNTS", "0") == "1"
+    "EVENMOE_KEEP_ZERO_REDUNDANCY_COUNTS": lambda: (
+        os.getenv("EVENMOE_KEEP_ZERO_REDUNDANCY_COUNTS", "0") == "1"
     ),
-    "MLB_FRESH_COUNTS": lambda: os.getenv("MLB_FRESH_COUNTS", "0") == "1",
-    "MLB_DUMP_LP": lambda: os.getenv("MLB_DUMP_LP") or None,
-    "MLB_DUMP_LP_N": lambda: int(os.getenv("MLB_DUMP_LP_N", "120")),
-    "MLB_DUMP_LP_SKIP": lambda: int(os.getenv("MLB_DUMP_LP_SKIP", "0")),
-    "MLB_TIME_L2": lambda: int(os.getenv("MLB_TIME_L2", "0")),
-    "MLB_TIME_REFRESH": lambda: int(os.getenv("MLB_TIME_REFRESH", "0")),
+    "EVENMOE_FRESH_COUNTS": lambda: os.getenv("EVENMOE_FRESH_COUNTS", "0") == "1",
+    "EVENMOE_DUMP_LP": lambda: os.getenv("EVENMOE_DUMP_LP") or None,
+    "EVENMOE_DUMP_LP_N": lambda: int(os.getenv("EVENMOE_DUMP_LP_N", "120")),
+    "EVENMOE_DUMP_LP_SKIP": lambda: int(os.getenv("EVENMOE_DUMP_LP_SKIP", "0")),
+    "EVENMOE_TIME_L2": lambda: int(os.getenv("EVENMOE_TIME_L2", "0")),
+    "EVENMOE_TIME_REFRESH": lambda: int(os.getenv("EVENMOE_TIME_REFRESH", "0")),
     # Force DeepEP to use intranode kernel for inter-node communication in
     # high throughput mode. This is useful archive higher prefill throughput
     # on system supports multi-node nvlink (e.g GB200).

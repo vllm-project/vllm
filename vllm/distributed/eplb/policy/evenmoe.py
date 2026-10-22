@@ -2,19 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """vLLM-owned glue for EvenMoE (the framework-decoupled MoE Load Balancer).
 
-EvenMoE (``evenmoe``; MLB below) implements expert-placement and token-routing
+EvenMoE (``evenmoe``) implements expert-placement and token-routing
 policies once, framework-neutrally, and each serving framework keeps a thin
 adapter.  This module is that adapter for vLLM's L1 placement slot: it
-translates :class:`AbstractEplbPolicy` arguments into an MLB
-``PlacementRequest``, runs the selected MLB policy, and translates the result
+translates :class:`AbstractEplbPolicy` arguments into an EvenMoE
+``PlacementRequest``, runs the selected EvenMoE policy, and translates the result
 back into the ``physical_to_logical_map`` vLLM expects.
 
-Enable with ``--eplb-config '{"policy": "mlb", "use_async": false}'``.
-The MLB placement algorithm is selected with ``VLLM_MLB_L1_ALGORITHM``
+Enable with ``--eplb-config '{"policy": "evenmoe", "use_async": false}'``.
+The EvenMoE placement algorithm is selected with ``VLLM_EVENMOE_L1_ALGORITHM``
 (default ``auto``); see ``evenmoe`` for the supported names.
 
 Note that ``use_async`` must be disabled: vLLM's async rearrangement path is
-validated only against the built-in policy (see ``EPLBConfig``), and MLB's
+validated only against the built-in policy (see ``EPLBConfig``), and EvenMoE's
 planner runs synchronously on the caller's thread.
 
 ``ultraep`` places redundant replicas by which *rank* is overloaded, not just
@@ -40,14 +40,14 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 DEFAULT_ALGORITHM = "auto"
-ALGORITHM_ENV = "VLLM_MLB_L1_ALGORITHM"
+ALGORITHM_ENV = "VLLM_EVENMOE_L1_ALGORITHM"
 
 
 def _algorithm() -> str:
-    return envs.VLLM_MLB_L1_ALGORITHM or DEFAULT_ALGORITHM
+    return envs.VLLM_EVENMOE_L1_ALGORITHM or DEFAULT_ALGORITHM
 
 
-class MlbEplbPolicy(AbstractEplbPolicy):
+class EvenMoeEplbPolicy(AbstractEplbPolicy):
     """Delegate expert placement to the EvenMoE core."""
 
     @classmethod
@@ -67,13 +67,13 @@ class MlbEplbPolicy(AbstractEplbPolicy):
         ep_rank: int | None = None,
     ) -> torch.Tensor:
         try:
-            from vllm.distributed.eplb.mlb_runtime import (
+            from vllm.distributed.eplb.evenmoe_runtime import (
                 placement_request,
                 plan_placement,
             )
         except ImportError as exc:  # pragma: no cover - depends on environment
             raise ImportError(
-                "EPLB policy 'mlb' requires the evenmoe package (formerly "
+                "EPLB policy 'evenmoe' requires the evenmoe package (formerly "
                 "moe-load-balancer). Install it into this environment with "
                 "`pip install -e /path/to/evenmoe --no-deps`."
             ) from exc
@@ -88,7 +88,7 @@ class MlbEplbPolicy(AbstractEplbPolicy):
         logical_count = (
             weight.float().cpu() if per_rank_weight is None else per_rank_weight.float()
         )
-        # vLLM passes num_groups=0 for models without expert groups; MLB
+        # vLLM passes num_groups=0 for models without expert groups; EvenMoE
         # expresses "no grouping" as a single group.
         request = placement_request(
             logical_count,
@@ -111,10 +111,10 @@ class MlbEplbPolicy(AbstractEplbPolicy):
         phy2log, plan = plan_placement(request)
         phy2log = phy2log.cpu().to(torch.int64)
 
-        # MLB's L1 policies do not consume a previous placement, so the
+        # EvenMoE's L1 policies do not consume a previous placement, so the
         # slot-preservation pass that the built-in policy performs inside
         # rebalance_experts is applied here instead.  It only permutes slots
-        # within a rank, so the placement MLB decided (which logical experts
+        # within a rank, so the placement EvenMoE decided (which logical experts
         # live on which rank, and how many replicas each gets) is unchanged --
         # only their slot positions are, which is what avoids weight copies.
         if old_global_expert_indices is not None:
@@ -127,7 +127,7 @@ class MlbEplbPolicy(AbstractEplbPolicy):
             )
 
         logger.info_once(
-            "EPLB placement delegated to MLB (algorithm=%s, resolved=%s)",
+            "EPLB placement delegated to EvenMoE (algorithm=%s, resolved=%s)",
             algorithm,
             plan.metadata.get("resolved_policy", "unknown"),
         )

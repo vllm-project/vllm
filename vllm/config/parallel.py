@@ -37,7 +37,7 @@ _NUMACTL_CPUSET_PATTERN = re.compile(r"^\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*$")
 ExpertPlacementStrategy = Literal["linear", "round_robin"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
-EPLBPolicyOption = Literal["default", "mlb"]
+EPLBPolicyOption = Literal["default", "evenmoe"]
 DCPCommBackend = Literal["ag_rs", "a2a"]
 EPLBCommunicatorBackend = Literal[
     "torch_nccl", "torch_gloo", "torch_xccl", "nixl", "pynccl"
@@ -97,7 +97,7 @@ class EPLBConfig:
     l2_algorithm: str = ""
     """EvenMoE routing expression for the L2 stage, which decides
     which *replica* of a logical expert each token goes to. Empty leaves vLLM's
-    built-in choice in place. Defaults to ``$VLLM_MLB_L2_ALGORITHM``."""
+    built-in choice in place. Defaults to ``$VLLM_EVENMOE_L2_ALGORITHM``."""
 
     communicator: EPLBCommunicatorBackend | None = None
     """
@@ -118,7 +118,7 @@ class EPLBConfig:
     When set, the initial physical_to_logical_map is loaded from this file
     instead of using the trivial (uniform) assignment.  This is the vLLM
     equivalent of SGLang's ``--init-expert-location``: profile once, save the
-    MLB-optimised placement, then start production with that placement pre-loaded
+    EvenMoE-optimised placement, then start production with that placement pre-loaded
     so LPLB has hot experts already replicated.
 
     The file must have been written by ``save_placement_path`` on a model with
@@ -159,7 +159,7 @@ class EPLBConfig:
             raise ValueError("log_balancedness_interval must be greater than 0.")
 
         if not self.l2_algorithm:
-            self.l2_algorithm = envs.VLLM_MLB_L2_ALGORITHM
+            self.l2_algorithm = envs.VLLM_EVENMOE_L2_ALGORITHM
 
         return self
 
@@ -643,7 +643,7 @@ class ParallelConfig:
         # still zero; gating on enable_eplb keeps such instances quiet, and a
         # run without EPLB has no routing boundary for the policy to sit in.
         if self.enable_eplb and self.eplb_config.l2_algorithm:
-            from vllm.distributed.eplb.mlb_runtime import l2_inapplicable_reason
+            from vllm.distributed.eplb.evenmoe_runtime import l2_inapplicable_reason
 
             reason = l2_inapplicable_reason(
                 self.eplb_config.l2_algorithm,

@@ -183,7 +183,7 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
             )
             prob_slots = replica_prob.shape[1]
             logger.info_once(
-                "MLB replica-share routing active: table width %d, map width %d",
+                "EvenMoE replica-share routing active: table width %d, map width %d",
                 prob_slots,
                 map_slots,
             )
@@ -195,7 +195,7 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
             )
             physical_ids = physical_ids.contiguous().to(torch.int32)
             logger.info_once(
-                "MLB direct-dispatch routing active: the policy resolves "
+                "EvenMoE direct-dispatch routing active: the policy resolves "
                 "replicas itself; load recording stays in this kernel"
             )
         _eplb_map_and_record_i32_kernel[grid](
@@ -240,9 +240,9 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
         replica_prob = None
         physical_ids = None
         if layer_state is not None and topk_weights is not None:
-            from vllm.distributed.eplb.mlb_runtime import get_mlb_routing
+            from vllm.distributed.eplb.evenmoe_runtime import get_evenmoe_routing
 
-            routing = get_mlb_routing()
+            routing = get_evenmoe_routing()
             # A policy that decides from the committed placement alone has
             # nothing to add per forward: its answer was already materialised
             # into a one-column candidate map when the placement committed, so
@@ -471,7 +471,7 @@ class BaseRouter(FusedMoERouter):
         """Re-map routed ids into the widened space and append the shared slot.
 
         The home rank comes from an L2 policy when one routes the shared
-        expert (MLB's Waterfill), and is this rank otherwise. Falling back to
+        expert (EvenMoE's Waterfill), and is this rank otherwise. Falling back to
         this rank rather than refusing to run keeps the fusion testable on its
         own: it places the shared expert exactly where the replicated MLP did,
         so any output difference is the dispatch detour and not a routing
@@ -486,9 +486,9 @@ class BaseRouter(FusedMoERouter):
             eplb_state is not None
             and eplb_state.num_unpadded_tokens_tensors is not None
         ):
-            from vllm.distributed.eplb.mlb_runtime import get_mlb_routing
+            from vllm.distributed.eplb.evenmoe_runtime import get_evenmoe_routing
 
-            routing = get_mlb_routing()
+            routing = get_evenmoe_routing()
             if routing is not None and routing.routes_shared_expert:
                 shared_rank = routing.resolve_shared_expert_rank(
                     topk_ids,

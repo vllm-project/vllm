@@ -300,7 +300,7 @@ def FusedMoEFactory(
             "shared expert is given a constant weight, which is only correct "
             "when the routed weights sum to 1. This model routes with "
             "renormalize=False. Unset VLLM_FUSE_SHARED_EXPERTS (and drop "
-            "waterfill from VLLM_MLB_L2_ALGORITHM, which turns fusion on) to "
+            "waterfill from VLLM_EVENMOE_L2_ALGORITHM, which turns fusion on) to "
             "keep the shared expert replicated per rank."
         )
 

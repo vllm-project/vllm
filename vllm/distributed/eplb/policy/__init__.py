@@ -6,11 +6,11 @@ from vllm.config.parallel import EPLBPolicyOption
 
 from .abstract import AbstractEplbPolicy
 from .default import DefaultEplbPolicy
-from .mlb import MlbEplbPolicy
+from .evenmoe import EvenMoeEplbPolicy
 
 EPLB_POLICIES: dict[str, type[AbstractEplbPolicy]] = {
     "default": DefaultEplbPolicy,
-    "mlb": MlbEplbPolicy,
+    "evenmoe": EvenMoeEplbPolicy,
 }
 
 # Ensure that the EPLB_POLICIES keys match the EPLBPolicyOption values
@@ -20,5 +20,5 @@ __all__ = [
     "AbstractEplbPolicy",
     "DefaultEplbPolicy",
     "EPLB_POLICIES",
-    "MlbEplbPolicy",
+    "EvenMoeEplbPolicy",
 ]
