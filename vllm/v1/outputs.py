@@ -365,6 +365,15 @@ class AsyncModelRunnerOutput(ABC):
         """
         pass
 
+    @abstractmethod
+    def get_kv_connector_output(self) -> KVConnectorOutput | None:
+        """Get the underlying kv_connector_output.
+
+        When get_output() fails, this is used to salvage the step's KV
+        output instead of losing it with the failure.
+        """
+        pass
+
 
 @dataclass
 class DraftTokenIds:
