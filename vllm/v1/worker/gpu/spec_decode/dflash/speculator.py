@@ -902,12 +902,16 @@ def prepare_dflash_inputs(
     # serial iterations in one program. Sizing from the span instead makes it
     # 16. The cap is higher than the main kernel's 256 because these are plain
     # contiguous fills with no per-element index arithmetic.
+    #
+    # No clamp on pad_span: num_reqs <= max_num_reqs (the pad loops below
+    # already assume it -- they run `range(num_reqs, max_num_reqs)`), so the
+    # first term is >= 1 and the max is never 0.
     pad_span = max(
         max_num_reqs + 1 - num_reqs,
         (max_num_reqs - num_reqs) * num_speculative_steps,
         max_num_tokens - num_reqs * num_query_per_req,
     )
-    PAD_BLOCK_SIZE = min(1024, triton.next_power_of_2(max(1, pad_span)))
+    PAD_BLOCK_SIZE = min(1024, triton.next_power_of_2(pad_span))
     _prepare_dflash_inputs_kernel[(num_reqs, num_blocks)](
         input_buffers.input_ids,
         input_buffers.positions,
