@@ -5,6 +5,7 @@
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import direct_register_custom_op
 
 
 # seqlen is not specialized: image sizes vary per request.
@@ -37,23 +38,7 @@ def _packed_qk_rope_kernel(
     tl.store(base + rk[None, :], tl.interleave(o0, o1), mask=mask_x)
 
 
-def packed_qk_rope_(xqkv: torch.Tensor, freqs_cis: torch.Tensor) -> None:
-    """Rotate Q and K in place inside a packed QKV buffer.
-
-    Args:
-        xqkv: contiguous (seqlen, 3, nheads, headdim); only the Q and K
-            slices are rotated.
-        freqs_cis: contiguous (seqlen, headdim // 2) complex64 rotary freqs,
-            read through its interleaved re/im fp32 view.
-
-    Matches ``ApplyRotaryEmb(enable_fp32_compute=True)`` applied to Q and K
-    separately to within one ULP, but in one kernel with ~5x less memory
-    traffic. Both compute in fp32; the gap is which product the compiler
-    keeps exact inside the fused multiply-add, which differs per backend.
-    Requires triton: callers must check HAS_TRITON and use the unfused path
-    otherwise. Contract violations raise.
-
-    """
+def _packed_qk_rope_impl(xqkv: torch.Tensor, freqs_cis: torch.Tensor) -> None:
     assert xqkv.ndim == 4 and xqkv.size(1) == 3, xqkv.shape
     assert xqkv.is_contiguous(), xqkv.shape
     assert freqs_cis.ndim == 2 and freqs_cis.is_contiguous(), freqs_cis.shape
@@ -81,3 +66,35 @@ def packed_qk_rope_(xqkv: torch.Tensor, freqs_cis: torch.Tensor) -> None:
         BLOCK_M=BLOCK_M,
         num_warps=2 if rotary_dim <= 64 else 4,
     )
+
+
+def _packed_qk_rope_fake(xqkv: torch.Tensor, freqs_cis: torch.Tensor) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="packed_qk_rope",
+    op_func=_packed_qk_rope_impl,
+    mutates_args=["xqkv"],
+    fake_impl=_packed_qk_rope_fake,
+)
+
+
+def packed_qk_rope_(xqkv: torch.Tensor, freqs_cis: torch.Tensor) -> None:
+    """Rotate Q and K in place inside a packed QKV buffer.
+
+    Args:
+        xqkv: contiguous (seqlen, 3, nheads, headdim); only the Q and K
+            slices are rotated.
+        freqs_cis: contiguous (seqlen, headdim // 2) complex64 rotary freqs,
+            read through its interleaved re/im fp32 view.
+
+    Matches ``ApplyRotaryEmb(enable_fp32_compute=True)`` applied to Q and K
+    separately to within one ULP, but in one kernel with ~5x less memory
+    traffic. Both compute in fp32; the gap is which product the compiler
+    keeps exact inside the fused multiply-add, which differs per backend.
+    Requires triton: callers must check HAS_TRITON and use the unfused path
+    otherwise. Contract violations raise.
+
+    """
+    torch.ops.vllm.packed_qk_rope(xqkv, freqs_cis)
