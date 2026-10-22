@@ -305,6 +305,12 @@ class Scheduler(SchedulerInterface):
         )
         self.prefix_replay_tokens = replay_windows.pop() if replay_windows else 0
         self.num_prefill_lookahead = vllm_config.num_prefill_lookahead_tokens
+        # The V2 model runner skips drafting in steps where no scheduled request
+        # can use the drafts. Only drafters with their own forward pass reserve
+        # lookahead slots.
+        self.can_skip_drafts = (
+            self.num_lookahead_tokens > 0 and vllm_config.use_v2_model_runner
+        )
         self.dynamic_sd_lookup: list[int] | None = None
         if speculative_config is not None:
             if speculative_config.num_speculative_tokens_per_batch_size:
@@ -470,6 +476,50 @@ class Scheduler(SchedulerInterface):
             {} if self.log_stats and self.connector is not None else None
         )
         self._kv_fetch_counts: dict[str, int] = dict.fromkeys(KV_FETCH_STAGES, 0)
+
+    def _drafts_unused(
+        self, request: Request, num_computed_tokens: int, num_new_tokens: int
+    ) -> bool:
+        """Whether the drafts proposed for `request` after this step are sure to
+        go unused.
+
+        Drafts proposed after a step are verified in the request's next decode
+        step. They go unused when no such step follows, in two cases:
+
+        1. This step is a non-final prefill chunk. It samples no token, and the
+           scheduler drops drafts proposed after a prefill chunk.
+        2. This step samples the request's last output token: even if every
+           draft is rejected, the request reaches `max_tokens` and finishes.
+
+        Stop tokens and stop strings also end requests, but they cannot be known
+        in advance. This returns True only when it is sure.
+
+        The model runner proposes no drafts (K=0) in a step where this is True
+        for every scheduled request on every DP rank.
+
+        Args:
+            request: A request scheduled in this step.
+            num_computed_tokens: Tokens computed before this step, including
+                prefix-cache and KV-connector hits for a newly admitted request.
+            num_new_tokens: Tokens scheduled for this step.
+
+        """
+        # Case 1: a non-final prefill chunk stops before the request's last
+        # known token, so this step samples nothing.
+        if num_computed_tokens + num_new_tokens < request.num_tokens:
+            return True
+
+        # Case 2: this step samples the request's last output token. Drafts may
+        # all be rejected, so count only the output tokens the request is sure
+        # to have once this step finishes: the verified ones, plus one from each
+        # step that samples. This step samples one.
+        min_num_output_tokens = request.num_output_tokens + 1
+        if request.num_output_placeholders > 0:
+            # Async scheduling: a step that samples is still in flight, and it
+            # adds one more.
+            min_num_output_tokens += 1
+        # Reaching max_tokens finishes the request, so no step verifies the drafts.
+        return min_num_output_tokens >= request.max_tokens
 
     def _mamba_block_aligned_split(
         self,
@@ -652,6 +702,9 @@ class Scheduler(SchedulerInterface):
         encoder_compute_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
+        # Whether a request scheduled this step can use the drafts proposed after
+        # it. Stays set if that request is preempted later in the step.
+        drafts_needed = not self.can_skip_drafts
         # Whether the running batch contains any prefill requests.
         prefill_scheduled = False
         # Whether a waiting request was admitted with prompt left to compute.
@@ -912,6 +965,9 @@ class Scheduler(SchedulerInterface):
             token_budget -= num_new_tokens
             input_budget -= num_new_tokens + draft_slots
             req_index += 1
+            drafts_needed = drafts_needed or not self._drafts_unused(
+                request, request.num_computed_tokens, num_new_tokens
+            )
 
             # Speculative decode related.
             if request.spec_token_ids:
@@ -1438,6 +1494,9 @@ class Scheduler(SchedulerInterface):
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
                 self._set_kv_fetch_stage(request, None)
+                drafts_needed = drafts_needed or not self._drafts_unused(
+                    request, num_computed_tokens, num_new_tokens
+                )
                 if pad_spec_decode:
                     assert num_new_tokens == 1 + self.num_spec_tokens
                     scheduled_spec_decode_tokens[request_id] = [
@@ -1605,6 +1664,7 @@ class Scheduler(SchedulerInterface):
             kv_cache_block_copies=pending_kv_cache_block_copies,
             kv_connector_block_state=kv_connector_block_state,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
+            skip_drafts=not drafts_needed,
             ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
         )
 
