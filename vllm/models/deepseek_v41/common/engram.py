@@ -59,7 +59,7 @@ from vllm.distributed.device_communicators.shm_broadcast import (
     SHM_PATH,
     check_shm_free_space,
 )
-from vllm.distributed.parallel_state import GroupCoordinator
+from vllm.distributed.parallel_state import GroupCoordinator, in_the_same_node_as
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
@@ -994,7 +994,22 @@ class ParallelEngramEmbedding(nn.Module):
             and self.dp_size > 1
             and get_tensor_model_parallel_world_size() == 1
         ):
-            peer_group, self.dp_size = get_engram_dp_group(), 1
+            group = get_engram_dp_group()
+            assert group is not None
+            # Cross-node groups require embedding_across_dp's single NVLink domain;
+            # node-local groups without NVLink P2P keep the DP collectives.
+            peer = not all(in_the_same_node_as(group.cpu_group, source_rank=0))
+            if not peer:
+                physical_id = current_platform.visible_device_id_to_physical_device_id(
+                    torch.accelerator.current_device_index()
+                )
+                physical_ids = [None] * group.world_size
+                torch.distributed.all_gather_object(
+                    physical_ids, physical_id, group=group.cpu_group
+                )
+                peer = current_platform.is_fully_connected(physical_ids)
+            if peer:
+                peer_group, self.dp_size = group, 1
         if cpu_offload and not is_uva_available():
             raise RuntimeError("Engram CPU offload requires UVA support")
         self._views: tuple[torch.Tensor, torch.Tensor] | None = None

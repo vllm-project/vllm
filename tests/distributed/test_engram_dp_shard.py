@@ -215,6 +215,13 @@ def _worker(rank: int, tp_size: int, port: int) -> None:
         for failure in ("create", "open", "mmap", "register", "pinned", None):
             _check_shared_storage_lifetime_and_failures(failure)
 
+        # GPU peer reads need NVLink P2P, which CI's L4s lack.
+        p2p = current_platform.is_fully_connected(
+            [
+                current_platform.visible_device_id_to_physical_device_id(i)
+                for i in range(WORLD_SIZE)
+            ]
+        )
         # Reuse the processes and communication groups across storage modes.
         for (cpu_offload, dp_shared_memory), n_heads, sequence_parallel in product(
             [(False, False), (True, False), (True, True)],
@@ -227,7 +234,11 @@ def _worker(rank: int, tp_size: int, port: int) -> None:
                 dp_shared_memory,
                 n_heads,
                 sequence_parallel,
+                p2p,
             )
+        if tp_size == 1 and p2p:
+            # Without NVLink P2P, GPU tables keep the DP collectives.
+            _check_table(vllm_config, False, False, 8, False, p2p=False)
         if tp_size == 1:
             _check_fp8_batch(vllm_config)
     finally:
@@ -395,7 +406,7 @@ def _check_shared_storage_lifetime_and_failures(failure):
 
 
 def _check_table(
-    vllm_config, cpu_offload, dp_shared_memory, n_heads, sequence_parallel
+    vllm_config, cpu_offload, dp_shared_memory, n_heads, sequence_parallel, p2p
 ):
     parallel = vllm_config.parallel_config
     dp_size, tp_size = parallel.data_parallel_size, parallel.tensor_parallel_size
@@ -448,6 +459,9 @@ def _check_table(
                 init_patch.setattr(
                     engram_ops, "get_current_vllm_config", lambda: component_config
                 )
+                init_patch.setattr(
+                    engram_ops.current_platform, "is_fully_connected", lambda _: p2p
+                )
                 engram = Engram(
                     config,
                     quant_config=None,
@@ -471,7 +485,7 @@ def _check_table(
                 )
             # Shared host tables and GPU peer reads look up only local tokens.
             local = layer.dp_size == 1
-            assert (layer.peer_rows > 0) == (not cpu_offload and tp_size == 1)
+            assert (layer.peer_rows > 0) == (not cpu_offload and tp_size == 1 and p2p)
             if dp_shared_memory:
                 assert layer.dp_size == 1
                 assert layer.head_start == tp_rank * layer.part_n_hash_cols
