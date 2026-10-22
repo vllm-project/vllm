@@ -11,7 +11,6 @@ import pytest
 import torch
 
 from vllm.config import ModelConfig
-from vllm.exceptions import VLLMValidationError
 from vllm.multimodal.media import AudioEmbeddingMediaIO, ImageEmbeddingMediaIO
 from vllm.renderers.embed_utils import safe_load_prompt_embeds
 from vllm.utils.sparse_utils import check_sparse_tensor_invariants_threadsafe
@@ -55,7 +54,7 @@ class TestNegativeControlWithoutRace:
 
     def test_malicious_sparse_rejected_by_prompt_loader(self, model_config):
         encoded = _encode_tensor(_create_malicious_sparse_tensor())
-        with pytest.raises((RuntimeError, ValueError, VLLMValidationError)):
+        with pytest.raises((RuntimeError, ValueError)):
             safe_load_prompt_embeds(model_config, encoded)
 
     def test_malicious_sparse_rejected_by_image_loader(self):
@@ -148,7 +147,7 @@ class TestConcurrentRaceProtection:
             try:
                 safe_load_prompt_embeds(model_config, malicious_encoded)
                 bypassed.append(True)
-            except (RuntimeError, ValueError, VLLMValidationError):
+            except (RuntimeError, ValueError):
                 rejected.append(True)
 
         with ThreadPoolExecutor(max_workers=num_workers) as pool:
@@ -193,7 +192,7 @@ class TestGlobalFlagRestoration:
         initial = torch.sparse.check_sparse_tensor_invariants.is_enabled()
         malicious_encoded = _encode_tensor(_create_malicious_sparse_tensor())
 
-        with pytest.raises((RuntimeError, ValueError, VLLMValidationError)):
+        with pytest.raises((RuntimeError, ValueError)):
             safe_load_prompt_embeds(model_config, malicious_encoded)
 
         assert torch.sparse.check_sparse_tensor_invariants.is_enabled() == initial
@@ -204,7 +203,7 @@ class TestGlobalFlagRestoration:
         malicious_encoded = _encode_tensor(_create_malicious_sparse_tensor())
 
         def attempt_load(_):
-            with contextlib.suppress(RuntimeError, ValueError, VLLMValidationError):
+            with contextlib.suppress(RuntimeError, ValueError):
                 safe_load_prompt_embeds(model_config, malicious_encoded)
 
         with ThreadPoolExecutor(max_workers=4) as pool:
@@ -245,7 +244,7 @@ class TestCrossLoaderLockSharing:
         # serialization — one finishes before the other starts), AND invalid
         # tensors are still rejected.
         malicious = _encode_tensor(_create_malicious_sparse_tensor())
-        with pytest.raises((RuntimeError, ValueError, VLLMValidationError)):
+        with pytest.raises((RuntimeError, ValueError)):
             safe_load_prompt_embeds(model_config, malicious)
         with pytest.raises((RuntimeError, ValueError)):
             io_handler.load_base64("", malicious.decode("utf-8"))
