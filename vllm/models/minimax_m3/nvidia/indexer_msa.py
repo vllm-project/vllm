@@ -626,7 +626,6 @@ def prefill_local_score(
         query = index_q[chunk.start : chunk.end]
         tokens = query.shape[0]
         scores = metadata.local_scores[:tokens]
-        scores.fill_(_SCORE_SENTINEL)
         minimax_m3_index_score(
             query,
             kv,
