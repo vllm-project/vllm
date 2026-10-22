@@ -148,19 +148,6 @@ class AuxOutputBuffer:
         if slot is not None:
             self._free_slots.append(slot)
 
-    def rewind(self, request_id: Hashable, token_start: int) -> None:
-        tail = self._requests.get(request_id)
-        if (
-            tail is not None
-            and tail.block_start <= token_start <= tail.block_start + tail.length
-        ):
-            tail.length = token_start - tail.block_start
-        else:
-            self.discard(request_id)
-
-    def has_tail(self, request_id: Hashable) -> bool:
-        return request_id in self._requests
-
     def discard(self, request_id: Hashable) -> None:
         tail = self._requests.pop(request_id, None)
         if tail is not None:

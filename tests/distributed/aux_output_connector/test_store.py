@@ -2040,13 +2040,14 @@ def test_indexer_shares_spec_acceptance_and_shm_prefix_lifecycle(enable_r3):
     worker.close()
 
 
-def test_preemption_rewinds_an_unpublished_partial_block():
+def test_preemption_discards_partial_block_before_request_resumes():
     worker = _make_worker(1)
     rows = np.arange(30, dtype=np.uint8).reshape(5, *_SHAPE)
     first = _metadata(0, [_request_metadata("request", 0, 3, 0, [])], {})
-    _process_output(worker, first, rows[:3], ["request"], np.array([0]))
-    replay = _metadata(0, [_request_metadata("request", 1, 4, 0, [b"a" * 32])], {})
-    output = _process_output(worker, replay, rows[1:], ["request"], np.array([0]))[
+    _process_output(worker, first, rows[:3] + 100, ["request"], np.array([0]))
+    _begin_step(worker, _metadata(0, [], {"request": []}))
+    resumed = _metadata(0, [_request_metadata("request", 0, 5, 3, [b"a" * 32])], {})
+    output = _process_output(worker, resumed, rows, ["request"], np.array([0]))[
         "request"
     ]
     assert output.token_start == 3

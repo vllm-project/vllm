@@ -352,23 +352,9 @@ class AuxOutputWorkerConnector:
             if capture_cursor is None:
                 capture_cursor = capture_start
 
-            replay_prefix = None
-            if capture_start < capture_cursor:
-                # Preemption/bounded replay recomputes an earlier logical range.
-                buffer.rewind(request_id, capture_start)
-                boundary = capture_start // block_size * block_size
-                retained = []
-                for block_start, block_rows in state.pending_blocks:
-                    if block_start < boundary:
-                        retained.append((block_start, block_rows))
-                    else:
-                        if block_start == boundary and capture_start % block_size:
-                            replay_prefix = block_rows[
-                                : capture_start % block_size
-                            ].copy()
-                        buffer.release_block(block_rows)
-                state.pending_blocks = retained
-                capture_cursor = capture_start
+            assert capture_start >= capture_cursor, (
+                "auxiliary output capture moved backwards"
+            )
             if capture_start > capture_cursor:
                 # Reattach after an optimistically scheduled suffix was rejected.
                 assert capture_cursor < state.scheduled_cursor, (
@@ -378,21 +364,6 @@ class AuxOutputWorkerConnector:
 
             emit_start = state.emit_cursor
             # Complete blocks without keys remain pending until a hash update.
-            if capture_start % block_size and not buffer.has_tail(request_id):
-                block_index = capture_start // block_size
-                prefix = replay_prefix
-                if prefix is None:
-                    if block_index >= len(state.aux_output_keys):
-                        raise RuntimeError(
-                            "AuxOutput replay boundary has no KV block hash"
-                        )
-                    prefix = materialize_aux_output(
-                        store,
-                        [state.aux_output_keys[block_index]],
-                        shape_per_token=buffer.shape_per_token,
-                        dtype=buffer.dtype,
-                    )[: capture_start % block_size]
-                buffer.capture(request_id, block_index * block_size, prefix)
             completed = buffer.capture(request_id, capture_start, rows)
             token_end = capture_start + len(rows)
             state.capture_cursor = token_end
