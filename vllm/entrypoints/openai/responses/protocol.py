@@ -271,6 +271,7 @@ class ResponsesRequest(OpenAIBaseModel):
     truncation: Literal["auto", "disabled"] | None = "disabled"
     user: str | None = None
     skip_special_tokens: bool | None = None
+    spaces_between_special_tokens: bool = True
     include_stop_str_in_output: bool = False
     presence_penalty: float | None = Field(
         default=None,
@@ -587,6 +588,7 @@ class ResponsesRequest(OpenAIBaseModel):
             extra_args=extra_args,
             skip_clone=True,  # Created fresh per request, safe to skip clone
             skip_special_tokens=skip_special_tokens,
+            spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
         )
 
