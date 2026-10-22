@@ -260,6 +260,60 @@ class TestStreaming:
         results = _stream(parser, mock_request, text, 3)
         assert TOOL_TOKEN not in _collect_content(results)
 
+    @pytest.mark.parametrize("chunk_size", [1, 3, 7])
+    def test_streamed_middle_param_corrected(self, parser, mock_request, chunk_size):
+        # The first argument is complete before the object closes, so it must
+        # be corrected on its own; otherwise "5" streams and the final 5 then
+        # cannot extend the already-sent prefix.
+        mock_request.tools = [
+            ChatCompletionToolsParam(
+                type="function",
+                function=FunctionDefinition(
+                    name="submit",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "count": {"type": "integer"},
+                            "note": {"type": "string"},
+                        },
+                    },
+                ),
+            )
+        ]
+        text = (
+            f'{TOOL_TOKEN} [{{"name": "submit", "arguments": '
+            f'{{"count": "5", "note": "x"}}}}]'
+        )
+        results = _stream(parser, mock_request, text, chunk_size)
+        args = _collect_args(results)
+        assert json.loads(args[0]) == {"count": 5, "note": "x"}
+
+    def test_streamed_nonfinite_middle_param_valid_json(self, parser, mock_request):
+        # A NaN in an already-complete middle value must be sanitized before
+        # it streams, or the client ends up with invalid JSON.
+        mock_request.tools = [
+            ChatCompletionToolsParam(
+                type="function",
+                function=FunctionDefinition(
+                    name="submit",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "count": {"description": "Any JSON value."},
+                            "note": {"type": "string"},
+                        },
+                    },
+                ),
+            )
+        ]
+        text = (
+            f'{TOOL_TOKEN} [{{"name": "submit", "arguments": '
+            f'{{"count": NaN, "note": "x"}}}}]'
+        )
+        results = _stream(parser, mock_request, text, 1)
+        args = _collect_args(results)
+        assert json.loads(args[0]) == {"count": "NaN", "note": "x"}
+
 
 class TestReplay:
     @pytest.mark.parametrize("scenario", _GRANITE_SCENARIOS, ids=lambda s: s.id)

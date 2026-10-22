@@ -1929,6 +1929,11 @@ def _growing_kv_converter(raw_args: str, partial: bool) -> str:
     return json.dumps(params, ensure_ascii=False)
 
 
+def _verbatim_converter(raw_args: str, partial: bool) -> str:
+    """Converter that returns the arguments text as-is, like Granite."""
+    return raw_args
+
+
 class TestCoercionInstabilityRegression:
     """Regression tests for _fix_arg_types coercion instability.
 
@@ -2001,6 +2006,53 @@ class TestCoercionInstabilityRegression:
         assert parsed["val"] == "4e"
         assert isinstance(parsed["val"], str)
         assert parsed["extra"] == "ok"
+
+    def test_middle_value_corrected_before_streaming(self):
+        """A middle value in a still-open object is corrected before it
+        streams, so the final flush can still extend the prefix.
+
+        The converter output is not valid JSON until the object closes, so
+        the engine has to correct the complete leading members on their own;
+        otherwise ``"5"`` streams and is later replaced by ``5``.
+        """
+        tool = _make_tool(
+            "f",
+            {
+                "count": {"type": "integer"},
+                "flag": {"type": "boolean"},
+                "note": {"type": "string"},
+            },
+        )
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        parsed = _run_streaming_tool(
+            engine,
+            "f",
+            ['{"count": "5", ', '"flag": true, ', '"note": "x', '"}'],
+        )
+        assert parsed == {"count": 5, "flag": True, "note": "x"}
+        assert isinstance(parsed["count"], int)
+
+    def test_nonfinite_middle_value_sanitized_before_streaming(self):
+        """A non-finite float in a middle value must not be streamed raw.
+
+        While the object is open, ``NaN`` cannot be seen by a whole-object
+        parse; streaming it would leave the client with invalid JSON once
+        the value is sanitized to ``"NaN"`` at close.
+        """
+        tool = _make_tool(
+            "f",
+            {
+                "count": {"description": "Any JSON value."},
+                "note": {"type": "string"},
+            },
+        )
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        parsed = _run_streaming_tool(
+            engine,
+            "f",
+            ['{"count": NaN, ', '"note": "x', '"}'],
+        )
+        assert parsed == {"count": "NaN", "note": "x"}
 
 
 _DROP_VOCAB: dict[str, int] = {

@@ -276,6 +276,12 @@ class TestCoerceTypedValue:
         schema = {"type": "string", "anyOf": [{}]}
         assert coerce_typed_value(5, schema) == ("5", True)
 
+    def test_typed_sibling_union_keyword_still_coerces(self):
+        # Only the ``anyOf`` branch is untyped; the sibling ``oneOf`` still
+        # constrains the type.
+        schema = {"anyOf": [{}], "oneOf": [{"type": "string"}]}
+        assert coerce_typed_value(5, schema) == ("5", True)
+
     def test_non_dict_schema_is_unchanged(self):
         assert coerce_typed_value(5, None) == (5, False)
 
@@ -295,6 +301,14 @@ class TestSchemaAdmitsAnyValue:
     def test_untyped_union_branch_admits_any(self):
         assert schema_admits_any_value({"anyOf": [{"type": "null"}, {}]})
         assert schema_admits_any_value({"oneOf": [{"type": "null"}, True]})
+
+    def test_sibling_union_keywords_are_conjunctive(self):
+        # ``anyOf`` and ``oneOf`` at the same level both have to hold, so an
+        # untyped ``anyOf`` must not override a typed ``oneOf``.
+        assert not schema_admits_any_value(
+            {"anyOf": [{}], "oneOf": [{"type": "string"}]}
+        )
+        assert schema_admits_any_value({"anyOf": [{}], "oneOf": [{}, True]})
 
     def test_typed_union_is_constrained(self):
         assert not schema_admits_any_value(

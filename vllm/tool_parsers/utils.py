@@ -1081,10 +1081,13 @@ def schema_admits_any_value(schema: Any) -> bool:
     """Whether *schema* is explicitly untyped, i.e. admits any JSON value.
 
     That covers an empty dict, a ``true`` boolean schema, and a union with
-    such an ``anyOf``/``oneOf`` branch.  An untyped ``allOf`` branch
-    constrains nothing, so every ``allOf`` branch must be untyped.  A
-    ``type``/``enum`` sibling narrows the schema, and an unresolved
-    ``$ref`` is unknown rather than untyped, so both make it constrained.
+    such an ``anyOf``/``oneOf`` branch.  Sibling keywords are conjunctive, so
+    every ``anyOf``/``oneOf`` present must admit any value, and each of those
+    admits any value only when one of its branches does.  An untyped
+    ``allOf`` branch constrains nothing, so every ``allOf`` branch must be
+    untyped.  A ``type``/``enum`` sibling narrows the schema, and an
+    unresolved ``$ref`` is unknown rather than untyped, so both make it
+    constrained.
     """
     if schema is True:
         return True
@@ -1093,20 +1096,14 @@ def schema_admits_any_value(schema: Any) -> bool:
     if any(key in schema for key in ("type", "enum", "$ref", "$dynamicRef")):
         return False
 
-    has_alternative = False
-    alternatives_admit = False
     for choice_field in ("anyOf", "oneOf"):
         choices = schema.get(choice_field)
-        if isinstance(choices, list):
-            has_alternative = True
-            alternatives_admit |= any(schema_admits_any_value(c) for c in choices)
+        if isinstance(choices, list) and not any(
+            schema_admits_any_value(choice) for choice in choices
+        ):
+            return False
 
-    all_admit = all(
-        schema_admits_any_value(choice) for choice in schema.get("allOf") or []
-    )
-    if not has_alternative:
-        return all_admit
-    return alternatives_admit and all_admit
+    return all(schema_admits_any_value(choice) for choice in schema.get("allOf") or [])
 
 
 def extract_types_from_schema(
@@ -1323,11 +1320,10 @@ def sanitize_non_finite(value: Any) -> tuple[Any, bool]:
     headed for serialization are sanitized first. Containers are updated in
     place. Returns ``(value, changed)``.
     """
-    if _is_json_finite(value):
-        return value, False
     if isinstance(value, float):
         if math.isfinite(value):
             return value, False
+        # Spell it the way json.dumps spells it ("NaN"/"Infinity").
         return json.dumps(value), True
     if isinstance(value, dict):
         changed = False
