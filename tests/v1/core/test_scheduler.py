@@ -14,6 +14,7 @@ from vllm.config import (
     CacheConfig,
     ECTransferConfig,
     KVTransferConfig,
+    LoRAConfig,
     ModelConfig,
     SchedulerConfig,
     SpeculativeConfig,
@@ -30,6 +31,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
+from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalKwargsItem,
@@ -407,6 +409,73 @@ def test_async_scheduling_pp_allows_rescheduling_with_output_placeholders():
     # scheduled again (multi-step in-flight).
     output = scheduler.schedule()
     assert req.request_id in output.num_scheduled_tokens
+
+
+def test_max_loras_counts_running_request_awaiting_output():
+    """PP: a running request with its prompt fully scheduled is skipped until
+    its output returns, but still holds its LoRA slot, so a request with
+    another adapter must not be admitted in the meantime."""
+    scheduler = create_scheduler(
+        pipeline_parallel_size=2, lora_config=LoRAConfig(max_loras=1)
+    )
+    req_a, req_b = create_requests(num_requests=2, num_tokens=8, req_ids=["a", "b"])
+    req_a.lora_request = LoRARequest("lora-a", 1, "/path/a")
+    req_b.lora_request = LoRARequest("lora-b", 2, "/path/b")
+
+    scheduler.add_request(req_a)
+    assert scheduler.schedule().num_scheduled_tokens == {"a": 8}
+
+    scheduler.add_request(req_b)
+    assert scheduler.schedule().num_scheduled_tokens == {}
+    assert req_b.status == RequestStatus.WAITING
+
+
+def test_max_loras_counts_running_request_skipped_for_encoder_budget():
+    """No PP: a running request skipped because earlier requests used up the
+    step's encoder compute budget still holds its LoRA slot."""
+    scheduler = create_scheduler(lora_config=LoRAConfig(max_loras=2))
+    scheduler.max_num_encoder_input_tokens = 100
+    scheduler.encoder_cache_manager = EncoderCacheManager(cache_size=1000)
+    # a: two 100-token images, one per step; b: image at 50, after a's.
+    req_a, req_b = create_requests(
+        num_requests=2,
+        num_tokens=300,
+        mm_positions=[
+            [
+                PlaceholderRange(offset=0, length=100),
+                PlaceholderRange(offset=150, length=100),
+            ],
+            [PlaceholderRange(offset=50, length=100)],
+        ],
+        req_ids=["a", "b"],
+    )
+    (req_c,) = create_requests(num_requests=1, num_tokens=10, req_ids=["c"])
+    req_a.lora_request = LoRARequest("lora-a", 1, "/path/a")
+    req_b.lora_request = LoRARequest("lora-b", 2, "/path/b")
+    req_c.lora_request = LoRARequest("lora-c", 3, "/path/c")
+
+    scheduler.add_request(req_a)
+    scheduler.add_request(req_b)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"a": 150, "b": 50}
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["a", "b"],
+            req_id_to_index={"a": 0, "b": 1},
+            sampled_token_ids=[[], []],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    # a's second image uses the whole encoder budget, so b is skipped; c
+    # (a third adapter) must still wait.
+    scheduler.add_request(req_c)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"a": 150}
+    assert req_c.status == RequestStatus.WAITING
 
 
 def test_cached_request_data_resumed_all_token_ids_mrv1_only():
