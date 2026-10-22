@@ -974,7 +974,7 @@ RUN set -eux; \
 # These are stable packages that don't depend on vLLM itself
 # From versions.json: .openai_server_extras.timm, .openai_server_extras.runai_model_streamer
 ARG TIMM_VERSION=">=1.0.17"
-ARG RUNAI_MODEL_STREAMER_VERSION=">=0.15.7"
+ARG RUNAI_MODEL_STREAMER_VERSION=">=0.17.0"
 RUN --mount=type=cache,target=/opt/uv/cache \
     uv pip install --system accelerate 'modelscope<1.38' \
         "timm${TIMM_VERSION}" "runai-model-streamer[s3,gcs,azure]${RUNAI_MODEL_STREAMER_VERSION}"
