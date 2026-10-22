@@ -665,6 +665,166 @@ def test_take_events_supports_restore_after_eviction():
     assert second_store[0].token_ids == [5, 6, 7, 8]
 
 
+def test_reused_key_delayed_store_preserves_metadata_after_eviction():
+    """Verify issue #63037: Reused OffloadKey does not lose metadata from delayed
+    events.
+
+    Minimal event ordering:
+    (1) K resident
+    (2) Eviction queues BlockRemoved(K)
+    (3) K stored again before async store completes
+    (4) Verify correct event translation and independent residency cleanup
+    """
+    block_size = 4
+    tracker = _tracker()
+    group_config = _group_config(block_size=block_size)
+    req1 = _request(block_hashes=[_hash(0)], token_count=block_size, req_id="req1")
+    key = _record_chunks(tracker, req1, group_config, num_chunks=1)[0]
+
+    # (1) K resident
+    [stored1] = tracker.take_events([_stored_event([key])])
+    assert isinstance(stored1, BlockStored)
+    assert stored1.token_ids == [1, 2, 3, 4]
+    assert stored1.block_size == block_size
+
+    # (2) Eviction queues BlockRemoved(K)
+    queued_eviction = _removed_event([key])
+
+    # (3) K stored again before async store completes
+    req2 = _request(block_hashes=[_hash(0)], token_count=block_size, req_id="req2")
+    req2.all_token_ids = [5, 6, 7, 8]
+    tracker.record_store(req2, group_config, chunk_idx=0, offload_key=key)
+
+    # (4) Verify correct event translation and independent residency cleanup
+    # Eviction from step (2) is translated first
+    [removed1] = tracker.take_events([queued_eviction])
+    assert isinstance(removed1, BlockRemoved)
+    assert removed1.block_hashes == [_wire_hash(_hash(0))]
+    assert removed1.group_idx == 0
+
+    # Key is still tracked with req2 metadata; not prematurely popped
+    assert key in tracker._pending_event_metadata
+    assert tracker._pending_event_metadata[key].token_ids == (5, 6, 7, 8)
+
+    # Async store for req2 completes
+    [stored2] = tracker.take_events([_stored_event([key])])
+    assert isinstance(stored2, BlockStored)
+    assert stored2.token_ids == [5, 6, 7, 8]
+    assert stored2.block_size == block_size
+    assert stored2.block_hashes == [_wire_hash(_hash(0))]
+
+    # Eventual eviction of req2 cleans up the tracker
+    [removed2] = tracker.take_events([_removed_event([key])])
+    assert isinstance(removed2, BlockRemoved)
+    assert removed2.block_hashes == [_wire_hash(_hash(0))]
+    assert not tracker._pending_event_metadata
+
+
+def test_reused_key_eviction_and_store_in_same_batch():
+    """Verify overlapping removal of old generation and store of new generation
+    in the exact same event batch."""
+    block_size = 4
+    tracker = _tracker()
+    group_config = _group_config(block_size=block_size)
+    req1 = _request(block_hashes=[_hash(0)], token_count=block_size)
+    key = _record_chunks(tracker, req1, group_config, num_chunks=1)[0]
+    list(tracker.take_events([_stored_event([key])]))
+
+    # Eviction queued and new store recorded
+    queued_eviction = _removed_event([key])
+    req2 = _request(block_hashes=[_hash(0)], token_count=block_size)
+    req2.all_token_ids = [10, 11, 12, 13]
+    tracker.record_store(req2, group_config, chunk_idx=0, offload_key=key)
+
+    # Both events delivered in the same batch
+    events = list(tracker.take_events([queued_eviction, _stored_event([key])]))
+    assert len(events) == 2
+    assert isinstance(events[0], BlockRemoved)
+    assert events[0].block_hashes == [_wire_hash(_hash(0))]
+    assert isinstance(events[1], BlockStored)
+    assert events[1].token_ids == [10, 11, 12, 13]
+    assert events[1].block_size == block_size
+
+    # Tracker still holds active residency for req2
+    assert key in tracker._pending_event_metadata
+    [final_removed] = tracker.take_events([_removed_event([key])])
+    assert isinstance(final_removed, BlockRemoved)
+    assert not tracker._pending_event_metadata
+
+
+def test_reused_key_store_completes_before_delayed_eviction():
+    """Verify overlapping transitions when new store completes before the
+    delayed eviction event arrives."""
+    block_size = 4
+    tracker = _tracker()
+    group_config = _group_config(block_size=block_size)
+    req1 = _request(block_hashes=[_hash(0)], token_count=block_size)
+    key = _record_chunks(tracker, req1, group_config, num_chunks=1)[0]
+    list(tracker.take_events([_stored_event([key])]))
+
+    queued_eviction = _removed_event([key])
+    req2 = _request(block_hashes=[_hash(0)], token_count=block_size)
+    req2.all_token_ids = [20, 21, 22, 23]
+    tracker.record_store(req2, group_config, chunk_idx=0, offload_key=key)
+
+    # New store completes first
+    [stored2] = tracker.take_events([_stored_event([key])])
+    assert isinstance(stored2, BlockStored)
+    assert stored2.token_ids == [20, 21, 22, 23]
+    assert stored2.block_size == block_size
+
+    # Delayed eviction of old generation arrives
+    [removed1] = tracker.take_events([queued_eviction])
+    assert isinstance(removed1, BlockRemoved)
+    assert key in tracker._pending_event_metadata
+
+    # Eventual eviction of new generation
+    [removed2] = tracker.take_events([_removed_event([key])])
+    assert isinstance(removed2, BlockRemoved)
+    assert not tracker._pending_event_metadata
+
+
+def test_reused_key_overlapping_in_flight_stores():
+    """Verify overlapping in-flight stores where Store 1 is in flight when
+    eviction and Store 2 occur."""
+    block_size = 4
+    tracker = _tracker()
+    group_config = _group_config(block_size=block_size)
+    req1 = _request(block_hashes=[_hash(0)], token_count=block_size)
+    key = _record_chunks(tracker, req1, group_config, num_chunks=1)[0]
+
+    # Store 1 in flight (take_events not called yet)
+    # Eviction queues BlockRemoved(K)
+    queued_eviction = _removed_event([key])
+
+    # Store 2 initiated
+    req2 = _request(block_hashes=[_hash(0)], token_count=block_size)
+    req2.all_token_ids = [30, 31, 32, 33]
+    tracker.record_store(req2, group_config, chunk_idx=0, offload_key=key)
+
+    # Delayed Store 1 completes
+    [stored1] = tracker.take_events([_stored_event([key])])
+    assert isinstance(stored1, BlockStored)
+    assert stored1.token_ids == [1, 2, 3, 4]
+    assert stored1.block_size == block_size
+
+    # Eviction of Generation 1 arrives
+    [removed1] = tracker.take_events([queued_eviction])
+    assert isinstance(removed1, BlockRemoved)
+    assert key in tracker._pending_event_metadata
+
+    # Store 2 completes
+    [stored2] = tracker.take_events([_stored_event([key])])
+    assert isinstance(stored2, BlockStored)
+    assert stored2.token_ids == [30, 31, 32, 33]
+    assert stored2.block_size == block_size
+
+    # Eviction of Generation 2
+    [removed2] = tracker.take_events([_removed_event([key])])
+    assert isinstance(removed2, BlockRemoved)
+    assert not tracker._pending_event_metadata
+
+
 def test_reset_cache_clears_side_table():
     tracker = _tracker()
     group_config = _group_config()

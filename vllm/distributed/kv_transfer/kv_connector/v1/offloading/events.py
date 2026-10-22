@@ -15,6 +15,7 @@ of the same hash. Opt-in via
 KV cache events are enabled. See the PR description for the full design.
 """
 
+from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -94,6 +95,124 @@ class _OffloadEventMetadata:
     group_idx: int
     kv_cache_spec: OffloadingEventGroupSpec
     active_residencies: set[tuple[Medium, str | None]]
+    store_pending: bool = False
+    generation: int = 0
+
+
+class _PendingEventMetadataMap(dict[OffloadKey, _OffloadEventMetadata]):
+    """Tracks metadata and independent residency lifecycles per OffloadKey."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._generations: dict[OffloadKey, deque[_OffloadEventMetadata]] = {}
+        self._next_generation: dict[OffloadKey, int] = {}
+
+    def add_store_generation(
+        self, key: OffloadKey, meta: _OffloadEventMetadata
+    ) -> _OffloadEventMetadata:
+        """Add a new store lifecycle generation for key."""
+        meta.store_pending = True
+        gen_num = self._next_generation.get(key, 0) + 1
+        self._next_generation[key] = gen_num
+        meta.generation = gen_num
+
+        gens = self._generations.get(key)
+        if gens:
+            # Preserve secondary tier residencies from prior generation.
+            latest = gens[-1]
+            for res in latest.active_residencies:
+                if res != (Medium.CPU, None):
+                    meta.active_residencies.add(res)
+            gens.append(meta)
+        else:
+            self._generations[key] = deque([meta])
+
+        dict.__setitem__(self, key, meta)
+        return meta
+
+    def add_lookup_generation(
+        self, key: OffloadKey, meta: _OffloadEventMetadata
+    ) -> _OffloadEventMetadata:
+        """Add a lookup generation for key if not already tracked."""
+        if key in self._generations and self._generations[key]:
+            return self._generations[key][-1]
+        meta.store_pending = False
+        gen_num = self._next_generation.get(key, 0) + 1
+        self._next_generation[key] = gen_num
+        meta.generation = gen_num
+        self._generations[key] = deque([meta])
+        dict.__setitem__(self, key, meta)
+        return meta
+
+    def get_generations(self, key: OffloadKey) -> deque[_OffloadEventMetadata] | None:
+        return self._generations.get(key)
+
+    def match_store(
+        self, key: OffloadKey, event: OffloadingEvent
+    ) -> _OffloadEventMetadata | None:
+        """Find the matching generation for a store event."""
+        gens = self._generations.get(key)
+        if not gens:
+            return None
+        if event.medium == Medium.CPU and event.ownership is None:
+            # Match the oldest generation that has a store pending.
+            for g in gens:
+                if g.store_pending:
+                    return g
+        # If no store pending or secondary tier, return the latest generation.
+        return gens[-1]
+
+    def match_removal(
+        self, key: OffloadKey, event: OffloadingEvent
+    ) -> _OffloadEventMetadata | None:
+        """Find the matching generation for a removal event."""
+        gens = self._generations.get(key)
+        if not gens:
+            return None
+        target_residency = (event.medium, event.ownership)
+        # Match the oldest generation that holds this residency.
+        for g in gens:
+            if target_residency in g.active_residencies:
+                return g
+        # Fall back to oldest generation if not found.
+        return gens[0]
+
+    def cleanup_key(self, key: OffloadKey) -> None:
+        """Retire generations with no active residencies and no store pending."""
+        gens = self._generations.get(key)
+        if not gens:
+            return
+        remaining = deque(g for g in gens if g.active_residencies or g.store_pending)
+        if remaining:
+            self._generations[key] = remaining
+            dict.__setitem__(self, key, remaining[-1])
+        else:
+            self._generations.pop(key, None)
+            self._next_generation.pop(key, None)
+            dict.pop(self, key, None)
+
+    def __setitem__(self, key: OffloadKey, meta: _OffloadEventMetadata) -> None:
+        gens = self._generations.get(key)
+        if gens:
+            gens.append(meta)
+        else:
+            self._generations[key] = deque([meta])
+        dict.__setitem__(self, key, meta)
+
+    def pop(self, key: OffloadKey, *args: Any) -> _OffloadEventMetadata:
+        gens = self._generations.pop(key, None)
+        self._next_generation.pop(key, None)
+        dict.pop(self, key, None)
+        if gens:
+            return gens[-1]
+        if args:
+            return args[0]
+        raise KeyError(key)
+
+    def clear(self) -> None:
+        self._generations.clear()
+        self._next_generation.clear()
+        dict.clear(self)
 
 
 class OffloadingEventsTracker:
@@ -113,7 +232,7 @@ class OffloadingEventsTracker:
         )
 
         # OffloadKey -> payload snapshot, kept until final removal or reset.
-        self._pending_event_metadata: dict[OffloadKey, _OffloadEventMetadata] = {}
+        self._pending_event_metadata = _PendingEventMetadataMap()
 
     def record_store(
         self,
@@ -132,9 +251,7 @@ class OffloadingEventsTracker:
         if group_config.sliding_window_size_in_chunks is not None:
             return
         meta = self._build_event_metadata(req, group_config, chunk_idx)
-        if existing := self._pending_event_metadata.get(offload_key):
-            meta.active_residencies.update(existing.active_residencies)
-        self._pending_event_metadata[offload_key] = meta
+        self._pending_event_metadata.add_store_generation(offload_key, meta)
 
     def record_lookup(
         self,
@@ -149,9 +266,8 @@ class OffloadingEventsTracker:
         if group_config.sliding_window_size_in_chunks is not None:
             return
         if offload_key not in self._pending_event_metadata:
-            self._pending_event_metadata[offload_key] = self._build_event_metadata(
-                req, group_config, chunk_idx
-            )
+            meta = self._build_event_metadata(req, group_config, chunk_idx)
+            self._pending_event_metadata.add_lookup_generation(offload_key, meta)
 
     def record_partial_store(
         self,
@@ -163,7 +279,9 @@ class OffloadingEventsTracker:
         """Snapshot metadata for a newly stored partial recurrent tail."""
         if group_config.sliding_window_size_in_chunks is not None:
             return
-        self._record_partial_tail(req, group_config, boundary_tokens, offload_key)
+        self._record_partial_tail(
+            req, group_config, boundary_tokens, offload_key, is_lookup=False
+        )
 
     def record_partial_lookup(
         self,
@@ -176,7 +294,9 @@ class OffloadingEventsTracker:
         if group_config.sliding_window_size_in_chunks is not None:
             return
         if offload_key not in self._pending_event_metadata:
-            self._record_partial_tail(req, group_config, boundary_tokens, offload_key)
+            self._record_partial_tail(
+                req, group_config, boundary_tokens, offload_key, is_lookup=True
+            )
 
     def _record_partial_tail(
         self,
@@ -184,6 +304,7 @@ class OffloadingEventsTracker:
         group_config: "GroupOffloadConfig",
         boundary_tokens: int,
         offload_key: OffloadKey,
+        is_lookup: bool = False,
     ) -> None:
         """Build metadata for the valid prefix of one physical cache block.
 
@@ -232,9 +353,10 @@ class OffloadingEventsTracker:
             kv_cache_spec=group_config.kv_event_group_spec,
             active_residencies={(Medium.CPU, None)},
         )
-        if existing := self._pending_event_metadata.get(offload_key):
-            meta.active_residencies.update(existing.active_residencies)
-        self._pending_event_metadata[offload_key] = meta
+        if is_lookup:
+            self._pending_event_metadata.add_lookup_generation(offload_key, meta)
+        else:
+            self._pending_event_metadata.add_store_generation(offload_key, meta)
 
     def take_events(self, events: Iterable[OffloadingEvent]) -> Iterable[KVCacheEvent]:
         """Translate raw OffloadingEvents into self-describing KV events.
@@ -248,21 +370,20 @@ class OffloadingEventsTracker:
             the underlying :class:`OffloadingEvent` stream.
 
         """
-        removed_keys: set[OffloadKey] = set()
+        touched_keys: set[OffloadKey] = set()
         for event in events:
+            if self.self_describing_enabled:
+                touched_keys.update(event.keys)
             if event.removed:
-                if self.self_describing_enabled:
-                    removed_keys.update(event.keys)
                 yield from self._take_removed_event(event)
             else:
                 yield from self._take_stored_event(event)
 
         # A primary removal can precede a queued secondary store in this batch.
         # Keep its payload until all stores have registered their residencies.
-        for key in removed_keys:
-            meta = self._pending_event_metadata.get(key)
-            if meta is not None and not meta.active_residencies:
-                self._pending_event_metadata.pop(key)
+        # Retire generations only after all batch transitions have occurred.
+        for key in touched_keys:
+            self._pending_event_metadata.cleanup_key(key)
 
     def reset(self) -> None:
         """Drop all tracked state; pending payloads are stale after a
@@ -362,7 +483,7 @@ class OffloadingEventsTracker:
         # Events are self-contained (own parent), so key order is free.
         locality = event.locality.value if event.locality is not None else None
         for key in event.keys:
-            meta = self._pending_event_metadata.get(key)
+            meta = self._pending_event_metadata.match_store(key, event)
             if meta is None:
                 if self.self_describing_enabled:
                     # Expected for unsupported shapes; warn once only.
@@ -378,6 +499,7 @@ class OffloadingEventsTracker:
                 )
                 continue
 
+            meta.store_pending = False
             if event.removal_expected:
                 meta.active_residencies.add((event.medium, event.ownership))
             yield BlockStored(
@@ -408,14 +530,21 @@ class OffloadingEventsTracker:
         # Keep group_idx unambiguous if a manager batch spans groups.
         locality = event.locality.value if event.locality is not None else None
         by_group: dict[int, list] = {}
+        target_residency = (event.medium, event.ownership)
         for key in event.keys:
-            meta = self._pending_event_metadata.get(key)
+            gens = self._pending_event_metadata.get_generations(key)
+            meta = self._pending_event_metadata.match_removal(key, event)
             if meta is not None:
                 group_idx = meta.group_idx
                 by_group.setdefault(group_idx, []).extend(
                     maybe_convert_block_hash(h) for h in meta.block_hashes
                 )
-                meta.active_residencies.discard((event.medium, event.ownership))
+                if event.medium != Medium.CPU or event.ownership is not None:
+                    if gens:
+                        for g in gens:
+                            g.active_residencies.discard(target_residency)
+                else:
+                    meta.active_residencies.discard(target_residency)
             else:
                 if self.self_describing_enabled:
                     logger.warning_once(
