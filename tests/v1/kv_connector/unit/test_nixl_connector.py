@@ -3176,6 +3176,7 @@ def test_sleep_unregisters_and_restores_kv_caches(dist_init, restore_failure):
     payload = worker.xfer_handshake_metadata
     agent = msgspec.msgpack.decode(payload.agent_metadata_bytes, type=NixlAgentMetadata)
     assert agent.agent_metadata == b"re-registered"
+    connector.unregister_kv_caches()
     connector.shutdown()
 
 

@@ -72,8 +72,8 @@ GPU memory. A peer that remains awake can retain CUDA IPC mappings to the sleepi
 instance's KV cache.
 
 Sleep destroys the local NIXL agent; wake-up creates a new agent and publishes
-fresh registration metadata. UCX transport selection and caches use their defaults;
-sleep mode does not require `UCX_TLS`, `UCX_RCACHE_ENABLE`, or
+fresh registration metadata. Sleep mode no longer overrides UCX transport selection
+or disables its caches. It does not require `UCX_TLS`, `UCX_RCACHE_ENABLE`, or
 `UCX_CUDA_IPC_CACHE` overrides.
 
 !!! warning
