@@ -68,6 +68,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
+from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, async_tensor_h2d
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
@@ -118,6 +119,7 @@ from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.ec_connector import get_ec_connector
 from vllm.v1.worker.gpu.eplb_utils import EPLBController, step_eplb_after
 from vllm.v1.worker.gpu.input_batch import (
+    BatchIndexUploader,
     InputBatch,
     InputBuffers,
     combine_sampled_and_draft_tokens,
@@ -328,6 +330,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_reqs=self.max_num_reqs,
             max_num_tokens=self.max_num_tokens,
             device=self.device,
+        )
+        # Uploads prepare_inputs()'s per-step index arrays with one kernel reading
+        # pinned memory; elsewhere they go through separate H2D copies.
+        self.batch_index_uploader = (
+            BatchIndexUploader(self.max_num_reqs, self.device)
+            if current_platform.is_cuda_alike() and is_uva_available()
+            else None
         )
         self.fast_prefill: FastPrefillHelper | None = None
         if self.use_pp:
@@ -1382,17 +1391,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_tokens = batch_req_state.num_tokens
         num_tokens_after_padding = max(num_tokens, batch_desc.num_tokens)
         assert num_tokens > 0
+        # Marked (when VLLM_MOE_SKIP_PADDING) with the batch index upload below.
         is_padding = self.input_buffers.is_padding[:num_tokens_after_padding]
-        if envs.VLLM_MOE_SKIP_PADDING:
-            is_padding[:num_tokens].fill_(False)
-            is_padding[num_tokens:].fill_(True)
 
         req_ids = batch_req_state.req_ids
         num_scheduled_tokens_np = batch_req_state.num_scheduled_tokens
         idx_mapping_np = batch_req_state.idx_mapping_np
-        idx_mapping = async_tensor_h2d(
-            idx_mapping_np, device=self.device, dtype=torch.int64
-        )
         num_reqs = len(req_ids)
 
         # Get the number of draft tokens for each request.
@@ -1403,13 +1407,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             total_num_draft_tokens = 0
             total_num_logits = num_reqs
             cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
-            cu_num_logits = torch.arange(
-                num_reqs + 1, device=self.device, dtype=torch.int32
-            )
-            expanded_idx_mapping = idx_mapping
-            expanded_local_pos = torch.zeros(
-                num_reqs, dtype=torch.int32, device=self.device
-            )
         else:
             num_draft_tokens_per_req = batch_req_state.num_draft_tokens_np
             if num_draft_tokens_per_req is None:
@@ -1425,7 +1422,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cu_num_logits_np = np.empty(num_reqs + 1, dtype=np.int32)
             cu_num_logits_np[0] = 0
             np.cumsum(num_logits, out=cu_num_logits_np[1:])
-            cu_num_logits = async_tensor_h2d(cu_num_logits_np, device=self.device)
+        # The device cu_num_logits holds the scheduled logits; adaptive
+        # verification replaces it below.
+        scheduled_cu_num_logits_np = cu_num_logits_np
 
         # The general branch also serves a no-draft batch with k != 1, and
         # compact_batch's budget is only primed when drafts are scheduled.
@@ -1453,7 +1452,39 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Some attention backends like FA3 require query_start_loc to be non-decreasing.
         query_start_loc_np[num_reqs + 1 :] = num_tokens
         query_start_loc = self.input_buffers.query_start_loc
-        async_tensor_h2d(query_start_loc_np, out=query_start_loc)
+
+        if self.batch_index_uploader is not None:
+            idx_mapping, cu_num_logits = self.batch_index_uploader.upload(
+                idx_mapping_np,
+                scheduled_cu_num_logits_np,
+                query_start_loc_np,
+                num_tokens,
+                query_start_loc,
+                is_padding if envs.VLLM_MOE_SKIP_PADDING else None,
+                num_tokens_after_padding,
+            )
+        else:
+            if envs.VLLM_MOE_SKIP_PADDING:
+                is_padding[:num_tokens].fill_(False)
+                is_padding[num_tokens:].fill_(True)
+            idx_mapping = async_tensor_h2d(
+                idx_mapping_np, device=self.device, dtype=torch.int64
+            )
+            if num_draft_tokens_per_req is None:
+                cu_num_logits = torch.arange(
+                    num_reqs + 1, device=self.device, dtype=torch.int32
+                )
+            else:
+                cu_num_logits = async_tensor_h2d(
+                    scheduled_cu_num_logits_np, device=self.device
+                )
+            async_tensor_h2d(query_start_loc_np, out=query_start_loc)
+
+        if num_draft_tokens_per_req is None:
+            expanded_idx_mapping = idx_mapping
+            expanded_local_pos = torch.zeros(
+                num_reqs, dtype=torch.int32, device=self.device
+            )
         if adaptive_verification is not None:
             cu_num_logits, query_start_loc, total_num_draft_tokens = (
                 adaptive_verification.reallocate_drafts(req_ids, idx_mapping)

@@ -10,6 +10,7 @@ import torch
 from vllm.triton_utils import tl, triton
 from vllm.utils import random_uuid
 from vllm.utils.math_utils import cdiv
+from vllm.v1.worker.gpu.buffer_utils import UvaBuffer
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.attn_utils import FastPrefillBatchMetadata
@@ -32,6 +33,129 @@ class InputBuffers:
         # DCP: per-request local seq_lens buffer
         self.dcp_local_seq_lens = torch.zeros(
             max_num_reqs, dtype=torch.int32, device=device
+        )
+
+
+class BatchIndexUploader:
+    """Uploads a step's idx_mapping, cu_num_logits and query_start_loc, and
+    marks is_padding, with one kernel launch. It replaces the H2D copies of
+    idx_mapping and query_start_loc (and cu_num_logits with drafts), plus the
+    padding fills.
+
+    The host writes the arrays into a pinned slot that the kernel reads through
+    UVA. Slots rotate, and an event recorded after each launch retires the slot
+    before the host writes it again, however many steps are in flight.
+    """
+
+    def __init__(self, max_num_reqs: int, device: torch.device, num_slots: int = 2):
+        self.max_num_reqs = max_num_reqs
+        self.device = device
+        self._idx_mapping = [
+            UvaBuffer(max_num_reqs, torch.int64) for _ in range(num_slots)
+        ]
+        # cu_num_logits and query_start_loc, [max_num_reqs + 1] each.
+        self._offsets = [
+            UvaBuffer(2 * (max_num_reqs + 1), torch.int32) for _ in range(num_slots)
+        ]
+        self._events = [torch.cuda.Event(blocking=True) for _ in range(num_slots)]
+        self._slot = 0
+
+    def upload(
+        self,
+        idx_mapping_np: np.ndarray,
+        cu_num_logits_np: np.ndarray,
+        query_start_loc_np: np.ndarray,
+        num_tokens: int,
+        query_start_loc: torch.Tensor,
+        is_padding: torch.Tensor | None,
+        num_tokens_after_padding: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Returns new device idx_mapping [num_reqs] and cu_num_logits
+        [num_reqs + 1]. Writes all of query_start_loc: the first num_reqs + 1
+        entries of query_start_loc_np, then num_tokens. If is_padding is given,
+        marks is_padding[num_tokens:num_tokens_after_padding] and clears the
+        tokens before.
+        """
+        num_reqs = idx_mapping_np.shape[0]
+        assert cu_num_logits_np.shape[0] == num_reqs + 1
+        # The device outputs take these dtypes, as the separate H2D copies did.
+        assert idx_mapping_np.dtype == np.int64
+        assert cu_num_logits_np.dtype == np.int32
+        assert query_start_loc_np.dtype == np.int32
+        self._slot = (self._slot + 1) % len(self._events)
+        event = self._events[self._slot]
+        if not event.query():
+            event.synchronize()
+        staged_idx_mapping = self._idx_mapping[self._slot]
+        staged_offsets = self._offsets[self._slot]
+        staged_idx_mapping.np[:num_reqs] = idx_mapping_np
+        staged_offsets.np[: num_reqs + 1] = cu_num_logits_np
+        staged_offsets.np[num_reqs + 1 : 2 * num_reqs + 2] = query_start_loc_np[
+            : num_reqs + 1
+        ]
+
+        idx_mapping = torch.empty(num_reqs, dtype=torch.int64, device=self.device)
+        cu_num_logits = torch.empty(num_reqs + 1, dtype=torch.int32, device=self.device)
+        num_padding_tokens = num_tokens_after_padding if is_padding is not None else 0
+        block_size = 1024
+        grid = (cdiv(max(query_start_loc.shape[0], num_padding_tokens), block_size),)
+        _upload_batch_indices_kernel[grid](
+            staged_idx_mapping.uva(),
+            staged_offsets.uva(),
+            idx_mapping,
+            cu_num_logits,
+            query_start_loc,
+            query_start_loc.shape[0],
+            is_padding,
+            num_reqs,
+            num_tokens,
+            num_padding_tokens,
+            HAS_IS_PADDING=is_padding is not None,
+            BLOCK_SIZE=block_size,
+        )
+        event.record()
+        return idx_mapping, cu_num_logits
+
+
+@triton.jit(
+    do_not_specialize=[
+        "query_start_loc_size",
+        "num_reqs",
+        "num_tokens",
+        "num_padding_tokens",
+    ]
+)
+def _upload_batch_indices_kernel(
+    staged_idx_mapping_ptr,  # [num_reqs], pinned host (UVA)
+    staged_offsets_ptr,  # [2 * (num_reqs + 1)], pinned host (UVA)
+    idx_mapping_ptr,  # [num_reqs]
+    cu_num_logits_ptr,  # [num_reqs + 1]
+    query_start_loc_ptr,  # [query_start_loc_size]
+    query_start_loc_size,
+    is_padding_ptr,  # [num_padding_tokens]
+    num_reqs,
+    num_tokens,
+    num_padding_tokens,
+    HAS_IS_PADDING: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    offs = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    is_req = offs < num_reqs
+    req_state_idx = tl.load(staged_idx_mapping_ptr + offs, mask=is_req)
+    tl.store(idx_mapping_ptr + offs, req_state_idx, mask=is_req)
+
+    is_offset = offs <= num_reqs
+    cu_num_logits = tl.load(staged_offsets_ptr + offs, mask=is_offset)
+    tl.store(cu_num_logits_ptr + offs, cu_num_logits, mask=is_offset)
+    # Entries past the last request repeat num_tokens (FULL cudagraph padding).
+    query_start = tl.load(
+        staged_offsets_ptr + num_reqs + 1 + offs, mask=is_offset, other=num_tokens
+    )
+    tl.store(query_start_loc_ptr + offs, query_start, mask=offs < query_start_loc_size)
+
+    if HAS_IS_PADDING:
+        tl.store(
+            is_padding_ptr + offs, offs >= num_tokens, mask=offs < num_padding_tokens
         )
 
 
