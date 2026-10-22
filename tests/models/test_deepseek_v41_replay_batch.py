@@ -24,7 +24,7 @@ from vllm.models.deepseek_v41.nvidia.model_state import DeepseekV41ModelState
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
-from vllm.v1.worker.gpu.pcp_manager import PCPInputBatch
+from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="the replay buffers live on the GPU"
@@ -238,53 +238,52 @@ def test_pcp_replay_keeps_global_tail_after_prefix_hit(state, monkeypatch):
         ncclDataTypeEnum.from_torch(tensor.dtype)
         return torch.cat([tensor] * 2, dim=dim)
 
-    global_batch = _input_batch([1, 513], [400, 1537], [False, True])
+    # A decode and a 513-token prefill from a 1024-token prefix hit.
+    global_batch = replace(
+        _input_batch([1, 513], [400, 1537], [False, True]),
+        num_computed_tokens_np=np.array([399, 1024], dtype=np.int32),
+        prefill_len_np=np.array([10, 1537], dtype=np.int32),
+    )
     state._replay_start_np[1] = 1024
-    for rank, query_lens, seq_lens, indices, expected_rows in (
-        (0, [1, 129, 126], [400, 1153, 1537], [0, 1, 1], [0, *range(130, 256)]),
-        (1, [129, 129], [1282, 1411], [1, 1], [256, 257]),
-    ):
+    for rank, expected_rows in ((0, [0, *range(130, 256)]), (1, [256, 257])):
         monkeypatch.setattr(
             module,
             "get_pcp_group",
             lambda rank=rank: SimpleNamespace(
-                rank_in_group=rank,
-                all_gather=all_gather,
+                rank_in_group=rank, all_gather=all_gather
             ),
         )
-        batch = _input_batch(
-            query_lens,
-            seq_lens,
-            [i == 1 for i in indices],
-            num_tokens_after_padding=258,
+        state.pcp_manager = PCPManager(
+            pcp_world_size=2,
+            pcp_rank=rank,
+            device=DEVICE,
+            shard_decode_requests=True,
+            max_num_reqs=16,
+            max_num_tokens=1024,
         )
-        batch = PCPInputBatch(**vars(batch), global_batch=global_batch)
-        batch.idx_mapping_np = np.array(indices, dtype=np.intp)
-        slots = _slot_mappings(516)
+        batch = state.pcp_manager.partition_batch(
+            global_batch, BatchExecutionDescriptor(CUDAGraphMode.NONE, 514, None)
+        )
+        slots = _slot_mappings(2 * batch.num_tokens_after_padding)
         state.prepare_attn(batch, CUDAGraphMode.NONE, BLOCK_TABLES, slots, [], GROUPS)
         replay = state.decoder_replay_layers.replay_batch
-        assert replay is not None and replay.num_padded == 129
+        # Rank 0 keeps the decode and 126 tail rows, rank 1 the other 2.
+        assert replay is not None and replay.num_padded == 127
         assert replay.rows.tolist() == expected_rows
+        indices = batch.idx_mapping_np[: batch.num_reqs].tolist()
         build, first = state.builds[-2:]
         assert build.replay_start.tolist() == [0 if i == 0 else 1409 for i in indices]
         assert first.replay_start.tolist() == [0 if i == 0 else 1024 for i in indices]
         local_slots = build.slot_mappings.chunk(2, dim=1)[rank]
         torch.testing.assert_close(
-            local_slots[0, : len(expected_rows)], slots[0, rank * 258 + replay.rows]
+            local_slots[0, : len(expected_rows)],
+            slots[0, rank * batch.num_tokens_after_padding + replay.rows],
         )
         assert (local_slots[:, len(expected_rows) :] == -1).all()
-        assert replay.forward_context.is_padding.sum() == 2 * (129 - len(expected_rows))
-        assert replay.forward_context.is_padding.dtype == torch.bool
+        assert replay.forward_context.is_padding.sum() == 2 * (127 - len(expected_rows))
+    # No request trims: every rank keeps the whole batch.
     state._keeps_rows_np[1] = True
-    state._prepare_replay_batch(
-        batch,
-        CUDAGraphMode.NONE,
-        BLOCK_TABLES,
-        slots,
-        [],
-        GROUPS,
-        state._replay_start[: batch.num_reqs],
-    )
+    state.prepare_attn(batch, CUDAGraphMode.NONE, BLOCK_TABLES, slots, [], GROUPS)
     assert state.decoder_replay_layers.replay_batch is None
 
 

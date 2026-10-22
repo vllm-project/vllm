@@ -35,18 +35,13 @@ class RankSegment:
         return self.global_batch_slice.stop - self.global_batch_slice.start
 
 
-@dataclass(kw_only=True)
-class PCPInputBatch(InputBatch):
-    global_batch: InputBatch
-
-
 class PCPManager:
     """MRV2 PC batch manager.
 
     The model runner keeps the global scheduled batch. This manager rewrites only
     the per-step InputBatch into rank-local DualChunkSwap rows and keeps the
-    global-batch view to prepare model-specific metadata and restore the global
-    shape before sampling/postprocess.
+    global-batch view private to restore to the global batch shape before
+    sampling/postprocess.
     """
 
     def __init__(
@@ -430,6 +425,45 @@ class PCPManager:
             for rank in range(self.pcp_world_size)
         )
 
+    def get_trailing_rows(
+        self, input_batch: InputBatch, num_kept_tokens: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, int] | None:
+        """Keep each request's last ``num_kept_tokens[req_state]`` query rows.
+
+        Returns this rank's kept rows and first kept position (0 if untrimmed)
+        per local request, and the largest rank's kept rows; None for batches
+        not partitioned here.
+        """
+        if input_batch is not self._local_batch:
+            return None
+        batch = self.global_batch
+        query_lens = batch.num_scheduled_tokens[: batch.num_reqs]
+        idx_mapping = batch.idx_mapping_np[: batch.num_reqs]
+        keep = np.minimum(num_kept_tokens[idx_mapping], query_lens)
+        first_kept = np.zeros_like(num_kept_tokens)
+        first_kept[idx_mapping] = np.where(
+            keep < query_lens,
+            batch.seq_lens_cpu_upper_bound[: batch.num_reqs].numpy() - keep,
+            0,
+        )
+        num_reqs = input_batch.num_reqs
+        local_first_kept = first_kept[input_batch.idx_mapping_np[:num_reqs]]
+        kept_lens = np.clip(
+            input_batch.seq_lens_cpu_upper_bound[:num_reqs].numpy() - local_first_kept,
+            0,
+            np.diff(input_batch.query_start_loc_np[: num_reqs + 1]),
+        )
+        num_padded = max(
+            sum(
+                max(0, offset + length - max(offset, int(query_lens[i] - keep[i])))
+                for i, offset, length in self._iter_rank_chunks(
+                    rank, query_lens, batch.is_prefilling_np
+                )
+            )
+            for rank in range(self.pcp_world_size)
+        )
+        return kept_lens, local_first_kept, num_padded
+
     @staticmethod
     def _resolve_num_reqs_after_padding(
         input_batch: InputBatch,
@@ -677,7 +711,7 @@ class PCPManager:
             )
 
         self._local_batch = replace(
-            PCPInputBatch(**vars(input_batch), global_batch=global_batch),
+            input_batch,
             req_ids=local_req_ids,
             num_reqs=num_local_reqs,
             num_reqs_after_padding=num_reqs_after_padding,
