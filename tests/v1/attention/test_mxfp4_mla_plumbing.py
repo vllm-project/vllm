@@ -10,17 +10,21 @@ from typing import Any
 import pytest
 import torch
 
+from vllm.v1.attention.ops.mxfp4_mla import row_bytes
+
+# GLM-5.3's latent; the other widths check nothing is pinned to it.
 LATENT = 512
-ROW = 272
+ROW = row_bytes(LATENT)
+LATENT_WIDTHS = [256, LATENT, 1024]
 
 
-def _layer_spec(block_size: int = 64):
+def _layer_spec(block_size: int = 64, latent: int = LATENT):
     """The spec the MLA layer publishes for a GLM-5.3 main layer."""
     from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 
     layer = types.SimpleNamespace(
         kv_cache_dtype="mxfp4_mla",
-        head_size=LATENT,
+        head_size=latent,
         sliding_window=None,
         indexer=None,
         topk_buffer_width=None,
@@ -35,7 +39,12 @@ def _layer_spec(block_size: int = 64):
     return MLAAttention.get_kv_cache_spec(layer, config)
 
 
-def test_dtype_selects_a_uint8_272_byte_row():
+def test_row_is_272_bytes_for_a_512_wide_latent():
+    assert ROW == 272
+
+
+@pytest.mark.parametrize("latent", LATENT_WIDTHS)
+def test_dtype_selects_a_packed_uint8_row(latent: int):
     from vllm.config.cache import CacheConfig
     from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
     from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
@@ -48,9 +57,9 @@ def test_dtype_selects_a_uint8_272_byte_row():
     assert STR_DTYPE_TO_TORCH_DTYPE["mxfp4_mla"] is torch.uint8
     assert "mxfp4_mla" in ROCMAiterMLASparseBackend.supported_kv_cache_dtypes
 
-    spec = _layer_spec()
+    spec = _layer_spec(latent=latent)
     assert spec.dtype is torch.uint8
-    assert spec.page_size_bytes == 64 * ROW
+    assert spec.page_size_bytes == 64 * (latent // 2 + latent // 32)
 
 
 def test_hybrid_block_size_matches_the_layer_page(monkeypatch):
@@ -107,7 +116,8 @@ def test_hybrid_block_size_matches_the_layer_page(monkeypatch):
     assert cache.mamba_page_size_padded == layer_page
 
 
-def test_decode_and_prefill_take_the_triton_route():
+@pytest.mark.parametrize("latent", LATENT_WIDTHS)
+def test_decode_and_prefill_take_the_triton_route(latent: int):
     """Only the Triton kernels read a packed cache; AITER's would misread it."""
     from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
         _use_rocm_sparse_triton,
@@ -119,7 +129,7 @@ def test_decode_and_prefill_take_the_triton_route():
     )
     for step in (decode, prefill):
         assert _use_rocm_sparse_triton(
-            kv_cache_dtype="mxfp4_mla", head_size=LATENT, kv_lora_rank=LATENT, **step
+            kv_cache_dtype="mxfp4_mla", head_size=latent, kv_lora_rank=latent, **step
         )
 
 

@@ -13,13 +13,13 @@ from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.ops.mxfp4_mla_read import _load_mxfp4_rows
 
 if current_platform.is_rocm() and torch.cuda.is_available():
-    from vllm.platforms.rocm import on_gfx950, on_mi3xx
+    from vllm.platforms.rocm import get_cdna_version
 
-    _ON_MI3XX, _ON_GFX950 = on_mi3xx(), on_gfx950()
+    _CDNA_VERSION = get_cdna_version()
 else:
-    _ON_MI3XX = _ON_GFX950 = False
+    _CDNA_VERSION = 0
 pytestmark = pytest.mark.skipif(
-    not _ON_MI3XX, reason="mxfp4_mla needs CDNA 3 or 4 (gfx942 or gfx950)"
+    _CDNA_VERSION not in (3, 4), reason="mxfp4_mla needs CDNA 3 or 4 (gfx942 or gfx950)"
 )
 
 LATENT, ROW, GROUP, BLOCK_K = 512, 272, 32, 16
@@ -71,7 +71,7 @@ def _gather_kernel(
         False,
         pytest.param(
             True,
-            marks=pytest.mark.skipif(not _ON_GFX950, reason="needs gfx950"),
+            marks=pytest.mark.skipif(_CDNA_VERSION != 4, reason="needs gfx950"),
         ),
     ],
     ids=["software", "gfx950"],
