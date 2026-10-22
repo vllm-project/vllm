@@ -9,14 +9,16 @@ from dataclasses import dataclass
 
 import torch
 
-from vllm.models.common.mono.peer import PeerBuffers
-from vllm.models.glm5next.amd.ops.mono.config import HC_MULT, HIDDEN
-from vllm.models.glm5next.amd.ops.mono.ffn.kernel import build_flash_ffn_kernel
-from vllm.models.glm5next.amd.ops.mono.ffn.layout import (
+from vllm.models.glm5next.amd.specialized_decode.mono.config import HC_MULT, HIDDEN
+from vllm.models.glm5next.amd.specialized_decode.mono.ffn.kernel import (
+    build_flash_ffn_kernel,
+)
+from vllm.models.glm5next.amd.specialized_decode.mono.ffn.layout import (
     DSA_TAB,
     POLL_STAGES,
     ROW_WORDS,
 )
+from vllm.models.glm5next.amd.specialized_decode.mono.peer import PeerBuffers
 
 
 @dataclass

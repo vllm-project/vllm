@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Test kit for MonoKernel specs: fake configs, a fake kernel, a fake forward
-context. Model tests reuse it with their own spec."""
+"""Test kit for the GLM-5.3-Flash specialized decode on CPU: a supported fake
+config, a fake backbone and kernels, a fake forward context."""
 
 from __future__ import annotations
 
@@ -12,14 +12,16 @@ from typing import Any
 import torch
 from torch import nn
 
-from vllm.config.compilation import CUDAGraphMode
-from vllm.models.common.mono import CacheReq, Feature, MonoSpec
+from vllm.config.compilation import CompilationMode, CUDAGraphMode
+from vllm.models.glm5next.amd.specialized_decode.runtime import spec
 
-STAGES = ("attn", "ffn")
+# kernel layers of the fake backbone: MoE layers 1..3 (layer 4 is the last)
+KERNEL_LAYERS = (1, 2, 3)
 
 
 def make_vllm_config(**overrides: Any) -> SimpleNamespace:
-    """The VllmConfig fields the shared guards read, all at a supported value."""
+    """The VllmConfig fields the config refusals read, all at a supported value
+    (only the platform is refused off ROCm / off gfx950)."""
     parallel = dict(
         pipeline_parallel_size=1,
         data_parallel_size=1,
@@ -28,20 +30,26 @@ def make_vllm_config(**overrides: Any) -> SimpleNamespace:
         decode_context_parallel_size=1,
         prefill_context_parallel_size=1,
         tensor_parallel_size=4,
+        use_sequence_parallel_moe=False,
     )
     parallel.update(overrides.pop("parallel", {}))
     compilation = dict(
+        mode=CompilationMode.VLLM_COMPILE,
         cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
         cudagraph_capture_sizes=[1, 2, 4, 8, 16, 32],
     )
     compilation.update(overrides.pop("compilation", {}))
+    cache = dict(cache_dtype="auto", mamba_ssm_cache_dtype="auto")
+    cache.update(overrides.pop("cache", {}))
+    hf = SimpleNamespace(model_type="glm5_next_text", **spec.GEOMETRY)
+    for key, value in overrides.pop("hf", {}).items():
+        setattr(hf, key, value)
     cfg = SimpleNamespace(
         parallel_config=SimpleNamespace(**parallel),
         model_config=SimpleNamespace(
-            enable_sleep_mode=False,
-            enable_prompt_embeds=False,
-            hf_text_config=SimpleNamespace(num_hidden_layers=4),
+            enable_sleep_mode=False, enable_prompt_embeds=False, hf_text_config=hf
         ),
+        cache_config=SimpleNamespace(**cache),
         offload_config=SimpleNamespace(
             uva=SimpleNamespace(cpu_offload_gb=0),
             prefetch=SimpleNamespace(offload_group_size=0),
@@ -76,11 +84,23 @@ class FakeLayer(nn.Module):
         return hidden + 1, residual
 
 
-class FakeModel(nn.Module):
-    def __init__(self, n: int = 4) -> None:
+class FakeBackbone(nn.Module):
+    def __init__(self, vllm_config: Any = None, n: int = 5) -> None:
         super().__init__()
+        self.vllm_config = vllm_config or make_vllm_config()
+        self.config = SimpleNamespace(
+            num_hidden_layers=n, mlp_layer_types=["dense"] + ["sparse"] * (n - 1)
+        )
         self.layers = nn.ModuleList(FakeLayer(i) for i in range(n))
         self.start_layer, self.end_layer = 0, n
+
+    def forward_layers(self, step, tokens: int):
+        hidden, residual = torch.zeros(tokens, 4), None
+        positions = torch.zeros(tokens, dtype=torch.long)
+        for idx, layer in enumerate(self.layers):
+            kernel = step.layer(idx) if step is not None else None
+            hidden, residual = (kernel or layer)(positions, hidden, residual)
+        return hidden, residual
 
 
 @dataclass
@@ -99,17 +119,18 @@ class FakeKernel:
         return self.words
 
 
-def make_spec(
-    supports: frozenset[Feature] = frozenset(),
-    config_reasons: tuple[str, ...] = (),
+def patch_layers(
+    monkeypatch,
+    log: list,
     model_reasons: tuple[str, ...] = (),
     bind_reasons: tuple[str, ...] = (),
     eligible_reason: str | None = None,
-    layers: tuple[int, ...] = (1, 2, 3),
-    log: list | None = None,
-) -> MonoSpec:
-    log = [] if log is None else log
-    words = torch.zeros(len(STAGES), dtype=torch.int32)
+    rank: int = 0,
+) -> None:
+    """Replace the GLM layer builders with fakes, so the executor runs on CPU."""
+    from vllm.models.glm5next.amd.specialized_decode.runtime import decode, layers
+
+    words = torch.zeros(len(spec.STAGES), dtype=torch.int32)
 
     def bind(ctx, caches):
         log.append(("bind", tuple(sorted(caches))))
@@ -119,23 +140,26 @@ def make_spec(
         log.append(("build", idx, width))
         return FakeKernel(idx, width, words)
 
-    return MonoSpec(
-        name="fake",
-        layers=lambda hf: list(layers),
-        widths=(2, 4, 8),
-        supports=supports,
-        caches={"kv": CacheReq("cache", (torch.float32,))},
-        weight_source="views",
-        grid=256,
-        stages=STAGES,
-        refuse_config=lambda cfg: list(config_reasons),
-        refuse_model=lambda model: list(model_reasons),
-        pack=lambda model, ctx: log.append(("pack",)) or "packed",
-        bind=bind,
-        eligible=lambda ctx, step: eligible_reason,
-        build=build,
-        metadata_names=lambda ls: [ls[i].attn_name for i in sorted(ls)],
-        options={"tokens": (1, 2, 4, 8)},
+    monkeypatch.setattr(decode, "model_refusals", lambda b: list(model_reasons))
+    monkeypatch.setattr(
+        layers, "pack", lambda model, ctx: log.append(("pack",)) or "packed"
+    )
+    monkeypatch.setattr(layers, "bind", bind)
+    monkeypatch.setattr(layers, "build", build)
+    monkeypatch.setattr(layers, "eligible", lambda ctx, step: eligible_reason)
+    monkeypatch.setattr(
+        layers, "metadata_names", lambda ls: [ls[i].attn_name for i in sorted(ls)]
+    )
+    monkeypatch.setattr(
+        layers, "CACHES", {"kv": ("cache", (torch.float32,), lambda layer: True)}
+    )
+    monkeypatch.setattr("vllm.distributed.get_tensor_model_parallel_rank", lambda: rank)
+    monkeypatch.setattr(
+        "vllm.distributed.get_tensor_model_parallel_world_size", lambda: 4
+    )
+    monkeypatch.setattr(
+        "vllm.distributed.get_tp_group",
+        lambda: type("G", (), {"cpu_group": None})(),
     )
 
 
@@ -148,6 +172,4 @@ def decode_metadata(names: list[str], **fields: Any) -> dict[str, SimpleNamespac
 def forward_context(
     metadata: Any, mode: CUDAGraphMode = CUDAGraphMode.FULL
 ) -> SimpleNamespace:
-    return SimpleNamespace(
-        attn_metadata=metadata, slot_mapping={}, cudagraph_runtime_mode=mode
-    )
+    return SimpleNamespace(attn_metadata=metadata, cudagraph_runtime_mode=mode)

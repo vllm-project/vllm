@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Model side of the GLM-5.3-Flash MonoKernel spec.
+"""The GLM-5.3-Flash kernel layers: weight packing, cache binding, step eligibility
+and the launch of each width.
 
 Every kernel layer is one launch for the whole decoder layer: the attention-side
 mHC, the attention (KDA, or sparse MLA with its kpool indexer and cache writes),
@@ -14,15 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm.models.common.mono.spec import MonoContext, MonoStep
-from vllm.models.glm5next.amd.mono import spec as flash_spec
-from vllm.models.glm5next.amd.mono.weights import (
-    dsa_weights,
-    experts_backend_reason,
-    kda_weights,
-    layer_weights,
-)
-from vllm.models.glm5next.amd.ops.mono.config import (
+from vllm.models.glm5next.amd.specialized_decode.mono.config import (
     GLOBAL_INTER,
     HC_MULT,
     HIDDEN,
@@ -33,39 +26,37 @@ from vllm.models.glm5next.amd.ops.mono.config import (
     FlashShard,
 )
 
+from . import spec as flash_spec
+from .context import DecodeContext as MonoContext
+from .context import DecodeStep as MonoStep
+from .weights import dsa_weights, kda_weights, layer_weights
+
 if TYPE_CHECKING:
     from torch import nn
 
-POLL_LIMIT = 20_000_000
 # kpool pools a sparse-attention task scores
 POOLS_PER_TASK = 256
+
+# the caches each kernel layer reads: (path on the vLLM layer, dtypes, layer filter)
+CACHES = {
+    "conv": ("self_attn.kv_cache[0]", (torch.bfloat16,), flash_spec.is_kda),
+    "rec": ("self_attn.kv_cache[1]", (torch.float32,), flash_spec.is_kda),
+    "mla": (
+        "self_attn.mla_attn.mla_attn.kv_cache",
+        (torch.bfloat16, torch.uint8, torch.float8_e4m3fn),
+        flash_spec.is_dsa,
+    ),
+    "icache": ("self_attn.indexer.k_cache.kv_cache", (torch.uint8,), flash_spec.is_dsa),
+    "tail": (
+        "self_attn.indexer.tail_cache.kv_cache",
+        (torch.bfloat16,),
+        flash_spec.is_dsa,
+    ),
+}
 
 
 def _kernel_layers(model: nn.Module) -> list[int]:
     return flash_spec.kernel_layers(model.config)
-
-
-def refuse_model(model: nn.Module) -> list[str]:
-    reasons = []
-    for idx in _kernel_layers(model):
-        layer = model.layers[idx]
-        why = experts_backend_reason(layer)
-        if why is not None:
-            reasons.append(f"layer {idx}: {why}")
-        if not getattr(layer, "mhc", False) or getattr(layer, "is_mtp_layer", False):
-            reasons.append(f"layer {idx}: needs an mHC decoder layer")
-        if getattr(layer, "is_sequence_parallel", False):
-            reasons.append(f"layer {idx}: sequence-parallel layer")
-        if not hasattr(layer.self_attn, "o_proj"):
-            reasons.append(f"layer {idx}: needs the attention's o_proj")
-        if flash_spec.is_kda(layer) and getattr(layer.self_attn, "num_spec", 0):
-            reasons.append(f"layer {idx}: KDA with speculative decoding")
-        if (
-            flash_spec.is_dsa(layer)
-            and getattr(layer.self_attn, "indexer", None) is None
-        ):
-            reasons.append(f"layer {idx}: sparse attention without its indexer")
-    return reasons
 
 
 def pack(model: nn.Module, ctx: MonoContext) -> dict[int, Any]:
@@ -113,7 +104,7 @@ def _bind_dsa(
     or e4m3 bytes with ``kv_fp8``), index cache [blocks, 16 n pools, 132] (16-pool
     tiles) and kpool tail ring [blocks, 2, 4, 128]; the kernel addresses every
     block with a 64-bit base."""
-    from vllm.models.glm5next.amd.ops.mono.ffn.op import FlashDsaCaches
+    from vllm.models.glm5next.amd.specialized_decode.mono.ffn.op import FlashDsaCaches
 
     reasons, out = [], {}
     for key, kv in caches.items():
@@ -153,7 +144,7 @@ def bind(ctx: MonoContext, caches: Mapping[str, torch.Tensor]) -> list[str]:
     and recurrent state [slots, H, 128, 128], and each sparse-attention layer's
     caches, kept for the launches."""
     from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
-    from vllm.models.glm5next.amd.ops.mono.ffn.op import FlashKdaState
+    from vllm.models.glm5next.amd.specialized_decode.mono.ffn.op import FlashKdaState
 
     shard = FlashShard(ctx.tp_size)
     P, H, D = shard.kda_proj, shard.kda_heads, KDA_DIM
@@ -244,7 +235,10 @@ class _Width:
     step's row table."""
 
     def __init__(self, runtime, width: int, device: torch.device) -> None:
-        from vllm.models.glm5next.amd.ops.mono.ffn.layout import ROW_BT, ROW_WORDS
+        from vllm.models.glm5next.amd.specialized_decode.mono.ffn.layout import (
+            ROW_BT,
+            ROW_WORDS,
+        )
 
         self.rt = runtime
         self.pad = (
@@ -287,7 +281,7 @@ class _Width:
     def dsa_rows(self, step: MonoStep, names: tuple[str, str, str]) -> torch.Tensor:
         """The step's (position, MLA slot, index-cache pool slot, tail slot) rows;
         every sparse-attention layer shares them (one cache group each)."""
-        from vllm.models.glm5next.amd.ops.mono.ffn.layout import (
+        from vllm.models.glm5next.amd.specialized_decode.mono.ffn.layout import (
             ROW_POOL_SLOT,
             ROW_POS,
             ROW_SLOT,
@@ -310,7 +304,7 @@ class _Width:
 
 def _runtime(ctx: MonoContext, width: int, launches: int, kind: str):
     from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
-    from vllm.models.glm5next.amd.ops.mono.ffn.op import FlashFfnRuntime
+    from vllm.models.glm5next.amd.specialized_decode.mono.ffn.op import FlashFfnRuntime
 
     widths = ctx.state.setdefault("widths", {})
     if (width, kind) not in widths:
@@ -322,7 +316,7 @@ def _runtime(ctx: MonoContext, width: int, launches: int, kind: str):
             ctx.cpu_group,
             GLOBAL_INTER // ctx.tp_size,
             launches,
-            POLL_LIMIT,
+            ctx.state["poll_limit"],
             # after one expired wait the step's later waits return at once, so a
             # stalled peer costs one poll limit a launch kind, well inside vLLM's
             # execute timeout, and the health check stops the engine
@@ -423,7 +417,7 @@ class _Unbuilt:
 
 
 def build(ctx: MonoContext, packed: dict, layer: nn.Module, idx: int, width: int):
-    from vllm.models.glm5next.amd.ops.mono.ffn.op import FlashFfnOp
+    from vllm.models.glm5next.amd.specialized_decode.mono.ffn.op import FlashFfnOp
 
     ffn, attn, kind = packed[idx]
     cap = flash_spec.TP_MAX_WIDTH.get(ctx.tp_size)

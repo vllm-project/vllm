@@ -29,7 +29,7 @@ class _Kda:
     this rank's shard, in vLLM's post-load layouts."""
 
     def __init__(self, rank: int, tp: int, device) -> None:
-        from vllm.models.glm5next.amd.ops.mono.config import (
+        from vllm.models.glm5next.amd.specialized_decode.mono.config import (
             HC_MULT,
             HIDDEN,
             KDA_DIM,
@@ -77,7 +77,9 @@ class _Kda:
         self.rec0 = rnd(SLOTS, H, D, D, scale=0.05)
 
     def weights(self):
-        from vllm.models.glm5next.amd.ops.mono.ffn.op import FlashKdaWeights
+        from vllm.models.glm5next.amd.specialized_decode.mono.ffn.op import (
+            FlashKdaWeights,
+        )
 
         return FlashKdaWeights(
             hc_fn=self.hc_fn,
@@ -109,8 +111,11 @@ def _kda_reference(k: _Kda, proj, gates, conv, rec, idx, dim_first):
     from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
         causal_conv1d_update,
     )
-    from vllm.models.glm5next.amd.ops.mono.config import KDA_DIM, KDA_LOWER_BOUND
     from vllm.models.glm5next.amd.ops.third_party.kda import fused_recurrent_kda
+    from vllm.models.glm5next.amd.specialized_decode.mono.config import (
+        KDA_DIM,
+        KDA_LOWER_BOUND,
+    )
     from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 
     S, P, H, D = proj.shape[0], k.P, k.H, KDA_DIM
@@ -161,13 +166,13 @@ def _check(rank: int, tp: int, device, dim_first: bool) -> None:
     import torch.distributed as dist
 
     from vllm.distributed import get_tp_group
-    from vllm.models.glm5next.amd.ops.mono.config import (
+    from vllm.models.glm5next.amd.specialized_decode.mono.config import (
         HC_MULT,
         HIDDEN,
         MOE_SLOTS,
         FlashShard,
     )
-    from vllm.models.glm5next.amd.ops.mono.ffn.op import (
+    from vllm.models.glm5next.amd.specialized_decode.mono.ffn.op import (
         FlashFfnOp,
         FlashFfnRuntime,
         FlashKdaState,

@@ -59,7 +59,7 @@ def _mxfp8(a):
 
 
 def _moe_reference(x, w_r, bias, w13, w2, inter):
-    from vllm.models.glm5next.amd.ops.mono.config import (
+    from vllm.models.glm5next.amd.specialized_decode.mono.config import (
         HIDDEN,
         N_EXPERTS,
         ROUTE_SCALE,
@@ -88,13 +88,13 @@ class _Layer:
     def __init__(self, rank: int, tp: int, device) -> None:
         from aiter.ops.shuffle import shuffle_scale, shuffle_weight
 
-        from vllm.models.glm5next.amd.ops.mono.config import (
+        from vllm.models.glm5next.amd.specialized_decode.mono.config import (
             GLOBAL_INTER,
             HC_MULT,
             HIDDEN,
             N_EXPERTS,
         )
-        from vllm.models.glm5next.amd.ops.mono.packing import pack_bf16
+        from vllm.models.glm5next.amd.specialized_decode.mono.packing import pack_bf16
 
         g = torch.Generator(device=device).manual_seed(0)
         E, full, self.inter = N_EXPERTS + 1, GLOBAL_INTER, GLOBAL_INTER // tp
@@ -143,9 +143,13 @@ class _Layer:
         self.g = g
 
     def weights(self, separate: bool = False):
-        from vllm.models.glm5next.amd.ops.mono.config import N_EXPERTS
-        from vllm.models.glm5next.amd.ops.mono.ffn.op import FlashFfnWeights
-        from vllm.models.glm5next.amd.ops.mono.packing import pack_shared_expert
+        from vllm.models.glm5next.amd.specialized_decode.mono.config import N_EXPERTS
+        from vllm.models.glm5next.amd.specialized_decode.mono.ffn.op import (
+            FlashFfnWeights,
+        )
+        from vllm.models.glm5next.amd.specialized_decode.mono.packing import (
+            pack_shared_expert,
+        )
 
         routed = (self.k_w13, self.k_s13, self.k_w2, self.k_s2)
         if separate:
@@ -174,7 +178,7 @@ class _Layer:
 def _vllm_seam(lay, x_attn, res, post, comb):
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.mhc import MHCFusedPostPreOp, _apply_mhc_norm
-    from vllm.models.glm5next.amd.ops.mono.config import (
+    from vllm.models.glm5next.amd.specialized_decode.mono.config import (
         EPS,
         HC_EPS,
         HC_POST_MULT,
@@ -205,7 +209,7 @@ def _vllm_seam(lay, x_attn, res, post, comb):
 
 def _runtime(width, rank, tp, poll_limit, launches=1):
     from vllm.distributed import get_tp_group
-    from vllm.models.glm5next.amd.ops.mono.ffn.op import FlashFfnRuntime
+    from vllm.models.glm5next.amd.specialized_decode.mono.ffn.op import FlashFfnRuntime
 
     return FlashFfnRuntime(
         width,
@@ -223,8 +227,12 @@ def _check(rank: int, tp: int, device, separate: bool) -> None:
     import torch.distributed as dist
 
     from vllm.distributed import get_tp_group
-    from vllm.models.glm5next.amd.ops.mono.config import HC_MULT, HIDDEN, MOE_SLOTS
-    from vllm.models.glm5next.amd.ops.mono.ffn.op import FlashFfnOp
+    from vllm.models.glm5next.amd.specialized_decode.mono.config import (
+        HC_MULT,
+        HIDDEN,
+        MOE_SLOTS,
+    )
+    from vllm.models.glm5next.amd.specialized_decode.mono.ffn.op import FlashFfnOp
 
     lay = _Layer(rank, tp, device)
     group = get_tp_group().cpu_group
@@ -325,8 +333,8 @@ def _check_fault(rank: int, tp: int, device) -> None:
     os.environ["FLYDSL_RUNTIME_CACHE_DIR"] = tempfile.mkdtemp(prefix="mono_fault_")
 
     from vllm.distributed import get_tp_group
-    from vllm.models.glm5next.amd.ops.mono.config import HC_MULT, HIDDEN
-    from vllm.models.glm5next.amd.ops.mono.ffn.op import FlashFfnOp
+    from vllm.models.glm5next.amd.specialized_decode.mono.config import HC_MULT, HIDDEN
+    from vllm.models.glm5next.amd.specialized_decode.mono.ffn.op import FlashFfnOp
 
     lay = _Layer(rank, tp, device)
     rt = _runtime(2, rank, tp, FAULT_POLL_LIMIT)

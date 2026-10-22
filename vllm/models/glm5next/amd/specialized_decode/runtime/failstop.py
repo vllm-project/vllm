@@ -11,8 +11,7 @@ import os
 import torch
 
 from vllm.logger import init_logger
-
-from . import abi
+from vllm.models.glm5next.amd.specialized_decode.mono import abi
 
 logger = init_logger(__name__)
 
