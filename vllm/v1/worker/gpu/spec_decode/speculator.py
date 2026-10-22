@@ -53,14 +53,18 @@ def compute_draft_seq_lens_cpu_lower_bound(
     num_speculative_steps: int,
     num_reqs: int,
     num_reqs_padded: int,
+    padded_seq_len: int = 0,
 ) -> torch.Tensor:
     """CPU lower bound on seq_lens for draft step ``step``, as a new tensor.
 
     The target lower bound already allows for the drafts of the step in
     flight. The verification just run may reject up to num_speculative_steps
-    more, which the target bounds still count. Padded entries are zero.
+    more, which the target bounds still count. Padded entries are
+    padded_seq_len, the exact length of those rows.
     """
-    draft_lower_bound = torch.zeros(num_reqs_padded, dtype=torch.int32, device="cpu")
+    draft_lower_bound = torch.full(
+        (num_reqs_padded,), padded_seq_len, dtype=torch.int32, device="cpu"
+    )
     torch.add(
         seq_lens_cpu_lower_bound[:num_reqs],
         step - num_speculative_steps,
@@ -380,6 +384,13 @@ class DraftModelSpeculator(BaseSpeculator):
                 ", ".join(unsupported_backends),
             )
 
+    def _padded_draft_seq_len(
+        self, step: int, batch_desc: BatchExecutionDescriptor
+    ) -> int:
+        """seq_lens of the CUDA-graph padded rows when draft step ``step``
+        builds its metadata."""
+        return 0
+
     def _build_attn_metadata(
         self,
         num_reqs: int,
@@ -425,12 +436,15 @@ class DraftModelSpeculator(BaseSpeculator):
         draft_seq_lens_cpu_upper_bound[:num_reqs].clamp_(max=self.max_model_len)
         draft_seq_lens_cpu_lower_bound = None
         if seq_lens_cpu_lower_bound is not None:
+            padded_seq_len = self._padded_draft_seq_len(step, batch_desc)
+            draft_seq_lens_cpu_upper_bound[num_reqs:] = padded_seq_len
             draft_seq_lens_cpu_lower_bound = compute_draft_seq_lens_cpu_lower_bound(
                 seq_lens_cpu_lower_bound,
                 step,
                 self.num_speculative_steps,
                 num_reqs,
                 num_reqs_padded,
+                padded_seq_len,
             )
         if dcp_local_seq_lens is None and self.dcp_size > 1:
             # Draft steps advance and rewind their own global sequence lengths,

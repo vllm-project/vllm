@@ -3,15 +3,21 @@
 """The CPU bounds on seq_lens that FlashInfer plans from, and the check of the
 exact seq_lens against them. No GPU needed."""
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import torch
 
 from vllm import envs
+from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backends.utils import check_seq_lens_bounds
 from vllm.v1.worker.gpu.model_runner import compute_seq_lens_cpu_lower_bound
 from vllm.v1.worker.gpu.spec_decode.speculator import (
     compute_draft_seq_lens_cpu_lower_bound,
+)
+from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
+    TargetDependentARSpeculator,
 )
 
 NUM_SPEC = 3
@@ -62,6 +68,36 @@ def test_draft_lower_bound_per_step(step: int, expected: list[int]) -> None:
     assert draft_lower.tolist() == expected + [0, 0]
     assert draft_lower.dtype == torch.int32
     assert target_lower.tolist() == LOWER
+
+
+def test_draft_lower_bound_fills_the_padded_rows() -> None:
+    target_lower = torch.tensor(LOWER, dtype=torch.int32)
+    draft_lower = compute_draft_seq_lens_cpu_lower_bound(
+        target_lower, 2, NUM_SPEC, NUM_REQS, num_reqs_padded=8, padded_seq_len=1
+    )
+    assert draft_lower.tolist() == [1324, 17, 462, 64, 0, 0, 1, 1]
+
+
+@pytest.mark.parametrize(
+    "advance, cg_mode, step, expected",
+    [
+        (True, CUDAGraphMode.FULL, 1, 0),
+        (True, CUDAGraphMode.FULL, 3, 2),
+        (True, CUDAGraphMode.PIECEWISE, 3, 0),
+        (False, CUDAGraphMode.FULL, 3, 0),
+    ],
+)
+def test_padded_draft_seq_len(
+    advance: bool, cg_mode: CUDAGraphMode, step: int, expected: int
+) -> None:
+    """Inside a FULL graph the padded rows advance with the others, once per
+    draft step already run."""
+    speculator = SimpleNamespace(advance_draft_positions=advance, max_model_len=4096)
+    batch_desc = SimpleNamespace(cg_mode=cg_mode)
+    assert (
+        TargetDependentARSpeculator._padded_draft_seq_len(speculator, step, batch_desc)
+        == expected
+    )
 
 
 def _bounds() -> tuple[torch.Tensor, torch.Tensor]:
