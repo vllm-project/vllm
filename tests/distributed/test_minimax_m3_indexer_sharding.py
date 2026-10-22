@@ -126,6 +126,8 @@ def _check_indexer_forwards(config, device, rank, comm):
     from vllm.models.minimax_m3.nvidia import indexer_msa as msa
 
     torch.manual_seed(123)
+    world = comm.world
+    local_heads = 4 // world
     # Five layers exercise all three receive slot sets, including wrap across
     # steps. Keep the actual production communication objects and dispatch.
     layers = []
@@ -133,20 +135,20 @@ def _check_indexer_forwards(config, device, rank, comm):
         layers.append(
             [
                 msa.MiniMaxM3IndexerMSAImpl(
-                    num_kv_heads=1,
+                    num_kv_heads=local_heads,
                     scale=128**-0.5,
                     topk_blocks=16,
                     sparse_block_size=128,
-                    num_index_heads=1,
+                    num_index_heads=local_heads,
                     index_head_dim=128,
                     init_blocks=1,
                     local_blocks=1,
                     prefix=f"indexer_{sharded}_{layer}",
                     cache_config=config.cache_config,
                     indexer_kv_dtype="fp8",
-                    index_k_shard=4 if sharded else 1,
+                    index_k_shard=world if sharded else 1,
                     topk_indices_buffer=torch.empty(
-                        (256, 1, 16), dtype=torch.int32, device=device
+                        (256, local_heads, 16), dtype=torch.int32, device=device
                     ),
                 )
                 for layer in range(5)
@@ -167,7 +169,13 @@ def _check_indexer_forwards(config, device, rank, comm):
         md = {impl.index_cache.prefix: metadata[sharded] for impl in impls}
         with set_forward_context(md, config):
             for impl, query in zip(impls, queries):
-                impl(query if sharded else query[:, rank : rank + 1].contiguous())
+                impl(
+                    query
+                    if sharded
+                    else query[
+                        :, rank * local_heads : (rank + 1) * local_heads
+                    ].contiguous()
+                )
 
     def check(metadata, queries, num_tokens):
         run(False, metadata, queries)
@@ -227,8 +235,10 @@ def _check_indexer_forwards(config, device, rank, comm):
             cache[:, :, :7] = page_codes[:, None]
             cache = cache.to(torch.float8_e4m3fn)
             reference.index_cache.bind_kv_cache(cache.unsqueeze(1))
-            shard = cache[:, rank::4].contiguous()
-            sharded.index_cache.bind_kv_cache(shard.view(num_pages, 1, 128, 32))
+            shard = cache[:, rank::world].contiguous()
+            sharded.index_cache.bind_kv_cache(
+                shard.view(num_pages, 1, 128, 128 // world)
+            )
             caches.append(cache)
             query = (
                 torch.randint(-2, 3, (num_tokens, 4, 128), device=device).float() / 64
@@ -254,7 +264,7 @@ def _check_indexer_forwards(config, device, rank, comm):
                 for query, cache, impl in zip(queries, caches, layers[1]):
                     query.copy_((-query.float()).to(query.dtype))
                     cache.view(torch.uint8).copy_(cache.view(torch.uint8).roll(1, 0))
-                    impl.index_cache.kv_cache.copy_(cache[:, rank::4])
+                    impl.index_cache.kv_cache.copy_(cache[:, rank::world])
                 graph.replay()
             check(metadata, queries, num_tokens)
         else:
@@ -273,18 +283,19 @@ def _check_indexer_forwards(config, device, rank, comm):
     not current_platform.is_device_capability_family(100),
     reason="MiniMax M3 sharded MSA indexer requires SM100",
 )
-def test_msa_indexer_tp4_matches_replicated(monkeypatch):
-    """Real TP4 score/TopK, prefill gather, and mailbox reuse under graph replay."""
-    if torch.accelerator.device_count() < 4:
-        pytest.skip("Requires four GPUs")
+@pytest.mark.parametrize("tp_size", [2, 4])
+def test_msa_indexer_tp_matches_replicated(monkeypatch, tp_size):
+    """Real TP score/TopK, prefill gather, and mailbox reuse under graph replay."""
+    if torch.accelerator.device_count() < tp_size:
+        pytest.skip(f"Requires {tp_size} GPUs")
     if not all(
         torch.cuda.can_device_access_peer(src, dst)
-        for src in range(4)
-        for dst in range(4)
+        for src in range(tp_size)
+        for dst in range(tp_size)
         if src != dst
     ):
-        pytest.skip("Requires peer access between all four GPUs")
-    multi_process_parallel(monkeypatch, 4, 1, _indexer_sharding)
+        pytest.skip("Requires peer access between all TP GPUs")
+    multi_process_parallel(monkeypatch, tp_size, 1, _indexer_sharding)
 
 
 def _check_sharding_policy(config, original_comm):
@@ -292,7 +303,7 @@ def _check_sharding_policy(config, original_comm):
 
     sparse_config = config.model_config.hf_text_config.sparse_attention_config
     policy = create_vllm_config(
-        tensor_parallel_size=4,
+        tensor_parallel_size=original_comm.world,
         block_size=128,
         max_model_len=4096,
         max_num_seqs=32,
@@ -300,9 +311,9 @@ def _check_sharding_policy(config, original_comm):
     )
     model = copy(policy.model_config)
     for mode, length, cap, active_cap, q, eager, graph_mode, expected in [
-        ("on", 4096, 1, None, 4, False, CUDAGraphMode.FULL, 4),
+        ("on", 4096, 1, None, 4, False, CUDAGraphMode.FULL, original_comm.world),
         ("off", 1024 * 1024, 32, None, 1, False, CUDAGraphMode.FULL, 1),
-        ("on", 4096, 1, None, 1, True, CUDAGraphMode.NONE, 4),
+        ("on", 4096, 1, None, 1, True, CUDAGraphMode.NONE, original_comm.world),
         ("off", 1024 * 1024, 32, None, 1, True, CUDAGraphMode.NONE, 1),
     ]:
         policy.model_config = copy(model)

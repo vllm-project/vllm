@@ -562,9 +562,14 @@ def _has_native_fp8() -> bool:
     reason="e4m3 conversion requires CUDA SM89+ or ROCm CDNA3/4.",
 )
 @pytest.mark.parametrize("num_tokens", [1, 7, 64, 513])
-@pytest.mark.parametrize("block_size,num_kv_heads", [(16, 4), (64, 4), (128, 1)])
+@pytest.mark.parametrize(
+    "block_size,num_kv_heads,tp_shard",
+    [(16, 4, 1), (64, 4, 1), (128, 1, 2), (128, 1, 4)],
+)
 @pytest.mark.parametrize("index_k_scale", [0.1, 3000.0])
-def test_sparse_full_fp8_index(num_tokens, block_size, num_kv_heads, index_k_scale):
+def test_sparse_full_fp8_index(
+    num_tokens, block_size, num_kv_heads, tp_shard, index_k_scale
+):
     # The fp8 flavour is the device's own: e4m3fnuz on gfx942, else e4m3fn.
     fp8_dtype = current_platform.fp8_dtype()
     torch.manual_seed(1)
@@ -727,21 +732,24 @@ def test_sparse_fp8_index_rejects_foreign_flavour():
 
         with set_current_vllm_config(VllmConfig()):
             cache = MiniMaxM3IndexerCache(
-                HEAD_DIM, prefix="index_cache", indexer_kv_dtype="fp8", tp_shard=4
+                HEAD_DIM,
+                prefix="index_cache",
+                indexer_kv_dtype="fp8",
+                tp_shard=tp_shard,
             )
-        for rank in range(4):
+        for rank in range(tp_shard):
             packed = torch.zeros(
                 num_blocks,
                 1,
                 block_size,
-                HEAD_DIM // 4,
+                HEAD_DIM // tp_shard,
                 dtype=torch.float8_e4m3fn,
                 device=device,
             )
             cache.bind_kv_cache(packed)
             assert cache.kv_cache.data_ptr() == packed.data_ptr()
             index_slots = shard_slot_mapping(
-                index_slot_mapping, rank, 4, torch.empty_like(index_slot_mapping)
+                index_slot_mapping, rank, tp_shard, torch.empty_like(index_slot_mapping)
             )
             qkv_sh, kvc_sh, idxc_sh, qo_sh, iq_sh = run(
                 torch.float8_e4m3fn, cache.kv_cache, index_slots
@@ -753,7 +761,7 @@ def test_sparse_fp8_index_rejects_foreign_flavour():
             ):
                 assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
             assert torch.equal(
-                idxc_sh.view(torch.uint8), idxc_fp[:, rank::4].view(torch.uint8)
+                idxc_sh.view(torch.uint8), idxc_fp[:, rank::tp_shard].view(torch.uint8)
             )
 
 

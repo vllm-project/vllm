@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Decode index scores over TP4-sharded FP8 keys and exchange top-k candidates."""
+"""Decode index scores over TP-sharded FP8 keys and exchange top-k candidates."""
 
 from functools import cache
 
@@ -18,8 +18,7 @@ from vllm.models.minimax_m3.nvidia.ops.index_decode_score import (
 from vllm.triton_utils import tl, triton
 
 BLOCK = 128
-ROWS = 32  # Local token rows per block, handled by one MMA warp.
-SUPPORTED_TP = BLOCK // ROWS
+SUPPORTED_TP = (2, 4)
 DEFAULT_SPLIT_K = 128
 MAX_K_TILES = 8192  # Matches the unified score buffer.
 TOPK = 16
@@ -37,18 +36,20 @@ class IndexDecodeScoreShardedKernel:
         max_decode_query_len: int,
         split_k: int,
         head_dim: int = 128,
+        world_size: int = 4,
     ):
         self.dtype = Float8E4M3FN
         self.num_heads = num_heads
         self.max_decode_query_len = max_decode_query_len
         self.split_k = split_k
         self.head_dim = head_dim
+        self.world_size = world_size
 
     @cute.jit
     def __call__(
         self,
         gQ: cute.Tensor,  # [bs * runtime_decode_query_len, num_heads, head_dim]
-        gK_cache: cute.Tensor,  # [num_pages, ROWS, head_dim]
+        gK_cache: cute.Tensor,  # [num_pages, BLOCK // world_size, head_dim]
         block_table: cute.Tensor,  # [bs, max_pages]
         scores: cute.Tensor,  # [total_tokens, num_heads, MAX_K_TILES]
         seq_lens: cute.Tensor,  # [bs]
@@ -61,6 +62,7 @@ class IndexDecodeScoreShardedKernel:
         num_stages = self.num_stages
         MAX_DQL = self.max_decode_query_len
         BLOCK_Q = num_heads * MAX_DQL
+        ROWS = BLOCK // self.world_size
         assert BLOCK_Q <= 32
         assert head_dim * dtype.width == 128 * 8  # one 128 B row per token
 
@@ -128,7 +130,8 @@ class IndexDecodeScoreShardedKernel:
         MAX_DQL = self.max_decode_query_len
         BLOCK_Q = NUM_HEADS * MAX_DQL
         PAGES = self.PAGES
-        TP = SUPPORTED_TP
+        TP = self.world_size
+        ROWS = BLOCK // TP
         head_dim = self.head_dim
         dtype = self.dtype
         MMA_N = 8
@@ -260,8 +263,10 @@ class IndexDecodeScoreShardedKernel:
                 rQ = cute.make_rmem_tensor(
                     ((elems // 2, 2), head_dim // (MMA_K * 2), Q_TILES), dtype
                 )
-                rK = cute.make_rmem_tensor((elems, 2, head_dim // MMA_K), dtype)
-                rC = cute.make_rmem_tensor((4, 2, Q_TILES), Float32)
+                rK = cute.make_rmem_tensor(
+                    (elems, ROWS // 16, head_dim // MMA_K), dtype
+                )
+                rC = cute.make_rmem_tensor((4, ROWS // 16, Q_TILES), Float32)
 
                 if warp_id == 0:
                     cute.arch.mbarrier_wait(tma_full_mbar, 0)
@@ -295,7 +300,7 @@ class IndexDecodeScoreShardedKernel:
                             sK_ldsm[None, (None, k, tma_stage)],
                             rK[None, None, k],
                         )
-                        for m in cutlass.range_constexpr(2):
+                        for m in cutlass.range_constexpr(ROWS // 16):
                             rK_lower, rK_upper = _fp8_to_f16_mma_fragments(
                                 rK[None, m, k]
                             )
@@ -319,25 +324,25 @@ class IndexDecodeScoreShardedKernel:
 
                     # causal mask
                     for q in cutlass.range_constexpr(Q_TILES):
-                        for i in cutlass.range_constexpr(4):
+                        rC_q = rC[None, None, q]
+                        for i in cutlass.range_constexpr(ROWS // 8):
                             for j in cutlass.range_constexpr(2):
                                 col = q * 8 + (lane_id % 4) * 2 + j
                                 q_local_pos = col % MAX_DQL
                                 q_pos = q_start + q_local_pos
                                 k_pos = k_base + (i * 8 + lane_id // 4) * TP
-                                rC[q * 8 + i * 2 + j] = (
-                                    rC[q * 8 + i * 2 + j]
-                                    if q_pos >= k_pos
-                                    else float("-inf")
+                                rC_q[i * 2 + j] = (
+                                    rC_q[i * 2 + j] if q_pos >= k_pos else float("-inf")
                                 )
 
                     for q in cutlass.range_constexpr(Q_TILES):
-                        # thread-reduction along the page's 32 rows
+                        rC_q = rC[None, None, q]
+                        # thread-reduction along the page's local rows
                         rScore = cute.make_rmem_tensor(2, Float32)
                         rScore.fill(float("-inf"))
-                        for i in cutlass.range_constexpr(4):
-                            rScore[0] = cute.arch.fmax(rScore[0], rC[i * 2 + 0 + q * 8])
-                            rScore[1] = cute.arch.fmax(rScore[1], rC[i * 2 + 1 + q * 8])
+                        for i in cutlass.range_constexpr(ROWS // 8):
+                            rScore[0] = cute.arch.fmax(rScore[0], rC_q[i * 2 + 0])
+                            rScore[1] = cute.arch.fmax(rScore[1], rC_q[i * 2 + 1])
 
                         # warp-reduction among lanes 0,4,8,12,...
                         for i in cutlass.range_constexpr(3):
@@ -379,6 +384,7 @@ class IndexDecodeScoreShardedKernel:
         max_decode_query_len: int,
         split_k: int,
         head_dim: int = 128,
+        world_size: int = 4,
     ):
         bs = cute.sym_int()
         total_tokens = cute.sym_int()
@@ -388,7 +394,7 @@ class IndexDecodeScoreShardedKernel:
             dtype, (total_tokens, num_heads, head_dim), divisibility=16
         )
         k_cache = make_fake_tensor(
-            dtype, (cute.sym_int(), ROWS, head_dim), divisibility=16
+            dtype, (cute.sym_int(), BLOCK // world_size, head_dim), divisibility=16
         )
         block_table = make_fake_tensor(Int32, (bs, cute.sym_int()), divisibility=1)
         scores = make_fake_tensor(
@@ -400,6 +406,7 @@ class IndexDecodeScoreShardedKernel:
             max_decode_query_len,
             split_k,
             head_dim,
+            world_size,
         )
         stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
         return cute.compile(
@@ -426,16 +433,17 @@ def minimax_m3_index_decode_score_sharded_cutedsl(
     score_out: torch.Tensor,
     split_k: int = DEFAULT_SPLIT_K,
 ) -> None:
-    """Write local maxima for all heads; local row i holds token i * 4 + rank."""
+    """Write local maxima for all heads over interleaved token shards."""
     if idx_q.dtype != torch.float8_e4m3fn or index_kv_shard.dtype != idx_q.dtype:
         raise TypeError("sharded index decode score supports FP8 E4M3 only")
     total_tokens, num_heads, head_dim = idx_q.shape
     batch = block_table.shape[0]
-    assert index_kv_shard.shape[1] == ROWS
+    assert index_kv_shard.shape[1] in (BLOCK // 2, BLOCK // 4)
+    world_size = BLOCK // index_kv_shard.shape[1]
     assert total_tokens == batch * decode_query_len
     assert 1 <= decode_query_len <= max_decode_query_len
     assert num_heads * max_decode_query_len <= 32
-    assert 0 <= rank < SUPPORTED_TP and num_heads % SUPPORTED_TP == 0
+    assert 0 <= rank < world_size and num_heads % world_size == 0
     assert score_out.shape == (total_tokens, num_heads, MAX_K_TILES)
     assert score_out.dtype == torch.float32 and score_out.is_contiguous()
     kernel = IndexDecodeScoreShardedKernel.compile(
@@ -443,6 +451,7 @@ def minimax_m3_index_decode_score_sharded_cutedsl(
         max_decode_query_len,
         split_k,
         head_dim,
+        world_size,
     )
     kernel(idx_q, index_kv_shard, block_table, score_out, seq_lens, rank)
 
@@ -614,7 +623,7 @@ def minimax_m3_index_merge_candidates(
     """Merge duplicate blocks by max, force init/local blocks, and sort Top16 IDs."""
     world, heads, capacity, row_size = recv_slot.shape
     tokens, out_heads, topk = output.shape
-    assert world == SUPPORTED_TP and out_heads == heads
+    assert world in SUPPORTED_TP and out_heads == heads
     assert topk == TOPK and row_size == CANDIDATE_ROW_SIZE and tokens <= capacity
     assert recv_slot.stride(-1) == output.stride(-1) == 1
     assert num_valid_pages.shape == (tokens,)
