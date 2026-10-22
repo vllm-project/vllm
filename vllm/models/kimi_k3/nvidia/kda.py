@@ -63,7 +63,10 @@ from vllm.utils.flashinfer import (
 )
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import MambaSpec
-from vllm.v1.worker.workspace import current_workspace_manager
+from vllm.v1.worker.workspace import (
+    current_workspace_manager,
+    is_workspace_manager_initialized,
+)
 
 logger = init_logger(__name__)
 
@@ -785,6 +788,18 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 (1, T, H, D),
                 self.model_config.dtype,
             )
+
+        # Profiling skips attention, so reserve its runtime layout before the
+        # KV cache is sized. Layers share the manager's grow-only allocation.
+        if is_workspace_manager_initialized():
+            if self._flashkda_buffer_specs is not None:
+                current_workspace_manager().get_simultaneous(
+                    *self._flashkda_buffer_specs
+                )
+            elif self._flashinfer_kda_output_spec is not None:
+                current_workspace_manager().get_simultaneous(
+                    self._flashinfer_kda_output_spec
+                )
 
         self.o_norm = FusedRMSNormGated(self.head_dim, activation="sigmoid")
         decode_norm_weight = None
