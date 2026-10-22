@@ -228,7 +228,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
     def model_config(self) -> ModelConfig:
         return self._model_config
 
-    def num_items(self, modality: ModalityStr) -> int:
+    def get_num_items(self, modality: ModalityStr) -> int:
         return len(self._items_by_modality.get(modality, ()))
 
     @cached_property

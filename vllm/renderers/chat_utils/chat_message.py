@@ -523,7 +523,7 @@ def parse_chat_message_content_part(
             raise VLLMValidationError(
                 _PROMPT_EMBEDS_MISSING_DATA_ERROR, parameter="prompt_embeds"
             )
-        prompt_embeds_index = mm_tracker.num_items("prompt_embeds")
+        prompt_embeds_index = mm_tracker.get_num_items("prompt_embeds")
         mm_parser.parse_prompt_embeds(cast(str, content))
         prompt_embeds_placeholder = make_prompt_embeds_placeholder(prompt_embeds_index)
         modality = "prompt_embeds"
