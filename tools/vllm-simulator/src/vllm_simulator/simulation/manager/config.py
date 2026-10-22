@@ -78,6 +78,14 @@ class ConfigManager:
         return hw
 
     @classmethod
+    def cpu_overhead_enabled(cls) -> bool:
+        """Enable measured native CPU time in NON_BLOCKING engine steps."""
+        enabled = cls._get_raw_config().get("cpu_overhead", {}).get("enabled", False)
+        if not isinstance(enabled, bool):
+            raise ValueError("cpu_overhead.enabled must be a boolean")
+        return enabled
+
+    @classmethod
     def get_inference_time_predictor(cls) -> InferTimePredictor:
         model = cls._model_config
         hw = cls.get_accelerator_info()

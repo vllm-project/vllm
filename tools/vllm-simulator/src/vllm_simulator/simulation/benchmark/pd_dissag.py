@@ -203,7 +203,8 @@ class PDDisaggBenchmarkRunner(BaseBenchmarkRunner):
                     req,
                     decode_counts[req.custom_params["decode_worker"].name],
                     custom_params={
-                        "created_time": prefill_stat["last_event_time"]
+                        "created_time": prefill_stat["last_event_time"],
+                        "queue_start": prefill_stat["last_event_time"],
                     },
                 )
                 for req, prefill_stat in paired

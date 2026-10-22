@@ -86,6 +86,8 @@ class VLLMWorker(BaseWorker):
             sim_meta = {}
             if "created_time" in req.custom_params:
                 sim_meta["created_time"] = req.custom_params["created_time"]
+            if "queue_start" in req.custom_params:
+                sim_meta["queue_start"] = req.custom_params["queue_start"]
             if "total_request" in req.custom_params:
                 sim_meta["total_request"] = req.custom_params["total_request"]
             if sim_meta:

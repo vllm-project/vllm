@@ -1,7 +1,7 @@
 """
 Engine-core hooks that drive one simulated engine step:
 
-- C_VLLMEngineCoreHook: created_time-based request dispatch, BLOCKING-mode
+- C_VLLMEngineCoreHook: readiness-based request dispatch, BLOCKING-mode
   request stats and profile()-driven stats export.
 - C_VLLMSchedulerHook: counts parked requests as unfinished so the busy
   loop keeps stepping.
@@ -13,9 +13,10 @@ The hooks share the module-level request/iteration stats.
 
 import heapq
 import json
+import math
 import os
 import time
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
 
 from vllm_simulator.hook import BaseHook
 from vllm_simulator.simulation.manager import ConfigManager, StateManager, Envs
@@ -35,6 +36,14 @@ _REQUEST_STATS: dict[str, RequestStats] = {}
 # One record per forward step, appended by C_VLLMExecutorHook.
 _ITERATION_STATS: list[IterationStats] = []
 
+
+@dataclass(slots=True)
+class _CPUOverheadStep:
+    predictor_time: float = 0.0
+    iteration: IterationStats | None = None
+    emitted: list[str] = field(default_factory=list)
+
+
 def _new_request_stats(request, created_time, queue_start, last_event_time):
     """Initialize the RequestStats entry; hit fields are set at queue_end."""
     rid = request.request_id
@@ -53,7 +62,7 @@ class ReqDispatcher:
     """Singleton holding the NON_BLOCKING replay state.
 
     Requests parked at EngineCore.add_request are released by dispatch()
-    once global_clock >= created_time.
+    at queue_start when supplied, otherwise created_time (the TTFT origin).
     """
 
     _instance = None
@@ -67,9 +76,8 @@ class ReqDispatcher:
     def __init__(self):
         if self.__class__._initialized:
             return
-        # (created_time, seq, request, request_wave); seq breaks ties so
-        # requests are never compared.
-        self.future_queue: list[tuple[float, int, object, int]] = []
+        # (dispatch_time, seq, request, request_wave, created_time).
+        self.future_queue: list[tuple[float, int, object, int, float]] = []
         self.seq_counter = 0
         self.total_expected = float("inf")
         self.all_received = False
@@ -77,6 +85,7 @@ class ReqDispatcher:
         self.original_core_add_request = None
         # Live Scheduler, read by C_VLLMExecutorHook.
         self.scheduler = None
+        self.cpu_step: _CPUOverheadStep | None = None
         self.__class__._initialized = True
 
     def reset(self):
@@ -91,14 +100,36 @@ class ReqDispatcher:
     def has_next(self) -> bool:
         return len(self.future_queue) > 0
 
-    def next_req_created_time(self) -> float:
+    def next_req_dispatch_time(self) -> float:
         return self.future_queue[0][0]
 
-    def add(self, request, request_wave: int, created_time: float):
-        """Park a request fully inert until its created_time."""
+    def add(
+        self,
+        request,
+        request_wave: int,
+        created_time: float,
+        queue_start: float | None = None,
+    ):
+        """Park a request until its recorded engine-entry time.
+
+        Pretokenized replay skips frontend preparation and input delivery.
+        Using queue_start preserves that delay; dispatching at created_time
+        would make the request eligible too early. This overhead can be tens
+        of milliseconds: significant for short TTFTs, but often negligible 
+        when TTFT is on the order of seconds.
+        created_time remains the TTFT origin and the dispatch fallback when
+        queue_start is absent.
+        """
+        dispatch_time = created_time if queue_start is None else queue_start
+        if (
+            not math.isfinite(created_time)
+            or not math.isfinite(dispatch_time)
+            or dispatch_time < created_time
+        ):
+            raise ValueError("Request times must be finite and queue_start >= arrival")
         heapq.heappush(
             self.future_queue,
-            (created_time, self.seq_counter, request, request_wave),
+            (dispatch_time, self.seq_counter, request, request_wave, created_time),
         )
         self.seq_counter += 1
 
@@ -113,7 +144,7 @@ class ReqDispatcher:
         """Re-submit due parked requests through the native add_request."""
         current_time = StateManager.get_global_clock()
         while self.future_queue and self.future_queue[0][0] <= current_time:
-            created_time, _, request, request_wave = heapq.heappop(
+            _, _, request, request_wave, created_time = heapq.heappop(
                 self.future_queue
             )
             _new_request_stats(
@@ -145,11 +176,10 @@ class C_VLLMSchedulerHook(BaseHook):
 
 
 class C_VLLMEngineCoreHook(BaseHook):
-    """Created_time-based request dispatch at EngineCore.
+    """Dispatch at supplied queue_start or created_time, retaining TTFT origins.
 
-    Requests are parked in add_request, ahead of Scheduler.add_request, so
-    no connector lookup or block allocation happens before created_time.
-    step() dispatches them in created_time order.
+    Requests are parked ahead of Scheduler.add_request so no connector lookup
+    or block allocation happens before the selected dispatch timestamp.
 
     Prefix block hashing still runs earlier in preprocess_add_request; it
     touches no cache state.
@@ -173,6 +203,7 @@ class C_VLLMEngineCoreHook(BaseHook):
             _ITERATION_STATS.clear()
 
             original_init(self, vllm_config, *args, **kwargs)
+            self._sim_cpu_overhead_enabled = ConfigManager.cpu_overhead_enabled()
             ReqDispatcher().scheduler = self.scheduler
 
         def wrapped_add_request(self, request, request_wave=0):
@@ -184,6 +215,7 @@ class C_VLLMEngineCoreHook(BaseHook):
                 request.max_tokens = _MAX_DECODE_STEPS
 
             created_time = None
+            queue_start = None
             sp = request.sampling_params
             if sp is not None and sp.extra_args:
                 sim = sp.extra_args.get("simulation")
@@ -192,6 +224,7 @@ class C_VLLMEngineCoreHook(BaseHook):
                     sim = json.loads(sim)
                 if sim:
                     created_time = sim.get("created_time")
+                    queue_start = sim.get("queue_start")
                     total = sim.get("total_request")
                     if total is not None:
                         dispatcher.total_expected = total
@@ -208,7 +241,7 @@ class C_VLLMEngineCoreHook(BaseHook):
                 original_add_request(self, request, request_wave)
                 return
 
-            dispatcher.add(request, request_wave, created_time)
+            dispatcher.add(request, request_wave, created_time, queue_start)
 
         def wrapped_step(self, *args, **kwargs):
             """Dispatch due future-queue requests before each engine step."""
@@ -217,16 +250,42 @@ class C_VLLMEngineCoreHook(BaseHook):
 
                 # Idle: jump the virtual clock to the next created_time.
                 if (
-                    not self.scheduler.waiting
-                    and not self.scheduler.running
+                    not any(self.scheduler.get_request_counts())
                     and dispatcher.has_next()
                 ):
                     StateManager.set_global_clock(
-                        dispatcher.next_req_created_time() + 1e-6
+                        dispatcher.next_req_dispatch_time() + 1e-6
                     )
                     dispatcher.dispatch(self)
 
-            return original_step(self, *args, **kwargs)
+            if (
+                _SIM_MODE != SimulationMode.NON_BLOCKING
+                or not dispatcher.all_received
+                or not getattr(self, "_sim_cpu_overhead_enabled", False)
+            ):
+                return original_step(self, *args, **kwargs)
+
+            # Start after dispatch/idle waits; predictor work is excluded below.
+            step = _CPUOverheadStep()
+            dispatcher.cpu_step = step
+            start = time.perf_counter()
+            try:
+                result = original_step(self, *args, **kwargs)
+            finally:
+                dispatcher.cpu_step = None
+            cpu_overhead = max(time.perf_counter() - start - step.predictor_time, 0.0)
+            StateManager.step_global_clock(cpu_overhead)
+            if step.iteration is None:
+                step.iteration = IterationStats()
+                _ITERATION_STATS.append(step.iteration)
+            step.iteration.cpu_overhead = cpu_overhead
+            event_time = StateManager.get_global_clock()
+            for req_id in step.emitted:
+                st = _REQUEST_STATS.get(req_id)
+                if st is not None:
+                    st.gen_token_latencies.append(event_time - st.last_event_time)
+                    st.last_event_time = event_time
+            return result
 
         target.__init__ = wrapped_init
         target.add_request = wrapped_add_request
@@ -238,7 +297,11 @@ class C_VLLMEngineCoreHook(BaseHook):
         # the native one: the utility RPC always sends (is_start,
         # profile_prefix).
         def wrapped_profile(
-            self, is_start: bool = True, profile_prefix: str | None = None
+            self,
+            is_start: bool = True,
+            profile_prefix: str | None = None,
+            delay_iterations: int | None = None,
+            max_iterations: int | None = None,
         ):
             req_stats = list(_REQUEST_STATS.values())
             output_dir = Envs.output_dir()
@@ -291,8 +354,7 @@ class C_VLLMExecutorHook(BaseHook):
         def wrapped_execute_model(self, scheduler_output, *args, **kwargs):
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens
             if not num_scheduled_tokens:
-                return original_execute_model(
-                    self, scheduler_output, *args, **kwargs)
+                return original_execute_model(self, scheduler_output, *args, **kwargs)
 
             # Clock before this step is accounted.
             queue_end_time = (
@@ -353,9 +415,10 @@ class C_VLLMExecutorHook(BaseHook):
                 )
             scheduler_output._sim_token_emitted = token_emitted
 
-            result = original_execute_model(
-                self, scheduler_output, *args, **kwargs)
+            result = original_execute_model(self, scheduler_output, *args, **kwargs)
 
+            cpu_step = ReqDispatcher().cpu_step
+            predictor_start = time.perf_counter() if cpu_step is not None else 0.0
             predictor = self._sim_predictor
             predicted_latency = float(
                 predictor.predict_infer_time(simulation_batch)
@@ -371,6 +434,8 @@ class C_VLLMExecutorHook(BaseHook):
             sample_tokens_latency = float(
                 predictor.predict_sample_tokens_time(total_tokens)
             )
+            if cpu_step is not None:
+                cpu_step.predictor_time += time.perf_counter() - predictor_start
 
             iter_stats = IterationStats(
                 requests=simulation_batch.request_info(),
@@ -380,6 +445,8 @@ class C_VLLMExecutorHook(BaseHook):
                 total_tokens=total_tokens,
             )
             _ITERATION_STATS.append(iter_stats)
+            if cpu_step is not None:
+                cpu_step.iteration = iter_stats
             full_step_latency = iter_stats.full_step_latency
 
             if _SIM_MODE == SimulationMode.BLOCKING:
@@ -388,10 +455,7 @@ class C_VLLMExecutorHook(BaseHook):
                 time.sleep(full_step_latency)
                 event_time = time.time()
             else:
-                # Known diff, deliberately uncompensated: the engine residual
-                # (~2.5ms/step of RPC + EngineCore bookkeeping, outside the
-                # label) is not modelled, so NON_BLOCKING runs ~2.5ms/step
-                # shorter than real.
+                # Optional host overhead is charged separately by wrapped_step.
                 StateManager.step_global_clock(full_step_latency)
                 event_time = StateManager.get_global_clock()
 
@@ -400,12 +464,13 @@ class C_VLLMExecutorHook(BaseHook):
                 # TTFT.
                 if not token_emitted[req_id]:
                     continue
-                st = _REQUEST_STATS.get(req_id)
-                if st is not None:
-                    st.gen_token_latencies.append(
-                        event_time - st.last_event_time
-                    )
-                    st.last_event_time = event_time
+                if cpu_step is not None:
+                    cpu_step.emitted.append(req_id)
+                else:
+                    st = _REQUEST_STATS.get(req_id)
+                    if st is not None:
+                        st.gen_token_latencies.append(event_time - st.last_event_time)
+                        st.last_event_time = event_time
 
             return result
 

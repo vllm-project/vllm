@@ -211,16 +211,16 @@ def build_kv_cache_spec(vllm_config) -> dict:
                 _ForceMetaDevice(),
             ):
                 initialize_model(vllm_config)
+            # Alignment queries config-derived Mamba shapes; keep simulated TP
+            # active until both block alignment and per-rank specs are resolved.
+            current_platform.update_block_size_for_backend(vllm_config)
+            kv_cache_spec = get_kv_cache_spec(vllm_config)
         finally:
             tp_group.world_size = orig_world
             vllm_config.parallel_config.tensor_parallel_size = orig_cfg_tp
             current_platform.is_out_of_tree = orig_oot
             torch.cuda.Stream = orig_stream
             ps._EP = orig_ep
-        # The executor resizes blocks for the backends only after
-        # init_device; the specs are collected here, so resize first.
-        current_platform.update_block_size_for_backend(vllm_config)
-        kv_cache_spec = get_kv_cache_spec(vllm_config)
     finally:
         for name, attr in orig_platform.items():
             if attr is None:

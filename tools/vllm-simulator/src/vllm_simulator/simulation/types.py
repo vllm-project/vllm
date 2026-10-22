@@ -66,9 +66,14 @@ class IterationStats:
     sample_tokens_latency: float = 0.0
     logprobs_latency: float = 0.0
     total_tokens: int = 0
+    # Engine-step wall time, excluding predictor work and idle waits.
+    cpu_overhead: float = 0.0
 
     @property
     def full_step_latency(self) -> float:
         return (
-            self.forward_latency + self.sample_tokens_latency + self.logprobs_latency
+            self.forward_latency
+            + self.sample_tokens_latency
+            + self.logprobs_latency
+            + self.cpu_overhead
         )
