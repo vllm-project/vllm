@@ -31,10 +31,10 @@ async def checkpoint_prepare(raw_request: Request, mode: PauseMode = "wait"):
     state, error = await client.checkpoint_state()
     if state == CheckpointState.RUNNING:
         if refusal := await client.checkpoint_prepare(mode):
-            return _state_response(state, refusal, 409)
+            return _state_response(state, refusal, 400)
         state, error = await client.checkpoint_state()
     elif state in (CheckpointState.RESUMING, CheckpointState.FAILED):
-        return _state_response(state, error, 409)
+        return _state_response(state, error, 400)
     return _state_response(state, error, 200)
 
 
@@ -46,7 +46,7 @@ async def checkpoint_resume(raw_request: Request):
     client = engine_client(raw_request)
     state, error = await client.checkpoint_state()
     if state in (CheckpointState.PREPARING, CheckpointState.FAILED):
-        return _state_response(state, error, 409)
+        return _state_response(state, error, 400)
     if state == CheckpointState.PREPARED:
         await client.checkpoint_restore()
         state, error = await client.checkpoint_state()
