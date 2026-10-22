@@ -39,6 +39,12 @@ from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.outputs import LogprobsLists
 
 
+@pytest.fixture(autouse=True)
+def _fixed_created_time(monkeypatch):
+    """Compared bodies are built at different times; ``created`` must match."""
+    monkeypatch.setattr(serving_mod.time, "time", lambda: 1700000000.0)
+
+
 def _rows(n, slots, seed=0, vocab=50_000):
     """Engine-like rows: distinct candidates; on even rows the sampled token
     (slot 0) is also one of the top-k; one -inf value. Ranks are int64."""
@@ -331,7 +337,6 @@ async def test_large_render_yields_to_the_event_loop(monkeypatch):
     blocks, and the bytes match a single-block render."""
     serving = _build_serving_tokens(_mock_engine())
     rows = _rows(40, 4)
-    monkeypatch.setattr(serving_mod.time, "time", lambda: 1700000000.0)
     whole = await _serve_full(serving, rows)
     monkeypatch.setattr(logprobs_render, "RENDER_BLOCK_ENTRIES", 16)
 
