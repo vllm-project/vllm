@@ -113,6 +113,8 @@ class UMBPStoreConnectorWorker:
         for request_id, plans in metadata.load_requests.items():
             if plans:
                 self._submit_loads(request_id, plans)
+        if not metadata.async_load:
+            self._drain_load_jobs(wait=True)
 
     def _submit_loads(
         self, request_id: str, plans: list[BlockTransferPlan] | BlockLoadBatch

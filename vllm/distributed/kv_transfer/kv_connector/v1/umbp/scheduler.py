@@ -296,7 +296,14 @@ class UMBPStoreConnectorScheduler:
                 num_prefill_lookahead=vllm_config.num_prefill_lookahead_tokens,
                 allow_partial_hash_hits=self.enable_partial_hash_hits,
             )
-            if len(lookup_groups) > 1
+            if lookup_groups
+            and (
+                len(lookup_groups) > 1
+                or not isinstance(
+                    _unwrap_store_spec(lookup_groups[0].kv_cache_spec),
+                    FullAttentionSpec,
+                )
+            )
             else None
         )
         self._lookup_pool = _LookupBlockPool(self.hash_block_size)
@@ -395,6 +402,8 @@ class UMBPStoreConnectorScheduler:
         if num_computed_tokens % self.block_size != 0:
             return 0, False
         group_ids = self.kv_cache_config.prefix_cacheable_group_ids
+        if not group_ids:
+            return 0, False
         # vLLM must execute at least the final prompt token. Returning a hit
         # for the entire prompt leaves the scheduler with no new token to run.
         max_external_token = request.num_tokens - 1
@@ -494,7 +503,17 @@ class UMBPStoreConnectorScheduler:
             external_tokens=matched_tokens,
             block_hashes_by_group=block_hashes_by_group,
         )
-        return need_to_load, self.load_async
+        load_async = self.load_async
+        if block_hashes_by_group and not any(
+            block_hash is not None
+            for group_id, group_hashes in zip(
+                group_ids, block_hashes_by_group, strict=True
+            )
+            for index, block_hash in enumerate(group_hashes)
+            if index >= num_computed_tokens // self.group_block_sizes[group_id]
+        ):
+            load_async = False
+        return need_to_load, load_async
 
     def _build_lookup_context(
         self, request: Request, local_tokens: int, hashes: tuple[bytes, ...]

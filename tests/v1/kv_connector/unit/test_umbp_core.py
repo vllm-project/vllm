@@ -1266,8 +1266,7 @@ def test_worker_preemption_cancels_only_matching_request():
     }
 
 
-@pytest.mark.parametrize("async_load", [False, True])
-def test_load_cancellation_preserves_other_requests(async_load):
+def test_async_load_cancellation_preserves_other_requests():
     handle = _CancellableWorkerHandle()
     worker = UMBPStoreConnectorWorker(handle)
     plans = {
@@ -1284,7 +1283,7 @@ def test_load_cancellation_preserves_other_requests(async_load):
     worker.start_load_kv(
         None,
         UMBPConnectorMetadata(
-            async_load=async_load,
+            async_load=True,
             load_requests=plans,
         ),
     )
@@ -1296,7 +1295,7 @@ def test_load_cancellation_preserves_other_requests(async_load):
     assert len(handle.cancelled) == 1
     assert handle.cancelled[0].plans[0].request_id == "first"
     assert worker.get_kv_connector_stats().reduce()["load_completed"] == 1
-    assert finished == (None, {"second"} if async_load else None)
+    assert finished == (None, {"second"})
     worker.wait_for_layer_load("")
     assert worker.get_kv_connector_stats() is None
 
@@ -1593,7 +1592,10 @@ def test_batched_load_localizes_rank_without_changing_request_or_destination(
         [0, 1],
         "request",
     )
-    worker.start_load_kv(None, UMBPConnectorMetadata(load_requests={"request": batch}))
+    worker.start_load_kv(
+        None,
+        UMBPConnectorMetadata(async_load=True, load_requests={"request": batch}),
+    )
 
     assert len(calls) == 1
     assert [(p.key, p.block_id, p.group_id, p.request_id) for p in calls[0]] == [
