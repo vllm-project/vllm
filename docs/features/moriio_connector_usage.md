@@ -144,6 +144,14 @@ For DSpark, configure the same draft model on both instances through `--speculat
 
 Hybrid READ keeps its existing single-transferable-attention-group requirement. Plain-attention WRITE retains its existing notification format.
 
+### Kimi-K3 specialized decode
+
+Kimi-K3 on MI355X supports `--additional-config '{"decode_backend":"latency_specialized"}'` on a MoRIIO READ or WRITE consumer. Use `VLLM_USE_V2_MODEL_RUNNER=1`, TP8, DCP1 or DCP8, DSpark with up to seven speculative tokens, and BF16 convolution / FP32 recurrent state on both instances. Keep the producer on the default decode backend and use the same transfer mode and cache layouts on both instances.
+
+The specialized kernels serve pure speculative verification steps of at most eight token rows. For example, with seven speculative tokens and `--max-num-seqs 1`, a verification step has eight rows; use `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,8]}'` on the consumer. Prefill, mixed, and wider steps use the regular model layers. All transferred attention and recurrent states are ready before the forward, so FULL graph replay does not need per-layer transfer hooks.
+
+Producers using the specialized backend and other connectors remain unsupported.
+
 ### Different prefill and decode TP sizes
 
 In WRITE mode, the prefill and decode instances can use different tensor-parallel sizes, as long as one is a multiple of the other. Each prefill rank writes its shard into the decode ranks that hold it:

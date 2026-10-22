@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.config import CompilationMode, CUDAGraphMode
+from vllm.config import CompilationMode, CUDAGraphMode, KVTransferConfig
 from vllm.models.kimi_k3.amd.specialized_decode import runtime
 from vllm.models.kimi_k3.amd.specialized_decode.runtime import (
     FFN,
@@ -141,6 +141,41 @@ def test_supported_config_is_accepted(on_mi355x):
     assert specialized_decode_config(_vllm_config()) == DecodeConfig(q=8)
 
 
+@pytest.mark.parametrize("read_mode", [False, True])
+@pytest.mark.parametrize("backend", ["rdma", "xgmi"])
+def test_moriio_consumer_is_supported(read_mode, backend):
+    config = KVTransferConfig(
+        kv_connector="MoRIIOConnector",
+        kv_role="kv_consumer",
+        kv_connector_extra_config={"read_mode": read_mode, "backend": backend},
+    )
+    assert runtime.supports_kv_transfer(config)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"kv_connector": "NixlConnector"},
+        {"kv_connector": "MultiConnector"},
+        {"kv_connector_module_path": "custom.connector"},
+        {"kv_role": "kv_producer"},
+        {"kv_role": "kv_both"},
+    ],
+)
+def test_unsupported_kv_transfer_is_refused(overrides):
+    config = KVTransferConfig(
+        **(
+            {
+                "kv_connector": "MoRIIOConnector",
+                "kv_role": "kv_consumer",
+                "kv_connector_extra_config": {"read_mode": True},
+            }
+            | overrides
+        )
+    )
+    assert not runtime.supports_kv_transfer(config)
+
+
 @pytest.mark.parametrize(
     "over, reason",
     [
@@ -153,7 +188,14 @@ def test_supported_config_is_accepted(on_mi355x):
         ),
         ({"parallel_config.pipeline_parallel_size": 2}, "pipeline parallelism"),
         ({"parallel_config.decode_context_parallel_size": 2}, "decode context"),
-        ({"kv_transfer_config": object()}, "KV transfer connectors"),
+        (
+            {
+                "kv_transfer_config": KVTransferConfig(
+                    kv_connector="NixlConnector", kv_role="kv_consumer"
+                )
+            },
+            "KV transfer connectors",
+        ),
         ({"speculative_config": None}, "without speculative decoding"),
         ({"speculative_config.num_speculative_tokens": 8}, "more than 7"),
         ({"speculative_config.enable_adaptive_verification": True}, "adaptive"),

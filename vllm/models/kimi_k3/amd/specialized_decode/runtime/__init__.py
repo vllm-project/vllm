@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 import torch
 
+from vllm.config import KVTransferConfig
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -103,7 +104,10 @@ def unsupported(vllm_config) -> list[str]:
         # the kernels read one batch's attention metadata per step
         (pc.use_ubatching, "DBO (dual-batch overlap)"),
         (vllm_config.lora_config is not None, "LoRA"),
-        (vllm_config.kv_transfer_config is not None, "KV transfer connectors"),
+        (
+            not supports_kv_transfer(vllm_config.kv_transfer_config),
+            "KV transfer connectors other than a MoRIIO consumer",
+        ),
         (
             vllm_config.aux_output_config.enable_return_routed_experts,
             "routed-expert capture",
@@ -160,6 +164,16 @@ def unsupported(vllm_config) -> list[str]:
     if getattr(mc.hf_text_config, "attn_res_block_size", None) is None:
         reasons.append("models without AttnRes")
     return reasons + platform_reasons()
+
+
+def supports_kv_transfer(config: KVTransferConfig | None) -> bool:
+    # MoRIIO completes READs before forward and WRITE receives before admission;
+    # neither consumer needs the per-layer hooks specialized layers bypass.
+    return config is None or (
+        config.kv_connector == "MoRIIOConnector"
+        and config.kv_connector_module_path is None
+        and config.kv_role == "kv_consumer"
+    )
 
 
 def text_shapes(text) -> tuple:
