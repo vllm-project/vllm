@@ -347,6 +347,7 @@ _SEQUENCE_CLASSIFICATION_MODELS = {
 
 _MULTIMODAL_MODELS = {
     # [Decoder-only]
+    "Alpamayo2Super": ("alpamayo2_super", "Alpamayo2SuperForConditionalGeneration"),
     "AriaForConditionalGeneration": ("aria", "AriaForConditionalGeneration"),
     "AudioFlamingo3ForConditionalGeneration": (
         "audioflamingo3",
@@ -544,6 +545,10 @@ _MULTIMODAL_MODELS = {
     "NemotronH_Omni_Reasoning_V3": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
     "NVLM_D": ("nvlm_d", "NVLM_D_Model"),
     "MuseGlimmerForConditionalGeneration": ("muse_glimmer", "MuseGlimmerForCausalLM"),
+    "MuseSparkForConditionalGeneration": (
+        "vllm.models.muse_spark",
+        "MuseSparkForConditionalGeneration",
+    ),
     "OpenCUAForConditionalGeneration": ("opencua", "OpenCUAForConditionalGeneration"),
     "OpenPanguVLForConditionalGeneration": (
         "openpangu_vl",
@@ -667,9 +672,18 @@ _SPECULATIVE_DECODING_MODELS = {
     ),
     "Qwen3DSparkModel": ("qwen3_dspark", "Qwen3DSparkForCausalLM"),
     "Qwen3OmniDSparkModel": ("qwen3_dspark", "Qwen3DSparkForCausalLM"),
+    # Serving under method="dflash" means EAGLEConfig rewrites the draft
+    # architecture to DFlash{arch}, so that is the name the registry is asked
+    # for. The bare name is kept as a defensive alias, as for MuseGlimmer.
+    "Qwen3XPressModel": ("qwen3_xpress", "Qwen3XPressForCausalLM"),
+    "DFlashQwen3XPressModel": ("qwen3_xpress", "Qwen3XPressForCausalLM"),
     "K3DSparkModel": (
         "vllm.models.kimi_k3.nvidia.dspark_mla",
         "K3DSparkForCausalLM",
+    ),
+    "MuseSparkDSparkModel": (
+        "vllm.models.muse_spark.common.dspark",
+        "MuseSparkDSparkForCausalLM",
     ),
     "DFlashLagunaForCausalLM": ("laguna_dflash", "DFlashLagunaForCausalLM"),
     "Gemma4DSparkModel": ("gemma4_dspark", "Gemma4DSparkForCausalLM"),
