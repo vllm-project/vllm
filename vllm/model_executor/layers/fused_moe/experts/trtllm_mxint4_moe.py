@@ -38,9 +38,6 @@ class TrtLlmMxint4ExpertsMonolithic(TrtLlmExpertsBase, mk.FusedMoEExpertsMonolit
         max_num_tokens: int | None = None,
         num_dispatchers: int | None = None,
     ):
-        # TrtLlmExpertsBase.__init__ stops the cooperative chain, so run the
-        # FusedMoEExperts base (activation_config, max_num_tokens, ...) first.
-        mk.FusedMoEExpertsMonolithic.__init__(self, moe_config, quant_config)
         super().__init__(moe_config, quant_config)
 
     @staticmethod

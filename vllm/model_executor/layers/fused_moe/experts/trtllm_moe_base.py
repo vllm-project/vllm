@@ -9,11 +9,14 @@ import torch
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEActivationFormat,
+    FusedMoEExperts,
 )
+from vllm.model_executor.layers.fused_moe.utils import fi_moe_largest_bucket
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_trtllm_fused_moe_workspace_size,
     has_flashinfer_trtllm_fused_moe,
+    has_flashinfer_trtllm_fused_moe_workspace,
 )
 from vllm.v1.worker.workspace import (
     current_workspace_manager,
@@ -34,7 +37,7 @@ logger = init_logger(__name__)
 _workspace_nbytes: dict[tuple, int] = {}
 
 
-class TrtLlmExpertsBase:
+class TrtLlmExpertsBase(FusedMoEExperts):
     """Shared base of the trtllm-gen fused-MoE backends.
 
     Reserves one trtllm-gen MoE workspace and shares it across MoE layers.
@@ -58,6 +61,7 @@ class TrtLlmExpertsBase:
         moe_config: "FusedMoEConfig",
         quant_config: "FusedMoEQuantConfig",
     ) -> None:
+        super().__init__(moe_config, quant_config)
         self.moe_config = moe_config
         self.quant_config = quant_config
         self.routing_method_type = moe_config.routing_method
@@ -85,10 +89,8 @@ class TrtLlmExpertsBase:
         )
 
     def _init_trtllm_moe_workspace(self) -> None:
-        # Upper bound on the rows a launch sees. Every DP rank may contribute
-        # its `max_num_tokens` to one gathered invocation.
-        dp_size = self.moe_config.elastic_ep_max_dp_size or self.moe_config.dp_size
-        self._workspace_rows = self.moe_config.max_num_tokens * max(1, dp_size)
+        # The tuning ceiling already includes all contributing DP ranks.
+        self._workspace_rows = fi_moe_largest_bucket(self.moe_config)
 
     def _get_workspace(
         self,
@@ -112,13 +114,13 @@ class TrtLlmExpertsBase:
         """Return the persistent trtllm-gen MoE workspace, or ``None``.
 
         The buffer is sized for the largest batch, so smaller batches reuse it
-        without another reservation. A FlashInfer without the workspace API
-        makes the sizing call fail, which disables the path; ``None`` keeps
-        FlashInfer's per-call workspace allocation.
+        without another reservation. When FlashInfer lacks the workspace API,
+        ``None`` keeps FlashInfer's per-call workspace allocation.
         """
         if (
             # A caller-owned workspace requires finalized output.
             not do_finalize
+            or not has_flashinfer_trtllm_fused_moe_workspace()
             or not is_workspace_manager_initialized()
             # Unexpectedly large batches keep the per-call allocation rather
             # than pinning one more persistent buffer per distinct size.
@@ -148,34 +150,26 @@ class TrtLlmExpertsBase:
         )
         nbytes = _workspace_nbytes.get(size_key)
         if nbytes is None:
-            try:
-                nbytes = int(
-                    flashinfer_trtllm_fused_moe_workspace_size(
-                        rows,
-                        hidden_size,
-                        intermediate_size,
-                        num_experts,
-                        top_k,
-                        quant_mode=quant_mode,
-                        local_num_experts=self.local_num_experts,
-                        num_fused_shared_experts=num_fused_shared_experts,
-                        activation_type=activation_type,
-                        use_shuffled_weight=use_shuffled_weight,
-                        weight_layout=weight_layout,
-                        use_routing_scales_on_input=use_routing_scales_on_input,
-                        use_per_token_scale=use_per_token_scale,
-                        valid_hidden_size=valid_hidden_size,
-                        valid_intermediate_size=valid_intermediate_size,
-                        device=device,
-                    )
+            nbytes = int(
+                flashinfer_trtllm_fused_moe_workspace_size(
+                    rows,
+                    hidden_size,
+                    intermediate_size,
+                    num_experts,
+                    top_k,
+                    quant_mode=quant_mode,
+                    local_num_experts=self.local_num_experts,
+                    num_fused_shared_experts=num_fused_shared_experts,
+                    activation_type=activation_type,
+                    use_shuffled_weight=use_shuffled_weight,
+                    weight_layout=weight_layout,
+                    use_routing_scales_on_input=use_routing_scales_on_input,
+                    use_per_token_scale=use_per_token_scale,
+                    valid_hidden_size=valid_hidden_size,
+                    valid_intermediate_size=valid_intermediate_size,
+                    device=device,
                 )
-            except (RuntimeError, ValueError) as e:
-                logger.warning_once(
-                    "FlashInfer trtllm-gen MoE workspace sizing failed (%s); "
-                    "falling back to per-call workspace allocation.",
-                    e,
-                )
-                nbytes = 0
+            )
             _workspace_nbytes[size_key] = nbytes
         if nbytes <= 0:
             return None

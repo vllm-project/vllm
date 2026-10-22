@@ -550,6 +550,17 @@ def has_flashinfer_trtllm_fused_moe() -> bool:
 
 
 @functools.cache
+def has_flashinfer_trtllm_fused_moe_workspace() -> bool:
+    """Return whether FlashInfer TRTLLM fused MoE supports caller-owned scratch."""
+    if not has_flashinfer_trtllm_fused_moe():
+        return False
+    mod = _get_submodule("flashinfer.fused_moe")
+    return mod is not None and callable(
+        getattr(mod, "trtllm_fused_moe_workspace_size", None)
+    )
+
+
+@functools.cache
 def has_flashinfer_cutlass_fused_moe() -> bool:
     """Return `True` if FlashInfer CUTLASS fused MoE is available."""
     if not has_flashinfer_moe():
@@ -1292,6 +1303,7 @@ __all__ = [
     "has_flashinfer_nvlink_one_sided",
     "has_flashinfer_cutlass_fused_moe",
     "has_flashinfer_trtllm_fused_moe",
+    "has_flashinfer_trtllm_fused_moe_workspace",
     "has_flashinfer_cutedsl_grouped_gemm_nt_masked",
     "has_flashinfer_recurrent_kda",
     "has_flashinfer_fused_kda_decode",
