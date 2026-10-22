@@ -476,6 +476,10 @@ class IterationStats:
 
     def __init__(self):
         self.iteration_timestamp = time.time()
+        # Read once per iteration: update_from_output runs per request per
+        # step, and each envs attribute access re-reads the environment
+        # in processes that never enable the envs cache (the API server).
+        self.compute_nans_in_logits = envs.VLLM_COMPUTE_NANS_IN_LOGITS
         self.num_generation_tokens = 0
         self.prompt_token_stats = PromptTokenStats()
         self.num_preempted_reqs = 0
@@ -527,7 +531,7 @@ class IterationStats:
         # Track if this request is corrupted (only check once per request)
         # Early exit if already marked as corrupted to avoid redundant checks
         if (
-            envs.VLLM_COMPUTE_NANS_IN_LOGITS
+            self.compute_nans_in_logits
             and not req_stats.is_corrupted
             and output.num_nans_in_logits > 0
         ):

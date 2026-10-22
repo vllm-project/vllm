@@ -169,7 +169,9 @@ class MambaPrefillCheckpointExporter:
 
     The recurrent states are rows of a buffer the prefill kernel emitted;
     ``recurrent_rows`` picks each checkpoint row's state out of it, and by
-    default row ``i`` holds checkpoint ``i``'s.
+    default row ``i`` holds checkpoint ``i``'s. Layers with only a conv state
+    pass no recurrent buffers. ``token_indices`` maps the rows' tokens, laid out
+    by ``cu_seqlens``, to their rows of ``raw_qkv``.
     """
 
     state_len: int | None = None
@@ -180,16 +182,24 @@ class MambaPrefillCheckpointExporter:
         *,
         raw_qkv: torch.Tensor,
         conv_state: torch.Tensor,
-        recurrent_checkpoint: torch.Tensor,
-        recurrent_state: torch.Tensor,
         cu_seqlens: torch.Tensor,
+        recurrent_checkpoint: torch.Tensor | None = None,
+        recurrent_state: torch.Tensor | None = None,
         recurrent_rows: torch.Tensor | None = None,
+        token_indices: torch.Tensor | None = None,
     ) -> None:
         state_len = (
             self.state_len if self.state_len is not None else conv_state.shape[-1]
         )
         width = raw_qkv.shape[-1]
-        recurrent_row_size = recurrent_checkpoint[0].numel()
+        has_recurrent = recurrent_checkpoint is not None
+        if recurrent_checkpoint is None:
+            # Unread placeholders for the recurrent pointers.
+            recurrent_checkpoint = recurrent_state = conv_state
+            recurrent_row_size = 0
+        else:
+            assert recurrent_state is not None
+            recurrent_row_size = recurrent_checkpoint[0].numel()
         block_size = 256
         store_cache_checkpoints_kernel[
             (
@@ -205,6 +215,7 @@ class MambaPrefillCheckpointExporter:
             checkpoint.checkpoint_offsets,
             checkpoint.state_indices,
             recurrent_rows if recurrent_rows is not None else checkpoint.state_indices,
+            token_indices if token_indices is not None else cu_seqlens,
             raw_qkv.stride(0),
             raw_qkv.stride(1),
             conv_state.stride(0),
@@ -217,7 +228,9 @@ class MambaPrefillCheckpointExporter:
             width,
             recurrent_row_size,
             NULL_BLOCK_ID,
+            has_recurrent,
             recurrent_rows is not None,
+            token_indices is not None,
             block_size,
         )
 
@@ -232,6 +245,7 @@ def store_cache_checkpoints_kernel(
     checkpoint_offsets_ptr,
     checkpoint_state_indices_ptr,
     recurrent_rows_ptr,
+    token_indices_ptr,
     x_stride_0: tl.constexpr,
     x_stride_1: tl.constexpr,
     state_stride_0: tl.constexpr,
@@ -244,7 +258,9 @@ def store_cache_checkpoints_kernel(
     WIDTH: tl.constexpr,
     RECURRENT_ROW_SIZE: tl.constexpr,
     NULL_STATE_IDX: tl.constexpr,
+    HAS_RECURRENT: tl.constexpr,
     HAS_RECURRENT_ROWS: tl.constexpr,
+    HAS_TOKEN_MAP: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     seq_idx = tl.program_id(0)
@@ -261,6 +277,8 @@ def store_cache_checkpoints_kernel(
     history_idx = cols % STATE_LEN
     checkpoint_end = tl.load(query_start_loc_ptr + seq_idx) + checkpoint_offset
     token_idx = checkpoint_end - STATE_LEN + history_idx
+    if HAS_TOKEN_MAP:
+        token_idx = tl.load(token_indices_ptr + token_idx, mask=valid_conv, other=0)
     values = tl.load(
         x_ptr + token_idx * x_stride_0 + width_idx * x_stride_1,
         mask=valid_conv,
@@ -274,17 +292,18 @@ def store_cache_checkpoints_kernel(
         mask=valid_conv,
     )
 
-    if HAS_RECURRENT_ROWS:
-        recurrent_row = tl.load(recurrent_rows_ptr + seq_idx).to(tl.int64)
-    else:
-        recurrent_row = seq_idx.to(tl.int64)
-    valid_recurrent = (cols < RECURRENT_ROW_SIZE) & valid_checkpoint
-    recurrent = tl.load(
-        recurrent_checkpoint_ptr + recurrent_row * checkpoint_stride_0 + cols,
-        mask=valid_recurrent,
-    )
-    tl.store(
-        recurrent_state_ptr + state_idx * recurrent_state_stride_0 + cols,
-        recurrent,
-        mask=valid_recurrent,
-    )
+    if HAS_RECURRENT:
+        if HAS_RECURRENT_ROWS:
+            recurrent_row = tl.load(recurrent_rows_ptr + seq_idx).to(tl.int64)
+        else:
+            recurrent_row = seq_idx.to(tl.int64)
+        valid_recurrent = (cols < RECURRENT_ROW_SIZE) & valid_checkpoint
+        recurrent = tl.load(
+            recurrent_checkpoint_ptr + recurrent_row * checkpoint_stride_0 + cols,
+            mask=valid_recurrent,
+        )
+        tl.store(
+            recurrent_state_ptr + state_idx * recurrent_state_stride_0 + cols,
+            recurrent,
+            mask=valid_recurrent,
+        )

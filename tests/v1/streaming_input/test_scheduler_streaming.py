@@ -2,12 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import unittest
+from typing import TypedDict
 from unittest.mock import MagicMock
 
 import numpy as np
+import pytest
 import torch
 
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
+from tests.v1.core.utils import create_scheduler as create_async_scheduler
+from tests.v1.core.utils import create_scheduler as create_spec_scheduler
 from vllm.config import DeviceConfig, VllmConfig
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -28,11 +32,20 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
 )
-from vllm.v1.outputs import LogprobsLists, ModelRunnerOutput
+from vllm.v1.outputs import DraftTokenIds, LogprobsLists, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.structured_output import StructuredOutputManager
 
 STOP_TOKEN = 128001
+
+
+class CachedState(TypedDict):
+    """The subset of `CachedRequestState` the model runner is simulated to cache."""
+
+    req_id: str
+    prompt_token_ids: list[int]
+    output_token_ids: list[int]
+    num_computed_tokens: int
 
 
 class DummyRequest(Request):
@@ -105,6 +118,7 @@ class TestStreamingScheduler(unittest.TestCase):
                 scheduled = scheduler.schedule()
 
                 continuation = DummyRequest("session", prompt_token_ids=[4, 5])
+                assert continuation.sampling_params is not None
                 assert continuation.sampling_params.logprobs is None
                 if continuation_queued:
                     scheduler.add_request(continuation)
@@ -177,6 +191,7 @@ class TestStreamingScheduler(unittest.TestCase):
             request_id="session",
             prompt_token_ids=[1, 2, 3],
         )
+        session.append_output_token_ids(10)
         session.num_computed_tokens = len(session.prompt_token_ids)
         session.max_tokens = 2
 
@@ -190,9 +205,11 @@ class TestStreamingScheduler(unittest.TestCase):
         update = StreamingUpdate.from_request(new_request)
         scheduler._update_request_as_session(session, update)
 
+        assert session.sampling_params is not None
         assert session.sampling_params.max_tokens == 10
         assert session.max_tokens == 10
 
+        session.append_output_token_ids(11)
         session.num_computed_tokens = len(session.prompt_token_ids)
 
         new_request2 = DummyRequest(
@@ -204,6 +221,7 @@ class TestStreamingScheduler(unittest.TestCase):
         update2 = StreamingUpdate.from_request(new_request2)
         scheduler._update_request_as_session(session, update2)
 
+        assert session.sampling_params is not None
         assert session.sampling_params.max_tokens == 4
         assert session.max_tokens == 4
 
@@ -214,6 +232,7 @@ class TestStreamingScheduler(unittest.TestCase):
             request_id="session",
             prompt_token_ids=[1, 2, 3],
         )
+        session.append_output_token_ids(10)
         session.num_computed_tokens = len(session.prompt_token_ids)
 
         new_request = DummyRequest(
@@ -227,6 +246,7 @@ class TestStreamingScheduler(unittest.TestCase):
 
         assert session.prompt_token_ids == [1, 2, 3, 4, 5, 6]
         assert session._all_token_ids == [1, 2, 3, 4, 5, 6]
+        assert session.sampling_params is not None
         assert session.sampling_params.max_tokens == 10
         assert session.status == RequestStatus.WAITING
 
@@ -244,6 +264,7 @@ class TestStreamingScheduler(unittest.TestCase):
             prompt_token_ids=[1, 2, 3],
             mm_features=[mm_feature],
         )
+        session.append_output_token_ids(10)
         session.num_computed_tokens = len(session.prompt_token_ids)
 
         mm_feature = MultiModalFeatureSpec(
@@ -314,6 +335,7 @@ class TestStreamingScheduler(unittest.TestCase):
         )
         scheduler.add_request(session)
         session.status = RequestStatus.WAITING_FOR_STREAMING_REQ
+        session.append_output_token_ids(10)
         session.num_computed_tokens = len(session.prompt_token_ids)
 
         next_request = DummyRequest(
@@ -523,7 +545,7 @@ class TestStreamingScheduler(unittest.TestCase):
         # This simulates gpu_model_runner.py:706-720 CachedRequestState creation
         # The model runner makes a copy of prompt_token_ids when creating
         # CachedRequestState
-        cached_state_cycle1 = {
+        cached_state_cycle1: CachedState = {
             "req_id": session.request_id,
             "prompt_token_ids": list(
                 new_req_data_cycle1.prompt_token_ids
@@ -681,7 +703,7 @@ class TestStreamingScheduler(unittest.TestCase):
         # The model runner makes a copy of prompt_token_ids when creating
         # CachedRequestState
         new_req_data_cycle3 = scheduler_output_cycle3.scheduled_new_reqs[0]
-        cached_state_cycle3 = {
+        cached_state_cycle3: CachedState = {
             "req_id": session.request_id,
             "prompt_token_ids": list(
                 new_req_data_cycle3.prompt_token_ids
@@ -709,3 +731,92 @@ class TestStreamingScheduler(unittest.TestCase):
             cached_state_cycle1["prompt_token_ids"]
             is not cached_state_cycle3["prompt_token_ids"]
         ), "Cached states from different cycles should be independent objects."
+
+
+def _model_output(request_id: str, token_ids: list[int]) -> ModelRunnerOutput:
+    return ModelRunnerOutput(
+        req_ids=[request_id],
+        req_id_to_index={request_id: 0},
+        sampled_token_ids=[token_ids],
+        logprobs=None,
+        prompt_logprobs_dict={request_id: None},
+        pooler_output=[],
+    )
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_next_chunk_fully_computed_after_stop_on_accepted_draft(async_scheduling):
+    """A stop on an accepted draft trims the step's later tokens. The next
+    chunk must still be computed in full rather than landing on positions
+    whose KV belongs to the trimmed drafts."""
+    scheduler = create_spec_scheduler(
+        num_speculative_tokens=2,
+        async_scheduling=async_scheduling,
+        speculative_method="ngram_gpu" if async_scheduling else None,
+    )
+    session = DummyRequest("session", prompt_token_ids=[1, 2, 3], max_tokens=2)
+    scheduler.add_request(session)
+    scheduler.update_from_output(scheduler.schedule(), _model_output("session", [10]))
+    scheduler.update_draft_token_ids(DraftTokenIds(["session"], [[11, 12]]))
+    # Both drafts are accepted, but max_tokens stops at 11.
+    scheduler.update_from_output(
+        scheduler.schedule(), _model_output("session", [11, 12, 13])
+    )
+    assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+
+    scheduler.add_request(DummyRequest("session", prompt_token_ids=[7, 8]))
+    output = scheduler.schedule()
+
+    assert list(session.prompt_token_ids) == [1, 2, 3, 10, 7, 8]
+    assert output.num_scheduled_tokens["session"] == 2
+
+
+@pytest.mark.parametrize("chunk_queued_before_stop", [False, True])
+def test_session_resumes_after_stop_while_preempted(chunk_queued_before_stop):
+    """A session preempted with a step in flight can stop when that step's
+    output is delivered. It must stay schedulable and keep its tokens."""
+    scheduler = create_async_scheduler(async_scheduling=True)
+    session = DummyRequest("session", prompt_token_ids=list(range(10)))
+    scheduler.add_request(session)
+    scheduler.update_from_output(scheduler.schedule(), _model_output("session", [10]))
+    in_flight = scheduler.schedule()
+    next_chunk = DummyRequest("session", prompt_token_ids=[20, 21])
+    if chunk_queued_before_stop:
+        scheduler.add_request(next_chunk)
+
+    scheduler.running.remove(session)
+    scheduler._preempt_request(session, timestamp=0.0)
+    scheduler.update_from_output(in_flight, _model_output("session", [STOP_TOKEN]))
+    # The parked variant holds a streaming-input slot until the next chunk.
+    assert scheduler.num_waiting_for_streaming_input == (
+        0 if chunk_queued_before_stop else 1
+    )
+    if not chunk_queued_before_stop:
+        scheduler.add_request(next_chunk)
+    output = scheduler.schedule()
+
+    assert scheduler.num_waiting_for_streaming_input == 0
+    expected = list(range(10)) + [10, 20, 21]
+    assert list(session.all_token_ids) == expected
+    assert list(session.prompt_token_ids) == expected
+    assert output.num_scheduled_tokens["session"] == len(expected)
+
+
+def test_non_resumable_request_stays_dequeued_after_stop_while_preempted():
+    """Only resumable requests continue after a stop; a request that finishes
+    while preempted must not be put back in a queue."""
+    scheduler = create_async_scheduler(async_scheduling=True)
+    request = DummyRequest("req", resumable=False, prompt_token_ids=list(range(10)))
+    scheduler.add_request(request)
+    scheduler.update_from_output(scheduler.schedule(), _model_output("req", [10]))
+    in_flight = scheduler.schedule()
+
+    scheduler.running.remove(request)
+    scheduler._preempt_request(request, timestamp=0.0)
+    scheduler.update_from_output(in_flight, _model_output("req", [STOP_TOKEN]))
+
+    assert request.status == RequestStatus.FINISHED_STOPPED
+    assert request not in scheduler.waiting
+    assert request not in scheduler.kv_holding_waiting
+    assert request not in scheduler.deferred_waiting
+    assert "req" not in scheduler.schedule().num_scheduled_tokens
