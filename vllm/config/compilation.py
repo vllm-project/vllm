@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import enum
+import math
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import field, fields
@@ -1505,7 +1506,7 @@ class CompilationConfig:
     ):
         multiple_of = uniform_decode_query_len
         if tensor_parallel_size > 1 and self.pass_config.enable_sp:
-            multiple_of = max(uniform_decode_query_len, tensor_parallel_size)
+            multiple_of = math.lcm(uniform_decode_query_len, tensor_parallel_size)
             if (
                 multiple_of % uniform_decode_query_len != 0
                 or multiple_of % tensor_parallel_size != 0
