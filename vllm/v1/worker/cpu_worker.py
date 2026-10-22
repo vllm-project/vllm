@@ -284,31 +284,16 @@ class CPUWorker(Worker):
         # Only compile here for models without kv cache
         if len(self.model_runner.kv_caches) == 0 and self._should_warm_up_model():
             self.model_runner.warming_up_model()
-        # profile_run skips the MRV2 scheduler-driven kernels, so their Triton
-        # JIT would land in the first request's TTFT. A single mixed step
-        # compiles them here; the full warmup_kernels matrix is unnecessary on
-        # CPU, where every extra shape is a cold Triton compile.
+        # profile_run skips the MRV2 scheduler-driven kernels, so without this
+        # their Triton JIT lands in the first request's TTFT.
         kernel_config = self.vllm_config.kernel_config
         if self.use_v2_model_runner and kernel_config.enable_jit_warmup:
-            from vllm.v1.worker.gpu.warmup import run_mixed_prefill_decode_warmup
+            from vllm.v1.worker.gpu.warmup import warmup_kernels
 
-            model_runner = cast("GPUModelRunner", self.model_runner)
-            num_tokens = min(
-                512,
-                self.scheduler_config.max_num_batched_tokens,
-                self.model_config.max_model_len,
-            )
-            # The KV-block zeroing kernel is driven by new_block_ids_to_zero,
-            # which the mixed step does not trigger, so warm it directly.
-            if model_runner.kv_block_zeroer is not None:
-                model_runner.kv_block_zeroer.warmup(
-                    model_runner.kv_cache_config.num_blocks
-                )
-            run_mixed_prefill_decode_warmup(
-                model_runner,
+            warmup_kernels(
+                cast("GPUModelRunner", self.model_runner),
                 self.execute_model,
                 self.sample_tokens,
-                num_tokens,
             )
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
