@@ -396,15 +396,12 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
 
             _on_gfx1250 = on_gfx1250()
 
-        # gfx1250 has no CK path; gfx950 opts in, and then never falls back to
-        # CK, which reads the activation scale row-major regardless of strides.
-        triton_only = _on_gfx1250 or rocm_aiter_ops.is_triton_blockscale_gemm_enabled()
         self.use_triton = not current_platform.is_fp8_fnuz() and (
-            rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k) or triton_only
+            rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k) or _on_gfx1250
         )
 
         self.use_bpreshuffle = (
-            triton_only
+            _on_gfx1250
             and n % 16 == 0
             and k % 128 == 0
             and bool(rocm_aiter_ops.is_triton_blockscale_bpreshuffle_gemm_tuned(n, k))

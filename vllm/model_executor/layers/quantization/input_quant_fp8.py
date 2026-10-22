@@ -25,6 +25,14 @@ _FP8_MIN, _FP8_MAX = get_fp8_min_max()
 _FP8_MIN_SCALING_FACTOR = 1.0 / (_FP8_MAX * 512.0)
 
 
+def _on_gfx1250() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx1250
+
+    return on_gfx1250()
+
+
 # --8<-- [start:quant_fp8]
 @CustomOp.register("quant_fp8")
 class QuantFP8(CustomOp):
@@ -68,6 +76,9 @@ class QuantFP8(CustomOp):
         self.use_deep_gemm_supported = is_deep_gemm_supported()
 
         self.use_aiter = rocm_aiter_ops.is_linear_fp8_enabled()
+        # aiter's group quant emits column-major scales only on gfx1250, whose
+        # Gluon block-scaled GEMM reads them; other archs keep row-major.
+        self.aiter_column_major_scales = column_major_scales and _on_gfx1250()
 
         self.is_group_quant = group_shape.is_per_group()
         if self.is_group_quant:
@@ -150,9 +161,9 @@ class QuantFP8(CustomOp):
 
         if use_aiter_per_group_quant:
             x_q, x_s = rocm_aiter_ops.group_fp8_quant(
-                x, self.group_size, transpose_scale=self.column_major_scales
+                x, self.group_size, transpose_scale=self.aiter_column_major_scales
             )
-            if self.column_major_scales:
+            if self.aiter_column_major_scales:
                 # aiter writes the transposed scale as bytes into a contiguous
                 # buffer; re-present it with column-major strides to match
                 # forward_cuda. This is a view, not a copy.
