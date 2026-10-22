@@ -195,19 +195,23 @@ def _run_rank(config, spec, layer_name, group, rank, q, q_scale, kv_cache_src, k
     impl = _impl(rank, heads, kv_cache_src.dtype != torch.bfloat16)
     output, lse = impl.forward_mqa(q.flatten(0, 1), kv_cache, metadata, layer)
     assert metadata.decode is not None
+    assert output.stride(1) == output.shape[-1]
+    assert lse is not None
+    assert lse.stride(1) == 1
     return metadata.decode.dcp_route.name, output, lse
 
 
 @pytest.mark.parametrize(
-    "heads_per_rank, qlen, block_size, fp8_kv, route",
+    "heads_per_rank, qlen, block_size, fp8_kv, route, stub_asm",
     [
-        (12, 6, 768, False, "ASM_ROWS"),
-        (12, 6, 768, False, "TRITON"),
-        (12, 6, 64, False, "ASM_ROWS"),
-        (12, 6, 64, False, "SEGMENTED"),
-        (8, 4, 16, False, "ASM_ROWS"),
-        (16, 2, 16, True, "ASM_ROWS"),
-        (16, 2, 16, True, "TRITON"),
+        (12, 6, 768, False, "ASM_ROWS", False),
+        (12, 6, 768, False, "TRITON", True),
+        (12, 6, 64, False, "ASM_ROWS", False),
+        (12, 6, 64, False, "SEGMENTED", True),
+        (8, 4, 16, False, "ASM_ROWS", False),
+        (16, 2, 16, True, "ASM_ROWS", False),
+        (16, 2, 16, True, "TRITON", True),
+        (32, 2, 768, False, "TRITON", False),
     ],
     ids=[
         "kimi-k3-hybrid-kda-blocks-asm",
@@ -217,11 +221,19 @@ def _run_rank(config, spec, layer_name, group, rank, q, q_scale, kv_cache_src, k
         "64-heads-bf16-padded-asm",
         "deepseek-v3-mtp-fp8-kv-asm",
         "deepseek-v3-mtp-fp8-kv-triton",
+        "256-heads-without-asm-kernel",
     ],
 )
 @torch.inference_mode()
 def test_dcp_verify_matches_attention(
-    monkeypatch, fake_dcp_groups, heads_per_rank, qlen, block_size, fp8_kv, route
+    monkeypatch,
+    fake_dcp_groups,
+    heads_per_rank,
+    qlen,
+    block_size,
+    fp8_kv,
+    route,
+    stub_asm,
 ):
     import vllm.v1.attention.backends.mla.rocm_aiter_mla as backend
     from vllm.config import set_current_vllm_config
@@ -231,7 +243,7 @@ def test_dcp_verify_matches_attention(
         is_workspace_manager_initialized,
     )
 
-    if route != "ASM_ROWS":
+    if stub_asm:
         # Exercise the fallback taken when gfx942 has no asm kernel for the
         # gathered head count.
         monkeypatch.setattr(backend, "_asm_rows_dcp_verify_heads", lambda *_: 0)
@@ -323,6 +335,25 @@ def test_asm_rows_split_count():
     # Rows alone fill the GPU, but one split would skip the LSE reducer.
     assert _asm_rows_num_kv_splits(192, 16384, mi325x_cus) == 2
     assert _asm_rows_num_kv_splits(2, 16, mi325x_cus) == 2
+    # A captured graph keeps one scalar split count while live context grows.
+    # The static local sequence bound makes the metadata indptr use that same
+    # count on every replay of a fixed row shape.
+    assert _asm_rows_num_kv_splits(2, 1024, mi325x_cus, 16384) == 64
+    assert _asm_rows_num_kv_splits(2, 16384, mi325x_cus, 16384) == 64
+
+
+@pytest.mark.parametrize("num_heads, target_heads", [(8, 16), (64, 128)])
+def test_explicit_head_padding_keeps_real_heads_contiguous(num_heads, target_heads):
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAHelper
+
+    q = torch.arange(2 * num_heads * 3).view(2, num_heads, 3)
+    padded = AiterMLAHelper.get_mla_padded_q(num_heads, q, target_heads=target_heads)
+    output = AiterMLAHelper.get_mla_unpadded_o(
+        num_heads, padded, target_heads=target_heads
+    )
+
+    torch.testing.assert_close(output, q)
+    assert output.stride(1) == output.shape[-1]
 
 
 def test_asm_rows_heads_fall_back_without_a_kernel():

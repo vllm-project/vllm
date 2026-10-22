@@ -12,7 +12,7 @@ import torch
 
 from vllm import envs
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
-from vllm.config import VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.distributed import get_dcp_group
 from vllm.logger import init_logger
@@ -450,12 +450,18 @@ _ASM_ROWS_MAX_SPLITS: Final = 64
 
 
 def _asm_rows_num_kv_splits(
-    num_rows: int, max_kv_seq_len: int, num_compute_units: int
+    num_rows: int,
+    max_kv_seq_len: int,
+    num_compute_units: int,
+    graph_max_kv_seq_len: int | None = None,
 ) -> int:
     """KV splits per verify row: one split workgroup per two CUs, bounded."""
+    split_seq_len = (
+        graph_max_kv_seq_len if graph_max_kv_seq_len is not None else max_kv_seq_len
+    )
     splits = min(
         cdiv(num_compute_units, 2 * num_rows),
-        max_kv_seq_len // _ASM_ROWS_MIN_SPLIT_TOKENS,
+        split_seq_len // _ASM_ROWS_MIN_SPLIT_TOKENS,
         _ASM_ROWS_MAX_SPLITS,
     )
     # One split skips AITER's reducer, and gfx942's fp8 kernel then writes no
@@ -990,6 +996,12 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             )
             * parallel_config.cp_kv_cache_interleave_size
         )
+        self._asm_rows_split_max_kv_seq_len = (
+            dcp_local_max_seq_len
+            if self.compilation_config.cudagraph_mode is not CUDAGraphMode.NONE
+            else None
+        )
+        self._asm_rows_num_compute_units = current_platform.num_compute_units()
 
         # In the flat view (.view(-1,1,1,H)), each token is its own page,
         # so max_num_pages_per_req = max_model_len regardless of
@@ -1619,13 +1631,18 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             verify.block_table.stride(0),
             verify.block_table.stride(1),
             kv_indptr,
+            verify.row_lens,
             KERNEL_BLOCK_SIZE=verify.page_size,
             BLOCK_SIZE=1024,
         )
-        # A graph replays the split count it was captured with, so size it from
-        # the row bound rather than this step's lengths.
+        # A graph replays the Python split count captured by mla_decode_fwd.
+        # Keep it invariant as live context length changes for the same row
+        # shape; eager mode can retain the tighter live-length heuristic.
         num_kv_splits = _asm_rows_num_kv_splits(
-            num_rows, verify.max_kv_seq_len, current_platform.num_compute_units()
+            num_rows,
+            verify.max_kv_seq_len,
+            self._asm_rows_num_compute_units,
+            self._asm_rows_split_max_kv_seq_len,
         )
         split_indptr = self._asm_rows_split_indptr[: num_rows + 1]
         torch.arange(
@@ -2251,10 +2268,10 @@ class AiterMLAHelper:
             return q
         if q.shape[1] == m:
             return q
-        if m % num_heads == 0:
-            return q.repeat_interleave(m // num_heads, dim=1)
         if q.stride(0) == m * q.stride(1):
             return q.as_strided((q.shape[0], m, q.shape[2]), q.stride())
+        if target_heads is None and m % num_heads == 0:
+            return q.repeat_interleave(m // num_heads, dim=1)
         # Non-divisor head counts cannot be padded by repeat_interleave. Tile
         # the query heads and slice to exactly m. MLA attention is independent
         # per query head over the shared KV, so padding heads cannot affect
@@ -2282,6 +2299,8 @@ class AiterMLAHelper:
         )
         if num_heads == m:
             return tensor
+        if target_heads is not None:
+            return tensor[:, :num_heads, ...]
         if m % num_heads == 0:
             return tensor[:, :: m // num_heads, ...]
         # Undo the tile-padding from get_mla_padded_q: the real heads are the
