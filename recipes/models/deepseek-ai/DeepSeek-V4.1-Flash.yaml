@@ -5,7 +5,7 @@ meta:
   provider: "DeepSeek"
   description: "DeepSeek V4.1 Flash vision-language MoE (552B backbone; 8B active per prompt token, 16B per output token) combining sliding-window plus compressed sparse attention with a two-level indexer, engram n-gram memory, hyper-connections, and a DSpark multi-token draft head."
   date_added: 2026-09-09
-  date_updated: 2026-10-19
+  date_updated: 2026-10-21
   tasks:
     - text
     - multimodal
@@ -931,14 +931,14 @@ guide: |
   (`--kernel-config '{"enable_flashinfer_autotune":true}'`), `--gpu-memory-utilization 0.97`
   and `VLLM_USE_V2_MODEL_RUNNER=1` on every point.
 
-  **TP4** serves concurrency 1 to 128 with `--tensor-parallel-size 4`, THP-backed Engram tables
+  **TP4** serves concurrency 1, 4, 8, 16, 32 and 128 with `--tensor-parallel-size 4`, THP-backed Engram tables
   (`--engram-config '{"cpu_offload":true,"use_thp":true}'`) and these per-point limits:
 
   | Concurrency | `--max-num-seqs` | `--max-num-batched-tokens` | `--max-cudagraph-capture-size` |
   |---|---|---|---|
   | 1, 4 | 8 | 4096 | 4092 |
   | 8, 16 | 16, 32 | 8192 | 8190 |
-  | 32, 64, 128 | 64, 128, 256 | 8192 | 8190 |
+  | 32, 128 | 128, 256 | 8192 | 8190 |
 
   Every TP4 point captures piecewise graphs at the DSpark verification multiples
   `[6,12,18,24,30,36,48,60,72,96,120,144,192,240,288,384,480,576,768,1020,1536,2046,3072,4092]`,
@@ -955,10 +955,9 @@ guide: |
   default of 1, while c24 and c32 extend piecewise graphs to 4096 tokens and set
   `--prefill-schedule-interval 64`.
 
-  **DEP4** (TP1 x DP4) serves concurrency 64 to 128 with `--max-num-batched-tokens 8192` and
-  `--max-cudagraph-capture-size 8190`. `--max-num-seqs` is 64 at c64, 96 at c96 and 128 at
-  c128. It sets `--prefill-schedule-interval 48` at c96 and c128 and keeps the default of 1
-  at c64. Decode-replay graphs are captured separately:
+  **DEP4** (TP1 x DP4) serves concurrency 96 and 128 with `--max-num-batched-tokens 8192` and
+  `--max-cudagraph-capture-size 8190`. `--max-num-seqs` is 96 at c96 and 128 at c128, and
+  `--prefill-schedule-interval` is 48 at both. Decode-replay graphs are captured separately:
 
   ```
   --compilation-config '{"mode":"VLLM_COMPILE","cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[6,12,18,24,30,36,48,60,72,96,120,144,192,240,288,384,480,576,768,1020,1536,2046,3072,4092,6144,8190],"decoder_replay_cudagraph_capture_sizes":[6,12,18,24,30,36,48,60,72,96,120,144,192,240,288,384,480,576,768,1020,1536,2048,2304,2560,2816,3072,3328,3584,3840,4096]}'
@@ -970,6 +969,20 @@ guide: |
   DP rank, so the server runs up to 96 sequences: nothing queues at c64, and about 32 clients
   wait at c128. It keeps `--prefill-schedule-interval` at 1 and captures graphs only up to
   576 tokens (`--max-cudagraph-capture-size 576`), as DEP2 does at c8 and c16.
+
+  **Router.** DEP2 and DEP4 sit behind vLLM Router 0.1.14, which fronts the DP ranks of the
+  single server:
+
+  ```
+  vllm-router --policy consistent_hash --request-timeout-secs 14400 --disable-retries \
+    --intra-node-data-parallel-size <DP> --worker-urls http://<server>:<port>
+  ```
+
+  `consistent_hash` replaces the router's `cache_aware` default, `--request-timeout-secs`
+  raises its 1800 s default so long agentic requests finish, and `--disable-retries` stops the
+  router from replaying a failed request. Set `--intra-node-data-parallel-size` to the server's
+  `--data-parallel-size` (2 or 4). The benchmark also binds the router's Prometheus endpoint
+  to localhost; that is telemetry, not a serving setting.
 
   In the command builder, pick **B200** and the **FP8 (0909)** checkpoint, and tick
   **Speculative decoding** and **Text only** (both are opt-in). **Tensor Parallel** then

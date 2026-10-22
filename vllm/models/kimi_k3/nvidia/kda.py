@@ -104,12 +104,21 @@ class _KimiGDNMergedColumnParallelLinear(MergedColumnParallelLinear):
         output_sizes: list[int],
         replicated_shard_id: int,
         tp_size: int,
+        padding_size: int = 0,
         **kwargs,
     ) -> None:
         self.replicated_shard_id = replicated_shard_id
+        self.padding_size = padding_size
         output_sizes = output_sizes.copy()
         output_sizes[replicated_shard_id] *= tp_size
         super().__init__(input_size, output_sizes, **kwargs)
+        if padding_size:
+            # Exclude padding rows from the load-completion count.
+            set_weight_attrs(
+                self.weight,
+                {"weight_loader_numel": self.weight[:-padding_size].numel()},
+            )
+            self.weight.data[-padding_size:].zero_()
 
     def weight_loader(
         self,
@@ -129,6 +138,8 @@ class _KimiGDNMergedColumnParallelLinear(MergedColumnParallelLinear):
                 param.tp_rank = 0
         try:
             super().weight_loader(param, loaded_weight, loaded_shard_id)
+            if self.padding_size and param is self.weight:
+                param.data[-self.padding_size :].zero_()
         finally:
             self.tp_rank = tp_rank
             if param_tp_rank is not None:
@@ -152,6 +163,8 @@ class _KimiGDNMergedColumnParallelLinear(MergedColumnParallelLinear):
                 param.tp_rank = 0
         try:
             super().weight_loader_v2(param, loaded_weight, loaded_shard_id)
+            if self.padding_size and param is self.weight:
+                param.data[-self.padding_size :].zero_()
         finally:
             self.tp_rank = tp_rank
             if param_tp_rank is not None:
@@ -647,12 +660,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             in_proj_output_sizes,
             replicated_shard_id=4,
             tp_size=self.tp_size,
+            padding_size=self.in_proj_padding,
             bias=False,
             quant_config=self.quant_config,
             prefix=in_proj_prefix,
         )
-        if self.in_proj_padding:
-            self.in_proj_qkvgfab.weight.data[-self.in_proj_padding :].zero_()
 
         self.f_b_proj = ColumnParallelLinear(
             self.head_dim,

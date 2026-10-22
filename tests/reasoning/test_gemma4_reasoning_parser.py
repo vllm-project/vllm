@@ -255,7 +255,10 @@ def test_gemma4_adjust_request(generic_tokenizer):
     )
 
     request = ChatCompletionRequest(messages=[], model="test-model")
-    assert request.skip_special_tokens is True
+    assert (
+        request.to_sampling_params(1, default_sampling_params={}).skip_special_tokens
+        is True
+    )
 
     result = parser.adjust_request(request)
     assert result.skip_special_tokens is False
