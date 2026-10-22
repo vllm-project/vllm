@@ -181,6 +181,19 @@ def test_nomic_late_chunking_without_special_tokens(vllm_runner):
 
 
 @pytest.mark.skip_global_cleanup
+def test_late_chunking_rejects_oversized_chunk_size(llm: LLM):
+    chunk_params = LateChunkingParams(1)
+    params = PoolingParams(late_chunking_params=chunk_params)
+    # Exercise request validation after a mutable parameter has changed.
+    chunk_params.chunk_size = 2**64
+    with pytest.raises(VLLMValidationError, match="positive integer"):
+        llm.encode(
+            prompt, pooling_task="token_embed", pooling_params=params, use_tqdm=False
+        )
+    assert not llm.llm_engine.has_unfinished_requests()
+
+
+@pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("normalize", [False, True])
 def test_e5_late_chunking_mixed_requests(llm: LLM, normalize: bool):
     texts = [prompt, "Short text.", "中文 😀 café"]
