@@ -205,7 +205,7 @@ def make_cache(blocks: int = 4, block: int = 32) -> torch.Tensor:
 
 def make_config(**overrides) -> Any:
     config = SimpleNamespace(
-        kernel_config=SimpleNamespace(specialized_decode=True),
+        kernel_config=SimpleNamespace(specialized_decode="monokernel"),
         model_config=SimpleNamespace(
             enable_sleep_mode=False,
             hf_config=SimpleNamespace(
@@ -512,7 +512,7 @@ def test_other_moe_backend_refuses(monkeypatch):
 def test_off_without_the_flag(monkeypatch):
     _gpu(monkeypatch)
     config = make_config()
-    config.kernel_config.specialized_decode = False
+    config.kernel_config.specialized_decode = None
     assert select_decode_spec(config, SPECS) is None
 
 

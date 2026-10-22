@@ -266,6 +266,8 @@ LinearBackend = Literal[
     "xpu_woq",
 ]
 
+SpecializedDecodeBackend = Literal["auto", "monokernel"]
+
 
 @config
 class KernelConfig:
@@ -293,10 +295,12 @@ class KernelConfig:
     enable_jit_warmup: bool = True
     """If True, run JIT compile warmup during kernel warmup."""
 
-    specialized_decode: bool = False
-    """If True, run decode steps on the model's specialized decode: a kernel
-    that runs most or all of a decoder layer in a single launch. A deployment
-    that cannot run it is refused at startup."""
+    specialized_decode: SpecializedDecodeBackend | None = None
+    """Which specialized decode to run decode steps on. `monokernel` runs most
+    or all of a decoder layer in a single persistent launch, which pays off at
+    the small batch sizes of low-latency serving; `auto` lets vLLM pick, which
+    today means the monokernel. None runs vLLM's regular decode. A deployment
+    that cannot run the selection is refused at startup."""
 
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:

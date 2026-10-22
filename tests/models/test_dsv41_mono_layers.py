@@ -294,7 +294,7 @@ def _decode(
         hf_overrides=TRUNCATED,
         worker_extension_cls=f"{__name__}.MonoProbe",
         moe_backend="aiter",
-        specialized_decode=mono,
+        specialized_decode="monokernel" if mono else None,
         language_model_only=True,
         tokenizer_mode="deepseek_v41",
         **indexer,

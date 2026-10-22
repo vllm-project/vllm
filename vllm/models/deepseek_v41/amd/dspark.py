@@ -423,7 +423,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Base logits U_k = lm_head(norm(head_hidden))."""
-        # On gfx942 with --specialized-decode, the 5 rows of one request take the
+        # On gfx942 with --monokernel, the 5 rows of one request take the
         # torch GEMM instead of wvSplitK (ops/draft_lm_head.py).
         return draft_lm_head.compute_logits(
             self.logits_processor, self.lm_head, self.model.norm(hidden_states)
@@ -456,7 +456,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         head_hidden: torch.Tensor,
     ) -> bool:
         """DSparkSpeculator._sample_sequential asks this first. With
-        --specialized-decode on gfx942 each Markov step is one launch
+        --monokernel on gfx942 each Markov step is one launch
         (ops/fused_markov.py), and this returns True. For a step that the
         fused launches do not take, it returns False, having done nothing,
         and the speculator runs its own loop."""

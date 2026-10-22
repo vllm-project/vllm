@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Layer- and model-level precision of --specialized-decode on a mini MiniMax M3 at
+"""Layer- and model-level precision of --monokernel on a mini MiniMax M3 at
 the real per-layer shapes, TP4, with random weights (no checkpoint): layers
 0-2 dense and stock, 3-4 sparse and fused, the last one ending in the step-end
 handshake. Engines load dummy weights, so vLLM's real MXFP4 / AITER post-load
@@ -12,7 +12,7 @@ MXFP4 format and converted by that same path.
   residual, post-attention norm, MoE) on captured decode-step inputs, native
   vs the fused launch;
 - model: teacher-forced decode (trace replay) with full-vocabulary logprobs,
-  --specialized-decode eager and under FULL graphs (with frequent epoch resets) vs
+  --monokernel eager and under FULL graphs (with frequent epoch resets) vs
   native eager;
 - fail-stop: a late rank fault under FULL graphs returns no token."""
 
@@ -334,7 +334,7 @@ def _engine(vllm_runner, model_dir, mono, graphs=False, **extra):
         kernel_config={
             "enable_jit_warmup": False,
             "moe_backend": "aiter",
-            "specialized_decode": mono,
+            "specialized_decode": "monokernel" if mono else None,
         },
         enforce_eager=not graphs,
         compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY" if graphs else "NONE"},
@@ -392,7 +392,7 @@ def _reset_state(worker):
 
 @pytest.mark.parametrize("graphs", [False, True], ids=["eager", "full_graphs"])
 def test_model_matches_native(vllm_runner, model_dir, native, graphs):
-    """Teacher-forced decode with --specialized-decode against native eager. Under
+    """Teacher-forced decode with --monokernel against native eager. Under
     FULL graphs (async scheduling) the epoch resets every 3 sampled steps,
     on every rank at the same steps, and no wait times out."""
     with _engine(
@@ -506,7 +506,7 @@ def _spec_requests():
 
 
 def test_eagle3_verify_steps_match_native(vllm_runner, model_dir, draft_dir, capfd):
-    """EAGLE3 (random draft) with --specialized-decode under FULL graphs: the verify
+    """EAGLE3 (random draft) with --monokernel under FULL graphs: the verify
     steps of 1-4 requests (4, 8, 12 padded to 16, and 16 rows) run the fused
     launches (the device epoch moves on); the target's full-vocabulary
     logprobs along the generated tokens match native eager teacher-forced on

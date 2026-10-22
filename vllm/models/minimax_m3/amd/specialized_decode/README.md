@@ -1,6 +1,6 @@
 # MiniMax M3 specialized decode
 
-`--specialized-decode` on MI355X/gfx950 runs each sparse layer (3-59) as vLLM's input
+`--monokernel` on MI355X/gfx950 runs each sparse layer (3-59) as vLLM's input
 norm and attention followed by one persistent FlyDSL launch for the rest of the
 layer (`mono/ffn.py`): the attention TP all-reduce and residual add, the Gemma
 post-attention norm, the FP32 router and top-4, the shared and routed experts,

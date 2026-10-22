@@ -86,6 +86,7 @@ from vllm.config.kernel import (
     LinearBackend,
     MoEBackend,
     SparseIndexerTopkBackend,
+    SpecializedDecodeBackend,
 )
 from vllm.config.load import SafetensorsLoadStrategy
 from vllm.config.logging import LogLevel
@@ -770,7 +771,8 @@ class EngineArgs:
     enable_flashinfer_autotune: bool = get_field(
         KernelConfig, "enable_flashinfer_autotune"
     )
-    specialized_decode: bool | None = None
+    specialized_decode: SpecializedDecodeBackend | None = None
+    monokernel: bool | None = None
     worker_cls: str = ParallelConfig.worker_cls
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
 
@@ -1830,9 +1832,16 @@ class EngineArgs:
             **kernel_kwargs["enable_flashinfer_autotune"],
         )
         specialized_decode_kwargs = kernel_kwargs["specialized_decode"]
-        # None, not the config's False, so an absent flag overrides nothing.
-        specialized_decode_kwargs["default"] = None
+        specialized_decode_kwargs["nargs"] = "?"
+        specialized_decode_kwargs["const"] = "auto"
         kernel_group.add_argument("--specialized-decode", **specialized_decode_kwargs)
+        kernel_group.add_argument(
+            "--monokernel",
+            action=argparse.BooleanOptionalAction,
+            default=None,
+            help="Shorthand for --specialized-decode monokernel. "
+            "--no-monokernel turns off a specialized decode asked for elsewhere.",
+        )
         moe_backend_kwargs = kernel_kwargs["moe_backend"]
         moe_backend_kwargs["type"] = lambda s: s.lower().replace("-", "_")
         kernel_group.add_argument("--moe-backend", **moe_backend_kwargs)
@@ -2787,6 +2796,8 @@ class EngineArgs:
                     "are mutually exclusive"
                 )
             kernel_config.enable_flashinfer_autotune = self.enable_flashinfer_autotune
+        if self.monokernel is not None:
+            kernel_config.specialized_decode = "monokernel" if self.monokernel else None
         if self.specialized_decode is not None:
             kernel_config.specialized_decode = self.specialized_decode
         if self.moe_backend != "auto":

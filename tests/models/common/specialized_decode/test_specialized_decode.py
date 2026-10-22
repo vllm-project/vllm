@@ -67,7 +67,7 @@ def positions(width: int) -> torch.Tensor:
 
 
 def test_off_without_the_flag(config):
-    config.kernel_config.specialized_decode = False
+    config.kernel_config.specialized_decode = None
     sizes = list(config.compilation_config.cudagraph_capture_sizes)
     assert select_decode_spec(config, SPECS) is None
     assert config.compilation_config.cudagraph_capture_sizes == sizes

@@ -211,7 +211,7 @@ def compute_global_topk_ragged_indices_and_indptr(
     block_size: int,
     is_valid_token: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    # On gfx942 with --specialized-decode, a decode batch of up to 16
+    # On gfx942 with --monokernel, a decode batch of up to 16
     # rows is packed with one launch instead of 4 (topk_pack.py). Other
     # batches return None there and take the function below.
     from vllm.models.deepseek_v41.amd.ops import topk_pack
@@ -380,7 +380,7 @@ class DeepseekV41ROCMAiterSparseSWAMetadataBuilder(DeepseekV41SparseSWAMetadataB
         fast_build: bool = False,
         replay_start: torch.Tensor | None = None,
     ) -> DeepseekV41ROCMAiterSparseSWAMetadata:
-        # On gfx942 with --specialized-decode, a decode batch gets this
+        # On gfx942 with --monokernel, a decode batch gets this
         # metadata from one launch instead of 8 launches per SWA group
         # (swa_decode_meta.py). Other batches return None there and take
         # the build below.
@@ -579,13 +579,13 @@ class DeepseekV41RocmMxfp4Indexer(DeepseekV4Indexer):
 class DeepseekV41Gfx942Indexer(DeepseekV4Indexer):
     """vLLM's FP8 indexer, whose layers run the gfx942 top-512 launches of
     ops/topk.py on decode steps (ops/sparse_indexer.py). The attention below
-    takes it only with --specialized-decode on gfx942."""
+    takes it only with --monokernel on gfx942."""
 
     attn_cls = Gfx942SparseAttnIndexer
 
 
 def _gfx942_specialized_decode() -> bool:
-    """True with --specialized-decode on a gfx942 GPU, read from the config of the
+    """True with --monokernel on a gfx942 GPU, read from the config of the
     model that is being built. ops.enabled() cannot answer here, because the
     mono decode layers record the flag only after their attention is built."""
     from vllm.platforms.rocm import on_gfx942

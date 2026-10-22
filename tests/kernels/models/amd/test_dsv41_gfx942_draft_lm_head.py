@@ -2,13 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """draft_lm_head.compute_logits, the DSpark draft's base logits on gfx942.
 
-With --specialized-decode on gfx942, the draft's 5 rows of one request get a
-sixth row of zeros, so that vLLM's dispatch (rocm_unquantized_gemm) takes the
-torch GEMM instead of wvSplitK, and the logits of the first 5 rows come back.
-Every other row count, and every call without --specialized-decode, keeps
-vLLM's dispatch, which sends up to 5 rows to wvSplitK. The tests count the
-wvSplitK calls of vLLM's dispatch on the draft's lm_head shard at TP 4 and
-compare the logits with an fp32 GEMM.
+With --monokernel on gfx942, the draft's 5 rows of one request get a sixth
+row of zeros, so that vLLM's dispatch (rocm_unquantized_gemm) takes the torch
+GEMM instead of wvSplitK, and the logits of the first 5 rows come back. Every
+other row count, and every call without --monokernel, keeps vLLM's dispatch,
+which sends up to 5 rows to wvSplitK. The tests count the wvSplitK calls of
+vLLM's dispatch on the draft's lm_head shard at TP 4 and compare the logits
+with an fp32 GEMM.
 """
 
 import pytest
@@ -34,8 +34,8 @@ def _skip_unless_gfx942():
 def _set_gate(monkeypatch, on: bool):
     from vllm.models.deepseek_v41.amd import ops
 
-    # The model records --specialized-decode when it is created. These tests
-    # have no model, so they set the recorded flag themselves.
+    # The model records --monokernel when it is created. These tests have no
+    # model, so they set the recorded flag themselves.
     monkeypatch.setattr(ops, "_specialized_decode", on)
     ops.enabled.cache_clear()
 
@@ -75,10 +75,10 @@ def wvsplitk_rows(monkeypatch):
     return rows
 
 
-@pytest.mark.parametrize("specialized_decode", [False, True])
+@pytest.mark.parametrize("monokernel", [False, True])
 @pytest.mark.parametrize("rows", [1, 4, 5, 6, 10])
 def test_draft_lm_head_takes_5_rows_off_wvsplitk(
-    monkeypatch, wvsplitk_rows, rows, specialized_decode
+    monkeypatch, wvsplitk_rows, rows, monokernel
 ):
     from vllm.models.deepseek_v41.amd.ops import draft_lm_head
 
@@ -88,16 +88,16 @@ def test_draft_lm_head_takes_5_rows_off_wvsplitk(
     x = torch.randn(rows, HIDDEN, generator=g, device="cuda")
     head = _LMHead(w.to(torch.bfloat16))
 
-    _set_gate(monkeypatch, on=specialized_decode)
+    _set_gate(monkeypatch, on=monokernel)
     try:
         got = draft_lm_head.compute_logits(_processor, head, x.to(torch.bfloat16))
         torch.accelerator.synchronize()
     finally:
         _set_gate(monkeypatch, on=False)
 
-    # Only the 5 rows with --specialized-decode leave wvSplitK. Every other
-    # call keeps vLLM's dispatch, which takes wvSplitK for up to 5 rows.
-    padded = specialized_decode and rows == draft_lm_head.ROWS
+    # Only the 5 rows with --monokernel leave wvSplitK. Every other call
+    # keeps vLLM's dispatch, which takes wvSplitK for up to 5 rows.
+    padded = monokernel and rows == draft_lm_head.ROWS
     assert wvsplitk_rows == ([] if padded or rows > 5 else [rows])
     assert got.shape == (rows, VOCAB_SHARD)
     want = x.to(torch.bfloat16).float() @ w.to(torch.bfloat16).float().T

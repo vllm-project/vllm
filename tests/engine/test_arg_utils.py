@@ -809,29 +809,49 @@ def test_ir_op_priority():
     ("argv", "expected"),
     [
         ([], None),
-        (["--specialized-decode"], True),
-        (["--no-specialized-decode"], False),
+        (["--specialized-decode"], "auto"),
+        (["--specialized-decode", "auto"], "auto"),
+        (["--specialized-decode", "monokernel"], "monokernel"),
+        (["--monokernel"], "monokernel"),
+        (["--no-monokernel"], None),
+        # The named backend wins over the shorthand, whatever the order.
+        (["--monokernel", "--specialized-decode", "auto"], "auto"),
+        (["--specialized-decode", "auto", "--monokernel"], "auto"),
     ],
 )
 def test_specialized_decode_cli(argv, expected):
+    """``--monokernel`` is shorthand for ``--specialized-decode monokernel``,
+    and a bare ``--specialized-decode`` means ``auto``."""
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     args = EngineArgs.from_cli_args(parser.parse_args(argv))
-    assert args.specialized_decode is expected
+    config = args.create_engine_config()
+    assert config.kernel_config.specialized_decode == expected
+
+
+def test_specialized_decode_rejects_an_unknown_backend():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--specialized-decode", "flydsl"])
 
 
 @pytest.mark.parametrize(
-    ("flag", "expected"), [(None, True), (True, True), (False, False)]
+    ("flags", "expected"),
+    [
+        ({}, "monokernel"),
+        ({"monokernel": False}, None),
+        ({"specialized_decode": "auto"}, "auto"),
+    ],
 )
-def test_specialized_decode_overrides_the_kernel_config(flag, expected):
-    """``--no-specialized-decode`` turns off a specialized decode that a config
-    file or the Python API asked for, and an absent flag leaves it alone."""
+def test_specialized_decode_overrides_the_kernel_config(flags, expected):
+    """``--no-monokernel`` turns off a specialized decode that a config file or
+    the Python API asked for, and absent flags leave it alone."""
     from vllm.config.kernel import KernelConfig
 
     config = EngineArgs(
-        specialized_decode=flag,
-        kernel_config=KernelConfig(specialized_decode=True),
+        kernel_config=KernelConfig(specialized_decode="monokernel"),
+        **flags,
     ).create_engine_config()
-    assert config.kernel_config.specialized_decode is expected
+    assert config.kernel_config.specialized_decode == expected
 
 
 @pytest.mark.parametrize(

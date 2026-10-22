@@ -11,7 +11,7 @@ rows. So here the 5 rows get a sixth row of zeros, which makes vLLM's dispatch
 take the torch GEMM, and the logits of the sixth row are dropped. That takes
 96 us. Every other GEMM keeps vLLM's dispatch.
 
-It runs on gfx942 with --specialized-decode (``ops.enabled()``).
+It runs on gfx942 with --monokernel (``ops.enabled()``).
 tests/kernels/models/amd/test_dsv41_gfx942_draft_lm_head.py checks it.
 """
 
@@ -26,7 +26,7 @@ ROWS = 5
 
 def compute_logits(logits_processor, lm_head, normed: torch.Tensor):
     """The base logits ``logits_processor(lm_head, normed)``. On gfx942 with
-    --specialized-decode, 5 rows run as 6 rows with a row of zeros and come back as
+    --monokernel, 5 rows run as 6 rows with a row of zeros and come back as
     5. The processor returns None on a rank that does not get the gathered
     logits, and so does this function then."""
     if normed.shape[0] != ROWS or not enabled():

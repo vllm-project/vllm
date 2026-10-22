@@ -41,11 +41,10 @@ model:
   min_vllm_version: "0.31.0"
   default_frontend: rust
   docker_image:
-    # ROCm 10.0 nightly channel. MI355X's --specialized-decode
-    # (vllm-project/vllm#60397, #61082, #61311), paged MXFP4 indexer (#58671)
-    # and Gluon sparse MLA (#53492) are on main but not in 0.31.0, so AMD stays
-    # on the nightly image the AMD rows were verified on; the MI355X pip tab is
-    # hidden in the variants below.
+    # ROCm 10.0 nightly channel. MI355X's --monokernel (vllm-project/vllm#60397,
+    # #61082), paged MXFP4 indexer (#58671) and Gluon sparse MLA (#53492) are on
+    # main but not in 0.31.0, so AMD stays on the nightly image the AMD rows were
+    # verified on; the MI355X pip tab is hidden in the variants below.
     amd: "vllm/vllm-openai-rocm:nightly-rocm100"
   architecture: moe
   parameter_count: "552B"
@@ -148,9 +147,8 @@ variants:
         extra_env:
           VLLM_USE_V2_MODEL_RUNNER: "1"
           PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
-      # --specialized-decode and the ROCm MXFP4 indexer path are on main, not in
-      # the 0.31.0 wheel, which rejects the flag. Drop this once a release ships
-      # them.
+      # --monokernel and the ROCm MXFP4 indexer path are on main, not in the
+      # 0.31.0 wheel, which rejects the flag. Drop this once a release ships them.
       mi355x:
         install:
           pip: false
@@ -293,13 +291,12 @@ strategy_overrides:
           # otherwise falls back to 64.
           - "--block-size"
           - "128"
-          # Specialized decode kernels (vllm-project/vllm#60397, #61082,
-          # #61311): two persistent launches a layer on all 40 backbone layers
-          # for decode steps of up to 48 rows, i.e. up to concurrency 8 with
-          # five DSpark drafts. Larger steps take the regular path, so the gain
-          # fades as concurrency rises. Replaces the VLLM_ROCM_MONO_DECODE
-          # environment variable and the --monokernel flag.
-          - "--specialized-decode"
+          # Mono decode kernels (vllm-project/vllm#60397, #61082): two persistent
+          # launches a layer on all 40 backbone layers for decode steps of up to
+          # 48 rows, i.e. up to concurrency 8 with five DSpark drafts. Larger
+          # steps take the regular path, so the gain fades as concurrency rises.
+          # Replaces the VLLM_ROCM_MONO_DECODE environment variable.
+          - "--monokernel"
         extra_env:
           # Aiter's Gluon sparse-MLA kernel, gfx950 only
           # (vllm-project/vllm#53492).
@@ -699,9 +696,9 @@ guide: |
     The launch-day `deepseekv41-flash-0909` image is no longer needed.
   - On AMD the Docker tab uses `vllm/vllm-openai-rocm:nightly-rocm100`, the ROCm 10.0
     nightly the AMD rows were verified on. **MI355X needs it**: the TP2 command uses
-    `--specialized-decode` and the ROCm MXFP4 indexer, which are on `main` but not
-    in 0.31.0, so the Install block offers only Docker on MI355X. MI300X, MI325X and
-    MI350X also run from the ROCm pip wheel.
+    `--monokernel` and the ROCm MXFP4 indexer, which are on `main` but not in 0.31.0,
+    so the Install block offers only Docker on MI355X. MI300X, MI325X and MI350X also
+    run from the ROCm pip wheel.
   - The Rust OpenAI frontend is selected by default in the command builder. Switch
     to Python if you encounter unsupported features or compatibility issues.
   - Expect a long first load: `VLLM_ENGINE_READY_TIMEOUT_S=3600` is set for that reason.
@@ -812,16 +809,14 @@ guide: |
   default `cpu_offload` on through `VLLM_PLE_CPU_OFFLOAD`, so set it explicitly
   rather than inheriting the default.
 
-  `--specialized-decode` selects the mono decode layer from
+  `--monokernel` selects the mono decode layer from
   [vllm-project/vllm#60397](https://github.com/vllm-project/vllm/pull/60397),
   which [vllm-project/vllm#61082](https://github.com/vllm-project/vllm/pull/61082)
   extended to all 40 backbone layers and moved from the
-  `VLLM_ROCM_MONO_DECODE` environment variable to a flag, named `--monokernel`
-  until [vllm-project/vllm#61311](https://github.com/vllm-project/vllm/pull/61311)
-  renamed it. Two persistent launches cover a layer for decode steps of up to 48
-  rows, which with five DSpark drafts is concurrency 8; larger steps fall back
-  to the regular path, so the gain is largest at low concurrency and fades as
-  concurrency rises.
+  `VLLM_ROCM_MONO_DECODE` environment variable to this flag. Two persistent
+  launches cover a layer for decode steps of up to 48 rows, which with five
+  DSpark drafts is concurrency 8; larger steps fall back to the regular path, so
+  the gain is largest at low concurrency and fades as concurrency rises.
 
   Decoder SWA bounded replay
   ([vllm-project/vllm#59039](https://github.com/vllm-project/vllm/pull/59039))

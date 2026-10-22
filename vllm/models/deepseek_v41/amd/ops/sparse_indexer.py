@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The sparse indexer layer of DeepSeek-V4.1 with --specialized-decode on gfx942.
+"""The sparse indexer layer of DeepSeek-V4.1 with --monokernel on gfx942.
 
 The layer runs vLLM's ROCm indexer op, rocm_aiter_sparse_attn_indexer, on
 every step except a step of only decode rows. Such a step runs the decode path
 of that op here, with the gfx942 launches of topk.py in front of vLLM's
 logits, candidate selection, candidate mask and top-k. Each launch returns
 False for a call that it cannot take, and then vLLM's op at that place runs.
-The model takes this layer only with --specialized-decode on gfx942
+The model takes this layer only with --monokernel on gfx942
 (DeepseekV41ROCMAiterMLAAttention._indexer_cls in rocm.py).
 """
 
@@ -98,7 +98,7 @@ def gfx942_sparse_attn_indexer(
     """rocm_aiter_sparse_attn_indexer with the same arguments, whose steps of
     only decode rows run _decode_step. The profiling run, prefill and mixed
     steps, a layer that writes its own K cache and a process without
-    --specialized-decode on gfx942 run vLLM's op unchanged.
+    --monokernel on gfx942 run vLLM's op unchanged.
 
     Like vLLM's op, this is a break of a breakable CUDA graph capture. Its
     Python runs again at every replay, so the choice between the two paths

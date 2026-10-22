@@ -25,7 +25,7 @@ bias value can differ in its last bf16 bit. That changes only which tokens
 the draft proposes, not the target's output, because the rejection sampler
 verifies every draft token against the target's own distribution.
 
-It runs on gfx942 with --specialized-decode (``ops.enabled()``). The speculator asks
+It runs on gfx942 with --monokernel (``ops.enabled()``). The speculator asks
 the draft model's ``sample_sequential`` (dspark.py) before its loop, and that
 calls ``sample_sequential`` here.
 tests/kernels/models/amd/test_dsv41_gfx942_fused_markov.py compares it with vLLM's loop.
