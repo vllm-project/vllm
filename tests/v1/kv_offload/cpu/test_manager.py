@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import OrderedDict
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass
 
 import numpy as np
@@ -41,6 +41,7 @@ def make_cpu_manager(
     enable_events: bool = False,
     store_threshold: int = 0,
     max_tracker_size: int = 64_000,
+    mamba_group_ids: Collection[int] = (),
 ) -> CPUOffloadingManager:
     return CPUOffloadingManager(
         num_chunks=num_chunks,
@@ -49,6 +50,7 @@ def make_cpu_manager(
         enable_events=enable_events,
         store_threshold=store_threshold,
         max_tracker_size=max_tracker_size,
+        mamba_group_ids=mamba_group_ids,
     )
 
 
@@ -1772,3 +1774,96 @@ def test_lru_insert_orders_positioned_chunks_without_followup_access(ready_on_in
     assert evicted is not None
     assert [key for key, _ in evicted] == [tail, middle]
     assert policy.get(head) is not None
+
+
+# A hybrid model with two Mamba groups and one attention group, 16-token chunks.
+MAMBA_GROUPS = (0, 1)
+ATTENTION_GROUP = 2
+
+
+def _chain_key(end: int, group: int) -> OffloadKey:
+    # Stands in for the block hash of one conversation's prefix ending at `end`.
+    return make_offload_key(str(end).encode(), group)
+
+
+def _mamba_states(end: int) -> list[OffloadKey]:
+    return [_chain_key(end, group) for group in MAMBA_GROUPS]
+
+
+def _attention_chunks(start: int, end: int) -> list[OffloadKey]:
+    return [_chain_key(pos, ATTENTION_GROUP) for pos in range(start + 16, end + 1, 16)]
+
+
+def _run_turn(
+    manager: CPUOffloadingManager,
+    resume: int,
+    end: int,
+    gpu_hit: bool = False,
+    junction: int | None = None,
+) -> None:
+    """One request: load the prefix up to `resume` from the CPU tier (unless the
+    GPU prefix cache served it), then store the new attention chunks, an
+    optional junction state below the tip, and the tip."""
+    ctx = make_req_context()
+    manager.on_new_request(ctx)
+    for pos in range(16, end + 1, 16):
+        for group in (*MAMBA_GROUPS, ATTENTION_GROUP):
+            ctx.set_offload_key_position(_chain_key(pos, group), pos)
+    if resume and not gpu_hit:
+        load = _attention_chunks(0, resume) + _mamba_states(resume)
+        manager.prepare_load(load, ctx)
+        manager.complete_load(load, ctx)
+    stores = [_attention_chunks(resume, end)]
+    if junction is not None:
+        stores.append(_mamba_states(junction))
+    stores.append(_mamba_states(end))
+    for keys in stores:
+        output = manager.prepare_store(keys, ctx)
+        assert output is not None
+        manager.complete_store(output.keys_to_store, ctx)
+    manager.on_request_finished(ctx)
+
+
+def _eviction_orders(*turns: dict) -> dict[str, list[OffloadKey]]:
+    """Run the turns under lru and mamba_aware_lru, then store a full cache of
+    new chunks, which evicts every cached one."""
+    orders = {}
+    for policy in ("lru", "mamba_aware_lru"):
+        manager = make_cpu_manager(
+            num_chunks=64, cache_policy=policy, mamba_group_ids=MAMBA_GROUPS
+        )
+        for turn in turns:
+            _run_turn(manager, **turn)
+        new = [make_offload_key(b"new%d" % i, ATTENTION_GROUP) for i in range(64)]
+        output = manager.prepare_store(new, make_req_context("evict"))
+        assert output is not None
+        orders[policy] = output.evicted_keys
+    return orders
+
+
+def test_mamba_aware_lru_evicts_superseded_tips_first():
+    """The first turn also stores a junction state below its tip; the third is
+    served from the GPU prefix cache, so it reaches the old tip only through
+    its chain positions. Both superseded tips go first, oldest first; the
+    junction, the newest tip and every attention chunk keep their LRU order."""
+    orders = _eviction_orders(
+        dict(resume=0, end=64, junction=32),
+        dict(resume=64, end=96),
+        dict(resume=96, end=128, gpu_hit=True),
+    )
+
+    superseded = _mamba_states(64) + _mamba_states(96)
+    assert orders["lru"][: len(superseded)] != superseded
+    assert orders["mamba_aware_lru"] == superseded + [
+        key for key in orders["lru"] if key not in superseded
+    ]
+
+
+def test_mamba_aware_lru_reused_tip_regains_lru_rank():
+    """A regenerated turn that resumes from a superseded tip reloads it and
+    leaves it ranked as under LRU."""
+    orders = _eviction_orders(
+        dict(resume=0, end=48), dict(resume=48, end=80), dict(resume=48, end=48)
+    )
+
+    assert orders["mamba_aware_lru"] == orders["lru"]

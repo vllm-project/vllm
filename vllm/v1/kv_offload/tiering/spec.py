@@ -9,9 +9,9 @@ Configuration via kv_connector_extra_config:
   - cpu_bytes_to_use: (required) Bytes to allocate for CPU primary tier
   - block_size: (optional) Tokens per offloaded chunk (default: GPU block size)
   - eviction_policy: (optional) Primary tier eviction policy: built-in "lru"/
-    "arc", or the name of a policy registered via CachePolicyFactory, or an
-    out-of-tree CachePolicy class name paired with cache_policy_module_path
-    (default: "lru")
+    "arc"/"mamba_aware_lru", or the name of a policy registered via
+    CachePolicyFactory, or an out-of-tree CachePolicy class name paired with
+    cache_policy_module_path (default: "lru")
   - cache_policy_module_path: (optional) Python import path to load
     eviction_policy from when it names an out-of-tree CachePolicy not
     registered via CachePolicyFactory
@@ -404,6 +404,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                     enable_events=self.kv_events_config.enable_kv_cache_events,
                     mmap_region=scheduler_mmap,
                     info=self.cpu_info,
+                    mamba_group_ids=self.mamba_group_ids,
                 )
 
                 # Create secondary tiers
