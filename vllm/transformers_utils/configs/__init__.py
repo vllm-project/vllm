@@ -14,6 +14,7 @@ from __future__ import annotations
 import importlib
 
 _CLASS_TO_MODULE: dict[str, str] = {
+    "Alpamayo2SuperConfig": "vllm.transformers_utils.configs.alpamayo2_super",
     "BagelConfig": "vllm.transformers_utils.configs.bagel",
     "BailingMoeV3TextConfig": "vllm.transformers_utils.configs.bailing_moe_v3_vl",
     "BailingMoeV3VisionConfig": "vllm.transformers_utils.configs.bailing_moe_v3_vl",
@@ -51,6 +52,12 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "MoonViTConfig": "vllm.transformers_utils.configs.moonvit",
     "KimiLinearConfig": "vllm.transformers_utils.configs.kimi_linear",
     "KimiVLConfig": "vllm.transformers_utils.configs.kimi_vl",
+    "MuseSpark1xTextConfig": "vllm.transformers_utils.configs.muse_spark",
+    "MuseSparkTextConfig": "vllm.transformers_utils.configs.muse_spark",
+    "MuseSparkVisionConfig": "vllm.transformers_utils.configs.muse_spark",
+    "MuseSparkAudioConfig": "vllm.transformers_utils.configs.muse_spark",
+    "MuseSparkDSparkConfig": "vllm.transformers_utils.configs.muse_spark",
+    "MuseSparkConfig": "vllm.transformers_utils.configs.muse_spark",
     "KimiK3Config": "vllm.transformers_utils.configs.kimi_k3",
     "KimiK3VisionConfig": "vllm.transformers_utils.configs.kimi_k3",
     "OpenVLAConfig": "vllm.transformers_utils.configs.openvla",
@@ -80,6 +87,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
 }
 
 __all__ = [
+    "Alpamayo2SuperConfig",
     "BagelConfig",
     "BailingMoeV3TextConfig",
     "BailingMoeV3VisionConfig",
@@ -114,6 +122,12 @@ __all__ = [
     "KimiLinearConfig",
     "KimiVLConfig",
     "Kimi_K25Config",
+    "MuseSpark1xTextConfig",
+    "MuseSparkTextConfig",
+    "MuseSparkVisionConfig",
+    "MuseSparkAudioConfig",
+    "MuseSparkDSparkConfig",
+    "MuseSparkConfig",
     "KimiK3Config",
     "KimiK3VisionConfig",
     "OpenVLAConfig",
