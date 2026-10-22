@@ -8,7 +8,6 @@ from fnmatch import fnmatch
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
-from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
 from vllm.config import get_current_vllm_config_or_none
@@ -81,6 +80,9 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_VALUE_DTYPE,
     dequant_mxfp8_to_bf16,
 )
+from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    dequantize_nvfp4_moe_weights,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     FP4_DTYPE,
     QuantKey,
@@ -99,7 +101,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     requantize_with_max_scale,
 )
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
 from vllm.model_executor.parameter import (
     BlockQuantScaleParameter,
     ChannelQuantScaleParameter,
@@ -111,6 +116,7 @@ from vllm.model_executor.utils import (
     replace_parameter,
     set_weight_attrs,
 )
+from vllm.utils.b12x import B12X_BLOCK_CODECS
 from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
@@ -885,6 +891,22 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         """FP4 variants use 'weight_scale_2' pattern for per-tensor weight scales."""
         return True
 
+    def dequantize_weight(
+        self, layer: torch.nn.Module
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Materialize serialized ModelOpt NVFP4 expert weights."""
+        return dequantize_nvfp4_moe_weights(
+            layer.w13_weight,
+            layer.w13_weight_scale,
+            layer.w13_weight_scale_2,
+            layer.w2_weight,
+            layer.w2_weight_scale,
+            layer.w2_weight_scale_2,
+            layer.params_dtype,
+            group_size=self.quant_config.group_size,
+            invert_global_scales=False,
+        )
+
     def create_weights(
         self,
         layer: RoutedExperts,
@@ -1559,6 +1581,19 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         super().__init__(exclude_modules)
         self.kv_cache_quant_method = kv_cache_quant_method
         self.quantized_layers = quantized_layers
+        for prefix, recipe in quantized_layers.items():
+            codec = recipe.get("quant_algo", "").lower()
+            if codec in B12X_BLOCK_CODECS and any(
+                recipe.get(key) != value
+                for key, value in {
+                    "group_size": B12X_BLOCK_CODECS[codec][0],
+                    "block_payload_bytes": B12X_BLOCK_CODECS[codec][1],
+                    "packing": "ggml",
+                }.items()
+            ):
+                raise ValueError(
+                    f"unsupported {codec.upper()} block contract for {prefix}: {recipe}"
+                )
         self.fp8_config = fp8_config
         self.nvfp4_config = nvfp4_config
         self.w4a16_nvfp4_config = w4a16_nvfp4_config
@@ -1811,6 +1846,22 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
 
         quant_algo = self._resolve_quant_algo(prefix)
 
+        if quant_algo is not None and quant_algo.lower() in B12X_BLOCK_CODECS:
+            from .modelopt_block_quant import (
+                ModelOptBlockQuantLinearMethod,
+                ModelOptBlockQuantMoEMethod,
+            )
+
+            if isinstance(layer, RoutedExperts):
+                return ModelOptBlockQuantMoEMethod(
+                    layer.moe_config, codec=quant_algo.lower()
+                )
+            if isinstance(layer, (LinearBase, VocabParallelEmbedding)):
+                return ModelOptBlockQuantLinearMethod(codec=quant_algo.lower())
+            raise ValueError(
+                f"{quant_algo} requires a linear, embedding or routed experts"
+            )
+
         if isinstance(layer, (LinearBase, ParallelLMHead)):
             # Per-prefix algo -> its sub-config, then the generic linear method.
             # resolve() reads group_size off whichever sub-config it is handed.
@@ -2027,7 +2078,7 @@ class KNvfp4Static(QuantKeyScheme):
             )
         # Raw max, no reciprocation — Marlin/cutlass want ModelOpt's amax/2688.
         weight_global_scale = layer.weight_scale_2.max().to(torch.float32)
-        layer.weight_global_scale = Parameter(weight_global_scale, requires_grad=False)
+        replace_parameter(layer, "weight_global_scale", weight_global_scale)
         del layer.weight_scale_2
 
 
@@ -2060,10 +2111,11 @@ class KNvfp4Dynamic(QuantKeyScheme):
                 "global NVFP4 scale for fused weights."
             )
         input_global_scale = layer.input_scale.max().to(torch.float32)
-        layer.input_global_scale = Parameter(input_global_scale, requires_grad=False)
-        layer.input_global_scale_inv = Parameter(
+        replace_parameter(layer, "input_global_scale", input_global_scale)
+        replace_parameter(
+            layer,
+            "input_global_scale_inv",
             (1.0 / layer.input_global_scale).to(torch.float32),
-            requires_grad=False,
         )
         del layer.input_scale
 
@@ -2119,12 +2171,10 @@ class KFp8StaticTensor(QuantKeyScheme):
                 )
             # Transposed here rather than in the kernel: ModelOpt maps each
             # fp8 key to exactly one kernel, so the layout is key-determined.
-            layer.weight = Parameter(weight.t(), requires_grad=False)
-            # The plain Parameter drops ModelWeightParameter's dim attributes;
-            # restore them for the transposed layout, which Humming reads.
-            layer.weight.input_dim = 0
-            layer.weight.output_dim = 1
-            layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
+            replace_parameter(layer, "weight", weight.t())
+            # The param keeps its checkpoint dims; Humming reads the (K, N) layout.
+            layer.processed_weight_dims = (0, 1)
+            replace_parameter(layer, "weight_scale", max_w_scale)
         elif role is ACT:
             if torch.unique(layer.input_scale).numel() != 1:
                 logger.warning_once(
@@ -2133,7 +2183,7 @@ class KFp8StaticTensor(QuantKeyScheme):
                     "them to the max will likely reduce accuracy. Consider a "
                     "checkpoint with the same input scale for fused weights."
                 )
-            layer.input_scale = Parameter(layer.input_scale.max(), requires_grad=False)
+            replace_parameter(layer, "input_scale", layer.input_scale.max())
         else:
             self.reject(role)
 
@@ -2174,8 +2224,10 @@ class KFp8StaticChannel(QuantKeyScheme):
         weight, weight_scale, _ = process_fp8_weight_channel_strategy(
             layer.weight, layer.weight_scale.data
         )
-        layer.weight = Parameter(weight, requires_grad=False)
-        layer.weight_scale = Parameter(weight_scale, requires_grad=False)
+        replace_parameter(layer, "weight", weight)
+        # The param keeps its checkpoint dims; Humming reads the (K, N) layout.
+        layer.processed_weight_dims = (0, 1)
+        replace_parameter(layer, "weight_scale", weight_scale)
 
 
 class KFp8Block128(QuantKeyScheme):
@@ -2224,15 +2276,14 @@ class KFp8Block128(QuantKeyScheme):
     def process(self, layer, role) -> None:
         if role is not WEIGHT:
             self.reject(role)
-        layer.weight = Parameter(layer.weight.data, requires_grad=False)
-        s = layer.weight_scale
+        s = layer.weight_scale.data
         if s.dim() == 4:
             s = s.squeeze(1).squeeze(-1)  # [ob,1,ib,1] -> [ob,ib]
         elif s.dim() != 2:
             raise ValueError(
                 f"Unexpected FP8_PB_WO weight_scale shape {tuple(s.shape)}"
             )
-        layer.weight_scale = Parameter(s.contiguous(), requires_grad=False)
+        replace_parameter(layer, "weight_scale", s.contiguous())
 
 
 class KMxfp8Static(QuantKeyScheme):
@@ -2343,9 +2394,8 @@ def maybe_fuse_global_scales(layer) -> None:
     W4A4 has both -> computed; W4A16 has no input_global_scale -> skipped.
     """
     if hasattr(layer, "weight_global_scale") and hasattr(layer, "input_global_scale"):
-        layer.alpha = Parameter(
-            layer.input_global_scale * layer.weight_global_scale,
-            requires_grad=False,
+        replace_parameter(
+            layer, "alpha", layer.input_global_scale * layer.weight_global_scale
         )
 
 
@@ -2443,7 +2493,7 @@ class _Fp8PbWoPartialBlock(FormatScheme):
         layer._pbwo_logical_out = out
         padded = w.data.new_zeros(out + pad, w.shape[1])
         padded[:out].copy_(w.data)
-        layer.weight = Parameter(padded, requires_grad=False)
+        replace_parameter(layer, "weight", padded)
 
     def apply(self, layer, x, bias, kernel_apply):
         logical = getattr(layer, "_pbwo_logical_out", None)
@@ -2598,17 +2648,20 @@ class ModelOptLinearMethod(LinearMethodBase):
                     "NVFP4 weights."
                 )
             assert self.ctx.group_size is not None
+            # Copies: the kernel may write its layout into the params in place.
             layer.register_buffer(
-                "_nvfp4_weight_for_gather", layer.weight.detach(), persistent=False
+                "_nvfp4_weight_for_gather",
+                layer.weight.detach().clone(),
+                persistent=False,
             )
             layer.register_buffer(
                 "_nvfp4_weight_scale_for_gather",
-                layer.weight_scale.detach(),
+                layer.weight_scale.detach().clone(),
                 persistent=False,
             )
             layer.register_buffer(
                 "_nvfp4_weight_global_scale_for_gather",
-                layer.weight_global_scale.detach(),
+                layer.weight_global_scale.detach().clone(),
                 persistent=False,
             )
             layer._nvfp4_group_size_for_gather = self.ctx.group_size

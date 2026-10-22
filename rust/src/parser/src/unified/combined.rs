@@ -6,7 +6,7 @@
 use vllm_tokenizer::{DecodedText, DynTokenizer};
 
 use super::{Result, UnifiedParser, UnifiedParserError, UnifiedParserOutput};
-use crate::output_grammar::{self, BuiltOutputGrammar, OutputGrammarContext};
+use crate::output_grammar::{self, BuiltOutputGrammar, OutputGrammarContext, ToolStrictLevel};
 use crate::reasoning::ReasoningParser;
 use crate::tool::{Tool, ToolParser, ToolParserOutput};
 
@@ -81,6 +81,12 @@ impl UnifiedParser for CombinedParser {
     fn preserve_special_tokens(&self) -> bool {
         self.reasoning.as_ref().is_some_and(|parser| parser.preserve_special_tokens())
             || self.tool.as_ref().is_some_and(|parser| parser.preserve_special_tokens())
+    }
+
+    fn default_tool_strict_level(&self) -> ToolStrictLevel {
+        self.tool.as_ref().map_or(ToolStrictLevel::Auto, |parser| {
+            parser.default_tool_strict_level()
+        })
     }
 
     fn build_output_grammar(
@@ -186,7 +192,7 @@ mod tests {
     use crate::tool::{
         DeepSeekV3ToolParser, DeepSeekV4ToolParser, DeepSeekV31ToolParser, DeepSeekV32ToolParser,
         Glm47MoeToolParser, KimiK2ToolParser, MinimaxM2ToolParser, Qwen3CoderToolParser,
-        Qwen3XmlToolParser, Tool, ToolParser,
+        Qwen3JsonToolParser, Tool, ToolParser,
     };
     use crate::unified::{UnifiedParser, UnifiedParserEvent, UnifiedParserOutput};
 
@@ -463,7 +469,7 @@ mod tests {
 
     #[test]
     fn combined_parser_emits_tool_calls_from_visible_content() {
-        let tool = Qwen3XmlToolParser::create(&test_tools()).unwrap();
+        let tool = Qwen3JsonToolParser::create(&test_tools()).unwrap();
         let mut parser = CombinedParser::new(None, Some(tool));
 
         let output = collect(
@@ -515,7 +521,7 @@ mod tests {
 
     #[test]
     fn split_parser_wrappers_match_builder_full_formats() {
-        assert_builder_parity::<Qwen3ReasoningParser, Qwen3XmlToolParser>("qwen3");
+        assert_builder_parity::<Qwen3ReasoningParser, Qwen3JsonToolParser>("qwen3");
         assert_builder_parity::<Qwen3ReasoningParser, Qwen3CoderToolParser>("qwen3.5");
         assert_builder_parity::<DeepSeekR1ReasoningParser, DeepSeekV3ToolParser>("deepseek-r1");
         assert_builder_parity::<DeepSeekV3ReasoningParser, DeepSeekV31ToolParser>("deepseek-v3.1");
@@ -538,7 +544,7 @@ mod tests {
             answer: None,
         };
         let reasoning = Qwen3ReasoningParser::create(Arc::new(tokenizer())).unwrap();
-        let tool = Qwen3XmlToolParser::create(&tools).unwrap();
+        let tool = Qwen3JsonToolParser::create(&tools).unwrap();
         let visible = tool.build_visible_format(&ctx).unwrap().unwrap();
         let mut parser = CombinedParser::new(Some(reasoning), Some(tool));
         parser.initialize(&[]).unwrap();
@@ -640,7 +646,7 @@ mod tests {
         };
         let tokenizer = Arc::new(tokenizer());
         let reasoning = Qwen3ReasoningParser::create(tokenizer.clone()).unwrap();
-        let tool = Qwen3XmlToolParser::create(&tools).unwrap();
+        let tool = Qwen3JsonToolParser::create(&tools).unwrap();
         let mut parser = CombinedParser::new(Some(reasoning), Some(tool));
         parser.initialize(&[]).unwrap();
         let outside = parser.build_output_grammar(&ctx).unwrap().unwrap().format;
@@ -682,7 +688,7 @@ mod tests {
 
     fn qwen3_parser(tools: &[Tool], with_tool: bool) -> CombinedParser {
         let reasoning = Qwen3ReasoningParser::create(Arc::new(tokenizer())).unwrap();
-        let tool = with_tool.then(|| Qwen3XmlToolParser::create(tools).unwrap());
+        let tool = with_tool.then(|| Qwen3JsonToolParser::create(tools).unwrap());
         let mut parser = CombinedParser::new(Some(reasoning), tool);
         parser.initialize(&[]).unwrap();
         parser
@@ -702,7 +708,7 @@ mod tests {
             ])
         };
         let required = ToolChoice::required();
-        let required_calls = Qwen3XmlToolParser::create(&tools)
+        let required_calls = Qwen3JsonToolParser::create(&tools)
             .unwrap()
             .build_visible_format(&grammar_ctx(&tools, &required, None))
             .unwrap()
@@ -748,7 +754,7 @@ mod tests {
         let ctx = grammar_ctx(&tools, &auto, Some(&answer));
         assert!(parser.build_output_grammar(&ctx).unwrap().is_none());
 
-        let parser = CombinedParser::new(None, Some(Qwen3XmlToolParser::create(&tools).unwrap()));
+        let parser = CombinedParser::new(None, Some(Qwen3JsonToolParser::create(&tools).unwrap()));
         let ctx = grammar_ctx(&tools, &none, Some(&answer));
         let alone = parser.build_output_grammar(&ctx).unwrap().unwrap();
         assert_eq!(alone, BuiltOutputGrammar::final_output_only(answer.clone()));

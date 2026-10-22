@@ -10,7 +10,7 @@ import torch.nn as nn
 
 from vllm.compilation.breakable_cudagraph import is_breakable_cudagraph_enabled
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.distributed.parallel_state import get_dp_group, get_pp_group
+from vllm.distributed.parallel_state import get_dp_group, get_pcp_group, get_pp_group
 from vllm.forward_context import BatchDescriptor, DPMetadata, create_forward_context
 from vllm.models.deepseek_v41.decoder_replay_layers import (
     DecoderReplayLayers,
@@ -41,7 +41,8 @@ from vllm.v1.worker.utils import AttentionGroup
 def _gather_lookback_kernel(
     lookback_ptr,
     idx_mapping_ptr,
-    num_computed_tokens_ptr,
+    query_start_loc_ptr,
+    positions_ptr,
     all_token_ids_ptr,
     all_token_ids_stride,
     num_reqs,
@@ -52,13 +53,16 @@ def _gather_lookback_kernel(
     batch_idx = tl.program_id(0)
     in_batch = batch_idx < num_reqs
     req_state_idx = tl.load(idx_mapping_ptr + batch_idx, mask=in_batch, other=0)
-    num_computed = tl.load(num_computed_tokens_ptr + req_state_idx)
+    begin = tl.load(query_start_loc_ptr + batch_idx, mask=in_batch, other=0)
+    end = tl.load(query_start_loc_ptr + batch_idx + 1, mask=in_batch, other=0)
+    in_batch = in_batch & (end > begin)
+    num_computed = tl.load(positions_ptr + begin, mask=in_batch, other=0)
 
     offs = tl.arange(0, BLOCK_DEPTH)
     pos = num_computed - 1 - offs
     valid = in_batch & (offs < DEPTH) & (pos >= 0)
     ids = tl.load(
-        all_token_ids_ptr + req_state_idx * all_token_ids_stride + pos,
+        all_token_ids_ptr + req_state_idx.to(tl.int64) * all_token_ids_stride + pos,
         mask=valid,
         other=-1,
     )
@@ -196,20 +200,22 @@ class DeepseekV41ModelState(DefaultModelState):
         device: torch.device,
     ):
         super().__init__(vllm_config, model, encoder_cache, device)
+        self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
+        max_local_reqs = self.max_num_reqs * (2 if self.pcp_size > 1 else 1)
         depth = model.token_lookback_depth
         self.lookback_token_ids: torch.Tensor | None = None
         if depth > 0:
             # Persistent so a captured graph can read it on replay.
             self.lookback_token_ids = torch.full(
-                (self.max_num_reqs, depth), -1, dtype=torch.int32, device=device
+                (max_local_reqs, depth), -1, dtype=torch.int32, device=device
             )
 
         # Per request state index; batches gather from it (see prepare_attn).
         self._replay_start_np = np.zeros(self.max_num_reqs, dtype=np.int32)
         self._replay_start = torch.zeros(
-            self.max_num_reqs, dtype=torch.int32, device=device
+            max_local_reqs, dtype=torch.int32, device=device
         )
-        self._replay_start_staging = UvaBufferPool(self.max_num_reqs, torch.int32)
+        self._replay_start_staging = UvaBufferPool(max_local_reqs, torch.int32)
         # The replay window and the indices of the prefix-cacheable groups, from
         # the KV cache config on first use; None until then.
         self._replay: tuple[int, torch.Tensor] | None = None
@@ -272,8 +278,12 @@ class DeepseekV41ModelState(DefaultModelState):
         if self.decoder_replay_layers is not None:
             params = new_req_data.sampling_params
             self._keeps_rows_np[req_index] = (
-                params is not None and params.prompt_logprobs is not None
-            )
+                params is not None
+                and (
+                    params.prompt_logprobs is not None
+                    or params.prompt_logprob_token_ids is not None
+                )
+            ) or self.vllm_config.aux_output_config.enable_return_routed_experts
 
     def prepare_inputs(
         self, input_batch: InputBatch, req_states: RequestState
@@ -287,7 +297,8 @@ class DeepseekV41ModelState(DefaultModelState):
         _gather_lookback_kernel[(window.shape[0],)](
             window,
             input_batch.idx_mapping,
-            req_states.num_computed_tokens.gpu,
+            input_batch.query_start_loc,
+            input_batch.positions,
             all_token_ids,
             all_token_ids.stride(0),
             input_batch.idx_mapping.shape[0],
@@ -337,7 +348,7 @@ class DeepseekV41ModelState(DefaultModelState):
             self._warm_up_replay_kernels(input_batch, slot_mappings)
         window, cacheable_groups = self._replay
         replay_start: torch.Tensor | None = None
-        if window:
+        if window or self.decoder_replay_layers is not None:
             num_reqs = input_batch.num_reqs
             # Decode rows sit above the hit, so only prefills carry a replay
             # start; dummy batches (captures, profiling) carry none.
@@ -346,15 +357,18 @@ class DeepseekV41ModelState(DefaultModelState):
                 self._replay_start_np[input_batch.idx_mapping_np[:num_reqs]],
                 0,
             ).astype(np.int32)
-            replay_start = self._replay_start_staging.copy_to_gpu(
-                replay_start_np, out=self._replay_start[:num_reqs]
-            )
-            if replay_start_np.any():
+            replay_start = self._upload_replay_start(replay_start_np, num_reqs)
+            local_slot_mappings = slot_mappings
+            if window and self.pcp_size > 1:
+                local_slot_mappings = slot_mappings.chunk(self.pcp_size, dim=1)[
+                    get_pcp_group().rank_in_group
+                ]
+            if window and replay_start_np.any():
                 # The replayed tokens rebuild window KV only: their slots in the
                 # prefix-cacheable groups are padded so the cached KV stays as is.
                 _pad_replayed_slots_kernel[(num_reqs,)](
-                    slot_mappings,
-                    slot_mappings.stride(0),
+                    local_slot_mappings,
+                    local_slot_mappings.stride(0),
                     cacheable_groups,
                     input_batch.query_start_loc,
                     input_batch.positions,
@@ -364,9 +378,15 @@ class DeepseekV41ModelState(DefaultModelState):
                     NUM_GROUPS=cacheable_groups.numel(),
                     BLOCK=1024,
                 )
+            if window and self.pcp_size > 1:
+                # Peers may have no replay rows. All ranks publish their masked
+                # cacheable slots in the same order as the gathered KV payload.
+                slot_mappings[cacheable_groups] = get_pcp_group().all_gather(
+                    local_slot_mappings[cacheable_groups], dim=1
+                )
             assert model_specific_attn_metadata is None
             model_specific_attn_metadata = ReplayAttnMetadata(replay_start)
-        attn_metadata = super().prepare_attn(
+        attn_metadata = self._build_attn_metadata(
             input_batch,
             cudagraph_mode,
             block_tables,
@@ -390,6 +410,16 @@ class DeepseekV41ModelState(DefaultModelState):
             )
         return attn_metadata
 
+    def _upload_replay_start(self, values: np.ndarray, num_reqs: int) -> torch.Tensor:
+        """Copy the batch's replay starts to their device buffer."""
+        return self._replay_start_staging.copy_to_gpu(
+            values, out=self._replay_start[:num_reqs]
+        )
+
+    def _build_attn_metadata(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        """The step's attention-metadata build (``DefaultModelState.prepare_attn``)."""
+        return super().prepare_attn(*args, **kwargs)
+
     def _warm_up_replay_kernels(
         self, input_batch: InputBatch, slot_mappings: torch.Tensor
     ) -> None:
@@ -397,21 +427,21 @@ class DeepseekV41ModelState(DefaultModelState):
         dummy batches never replay or trim, so they would not launch them."""
         assert self._replay is not None
         window, cacheable_groups = self._replay
-        if not window:
-            return
-        _pad_replayed_slots_kernel.warmup(
-            slot_mappings,
-            slot_mappings.stride(0),
-            cacheable_groups,
-            input_batch.query_start_loc,
-            input_batch.positions,
-            self._replay_start,
-            window,
-            PAD_SLOT_ID,
-            NUM_GROUPS=cacheable_groups.numel(),
-            BLOCK=1024,
-            grid=(1,),
-        )
+        # Pad warmup is prefix-cache SWA. A zero window must not skip the gather warmup.
+        if window:
+            _pad_replayed_slots_kernel.warmup(
+                slot_mappings,
+                slot_mappings.stride(0),
+                cacheable_groups,
+                input_batch.query_start_loc,
+                input_batch.positions,
+                self._replay_start,
+                window,
+                PAD_SLOT_ID,
+                NUM_GROUPS=cacheable_groups.numel(),
+                BLOCK=1024,
+                grid=(1,),
+            )
         if self.decoder_replay_layers is None:
             return
         assert self._kept_slot_mappings is not None

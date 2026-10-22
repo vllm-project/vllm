@@ -12,7 +12,6 @@ from vllm.utils.torch_utils import (
     current_stream,
     get_kv_cache_torch_dtype,
     is_lossless_cast,
-    is_quantized_kv_cache,
     set_default_torch_dtype,
     set_random_seed,
     set_torch_threads_for_runtime,
@@ -22,7 +21,11 @@ from vllm.utils.torch_utils import (
 
 def test_nvfp4_4over6_cache_dtype() -> None:
     from vllm.config.cache import CacheConfig
-    from vllm.v1.kv_cache_interface import KVQuantMode, get_kv_quant_mode
+    from vllm.v1.kv_cache_interface import (
+        KVQuantMode,
+        get_kv_quant_mode,
+        is_quantized_kv_cache,
+    )
 
     cache_config = CacheConfig(cache_dtype="nvfp4_4over6")
 
