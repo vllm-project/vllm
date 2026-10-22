@@ -143,10 +143,20 @@ class TokenClassificationHeadWithLoRA(BaseClassificationHeadWithLoRA):
         ]
 
     def forward(self, input_: torch.Tensor) -> torch.Tensor:
-        base_result = super().forward(input_)
-        base_result = base_result[0] if isinstance(base_result, tuple) else base_result
-        output = base_result.new_zeros(base_result.size(0), self.padded_num_labels)
-        output[:, : self.output_size].copy_(base_result)
+        if self._output_lora_indices and all(
+            index >= 0 and self.full_module_num_labels[index] > 0
+            for index in self._output_lora_indices
+        ):
+            output = self.full_bias_stacked.new_zeros(
+                input_.size(0), self.padded_num_labels
+            )
+        else:
+            base_result = super().forward(input_)
+            base_result = (
+                base_result[0] if isinstance(base_result, tuple) else base_result
+            )
+            output = base_result.new_zeros(base_result.size(0), self.padded_num_labels)
+            output[:, : self.output_size].copy_(base_result)
         adapter_output = torch.zeros(
             (1, output.size(0), self.padded_num_labels),
             dtype=torch.float32,
