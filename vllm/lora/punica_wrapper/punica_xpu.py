@@ -27,6 +27,9 @@ if HAS_TRITON:
 
 from .punica_base import PunicaWrapperBase
 
+# Matches kMaxSlices in vllm-xpu-kernels' csrc/xpu/lora/lora_ops.cpp.
+_LORA_LINEAR_MAX_SLICES = 8
+
 
 @final
 class PunicaWrapperXPU(PunicaWrapperBase):
@@ -296,6 +299,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
             )
             if (
                 0 < rank < r
+                and len(output_slices) <= _LORA_LINEAR_MAX_SLICES
                 and x.is_contiguous()
                 and y.is_contiguous()
                 and all(w.is_contiguous() for w in (*lora_a_stacked, *lora_b_stacked))
