@@ -117,6 +117,7 @@ class KimiK3ForConditionalGeneration(
 
             self.mm_projector = KimiK25MultiModalProjector(
                 config=config.vision_config,
+                out_hidden_size=config.text_config.hidden_size,
                 use_data_parallel=self.use_data_parallel,
                 quant_config=self._maybe_ignore_quant_config(quant_config),
                 prefix=maybe_prefix(prefix, "mm_projector"),
@@ -218,6 +219,9 @@ class KimiK3ForConditionalGeneration(
 
     def compute_logits(self, hidden_states: torch.Tensor, **kwargs) -> torch.Tensor:
         return self.language_model.compute_logits(hidden_states)
+
+    def get_model_state_cls(self) -> type:
+        return self.language_model.get_model_state_cls()
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
         return self.language_model.mamba_cache.copy_inputs_before_cuda_graphs(

@@ -42,6 +42,7 @@ import torch.distributed
 import torch.distributed._functional_collectives as funcol
 import torch.distributed._symmetric_memory
 from torch.distributed import Backend, ProcessGroup, Store
+from torch.distributed.constants import default_pg_timeout
 
 import vllm.envs as envs
 from vllm.distributed.device_communicators.base_device_communicator import (
@@ -49,6 +50,8 @@ from vllm.distributed.device_communicators.base_device_communicator import (
 )
 from vllm.distributed.utils import (
     StatelessProcessGroup,
+    cpu_all_reduce_,
+    create_tcp_store,
     get_cached_tcp_store_client,
 )
 from vllm.logger import init_logger
@@ -1374,6 +1377,10 @@ class GroupCoordinator:
         """
         torch.distributed.barrier(group=self.cpu_group)
 
+    def cpu_all_reduce_(self, tensor: torch.Tensor) -> torch.Tensor:
+        """In-place SUM all-reduce of a small CPU tensor over `cpu_group`."""
+        return cpu_all_reduce_(tensor, self.cpu_group)
+
     def send(self, tensor: torch.Tensor, dst: int | None = None) -> None:
         """Sends a tensor to the destination rank in a blocking way."""
         """NOTE: `dst` is the local rank of the destination rank."""
@@ -1678,6 +1685,11 @@ def get_pcp_group() -> GroupCoordinator:
     return _PCP
 
 
+def _aiter_registers_graph_buffers(group: GroupCoordinator) -> bool:
+    comm = getattr(group.device_communicator, "aiter_ar_comm", None)
+    return comm is not None and comm.registers_graph_buffers
+
+
 @contextmanager
 def graph_capture(device: torch.device):
     """`graph_capture` is a context manager which should surround the code that
@@ -1692,11 +1704,23 @@ def graph_capture(device: torch.device):
     in order to explicitly distinguish the kernels to capture
     from other kernels possibly launched on background in the default stream.
     """
+    from vllm.device_allocator.alloc_conf import non_expandable_allocations
+    from vllm.platforms import current_platform
+
+    tp, pp, dp = get_tp_group(), get_pp_group(), get_dp_group()
     context = GraphCaptureContext(torch.cuda.Stream(device=device))
+    # Let AITER all-reduce register captured buffers instead of copying them.
+    # Not with DP AITER collectives: they reduce workspaces allocated earlier.
+    non_expandable = (
+        current_platform.is_rocm()
+        and _aiter_registers_graph_buffers(tp)
+        and not _aiter_registers_graph_buffers(dp)
+    )
     with (
-        get_tp_group().graph_capture(context),
-        get_pp_group().graph_capture(context),
-        get_dp_group().graph_capture(context),
+        non_expandable_allocations() if non_expandable else nullcontext(),
+        tp.graph_capture(context),
+        pp.graph_capture(context),
+        dp.graph_capture(context),
     ):
         yield context
 
@@ -1829,6 +1853,7 @@ def init_distributed_environment(
 
     config = get_current_vllm_config_or_none()
     enable_elastic_ep = config is not None and config.parallel_config.enable_elastic_ep
+    world_pg_store: Store | None = None
     if (
         config is not None
         and config.parallel_config.distributed_executor_backend != "external_launcher"
@@ -1852,7 +1877,46 @@ def init_distributed_environment(
             distributed_init_method = get_distributed_init_method(ip, port)
         else:
             ip = parallel_config.data_parallel_master_ip
-            port = parallel_config.get_next_dp_init_port()
+            if (
+                parallel_config._coord_store_port
+                and not torch.distributed.is_initialized()
+            ):
+                # Group rank 0 lets the world-group TCPStore bind port 0
+                # and publishes the kernel-assigned port via the
+                # coordination store. A one-shot client of our own: the
+                # cached one is inherited across fork and shared with
+                # sibling workers.
+                coord_store = create_tcp_store(
+                    ip,
+                    parallel_config._coord_store_port,
+                    is_master=False,
+                    wait_for_workers=False,
+                )
+                if rank == 0:
+                    # Workers can only connect once the port is published.
+                    world_pg_store = create_tcp_store(
+                        ip,
+                        0,
+                        world_size=world_size,
+                        is_master=True,
+                        wait_for_workers=False,
+                        timeout=timeout or default_pg_timeout,
+                        multi_tenant=True,
+                    )
+                    port = world_pg_store.port
+                    coord_store.set("world_pg_port", str(port).encode())
+                else:
+                    port = int(coord_store.get("world_pg_port").decode())
+                    world_pg_store = create_tcp_store(
+                        ip,
+                        port,
+                        world_size=world_size,
+                        is_master=False,
+                        timeout=timeout or default_pg_timeout,
+                        multi_tenant=True,
+                    )
+            else:
+                port = parallel_config.get_next_dp_init_port()
             distributed_init_method = get_distributed_init_method(ip, port)
             logger.debug(
                 "Adjusting world_size=%d rank=%d distributed_init_method=%s for DP",
@@ -1882,8 +1946,8 @@ def init_distributed_environment(
                 "Fallback Gloo backend is not available."
             )
             backend = "gloo"
-        store = None
-        if distributed_init_method.startswith("file://"):
+        store = world_pg_store
+        if store is None and distributed_init_method.startswith("file://"):
             store = torch.distributed.FileStore(
                 distributed_init_method.removeprefix("file://"), world_size
             )
@@ -2400,6 +2464,11 @@ def get_tensor_model_parallel_world_size() -> int:
 def get_tensor_model_parallel_rank() -> int:
     """Return my rank for the tensor model parallel group."""
     return get_tp_group().rank_in_group
+
+
+def get_pipeline_model_parallel_rank() -> int:
+    """Return my rank for the pipeline model parallel group."""
+    return get_pp_group().rank_in_group
 
 
 def get_node_count() -> int:

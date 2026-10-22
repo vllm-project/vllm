@@ -23,10 +23,10 @@ from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
-from vllm.v1.worker.gpu.spec_decode.autoregressive import (
+from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import (
     cudagraph_utils as spec_cudagraph_utils,
 )
-from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
+from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.cudagraph_utils import (
     SpeculatorCudaGraphManager,
 )
 
@@ -132,6 +132,7 @@ def test_piecewise_capture_uses_pcp_dummy_slot_mappings():
     pcp_block_tables = SimpleNamespace(
         num_kv_cache_groups=1,
         input_block_tables=(torch.zeros(num_reqs * 2, 1, dtype=torch.int32),),
+        cp_interleave=1,
     )
     pcp_manager = PCPManager(
         pcp_world_size=pcp_world_size,
@@ -172,6 +173,52 @@ def test_piecewise_capture_uses_pcp_dummy_slot_mappings():
     slot_mappings = model_state.prepare_attn.call_args.args[3]
     assert slot_mappings.shape == (1, num_tokens * pcp_world_size)
     block_tables.get_dummy_slot_mappings.assert_not_called()
+
+
+@pytest.mark.parametrize("full_cudagraph,expected_context_len", [(True, 2), (False, 0)])
+def test_dcp_full_capture_has_kv_context(
+    monkeypatch, full_cudagraph, expected_context_len
+):
+    """DCP skips context attention on the host when no request has context, so a
+    FULL graph captured without context would ignore the KV cache on replay."""
+    monkeypatch.setattr(
+        gpu_cudagraph_utils, "prepare_dcp_local_seq_lens", lambda *a, **kw: None
+    )
+    num_tokens = num_reqs = 8
+    buffers = InputBuffers(num_reqs, num_tokens, torch.device("cpu"))
+    block_tables = MagicMock()
+    block_tables.cp_size = 2
+    block_tables.cp_interleave = 1
+    block_tables.block_sizes = [16]
+    block_tables.get_dummy_block_tables.return_value = (
+        torch.zeros(num_reqs, 4, dtype=torch.int32),
+    )
+    block_tables.get_dummy_slot_mappings.return_value = torch.empty(
+        1, num_tokens, dtype=torch.int64
+    )
+    model_state = MagicMock()
+    model_state.max_model_len = 1024
+    kv_cache_config = KVCacheConfig(
+        num_blocks=8, kv_cache_tensors=[], kv_cache_groups=[]
+    )
+
+    gpu_cudagraph_utils.prepare_inputs_to_capture(
+        num_reqs,
+        num_tokens,
+        model_state,
+        buffers,
+        block_tables,
+        [],
+        kv_cache_config,
+        full_cudagraph=full_cudagraph,
+        max_query_len=1,
+    )
+
+    batch = model_state.prepare_attn.call_args.args[0]
+    context_lens = batch.seq_lens_cpu_upper_bound[:num_reqs] - torch.from_numpy(
+        batch.num_scheduled_tokens[:num_reqs]
+    )
+    assert (context_lens == expected_context_len).all()
 
 
 @pytest.mark.parametrize(

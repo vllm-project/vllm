@@ -32,6 +32,7 @@ from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import SiluAndMul, get_act_and_mul_fn
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
+from vllm.model_executor.layers.fusion.fused_act_quant import maybe_fused_act_quant
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -122,7 +123,9 @@ def position_ids_in_meshgrid(
     for patch in patch_embeds_list:
         height, width = patch.shape[-2:]
         h_ids, w_ids = torch.meshgrid(
-            torch.arange(height), torch.arange(width), indexing="ij"
+            torch.arange(height, device=patch.device),
+            torch.arange(width, device=patch.device),
+            indexing="ij",
         )
         positions.append(torch.stack([h_ids.flatten(), w_ids.flatten()], dim=-1))
     return torch.cat(positions, dim=0)
@@ -758,7 +761,7 @@ class FeedForward(nn.Module):
 
     def forward(self, x):
         x, _ = self.gate_up_proj(x)
-        x = self.act_fn(x)
+        x = maybe_fused_act_quant(self.act_fn, x, self.down_proj)
         x, _ = self.down_proj(x)
         return x
 
@@ -935,8 +938,8 @@ def position_meshgrid(
         [
             torch.stack(
                 torch.meshgrid(
-                    torch.arange(p.shape[-2]),
-                    torch.arange(p.shape[-1]),
+                    torch.arange(p.shape[-2], device=p.device),
+                    torch.arange(p.shape[-1], device=p.device),
                     indexing="ij",
                 ),
                 dim=-1,
@@ -1029,7 +1032,7 @@ class VisionTransformer(nn.Module):
         patch_embeds = self.ln_pre(patch_embeds)
 
         # positional embeddings
-        positions = position_meshgrid(patch_embeds_list).to(self.device)
+        positions = position_meshgrid(patch_embeds_list)
         freqs_cis = self.freqs_cis[positions[:, 0], positions[:, 1]]
 
         attention = self.transformer.layers[0].attention.attn
@@ -1259,7 +1262,7 @@ class PixtralHFMLP(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate_up, _ = self.gate_up_proj(x)
-        x = self.act_and_mul(gate_up)
+        x = maybe_fused_act_quant(self.act_and_mul, gate_up, self.down_proj)
         x, _ = self.down_proj(x)
         return x
 

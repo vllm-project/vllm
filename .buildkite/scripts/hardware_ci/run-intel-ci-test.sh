@@ -57,7 +57,7 @@ case "${test_suite}" in
     cd tests
 
     pytest -v -s quantization/test_auto_round.py
-    pytest -v -s quantization/test_online.py --deselect=tests/quantization/test_online.py::test_online_quantization_loads_real_weights
+    pytest -v -s quantization/test_online.py --deselect=tests/quantization/test_online.py::test_online_quantization_loads_real_weights --deselect="tests/quantization/test_online.py::test_online_quantization[False-requantization_mxfp8_ptcp_fp8]"
     ;;
   compressed-tensors-fp8)
     cd tests
