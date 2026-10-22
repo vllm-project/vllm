@@ -55,13 +55,26 @@ logger = init_logger(__name__)
 
 def _more_kv_cache_memory_hint(vllm_config: VllmConfig) -> str:
     """How the user can make room for the KV cache, for error messages."""
+    mm_config = vllm_config.model_config.multimodal_config
+    mm_profiling_msg = ""
+    if (
+        mm_config is not None
+        and not mm_config.skip_mm_profiling
+        and not mm_config.language_model_only
+    ):
+        mm_profiling_msg = (
+            "Memory profiling reserved activation memory for the multimodal "
+            "encoder at the maximum input size; reduce it with size hints in "
+            "`limit_mm_per_prompt`, `mm_processor_kwargs` (e.g. `max_pixels`) "
+            "or `skip_mm_profiling`. "
+        )
     if vllm_config.cache_config.enable_extensible_kv_cache:
-        return (
+        return mm_profiling_msg + (
             "The extensible KV cache already takes all device memory left after "
             "the model and its activations; decrease `max_model_len` or "
             "`max_num_seqs`, or the model needs a device with more memory."
         )
-    return (
+    return mm_profiling_msg + (
         "Try increasing `gpu_memory_utilization` when initializing the engine "
         "(this flag also controls CPU memory reservation on the CPU backend, "
         "despite its name)."
