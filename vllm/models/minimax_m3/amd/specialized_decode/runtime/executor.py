@@ -11,6 +11,7 @@ import torch
 
 from vllm.distributed import get_tp_group
 from vllm.logger import init_logger
+from vllm.models.common.specialized_decode import tp_agree as _tp_agree
 from vllm.platforms import current_platform
 
 from ..mono.ffn import ERROR_BYTES, ERROR_WORDS, peer_bytes
@@ -36,9 +37,7 @@ class MonoHealth:
 
 
 def tp_agree(ok: bool) -> bool:
-    from vllm.models.deepseek_v41.amd.mono.common.peer_memory import tp_agree
-
-    return tp_agree(ok, get_tp_group().cpu_group)
+    return _tp_agree(ok, get_tp_group().cpu_group)
 
 
 class FfnExecutor:
