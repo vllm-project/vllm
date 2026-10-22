@@ -70,6 +70,9 @@ class KimiK3ForConditionalGeneration(
     """Kimi-K3 model with Kimi-K2.5 vision and KimiLinear text."""
 
     supports_encoder_cudagraph: ClassVar[Literal[True]] = True
+    # Graph replay gives no speedup above ~1k encoder tokens (compute bound) and
+    # larger graphs cost KV cache, so larger batches run the eager path.
+    _MAX_ENCODER_CUDAGRAPH_TOKEN_BUDGET: ClassVar[int] = 1040
     supports_encoder_tp_data = True
     supports_mm_device_do_normalize = True
 
@@ -172,6 +175,7 @@ class KimiK3ForConditionalGeneration(
         max_budget = min(
             vllm_config.scheduler_config.max_num_batched_tokens,
             self.model_config.max_model_len,
+            self._MAX_ENCODER_CUDAGRAPH_TOKEN_BUDGET,
         )
         return min_budget, max_budget
 
