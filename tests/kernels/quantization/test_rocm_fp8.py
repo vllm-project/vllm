@@ -357,7 +357,7 @@ def test_fp8_scaled_mm_determinism():
 
 
 # (N, K) of FP8 linear layers. torch._scaled_mm needs K % 16 == 0.
-UNALIGNED_K_CASES = [
+K_PADDING_CASES = [
     # Padded, K 1368 -> 1376: DeepSeek-Coder-V2-Lite down_proj at TP8 (10944 / 8).
     pytest.param((2048, 1368), id="N2048xK1368"),
     # Padded, K 264 -> 272: DiffusionGemma down_proj at TP8 (2112 / 8).
@@ -369,7 +369,7 @@ UNALIGNED_K_CASES = [
 
 @fp8_only
 @pytest.mark.usefixtures("default_vllm_config")
-@pytest.mark.parametrize("weight_shape", UNALIGNED_K_CASES)
+@pytest.mark.parametrize("weight_shape", K_PADDING_CASES)
 @pytest.mark.parametrize("num_tokens", [1, 32])
 @pytest.mark.parametrize(
     "kernel_type, activation_quant_key, weight_quant_key",
