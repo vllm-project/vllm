@@ -8,7 +8,7 @@ use vllm_parser::tool::test_utils::{split_by_chars, test_tools};
 use vllm_parser::tool::{DeepSeekV32ToolParser, Tool, ToolParser};
 
 mod utils;
-use utils::feed_parser;
+use utils::{feed_parser, test_tokenizer};
 
 const CHUNK_CHARS: usize = 7;
 const LONG_NORMAL_TEXT_REPEATS: usize = 2048;
@@ -40,7 +40,8 @@ fn long_normal_text_fixture() -> String {
 }
 
 fn parser(tools: &[Tool]) -> Box<dyn ToolParser> {
-    DeepSeekV32ToolParser::create(tools).expect("DeepSeek V3.2 parser should initialize")
+    DeepSeekV32ToolParser::create(tools, test_tokenizer())
+        .expect("DeepSeek V3.2 parser should initialize")
 }
 
 fn run_stream_group(
