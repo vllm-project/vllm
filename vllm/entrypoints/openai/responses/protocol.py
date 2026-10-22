@@ -296,7 +296,7 @@ class ResponsesRequest(OpenAIBaseModel):
     min_p: float | None = None
     truncation: Literal["auto", "disabled"] | None = "disabled"
     user: str | None = None
-    skip_special_tokens: bool = True
+    skip_special_tokens: bool | None = None
     include_stop_str_in_output: bool = False
     presence_penalty: float | None = Field(
         default=None,
@@ -601,6 +601,11 @@ class ResponsesRequest(OpenAIBaseModel):
         if (frequency_penalty := self.frequency_penalty) is None:
             frequency_penalty = default_sampling_params.get("frequency_penalty", 0.0)
 
+        if (skip_special_tokens := self.skip_special_tokens) is None:
+            skip_special_tokens = default_sampling_params.get(
+                "skip_special_tokens", True
+            )
+
         stop = self.stop if self.stop else []
         if isinstance(stop, str):
             stop = [stop]
@@ -633,7 +638,7 @@ class ResponsesRequest(OpenAIBaseModel):
             logit_bias=self.logit_bias,
             extra_args=extra_args,
             skip_clone=True,  # Created fresh per request, safe to skip clone
-            skip_special_tokens=self.skip_special_tokens,
+            skip_special_tokens=skip_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
         )
 
