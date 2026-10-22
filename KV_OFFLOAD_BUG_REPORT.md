@@ -31,15 +31,28 @@ None was rejected, but review changed two claims:
 - **B4:** it needs one request whose matching prefix is larger than the whole
   CPU staging tier. Severity lowered from high to medium.
 
+**Upstream status** (searched 2026-10-22; see [Upstream search record](#upstream-search-record)):
+
+- **B1** and **B3** already have open upstream fix PRs (#59099 and #59746). Do
+  not file them again. Review or test those PRs instead.
+- **B4** has the same root cause as open issue #62931 ("a secondary-tier hit
+  larger than the CPU tier loads nothing"). That issue's open fix PR #62932
+  caps a load at what the CPU tier can stage, and likely fixes B4 too. B4's
+  symptom differs (endless deferral rather than a zero hit), so add it to
+  #62931 as a comment instead of filing a new issue. Neither #62932 nor the
+  related #50014 was run against the B4 test.
+- **B2** and **B5** have no matching upstream issue or PR. Both are candidates
+  for a new issue. A B5 fix would conflict with open PR #61667.
+
 ## Overview
 
-| ID | Title | Component | Location | Reported | Reviewed | Found by |
-|----|-------|-----------|----------|----------|----------|----------|
-| B1 | Second connector reset with no step in between trips an assert | OffloadingConnector scheduler | `vllm/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py:2199` | high | **medium** | Opus |
-| B2 | P2P tier keeps `has_work()` True forever; pause/sleep/shutdown never complete | P2P secondary tier | `vllm/v1/kv_offload/tiering/p2p/manager.py:648` | high | **high** | Opus |
-| B3 | Heterogeneous block sizes misalign transfers after a prefix hit | NIXL worker | `vllm/distributed/kv_transfer/kv_connector/v1/nixl/base_worker.py:3601` | high | **high** | Codex |
-| B4 | Prefix lookup defers forever when the prefix exceeds CPU staging capacity | OffloadingConnector scheduler + tiering | `vllm/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py:779` | high | **medium** | Codex |
-| B5 | P2P `drain_jobs` skips parked stores; reset then asserts | P2P secondary tier | `vllm/v1/kv_offload/tiering/p2p/manager.py:670` | medium | **medium** | Codex |
+| ID | Title | Component | Location | Reported | Reviewed | Upstream | Found by |
+|----|-------|-----------|----------|----------|----------|----------|----------|
+| B1 | Second connector reset with no step in between trips an assert | OffloadingConnector scheduler | `vllm/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py:2199` | high | **medium** | Covered by #59099 (open) | Opus |
+| B2 | P2P tier keeps `has_work()` True forever; pause/sleep/shutdown never complete | P2P secondary tier | `vllm/v1/kv_offload/tiering/p2p/manager.py:648` | high | **high** | None found | Opus |
+| B3 | Heterogeneous block sizes misalign transfers after a prefix hit | NIXL worker | `vllm/distributed/kv_transfer/kv_connector/v1/nixl/base_worker.py:3601` | high | **high** | Covered by #59746 (open) | Codex |
+| B4 | Prefix lookup defers forever when the prefix exceeds CPU staging capacity | OffloadingConnector scheduler + tiering | `vllm/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py:779` | high | **medium** | Same root cause as #62931; likely fixed by #62932 (open, not verified) | Codex |
+| B5 | P2P `drain_jobs` skips parked stores; reset then asserts | P2P secondary tier | `vllm/v1/kv_offload/tiering/p2p/manager.py:670` | medium | **medium** | None found | Codex |
 
 Severity scale: *critical* means data loss, a security breach, or failure of
 the main purpose for most users. *High* means wrong behaviour on a main path.
@@ -125,11 +138,29 @@ The comment at `scheduler.py:2237` explains why the flush set is kept. It does
 not say a second reset must be refused. Open upstream PR #59099 treats this
 exact crash as a bug.
 
-### Related upstream work
+### Upstream status
 
-- vllm-project/vllm#59099 (open): *[Bugfix][KV Offload] Keep stepping until a
-  reset_cache flush is delivered, and make reset_cache re-entrant*. It covers
-  both halves of this bug.
+**Covered by an open PR. Do not file again.**
+
+- vllm-project/vllm#59099 (open, by sohom-cs, last updated 2026-09-30):
+  *[Bugfix][KV Offload] Keep stepping until a reset_cache flush is delivered,
+  and make reset_cache re-entrant*. Its description covers this bug, both
+  halves: the flush set that is never delivered, and the AssertionError on a
+  second reset. Its fix makes `has_pending_push_work()` return True while
+  `_current_batch_jobs_to_flush` is non-empty, and removes the re-entrancy
+  assert.
+
+Related, not fixes:
+
+- vllm-project/vllm#57810 (open): *[Core][KVConnector] Keep the offloaded KV
+  tier across pause/sleep*. It adds an opt-out
+  (`sleep(..., clear_connector_cache=False)`) that skips the connector reset
+  on pause and sleep. That would avoid one way of reaching B1, but the default
+  still resets.
+- vllm-project/vllm#45268 (open issue): *EngineDeadError after first L1
+  sleep/wake cycle with --kv-offloading-backend native*. Not B1. The issue
+  thread traces it to an unfenced memory unmap during sleep (fixed by #45490)
+  and a separate Mamba-align scheduler assert.
 
 ### Fix direction (untested)
 
@@ -221,6 +252,21 @@ P2P sets `tolerates_off_thread_polling = True`, so the tier-poll thread
 (`tiering/manager.py:308`, default interval 1 ms) already services peers
 between steps. The hang is a side effect nobody handled, not a designed
 behaviour.
+
+### Upstream status
+
+**No matching issue or PR found.** This is a candidate for a new issue.
+
+Context:
+
+- vllm-project/vllm#58168 (merged): *[KV Offload] Expose
+  OffloadingManager.lock()/unlock() and service the tiering control plane off
+  the scheduler thread*. It added the tier-poll thread that now services P2P
+  peers between steps. That largely removes the original reason for returning
+  True always, which was that only the engine tick drove peer polling.
+- vllm-project/vllm#51476 (open RFC): *DP pause/sleep correctness*. It notes
+  that the pause Future resolves off `has_work()`, the check B2 keeps True.
+  The RFC does not mention connectors that report work forever.
 
 ### Fix direction (untested)
 
@@ -317,6 +363,34 @@ transferred". The docs list P < D block sizes as supported with automatic
 remapping. No test or comment covers a block-size ratio above 1 combined with a
 prefix hit; the existing ratio tests use no prefix hit.
 
+### Upstream status
+
+**Covered by an open PR. Do not file again.**
+
+- vllm-project/vllm#59746 (open, last updated 2026-10-20): *[Bugfix][NIXL]
+  Pair P/D blocks by the last token with different block sizes*. Its overview
+  describes this bug: with different P/D block sizes, NIXL pull pairs the
+  block lists by position, so KV lands in the wrong blocks when the lists
+  start or end at different tokens. It claims D receives every page into the
+  right block "also after a partial prefix hit on D". Its GPU evals show
+  wrong output without the fix (Qwen3-0.6B, 16/64 block sizes, 512-token hit
+  on D: 2 of 4 identical without the PR, 4 of 4 with it). It also fixes a
+  related D crash on `assert num_decode_blocks <= len(prefill_group)`.
+
+Related, not duplicates:
+
+- vllm-project/vllm#51527 (open draft): *[KV Connector][NIXL] Support prefix
+  caching with heterogeneous P/D logical block sizes*. It aligns full-attention
+  transfers by token offset, but only for hybrid Mamba/MLA deployments whose
+  kernel block sizes match. It overlaps with #59746.
+- vllm-project/vllm#61160 (open issue): *Cross-request context contamination
+  via shared-prefix KV reuse in PD disaggregation with automatic prefix
+  caching*. Same family of flaw: end-aligned pairing with D allocating one
+  block fewer, so a decode block keeps another request's KV. The trigger is
+  different, though: equal block sizes (64) with sliding-window replay on
+  DeepSeek-V4.1. Not B3, but a fix for one should be checked against the
+  other.
+
 ### Fix direction (untested)
 
 Clip D's expanded sub-block list to the true number of uncomputed remote
@@ -395,14 +469,66 @@ It is a real liveness bug, but it needs one request whose matching prefix is
 larger than the whole CPU staging tier, which a sized deployment avoids. That
 is why it is rated medium rather than high.
 
-### Related upstream work
+### Upstream status
 
-These are nearby changes to the promotion lifecycle, not fixes for B4:
+**Same root cause as an open issue, with an open fix PR. Not verified, so
+add B4 to the existing issue instead of filing a new one.**
 
+- vllm-project/vllm#62931 (open issue, opened 2026-10-21): *Tiered KV offload:
+  a secondary-tier hit larger than the CPU tier loads nothing*. Its root cause
+  matches B4's: "Nothing bounds one request by the CPU tier's size." It
+  expects the same behaviour: "load the longest prefix that the CPU tier can
+  stage ... and recompute the rest". The symptom differs, though:
+  - **#62931:** two KV cache groups. The first group's promotions fill the CPU
+    tier, and the second group's first promotion fails. The lookup returns
+    `MISS`, so the request gets a zero hit and recomputes everything.
+  - **B4:** one group, with promotions completing between retries. The
+    promotions keep evicting each other, so the lookup defers forever instead
+    of returning a zero hit.
+- vllm-project/vllm#62932 (open, last updated 2026-10-22): *[KV Offload] Bound
+  staged loads by primary tier capacity*. It fixes #62931 by capping one load
+  at the number of chunks the CPU tier can stage across all groups (computed
+  at startup, `TieringOffloadingSpec` only). It also adds
+  `staged_load_timeout_s` (default 300 s), after which a lookup shortened by
+  the cap that is still deferred falls back to recompute.
+  - In the B4 test the cap would be 1 chunk, so the lookup would request only
+    chunk 1, which should then resolve as a 1-chunk hit. Even without that,
+    the timeout would end the endless deferral.
+  - This is inferred from reading the PR description. The PR was not applied
+    and the B4 test was not run against it.
+- vllm-project/vllm#50014 (open, last updated 2026-10-22): *[Bugfix][KV
+  Offload] Protect unread promotions from eviction by other speculative
+  promotions*. Another possible fix, by a different mechanism. Its current
+  diff adds a `PinUnreadPromotionsPolicy` (the default) that pins a promotion
+  when it lands, via `prepare_load`, until the chunk is read or its request
+  finishes.
+  - In the B4 test chunk 2's promotion would then fail to allocate (MISS), so
+    `_maximal_prefix_lookup` would return a 1-chunk partial hit.
+  - This is inferred from the diff, not run.
+  - It fixes vllm-project/vllm#49902 (open issue): *Tiered KV offload promotes
+    every waiting request (which fills primary DRAM pool)*. That issue
+    describes the same promote → evict → re-promote cycle across many waiting
+    requests, where B4 shows it within one request.
+
+Related, not fixes:
+
+- vllm-project/vllm#49829 (open issue): *`HIT_PENDING` has no deadline; a
+  stalled write can defer requests until the client timeout*. It is the same
+  missing cap on deferral, triggered by a stalled write instead of an eviction
+  cycle. Its fix PR, vllm-project/vllm#53087 (open), turns a HIT_PENDING
+  outstanding past `hit_pending_timeout_s` (default 5 s) into a MISS.
+  - That might also end B4's cycle.
+  - But B4's chunks change from HIT_PENDING to HIT to evicted, rather than
+    staying HIT_PENDING, so it is unclear whether the deadline ever fires.
+    Not verified.
+- vllm-project/vllm#62615 (open): *Pin batch lookup HITs before
+  secondary-tier promotions*. The same mechanism (a promotion evicts an
+  unpinned primary HIT), but in P2P producer batch lookups (`LookupMsg`), not
+  in the scheduler's lookup.
 - vllm-project/vllm#62795 (open): *Flush a request's promotions before
-  finalizing its tiers*
-- vllm-project/vllm#62929 (open): *Hold promotions after a cache reset until
-  jobs report*
+  finalizing its tiers*, and vllm-project/vllm#62929 (open): *Hold promotions
+  after a cache reset until jobs report*. Nearby changes to the promotion
+  lifecycle.
 
 ### Fix direction (untested)
 
@@ -483,6 +609,22 @@ reset is about to invalidate them. `shutdown()` (`p2p/manager.py:1084–1091`)
 already fails parked stores for the same reason, so the drain is simply missing
 that step.
 
+### Upstream status
+
+**No matching issue or PR found.** This is a candidate for a new issue.
+
+A fix would collide with:
+
+- vllm-project/vllm#61667 (open, last updated 2026-10-16): *[Bugfix][KV
+  Offload][P2P] Quarantine consumer slots until writes settle*. It rewrites
+  `TieringOffloadingManager.reset_cache` (retries the drain, rejects the reset
+  for quarantined slots) and P2P `drain_jobs` (raises `UnsafeTransferError` on
+  unsafe failures). It does not touch `_unbound_stores`, so B5 remains on that
+  branch. A B5 fix should be based on it, or coordinated with its author.
+
+Context: vllm-project/vllm#59790 (merged) changed how the producer keeps store
+pins until NIXL transfers stop. It does not cover parked stores either.
+
 ### Fix direction (untested)
 
 In `drain_jobs`, after the session drain loop, fail and clear every entry in
@@ -511,7 +653,29 @@ need no GPU, NIXL/UCX or model downloads.
 Observed on 2026-10-22: `5 failed in 0.80s`. Each test failed for the reason
 documented above.
 
-Before any of these bugs goes upstream, run the duplicate-work checks in
-`AGENTS.md`. At the time of writing, B1 is already covered by
-vllm-project/vllm#59099. For B2–B5 only a brief search was done, and it found
-no matching PR. That is not a full duplicate check.
+## Upstream search record
+
+Searched on 2026-10-22 with read-only `gh` queries against
+`vllm-project/vllm`:
+
+```bash
+gh pr list --repo vllm-project/vllm --state open --search "<query>"
+gh issue list --repo vllm-project/vllm --state open --search "<query>"
+```
+
+Some queries were repeated with `--state all` to find merged or closed
+context. The open PRs and issues found above were then read with `gh pr view`,
+`gh pr diff` and `gh issue view`.
+
+| Bug | Queries |
+|-----|---------|
+| B1 | `reset_cache offloading`, `reset_prefix_cache offloading assert`, `_current_batch_jobs_to_flush`, `reset_connector offload`, `reset_cache re-entrant` |
+| B2 | `p2p has_pending_work`, `P2P shutdown hang`, `has_pending_push_work shutdown`, `P2PSecondaryTierManager`, `pause hang offload`, `sleep hang kv connector`, `p2p tier`, `has_work shutdown connector`; with `--state all`: `has_pending_work`, `pause_generation hang`, `pause never completes`, `engine never idle`, `sleep never returns`, `shutdown SIGKILL offload`, `tier-poll thread` |
+| B3 | `heterogeneous block size prefix`, `block_size_ratio prefix caching`, `nixl block size prefix cache`, `hetero block size`, `_map_block_ids_for_block_size_ratio`, `_apply_prefix_caching`, `nixl different block size` |
+| B4 | `promotion evicts`, `HIT_PENDING defer`, `promotion primary full`, `promotion livelock` (issues), `defer_lookup` (PRs; no results). #50014, #62615 and #49829 also came up in the B1/B2/B5 searches |
+| B5 | `unbound_stores`, `drain_jobs p2p`, `p2p reset_cache`, `p2p reset prefix cache`, `tiering reset_cache assert`, `unbound store`, `drain_jobs` |
+
+GitHub search is keyword-based, so a matching item that uses different words
+could still exist. Before filing B2 or B5, or commenting on #62931 for B4,
+also run the duplicate-work checks in `AGENTS.md`. Where an open PR above
+overlaps, comment on it rather than opening a new one.
