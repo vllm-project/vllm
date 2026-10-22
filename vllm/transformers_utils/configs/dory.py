@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Configuration for the normalized latent recurrent Dory architecture."""
 
+from typing import Any
+
 from huggingface_hub.dataclasses import strict
 from transformers.configuration_utils import PreTrainedConfig
 
@@ -34,6 +36,11 @@ class DoryConfig(PreTrainedConfig):
     n_recurrent_layers: int | None = None
     n_output_layers: int = 0
     n_recurrent_loops: int = 1
+    # Requests may set their own loop count, 1..max_recurrent_loops, with
+    # SamplingParams.extra_args["loops"]; n_recurrent_loops is the default. The
+    # per-loop KV cache is sized for max_recurrent_loops (None: n_recurrent_loops,
+    # resolved at use so an hf_overrides change of n_recurrent_loops follows).
+    max_recurrent_loops: int | None = None
     # "last_loop" reuses one cache, overwritten by each recurrent loop.
     recurrent_kv_cache_mode: str = "per_loop"
 
@@ -89,6 +96,17 @@ class DoryConfig(PreTrainedConfig):
             )
         if self.n_recurrent_loops < 1:
             raise ValueError("n_recurrent_loops must be a positive integer")
+        max_loops = self.max_recurrent_loops or self.n_recurrent_loops
+        if max_loops < self.n_recurrent_loops:
+            raise ValueError("max_recurrent_loops must be >= n_recurrent_loops")
+        if (
+            self.recurrent_kv_cache_mode == "last_loop"
+            and max_loops != self.n_recurrent_loops
+        ):
+            # One shared cache per layer would mix the loops of different counts.
+            raise ValueError(
+                "per-request loop counts require recurrent_kv_cache_mode=per_loop"
+            )
         if self.recurrent_kv_cache_mode not in ("per_loop", "last_loop"):
             raise ValueError("recurrent_kv_cache_mode must be per_loop or last_loop")
         if any(
@@ -135,3 +153,27 @@ class DoryConfig(PreTrainedConfig):
                 raise ValueError(
                     "Rotary dimensions must be positive, even, and <= head_dim"
                 )
+
+    def request_cache_salt(
+        self, extra_args: dict[str, Any], cache_salt: str | None
+    ) -> str | None:
+        """Validate a request's loop count (``extra_args["loops"]``) and return its
+        prefix-cache salt. KV computed with one loop count is only valid for that
+        count, so requests with a non-default count get their own salt."""
+        raw = extra_args.get("loops")
+        if raw is None:
+            return cache_salt
+        max_loops = self.max_recurrent_loops or self.n_recurrent_loops
+        loops = raw if isinstance(raw, int) and not isinstance(raw, bool) else None
+        if isinstance(raw, str) and raw.strip().isdigit():
+            loops = int(raw)
+        if loops is None or not 1 <= loops <= max_loops:
+            raise ValueError(
+                f"loops must be an integer from 1 to {max_loops} "
+                f"(default {self.n_recurrent_loops}), got {raw!r}"
+            )
+        extra_args["loops"] = loops
+        if loops == self.n_recurrent_loops:
+            return cache_salt
+        tag = f"dory-loops={loops}"
+        return f"{cache_salt}|{tag}" if cache_salt else tag

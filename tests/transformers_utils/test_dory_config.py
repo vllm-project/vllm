@@ -117,3 +117,41 @@ def test_dory_rejects_incompatible_architecture(overrides, match):
         match=match,
     ):
         DoryConfig(**overrides)
+
+
+def test_dory_max_recurrent_loops_defaults_and_validation(tmp_path):
+    assert DoryConfig(n_recurrent_loops=2).max_recurrent_loops is None
+    # an hf_overrides change of the default must not trip over a resolved max
+    DoryConfig(architectures=["DoryForCausalLM"]).save_pretrained(tmp_path)
+    config = ModelConfig(
+        model=str(tmp_path),
+        skip_tokenizer_init=True,
+        max_model_len=128,
+        hf_overrides={"n_recurrent_loops": 3},
+    ).hf_config
+    assert config.n_recurrent_loops == 3
+    assert (
+        DoryConfig(n_recurrent_loops=2, max_recurrent_loops=4).max_recurrent_loops == 4
+    )
+    with pytest.raises(StrictDataclassClassValidationError):
+        DoryConfig(n_recurrent_loops=3, max_recurrent_loops=2)
+    with pytest.raises(StrictDataclassClassValidationError):
+        DoryConfig(
+            n_recurrent_loops=2,
+            max_recurrent_loops=4,
+            recurrent_kv_cache_mode="last_loop",
+        )
+
+
+def test_dory_request_cache_salt():
+    config = DoryConfig(n_recurrent_loops=2, max_recurrent_loops=4)
+    assert config.request_cache_salt({}, None) is None
+    assert config.request_cache_salt({"loops": 2}, "user") == "user"
+    assert config.request_cache_salt({"loops": 4}, None) == "dory-loops=4"
+    assert config.request_cache_salt({"loops": 1}, "user") == "user|dory-loops=1"
+    extra = {"loops": "3"}
+    assert config.request_cache_salt(extra, None) == "dory-loops=3"
+    assert extra["loops"] == 3
+    for bad in (0, 5, "two", True, 2.5):
+        with pytest.raises(ValueError, match="loops must be"):
+            config.request_cache_salt({"loops": bad}, None)
