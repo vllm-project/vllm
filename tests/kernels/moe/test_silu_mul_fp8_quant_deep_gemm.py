@@ -11,7 +11,8 @@ from vllm.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
     persistent_masked_m_silu_mul_quant,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    fused_silu_mul_per_token_group_quant_fp8,
+    silu_mul_per_token_group_quant_fp8_colmajor,
+    silu_mul_quant_fp8_packed_triton,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
@@ -215,49 +216,6 @@ def token_random(E, T, H2, tokens_per_expert):
     return y
 
 
-@pytest.mark.parametrize("H", [128, 256, 384, 512, 640])
-@pytest.mark.skipif(
-    not current_platform.is_cuda() or not current_platform.has_device_capability(80),
-    reason="batch-invariant fused SiLU quantization requires CUDA sm80+",
-)
-@torch.inference_mode()
-def test_batch_invariant_packed_scale_padding(H: int):
-    y = torch.randn((4, 2 * H), device=DEVICE, dtype=torch.bfloat16)
-    _, scales = fused_silu_mul_per_token_group_quant_fp8(
-        y, use_ue8m0=True, masked_m=None
-    )
-    scale_bytes = as_uint8(scales)
-    assert torch.all(scale_bytes[:, H // 128 :] == 0)
-
-
-@pytest.mark.skipif(
-    not current_platform.is_cuda() or not current_platform.has_device_capability(80),
-    reason="batch-invariant fused SiLU quantization requires CUDA sm80+",
-)
-@torch.inference_mode()
-def test_batch_invariant_input_contract():
-    y = torch.randn((4, 256), device=DEVICE, dtype=torch.bfloat16)
-    with pytest.raises(ValueError, match="contiguous CUDA BF16"):
-        fused_silu_mul_per_token_group_quant_fp8(
-            y.T.contiguous().T, use_ue8m0=True, masked_m=None
-        )
-    with pytest.raises(ValueError, match="activation shape"):
-        fused_silu_mul_per_token_group_quant_fp8(
-            y[:, :192].contiguous(), use_ue8m0=True, masked_m=None
-        )
-    output_q = torch.empty((4, 128), device="cpu", dtype=fp8_dtype)
-    with pytest.raises(ValueError, match="output_q must be contiguous"):
-        fused_silu_mul_per_token_group_quant_fp8(
-            y, use_ue8m0=True, masked_m=None, output_q=output_q
-        )
-    with pytest.raises(ValueError, match="masked_m must be int32"):
-        fused_silu_mul_per_token_group_quant_fp8(
-            y.unsqueeze(0),
-            use_ue8m0=True,
-            masked_m=torch.tensor([4], device=DEVICE, dtype=torch.int64),
-        )
-
-
 @pytest.mark.parametrize("E,T,H,fp8_type", CASES)
 @torch.inference_mode()
 def test_silu_mul_fp8_quant_deep_gemm(E: int, T: int, H: int, fp8_type: torch.dtype):
@@ -362,3 +320,102 @@ def test_silu_mul_fp8_quant_deep_gemm(E: int, T: int, H: int, fp8_type: torch.dt
                     y_s[e, :nt],
                     ref_y_s[e, :nt],
                 )
+
+
+SCALE_FMTS = [
+    DeepGemmQuantScaleFMT.FLOAT32,
+    DeepGemmQuantScaleFMT.FLOAT32_CEIL_UE8M0,
+    DeepGemmQuantScaleFMT.UE8M0,
+]
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="the batch-invariant masked quant kernel is CUDA-only",
+)
+# 5 groups (pack padding), 16 groups (DeepSeek-V4-Flash), 24 groups (V4-Pro)
+@pytest.mark.parametrize("H", [128 * 5, 2048, 3072])
+@pytest.mark.parametrize("clamp_limit", [None, 0.0, 10.0])
+@pytest.mark.parametrize("scale_fmt", SCALE_FMTS)
+@torch.inference_mode()
+def test_batch_invariant_masked_quant_matches_dense(
+    monkeypatch: pytest.MonkeyPatch,
+    H: int,
+    clamp_limit: float | None,
+    scale_fmt: DeepGemmQuantScaleFMT,
+):
+    """Under VLLM_BATCH_INVARIANT a token must quantize to identical bytes on
+    the masked path (BatchedDeepGemmExperts) and the dense path
+    (DeepGemmExperts), whatever batch it is in and wherever padding sits."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    set_random_seed(42)
+    M = 512
+    x = torch.randn(M, 2 * H, device=DEVICE, dtype=torch.bfloat16) * 3
+    # Values beyond the limit make the clamp observable.
+    x[:8, :16] = 25.0
+    x[:8, H : H + 16] = -25.0
+
+    # Same tokens in a masked (E, T, 2H) layout: expert 1 is empty, the
+    # padding rows hold NaN so any read past tokens_per_expert would show.
+    E, T = 3, 640
+    counts = [200, 0, 312]
+    y = torch.full((E, T, 2 * H), float("nan"), device=DEVICE, dtype=torch.bfloat16)
+    y[0, : counts[0]] = x[: counts[0]]
+    y[2, : counts[2]] = x[counts[0] :]
+    tokens_per_expert = torch.tensor(counts, device=DEVICE, dtype=torch.int32)
+
+    q_m, s_m = persistent_masked_m_silu_mul_quant(
+        y, tokens_per_expert, quant_scale_fmt=scale_fmt, clamp_limit=clamp_limit
+    )
+    q_masked = torch.cat([q_m[0, : counts[0]], q_m[2, : counts[2]]])
+    s_masked = torch.cat(
+        [s_m[0, : counts[0]].contiguous(), s_m[2, : counts[2]].contiguous()]
+    )
+
+    if scale_fmt == DeepGemmQuantScaleFMT.UE8M0:
+        q_dense, s_dense = silu_mul_quant_fp8_packed_triton(x, clamp_limit=clamp_limit)
+    else:
+        q_dense, s_dense = silu_mul_per_token_group_quant_fp8_colmajor(
+            x,
+            use_ue8m0=scale_fmt == DeepGemmQuantScaleFMT.FLOAT32_CEIL_UE8M0,
+            clamp_limit=clamp_limit,
+        )
+
+    assert torch.equal(as_uint8(q_masked), as_uint8(q_dense))
+    assert torch.equal(s_masked, s_dense.contiguous())
+    # Masked-out slots keep their zero scales; padding rows are never read.
+    assert torch.all(s_m[1] == 0)
+    assert torch.all(s_m[0, counts[0] :] == 0)
+    assert not torch.isnan(q_masked.to(torch.float32)).any()
+
+
+@pytest.mark.parametrize("scale_fmt", SCALE_FMTS)
+@pytest.mark.parametrize("limit", [0.0, 10.0])
+@torch.inference_mode()
+def test_persistent_masked_quant_applies_clamp(
+    scale_fmt: DeepGemmQuantScaleFMT, limit: float
+):
+    """clamp_limit must act like the dense kernels: fp32 min/max on gate and
+    up, then narrow to bf16. Pre-clamping the input is exact under that rule,
+    so the two runs must match byte for byte, and the clamp must change the
+    output relative to no clamp."""
+    set_random_seed(42)
+    E, T, H = 2, 64, 256
+    y = torch.randn(E, T, 2 * H, device=DEVICE, dtype=torch.bfloat16) * 8
+    counts = torch.tensor([64, 17], device=DEVICE, dtype=torch.int32)
+    y_clamped = y.clone()
+    y_clamped[..., :H] = y[..., :H].float().clamp(max=limit).to(torch.bfloat16)
+    y_clamped[..., H:] = y[..., H:].float().clamp(-limit, limit).to(torch.bfloat16)
+
+    q_kernel, s_kernel = persistent_masked_m_silu_mul_quant(
+        y, counts, quant_scale_fmt=scale_fmt, clamp_limit=limit
+    )
+    q_pre, s_pre = persistent_masked_m_silu_mul_quant(
+        y_clamped, counts, quant_scale_fmt=scale_fmt
+    )
+    q_none, _ = persistent_masked_m_silu_mul_quant(y, counts, quant_scale_fmt=scale_fmt)
+
+    for e, n in enumerate(counts.tolist()):
+        assert torch.equal(as_uint8(q_kernel[e, :n]), as_uint8(q_pre[e, :n]))
+        assert torch.equal(s_kernel[e, :n].contiguous(), s_pre[e, :n].contiguous())
+    assert not torch.equal(as_uint8(q_kernel[0]), as_uint8(q_none[0]))

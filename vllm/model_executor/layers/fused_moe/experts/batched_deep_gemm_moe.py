@@ -19,7 +19,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 )
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    fused_silu_mul_per_token_group_quant_fp8,
+    silu_mul_fp8_quant_masked_triton,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -82,12 +82,14 @@ def _silu_mul_fp8_quant_deep_gemm(
     stride_ys_g,
     # Stride for counts (elements)
     stride_counts_e,
+    # SwiGLU clamp limit (swiglu_limit); only read when HAS_CLAMP
+    clamp_limit,
     # Numeric params ------------------------------------------------------
     eps: tl.constexpr,
     fp8_min: tl.constexpr,
     fp8_max: tl.constexpr,
     ceil_ue8m0: tl.constexpr,
-    clamp_limit,
+    HAS_CLAMP: tl.constexpr,
     # Meta ---------------------------------------------------------------
     BLOCK: tl.constexpr,
     NUM_STAGES: tl.constexpr,
@@ -120,13 +122,9 @@ def _silu_mul_fp8_quant_deep_gemm(
         ).to(tl.float32)
         up = tl.load(input_ptr + base_up_offset + t * stride_i_t, mask=mask, other=0.0)
 
-        if clamp_limit > 0.0:
-            gate = tl.minimum(gate, clamp_limit).to(input_ptr.dtype.element_ty)
-            up = tl.clamp(up.to(tl.float32), -clamp_limit, clamp_limit).to(
-                input_ptr.dtype.element_ty
-            )
-
-        up = up.to(tl.float32)
+        if HAS_CLAMP:
+            gate = tl.minimum(gate, clamp_limit)
+            up = tl.clamp(up.to(tl.float32), -clamp_limit, clamp_limit)
 
         gate = gate * (1.0 / (1.0 + tl.exp(-gate)))
         y = gate * up
@@ -151,13 +149,19 @@ def persistent_masked_m_silu_mul_quant(
     group_size: int = 128,
     quant_scale_fmt: DeepGemmQuantScaleFMT = DeepGemmQuantScaleFMT.FLOAT32,
     clamp_limit: float | None = None,
-    full_tokens: bool = False,
-    output_q: torch.Tensor | None = None,
-    original_numerics: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize silu(y[..., :H]) * y[..., H:] to FP8 with group per-token scales
     y has shape (E, T, 2*H). The first half of the last dimension is
     silu-activated, multiplied by the second half, then quantized into FP8.
+    `clamp_limit` is the model's SwiGLU limit (``swiglu_limit``): when set,
+    the gate is clamped to ``(-inf, clamp_limit]`` and the up projection to
+    ``[-clamp_limit, clamp_limit]`` before the activation, exactly as the
+    dense DeepGemmExperts quantizers do.
+
+    Under ``VLLM_BATCH_INVARIANT`` on CUDA the work is done by a Triton kernel
+    that shares its arithmetic with the dense quantizers, so a token produces
+    the same bytes whether it is quantized on the dense (DeepGemmExperts) or
+    the masked (BatchedDeepGemmExperts) path.
     We launch a fixed grid of threads to accommodate CUDA graphs. Let `P2`
     be a parallelization factor for persistent_masked_m_silu_mul_quant over the
     hidden dimension.
@@ -208,37 +212,11 @@ def persistent_masked_m_silu_mul_quant(
     assert H % 8 == 0, "H must be divisible by 8"
     assert group_size == 128, "H must be divisible by 8"
     assert tokens_per_expert.ndim == 1 and tokens_per_expert.shape[0] == E
-    assert not full_tokens or E == 1
-
-    if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda():
-        if quant_scale_fmt not in (
-            DeepGemmQuantScaleFMT.FLOAT32,
-            DeepGemmQuantScaleFMT.FLOAT32_CEIL_UE8M0,
-            DeepGemmQuantScaleFMT.UE8M0,
-        ):
-            raise RuntimeError(f"unsupported batch-invariant scale: {quant_scale_fmt}")
-        return fused_silu_mul_per_token_group_quant_fp8(
-            y,
-            use_ue8m0=quant_scale_fmt == DeepGemmQuantScaleFMT.UE8M0,
-            round_scale=quant_scale_fmt != DeepGemmQuantScaleFMT.FLOAT32,
-            clamp_limit=clamp_limit,
-            masked_m=tokens_per_expert,
-            output_q=output_q,
-            group_size=group_size,
-        )
 
     tokens_per_expert = tokens_per_expert.to(device=y.device, dtype=torch.int32)
-    if full_tokens and not (
-        current_platform.is_cuda() and current_platform.has_device_capability(80)
-    ):
-        tokens_per_expert = torch.full_like(tokens_per_expert, T)
 
     fp8_dtype = current_platform.fp8_dtype()
-    if output_q is None:
-        y_q = torch.empty((E, T, H), dtype=fp8_dtype, device=y.device)
-    else:
-        assert output_q.shape == (E, T, H) and output_q.dtype == fp8_dtype
-        y_q = output_q
+    y_q = torch.empty((E, T, H), dtype=fp8_dtype, device=y.device)
 
     ys_shape, ys_strides, ys_dtype = scales_shape_stride_dtype(E, T, G, quant_scale_fmt)
     y_s = torch.empty_strided(
@@ -247,26 +225,36 @@ def persistent_masked_m_silu_mul_quant(
         dtype=ys_dtype,
         device=y.device,
     )
-    if not full_tokens or (quant_scale_fmt == DeepGemmQuantScaleFMT.UE8M0 and G % 4):
-        y_s.zero_()
+    y_s.zero_()
 
     ceil_ue8m0 = quant_scale_fmt in [
         DeepGemmQuantScaleFMT.FLOAT32_CEIL_UE8M0,
         DeepGemmQuantScaleFMT.UE8M0,
     ]
-    clamp_limit = 0.0 if clamp_limit is None else clamp_limit
 
-    # The C++ kernel requires sm_80+; ROCm and XPU take the Triton path below.
-    if current_platform.is_cuda() and current_platform.has_device_capability(80):
+    if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda():
+        # Batch invariance: the same token must quantize to identical bytes on
+        # the dense and the masked path, so reuse the dense kernels' Triton
+        # arithmetic instead of the bf16 C++ kernel.
+        silu_mul_fp8_quant_masked_triton(
+            y,
+            tokens_per_expert,
+            y_q,
+            y_s,
+            use_ue8m0=ceil_ue8m0,
+            clamp_limit=clamp_limit,
+            group_size=group_size,
+        )
+    elif current_platform.is_cuda() and current_platform.has_device_capability(80):
+        # The C++ kernel requires sm_80+; ROCm and XPU take the Triton path
+        # below. A negative clamp_limit disables the clamp in the kernel.
         torch.ops._C.persistent_masked_m_silu_mul_quant(
             y,
             tokens_per_expert,
             y_q,
             y_s,
             ceil_ue8m0,
-            clamp_limit,
-            full_tokens,
-            original_numerics or envs.VLLM_BATCH_INVARIANT,
+            -1.0 if clamp_limit is None else float(clamp_limit),
         )
     else:
         # Triton fallback for ROCm and XPU -- the C++ kernel is guarded by
@@ -322,11 +310,12 @@ def persistent_masked_m_silu_mul_quant(
             f32_strides[1],
             f32_strides[2],
             stride_cnt_e,
+            0.0 if clamp_limit is None else float(clamp_limit),
             eps,
             fp8_min,
             fp8_max,
             ceil_ue8m0,
-            clamp_limit,
+            HAS_CLAMP=clamp_limit is not None,
             BLOCK=group_size,
             NUM_STAGES=4,
             num_warps=1,
@@ -519,6 +508,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
             workspace1,
             expert_num_tokens,
             quant_scale_fmt=quant_scale_fmt,
+            clamp_limit=self.activation_config.clamp_limit,
         )
 
         fp8_m_grouped_gemm_nt_masked(
