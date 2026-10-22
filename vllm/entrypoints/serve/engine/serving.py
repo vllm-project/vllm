@@ -130,6 +130,21 @@ class BaseServing:
         )
 
     @staticmethod
+    def _track_engine_request(
+        raw_request: Request | None, client_req_id: str, engine_req_id: str
+    ) -> None:
+        """Record a derived engine request id against the id the client sees.
+
+        Lets the cancellation endpoints resolve the id from the response body
+        back to the requests it actually created.
+        """
+        if raw_request is None:
+            return
+        registry = getattr(raw_request.app.state, "cancellation_registry", None)
+        if registry is not None:
+            registry.add(client_req_id, engine_req_id)
+
+    @staticmethod
     def _base_request_id(
         raw_request: Request | None, default: str | None = None
     ) -> str | None:

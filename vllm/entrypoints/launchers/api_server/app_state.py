@@ -11,6 +11,7 @@ from vllm.entrypoints.common.cli_args import resolve_default_chat_template_kwarg
 from vllm.entrypoints.mcp.tool_server import init_tool_server
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.cancel.registry import CancellationRegistry
 from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.entrypoints.serve.utils.api_utils import process_lora_modules
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
@@ -61,6 +62,7 @@ async def init_app_state(
     ]
 
     state.engine_client = engine_client
+    state.cancellation_registry = CancellationRegistry()
     state.log_stats = not args.disable_log_stats
     state.vllm_config = vllm_config
     state.args = args

@@ -345,6 +345,7 @@ class OpenAIServingChat(GenerateBaseServing):
             sub_request_id = (
                 request_id if len(engine_inputs) == 1 else f"{request_id}_{i}"
             )
+            self._track_engine_request(raw_request, request_id, sub_request_id)
 
             max_tokens = get_max_tokens(
                 max_model_len,
