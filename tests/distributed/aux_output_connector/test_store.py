@@ -38,8 +38,10 @@ from vllm.distributed.aux_output_connector.store import (
 from vllm.distributed.aux_output_connector.worker import (
     AuxOutputWorkerConnector,
 )
+from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.request import Request
 from vllm.v1.worker.gpu import async_utils
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 
@@ -1537,7 +1539,7 @@ def test_scheduler_connector_builds_worker_metadata_and_forwards_output():
     routing = np.arange(4 * 3 * 2, dtype=np.uint8).reshape(4, 3, 2)
     output = {"request": AuxRequestOutput(0, routing)}
     request.num_computed_tokens = 4
-    np.testing.assert_array_equal(connector.take_output(request, output), routing)
+    np.testing.assert_array_equal(connector.take_output(request, output)[0], routing)
 
 
 @pytest.mark.parametrize("finish", [False, True], ids=["hash-only-update", "finish"])
@@ -1819,10 +1821,10 @@ def test_scheduler_consumes_ordered_stale_aux_outputs():
     connector.request_finished(request)
 
     request.num_tokens = 5
-    np.testing.assert_array_equal(connector.take_output(request, first), first_rows)
+    np.testing.assert_array_equal(connector.take_output(request, first)[0], first_rows)
     request.num_tokens = 6
     np.testing.assert_array_equal(
-        connector.take_output(request, second), second_rows[:1]
+        connector.take_output(request, second)[0], second_rows[:1]
     )
 
 
@@ -1858,7 +1860,7 @@ def test_scheduler_rejects_missing_accepted_aux_output_rows():
     }
 
     with pytest.raises(AssertionError, match="invalid token range"):
-        connector.take_output(request, output)
+        connector.take_output(request, output)[0]
 
 
 def test_scheduler_rejects_aux_output_past_finished_request():
@@ -1879,7 +1881,7 @@ def test_scheduler_rejects_aux_output_past_finished_request():
     with pytest.raises(
         AssertionError, match="finished auxiliary output output has no accepted"
     ):
-        connector.take_output(request, output)
+        connector.take_output(request, output)[0]
 
 
 @pytest.mark.parametrize("chunk_size", [2, 4])
@@ -1913,7 +1915,7 @@ def test_prompt_end_offset_through_worker_and_scheduler(chunk_size, max_tokens):
         request.num_tokens = 5
         request.num_output_tokens = 1
         request.finished = max_tokens == 1
-        result = connector.take_output(request, output)
+        result = connector.take_output(request, output)[0]
         np.testing.assert_array_equal(result, rows[:0])
 
         if max_tokens == 2:
@@ -1933,7 +1935,7 @@ def test_prompt_end_offset_through_worker_and_scheduler(chunk_size, max_tokens):
             request.num_tokens = 6
             request.finished = True
             np.testing.assert_array_equal(
-                connector.take_output(request, output), rows[4:]
+                connector.take_output(request, output)[0], rows[4:]
             )
     finally:
         worker.close()
@@ -2025,11 +2027,11 @@ def test_indexer_shares_spec_acceptance_and_shm_prefix_lifecycle(enable_r3):
         indexer_rows=indexer,
     )["producer"]
     np.testing.assert_array_equal(output.indexer_rows, indexer[:4])
-    assert len(output.routed_rows) == 4
+    assert output.get_num_rows() == 4
     if enable_r3:
         np.testing.assert_array_equal(output.routed_rows, routing[:4])
     else:
-        assert output.routed_rows.shape == (4, 0)
+        assert output.routed_rows is None
     # A different request skips the cached prefix's forward entirely.
     cached = _metadata(0, [_request_metadata("cached", 4, 1, 0, [b"a" * 32])], {})
     output = _process_output(
@@ -2061,23 +2063,69 @@ def test_preemption_rewinds_an_unpublished_partial_block():
     worker.close()
 
 
-def test_indexer_and_routing_prompt_offsets_are_independent():
-    connector = AuxOutputSchedulerConnector(_BLOCK_SIZE, enable_indexer=True)
-    request = _scheduler_request("request", [], num_tokens=6)
-    request.sampling_params = SimpleNamespace(
-        routed_experts_prompt_start=3,
-        indexer_topk_prompt_start=1,
+@pytest.mark.parametrize(
+    ("routed", "indexer_enabled"), [(True, False), (False, True), (True, True)]
+)
+def test_indexer_and_routing_prompt_offsets_are_independent(routed, indexer_enabled):
+    connector = AuxOutputSchedulerConnector(
+        _BLOCK_SIZE, enable_routed_experts=routed, enable_indexer=indexer_enabled
+    )
+    request = Request(
+        "request",
+        [0, 1, 2, 3],
+        SamplingParams(
+            max_tokens=2, routed_experts_prompt_start=3, indexer_topk_prompt_start=1
+        ),
+        None,
     )
     metadata = connector.build_connector_meta(
-        _step_output(["request"], [0], [5]), {"request": request}
+        _step_output(["request"], [0], [4]), {"request": request}
     )
-    assert metadata.requests["request"] == 1
+    assert metadata.requests["request"] == (1 if indexer_enabled else 3)
+    request.append_output_token_ids([4, 5])
     routing = np.arange(24, dtype=np.uint8).reshape(4, *_SHAPE)
     indexer = np.arange(8, dtype=np.int32).reshape(4, 2)
-    outputs = {"request": AuxRequestOutput(1, routing, indexer, {"codec_version": 1})}
-    np.testing.assert_array_equal(connector.take_output(request, outputs), routing[2:])
-    selections, _ = connector.take_indexer_output(request, outputs)
-    np.testing.assert_array_equal(selections, indexer)
+    outputs = {
+        "request": AuxRequestOutput(
+            1,
+            routing if routed else None,
+            indexer if indexer_enabled else None,
+            {"codec_version": 1} if indexer_enabled else None,
+        )
+    }
+    assert outputs["request"].get_num_rows() == 4
+    routed_rows, selections, profile = connector.take_output(request, outputs)
+    if routed:
+        np.testing.assert_array_equal(routed_rows, routing[2:])
+    else:
+        assert routed_rows is None
+    if indexer_enabled:
+        np.testing.assert_array_equal(selections, indexer)
+        assert profile == {"codec_version": 1}
+    else:
+        assert selections is None
+        assert profile is None
+
+
+def test_shared_output_validation_rejects_mismatched_artifact_rows():
+    connector = AuxOutputSchedulerConnector(_BLOCK_SIZE, enable_indexer=True)
+    request = Request("request", [0, 1], SamplingParams(max_tokens=1), None)
+    output = AuxRequestOutput(
+        0, np.empty((1, 1, 2), dtype=np.uint8), np.empty((2, 1, 2), dtype=np.int32)
+    )
+    with pytest.raises(AssertionError, match="artifact row counts differ"):
+        connector.take_output(request, {"request": output})
+
+
+def test_indexer_only_checks_accepted_range_without_routing_placeholder():
+    connector = AuxOutputSchedulerConnector(
+        _BLOCK_SIZE, enable_routed_experts=False, enable_indexer=True
+    )
+    request = Request("request", [0, 1, 2, 3], SamplingParams(max_tokens=1), None)
+    request.append_output_token_ids(4)
+    output = AuxRequestOutput(0, indexer_rows=np.empty((3, 1, 2), dtype=np.int32))
+    with pytest.raises(AssertionError, match="invalid token range"):
+        connector.take_output(request, {"request": output})
 
 
 def test_fixed_store_rejects_payload_size_before_retaining_keys():

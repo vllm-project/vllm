@@ -438,9 +438,14 @@ class AuxOutputWorkerConnector:
         if self._indexer is None:
             return AuxRequestOutput(token_start=token_start, routed_rows=rows)
         n = len(rows)
-        routed_rows = rows[:, : self._r3_nbytes].copy()
+        routed_rows = None
         if self._capturer is not None:
-            routed_rows = routed_rows.view(self._r3_dtype).reshape(n, *self._r3_shape)
+            routed_rows = (
+                rows[:, : self._r3_nbytes]
+                .copy()
+                .view(self._r3_dtype)
+                .reshape(n, *self._r3_shape)
+            )
         indexer = rows[:, self._r3_nbytes :].copy().view(np.int32)
         return AuxRequestOutput(
             token_start=token_start,

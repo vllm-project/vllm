@@ -2294,11 +2294,8 @@ class Scheduler(SchedulerInterface):
                 new_token_ids or pooler_output is not None or stopped
             )
             if self.aux_output_connector is not None and should_emit_output:
-                routed_experts = self.aux_output_connector.take_output(
-                    request, model_runner_output.aux_output_connector_output
-                )
-                indexer_rows, indexer_profile = (
-                    self.aux_output_connector.take_indexer_output(
+                routed_experts, indexer_rows, indexer_profile = (
+                    self.aux_output_connector.take_output(
                         request, model_runner_output.aux_output_connector_output
                     )
                 )
