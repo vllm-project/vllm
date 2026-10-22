@@ -411,7 +411,7 @@ def _check_cumem_host_table(failure):
                 ),
             )
         storage = engram_ops.DPSharedEngramStorage(rows, DIM, BLOCK, group)
-    assert storage.backing == ("/dev/shm" if failure else "cuMem")
+    assert storage.huge_pages == (failure is None)
     table = torch.arange(rows * DIM).remainder(251).to(torch.uint8).view(rows, DIM)
     if group.rank_in_group == 0:
         storage.weight.view(torch.uint8).copy_(table)

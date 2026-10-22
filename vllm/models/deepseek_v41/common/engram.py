@@ -829,19 +829,20 @@ class DPSharedEngramStorage:
             from vllm.models.deepseek_v41.nvidia.ops import engram_host_table
 
             views = engram_host_table.share_host_table(num_bytes, group)
-        self.backing = "/dev/shm" if views is None else "cuMem"
-        if views is None:
-            host = self._allocate_shm(num_bytes)
-            views = host, get_accelerator_view_from_cpu_tensor(host)
-        host, gpu = views
+        # The GPU maps cuMem host memory with 2M pages, /dev/shm with 64K pages.
+        self.huge_pages = views is not None
+        host, gpu = views or self._allocate_shm(num_bytes)
         self.weight, self.weight_scale_inv = split_table(host)
         self._views = split_table(gpu)
 
-    def _allocate_shm(self, num_bytes: int) -> torch.Tensor:
-        """Map and register one /dev/shm file across a node-local DP group."""
+    def _allocate_shm(self, num_bytes: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Map and register one /dev/shm file across a node-local DP group.
+
+        Returns CPU and GPU views of the file.
+        """
         group = self.group
         with ExitStack() as stack:
-            backing_file = path = error = None
+            path = error = None
             if group.rank_in_group == 0 and not (error := _shm_shortfall(num_bytes)):
                 try:
                     backing_file = stack.enter_context(
@@ -870,8 +871,7 @@ class DPSharedEngramStorage:
                 )
             # Unlink while the file is still sparse, so a crash during the slow
             # registration below cannot orphan the table.
-            if backing_file is not None:
-                backing_file.close()
+            stack.close()
             assert mapping is not None
 
             owner = tensor = None
@@ -899,7 +899,7 @@ class DPSharedEngramStorage:
                     "Engram shared-memory initialization failed: " + failures
                 )
             assert tensor is not None
-            return tensor
+            return tensor, get_accelerator_view_from_cpu_tensor(tensor)
 
     @staticmethod
     def _unregister(mapping: mmap.mmap, pointer: int) -> None:
@@ -1074,9 +1074,10 @@ class ParallelEngramEmbedding(nn.Module):
                 self.part_num_embeddings,
                 dim,
                 self.part_num_embeddings * (dim + dim // block_size) / 1024**3,
-                f"shared across DP replicas via {self._shared_memory.backing}"
-                if self._shared_memory is not None
-                else "per rank",
+                "per rank"
+                if self._shared_memory is None
+                else "shared across DP replicas via "
+                + ("cuMem" if self._shared_memory.huge_pages else "/dev/shm"),
             )
 
     def _get_shard_info(self) -> tuple[int, int]:
@@ -1148,7 +1149,7 @@ class ParallelEngramEmbedding(nn.Module):
     def _uses_small_host_pages(self) -> bool:
         """Whether the GPU maps this host table with pages too small for its TLB."""
         if self._shared_memory is not None:
-            return self._shared_memory.backing == "/dev/shm"
+            return not self._shared_memory.huge_pages
         return self.cpu_offload and self._packed is None
 
     def _storage(self) -> tuple[torch.Tensor, torch.Tensor]:
