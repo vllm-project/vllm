@@ -927,6 +927,8 @@ class GPUModelRunner(
         self.valid_sampled_token_count_cpu: torch.Tensor | None = None
         self.draft_token_ids_cpu: torch.Tensor | None = None
         self.num_accepted_tokens_event: torch.Event | None = None
+        # Saved accepted-token counts of requests re-added in this step.
+        self._num_accepted_on_readd: dict[str, int] = {}
         if self.num_spec_tokens:
             self.draft_token_ids_event = torch.Event()
             self.num_accepted_tokens_event = torch.Event()
@@ -1229,6 +1231,8 @@ class GPUModelRunner(
         # that they get cleared from the persistent batch before being re-scheduled
         # in the normal resumed request path.
         unscheduled_req_ids = cached_req_ids - (scheduled_req_ids - resumed_req_ids)
+        self._save_num_accepted_tokens(unscheduled_req_ids)
+        self._num_accepted_on_readd.clear()
         # NOTE(woosuk): The persistent batch optimization assumes that
         # consecutive batches contain mostly the same requests. If batches
         # have low request overlap (e.g., alternating between two distinct
@@ -1433,6 +1437,7 @@ class GPUModelRunner(
                 # Its recurrent state is recomputed, so re-anchor the ReplaySSM
                 # ring at re-admission.
                 req_state.replayssm_decode_base = None
+                req_state.num_accepted_tokens = 1
 
             if req_index is None:
                 # The request is not in the persistent batch.
@@ -1492,6 +1497,10 @@ class GPUModelRunner(
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
         for request in reqs_to_add:
+            if request.num_accepted_tokens != 1:
+                self._num_accepted_on_readd[request.req_id] = (
+                    request.num_accepted_tokens
+                )
             self.input_batch.add_request(request)
             self.input_batch.update_req_spec_token_ids(request, scheduled_spec_tokens)
 
@@ -1595,6 +1604,27 @@ class GPUModelRunner(
             assert self.num_accepted_tokens_event is not None
             self.num_accepted_tokens_event.record()
 
+    def _save_num_accepted_tokens(self, req_ids: Iterable[str]) -> None:
+        """Save the accepted-token count of requests leaving the persistent
+        batch. Hybrid spec decode reads the recurrent state from slot
+        num_accepted_tokens - 1, so a running request that is skipped for a
+        step needs the count back when it is scheduled again."""
+        if (
+            not req_ids
+            or self.num_accepted_tokens_event is None
+            or not self.model_config.is_hybrid
+        ):
+            return
+        self.num_accepted_tokens_event.synchronize()
+        for req_id in req_ids:
+            req_index = self.input_batch.req_id_to_index.get(req_id)
+            req_state = self.requests.get(req_id)
+            if req_index is None or req_state is None:
+                continue
+            req_state.num_accepted_tokens = max(
+                1, int(self.input_batch.num_accepted_tokens_cpu[req_index])
+            )
+
     def _update_streaming_request(
         self, req_id: str, new_req_data: NewRequestData
     ) -> CachedRequestState:
@@ -1624,6 +1654,9 @@ class GPUModelRunner(
         # Clear `output_token_ids` as previous output tokens are now part of
         # `prompt_token_ids`.
         req_state.output_token_ids.clear()
+        # The new input is prefilled on top of the state, so start over.
+        req_state.replayssm_decode_base = None
+        req_state.num_accepted_tokens = 1
 
         if self.uses_mrope:
             self._init_mrope_positions(req_state)
@@ -1724,6 +1757,18 @@ class GPUModelRunner(
         )
 
         return cu_num_tokens
+
+    def _apply_num_accepted_on_readd(self, num_reqs: int) -> bool:
+        """Restore the saved accepted-token counts of requests re-added this
+        step after being skipped (async scheduling, where the CPU copy of the
+        counts cannot be read directly)."""
+        if not self._num_accepted_on_readd:
+            return False
+        for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+            n = self._num_accepted_on_readd.get(req_id)
+            if n is not None:
+                self.num_accepted_tokens.np[i] = n
+        return True
 
     def _compute_prev_positions(self, num_reqs: int) -> None:
         """Build prev_positions mapping: current pos -> previous pos (-1 if new).
@@ -2087,6 +2132,7 @@ class GPUModelRunner(
                     ]
                 )
                 self.num_accepted_tokens.np[:num_reqs][new_mask] = 1
+                self._apply_num_accepted_on_readd(num_reqs)
                 self.input_batch.num_accepted_tokens_cpu[:num_reqs] = (
                     self.num_accepted_tokens.np[:num_reqs]
                 )
@@ -2101,7 +2147,10 @@ class GPUModelRunner(
             # Default to 1; update_num_computed_tokens_for_batch_change below
             # corrects rows that had drafts from valid_sampled_token_count.
             self.num_accepted_tokens.np.fill(1)
-            self.num_accepted_tokens.gpu.fill_(1)
+            if self._apply_num_accepted_on_readd(num_reqs):
+                self.num_accepted_tokens.copy_to_gpu()
+            else:
+                self.num_accepted_tokens.gpu.fill_(1)
 
         # Update num_computed_tokens on GPU. In async spec decode,
         # CPU values are optimistic (all drafts accepted). The kernel
