@@ -162,12 +162,15 @@ class ParserEngineReasoningAdapter(ReasoningParser):
             )
         engine = self._counting_parser_engine
         counted = self._counted_token_ids
-        if counted and len(counted) <= len(token_ids):
-            # parse only the tokens added since the last call.
-            if list(token_ids[: len(counted)]) == counted:
-                if len(counted) < len(token_ids):
-                    self._feed_counting_tokens(engine, token_ids[len(counted) :])
-                return engine.count_reasoning_tokens(token_ids)
+        # parse only the tokens added since the last call.
+        if (
+            counted
+            and len(counted) <= len(token_ids)
+            and list(token_ids[: len(counted)]) == counted
+        ):
+            if len(counted) < len(token_ids):
+                self._feed_counting_tokens(engine, token_ids[len(counted) :])
+            return engine.count_reasoning_tokens(token_ids)
         engine._single_pass_parse(self.model_tokenizer.decode(token_ids), token_ids)
         self._counted_token_ids = list(token_ids)
         self._num_fed_counting_tokens = None
