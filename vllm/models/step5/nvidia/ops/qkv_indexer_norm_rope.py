@@ -40,6 +40,8 @@ def _prepare_main(
     KScale,
     VScale,
     FP8_CACHE: tl.constexpr,
+    FP8_QUERY: tl.constexpr,
+    QScale,
 ):
     DIM: tl.constexpr = 192
     LANES: tl.constexpr = 32 if ROTARY > 128 else 16
@@ -89,16 +91,31 @@ def _prepare_main(
             (d < ROTARY)[None, :], tl.where((d < half)[None, :], low, high), normalized
         )
     result = tl.where((h < QH + KH)[:, None], normalized.to(QKV.dtype.element_ty), raw)
-    target = tl.where(
-        (h < QH)[:, None],
-        QOut + token * QH * DIM + h[:, None] * DIM + d[None, :],
-        tl.where(
+    if FP8_QUERY:
+        q_value = tl.div_rn(result.to(tl.float32), QScale)
+        q_value = tl.minimum(tl.maximum(q_value, -448.0), 448.0)
+        tl.store(
+            QOut + token * QH * DIM + h[:, None] * DIM + d[None, :],
+            q_value,
+            valid & (h < QH)[:, None],
+        )
+        kv_target = tl.where(
             (h < QH + KH)[:, None],
             KOut + token * KH * DIM + (h[:, None] - QH) * DIM + d[None, :],
             VOut + token * KH * DIM + (h[:, None] - QH - KH) * DIM + d[None, :],
-        ),
-    )
-    tl.store(target, result, valid)
+        )
+        tl.store(kv_target, result, valid & (h >= QH)[:, None])
+    else:
+        target = tl.where(
+            (h < QH)[:, None],
+            QOut + token * QH * DIM + h[:, None] * DIM + d[None, :],
+            tl.where(
+                (h < QH + KH)[:, None],
+                KOut + token * KH * DIM + (h[:, None] - QH) * DIM + d[None, :],
+                VOut + token * KH * DIM + (h[:, None] - QH - KH) * DIM + d[None, :],
+            ),
+        )
+        tl.store(target, result, valid)
     slot = tl.load(Slots + token, token < SLOT_ROWS, other=-1)
     cache_head = tl.where(h < QH + KH, h - QH, h - QH - KH)
     offset = (
@@ -177,6 +194,8 @@ def _joint_prepare(
     MainKScale,
     MainVScale,
     FP8_CACHE: tl.constexpr,
+    FP8_QUERY: tl.constexpr,
+    QScale,
 ):
     if tl.program_id(1) <= GROUPS * PAD_HEADS:
         _indexer_norm_rope(
@@ -246,6 +265,8 @@ def _joint_prepare(
             MainKScale,
             MainVScale,
             FP8_CACHE,
+            FP8_QUERY,
+            QScale,
         )
 
 
@@ -267,6 +288,8 @@ def qkv_indexer_norm_rope(
     decode_ring=None,
     decode_z: torch.Tensor | None = None,
     decode_slots: torch.Tensor | None = None,
+    q_dtype: torch.dtype | None = None,
+    q_scale: float = 1.0,
 ) -> tuple[
     torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
 ]:
@@ -287,12 +310,19 @@ def qkv_indexer_norm_rope(
         main_k_scale,
         main_v_scale,
     ) = main_inputs
+    if q_dtype not in (None, main_qkv.dtype, torch.float8_e4m3fn):
+        raise ValueError("Q must use the input dtype or float8_e4m3fn")
+    fp8_query = q_dtype == torch.float8_e4m3fn
     fp8_cache = main_kc.dtype in (torch.uint8, torch.float8_e4m3fn)
     if fp8_cache:
         main_kc = main_kc.view(torch.float8_e4m3fn)
         main_vc = main_vc.view(torch.float8_e4m3fn)
     tokens, width = query.shape
-    main_q = main_qkv.new_empty((tokens, main_qh * 192))
+    main_q = torch.empty(
+        (tokens, main_qh * 192),
+        device=main_qkv.device,
+        dtype=main_qkv.dtype if q_dtype is None else q_dtype,
+    )
     main_k = main_qkv.new_empty((tokens, main_kh * 192))
     main_v = torch.empty_like(main_k)
     main_group = 4 if main_rotary > 128 else 8
@@ -387,6 +417,8 @@ def qkv_indexer_norm_rope(
             main_k_scale,
             main_v_scale,
             fp8_cache,
+            fp8_query,
+            q_scale,
             num_warps=4,
             enable_fp_fusion=False,
         )

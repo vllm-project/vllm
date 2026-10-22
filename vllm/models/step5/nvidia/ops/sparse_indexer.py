@@ -414,27 +414,77 @@ def pack_decode_summary_pages(
 
 
 @triton.jit
-def _emit_all_regions(current, Output, K, BLOCK: tl.constexpr):
-    col = tl.arange(0, BLOCK)
-    # Left-pad with -1, then include every historical region and the current one.
-    region = col - (K - current)
-    tl.store(Output + col, tl.where(region >= 0, region, -1), col <= K)
+def _all_region_ids(current, col, K, HISTORY_ONLY: tl.constexpr):
+    start = 0 if HISTORY_ONLY else K - current
+    region = col - start
+    end = tl.minimum(current, K) if HISTORY_ONLY else current + 1
+    return tl.where((region >= 0) & (region < end), region, -1)
 
 
 @triton.jit
-def _all_regions(Current, Output, K: tl.constexpr, BLOCK: tl.constexpr):
+def _emit_all_regions(
+    current,
+    Output,
+    K,
+    BLOCK: tl.constexpr,
+    HISTORY_ONLY: tl.constexpr = False,
+    OUTPUT_WIDTH=0,
+):
+    col = tl.arange(0, BLOCK)
+    selected = _all_region_ids(current, col, K, HISTORY_ONLY)
+    tl.store(Output + col, selected, col < OUTPUT_WIDTH)
+
+
+@triton.jit
+def _all_regions(
+    Current,
+    Output,
+    K: tl.constexpr,
+    BLOCK: tl.constexpr,
+    HISTORY_ONLY: tl.constexpr = False,
+    OUTPUT_ROW: tl.constexpr = 0,
+    OUTPUT_WIDTH: tl.constexpr = 0,
+):
     row = tl.program_id(0)
     current = tl.load(Current + row)
-    _emit_all_regions(current, Output + row * (K + 1), K, BLOCK)
+    _emit_all_regions(
+        current,
+        Output + row.to(tl.int64) * OUTPUT_ROW,
+        K,
+        BLOCK,
+        HISTORY_ONLY,
+        OUTPUT_WIDTH,
+    )
 
 
-def select_all_regions(current: torch.Tensor, capacity: int) -> torch.Tensor:
-    """Select all history and current without computing unused indexer scores."""
+def _selection_output(rows, capacity, device, out, history_only):
+    width = capacity + int(not history_only)
+    if out is None:
+        return torch.empty((rows, width), device=device, dtype=torch.int64)
+    if out.shape[0] != rows:
+        raise ValueError("selection output must match the number of rows")
+    return out
+
+
+def select_all_regions(
+    current: torch.Tensor,
+    capacity: int,
+    *,
+    out: torch.Tensor | None = None,
+    history_only: bool = False,
+) -> torch.Tensor:
+    """Select all history; native output also includes the current region."""
     rows = current.shape[0]
-    output = torch.empty((rows, capacity + 1), device=current.device, dtype=torch.long)
+    output = _selection_output(rows, capacity, current.device, out, history_only)
     if rows:
         _all_regions[(rows,)](
-            current, output, capacity, triton.next_power_of_2(capacity + 1)
+            current,
+            output,
+            capacity,
+            triton.next_power_of_2(max(capacity + 1, output.shape[1])),
+            HISTORY_ONLY=history_only,
+            OUTPUT_ROW=output.stride(0),
+            OUTPUT_WIDTH=output.shape[1],
         )
     return output
 
@@ -464,9 +514,15 @@ def _stable_topk_regions(
     OWNER_STRIDE: tl.constexpr = 0,
     INDPTR_STRIDE: tl.constexpr = 1,
     SORT: tl.constexpr = True,
+    HISTORY_ONLY: tl.constexpr = False,
+    OUTPUT_ROW: tl.constexpr = 0,
+    OUTPUT_WIDTH: tl.constexpr = 0,
 ):
     row = tl.program_id(0)
     length = tl.load(Current + row).to(tl.int32)
+    if HISTORY_ONLY:
+        length = tl.maximum(length, 0)
+    output_row = row.to(tl.int64) * OUTPUT_ROW
     col = tl.arange(0, BLOCK_K)
     chosen = tl.load(Indices + row * INDEX_STRIDE + col, col < K, other=-1)
     valid = (col < K) & (chosen >= 0) & (chosen < length)
@@ -481,8 +537,7 @@ def _stable_topk_regions(
         short_finite = tl.sum(nonfinite.to(tl.int32), 0) == 0
     if short_finite:
         output_col = tl.arange(0, BLOCK_SORT)
-        region = output_col - (K - length)
-        selected = tl.where(region >= 0, region, -1)
+        selected = _all_region_ids(length, output_col, K, HISTORY_ONLY)
     else:
         threshold = tl.min(values, 0)
         above = valid & (values > threshold)
@@ -494,11 +549,12 @@ def _stable_topk_regions(
             output = Scratch + row * (K + 1)
             pad = 0
         else:
-            output = Output + row * (K + 1)
-            pad = K - tl.minimum(length, K)
+            output = Output + output_row
+            pad = 0 if HISTORY_ONLY else K - tl.minimum(length, K)
         # Also initialize capture/dummy rows whose scores can be NaN.
         tl.store(output + col, -1, col < K)
-        tl.store(output + K, length)
+        if not HISTORY_ONLY:
+            tl.store(output + K, length)
         tl.debug_barrier()
         tl.store(output + pad + above_rank - 1, chosen, above)
         # Public top-k backends need not prefer smaller IDs at the cutoff.
@@ -527,8 +583,13 @@ def _stable_topk_regions(
         if SORT:
             tl.debug_barrier()
             sorted_col = tl.arange(0, BLOCK_SORT)
-            selected = tl.load(output + sorted_col, sorted_col <= K, other=2147483647)
+            valid_sort = (
+                sorted_col < tl.minimum(length, K) if HISTORY_ONLY else sorted_col <= K
+            )
+            selected = tl.load(output + sorted_col, valid_sort, other=2147483647)
             selected = tl.sort(selected, descending=False)
+            if HISTORY_ONLY:
+                selected = tl.where(sorted_col < tl.minimum(length, K), selected, -1)
         elif PREPARE_PREFILL:
             # Page metadata reads the row back; the unsorted layout (-1 left
             # padding, current last) already matches its compact-page contract.
@@ -541,7 +602,11 @@ def _stable_topk_regions(
 
     col = tl.arange(0, BLOCK_SORT)
     if SORT or short_finite:
-        tl.store(Output + row * (K + 1) + col, selected, col <= K)
+        tl.store(
+            Output + output_row + col,
+            selected,
+            col < OUTPUT_WIDTH,
+        )
     if PREPARE_PREFILL:
         _emit_prefill_pages(
             selected,
@@ -570,10 +635,15 @@ def select_regions(
     topk_lengths: torch.Tensor | None = None,
     paged_prefill: PagedPrefillMetadata | None = None,
     sort: bool = True,
+    out: torch.Tensor | None = None,
+    history_only: bool = False,
 ) -> torch.Tensor:
-    """Select stable top-k historical regions and append current.
+    """Select stable top-k historical regions.
 
-    With ``sort=False`` selected regions keep top-k order, left-padded with -1.
+    By default, rows are left-padded with -1 and include current last.
+    ``history_only`` writes a valid historical prefix without current.
+    ``out`` may supply a strided INT32/INT64 output buffer; the last dimension
+    must be contiguous. ``sort=False`` preserves deterministic top-k order.
     """
     rows, regions = scores.shape
     k = min(topk, regions)
@@ -583,8 +653,8 @@ def select_regions(
         if paged_prefill.block_size not in (16, 32, 64, 128):
             raise ValueError("Unsupported prefill cache block size")
     if regions <= topk:
-        return select_all_regions(current, k)
-    output = torch.empty((rows, k + 1), device=scores.device, dtype=torch.long)
+        return select_all_regions(current, k, out=out, history_only=history_only)
+    output = _selection_output(rows, k, scores.device, out, history_only)
     if not rows:
         return output
     # Step5 requires exact FP32 ordering. The cooperative/persistent backends
@@ -642,8 +712,11 @@ def select_regions(
         k,
         triton.next_power_of_2(k),
         1024,
-        triton.next_power_of_2(k + 1),
+        triton.next_power_of_2(max(k + 1, output.shape[1])),
         **paged_kwargs,
+        HISTORY_ONLY=history_only,
+        OUTPUT_ROW=output.stride(0),
+        OUTPUT_WIDTH=output.shape[1],
         SORT=sort,
     )
     return output

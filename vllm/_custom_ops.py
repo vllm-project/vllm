@@ -2624,7 +2624,10 @@ def fused_qknorm_rope_cache(
     rotary_dim: int,
     eps: float,
     norm_weight_bias: float = 0.0,
+    *,
+    q_dtype: torch.dtype | None = None,
     kv_cache_dtype: str = "auto",
+    q_scale: float = 1.0,
     k_scale: torch.Tensor | None = None,
     v_scale: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -2635,7 +2638,11 @@ def fused_qknorm_rope_cache(
     """
     if rotary_dim < 0 or rotary_dim > head_dim or rotary_dim % 8:
         raise ValueError("rotary_dim must be a multiple of 8 in [0, head_dim]")
-    q = qkv.new_empty((qkv.shape[0], num_q_heads * head_dim))
+    q = torch.empty(
+        (qkv.shape[0], num_q_heads * head_dim),
+        device=qkv.device,
+        dtype=qkv.dtype if q_dtype is None else q_dtype,
+    )
     k = qkv.new_empty((qkv.shape[0], num_kv_heads * head_dim))
     v = torch.empty_like(k)
     cos, sin = cos_sin_cache.chunk(2, dim=-1)
@@ -2659,6 +2666,7 @@ def fused_qknorm_rope_cache(
         eps,
         norm_weight_bias,
         kv_cache_dtype,
+        q_scale,
         k_scale,
         v_scale,
     )
