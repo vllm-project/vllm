@@ -476,6 +476,7 @@ def test_daemon_sets_its_rank_like_engine_workers(monkeypatch):
                 rank=0,
             ),
             model_config=SimpleNamespace(is_moe=False),
+            cache_config=None,
         )
         server = daemon.WeightCacheDaemon(
             vllm_config, global_rank, global_rank, "tcp://127.0.0.1:0"
