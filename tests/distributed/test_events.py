@@ -10,6 +10,7 @@ from vllm.distributed.kv_events import (
     EventBatch,
     EventPublisherFactory,
     NullEventPublisher,
+    ZmqEventPublisher,
 )
 
 DP_RANK = 0
@@ -111,6 +112,38 @@ def test_replay_includes_topic(publisher, subscriber, publisher_config):
     assert len(replayed) == 5, f"Expected 5 replayed messages, got {len(replayed)}"
     seqs = [seq for seq, _ in replayed]
     assert seqs == list(range(5)), "Replayed sequences should be 0-4"
+
+
+def test_full_replay_with_slow_subscriber(publisher_config, subscriber):
+    """A replay exceeding the default HWM must include every batch and marker."""
+    publisher_config.buffer_steps = 2500
+    publisher_config.hwm = publisher_config.buffer_steps + 1
+    pub = EventPublisherFactory.create(publisher_config, DP_RANK)
+    replay = subscriber.replay_sockets[0]
+    batch = create_test_events(1)
+    try:
+        for _ in range(publisher_config.buffer_steps):
+            pub.publish(batch)
+        for _ in range(publisher_config.buffer_steps):
+            assert subscriber.receive_one(timeout=1000) is not None
+
+        subscriber.request_replay(0)
+        assert replay.poll(1000), "Replay did not start"
+        # Leave replay unread until the publisher sends another live batch:
+        # the same thread must finish the entire replay burst before doing so.
+        pub.publish(batch)
+        assert subscriber.receive_one(timeout=1000) is not None
+
+        for expected_seq in range(publisher_config.buffer_steps):
+            assert replay.poll(1000), f"Replay stalled after {expected_seq} batches"
+            delimiter, topic, seq, payload = replay.recv_multipart()
+            assert delimiter == b"" and topic == subscriber.topic_bytes
+            assert int.from_bytes(seq, "big") == expected_seq
+            assert payload
+        assert replay.poll(1000), "Missing end-of-replay marker"
+        assert replay.recv_multipart() == [b"", b"", ZmqEventPublisher.END_SEQ, b""]
+    finally:
+        pub.shutdown()
 
 
 def test_buffer_limit(publisher, subscriber, publisher_config):
