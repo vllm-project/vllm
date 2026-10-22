@@ -92,6 +92,7 @@ async def init_render_app_state(
         reasoning_parser=reasoning_parser,
         default_chat_template_kwargs=default_chat_template_kwargs,
         log_error_stack=args.log_error_stack,
+        return_tokens_as_token_ids=args.return_tokens_as_token_ids,
     )
 
     state.openai_serving_models = model_registry

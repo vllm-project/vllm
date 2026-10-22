@@ -12,6 +12,7 @@ from vllm.entrypoints.generate.base.serving import (
     chat_top_logprobs_limit,
     completion_top_logprobs_limit,
     decode_token_ids,
+    format_token_id_placeholder,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProb,
@@ -83,10 +84,12 @@ class OnlineDerenderer:
         tool_strict_level: str | None = None,
         default_chat_template_kwargs: dict[str, Any] | None = None,
         log_error_stack: bool = False,
+        return_tokens_as_token_ids: bool = False,
     ) -> None:
         self.model_config = model_config
         self.renderer = renderer
         self.request_logger = request_logger
+        self.return_tokens_as_token_ids = return_tokens_as_token_ids
 
         # EOS ids the engine stops on, loaded once like InputProcessor does.
         self._eos_token_id = renderer.get_eos_token_id()
@@ -196,6 +199,13 @@ class OnlineDerenderer:
         if not stopped or (request is not None and request.include_stop_str_in_output):
             return token_ids, stop_reason
         return token_ids[:-1], stop_reason
+
+    def _return_tokens_as_token_ids(
+        self, request: ChatCompletionRequest | CompletionRequest | None
+    ) -> bool:
+        if request is not None and request.return_tokens_as_token_ids is not None:
+            return request.return_tokens_as_token_ids
+        return self.return_tokens_as_token_ids
 
     def _decode_output(
         self,
@@ -310,6 +320,9 @@ class OnlineDerenderer:
                     choice.logprobs,
                     tokenizer,
                     top_limit=top_limit,
+                    return_tokens_as_token_ids=self._return_tokens_as_token_ids(
+                        chat_request
+                    ),
                 )
                 if choice.logprobs is not None and not hide_metadata
                 else None
@@ -667,6 +680,9 @@ class OnlineDerenderer:
                     tokenizer,
                     initial_context_token_ids=state.logprob_context_token_ids,
                     top_limit=top_limit,
+                    return_tokens_as_token_ids=self._return_tokens_as_token_ids(
+                        chat_request
+                    ),
                 )
 
             include_role = not updated_state.role_sent
@@ -852,6 +868,9 @@ class OnlineDerenderer:
                     tokenizer,
                     initial_context_token_ids=state.logprob_context_token_ids,
                     top_limit=top_limit,
+                    return_tokens_as_token_ids=self._return_tokens_as_token_ids(
+                        chat_request
+                    ),
                 )
             logprob_context = _logprob_context_tail(
                 state.logprob_context_token_ids, delta_tids
@@ -988,6 +1007,9 @@ class OnlineDerenderer:
                         choice.logprobs,
                         tokenizer,
                         top_limit=top_limit,
+                        return_tokens_as_token_ids=self._return_tokens_as_token_ids(
+                            completion_request
+                        ),
                     )
                     completion_logprobs = _convert_chat_logprobs_to_completion_logprobs(
                         resolved, choice.logprobs
@@ -1091,6 +1113,9 @@ class OnlineDerenderer:
                     tokenizer,
                     initial_context_token_ids=state.logprob_context_token_ids,
                     top_limit=top_limit,
+                    return_tokens_as_token_ids=self._return_tokens_as_token_ids(
+                        completion_request
+                    ),
                 )
                 completion_logprobs = _convert_chat_logprobs_to_completion_logprobs(
                     resolved,
@@ -1298,6 +1323,7 @@ def _resolve_logprobs(
     tokenizer: TokenizerLike,
     initial_context_token_ids: Sequence[int] = (),
     top_limit: int | None = None,
+    return_tokens_as_token_ids: bool = False,
 ) -> ChatCompletionLogProbs:
     """Convert generate's integer-id logprobs to the OpenAI chat shape.
 
@@ -1324,12 +1350,15 @@ def _resolve_logprobs(
             entry.top_logprobs if top_limit is None else entry.top_logprobs[:top_limit]
         )
         # One batch per position: the sampled id and its kept top-k ids.
-        (token_str, token_bytes), *top_decoded = decode_token_ids(
-            [entry.token_id, *(top.token_id for top in top_entries)],
-            tokenizer,
+        token_ids = [entry.token_id, *(top.token_id for top in top_entries)]
+        decoded = (
+            [(format_token_id_placeholder(tid), None) for tid in token_ids]
+            if return_tokens_as_token_ids
+            else decode_token_ids(token_ids, tokenizer)
         )
+        (token_str, token_bytes), *top_decoded = decoded
 
-        if token_str.endswith("\ufffd"):
+        if not return_tokens_as_token_ids and token_str.endswith("\ufffd"):
             token_str = _correct_decoded_token(
                 entry.token_id, context_token_ids, tokenizer
             )
@@ -1337,7 +1366,7 @@ def _resolve_logprobs(
 
         resolved_top = []
         for top, (top_str, top_bytes) in zip(top_entries, top_decoded):
-            if top_str.endswith("\ufffd"):
+            if not return_tokens_as_token_ids and top_str.endswith("\ufffd"):
                 top_str = _correct_decoded_token(
                     top.token_id, context_token_ids, tokenizer
                 )

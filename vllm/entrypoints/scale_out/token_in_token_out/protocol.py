@@ -65,6 +65,7 @@ class ParseContext(BaseModel):
     ) = "none"
     parallel_tool_calls: bool | None = True
     include_reasoning: bool = True
+    return_tokens_as_token_ids: bool | None = None
     chat_template_kwargs: dict[str, JsonValue] = Field(default_factory=dict)
     """Template kwargs with the render server's defaults already applied,
     without the API server only entries a handler keeps out of the engine."""
@@ -96,6 +97,7 @@ class ParseContext(BaseModel):
             tool_choice=self.tool_choice,
             parallel_tool_calls=self.parallel_tool_calls,
             include_reasoning=self.include_reasoning,
+            return_tokens_as_token_ids=self.return_tokens_as_token_ids,
             chat_template_kwargs=self.chat_template_kwargs,
         )
 

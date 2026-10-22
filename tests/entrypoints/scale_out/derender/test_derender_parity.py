@@ -51,6 +51,90 @@ ARGS = [
     "--enable-scale-out",
 ]
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("server_flag", [False, True])
+async def test_derender_logprob_request_override(server_flag, tmp_path):
+    """Both derender routes must use the same tri-state override as coupled chat."""
+    template = tmp_path / "chat.jinja"
+    template.write_text("{{ messages[0]['content'] }}")
+    args = [
+        "--served-model-name",
+        "tiny",
+        "--chat-template",
+        str(template),
+        "--enable-scale-out",
+        "--enforce-eager",
+        "--max-model-len",
+        "128",
+        "--max-num-seqs",
+        "2",
+        "--no-enable-prefix-caching",
+        "--kv-cache-memory-bytes",
+        "134217728",
+        "--gpu-memory-utilization",
+        "0.12",
+        "--shutdown-timeout",
+        "15",
+    ]
+    if server_flag:
+        args.append("--return-tokens-as-token-ids")
+    with RemoteOpenAIServer("hmellor/tiny-random-LlamaForCausalLM", args) as server:
+        transport = httpx.AsyncHTTPTransport(uds=server.uds) if server.uds else None
+        async with httpx.AsyncClient(
+            base_url=server.url_root,
+            transport=transport,
+            timeout=60,
+            headers={"Authorization": f"Bearer {server.DUMMY_API_KEY}"},
+        ) as client:
+            for override in (None, False, True):
+                request = {
+                    "model": "tiny",
+                    "messages": [{"role": "user", "content": "Hi"}],
+                    "max_completion_tokens": 2,
+                    "temperature": 0,
+                    "logprobs": True,
+                    "top_logprobs": 2,
+                }
+                if override is not None:
+                    request["return_tokens_as_token_ids"] = override
+                coupled = await client.post("/v1/chat/completions", json=request)
+                assert coupled.status_code == 200, coupled.text
+                expected = coupled.json()["choices"][0]["logprobs"]
+                assert expected and expected["content"]
+                placeholders = server_flag if override is None else override
+                if placeholders:
+                    # Generate placeholders have no bytes, unlike coupled chat.
+                    for entry in expected["content"]:
+                        entry["bytes"] = None
+                        for top in entry["top_logprobs"]:
+                            top["bytes"] = None
+                rendered = await client.post(
+                    "/v1/chat/completions/render", json=request
+                )
+                assert rendered.status_code == 200, rendered.text
+                payload = rendered.json()
+                for mode in ("derender", "tokens"):
+                    generated = await client.post(
+                        "/inference/v1/generate", json={**payload, "output_mode": mode}
+                    )
+                    assert generated.status_code == 200, generated.text
+                    result = generated.json()
+                    if mode == "tokens":
+                        derendered = await client.post(
+                            "/v1/chat/completions/derender",
+                            json={
+                                "model": "tiny",
+                                "chat_request": request,
+                                "prompt_token_ids": payload["token_ids"],
+                                "generate_response": result,
+                            },
+                        )
+                        assert derendered.status_code == 200, derendered.text
+                        result = derendered.json()
+                    assert result["choices"][0]["logprobs"] == expected
+
+
 TOOLS = [
     {
         "type": "function",
