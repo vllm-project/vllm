@@ -31,6 +31,7 @@ class SpecDecodingStats:
     num_accepted_tokens: int = 0
     num_accepted_tokens_per_pos: list[int] = field(default_factory=list)
     num_draft_tokens_per_pos: list[int] = field(default_factory=list)
+    num_verified_draft_tokens_per_pos: list[int] = field(default_factory=list)
 
     @classmethod
     def new(cls, num_spec_tokens: int) -> "SpecDecodingStats":
@@ -38,6 +39,7 @@ class SpecDecodingStats:
             num_spec_tokens=num_spec_tokens,
             num_accepted_tokens_per_pos=[0] * num_spec_tokens,
             num_draft_tokens_per_pos=[0] * num_spec_tokens,
+            num_verified_draft_tokens_per_pos=[0] * num_spec_tokens,
         )
 
     def observe_draft_stats_per_req(
@@ -51,6 +53,8 @@ class SpecDecodingStats:
         self.num_accepted_tokens += num_accepted_tokens
         if num_verified_draft_tokens is not None:
             self.num_verified_draft_tokens += num_verified_draft_tokens
+            for i in range(num_verified_draft_tokens):
+                self.num_verified_draft_tokens_per_pos[i] += 1
         assert num_accepted_tokens <= self.num_spec_tokens
         for i in range(num_accepted_tokens):
             self.num_accepted_tokens_per_pos[i] += 1
@@ -288,6 +292,9 @@ class SpecDecodingProm:
         self.counter_spec_decode_num_accepted_tokens = counters[2]
 
         self.counter_spec_decode_num_verified_draft_tokens = None
+        self.counter_spec_decode_num_verified_draft_tokens_per_pos: dict[
+            int, list[prometheus_client.Counter]
+        ] = {}
         if not is_diffusion:
             assert speculative_config is not None
             if speculative_config.enable_adaptive_verification:
@@ -299,6 +306,18 @@ class SpecDecodingProm:
                 self.counter_spec_decode_num_verified_draft_tokens = (
                     create_metric_per_engine(metric, per_engine_labelvalues)
                 )
+                per_pos_metric = self._counter_cls(
+                    name="vllm:spec_decode_num_verified_draft_tokens_per_pos",
+                    documentation="Draft tokens actually verified per draft position.",
+                    labelnames=labelnames + ["position"],
+                )
+                self.counter_spec_decode_num_verified_draft_tokens_per_pos = {
+                    idx: [
+                        per_pos_metric.labels(*lv, str(pos))
+                        for pos in range(speculative_config.num_speculative_tokens)
+                    ]
+                    for idx, lv in per_engine_labelvalues.items()
+                }
 
         self.counter_spec_decode_num_accepted_tokens_per_pos: dict[
             int, list[prometheus_client.Counter]
@@ -335,6 +354,12 @@ class SpecDecodingProm:
             self.counter_spec_decode_num_verified_draft_tokens[engine_idx].inc(
                 spec_decoding_stats.num_verified_draft_tokens
             )
+        for pos, counter in enumerate(
+            self.counter_spec_decode_num_verified_draft_tokens_per_pos.get(
+                engine_idx, []
+            )
+        ):
+            counter.inc(spec_decoding_stats.num_verified_draft_tokens_per_pos[pos])
         for pos, counter in enumerate(
             self.counter_spec_decode_num_accepted_tokens_per_pos.get(engine_idx, [])
         ):
