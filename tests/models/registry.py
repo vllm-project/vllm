@@ -1527,6 +1527,19 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
         max_num_seqs=32,
     ),
+    # [XPress]
+    "Qwen3XPressModel": _HfExamplesInfo(
+        "Qwen/Qwen3-8B",
+        speculative_model="UIUC-SSAIL/Qwen3-8B-XPress-b16",
+        use_original_num_layers=True,  # The refiner reads aux hidden states
+        max_num_seqs=16,  # XPress sizes a [max_num_seqs * block, vocab] scratch
+    ),
+    "DFlashQwen3XPressModel": _HfExamplesInfo(
+        "Qwen/Qwen3-8B",
+        speculative_model="UIUC-SSAIL/Qwen3-8B-XPress-b16",
+        use_original_num_layers=True,  # The refiner reads aux hidden states
+        max_num_seqs=16,  # XPress sizes a [max_num_seqs * block, vocab] scratch
+    ),
     # [DSpark]
     "DSparkDraftModel": _HfExamplesInfo(
         "deepseek-ai/DeepSeek-V4-Pro-DSpark",
