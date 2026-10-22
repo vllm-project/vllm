@@ -238,6 +238,8 @@ def _check_indexer_forwards(config, device, rank, comm):
         BatchSpec(seq_lens=[128, 2306], query_lens=[4, 4]),
         BatchSpec(seq_lens=[128, 2307], query_lens=[8, 8]),
         BatchSpec(seq_lens=[2305, 2561, 2691, 2720], query_lens=[1, 1, 1027, 127]),
+        BatchSpec(seq_lens=[2308, 2564, 2691, 2720], query_lens=[4, 4, 1027, 127]),
+        BatchSpec(seq_lens=[2305, 2562, 2691, 2720], query_lens=[1, 2, 3, 4]),
         BatchSpec(seq_lens=[2691], query_lens=[1027]),
         BatchSpec(seq_lens=[129, 2305], query_lens=[1, 1]),
     ]
@@ -249,7 +251,7 @@ def _check_indexer_forwards(config, device, rank, comm):
         common.block_table_tensor = torch.randperm(num_pages, device=device)[
             common.block_table_tensor.long()
         ].int()
-        if len(batch.query_lens) > 1 and batch.query_lens[-1] > 8:
+        if len(set(batch.query_lens)) > 1:
             # Shared prefix pages must retain each request's logical order.
             common.block_table_tensor[-1, :8] = common.block_table_tensor[-2, :8]
         common.positions = torch.cat(
@@ -287,6 +289,15 @@ def _check_indexer_forwards(config, device, rank, comm):
             queries.append(query.to(torch.float8_e4m3fn))
         metadata = [builder.build(0, common) for builder in builders]
         assert metadata[2].unified_scores is None
+        expected_decode = {
+            (4, 4, 1027, 127): (2, 8),
+            (1, 2, 3, 4): (1, 1),
+        }.get(tuple(batch.query_lens))
+        if expected_decode is not None:
+            assert all(
+                (md.num_decodes, md.num_decode_tokens) == expected_decode
+                for md in metadata
+            )
 
         # Compile before capture. No host assertion/barrier between layers or
         # repeated steps: those would hide receive-slot reuse races.
