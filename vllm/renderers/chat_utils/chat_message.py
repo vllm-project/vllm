@@ -567,7 +567,8 @@ def parse_chat_message_content_part(
         # Emit the renderer token inline regardless of `interleave_strings`.
         # Falling back to front-padding via `missing_placeholders` would
         # reorder them relative to surrounding text.
-        return cast(str, prompt_embeds_placeholder)
+        assert prompt_embeds_placeholder is not None
+        return prompt_embeds_placeholder
     return MODALITY_PLACEHOLDERS_MAP[modality] if interleave_strings else None
 
 
