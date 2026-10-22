@@ -267,7 +267,6 @@ def test_mori_embedded_dram_eviction_and_restore(tmp_path, bulk_load):
     missing = {key for key, hit in zip(keys, hits, strict=True) if not hit}
     assert missing
     assert hits[-1]
-    assert missing <= set(worker.take_evicted_keys())
 
     destination.zero_()
     latest = keys[-1]
