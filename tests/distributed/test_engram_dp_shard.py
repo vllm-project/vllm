@@ -200,6 +200,8 @@ def _worker(rank: int, tp_size: int, port: int) -> None:
 
         for failure in ("create", "open", "mmap", "register", "pinned", None):
             _check_shared_storage_lifetime_and_failures(failure)
+        for failure in (None, "create", "import"):
+            _check_cumem_host_table(failure)
 
         # Reuse the processes and communication groups across storage modes.
         for (cpu_offload, dp_shared_memory), n_heads, sequence_parallel in product(
@@ -332,8 +334,10 @@ def _check_shared_storage_lifetime_and_failures(failure):
         return result
 
     with pytest.MonkeyPatch.context() as patch:
-        # Exercise the /dev/shm path even where FABRIC cuMem tables are used.
-        patch.setattr(engram_ops, "_fabric_host_tables_supported", lambda: False)
+        # Exercise the /dev/shm path even where cuMem tables are used.
+        patch.setattr(
+            engram_ops.DPSharedEngramStorage, "_allocate_cumem", lambda *args: None
+        )
         patch.setattr(
             engram_ops,
             "tempfile",
@@ -380,6 +384,40 @@ def _check_shared_storage_lifetime_and_failures(failure):
             mapped = ref()
             assert mapped is None or mapped.closed
         assert all(not path.exists() for path in paths)
+
+
+def _check_cumem_host_table(failure):
+    """Chunked cuMem tables read back across ranks; a failed allocation or
+    import on any rank falls back to /dev/shm on all of them."""
+    if not engram_ops._cumem_tables_fit(0):
+        return
+    from vllm.models.deepseek_v41.nvidia.ops import engram_host_table
+
+    group = get_engram_dp_group()
+    # Three 2 MiB chunks, the last one partial.
+    rows = 5 * (1 << 20) // DIM
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(engram_host_table, "CHUNK_BYTES", 2 << 20)
+        if failure == "create" and group.rank_in_group == 0:
+            patch.setattr(engram_host_table, "NODE_RESERVE", 1.0)
+        if failure == "import" and group.rank_in_group == 1:
+            patch.setattr(
+                engram_host_table.cu,
+                "cuMemImportFromShareableHandle",
+                lambda *args: (
+                    engram_host_table.cu.CUresult.CUDA_ERROR_INVALID_VALUE,
+                    None,
+                ),
+            )
+        storage = engram_ops.DPSharedEngramStorage(rows, DIM, BLOCK, group)
+    assert storage.backing == ("/dev/shm" if failure else "cuMem")
+    table = torch.arange(rows * DIM).remainder(251).to(torch.uint8).view(rows, DIM)
+    if group.rank_in_group == 0:
+        storage.weight.view(torch.uint8).copy_(table)
+    group.barrier()
+    weight, _ = storage.get_views(storage.weight, storage.weight_scale_inv)
+    assert torch.equal(weight.view(torch.uint8).cpu(), table)
+    group.barrier()
 
 
 def _check_table(
