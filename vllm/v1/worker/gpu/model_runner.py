@@ -179,6 +179,7 @@ from vllm.v1.worker.gpu.structured_outputs import (
     StructuredOutputsWorker,
     grammar_invalid_drafts,
 )
+from vllm.v1.worker.gpu.suffix_staging import SuffixTokenStaging
 from vllm.v1.worker.gpu.ubatch_utils import (
     UBatchRunner,
     UBatchState,
@@ -345,6 +346,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.prompt_logprobs_worker: PromptLogprobsWorker | None = None
         self.structured_outputs_worker: StructuredOutputsWorker | None = None
         self.cudagraph_manager: ModelCudaGraphManager | None = None
+        self.suffix_staging: SuffixTokenStaging | None = None
 
         # LoRA-related workers.
         self.lora_state = LoraState(max_num_reqs=self.max_num_reqs)
@@ -463,6 +465,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         config_processors = self.model_config.logits_processors or ()
         custom_logits_processors = build_custom_logits_processors(
             self.vllm_config, self.req_states, self.is_pooling_model, config_processors
+        )
+        self.suffix_staging = SuffixTokenStaging.create(
+            self.vllm_config,
+            bool(custom_logits_processors),
+            self.model_state.token_lookback_depth,
         )
         if self.is_last_pp_rank and not self.is_pooling_model:
             # Speculative verification uses native top-k/top-p masking even
@@ -1211,12 +1218,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             prompt_len = new_req_data.prompt_len
             sampling_params = new_req_data.sampling_params
+            staging_start = 0
+            if self.suffix_staging is not None:
+                staging_start = self.suffix_staging.get_start(new_req_data)
             self.req_states.add_request(
                 req_id=req_id,
                 prompt_len=prompt_len,
                 all_token_ids=new_req_data.prefill_token_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 max_tokens=sampling_params.max_tokens if sampling_params else 1,  # type: ignore[arg-type]
+                staging_start=staging_start,
             )
             req_index = self.req_states.req_id_to_index[req_id]
             if self.adaptive_verification is not None:

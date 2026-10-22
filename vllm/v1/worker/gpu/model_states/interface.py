@@ -254,3 +254,7 @@ class ModelState(ABC):
     num_new_sampled_tokens_per_step: int = 1
     """New tokens sampled on each decode step 
     (excluding accepted draft tokens, a.k.a num bonus tokens)."""
+
+    token_lookback_depth: int = 0
+    """Number of tokens below ``num_computed_tokens`` that the model state
+    reads from ``RequestState.all_token_ids``."""

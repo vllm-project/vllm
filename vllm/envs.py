@@ -309,6 +309,8 @@ if TYPE_CHECKING:
     VLLM_COHERE2_ATTN_MOE_DUAL_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool | None = None
+    VLLM_SUFFIX_TOKEN_STAGING: int | None = None
+    VLLM_SUFFIX_TOKEN_STAGING_MIN: int = 4096
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
@@ -2146,6 +2148,24 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Flag to control the v2 model runner. If unset, use config defaults.
     "VLLM_USE_V2_MODEL_RUNNER": lambda: maybe_convert_bool(
         os.getenv("VLLM_USE_V2_MODEL_RUNNER", None)
+    ),
+    # Model Runner V2 only. If set, a new request with a prefix-cache hit
+    # stages only its token ids from min(num_computed_tokens, prompt_len)
+    # minus this margin (at least the model's token lookback) into the
+    # persistent token-id buffer, instead of its whole history. Requests
+    # that read older tokens (prompt logprobs, repetition penalty, bad words,
+    # thinking budget, multimodal, pooling) are staged fully, and it is
+    # disabled with watermarking, custom logits processors, n-gram
+    # speculative decoding and KV connectors.
+    # Unset (default): off.
+    "VLLM_SUFFIX_TOKEN_STAGING": lambda: maybe_convert_int(
+        os.getenv("VLLM_SUFFIX_TOKEN_STAGING", None)
+    ),
+    # With VLLM_SUFFIX_TOKEN_STAGING set, only skip the prefix of requests
+    # whose staging start is at least this many tokens; shorter hits are
+    # staged fully.
+    "VLLM_SUFFIX_TOKEN_STAGING_MIN": lambda: int(
+        os.getenv("VLLM_SUFFIX_TOKEN_STAGING_MIN", "4096")
     ),
     # Log model inspection after loading.
     # If enabled, logs a transformers-style hierarchical view of the model

@@ -43,6 +43,7 @@ class Qwen4ExpModelState(MambaHybridModelState):
         self.ngram_context_len = int(config.ngram_size) - 1
         if self.ngram_context_len <= 0:
             raise ValueError("N-gram embedding requires context length >= 1.")
+        self.token_lookback_depth = self.ngram_context_len
         self.ngram_eos_token_id = int(config.eos_token_id)
         self.ngram_context = torch.full(
             (self.max_num_reqs, self.ngram_context_len),
