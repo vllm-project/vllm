@@ -4,7 +4,7 @@
 
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, ClassVar, Self
 
 import torch
@@ -91,11 +91,15 @@ class NCCLWeightTransferUpdateInfo(WeightTransferUpdateInfo):
     wire param carried on the init info (`NCCLTrainerInitInfo` /
     `NCCLWeightTransferInitInfo`), not here; this carries only the per-round
     parameter metadata.
+
+    Leave all three lists empty to reuse the metadata of the previous
+    `update_weights` call on the same model, so a trainer that sends the same
+    parameters every round ships the names, dtypes and shapes only once.
     """
 
-    names: list[str]
-    dtype_names: list[str]
-    shapes: list[list[int]]
+    names: list[str] = field(default_factory=list)
+    dtype_names: list[str] = field(default_factory=list)
+    shapes: list[list[int]] = field(default_factory=list)
 
     def __post_init__(self):
         """Validate that all lists have the same length."""
@@ -141,6 +145,8 @@ class NCCLWeightTransferEngine(
         self.packed = False
         self.packed_buffer_size_bytes = DEFAULT_PACKED_BUFFER_SIZE_BYTES
         self.packed_num_buffers = DEFAULT_PACKED_NUM_BUFFERS
+        # Metadata of the last update per model, reused by empty update info.
+        self._last_update_info: dict[torch.nn.Module, NCCLWeightTransferUpdateInfo] = {}
 
     def init_transfer_engine(self, init_info: NCCLWeightTransferInitInfo) -> None:
         """Initialize NCCL process group with the trainer and record the
@@ -155,6 +161,7 @@ class NCCLWeightTransferEngine(
         self.packed = init_info.packed
         self.packed_buffer_size_bytes = init_info.packed_buffer_size_bytes
         self.packed_num_buffers = init_info.packed_num_buffers
+        self._last_update_info.clear()
         self.model_update_group = worker_init_process_group(
             init_info, self.parallel_config
         )
@@ -185,7 +192,7 @@ class NCCLWeightTransferEngine(
 
         Args:
             update_info: NCCL update info containing parameter names, dtypes,
-                        and shapes
+                        and shapes; empty to reuse the previous call's
 
         """
         if self.model_update_group is None:
@@ -193,6 +200,10 @@ class NCCLWeightTransferEngine(
                 "NCCL weight transfer not initialized. "
                 "Call init_transfer_engine() first."
             )
+        if update_info.names:
+            self._last_update_info[self.model] = update_info
+        else:
+            update_info = self._last_update_info.get(self.model, update_info)
 
         from vllm.model_executor.model_loader.mtp_validation import (
             disable_mtp_completeness_check,
@@ -269,6 +280,8 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         self.packed_buffer_size_bytes = packed_buffer_size_bytes
         self.packed_num_buffers = packed_num_buffers
         self.model_update_group: WeightTransferCommunicator | None = None
+        # Metadata the worker already holds; an unchanged round sends none.
+        self._sent_meta: list[ParamMeta] | None = None
 
     @classmethod
     def trainer_init(
@@ -332,11 +345,14 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
             self._post_send_sync()
             return
 
-        update_info = NCCLWeightTransferUpdateInfo(
-            names=[m.name for m in meta],
-            dtype_names=[str(m.dtype).split(".")[-1] for m in meta],
-            shapes=[list(m.shape) for m in meta],
-        )
+        if meta == self._sent_meta:
+            update_info = NCCLWeightTransferUpdateInfo()
+        else:
+            update_info = NCCLWeightTransferUpdateInfo(
+                names=[m.name for m in meta],
+                dtype_names=[str(m.dtype).split(".")[-1] for m in meta],
+                shapes=[list(m.shape) for m in meta],
+            )
 
         self.client.start_weight_update()
         # update_weights (workers receive) must run concurrently with the
@@ -361,6 +377,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
             # to exit cleanly after such a failure must not wait on it.)
             exe.shutdown(wait=False)
         self.client.finish_weight_update()
+        self._sent_meta = meta
         self._post_send_sync()
 
     def _broadcast(self, source: WeightSource, meta: list[ParamMeta]) -> None:
