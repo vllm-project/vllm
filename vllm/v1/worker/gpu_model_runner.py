@@ -208,6 +208,7 @@ from vllm.v1.worker.gpu.eplb_utils import (
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
+from vllm.v1.worker.kv_key_bias_preflight import check_key_bias_under_quantized_kv
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
@@ -5025,6 +5026,16 @@ class GPUModelRunner(
                     self.model = model or model_loader.load_model(
                         vllm_config=self.vllm_config,
                         model_config=self.model_config,
+                    )
+                if not load_dummy_weights:
+                    # Startup warning only, no behaviour change: a quantized
+                    # KV cache on a model whose first attention layer has a
+                    # large key bias (Qwen2 / Qwen2.5) is known to answer at
+                    # chance. See kv_key_bias_preflight.py.
+                    check_key_bias_under_quantized_kv(
+                        self.model,
+                        self.cache_config.cache_dtype,
+                        self.cache_config.kv_cache_dtype_skip_layers,
                     )
                 lookback_depth = getattr(self.model, "token_lookback_depth", 0)
                 if lookback_depth > 0:

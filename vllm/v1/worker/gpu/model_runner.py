@@ -116,6 +116,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 )
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.ec_connector import get_ec_connector
+from vllm.v1.worker.kv_key_bias_preflight import check_key_bias_under_quantized_kv
 from vllm.v1.worker.gpu.eplb_utils import EPLBController, step_eplb_after
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
@@ -403,6 +404,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.model = model or model_loader.load_model(
                     vllm_config=self.vllm_config,
                     model_config=self.vllm_config.model_config,
+                )
+            if not load_dummy_weights:
+                # Startup warning only, no behaviour change: a quantized
+                # KV cache on a model whose first attention layer has a
+                # large key bias (Qwen2 / Qwen2.5) is known to answer at
+                # chance. See kv_key_bias_preflight.py.
+                check_key_bias_under_quantized_kv(
+                    self.model,
+                    self.cache_config.cache_dtype,
+                    self.cache_config.kv_cache_dtype_skip_layers,
                 )
             if self.lora_config:
                 self.model = self.load_lora_model(
