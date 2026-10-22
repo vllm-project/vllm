@@ -10,11 +10,13 @@ import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
 import msgspec
 import pytest
 import torch
 import zmq.asyncio
+
+# The connector takes httpx from huggingface_hub, which is httpx2 under hub 2.x.
+from huggingface_hub.utils import httpx
 
 from tests.v1.attention.utils import dense_kv_cache_views
 from vllm import envs
@@ -1141,7 +1143,7 @@ def patch_worker_dependencies():
         patch(
             "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.make_zmq_socket"
         ) as mock_make_zmq,
-        patch("httpx.AsyncClient") as mock_async_client,
+        patch.object(httpx, "AsyncClient") as mock_async_client,
     ):
         # Mock PP group
         mock_pp_group = MagicMock()
