@@ -22,6 +22,12 @@ def _has_device_capability(major: int) -> bool:
     return current_platform.is_cuda() and current_platform.has_device_capability(major)
 
 
+def _has_cooperative_topk() -> bool:
+    return _has_device_capability(
+        90
+    ) and not current_platform.is_device_capability_family(120)
+
+
 def _on_gfx950() -> bool:
     if not current_platform.is_rocm():
         return False
@@ -1809,7 +1815,9 @@ def test_cooperative_topk_overflow_mixed_lengths(num_rows: int, top_k: int) -> N
         )
 
 
-@pytest.mark.skipif(not _has_device_capability(90), reason="This test requires SM90+")
+@pytest.mark.skipif(
+    not _has_cooperative_topk(), reason="This test requires cooperative_topk"
+)
 @pytest.mark.parametrize("num_rows", [1, 9, 64])
 @pytest.mark.parametrize("seq_len", [65536, 262144, 1048576])
 @torch.inference_mode()
@@ -2141,12 +2149,6 @@ def _has_flashinfer_topk() -> bool:
     import importlib.util
 
     return importlib.util.find_spec("flashinfer") is not None
-
-
-def _has_cooperative_topk() -> bool:
-    return _has_device_capability(
-        90
-    ) and not current_platform.is_device_capability_family(120)
 
 
 SPARSE_INDEXER_EXPLICIT_BACKENDS = [
