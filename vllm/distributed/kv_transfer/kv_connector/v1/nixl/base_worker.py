@@ -900,7 +900,6 @@ class NixlBaseConnectorWorker:
         self.dst_uses_region_group_mapping: dict[EngineId, bool] = {}
         self.dst_region_mem_types: dict[EngineId, list[str]] = {}
         self._registered_descs: list[Any] = []
-        self._kv_unregistered = False
 
         # In progress transfers.
         # [req_id -> list[handle]]
@@ -1938,13 +1937,13 @@ class NixlBaseConnectorWorker:
         return self._ple_block_len
 
     def unregister_kv_caches(self) -> None:
-        if self._kv_unregistered or not self._registered_descs:
+        if self.nixl_wrapper is None or not self._registered_descs:
             return
         if self._recving_transfers:
             raise RuntimeError(
                 "NIXL transfers must drain before unregistering KV caches"
             )
-        # The executor has one worker. A barrier also waits for its callbacks.
+        # Wait for pending handshakes and their callbacks.
         self._handshake_initiation_executor.submit(lambda: None).result()
         self._release_local_xfer_handles()
         # Remote engines hold local handles too; they handshake again on demand.
@@ -1952,12 +1951,11 @@ class NixlBaseConnectorWorker:
             self._cleanup_remote_engine(engine_id, log_eviction=False)
         for descs in self._registered_descs:
             self.nixl_wrapper.deregister_memory(descs)
-        # Deregistration alone can leave physical pages in UCX's local cache.
+        # Destroy the agent to release UCX's registration cache.
         self.nixl_wrapper = None
-        self._kv_unregistered = True
 
     def restore_kv_caches(self) -> None:
-        if not self._kv_unregistered:
+        if self.nixl_wrapper is not None:
             return
         self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), self._nixl_agent_config)
         try:
@@ -1976,12 +1974,10 @@ class NixlBaseConnectorWorker:
             agent_metadata.agent_metadata = self.nixl_wrapper.get_agent_metadata()
             payload.agent_metadata_bytes = msgspec.msgpack.encode(agent_metadata)
         except Exception:
-            try:
+            with contextlib.suppress(Exception):
                 self._release_local_xfer_handles()
-            finally:
-                self.nixl_wrapper = None
+            self.nixl_wrapper = None
             raise
-        self._kv_unregistered = False
 
     def _build_mamba_local(self, base_addresses: list[int]) -> np.ndarray:
         """Build desc regions (conv sub-projections + ssm) per layer for
@@ -4106,7 +4102,7 @@ class NixlBaseConnectorWorker:
         except Exception:
             logger.exception("NIXL remote-engine cleanup failed at shutdown.")
         try:
-            if not self._kv_unregistered:
+            if self.nixl_wrapper is not None:
                 for desc in self._registered_descs:
                     self.nixl_wrapper.deregister_memory(desc)
         finally:
