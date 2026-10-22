@@ -125,17 +125,24 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         if self.prefill_cudagraph_manager.use_breakable_cg:
             self.prefill_cudagraph_manager.init_breakable_cg_runner(self.model)
 
-        self.on_prefill_begin(self.max_num_reqs)
-        self.prefill_cudagraph_manager.capture(
-            self._prefill,
-            self.model_state,
-            self.target_input_buffers,
-            self.block_tables,
-            self.target_attn_groups,
-            self.kv_cache_config,
-            progress_bar_desc="Capturing prefill CUDA graphs",
-        )
-        self.on_prefill_end(self.max_num_reqs)
+        if self.pcp_manager is not None:
+            # Capture uses generic dummy inputs, but under PCP the draft prefill
+            # runs on inputs the PCP manager prepares; capturing it fails in the
+            # sparse indexer. Without prefill graphs the draft prefill runs
+            # eagerly while the target model keeps its piecewise graphs.
+            logger.info("PCP: draft prefill runs eagerly (no prefill CUDA graphs).")
+        else:
+            self.on_prefill_begin(self.max_num_reqs)
+            self.prefill_cudagraph_manager.capture(
+                self._prefill,
+                self.model_state,
+                self.target_input_buffers,
+                self.block_tables,
+                self.target_attn_groups,
+                self.kv_cache_config,
+                progress_bar_desc="Capturing prefill CUDA graphs",
+            )
+            self.on_prefill_end(self.max_num_reqs)
 
         if self.num_speculative_steps == 1:
             return
