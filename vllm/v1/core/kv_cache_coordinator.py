@@ -429,6 +429,7 @@ class KVCacheCoordinator(ABC):
                         manager.block_size,
                         group_idx,
                         start_block=run_start,
+                        num_cached_tokens=hit.num_computed_tokens,
                     )
                     run_start = None
 

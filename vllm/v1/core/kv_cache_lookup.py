@@ -33,7 +33,6 @@ class JointCacheLookup:
         self.hash_block_size = gpu.hash_block_size
         self.null_block = gpu.null_block
         self._hits: dict[tuple[BlockHash, int], KVCacheBlock | None] = {}
-        self.cpu_objects: set[int] = set()
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
@@ -45,8 +44,6 @@ class JointCacheLookup:
                 hit = self.gpu.get_cached_block(block_hash, [group])
                 if hit is None:
                     hit = self.cpu.get_cached_block(block_hash, [group])
-                    if hit is not None:
-                        self.cpu_objects.add(id(hit[0]))
                 self._hits[key] = hit[0] if hit is not None else None
             block = self._hits[key]
             if block is None:
@@ -85,44 +82,44 @@ class JointCacheHit:
         lookup: JointCacheLookup,
         block_hashes: list[BlockHash],
         max_length: int,
-        block_size: int,
+        scheduler_block_size: int,
     ) -> "JointCacheHit":
         blocks, length, uncached = coordinator.find_longest_cache_hit(
             block_hashes, max_length, lookup=lookup
         )
-        while length % block_size and any(
-            id(block) in lookup.cpu_objects for group in blocks for block in group
+        while length % scheduler_block_size and any(
+            block.pool is lookup.cpu for group in blocks for block in group
         ):
             blocks, length, uncached = coordinator.find_longest_cache_hit(
                 block_hashes,
-                length // block_size * block_size,
+                length // scheduler_block_size * scheduler_block_size,
                 lookup=lookup,
             )
         hits = tuple(
-            [CacheHitBlock(block, id(block) in lookup.cpu_objects) for block in group]
+            [CacheHitBlock(block, block.pool is lookup.cpu) for block in group]
             for group in blocks
         )
-        gpu_prefix = length
-        cpu_units: set[int] = set()
-        hash_size = lookup.hash_block_size
+        gpu_prefix_tokens = length
+        cpu_hash_blocks: set[int] = set()
+        hash_block_size = lookup.hash_block_size
         for group, manager in zip(hits, coordinator.single_type_managers, strict=True):
-            group_size = manager.block_size
             for index, hit in enumerate(group):
                 if hit.is_cpu:
-                    gpu_prefix = min(gpu_prefix, index * group_size)
-                    cpu_units.update(
-                        range(
-                            index * group_size // hash_size,
-                            min((index + 1) * group_size, length) // hash_size,
-                        )
+                    start = index * manager.block_size
+                    end = min(start + manager.block_size, length)
+                    gpu_prefix_tokens = min(gpu_prefix_tokens, start)
+                    cpu_hash_blocks.update(
+                        range(start // hash_block_size, end // hash_block_size)
                     )
         return cls(
             blocks=hits,
             num_computed_tokens=length,
             num_gpu_prefix_tokens=(
-                gpu_prefix // block_size * block_size if cpu_units else length
+                gpu_prefix_tokens // scheduler_block_size * scheduler_block_size
+                if cpu_hash_blocks
+                else length
             ),
-            num_cpu_tokens=len(cpu_units) * hash_size,
+            num_cpu_tokens=len(cpu_hash_blocks) * hash_block_size,
             shared_prefix_boundary=length + uncached if uncached else 0,
             lookup=lookup,
         )

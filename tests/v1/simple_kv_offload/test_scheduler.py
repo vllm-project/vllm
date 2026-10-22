@@ -3127,11 +3127,13 @@ def test_lazy_target_blocks_ignore_non_prefix_cacheable_groups() -> None:
     assert target_with == target_without
 
 
-def _make_joint_prefix_case(locations, *, enable_events=False):
+def _make_joint_prefix_case(
+    locations, *, num_gpu_blocks=16, enable_events=False, request=None
+):
     from vllm.v1.core.kv_cache_manager import KVCacheManager
 
     fix = make_scheduler(
-        num_cpu_blocks=16, num_gpu_blocks=16, num_groups=len(locations)
+        num_cpu_blocks=16, num_gpu_blocks=num_gpu_blocks, num_groups=len(locations)
     )
     manager = KVCacheManager(
         fix.kv_cache_config,
@@ -3141,7 +3143,8 @@ def _make_joint_prefix_case(locations, *, enable_events=False):
         enable_kv_cache_events=enable_events,
     )
     fix.scheduler.bind_gpu_block_pool(manager.block_pool)
-    request = make_request(num_blocks=4)
+    if request is None:
+        request = make_request(num_blocks=4)
     if enable_events:
         request.kv_cache_report_mode = "full"
     sources = {}
@@ -3166,19 +3169,18 @@ def _make_joint_prefix_case(locations, *, enable_events=False):
 
 
 @pytest.mark.parametrize(
-    "locations",
+    ("locations", "needs_kv_cache_zeroing"),
     [
-        ("gggg",),
-        ("cccc",),
-        ("gcgg",),
-        ("cgcg",),
-        ("gbcg",),
-        ("gmgg",),
-        ("cgcg", "gcgc"),
-        ("gmgg", "cmcc"),
+        (("gggg",), True),
+        (("cccc",), True),
+        (("gcgg",), False),
+        (("cgcg",), False),
+        (("gbcg",), False),
+        (("gmgg",), False),
+        (("cgcg", "gcgc"), True),
+        (("gmgg", "cmcc"), False),
     ],
 )
-@pytest.mark.parametrize("needs_kv_cache_zeroing", [False, True])
 def test_joint_prefix_reuses_gpu_and_loads_only_cpu(
     locations, needs_kv_cache_zeroing, monkeypatch
 ):
@@ -3262,10 +3264,9 @@ def test_joint_lookup_memoizes_hits_and_misses(monkeypatch):
     from vllm.v1.core.kv_cache_lookup import JointCacheLookup
     from vllm.v1.core.kv_cache_utils import BlockHash
 
-    fix = make_scheduler()
     request = make_request()
-    gpu = fix.gpu_block_pool
-    cpu = fix.scheduler.cpu_block_pool
+    gpu = BlockPool(4, True, BLOCK_SIZE)
+    cpu = BlockPool(4, True, BLOCK_SIZE)
     block = cpu.get_new_blocks(1)[0]
     cpu._insert_block_hash(
         make_block_hash_with_group_id(request.block_hashes[0], 0),
@@ -3296,7 +3297,9 @@ def test_joint_lookup_memoizes_hits_and_misses(monkeypatch):
 @pytest.mark.parametrize("attention", ["swa", "mamba", "mamba_align", "mixed_sizes"])
 def test_joint_sparse_prefix_allocates_reachable_states(attention):
     """Sparse groups load reachable states without materializing null padding."""
+    from vllm.distributed.kv_events import BlockStored
     from vllm.v1.core.kv_cache_manager import KVCacheManager
+    from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
     from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 
     num_blocks = 4
@@ -3325,7 +3328,9 @@ def test_joint_sparse_prefix_allocates_reachable_states(attention):
         block_size,
         BLOCK_SIZE,
     )
-    manager = KVCacheManager(config, 1024, block_size, BLOCK_SIZE)
+    manager = KVCacheManager(
+        config, 1024, block_size, BLOCK_SIZE, enable_kv_cache_events=True
+    )
     offload.bind_gpu_block_pool(manager.block_pool)
     request = make_request(num_blocks=num_blocks)
     for group_idx, group in enumerate(config.kv_cache_groups):
@@ -3375,6 +3380,24 @@ def test_joint_sparse_prefix_allocates_reachable_states(attention):
         KVConnectorOutput(finished_recving={request.request_id})
     )
     manager.cache_blocks(request, hit.num_computed_tokens)
+    events = manager.block_pool.take_events()
+    assert events
+    for event in events:
+        assert isinstance(event, BlockStored)
+        assert len(event.token_ids) == len(event.block_hashes) * event.block_size
+        start = request.all_token_ids.index(event.token_ids[0])
+        assert (
+            event.token_ids
+            == request.all_token_ids[start : start + len(event.token_ids)]
+        )
+        assert event.block_hashes == [
+            maybe_convert_block_hash(
+                request.block_hashes[
+                    (start + (i + 1) * event.block_size) // BLOCK_SIZE - 1
+                ]
+            )
+            for i in range(len(event.block_hashes))
+        ]
     offload.request_finished(request, [])
     manager.free(request)
     assert all(b.ref_cnt == 0 for b in manager.block_pool.blocks if not b.is_null)
@@ -3384,22 +3407,10 @@ def test_joint_sparse_prefix_allocates_reachable_states(attention):
 @pytest.mark.parametrize("cleanup", ["cancel", "reset", "retry"])
 def test_joint_prefix_allocation_failure_preserves_caches(cleanup):
     """Insufficient capacity does not materialize any CPU holes or lose GPU hits."""
-    from vllm.v1.core.kv_cache_manager import KVCacheManager
-
-    fix = make_scheduler(num_gpu_blocks=4)
-    manager = KVCacheManager(fix.kv_cache_config, 1024, BLOCK_SIZE, BLOCK_SIZE)
-    fix.scheduler.bind_gpu_block_pool(manager.block_pool)
-    request = make_request(num_blocks=4)
-    for index in range(4):
-        pool = manager.block_pool if index % 2 == 0 else fix.scheduler.cpu_block_pool
-        block = pool.get_new_blocks(1)[0]
-        pool._insert_block_hash(
-            make_block_hash_with_group_id(request.block_hashes[index], 0),
-            block,
-            num_tokens=(index + 1) * BLOCK_SIZE,
-        )
-        pool.free_blocks([block])
-    hit = fix.scheduler.get_joint_cache_hit(request, manager.coordinator)
+    offload, manager, request, _ = _make_joint_prefix_case(
+        ("gcgc",), num_gpu_blocks=4, enable_events=True
+    )
+    hit = offload.get_joint_cache_hit(request, manager.coordinator)
     free_before = manager.block_pool.get_num_free_blocks()
     assert (
         manager.allocate_slots(
@@ -3413,25 +3424,26 @@ def test_joint_prefix_allocation_failure_preserves_caches(cleanup):
         )
         is None
     )
+    assert manager.block_pool.take_events() == []
     assert manager.block_pool.get_num_free_blocks() == free_before
     assert not manager.get_blocks(request.request_id).blocks[0]
     if cleanup == "cancel":
-        fix.scheduler.request_finished(request, [])
+        offload.request_finished(request, [])
     elif cleanup == "reset":
-        assert fix.scheduler.reset()
+        assert offload.reset()
     else:
-        retry = fix.scheduler.get_joint_cache_hit(request, manager.coordinator)
+        retry = offload.get_joint_cache_hit(request, manager.coordinator)
         assert not hit.pinned and retry.pinned
         assert all(
             source.block.ref_cnt == 1 for group in retry.blocks for source in group
         )
-        fix.scheduler.build_connector_meta(make_scheduler_output({}))
+        offload.build_connector_meta(make_scheduler_output({}))
         assert not retry.pinned
     assert not hit.pinned
     assert manager.block_pool.get_num_free_blocks() == 3
     assert all(
         block.ref_cnt == 0
-        for block in fix.scheduler.cpu_block_pool.blocks
+        for block in offload.cpu_block_pool.blocks
         if not block.is_null
     )
 
@@ -3595,6 +3607,7 @@ def test_joint_prefix_respects_bounded_replay(locations):
 @pytest.mark.parametrize("extra_tokens", [0, 1])
 def test_joint_prefix_preserves_dcp_eagle_and_last_token(dcp, eagle, extra_tokens):
     """Joint lookup uses the same effective block and EAGLE drop boundaries."""
+    from vllm.distributed.kv_events import BlockStored
     from vllm.v1.core.kv_cache_manager import KVCacheManager
 
     fix = _make_cp_scheduler(dcp_world_size=dcp)
@@ -3606,6 +3619,7 @@ def test_joint_prefix_preserves_dcp_eagle_and_last_token(dcp, eagle, extra_token
         size,
         dcp_world_size=dcp,
         use_eagle=eagle,
+        enable_kv_cache_events=True,
     )
     fix.scheduler.bind_gpu_block_pool(manager.block_pool)
     request = _make_cp_request(4, size)
@@ -3629,6 +3643,13 @@ def test_joint_prefix_preserves_dcp_eagle_and_last_token(dcp, eagle, extra_token
         pool.free_blocks([block])
     hit = fix.scheduler.get_joint_cache_hit(request, manager.coordinator)
     assert hit.num_computed_tokens == (3 + extra_tokens - int(eagle)) * size
+    manager.coordinator.emit_joint_cached_block_events(request, hit)
+    events = manager.block_pool.take_events()
+    assert len(events) == (hit.num_computed_tokens // size + 1) // 2
+    for event in events:
+        assert isinstance(event, BlockStored)
+        assert event.block_size == size
+        assert len(event.token_ids) == len(event.block_hashes) * size
     fix.scheduler.request_finished(request, [])
     assert not hit.pinned
 

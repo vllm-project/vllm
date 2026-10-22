@@ -10,6 +10,9 @@ is unset.
 
 from __future__ import annotations
 
+import pytest
+
+from tests.v1.core.test_prefix_caching import make_request as make_mm_request
 from tests.v1.simple_kv_offload.test_scheduler import (
     _BYTES_PER_BLOCK,
     BLOCK_SIZE,
@@ -37,6 +40,7 @@ from vllm.distributed.kv_events import (
     BlockStored,
 )
 from vllm.lora.request import LoRARequest
+from vllm.multimodal.inputs import PlaceholderRange
 from vllm.utils.hashing import sha256
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -799,39 +803,92 @@ def test_scratch_group_store_emits_events_for_cacheable_groups_only() -> None:
     assert all(len(e.token_ids) == BLOCK_SIZE for e in events)
 
 
-def test_joint_prefix_events_separate_reused_and_loaded_blocks():
-    """Interleaved GPU hits emit reuse runs; completion registers only CPU targets."""
+@pytest.mark.parametrize("report_mode", ["incremental", "full"])
+@pytest.mark.parametrize(
+    ("layout", "gpu_runs", "cpu_runs"),
+    [
+        ("gcgg", [(0, 1), (2, 4)], [(1, 2)]),
+        ("gcgc", [(0, 1), (2, 3)], [(1, 2), (3, 4)]),
+        ("gccc", [(0, 1)], [(1, 4)]),
+        ("cgcg", [(1, 2), (3, 4)], [(0, 1), (2, 3)]),
+    ],
+    ids=["gcgg", "gcgc", "gccc", "cgcg"],
+)
+def test_joint_prefix_events_separate_reused_and_loaded_blocks(
+    layout, gpu_runs, cpu_runs, report_mode
+):
+    """Each store event must align hashes, tokens and parent for one dense run."""
     from tests.v1.simple_kv_offload.test_scheduler import _make_joint_prefix_case
     from vllm.v1.outputs import KVConnectorOutput
 
-    offload, manager, request, _ = _make_joint_prefix_case(
-        ("gcgg",), enable_events=True
+    request = make_mm_request(
+        "joint-events",
+        list(range(4 * BLOCK_SIZE + 1)),
+        BLOCK_SIZE,
+        sha256,
+        mm_positions=[
+            PlaceholderRange(offset=BLOCK_SIZE - 2, length=2 * BLOCK_SIZE + 4)
+        ],
+        mm_hashes=["joint-mm"],
+        cache_salt="joint-salt",
     )
+    offload, manager, request, _ = _make_joint_prefix_case(
+        (layout,), enable_events=True, request=request
+    )
+    request.kv_cache_report_mode = report_mode
     hit = offload.get_joint_cache_hit(request, manager.coordinator)
+    local_tokens = hit.num_gpu_prefix_tokens
+    external_tokens = hit.num_computed_tokens - local_tokens
     assert (
         manager.allocate_slots(
             request,
             0,
-            num_new_computed_tokens=BLOCK_SIZE,
-            num_external_computed_tokens=3 * BLOCK_SIZE,
+            num_new_computed_tokens=local_tokens,
+            num_external_computed_tokens=external_tokens,
             delay_cache_blocks=True,
             joint_cache_hit=hit,
         )
         is not None
     )
     hashes = [maybe_convert_block_hash(h) for h in request.block_hashes[:4]]
-    events = manager.block_pool.take_events()
-    assert [event.block_hashes for event in events] == [[hashes[0]], hashes[2:]]
-    assert [event.parent_block_hash for event in events] == [None, hashes[1]]
+
+    def assert_dense_events(events, runs):
+        assert [
+            (
+                event.block_hashes,
+                event.token_ids,
+                event.parent_block_hash,
+                event.extra_keys,
+            )
+            for event in events
+        ] == [
+            (
+                hashes[start:end],
+                request.all_token_ids[start * BLOCK_SIZE : end * BLOCK_SIZE],
+                hashes[start - 1] if start else None,
+                [
+                    (("joint-mm", BLOCK_SIZE - 2 - index * BLOCK_SIZE),)
+                    + (("joint-salt",) if index == 0 else ())
+                    for index in range(start, end)
+                ],
+            )
+            for start, end in runs
+        ]
+
+    assert_dense_events(
+        manager.block_pool.take_events(), gpu_runs if report_mode == "full" else []
+    )
 
     offload.update_state_after_alloc(
-        request, manager.get_blocks(request.request_id), 3 * BLOCK_SIZE
+        request, manager.get_blocks(request.request_id), external_tokens
     )
     offload.update_connector_output(
         KVConnectorOutput(finished_recving={request.request_id})
     )
     manager.cache_blocks(request, 4 * BLOCK_SIZE)
     events = manager.block_pool.take_events()
-    assert [event.block_hashes for event in events] == [[hashes[1]]]
+    manager.cache_blocks(request, 4 * BLOCK_SIZE)
+    assert manager.block_pool.take_events() == []
+    assert_dense_events(events, cpu_runs)
     offload.request_finished(request, [])
     manager.free(request)

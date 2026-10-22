@@ -130,6 +130,7 @@ class SingleTypeKVCacheManager(ABC):
         # This is only used to track the RUNNING requests, we do not track the
         # data for preempted ones.
         self.num_cached_block: dict[str, int] = {}
+        # An empty set still marks a joint load for dense event emission.
         self._joint_cache_reused_blocks: dict[str, set[int]] = {}
 
         self.kv_cache_group_id = kv_cache_group_id
@@ -345,13 +346,10 @@ class SingleTypeKVCacheManager(ABC):
             for index, hit in enumerate(hits)
             if index >= skipped_blocks and hit.is_cpu and not hit.block.is_null
         ]
-        targets = (
-            self.block_pool.get_new_blocks(len(cpu_positions)) if cpu_positions else []
-        )
+        # Allocate directly so async load targets bypass worker-side zeroing.
+        targets = self.block_pool.get_new_blocks(len(cpu_positions))
         for index, target in zip(cpu_positions, targets, strict=True):
             blocks[index] = target
-        # Async loads overwrite these targets; worker-side zeroing would race
-        # the transfer. Blocks allocated for new computation are still zeroed.
 
         self.add_local_computed_blocks(request_id, blocks, num_computed_tokens, 0)
         # The request now owns the targets; drop their allocation references.
@@ -562,26 +560,52 @@ class SingleTypeKVCacheManager(ABC):
             reachable_boundaries=reachable_boundaries,
             dcp_world_size=self.dcp_world_size,
         )
-        if reused := self._joint_cache_reused_blocks.get(request.request_id):
+        reused_gpu_blocks = self._joint_cache_reused_blocks.get(request.request_id)
+        if reused_gpu_blocks is not None:
             block_mask = [
                 (block_mask is None or block_mask[i - num_cached_blocks])
-                and i not in reused
+                and i not in reused_gpu_blocks
                 for i in range(num_cached_blocks, num_full_blocks)
             ]
-            reused.difference_update(range(num_cached_blocks, num_full_blocks))
-            if not reused:
+
+        blocks = self.req_to_blocks[request.request_id]
+        if reused_gpu_blocks is not None and self.block_pool.enable_kv_cache_events:
+            run_start = None
+            for index in range(num_cached_blocks, num_full_blocks + 1):
+                cacheable = (
+                    index < num_full_blocks
+                    and not blocks[index].is_null
+                    and (block_mask is None or block_mask[index - num_cached_blocks])
+                )
+                if cacheable and run_start is None:
+                    run_start = index
+                elif not cacheable and run_start is not None:
+                    self.block_pool.cache_full_blocks(
+                        request=request,
+                        blocks=blocks,
+                        num_cached_blocks=run_start,
+                        num_full_blocks=index,
+                        block_size=self.block_size,
+                        kv_cache_group_id=self.kv_cache_group_id,
+                    )
+                    run_start = None
+        else:
+            self.block_pool.cache_full_blocks(
+                request=request,
+                blocks=blocks,
+                num_cached_blocks=num_cached_blocks,
+                num_full_blocks=num_full_blocks,
+                block_size=self.block_size,
+                kv_cache_group_id=self.kv_cache_group_id,
+                block_mask=block_mask,
+            )
+
+        if reused_gpu_blocks is not None:
+            reused_gpu_blocks.difference_update(
+                range(num_cached_blocks, num_full_blocks)
+            )
+            if not reused_gpu_blocks:
                 self._joint_cache_reused_blocks.pop(request.request_id, None)
-
-        self.block_pool.cache_full_blocks(
-            request=request,
-            blocks=self.req_to_blocks[request.request_id],
-            num_cached_blocks=num_cached_blocks,
-            num_full_blocks=num_full_blocks,
-            block_size=self.block_size,
-            kv_cache_group_id=self.kv_cache_group_id,
-            block_mask=block_mask,
-        )
-
         self.num_cached_block[request.request_id] = num_full_blocks
 
     @classmethod

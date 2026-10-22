@@ -41,6 +41,10 @@ When `SimpleCPUOffloadConnector` is configured directly, a reusable prefix can c
 
 CPU loads use complete aligned blocks and finish before generation resumes. If the GPU cannot accommodate the complete matched prefix, the request waits for capacity. This lookup is enabled automatically with prefix caching; `MultiConnector` and HiSparse configurations with separate host pools retain their existing lookup behavior.
 
+With KV cache events enabled, joint lookup emits each `BlockStored` event for one contiguous span, with matching hashes, token IDs, and extra keys. In `full` report mode, the joint path reports reused GPU spans after successful allocation; CPU load targets are reported after loading completes. The non-joint path currently reports reuse during lookup.
+
+Each span names its logical predecessor as `parent_block_hash`. If block 0 is on CPU, the initial GPU reuse reports have no event with a null parent, and a later GPU span can reference a parent whose store event arrives after loading. A reused partial GPU tail is reported separately with its actual token length.
+
 ## Example workloads
 
 We describe two example workloads, where APC can provide huge performance benefit:

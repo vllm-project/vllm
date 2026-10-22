@@ -103,6 +103,7 @@ def make_full_mamba_manager(
     use_eagle: bool = False,
     num_speculative_blocks: int = 0,
     num_prefill_checkpoint_blocks: int = 0,
+    enable_kv_cache_events: bool = False,
 ):
     mamba_group = KVCacheGroupSpec(
         ["mamba"],
@@ -146,6 +147,7 @@ def make_full_mamba_manager(
         scheduler_block_size=scheduler_block_size,
         hash_block_size=hash_block_size,
         use_eagle=use_eagle,
+        enable_kv_cache_events=enable_kv_cache_events,
     )
 
 
@@ -457,6 +459,80 @@ def test_hybrid_mamba_align_partial_hash_hit(joint_lookup):
         in copies
     )
     assert manager.get_blocks("1").blocks[1][1].block_hash_num_tokens == 8
+
+
+@pytest.mark.parametrize("prompt_tokens", [7, 8])
+@pytest.mark.parametrize("full_block_size", [2, 4])
+def test_joint_full_report_bounds_partial_tail_by_actual_hit(
+    prompt_tokens, full_block_size
+):
+    """A partial GPU hit must not report or index an uncached full-block hash."""
+    from vllm.distributed.kv_events import BlockStored
+    from vllm.v1.core.block_pool import BlockPool
+    from vllm.v1.core.kv_cache_lookup import JointCacheHit, JointCacheLookup
+    from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
+
+    manager = make_full_mamba_manager(
+        dcp_world_size=1,
+        full_block_size=full_block_size,
+        enable_kv_cache_events=True,
+    )
+    producer = make_request("producer", list(range(7)), 2, sha256)
+    assert manager.allocate_slots(producer, 6) is not None
+    manager.free(producer)
+    manager.new_step_starts()
+    manager.block_pool.take_events()
+
+    request = make_request("consumer", list(range(prompt_tokens)), 2, sha256)
+    request.kv_cache_report_mode = "full"
+    hit = JointCacheHit.find(
+        manager.coordinator,
+        JointCacheLookup(manager.block_pool, BlockPool(20, True, 2)),
+        request.block_hashes,
+        request.num_tokens - 1,
+        manager.coordinator.scheduler_block_size,
+    )
+    assert hit.num_computed_tokens == 6
+    assert not hit.needs_load
+    hit.pin()
+    assert (
+        manager.allocate_slots(
+            request,
+            0,
+            num_new_computed_tokens=6,
+            delay_cache_blocks=True,
+            joint_cache_hit=hit,
+        )
+        is not None
+    )
+    hit.release()
+    events = manager.block_pool.take_events()
+    manager.free(request)
+    manager.new_step_starts()
+
+    assert all(isinstance(event, BlockStored) for event in events)
+    hashes = [maybe_convert_block_hash(h) for h in request.block_hashes]
+    full_events = (
+        [(0, hashes[:3], request.all_token_ids[:6], None, 2)]
+        if full_block_size == 2
+        else [
+            (0, [hashes[1]], request.all_token_ids[:4], None, 4),
+            (0, [hashes[2]], request.all_token_ids[4:6], hashes[1], 2),
+        ]
+    )
+    assert [
+        (
+            event.group_idx,
+            event.block_hashes,
+            event.token_ids,
+            event.parent_block_hash,
+            event.block_size,
+        )
+        for event in events
+    ] == [
+        *full_events,
+        (1, [hashes[2]], request.all_token_ids[4:6], hashes[1], 2),
+    ]
 
 
 def test_eagle_group_registers_unaligned_tail_under_partial_hash_hits():
