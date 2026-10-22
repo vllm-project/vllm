@@ -100,6 +100,7 @@ AITER_MODEL_LIST = [
             marks=[pytest.mark.core_model],
         ),
         pytest.param("swiss-ai/Apertus-8B-Instruct-2509"),  # apertus
+        pytest.param("domyn/Domyn-Edge-Base"),  # domyn_edge
         pytest.param(
             "naver-hyperclovax/HyperCLOVAX-SEED-Think-14B",  # hyperclovax
             marks=[large_gpu_mark(min_gb=32)],

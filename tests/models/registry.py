@@ -270,7 +270,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "deepseek-ai/DeepSeek-V4-Flash", is_available_online=False
     ),
     "DomynEdgeForCausalLM": _HfExamplesInfo(
-        "domyn/Domyn-Edge-Base", is_available_online=False
+        "domyn/Domyn-Edge-Base",
+        trust_remote_code=True,
+        extras={"sft": "domyn/Domyn-Edge-SFT"},
     ),
     "Ernie4_5ForCausalLM": _HfExamplesInfo("baidu/ERNIE-4.5-0.3B-PT"),
     "Ernie4_5_MoeForCausalLM": _HfExamplesInfo("baidu/ERNIE-4.5-21B-A3B-PT"),
