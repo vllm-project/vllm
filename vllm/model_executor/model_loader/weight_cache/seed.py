@@ -29,7 +29,7 @@ import socket
 import threading
 import time
 from collections.abc import Iterable
-from typing import Any, Protocol
+from typing import Any, NamedTuple, Protocol
 
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_cache.protocol import (
@@ -76,22 +76,29 @@ class Seedable(Protocol):
         ...
 
 
+class SeedConfig(NamedTuple):
+    """One daemon's D2D seeding configuration: its listener, its source
+    replica, and the shared token authenticating both."""
+
+    listen: tuple[str, int] | None = None
+    source: tuple[str, int] | None = None
+    token: str | None = None
+
+
 class SeedTransport:
     """The daemon's D2D seeding endpoint: serves and fetches seedables."""
 
     def __init__(
         self,
         seedables: Iterable[Seedable],
-        listen: tuple[str, int] | None = None,
-        source: tuple[str, int] | None = None,
-        token: str | None = None,
+        seed_config: SeedConfig | None = None,
     ):
+        seed_config = seed_config or SeedConfig()
+        listen, source, token = seed_config
         if (listen is not None or source is not None) and not token:
             raise ValueError("A daemon-to-daemon listener/source requires a token")
         self._seedables = list(seedables)
-        self._listen = listen
-        self._source = source
-        self._token = token
+        self._seed_config = seed_config
         self._server: socket.socket | None = None
 
     def adopt(self, seedable: Seedable, ctx: Any) -> None:
@@ -133,7 +140,7 @@ class SeedTransport:
             return {"status": "error", "message": "unsupported seed kind"}
         try:
             payload = seedable.resolve(request)
-        except (OSError, ValueError) as e:
+        except (OSError, KeyError, TypeError, ValueError) as e:
             return {"status": "error", "message": str(e)}
         if payload is None:
             return {"status": "miss"}
@@ -145,27 +152,26 @@ class SeedTransport:
         Returns the response, or None with a log line on any transport
         failure; the caller falls back to its local path then.
         """
-        if self._source is None:
+        source = self._seed_config.source
+        if source is None:
             return None
         label = payload.get("kind", "payload")
         try:
-            with socket.create_connection(
-                self._source, timeout=_REQUEST_TIMEOUT_S
-            ) as sock:
-                send_json(sock, {**payload, "token": self._token})
+            with socket.create_connection(source, timeout=_REQUEST_TIMEOUT_S) as sock:
+                send_json(sock, {**payload, "token": self._seed_config.token})
                 response = recv_json(sock)
         except (OSError, ConnectionError, ValueError) as e:
             logger.warning(
                 "Cannot fetch %s from %s over D2D; falling back locally: %s",
                 label,
-                self._source,
+                source,
                 e,
             )
             return None
         if not isinstance(response, dict):
             logger.warning(
                 "Source %s sent a malformed response for %s; falling back locally",
-                self._source,
+                source,
                 label,
             )
             return None
@@ -176,10 +182,11 @@ class SeedTransport:
 
         Returns the bound address, or None when no listener is configured.
         """
-        if self._listen is None:
+        listen = self._seed_config.listen
+        if listen is None:
             return None
-        family = socket.AF_INET6 if ":" in self._listen[0] else socket.AF_INET
-        self._server = socket.create_server(self._listen, family=family)
+        family = socket.AF_INET6 if ":" in listen[0] else socket.AF_INET
+        self._server = socket.create_server(listen, family=family)
         threading.Thread(
             target=self._serve,
             name="vllm-weight-cache-d2d",
@@ -211,9 +218,9 @@ class SeedTransport:
                         request.get("token") if isinstance(request, dict) else None
                     )
                     if (
-                        not self._token
+                        not self._seed_config.token
                         or not isinstance(presented, str)
-                        or not hmac.compare_digest(presented, self._token)
+                        or not hmac.compare_digest(presented, self._seed_config.token)
                     ):
                         send_json(
                             conn,

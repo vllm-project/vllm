@@ -112,7 +112,10 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     send_msg,
     verify_peer_is_owner,
 )
-from vllm.model_executor.model_loader.weight_cache.seed import SeedTransport
+from vllm.model_executor.model_loader.weight_cache.seed import (
+    SeedConfig,
+    SeedTransport,
+)
 from vllm.model_executor.model_loader.weight_cache.utils import (
     export_model_attrs,
     format_daemon_role,
@@ -187,17 +190,13 @@ class WeightCacheDaemon:
         is_draft: bool = False,
         dp_rank: int = 0,
         pp_rank: int = 0,
-        seed_listen: tuple[str, int] | None = None,
-        seed_source: tuple[str, int] | None = None,
-        seed_token: str | None = None,
+        seed_config: SeedConfig | None = None,
     ):
         parallel_config = vllm_config.parallel_config
         if parallel_config.enable_eplb:
             raise ValueError("The weight cache daemon does not support EPLB.")
         self.warmup_caches = [FlashInferWarmupCache()]
-        self.d2d = SeedTransport(
-            self.warmup_caches, seed_listen, seed_source, seed_token
-        )
+        self.d2d = SeedTransport(self.warmup_caches, seed_config)
         self.tp_size = parallel_config.tensor_parallel_size
         self.pp_size = parallel_config.pipeline_parallel_size
         self.dp_size = parallel_config.data_parallel_size
@@ -478,9 +477,7 @@ def _run_daemon(
     is_draft: bool = False,
     dp_rank: int = 0,
     pp_rank: int = 0,
-    seed_listen: tuple[str, int] | None = None,
-    seed_source: tuple[str, int] | None = None,
-    seed_token: str | None = None,
+    seed_config: SeedConfig | None = None,
 ) -> None:
     # Spawned children get a fresh interpreter: apply the logging config
     # explicitly or every vllm-logger line from this daemon is dropped.
@@ -494,9 +491,7 @@ def _run_daemon(
         is_draft,
         dp_rank,
         pp_rank,
-        seed_listen,
-        seed_source,
-        seed_token,
+        seed_config=seed_config,
     )
     daemon.load_model()
     daemon.warmup()
