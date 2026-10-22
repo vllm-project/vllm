@@ -11,6 +11,7 @@ import pytest
 import torch
 from transformers import PreTrainedConfig
 
+from vllm import envs
 from vllm.config import PoolerConfig, set_current_vllm_config
 from vllm.model_executor.layers.pooler import PoolingParamsUpdate
 from vllm.model_executor.layers.pooler.activations import PoolerNormalize
@@ -195,6 +196,30 @@ class TestLastPool:
 # MeanPool
 # ---------------------------------------------------------------------------
 class TestMeanPool:
+    @pytest.mark.parametrize(
+        ("length", "expected_segmented"), [(512, True), (513, False)]
+    )
+    def test_short_sequence_kernel_boundary(self, length, expected_segmented):
+        torch.manual_seed(0)
+        hidden = torch.randn(length, 131, device=current_platform.device_type)
+        metadata = _make_metadata([length], device=hidden.device)
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU]
+        ) as profile:
+            out = MeanPool()(hidden, metadata)
+
+        expected = hidden.double().mean(dim=0, keepdim=True).float()
+        torch.testing.assert_close(out, expected, rtol=1e-5, atol=2e-7)
+        selected = any(
+            event.key == "vllm::segmented_mean" for event in profile.key_averages()
+        )
+        expected_segmented = (
+            expected_segmented
+            and current_platform.is_cuda()
+            and not envs.VLLM_BATCH_INVARIANT
+        )
+        assert selected == expected_segmented
+
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
     def test_ragged_strided_hidden_states(self, dtype):
         lengths = [1, 31, 32, 33, 65]
