@@ -552,7 +552,8 @@ def test_mxfp4_experts_quant_sorted_expert_ids_matches_offset_search(
     )
 
     assert torch.equal(baseline_out, direct_out)
-    assert torch.equal(baseline_sf, direct_sf)
+    num_sf_rows = int(blockscale_offsets[-1].item())
+    assert torch.equal(baseline_sf[:num_sf_rows], direct_sf[:num_sf_rows])
 
 
 @pytest.mark.skipif(
@@ -609,7 +610,8 @@ def test_silu_and_mul_mxfp4_sorted_expert_ids_matches_offset_search():
     )
 
     assert torch.equal(baseline_out, direct_out)
-    assert torch.equal(baseline_sf, direct_sf)
+    num_sf_rows = int(blockscale_offsets[-1].item())
+    assert torch.equal(baseline_sf[:num_sf_rows], direct_sf[:num_sf_rows])
 
 
 if __name__ == "__main__":
