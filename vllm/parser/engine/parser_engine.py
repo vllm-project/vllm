@@ -7,7 +7,6 @@ extraction with a single :class:`StreamingParserEngine`.
 from __future__ import annotations
 
 import json
-import math
 from collections.abc import Sequence
 from functools import cached_property
 from typing import TYPE_CHECKING, NamedTuple
@@ -33,6 +32,7 @@ from vllm.parser.engine.parser_engine_config import (
 from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
 from vllm.renderers.chat_utils import get_tool_call_id_type, make_tool_call_id
 from vllm.tool_parsers.utils import (
+    coerce_to_schema_type,
     coerce_typed_value,
     extract_types_from_schema,
     find_tool_name,
@@ -69,7 +69,6 @@ class ToolCallSlot:
         "_streamed_joined",
         "extend_open_value",
         "open_value_streams",
-        "arg_head_cache",
     )
 
     def __init__(self) -> None:
@@ -83,9 +82,6 @@ class ToolCallSlot:
         self._streamed_joined: str | None = ""
         self.extend_open_value: ArgValueExtender | None = None
         self.open_value_streams: bool = False
-        # (raw leading members, corrected form) reused until another member
-        # completes while a partial object is streamed.
-        self.arg_head_cache: tuple[str, str | None] | None = None
 
     @property
     def args(self) -> str:
@@ -111,6 +107,205 @@ class ToolCallSlot:
     def append_streamed(self, value: str) -> None:
         self._streamed_parts.append(value)
         self._streamed_joined = None
+
+
+_NON_FINITE_LITERALS = ("NaN", "Infinity", "-Infinity")
+_NUMBER_CHARS = frozenset("0123456789+-.eE")
+
+
+def _literal_type(literal: str) -> str | None:
+    """JSON type of a complete bare literal token, or ``None`` if not one."""
+    if literal in ("true", "false"):
+        return "boolean"
+    if literal == "null":
+        return "null"
+    if all(c in _NUMBER_CHARS for c in literal):
+        try:
+            float(literal)
+        except ValueError:
+            return None
+        return "number"
+    return None
+
+
+class _ArgsRewriter:
+    """Rewrite tool-call argument JSON in place.
+
+    Only complete value tokens that a property schema coerces, plus
+    ``NaN``/``Infinity`` literals (invalid JSON), are replaced; every other
+    byte — separators, whitespace, number formats, escapes, key order — is
+    kept verbatim.  A rewritten token is final; a token still undelimited
+    may be rewritten once its delimiter arrives, but ``_safe_arg_prefix``
+    never emits it before then, so streamed argument deltas stay
+    prefix-consistent however the model formats its JSON: the final
+    arguments are always the streamed text plus a suffix.  Re-serializing
+    with ``json.dumps`` instead would normalize separators and numbers,
+    breaking that prefix.  A truncated tail is passed through unchanged.
+    """
+
+    def __init__(self, text: str, properties: dict | None, *, final: bool) -> None:
+        self._text = text
+        self._props = properties
+        # Whether no more text can arrive.  A trailing literal is otherwise
+        # treated as still growing: it is only rewritten once delimited.
+        self._final = final
+        self._out: list[str] = []
+
+    def rewrite(self) -> str:
+        text = self._text
+        i = self._skip_ws(0)
+        if i >= len(text) or text[i] != "{":
+            return text
+        j = self._object(i, self._props)
+        if j < len(text):
+            self._out.append(text[j:])
+        return "".join(self._out)
+
+    def _skip_ws(self, i: int) -> int:
+        text = self._text
+        j = i
+        while j < len(text) and text[j] in " \t\n\r":
+            j += 1
+        if j > i:
+            self._out.append(text[i:j])
+        return j
+
+    def _scan_string(self, i: int) -> tuple[str, int] | None:
+        """Return ``(value, end)`` for the closed string at *i*, else None."""
+        text = self._text
+        escape = False
+        for j in range(i + 1, len(text)):
+            c = text[j]
+            if escape:
+                escape = False
+            elif c == "\\":
+                escape = True
+            elif c == '"':
+                if "\\" in text[i + 1 : j]:
+                    try:
+                        return json.loads(text[i : j + 1]), j + 1
+                    except ValueError:
+                        return None
+                return text[i + 1 : j], j + 1
+        return None
+
+    def _truncated(self, i: int) -> int:
+        self._out.append(self._text[i:])
+        return len(self._text)
+
+    def _delimited(self, j: int) -> bool:
+        text = self._text
+        k = j
+        while k < len(text) and text[k] in " \t\n\r":
+            k += 1
+        return k < len(text) and text[k] in ",}]"
+
+    def _object(self, i: int, props: dict | None) -> int:
+        text, out = self._text, self._out
+        out.append("{")
+        i = self._skip_ws(i + 1)
+        while True:
+            if i >= len(text):
+                return i
+            if text[i] == "}":
+                out.append("}")
+                return i + 1
+            scanned = self._scan_string(i) if text[i] == '"' else None
+            if scanned is None:
+                return self._truncated(i)
+            key, j = scanned
+            out.append(text[i:j])
+            i = self._skip_ws(j)
+            if i >= len(text) or text[i] != ":":
+                return self._truncated(i)
+            out.append(":")
+            i = self._skip_ws(i + 1)
+            i = self._value(i, props.get(key) if props else None)
+            if i >= len(text):
+                return i
+            i = self._skip_ws(i)
+            if i < len(text) and text[i] == ",":
+                out.append(",")
+                i = self._skip_ws(i + 1)
+                continue
+            if i < len(text) and text[i] == "}":
+                out.append("}")
+                return i + 1
+            return self._truncated(i)
+
+    def _array(self, i: int, items: dict | None) -> int:
+        text, out = self._text, self._out
+        out.append("[")
+        i = self._skip_ws(i + 1)
+        while True:
+            if i >= len(text):
+                return i
+            if text[i] == "]":
+                out.append("]")
+                return i + 1
+            i = self._value(i, items)
+            if i >= len(text):
+                return i
+            i = self._skip_ws(i)
+            if i < len(text) and text[i] == ",":
+                out.append(",")
+                i = self._skip_ws(i + 1)
+                continue
+            if i < len(text) and text[i] == "]":
+                out.append("]")
+                return i + 1
+            return self._truncated(i)
+
+    def _value(self, i: int, schema: object) -> int:
+        text, out = self._text, self._out
+        if i >= len(text):
+            return i
+        c = text[i]
+        if c == "{":
+            nested = schema.get("properties") if isinstance(schema, dict) else None
+            return self._object(i, nested if isinstance(nested, dict) else None)
+        if c == "[":
+            items = schema.get("items") if isinstance(schema, dict) else None
+            return self._array(i, items if isinstance(items, dict) else None)
+        if c == '"':
+            scanned = self._scan_string(i)
+            if scanned is None:
+                return self._truncated(i)
+            value, j = scanned
+            if isinstance(schema, dict):
+                coerced, changed = coerce_typed_value(value, schema)
+                if changed:
+                    out.append(json.dumps(coerced, ensure_ascii=False))
+                    return j
+            out.append(text[i:j])
+            return j
+        return self._literal(i, schema)
+
+    def _literal(self, i: int, schema: object) -> int:
+        text, out = self._text, self._out
+        j = i + 1 if text[i] == "-" else i
+        while j < len(text) and (text[j] in _NUMBER_CHARS or text[j].isalpha()):
+            j += 1
+        literal = text[i:j]
+        if not literal:
+            return self._truncated(i)
+        if literal in _NON_FINITE_LITERALS and (self._final or self._delimited(j)):
+            # Not valid JSON as a bare literal; the quoted string form is.
+            out.append(f'"{literal}"')
+            return j
+        if isinstance(schema, dict) and self._delimited(j):
+            types = extract_types_from_schema(schema, fallback=[])
+            if types and _literal_type(literal) is not None:
+                # Coerce from the literal text and compare serializations:
+                # integral floats normalize (5.0 -> 5) and values whose type
+                # the schema does not admit are re-encoded (5 -> "5").
+                coerced = coerce_to_schema_type(literal, types)
+                dumped = json.dumps(coerced, ensure_ascii=False)
+                if dumped != literal:
+                    out.append(dumped)
+                    return j
+        out.append(text[i:j])
+        return j
 
 
 class ParserEngine(Parser):
@@ -295,52 +490,9 @@ class ParserEngine(Parser):
     # ── Schema-aware type correction ─────────────────────────────────
 
     @staticmethod
-    def _coerce_value(value: object, schema: dict) -> tuple[object, bool]:
-        """Coerce a single value according to its schema.
-
-        Returns ``(coerced_value, changed)``.
-        """
-        if isinstance(value, dict):
-            nested_props = schema.get("properties")
-            if isinstance(nested_props, dict):
-                _, changed = ParserEngine._coerce_dict(value, nested_props)
-                return value, changed
-            return value, False
-
-        if isinstance(value, list):
-            items_schema = schema.get("items")
-            if isinstance(items_schema, dict):
-                changed = False
-                for i, item in enumerate(value):
-                    coerced, item_changed = ParserEngine._coerce_value(
-                        item, items_schema
-                    )
-                    if item_changed:
-                        value[i] = coerced
-                        changed = True
-                return value, changed
-            return value, False
-
-        return coerce_typed_value(value, schema)
-
-    @staticmethod
-    def _coerce_dict(args: dict, properties: dict) -> tuple[dict, bool]:
-        """Coerce all values in *args* using *properties* schemas."""
-        changed = False
-        for key, value in args.items():
-            prop = properties.get(key)
-            if not isinstance(prop, dict):
-                continue
-            coerced, val_changed = ParserEngine._coerce_value(value, prop)
-            if val_changed:
-                args[key] = coerced
-                changed = True
-        return args, changed
-
-    @staticmethod
     def _safe_arg_prefix(
         json_str: str, string_keys: set[str] | None = None
-    ) -> tuple[str, bool, int]:
+    ) -> tuple[str, bool]:
         """Return the prefix of *json_str* up to the last top-level value.
 
         Middle values (followed by a comma) are stable across streaming
@@ -355,13 +507,8 @@ class ParserEngine(Parser):
         string, so streamed text may be appended to it.  This holds even when
         *json_str* closes the string: converters serialise an open raw value
         as a closed JSON string.
-
-        The last top-level comma is returned too: everything before it is a
-        complete member, so a partial object's leading values can be
-        corrected before they are streamed.
         """
         last_colon = -1
-        last_comma = -1
         last_key: str | None = None
         pending_key: str | None = None
         in_string = False
@@ -391,17 +538,15 @@ class ParserEngine(Parser):
                 last_colon = i
                 last_key = pending_key
                 pending_key = None
-            elif c == "," and depth == 1:
-                last_comma = i
         if last_colon < 0:
-            return "", False, last_comma
+            return "", False
         end = last_colon + 1
         while end < len(json_str) and json_str[end] in (" ", "\t", "\n", "\r"):
             end += 1
         if end >= len(json_str) or json_str[end] != '"':
-            return json_str[:end], False, last_comma
+            return json_str[:end], False
         if string_keys is not None and last_key not in string_keys:
-            return json_str[:end], False, last_comma
+            return json_str[:end], False
 
         escape = False
         for i in range(end + 1, len(json_str)):
@@ -413,8 +558,8 @@ class ParserEngine(Parser):
                 escape = True
                 continue
             if c == '"':
-                return json_str[:i], True, last_comma
-        return json_str, True, last_comma
+                return json_str[:i], True
+        return json_str, True
 
     @staticmethod
     def _streamable_string_keys(properties: dict) -> set[str] | None:
@@ -434,200 +579,38 @@ class ParserEngine(Parser):
                 streamable.add(key)
         return streamable
 
-    @staticmethod
-    def _load_args_json(args_json: str) -> tuple[object, bool]:
-        """Parse argument JSON, replacing non-finite floats with strings.
-
-        ``NaN``/``Infinity`` literals and overflowing literals such as
-        ``1e999`` parse to non-finite floats, which ``json.dumps`` would
-        render as invalid JSON. They are replaced during parsing so no
-        separate recursive scan is needed. Returns ``(value, sanitized)``.
-        """
-        sanitized = False
-
-        def parse_float(literal: str) -> float | str:
-            nonlocal sanitized
-            value = float(literal)
-            if math.isfinite(value):
-                return value
-            sanitized = True
-            return json.dumps(value)
-
-        def parse_constant(literal: str) -> str:
-            nonlocal sanitized
-            sanitized = True
-            return literal
-
-        value = json.loads(
-            args_json, parse_float=parse_float, parse_constant=parse_constant
-        )
-        return value, sanitized
-
-    @staticmethod
-    def _parse_arg_head(args_json: str, comma: int) -> tuple[dict, str, bool] | None:
-        """Parse the members before *comma* as a closed object.
-
-        Returns ``(leading_members, raw_tail, sanitized)`` when *comma* is a
-        top-level separator, i.e. everything before it is complete and
-        appending a closing brace yields valid JSON.
-        """
-        try:
-            head, sanitized = ParserEngine._load_args_json(args_json[:comma] + "}")
-        except (json.JSONDecodeError, ValueError):
-            return None
-        if not isinstance(head, dict):
-            return None
-        return head, args_json[comma:], sanitized
-
-    @staticmethod
-    def _split_partial_args(args_json: str) -> tuple[dict, str, bool] | None:
-        """Parse the complete leading members of a partial arguments object.
-
-        While streaming, a converter may hand over an object that is still
-        open, so it is not valid JSON and cannot be corrected as a whole.
-        Everything before the last top-level comma is complete and therefore
-        stable, so it is parsed (with a closing brace appended) and corrected.
-        """
-        depth = 0
-        in_string = False
-        escape = False
-        last_comma = -1
-        for i, c in enumerate(args_json):
-            if escape:
-                escape = False
-            elif in_string:
-                if c == "\\":
-                    escape = True
-                elif c == '"':
-                    in_string = False
-            elif c == '"':
-                in_string = True
-            elif c in "{[":
-                depth += 1
-            elif c in "}]":
-                depth -= 1
-            elif c == "," and depth == 1:
-                last_comma = i
-        if last_comma < 0:
-            return None
-        return ParserEngine._parse_arg_head(args_json, last_comma)
-
     def _fix_arg_types(self, args_json: str, func_name: str) -> str:
-        """Correct parameter types using the tool schema.
+        """Correct argument values in place using the tool schema.
 
-        Values are coerced via :func:`coerce_typed_value`. Nested objects and
-        arrays are recursed into when the schema defines ``properties`` or
-        ``items``. Without a schema, values keep their emitted type. Non-finite
-        floats are replaced by their string form so the re-serialized arguments
-        stay valid JSON, whether or not a schema is available. A still-open
-        object is corrected as far as its complete leading members allow.
+        Values are coerced via :func:`coerce_typed_value` and non-finite
+        float literals are replaced by their quoted string form, so the
+        arguments stay valid JSON, whether or not a schema is available.
+        Everything else is kept verbatim — see :class:`_ArgsRewriter` for
+        why re-serializing instead would break streamed arguments.  A
+        truncated object is corrected as far as its complete tokens allow.
         """
-        try:
-            args, sanitized = self._load_args_json(args_json)
-            tail = ""
-        except (json.JSONDecodeError, ValueError):
-            split = self._split_partial_args(args_json)
-            if split is None:
-                return args_json
-            args, tail, sanitized = split
-        if not isinstance(args, dict):
-            return args_json
-
-        properties = find_tool_properties(self._tools, func_name)
-        changed = False
-        if properties:
-            _, changed = self._coerce_dict(args, properties)
-
-        if not (changed or sanitized):
-            return args_json
-
-        fixed = json.dumps(args, ensure_ascii=False)
-        return fixed[:-1] + tail if tail else fixed
-
-    def _corrected_arg_head(
-        self,
-        slot: ToolCallSlot,
-        args_json: str,
-        last_comma: int,
-        func_name: str,
-    ) -> str | None:
-        """Correct the complete leading members of a partial object.
-
-        Returns the corrected text of everything before *last_comma*, or
-        ``None`` when it needs no correction. The result is cached until
-        another member completes: the leading members are stable, so only
-        new text needs parsing, not the whole object on every delta.
-        """
-        if last_comma < 0:
-            return None
-        cache = slot.arg_head_cache
-        if (
-            cache is not None
-            and len(cache[0]) == last_comma
-            and args_json.startswith(cache[0])
-        ):
-            return cache[1]
-
-        split = self._parse_arg_head(args_json, last_comma)
-        if split is None:
-            slot.arg_head_cache = (args_json[:last_comma], None)
-            return None
-        head, _, sanitized = split
-        properties = find_tool_properties(self._tools, func_name)
-        changed = False
-        if properties:
-            _, changed = self._coerce_dict(head, properties)
-        fixed_head = None
-        if changed or sanitized:
-            fixed_head = json.dumps(head, ensure_ascii=False)[:-1]
-        slot.arg_head_cache = (args_json[:last_comma], fixed_head)
-        return fixed_head
+        return _ArgsRewriter(
+            args_json, find_tool_properties(self._tools, func_name), final=True
+        ).rewrite()
 
     def _streaming_safe_args(
         self,
-        slot: ToolCallSlot,
         args_json: str,
         func_name: str,
         string_keys: set[str] | None,
     ) -> tuple[str, bool]:
         """Correct *args_json* and return its safe streamed prefix.
 
-        While the object is still open it is not valid JSON, so the prefix is
-        computed from the converter output first and the correctable leading
-        members are then stitched in. That keeps this to one structural scan
-        per delta, as the scan is needed anyway.
+        The correction rewrites value tokens in place (see
+        :class:`_ArgsRewriter`), so the corrected text of one delta extends
+        the corrected text of every earlier delta and the prefix invariant
+        holds however the model formats its JSON.  Trailing literals are
+        treated as still growing: they are only corrected once delimited.
         """
-        try:
-            args, sanitized = self._load_args_json(args_json)
-        except (json.JSONDecodeError, ValueError):
-            safe_json, value_streams, last_comma = self._safe_arg_prefix(
-                args_json, string_keys
-            )
-            fixed_head = self._corrected_arg_head(
-                slot, args_json, last_comma, func_name
-            )
-            if fixed_head is None:
-                return safe_json, value_streams
-            if last_comma < len(safe_json):
-                # The prefix extends past the corrected members, so only its
-                # leading part changes.
-                return fixed_head + safe_json[last_comma:], value_streams
-            # The prefix stops inside the head (a trailing comma with no key
-            # after it yet), so rescan the corrected text.
-            safe_json, value_streams, _ = self._safe_arg_prefix(
-                fixed_head + args_json[last_comma:], string_keys
-            )
-            return safe_json, value_streams
-
-        if isinstance(args, dict):
-            properties = find_tool_properties(self._tools, func_name)
-            changed = False
-            if properties:
-                _, changed = self._coerce_dict(args, properties)
-            if changed or sanitized:
-                args_json = json.dumps(args, ensure_ascii=False)
-        safe_json, value_streams, _ = self._safe_arg_prefix(args_json, string_keys)
-        return safe_json, value_streams
+        rewritten = _ArgsRewriter(
+            args_json, find_tool_properties(self._tools, func_name), final=False
+        ).rewrite()
+        return self._safe_arg_prefix(rewritten, string_keys)
 
     def _is_valid_tool_name(self, name: str) -> bool:
         if not self.parser_engine_config.validate_tool_names:
@@ -1269,10 +1252,10 @@ class ParserEngine(Parser):
         prev = slot.streamed_json
         if slot.name:
             safe_json, value_streams = self._streaming_safe_args(
-                slot, current_json, slot.name, slot.string_keys
+                current_json, slot.name, slot.string_keys
             )
         else:
-            safe_json, value_streams, _ = self._safe_arg_prefix(
+            safe_json, value_streams = self._safe_arg_prefix(
                 current_json, slot.string_keys
             )
 

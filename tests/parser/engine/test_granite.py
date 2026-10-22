@@ -314,6 +314,36 @@ class TestStreaming:
         args = _collect_args(results)
         assert json.loads(args[0]) == {"count": "NaN", "note": "x"}
 
+    @pytest.mark.parametrize("chunk_size", [1, 3, 7])
+    def test_streamed_compact_args_survive_correction(
+        self, parser, mock_request, chunk_size
+    ):
+        # Compact separators and no space after ':' must survive correction:
+        # re-serializing with json.dumps normalizes them, which cannot extend
+        # the already-streamed prefix and truncates the call.
+        mock_request.tools = [
+            ChatCompletionToolsParam(
+                type="function",
+                function=FunctionDefinition(
+                    name="submit",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "count": {"type": "integer"},
+                            "note": {"type": "string"},
+                        },
+                    },
+                ),
+            )
+        ]
+        text = (
+            f'{TOOL_TOKEN} [{{"name": "submit", "arguments": '
+            f'{{"count":"5","note":"x"}}}}]'
+        )
+        results = _stream(parser, mock_request, text, chunk_size)
+        args = _collect_args(results)
+        assert args[0] == '{"count":5,"note":"x"}'
+
 
 class TestReplay:
     @pytest.mark.parametrize("scenario", _GRANITE_SCENARIOS, ids=lambda s: s.id)

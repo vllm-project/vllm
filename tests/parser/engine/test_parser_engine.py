@@ -920,7 +920,6 @@ class TestFixArgTypes:
         """
         tool = _make_tool("f", {"count": {"type": "integer"}, "x": {}})
         engine = _make_engine(tools=[tool])
-        # The sibling repair forces re-serialization of the whole object.
         result = engine._fix_arg_types('{"count": "5", "x": NaN}', "f")
         parsed = json.loads(result, parse_constant=_reject_json_constant)
         assert parsed == {"count": 5, "x": "NaN"}
@@ -942,7 +941,7 @@ class TestFixArgTypes:
         parsed = json.loads(result, parse_constant=_reject_json_constant)
         assert parsed == {"count": 5, "x": {"a": "NaN"}}
 
-    def test_nonfinite_float_alone_forces_reserialization(self):
+    def test_nonfinite_float_alone_forces_rewrite(self):
         """Sanitizing a non-finite float is itself a change, even when no
         value is coerced.
         """
@@ -1653,6 +1652,31 @@ def _collect_arg_deltas(deltas: list) -> str:
     return "".join(parts)
 
 
+def _stream_tool_args(engine, name: str, chunks: list[str]) -> str:
+    """Stream a tool call and return the exact joined argument text."""
+    deltas = []
+    deltas.append(
+        engine._events_to_delta(
+            [SemanticEvent(EventType.TOOL_CALL_START, tool_index=0)]
+        )
+    )
+    deltas.append(
+        engine._events_to_delta(
+            [SemanticEvent(EventType.TOOL_NAME, name, tool_index=0)]
+        )
+    )
+    for chunk in chunks:
+        deltas.append(
+            engine._events_to_delta(
+                [SemanticEvent(EventType.ARG_VALUE_CHUNK, chunk, tool_index=0)]
+            )
+        )
+    deltas.append(
+        engine._events_to_delta([SemanticEvent(EventType.TOOL_CALL_END, tool_index=0)])
+    )
+    return _collect_arg_deltas(deltas)
+
+
 def _run_streaming_tool(engine, name: str, chunks: list[str]) -> dict:
     deltas = []
     deltas.append(
@@ -2053,6 +2077,53 @@ class TestCoercionInstabilityRegression:
             ['{"count": NaN, ', '"note": "x', '"}'],
         )
         assert parsed == {"count": "NaN", "note": "x"}
+
+    @pytest.mark.parametrize("sep", [",", ",\n", ",\t", ", "])
+    def test_model_separator_formatting_survives_correction(self, sep):
+        """Correction must rewrite value tokens in place, not re-serialize.
+
+        ``json.dumps`` normalizes separators to ``, `` and ``: ``, which
+        cannot extend an already-streamed prefix in the model's own
+        formatting, silently truncating the streamed arguments.
+        """
+        tool = _make_tool(
+            "f",
+            {"count": {"type": "integer"}, "note": {"type": "string"}},
+        )
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        chunks = [f'{{"count": "5"{sep}', '"note": "x', '"}']
+        args = _stream_tool_args(engine, "f", chunks)
+        assert args == f'{{"count": 5{sep}"note": "x"}}'
+
+    def test_sanitization_without_coercion_keeps_prefix(self):
+        """A sanitized value alone must not re-serialize the object.
+
+        With nothing to coerce, the pre-fix code still ran ``json.dumps``,
+        whose ``", "`` separators broke the ``startswith(prev)`` check on
+        the compact prefix already streamed and truncated the call.
+        """
+        tool = _make_tool("f", {"a": {"type": "integer"}})
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        args = _stream_tool_args(engine, "f", ['{"a":1,"x":', "NaN}"])
+        assert args == '{"a":1,"x":"NaN"}'
+
+    def test_overflowing_number_literal_kept_verbatim(self):
+        """``1e999`` is valid JSON; it must not become the string
+        ``"Infinity"`` just because sanitization ran."""
+        tool = _make_tool("f", {"a": {"type": "integer"}})
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        args = _stream_tool_args(engine, "f", ['{"a": 1, "x": 1e999}'])
+        assert args == '{"a": 1, "x": 1e999}'
+        assert json.loads(args)["x"] == float("inf")
+
+    def test_truncated_first_member_sanitized(self):
+        """A truncated call still has its complete tokens corrected: the
+        first member is never preceded by a comma, but its ``NaN`` literal
+        is complete once the arguments end."""
+        tool = _make_tool("f", {"note": {"type": "string"}})
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        args = _stream_tool_args(engine, "f", ['{"x": NaN'])
+        assert args == '{"x": "NaN"'
 
 
 _DROP_VOCAB: dict[str, int] = {
