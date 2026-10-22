@@ -49,6 +49,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
     kFp8StaticTensorSym,
+    kInt4Static32,
     kMxfp4Dynamic,
     kMxfp4Static,
     kMxfp8Dynamic,
@@ -2204,6 +2205,8 @@ _MXFP4_SCHEME_CANDIDATES: list[tuple[QuantKey, QuantKey | None]] = [
     (kMxfp4Static, kFp8Dynamic128Sym),
     (kMxfp4Static, kFp8StaticTensorSym),
     (kMxfp4Static, None),
+    # gfx942's load-time int4 requant of Kimi-K3's MXFP4 experts
+    (kInt4Static32, None),
 ]
 
 
