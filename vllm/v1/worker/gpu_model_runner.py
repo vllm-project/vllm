@@ -1231,7 +1231,12 @@ class GPUModelRunner(
         # that they get cleared from the persistent batch before being re-scheduled
         # in the normal resumed request path.
         unscheduled_req_ids = cached_req_ids - (scheduled_req_ids - resumed_req_ids)
-        self._save_num_accepted_tokens(unscheduled_req_ids)
+        # Preempted requests recompute their state and restart at 1.
+        self._save_num_accepted_tokens(
+            unscheduled_req_ids
+            - resumed_req_ids
+            - (scheduler_output.preempted_req_ids or set())
+        )
         self._num_accepted_on_readd.clear()
         # NOTE(woosuk): The persistent batch optimization assumes that
         # consecutive batches contain mostly the same requests. If batches
@@ -1654,7 +1659,8 @@ class GPUModelRunner(
         # Clear `output_token_ids` as previous output tokens are now part of
         # `prompt_token_ids`.
         req_state.output_token_ids.clear()
-        # The new input is prefilled on top of the state, so start over.
+        # Same as before the request was kept across skipped steps: the
+        # streaming update re-anchors this bookkeeping on re-add.
         req_state.replayssm_decode_base = None
         req_state.num_accepted_tokens = 1
 
