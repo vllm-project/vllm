@@ -705,16 +705,6 @@ def _validate_fused_qkv_indexer_weights(module: nn.Module) -> set[str]:
     return loaded_params
 
 
-def _uses_serialized_modelopt_nvfp4(
-    quant_config: QuantizationConfig | None,
-) -> bool:
-    return bool(
-        quant_config is not None
-        and quant_config.get_name() == "modelopt_fp4"
-        and getattr(quant_config, "is_checkpoint_nvfp4_serialized", False)
-    )
-
-
 class Step5SparseIndexerIndexTPLinear(ColumnParallelLinear):
     """Sparse-indexer linear sharded by its own tensor-parallel size."""
 
@@ -2162,9 +2152,6 @@ class Step5Model(nn.Module):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        from vllm.model_executor.layers.fused_moe import (
-            fused_moe_make_expert_params_mapping,
-        )
         from vllm.model_executor.model_loader.weight_utils import (
             default_weight_loader,
             maybe_remap_kv_scale_name,
@@ -2213,14 +2200,6 @@ class Step5Model(nn.Module):
             for param, weight, shard in expert_params_mapping
         ]
 
-        per_expert_params_mapping = fused_moe_make_expert_params_mapping(
-            self,
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.moe_num_experts,
-        )
-
         disable_moe_stacked_params = [data[1] for data in expert_params_mapping]
 
         def _load_weight(name: str, loaded_weight: torch.Tensor) -> set[str]:
@@ -2244,31 +2223,6 @@ class Step5Model(nn.Module):
             local_name = remapped_name
 
             if ".moe.experts." in local_name:
-                is_per_expert_weight = False
-                for mapping in per_expert_params_mapping:
-                    param_name, weight_name, expert_id, shard_id = mapping
-                    if weight_name not in local_name:
-                        continue
-                    is_per_expert_weight = True
-                    mapped_name = local_name.replace(weight_name, param_name)
-                    if is_pp_missing_parameter(mapped_name, self):
-                        continue
-                    if mapped_name not in params_dict:
-                        continue
-                    param = params_dict[mapped_name]
-                    success = param.weight_loader(
-                        param,
-                        loaded_weight,
-                        mapped_name,
-                        shard_id=shard_id,
-                        expert_id=expert_id,
-                        return_success=True,
-                    )
-                    if success:
-                        loaded_params.add(mapped_name)
-                        break
-                if is_per_expert_weight:
-                    return loaded_params
                 if is_pp_missing_parameter(local_name, self):
                     return loaded_params
                 if local_name not in params_dict:
@@ -2494,10 +2448,7 @@ class Step5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
             is_mtp_completeness_check_enabled,
         )
 
-        validate_completeness = (
-            is_mtp_completeness_check_enabled()
-            and not _uses_serialized_modelopt_nvfp4(self.vllm_config.quant_config)
-        )
+        validate_completeness = is_mtp_completeness_check_enabled()
         if validate_completeness:
             _reset_fused_qkv_indexer_load_state(self.model)
         skip_prefixes = ["vision_model."]
