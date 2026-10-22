@@ -15,7 +15,22 @@ from tests.kernels.quant_utils import (
     ref_dynamic_per_token_quant,
 )
 from tests.kernels.utils import _assert_deterministic
+from vllm.model_executor.kernels.linear import init_fp8_linear_kernel
+from vllm.model_executor.kernels.linear.scaled_mm.pytorch import (
+    PerTensorTorchFP8ScaledMMLinearKernel,
+    RowWiseTorchFP8ScaledMMLinearKernel,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.rocm import (
+    ROCmFP8ScaledMMLinearKernel,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8DynamicTensorSym,
+    kFp8DynamicTokenSym,
+    kFp8StaticChannelSym,
+    kFp8StaticTensorSym,
+)
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import set_random_seed
 
 pytestmark = pytest.mark.skipif(
@@ -339,6 +354,99 @@ def test_fp8_scaled_mm_determinism():
         )
 
     _assert_deterministic(run_gemm, n_runs=4)
+
+
+# (N, K) of FP8 linear layers. torch._scaled_mm needs K % 16 == 0.
+UNALIGNED_K_CASES = [
+    # Padded, K 1368 -> 1376: DeepSeek-Coder-V2-Lite down_proj at TP8 (10944 / 8).
+    pytest.param((2048, 1368), id="N2048xK1368"),
+    # Padded, K 264 -> 272: DiffusionGemma down_proj at TP8 (2112 / 8).
+    pytest.param((2816, 264), id="N2816xK264"),
+    # Not padded: K 1024 is already a multiple of 16.
+    pytest.param((2048, 1024), id="N2048xK1024-aligned"),
+]
+
+
+@fp8_only
+@pytest.mark.usefixtures("default_vllm_config")
+@pytest.mark.parametrize("weight_shape", UNALIGNED_K_CASES)
+@pytest.mark.parametrize("num_tokens", [1, 32])
+@pytest.mark.parametrize(
+    "kernel_type, activation_quant_key, weight_quant_key",
+    [
+        # Pads an unaligned K: falls back to torch._scaled_mm.
+        pytest.param(
+            ROCmFP8ScaledMMLinearKernel,
+            kFp8DynamicTensorSym,
+            kFp8StaticTensorSym,
+            id="ROCm",
+        ),
+        # Pads an unaligned K: calls torch._scaled_mm.
+        pytest.param(
+            PerTensorTorchFP8ScaledMMLinearKernel,
+            kFp8DynamicTensorSym,
+            kFp8StaticTensorSym,
+            id="PerTensorTorch",
+        ),
+        # Pads an unaligned K: calls torch._scaled_mm.
+        pytest.param(
+            RowWiseTorchFP8ScaledMMLinearKernel,
+            kFp8DynamicTokenSym,
+            kFp8StaticChannelSym,
+            id="RowWiseTorch",
+        ),
+    ],
+)
+def test_fp8_scaled_mm_linear_kernel_pads_k(
+    kernel_type, activation_quant_key, weight_quant_key, num_tokens, weight_shape
+):
+    """The FP8 linear kernels zero-pad the weight's K to a multiple of 16 at
+    load and the input's K at apply, so a layer with an unaligned K runs."""
+    torch.manual_seed(0)
+
+    n_dim, k_dim = weight_shape
+    per_tensor = weight_quant_key.scale.group_shape.is_per_tensor()
+
+    w_fp8 = torch.randn(weight_shape, device=DEVICE).to(FP8_DTYPE)
+    w_scale = torch.rand((1,) if per_tensor else (n_dim, 1), device=DEVICE) + 0.5
+    # Loaded layout: the weight is the (K, N) view of an (N, K) tensor.
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(w_fp8.t(), requires_grad=False)
+    layer.weight_scale = torch.nn.Parameter(w_scale, requires_grad=False)
+    layer.input_scale = None
+    layer.input_scale_ub = None
+
+    kernel = init_fp8_linear_kernel(
+        activation_quant_key=activation_quant_key,
+        weight_quant_key=weight_quant_key,
+        input_dtype=torch.bfloat16,
+        out_dtype=torch.bfloat16,
+        weight_shape=weight_shape,
+        force_kernel=kernel_type,
+    )
+    assert isinstance(kernel, kernel_type), (
+        f"Expected {kernel_type.__name__} to be selected, but got "
+        f"{type(kernel).__name__}."
+    )
+    kernel.process_weights_after_loading(layer)
+
+    # apply_weights pads the input's K to match the weight; torch._scaled_mm
+    # raises if it doesn't.
+    x = torch.randn(num_tokens, k_dim, dtype=torch.bfloat16, device=DEVICE)
+    out = kernel.apply_weights(layer, x)
+    assert out.shape == (num_tokens, n_dim), (
+        f"The output shape is {tuple(out.shape)}, but it should be "
+        f"{(num_tokens, n_dim)}."
+    )
+
+    # The stored (K, N) weight has K zero-padded to a multiple of 16.
+    assert layer.weight.shape == (round_up(k_dim, 16), n_dim), (
+        f"The weight shape is {tuple(layer.weight.shape)}, but K should be "
+        f"padded to {round_up(k_dim, 16)}."
+    )
+    assert not layer.weight[k_dim:].float().any(), (
+        "The padded rows of the weight are not all zero."
+    )
 
 
 @fp8_only
