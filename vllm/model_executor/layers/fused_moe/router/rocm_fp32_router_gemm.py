@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Low-token router GEMM with FP32 output for gfx950 (FP32 or BF16 weights)."""
+"""Router GEMM with FP32 output on ROCm.
+
+gfx950: low-token native kernel (FP32 or BF16 weights).
+gfx1250: aiter tuned GEMM for BF16 weights at any token count.
+"""
 
 import torch
 
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx950
+from vllm.platforms.rocm import get_cdna_version
 from vllm.triton_utils import tl, triton
 
 _MAX_TOKENS = 32
@@ -97,7 +101,7 @@ def can_use_rocm_fp32_router_gemm(
     hidden_states: torch.Tensor,
     router_weight: torch.Tensor,
 ) -> bool:
-    """Return whether the tensors can use the gfx950 fast path."""
+    """Return whether the tensors can use the gfx950 / gfx1250 fast path."""
     try:
         _validate_inputs(hidden_states, router_weight)
     except (RuntimeError, ValueError):
@@ -109,8 +113,8 @@ def _validate_inputs(
     hidden_states: torch.Tensor,
     router_weight: torch.Tensor,
 ) -> None:
-    if not current_platform.is_rocm() or not on_gfx950():
-        raise RuntimeError("rocm_fp32_router_gemm requires ROCm gfx950")
+    if not current_platform.is_rocm() or not (get_cdna_version() >= 4):
+        raise RuntimeError("rocm_fp32_router_gemm requires ROCm gfx950 or gfx1250")
     if hidden_states.dim() != 2 or router_weight.dim() != 2:
         raise ValueError("hidden_states and router_weight must be 2D tensors")
     if hidden_states.dtype not in (torch.bfloat16, torch.float32):
@@ -125,6 +129,14 @@ def _validate_inputs(
         raise ValueError("hidden_states and router_weight must be contiguous")
     if router_weight.shape[1] != hidden_states.shape[1]:
         raise ValueError("router_weight and hidden_states hidden sizes differ")
+    if get_cdna_version() >= 5:
+        # aiter tgemm has no token limit; its Gluon a16w16 path needs BF16.
+        if (
+            hidden_states.dtype != torch.bfloat16
+            or router_weight.dtype != torch.bfloat16
+        ):
+            raise ValueError("gfx1250 router GEMM needs BF16 inputs and weights")
+        return
     if not 0 <= hidden_states.shape[0] <= _MAX_TOKENS:
         raise ValueError(f"num_tokens must be in [0, {_MAX_TOKENS}]")
     if hidden_states.shape[0] * router_weight.numel() >= _MAX_MACS:
@@ -147,6 +159,12 @@ def rocm_fp32_router_gemm(
 ) -> torch.Tensor:
     """Compute ``hidden_states @ router_weight.T`` with FP32 accumulation."""
     _validate_inputs(hidden_states, router_weight)
+    if get_cdna_version() >= 5:
+        # Untuned shapes run aiter's Gluon a16w16 kernel, which beats both
+        # hipBLASLt and the native kernel below on gfx1250.
+        from aiter.tuned_gemm import tgemm
+
+        return tgemm.mm(hidden_states, router_weight, otype=torch.float32)
     num_tokens = hidden_states.shape[0]
     hidden_size = hidden_states.shape[1]
     num_experts = router_weight.shape[0]
