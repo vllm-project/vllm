@@ -1517,61 +1517,93 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   #
   # _rocm_C extension
   #
-  # The paged attention *instantiations* are split over one translation unit
-  # per (dtype, kv-cache dtype, head size) combination: compiling them all in a
-  # single file serializes ~10 min of device code generation onto one core.
-  # attention_dispatch.cu only holds the runtime dispatch, attention_kernels.cuh
-  # the kernels and launchers. A file listed here is dead weight unless
-  # attention_dispatch.cu also dispatches its entry point (guarded below).
+  # The paged attention instantiations are split over one generated translation
+  # unit per (dtype, kv-cache dtype, head size, block size); compiling them in a
+  # single file serialized ~10 min of device code generation onto one core. The
+  # same script emits the entry point prototypes and paged_attention()'s dispatch
+  # arms, so a unit cannot be compiled without being dispatched.
+  # attention_dispatch.cu only holds argument validation and is_navi detection,
+  # attention_kernels.cuh the kernels and launchers.
+  #
+  set(ROCM_ATTN_GEN_SCRIPT
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/rocm/generate_paged_attn.py)
+  # Editing the script has to re-run configure, otherwise the units on disk stay
+  # stale until something else triggers a reconfigure.
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    ${ROCM_ATTN_GEN_SCRIPT})
+  file(MD5 ${ROCM_ATTN_GEN_SCRIPT} ROCM_ATTN_GEN_SCRIPT_HASH)
+  # The script records this key plus the exact list of files it wrote, in a stamp
+  # next to the outputs; the list is what CMake uses as the source list, so a
+  # stray `attention_paged_attn_*.cu` or a partially deleted set cannot slip in.
+  # The stamp lives in the source tree (not in a per-build-directory cache)
+  # because the outputs do. Whether the Navi kernel set is instantiated is a
+  # compile definition, not part of the generated text, so the units are identical
+  # for every build directory and arch list.
+  set(ROCM_ATTN_GEN_STAMP
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/rocm/.paged_attn_generated)
+
+  # Sets OUT_SRCS to the .cu files the stamp lists, or to nothing when the stamp
+  # is missing, written by another version of the script, or lists a missing file
+  # (all of which mean "regenerate").
+  function (vllm_rocm_attn_generated_srcs out_srcs)
+    set(${out_srcs} "" PARENT_SCOPE)
+    if (NOT EXISTS ${ROCM_ATTN_GEN_STAMP})
+      return()
+    endif()
+    file(STRINGS ${ROCM_ATTN_GEN_STAMP} _lines)
+    if (NOT _lines)
+      return()
+    endif()
+    list(GET _lines 0 _key)
+    list(REMOVE_AT _lines 0)
+    if (NOT _key STREQUAL "${ROCM_ATTN_GEN_SCRIPT_HASH}")
+      return()
+    endif()
+    set(_srcs)
+    foreach (_f ${_lines})
+      if (NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/csrc/rocm/${_f})
+        return()
+      endif()
+      if (_f MATCHES "\\.cu$")
+        list(APPEND _srcs csrc/rocm/${_f})
+      endif()
+    endforeach()
+    set(${out_srcs} ${_srcs} PARENT_SCOPE)
+  endfunction()
+
+  vllm_rocm_attn_generated_srcs(VLLM_ATTENTION_PAGED_ATTN_SRC)
+  if (NOT VLLM_ATTENTION_PAGED_ATTN_SRC)
+    execute_process(
+      COMMAND ${Python_EXECUTABLE} ${ROCM_ATTN_GEN_SCRIPT}
+              ${ROCM_ATTN_GEN_SCRIPT_HASH}
+      RESULT_VARIABLE rocm_attn_generation_result
+      OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/rocm_attn_generation.log
+      ERROR_FILE ${CMAKE_CURRENT_BINARY_DIR}/rocm_attn_generation.log
+    )
+
+    if (NOT rocm_attn_generation_result EQUAL 0)
+      message(FATAL_ERROR "Paged attention generation failed."
+                          " Result: \"${rocm_attn_generation_result}\""
+                          "\nCheck the log for details: "
+                          "${CMAKE_CURRENT_BINARY_DIR}/rocm_attn_generation.log")
+    endif()
+    vllm_rocm_attn_generated_srcs(VLLM_ATTENTION_PAGED_ATTN_SRC)
+    if (NOT VLLM_ATTENTION_PAGED_ATTN_SRC)
+      message(FATAL_ERROR "Paged attention generation produced no sources; see "
+                          "${CMAKE_CURRENT_BINARY_DIR}/rocm_attn_generation.log")
+    endif()
+    message(STATUS "Paged attention generation completed successfully.")
+  else()
+    message(STATUS "Paged attention generation is up to date.")
+  endif()
+
   set(VLLM_ROCM_EXT_SRC
     "csrc/rocm/torch_bindings.cpp"
     "csrc/rocm/skinny_gemms.cu"
     "csrc/rocm/skinny_gemms_int4.cu"
     "csrc/rocm/attention_dispatch.cu"
-    "csrc/rocm/attention_paged_attn_h64_f16_auto.cu"
-    "csrc/rocm/attention_paged_attn_h128_f16_auto.cu"
-    "csrc/rocm/attention_paged_attn_h64_bf16_auto.cu"
-    "csrc/rocm/attention_paged_attn_h128_bf16_auto.cu"
-    "csrc/rocm/attention_paged_attn_h64_f16_fp8_f16.cu"
-    "csrc/rocm/attention_paged_attn_h128_f16_fp8_f16.cu"
-    "csrc/rocm/attention_paged_attn_h64_f16_fp8_fp8.cu"
-    "csrc/rocm/attention_paged_attn_h128_f16_fp8_fp8.cu"
-    "csrc/rocm/attention_paged_attn_h64_bf16_fp8_f16.cu"
-    "csrc/rocm/attention_paged_attn_h128_bf16_fp8_f16.cu"
-    "csrc/rocm/attention_paged_attn_h64_bf16_fp8_fp8.cu"
-    "csrc/rocm/attention_paged_attn_h128_bf16_fp8_fp8.cu")
+    ${VLLM_ATTENTION_PAGED_ATTN_SRC})
 
-  # Each attention_paged_attn_*.cu file below instantiates one kernel set and
-  # exposes it as one entry point. That entry point is only reachable if
-  # paged_attention() in csrc/rocm/attention_dispatch.cu names it in one of its
-  # ATTN_HEAD_SWITCH() calls (the dispatch arms); otherwise the file is compiled
-  # and linked unnecessarily. Fail at configure time instead.
-  file(READ "${CMAKE_SOURCE_DIR}/csrc/rocm/attention_dispatch.cu" _attn_dispatch)
-  string(FIND "${_attn_dispatch}" "#define ATTN_HEAD_SWITCH" _attn_arms_pos)
-  if (_attn_arms_pos EQUAL -1)
-    message(FATAL_ERROR
-      "csrc/rocm/attention_dispatch.cu no longer defines ATTN_HEAD_SWITCH; "
-      "update the instantiation guard in CMakeLists.txt accordingly.")
-  endif()
-  string(SUBSTRING "${_attn_dispatch}" ${_attn_arms_pos} -1 _attn_arms)
-  foreach (_attn_src ${VLLM_ROCM_EXT_SRC})
-    if (_attn_src MATCHES "^csrc/rocm/attention_paged_attn_.*\\.cu$")
-      file(READ "${CMAKE_SOURCE_DIR}/${_attn_src}" _attn_tu)
-      string(REGEX MATCHALL "ATTN_ENTRY\\([A-Za-z0-9_]+\\)" _attn_entries
-        "${_attn_tu}")
-      foreach (_attn_entry ${_attn_entries})
-        string(REGEX REPLACE "ATTN_ENTRY\\((.*)\\)" "\\1" _attn_name
-          "${_attn_entry}")
-        if (NOT _attn_arms MATCHES "${_attn_name}[,)]")
-          message(FATAL_ERROR
-            "${_attn_src} instantiates ${_attn_name}, but "
-            "csrc/rocm/attention_dispatch.cu never dispatches it: the file "
-            "would be compiled and linked for nothing. Add it to one of the "
-            "ATTN_HEAD_SWITCH() calls in paged_attention().")
-        endif()
-      endforeach()
-    endif()
-  endforeach()
   set(VLLM_ROCM_EXT_FLAGS ${VLLM_GPU_FLAGS})
 
   # skinny_gemms*.cu are built on gfx9/gfx11 ISA (MFMA, dot2/dot4, legacy
@@ -1628,6 +1660,21 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     target_link_libraries(_rocm_C PRIVATE _rocm_C_skinny)
   else()
     target_compile_definitions(_rocm_C PRIVATE VLLM_SKIP_SKINNY_GEMMS)
+  endif()
+
+  # The paged attention units are identical whatever the arch list is; whether the
+  # Navi (gfx11/gfx12) kernel set is needed is decided here, as a compile
+  # definition, so no generated file has to be rewritten for a different build
+  # directory. Keep this predicate in sync with is_navi_gpu() in
+  # csrc/rocm/attention_dispatch.cu.
+  set(_ROCM_NAVI_ARCHS ${VLLM_GPU_ARCHES})
+  list(FILTER _ROCM_NAVI_ARCHS INCLUDE REGEX "gfx1[12]")
+  set(_ROCM_NO_NAVI_ARCHS ${VLLM_GPU_ARCHES})
+  list(FILTER _ROCM_NO_NAVI_ARCHS EXCLUDE REGEX "gfx1[12]")
+  if(_ROCM_NO_NAVI_ARCHS AND NOT _ROCM_NAVI_ARCHS)
+    message(STATUS "paged attention: CDNA only (${VLLM_GPU_ARCHES}), "
+                   "Navi kernels not instantiated")
+    target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_ATTN_NO_NAVI)
   endif()
 
   if(VLLM_ROCM_HAS_GFX1100)
