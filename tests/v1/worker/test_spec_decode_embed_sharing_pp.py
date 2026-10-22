@@ -160,6 +160,7 @@ def m3_config():
         ),
         quant_config=None,
         cache_config=None,
+        kernel_config=SimpleNamespace(monokernel=False),
     )
 
 
