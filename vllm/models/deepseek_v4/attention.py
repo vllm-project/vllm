@@ -45,10 +45,7 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
-from vllm.model_executor.layers.indexer_capture import (
-    IndexerCaptureSink,
-    configure_indexer_capture,
-)
+from vllm.model_executor.layers.indexer_capture import IndexerCaptureSource
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.utils import extract_layer_index
@@ -133,7 +130,7 @@ def _resolve_dsv4_kv_cache_dtype(
     return kv_cache_dtype, torch.bfloat16
 
 
-class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
+class DeepseekV4Attention(nn.Module, AttentionLayerBase, IndexerCaptureSource, ABC):
     """DeepseekV4 MLA attention layer.
 
     The platform-specific sparse-MLA forward (``forward_mqa`` /
@@ -319,15 +316,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 aux_stream=indexer_aux_stream,
             )
 
-        self.indexer_capture: IndexerCaptureSink | None = None
-        if (
-            vllm_config.aux_output_config.enable_return_indexer_topk
-            and self.indexer is not None
-        ):
-            configure_indexer_capture(
-                self, vllm_config, layer_id, self.indexer.topk_tokens
-            )
-
         self._prepare_and_attn_fn = self._prepare_and_attn
         if not vllm_config.use_v2_model_runner:
             # MRV1's piecewise capture only tolerates the wide eager region: with
@@ -479,6 +467,11 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
                     _COMPUTE_GLOBAL_TOPK_INDICES_AND_LENS_KERNEL.register_warmup()
                     _BUILD_FLASHINFER_MIXED_SPARSE_INDICES_KERNEL.register_warmup()
+
+    def get_indexer_capture_metadata(self) -> tuple[int, int] | None:
+        if self.indexer is None:
+            return None
+        return extract_layer_index(self.prefix), self.indexer.topk_tokens
 
     def forward(
         self,

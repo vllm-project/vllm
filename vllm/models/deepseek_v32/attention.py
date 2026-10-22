@@ -13,10 +13,7 @@ from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.attention.attention import get_attention_context
-from vllm.model_executor.layers.indexer_capture import (
-    IndexerCaptureSink,
-    configure_indexer_capture,
-)
+from vllm.model_executor.layers.indexer_capture import IndexerCaptureSource
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -122,7 +119,7 @@ class DeepseekV32Indexer(nn.Module):
         )
 
 
-class DeepseekV32Attention(MLAAttention):
+class DeepseekV32Attention(MLAAttention, IndexerCaptureSource):
     indexer: "DeepseekV32Indexer | None"
     indexer_cls: "type[DeepseekV32Indexer]" = DeepseekV32Indexer
     supports_pcp_dcp: ClassVar[bool] = True
@@ -238,12 +235,10 @@ class DeepseekV32Attention(MLAAttention):
         self._dense_mha_metadata_layer_name = (
             self.layer_name if enable_short_prefill_scoring_skip else ""
         )
-        self.indexer_capture: IndexerCaptureSink | None = None
         if (
             vllm_config.aux_output_config.enable_return_indexer_topk
             and indexer is not None
         ):
-            configure_indexer_capture(self, vllm_config, layer_id, indexer.topk_tokens)
             # Replay needs the selection even on a short dense-MHA prefill.
             self._dense_mha_metadata_layer_name = ""
 
@@ -306,6 +301,11 @@ class DeepseekV32Attention(MLAAttention):
             or cudagraph_runtime_mode == CUDAGraphMode.FULL
             or torch.cuda.is_current_stream_capturing()
         )
+
+    def get_indexer_capture_metadata(self) -> tuple[int, int] | None:
+        if self.indexer is None:
+            return None
+        return extract_layer_index(self.layer_name), self.indexer.topk_tokens
 
     def forward(  # type: ignore[override]
         self,

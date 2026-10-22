@@ -7,11 +7,9 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING
 
 import torch
-
-from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -32,10 +30,17 @@ class IndexerCaptureSink:
         self.rows[token_start:end].copy_(indices)
 
 
-class IndexerCaptureSource(Protocol):
-    indexer_capture_layer_id: int
-    indexer_capture_topk: int
-    indexer_capture: IndexerCaptureSink | None
+class IndexerCaptureSource:
+    """Explicit capability for a logical TopK producer's execution path."""
+
+    indexer_capture: IndexerCaptureSink | None = None
+
+    def get_indexer_capture_metadata(self) -> tuple[int, int] | None:
+        """Return (layer_id, topk), or None for a shared-index consumer."""
+        raise NotImplementedError
+
+    def set_indexer_capture_sink(self, sink: IndexerCaptureSink | None) -> None:
+        self.indexer_capture = sink
 
 
 @dataclass
@@ -45,32 +50,23 @@ class IndexerSnapshot:
 
 
 class IndexerCapturer:
+    """Own raw storage and snapshots for a validated source layout."""
+
     def __init__(
         self,
-        model: torch.nn.Module,
         config: VllmConfig,
+        layer_ids: tuple[int, ...],
+        topk: int,
         *,
         output_rank: bool = True,
     ) -> None:
-        sources: list[IndexerCaptureSource] = []
-        for module in model.modules():
-            if hasattr(module, "indexer_capture_layer_id"):
-                sources.append(cast(IndexerCaptureSource, module))
-        sources.sort(key=lambda source: source.indexer_capture_layer_id)
-        if not sources:
-            raise ValueError(
-                "No backbone indexer capture sources: this model/backend "
-                "does not support ordinary indexer replay"
-            )
-        layer_ids = tuple(source.indexer_capture_layer_id for source in sources)
-        topks = {source.indexer_capture_topk for source in sources}
-        if len(set(layer_ids)) != len(layer_ids) or len(topks) != 1 or min(topks) <= 0:
-            raise ValueError(
-                "Ordinary indexer replay requires unique layers and uniform topk"
-            )
-        topk = topks.pop()
-        self.shape_per_token = (len(sources), topk)
-        self.fixed_bytes_per_token = len(sources) * topk * 4
+        self.source_columns = {
+            layer_id: column for column, layer_id in enumerate(layer_ids)
+        }
+        self.shape_per_token = (len(layer_ids), topk)
+        self.fixed_bytes_per_token = len(layer_ids) * topk * 4
+        self._sources: list[IndexerCaptureSource] = []
+        self._closed = False
         model_config = config.model_config
         identity = json.dumps(
             {
@@ -95,16 +91,13 @@ class IndexerCapturer:
                 *self.shape_per_token,
             ),
             dtype=torch.int32,
-            device=current_platform.device_type,
+            device=config.device_config.device,
         )
         num_slots = config.max_concurrent_batches if output_rank else 0
         self._snapshot_rows = [
             torch.empty_like(self.device_buffer) for _ in range(num_slots)
         ]
         self._free_snapshot_slots = list(range(num_slots))
-        self._sources = sources
-        for column, source in enumerate(sources):
-            source.indexer_capture = IndexerCaptureSink(self.device_buffer[:, column])
 
     def snapshot(self, num_rows: int) -> IndexerSnapshot:
         assert 0 <= num_rows <= len(self.device_buffer)
@@ -122,27 +115,69 @@ class IndexerCapturer:
         self._free_snapshot_slots.append(slot)
 
     def close(self) -> None:
-        if not hasattr(self, "device_buffer"):
+        if self._closed:
             return
         for source in self._sources:
-            source.indexer_capture = None
+            source.set_indexer_capture_sink(None)
         self._sources.clear()
         self._snapshot_rows.clear()
         self._free_snapshot_slots.clear()
         del self.device_buffer
+        self._closed = True
 
 
-def configure_indexer_capture(
-    module: torch.nn.Module,
+def bind_indexer_capturer(
+    model: torch.nn.Module,
     config: VllmConfig,
-    layer_id: int,
-    topk: int,
-) -> None:
-    capture_source = cast(IndexerCaptureSource, module)
-    capture_source.indexer_capture = None
+    *,
+    output_rank: bool = True,
+) -> IndexerCapturer:
+    """Discover producers, allocate their sparse layout, and bind capture sinks.
+
+    Call before KV cache capacity planning and compilation/graph capture.
+    """
+    sources = []
+    num_layers = config.model_config.get_total_num_hidden_layers()
+    for module in model.modules():
+        if not isinstance(module, IndexerCaptureSource):
+            continue
+        metadata = module.get_indexer_capture_metadata()
+        if metadata is None:
+            continue
+        layer_id, topk = metadata
+        if layer_id >= num_layers:
+            continue
+        if module.indexer_capture is not None:
+            raise ValueError(
+                f"Indexer capture source layer {layer_id} is already bound"
+            )
+        sources.append((layer_id, topk, module))
+    sources.sort(key=lambda entry: entry[0])
+    if not sources:
+        raise ValueError(
+            "No backbone indexer capture sources: this model/backend "
+            "does not support ordinary indexer replay"
+        )
+    layer_ids = tuple(layer_id for layer_id, _, _ in sources)
+    topks = {topk for _, topk, _ in sources}
     if (
-        config.aux_output_config.enable_return_indexer_topk
-        and layer_id < config.model_config.get_total_num_hidden_layers()
+        min(layer_ids) < 0
+        or len(set(layer_ids)) != len(layer_ids)
+        or len(topks) != 1
+        or min(topks) <= 0
     ):
-        capture_source.indexer_capture_layer_id = layer_id
-        capture_source.indexer_capture_topk = topk
+        raise ValueError(
+            "Ordinary indexer replay requires unique layers and uniform positive topk"
+        )
+    capturer = IndexerCapturer(config, layer_ids, topks.pop(), output_rank=output_rank)
+    try:
+        for layer_id, _, source in sources:
+            column = capturer.source_columns[layer_id]
+            capturer._sources.append(source)
+            source.set_indexer_capture_sink(
+                IndexerCaptureSink(capturer.device_buffer[:, column])
+            )
+    except Exception:
+        capturer.close()
+        raise
+    return capturer
