@@ -409,10 +409,24 @@ def has_flashinfer_nvlink_two_sided() -> bool:
 
 @functools.cache
 def has_flashinfer_nvlink_one_sided() -> bool:
-    """Return `True` if FlashInfer trtllm_moe_alltoall module is available."""
+    """Return whether FlashInfer exposes the NVLink MoE EP wrapper."""
     if not has_flashinfer_comm():
         return False
-    return importlib.util.find_spec("flashinfer.comm.trtllm_moe_alltoall") is not None
+    mod = _get_submodule("flashinfer.moe_ep")
+    return (
+        mod is not None
+        and all(
+            hasattr(mod, name)
+            for name in (
+                "BootstrapConfig",
+                "MoEEpCommParams",
+                "NVLinkOneSidedAlltoAll",
+                "NVLinkOneSidedConfig",
+                "create_communication",
+            )
+        )
+        and hasattr(mod.MoEEpCommParams, "dispatch_format")
+    )
 
 
 @functools.cache
