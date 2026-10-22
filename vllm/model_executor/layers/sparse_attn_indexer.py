@@ -516,7 +516,7 @@ def sparse_attn_indexer(
         if uses_fused:
             # The fused prefill kernel's fixed-size workspace is persistent;
             # allocate it during profiling so it is accounted for.
-            get_fused_mqa_topk_workspace(q_quant.device)
+            get_fused_mqa_topk_workspace(q_quant.device, q_quant.shape[0])
 
         # Dummy allocation to simulate for peak logits tensor memory during inference.
         # Needed with the fused kernel too: chunks below fused_mqa_topk_min_keys
