@@ -20,6 +20,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from tests.distributed.test_sharded_rdt_plan import consumer_engine
 from tests.distributed.test_weight_transfer import RecordingClient
 from vllm.distributed.weight_transfer import (
     ParamMeta,
@@ -28,7 +29,6 @@ from vllm.distributed.weight_transfer import (
 )
 from vllm.distributed.weight_transfer.base import layerwise_groups
 from vllm.distributed.weight_transfer.sharded_rdt_engine import (
-    ShardedRDTWeightTransferEngine,
     ShardedRDTWeightTransferUpdateInfo,
     _CallPlan,
 )
@@ -417,13 +417,12 @@ class TestLiveCountPlumbing:
 
     @staticmethod
     def _engine(num_consumers, world=2, rank=0):
-        engine = ShardedRDTTrainerWeightTransferEngine.__new__(
-            ShardedRDTTrainerWeightTransferEngine
+        engine = ShardedRDTTrainerWeightTransferEngine(
+            client=RecordingClient(),
+            source=object(),  # send_weights asserts a source is present
+            is_sender=rank == 0,
+            init_info=ShardedRDTTrainerInitInfo(rank=rank, num_consumers=num_consumers),
         )
-        engine._init_info = ShardedRDTTrainerInitInfo(
-            rank=rank, num_consumers=num_consumers
-        )
-        engine.source = object()  # send_weights asserts a source is present
         received: list = []
         engine._send_weights_inner = lambda count, ids: received.append((count, ids))
         return engine, received
@@ -467,14 +466,8 @@ class TestLiveCountPlumbing:
 class TestSyncIndexPlumbing:
     @staticmethod
     def _worker(calls):
-        engine = ShardedRDTWeightTransferEngine.__new__(ShardedRDTWeightTransferEngine)
-        engine._proc_error = None
-        engine._pending_frees = []
+        engine = consumer_engine()
         engine._cached_plan = _CallPlan(chunks=[], pre_free=[0, 1])
-        engine._completed_syncs = 0
-        engine._ring_depth = 1
-        engine._lanes = 1
-        engine._lane_cursors = [0]
         engine._router = SimpleNamespace(
             free_group=lambda group_idx, sync_idx: (
                 calls.append((group_idx, sync_idx)) or []
@@ -483,14 +476,14 @@ class TestSyncIndexPlumbing:
         return engine
 
     def test_worker_attaches_update_index_to_every_free_signal(self):
-        calls = []
+        calls: list[tuple[int, int | None]] = []
         self._worker(calls).receive_weights(
             ShardedRDTWeightTransferUpdateInfo(sync_idx=4)
         )
         assert calls == [(0, 4), (1, 4)]
 
     def test_default_update_sends_untagged_free_signals(self):
-        calls = []
+        calls: list[tuple[int, int | None]] = []
         self._worker(calls).receive_weights(ShardedRDTWeightTransferUpdateInfo())
         assert calls == [(0, None), (1, None)]
 
@@ -505,18 +498,14 @@ class TestSyncIndexPlumbing:
                 self.updates.append(update_info)
                 super().update_weights(update_info)
 
-        engine = ShardedRDTTrainerWeightTransferEngine.__new__(
-            ShardedRDTTrainerWeightTransferEngine
+        engine = ShardedRDTTrainerWeightTransferEngine(
+            client=_RecordingUpdates(),
+            source=SimpleNamespace(iter_full=lambda: iter(())),
+            is_sender=is_sender,
+            init_info=ShardedRDTTrainerInitInfo(
+                rank=0 if is_sender else 1, num_consumers=2
+            ),
         )
-        engine._init_info = ShardedRDTTrainerInitInfo(
-            rank=0 if is_sender else 1,
-            num_consumers=2,
-        )
-        engine.source = SimpleNamespace(iter_full=lambda: iter(()))
-        engine.is_sender = is_sender
-        engine.client = _RecordingUpdates()
-        engine._owned_idx = []
-        engine._inflight = {}
         producer_calls = []
 
         def _rpc(method, *args):

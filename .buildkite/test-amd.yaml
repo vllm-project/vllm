@@ -2771,6 +2771,7 @@ steps:
   - tests/distributed/test_sharded_rdt_plan.py
   - tests/distributed/test_sharded_rdt_producer.py
   - tests/distributed/test_sharded_rdt_trainer.py
+  - tests/distributed/test_sharded_rdt_engine.py
   - vllm/platforms/rocm.py
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -2778,6 +2779,7 @@ steps:
   - pytest -v -s distributed/test_sharded_rdt_plan.py
   - pytest -v -s distributed/test_sharded_rdt_producer.py
   - pytest -v -s distributed/test_sharded_rdt_trainer.py
+  - pytest -v -s distributed/test_sharded_rdt_engine.py
 
 - label: ":amd: (MI355) GEMM-RS-AR"
   timeout_in_minutes: 20

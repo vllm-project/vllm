@@ -391,13 +391,14 @@ def _loop_engine(server, n_groups, *, lookahead):
     state `_run_gather_loop` reads. The `_rpc` seam dispatches inline;
     `_publish_async` sees no `.remote` and runs inline too."""
     groups = [(f"model.layers.{gi}.w",) for gi in range(n_groups)]
-    e = ShardedRDTTrainerWeightTransferEngine.__new__(
-        ShardedRDTTrainerWeightTransferEngine
+    e = ShardedRDTTrainerWeightTransferEngine(
+        client=Mock(),  # the loop runs below the client; never called
+        source=_CountingSource(groups),
+        is_sender=True,
+        init_info=ShardedRDTTrainerInitInfo(
+            rank=0, num_consumers=1, gather_lookahead=lookahead
+        ),
     )
-    e._init_info = ShardedRDTTrainerInitInfo(
-        rank=0, num_consumers=1, gather_lookahead=lookahead
-    )
-    e.source = _CountingSource(groups)
     e._server = server
     e._rpc = lambda method, *a: getattr(server, method)(*a)
     e._meta = e.source.metadata
@@ -965,8 +966,11 @@ class TestExportRing:
 
     @staticmethod
     def _engine():
-        eng = ShardedRDTTrainerWeightTransferEngine.__new__(
-            ShardedRDTTrainerWeightTransferEngine
+        eng = ShardedRDTTrainerWeightTransferEngine(
+            client=Mock(),
+            source=None,
+            is_sender=True,
+            init_info=ShardedRDTTrainerInitInfo(rank=0, num_consumers=1),
         )
         eng._export_ring = [None, None]
         eng._export_ring_args = [None, None]

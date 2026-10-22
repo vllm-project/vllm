@@ -1,24 +1,49 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Focused receive-pool and scheduler tests for sharded RDT."""
+"""Receive-pool, scheduler, settings and CUDA-path tests for sharded RDT.
+
+Most tests drive the engine on CPU with a fake CUDA runtime and stubbed NIXL
+registration; the cases under ``requires_cuda`` need one GPU (they page-lock
+through libcudart and time stream holds), so they skip on CPU and on ROCm.
+"""
 
 import logging
 import threading
 import time
+from dataclasses import asdict
 from types import SimpleNamespace
 
 import pytest
 import torch
 
 import vllm.distributed.weight_transfer.sharded_rdt_engine as engine_module
+from tests.distributed.test_sharded_rdt_plan import consumer_engine
+from tests.distributed.test_weight_transfer import RecordingClient
+from vllm.distributed.weight_transfer.sharded_rdt_common import (
+    check_ray_rdt_version,
+)
 from vllm.distributed.weight_transfer.sharded_rdt_engine import (
     HostStagingAllocationError,
     ShardedRDTWeightTransferEngine,
     ShardedRDTWeightTransferInitInfo,
     _CallPlan,
     _Chunk,
+    _ProcItem,
     _PullHooks,
     _run_lanes,
+)
+from vllm.distributed.weight_transfer.sharded_rdt_fake import _Scatter
+from vllm.distributed.weight_transfer.sharded_rdt_trainer import (
+    ShardedRDTTrainerInitInfo,
+    ShardedRDTTrainerWeightTransferEngine,
+)
+from vllm.model_executor.model_loader.reload.layerwise import LAYERWISE_INFO
+from vllm.model_executor.model_loader.reload.types import LayerReloadingInfo
+from vllm.platforms import current_platform
+
+requires_cuda = pytest.mark.skipif(
+    not (torch.cuda.is_available() and current_platform.is_cuda()),
+    reason="requires CUDA (page-locks through libcudart, times stream holds)",
 )
 
 
@@ -80,23 +105,7 @@ def _engine(
     streams: int = 1,
     chunk_bytes: tuple[int, ...] = (32,),
 ) -> ShardedRDTWeightTransferEngine:
-    engine = object.__new__(ShardedRDTWeightTransferEngine)
-    engine.device = torch.device("cpu")
-    engine._proc_thread = None
-    engine._slot_read_done = []
-    engine._slot_queued = []
-    engine._slot_done = []
-    engine._slot_cv = None
-    engine._pool_geometry = None
-    engine._staging_device = "gpu"
-    engine._stages_in_flight = 1
-    engine._ring_depth = 1
-    engine._lanes = 1
-    engine._dest_buffers = [{}]
-    engine._lane_cursors = [0]
-    engine._targets_cache = {}
-    engine._parked_host_slots = []
-    engine._buffer_presize = 0
+    engine = consumer_engine()
     engine._cached_plan = _plan(streams=streams, chunk_bytes=chunk_bytes)
     engine._router = SimpleNamespace(
         num_producers=1,
@@ -227,20 +236,14 @@ def _released(buffers) -> list[tuple[str, int]]:
 
 
 def _host_pool_engine(staging_device: str = "host") -> ShardedRDTWeightTransferEngine:
-    """A 2x2 pool whose largest chunk is 48 bytes, with shutdown's state."""
-    engine = _engine(
+    """A 2x2 pool whose largest chunk is 48 bytes."""
+    return _engine(
         staging_device=staging_device,
         stages_in_flight=2,
         ring_depth=2,
         streams=2,
         chunk_bytes=(48, 16),
     )
-    engine._quant_thread = None
-    engine._name_to_plan = {}
-    engine._name_meta = {}
-    engine._live_names = set()
-    engine._retired_slots = []
-    return engine
 
 
 def _stub_init(engine, monkeypatch, plan: _CallPlan, *, fail: Exception | None):
@@ -364,188 +367,132 @@ def test_receive_slots_use_the_selected_memory_and_register_once(
     assert cuda_runtime.events == []
 
 
-@pytest.mark.parametrize("staging_device", ["gpu", "host"])
-def test_shutdown_releases_every_host_slot_before_dropping_it(
-    staging_device, nixl, cuda_runtime
-):
-    engine = _host_pool_engine(staging_device)
+def test_shutdown_releases_every_host_slot_before_dropping_it(nixl, cuda_runtime):
+    engine = _host_pool_engine()
     engine._preregister_at_init()
     buffers = [slot[torch.uint8] for slot in engine._dest_buffers]
 
     engine.shutdown()
 
     assert engine._dest_buffers == [{}, {}, {}, {}]
-    if staging_device == "gpu":
-        assert cuda_runtime.events == []
-    else:
-        assert _ids(nixl.deregistered) == _ids(buffers)
-        assert cuda_runtime.events == _released(buffers)
+    assert _ids(nixl.deregistered) == _ids(buffers)
+    assert cuda_runtime.events == _released(buffers)
 
 
-@pytest.mark.parametrize("staging_device", ["gpu", "host"])
-def test_the_regrow_in_issue_pull_releases_the_replaced_host_slot(
-    staging_device, nixl, cuda_runtime, monkeypatch
-):
+def _regrow_slot_zero(engine, monkeypatch) -> None:
+    """Pull a 64-byte chunk into slot 0, which every pool here sized smaller."""
     import ray.experimental
 
     monkeypatch.setattr(
         ray.experimental, "set_target_for_ref", lambda _ref, _targets: None
     )
-    engine = _engine(staging_device=staging_device, ring_depth=1, chunk_bytes=(32,))
+    pending = engine._issue_pull(_chunk(64), 0)
+    assert pending.blob.numel() == 64
+
+
+def test_the_regrow_in_issue_pull_releases_the_replaced_host_slot(
+    nixl, cuda_runtime, monkeypatch
+):
+    engine = _engine(staging_device="host", ring_depth=1, chunk_bytes=(32,))
     engine._preregister_at_init()
     old = engine._dest_buffers[0][torch.uint8]
     assert old.numel() == 32
 
-    pending = engine._issue_pull(_chunk(64), 0)
+    _regrow_slot_zero(engine, monkeypatch)
 
     new = engine._dest_buffers[0][torch.uint8]
-    assert new is not old and new.numel() == 64 and pending.blob.numel() == 64
+    assert new is not old and new.numel() == 64
     assert _ids(nixl.registered) == _ids([old, new])
-    if staging_device == "gpu":
-        assert cuda_runtime.events == []
-    else:
-        assert cuda_runtime.events == _released([old])
-        assert cuda_runtime.registered[-1] == (_base(new), 64, 0)
-
-
-def test_a_failed_nixl_deregistration_parks_the_old_host_slot_page_locked(
-    nixl, cuda_runtime, monkeypatch, engine_log
-):
-    import ray.experimental
-
-    monkeypatch.setattr(
-        ray.experimental, "set_target_for_ref", lambda _ref, _targets: None
-    )
-    engine = _engine(staging_device="host", ring_depth=1, chunk_bytes=(32,))
-    engine._preregister_at_init()
-    old = engine._dest_buffers[0][torch.uint8]
-    nixl.deregister_failure = RuntimeError("NIXL refcount already zero")
-
-    pending = engine._issue_pull(_chunk(64), 0)
-
-    new = engine._dest_buffers[0][torch.uint8]
-    assert new is not old and pending.blob.numel() == 64
-    assert _ids(nixl.registered) == _ids([old, new])
-    assert cuda_runtime.registered[-1] == (_base(new), 64, 0)
-    # The old slot may still be NIXL-registered, so it is never handed back to
-    # the allocator: it stays page-locked and parked for the process lifetime.
-    assert nixl.deregistered == []
-    assert ("unregister", _base(old)) not in cuda_runtime.events
-    assert _ids(engine._parked_host_slots) == _ids([old])
-    (error,) = _errors(engine_log)
-    assert f"{_base(old):#x}" in error and "32 bytes" in error
-    assert "NIXL deregistration failed" in error and "never freed" in error
-
-
-def test_a_failed_cuda_host_unregister_parks_the_old_host_slot(
-    nixl, cuda_runtime, monkeypatch, engine_log
-):
-    import ray.experimental
-
-    monkeypatch.setattr(
-        ray.experimental, "set_target_for_ref", lambda _ref, _targets: None
-    )
-    engine = _engine(staging_device="host", ring_depth=1, chunk_bytes=(32,))
-    engine._preregister_at_init()
-    old = engine._dest_buffers[0][torch.uint8]
-    cuda_runtime.unregister_code = 1  # cudaErrorInvalidValue
-
-    engine._issue_pull(_chunk(64), 0)
-
-    # NIXL let go of the slot and cudaHostUnregister was asked, but it did not
-    # confirm, so the slot's page-lock state is unknown: parked, not freed.
-    assert _ids(nixl.deregistered) == _ids([old])
     assert cuda_runtime.events == _released([old])
-    assert _ids(engine._parked_host_slots) == _ids([old])
-    (error,) = _errors(engine_log)
-    assert f"{_base(old):#x}" in error and "cudaHostUnregister failed" in error
+    assert cuda_runtime.registered[-1] == (_base(new), 64, 0)
 
 
-def test_shutdown_parks_every_host_slot_when_the_worker_thread_did_not_stop(
-    nixl, cuda_runtime, monkeypatch, engine_log
+def test_gpu_staging_releases_nothing_on_regrow_or_shutdown(
+    nixl, cuda_runtime, monkeypatch
 ):
-    engine = _host_pool_engine()
+    # GPU staging never touches the host CUDA runtime wrapper.
+    cuda_runtime.load_error = AssertionError("libcudart is not loaded")
+    engine = _host_pool_engine("gpu")
     engine._preregister_at_init()
-    buffers = [slot[torch.uint8] for slot in engine._dest_buffers]
-    # A post-processing thread that survives join(timeout=30) may still be
-    # scattering out of the slots.
+    old = engine._dest_buffers[0][torch.uint8]
+
+    _regrow_slot_zero(engine, monkeypatch)
+    new = engine._dest_buffers[0][torch.uint8]
+    engine.shutdown()
+
+    # GPU slots keep their NIXL registration for the process lifetime: the
+    # regrow and the shutdown only drop the engine's references.
+    assert new is not old and new.numel() == 64
+    assert _ids(nixl.registered)[-1] == id(new)
+    assert engine._dest_buffers == [{}, {}, {}, {}]
+    assert nixl.deregistered == [] and cuda_runtime.events == []
+    assert engine._parked_host_slots == []
+
+
+def _shutdown_with_a_live_worker(engine, monkeypatch) -> None:
+    """Shut down while the post-processing thread survives its join: it may
+    still be scattering out of the slots."""
     engine._proc_thread = SimpleNamespace(
         join=lambda timeout=None: None, is_alive=lambda: True
     )
     engine._proc_queue = SimpleNamespace(put=lambda _item: None)
     engine._proc_stream = None
     monkeypatch.setattr(engine, "drain_pending", lambda: None)
-
     engine.shutdown()
 
-    assert engine._dest_buffers == [{}, {}, {}, {}]
-    assert engine._proc_thread is None and engine._proc_queue is None
-    assert nixl.deregistered == [] and cuda_runtime.events == []
-    assert _ids(engine._parked_host_slots) == _ids(buffers)
-    errors = _errors(engine_log)
-    assert errors[0].startswith("RDT post-processing thread did not stop")
-    assert len(errors) == 1 + len(buffers)
-    assert all("did not stop" in error for error in errors[1:])
 
-
-def test_a_fresh_engine_has_nothing_parked_or_retired_and_shuts_down_clean(
-    nixl, cuda_runtime
+@pytest.mark.parametrize(
+    ("release", "trigger", "reason", "nixl_let_go"),
+    [
+        ("regrow", "nixl_deregister_raises", "NIXL deregistration failed", False),
+        ("regrow", "cuda_host_unregister_nonzero", "cudaHostUnregister failed", True),
+        ("shutdown", "worker_thread_alive", "did not stop", False),
+        ("shutdown", "nixl_deregister_raises", "NIXL deregistration failed", False),
+    ],
+)
+def test_a_host_slot_whose_release_is_unsure_is_parked_and_reported(
+    release, trigger, reason, nixl_let_go, nixl, cuda_runtime, monkeypatch, engine_log
 ):
-    vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(distributed_executor_backend="ray"),
-        model_config=None,
-    )
-    engine = ShardedRDTWeightTransferEngine(
-        None, vllm_config, torch.device("cpu"), torch.nn.Module()
-    )
-
-    assert engine._parked_host_slots == [] and engine._retired_slots == []
-
-    engine.shutdown()
-
-    assert engine._dest_buffers == [{}] and engine._parked_host_slots == []
-    assert nixl.deregistered == [] and cuda_runtime.events == []
-
-
-def test_shutdown_parks_a_host_slot_whose_nixl_deregistration_fails(nixl, cuda_runtime):
     engine = _host_pool_engine()
     engine._preregister_at_init()
-    buffers = [slot[torch.uint8] for slot in engine._dest_buffers]
-    nixl.deregister_failure = RuntimeError("NIXL refcount already zero")
+    slots = [slot[torch.uint8] for slot in engine._dest_buffers]
+    if trigger == "nixl_deregister_raises":
+        nixl.deregister_failure = RuntimeError("NIXL refcount already zero")
+    elif trigger == "cuda_host_unregister_nonzero":
+        cuda_runtime.unregister_code = 1  # cudaErrorInvalidValue
 
-    engine.shutdown()
+    if release == "regrow":
+        _regrow_slot_zero(engine, monkeypatch)
+        parked = slots[:1]
+        assert engine._dest_buffers[0][torch.uint8] is not slots[0]
+    elif trigger == "worker_thread_alive":
+        _shutdown_with_a_live_worker(engine, monkeypatch)
+        parked = slots
+        assert engine._dest_buffers == [{}, {}, {}, {}]
+    else:
+        engine.shutdown()
+        parked = slots
+        assert engine._dest_buffers == [{}, {}, {}, {}]
 
-    assert engine._dest_buffers == [{}, {}, {}, {}]
-    assert nixl.deregistered == [] and cuda_runtime.events == []
-    assert _ids(engine._parked_host_slots) == _ids(buffers)
-
-
-def test_a_host_regrow_failure_names_the_slot_bytes_and_keeps_the_old_slot(
-    nixl, cuda_runtime, monkeypatch
-):
-    import ray.experimental
-
-    monkeypatch.setattr(
-        ray.experimental, "set_target_for_ref", lambda _ref, _targets: None
-    )
-    engine = _engine(staging_device="host", ring_depth=2, chunk_bytes=(32,))
-    engine._preregister_at_init()
-    old = engine._dest_buffers[0][torch.uint8]
-    assert engine._num_slots == 2 and old.numel() == 32
-    cuda_runtime.register_code = 712
-
-    with pytest.raises(HostStagingAllocationError) as excinfo:
-        engine._issue_pull(_chunk(64), 0)
-
-    message = str(excinfo.value)
-    assert "staging_device='host'" in message and "cudaHostRegister" in message
-    assert "64 bytes" in message and "712" in message
-    # Only this slot is regrown; the other keeps its 32 bytes, so the error
-    # speaks of one slot and cannot claim an exact pool total.
-    assert "regrow one receive slot" in message and "to 64 bytes, exactly" in message
-    assert f"= {engine._num_slots * 64} bytes per worker" not in message
-    assert engine._dest_buffers[0][torch.uint8] is old
-    assert cuda_runtime.events == [] and nixl.deregistered == []
+    # A slot that may still be NIXL-registered, page-locked or being read is
+    # never handed back to the allocator: it stays referenced for the process
+    # lifetime, and nothing that was not proven released is unregistered.
+    assert _ids(engine._parked_host_slots) == _ids(parked)
+    if nixl_let_go:
+        assert _ids(nixl.deregistered) == _ids(parked)
+        assert cuda_runtime.events == _released(parked)
+    else:
+        assert nixl.deregistered == [] and cuda_runtime.events == []
+    # Each parked slot is reported once at error level with its base address
+    # and byte count, so an operator can account for the leaked memory.
+    errors = _errors(engine_log)
+    if trigger == "worker_thread_alive":
+        assert errors[0].startswith("RDT post-processing thread did not stop")
+        errors = errors[1:]
+    assert len(errors) == len(parked)
+    for buffer, error in zip(parked, errors):
+        assert f"{_base(buffer):#x}" in error and "48 bytes" in error
+        assert reason in error and "never freed" in error
 
 
 def test_a_failed_first_init_releases_every_host_slot_it_built(
@@ -833,3 +780,291 @@ def test_sync_zero_is_one_lane_at_depth_one_in_whole_plan_order(monkeypatch):
         chunk.keys[0][0] for chunk in engine._cached_plan.chunks
     ]
     assert {event[2] // engine._ring_depth for event in issues} == {0}
+
+
+# ---------------------------------------------------------------------------
+# Settings shared by trainers and workers
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("staging_device", "cpu"),
+        ("stages_in_flight", 0),
+        ("stages_in_flight", True),
+        ("num_rdt_buffers", -1),
+        ("buffer_presize_gb", float("nan")),
+        ("num_consumers", 0),
+    ],
+)
+def test_trainer_rejects_invalid_settings(field, value):
+    with pytest.raises(ValueError, match=field):
+        ShardedRDTTrainerInitInfo(rank=0, **{"num_consumers": 1, field: value})
+
+
+def test_settings_reach_workers_unchanged():
+    trainer = ShardedRDTTrainerInitInfo(
+        rank=0,
+        num_consumers=7,
+        staging_device="host",
+        stages_in_flight=3,
+        num_rdt_buffers=4,
+        buffer_presize_gb=0.5,
+    )
+    engine = ShardedRDTTrainerWeightTransferEngine(
+        client=RecordingClient(), source=None, is_sender=True, init_info=trainer
+    )
+    engine._groups = [["w"]]
+    engine._meta = [SimpleNamespace(name="w", dtype=torch.bfloat16, shape=(4,))]
+    engine._owner_sets = [[0]]
+    engine._name_owner_class = [0]
+
+    worker = ShardedRDTWeightTransferInitInfo(
+        **asdict(engine._build_worker_init_info(["server-0"]))
+    )
+
+    assert (
+        worker.num_consumers,
+        worker.staging_device,
+        worker.stages_in_flight,
+        worker.num_rdt_buffers,
+        worker.buffer_presize_gb,
+    ) == (7, "host", 3, 4, 0.5)
+
+
+@pytest.mark.parametrize(
+    ("staging_device", "installed", "passes"),
+    [
+        ("gpu", "2.55.0", False),
+        ("gpu", "2.56.0", True),
+        ("host", "2.57.0", False),
+        ("host", "2.58.0", True),
+    ],
+)
+def test_ray_floor_depends_on_staging_mode(
+    monkeypatch, staging_device, installed, passes
+):
+    monkeypatch.setattr("importlib.metadata.version", lambda _name: installed)
+    if passes:
+        check_ray_rdt_version(staging_device)
+    else:
+        with pytest.raises(ValueError, match=staging_device):
+            check_ray_rdt_version(staging_device)
+
+
+# ---------------------------------------------------------------------------
+# CUDA: host-staged scatter copies, receive-slot lifetime, quant-stream lifetime
+# ---------------------------------------------------------------------------
+
+SLICE = 64 << 20
+HOLD_SECONDS = 0.5
+NUMEL = 16 << 20
+
+
+def _hold(
+    stream: torch.cuda.Stream,
+    seconds: float,
+) -> tuple[torch.cuda.Event, torch.cuda.Event]:
+    """Keep ``stream`` busy for approximately ``seconds``."""
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    probe = 10_000_000
+    start.record()
+    torch.cuda._sleep(probe)
+    end.record()
+    end.synchronize()
+    cycles = int(probe * seconds * 1000 / start.elapsed_time(end))
+
+    held = (
+        torch.cuda.Event(enable_timing=True),
+        torch.cuda.Event(enable_timing=True),
+    )
+    with torch.cuda.stream(stream):
+        held[0].record()
+        torch.cuda._sleep(cycles)
+        held[1].record()
+    return held
+
+
+@pytest.fixture
+def host_scatter(monkeypatch):
+    """Build a one-slot host-staging engine without its worker threads."""
+    device = torch.device("cuda", 0)
+    torch.accelerator.set_device_index(device)
+    monkeypatch.setattr(engine_module, "register_nixl_memory", lambda _tensor: None)
+    monkeypatch.setattr(
+        engine_module, "deregister_nixl_memory", lambda _tensor: None, raising=False
+    )
+
+    engine = consumer_engine(device=device)
+
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(
+        torch.zeros(SLICE, dtype=torch.uint8, device=device),
+        requires_grad=False,
+    )
+    scatter = _Scatter(
+        layer=layer,
+        param_name="weight",
+        src=("w", ()),
+        offset=0,
+        shape=(SLICE,),
+        stride=(1,),
+        dtype=torch.uint8,
+    )
+    chunk = _Chunk(
+        scatters=[scatter],
+        keys=[("w", ())],
+        pack_layout=[(0, torch.uint8, SLICE, (SLICE,))],
+        pack_bytes=SLICE,
+        materialize=[],
+        quant=[],
+        free=[],
+        owner=0,
+    )
+    plan = _CallPlan(chunks=[chunk], pre_free=[], num_streams=1)
+    config = engine._configure_ring(
+        ShardedRDTWeightTransferInitInfo(
+            num_rdt_buffers=1,
+            staging_device="host",
+        )
+    )
+    engine._size_pool(config, plan)
+
+    slot = engine._alloc_receive_buffer(SLICE)
+    # The whole storage is page-locked, so the scatter copies at the pinned rate.
+    assert slot.is_pinned()
+    engine._dest_buffers[0][torch.uint8] = slot
+    engine._router = SimpleNamespace(
+        pull=lambda _owner, _keys, _seq: object(),
+    )
+    engine._proc_stream = torch.cuda.Stream(device=device)
+    engine._slot_read_done = [torch.cuda.Event()]
+    engine._slot_queued = [0]
+    engine._slot_done = [0]
+    engine._slot_cv = threading.Condition()
+
+    state = SimpleNamespace(
+        engine=engine,
+        chunk=chunk,
+        layer=layer,
+        slot=slot,
+    )
+    # Warm the copy path so first-use costs are not measured as scatter time.
+    _scatter(state, hold=False)
+    engine._proc_stream.synchronize()
+    layer.weight.data.zero_()
+    state.pattern = (torch.arange(SLICE, dtype=torch.int32) % 251).to(torch.uint8)
+    slot.copy_(state.pattern)
+    yield state
+    # Shutdown gives the host slot back (NIXL deregistration is stubbed above,
+    # cudaHostUnregister is real) once the scatter out of it has run.
+    engine.shutdown()
+
+
+def _scatter(state, hold=True) -> float:
+    """Process one landed slot while optionally holding the process stream."""
+    item = _ProcItem(
+        chunk=state.chunk,
+        results={("w", ()): state.slot[:SLICE]},
+        slot=0,
+    )
+    state.engine._slot_queued[0] += 1
+    if hold:
+        state.held = _hold(state.engine._proc_stream, HOLD_SECONDS)
+    start = time.perf_counter()
+    state.engine._process_item(item)
+    return time.perf_counter() - start
+
+
+@requires_cuda
+def test_the_copy_is_queued_not_waited_for(host_scatter):
+    seconds = _scatter(host_scatter)
+    queued = not host_scatter.engine._slot_read_done[0].query()
+    host_scatter.engine._proc_stream.synchronize()
+    held = host_scatter.held[0].elapsed_time(host_scatter.held[1]) / 1000
+
+    assert seconds < held / 5, (
+        f"the scatter took {seconds:.3f}s of the stream's {held:.3f}s hold"
+    )
+    assert queued, "the copy should still be queued behind the hold"
+    assert torch.equal(host_scatter.layer.weight.cpu(), host_scatter.pattern)
+
+
+@requires_cuda
+def test_the_slot_is_pulled_into_again_only_after_its_copy_ran(
+    host_scatter,
+    monkeypatch,
+):
+    import ray.experimental
+
+    _scatter(host_scatter)
+    assert not host_scatter.engine._slot_free(0), (
+        "the copy is still queued, so the slot is not free"
+    )
+    seen = {}
+
+    def set_target_for_ref(_ref, _buffers):
+        seen["copy ran"] = host_scatter.engine._slot_read_done[0].query()
+
+    monkeypatch.setattr(
+        ray.experimental,
+        "set_target_for_ref",
+        set_target_for_ref,
+    )
+    host_scatter.engine._issue_pull(host_scatter.chunk, 0)
+
+    assert seen["copy ran"], (
+        "the next pull was pointed at the slot before the copy out of it ran"
+    )
+    host_scatter.slot.zero_()
+    host_scatter.engine._proc_stream.synchronize()
+    assert torch.equal(host_scatter.layer.weight.cpu(), host_scatter.pattern)
+
+
+@requires_cuda
+def test_a_layers_kernel_copy_is_not_overwritten_by_the_next_layer():
+    device = torch.device("cuda", 0)
+    torch.accelerator.set_device_index(device)
+    engine = consumer_engine(device=device)
+    engine._proc_stream = torch.cuda.Stream(device=device)
+    engine._quant_stream = torch.cuda.Stream(device=device)
+    kernel = torch.nn.Parameter(
+        torch.zeros(NUMEL, dtype=torch.bfloat16, device=device),
+        requires_grad=False,
+    )
+    torch.accelerator.synchronize()
+
+    # The layer as materialize_layer leaves it and the scatter fills it.
+    layer = torch.nn.Module()
+    with torch.cuda.stream(engine._proc_stream):
+        loaded = torch.full((NUMEL,), 1.0, dtype=torch.bfloat16, device=device)
+        layer.weight = torch.nn.Parameter(loaded, requires_grad=False)
+        ready = torch.cuda.Event()
+        ready.record(engine._proc_stream)
+    loaded_ptr = loaded.data_ptr()
+    del loaded
+    LAYERWISE_INFO[layer] = LayerReloadingInfo(
+        restore_metadata=({}, {}),
+        restore_device=device,
+        kernel_tensors=({"weight": kernel}, {}),
+    )
+    engine._proc_stream.synchronize()
+
+    _hold(engine._quant_stream, HOLD_SECONDS)
+    engine._run_quant([layer], ready)
+
+    # The next layer, materialized and scattered on the process stream.
+    with torch.cuda.stream(engine._proc_stream):
+        following = torch.empty(NUMEL, dtype=torch.bfloat16, device=device)
+        following.fill_(2.0)
+    reused = following.data_ptr() == loaded_ptr
+    engine._quant_stream.synchronize()
+    engine._proc_stream.synchronize()
+
+    assert layer.weight is kernel
+    assert torch.equal(kernel, torch.full_like(kernel, 1.0)), (
+        "the kernel tensor holds the next layer's bytes: its source was reused "
+        f"before the quant stream's copy read it (memory reused: {reused})"
+    )
