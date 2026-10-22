@@ -6,7 +6,8 @@ use std::sync::Arc;
 use thiserror_ext::AsReport as _;
 use tracing::{info, warn};
 use vllm_text::backend::hf::{
-    HfTextBackend, ResolvedModelFiles, load_model_config, load_tokenizer_config,
+    HfTextBackend, ModelFileSources, ModelSource, ResolvedModelFiles, load_model_config,
+    load_tokenizer_config,
 };
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{DynTextBackend, TextBackend as _};
@@ -180,7 +181,15 @@ pub(super) async fn load_model_backends(
     model_id: &str,
     options: LoadModelBackendsOptions,
 ) -> Result<LoadedModelBackends> {
-    let mut files = ResolvedModelFiles::new(model_id, options.revision.as_deref()).await?;
+    let mut files = ResolvedModelFiles::from_sources(&ModelFileSources {
+        model: ModelSource {
+            id: model_id.to_string(),
+            revision: options.revision.clone(),
+        },
+        tokenizer: options.tokenizer.clone(),
+        hf_config: options.hf_config.clone(),
+    })
+    .await?;
     files.apply_overrides(&options.hf_overrides)?;
     let text_backend = HfTextBackend::from_resolved_model_files(
         files.clone(),
@@ -278,12 +287,15 @@ mod tests {
             "test-model".to_string(),
             LoadModelBackendsOptions {
                 revision: None,
+                tokenizer: None,
+                hf_config: None,
                 hf_overrides: Default::default(),
                 generation_config: Default::default(),
                 renderer,
                 language_model_only: false,
                 chat_template_content_format: Default::default(),
                 chat_template: None,
+                trust_request_chat_template: false,
                 default_chat_template_kwargs: HashMap::new(),
                 limit_mm_per_prompt: HashMap::new(),
             },
