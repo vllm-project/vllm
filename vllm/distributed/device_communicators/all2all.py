@@ -32,22 +32,7 @@ from .base_device_communicator import All2AllManagerBase, Cache
 
 if TYPE_CHECKING:
     from flashinfer.fused_moe import QuantFormat
-
-if has_flashinfer_nvlink_two_sided():
-    from flashinfer.comm import Mapping  # type: ignore[import-not-found]
-    from flashinfer.comm.mnnvl import MnnvlConfig  # type: ignore[import-not-found]
-    from flashinfer.comm.trtllm_alltoall import (
-        MnnvlMoe,  # type: ignore[import-not-found]
-    )
-
-if has_flashinfer_nvlink_one_sided():
-    from flashinfer.moe_ep import (  # type: ignore[import-not-found]
-        BootstrapConfig,
-        MoEEpCommParams,
-        NVLinkOneSidedAlltoAll,
-        NVLinkOneSidedConfig,
-        create_communication,
-    )
+    from flashinfer.moe_ep import NVLinkOneSidedAlltoAll
 
 
 logger = init_logger(__name__)
@@ -690,6 +675,10 @@ class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
         gpus_per_node: int,
     ):
         """Initialize workspace."""
+        from flashinfer.comm import Mapping
+        from flashinfer.comm.mnnvl import MnnvlConfig
+        from flashinfer.comm.trtllm_alltoall import MnnvlMoe
+
         if self.initialized:
             return
 
@@ -791,6 +780,14 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
         extra_payload_bytes_per_token: int = 0,
     ) -> None:
         """Share the largest token, dispatch-row and combine-row capacities."""
+        from flashinfer.moe_ep import (
+            BootstrapConfig,
+            MoEEpCommParams,
+            NVLinkOneSidedAlltoAll,
+            NVLinkOneSidedConfig,
+            create_communication,
+        )
+
         if self.initialized:
             assert top_k == self.top_k, (
                 "FlashInfer one-sided communication does not support "
