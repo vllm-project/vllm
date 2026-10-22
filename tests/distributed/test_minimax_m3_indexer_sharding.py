@@ -135,15 +135,18 @@ def _check_initialization_fallback(config, device, rank):
                     assert msa.get_comm() is None
                     assert msa._COMM_FAILED
                 else:
-                    assert shard == 4
+                    assert shard == config.parallel_config.tensor_parallel_size
                     comm = msa.get_comm()
                     assert comm is not None and comm.gather is None
                     local = torch.full(
-                        (1, 32, 128), rank, dtype=torch.uint8, device=device
+                        (1, 128 // comm.world, 128),
+                        rank,
+                        dtype=torch.uint8,
+                        device=device,
                     )
                     pages = torch.tensor([0], device=device)
                     full = msa.gather_prefill_pages(local, pages, comm)
-                    expected = torch.arange(128, device=device) % 4
+                    expected = torch.arange(128, device=device) % comm.world
                     assert torch.equal(full[0, :, 0].long(), expected)
             finally:
                 faulthandler.cancel_dump_traceback_later()
