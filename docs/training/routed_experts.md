@@ -55,6 +55,6 @@ Requests that opt out get their own prefix-cache namespace, because their KV blo
 
 ## Limitations
 
-- The Rust HTTP frontend returns `routed_experts` only on `/inference/v1/generate`. Its completions and chat completions routes ignore `routed_experts_prompt_start` and `return_routed_experts` and return no routing.
+- The Rust HTTP frontend returns `routed_experts` only on `/inference/v1/generate`. Its completions and chat completions routes accept `return_routed_experts` but ignore `routed_experts_prompt_start` and return no routing.
 
 Example: [examples/rl/routed_experts_e2e.py](../../examples/rl/routed_experts_e2e.py).

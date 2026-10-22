@@ -183,7 +183,7 @@ pub(super) fn prepare_chat_request(
             structured_outputs,
             skip_reading_prefix_cache: None,
             routed_experts_prompt_start: None,
-            return_routed_experts: None,
+            return_routed_experts: request.return_routed_experts,
             vllm_xargs: merge_kv_transfer_params(
                 merge_ec_transfer_params(request.vllm_xargs, request.ec_transfer_params.as_ref()),
                 request.kv_transfer_params.as_ref(),
@@ -1645,6 +1645,26 @@ mod tests {
         assert_eq!(
             prepared.chat_request.sampling_params.prompt_logprobs,
             Some(2)
+        );
+    }
+
+    #[test]
+    fn prepare_chat_request_passes_through_return_routed_experts() {
+        let request = ChatCompletionRequest {
+            return_routed_experts: Some(false),
+            ..base_request()
+        };
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert_eq!(
+            prepared.chat_request.sampling_params.return_routed_experts,
+            Some(false)
         );
     }
 

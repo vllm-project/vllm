@@ -147,7 +147,7 @@ pub(super) fn prepare_completion_request(
             structured_outputs,
             skip_reading_prefix_cache: None,
             routed_experts_prompt_start: None,
-            return_routed_experts: None,
+            return_routed_experts: request.return_routed_experts,
             vllm_xargs: merge_kv_transfer_params(
                 merge_ec_transfer_params(request.vllm_xargs, request.ec_transfer_params.as_ref()),
                 request.kv_transfer_params.as_ref(),
@@ -412,7 +412,8 @@ mod tests {
             "repetition_penalty": 1.1,
             "ignore_eos": true,
             "skip_special_tokens": false,
-            "stream_interval": 4
+            "stream_interval": 4,
+            "return_routed_experts": false
         }))
         .expect("parse request");
 
@@ -451,6 +452,10 @@ mod tests {
         assert_eq!(
             prepared.text_request.sampling_params.stream_interval,
             NonZeroU32::new(4)
+        );
+        assert_eq!(
+            prepared.text_request.sampling_params.return_routed_experts,
+            Some(false)
         );
     }
 
