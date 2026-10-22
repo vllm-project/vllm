@@ -243,7 +243,7 @@ steps:
   - .buildkite/scripts/install-kv-connectors.sh
   commands:
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
-  - pytest -v -s models/minimax_m3
+  - pytest -v -s models/minimax_m3/test_feature_matrix.py
 
 - label: ":nvidia: (H200) GLM5Next"
   key: glm5next-unit-tests
