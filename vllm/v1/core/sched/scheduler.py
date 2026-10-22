@@ -345,17 +345,6 @@ class Scheduler(SchedulerInterface):
                 self.cache_config.enable_mamba_shared_prefix_checkpoint
             ),
         )
-        # Mamba managers already account for their speculative state blocks.
-        num_spec_decode_tokens = (
-            1 + self.num_spec_tokens + self.num_lookahead_tokens
-            if self.num_spec_tokens
-            else 0
-        )
-        self._spec_decode_step_blocks = sum(
-            cdiv(num_spec_decode_tokens, manager.block_size)
-            for manager in self.kv_cache_manager.coordinator.single_type_managers
-            if not isinstance(manager.kv_cache_spec, MambaSpec)
-        )
         # Bind after construction so connectors can access the cache manager.
         if self.connector is not None:
             self.connector.bind_kv_cache_manager(self.kv_cache_manager)
@@ -1311,7 +1300,7 @@ class Scheduler(SchedulerInterface):
                     # predictable preemptions.
                     reserved_blocks = (
                         self._inflight_prefill_reserved_blocks()
-                        + self._spec_decode_step_blocks
+                        + self._spec_decode_step_blocks(request)
                     )
 
                 # Replayed tokens are already counted in the adopted hit; a
@@ -3160,9 +3149,7 @@ class Scheduler(SchedulerInterface):
     def _request_remaining_blocks(self, request: Request) -> int:
         """Blocks `request` still needs to hold its full sequence and be promoted."""
         full_num_tokens = min(request.num_tokens, self.max_model_len)
-        num_tokens = full_num_tokens
-        if self.num_spec_tokens:
-            num_tokens += 1 + self.num_spec_tokens + self.num_lookahead_tokens
+        num_tokens = self._num_tokens_with_spec_step(full_num_tokens)
         return self.kv_cache_manager.coordinator.get_num_blocks_to_allocate(
             request_id=request.request_id,
             num_tokens=num_tokens,
@@ -3184,6 +3171,29 @@ class Scheduler(SchedulerInterface):
             if stage is not None:
                 kv_fetch_stages[request] = stage
                 self._kv_fetch_counts[stage] += 1
+
+    def _num_tokens_with_spec_step(self, num_tokens: int) -> int:
+        """Slots `num_tokens` grows to after a spec decode step, capped like
+        `allocate_slots` caps them at max_model_len."""
+        if not self.num_spec_tokens:
+            return num_tokens
+        num_tokens += 1 + self.num_spec_tokens + self.num_lookahead_tokens
+        return min(num_tokens, self.max_model_len)
+
+    def _spec_decode_step_blocks(self, request: Request) -> int:
+        """Blocks the spec decode step after promotion adds beyond the blocks
+        holding `request`'s full sequence, summed over the KV cache groups.
+
+        Mamba managers already account for their speculative state blocks.
+        """
+        full_num_tokens = min(request.num_tokens, self.max_model_len)
+        num_tokens = self._num_tokens_with_spec_step(full_num_tokens)
+        return sum(
+            cdiv(num_tokens, manager.block_size)
+            - cdiv(full_num_tokens, manager.block_size)
+            for manager in self.kv_cache_manager.coordinator.single_type_managers
+            if not isinstance(manager.kv_cache_spec, MambaSpec)
+        )
 
     def _inflight_prefill_reserved_blocks(self) -> int:
         """Num blocks in-flight prefills still need to finish (their reservation)."""

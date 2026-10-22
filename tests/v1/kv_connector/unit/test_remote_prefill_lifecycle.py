@@ -845,6 +845,64 @@ def test_async_load_reserves_blocks_for_promotion_margin(
     assert scheduler_output.num_scheduled_tokens[req_a.request_id] > 0
 
 
+@pytest.mark.parametrize("num_spec_tokens", [1, 3])
+@pytest.mark.parametrize(
+    ("num_tokens", "num_blocks"),
+    [(40, 4), (2048, 129)],
+    ids=["room-in-last-block", "capped-by-max-model-len"],
+)
+def test_async_load_admits_request_whose_spec_step_fits_its_blocks(
+    num_spec_tokens, num_tokens, num_blocks
+):
+    """The spec decode margin must only reserve blocks the step really adds.
+
+    A prompt whose last block has room for the spec decode step, or that is
+    already at max_model_len, needs no extra block for it. Reserving a flat
+    step's worth of blocks anyway means a request that fits in the whole pool
+    (`num_blocks` counts the null block) can never be admitted: the head of
+    the queue is retried every step and nothing runs to free blocks.
+    """
+    block_size = 16
+    vllm_config = create_vllm_config(
+        block_size=block_size, num_speculative_tokens=num_spec_tokens
+    )
+    assert vllm_config.model_config.max_model_len == 2048
+    scheduler = create_scheduler(vllm_config, num_blocks=num_blocks)
+
+    request = create_request(
+        request_id=1,
+        block_size=block_size,
+        num_tokens=num_tokens,
+        do_remote_prefill=True,
+        max_tokens=1,
+    )
+    scheduler.add_request(request)
+
+    # Full external hit: the request would hold its whole prompt while loading.
+    with patch.object(
+        scheduler.connector,
+        "get_num_new_matched_tokens",
+        return_value=(num_tokens, True),
+    ):
+        scheduler.schedule()
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+    # The load lands: the request must be promoted and run to completion.
+    scheduler.update_from_output(
+        scheduler.schedule(),
+        create_model_runner_output([], finished_recving={request.request_id}),
+    )
+    scheduler_output = scheduler.schedule()
+    assert request.status == RequestStatus.RUNNING
+    assert scheduler_output.num_scheduled_tokens[request.request_id] > 0
+    scheduler.update_from_output(
+        scheduler_output, create_model_runner_output([request], use_eos=True)
+    )
+    assert request.is_finished()
+    scheduler.schedule()
+    assert_scheduler_empty(scheduler)
+
+
 @pytest.mark.parametrize(
     ("mamba_cache_mode", "mamba_block_size", "num_blocks"),
     [("none", 128, 18), ("align", 16, 18)],
