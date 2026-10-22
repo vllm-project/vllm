@@ -62,7 +62,11 @@ def test_moe_lora_ep_requires_contiguous_expert_placement(
         expert_placement_strategy=expert_map.placement_strategy
     )
     error = (
-        pytest.raises(ValueError, match="requires linear expert placement")
+        pytest.raises(
+            ValueError,
+            match="Set expert_placement_strategy='linear' to use MoE LoRA "
+            "with expert parallelism",
+        )
         if use_ep and resolved_placement != "linear"
         else nullcontext()
     )

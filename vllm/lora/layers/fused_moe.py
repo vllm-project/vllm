@@ -238,7 +238,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 raise ValueError(
                     "Fused MoE LoRA with EP requires linear expert placement: "
                     "adapter loading assumes a contiguous range of experts "
-                    f"on each rank, got '{placement}'."
+                    f"on each rank, got '{placement}'. "
+                    "Set expert_placement_strategy='linear' to use MoE LoRA "
+                    "with expert parallelism."
                 )
             moe_config = self.moe_config
             all2all_backend = moe_config.moe_parallel_config.all2all_backend
