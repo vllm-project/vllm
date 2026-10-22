@@ -40,9 +40,38 @@ from vllm.v1.spec_decode.remote.runtime.weights import (
 )
 
 if TYPE_CHECKING:
+    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 
 logger = init_logger(__name__)
+
+
+def initialize_standalone_kv_cache_config(
+    vllm_config: VllmConfig, kv_cache_bytes: int
+) -> "KVCacheConfig":
+    """Resolve the loaded draft's KV layout and attention cache capacity."""
+    from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+    from vllm.v1.attention.backends.utils import (
+        get_supported_kv_cache_layouts,
+        resolve_kv_cache_layout,
+    )
+    from vllm.v1.worker.gpu.attn_utils import get_kv_cache_spec
+
+    specs = get_kv_cache_spec(vllm_config)
+    first = select_standalone_kv_spec(specs)
+    layers = get_layers_from_vllm_config(
+        vllm_config,
+        AttentionLayerBase,  # type: ignore[type-abstract]
+    )
+    layouts = get_supported_kv_cache_layouts(
+        layer.get_attn_backend() for layer in layers.values()
+    )
+    layout = resolve_kv_cache_layout(
+        vllm_config, [[layout.name for layout in layouts]], specs.values()
+    )
+    kv_config = _make_standalone_kv_config(first, list(specs), kv_cache_bytes, layout)
+    vllm_config.cache_config.num_gpu_blocks = kv_config.num_blocks
+    return kv_config
 
 
 def _resolve_local_rank(
@@ -154,19 +183,13 @@ class GPUDraftStepExecutor(DraftStepExecutor):
             init_distributed_environment,
             initialize_model_parallel,
         )
-        from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
         from vllm.platforms import current_platform
         from vllm.utils.torch_utils import (
             set_random_seed,
             set_torch_threads_for_runtime,
         )
-        from vllm.v1.attention.backends.utils import (
-            get_supported_kv_cache_layouts,
-            resolve_kv_cache_layout,
-        )
         from vllm.v1.worker.block_table import get_block_table_width
         from vllm.v1.worker.gpu.attn_utils import (
-            get_kv_cache_spec,
             init_attn_backend,
             init_kv_cache,
         )
@@ -227,22 +250,11 @@ class GPUDraftStepExecutor(DraftStepExecutor):
             del target_shell
             self.speculator.model.eval()
 
-            specs = get_kv_cache_spec(vllm_config)
-            first = select_standalone_kv_spec(specs)
+            self.kv_config = initialize_standalone_kv_cache_config(
+                vllm_config, kv_cache_bytes
+            )
+            first = self.kv_config.kv_cache_groups[0].kv_cache_spec
             self.block_size = first.block_size
-            layers = get_layers_from_vllm_config(
-                vllm_config,
-                AttentionLayerBase,  # type: ignore[type-abstract]
-            )
-            layouts = get_supported_kv_cache_layouts(
-                layer.get_attn_backend() for layer in layers.values()
-            )
-            layout = resolve_kv_cache_layout(
-                vllm_config, [[layout.name for layout in layouts]], specs.values()
-            )
-            self.kv_config = _make_standalone_kv_config(
-                first, list(specs), kv_cache_bytes, layout
-            )
             self.num_blocks = self.kv_config.num_blocks
             scheduler = vllm_config.scheduler_config
             self.input_buffers = InputBuffers(

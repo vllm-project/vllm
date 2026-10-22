@@ -15,7 +15,10 @@ from tests.v1.spec_decode.remote.runtime_fixtures import (
 )
 from tests.v1.spec_decode.remote.runtime_fixtures import make_config
 from vllm.v1.spec_decode.remote.protocol import SequenceKey
-from vllm.v1.spec_decode.remote.runtime.gpu import make_input_batch
+from vllm.v1.spec_decode.remote.runtime.gpu import (
+    initialize_standalone_kv_cache_config,
+    make_input_batch,
+)
 from vllm.v1.spec_decode.remote.runtime.kv import DraftBlockPool
 from vllm.v1.spec_decode.remote.runtime.schema import create_runtime_contract
 from vllm.v1.spec_decode.remote.runtime.step import DraftStepPlanner, DraftStepRow
@@ -435,6 +438,43 @@ def test_partial_weight_auth_errors_do_not_fall_back_to_full_checkpoint(monkeypa
     monkeypatch.setattr(weights, "hf_api", lambda: HubService(denied))
     with pytest.raises(PermissionError, match="access denied"):
         selected_checkpoint_weights("test/target", "sha", ("lm_head.weight",))
+
+
+@pytest.mark.parametrize("num_blocks", [2, 7])
+def test_standalone_capacity_reaches_flex_attention_metadata_builder(num_blocks):
+    """Flex metadata needs the actual allocated capacity before warmup starts."""
+    from vllm.config import set_current_vllm_config
+    from vllm.model_executor.layers.attention import Attention
+    from vllm.v1.attention.backends.flex_attention import (
+        FlexAttentionBackend,
+        FlexAttentionMetadataBuilder,
+    )
+    from vllm.v1.worker.gpu.attn_utils import init_attn_backend
+
+    config = make_config()
+    with set_current_vllm_config(config):
+        attention = Attention(
+            num_heads=2,
+            head_size=8,
+            num_kv_heads=2,
+            scale=8**-0.5,
+            cache_config=config.cache_config,
+            prefix="draft.layers.0.self_attn",
+            attn_backend=FlexAttentionBackend,
+        )
+        spec = attention.get_kv_cache_spec(config)
+        assert spec is not None
+        budget = num_blocks * spec.page_size_bytes + spec.page_size_bytes // 2
+        kv_config = initialize_standalone_kv_cache_config(config, budget)
+        groups, _, _ = init_attn_backend(kv_config, config, torch.device("cpu"))
+        builder = groups[0][0].metadata_builders[0]
+
+    assert kv_config.num_blocks == num_blocks
+    assert isinstance(builder, FlexAttentionMetadataBuilder)
+    assert builder.cache_config.num_gpu_blocks == num_blocks
+    assert sum(t.size for t in kv_config.kv_cache_tensors) == (
+        num_blocks * spec.page_size_bytes
+    )
 
 
 def test_input_batch_preserves_reordered_request_slots_and_rejected_tail():
