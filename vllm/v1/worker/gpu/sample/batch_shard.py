@@ -10,7 +10,6 @@ import torch.distributed
 from vllm.distributed.communication_op import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.core.sched.output import GrammarOutput
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -49,11 +48,12 @@ class BatchShardMetadata:
     adaptive_verification_enabled: bool
 
 
-@triton.jit(do_not_specialize=["num_reqs", "max_num_reqs_per_rank"])
+@triton.jit(
+    do_not_specialize=["num_reqs", "local_logits_start", "max_num_reqs_per_rank"]
+)
 def _build_shard_plan_kernel(
     idx_mapping_ptr,
     cu_num_logits_ptr,
-    scheduled_cu_num_logits_ptr,
     query_start_loc_ptr,
     seq_lens_ptr,
     sorted_logits_indices_ptr,
@@ -65,6 +65,7 @@ def _build_shard_plan_kernel(
     local_expanded_local_pos_ptr,
     local_seq_lens_ptr,
     num_reqs,
+    local_logits_start,
     max_num_reqs_per_rank,
     TP_SIZE: tl.constexpr,
     TP_RANK: tl.constexpr,
@@ -81,26 +82,19 @@ def _build_shard_plan_kernel(
     req_block = tl.arange(0, PADDED_NUM_REQS)
     req_mask = req_block < num_reqs
     owners = tl.load(idx_mapping_ptr + req_block, mask=req_mask, other=0) % TP_SIZE
-    # Get the number of admitted and scheduled logits per request. These only differ
-    # during adaptive verification.
     num_logits_per_req = tl.load(
         cu_num_logits_ptr + req_block + 1, mask=req_mask, other=0
     ) - tl.load(cu_num_logits_ptr + req_block, mask=req_mask, other=0)
-    num_scheduled_logits_per_req = tl.load(
-        scheduled_cu_num_logits_ptr + req_block + 1, mask=req_mask, other=0
-    ) - tl.load(scheduled_cu_num_logits_ptr + req_block, mask=req_mask, other=0)
 
     # Owner-sorted layout is rank 0's requests in batch order, then rank 1's,
     # etc, so a request's starting offset can be derived from counting.
     lower = (owners < owner) & req_mask
     earlier = (owners == owner) & (req_block < req_idx) & req_mask
 
-    # Offset of this request's logits within its owner's segment.
-    local_start = tl.sum(tl.where(earlier, num_logits_per_req, 0))
-    # Offset in the owner-sorted send buffer. Segment base offsets follow the
-    # scheduled counts because the all-to-all split sizes are computed from them.
-    req_logits_start = (
-        tl.sum(tl.where(lower, num_scheduled_logits_per_req, 0)) + local_start
+    # Compute the logits row offset for the current request in the sorted
+    # batch.
+    req_logits_start = tl.sum(tl.where(lower, num_logits_per_req, 0)) + tl.sum(
+        tl.where(earlier, num_logits_per_req, 0)
     )
 
     # Copy the current request logit indices into the sorted batch.
@@ -128,6 +122,7 @@ def _build_shard_plan_kernel(
         tl.store(local_cu_num_logits_ptr, 0)
 
     if owner == TP_RANK:
+        local_start = req_logits_start - local_logits_start
         tl.store(local_idx_mapping_ptr + local_req_idx, req_state_idx)
         tl.store(local_cu_num_logits_ptr + local_req_idx + 1, local_start + num_logits)
         tl.store(
@@ -183,7 +178,6 @@ class BatchSharder:
         tp_rank = self.tp_rank
         tp_size = self.tp_size
         num_reqs = input_batch.idx_mapping_np.shape[0]
-        num_logits = int(input_batch.cu_num_logits_np[-1])
 
         # Deterministically assign requests to ranks, round-robin over slot
         # indices so ownership stays balanced when the slot allocator fills
@@ -195,13 +189,28 @@ class BatchSharder:
         num_local_reqs = local_req_indices_np.shape[0]
         num_reqs_per_rank_np = np.bincount(req_owner_np, minlength=tp_size)
         max_num_reqs_per_rank = int(num_reqs_per_rank_np.max()) if num_reqs else 1
+        # Get the number of logits per request on the host.
+        num_logits_per_req_np = np.diff(input_batch.cu_num_logits_np)
+        num_admitted_draft_tokens_np = None
+        if input_batch.num_admitted_draft_tokens is not None:
+            # Under adaptive verification, cu_num_logits_np holds the scheduled counts.
+            # When the budget binds, the admitted counts are copied to the host so the
+            # plan matches the device layout.
+            assert input_batch.num_draft_tokens_per_req is not None
+            num_admitted_draft_tokens_np = input_batch.num_admitted_draft_tokens.wait()
+            num_logits_per_req_np = (
+                num_logits_per_req_np
+                - input_batch.num_draft_tokens_per_req
+                + num_admitted_draft_tokens_np
+            )
+        num_logits = int(num_logits_per_req_np.sum())
         # Derive the number of logits owned by each rank, as well as the
         # local rank.
-        num_logits_per_req_np = np.diff(input_batch.cu_num_logits_np)
         num_logits_per_rank_np = np.bincount(
             req_owner_np, weights=num_logits_per_req_np, minlength=tp_size
         ).astype(np.int64)
         num_local_logits = int(num_logits_per_rank_np[tp_rank])
+        local_logits_start = int(num_logits_per_rank_np[:tp_rank].sum())
         local_cu_num_logits_np = np.zeros(num_local_reqs + 1, dtype=np.int32)
         np.cumsum(
             num_logits_per_req_np[local_req_indices_np], out=local_cu_num_logits_np[1:]
@@ -211,51 +220,29 @@ class BatchSharder:
             torch.from_numpy(local_req_indices_np)
         ]
 
-        # Under adaptive verification the device cu_num_logits holds the admitted
-        # draft counts while cu_num_logits_np still holds the scheduled ones. The
-        # all-to-all split sizes and buffer lengths come from the host array, so
-        # the kernel should place each owner's segment using the scheduled layout,
-        # and pack the admitted rows at the front of it.
-        scheduled_cu_num_logits = (
-            async_tensor_h2d(input_batch.cu_num_logits_np, device=self.device)
-            if self.adaptive_verification_enabled
-            else input_batch.cu_num_logits
-        )
-        # Under adaptive verification each owner segment ends in scheduled - admitted
-        # rows that the kernel never writes. These rows must point to valid logit and
-        # request slots.
-        indices_alloc = (
-            torch.zeros if self.adaptive_verification_enabled else torch.empty
-        )
-
         # Shard the input batch GPU tensors.
-        sorted_logits_indices = indices_alloc(
+        sorted_logits_indices = torch.empty(
             num_logits, dtype=torch.int64, device=self.device
         )
         gathered_src_indices = torch.empty(
             num_reqs, dtype=torch.int64, device=self.device
         )
-        local_logits_indices = indices_alloc(
+        local_logits_indices = torch.empty(
             num_local_logits, dtype=torch.int64, device=self.device
         )
         local_idx_mapping = input_batch.idx_mapping.new_empty(num_local_reqs)
         local_cu_num_logits = input_batch.cu_num_logits.new_empty(num_local_reqs + 1)
-        local_expanded_idx_mapping = indices_alloc(
-            num_local_logits,
-            dtype=input_batch.expanded_idx_mapping.dtype,
-            device=self.device,
+        local_expanded_idx_mapping = input_batch.expanded_idx_mapping.new_empty(
+            num_local_logits
         )
-        local_expanded_local_pos = indices_alloc(
-            num_local_logits,
-            dtype=input_batch.expanded_local_pos.dtype,
-            device=self.device,
+        local_expanded_local_pos = input_batch.expanded_local_pos.new_empty(
+            num_local_logits
         )
         local_seq_lens = input_batch.seq_lens.new_empty(num_local_reqs)
         if num_reqs > 0:
             _build_shard_plan_kernel[(num_reqs,)](
                 input_batch.idx_mapping,
                 input_batch.cu_num_logits,
-                scheduled_cu_num_logits,
                 input_batch.query_start_loc,
                 input_batch.seq_lens,
                 sorted_logits_indices,
@@ -267,6 +254,7 @@ class BatchSharder:
                 local_expanded_local_pos,
                 local_seq_lens,
                 num_reqs,
+                local_logits_start,
                 max_num_reqs_per_rank,
                 TP_SIZE=tp_size,
                 TP_RANK=tp_rank,
@@ -282,7 +270,15 @@ class BatchSharder:
             num_draft_tokens_per_req = input_batch.num_draft_tokens_per_req[
                 local_req_indices_np
             ]
-            num_draft_tokens = int(num_draft_tokens_per_req.sum())
+            if num_admitted_draft_tokens_np is not None:
+                # Under adaptive verification num_draft_tokens_per_req holds the
+                # scheduled counts. Follow the admitted counts so every rank picks
+                # the same sampler as the replicated path, including a budget of 0.
+                num_draft_tokens = int(
+                    num_admitted_draft_tokens_np[local_req_indices_np].sum()
+                )
+            elif input_batch.num_draft_tokens > 0:
+                num_draft_tokens = int(num_draft_tokens_per_req.sum())
 
         local_req_ids = [input_batch.req_ids[i] for i in local_req_indices_np.tolist()]
         local_batch = replace(

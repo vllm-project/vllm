@@ -7,6 +7,7 @@ sub-batch, the all-to-all send/recv layout, and the padded result gather must
 compose to a bit-exact round trip of the replicated computation.
 """
 
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest import mock
 
@@ -110,7 +111,12 @@ def _make_batch(
     )
 
 
-def _shard_all_ranks(batch: InputBatch, max_num_reqs: int, tp_size: int):
+def _shard_all_ranks(
+    batch: InputBatch,
+    max_num_reqs: int,
+    tp_size: int,
+    adaptive_verification_enabled: bool = False,
+):
     """Simulate every TP rank by faking get_tp_group() per BatchSharder."""
     results = []
     for rank in range(tp_size):
@@ -120,13 +126,60 @@ def _shard_all_ranks(batch: InputBatch, max_num_reqs: int, tp_size: int):
                 max_num_reqs=max_num_reqs,
                 max_num_logits_per_req=8,
                 device=torch.device(DEVICE),
-                adaptive_verification_enabled=False,
+                adaptive_verification_enabled=adaptive_verification_enabled,
             )
         local_batch, sorted_logits_indices, _, metadata = sharder.shard_sampler_inputs(
             batch, None
         )
         results.append((local_batch, sorted_logits_indices, metadata))
     return results
+
+
+@requires_gpu
+@pytest.mark.parametrize("tp_size", [2, 4])
+@pytest.mark.parametrize("seed", [0, 1])
+def test_admitted_counts_give_unpadded_plan(tp_size: int, seed: int):
+    """With the admitted draft counts on the host, an adaptive verification
+    batch shards exactly like a batch scheduled with only the admitted drafts."""
+    rng = np.random.default_rng(seed)
+    max_num_reqs = 64
+    admitted = _make_batch(rng, num_reqs=23, max_num_reqs=max_num_reqs, max_spec=3)
+    assert admitted.num_draft_tokens_per_req is not None
+    admitted_drafts = admitted.num_draft_tokens_per_req
+    # The host only sees the scheduled counts, an upper bound on the admitted ones.
+    scheduled_drafts = admitted_drafts + rng.integers(0, 3, size=23).astype(np.int32)
+    scheduled_cu = np.zeros(24, dtype=np.int32)
+    np.cumsum(1 + scheduled_drafts, out=scheduled_cu[1:])
+    av_batch = replace(
+        admitted,
+        cu_num_logits_np=scheduled_cu,
+        num_draft_tokens_per_req=scheduled_drafts,
+        num_admitted_draft_tokens=SimpleNamespace(wait=lambda: admitted_drafts),
+    )
+
+    expected = _shard_all_ranks(admitted, max_num_reqs, tp_size)
+    actual = _shard_all_ranks(
+        av_batch, max_num_reqs, tp_size, adaptive_verification_enabled=True
+    )
+    for (exp_local, exp_sorted, exp_meta), (local, sorted_idx, meta) in zip(
+        expected, actual
+    ):
+        assert meta.num_logits_per_rank == exp_meta.num_logits_per_rank
+        assert meta.num_local_logits == exp_meta.num_local_logits
+        assert _np(sorted_idx).tolist() == _np(exp_sorted).tolist()
+        assert (local.cu_num_logits_np == exp_local.cu_num_logits_np).all()
+        assert (
+            _np(local.cu_num_logits).tolist() == _np(exp_local.cu_num_logits).tolist()
+        )
+        assert (
+            _np(local.logits_indices).tolist() == _np(exp_local.logits_indices).tolist()
+        )
+        assert (
+            _np(local.expanded_idx_mapping).tolist()
+            == _np(exp_local.expanded_idx_mapping).tolist()
+        )
+        assert local.num_draft_tokens == exp_local.num_draft_tokens
+        assert meta.max_num_logits_per_req == exp_meta.max_num_logits_per_req
 
 
 def _owned_batch_indices(local_batch: InputBatch) -> np.ndarray:
