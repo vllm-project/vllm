@@ -346,7 +346,7 @@ def build(key: K2Build):
         ug: UgLds
         down: DownLds
         m1b: M1bLds
-        m1c: M1cLds
+        m1c: M1cLds  # type: ignore[valid-type]
 
     @fx.struct
     class Smem:
