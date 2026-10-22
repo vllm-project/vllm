@@ -1096,6 +1096,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
                 kv_k_scale=self._k_scale if self.use_nvfp4_kv else None,
                 kv_v_scale=self._v_scale if self.use_nvfp4_kv else None,
                 write_qkv=not q_is_fp8,
+                # CP scoring reads step metadata before waiting for this writer.
+                enable_pdl=self.indexer.index_cache.tp_shard == 1,
             )
 
         output = torch.empty((num_tokens, self.q_size), dtype=dtype, device=device)
