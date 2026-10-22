@@ -4083,9 +4083,13 @@ steps:
   - vllm/model_executor/layers/fused_moe/
   - vllm/model_executor/layers/quantization/
   - vllm/_aiter_ops.py
+  - vllm/model_executor/models/mimo_v2.py
+  - vllm/model_executor/models/mimo_v2_mega_moe.py
+  - tests/models/test_mimo_v2_tp_mega.py
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-rocm-shard-$$BUILDKITE_PARALLEL_JOB.txt
+  - pytest -s -v models/test_mimo_v2_tp_mega.py
 
 
 - label: ":amd: (MI355) Qwen3-30B-A3B-FP8-block Sync EPLB Accuracy" # TBD
