@@ -539,6 +539,8 @@ steps:
   - vllm/utils/deep_gemm.py
   - vllm/model_executor/layers/fused_moe
   - vllm/model_executor/layers/quantization
+  - vllm/model_executor/kernels/linear/scaled_mm/flashinfer.py
+  - vllm/model_executor/kernels/linear/scaled_mm/deep_gemm.py
   - tests/kernels/quantization/test_block_fp8.py
   - tests/kernels/moe/test_deepgemm.py
   - tests/kernels/moe/test_batched_deepgemm.py
