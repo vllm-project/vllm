@@ -325,9 +325,6 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
         self._lookup_server: _MoriLookupServer | None = None
         self._registered_storages: set[int] = set()
         self._gpu_devices: set[int] = set()
-        self._published_keys: set[str] = set()
-        self._evicted_keys: set[str] = set()
-        self._key_lock = threading.Lock()
         self._executor = ThreadPoolExecutor(
             max_workers=max_workers,
             thread_name_prefix="umbp-embedded-transfer",
@@ -472,21 +469,10 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
         )
 
     def batch_exists(self, keys: Sequence[str]) -> Sequence[bool]:
-        result = [bool(value) for value in self.client.batch_exists(keys)]
-        with self._key_lock:
-            for key, exists in zip(keys, result, strict=True):
-                if not exists and key in self._published_keys:
-                    self._published_keys.remove(key)
-                    self._evicted_keys.add(key)
-        return result
+        return [bool(value) for value in self.client.batch_exists(keys)]
 
     def clear(self) -> bool:
-        success = bool(self.client.clear())
-        if success:
-            with self._key_lock:
-                self._published_keys.clear()
-                self._evicted_keys.clear()
-        return success
+        return bool(self.client.clear())
 
     @staticmethod
     def _range_args(plans: Sequence[BlockTransferPlan], *, for_store: bool = True):
@@ -717,8 +703,6 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
     def publish(self, job: TransferJobState) -> None:
         if job.status.value != "completed":
             raise RuntimeError("cannot publish an incomplete MORI UMBP job")
-        with self._key_lock:
-            self._published_keys.update(job.completed_keys)
 
     def cancel(self, job: TransferJobState) -> TransferJobState:
         with self._job_lock:
@@ -734,10 +718,7 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
         return self.wait(job)
 
     def take_evicted_keys(self) -> Sequence[str]:
-        with self._key_lock:
-            result = tuple(self._evicted_keys)
-            self._evicted_keys.clear()
-        return result
+        return ()
 
     def close(self) -> None:
         self._executor.shutdown(wait=True, cancel_futures=True)
