@@ -815,31 +815,28 @@ def _aiter_mxfp4_sort_backend_worker(
     block_size = bound.arguments["block_size"]
     num_experts = bound.arguments["num_experts"]
     routed_rows = bound.arguments["topk_ids"].numel()
-    # Mirrors aiter's own predicate, so the expectation holds even if a
-    # different installed build picks a different block_m for this shape.
     aux_uses_opus = aiter_fused_moe._aux_uses_opus(
         output_aux, block_size, routed_rows, num_experts
     )
-    expect_adaptive = not backend_forces_opus and not aux_uses_opus
+    # Assert (don't derive expect_adaptive from) this predicate: otherwise a
+    # tuning change that flips it would silently relax the assertion below
+    # instead of failing it.
+    assert not aux_uses_opus, (
+        f"block_size={block_size} was chosen as adaptive-eligible, but the "
+        "installed aiter build's crossover now prefers Opus for it -- pick "
+        "a new adaptive-eligible shape."
+    )
 
-    if expect_adaptive:
-        assert adaptive_mock.call_count > 0, (
-            f"AITER_MOE_SORT_BACKEND={backend!r} was requested and "
-            f"block_size={block_size}/routed_rows={routed_rows}/"
-            f"num_experts={num_experts} is adaptive-eligible, but the "
-            "adaptive sort never fired -- a silent fallback to Opus."
+    if backend_forces_opus:
+        assert adaptive_mock.call_count == 0, (
+            f"AITER_MOE_SORT_BACKEND={backend!r} unconditionally disables "
+            "the adaptive sort, but the adaptive sort fired anyway."
         )
     else:
-        assert adaptive_mock.call_count == 0, (
-            f"AITER_MOE_SORT_BACKEND={backend!r} "
-            + (
-                "unconditionally disables the adaptive sort"
-                if backend_forces_opus
-                else f"with block_size={block_size}/routed_rows={routed_rows}/"
-                f"num_experts={num_experts} falls on the Opus side of aiter's "
-                "own crossover heuristic"
-            )
-            + ", but the adaptive sort fired anyway."
+        assert adaptive_mock.call_count > 0, (
+            f"AITER_MOE_SORT_BACKEND={backend!r} was requested for this "
+            "adaptive-eligible shape, but the adaptive sort never fired "
+            "-- a silent fallback to Opus."
         )
 
 
