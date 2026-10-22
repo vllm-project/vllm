@@ -18,7 +18,6 @@ from vllm.lora.layers import (
     ReplicatedLinearWithLoRA,
     RowParallelLinearWithLoRA,
 )
-from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.lora.layers.fused_moe import FusedMoE3DWithLoRA, FusedMoEWithLoRA
 from vllm.lora.lora_model import LoRAModel
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
