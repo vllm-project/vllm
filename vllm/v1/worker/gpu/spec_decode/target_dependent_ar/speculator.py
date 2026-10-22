@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
+import copy
+import ctypes
+import os
 from typing import Any
 
 import torch
@@ -7,6 +11,9 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+from vllm.distributed.device_communicators.pynccl_wrapper import ncclComm_t
+from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
@@ -21,6 +28,114 @@ from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.cudagraph_utils import (
 from vllm.v1.worker.utils import get_uniform_decode_token_count
 
 logger = init_logger(__name__)
+
+
+@contextlib.contextmanager
+def capture_while_body(pred: torch.Tensor):
+    """Captures the enclosed work as the body of a CUDA graph WHILE node.
+
+    The body runs while `pred` is true. `pred` is read before the first iteration
+    and after every iteration, so the body must leave it updated.
+    """
+    graph = torch.cuda.CUDAGraph.get_currently_capturing_graph()
+    graph.begin_capture_to_while_node(pred)
+    # PyTorch captures the body on a stream it makes current in C++, which the
+    # current_stream() that vLLM caches (and pynccl launches on) does not follow.
+    torch.cuda.set_stream(torch.cuda.current_stream())
+    yield
+    graph.set_conditional_handle_for_current_node(pred)
+    graph.end_capture_to_conditional_node()
+    torch.cuda.set_stream(torch.cuda.current_stream())
+
+
+class _NcclConfig(ctypes.Structure):
+    """ncclConfig_t as declared by the nccl.h of NCCL 2.30.7."""
+
+    _fields_ = [
+        ("size", ctypes.c_size_t),
+        ("magic", ctypes.c_uint),
+        ("version", ctypes.c_uint),
+        ("blocking", ctypes.c_int),
+        ("cgaClusterSize", ctypes.c_int),
+        ("minCTAs", ctypes.c_int),
+        ("maxCTAs", ctypes.c_int),
+        ("netName", ctypes.c_char_p),
+        ("splitShare", ctypes.c_int),
+        ("trafficClass", ctypes.c_int),
+        ("commName", ctypes.c_char_p),
+        ("collnetEnable", ctypes.c_int),
+        ("CTAPolicy", ctypes.c_int),
+        ("shrinkShare", ctypes.c_int),
+        ("nvlsCTAs", ctypes.c_int),
+        ("nChannelsPerNetPeer", ctypes.c_int),
+        ("nvlinkCentricSched", ctypes.c_int),
+        ("graphUsageMode", ctypes.c_int),
+        ("numRmaCtx", ctypes.c_int),
+        ("maxP2pPeers", ctypes.c_int),
+        ("graphStreamOrdering", ctypes.c_int),
+    ]
+
+
+def split_pynccl_without_graph_mixing(
+    pynccl: PyNcclCommunicator,
+) -> PyNcclCommunicator:
+    """Returns a copy of `pynccl` on a new communicator over the same ranks whose
+    CUDA graph captures contain only kernel nodes.
+
+    With its default graphUsageMode=2, NCCL adds event wait and record nodes to the
+    graph it is captured into, and CUDA does not allow those in the body of a
+    conditional node. graphUsageMode=1 leaves the ordering to the caller: the new
+    communicator must not be used eagerly while a graph that uses it is in flight,
+    and graphs that use it must not run concurrently on different streams. It
+    shares no resources with `pynccl`.
+    """
+    if pynccl.nccl_version < 23000:
+        raise RuntimeError(
+            f"NCCL {pynccl.nccl.ncclGetVersion()} predates the 2.30 ncclConfig_t"
+        )
+    config = _NcclConfig()
+    for name, field_type in _NcclConfig._fields_:
+        if field_type is ctypes.c_int:
+            setattr(config, name, -(2**31))  # NCCL_CONFIG_UNDEF_INT
+    config.size = ctypes.sizeof(_NcclConfig)
+    config.magic = 0xCAFEBEEF  # NCCL_API_MAGIC
+    config.version = 23007  # NCCL_VERSION_CODE of that nccl.h
+    config.splitShare = 0
+    config.graphUsageMode = 1
+    split = pynccl.nccl.lib.ncclCommSplit
+    split.restype = ctypes.c_int
+    split.argtypes = [
+        ncclComm_t,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.POINTER(ncclComm_t),
+        ctypes.POINTER(_NcclConfig),
+    ]
+    comm = ncclComm_t()
+    with torch.accelerator.device_index(pynccl.device.index):
+        pynccl.nccl.NCCL_CHECK(
+            split(
+                pynccl.comm, 0, pynccl.rank, ctypes.byref(comm), ctypes.byref(config)
+            )
+        )
+    split_pynccl = copy.copy(pynccl)
+    split_pynccl.comm = comm
+    return split_pynccl
+
+
+@contextlib.contextmanager
+def use_tp_pynccl(pynccl: PyNcclCommunicator | None):
+    """Routes the TP group's pynccl collectives to `pynccl`; None changes nothing."""
+    if pynccl is None:
+        yield
+        return
+    device_communicator = get_tp_group().device_communicator
+    tp_pynccl = device_communicator.pynccl_comm
+    device_communicator.pynccl_comm = pynccl
+    try:
+        yield
+    finally:
+        device_communicator.pynccl_comm = tp_pynccl
 
 
 class TargetDependentARSpeculator(DraftModelSpeculator):
@@ -48,6 +163,38 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
 
         self.prefill_cudagraph_manager: SpeculatorCudaGraphManager | None = None
         self.decode_cudagraph_manager: SpeculatorCudaGraphManager | None = None
+
+        # Dynamic drafting (VLLM_DYN_DRAFT): the captured decode graph runs draft
+        # steps 1..k-1 in a CUDA graph WHILE node. "cost" stops once the next draft
+        # position is expected to add fewer accepted tokens than dyn_draft_threshold,
+        # which adaptive verification sets every step from its cost model; "full"
+        # never stops early.
+        self.dyn_draft_mode = os.environ.get("VLLM_DYN_DRAFT") or None
+        if self.dyn_draft_mode not in (None, "full", "cost"):
+            raise ValueError(
+                f"VLLM_DYN_DRAFT must be full or cost, not {self.dyn_draft_mode!r}"
+            )
+        # 0 until adaptive verification first sets it, so graph capture and the
+        # cost profiling draft every position.
+        self.dyn_draft_threshold = torch.zeros((), dtype=torch.float32, device=device)
+        self.num_drafted = torch.full(
+            (), self.num_speculative_steps, dtype=torch.int32, device=device
+        )
+        # Per request state: num_drafted of the propose that made its current
+        # drafts (the model runner stores it with the drafts).
+        self.num_drafted_per_req = torch.full(
+            (self.max_num_reqs,),
+            self.num_speculative_steps,
+            dtype=torch.int32,
+            device=device,
+        )
+        self.dyn_draft_continue = torch.ones((), dtype=torch.bool, device=device)
+        self.dyn_draft_positions = torch.arange(
+            self.num_speculative_steps, device=device
+        )
+        # The TP collectives of the captured decode graphs run on this
+        # communicator (see split_pynccl_without_graph_mixing).
+        self.dyn_draft_pynccl: PyNcclCommunicator | None = None
 
     def load_model(self, target_model: nn.Module) -> None:
         super().load_model(target_model)
@@ -148,17 +295,35 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             if self.supports_decode_metadata_update
             else self._generate_draft
         )
-        self.decode_cudagraph_manager.capture(
-            decode_fn,
-            self.model_state,
-            self.input_buffers,
-            self.block_tables,
-            self.attn_groups,
-            self.kv_cache_config,
-            progress_bar_desc="Capturing decode CUDA graphs",
-            specialize_spec_tokens=self.supports_decode_metadata_update
-            and self.speculative_config.uses_dynamic_speculative_decoding(),
-        )
+        if self.dyn_draft_mode is not None:
+            if not (
+                self.supports_decode_metadata_update
+                and self.decode_cudagraph_manager.needs_capture()
+            ):
+                raise ValueError(
+                    "VLLM_DYN_DRAFT needs FULL CUDA graphs of the fused draft decode"
+                )
+            tp_pynccl = getattr(get_tp_group().device_communicator, "pynccl_comm", None)
+            if (
+                self.dyn_draft_pynccl is None
+                and tp_pynccl is not None
+                and not tp_pynccl.disabled
+            ):
+                self.dyn_draft_pynccl = split_pynccl_without_graph_mixing(tp_pynccl)
+        # Capture also runs every graph once eagerly beforehand, so NCCL sets up
+        # the new communicator's connections outside of graph capture.
+        with use_tp_pynccl(self.dyn_draft_pynccl):
+            self.decode_cudagraph_manager.capture(
+                decode_fn,
+                self.model_state,
+                self.input_buffers,
+                self.block_tables,
+                self.attn_groups,
+                self.kv_cache_config,
+                progress_bar_desc="Capturing decode CUDA graphs",
+                specialize_spec_tokens=self.supports_decode_metadata_update
+                and self.speculative_config.uses_dynamic_speculative_decoding(),
+            )
         self.on_multi_step_decode_end(self.max_num_reqs)
 
     @torch.inference_mode()
@@ -193,6 +358,9 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         num_reqs = input_batch.num_reqs
         if num_speculative_tokens is None:
             num_speculative_tokens = self.num_speculative_steps
+        if self.dyn_draft_mode is not None:
+            # A captured dynamic decode graph overwrites this when it stops early.
+            self.num_drafted.fill_(num_speculative_tokens)
         num_tokens = input_batch.num_tokens
         num_tokens_padded = input_batch.num_tokens_after_padding
         max_query_len = input_batch.num_scheduled_tokens.max()
@@ -603,6 +771,18 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         positions = self.input_buffers.positions[:num_reqs]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
 
+        if self.dyn_draft_mode is not None and torch.cuda.is_current_stream_capturing():
+            self._generate_fused_drafts_dynamic(
+                num_reqs,
+                num_tokens_padded,
+                attn_metadata,
+                slot_mappings,
+                num_tokens_across_dp,
+                cudagraph_runtime_mode,
+                num_speculative_steps,
+            )
+            return
+
         for step in range(1, num_speculative_steps):
             if attn_metadata is not None and (
                 self.advance_draft_positions or step == 1
@@ -625,6 +805,85 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
                 cudagraph_runtime_mode,
                 num_speculative_steps,
             )
+
+    def _generate_fused_drafts_dynamic(
+        self,
+        num_reqs: int,
+        num_tokens_padded: int,
+        attn_metadata: dict[str, Any] | None,
+        slot_mappings: dict[str, torch.Tensor] | None,
+        num_tokens_across_dp: torch.Tensor | None,
+        cudagraph_runtime_mode: CUDAGraphMode,
+        num_speculative_steps: int,
+    ) -> None:
+        """Captures draft steps 1..k-1 as one CUDA graph WHILE node.
+
+        The body is one draft step for the whole batch. It reads the step index,
+        positions and attention metadata from device buffers, so a single capture
+        serves every iteration. On exit, num_drafted holds the number of draft
+        positions this propose produced.
+        """
+        if self.dyn_draft_mode == "cost" and self.acceptance_estimator is None:
+            raise ValueError(
+                "VLLM_DYN_DRAFT=cost needs adaptive verification: its cost model "
+                "sets the stopping threshold and its acceptance estimator scores "
+                "each draft"
+            )
+        if not self.advance_draft_positions:
+            raise ValueError(
+                "VLLM_DYN_DRAFT needs a drafter whose positions advance every step"
+            )
+        idx_mapping = self.idx_mapping[:num_reqs]
+        positions = self.input_buffers.positions[:num_reqs]
+        query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
+
+        self.current_draft_step.fill_(1)
+        self._decide_continue(num_reqs, num_speculative_steps, advance=False)
+        with capture_while_body(self.dyn_draft_continue):
+            if attn_metadata is not None:
+                self.block_tables.compute_slot_mappings(
+                    idx_mapping,
+                    query_start_loc,
+                    positions,
+                    num_tokens_padded,
+                )
+                self._update_draft_decode_metadata(attn_metadata, num_reqs)
+            self._generate_draft(
+                num_reqs,
+                num_tokens_padded,
+                attn_metadata,
+                slot_mappings,
+                num_tokens_across_dp,
+                cudagraph_runtime_mode,
+                num_speculative_steps,
+            )
+            self._decide_continue(num_reqs, num_speculative_steps, advance=True)
+
+        self.num_drafted.copy_(self.current_draft_step)
+        # Skipped positions still hold confidences from an earlier propose.
+        self.draft_token_confidence_probs[:num_reqs].masked_fill_(
+            self.dyn_draft_positions >= self.current_draft_step, 0.0
+        )
+
+    def _decide_continue(
+        self, num_reqs: int, num_speculative_steps: int, advance: bool
+    ) -> None:
+        """Sets dyn_draft_continue on the GPU (see _dyn_draft_decide_kernel); with
+        `advance`, first counts the draft step that just ran in current_draft_step.
+        """
+        _dyn_draft_decide_kernel[(1,)](
+            self.dyn_draft_continue,
+            self.current_draft_step,
+            self.dyn_draft_threshold,
+            self.draft_token_confidence_probs,
+            self.draft_token_confidence_probs.stride(0),
+            self.idx_mapping,
+            num_reqs,
+            num_speculative_steps,
+            ADVANCE=advance,
+            BLOCK_R=min(1024, triton.next_power_of_2(num_reqs)),
+            BLOCK_K=triton.next_power_of_2(num_speculative_steps),
+        )
 
     def _generate_draft(
         self,
@@ -987,3 +1246,55 @@ def update_draft_inputs(
         BLOCK_SIZE=1024,
         ADVANCE_DRAFT_POSITIONS=advance_draft_positions,
     )
+
+
+@triton.jit
+def _dyn_draft_decide_kernel(
+    continue_ptr,
+    current_draft_step_ptr,
+    threshold_ptr,
+    confidence_ptr,
+    confidence_stride,
+    idx_mapping_ptr,
+    num_reqs,
+    num_speculative_steps,
+    ADVANCE: tl.constexpr,
+    BLOCK_R: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    """Whether to draft position j, with positions 0..j-1 drafted (j is the
+    current draft step).
+
+    Drafting position j pays for itself if the batch is expected to accept at least
+    `threshold` more tokens from it. A request's survival probability at j-1, the
+    product of its confidences at 0..j-1, times its confidence at j-1 predicts its
+    survival at j; the batch's sum is the expected gain. A position must also be
+    left. CUDA-graph padding rows (idx_mapping < 0) have unwritten, possibly NaN,
+    confidences and are selected away; a NaN from a real row keeps drafting.
+    """
+    step = tl.load(current_draft_step_ptr)
+    if ADVANCE:
+        step += 1
+        tl.store(current_draft_step_ptr, step)
+    cols = tl.arange(0, BLOCK_K)
+    expected_gain = 0.0
+    for start in range(0, num_reqs, BLOCK_R):
+        rows = start + tl.arange(0, BLOCK_R)
+        in_batch = rows < num_reqs
+        is_real = tl.load(idx_mapping_ptr + rows, mask=in_batch, other=-1) >= 0
+        confidences = tl.load(
+            confidence_ptr + rows[:, None] * confidence_stride + cols[None, :],
+            mask=in_batch[:, None] & (cols[None, :] < step),
+            other=1.0,
+        )
+        log_confidences = tl.log(
+            tl.maximum(confidences, 1e-30, propagate_nan=tl.PropagateNan.ALL)
+        )
+        log_newest = tl.sum(
+            tl.where(cols[None, :] == step - 1, log_confidences, 0.0), axis=1
+        )
+        predicted = tl.exp(tl.sum(log_confidences, axis=1) + log_newest)
+        expected_gain += tl.sum(tl.where(is_real, predicted, 0.0), axis=0)
+    threshold = tl.load(threshold_ptr)
+    keep = (step < num_speculative_steps) & ~(expected_gain < threshold)
+    tl.store(continue_ptr, keep)
