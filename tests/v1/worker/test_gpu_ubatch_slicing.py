@@ -48,7 +48,9 @@ from vllm.v1.worker.gpu.ubatch_utils import (
     UBatchState,
     _slice_input_batch,
     create_ubatch_slices,
+    restore_staged_inputs,
     slice_model_inputs,
+    stage_decode_tokens,
 )
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlice,
@@ -1002,3 +1004,35 @@ def test_microbatched_graph_needs_every_rank_to_reach_the_split():
     assert desc.cg_mode == CUDAGraphMode.NONE
     assert desc.num_ubatches == 2
     assert dp_sync_state is not None and dp_sync_state.eager
+
+
+@pytest.mark.parametrize("padded,k", [(127, 2), (128, 3), (129, 4), (127, 8)])
+def test_staged_rows_roundtrip_preserves_inputs_and_kv_slots(padded, k):
+    n = 32
+    buffers = InputBuffers(padded, padded, torch.device("cpu"))
+    batch = _make_input_batch([1] * n, [100] * n, buffers, padded, padded)
+    batch.input_ids.copy_(torch.arange(padded))
+    batch.positions.copy_(torch.arange(padded) + 100)
+    tables = (torch.arange(padded * 2).reshape(padded, 2),)
+    slots = torch.arange(padded).unsqueeze(0)
+    values = (batch.input_ids, batch.positions, *tables)
+    expected = [value[:n].clone() for value in values]
+    slices = create_ubatch_slices(batch, k)
+    rows = stage_decode_tokens(batch, tables, slots, slices)
+    for value, original in zip(values, expected):
+        torch.testing.assert_close(value[rows], original)
+    torch.testing.assert_close(slots[:, rows], torch.arange(n).unsqueeze(0))
+    assert (~batch.is_padding).sum() == n
+    for region in slices:
+        assert (~batch.is_padding[region.token_slice]).sum() in (n // k, n // k + 1)
+    output = torch.zeros(padded, 2)
+    output[rows] = torch.arange(n * 2).reshape(n, 2).float()
+    output[:n] = output[rows]
+    torch.testing.assert_close(output[:n], torch.arange(n * 2).reshape(n, 2).float())
+    restore_staged_inputs(batch, tables, slots, rows)
+    for value, original in zip(values, expected):
+        torch.testing.assert_close(value[:n], original)
+        assert not value[n:].any()
+    torch.testing.assert_close(slots[:, :n], torch.arange(n).unsqueeze(0))
+    assert (slots[:, n:] == -1).all()
+    assert not batch.is_padding[:n].any() and batch.is_padding[n:].all()

@@ -44,13 +44,65 @@ class UBatchState(NamedTuple):
 
     slices: UBatchSlices
     forward_contexts: list[ForwardContext]
+    staged_rows: torch.Tensor | None = None
+
+
+def stage_decode_tokens(
+    input_batch: InputBatch,
+    block_tables: tuple[torch.Tensor, ...],
+    slot_mappings: torch.Tensor,
+    ubatch_slices: UBatchSlices,
+) -> torch.Tensor:
+    """Stage single-token decodes in the regions agreed by DP graph selection."""
+    n = input_batch.num_tokens
+    num_padded = input_batch.num_tokens_after_padding
+    k = len(ubatch_slices)
+    counts = [n // k + (i < n % k) for i in range(k)]
+    staged_rows = torch.cat(
+        [
+            torch.arange(
+                s.token_slice.start,
+                s.token_slice.start + count,
+                device=input_batch.input_ids.device,
+            )
+            for s, count in zip(ubatch_slices, counts)
+        ]
+    )
+    # A temporary keeps unread source rows intact when regions overlap.
+    for values in (input_batch.input_ids, input_batch.positions, *block_tables):
+        staged = torch.zeros_like(values[:num_padded])
+        staged[staged_rows] = values[:n]
+        values[:num_padded].copy_(staged)
+    staged_slots = torch.full_like(slot_mappings[:, :num_padded], -1)
+    staged_slots[:, staged_rows] = slot_mappings[:, :n]
+    slot_mappings[:, :num_padded].copy_(staged_slots)
+    input_batch.is_padding[:num_padded].fill_(True)
+    input_batch.is_padding[staged_rows] = False
+    return staged_rows
+
+
+def restore_staged_inputs(
+    input_batch: InputBatch,
+    block_tables: tuple[torch.Tensor, ...],
+    slot_mappings: torch.Tensor,
+    staged_rows: torch.Tensor,
+) -> None:
+    """Restore logical rows for post-forward consumers, including the sampler."""
+    n = staged_rows.numel()
+    for values in (input_batch.input_ids, input_batch.positions, *block_tables):
+        values[:n] = values[staged_rows]
+        values[n : input_batch.num_tokens_after_padding].zero_()
+    slot_mappings[:, :n] = slot_mappings[:, staged_rows]
+    slot_mappings[:, n : input_batch.num_tokens_after_padding].fill_(-1)
+    input_batch.is_padding[:n].fill_(False)
+    input_batch.is_padding[n : input_batch.num_tokens_after_padding].fill_(True)
 
 
 def create_ubatch_slices(input_batch: InputBatch, num_ubatches: int) -> UBatchSlices:
     """Split a DP-padded batch into the slices its microbatches run on.
 
-    Splitting at the midpoint of the DP-padded token count leaves the trailing
-    microbatch anywhere from full to entirely inside the padding. Clamping its
+    Splitting the DP-padded token range can leave trailing microbatches
+    entirely inside the padding. Clamping each such microbatch's
     request slice onto the last request leaves it holding that request with
     zero query tokens -- the shape a straddling request already takes -- so it
     stays well-formed with no work to do, like a dummy run.
