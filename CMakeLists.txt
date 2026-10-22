@@ -1150,6 +1150,26 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       "Building fused GDN decode for archs: ${FUSED_GDN_DECODE_ARCHS}")
   endif()
 
+  # Beam's kernels use NVLink multicast and thread-block clusters. Their norms
+  # must not contract into FMAs to keep the FP32 boundary exact.
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    cuda_archs_loose_intersection(BEAM_KERNEL_ARCHS
+      "9.0a;10.0f;10.3f" "${CUDA_ARCHS}")
+  else()
+    cuda_archs_loose_intersection(BEAM_KERNEL_ARCHS
+      "9.0a;10.0a;10.3a" "${CUDA_ARCHS}")
+  endif()
+  if(BEAM_KERNEL_ARCHS)
+    set(BEAM_KERNEL_SRCS "csrc/beam/allreduce_norm.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${BEAM_KERNEL_SRCS}"
+      CUDA_ARCHS "${BEAM_KERNEL_ARCHS}")
+    set_property(SOURCE ${BEAM_KERNEL_SRCS} APPEND PROPERTY
+      COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:CUDA>:--fmad=false>")
+    list(APPEND VLLM_STABLE_EXT_SRC "${BEAM_KERNEL_SRCS}")
+    message(STATUS "Building Beam kernels for archs: ${BEAM_KERNEL_ARCHS}")
+  endif()
+
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
     cuda_archs_loose_intersection(KIMI_K3_ATTN_RES_ARCHS
       "10.0f" "${CUDA_ARCHS}")
@@ -1250,6 +1270,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     if(KIMI_K3_ATTN_RES_ARCHS)
       target_compile_definitions(_C_stable_libtorch PRIVATE
         VLLM_ENABLE_KIMI_K3_ATTN_RES=1)
+    endif()
+    if(BEAM_KERNEL_ARCHS)
+      target_compile_definitions(_C_stable_libtorch PRIVATE
+        VLLM_ENABLE_BEAM_KERNELS=1)
     endif()
     # Needed by CUTLASS kernels
     target_compile_definitions(_C_stable_libtorch PRIVATE
