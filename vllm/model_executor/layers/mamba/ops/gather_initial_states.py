@@ -49,7 +49,7 @@ def gather_initial_states(
 ) -> torch.Tensor:
     """Gather dense state rows, replacing uninitialized rows with zeros."""
     assert state.ndim >= 2
-    assert state.is_cuda
+    assert state.is_cuda or state.is_xpu
     assert indices.ndim == 1 and has_initial_state.ndim == 1
     assert indices.shape == has_initial_state.shape
     assert indices.device == state.device

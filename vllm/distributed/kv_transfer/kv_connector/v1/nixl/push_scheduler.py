@@ -60,6 +60,8 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
     hooks.
     """
 
+    _TRANSFER_MODE: str = "push"
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -120,9 +122,6 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             count = actual - num_computed_tokens
             if count > 0:
                 return count, True
-
-        if params is not None and params.get("do_remote_decode") and self._has_mamba:
-            self._truncate_mamba_request_for_prefill(request)
 
         return 0, False
 
@@ -199,7 +198,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         # ReqMeta without a KeyError — the actual remote block IDs are
         # learned by P over the NIXL handshake at WRITE time.
         params["remote_block_ids"] = ()
-        self._reqs_need_recv[request.request_id] = (request, local_block_ids)
+        self._reqs_need_recv[request.request_id] = (request, local_block_ids, (), False)
 
         # Mark as processed so a re-entry (e.g. preemption + reschedule)
         # doesn't re-stage the registration.
@@ -241,7 +240,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             # recv so the worker emits a notif that lets P free them.
             # Seed remote_block_ids so add_new_req_to_recv won't KeyError.
             params["remote_block_ids"] = ()
-            self._reqs_need_recv[request.request_id] = (request, [])
+            self._reqs_need_recv[request.request_id] = (request, [], (), False)
             params["do_remote_prefill"] = False
             return False, None
 
@@ -287,9 +286,11 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             remote_request_id=request.request_id,
             remote_host=self.side_channel_host,
             remote_port=self.side_channel_port,
-            tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
+            tp_size=self.transfer_tp_size,
+            dcp_size=self.vllm_config.parallel_config.decode_context_parallel_size,
             pp_size=self.vllm_config.parallel_config.pipeline_parallel_size,
             remote_num_tokens=remote_num_tokens,
+            transfer_mode=self._TRANSFER_MODE,
         )
 
     def build_connector_meta(

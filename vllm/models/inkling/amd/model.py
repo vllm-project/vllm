@@ -646,7 +646,7 @@ def _load_inkling_weights(
                         weight.shard_id = shard_id
 
             # MoE expert tensors (fused stacked, routed + shared sink): translate
-            # the checkpoint layout to per-expert FusedMoE loads.
+            # the checkpoint layout to per-expert MoERunner loads.
             moe_match = _MOE_EXPERT_WEIGHT_RE.match(name)
             if moe_match is not None and moe_match.group("mlp") in moe_modules:
                 moe = moe_modules[moe_match.group("mlp")]
@@ -656,8 +656,9 @@ def _load_inkling_weights(
 
             yield name, weight
 
-    loader = AutoWeightsLoader(module, skip_prefixes=["model.mtp."])
-    loaded |= loader.load_weights(_iter_loadable_weights())
+    mapper = WeightsMapper(orig_to_new_prefix={"model.mtp.": None})
+    loader = AutoWeightsLoader(module)
+    loaded |= loader.load_weights(_iter_loadable_weights(), mapper=mapper)
 
     # Post-load MoE fixups (default input scales, zeroed EP-padding experts).
     for moe_name, moe in moe_modules.items():

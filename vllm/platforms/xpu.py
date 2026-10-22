@@ -31,8 +31,7 @@ logger = init_logger(__name__)
 def get_mem_info_wrapper(
     device: int | str | torch.device | None = None,
 ) -> tuple[int, int]:
-    """
-    Get memory info for a device, compatible with torch.accelerator.get_memory_info API.
+    """Get memory info for a device, matching `torch.accelerator.get_memory_info`.
 
     Args:
         device: Device specification. Can be:
@@ -43,6 +42,7 @@ def get_mem_info_wrapper(
 
     Returns:
         Tuple[int, int]: (free_memory, total_memory) in bytes
+
     """
     # Handle None - use current device
     if device is None:
@@ -113,6 +113,7 @@ class XPUPlatform(Platform):
     supported_quantization: list[str] = [
         "awq",
         "gptq",
+        "moe_wna16",
         "auto_awq",
         "auto_gptq",
         "inc",
@@ -122,6 +123,7 @@ class XPUPlatform(Platform):
         "mxfp8",
         "fp8_per_tensor",
         "fp8_per_block",
+        "fp8_per_channel",
         "online",
         "gpt_oss_mxfp4",
         "modelopt",
@@ -133,6 +135,10 @@ class XPUPlatform(Platform):
         # Do not import vllm._C
         with contextlib.suppress(ImportError):
             import vllm._moe_C  # noqa: F401
+
+    @classmethod
+    def check_runner_kv_caches_multi_layer(cls) -> None:
+        pass
 
     @classmethod
     def get_attn_backend_cls(
@@ -152,16 +158,63 @@ class XPUPlatform(Platform):
             logger.info_once("Using XPU MLA Sparse backend.")
             return AttentionBackendEnum.XPU_MLA_SPARSE.get_path()
         if attn_selector_config.use_mla:
-            logger.info_once("Using Triton MLA backend on V1 engine.")
-            return AttentionBackendEnum.TRITON_MLA.get_path()
+            if selected_backend == AttentionBackendEnum.TRITON_MLA:
+                logger.info_once("Using Triton MLA backend on V1 engine.")
+                return AttentionBackendEnum.TRITON_MLA.get_path()
+            if selected_backend not in (None, AttentionBackendEnum.FLASH_ATTN_MLA):
+                raise ValueError(
+                    f"Invalid attention backend for {cls.device_name}, "
+                    f"with use_mla: {attn_selector_config.use_mla}"
+                )
+            from vllm.v1.attention.backends.mla.flashattn_mla import (
+                XPUFlashAttnMLABackend,
+            )
+
+            invalid_reasons = XPUFlashAttnMLABackend.validate_configuration(
+                device_capability=cls.get_device_capability(),  # type: ignore[arg-type]
+                **attn_selector_config._asdict(),
+            )
+            if invalid_reasons:
+                if selected_backend == AttentionBackendEnum.FLASH_ATTN_MLA:
+                    raise ValueError(
+                        f"FlashAttnMLA on XPU is not valid for this "
+                        f"configuration: {invalid_reasons}"
+                    )
+                logger.info_once(
+                    "FlashAttnMLA on XPU is not valid for this configuration "
+                    "(%s); falling back to Triton MLA backend.",
+                    tuple(invalid_reasons),
+                )
+                return AttentionBackendEnum.TRITON_MLA.get_path()
+            logger.info_once("Using Flash Attention MLA backend on XPU.")
+            return "vllm.v1.attention.backends.mla.flashattn_mla.XPUFlashAttnMLABackend"
         if selected_backend == AttentionBackendEnum.TRITON_ATTN:
             logger.info_once("Using Triton backend.")
+            return AttentionBackendEnum.TRITON_ATTN.get_path()
+        elif attn_selector_config.use_batch_invariant:
+            # Flash Attention on XPU has not been validated for batch
+            # invariance. Honor an explicit Flash Attention request;
+            # otherwise fall back to Triton Attention, which implements
+            # batch-invariant kernels.
+            if selected_backend == AttentionBackendEnum.FLASH_ATTN:
+                logger.warning_once(
+                    "Using Flash Attention on XPU with batch invariance "
+                    "enabled because it was explicitly requested. This "
+                    "backend has not been validated for batch invariance "
+                    "on XPU and may produce non-deterministic results "
+                    "across batch sizes."
+                )
+                return AttentionBackendEnum.FLASH_ATTN.get_path()
+            logger.info_once(
+                "VLLM_BATCH_INVARIANT is enabled. Using Triton Attention "
+                "backend on XPU, which implements batch-invariant kernels."
+            )
             return AttentionBackendEnum.TRITON_ATTN.get_path()
         elif attn_selector_config.use_mm_prefix:
             # Flash Attention on XPU has no FA4 kernel, so it cannot apply the
             # multimodal prefix-LM bidirectional mask. Honor an explicit Flash
-            # Attention request (for text-only workloads); otherwise fall back
-            # to Triton Attention, which supports mm_prefix.
+            # Attention request (for text-only workloads); otherwise use the
+            # Triton/FlashAttention composite, falling back to Triton Attention.
             if selected_backend == AttentionBackendEnum.FLASH_ATTN:
                 logger.warning_once(
                     "Using Flash Attention on XPU for a multimodal prefix-LM "
@@ -171,6 +224,29 @@ class XPUPlatform(Platform):
                     "text-only workloads."
                 )
                 return AttentionBackendEnum.FLASH_ATTN.get_path()
+            if (
+                selected_backend in (None, AttentionBackendEnum.TRITON_FLASH_ATTN)
+                and dtype != torch.float32
+            ):
+                from vllm.v1.attention.backends.triton_flash_attn import (
+                    TritonFlashAttentionBackend,
+                )
+
+                if TritonFlashAttentionBackend.supports_head_size(
+                    attn_selector_config.head_size
+                ):
+                    logger.info_once(
+                        "Using the Triton/FlashAttention composite backend on "
+                        "XPU: batches with multimodal prefix masks run Triton "
+                        "Attention, causal batches run Flash Attention."
+                    )
+                    return AttentionBackendEnum.TRITON_FLASH_ATTN.get_path()
+                if selected_backend == AttentionBackendEnum.TRITON_FLASH_ATTN:
+                    raise ValueError(
+                        "TRITON_FLASH_ATTN on XPU supports head sizes "
+                        f"{TritonFlashAttentionBackend.get_supported_head_sizes()}"
+                        f", got {attn_selector_config.head_size}."
+                    )
             logger.warning_once(
                 "Flash Attention on XPU does not support multimodal prefix-LM "
                 "attention. Falling back to Triton Attention backend."
@@ -232,9 +308,7 @@ class XPUPlatform(Platform):
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
-        """
-        Set the device for the current platform.
-        """
+        """Set the device for the current platform."""
         torch.xpu.set_device(device)
 
     @classmethod
@@ -280,6 +354,27 @@ class XPUPlatform(Platform):
         # lazy import to avoid circular import
         from vllm.config import CUDAGraphMode
 
+        if envs.VLLM_BATCH_INVARIANT:
+            model_config = vllm_config.model_config
+            if model_config is not None and (
+                model_config.quantization is not None
+                or vllm_config.quant_config is not None
+            ):
+                raise ValueError(
+                    "XPU batch invariance currently supports only unquantized "
+                    f"models; got quantization={model_config.quantization!r}. "
+                    "Use an unquantized model or disable VLLM_BATCH_INVARIANT."
+                )
+
+            cache_dtype = vllm_config.cache_config.cache_dtype
+            if cache_dtype not in ("auto", "float16", "bfloat16"):
+                raise ValueError(
+                    "XPU batch invariance currently does not support quantized "
+                    f"KV caches; got kv_cache_dtype={cache_dtype!r}. "
+                    "Use an unquantized KV cache dtype or disable "
+                    "VLLM_BATCH_INVARIANT."
+                )
+
         compilation_config = vllm_config.compilation_config
         if compilation_config.compile_sizes is None:
             compilation_config.compile_sizes = []
@@ -293,21 +388,15 @@ class XPUPlatform(Platform):
                 "XPU Graph is not supported in the current PyTorch version, "
                 "disabling cudagraph_mode."
             )
-        elif not envs.VLLM_XPU_ENABLE_XPU_GRAPH:
+
+        if (
+            vllm_config.model_config is not None
+            and vllm_config.model_config.enable_sleep_mode
+            and compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+        ):
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
             logger.warning_once(
-                "XPU Graph is disabled by environment variable, "
-                "please set VLLM_XPU_ENABLE_XPU_GRAPH=1 to enable it."
-            )
-        else:
-            logger.warning_once(
-                "XPU Graph support is experimental and has known limitations: "
-                "(1) only single-GPU execution is supported; "
-                "(2) FLASH_ATTN supports PIECEWISE mode only; use TRITON_ATTN "
-                "for FULL mode; "
-                "(3) XPU Graph may increase device memory usage, "
-                "potentially causing OOM errors or leaving less memory "
-                "for the KV cache and reducing performance."
+                "XPU Graph is not compatible with sleep mode, disabling cudagraph_mode."
             )
 
         # Disable fusion passes not yet supported on XPU.
@@ -315,7 +404,6 @@ class XPUPlatform(Platform):
 
         pass_config = compilation_config.pass_config
         fusion_passes_to_disable = {
-            "fuse_gemm_comms": "Async TP",
             "fuse_allreduce_rms": "AllReduce + RMSNorm fusion",
             "fuse_attn_quant": "Attention + quant fusion",
             "fuse_act_padding": "Activation + padding fusion",
@@ -330,6 +418,30 @@ class XPUPlatform(Platform):
                         feature_name,
                     )
                     setattr(pass_config, flag, False)
+
+        # UVA-offloaded weights are host USM allocations, which Inductor's
+        # static Triton launcher rejects ("Pointer argument doesn't reference
+        # XPU device memory"). Fall back to Triton's own launcher. Remove once
+        # the released torch contains pytorch/pytorch#188240, which relaxes
+        # that check to any memory type known by the driver.
+        offload_config = vllm_config.offload_config
+        uva_offloading = offload_config.offload_backend == "uva" or (
+            offload_config.offload_backend == "auto"
+            and offload_config.prefetch.offload_group_size == 0
+            and offload_config.uva.cpu_offload_gb > 0
+        )
+        if (
+            uva_offloading
+            and not envs.VLLM_WEIGHT_OFFLOADING_DISABLE_UVA
+            and compilation_config.mode != CompilationMode.NONE
+        ):
+            compilation_config.inductor_compile_config.setdefault(
+                "use_static_cuda_launcher", False
+            )
+            logger.info_once(
+                "Disabling Inductor's static Triton launcher because UVA "
+                "weight offloading is enabled."
+            )
 
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
@@ -391,6 +503,7 @@ class XPUPlatform(Platform):
         if new_block_size == cache_config.block_size:
             return
 
+        pre_block_size = cache_config.block_size
         if cache_config.mamba_cache_mode == "align":
             cache_config.mamba_block_size = new_block_size
         original_mamba_page_size_padded = cache_config.mamba_page_size_padded
@@ -403,12 +516,19 @@ class XPUPlatform(Platform):
             )
         cache_config.block_size = new_block_size
         logger.info(
-            "[XPU]Setting attention block size to %d tokens to ensure multiple of %d, "
-            "set mamba_page_size_padded to %d bytes accordingly, before was %d bytes.",
+            "[XPU]Setting attention block size to %d tokens to ensure multiple of %d.",
             new_block_size,
             kernel_block_size,
-            cache_config.mamba_page_size_padded,
-            original_mamba_page_size_padded,
+        )
+        if original_mamba_page_size_padded is not None:
+            logger.info(
+                "[XPU]Scaled mamba_page_size_padded from %d to %d bytes accordingly.",
+                original_mamba_page_size_padded,
+                cache_config.mamba_page_size_padded,
+            )
+        # This rounding runs after super()'s check, so check its result too.
+        cls._check_aligned_block_size(
+            vllm_config, cls._find_non_ssm_backends(vllm_config), pre_block_size
         )
 
     @classmethod
@@ -465,9 +585,9 @@ class XPUPlatform(Platform):
         # use fused kernels where available when no codegen
         cc = vllm_config.compilation_config
         using_inductor = cc.backend == "inductor" and cc.mode != CompilationMode.NONE
-        default = ["native"] if using_inductor else ["xpu_kernels", "native"]
+        default = ["native"] if using_inductor else ["vllm_c", "native"]
 
-        return IrOpPriorityConfig.with_default(default)
+        return IrOpPriorityConfig.with_default(default, gelu_and_mul_sparse=["native"])
 
     @classmethod
     def device_count(cls) -> int:

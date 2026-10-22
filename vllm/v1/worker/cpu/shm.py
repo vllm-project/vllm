@@ -17,6 +17,12 @@ def noop(*args: Any, **kwargs: Any) -> None:
     pass
 
 
+# Distinct no-op so empty_cache does not alias synchronize: Dynamo's
+# handle_synchronize is keyed on that object and asserts on CPU-only hosts.
+def empty_cache_noop(*args: Any, **kwargs: Any) -> None:
+    pass
+
+
 def fake_pin_memory(self: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
     return self
 
@@ -57,8 +63,9 @@ torch.cuda.Event = _EventPlaceholder
 torch.cuda.Stream = _StreamPlaceholder
 torch.cuda.set_stream = noop
 torch.cuda.current_stream = lambda *args, **kwargs: _StreamPlaceholder()
+torch.cuda.stream = lambda *args, **kwargs: _StreamPlaceholder()
 torch.accelerator.synchronize = noop
-torch.accelerator.empty_cache = noop
+torch.accelerator.empty_cache = empty_cache_noop
 torch.Tensor.pin_memory = fake_pin_memory
 torch.Tensor.record_stream = noop
 torch.accelerator.get_memory_info = get_memory_info
@@ -69,14 +76,17 @@ import vllm.utils.torch_utils as torch_utils
 
 def async_tensor_h2d(
     data: list | np.ndarray | torch.Tensor,
-    device: str | torch.device,
+    device: str | torch.device | None = None,
     dtype: torch.dtype | None = None,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if isinstance(data, np.ndarray):
         data = torch.from_numpy(data)
-    if isinstance(data, torch.Tensor):
+    if not isinstance(data, torch.Tensor):
+        data = torch.tensor(data, dtype=dtype, device="cpu")
+    elif out is None:
         return data.to(dtype=dtype)
-    return torch.tensor(data, dtype=dtype, device="cpu")
+    return data if out is None else out.copy_(data)
 
 
 torch_utils.async_tensor_h2d = async_tensor_h2d
@@ -86,6 +96,14 @@ import vllm.v1.worker.gpu.buffer_utils as gpu_buffer_utils
 import vllm.v1.worker.cpu.buffer_utils as cpu_buffer_utils
 
 gpu_buffer_utils.UvaBuffer = cpu_buffer_utils.UvaBuffer
+
+import vllm.v1.worker.gpu.sample.penalties as gpu_penalties
+import vllm.v1.worker.gpu.structured_outputs as gpu_structured_outputs
+
+# triton-cpu lowers the bitmask unpack in these kernels to IR quadratic in the
+# block size: ~70 s per cold compile at 8192, ~2 s at 1024, at no runtime cost.
+gpu_penalties.PENALTIES_BLOCK_SIZE = 1024
+gpu_structured_outputs.GRAMMAR_BITMASK_BLOCK_SIZE = 1024
 
 # Patch Triton
 from vllm.triton_utils import HAS_TRITON, tl

@@ -15,11 +15,25 @@ pub enum Error {
     Tokenizer(String),
     #[error("text request `{request_id}` must contain at least one prompt token ID")]
     EmptyPromptTokenIds { request_id: String },
+    #[error("text request `{request_id}` stop strings cannot be empty")]
+    EmptyStopString { request_id: String },
     #[error(
-        "this model's maximum context length is {max_model_len} tokens, \
-         but the prompt contains {prompt_len} input tokens"
+        "Parameter 'cache_salt' must be a non-empty string of at most 128 characters \
+         and must not contain '@', '/', '\\', or NUL."
+    )]
+    InvalidCacheSalt,
+    #[error(
+        "This model's maximum context length is {max_model_len} tokens. However, your \
+         prompt contains {prompt_len} input tokens, which exceeds this limit even without \
+         any output tokens. Please reduce the length of the input prompt."
     )]
     PromptTooLong { max_model_len: u32, prompt_len: u32 },
+    #[error(
+        "This model's maximum context length is {max_model_len} tokens. However, your \
+         prompt fills it with {max_model_len} input tokens, leaving no room for output \
+         tokens. Please reduce the length of the input prompt."
+    )]
+    PromptFillsContext { max_model_len: u32 },
     #[error(transparent)]
     Logprobs(#[from] LogprobsError),
     #[error(transparent)]
@@ -33,6 +47,15 @@ pub enum Error {
     MinTokensExceedsMaxTokens { min_tokens: u32, max_tokens: u32 },
     #[error("`thinking_token_budget` must be a non-negative integer or -1 for unlimited.")]
     InvalidThinkingTokenBudget,
+    #[error(
+        "truncate_prompt_tokens={value} cannot be greater than max_model_len = \
+         {max_model_len}. Please request a smaller truncation size."
+    )]
+    TruncatePromptTokensExceedsMaxModelLen { value: u64, max_model_len: u32 },
+    #[error("invalid truncate_prompt_tokens={value}; must be >= -1")]
+    InvalidTruncatePromptTokens { value: i64 },
+    #[error("truncate_prompt_tokens is not supported for multimodal requests")]
+    TruncateUnsupportedWithMultimodal,
     #[error("invalid repetition detection params: {message}")]
     InvalidRepetitionDetection { message: String },
     #[error("text request stream `{request_id}` closed before terminal output")]
@@ -50,17 +73,36 @@ impl Error {
     pub fn is_request_validation_error(&self) -> bool {
         match self {
             Self::PromptTooLong { .. }
+            | Self::PromptFillsContext { .. }
             | Self::EmptyPromptTokenIds { .. }
+            | Self::EmptyStopString { .. }
+            | Self::InvalidCacheSalt
             | Self::Logprobs(_)
             | Self::TokenIds(_)
             | Self::SamplingParams(_)
             | Self::MinTokensExceedsMaxTokens { .. }
             | Self::InvalidThinkingTokenBudget
+            | Self::TruncatePromptTokensExceedsMaxModelLen { .. }
+            | Self::InvalidTruncatePromptTokens { .. }
+            | Self::TruncateUnsupportedWithMultimodal
             | Self::InvalidRepetitionDetection { .. }
             // An empty tokenized prompt detected later, at request prepare
             // time, surfaces through the transparent Llm wrapper.
-            | Self::Llm(LlmError::EmptyPromptTokenIds { .. }) => true,
+            | Self::Llm(LlmError::EmptyPromptTokenIds { .. })
+            | Self::Llm(LlmError::EngineCoreClient(
+                EngineCoreError::InvalidDataParallelRank { .. },
+            ))
+            | Self::EngineCore(EngineCoreError::InvalidStructuredOutputsParams { .. }) => true,
             _ => false,
+        }
+    }
+
+    /// The request parameter a validation error refers to, reported as the
+    /// `param` of the OpenAI error object.
+    pub fn param(&self) -> Option<&'static str> {
+        match self {
+            Self::PromptTooLong { .. } | Self::PromptFillsContext { .. } => Some("input_tokens"),
+            _ => None,
         }
     }
 }

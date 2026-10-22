@@ -2,27 +2,28 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-import io
+import itertools
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
 from http import HTTPStatus
 from typing import Any, Final, cast
 
-import numpy as np
-import pybase64 as base64
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import (
-    ChatTemplateContentFormatOption,
-    ConversationMessage,
-    make_tool_call_id,
+from vllm.entrypoints.generate.base.protocol import (
+    DeltaMessage,
+    FunctionCall,
+    PerRequestMetrics,
+    RequestResponseMetadata,
+    ToolCall,
 )
 from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
-    GenerationError,
     build_per_request_timing_metrics,
+    build_spec_decoding_metrics,
+    chat_top_logprobs_limit,
     clamp_prompt_logprobs,
     format_token_id_placeholder,
 )
@@ -38,33 +39,39 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionStreamResponse,
     ChatMessage,
 )
-from vllm.entrypoints.openai.engine.protocol import (
-    DeltaMessage,
-    ErrorResponse,
-    FunctionCall,
-    PerRequestTimingMetrics,
-    PromptTokenUsageInfo,
-    RequestResponseMetadata,
-    ToolCall,
-    UsageInfo,
+from vllm.entrypoints.openai.chat_completion.stream_processor import (
+    ChatStreamProcessor,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.engine.protocol import (
+    CompletionTokenUsageInfo,
+    ErrorResponse,
+    PromptTokenUsageInfo,
+    UsageInfo,
+)
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
     maybe_filter_parallel_tool_calls,
+    resolve_finish_reason,
 )
+from vllm.exceptions import GenerationError
 from vllm.inputs import EngineInput, MultiModalPlaceholders
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
 from vllm.parser import ParserManager
 from vllm.parser.abstract_parser import Parser
-from vllm.renderers import ChatParams
+from vllm.renderers.chat_utils import (
+    ChatTemplateContentFormatOption,
+    ConversationMessage,
+    make_tool_call_id,
+)
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import as_list
+from vllm.utils.serial_utils import numpy2base64
 
 logger = init_logger(__name__)
 
@@ -108,6 +115,12 @@ def _make_prompt_tokens_details(
     )
 
 
+def _make_completion_tokens_details(
+    reasoning_tokens: int,
+) -> CompletionTokenUsageInfo:
+    return CompletionTokenUsageInfo(reasoning_tokens=reasoning_tokens)
+
+
 class OpenAIServingChat(GenerateBaseServing):
     def __init__(
         self,
@@ -125,6 +138,7 @@ class OpenAIServingChat(GenerateBaseServing):
         enable_auto_tools: bool = False,
         exclude_tools_when_tool_choice_none: bool = False,
         tool_parser: str | None = None,
+        tool_strict_level: str | None = None,
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
         enable_log_outputs: bool = False,
@@ -149,12 +163,15 @@ class OpenAIServingChat(GenerateBaseServing):
         self.enable_log_deltas = enable_log_deltas
 
         self.enable_auto_tools: bool = enable_auto_tools
+        self._include_reasoning_tokens_details = bool(reasoning_parser)
         self.parser_cls = ParserManager.get_parser(
             tool_parser_name=tool_parser,
             reasoning_parser_name=reasoning_parser,
             enable_auto_tools=enable_auto_tools,
+            tool_strict_level=tool_strict_level,
             model_name=self.model_config.model,
             is_harmony=self.model_config.hf_config.model_type == "gpt_oss",
+            tokenizer=self.renderer.tokenizer,
         )
         self.exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
 
@@ -178,15 +195,6 @@ class OpenAIServingChat(GenerateBaseServing):
         self.supports_code_interpreter = False
         self.python_tool = None
 
-    def warmup(self) -> None:
-        self.renderer.warmup(
-            ChatParams(
-                chat_template=self.chat_template,
-                chat_template_content_format=self.chat_template_content_format,
-                chat_template_kwargs=self.default_chat_template_kwargs,
-            )
-        )
-
     def _effective_chat_template_kwargs(
         self, request: ChatCompletionRequest
     ) -> dict[str, Any]:
@@ -199,12 +207,65 @@ class OpenAIServingChat(GenerateBaseServing):
             .chat_template_kwargs
         )
 
+    def _make_parser(
+        self,
+        request: ChatCompletionRequest,
+        tokenizer: TokenizerLike,
+        chat_template_kwargs: dict[str, Any] | None,
+    ) -> Parser:
+        assert self.parser_cls is not None
+        return self.parser_cls(
+            tokenizer,
+            request.tools,
+            chat_template_kwargs=chat_template_kwargs,
+            model_config=self.model_config,
+        )
+
+    def _engine_chat_template_kwargs(
+        self, chat_template_kwargs: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Subclass hook to narrow ``chat_template_kwargs`` for the engine.
+
+        The same dict is used twice: to build the API-server-side parser
+        instance, and to populate
+        ``EngineCoreRequest.reasoning_parser_kwargs`` for the engine-core
+        side. The latter crosses ZMQ as msgpack, so a handler that stashes
+        request-scoped state only the API-server-side parser needs (values
+        msgpack can't encode, or payloads not worth shipping) can drop
+        those entries here without affecting the in-process parser.
+
+        Must not mutate the argument -- the caller still needs the full
+        dict. The default forwards it unchanged.
+        """
+        return chat_template_kwargs
+
+    def _engine_reasoning_kwargs(
+        self,
+        request: ChatCompletionRequest,
+        parser: Parser | None,
+        chat_template_kwargs: dict[str, Any],
+        prompt_token_ids: list[int] | None,
+    ) -> dict[str, Any]:
+        """`reasoning_ended` and `reasoning_parser_kwargs` for `generate()`."""
+        reasoning_parser_kwargs = None
+        if parser is not None and parser.reasoning_parser is not None:
+            reasoning_parser_kwargs = {
+                "chat_template_kwargs": self._engine_chat_template_kwargs(
+                    chat_template_kwargs
+                ),
+            }
+        return {
+            "reasoning_ended": request.resolve_reasoning_ended(
+                parser, prompt_token_ids or []
+            ),
+            "reasoning_parser_kwargs": reasoning_parser_kwargs,
+        }
+
     async def render_chat_request(
         self,
         request: ChatCompletionRequest,
     ) -> tuple[list[ConversationMessage], list[EngineInput]] | ErrorResponse:
-        """
-        Validate the model and preprocess a chat completion request.
+        """Validate the model and preprocess a chat completion request.
 
         Delegates preprocessing logic to OnlineRenderer, adding the
         engine-aware checks (LoRA model validation, engine health).
@@ -212,17 +273,14 @@ class OpenAIServingChat(GenerateBaseServing):
         Returns:
             A tuple of (conversation, engine_inputs) on success,
             or an ErrorResponse on failure.
+
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
             return error_check_ret
 
-        # If the engine is dead, raise the engine's DEAD_ERROR.
-        # This is required for the streaming case, where we return a
-        # success status before we actually start generating text :).
-        if self.engine_client.errored:
-            raise self.engine_client.dead_error
+        self._preflight(request.n or 1)
 
         return await self.online_renderer.render_chat(request)
 
@@ -231,8 +289,7 @@ class OpenAIServingChat(GenerateBaseServing):
         request: ChatCompletionRequest,
         raw_request: Request | None = None,
     ) -> AsyncGenerator[str, None] | ChatCompletionResponse | ErrorResponse:
-        """
-        Chat Completion API similar to OpenAI's API.
+        """Chat Completion API similar to OpenAI's API.
 
         See https://platform.openai.com/docs/api-reference/chat/create
         for the API specification. This API mimics the OpenAI
@@ -253,12 +310,7 @@ class OpenAIServingChat(GenerateBaseServing):
         chat_template_kwargs = self._effective_chat_template_kwargs(request)
         parser: Parser | None = None
         if self.parser_cls is not None:
-            parser = self.parser_cls(
-                tokenizer,
-                request.tools,
-                chat_template_kwargs=chat_template_kwargs,
-                model_config=self.model_config,
-            )
+            parser = self._make_parser(request, tokenizer, chat_template_kwargs)
         result = await self.render_chat_request(request)
         if isinstance(result, ErrorResponse):
             return result
@@ -328,6 +380,7 @@ class OpenAIServingChat(GenerateBaseServing):
                 if raw_request is None
                 else await self._get_trace_headers(raw_request.headers)
             )
+            session_id = self._get_session_id(request, raw_request)
 
             if isinstance(sampling_params, BeamSearchParams):
                 generator = self.beam_search(
@@ -336,34 +389,22 @@ class OpenAIServingChat(GenerateBaseServing):
                     params=sampling_params,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
+                    session_id=session_id,
+                    priority=self._get_priority(request, raw_request),
                 )
             else:
-                if not request.include_reasoning:
-                    reasoning_ended = True
-                elif request._grammar_from_parser:
-                    # The Mistral grammar already includes an optional
-                    # `think?` rule that handles both reasoning and
-                    # non-reasoning outputs.
-                    reasoning_ended = True
-                elif parser is not None and parser.reasoning_parser is not None:
-                    reasoning_ended = parser.is_reasoning_end(prompt_token_ids or [])
-                else:
-                    reasoning_ended = None
-
                 generator = self.engine_client.generate(
                     engine_input,
                     sampling_params,
                     sub_request_id,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
-                    priority=request.priority,
+                    priority=self._get_priority(request, raw_request),
                     data_parallel_rank=data_parallel_rank,
-                    reasoning_ended=reasoning_ended,
-                    reasoning_parser_kwargs={
-                        "chat_template_kwargs": chat_template_kwargs,
-                    }
-                    if parser is not None and parser.reasoning_parser is not None
-                    else None,
+                    session_id=session_id,
+                    **self._engine_reasoning_kwargs(
+                        request, parser, chat_template_kwargs, prompt_token_ids
+                    ),
                 )
 
             generators.append(generator)
@@ -401,6 +442,34 @@ class OpenAIServingChat(GenerateBaseServing):
             return self.response_role
         return request.messages[-1]["role"]
 
+    def _create_chat_message(self, *args: Any, **kwargs: Any) -> ChatMessage:
+        """Construct the response :class:`ChatMessage` for the non-streaming path.
+
+        The full-generator calls this at every construction site so
+        subclasses can swap in a specialized :class:`ChatMessage`
+        subclass (e.g. :class:`CohereServingChatV2` returning
+        :class:`CohereChatMessage`) without duplicating the branchy
+        tool-choice / auto-tools logic that decides which fields are
+        populated. The default returns a plain :class:`ChatMessage`.
+        """
+        return ChatMessage(*args, **kwargs)
+
+    def _finalize_response_message(
+        self,
+        message: ChatMessage,
+        *,
+        parser: Parser | None,
+    ) -> ChatMessage:
+        """Subclass hook to enrich a fully-constructed :class:`ChatMessage`.
+
+        Default is a no-op. Subclasses that need to surface parser-side
+        extras (e.g. :class:`CohereServingChatV2` reading grounding
+        citations off the reasoning parser and populating
+        :class:`CohereChatMessage.citations`) override this to inspect
+        ``parser`` and mutate/replace ``message``.
+        """
+        return message
+
     async def chat_completion_stream_generator(
         self,
         request: ChatCompletionRequest,
@@ -413,23 +482,57 @@ class OpenAIServingChat(GenerateBaseServing):
         chat_template_kwargs: dict[str, Any] | None = None,
         mm_token_counts: dict[str, int] | None = None,
     ) -> AsyncGenerator[str, None]:
+        try:
+            async for chunk in self.chat_completion_stream_generator_raw(
+                request,
+                result_generator,
+                request_id,
+                model_name,
+                conversation,
+                tokenizer,
+                request_metadata,
+                chat_template_kwargs=chat_template_kwargs,
+                mm_token_counts=mm_token_counts,
+            ):
+                if isinstance(chunk, ErrorResponse):
+                    data = chunk.model_dump_json()
+                else:
+                    data = chunk.model_dump_json(
+                        exclude_unset=True, exclude_none=not chunk.choices
+                    )
+                yield f"data: {data}\n\n"
+        except Exception as e:
+            logger.exception("Error serializing chat completion stream.")
+            data = self.create_streaming_error_response(e)
+            yield f"data: {data}\n\n"
+        yield "data: [DONE]\n\n"
+
+    async def chat_completion_stream_generator_raw(
+        self,
+        request: ChatCompletionRequest,
+        result_generator: AsyncIterator[RequestOutput],
+        request_id: str,
+        model_name: str,
+        conversation: list[ConversationMessage],
+        tokenizer: TokenizerLike,
+        request_metadata: RequestResponseMetadata,
+        chat_template_kwargs: dict[str, Any] | None = None,
+        mm_token_counts: dict[str, int] | None = None,
+    ) -> AsyncGenerator[ChatCompletionStreamResponse | ErrorResponse, None]:
+        """Yield chat chunks or errors without serializing them into SSE frames."""
         created_time = int(time.time())
         chunk_object_type: Final = "chat.completion.chunk"
         first_iteration = True
 
         # Send response for each token for each request.n (index)
         num_choices = 1 if request.n is None else request.n
-        previous_num_tokens = [0] * num_choices
+        # TODO: Remove once all reasoning parsers use the Parser Engine.
+        generated_token_ids: list[list[int]] = [[] for _ in range(num_choices)]
+        previous_reasoning_tokens = [0] * num_choices
         finish_reason_sent = [False] * num_choices
         num_prompt_tokens = 0
         num_cached_tokens = None
         num_cache_creation_tokens = None
-        tools_streamed = [False] * num_choices
-
-        if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
-            tool_choice_function_name = request.tool_choice.function.name
-        else:
-            tool_choice_function_name = None
 
         previous_texts = [""] * num_choices
 
@@ -439,22 +542,20 @@ class OpenAIServingChat(GenerateBaseServing):
                     raise ValueError(
                         "Tokenizer not available when `skip_tokenizer_init=True`"
                     )
-                parsers: list[Parser | None] = [
-                    self.parser_cls(
-                        tokenizer,
-                        request.tools,
-                        chat_template_kwargs=chat_template_kwargs,
-                        model_config=self.model_config,
+                processors = [
+                    ChatStreamProcessor(
+                        request,
+                        self._make_parser(request, tokenizer, chat_template_kwargs),
                     )
                     for _ in range(num_choices)
                 ]
             else:
-                parsers = [None] * num_choices
+                processors = [
+                    ChatStreamProcessor(request, None) for _ in range(num_choices)
+                ]
         except Exception as e:
             logger.exception("Error in parser creation.")
-            data = self.create_streaming_error_response(e)
-            yield f"data: {data}\n\n"
-            yield "data: [DONE]\n\n"
+            yield self.create_error_response(e)
             return
 
         stream_options = request.stream_options
@@ -518,10 +619,14 @@ class OpenAIServingChat(GenerateBaseServing):
                                 prompt_tokens=num_prompt_tokens,
                                 completion_tokens=0,
                                 total_tokens=num_prompt_tokens,
+                                completion_tokens_details=(
+                                    _make_completion_tokens_details(0)
+                                    if self._include_reasoning_tokens_details
+                                    else None
+                                ),
                             )
 
-                        data = chunk.model_dump_json(exclude_unset=True)
-                        yield f"data: {data}\n\n"
+                        yield chunk
 
                     # Send response to echo the input portion of the
                     # last message
@@ -554,21 +659,26 @@ class OpenAIServingChat(GenerateBaseServing):
                                         prompt_tokens=num_prompt_tokens,
                                         completion_tokens=0,
                                         total_tokens=num_prompt_tokens,
+                                        completion_tokens_details=(
+                                            _make_completion_tokens_details(0)
+                                            if self._include_reasoning_tokens_details
+                                            else None
+                                        ),
                                     )
 
-                                data = chunk.model_dump_json(exclude_unset=True)
-                                yield f"data: {data}\n\n"
+                                yield chunk
                     first_iteration = False
 
                 for output in res.outputs:
                     i = output.index
-                    parser = parsers[i]
+                    processor = processors[i]
+                    parser = processor.parser
                     if finish_reason_sent[i]:
                         continue
 
-                    if request.logprobs and (
-                        request.top_logprobs is not None or request.logprob_token_ids
-                    ):
+                    self._raise_if_error(output.finish_reason, request_id)
+
+                    if request.logprobs:
                         assert output.logprobs is not None, "Did not output logprobs"
                         logprobs = self._create_chat_logprobs(
                             token_ids=output.token_ids,
@@ -586,53 +696,46 @@ class OpenAIServingChat(GenerateBaseServing):
                     if (
                         not delta_text
                         and not output.token_ids
-                        and not previous_num_tokens[i]
+                        and not processor.num_output_tokens
+                        and output.finish_reason is None
                     ):
                         # Chunked prefill case, don't return empty chunks
                         continue
 
-                    delta_message: DeltaMessage | None
-
-                    if parser is not None:
-                        delta_message = parser.parse_delta(
-                            delta_text=delta_text,
-                            delta_token_ids=as_list(output.token_ids),
-                            request=request,
-                            prompt_token_ids=res.prompt_token_ids,
-                            finished=output.finish_reason is not None,
-                        )
-                        if delta_message is not None and delta_message.tool_calls:
-                            tools_streamed[i] = True
-
-                    # handle streaming just a content delta (no parsers)
-                    else:
-                        delta_message = DeltaMessage(content=delta_text)
+                    delta_message, finish_reason = processor.step(
+                        delta_text,
+                        as_list(output.token_ids),
+                        output.finish_reason,
+                        res.prompt_token_ids,
+                    )
 
                     previous_texts[i] += delta_text
 
-                    # set the previous values for the next iteration
-                    previous_num_tokens[i] += len(output.token_ids)
+                    if parser is not None and self._include_reasoning_tokens_details:
+                        generated_token_ids[i].extend(output.token_ids)
+                        if include_continuous_usage:
+                            previous_reasoning_tokens[i] = (
+                                parser.count_reasoning_tokens(
+                                    tuple(generated_token_ids[i])
+                                )
+                            )
 
                     # if the message delta is None (e.g. because it was a
                     # "control token" for tool calls or the parser otherwise
                     # wasn't ready to send a token, then
                     #   get the next token without streaming a chunk
-                    # When reasoning is hidden, suppress per-token
-                    # metadata (logprobs, token_ids) on every chunk to
-                    # prevent leaking reasoning tokens through decoded
-                    # token text in logprob entries or raw token IDs.
-                    hide_stream_metadata = (
-                        not request.include_reasoning and parser is not None
-                    )
+                    hide_stream_metadata = processor.hide_metadata
                     if hide_stream_metadata:
                         logprobs = None
 
                     if delta_message is None:
-                        # NOTE: If return_token_ids is enabled, we still need to
-                        # send a chunk with token_ids even if delta_message is None
+                        # NOTE: If return_token_ids or logprobs are enabled, we
+                        # still need to send a chunk even if delta_message is None
                         # to ensure all tokens are included in the response
-                        if output.finish_reason is None and (
-                            not request.return_token_ids or hide_stream_metadata
+                        if (
+                            output.finish_reason is None
+                            and logprobs is None
+                            and (not request.return_token_ids or hide_stream_metadata)
                         ):
                             continue
                         delta_message = DeltaMessage()
@@ -683,35 +786,25 @@ class OpenAIServingChat(GenerateBaseServing):
 
                     # if the model is finished generating
                     else:
-                        # check for error finish reason and abort streaming
-                        # finish_reason='error' indicates a retryable error
-                        self._raise_if_error(output.finish_reason, request_id)
-
                         # Send the finish response for each request.n only once
-                        # In OpenAI's API, when a tool is called, the
-                        # finish_reason is:
-                        # "tool_calls" for "auto" or "required" tool calls,
-                        # and "stop" for named tool calls.
-                        if tools_streamed[i] and not tool_choice_function_name:
-                            finish_reason_ = "tool_calls"
-                        else:
-                            finish_reason_ = (
-                                output.finish_reason if output.finish_reason else "stop"
-                            )
                         choice_data = ChatCompletionResponseStreamChoice(
                             index=i,
                             delta=delta_message,
                             logprobs=logprobs,
-                            finish_reason=finish_reason_,
+                            finish_reason=finish_reason,
                             stop_reason=output.stop_reason,
                             token_ids=(
                                 as_list(output.token_ids) if include_token_ids else None
+                            ),
+                            weight_versions=(
+                                output.weight_versions
+                                if request.return_weight_versions
+                                else None
                             ),
                         )
 
                         finish_reason_sent[i] = True
 
-                    choice_data = maybe_filter_parallel_tool_calls(choice_data, request)
                     chunk = ChatCompletionStreamResponse(
                         id=request_id,
                         object=chunk_object_type,
@@ -732,24 +825,43 @@ class OpenAIServingChat(GenerateBaseServing):
 
                     # handle usage stats if requested & if continuous
                     if include_continuous_usage:
-                        completion_tokens = previous_num_tokens[i]
+                        completion_tokens = processor.num_output_tokens
                         chunk.usage = UsageInfo(
                             prompt_tokens=num_prompt_tokens,
                             completion_tokens=completion_tokens,
                             total_tokens=num_prompt_tokens + completion_tokens,
+                            completion_tokens_details=(
+                                _make_completion_tokens_details(
+                                    previous_reasoning_tokens[i]
+                                )
+                                if self._include_reasoning_tokens_details
+                                else None
+                            ),
                         )
 
-                    data = chunk.model_dump_json(exclude_unset=True)
-                    yield f"data: {data}\n\n"
+                    yield chunk
+
+            if self._include_reasoning_tokens_details and not include_continuous_usage:
+                for i, processor in enumerate(processors):
+                    parser = processor.parser
+                    if parser is not None and generated_token_ids[i]:
+                        previous_reasoning_tokens[i] = parser.count_reasoning_tokens(
+                            tuple(generated_token_ids[i])
+                        )
 
             # once the final token is handled, if stream_options.include_usage
             # is sent, send the usage
             if include_usage:
-                completion_tokens = sum(previous_num_tokens)
+                completion_tokens = sum(p.num_output_tokens for p in processors)
                 final_usage = UsageInfo(
                     prompt_tokens=num_prompt_tokens,
                     completion_tokens=completion_tokens,
                     total_tokens=num_prompt_tokens + completion_tokens,
+                    completion_tokens_details=_make_completion_tokens_details(
+                        sum(previous_reasoning_tokens)
+                    )
+                    if self._include_reasoning_tokens_details
+                    else None,
                 )
                 final_usage.prompt_tokens_details = _make_prompt_tokens_details(
                     self.enable_prompt_tokens_details,
@@ -762,16 +874,21 @@ class OpenAIServingChat(GenerateBaseServing):
                 # only emitted when usage reporting is enabled (i.e.
                 # ``stream_options.include_usage=true`` or
                 # ``--enable-force-include-usage``).
-                stream_per_request_metrics: PerRequestTimingMetrics | None = None
-                if (
-                    self.enable_per_request_metrics
-                    # See note in chat_completion_full_generator: suppress for n>1.
-                    and (request.n or 1) == 1
-                ):
-                    last_metrics = last_res.metrics if last_res is not None else None
-                    stream_per_request_metrics = build_per_request_timing_metrics(
-                        last_metrics, completion_tokens
-                    )
+                stream_per_request_metrics: PerRequestMetrics | None = None
+                # See note in chat_completion_full_generator: suppress for n>1.
+                if (request.n or 1) == 1:
+                    if self.enable_per_request_metrics:
+                        last_metrics = (
+                            last_res.metrics if last_res is not None else None
+                        )
+                        stream_per_request_metrics = build_per_request_timing_metrics(
+                            last_metrics, completion_tokens
+                        )
+                    spec_stats = build_spec_decoding_metrics(last_res)
+                    if spec_stats is not None:
+                        if stream_per_request_metrics is None:
+                            stream_per_request_metrics = PerRequestMetrics()
+                        stream_per_request_metrics.speculative_decoding = spec_stats
 
                 final_usage_chunk = ChatCompletionStreamResponse(
                     id=request_id,
@@ -783,27 +900,30 @@ class OpenAIServingChat(GenerateBaseServing):
                     system_fingerprint=self.system_fingerprint,
                     metrics=stream_per_request_metrics,
                 )
-                final_usage_data = final_usage_chunk.model_dump_json(
-                    exclude_unset=True, exclude_none=True
-                )
-                yield f"data: {final_usage_data}\n\n"
+                yield final_usage_chunk
 
             # report to FastAPI middleware aggregate usage across all choices
-            num_completion_tokens = sum(previous_num_tokens)
+            num_completion_tokens = sum(p.num_output_tokens for p in processors)
             request_metadata.final_usage_info = UsageInfo(
                 prompt_tokens=num_prompt_tokens,
                 completion_tokens=num_completion_tokens,
                 total_tokens=num_prompt_tokens + num_completion_tokens,
+                completion_tokens_details=_make_completion_tokens_details(
+                    sum(previous_reasoning_tokens)
+                )
+                if self._include_reasoning_tokens_details
+                else None,
             )
 
             # Log complete streaming response if output logging is enabled
             if self.enable_log_outputs and self.request_logger:
                 # Log the complete response for each choice
-                for i in range(num_choices):
+                for i, processor in enumerate(processors):
+                    num_tokens = processor.num_output_tokens
                     full_text = (
                         previous_texts[i]
                         if previous_texts and i < len(previous_texts)
-                        else f"<streaming_complete: {previous_num_tokens[i]} tokens>"
+                        else f"<streaming_complete: {num_tokens} tokens>"
                     )
                     self.request_logger.log_outputs(
                         request_id=request_id,
@@ -815,13 +935,12 @@ class OpenAIServingChat(GenerateBaseServing):
                     )
 
         except GenerationError as e:
-            yield f"data: {self._convert_generation_error_to_streaming_response(e)}\n\n"
+            yield self.create_error_response(
+                str(e), err_type="InternalServerError", status_code=e.status_code
+            )
         except Exception as e:
             logger.exception("Error in chat completion stream generator.")
-            data = self.create_streaming_error_response(e)
-            yield f"data: {data}\n\n"
-        # Send the final done message after all response.n are finished
-        yield "data: [DONE]\n\n"
+            yield self.create_error_response(e)
 
     async def chat_completion_full_generator(
         self,
@@ -852,21 +971,27 @@ class OpenAIServingChat(GenerateBaseServing):
             )
 
         choices: list[ChatCompletionResponseChoice] = []
+        total_reasoning_tokens = 0
 
         role = self.get_chat_request_role(request)
         tool_parser_cls = (
             self.parser_cls.tool_parser_cls if self.parser_cls is not None else None
         )
-        for output in final_res.outputs:
+        for i, output in enumerate(final_res.outputs):
             # check for error finish reason and raise GenerationError
             # finish_reason='error' indicates a retryable request-level internal error
             self._raise_if_error(output.finish_reason, request_id)
+            if i > 0 and parser is not None:
+                # Parsers are stateful: like streaming, use one per choice.
+                parser = self._make_parser(
+                    request, tokenizer, self._effective_chat_template_kwargs(request)
+                )
+            if parser is not None and final_res.prompt_token_ids is not None:
+                parser.set_prompt_token_ids(final_res.prompt_token_ids)
             token_ids = output.token_ids
             out_logprobs = output.logprobs
 
-            if request.logprobs and (
-                request.top_logprobs is not None or request.logprob_token_ids
-            ):
+            if request.logprobs:
                 assert out_logprobs is not None, "Did not output logprobs"
                 logprobs = self._create_chat_logprobs(
                     token_ids=token_ids,
@@ -889,6 +1014,7 @@ class OpenAIServingChat(GenerateBaseServing):
                 suppress_metadata = not request.include_reasoning and parser is not None
                 if not request.include_reasoning:
                     reasoning = None
+                total_reasoning_tokens += parser.count_reasoning_tokens(token_ids)
                 if suppress_metadata:
                     logprobs = None
             else:
@@ -897,20 +1023,25 @@ class OpenAIServingChat(GenerateBaseServing):
                 tool_calls = []
                 suppress_metadata = False
 
-            auto_tools_called = False
             is_named_tool_choice = (
                 request.tool_choice is not None
                 and type(request.tool_choice) is ChatCompletionNamedToolChoiceParam
             )
             is_required_tool_choice = request.tool_choice == "required"
 
+            # All six construction sites route through ``self._create_chat_message``
+            # so subclasses can swap in a specialized :class:`ChatMessage`
+            # (e.g. the Cohere v2 handler's ``CohereChatMessage``) without
+            # having to duplicate this branch logic.
             if (not self.enable_auto_tools or not tool_parser_cls) and (
                 not is_named_tool_choice and not is_required_tool_choice
             ):
-                message = ChatMessage(role=role, reasoning=reasoning, content=content)
+                message = self._create_chat_message(
+                    role=role, reasoning=reasoning, content=content
+                )
 
             elif is_named_tool_choice or is_required_tool_choice:
-                message = ChatMessage(
+                message = self._create_chat_message(
                     role=role,
                     reasoning=reasoning,
                     content=content or "",
@@ -923,7 +1054,9 @@ class OpenAIServingChat(GenerateBaseServing):
             # if the request doesn't use tool choice
             # OR specifies to not use a tool
             elif not request.tool_choice or request.tool_choice == "none":
-                message = ChatMessage(role=role, reasoning=reasoning, content=content)
+                message = self._create_chat_message(
+                    role=role, reasoning=reasoning, content=content
+                )
 
             # handle when there are tools and tool choice is auto
             elif (
@@ -932,9 +1065,8 @@ class OpenAIServingChat(GenerateBaseServing):
                 and self.enable_auto_tools
                 and tool_parser_cls
             ):
-                auto_tools_called = tool_calls is not None and len(tool_calls) > 0
                 if tool_calls:
-                    message = ChatMessage(
+                    message = self._create_chat_message(
                         role=role,
                         reasoning=reasoning,
                         content=content,
@@ -945,7 +1077,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     )
 
                 else:
-                    message = ChatMessage(
+                    message = self._create_chat_message(
                         role=role,
                         reasoning=reasoning,
                         content=content,
@@ -958,35 +1090,30 @@ class OpenAIServingChat(GenerateBaseServing):
                     " if tools should be extracted. Returning a standard chat "
                     "completion."
                 )
-                message = ChatMessage(role=role, reasoning=reasoning, content=content)
-            # In OpenAI's API, when a tool is called, the finish_reason is:
-            # "tool_calls" for "auto" or "required" tool calls,
-            # and "stop" for named tool calls.
-            is_finish_reason_tool_calls = auto_tools_called or (
-                request.tool_choice
-                and request.tool_choice == "required"
-                and output.finish_reason == "stop"
-            )
+                message = self._create_chat_message(
+                    role=role, reasoning=reasoning, content=content
+                )
 
-            # Encode routed_experts for transport. JSON can't carry raw
-            # bytes, so we write the ndarray as a ``.npy`` byte stream
-            # and base64-encode it. ``pybase64`` is ~3x faster than the
-            # stdlib ``base64`` on large payloads thanks to SIMD.
-            routed_experts_b64 = None
-            if output.routed_experts is not None:
-                buf = io.BytesIO()
-                np.save(buf, output.routed_experts)
-                routed_experts_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+            # Subclass hook: enrich the constructed message with any
+            # parser-side extras that don't fit through the plain
+            # ``(reasoning, content, tool_calls)`` tuple. Base is a no-op;
+            # citation-aware handlers use this to surface grounding
+            # metadata cached on the reasoning parser.
+            message = self._finalize_response_message(message, parser=parser)
+
+            routed_experts_b64 = (
+                numpy2base64(output.routed_experts)
+                if output.routed_experts is not None
+                else None
+            )
 
             choice_data = ChatCompletionResponseChoice(
                 index=output.index,
                 message=message,
                 logprobs=logprobs,
-                finish_reason="tool_calls"
-                if is_finish_reason_tool_calls
-                else output.finish_reason
-                if output.finish_reason
-                else "stop",
+                finish_reason=resolve_finish_reason(
+                    output.finish_reason, request, bool(message.tool_calls)
+                ),
                 stop_reason=output.stop_reason,
                 token_ids=(
                     as_list(output.token_ids)
@@ -994,6 +1121,9 @@ class OpenAIServingChat(GenerateBaseServing):
                     else None
                 ),
                 routed_experts=routed_experts_b64,
+                weight_versions=(
+                    output.weight_versions if request.return_weight_versions else None
+                ),
             )
             choice_data = maybe_filter_parallel_tool_calls(choice_data, request)
 
@@ -1025,6 +1155,11 @@ class OpenAIServingChat(GenerateBaseServing):
             prompt_tokens=num_prompt_tokens,
             completion_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
+            completion_tokens_details=_make_completion_tokens_details(
+                total_reasoning_tokens
+            )
+            if self._include_reasoning_tokens_details
+            else None,
         )
         usage.prompt_tokens_details = _make_prompt_tokens_details(
             self.enable_prompt_tokens_details,
@@ -1035,17 +1170,20 @@ class OpenAIServingChat(GenerateBaseServing):
 
         request_metadata.final_usage_info = usage
 
-        per_request_metrics: PerRequestTimingMetrics | None = None
-        if (
-            self.enable_per_request_metrics
-            # Timing metrics describe a single generation stream. For n>1 the
-            # returned stats belong to only one of the n sequences, so they
-            # cannot be accurately attributed to the request; suppress instead.
-            and (request.n or 1) == 1
-        ):
-            per_request_metrics = build_per_request_timing_metrics(
-                final_res.metrics, num_generated_tokens
-            )
+        per_request_metrics: PerRequestMetrics | None = None
+        # Per-request metrics (timing + spec-decode acceptance) describe a single
+        # generation stream. For n>1 the stats belong to only one of the n
+        # sequences, so they cannot be attributed to the request; suppress.
+        if (request.n or 1) == 1:
+            if self.enable_per_request_metrics:
+                per_request_metrics = build_per_request_timing_metrics(
+                    final_res.metrics, num_generated_tokens
+                )
+            spec_stats = build_spec_decoding_metrics(final_res)
+            if spec_stats is not None:
+                if per_request_metrics is None:
+                    per_request_metrics = PerRequestMetrics()
+                per_request_metrics.speculative_decoding = spec_stats
 
         # ``final_res.prompt`` is the rendered chat-templated prompt text
         prompt_text = final_res.prompt if request.return_prompt_text else None
@@ -1122,10 +1260,9 @@ class OpenAIServingChat(GenerateBaseServing):
                 logprob=max(p[1].logprob, -9999.0),
                 bytes=list(token.encode("utf-8", errors="replace")),
             )
-            for i, p in enumerate(logprobs.items())
-            if return_all
-            or top_logprobs == -1
-            or (top_logprobs is not None and i < top_logprobs)
+            for p in itertools.islice(
+                logprobs.items(), chat_top_logprobs_limit(top_logprobs, return_all)
+            )
         ]
 
     def _create_chat_logprobs(

@@ -13,11 +13,8 @@ from pydantic import (
 )
 
 from vllm.config.speech_to_text import SpeechToTextParams
-from vllm.entrypoints.openai.engine.protocol import (
-    DeltaMessage,
-    OpenAIBaseModel,
-    UsageInfo,
-)
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
+from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.sampling_params import (
@@ -154,6 +151,9 @@ class TranscriptionRequest(OpenAIBaseModel):
     to automatically increase the temperature until certain thresholds are hit.
     """
 
+    watermarking: bool | None = None
+    """Whether to apply the engine's configured watermark to this request."""
+
     top_p: float | None = None
     """Enables nucleus (top-p) sampling, where tokens are selected from the
     smallest possible set whose cumulative probability exceeds `p`.
@@ -229,6 +229,7 @@ class TranscriptionRequest(OpenAIBaseModel):
             beam_width=n,
             max_tokens=max_tokens,
             temperature=temperature,
+            watermarking=self.watermarking,
             length_penalty=self.length_penalty,
             include_stop_str_in_output=self.include_stop_str_in_output,
         )
@@ -267,6 +268,7 @@ class TranscriptionRequest(OpenAIBaseModel):
 
         return SamplingParams.from_optional(
             temperature=temperature,
+            watermarking=self.watermarking,
             max_tokens=max_tokens,
             seed=self.seed,
             top_p=top_p,
@@ -285,6 +287,8 @@ class TranscriptionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def validate_transcription_request(cls, data):
+        if not isinstance(data, dict):
+            return data
         if isinstance(data.get("file"), str):
             raise HTTPException(
                 status_code=HTTPStatus.UNPROCESSABLE_ENTITY,

@@ -5,10 +5,10 @@ import itertools
 import math
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from typing import Final, Generic, Literal, Protocol, TypeAlias, TypeVar
+from typing import Generic, Literal, Protocol, TypeAlias, TypeVar
 
 import torch
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config import MultiModalConfig, get_current_vllm_config_or_none
 from vllm.distributed import (
@@ -23,11 +23,13 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = init_logger(__name__)
 
-_C = TypeVar("_C", bound=PretrainedConfig)
+_C = TypeVar("_C", bound=PreTrainedConfig)
+_C_co = TypeVar("_C_co", bound=PreTrainedConfig, covariant=True)
 
 
-class _RootConfig(Protocol[_C]):
-    vision_config: _C
+class _RootConfig(Protocol[_C_co]):
+    @property
+    def vision_config(self) -> _C_co: ...
 
 
 class VisionEncoderInfo(ABC, Generic[_C]):
@@ -60,7 +62,8 @@ class VisionEncoderInfo(ABC, Generic[_C]):
 
 
 class VisionLanguageConfig(Protocol):
-    vision_config: Final[PretrainedConfig]
+    @property
+    def vision_config(self) -> PreTrainedConfig: ...
 
 
 def get_vision_encoder_info(hf_config: VisionLanguageConfig) -> VisionEncoderInfo:
@@ -86,9 +89,7 @@ def _get_vit_attn_backend(
     *,
     attn_backend_override: AttentionBackendEnum | None = None,
 ) -> AttentionBackendEnum:
-    """
-    Get the available attention backend for Vision Transformer.
-    """
+    """Get the available attention backend for Vision Transformer."""
     return current_platform.get_vit_attn_backend(
         head_size,
         dtype,
@@ -100,9 +101,7 @@ def get_vit_attn_backend(
     head_size: int,
     dtype: torch.dtype,
 ) -> AttentionBackendEnum:
-    """
-    Get the attention backend for Vision Transformer.
-    """
+    """Get the attention backend for Vision Transformer."""
     mm_cfg = get_multimodal_config()
     attn_backend_override = (
         mm_cfg.mm_encoder_attn_backend if mm_cfg is not None else None
@@ -140,9 +139,7 @@ def get_fp8_padded_hidden_size(num_heads: int, head_dim: int) -> int | None:
 
 
 def is_vit_use_data_parallel(num_heads: int | None = None) -> bool:
-    """
-    Get the tensor parallel type for Vision Transformer.
-    """
+    """Get the tensor parallel type for Vision Transformer."""
     mm_cfg = get_multimodal_config()
     can_split = (
         num_heads % get_tensor_model_parallel_world_size() == 0
@@ -233,6 +230,7 @@ def resolve_visual_encoder_outputs(
             concatenated with the other select_layers along the last dimension.
         feature_select_strategy: Defines how to select the hidden states
             from each layer.
+
     """
     if select_layers is None:
         if not isinstance(encoder_outputs, torch.Tensor):
@@ -300,10 +298,11 @@ def run_dp_sharded_vision_model(
     Args:
         image_input (torch.Tensor): Image input tensor.
         vision_model (torch.nn.Module): Vision model.
+
     Returns:
         torch.Tensor: Output image embeddings
-    """
 
+    """
     num_chunks = image_input.shape[0]
     mp_world_size = get_tensor_model_parallel_world_size()
     num_chunks_per_rank = (num_chunks + mp_world_size - 1) // mp_world_size
@@ -327,8 +326,7 @@ def get_load_balance_assignment(
     sizes: list[int],
     num_gpus: int = 2,
 ) -> tuple[list[int], list[int], list[int]]:
-    """
-    Generate load balancing assignment and metadata
+    """Generate load balancing assignment and metadata
     for distributing data across GPUs.
     The load is determined by the total image sizes,
     not the number of images.
@@ -352,7 +350,6 @@ def get_load_balance_assignment(
         ```
 
     """
-
     n_samples = len(sizes)
 
     # Handle edge cases
@@ -412,6 +409,7 @@ def run_dp_sharded_mrope_vision_model(
                    Different rope types have different dimension to do ViT.
                    "rope_3d" for 3D rope (e.g., Qwen2.5-VL)
                    "rope_2d" for 2D rope (e.g., Kimi-VL)
+
     Returns:
         torch.Tensor: Output image embeddings
 
@@ -484,6 +482,7 @@ def run_dp_sharded_mrope_vision_model(
     # to work
     max_len_per_rank = max(grouped_pixel_values_len) // embed_dim_reduction_factor
     local_grid_thw_list = [grid_thw_list[i] for i in image_idxs_local]
+    embed_dtype = next(vision_model.parameters()).dtype
 
     # Run the vision model on the local pixel_values_local
     if rope_type == "rope_2d":
@@ -498,7 +497,7 @@ def run_dp_sharded_mrope_vision_model(
             image_embeds_local = torch.empty(
                 (0, embed_dim_reduction_factor, out_dim),
                 device=pixel_values.device,
-                dtype=pixel_values.dtype,
+                dtype=embed_dtype,
             )
     else:
         if pixel_values_local.shape[0] > 0:
@@ -508,7 +507,7 @@ def run_dp_sharded_mrope_vision_model(
             image_embeds_local = torch.empty(
                 (0, vision_model.out_hidden_size),
                 device=pixel_values.device,
-                dtype=pixel_values.dtype,
+                dtype=embed_dtype,
             )
 
     # Pad the output based on max_len_per_rank
@@ -580,40 +579,3 @@ def run_dp_sharded_mrope_vision_model(
         "Found unassigned embeddings"
     )
     return out_embeddings
-
-
-def get_llm_pos_ids_for_vision(
-    start_idx: int,
-    vision_idx: int,
-    spatial_merge_size: int,
-    t_index: list[int],
-    grid_hs: torch.Tensor,
-    grid_ws: torch.Tensor,
-) -> torch.Tensor:
-    llm_pos_ids_list = []
-    llm_grid_h = grid_hs[vision_idx] // spatial_merge_size
-    llm_grid_w = grid_ws[vision_idx] // spatial_merge_size
-    h_index = (
-        torch.arange(llm_grid_h)
-        .view(1, -1, 1)
-        .expand(len(t_index), -1, llm_grid_w)
-        .flatten()
-    )
-    w_index = (
-        torch.arange(llm_grid_w)
-        .view(1, 1, -1)
-        .expand(len(t_index), llm_grid_h, -1)
-        .flatten()
-    )
-    t_index_tensor = (
-        torch.Tensor(t_index)
-        .to(llm_grid_h.device)
-        .view(-1, 1)
-        .expand(-1, llm_grid_h * llm_grid_w)
-        .long()
-        .flatten()
-    )
-    _llm_pos_ids = torch.stack([t_index_tensor, h_index, w_index])
-    llm_pos_ids_list.append(_llm_pos_ids + start_idx)
-    llm_pos_ids = torch.cat(llm_pos_ids_list, dim=1)
-    return llm_pos_ids

@@ -28,11 +28,40 @@ class LateInteractionParams(
             - "score_doc": score a document against a cached query.
         query_key: stable key used for both DP routing and worker cache lookup.
         query_uses: expected number of document requests
+
     """
 
     mode: str
     query_key: str
     query_uses: int | None = None
+
+
+class LateChunkingParams(
+    msgspec.Struct,
+    omit_defaults=True,  # type: ignore[call-arg]
+    array_like=True,
+):  # type: ignore[call-arg]
+    """Fixed-length mean pooling before the token embedding head.
+
+    Requests recompute all prompt tokens, bypassing prefix cache reads.
+    Special tokens count toward chunk boundaries and are included in chunk means,
+    including the BOS token normally filtered from BGE-M3 token embeddings.
+
+    Attributes:
+        chunk_size: Tokens per chunk, as an integer in [1, 2**63 - 1].
+
+    """
+
+    chunk_size: int
+
+    def __post_init__(self) -> None:
+        self.verify()
+
+    def verify(self) -> None:
+        if type(self.chunk_size) is not int or not 0 < self.chunk_size < 2**63:
+            raise VLLMValidationError(
+                "chunk_size must be a positive integer less than 2**63"
+            )
 
 
 class PoolingParams(
@@ -47,6 +76,9 @@ class PoolingParams(
             `None` uses the pooler's default, which is `True` in most cases.
         dimensions: Reduce the dimensions of embeddings
             if model support matryoshka representation.
+        late_chunking_params: Mean-pool contextual token states into fixed-size
+            chunks for the token embedding task.
+
     """
 
     # --8<-- [start:common-pooling-params]
@@ -70,16 +102,22 @@ class PoolingParams(
     extra_kwargs: dict[str, Any] | None = None
     output_kind: RequestOutputKind = RequestOutputKind.FINAL_ONLY
 
+    ## for token embedding models
+    # --8<-- [start:token-embed-pooling-params]
+    late_chunking_params: LateChunkingParams | None = None
+    """Mean-pool contextual tokens into fixed-size chunks for `token_embed`."""
+    # --8<-- [end:token-embed-pooling-params]
+
     @property
     def all_parameters(self) -> list[str]:
-        return ["dimensions", "use_activation"]
+        return ["dimensions", "use_activation", "late_chunking_params"]
 
     @property
     def valid_parameters(self):
         return {
             "embed": ["dimensions", "use_activation"],
             "classify": ["use_activation"],
-            "token_embed": ["dimensions", "use_activation"],
+            "token_embed": ["dimensions", "use_activation", "late_chunking_params"],
             "token_classify": ["use_activation"],
         }
 
@@ -88,7 +126,16 @@ class PoolingParams(
         return deepcopy(self)
 
     def verify(self, model_config: ModelConfig) -> None:
-        # plugin task uses io_processor.parse_request to verify inputs,
+        if self.late_chunking_params is not None:
+            self.late_chunking_params.verify()
+            if self.task != "token_embed":
+                raise VLLMValidationError("Late chunking requires token_embed")
+            if self.late_interaction_params is not None:
+                raise VLLMValidationError(
+                    "Late chunking cannot be combined with late-interaction scoring"
+                )
+
+        # plugin task uses io_processor.parse_data to verify inputs,
         # skipping PoolingParams verify
         if self.task == "plugin":
             if self.skip_reading_prefix_cache is None:
@@ -105,6 +152,11 @@ class PoolingParams(
         self._merge_default_parameters(model_config)
         self._set_default_parameters(model_config)
         self._verify_valid_parameters()
+        if self.late_chunking_params is not None:
+            if self.step_tag_id is not None:
+                raise VLLMValidationError("Late chunking requires all token rows")
+            # KV cache hits omit hidden states needed for complete chunk means.
+            self.skip_reading_prefix_cache = True
 
     def _merge_default_parameters(self, model_config: ModelConfig) -> None:
         pooler_config = model_config.pooler_config
@@ -226,6 +278,7 @@ class PoolingParams(
             f"requires_token_ids={self.requires_token_ids}, "
             f"skip_reading_prefix_cache={self.skip_reading_prefix_cache}, "
             f"late_interaction_params={self.late_interaction_params}, "
+            f"late_chunking_params={self.late_chunking_params}, "
             f"extra_kwargs={self.extra_kwargs})"
         )
 

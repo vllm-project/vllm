@@ -21,6 +21,6 @@ pub async fn version(State(state): State<Arc<AppState>>) -> Json<VersionResponse
 
     Json(VersionResponse {
         version,
-        rust_frontend_version: env!("CARGO_PKG_VERSION"),
+        rust_frontend_version: vllm_build_info::VERSION,
     })
 }

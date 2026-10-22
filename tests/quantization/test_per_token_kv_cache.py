@@ -497,7 +497,6 @@ def test_process_weights_sets_placeholder_scales(kv_cache_dtype: str):
 
     layer = MagicMock()
     layer.kv_cache_dtype = kv_cache_dtype
-    layer.calculate_kv_scales = False
     layer.k_scale = torch.nn.Parameter(torch.tensor(-1.0), requires_grad=False)
     layer.v_scale = torch.nn.Parameter(torch.tensor(-1.0), requires_grad=False)
     layer.q_scale = torch.nn.Parameter(torch.tensor(-1.0), requires_grad=False)

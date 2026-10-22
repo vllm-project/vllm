@@ -88,15 +88,18 @@ def _wait_pairs(ptr, offsets, mask):
 @triton.jit
 def _publish_input_kernel(
     stage_ptr,
+    shared_ptr,
     peer_ptrs,
     peer_offset_u32,
     stride_stage_t,
+    stride_shared_t,
     C: tl.constexpr,
     CS: tl.constexpr,
     CS_P2: tl.constexpr,
     SPLITS: tl.constexpr,
     RANK: tl.constexpr,
     WORLD: tl.constexpr,
+    HAS_SHARED: tl.constexpr,
     USE_PDL: tl.constexpr,
     launch_pdl: tl.constexpr,
 ):
@@ -120,6 +123,13 @@ def _publish_input_kernel(
             mask=elem_mask,
             other=0.0,
         )
+        if HAS_SHARED:
+            shared = tl.load(
+                shared_ptr + token * stride_shared_t + owner * CS + split * CSS + elem,
+                mask=elem_mask,
+                other=0.0,
+            )
+            values = (values.to(tl.float32) + shared.to(tl.float32)).to(tl.bfloat16)
         packed = _pack_bf16_pairs(values)
         base = tl.load(ptrs + owner).to(tl.pointer_type(tl.uint32))
         dst = (token * WORLD + RANK) * (CS // 2) + split * (CSS // 2) + pair
@@ -595,6 +605,7 @@ class LamportRSConv:
         off_s: int,
         ws: int,
         block_size: int,
+        shared_tensor: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
         """Return ``(normed | None, new_residual)``, both shaped ``[T, 6144]``."""
         tokens, hidden_size = residual.shape
@@ -608,6 +619,13 @@ class LamportRSConv:
             or input_tensor.stride(1) != 1
         ):
             raise ValueError("input_tensor must be channel-contiguous bf16 [T, 6144]")
+        if shared_tensor is not None and (
+            shared_tensor.shape != input_tensor.shape
+            or shared_tensor.dtype != input_tensor.dtype
+            or shared_tensor.device != input_tensor.device
+            or shared_tensor.stride(1) != 1
+        ):
+            raise ValueError("shared_tensor must match input_tensor")
         shard_size = hidden_size // self.world_size
         if conv_weight.shape != (shard_size, self.window_size):
             raise ValueError(
@@ -648,15 +666,22 @@ class LamportRSConv:
         gather_warps = 4 if tokens >= 256 else 8
         _publish_input_kernel[phase_grid](
             input_tensor,
+            shared_tensor if shared_tensor is not None else input_tensor,
             self.input_peer_ptrs,
             input_offset,
             input_tensor.stride(0),
+            (
+                shared_tensor.stride(0)
+                if shared_tensor is not None
+                else input_tensor.stride(0)
+            ),
             C=hidden_size,
             CS=shard_size,
             CS_P2=phase_tile_p2,
             SPLITS=phase_splits,
             RANK=self.rank,
             WORLD=self.world_size,
+            HAS_SHARED=shared_tensor is not None,
             USE_PDL=self.use_pdl,
             launch_pdl=self.use_pdl,
             num_warps=phase_warps,

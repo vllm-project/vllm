@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-Standard attention benchmark runner - shared utilities for non-MLA benchmarks.
+"""Standard attention benchmark runner - shared utilities for non-MLA benchmarks.
 
 This module provides helpers for running standard attention backends
 (FlashAttention, Triton, FlashInfer) with real vLLM integration.
@@ -12,6 +11,7 @@ import logging
 import statistics
 import types
 from contextlib import contextmanager
+from math import prod
 
 import torch
 from batch_spec import parse_batch_spec, reorder_for_flashinfer
@@ -35,12 +35,20 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
-    get_kv_cache_layout,
-    set_kv_cache_layout,
+    get_supported_kv_cache_layouts,
+    resolve_kv_cache_layout,
 )
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheLayout,
+    KVCacheTensor,
+    compute_layer_kv_cache_shape_bytes,
+    compute_layout_strides,
+    create_kv_cache_views,
+)
 
 # ============================================================================
 # Backend Configuration
@@ -48,8 +56,7 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 
 def _get_backend_config(backend: str) -> dict:
-    """
-    Get backend configuration from AttentionBackendEnum.
+    """Get backend configuration from AttentionBackendEnum.
 
     Args:
         backend: Backend name matching AttentionBackendEnum exactly
@@ -57,6 +64,7 @@ def _get_backend_config(backend: str) -> dict:
 
     Returns:
         Dict with backend_class
+
     """
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -340,49 +348,42 @@ def _create_kv_cache(
     backend_class,
     device: torch.device,
     dtype: torch.dtype,
+    layout: KVCacheLayout,
 ) -> list:
-    """Create KV cache tensors for all layers using the backend's methods.
-
-    Uses the backend's get_kv_cache_shape() and get_kv_cache_stride_order()
-    to create the cache with the correct shape and memory layout.
-    """
-    # Get the logical shape from the backend
-    cache_shape = backend_class.get_kv_cache_shape(
-        num_blocks=max_num_blocks,
+    """Create KV cache tensors for all layers using the standard allocator."""
+    if config.kv_cache_dtype.startswith("fp8"):
+        cache_dtype = current_platform.fp8_dtype()
+    else:
+        cache_dtype = dtype
+    spec = FullAttentionSpec(
         block_size=config.block_size,
         num_kv_heads=config.num_kv_heads,
         head_size=config.head_dim,
+        dtype=cache_dtype,
     )
-
-    # Get the stride order for custom memory layout
-    try:
-        stride_order = backend_class.get_kv_cache_stride_order()
-        assert len(stride_order) == len(cache_shape)
-    except (AttributeError, NotImplementedError):
-        stride_order = tuple(range(len(cache_shape)))
-
-    # Permute shape to physical layout order
-    physical_shape = tuple(cache_shape[i] for i in stride_order)
-
-    # Compute inverse permutation to get back to logical view
-    inv_order = [stride_order.index(i) for i in range(len(stride_order))]
-
-    # Use fp8 dtype for cache when requested.
-    cache_dtype = dtype
-    if config.kv_cache_dtype == "fp8":
-        from vllm.platforms import current_platform
-
-        cache_dtype = current_platform.fp8_dtype()
-
-    cache_list = []
-    for _ in range(config.num_layers):
-        # Allocate in physical layout order (contiguous in memory)
-        cache = torch.zeros(*physical_shape, device=device, dtype=cache_dtype)
-        # Permute to logical view
-        cache = cache.permute(*inv_order)
-        cache_list.append(cache)
-
-    return cache_list
+    # Apply the backend's page customization, as the worker does for the real spec.
+    spec = backend_class.customize_spec(spec)
+    total_bytes = (
+        prod(compute_layer_kv_cache_shape_bytes(spec, max_num_blocks))
+        * config.num_layers
+    )
+    buf = torch.zeros(total_bytes, device=device, dtype=torch.int8)
+    layer_stride, block_stride, _, _, _ = compute_layout_strides(
+        spec, max_num_blocks, config.num_layers, layout
+    )
+    tensor = KVCacheTensor(
+        size=total_bytes,
+        layers=[str(i) for i in range(config.num_layers)],
+        layer_stride=layer_stride,
+        block_stride=block_stride,
+    )
+    return create_kv_cache_views(
+        buf,
+        spec,
+        max_num_blocks,
+        layout,
+        tensor,
+    )
 
 
 # ============================================================================
@@ -407,6 +408,7 @@ def _run_single_benchmark(
     Returns:
         (timing_stats, mem_stats) where timing_stats is a dict with
         mean/std/min/max in seconds per layer.
+
     """
     total_q = q_list[0].shape[0]
     v_dim = config.v_head_dim if config.v_head_dim is not None else config.head_dim
@@ -456,8 +458,7 @@ def _run_single_benchmark(
 
 
 def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
-    """
-    Run standard attention benchmark with real kernels.
+    """Run standard attention benchmark with real kernels.
 
     Supports: FLASH_ATTN, TRITON_ATTN, FLASHINFER
 
@@ -466,6 +467,7 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
 
     Returns:
         BenchmarkResult with timing and memory statistics
+
     """
     device = torch.device(config.device)
     torch.accelerator.set_device_index(device)
@@ -499,13 +501,10 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
             backend_class, impl, layer = _create_backend_impl(
                 backend_cfg, config, device, dtype
             )
-
             # Set KV cache layout if the backend requires a specific one
-            # (e.g., FlashInfer requires HND on SM100/Blackwell for TRTLLM attention)
-            required_layout = backend_class.get_required_kv_cache_layout()
-            if required_layout is not None:
-                set_kv_cache_layout(required_layout)
-                get_kv_cache_layout.cache_clear()
+            # (e.g., FlashInfer requires LBHNC on SM100/Blackwell for TRTLLM attention)
+            supported = get_supported_kv_cache_layouts([backend_class])
+            layout = resolve_kv_cache_layout(vllm_config, [[m.name for m in supported]])
 
             common_metadata = _build_common_attn_metadata(
                 q_lens, kv_lens, config.block_size, device
@@ -542,7 +541,7 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
             )
 
             cache_list = _create_kv_cache(
-                config, max_num_blocks, backend_class, device, dtype
+                config, max_num_blocks, backend_class, device, dtype, layout
             )
 
             timing_stats, mem_stats = _run_single_benchmark(

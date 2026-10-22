@@ -10,44 +10,33 @@ import torch
 
 from tests.quantization.utils import is_quant_method_supported
 from vllm import LLM, SamplingParams
-from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode, PassConfig
+from vllm.config import (
+    CacheConfig,
+    CompilationConfig,
+    CompilationMode,
+    CUDAGraphMode,
+    PassConfig,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_torch_equal_or_newer
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-from ...utils import create_new_process_for_each_test
+from ...utils import create_new_process_for_each_test, wait_for_memory_to_settle
 
 
 def models_list(*, all: bool = True, keywords: list[str] | None = None):
     TEST_MODELS: list[tuple[str, dict[str, Any]]] = [
         ("facebook/opt-125m", {}),
         (
-            "neuralmagic/Llama-3.2-1B-Instruct-FP8-dynamic",
+            "RedHatAI/Llama-3.2-1B-Instruct-FP8-dynamic",
             {"dtype": torch.float16},
         ),
-        ("meta-llama/Llama-3.2-1B-Instruct", {}),
     ]
 
     if all:
-        TEST_MODELS.extend(
-            [
-                ("neuralmagic/Llama-3.2-1B-Instruct-quantized.w8a8", {}),
-                (
-                    "nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change",
-                    {"dtype": torch.float16},
-                ),
-            ]
-        )
-
-        if is_quant_method_supported("gptq"):
-            TEST_MODELS.append(
-                ("TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ", {"quantization": "gptq"})
-            )
-
         if is_quant_method_supported("gptq_marlin"):
             TEST_MODELS.append(
                 (
-                    "TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ",
+                    "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit",
                     {"quantization": "gptq_marlin"},
                 )
             )
@@ -77,14 +66,6 @@ def test_full_graph(
     model_kwargs: dict[str, Any],
     compilation_mode: CompilationMode,
 ):
-    if (
-        "w8a8" in model
-        or "w8w8" in model
-        and current_platform.has_device_capability((10, 0))
-    ):
-        # int8 removed on Blackwell:
-        pytest.skip("int8 support removed on Blackwell")
-
     with monkeypatch.context():
         print(f"MODEL={model}")
 
@@ -114,7 +95,7 @@ def test_full_graph(
             ),
             *model_info,
         )
-        for model_info in models_list(keywords=["FP8-dynamic", "quantized.w8a8"])
+        for model_info in models_list(keywords=["FP8-dynamic"])
     ]
     + [
         # Test depyf integration works
@@ -165,14 +146,6 @@ def test_custom_compile_config(
     model: str,
     model_kwargs: dict[str, Any],
 ):
-    if (
-        "w8a8" in model
-        or "w8w8" in model
-        and current_platform.has_device_capability((10, 0))
-    ):
-        # int8 removed on Blackwell:
-        pytest.skip("int8 support removed on Blackwell")
-
     if compilation_config.use_inductor_graph_partition and not is_torch_equal_or_newer(
         "2.9.0.dev"
     ):
@@ -180,37 +153,6 @@ def test_custom_compile_config(
 
     print(f"MODEL={model}")
     run_model(compilation_config, model, **model_kwargs)
-
-
-@pytest.mark.parametrize(
-    "compilation_mode",
-    [CompilationMode.NONE, CompilationMode.VLLM_COMPILE],
-)
-@pytest.mark.parametrize(
-    "model, backend",
-    [
-        ("Qwen/Qwen2-0.5B", None),  # Standard attention model
-        (
-            "deepseek-ai/DeepSeek-V2-Lite",
-            AttentionBackendEnum.FLASHINFER_MLA,
-        ),  # MLA (Multi-head Latent Attention) model
-    ],
-)
-def test_fp8_kv_scale_compile(
-    compilation_mode: CompilationMode,
-    model: str,
-    backend: AttentionBackendEnum | None,
-):
-    model_kwargs = {
-        "quantization": "fp8",
-        "kv_cache_dtype": "fp8_e4m3",
-        "calculate_kv_scales": True,
-        "max_model_len": 512,
-    }
-    if backend:
-        model_kwargs["attention_config"] = {"backend": backend.name}
-
-    run_model(compilation_mode, model, **model_kwargs)
 
 
 def run_model(
@@ -236,6 +178,14 @@ def run_model(
     # No cudagraphs by default
     if compilation_config.cudagraph_mode is None:
         compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
+    # V1 startup requires free_memory >= total * gpu_memory_utilization, so a
+    # device that is not free yet fails engine init rather than waiting for it.
+    # VllmRunner guards this; building LLM directly does not. No-op off ROCm.
+    wait_for_memory_to_settle(
+        threshold_ratio=1.0
+        - model_kwargs.get("gpu_memory_utilization", CacheConfig.gpu_memory_utilization)
+    )
 
     llm = LLM(
         model=model,

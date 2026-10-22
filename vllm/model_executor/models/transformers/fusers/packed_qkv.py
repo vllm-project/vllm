@@ -12,6 +12,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import QKVParallelLinear
 from vllm.model_executor.models.transformers.fusers.base import (
     RewriteFuser,
+    fused_head_size,
     local_output_sizes,
 )
 from vllm.model_executor.models.transformers.fx_utils import (
@@ -122,7 +123,7 @@ class PackedQKVFuser(RewriteFuser):
 
     def validate(self, module: nn.Module, vllm_config: "VllmConfig") -> bool:
         """Shapes must be compatible with a head-sharded packed GEMM."""
-        head_size = vllm_config.model_config.get_head_size()
+        head_size = fused_head_size(module, vllm_config)
         qkv = module.get_submodule(self.qkv_name)
         compatible = (
             self.q_size % head_size == 0
@@ -137,7 +138,7 @@ class PackedQKVFuser(RewriteFuser):
         self, module: nn.Module, prefix: str, vllm_config: "VllmConfig"
     ) -> None:
         quant_config = vllm_config.quant_config
-        head_size = vllm_config.model_config.get_head_size()
+        head_size = fused_head_size(module, vllm_config)
         qkv_prefix = maybe_prefix(prefix, self.qkv_name)
         qkv = module.get_submodule(self.qkv_name)
         merged = QKVParallelLinear(
