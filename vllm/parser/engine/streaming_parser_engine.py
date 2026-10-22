@@ -218,6 +218,7 @@ class StreamingParserEngine:
         self._message_header_buffer = ""
         self._message_header_token_count = 0
         self._in_skipped_tool_span = False
+        self._reasoning_ended_in_skip_tool_mode = False
         self._reset_args_state()
         self._reset_array_state()
 
@@ -420,7 +421,9 @@ class StreamingParserEngine:
                 self._in_skipped_tool_span = False
             return self._emit_for_state(value, token_count)
 
-        if self.skip_reasoning_parsing and terminal in self._reasoning_markup_terminals:
+        if (
+            self.skip_reasoning_parsing or self._reasoning_ended_in_skip_tool_mode
+        ) and terminal in self._reasoning_markup_terminals:
             return self._emit_for_state(value, token_count)
 
         if self.skip_tool_parsing and terminal in self._tool_terminals:
@@ -551,6 +554,8 @@ class StreamingParserEngine:
         for event_type in transition.events:
             if event_type == EventType.TOOL_CALL_START:
                 self.tool_index += 1
+            elif event_type == EventType.REASONING_END and self.skip_tool_parsing:
+                self._reasoning_ended_in_skip_tool_mode = True
             event_value = (
                 message_header
                 if previous_state == ParserState.MESSAGE_HEADER
