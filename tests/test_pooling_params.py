@@ -216,10 +216,18 @@ def test_token_classify(pooling_type: str):
             pooling_params.verify(model_config)
 
 
-@pytest.mark.parametrize("value", [0, -1, True, False, 1.5, "2"])
-def test_late_chunk_size_rejects_non_positive_integers(value):
+@pytest.mark.parametrize("value", [0, -1, True, False, 1.5, "2", 2**63, 2**64])
+def test_late_chunk_size_rejects_invalid_values(value):
     with pytest.raises(VLLMValidationError, match="positive integer"):
         PoolingParams(late_chunking_params=LateChunkingParams(chunk_size=value))
+
+
+def test_late_chunk_size_maximum_survives_wire_round_trip():
+    params = PoolingParams(late_chunking_params=LateChunkingParams(2**63 - 1))
+    assert (
+        msgspec.msgpack.decode(msgspec.msgpack.encode(params), type=PoolingParams)
+        == params
+    )
 
 
 def _late_chunking_model_config():

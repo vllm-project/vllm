@@ -544,6 +544,10 @@ _MULTIMODAL_MODELS = {
     "NemotronH_Omni_Reasoning_V3": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
     "NVLM_D": ("nvlm_d", "NVLM_D_Model"),
     "MuseGlimmerForConditionalGeneration": ("muse_glimmer", "MuseGlimmerForCausalLM"),
+    "MuseSparkForConditionalGeneration": (
+        "vllm.models.muse_spark",
+        "MuseSparkForConditionalGeneration",
+    ),
     "OpenCUAForConditionalGeneration": ("opencua", "OpenCUAForConditionalGeneration"),
     "OpenPanguVLForConditionalGeneration": (
         "openpangu_vl",
@@ -670,6 +674,10 @@ _SPECULATIVE_DECODING_MODELS = {
     "K3DSparkModel": (
         "vllm.models.kimi_k3.nvidia.dspark_mla",
         "K3DSparkForCausalLM",
+    ),
+    "MuseSparkDSparkModel": (
+        "vllm.models.muse_spark.common.dspark",
+        "MuseSparkDSparkForCausalLM",
     ),
     "DFlashLagunaForCausalLM": ("laguna_dflash", "DFlashLagunaForCausalLM"),
     "Gemma4DSparkModel": ("gemma4_dspark", "Gemma4DSparkForCausalLM"),
