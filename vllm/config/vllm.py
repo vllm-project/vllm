@@ -3415,7 +3415,6 @@ class VllmConfig:
     def validate_mamba_cached_kernel(self) -> "VllmConfig":
         if not self.cache_config.use_replayssm:
             self.cache_config.use_kda_recoverssm = False
-            _validate_kda_recoverssm_prefill_only(self)
             return self
 
         kda_architectures = (
@@ -3461,7 +3460,8 @@ class VllmConfig:
                     "RecoverSSM currently requires pipeline_parallel_size=1"
                 )
             if self.parallel_config.enable_dbo:
-                # Micro-batches would run a layer's verifies concurrently.
+                # Micro-batches would run a layer's verifies concurrently, on
+                # the same verify record rows.
                 raise ValueError("RecoverSSM does not support --enable-dbo")
             if self.mamba_config.backend != MambaBackendEnum.TRITON:
                 raise ValueError("RecoverSSM requires --mamba-backend triton")
@@ -3499,15 +3499,12 @@ class VllmConfig:
                 "Triton ReplaySSM requires Model Runner V1; use "
                 "--mamba-backend flashinfer or Model Runner V1"
             )
-        _validate_kda_recoverssm_prefill_only(self)
         if (
             self.kv_transfer_config is not None
             and self.kv_transfer_config.is_kv_transfer_instance
-            # Between steps a KDA RecoverSSM request's state is its conv and SSM
-            # state, stored in the Mamba page in the same layout as without
-            # RecoverSSM, so the connectors transfer it as usual. The verify
-            # records stored after it are scratch space for one step: each
-            # verify writes them and the commit after it reads them.
+            # A KDA RecoverSSM request's state is its conv and SSM state in the
+            # stock Mamba page (the verify records are kept outside the KV
+            # cache), so KV connectors transfer it as usual.
             and not self.cache_config.use_kda_recoverssm
         ):
             raise ValueError(
@@ -3515,55 +3512,6 @@ class VllmConfig:
                 "(P/D disaggregation, KV cache offload)"
             )
         return self
-
-
-def _validate_kda_recoverssm_prefill_only(config: VllmConfig) -> None:
-    if not config.cache_config.kda_recoverssm_prefill_only:
-        return
-    if not config.cache_config.use_kda_recoverssm:
-        raise ValueError(
-            "--kda-recoverssm-prefill-only requires KDA RecoverSSM "
-            "(--use-replayssm with speculative decoding on a Kimi-K3 model)"
-        )
-    kv_transfer_config = config.kv_transfer_config
-    if kv_transfer_config is None or not kv_transfer_config.is_kv_producer:
-        role = (
-            "no KV connector"
-            if kv_transfer_config is None
-            else f"kv_role {kv_transfer_config.kv_role!r}"
-        )
-        raise ValueError(
-            "--kda-recoverssm-prefill-only marks a P/D prefill instance and "
-            f"requires kv_role 'kv_producer' or 'kv_both'; got {role}"
-        )
-    from vllm.distributed.kv_transfer.kv_connector.factory import (
-        KVConnectorFactory,
-    )
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.connector import (
-        NixlBaseConnector,
-    )
-
-    configs = [kv_transfer_config]
-    if kv_transfer_config.kv_connector == "MultiConnector":
-        configs = [
-            KVTransferConfig(**{"engine_id": kv_transfer_config.engine_id, **child})
-            for child in kv_transfer_config.kv_connector_extra_config.get(
-                "connectors", []
-            )
-        ]
-    if not any(
-        issubclass(KVConnectorFactory.get_connector_class(c), NixlBaseConnector)
-        for c in configs
-    ):
-        # A prefill-only Mamba page is smaller than the decode instance's.
-        # NIXL describes the conv and SSM state as separate regions with
-        # each side's page stride; other connectors copy whole pages.
-        raise ValueError(
-            "--kda-recoverssm-prefill-only requires a NIXL connector (alone or "
-            "in a MultiConnector) to transfer Mamba state to decode instances, "
-            "whose pages are larger; got "
-            f"{[c.kv_connector for c in configs]}"
-        )
 
 
 _current_vllm_config: VllmConfig | None = None

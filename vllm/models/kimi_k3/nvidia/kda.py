@@ -26,6 +26,8 @@ from vllm.model_executor.layers.mamba.kda_checkpoint import (
     kda_prefill_checkpoint_alignment,
 )
 from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateDtypeCalculator,
+    MambaStateShapeCalculator,
     is_conv_state_dim_first,
 )
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
@@ -48,16 +50,14 @@ from vllm.models.kimi_k3.nvidia.kda_metadata import (
     KimiK3KDAAttentionBackend,
     KimiK3KDAMetadata,
 )
+from vllm.models.kimi_k3.nvidia.ops.recoverssm import (
+    KDARecoverSSMRecords,
+    kda_recoverssm_verify,
+)
 from vllm.models.kimi_k3.nvidia.recoverssm.kernels import (
     CuteRecoverSSMVerify,
     compile_state_commit,
     cute_recoverssm_unsupported_reason,
-)
-from vllm.models.kimi_k3.nvidia.recoverssm.layout import (
-    RecoverSSMRecords,
-    kda_state_dtypes,
-    kda_state_shapes,
-    recoverssm_records_in_page,
 )
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
@@ -609,40 +609,41 @@ def _make_decode_norm_weight_loader(
 
 
 class KimiK3DeltaAttention(GatedDeltaNetAttention):
-    # The verify records in this layer's Mamba pages (bound with the KV cache).
-    recoverssm_records: RecoverSSMRecords | None
-
     def get_attn_backend(self) -> type[AttentionBackend]:
         return KimiK3KDAAttentionBackend
 
-    def get_state_dtype(self) -> tuple[torch.dtype, ...]:
+    def get_state_dtype(
+        self,
+    ) -> tuple[torch.dtype, ...]:
         if self.model_config is None or self.cache_config is None:
             raise ValueError("model_config and cache_config must be set")
-        return kda_state_dtypes(self.model_config.dtype, self.cache_config)
+        return MambaStateDtypeCalculator.kda_state_dtype(
+            self.model_config.dtype,
+            self.cache_config.mamba_cache_dtype,
+            self.cache_config.mamba_ssm_cache_dtype,
+        )
 
-    def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
-        if self.cache_config is None:
-            raise ValueError("cache_config must be set")
-        return kda_state_shapes(
-            self.cache_config,
-            tp_size=self.tp_size,
-            num_heads=self.num_heads,
-            head_dim=self.head_dim,
+    def get_state_shape(
+        self,
+    ) -> tuple[tuple[int, ...], ...]:
+        return MambaStateShapeCalculator.kda_state_shape(
+            self.tp_size,
+            self.num_heads,
+            self.head_dim,
             conv_kernel_size=self.conv_size,
             num_spec=self.num_spec,
         )
 
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         super().bind_kv_cache(kv_cache)
-        self.recoverssm_records = None
-        if self.recoverssm_records_in_page:
-            _, _, correction, key_gate = self.kv_cache
-            self.recoverssm_records = RecoverSSMRecords(correction, key_gate)
         if self.recoverssm_verify is not None:
             # Compile before CUDA graph capture (shared by all KDA layers).
             self.recoverssm_verify.compile()
             compile_state_commit(
-                self.local_num_heads, self.spec_query_len, self.A_log.device
+                self.local_num_heads,
+                self.spec_query_len,
+                self.A_log.device,
+                align=self.cache_config.mamba_cache_mode == "align",
             )
 
     def __init__(
@@ -655,9 +656,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
     ) -> None:
         super().__init__(config, vllm_config, prefix)
         self.use_recoverssm = self.cache_config.use_kda_recoverssm
-        # False on a --kda-recoverssm-prefill-only instance: it never verifies.
-        self.recoverssm_records_in_page = recoverssm_records_in_page(self.cache_config)
-        self.recoverssm_records = None
         if self.cache_config.use_replayssm and not self.use_recoverssm:
             raise ValueError(
                 "Kimi-K3 supports --use-replayssm only with speculative decoding"
@@ -777,10 +775,20 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             self.gate_lower_bound,
             self.use_recoverssm,
         )
-        # The CuTe RecoverSSM verify (fused convolution); None runs the Triton
-        # convolution and verify. A prefill-only instance never verifies.
+        # RecoverSSM: this layer's verify records of a speculative step, and the
+        # CuTe verify (short convolution fused in) where it runs, else the Triton
+        # convolution and verify.
+        self.recoverssm_records: KDARecoverSSMRecords | None = None
         self.recoverssm_verify: CuteRecoverSSMVerify | None = None
-        if self.use_recoverssm and self.recoverssm_records_in_page:
+        if self.use_recoverssm:
+            self.recoverssm_records = KDARecoverSSMRecords.allocate(
+                vllm_config.scheduler_config.max_num_seqs,
+                self.local_num_heads,
+                self.spec_query_len,
+                self.head_dim,
+                vllm_config.model_config.dtype,
+                self.conv1d.weight.device,
+            )
             backend = resolve_kda_recoverssm_backend(
                 additional_config.get("kda_recoverssm_backend", "auto")
                 if isinstance(additional_config, dict)
@@ -1017,11 +1025,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         assert m.num_accepted_tokens is not None
         state_indices = m.spec_state_indices_tensor[: m.num_spec_decodes, 0]
         records = self.recoverssm_records
-        if records is None:
-            # A prefill-only instance has no verify records and admits only
-            # max_tokens=1 requests, which never verify. CUDA graph capture and
-            # dummy runs still get here: leave the conv and SSM state untouched.
-            return out.zero_()
+        assert records is not None
         conv_state, state = self.kv_cache[:2]
         verify = self.recoverssm_verify
         if verify is not None:
@@ -1034,8 +1038,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 dt_bias=self.dt_bias,
                 lower_bound=self.gate_lower_bound,
                 state=state,
-                correction=records.correction,
-                key_gate=records.key_gate,
+                records=records,
                 query_start_loc=query_start_loc,
                 state_indices=state_indices,
                 num_accepted_tokens=m.num_accepted_tokens,
@@ -1044,8 +1047,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 out=out[0].flatten(-2),
             ):
                 return out
-
-        from vllm.models.kimi_k3.nvidia.ops.recoverssm import kda_recoverssm_verify
 
         if not is_conv_state_dim_first():
             conv_state = conv_state.transpose(-1, -2)
@@ -1076,8 +1077,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             dt_bias=self.dt_bias,
             lower_bound=self.gate_lower_bound,
             checkpoint_state=state,
-            correction_cache=records.correction,
-            kg_cache=records.key_gate,
+            records=records,
             query_start_loc=query_start_loc,
             state_indices=state_indices,
             spec_query_len=self.spec_query_len,

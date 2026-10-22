@@ -29,18 +29,15 @@ On SM10x (Blackwell) GPUs, the verify and the commit run CuTe DSL tensor-core ke
 
 - a bfloat16 SSM state (`--mamba-ssm-cache-dtype bfloat16`);
 - bfloat16 activations;
-- the model's bounded KDA gate.
+- the model's bounded KDA gate;
+- at most 7 speculative tokens.
 
-Otherwise, and on other GPUs, Triton kernels run instead. To force the Triton kernels, use `--additional-config '{"kda_recoverssm_backend": "triton"}'`.
+Otherwise, and on other GPUs, Triton kernels run instead. The server logs which kernels a deployment uses; to force the Triton kernels, use `--additional-config '{"kda_recoverssm_backend": "triton"}'`.
 
-## P/D disaggregation
+## Memory
 
-RecoverSSM runs with KV connectors. A request's state between steps is its conv and SSM state, in the same layout as without RecoverSSM. It has been tested with the NixlConnector for P/D transfers, together with the MooncakeStoreConnector for prefix caching between prefill instances.
+A request's state between steps is its conv and SSM state, stored in the KV cache in the same layout as without RecoverSSM. The verify records are scratch space for one decode step (each verify writes them and the commit after it reads them), so they live in a separate buffer per KDA layer, sized by `--max-num-seqs`, rather than in the KV cache.
 
-The verify records extend each KDA Mamba page and thereby the attention block size (for Kimi-K3, 896 to 1024 tokens). A P/D prefill instance never verifies, so it can drop the records with `--kda-recoverssm-prefill-only`. This flag:
+## P/D disaggregation and KV offloading
 
-- requires `kv_role` `kv_producer` or `kv_both`;
-- requires the NixlConnector, alone or in a MultiConnector. NIXL pairs the prefill and decode pages of different sizes;
-- rejects requests whose `max_tokens` is not 1 (P/D proxies send prefill requests with `max_tokens=1`).
-
-Run both instances with the same `--use-replayssm` and speculative configuration; NIXL rejects peers whose conv or SSM state sizes differ. With RecoverSSM, the MooncakeStoreConnector keys its objects by the instance's page layout, so prefill-only and decode instances sharing a store never load each other's pages.
+Because the KV cache layout is the same as without RecoverSSM, KV connectors (P/D disaggregation, KV cache offloading) transfer a request's state as usual. Run P/D instances with the same `--use-replayssm`, speculative and Mamba cache dtype configuration.

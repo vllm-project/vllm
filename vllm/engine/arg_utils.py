@@ -816,7 +816,6 @@ class EngineArgs:
     )
     replayssm_buffer_len: int = CacheConfig.replayssm_buffer_len
     use_replayssm: bool = CacheConfig.use_replayssm
-    kda_recoverssm_prefill_only: bool = CacheConfig.kda_recoverssm_prefill_only
 
     mamba_backend: MambaBackendEnum = MambaBackendEnum.TRITON
     mamba_ssu_algorithm: MambaSSUAlgorithm | None = None
@@ -1440,10 +1439,6 @@ class EngineArgs:
             "--replayssm-buffer-len", **cache_kwargs["replayssm_buffer_len"]
         )
         cache_group.add_argument("--use-replayssm", **cache_kwargs["use_replayssm"])
-        cache_group.add_argument(
-            "--kda-recoverssm-prefill-only",
-            **cache_kwargs["kda_recoverssm_prefill_only"],
-        )
         cache_group.add_argument(
             "--kv-offloading-size", **cache_kwargs["kv_offloading_size"]
         )
@@ -2321,7 +2316,6 @@ class EngineArgs:
             ),
             replayssm_buffer_len=self.replayssm_buffer_len,
             use_replayssm=self.use_replayssm,
-            kda_recoverssm_prefill_only=self.kda_recoverssm_prefill_only,
             kv_offloading_size=self.kv_offloading_size,
             kv_offloading_backend=self.kv_offloading_backend,
         )

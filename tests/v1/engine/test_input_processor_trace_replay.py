@@ -83,7 +83,6 @@ def _validate(enable_trace_replay: bool) -> None:
             is_diffusion=False,
         ),
         vllm_config=SimpleNamespace(
-            cache_config=SimpleNamespace(kda_recoverssm_prefill_only=False),
             reasoning_config=None,
             # Engine has no watermark configuration.
             _check_supports_watermarking=lambda params: False,

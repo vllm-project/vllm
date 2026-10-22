@@ -47,6 +47,8 @@ from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import (
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFunc,
     MambaStateCopyFuncCalculator,
+    MambaStateDtypeCalculator,
+    MambaStateShapeCalculator,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.compressed_tensors import (
@@ -105,10 +107,6 @@ from vllm.models.kimi_k3.nvidia.low_latency_gemm import (
 )
 from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
 from vllm.models.kimi_k3.nvidia.ops import attn_res
-from vllm.models.kimi_k3.nvidia.recoverssm.layout import (
-    kda_state_dtypes,
-    kda_state_shapes,
-)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import NestedTensors
 from vllm.platforms import current_platform
@@ -1498,8 +1496,10 @@ class KimiLinearForCausalLM(
         cls,
         vllm_config: "VllmConfig",
     ) -> tuple[torch.dtype, ...]:
-        return kda_state_dtypes(
-            vllm_config.model_config.dtype, vllm_config.cache_config
+        return MambaStateDtypeCalculator.kda_state_dtype(
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.mamba_cache_dtype,
+            vllm_config.cache_config.mamba_ssm_cache_dtype,
         )
 
     @classmethod
@@ -1514,11 +1514,10 @@ class KimiLinearForCausalLM(
             if vllm_config.speculative_config
             else 0
         )
-        return kda_state_shapes(
-            vllm_config.cache_config,
-            tp_size=tp_size,
-            num_heads=hf_config.linear_attn_config["num_heads"],
-            head_dim=hf_config.linear_attn_config["head_dim"],
+        return MambaStateShapeCalculator.kda_state_shape(
+            tp_size,
+            hf_config.linear_attn_config["num_heads"],
+            hf_config.linear_attn_config["head_dim"],
             conv_kernel_size=hf_config.linear_attn_config["short_conv_kernel_size"],
             num_spec=num_spec,
         )

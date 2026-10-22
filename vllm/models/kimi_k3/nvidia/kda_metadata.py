@@ -18,7 +18,6 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.config import VllmConfig
-from vllm.models.kimi_k3.nvidia.recoverssm.layout import recoverssm_records_in_page
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import async_tensor_h2d
@@ -321,9 +320,6 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             and additional_config.get("kda_prefill_backend") == "flashinfer"
         )
         self.use_recoverssm = vllm_config.cache_config.use_kda_recoverssm
-        self.recoverssm_records_in_page = recoverssm_records_in_page(
-            vllm_config.cache_config
-        )
         self.spec_state_slots = 1 if self.use_recoverssm else self.num_spec + 1
         self.recoverssm_num_accepted_tokens: torch.Tensor | None = None
         self.recoverssm_context: KDARecoverSSMCommitContext | None = None
@@ -673,10 +669,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             ]
 
         recoverssm_commit = None
-        # A prefill-only instance only admits max_tokens=1 requests, which never
-        # verify: its spec-decode batches are dummy or warmup runs, whose verify
-        # leaves the state untouched and needs no commit.
-        if self.recoverssm_records_in_page and num_spec_decodes > 0:
+        if self.use_recoverssm and num_spec_decodes > 0:
             assert spec_state_indices_tensor is not None
             assert spec_query_start_loc is not None
             align = None

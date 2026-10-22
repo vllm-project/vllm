@@ -9,7 +9,7 @@
   ``kda_recoverssm_verify``.
 * ``CuteRecoverSSMStateCommit``: the state fold of a prepared commit plan for all
   KDA layers in one launch (``cutedsl/commit.py``), replacing the Triton fold of
-  ``KDARecoverSSMCommitContext.commit`` outside align mode.
+  ``KDARecoverSSMCommitContext.commit``.
 
 A compiled CuTe kernel accepts any tensor without checking it against the
 signature it was compiled for, so every entry point checks dtypes and layouts
@@ -28,14 +28,16 @@ from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 if TYPE_CHECKING:
-    from vllm.models.kimi_k3.nvidia.ops.recoverssm import KDARecoverSSMCommitContext
+    from vllm.models.kimi_k3.nvidia.ops.recoverssm import (
+        KDARecoverSSMCommitContext,
+        KDARecoverSSMRecords,
+    )
 
 logger = init_logger(__name__)
 
 K = 128  # KDA head dim (keys = values)
 CONV_WIDTH = 4
 MAX_WINDOW = 8
-COMMIT_HEADS_PER_CTA = 8
 
 
 def cute_recoverssm_unsupported_reason(
@@ -115,8 +117,8 @@ def _compile_verify(
         dynamic_fake(1, f32),  # A_log [H]
         dynamic_fake(1, f32),  # dt_bias [HK]
         dynamic_fake(4, bf16),  # SSM state [slots, H, V, K]
-        dynamic_fake(4, f32),  # corrections [slots, H, Q, V]
-        dynamic_fake(4, bf16),  # key / gate records [slots, H, Q, 2K]
+        dynamic_fake(4, f32),  # corrections [rows, H, Q, V]
+        dynamic_fake(4, bf16),  # key / gate records [rows, H, Q, 2K]
         dynamic_fake(2, bf16),  # output [T, HV]
         dynamic_fake(1, i32),  # query start [B + 1]
         dynamic_fake(1, i32),  # state slots [B]
@@ -218,8 +220,7 @@ class CuteRecoverSSMVerify:
         dt_bias: torch.Tensor,
         lower_bound: float,
         state: torch.Tensor,
-        correction: torch.Tensor,
-        key_gate: torch.Tensor,
+        records: "KDARecoverSSMRecords",
         query_start_loc: torch.Tensor,
         state_indices: torch.Tensor,
         num_accepted_tokens: torch.Tensor,
@@ -231,11 +232,13 @@ class CuteRecoverSSMVerify:
         the raw projection (before the convolution), ``raw_gate`` [T, HK],
         ``raw_beta`` [T, H], ``out`` [T, HV]; ``conv_state`` is the stored
         [slots, 3HK, Q + 2] (dim first) or [slots, Q + 2, 3HK] page view.
+        Request ``b`` writes its verify records to row ``b`` of ``records``.
 
         Returns False without launching when a tensor does not start on a
         16-byte boundary (the kernels assume it, e.g. for an odd token offset
         into the projection rows): the caller then runs the Triton verify.
         Raises on any other mismatch with the compiled signature."""
+        correction, key_gate = records.correction, records.key_gate
         static = (A_log, dt_bias, state, correction, key_gate, conv_state, conv_weight)
         key = tuple((t.data_ptr(), tuple(t.shape), t.stride(), t.dtype) for t in static)
         if key not in self._checked:
@@ -265,6 +268,8 @@ class CuteRecoverSSMVerify:
         )
         if tokens > batch * Q:
             raise ValueError("KDA RecoverSSM CuTe verify: more tokens than slots")
+        if batch > records.max_num_reqs:
+            raise ValueError("KDA RecoverSSM CuTe verify: more requests than records")
         if not _aligned(*(t for _, t, _, _ in dynamic), num_accepted_tokens):
             return False
         if batch == 0 or tokens == 0:
@@ -311,7 +316,7 @@ class CuteRecoverSSMVerify:
         conv_weight: torch.Tensor,
     ) -> None:
         H, Q = self.num_heads, self.window
-        slots = state.shape[0]
+        slots, rows = state.shape[0], correction.shape[0]
         conv_len = Q + CONV_WIDTH - 2
         conv_shape = (slots, 3 * H * K, conv_len)
         if not self.conv_dim_first:
@@ -320,8 +325,8 @@ class CuteRecoverSSMVerify:
             ("A_log", A_log, torch.float32, (H,)),
             ("dt_bias", dt_bias, torch.float32, (H * K,)),
             ("state", state, torch.bfloat16, (slots, H, K, K)),
-            ("correction", correction, torch.float32, (slots, H, Q, K)),
-            ("key_gate", key_gate, torch.bfloat16, (slots, H, Q, 2 * K)),
+            ("correction", correction, torch.float32, (rows, H, Q, K)),
+            ("key_gate", key_gate, torch.bfloat16, (rows, H, Q, 2 * K)),
             ("conv_state", conv_state, torch.bfloat16, conv_shape),
             ("conv_weight", conv_weight, self.conv_weight_dtype, (3 * H * K, 4)),
         ):
@@ -333,6 +338,8 @@ class CuteRecoverSSMVerify:
                 f"KDA RecoverSSM CuTe verify: state strides {state.stride()} need "
                 "contiguous heads and 16-byte aligned slots"
             )
+        if not (correction.is_contiguous() and key_gate.is_contiguous()):
+            raise ValueError("KDA RecoverSSM CuTe verify: records must be contiguous")
 
     def _bulk_copy_aligned(
         self,
@@ -355,7 +362,9 @@ class CuteRecoverSSMVerify:
 
 
 @cache
-def _compile_commit(heads: int, window: int, arch: str, param_dtype: torch.dtype):
+def _compile_commit(
+    heads: int, window: int, arch: str, param_dtype: torch.dtype, align: bool
+):
     import cutlass
     import cutlass.cute as cute
     from cutlass.cute.runtime import make_fake_stream
@@ -372,16 +381,18 @@ def _compile_commit(heads: int, window: int, arch: str, param_dtype: torch.dtype
         dynamic_fake(1, i64),  # correction base addresses [L]
         dynamic_fake(1, i64),  # key / gate base addresses [L]
         dynamic_fake(1, i64),  # state slot strides [L]
-        dynamic_fake(1, i64),  # correction slot strides [L]
-        dynamic_fake(1, i64),  # key / gate slot strides [L]
+        dynamic_fake(1, i64),  # correction row strides [L]
+        dynamic_fake(1, i64),  # key / gate row strides [L]
         dynamic_fake(2, param_dtype),  # A_log [L, H]
         dynamic_fake(3, param_dtype),  # dt_bias [L, H, K]
         dynamic_fake(1, i32),  # source slots [B]
         dynamic_fake(1, i32),  # commit lengths [B]
         dynamic_fake(1, i32),  # destination slots [B]
+        dynamic_fake(1, i32),  # boundary slots [B]
+        dynamic_fake(1, i32),  # boundary lengths [B]
     )
     return cute.compile(
-        KdaCommit(heads, window),
+        KdaCommit(heads, window, align),
         *fakes,
         cutlass.Float32(0),
         cutlass.Int32(0),
@@ -390,10 +401,11 @@ def _compile_commit(heads: int, window: int, arch: str, param_dtype: torch.dtype
     )
 
 
-def compile_state_commit(num_heads: int, window: int, device: torch.device) -> None:
-    """Compile the CuTe state commit (outside graph capture)."""
-    if num_heads % COMMIT_HEADS_PER_CTA == 0:
-        _compile_commit(num_heads, window, _architecture(device), torch.float32)
+def compile_state_commit(
+    num_heads: int, window: int, device: torch.device, align: bool
+) -> None:
+    """Compile the CuTe state commit (before serving: it runs eagerly)."""
+    _compile_commit(num_heads, window, _architecture(device), torch.float32, align)
 
 
 class CuteRecoverSSMStateCommit:
@@ -404,8 +416,11 @@ class CuteRecoverSSMStateCommit:
     def __init__(self, context: "KDARecoverSSMCommitContext") -> None:
         state = context.checkpoints[0]
         _, heads, _, _ = state.shape
-        self.compiled = _compile_commit(
-            heads, context.spec_query_len, _architecture(state.device), torch.float32
+        self.compile_args = (
+            heads,
+            context.spec_query_len,
+            _architecture(state.device),
+            torch.float32,
         )
         self.context = context
 
@@ -415,6 +430,7 @@ class CuteRecoverSSMStateCommit:
         corrections: Sequence[torch.Tensor],
         key_gates: Sequence[torch.Tensor],
         A_log: torch.Tensor,
+        dt_bias: torch.Tensor,
         window: int,
         lower_bound: float | None,
     ) -> str | None:
@@ -422,9 +438,7 @@ class CuteRecoverSSMStateCommit:
         _, heads, value_dim, key_dim = state.shape
         if (value_dim, key_dim) != (K, K) or not 1 <= window <= MAX_WINDOW:
             return f"it needs {K} x {K} heads and 1 to {MAX_WINDOW} tokens"
-        if heads % COMMIT_HEADS_PER_CTA:
-            return f"it folds {COMMIT_HEADS_PER_CTA} heads per CTA"
-        if lower_bound is None or A_log.dtype != torch.float32:
+        if lower_bound is None or (A_log.dtype, dt_bias.dtype) != (torch.float32,) * 2:
             return "it needs a bounded gate and float32 gate parameters"
         for tensors, dtype, inner in (
             (states, torch.bfloat16, (K * K, K, 1)),
@@ -446,10 +460,10 @@ class CuteRecoverSSMStateCommit:
                     )
         return None
 
-    def __call__(self, state_indices: torch.Tensor, batch: int) -> None:
+    def __call__(self, state_indices: torch.Tensor, batch: int, align: bool) -> None:
         context = self.context
         assert context.lower_bound is not None
-        self.compiled(
+        _compile_commit(*self.compile_args, align)(
             context.state_base_addrs,
             context.correction_cache_base_addrs,
             context.kg_cache_base_addrs,
@@ -461,6 +475,8 @@ class CuteRecoverSSMStateCommit:
             state_indices[:batch],
             context.commit_lens[:batch],
             context.final_state_indices[:batch],
+            context.boundary_state_indices[:batch],
+            context.boundary_recovery_lens[:batch],
             context.lower_bound,
             NULL_BLOCK_ID,
         )

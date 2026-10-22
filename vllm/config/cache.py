@@ -325,16 +325,6 @@ class CacheConfig:
     multiple of replayssm_buffer_len, but this is not required."""
     use_kda_recoverssm: bool = field(default=False, init=False)
     """Whether Kimi-K3 KDA uses RecoverSSM speculative decode."""
-    kda_recoverssm_prefill_only: bool = False
-    """Mark a P/D prefill instance of a Kimi-K3 KDA RecoverSSM deployment
-    (``--use-replayssm`` with speculative decoding) as prefill-only. Its requests
-    never verify draft tokens, so each KDA Mamba page omits RecoverSSM's verify
-    records and keeps the page size (and attention block size) of an instance
-    without RecoverSSM; the conv and SSM state layout still matches the decode
-    instance. Requests must set ``max_tokens=1`` (others are rejected). Requires a
-    NIXL KV connector (directly or in a MultiConnector) with ``kv_role``
-    ``kv_producer`` or ``kv_both``: only NIXL transfers Mamba state between pages
-    of different sizes."""
 
     # Will be set after profiling.
     num_gpu_blocks: int | None = field(default=None, init=False)

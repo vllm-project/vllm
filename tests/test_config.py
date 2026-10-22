@@ -47,9 +47,6 @@ from vllm.config.mamba import MambaBackendEnum
 from vllm.config.speculative import _validate_qwen3_omni_dspark
 from vllm.config.utils import get_field
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.connector import (
-    NixlPullConnector,
-)
 from vllm.platforms import current_platform
 from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.config import (
@@ -248,7 +245,6 @@ def test_kda_recoverssm_derivation_is_revalidated():
         cache_config=SimpleNamespace(
             use_replayssm=True,
             use_kda_recoverssm=False,
-            kda_recoverssm_prefill_only=False,
             mamba_cache_mode="none",
             replayssm_buffer_len=16,
         ),
@@ -298,15 +294,12 @@ def test_kda_recoverssm_derivation_is_revalidated():
 def _replayssm_config(
     architecture: str = "KimiK3ForConditionalGeneration",
     kv_transfer_config: KVTransferConfig | None = None,
-    kda_recoverssm_prefill_only: bool = False,
-    use_replayssm: bool = True,
 ) -> SimpleNamespace:
     is_kda = architecture == "KimiK3ForConditionalGeneration"
     return SimpleNamespace(
         cache_config=SimpleNamespace(
-            use_replayssm=use_replayssm,
+            use_replayssm=True,
             use_kda_recoverssm=False,
-            kda_recoverssm_prefill_only=kda_recoverssm_prefill_only,
             mamba_cache_mode="none",
             replayssm_buffer_len=16,
         ),
@@ -324,25 +317,8 @@ def _replayssm_config(
     )
 
 
-class _TestNixlConnector(NixlPullConnector):
-    pass
-
-
 def _nixl(kv_role: str) -> KVTransferConfig:
     return KVTransferConfig(kv_connector="NixlConnector", kv_role=kv_role)
-
-
-def _multi(kv_role: str, *connectors: str) -> KVTransferConfig:
-    return KVTransferConfig(
-        kv_connector="MultiConnector",
-        kv_role=kv_role,
-        kv_connector_extra_config={
-            "connectors": [
-                {"kv_connector": connector, "kv_role": kv_role}
-                for connector in connectors
-            ]
-        },
-    )
 
 
 @pytest.mark.parametrize("kv_role", ["kv_producer", "kv_consumer", "kv_both"])
@@ -359,65 +335,6 @@ def test_mamba2_replayssm_rejects_kv_connectors(kv_role):
     """Mamba2 ReplaySSM's ring state is not transferred."""
     config = _replayssm_config("NemotronHForCausalLM", _nixl(kv_role))
     with pytest.raises(ValueError, match="incompatible with KV connectors"):
-        VllmConfig.validate_mamba_cached_kernel(config)
-
-
-@pytest.mark.parametrize(
-    "kv_transfer_config",
-    [
-        _nixl("kv_producer"),
-        _nixl("kv_both"),
-        _multi("kv_both", "NixlConnector", "ExampleConnector"),
-        # A NIXL subclass loaded from a module path.
-        KVTransferConfig(
-            kv_connector="_TestNixlConnector",
-            kv_connector_module_path=__name__,
-            kv_role="kv_producer",
-        ),
-    ],
-)
-def test_kda_recoverssm_prefill_only_accepted(kv_transfer_config):
-    config = _replayssm_config(
-        kv_transfer_config=kv_transfer_config, kda_recoverssm_prefill_only=True
-    )
-    VllmConfig.validate_mamba_cached_kernel(config)
-    assert config.cache_config.use_kda_recoverssm
-
-
-@pytest.mark.parametrize(
-    "kv_transfer_config,match",
-    [
-        (None, "got no KV connector"),
-        (_nixl("kv_consumer"), "got kv_role 'kv_consumer'"),
-        (
-            KVTransferConfig(kv_connector="ExampleConnector", kv_role="kv_producer"),
-            r"requires a NIXL connector .*got \['ExampleConnector'\]",
-        ),
-        (
-            _multi("kv_both", "ExampleConnector", "ExampleConnector"),
-            "requires a NIXL connector",
-        ),
-    ],
-)
-def test_kda_recoverssm_prefill_only_rejected(kv_transfer_config, match):
-    config = _replayssm_config(
-        kv_transfer_config=kv_transfer_config, kda_recoverssm_prefill_only=True
-    )
-    with pytest.raises(ValueError, match=match):
-        VllmConfig.validate_mamba_cached_kernel(config)
-
-
-@pytest.mark.parametrize("use_replayssm", [True, False])
-def test_kda_recoverssm_prefill_only_requires_recoverssm(use_replayssm):
-    config = _replayssm_config(
-        kv_transfer_config=_nixl("kv_producer"),
-        kda_recoverssm_prefill_only=True,
-        use_replayssm=use_replayssm,
-    )
-    # Without speculative decoding --use-replayssm runs Triton ReplaySSM (V1).
-    config.num_speculative_tokens = 0
-    config.use_v2_model_runner = False
-    with pytest.raises(ValueError, match="requires KDA RecoverSSM"):
         VllmConfig.validate_mamba_cached_kernel(config)
 
 
@@ -1251,7 +1168,7 @@ def test_adaptive_verification_requires_full_cudagraphs(graph_mode, should_raise
         speculative_config=SimpleNamespace(enable_adaptive_verification=True),
         lora_config=None,
         compilation_config=CompilationConfig(cudagraph_mode=graph_mode),
-        parallel_config=SimpleNamespace(pipeline_parallel_size=1, enable_dbo=False),
+        parallel_config=SimpleNamespace(pipeline_parallel_size=1),
     )
 
     if should_raise:

@@ -158,7 +158,8 @@ def bf16_split(value: Float32):
 
 class KdaTcVerify:
     """Args: qkv [T, 3HK], raw_g [T, HK], raw_beta [T, H], a_log [H], dt_bias [HK],
-    state [slots, H, V, K], corr [slots, H, Q, V], kg [slots, H, Q, 2K], out [T, HV],
+    state [slots, H, V, K], corr [rows, H, Q, V], kg [rows, H, Q, 2K] (request b's
+    records in row b), out [T, HV],
     query_start [B + 1], request slots [B], (conv state [slots, Q + 2, 3HK] token
     major, or [slots, 3HK, Q + 2] with ``conv_dim_first``, conv weight [3HK, 4]
     (BF16, or FP32 with ``conv_weight_f32``: the stock conv1d parameter),
@@ -373,8 +374,8 @@ class KdaTcVerify:
                     vv[t] = raw[2, t].to(Float32)
                     qv[t], kv[t] = Float32(0), Float32(0)
                     if t < qlen:
-                        kg[slot, head, t, c] = raw[1, t]
-                        kg[slot, head, t, K + c] = g_raw[t]
+                        kg[request, head, t, c] = raw[1, t]
+                        kg[request, head, t, K + c] = g_raw[t]
                         qv[t], kv[t] = raw[0, t].to(Float32), raw[1, t].to(Float32)
                         gate = sigmoid(a * (g_raw[t].to(Float32) + bias), True)
                         cum = cum + lower_bound * gate
@@ -509,7 +510,7 @@ class KdaTcVerify:
                         o = fma(coef[Q * Q + t * Q + i], u[i], o)
                     if t < qlen:
                         out[bos + t, head * K + r] = o.to(out.element_type)
-                        corr[slot, head, t, r] = u[t]
+                        corr[request, head, t, r] = u[t]
             if slot <= Int64(null_slot):
                 for t in cutlass.range_constexpr(Q):
                     if t < qlen:

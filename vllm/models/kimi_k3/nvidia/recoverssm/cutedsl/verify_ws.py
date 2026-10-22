@@ -457,12 +457,11 @@ class KdaTcVerify2:
             b_offset = (c // 8) * (B_KGROUP_BYTES // 2) + c % 8
             while cur < items:
                 mi = k_step % 2
-                slot = Int64(meta[mi, 1])
                 bos = meta[mi, 2]
                 qlen = meta[mi, 3]
                 loaded = meta[mi, 5] != 0
                 valid = meta[mi, 6]
-                head = cur % H
+                request, head = cur // H, cur % H
                 live = loaded & (qlen > 0)
                 qv = cute.make_rmem_tensor((Q,), Float32)
                 kv = cute.make_rmem_tensor((Q,), Float32)
@@ -530,8 +529,8 @@ class KdaTcVerify2:
                         vv[t] = raw[2, t].to(Float32)
                         qv[t], kv[t] = Float32(0), Float32(0)
                         if t < qlen:
-                            kg[slot, head, t, c] = raw[1, t]
-                            kg[slot, head, t, K + c] = g_raw[t]
+                            kg[request, head, t, c] = raw[1, t]
+                            kg[request, head, t, K + c] = g_raw[t]
                             qv[t], kv[t] = raw[0, t].to(Float32), raw[1, t].to(Float32)
                             gate = sigmoid(a * (g_raw[t].to(Float32) + bias), True)
                             cum = cum + lower_bound * gate
@@ -683,7 +682,7 @@ class KdaTcVerify2:
                             o = fma(coef[Q * Q + t * Q + i], u[i], o)
                         if t < qlen:
                             out[bos + t, head * K + r] = o.to(out.element_type)
-                            corr[slot, head, t, r] = u[t]
+                            corr[request, head, t, r] = u[t]
                 if loaded:
                     mma_phase = mma_phase ^ 1
                 if valid == 0:

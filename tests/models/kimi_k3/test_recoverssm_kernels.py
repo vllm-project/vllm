@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The CuTe KDA RecoverSSM verify and state commit against the Triton reference
 (``causal_conv1d_update`` + ``kda_recoverssm_verify``, and the Triton commit), on
-Mamba page views as vLLM binds them: one padded page per slot holding the conv
-state, the SSM state and the verify records."""
+Mamba page views as vLLM binds them (one padded page per slot holding the conv
+and SSM state) and per-layer verify records indexed by batch row."""
 
 from math import prod
 from types import SimpleNamespace
@@ -24,14 +24,12 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (  # noqa: E402
 )
 from vllm.models.kimi_k3.nvidia.ops.recoverssm import (  # noqa: E402
     KDARecoverSSMCommitContext,
+    KDARecoverSSMRecords,
     kda_recoverssm_verify,
 )
 from vllm.models.kimi_k3.nvidia.recoverssm.kernels import (  # noqa: E402
     CuteRecoverSSMVerify,
     compile_state_commit,
-)
-from vllm.models.kimi_k3.nvidia.recoverssm.layout import (  # noqa: E402
-    RecoverSSMRecords,
 )
 
 D = 128
@@ -42,8 +40,8 @@ PAGE_PADDING = 4096
 
 
 def _pages(slots: int, heads: int, window: int, dim_first: bool):
-    """Page views of (conv state, SSM state, corrections, key / gate) with a
-    padded slot stride, filled with random values."""
+    """Page views of (conv state, SSM state) with a padded slot stride, filled
+    with random values."""
     conv_dim, conv_len = 3 * heads * D, window + 2
     conv_shape = (
         (slots, conv_dim, conv_len) if dim_first else (slots, conv_len, conv_dim)
@@ -51,8 +49,6 @@ def _pages(slots: int, heads: int, window: int, dim_first: bool):
     specs = [
         (torch.bfloat16, conv_shape),
         (torch.bfloat16, (slots, heads, D, D)),
-        (torch.float32, (slots, heads, window, D)),
-        (torch.bfloat16, (slots, heads, window, 2 * D)),
     ]
     sizes = [dtype.itemsize * prod(shape[1:]) for dtype, shape in specs]
     page = sum(sizes) + PAGE_PADDING
@@ -69,13 +65,24 @@ def _pages(slots: int, heads: int, window: int, dim_first: bool):
                 sum(sizes[:i]) // dtype.itemsize,
             )
         )
-    conv, state, correction, key_gate = views
+    conv, state = views
     # Bounded values: random bits are not finite floats.
     conv.copy_(torch.randn_like(conv))
     state.copy_(torch.randn_like(state) * 0.1)
-    correction.copy_(torch.randn_like(correction))
-    key_gate.copy_(torch.randn_like(key_gate))
     return (raw, *views)
+
+
+def _records(rows: int, heads: int, window: int) -> KDARecoverSSMRecords:
+    records = KDARecoverSSMRecords.allocate(
+        rows, heads, window, D, torch.bfloat16, DEVICE
+    )
+    records.correction.normal_()
+    records.key_gate.normal_()
+    return records
+
+
+def _clone_records(records: KDARecoverSSMRecords) -> KDARecoverSSMRecords:
+    return KDARecoverSSMRecords(records.correction.clone(), records.key_gate.clone())
 
 
 def _clone_pages(pages):
@@ -165,8 +172,12 @@ def _check_verify(
     pages = _pages(slots, heads, window, dim_first)
     ref = _clone_pages(pages)
     initial = _clone_pages(pages)
-    _, conv, state, correction, key_gate = pages
-    _, ref_conv, ref_state, ref_correction, ref_key_gate = ref
+    _, conv, state = pages
+    _, ref_conv, ref_state = ref
+    # More rows than requests: rows past the batch are left alone.
+    records = _records(batch + 2, heads, window)
+    ref_records = _clone_records(records)
+    initial_records = _clone_records(records)
 
     # Reference: the stock convolution, then the Triton verify. (The stock
     # convolution writes out of bounds for slot -1, so it gets the null block.)
@@ -201,8 +212,7 @@ def _check_verify(
         dt_bias=dt_bias,
         lower_bound=LOWER_BOUND,
         checkpoint_state=ref_state,
-        correction_cache=ref_correction,
-        kg_cache=ref_key_gate,
+        records=ref_records,
         query_start_loc=query_start,
         state_indices=ref_indices,
         spec_query_len=window,
@@ -219,8 +229,7 @@ def _check_verify(
         dt_bias=dt_bias,
         lower_bound=LOWER_BOUND,
         state=state,
-        correction=correction,
-        key_gate=key_gate,
+        records=records,
         query_start_loc=query_start,
         state_indices=state_indices,
         num_accepted_tokens=accepted,
@@ -254,9 +263,14 @@ def _check_verify(
     for b in live:
         slot, n = int(state_indices[b]), int(lens[b])
         torch.testing.assert_close(
-            correction[slot, :, :n], ref_correction[slot, :, :n], atol=3e-2, rtol=3e-2
+            records.correction[b, :, :n],
+            ref_records.correction[b, :, :n],
+            atol=3e-2,
+            rtol=3e-2,
         )
-        torch.testing.assert_close(key_gate[slot, :, :n], ref_key_gate[slot, :, :n])
+        torch.testing.assert_close(
+            records.key_gate[b, :, :n], ref_records.key_gate[b, :, :n]
+        )
         # The rolled conv state: two history rows, then the raw tokens.
         if dim_first:
             torch.testing.assert_close(
@@ -264,11 +278,17 @@ def _check_verify(
             )
         else:
             torch.testing.assert_close(conv[slot, : n + 2], ref_conv[slot, : n + 2])
-    # The checkpoint is never written; other slots' pages are untouched.
+    # The checkpoint is never written; other slots' pages and other rows'
+    # records are untouched.
     torch.testing.assert_close(state, ref_state, atol=0, rtol=0)
     untouched = sorted(set(range(slots)) - {int(state_indices[b]) for b in live})
     for page, before in zip(pages[1:], initial[1:]):
         assert torch.equal(page[untouched], before[untouched])
+    for record, before in zip(
+        (records.correction, records.key_gate),
+        (initial_records.correction, initial_records.key_gate),
+    ):
+        assert torch.equal(record[batch:], before[batch:])
     return True
 
 
@@ -323,7 +343,7 @@ def test_cute_verify_rejects_mismatched_tensors():
         batch, heads, window, False, 0, 0
     )
     tokens = mixed_qkv.shape[0]
-    _, conv, state, correction, key_gate = _pages(4, heads, window, True)
+    _, conv, state = _pages(4, heads, window, True)
     verify = _compiled_verify(heads, window, True, torch.float32)
     args = dict(
         mixed_qkv=mixed_qkv,
@@ -333,8 +353,7 @@ def test_cute_verify_rejects_mismatched_tensors():
         dt_bias=torch.zeros(heads * D, device=DEVICE),
         lower_bound=LOWER_BOUND,
         state=state,
-        correction=correction,
-        key_gate=key_gate,
+        records=_records(batch, heads, window),
         query_start_loc=query_start,
         state_indices=torch.arange(1, batch + 1, dtype=torch.int32, device=DEVICE),
         num_accepted_tokens=torch.ones(batch, dtype=torch.int32, device=DEVICE),
@@ -359,12 +378,12 @@ def test_cute_verify_rejects_mismatched_tensors():
     )
 
 
-def _layer(pages, heads: int) -> SimpleNamespace:
-    _, conv, state, correction, key_gate = pages
+def _layer(pages, records: KDARecoverSSMRecords, heads: int) -> SimpleNamespace:
+    _, conv, state = pages
     return SimpleNamespace(
         pages=pages,
-        kv_cache=(conv, state, correction, key_gate),
-        recoverssm_records=RecoverSSMRecords(correction, key_gate),
+        kv_cache=(conv, state),
+        recoverssm_records=records,
         A_log=torch.randn(heads, device=DEVICE) * 0.5,
         dt_bias=torch.randn(heads * D, device=DEVICE) * 0.5,
         local_num_heads=heads,
@@ -373,25 +392,32 @@ def _layer(pages, heads: int) -> SimpleNamespace:
     )
 
 
-@pytest.mark.parametrize("heads", [96, 16])
+@pytest.mark.parametrize("heads", [96, 12, 3])
 @pytest.mark.parametrize("batch", [1, 8, 13])
+@pytest.mark.parametrize("window", [2, 5, 8])
 @torch.inference_mode()
-def test_cute_state_commit_matches_triton(heads, batch, monkeypatch):
+def test_cute_state_commit_matches_triton(heads, batch, window, monkeypatch):
     """The CuTe fold of every layer's accepted tokens equals the Triton fold,
     with varlen windows, rejected-everything (0 accepted) and dead requests."""
     monkeypatch.setattr(
         "vllm.model_executor.layers.mamba.mamba_utils.get_conv_state_layout",
         lambda: "DS",
     )
-    torch.manual_seed(heads + batch)
-    window, num_layers = 5, 3
+    torch.manual_seed(heads + batch + window)
+    num_layers = 3
     slots = 2 * batch + 1
     layers = []
     for _ in range(num_layers):
-        layers.append(_layer(_pages(slots, heads, window, dim_first=True), heads))
+        layers.append(
+            _layer(
+                _pages(slots, heads, window, dim_first=True),
+                _records(batch, heads, window),
+                heads,
+            )
+        )
     lens = torch.full((batch,), window, dtype=torch.int32)
     if batch > 2:
-        lens[0] = 2
+        lens[0] = min(2, window)
     query_start = torch.zeros(batch + 1, dtype=torch.int32)
     query_start[1:] = torch.cumsum(lens, 0)
     query_start = query_start.to(DEVICE)
@@ -400,7 +426,7 @@ def test_cute_state_commit_matches_triton(heads, batch, monkeypatch):
     if batch > 3:
         state_indices[3] = 0
 
-    compile_state_commit(heads, window, DEVICE)
+    compile_state_commit(heads, window, DEVICE, align=False)
     initial = [_clone_pages(layer.pages) for layer in layers]
     results = {}
     for cute in (False, True):
@@ -450,10 +476,14 @@ def test_recoverssm_steps_match_stock_spec_decode(heads, monkeypatch):
     conv_weight = torch.randn(3 * heads * D, 4, device=DEVICE) * 0.5
 
     # RecoverSSM: one slot per request.
-    layer = _layer(_pages(batch + 1, heads, window, dim_first=True), heads)
+    layer = _layer(
+        _pages(batch + 1, heads, window, dim_first=True),
+        _records(batch, heads, window),
+        heads,
+    )
     rss_slots = torch.arange(1, batch + 1, dtype=torch.int32, device=DEVICE)
     # Stock: 1 + k slots per request; the request's state starts in column 0.
-    _, ref_conv, ref_state, _, _ = _pages(batch * window + 1, heads, window, True)
+    _, ref_conv, ref_state = _pages(batch * window + 1, heads, window, True)
     ref_slots = torch.arange(
         1, batch * window + 1, dtype=torch.int32, device=DEVICE
     ).view(batch, window)
@@ -461,7 +491,7 @@ def test_recoverssm_steps_match_stock_spec_decode(heads, monkeypatch):
     ref_state[ref_slots[:, 0]] = layer.kv_cache[1][rss_slots]
 
     verify = _compiled_verify(heads, window, True, torch.float32)
-    compile_state_commit(heads, window, DEVICE)
+    compile_state_commit(heads, window, DEVICE, align=False)
     context = KDARecoverSSMCommitContext.create(
         [layer], spec_query_len=window, max_num_reqs=batch, cute_state_commit=True
     )
@@ -479,8 +509,7 @@ def test_recoverssm_steps_match_stock_spec_decode(heads, monkeypatch):
             dt_bias=layer.dt_bias,
             lower_bound=LOWER_BOUND,
             state=layer.kv_cache[1],
-            correction=layer.kv_cache[2],
-            key_gate=layer.kv_cache[3],
+            records=layer.recoverssm_records,
             query_start_loc=query_start,
             state_indices=rss_slots,
             num_accepted_tokens=ones,
@@ -528,3 +557,167 @@ def test_recoverssm_steps_match_stock_spec_decode(heads, monkeypatch):
             1, window + 1, (batch,), dtype=torch.int32, device=DEVICE
         )
         context.commit(accepted, rss_slots, query_start)
+
+
+@pytest.mark.parametrize("window", [2, 8])
+@torch.inference_mode()
+def test_cute_verify_cuda_graph_replay(window):
+    """A captured verify replays with new inputs (every launch, including the
+    captured one, leaves the work counter zeroed)."""
+    heads, batch = 96, 8
+    torch.manual_seed(window)
+    _, query_start, mixed_qkv, raw_gate, raw_beta = _inputs(
+        batch, heads, window, False, 0, 0
+    )
+    tokens = mixed_qkv.shape[0]
+    A_log = torch.randn(heads, device=DEVICE) * 0.5
+    dt_bias = torch.randn(heads * D, device=DEVICE) * 0.5
+    conv_weight = torch.randn(3 * heads * D, 4, device=DEVICE) * 0.5
+    slots = torch.arange(1, batch + 1, dtype=torch.int32, device=DEVICE)
+    ones = torch.ones(batch, dtype=torch.int32, device=DEVICE)
+    pages = _pages(batch + 1, heads, window, True)
+    initial = _clone_pages(pages)
+    _, conv, state = pages
+    records = _records(batch, heads, window)
+    verify = _compiled_verify(heads, window, True, torch.float32)
+    out = torch.empty(tokens, heads * D, device=DEVICE, dtype=torch.bfloat16)
+
+    def run():
+        assert verify(
+            mixed_qkv=mixed_qkv,
+            raw_gate=raw_gate,
+            raw_beta=raw_beta,
+            A_log=A_log,
+            dt_bias=dt_bias,
+            lower_bound=LOWER_BOUND,
+            state=state,
+            records=records,
+            query_start_loc=query_start,
+            state_indices=slots,
+            num_accepted_tokens=ones,
+            conv_state=conv,
+            conv_weight=conv_weight,
+            out=out,
+        )
+
+    graph = torch.cuda.CUDAGraph()
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        run()
+        stream.synchronize()
+        with torch.cuda.graph(graph, stream=stream):
+            run()
+    for replay in range(2):
+        pages[0].copy_(initial[0])
+        mixed_qkv.normal_()
+        graph.replay()
+        torch.accelerator.synchronize()
+        ref = _clone_pages(initial)
+        ref_records = _records(batch, heads, window)
+        conv_out = torch.empty_like(mixed_qkv)
+        causal_conv1d_update(
+            mixed_qkv,
+            ref[1],
+            conv_weight,
+            None,
+            activation="silu",
+            conv_state_indices=slots,
+            num_accepted_tokens=ones,
+            query_start_loc=query_start,
+            max_query_len=window,
+            validate_data=False,
+            out=conv_out,
+        )
+        q, k, v = (
+            x.unflatten(-1, (heads, D)).unsqueeze(0)
+            for x in conv_out.split(heads * D, -1)
+        )
+        ref_out = kda_recoverssm_verify(
+            q=q,
+            k=k,
+            v=v,
+            raw_g=raw_gate.view(1, tokens, heads, D),
+            raw_beta=raw_beta.unsqueeze(0),
+            A_log=A_log,
+            dt_bias=dt_bias,
+            lower_bound=LOWER_BOUND,
+            checkpoint_state=ref[2],
+            records=ref_records,
+            query_start_loc=query_start,
+            state_indices=slots,
+            spec_query_len=window,
+        )
+        torch.testing.assert_close(
+            out.float(), ref_out.view(tokens, -1).float(), atol=3e-2, rtol=3e-2
+        )
+        torch.testing.assert_close(
+            records.correction, ref_records.correction, atol=3e-2, rtol=3e-2
+        )
+        assert int(verify.counter) == 0, replay
+
+
+@pytest.mark.parametrize("window", [2, 5, 8])
+@pytest.mark.parametrize("batch", [1, 13])
+@torch.inference_mode()
+def test_cute_state_commit_align_matches_triton(window, batch, monkeypatch):
+    """With prefix caching the commit stores the window's final state to the
+    block holding its last token and, when the window crosses a block boundary,
+    the state at the boundary to the boundary's block."""
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.mamba.mamba_utils.get_conv_state_layout",
+        lambda: "DS",
+    )
+    torch.manual_seed(window * 31 + batch)
+    heads, block_size, width = 12, 8, 4
+    slots = 1 + batch * width
+    layers = [
+        _layer(
+            _pages(slots, heads, window, dim_first=True),
+            _records(batch, heads, window),
+            heads,
+        )
+        for _ in range(2)
+    ]
+    query_start = torch.arange(
+        0, (batch + 1) * window, window, dtype=torch.int32, device=DEVICE
+    )
+    accepted = torch.randint(0, window + 1, (batch,), dtype=torch.int32, device=DEVICE)
+    # Each request owns blocks 1 + b * width ...; its state is in the block of
+    # its last computed token.
+    block_table = (
+        1 + torch.arange(batch * width, dtype=torch.int32, device=DEVICE)
+    ).view(batch, width)
+    num_computed = torch.randint(
+        1, 2 * block_size, (batch,), dtype=torch.int32, device=DEVICE
+    )
+    # Request 0 crosses a block boundary with every accepted token.
+    num_computed[0] = block_size - 1
+    accepted[0] = window
+    state_indices = block_table.gather(
+        1, ((num_computed - 1) // block_size).long().unsqueeze(1)
+    ).squeeze(1)
+    if batch > 3:
+        state_indices[3] = 0
+    compile_state_commit(heads, window, DEVICE, align=True)
+    initial = [_clone_pages(layer.pages) for layer in layers]
+    results = {}
+    for cute in (False, True):
+        for layer, before in zip(layers, initial):
+            layer.pages[0].copy_(before[0])
+        context = KDARecoverSSMCommitContext.create(
+            layers, spec_query_len=window, max_num_reqs=batch, cute_state_commit=cute
+        )
+        context.commit(
+            accepted,
+            state_indices,
+            query_start,
+            block_table=block_table,
+            num_computed_tokens=num_computed,
+            mamba_block_size=block_size,
+        )
+        torch.accelerator.synchronize()
+        results[cute] = [layer.kv_cache[1].clone() for layer in layers]
+    for triton_state, cute_state in zip(results[False], results[True]):
+        torch.testing.assert_close(
+            cute_state.float(), triton_state.float(), atol=2e-2, rtol=2e-2
+        )

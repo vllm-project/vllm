@@ -11,7 +11,6 @@ and MooncakeDistributedStore integration.
 """
 
 import dataclasses
-import hashlib
 import math
 import os
 import queue
@@ -142,24 +141,6 @@ DEFAULT_MOONCAKE_DISK_STAGING_BUFFER_BYTES = 1280 * 1024 * 1024
 # Mirrors DirectIO alignment in Mooncake's AllocateBatch.
 _DIRECT_IO_ALIGNMENT = 4096
 _DIRECT_IO_PADDING_BYTES = 2 * _DIRECT_IO_ALIGNMENT
-
-
-def page_layout_namespace(
-    vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
-) -> str:
-    """Store namespace component for instances whose KV pages depend on the
-    instance role. With Kimi-K3 KDA RecoverSSM, a --kda-recoverssm-prefill-only
-    instance stores Mamba pages without the verify records, so its pages (and
-    block size) differ from a decode instance's: they must not share objects.
-    Empty otherwise, keeping keys byte-identical."""
-    if not vllm_config.cache_config.use_kda_recoverssm:
-        return ""
-    layout = [
-        (group.kv_cache_spec.block_size, group.kv_cache_spec.page_size_bytes)
-        for group in kv_cache_config.kv_cache_groups
-    ]
-    digest = hashlib.sha256(repr(layout).encode()).hexdigest()[:16]
-    return f"@page_layout:{digest}"
 
 
 def _align_up(value: int, alignment: int) -> int:
@@ -1534,7 +1515,6 @@ class MooncakeStoreWorker:
         self.store_tp_size, store_namespace, store_layout_cls = (
             self._select_store_layout(extra_config)
         )
-        store_namespace += page_layout_namespace(vllm_config, kv_cache_config)
         metadata = KeyMetadata(
             model_name=model_config.model.rstrip("/").split("/")[-1],
             tp_rank=self.tp_rank,
