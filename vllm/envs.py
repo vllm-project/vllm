@@ -1687,7 +1687,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_FLASHINFER_MOE_INT4": lambda: bool(
         int(os.getenv("VLLM_USE_FLASHINFER_MOE_INT4", "0"))
     ),
-    # Split Rubin NVFP4 MoE across locality domains; requires cuda-bindings >= 13.4.
+    # Split Rubin NVFP4 MoE across locality domains. Requires cuda-bindings >= 13.4,
+    # a PyTorch build with torch.cuda.execute_on_streams, and FlashInfer with
+    # locality-domain MoE support (see vllm/distributed/localization.py).
     "VLLM_USE_LOCALITY_DOMAINS": lambda: bool(
         int(os.getenv("VLLM_USE_LOCALITY_DOMAINS", "0"))
     ),

@@ -67,6 +67,8 @@ def cuda_locality(monkeypatch):
         "MemPool",
         lambda *, allocator: SimpleNamespace(allocator=allocator, device=state.device),
     )
+    # Model a torch/FlashInfer stack that provides the localized MoE APIs.
+    monkeypatch.setattr(localization, "localized_moe_unsupported_reason", lambda: None)
     monkeypatch.setattr(localization.envs, "VLLM_USE_LOCALITY_DOMAINS", True)
     monkeypatch.setattr(localization.envs, "VLLM_MOE_LOCALIZE_BACKFILL", False)
     monkeypatch.setattr(localization, "_LOCALIZED_RESOURCES", {})
@@ -148,3 +150,53 @@ def test_remainder_creation_failure_preserves_compute_domains(cuda_locality):
     assert result.split_sm_counts == [60, 68]
     assert result.aux_stream.device == 0
     assert result.contexts[-1] is None
+
+
+@pytest.mark.parametrize("missing", ["torch", "flashinfer"])
+def test_unsupported_stack_disables_localization(monkeypatch, missing):
+    """An old torch or FlashInfer disables localization before any partitioning."""
+    import vllm.utils.flashinfer as fi
+
+    cuda = localization.torch.cuda
+    monkeypatch.setattr(localization.envs, "VLLM_USE_LOCALITY_DOMAINS", True)
+    monkeypatch.setattr(localization, "_LOCALIZED_RESOURCES", {})
+    # Provide the allocator/partition APIs so only the MoE-stack check can refuse.
+    monkeypatch.setattr(cuda, "LocalizedAllocator", Mock(), raising=False)
+    green = SimpleNamespace(
+        SMPartition=SimpleNamespace(from_device=Mock()),
+        GreenContext=Mock(),
+        get_num_locality_domains=lambda device: 2,
+        is_localization_supported=lambda device: True,
+    )
+    monkeypatch.setitem(sys.modules, "torch.cuda.green_contexts", green)
+
+    if missing == "torch":
+        monkeypatch.delattr(cuda, "execute_on_streams", raising=False)
+        monkeypatch.setattr(fi, "has_flashinfer_localized_moe", lambda: True)
+        expected = "execute_on_streams"
+    else:
+        monkeypatch.setattr(
+            cuda, "execute_on_streams", lambda *a, **k: None, raising=False
+        )
+        monkeypatch.setattr(fi, "has_flashinfer_localized_moe", lambda: False)
+        expected = "flashinfer-ai/flashinfer#6488"
+
+    reason = localization.localized_moe_unsupported_reason()
+    assert reason is not None and expected in reason
+
+    assert localization.maybe_init_localized_resources(SimpleNamespace(index=0)) is None
+    assert green.SMPartition.from_device.call_count == 0
+    assert localization.get_localized_resources(0) is None
+
+
+def test_supported_stack_reports_no_reason(monkeypatch):
+    import vllm.utils.flashinfer as fi
+
+    monkeypatch.setattr(
+        localization.torch.cuda,
+        "execute_on_streams",
+        lambda *a, **k: None,
+        raising=False,
+    )
+    monkeypatch.setattr(fi, "has_flashinfer_localized_moe", lambda: True)
+    assert localization.localized_moe_unsupported_reason() is None

@@ -5,8 +5,12 @@
 Initialize before weight allocation and CUDA graph capture; all layers share
 these resources. Enable with VLLM_USE_LOCALITY_DOMAINS. Optional
 VLLM_MOE_LOCALIZE_BACKFILL adds SMs outside each domain's local allocation.
-Requires upstream PyTorch LocalizedAllocator and SMPartition APIs, CUDA driver
-and cuda.bindings 13.4+, and a GPU with multiple locality domains.
+Requires upstream PyTorch LocalizedAllocator, SMPartition, and
+``torch.cuda.execute_on_streams`` APIs (nightly from 2026-10-08, 2.16), FlashInfer
+with locality-domain MoE support (main after flashinfer-ai/flashinfer#6488; no
+0.7.x release has it), CUDA driver and cuda.bindings 13.4+, and a GPU with
+multiple locality domains. When any of these is missing, localization logs why
+and is disabled; the ordinary full-width MoE path runs instead.
 """
 
 from __future__ import annotations
@@ -116,6 +120,29 @@ def _reserved_remainder_stream(remainder):
         )
 
 
+def localized_moe_unsupported_reason() -> str | None:
+    """Explain why the installed torch/FlashInfer cannot run the localized MoE.
+
+    Returns None when both provide the APIs FlashInfer's locality-domain path
+    calls. Checked before any hardware is touched so an unsupported stack never
+    shards weights it cannot use.
+    """
+    from vllm.utils.flashinfer import has_flashinfer_localized_moe
+
+    if not hasattr(torch.cuda, "execute_on_streams"):
+        return (
+            "torch.cuda.execute_on_streams is missing; FlashInfer's localized "
+            "MoE needs a PyTorch nightly from 2026-10-08 or later (2.16)"
+        )
+    if not has_flashinfer_localized_moe():
+        return (
+            "flashinfer.cute_dsl_fused_moe_nvfp4 does not accept the localized_* "
+            "arguments; needs FlashInfer main after flashinfer-ai/flashinfer#6488 "
+            "(not in any 0.7.x release)"
+        )
+    return None
+
+
 def maybe_init_localized_resources(
     device: torch.device,
 ) -> LocalizedResources | None:
@@ -144,6 +171,15 @@ def maybe_init_localized_resources(
     except ImportError as e:
         logger.warning(
             "[locality domains] localization requested but torch lacks the API: %s", e
+        )
+        return None
+
+    reason = localized_moe_unsupported_reason()
+    if reason is not None:
+        logger.warning(
+            "[locality domains] localization requested but unsupported by the "
+            "installed stack: %s; using the full-width MoE path",
+            reason,
         )
         return None
 
