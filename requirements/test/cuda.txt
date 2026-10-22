@@ -749,6 +749,8 @@ optuna==3.6.1
     # via genai-perf
 orjson==3.12.0
     # via
+    #   -c requirements/common.txt
+    #   -r requirements/test/../common.txt
     #   -r requirements/test/cuda.in
     #   genai-perf
 oss-harmony==0.0.11
