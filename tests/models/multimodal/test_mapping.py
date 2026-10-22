@@ -16,6 +16,32 @@ from vllm.transformers_utils.config import try_get_safetensors_metadata
 from ..registry import _MULTIMODAL_EXAMPLE_MODELS, HF_EXAMPLE_MODELS
 
 
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("suffix", ["weight", "qweight", "qzeros", "scales", "g_idx"])
+def test_agnes_parallel_ffn_weights_keep_gate_up_shards(suffix):
+    """Load both parallel SwiGLU projections into the correct fused shards."""
+    from vllm.model_executor.models.agnes import AgnesForConditionalGeneration
+
+    mapper = AgnesForConditionalGeneration.hf_to_vllm_mapper
+    source = "model.language_model.layers.0.mlp.parallel_ffn"
+    target = "language_model.model.layers.0.mlp.parallel_ffn"
+    gate, up = torch.tensor([1]), torch.tensor([2])
+
+    mapped = list(
+        mapper.apply(
+            [
+                (f"{source}.gate_proj.{suffix}", gate),
+                (f"{source}.up_proj.{suffix}", up),
+            ]
+        )
+    )
+
+    assert [name for name, _ in mapped] == [f"{target}.gate_up_proj.{suffix}"] * 2
+    assert [getattr(tensor, "shard_id", None) for _, tensor in mapped] == [0, 1]
+    assert mapped[0][1] is gate
+    assert mapped[1][1] is up
+
+
 def test_cosmos3_new_checkpoint_weights_mapper():
     from vllm.model_executor.models.cosmos3 import Cosmos3ForConditionalGeneration
 
