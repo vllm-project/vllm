@@ -5,17 +5,17 @@ the extract_hidden_states spec decoding method."""
 
 import os
 
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.transformers_utils.utils import without_trust_remote_code
 
 
-class ExtractHiddenStatesConfig(PretrainedConfig):
+class ExtractHiddenStatesConfig(PreTrainedConfig):
     model_type = "extract_hidden_states"
 
     def __init__(
         self,
-        model: PretrainedConfig | dict | None = None,
+        model: PreTrainedConfig | dict | None = None,
         method: str | None = "extract_hidden_states",
         **kwargs,
     ):
@@ -24,7 +24,7 @@ class ExtractHiddenStatesConfig(PretrainedConfig):
         if isinstance(model, dict):
             model_dict = model
             source_text_config = None
-        elif isinstance(model, PretrainedConfig):
+        elif isinstance(model, PreTrainedConfig):
             model_dict = model.to_dict()
             text_config = model.get_text_config()
             source_text_config = text_config if text_config is not model else None
@@ -40,7 +40,7 @@ class ExtractHiddenStatesConfig(PretrainedConfig):
         combined["architectures"] = ["ExtractHiddenStatesModel"]
 
         # to_dict() and kwargs both flatten text_config to a plain dict;
-        # downstream get_hf_text_config() needs it as a PretrainedConfig
+        # downstream get_hf_text_config() needs it as a PreTrainedConfig
         # for attribute access. Re-insert the original object.
         if source_text_config is not None:
             combined["text_config"] = source_text_config

@@ -75,7 +75,7 @@ from vllm.multimodal.parse import (
 from vllm.multimodal.processing import PromptReplacement, PromptUpdate
 from vllm.multimodal.processing.context import TimingContext
 from vllm.multimodal.processing.inputs import ProcessorInputs
-from vllm.multimodal.processing.processor import MultiModalProcessingInfo
+from vllm.multimodal.processing.processor import MultiModalProcessingResult
 from vllm.transformers_utils.processors.deepseek_ocr import (
     BASE_SIZE,
     CROP_MODE,
@@ -162,10 +162,8 @@ class UnlimitedOCRProcessingInfo(DeepseekOCRProcessingInfo):
         return global_views_tokens + local_views_tokens + 1
 
     def get_image_size_with_most_features(self) -> ImageSize:
-        # With max_crops=32, the widest possible grid is 4×8 (aspect ratio 1:2).
-        # A 2560×5120 image (4×640 × 8×640) selects exactly 4×8=32 tiles and
-        # produces the maximum token count.
-        return ImageSize(width=640 * 4, height=640 * 8)
+        # A vertical grid maximizes both crop count and newline tokens.
+        return ImageSize(width=IMAGE_SIZE, height=IMAGE_SIZE * _UNLIMITED_OCR_MAX_CROPS)
 
 
 class UnlimitedOCRMultiModalProcessor(DeepseekOCRMultiModalProcessor):
@@ -199,6 +197,7 @@ class UnlimitedOCRMultiModalProcessor(DeepseekOCRMultiModalProcessor):
             if isinstance(images, ImageEmbeddingItems):
                 num_image_tokens = images.get_feature_size(item_idx)
             else:
+                assert isinstance(images, ImageProcessorItems)
                 size = images.get_image_size(item_idx)
 
                 # Disable crop mode for multi-image input.
@@ -225,7 +224,7 @@ class UnlimitedOCRMultiModalProcessor(DeepseekOCRMultiModalProcessor):
         self,
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
-    ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
+    ) -> MultiModalProcessingResult:
         # The processor logic differs for single-image (crop) vs multi-image
         # (no crop) requests. The processing cache assumes per-item output is
         # invariant of how many images are passed per prompt, so we only cache

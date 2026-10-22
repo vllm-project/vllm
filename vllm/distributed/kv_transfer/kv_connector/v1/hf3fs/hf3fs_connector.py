@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-HF3FS KV Connector Implementation for vLLM.
+"""HF3FS KV Connector Implementation for vLLM.
 
 This module implements a KV connector that uses
 the 3FS for storing and retrieving KV cache data.
@@ -99,9 +98,7 @@ logger = init_logger(__name__)
 
 
 class AsyncOperationManager:
-    """
-    Manages async save/load operations with background threads.
-    """
+    """Manages async save/load operations with background threads."""
 
     def __init__(self, connector: "HF3FSKVConnector"):
         # Store connector reference and extract commonly used attributes
@@ -541,35 +538,32 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         self._dtype = first_cache.dtype
         element_size = first_cache.element_size()
 
-        if self._use_mla:
-            assert len(first_cache.shape) == 3, "MLA format should have 3 dimensions"
-            # MLA format: [num_blocks, block_size, head_size]
-            num_blocks, block_size, head_size = first_cache.shape
-            num_heads = 1
-        else:
-            # MHA format: [2, num_blocks, block_size, num_heads, head_size]
-            _, num_blocks, block_size, num_heads, head_size = first_cache.shape
+        # Standardized per-layer [B, H, N, C] view; MLA is just H == 1 with the
+        # latent vector as the content dim.
+        assert len(first_cache.shape) == 4, (
+            f"expected a [B, H, N, C] KV cache view, got {tuple(first_cache.shape)}"
+        )
+        num_blocks, num_heads, block_size, content_dim = first_cache.shape
+        cache_strides = first_cache.stride()
+        assert all(
+            cache.shape == first_cache.shape and cache.stride() == cache_strides
+            for cache in self._kv_caches.values()
+        ), "HF3FS requires uniform KV cache shapes and strides."
 
         self._local_total_tokens = num_blocks * block_size
         self._local_block_size = block_size
+        self._num_heads = num_heads
+        self._content_dim = content_dim
+        self._kv_cache_strides = cache_strides
 
-        if self._use_mla:
-            layer_block_size = block_size * head_size * element_size
-            self._bytes_per_page = layer_block_size * len(self._kv_caches)
-            self._shape_per_page = [
-                len(self._kv_caches),
-                block_size,
-                head_size,
-            ]
-        else:
-            layer_block_size = 2 * block_size * num_heads * head_size * element_size
-            self._bytes_per_page = layer_block_size * len(self._kv_caches)
-            self._shape_per_page = [
-                len(self._kv_caches),
-                2,
-                block_size,
-                num_heads * head_size,
-            ]
+        layer_block_size = num_heads * block_size * content_dim * element_size
+        self._bytes_per_page = layer_block_size * len(self._kv_caches)
+        self._shape_per_page = [
+            len(self._kv_caches),
+            num_heads,
+            block_size,
+            content_dim,
+        ]
 
         self._kvcache_ptrs = torch.tensor(
             [cache.data_ptr() for cache in self._kv_caches.values()],
@@ -670,9 +664,7 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         return self._async_manager.get_finished_operations(finished_req_ids)
 
     def get_kv_connector_stats(self) -> Optional["KVConnectorStats"]:
-        """
-        Get the KV connector stats collected during the last interval.
-        """
+        """Get the KV connector stats collected during the last interval."""
         # Clear stats for next iteration
         if (
             hasattr(self, "_async_manager")
@@ -889,8 +881,7 @@ class HF3FSKVConnector(KVConnectorBase_V1):
     def build_kv_connector_stats(
         cls, data: dict[str, Any] | None = None
     ) -> Optional["KVConnectorStats"]:
-        """
-        KVConnectorStats resolution method. This method allows dynamically
+        """KVConnectorStats resolution method. This method allows dynamically
         registered connectors to return their own KVConnectorStats object,
         which can implement custom aggregation logic on the data dict.
         """
@@ -993,7 +984,10 @@ class HF3FSKVConnector(KVConnectorBase_V1):
                     self._local_total_tokens,
                     buffer_tensor,
                     token_indices,
-                    is_mla=self._use_mla,
+                    self._local_block_size,
+                    self._num_heads,
+                    self._content_dim,
+                    self._kv_cache_strides,
                 )
             else:
                 gather_scatter_helper.scatter_kv_caches(
@@ -1001,7 +995,10 @@ class HF3FSKVConnector(KVConnectorBase_V1):
                     self._local_total_tokens,
                     buffer_tensor,
                     token_indices,
-                    is_mla=self._use_mla,
+                    self._local_block_size,
+                    self._num_heads,
+                    self._content_dim,
+                    self._kv_cache_strides,
                 )
 
     def _compute_prefix_hash(
@@ -1018,7 +1015,7 @@ class HF3FSKVConnector(KVConnectorBase_V1):
 
 @dataclass
 class HF3FSKVConnectorStats(KVConnectorStats):
-    """Container for transfer performance metrics"""
+    """Container for transfer performance metrics."""
 
     def __post_init__(self):
         if not self.data:
@@ -1078,10 +1075,14 @@ class HF3FSKVConnectorStats(KVConnectorStats):
             "Num save task failed": num_failed_save,
             "Num load task success": num_success_load,
             "Num load task failed": num_failed_load,
-            "Avg save duration (ms)": round(save_duration.mean() * 1e3, 3),
-            "P90 save duration (ms)": round(np.percentile(save_duration, 90) * 1e3, 3),
-            "Avg load duration (ms)": round(load_duration.mean() * 1e3, 3),
-            "P90 load duration (ms)": round(np.percentile(load_duration, 90) * 1e3, 3),
+            "Avg save duration (ms)": round(save_duration.mean().item() * 1e3, 3),
+            "P90 save duration (ms)": round(
+                np.percentile(save_duration, 90).item() * 1e3, 3
+            ),
+            "Avg load duration (ms)": round(load_duration.mean().item() * 1e3, 3),
+            "P90 load duration (ms)": round(
+                np.percentile(load_duration, 90).item() * 1e3, 3
+            ),
         }
 
     def is_empty(self) -> bool:

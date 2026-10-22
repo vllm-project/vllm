@@ -10,15 +10,30 @@ from __future__ import annotations
 
 import time
 import uuid
+from concurrent.futures import Future
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
-from vllm.v1.kv_offload.base import LookupResult, ReqContext, ScheduleEndContext
-from vllm.v1.kv_offload.tiering.base import JobResult, TransferJob
+from vllm.utils.hashing import sha256
+from vllm.v1.core.kv_cache_utils import DEFAULT_NONE_HASH_SEED, init_none_hash
+from vllm.v1.kv_offload.base import (
+    LookupResult,
+    OffloadKey,
+    OffloadPolicy,
+    ReqContext,
+    ScheduleEndContext,
+)
+from vllm.v1.kv_offload.tiering.base import (
+    JobResult,
+    TieringOffloadingMetrics,
+    TransferJob,
+)
+from vllm.v1.kv_offload.tiering.manager import TieringOffloadingManager
 from vllm.v1.kv_offload.tiering.p2p import manager as manager_module
 from vllm.v1.kv_offload.tiering.p2p.manager import (
+    _RECONNECT_MAX_BACKOFF_S,
     _UNBOUND_STORE_TIMEOUT_S,
     P2PSecondaryTierManager,
     _annotate_req_context,
@@ -29,6 +44,8 @@ from vllm.v1.kv_offload.tiering.p2p.session import (
     SessionPollResult,
     StoreResult,
 )
+from vllm.v1.kv_offload.tiering.p2p.session.client import _LOOKUP_TIMEOUT_S
+from vllm.v1.kv_offload.tiering.p2p.session.protocol import TYPE_KEY, DisconnectMsg
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -83,18 +100,18 @@ def _req_context(kv_params: dict | None = None) -> ReqContext:
 
 def _job_metadata(
     job_id: int,
-    keys: list[bytes] | None = None,
-    block_ids: list[int] | None = None,
+    keys: list[OffloadKey] | None = None,
+    chunk_ids: list[int] | None = None,
     kv_params: dict | None = None,
 ) -> TransferJob:
     if keys is None:
-        keys = [b"key1"]
-    if block_ids is None:
-        block_ids = list(range(len(keys)))
+        keys = [OffloadKey(b"key1")]
+    if chunk_ids is None:
+        chunk_ids = list(range(len(keys)))
     return TransferJob(
         job_id=job_id,
         keys=keys,
-        block_ids=np.array(block_ids),
+        chunk_ids=np.array(chunk_ids),
         is_promotion=False,
         req_context=_req_context(kv_params),
     )
@@ -103,13 +120,19 @@ def _job_metadata(
 def _make_manager() -> P2PSecondaryTierManager:
     """Create a manager with stubbed __init__."""
     mgr = P2PSecondaryTierManager.__new__(P2PSecondaryTierManager)
+    mgr.tier_type = "p2p"
+    mgr._bp_detector = None
     mgr._local_id = "127.0.0.1:7777"
     mgr._hash_seed = "0"
     mgr._finished_jobs = []
     mgr._failed_req_ids = set()
     mgr._sessions = {}
+    mgr._reconnect_backoff = {}
+    mgr._data_plane_faults = {}
     mgr._kv_to_session = {}
     mgr._unbound_stores = {}
+    mgr._reaped_stores = {}
+    mgr._unbound_store_timeout_s = _UNBOUND_STORE_TIMEOUT_S
     mgr._failed_serve_ctxs = []
     return mgr
 
@@ -123,23 +146,12 @@ def _init_offloading_spec() -> SimpleNamespace:
 
 
 # ---------------------------------------------------------------------------
-# Tests for __init__ PYTHONHASHSEED assertion
+# Tests for __init__ hash seed resolution
 # ---------------------------------------------------------------------------
 
 
-class TestInitHashSeedAssertion:
-    def test_missing_pythonhashseed_raises(self, monkeypatch):
-        """P2P instance refuses to start when PYTHONHASHSEED is unset."""
-        monkeypatch.delenv("PYTHONHASHSEED", raising=False)
-        with pytest.raises(ValueError, match="PYTHONHASHSEED"):
-            P2PSecondaryTierManager(
-                offloading_spec=_init_offloading_spec(),
-                primary_kv_view=memoryview(bytearray(16)),
-            )
-
-    def test_pythonhashseed_set_succeeds(self, monkeypatch):
-        """With PYTHONHASHSEED set, __init__ records it for the handshake."""
-        monkeypatch.setenv("PYTHONHASHSEED", "12345")
+class TestInitHashSeed:
+    def _build(self, monkeypatch) -> P2PSecondaryTierManager:
         monkeypatch.setattr(manager_module, "NixlTransport", lambda *a, **k: object())
         monkeypatch.setattr(manager_module, "ZmqTransport", lambda *a, **k: object())
         monkeypatch.setattr(
@@ -147,11 +159,73 @@ class TestInitHashSeedAssertion:
             "from_offloading_spec",
             lambda **k: SimpleNamespace(get_run_config=lambda: {}),
         )
+        return P2PSecondaryTierManager(
+            offloading_spec=_init_offloading_spec(),
+            primary_kv_view=memoryview(bytearray(16)),
+        )
+
+    def test_missing_pythonhashseed_uses_default(self, monkeypatch):
+        """P2P falls back to the deterministic default seed when unset."""
+        monkeypatch.delenv("PYTHONHASHSEED", raising=False)
+        mgr = self._build(monkeypatch)
+        init_none_hash(sha256)
+        assert mgr._get_hash_seed() == DEFAULT_NONE_HASH_SEED
+
+    def test_pythonhashseed_set_succeeds(self, monkeypatch):
+        """With PYTHONHASHSEED set, the handshake advertises it."""
+        monkeypatch.setenv("PYTHONHASHSEED", "12345")
+        mgr = self._build(monkeypatch)
+        init_none_hash(sha256)
+        assert mgr._get_hash_seed() == "12345"
+
+    def test_seed_resolved_after_init_none_hash(self, monkeypatch):
+        """The seed is read lazily, not at construction time.
+
+        This tier is built before init_none_hash runs, and a non-cryptographic
+        hash algorithm seeds NONE_HASH randomly, so resolving in __init__ would
+        advertise a value that does not match the NONE_HASH actually in use.
+        """
+        monkeypatch.delenv("PYTHONHASHSEED", raising=False)
+        mgr = self._build(monkeypatch)
+        assert mgr._hash_seed is None
+        monkeypatch.setattr(
+            manager_module, "get_none_hash_seed", lambda: "random-seed-abc"
+        )
+        assert mgr._get_hash_seed() == "random-seed-abc"
+
+
+class TestBackpressureRejected:
+    def _patch_transports(self, monkeypatch) -> None:
+        monkeypatch.setattr(manager_module, "NixlTransport", lambda *a, **k: object())
+        monkeypatch.setattr(manager_module, "ZmqTransport", lambda *a, **k: object())
+        monkeypatch.setattr(
+            manager_module.FileMapper,
+            "from_offloading_spec",
+            lambda **k: SimpleNamespace(get_run_config=lambda: {}),
+        )
+
+    def test_explicit_backpressure_detector_rejected(self, monkeypatch):
+        """An explicitly configured detector must fail fast for P2P.
+
+        The generic store-latency detector cannot fail fast in PD mode and
+        rendezvous time makes store latency an unreliable pressure signal,
+        so P2P rejects it rather than degrading silently.
+        """
+        self._patch_transports(monkeypatch)
+        with pytest.raises(ValueError, match="not supported for the P2P"):
+            P2PSecondaryTierManager(
+                offloading_spec=_init_offloading_spec(),
+                primary_kv_view=memoryview(bytearray(16)),
+                backpressure_detector=object(),
+            )
+
+    def test_no_detector_constructs_normally(self, monkeypatch):
+        self._patch_transports(monkeypatch)
         mgr = P2PSecondaryTierManager(
             offloading_spec=_init_offloading_spec(),
             primary_kv_view=memoryview(bytearray(16)),
         )
-        assert mgr._hash_seed == "12345"
+        assert mgr.bp_detector is None
 
 
 # ---------------------------------------------------------------------------
@@ -188,29 +262,29 @@ class TestLookup:
     def test_lookup_returns_miss_without_kv_params(self):
         mgr = _make_manager()
         ctx = _req_context(kv_params=None)
-        assert mgr.lookup(b"key", ctx) is LookupResult.MISS
+        assert mgr.lookup(OffloadKey(b"key"), ctx) is LookupResult.MISS
 
     def test_lookup_returns_miss_without_required_fields(self):
         mgr = _make_manager()
         ctx = _req_context(kv_params={"remote_prefiller": {"remote_host": "x"}})
-        assert mgr.lookup(b"key", ctx) is LookupResult.MISS
+        assert mgr.lookup(OffloadKey(b"key"), ctx) is LookupResult.MISS
 
     def test_lookup_returns_hit_for_valid_request(self):
         mgr = _make_manager()
         ctx = _req_context(kv_params=_remote_prefiller_kv_params())
-        assert mgr.lookup(b"key", ctx) is LookupResult.HIT
+        assert mgr.lookup(OffloadKey(b"key"), ctx) is LookupResult.HIT
 
     def test_lookup_returns_miss_for_failed_request(self):
         mgr = _make_manager()
         mgr._failed_req_ids.add("req-1")
         ctx = _req_context(kv_params=_remote_prefiller_kv_params(kv_request_id="req-1"))
-        assert mgr.lookup(b"key", ctx) is LookupResult.MISS
+        assert mgr.lookup(OffloadKey(b"key"), ctx) is LookupResult.MISS
 
     def test_lookup_returns_hit_for_different_request_id(self):
         mgr = _make_manager()
         mgr._failed_req_ids.add("req-1")
         ctx = _req_context(kv_params=_remote_prefiller_kv_params(kv_request_id="req-2"))
-        assert mgr.lookup(b"key", ctx) is LookupResult.HIT
+        assert mgr.lookup(OffloadKey(b"key"), ctx) is LookupResult.HIT
 
     def test_lookup_returns_miss_without_prefill_key(self):
         """No ``remote_prefiller`` sub-dict means the request was not routed for
@@ -218,7 +292,29 @@ class TestLookup:
         returns MISS even when a stale ``remote_decoder`` block is present."""
         mgr = _make_manager()
         ctx = _req_context(kv_params=_remote_decoder_kv_params())
-        assert mgr.lookup(b"key", ctx) is LookupResult.MISS
+        assert mgr.lookup(OffloadKey(b"key"), ctx) is LookupResult.MISS
+
+
+# ---------------------------------------------------------------------------
+# Tests for on_new_request offload policy
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "kv_params,expected",
+    [
+        (_remote_decoder_kv_params(), OffloadPolicy.REQUEST_LEVEL),
+        (None, OffloadPolicy.CHUNK_LEVEL),
+        (_remote_prefiller_kv_params(), OffloadPolicy.CHUNK_LEVEL),
+        ({"remote_decoder": {}}, OffloadPolicy.CHUNK_LEVEL),
+    ],
+    ids=["producer", "plain", "consumer", "producer_no_id"],
+)
+def test_on_new_request_policy(monkeypatch, kv_params, expected):
+    """Only a producer leg carrying a kv_request_id widens to REQUEST_LEVEL."""
+    mgr = _make_manager()
+    monkeypatch.setattr(mgr, "_get_or_create_session", lambda peer_id: None)
+    assert mgr.on_new_request(_req_context(kv_params=kv_params)).policy is expected
 
 
 # ---------------------------------------------------------------------------
@@ -267,10 +363,10 @@ class TestServeExternalRequests:
         mgr._failed_serve_ctxs = [ctx]
         sess_a = _RecordingSession()
         sess_b = _RecordingSession()
-        mgr._sessions = {"a": sess_a, "b": sess_b}  # type: ignore[assignment]
+        mgr._sessions = {"a": sess_a, "b": sess_b}  # type: ignore[dict-item]  # P2PSession stand-in
 
         parent = _RecordingParent()
-        mgr.serve_external_requests(parent)  # type: ignore[arg-type]
+        mgr.serve_external_requests(parent)
 
         # Failed serve released and queue cleared.
         assert parent.finished == ["p2p:peer:req-1:lu1"]
@@ -282,10 +378,10 @@ class TestServeExternalRequests:
     def test_no_failed_serves_still_serves_sessions(self):
         mgr = _make_manager()
         sess = _RecordingSession()
-        mgr._sessions = {"a": sess}  # type: ignore[assignment]
+        mgr._sessions = {"a": sess}  # type: ignore[dict-item]  # P2PSession stand-in
 
         parent = _RecordingParent()
-        mgr.serve_external_requests(parent)  # type: ignore[arg-type]
+        mgr.serve_external_requests(parent)
 
         assert parent.finished == []
         assert sess.served_with == [parent]
@@ -319,8 +415,8 @@ class TestSubmitStore:
         mgr = _make_manager()
         job = _job_metadata(
             job_id=1,
-            keys=[b"k1", b"k2"],
-            block_ids=[3, 4],
+            keys=[OffloadKey(b"k1"), OffloadKey(b"k2")],
+            chunk_ids=[3, 4],
             kv_params=_remote_decoder_kv_params(kv_request_id="req-1"),
         )
         mgr.submit_store(job)
@@ -345,13 +441,13 @@ class TestSubmitStore:
         forwards directly to that session rather than re-buffering."""
         mgr = _make_manager()
         bound = _FakeSession(peer_id="10.0.0.1:8000", connected=True)
-        mgr._kv_to_session["req-1"] = bound  # type: ignore[assignment]
+        mgr._kv_to_session["req-1"] = bound
         # Note: _sessions is intentionally untouched — this test isolates
         # the kv_request_id → session fast path.
         job = _job_metadata(
             job_id=7,
-            keys=[b"k1", b"k2"],
-            block_ids=[3, 4],
+            keys=[OffloadKey(b"k1"), OffloadKey(b"k2")],
+            chunk_ids=[3, 4],
             kv_params=_remote_decoder_kv_params(kv_request_id="req-1"),
         )
         mgr.submit_store(job)
@@ -394,7 +490,7 @@ class TestSubmitLoad:
         """Empty key list succeeds immediately."""
         mgr = _make_manager()
         job = _job_metadata(
-            job_id=1, keys=[], block_ids=[], kv_params=_remote_prefiller_kv_params()
+            job_id=1, keys=[], chunk_ids=[], kv_params=_remote_prefiller_kv_params()
         )
         mgr.submit_load(job)
         assert mgr._finished_jobs == [JobResult(job_id=1, success=True)]
@@ -413,11 +509,11 @@ class TestSubmitLoad:
         mgr = _make_manager()
         peer_id = "10.0.0.1:8000"
         existing = _FakeSession(peer_id=peer_id, connected=True)
-        mgr._sessions[peer_id] = existing  # type: ignore[assignment]
+        mgr._sessions[peer_id] = existing
         job = _job_metadata(
             job_id=42,
-            keys=[b"k1", b"k2"],
-            block_ids=[5, 6],
+            keys=[OffloadKey(b"k1"), OffloadKey(b"k2")],
+            chunk_ids=[5, 6],
             kv_params=_remote_prefiller_kv_params(kv_request_id="req-42"),
         )
         mgr.submit_load(job)
@@ -439,6 +535,66 @@ class TestSubmitLoad:
         job = _job_metadata(job_id=1, kv_params=params)
         mgr.submit_load(job)
         assert mgr._finished_jobs == [JobResult(job_id=1, success=False)]
+
+
+# ---------------------------------------------------------------------------
+# Tests for promotion latency metrics
+# ---------------------------------------------------------------------------
+
+
+class TestPromotionLatency:
+    def test_p2p_load_without_transfer_time_records_promotion_latency(self):
+        """P2P load results omit transfer_time; the manager records promotion
+        latency from job creation to completion."""
+        p2p_tier = _make_manager()
+        primary_kv_view = memoryview(np.zeros((5, 16), dtype=np.uint8))
+
+        primary_tier = SimpleNamespace(
+            _num_chunks=5,
+            get_kv_memoryview=lambda: primary_kv_view,
+            complete_write=lambda *args: None,
+            get_stats=lambda: None,
+        )
+        tiering_manager = TieringOffloadingManager(
+            primary_tier=primary_tier,
+            secondary_tiers=[p2p_tier],
+            tier_poll_interval_s=0.0,
+        )
+        job = TransferJob(
+            job_id=42,
+            keys=[OffloadKey(b"key1")],
+            chunk_ids=np.array([0]),
+            is_promotion=True,
+            req_context=_req_context(_remote_prefiller_kv_params()),
+        )
+        tiering_manager._register_job(job, tier_idx=0)
+
+        session = _FakeSession(
+            peer_id="10.0.0.1:8000",
+            loads=[LoadResult(job_id=42, kv_request_id="req-1", success=True)],
+        )
+        p2p_tier._sessions[session.peer_id] = session
+        p2p_tier._control = SimpleNamespace(poll=lambda: [])
+        reported_results: list[JobResult] = []
+        get_finished_jobs = p2p_tier.get_finished_jobs
+
+        def capture_finished_jobs():
+            results = list(get_finished_jobs())
+            reported_results.extend(results)
+            return results
+
+        p2p_tier.get_finished_jobs = capture_finished_jobs  # type: ignore[method-assign]
+        p2p_tier.submit_load(job)
+        assert session.requests == [(42, "req-1")]
+
+        tiering_manager._process_finished_jobs()
+
+        assert reported_results == [JobResult(job_id=42, success=True)]
+        assert reported_results[0].transfer_time is None
+        stats = tiering_manager.get_stats()
+        assert stats is not None
+        observations = stats.data["data"][TieringOffloadingMetrics.PROMOTION_LATENCY]
+        assert len(observations[("1:p2p", "success")]) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -499,7 +655,7 @@ class TestOnRequestFinished:
         (FetchMsg received) routes via _kv_to_session and pops the entry."""
         mgr = _make_manager()
         bound = _FakeSession(peer_id="some-peer:1", connected=True)
-        mgr._kv_to_session["req-1"] = bound  # type: ignore[assignment]
+        mgr._kv_to_session["req-1"] = bound
         ctx = _req_context(kv_params=_remote_decoder_kv_params(kv_request_id="req-1"))
         mgr.on_request_finished(ctx)
         assert bound.finishes == ["req-1"]
@@ -515,8 +671,8 @@ class TestOnRequestFinished:
 
         mgr = _make_manager()
         mgr._unbound_stores["req-1"] = [
-            _UnboundStoreBatch(job_id=10, keys=[b"k"], block_ids=[0]),
-            _UnboundStoreBatch(job_id=11, keys=[b"k2"], block_ids=[1]),
+            _UnboundStoreBatch(job_id=10, keys=[OffloadKey(b"k")], block_ids=[0]),
+            _UnboundStoreBatch(job_id=11, keys=[OffloadKey(b"k2")], block_ids=[1]),
         ]
         ctx = _req_context(kv_params=_remote_decoder_kv_params(kv_request_id="req-1"))
         mgr.on_request_finished(ctx)
@@ -565,11 +721,14 @@ class _FakeSession:
         close_req_ids: list[str] | None = None,
         close_stores: list[int] | None = None,
         close_failed_serves: list[ReqContext] | None = None,
+        last_activity_at: float | None = None,
     ) -> None:
         self.peer_id = peer_id
         self.alive = alive
         self.connected = connected
         self.ready = True
+        self.death_reason = "control connection lost"
+        self.data_plane_fault: str | None = None
         self._loads = loads or []
         self._stores = stores or []
         self._new_fetch_ids = new_fetch_ids or []
@@ -581,6 +740,9 @@ class _FakeSession:
         self.stores_added: list[tuple[str, list, object, int]] = []
         self.attached: list[object] = []
         self.finishes: list[str] = []
+        self.last_activity_at: float = (
+            last_activity_at if last_activity_at is not None else time.monotonic()
+        )
         # Mirror P2PSession._server._inflight (transfer_id → handle) and
         # P2PSession._client.has_active_loads for the shutdown-drain and
         # drain_jobs paths. Tests populate _server._inflight when needed.
@@ -636,8 +798,8 @@ class TestGetFinished:
             def poll(self):
                 return []
 
-        mgr._control = FakeControl()  # type: ignore[assignment]
-        mgr._data = None  # type: ignore[assignment]
+        mgr._control = FakeControl()
+        mgr._data = None
         return mgr
 
     def test_drains_finished_jobs(self):
@@ -658,7 +820,7 @@ class TestGetFinished:
                 pass
 
         mgr = self._make()
-        mgr._data = FakeData()  # type: ignore[assignment]
+        mgr._data = FakeData()
         dead = _FakeSession(
             peer_id="dead:1234",
             alive=False,
@@ -667,7 +829,7 @@ class TestGetFinished:
             close_req_ids=["req-load"],
             close_stores=[10, 11],
         )
-        mgr._sessions["dead:1234"] = dead  # type: ignore[assignment]
+        mgr._sessions["dead:1234"] = dead
 
         results = list(mgr.get_finished_jobs())
         # 2 baseline + 1 failed load + 2 failed stores
@@ -687,14 +849,14 @@ class TestGetFinished:
                 pass
 
         mgr = self._make()
-        mgr._data = FakeData()  # type: ignore[assignment]
+        mgr._data = FakeData()
         dead = _FakeSession(
             peer_id="dead:1234",
             alive=False,
             connected=True,
             close_req_ids=["req-probe-1", "req-probe-2"],
         )
-        mgr._sessions["dead:1234"] = dead  # type: ignore[assignment]
+        mgr._sessions["dead:1234"] = dead
 
         list(mgr.get_finished_jobs())
         assert "dead:1234" not in mgr._sessions
@@ -707,24 +869,24 @@ class TestGetFinished:
         from vllm.v1.kv_offload.tiering.p2p.manager import _UnboundStoreBatch
 
         mgr._unbound_stores["req-fresh"] = [
-            _UnboundStoreBatch(job_id=99, keys=[b"k"], block_ids=[0])
+            _UnboundStoreBatch(job_id=99, keys=[OffloadKey(b"k")], block_ids=[0])
         ]
         list(mgr.get_finished_jobs())
         assert "req-fresh" in mgr._unbound_stores
 
     def test_unbound_store_reaped_after_timeout(self):
-        """Unbound stores past _UNBOUND_STORE_TIMEOUT_S surface as failed
-        and their kv_request_id lands in _failed_req_ids so a late
-        FetchMsg/lookup doesn't try to satisfy them."""
+        """Unbound stores past the reap deadline surface as failed and their
+        kv_request_id lands in _reaped_stores so a late FetchMsg is rejected
+        instead of parking demand nothing can satisfy."""
         from vllm.v1.kv_offload.tiering.p2p.manager import _UnboundStoreBatch
 
         mgr = self._make()
-        stale = _UnboundStoreBatch(job_id=10, keys=[b"k"], block_ids=[0])
+        stale = _UnboundStoreBatch(job_id=10, keys=[OffloadKey(b"k")], block_ids=[0])
         # Backdate the submission so the head batch is past the deadline.
         stale.submitted_at = time.monotonic() - _UNBOUND_STORE_TIMEOUT_S - 1.0
         mgr._unbound_stores["req-stale"] = [
             stale,
-            _UnboundStoreBatch(job_id=11, keys=[b"k2"], block_ids=[1]),
+            _UnboundStoreBatch(job_id=11, keys=[OffloadKey(b"k2")], block_ids=[1]),
         ]
 
         results = list(mgr.get_finished_jobs())
@@ -733,7 +895,7 @@ class TestGetFinished:
         # 2 baseline + 2 buffered stores
         assert JobResult(job_id=10, success=False) in results
         assert JobResult(job_id=11, success=False) in results
-        assert "req-stale" in mgr._failed_req_ids
+        assert "req-stale" in mgr._reaped_stores
 
     def test_submit_store_parks_unbound_batch(self):
         """submit_store on an unbound id appends a batch with a fresh
@@ -772,7 +934,7 @@ class TestHasPendingWork:
         """The result is the same regardless of session state — there is
         no 'idle' branch."""
         mgr = _make_manager()
-        mgr._sessions["peer:1"] = _FakeSession(peer_id="peer:1")  # type: ignore[assignment]
+        mgr._sessions["peer:1"] = _FakeSession(peer_id="peer:1")
         assert mgr.has_pending_work() is True
 
 
@@ -837,12 +999,12 @@ class TestShutdownDrain:
         mgr = _make_manager()
         data = _ShutdownFakeData(still_queue=still_queue)
         control = _ShutdownFakeControl()
-        mgr._data = data  # type: ignore[assignment]
-        mgr._control = control  # type: ignore[assignment]
+        mgr._data = data
+        mgr._control = control
         if inflight_ids:
             session = _FakeSession(peer_id="peer:1", connected=True)
             session._server._inflight = {tid: object() for tid in inflight_ids}
-            mgr._sessions["peer:1"] = session  # type: ignore[assignment]
+            mgr._sessions["peer:1"] = session
         return mgr, data, control
 
     def test_shutdown_drains_inflight_via_wait_cancel(self):
@@ -1025,6 +1187,14 @@ class _FakeData:
             "block_len": block_len,
         }
 
+    def add_remote_peer_async(
+        self, peer_id, agent_metadata, base_addr, num_blocks, block_len
+    ):
+        future: Future[None] = Future()
+        self.add_remote_peer(peer_id, agent_metadata, base_addr, num_blocks, block_len)
+        future.set_result(None)
+        return future
+
     def remove_remote_peer(self, peer_id: str) -> None:
         self._remote_peers.pop(peer_id, None)
 
@@ -1066,16 +1236,118 @@ def _build_paired_managers() -> tuple[P2PSecondaryTierManager, P2PSecondaryTierM
     ctrl_b = _LoopbackControl(mgr_b._local_id)
     ctrl_a.pair(ctrl_b)
 
-    mgr_a._control = ctrl_a  # type: ignore[assignment]
-    mgr_b._control = ctrl_b  # type: ignore[assignment]
-    mgr_a._data = _FakeData(mgr_a._local_id)  # type: ignore[assignment]
-    mgr_b._data = _FakeData(mgr_b._local_id)  # type: ignore[assignment]
+    mgr_a._control = ctrl_a
+    mgr_b._control = ctrl_b
+    mgr_a._data = _FakeData(mgr_a._local_id)
+    mgr_b._data = _FakeData(mgr_b._local_id)
 
     return mgr_a, mgr_b
 
 
 class TestBidirectionalManager:
     """Two managers each load FROM and serve TO the other over a single peer."""
+
+    def test_unanswered_lookup_falls_back_to_local_prefill(self, lookup_clock):
+        mgr_a, mgr_b = _build_paired_managers()
+        ctx = _req_context(_remote_kv_source_kv_params("B", 2))
+        mgr_a.on_new_request(ctx)
+        for _ in range(3):
+            list(mgr_a.get_finished_jobs())
+            list(mgr_b.get_finished_jobs())
+        assert mgr_a._sessions["B:2"].ready
+        assert mgr_a.lookup(b"key", ctx) == LookupResult.RETRY
+        mgr_a.on_schedule_end(ScheduleEndContext(new_req_ids=[], preempted_req_ids=[]))
+
+        # Stop the server's progress without closing its live connection.
+        lookup_clock.now = _LOOKUP_TIMEOUT_S - 1
+        assert list(mgr_a.get_finished_jobs()) == []
+        assert mgr_a.lookup(b"key", ctx) == LookupResult.RETRY
+        lookup_clock.now = _LOOKUP_TIMEOUT_S
+        assert list(mgr_a.get_finished_jobs()) == []
+        assert mgr_a.lookup(b"key", ctx) == LookupResult.MISS
+        assert "B:2" not in mgr_a._sessions
+        assert "B:2" not in mgr_a._data._remote_peers  # type: ignore[attr-defined]  # _FakeData
+
+        # A replacement session must not restart the expired request's probes.
+        mgr_a._sessions["B:2"] = _FakeSession(peer_id="B:2")  # type: ignore[assignment]
+        assert mgr_a.lookup(b"key", ctx) == LookupResult.MISS
+        mgr_a.on_request_finished(ctx)
+        assert "req-1" not in mgr_a._failed_req_ids
+
+    def test_lookup_expiry_allows_zmq_reconnect(self, lookup_clock):
+        """The peer must retire the timed-out session before a new handshake."""
+        import zmq
+        from zmq.utils.monitor import recv_monitor_message
+
+        from .test_zmq_transport import _make_transport
+
+        managers = []
+        monitors = []
+        try:
+            for _ in range(2):
+                mgr = _make_manager()
+                mgr._control, port = _make_transport()
+                mgr._local_id = f"127.0.0.1:{port}"
+                mgr._data = _FakeData(mgr._local_id)
+                managers.append(mgr)
+                monitors.append(
+                    mgr._control._router.get_monitor_socket(zmq.EVENT_DISCONNECTED)  # type: ignore[attr-defined]
+                )
+            mgr_a, mgr_b = managers
+            peer_a, peer_b = mgr_a._local_id, mgr_b._local_id
+            port_b = int(peer_b.rsplit(":", 1)[1])
+
+            def poll_until(condition):
+                deadline = time.perf_counter() + 5.0
+                while time.perf_counter() < deadline:
+                    list(mgr_a.get_finished_jobs())
+                    list(mgr_b.get_finished_jobs())
+                    if condition():
+                        return
+                    time.sleep(0.005)
+                pytest.fail("P2P session did not reach the expected state")
+
+            def both_ready():
+                return (
+                    peer_b in mgr_a._sessions
+                    and peer_a in mgr_b._sessions
+                    and mgr_a._sessions[peer_b].ready
+                    and mgr_b._sessions[peer_a].ready
+                )
+
+            ctx = _req_context(_remote_kv_source_kv_params("127.0.0.1", port_b))
+            mgr_a.on_new_request(ctx)
+            poll_until(both_ready)
+            old_peer_session = mgr_b._sessions[peer_a]
+            assert mgr_a.lookup(b"key", ctx) == LookupResult.RETRY
+            mgr_a.on_schedule_end(
+                ScheduleEndContext(new_req_ids=[], preempted_req_ids=[])
+            )
+
+            lookup_clock.now = _LOOKUP_TIMEOUT_S
+            list(mgr_a.get_finished_jobs())
+            assert mgr_a.lookup(b"key", ctx) == LookupResult.MISS
+            assert peer_b not in mgr_a._sessions
+            poll_until(lambda: peer_a not in mgr_b._sessions)
+            # Wait for old TCP identities to retire before reconnecting.
+            for monitor in monitors:
+                assert monitor.poll(5000), "old TCP connection did not disconnect"
+                assert recv_monitor_message(monitor)["event"] == zmq.EVENT_DISCONNECTED
+
+            new_ctx = _req_context(
+                _remote_kv_source_kv_params("127.0.0.1", port_b, "req-2")
+            )
+            mgr_a.on_new_request(new_ctx)
+            poll_until(both_ready)
+            assert mgr_b._sessions[peer_a] is not old_peer_session
+            assert mgr_a.lookup(b"key", ctx) == LookupResult.MISS
+        finally:
+            for monitor in monitors:
+                monitor.close(linger=0)
+            # Avoid queuing shutdown messages to an already closed peer.
+            for mgr in managers:
+                mgr._control.close()
+                mgr.shutdown()
 
     def test_both_loads_succeed(self):
         mgr_a, mgr_b = _build_paired_managers()
@@ -1108,16 +1380,16 @@ class TestBidirectionalManager:
         mgr_a.submit_store(
             _job_metadata(
                 job_id=100,
-                keys=[b"a-block"],
-                block_ids=[0],
+                keys=[OffloadKey(b"a-block")],
+                chunk_ids=[0],
                 kv_params=a_prefiller_params,
             )
         )
         mgr_b.submit_store(
             _job_metadata(
                 job_id=200,
-                keys=[b"b-block"],
-                block_ids=[0],
+                keys=[OffloadKey(b"b-block")],
+                chunk_ids=[0],
                 kv_params=b_prefiller_params,
             )
         )
@@ -1126,16 +1398,16 @@ class TestBidirectionalManager:
         mgr_a.submit_load(
             _job_metadata(
                 job_id=101,
-                keys=[b"b-block"],
-                block_ids=[0],
+                keys=[OffloadKey(b"b-block")],
+                chunk_ids=[0],
                 kv_params=a_decoder_params,
             )
         )
         mgr_b.submit_load(
             _job_metadata(
                 job_id=201,
-                keys=[b"a-block"],
-                block_ids=[0],
+                keys=[OffloadKey(b"a-block")],
+                chunk_ids=[0],
                 kv_params=b_decoder_params,
             )
         )
@@ -1157,6 +1429,77 @@ class TestBidirectionalManager:
         # B: load job 201 + store job 200
         assert 201 in b_ok, f"B loads succeeded: {b_ok}"
         assert 200 in b_ok, f"B stores succeeded: {b_ok}"
+
+    def test_late_fetch_after_reap_fails_immediately(self, monkeypatch):
+        """A fetch for a reaped kv_request_id fails in one round trip.
+
+        The producer drops parked blocks once unbound_store_timeout_s
+        expires. A consumer whose fetch arrives after that must learn on the
+        next tick via TransferDoneMsg(success=False) — not stall for
+        _LOAD_TIMEOUT_S and then take the abort path.
+        """
+        from vllm.v1.kv_offload.tiering.p2p.session.client import _LOAD_TIMEOUT_S
+
+        mgr_a, mgr_b = _build_paired_managers()
+        kv_id = "req-late"
+
+        # Record every message type leaving the consumer, so the assertion
+        # below can prove no abort was ever needed.
+        sent_from_a: list[str] = []
+        ctrl_a = mgr_a._control
+        assert isinstance(ctrl_a, _LoopbackControl)
+        drain = ctrl_a._drain_outbound_to
+
+        def recording_drain(peer_local_id: str):
+            out = drain(peer_local_id)
+            sent_from_a.extend(msg.get("type") for _, msg in out)
+            return out
+
+        monkeypatch.setattr(ctrl_a, "_drain_outbound_to", recording_drain)
+
+        # Producer parks the blocks, then reaps them before any fetch lands.
+        mgr_b.submit_store(
+            _job_metadata(
+                job_id=200,
+                keys=[OffloadKey(b"b-block")],
+                chunk_ids=[0],
+                kv_params={"remote_decoder": {"kv_request_id": kv_id}},
+            )
+        )
+        mgr_b._unbound_store_timeout_s = 0.0
+        reap_results = list(mgr_b.get_finished_jobs())
+        assert JobResult(job_id=200, success=False) in reap_results
+        assert kv_id in mgr_b._reaped_stores
+
+        # Consumer now asks for the blocks that no longer exist.
+        consumer_params = {
+            "remote_prefiller": {
+                "kv_request_id": kv_id,
+                "remote_host": "B",
+                "remote_port": 2,
+            },
+        }
+        mgr_a.on_new_request(_req_context(consumer_params))
+        mgr_a.submit_load(
+            _job_metadata(
+                job_id=101,
+                keys=[OffloadKey(b"b-block")],
+                chunk_ids=[0],
+                kv_params=consumer_params,
+            )
+        )
+
+        started = time.monotonic()
+        all_a: list[JobResult] = []
+        for _ in range(8):
+            all_a.extend(list(mgr_a.get_finished_jobs()))
+            list(mgr_b.get_finished_jobs())
+        elapsed = time.monotonic() - started
+
+        assert JobResult(job_id=101, success=False) in all_a, all_a
+        assert kv_id in mgr_a._failed_req_ids
+        assert "abort_fetch" not in sent_from_a, sent_from_a
+        assert elapsed < _LOAD_TIMEOUT_S
 
 
 # ---------------------------------------------------------------------------
@@ -1183,10 +1526,10 @@ class TestAcceptNewPeers:
         mgr = _make_manager()
         peer_id = "10.0.0.1:8000"
         existing = _FakeSession(peer_id=peer_id, connected=True)
-        mgr._sessions[peer_id] = existing  # type: ignore[assignment]
+        mgr._sessions[peer_id] = existing
 
         new_conn = _RecordingConn(peer_id)
-        mgr._accept_new_peers([new_conn])
+        mgr._accept_new_peers([new_conn])  # type: ignore[list-item]  # ControlConnection stand-in
 
         # Manager swallowed the ValueError and closed the duplicate conn.
         assert new_conn.close_calls == 1
@@ -1213,8 +1556,13 @@ class TestAcceptNewPeers:
             def add_remote_peer(self, *args, **kwargs):
                 pass
 
+            def add_remote_peer_async(self, *args, **kwargs):
+                future: Future[None] = Future()
+                future.set_result(None)
+                return future
+
         mgr = _make_manager()
-        mgr._data = FakeData()  # type: ignore[assignment]
+        mgr._data = FakeData()
         peer_id = "10.0.0.1:8000"
 
         # Real ControlConnection-shaped fake: send/close/peer_id only.
@@ -1231,7 +1579,7 @@ class TestAcceptNewPeers:
             def close(self) -> None:
                 self.alive = False
 
-        mgr._accept_new_peers([_Conn(peer_id)])  # type: ignore[arg-type]
+        mgr._accept_new_peers([_Conn(peer_id)])  # type: ignore[list-item]  # ControlConnection stand-in
 
         assert peer_id in mgr._sessions
         assert mgr._sessions[peer_id].connected is True
@@ -1260,7 +1608,7 @@ class TestPollOnce:
             loads=[LoadResult(job_id=11, kv_request_id="req-11", success=True)],
             stores=[StoreResult(job_id=22, success=True)],
         )
-        mgr._sessions[peer_alive] = alive  # type: ignore[assignment]
+        mgr._sessions[peer_alive] = alive
 
         # Dead session whose pending close() jobs surface as failures.
         peer_dead = "10.0.0.3:9999"
@@ -1272,7 +1620,7 @@ class TestPollOnce:
             close_req_ids=["req-33"],
             close_stores=[44],
         )
-        mgr._sessions[peer_dead] = dead  # type: ignore[assignment]
+        mgr._sessions[peer_dead] = dead
 
         class _Ctrl:
             def poll(self_inner):
@@ -1282,8 +1630,8 @@ class TestPollOnce:
             def remove_remote_peer(self_inner, pid):
                 pass
 
-        mgr._control = _Ctrl()  # type: ignore[assignment]
-        mgr._data = _Data()  # type: ignore[assignment]
+        mgr._control = _Ctrl()
+        mgr._data = _Data()
 
         mgr._poll_once()
 
@@ -1313,17 +1661,17 @@ class TestPollOnce:
             connected=True,
             new_fetch_ids=["req-1"],
         )
-        mgr._sessions[peer] = sess  # type: ignore[assignment]
+        mgr._sessions[peer] = sess
         mgr._unbound_stores["req-1"] = [
-            _UnboundStoreBatch(job_id=5, keys=[b"k1"], block_ids=[0]),
-            _UnboundStoreBatch(job_id=6, keys=[b"k2"], block_ids=[1]),
+            _UnboundStoreBatch(job_id=5, keys=[OffloadKey(b"k1")], block_ids=[0]),
+            _UnboundStoreBatch(job_id=6, keys=[OffloadKey(b"k2")], block_ids=[1]),
         ]
 
         class _Ctrl:
             def poll(self_inner):
                 return []
 
-        mgr._control = _Ctrl()  # type: ignore[assignment]
+        mgr._control = _Ctrl()
         mgr._poll_once()
 
         assert mgr._kv_to_session["req-1"] is sess
@@ -1345,13 +1693,13 @@ class TestPollOnce:
             connected=True,
             new_fetch_ids=["req-fast"],
         )
-        mgr._sessions[peer] = sess  # type: ignore[assignment]
+        mgr._sessions[peer] = sess
 
         class _Ctrl:
             def poll(self_inner):
                 return []
 
-        mgr._control = _Ctrl()  # type: ignore[assignment]
+        mgr._control = _Ctrl()
         mgr._poll_once()
 
         assert mgr._kv_to_session["req-fast"] is sess
@@ -1368,13 +1716,13 @@ class TestPollOnce:
             connected=True,
             loads=[LoadResult(job_id=5, kv_request_id="req-5", success=False)],
         )
-        mgr._sessions[peer] = sess  # type: ignore[assignment]
+        mgr._sessions[peer] = sess
 
         class _Ctrl:
             def poll(self_inner):
                 return []
 
-        mgr._control = _Ctrl()  # type: ignore[assignment]
+        mgr._control = _Ctrl()
 
         mgr._poll_once()
 
@@ -1398,26 +1746,26 @@ class TestDrainJobs:
     def test_returns_immediately_when_quiescent(self):
         """No sessions and no inflight: drain_jobs returns without sleeping."""
         mgr = _make_manager()
-        mgr._control = _DrainCtrl()  # type: ignore[assignment]
+        mgr._control = _DrainCtrl()
 
         sleeps: list[float] = []
         # If drain_jobs sleeps when nothing is pending, that's a regression.
         import vllm.v1.kv_offload.tiering.p2p.manager as m
 
         original_sleep = m.time.sleep
-        m.time.sleep = lambda s: sleeps.append(s)  # type: ignore[assignment]
+        m.time.sleep = lambda s: sleeps.append(s)
         try:
             mgr.drain_jobs()
         finally:
-            m.time.sleep = original_sleep  # type: ignore[assignment]
+            m.time.sleep = original_sleep
 
         assert sleeps == []
 
     def test_returns_when_session_has_no_inflight_or_inbound(self):
         """A session with empty _inbound and _inflight does not block drain."""
         mgr = _make_manager()
-        mgr._control = _DrainCtrl()  # type: ignore[assignment]
-        mgr._sessions["peer:1"] = _FakeSession(peer_id="peer:1")  # type: ignore[assignment]
+        mgr._control = _DrainCtrl()
+        mgr._sessions["peer:1"] = _FakeSession(peer_id="peer:1")
         # Should return on the first iteration.
         mgr.drain_jobs()
 
@@ -1425,10 +1773,10 @@ class TestDrainJobs:
         """A session that stays inflight past 5s triggers the warning, and
         once it clears the loop returns."""
         mgr = _make_manager()
-        mgr._control = _DrainCtrl()  # type: ignore[assignment]
+        mgr._control = _DrainCtrl()
         sess = _FakeSession(peer_id="peer:1")
         sess._server._inflight = {1: object()}  # non-empty
-        mgr._sessions["peer:1"] = sess  # type: ignore[assignment]
+        mgr._sessions["peer:1"] = sess
 
         # Synthetic monotonic clock: 100.0 for the start stamp, then 106.0
         # for the first elapsed-check (past the 5s warning threshold), then
@@ -1526,16 +1874,16 @@ class TestConnectionDeathMidTransfer:
         mgr_a.submit_store(
             _job_metadata(
                 job_id=900,
-                keys=[b"a-block"],
-                block_ids=[0],
+                keys=[OffloadKey(b"a-block")],
+                chunk_ids=[0],
                 kv_params=a_prefiller_params,
             )
         )
         mgr_a.submit_load(
             _job_metadata(
                 job_id=901,
-                keys=[b"b-block"],
-                block_ids=[0],
+                keys=[OffloadKey(b"b-block")],
+                chunk_ids=[0],
                 kv_params=a_decoder_params,
             )
         )
@@ -1590,12 +1938,14 @@ class TestBindHostPortDefaults:
     """host/port fall back to VLLM_P2P_SIDE_CHANNEL_* when not in config."""
 
     @staticmethod
-    def _construct(monkeypatch, dp_index=0, **kwargs) -> P2PSecondaryTierManager:
+    def _construct(
+        monkeypatch, dp_index=0, calls: dict | None = None, **kwargs
+    ) -> P2PSecondaryTierManager:
         """Build a manager with the transports/file-mapper stubbed out.
 
         The host is used verbatim (no resolution). The transport constructor
-        args are recorded on ``mgr._test_calls`` so tests can assert the ZMQ
-        identity (``host:port``) stays decoupled from the NIXL agent name
+        args are recorded into ``calls`` (when given) so tests can assert the
+        ZMQ identity (``host:port``) stays decoupled from the NIXL agent name
         (a uuid).
         """
         monkeypatch.setenv("PYTHONHASHSEED", "0")
@@ -1608,19 +1958,19 @@ class TestBindHostPortDefaults:
                 )
             ),
         )
-        calls: dict = {}
+        recorded: dict = {} if calls is None else calls
         monkeypatch.setattr(
             manager_module,
             "NixlTransport",
             lambda agent_name, *a, **k: (
-                calls.update(nixl_name=agent_name) or SimpleNamespace()
+                recorded.update(nixl_name=agent_name) or SimpleNamespace()
             ),
         )
         monkeypatch.setattr(
             manager_module,
             "ZmqTransport",
             lambda local_id, host, port, *a, **k: (
-                calls.update(zmq_id=local_id, zmq_host=host, zmq_port=port)
+                recorded.update(zmq_id=local_id, zmq_host=host, zmq_port=port)
                 or SimpleNamespace()
             ),
         )
@@ -1630,9 +1980,7 @@ class TestBindHostPortDefaults:
                 parallel=SimpleNamespace(data_parallel_index=dp_index)
             ),
         )
-        mgr = P2PSecondaryTierManager(spec, memoryview(b""), **kwargs)
-        mgr._test_calls = calls
-        return mgr
+        return P2PSecondaryTierManager(spec, memoryview(b""), **kwargs)
 
     def test_defaults_from_env_unset(self, monkeypatch):
         monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_HOST", raising=False)
@@ -1675,13 +2023,14 @@ class TestBindHostPortDefaults:
     def test_nixl_name_decoupled_from_identity(self, monkeypatch):
         # The ZMQ identity is the verbatim host:port; the NIXL agent name is a
         # uuid, distinct from the identity and never used as an address.
-        mgr = self._construct(monkeypatch, host="127.0.0.1", port=5710)
-        assert mgr._test_calls["zmq_host"] == "127.0.0.1"
-        assert mgr._test_calls["zmq_port"] == 5710
-        assert mgr._test_calls["zmq_id"] == "127.0.0.1:5710"
+        calls: dict = {}
+        mgr = self._construct(monkeypatch, calls=calls, host="127.0.0.1", port=5710)
+        assert calls["zmq_host"] == "127.0.0.1"
+        assert calls["zmq_port"] == 5710
+        assert calls["zmq_id"] == "127.0.0.1:5710"
         assert mgr._local_id == "127.0.0.1:5710"
         # nixl_name is a valid uuid4 and not the host:port identity.
-        nixl_name = mgr._test_calls["nixl_name"]
+        nixl_name = calls["nixl_name"]
         assert nixl_name != mgr._local_id
         assert uuid.UUID(nixl_name).version == 4
 
@@ -1693,3 +2042,387 @@ class TestBindHostPortDefaults:
         mgr_b = self._construct(monkeypatch, host="localhost", port=5710)
         assert mgr_a._local_id == mgr_b._local_id == "localhost:5710"
         assert mgr_a._nixl_agent_name != mgr_b._nixl_agent_name
+
+
+# ---------------------------------------------------------------------------
+# Tests for session capacity limit (VLLM_P2P_MAX_PEERS)
+# ---------------------------------------------------------------------------
+
+
+class TestSessionCapLimit:
+    """_get_or_create_session and _accept_new_peers reject new peers when
+    the session count reaches VLLM_P2P_MAX_PEERS."""
+
+    def _make_with_control(self):
+        mgr = _make_manager()
+        created = []
+
+        class FakeControl:
+            def connect(self, peer_id):
+                conn = _RecordingConn(peer_id)
+                created.append(conn)
+                return conn
+
+            def poll(self):
+                return []
+
+        class FakeData:
+            block_len = 4096
+            base_addr = 0x1000
+            num_blocks = 16
+            config_fingerprint = ""
+
+            def get_agent_metadata(self):
+                return b"meta"
+
+            def add_remote_peer(self, *a, **k):
+                pass
+
+            def remove_remote_peer(self, pid):
+                pass
+
+        mgr._control = FakeControl()  # type: ignore[assignment]
+        mgr._data = FakeData()  # type: ignore[assignment]
+        return mgr, created
+
+    def test_outbound_rejected_at_capacity(self, monkeypatch):
+        monkeypatch.setenv("VLLM_P2P_MAX_PEERS", "2")
+        import vllm.envs
+
+        vllm.envs.__dict__.pop("VLLM_P2P_MAX_PEERS", None)
+
+        mgr, created = self._make_with_control()
+        mgr._sessions["peer-a:1"] = _FakeSession(peer_id="peer-a:1")  # type: ignore[assignment]
+        mgr._sessions["peer-b:2"] = _FakeSession(peer_id="peer-b:2")  # type: ignore[assignment]
+
+        result = mgr._get_or_create_session("peer-c:3")
+        assert result is None
+        assert "peer-c:3" not in mgr._sessions
+        assert len(created) == 0
+
+    def test_on_new_request_records_failure_on_cap(self, monkeypatch):
+        monkeypatch.setenv("VLLM_P2P_MAX_PEERS", "1")
+        import vllm.envs
+
+        vllm.envs.__dict__.pop("VLLM_P2P_MAX_PEERS", None)
+
+        mgr, _ = self._make_with_control()
+        mgr._sessions["existing:1"] = _FakeSession(peer_id="existing:1")  # type: ignore[assignment]
+
+        ctx = _req_context(
+            kv_params=_remote_prefiller_kv_params(
+                remote_host="10.0.0.2", remote_port=9000, kv_request_id="req-cap"
+            )
+        )
+        mgr.on_new_request(ctx)
+        assert "req-cap" in mgr._failed_req_ids
+
+    def test_inbound_rejected_at_capacity(self, monkeypatch):
+        monkeypatch.setenv("VLLM_P2P_MAX_PEERS", "1")
+        import vllm.envs
+
+        vllm.envs.__dict__.pop("VLLM_P2P_MAX_PEERS", None)
+
+        mgr, _ = self._make_with_control()
+        mgr._sessions["existing:1"] = _FakeSession(peer_id="existing:1")  # type: ignore[assignment]
+
+        conn = _RecordingConn("new-peer:2")
+        mgr._accept_new_peers([conn])
+        assert conn.close_calls == 1
+        assert "new-peer:2" not in mgr._sessions
+
+    def test_existing_session_reused_below_cap(self, monkeypatch):
+        monkeypatch.setenv("VLLM_P2P_MAX_PEERS", "1")
+        import vllm.envs
+
+        vllm.envs.__dict__.pop("VLLM_P2P_MAX_PEERS", None)
+
+        mgr, _ = self._make_with_control()
+        existing = _FakeSession(peer_id="existing:1")
+        mgr._sessions["existing:1"] = existing  # type: ignore[assignment]
+
+        result = mgr._get_or_create_session("existing:1")
+        assert result is existing
+
+
+# ---------------------------------------------------------------------------
+# Tests for graceful error boundary in _get_or_create_session
+# ---------------------------------------------------------------------------
+
+
+class TestGetOrCreateSessionErrorBoundary:
+    def test_connect_failure_returns_none(self):
+        mgr = _make_manager()
+
+        class FailingControl:
+            def connect(self, peer_id):
+                raise RuntimeError("socket exhausted")
+
+            def poll(self):
+                return []
+
+        mgr._control = FailingControl()  # type: ignore[assignment]
+        result = mgr._get_or_create_session("bad:1")
+        assert result is None
+        assert "bad:1" not in mgr._sessions
+
+    def test_session_construction_failure_closes_conn(self):
+        """connect() succeeding but P2PSession construction failing must
+        close the conn so it is not left registered without a session."""
+        mgr = _make_manager()
+        created: list[_RecordingConn] = []
+
+        class RaisingConn(_RecordingConn):
+            def send(self, msg):
+                raise RuntimeError("send failed during connect")
+
+        class Control:
+            def connect(self, peer_id):
+                conn = RaisingConn(peer_id)
+                created.append(conn)
+                return conn
+
+            def poll(self):
+                return []
+
+        class FakeData:
+            block_len = 4096
+            base_addr = 0x1000
+            num_blocks = 16
+            config_fingerprint = ""
+
+            def get_agent_metadata(self):
+                return b"meta"
+
+        mgr._control = Control()  # type: ignore[assignment]
+        mgr._data = FakeData()  # type: ignore[assignment]
+        result = mgr._get_or_create_session("bad:2")
+        assert result is None
+        assert "bad:2" not in mgr._sessions
+        assert len(created) == 1
+        assert created[0].close_calls == 1
+
+
+# ---------------------------------------------------------------------------
+# Tests for idle session eviction
+# ---------------------------------------------------------------------------
+
+
+class TestIdleSessionEviction:
+    def _make_with_fake_data(self):
+        mgr = _make_manager()
+
+        class FakeControl:
+            def poll(self):
+                return []
+
+        class FakeData:
+            def remove_remote_peer(self, pid):
+                pass
+
+        mgr._control = FakeControl()  # type: ignore[assignment]
+        mgr._data = FakeData()  # type: ignore[assignment]
+        return mgr
+
+    def test_idle_session_evicted(self, monkeypatch):
+        monkeypatch.setenv("VLLM_P2P_IDLE_TIMEOUT_S", "10")
+        monkeypatch.setenv("VLLM_P2P_MAX_PEERS", "1")
+        import vllm.envs
+
+        vllm.envs.__dict__.pop("VLLM_P2P_IDLE_TIMEOUT_S", None)
+        vllm.envs.__dict__.pop("VLLM_P2P_MAX_PEERS", None)
+
+        mgr = self._make_with_fake_data()
+        idle_session = _FakeSession(
+            peer_id="idle:1",
+            last_activity_at=time.monotonic() - 20,
+        )
+        mgr._sessions["idle:1"] = idle_session  # type: ignore[assignment]
+
+        mgr._reap_idle_sessions()
+        assert "idle:1" not in mgr._sessions
+
+    def test_idle_session_kept_below_headroom(self, monkeypatch):
+        monkeypatch.setenv("VLLM_P2P_IDLE_TIMEOUT_S", "10")
+        import vllm.envs
+
+        vllm.envs.__dict__.pop("VLLM_P2P_IDLE_TIMEOUT_S", None)
+        vllm.envs.__dict__.pop("VLLM_P2P_MAX_PEERS", None)
+
+        mgr = self._make_with_fake_data()
+        idle_session = _FakeSession(
+            peer_id="idle:1",
+            last_activity_at=time.monotonic() - 20,
+        )
+        mgr._sessions["idle:1"] = idle_session  # type: ignore[assignment]
+
+        mgr._reap_idle_sessions()
+        assert "idle:1" in mgr._sessions
+
+    def test_active_session_kept(self, monkeypatch):
+        monkeypatch.setenv("VLLM_P2P_IDLE_TIMEOUT_S", "10")
+        monkeypatch.setenv("VLLM_P2P_MAX_PEERS", "1")
+        import vllm.envs
+
+        vllm.envs.__dict__.pop("VLLM_P2P_IDLE_TIMEOUT_S", None)
+        vllm.envs.__dict__.pop("VLLM_P2P_MAX_PEERS", None)
+
+        mgr = self._make_with_fake_data()
+        active = _FakeSession(
+            peer_id="active:1",
+            last_activity_at=time.monotonic(),
+        )
+        mgr._sessions["active:1"] = active  # type: ignore[assignment]
+
+        mgr._reap_idle_sessions()
+        assert "active:1" in mgr._sessions
+
+    def test_session_with_pending_work_not_evicted(self, monkeypatch):
+        monkeypatch.setenv("VLLM_P2P_IDLE_TIMEOUT_S", "1")
+        monkeypatch.setenv("VLLM_P2P_MAX_PEERS", "1")
+        import vllm.envs
+
+        vllm.envs.__dict__.pop("VLLM_P2P_IDLE_TIMEOUT_S", None)
+        vllm.envs.__dict__.pop("VLLM_P2P_MAX_PEERS", None)
+
+        mgr = self._make_with_fake_data()
+        busy = _FakeSession(
+            peer_id="busy:1",
+            last_activity_at=time.monotonic() - 100,
+        )
+        busy._server._inflight[1] = object()
+        mgr._sessions["busy:1"] = busy  # type: ignore[assignment]
+
+        mgr._reap_idle_sessions()
+        assert "busy:1" in mgr._sessions
+
+    def test_disabled_when_zero(self, monkeypatch):
+        monkeypatch.setenv("VLLM_P2P_IDLE_TIMEOUT_S", "0")
+        import vllm.envs
+
+        vllm.envs.__dict__.pop("VLLM_P2P_IDLE_TIMEOUT_S", None)
+
+        mgr = self._make_with_fake_data()
+        old = _FakeSession(
+            peer_id="old:1",
+            last_activity_at=time.monotonic() - 999999,
+        )
+        mgr._sessions["old:1"] = old  # type: ignore[assignment]
+
+        mgr._reap_idle_sessions()
+        assert "old:1" in mgr._sessions
+
+
+# ---------------------------------------------------------------------------
+# Reconnect backoff after a data-plane fault
+# ---------------------------------------------------------------------------
+
+
+class TestReconnectBackoff:
+    """A peer whose session ended on a data-plane fault reconnects at once the
+    first time; repeats back off from 1 s up to _RECONNECT_MAX_BACKOFF_S."""
+
+    PEER = "10.0.0.1:8000"
+
+    def _reap(self, mgr: P2PSecondaryTierManager, fault: str | None) -> None:
+        class FakeData:
+            def remove_remote_peer(self, pid):
+                pass
+
+        mgr._data = FakeData()  # type: ignore[assignment]
+        session = _FakeSession(peer_id=self.PEER, alive=False, connected=True)
+        session.data_plane_fault = fault
+        mgr._sessions[self.PEER] = session  # type: ignore[assignment]
+        mgr._reap_dead_sessions()
+
+    def test_backoff_doubles_up_to_max(self):
+        mgr = _make_manager()
+        waits = []
+        for _ in range(9):
+            self._reap(mgr, "NIXL_ERR_REMOTE_DISCONNECT")
+            waits.append(mgr._reconnect_backoff[self.PEER][0])
+        assert waits == [0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 60.0, 60.0]
+        assert waits[-1] == _RECONNECT_MAX_BACKOFF_S
+
+    def test_first_fault_reconnects_at_once(self):
+        mgr = _make_manager()
+        self._reap(mgr, "NIXL_ERR_REMOTE_DISCONNECT")
+        assert mgr._reconnect_wait(self.PEER) <= 0
+
+    def test_control_plane_death_does_not_back_off(self):
+        mgr = _make_manager()
+        for _ in range(3):
+            self._reap(mgr, None)
+        assert self.PEER not in mgr._reconnect_backoff
+
+    def test_healthy_peer_resets_backoff(self):
+        mgr = _make_manager()
+        self._reap(mgr, "fault")
+        self._reap(mgr, "fault")
+        backoff, _ = mgr._reconnect_backoff[self.PEER]
+        assert backoff == 1.0
+        # The previous wait then expired more than the max ago (no fault
+        # since; no successful transfer is required).
+        mgr._reconnect_backoff[self.PEER] = (
+            backoff,
+            time.monotonic() - _RECONNECT_MAX_BACKOFF_S - 1.0,
+        )
+        self._reap(mgr, "fault")
+        assert mgr._reconnect_backoff[self.PEER][0] == 0.0
+
+    def test_peer_down_log_counts_faults_across_backoff_reset(self, monkeypatch):
+        warnings: list[str] = []
+
+        def record_warning(msg, *args, **_kwargs):
+            warnings.append(msg % args if args else msg)
+
+        monkeypatch.setattr(manager_module.logger, "warning", record_warning)
+        mgr = _make_manager()
+        self._reap(mgr, "fault")
+        self._reap(mgr, "fault")
+        # Let the backoff expire: the count must keep growing regardless.
+        backoff, _ = mgr._reconnect_backoff[self.PEER]
+        mgr._reconnect_backoff[self.PEER] = (
+            backoff,
+            time.monotonic() - _RECONNECT_MAX_BACKOFF_S - 1.0,
+        )
+        self._reap(mgr, "fault")
+        self._reap(mgr, None)
+
+        assert mgr._data_plane_faults[self.PEER] == 3
+        assert warnings[0].endswith("; data-plane fault #1")
+        assert warnings[1].endswith("; data-plane fault #2; reconnect backoff 1s")
+        assert warnings[2].endswith("; data-plane fault #3")
+        # A control-plane death neither counts nor reports a fault.
+        assert "data-plane fault" not in warnings[3]
+
+    def test_outbound_connect_is_skipped_during_backoff(self):
+        mgr = _make_manager()
+        self._reap(mgr, "fault")
+        self._reap(mgr, "fault")
+
+        class NoConnect:
+            def connect(self, peer_id):
+                raise AssertionError("connect() during reconnect backoff")
+
+        mgr._control = NoConnect()  # type: ignore[assignment]
+        assert mgr._get_or_create_session(self.PEER) is None
+
+    def test_inbound_is_told_to_disconnect_during_backoff(self):
+        mgr = _make_manager()
+        self._reap(mgr, "fault")
+        self._reap(mgr, "fault")
+
+        class Conn(_RecordingConn):
+            def __init__(self, peer_id: str) -> None:
+                super().__init__(peer_id)
+                self.sent: list[dict] = []
+
+            def send(self, msg: dict) -> None:
+                self.sent.append(msg)
+
+        conn = Conn(self.PEER)
+        mgr._accept_new_peers([conn])  # type: ignore[list-item]
+        assert conn.sent == [{TYPE_KEY: DisconnectMsg.TYPE}]
+        assert conn.close_calls == 1
+        assert self.PEER not in mgr._sessions

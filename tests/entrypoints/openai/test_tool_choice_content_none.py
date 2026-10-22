@@ -1,10 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Sequence
+
 import pytest
 from openai.types.chat.chat_completion import ChatCompletion as OpenAIChatCompletion
 from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
 
+from vllm.entrypoints.generate.base.protocol import (
+    DeltaFunctionCall,
+    DeltaMessage,
+    DeltaToolCall,
+    FunctionCall,
+    ToolCall,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -13,15 +22,8 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionStreamResponse,
     ChatMessage,
 )
-from vllm.entrypoints.openai.engine.protocol import (
-    DeltaFunctionCall,
-    DeltaMessage,
-    DeltaToolCall,
-    FunctionCall,
-    ToolCall,
-    UsageInfo,
-)
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.serve.engine.protocol import UsageInfo
 from vllm.parser.abstract_parser import DelegatingParser
 
 pytestmark = pytest.mark.skip_global_cleanup
@@ -31,9 +33,6 @@ class _DummyDelegatingParser(DelegatingParser):
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         return False
 
-    def extract_content_ids(self, input_ids: list[int]) -> list[int]:
-        return input_ids
-
     def extract_reasoning(self, model_output: str, request):
         return None, model_output
 
@@ -42,9 +41,9 @@ class _DummyDelegatingParser(DelegatingParser):
         previous_text: str,
         current_text: str,
         delta_text: str,
-        previous_token_ids: list[int],
-        current_token_ids: list[int],
-        delta_token_ids: list[int],
+        previous_token_ids: Sequence[int],
+        current_token_ids: Sequence[int],
+        delta_token_ids: Sequence[int],
     ):
         return None
 

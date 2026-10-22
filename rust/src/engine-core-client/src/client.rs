@@ -2,14 +2,15 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::BTreeMap;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::future::{join_all, try_join_all};
+use futures::future::join_all;
 use itertools::Itertools;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, trace};
 
@@ -25,10 +26,11 @@ use crate::runtime::{BackgroundShutdownRuntime, build_zmq_runtime};
 use crate::transport::{self, ConnectedEngine};
 
 pub(crate) mod imp;
+mod output_channel;
 mod state;
 mod stream;
 
-pub use stream::{EngineCoreOutputStream, EngineCoreStreamOutput};
+pub use stream::{EngineCoreOutputStream, EngineCoreStreamDelivery, EngineCoreStreamOutput};
 
 /// How the frontend acquires its request/response transport with Python
 /// `EngineCoreProc`s.
@@ -53,16 +55,15 @@ pub enum TransportMode {
         local_output_address: Option<String>,
     },
 
-    /// The Python supervisor has already chosen the frontend transport
-    /// addresses, and the Rust process only needs to bind them and wait for
-    /// engine registration frames.
+    /// The Python supervisor has already bound the frontend transport
+    /// listeners. Rust adopts them and waits for engine registration frames.
+    /// `EngineCoreClient::connect` consumes each descriptor exactly once;
+    /// copied integer values do not create additional descriptor ownership.
     Bootstrapped {
-        /// Input ROUTER socket address that engines will connect to for
-        /// requests.
-        input_address: String,
-        /// Output PULL socket address that engines will connect to for
-        /// responses.
-        output_address: String,
+        /// Raw input ROUTER listener descriptor inherited from the supervisor.
+        input_listener_fd: i32,
+        /// Raw output PULL listener descriptor inherited from the supervisor.
+        output_listener_fd: i32,
         /// First data-parallel engine rank expected to register on this
         /// transport.
         engine_start_index: u32,
@@ -155,6 +156,11 @@ pub struct EngineCoreClientConfig {
     pub model_name: String,
     /// Frontend client index stamped onto every request.
     pub client_index: u32,
+    /// Whether the connected engines record stats, i.e. were not started with
+    /// `--disable-log-stats`. When `false`, engines emit neither
+    /// `SchedulerStats` nor request lifecycle events, so frontend metrics
+    /// derived from them are not exported.
+    pub engine_stats_enabled: bool,
 }
 
 impl EngineCoreClientConfig {
@@ -173,6 +179,7 @@ impl EngineCoreClientConfig {
             coordinator_mode: None,
             model_name: String::new(),
             client_index: 0,
+            engine_stats_enabled: true,
         }
     }
 
@@ -190,6 +197,12 @@ impl EngineCoreClientConfig {
     /// Override the client index stamped onto every outgoing request.
     pub fn with_client_index(mut self, client_index: u32) -> Self {
         self.client_index = client_index;
+        self
+    }
+
+    /// Set whether the connected engines record stats.
+    pub fn with_engine_stats_enabled(mut self, engine_stats_enabled: bool) -> Self {
+        self.engine_stats_enabled = engine_stats_enabled;
         self
     }
 
@@ -271,6 +284,9 @@ pub struct EngineCoreClient {
     inner: Arc<ClientInner>,
     coordinator: Option<CoordinatorHandle>,
     abort_tx: mpsc::UnboundedSender<AbortRequest>,
+    /// Whether a profiling session is awaiting an explicit stop. Held across each
+    /// start/stop utility call so a stale stop reply cannot clear a newer session.
+    profile_active: Mutex<bool>,
 
     /// Runtime used to send messages to the engine and drive all background tasks.
     runtime: BackgroundShutdownRuntime,
@@ -321,8 +337,8 @@ impl EngineCoreClient {
             }
 
             TransportMode::Bootstrapped {
-                input_address,
-                output_address,
+                input_listener_fd,
+                output_listener_fd,
                 engine_start_index,
                 engine_count,
                 ready_timeout,
@@ -333,8 +349,8 @@ impl EngineCoreClient {
                 }
 
                 transport::connect_bootstrapped(
-                    input_address,
-                    output_address,
+                    *input_listener_fd,
+                    *output_listener_fd,
                     *engine_start_index,
                     *engine_count,
                     *ready_timeout,
@@ -361,6 +377,7 @@ impl EngineCoreClient {
             connected.input_send,
             runtime.handle().clone(),
             config.model_name.clone(),
+            config.engine_stats_enabled,
             &engines,
         ));
         let output_task = AbortOnDropHandle::new(runtime.spawn(transport::run_output_loop(
@@ -418,6 +435,7 @@ impl EngineCoreClient {
             inner,
             coordinator,
             abort_tx,
+            profile_active: Mutex::new(false),
             runtime,
             output_task,
             dispatcher_task,
@@ -448,6 +466,11 @@ impl EngineCoreClient {
     /// client.
     pub fn data_parallel_size(&self) -> usize {
         self.config.transport_mode.data_parallel_size()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_utility_call_count(&self) -> usize {
+        self.inner.pending_utility_call_count()
     }
 
     /// Return the engine-side indices connected to this client.
@@ -505,6 +528,15 @@ impl EngineCoreClient {
         self.engines.iter().map(|engine| engine.ready_response.num_gpu_blocks).sum()
     }
 
+    /// Return the effective attention block size if all engines report the same value.
+    pub fn effective_attention_block_size(&self) -> Option<u64> {
+        let size = self.ready_response().effective_attention_block_size?;
+        self.engines
+            .iter()
+            .all(|engine| engine.ready_response.effective_attention_block_size == Some(size))
+            .then_some(size)
+    }
+
     /// Return the minimum engine-reported `max_model_len` across all engines.
     ///
     /// This is the auto-fitted value after KV cache profiling and may differ
@@ -530,6 +562,11 @@ impl EngineCoreClient {
     /// labeling.
     pub fn model_name(&self) -> &str {
         self.inner.model_name()
+    }
+
+    /// Return whether the connected engines record stats.
+    pub fn engine_stats_enabled(&self) -> bool {
+        self.config.engine_stats_enabled
     }
 
     /// Return whether the client still considers the engine healthy.
@@ -579,6 +616,12 @@ fn validate_lora_capabilities(engines: &[ConnectedEngine]) -> Result<()> {
 impl EngineCoreClient {
     /// Add a new request to the engine and return a per-request raw output
     /// stream.
+    ///
+    /// With `sampling_params.stream_interval` above one, outputs after the
+    /// first are delivered to the stream in batches of at least that many new
+    /// tokens, and the terminal output is delivered immediately together with
+    /// any held-back outputs. The stream still yields every raw output in
+    /// order; batching only reduces how often the consuming task is woken.
     pub async fn call(&self, mut req: EngineCoreRequest) -> Result<EngineCoreOutputStream> {
         req.client_index = self.config.client_index;
         req.validate()?;
@@ -593,16 +636,30 @@ impl EngineCoreClient {
         let request_id = req.request_id.clone();
         let lora_name = req.lora_request.as_ref().map(|lora| lora.lora_name.clone());
         let data_parallel_rank = req.data_parallel_rank;
-        let (engine_id, rx) =
-            self.inner.register_request(request_id.clone(), lora_name, data_parallel_rank)?;
+        let stream_interval = (req.sampling_params.as_ref())
+            .and_then(|params| params.stream_interval)
+            .unwrap_or(NonZeroU32::MIN);
+        let (engine_id, rx) = self.inner.register_request(
+            request_id.clone(),
+            lora_name,
+            data_parallel_rank,
+            stream_interval,
+        )?;
+
+        // Construct the output stream first before actually sending the request to the engine.
+        // This ensures that cancelling the future will properly clean up the request registration
+        // via `Drop` of the stream.
+        let stream = EngineCoreOutputStream::new(
+            request_id.clone(),
+            engine_id.engine_index().unwrap_or(0),
+            self.abort_tx.clone(),
+            rx,
+        );
 
         let result: Result<()> = async {
+            // The engine that receives it wakes the other ranks if they are idle.
             if let Some(coordinator) = self.coordinator.as_ref() {
-                let snapshot = coordinator.snapshot();
-                req.current_wave = snapshot.current_wave;
-                if !snapshot.engines_running {
-                    coordinator.notify_first_request(engine_id.clone())?;
-                }
+                req.current_wave = coordinator.snapshot().current_wave;
             }
 
             debug!(
@@ -622,12 +679,7 @@ impl EngineCoreClient {
             return Err(error);
         }
 
-        Ok(EngineCoreOutputStream::new(
-            request_id,
-            engine_id.engine_index().unwrap_or(0),
-            self.abort_tx.clone(),
-            rx,
-        ))
+        Ok(stream)
     }
 
     /// Abort currently in-flight requests by request ID.
@@ -651,8 +703,9 @@ impl EngineCoreClient {
     }
 
     /// Call a typed utility method on all connected engines, returning one
-    /// decoded result per connected engine if all calls succeed or an error
-    /// if any call fails.
+    /// decoded result per connected engine if all calls succeed. The client
+    /// waits for every engine outcome before returning an error so callers can
+    /// safely compensate partially applied mutations.
     ///
     /// Callers should pass utility arguments using Rust tuple semantics so the
     /// encoded payload matches Python's `(client_index, call_id,
@@ -669,62 +722,47 @@ impl EngineCoreClient {
             "sending utility request"
         );
 
-        // Phase 1: allocate one call id per engine and build the per-engine
-        // request payloads up-front. Any failure here (registry closed, encode
-        // error) must roll back the call ids already allocated so they do not
-        // leak in the utility registry until shutdown.
-        let mut pending_calls = Vec::with_capacity(self.engines.len());
-        let mut prepared_sends = Vec::with_capacity(self.engines.len());
+        /// Removes utility waiters if a call future is cancelled before completion.
+        struct UtilityCallGuard<'a> {
+            inner: &'a ClientInner,
+            call_ids: Vec<u64>,
+        }
+
+        impl Drop for UtilityCallGuard<'_> {
+            fn drop(&mut self) {
+                self.inner.unregister_utility_calls(self.call_ids.drain(..));
+            }
+        }
+
+        let mut call_guard = UtilityCallGuard {
+            inner: self.inner.as_ref(),
+            call_ids: Vec::with_capacity(self.engines.len()),
+        };
+
+        let mut prepared_calls = Vec::with_capacity(self.engines.len());
         for engine in &self.engines {
-            let (call_id, rx) = match self.inner.allocate_and_register_utility_call() {
-                Ok(pair) => pair,
-                Err(err) => {
-                    self.inner.unregister_utility_calls(pending_calls.iter().map(|(id, _)| *id));
-                    return Err(err);
-                }
-            };
-            let request = match EngineCoreUtilityRequest::new(
-                self.config.client_index,
-                call_id,
-                method,
-                &args,
-            ) {
-                Ok(request) => request,
-                Err(err) => {
-                    self.inner.unregister_utility_calls(
-                        pending_calls.iter().map(|(id, _)| *id).chain(std::iter::once(call_id)),
-                    );
-                    return Err(err);
-                }
-            };
-            pending_calls.push((call_id, rx));
-            prepared_sends.push((&engine.engine_id, request));
+            let (call_id, rx) = self.inner.allocate_and_register_utility_call()?;
+            call_guard.call_ids.push(call_id);
+            let request =
+                EngineCoreUtilityRequest::new(self.config.client_index, call_id, method, &args)?;
+            prepared_calls.push((&engine.engine_id, call_id, rx, request));
         }
 
-        // Phase 2: dispatch every utility request concurrently. `try_join_all`
-        // fails fast on the first transport error and drops the remaining send
-        // futures; any engines that already received the request will reply,
-        // but those replies are simply dropped because we roll back the call
-        // ids below.
-        let send_futures = prepared_sends.iter().map(|(engine_id, request)| {
-            self.inner.send_to_engine(engine_id, EngineCoreRequestType::Utility, request)
-        });
-        if let Err(err) = try_join_all(send_futures).await {
-            self.inner.unregister_utility_calls(pending_calls.iter().map(|(id, _)| *id));
-            return Err(err);
-        }
-
-        // Phase 3: wait for all engines to respond and preserve the per-engine
-        // result list.
-        let futures = pending_calls.into_iter().map(|(call_id, rx)| async move {
-            rx.await
-                .map_err(|_| Error::UtilityCallClosed {
-                    method: method.to_string(),
-                    call_id,
-                })??
-                .into_typed_result(method)
-        });
-        try_join_all(futures).await
+        let outcomes = join_all(prepared_calls.into_iter().map(
+            |(engine_id, call_id, rx, request)| async move {
+                self.inner
+                    .send_to_engine(engine_id, EngineCoreRequestType::Utility, &request)
+                    .await?;
+                rx.await
+                    .map_err(|_| Error::UtilityCallClosed {
+                        method: method.to_string(),
+                        call_id,
+                    })??
+                    .into_typed_result(method)
+            },
+        ))
+        .await;
+        outcomes.into_iter().collect()
     }
 
     /// Call a utility method on all connected engines and return the shared
@@ -782,6 +820,18 @@ impl EngineCoreClient {
             None,
             Vec::<JsonValue>::new(),
             BTreeMap::from([("init_info".to_string(), init_info)]),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Release the trainer connection without shutting down inference.
+    pub async fn shutdown_weight_transfer_engine(&self) -> Result<()> {
+        self.collective_rpc(
+            "shutdown_weight_transfer_engine",
+            None,
+            Vec::<JsonValue>::new(),
+            BTreeMap::<String, JsonValue>::new(),
         )
         .await?;
         Ok(())
@@ -906,16 +956,26 @@ impl EngineCoreClient {
         Ok(())
     }
 
-    /// Wake the engine from sleep, optionally limiting the wake-up to specific
-    /// tags.
-    pub async fn wake_up(&self, tags: Option<Vec<String>>) -> Result<()> {
-        self.call_utility::<(), _>("wake_up", (tags,)).await?;
+    /// Release KV cache memory while keeping model weights resident.
+    pub async fn release_kv_cache_memory(&self) -> Result<()> {
+        self.call_utility::<(), _>("release_kv_cache_memory", ()).await?;
         Ok(())
     }
 
-    /// Pause the scheduler so generation can be halted
-    pub async fn pause_scheduler(&self, mode: PauseMode, clear_cache: bool) -> Result<()> {
-        self.call_utility::<(), _>("pause_scheduler", (mode, clear_cache)).await?;
+    /// Wake the engine from sleep, optionally limiting the wake-up to specific
+    /// tags, and return whether every engine is fully awake.
+    pub async fn wake_up(&self, tags: Option<Vec<String>>) -> Result<bool> {
+        Ok(self
+            .call_utility::<bool, _>("wake_up", (tags,))
+            .await?
+            .into_iter()
+            .all(|fully_awake| fully_awake))
+    }
+
+    /// Pause generation (e.g. for weight updates). In `abort` and `wait` mode
+    /// the engine rejects new requests with a retryable error until resume.
+    pub async fn pause_generation(&self, mode: PauseMode, clear_cache: bool) -> Result<()> {
+        self.call_utility::<(), _>("pause_generation", (mode, clear_cache)).await?;
         Ok(())
     }
 
@@ -931,14 +991,38 @@ impl EngineCoreClient {
     }
 
     /// Start profiling the engine.
-    pub async fn start_profile(&self, profile_prefix: Option<&str>) -> Result<()> {
-        self.call_utility::<(), _>("profile", (true, profile_prefix)).await?;
+    pub async fn start_profile(
+        &self,
+        profile_prefix: Option<&str>,
+        delay_iterations: Option<u64>,
+        max_iterations: Option<u64>,
+    ) -> Result<()> {
+        let mut active = self.profile_active.lock().await;
+        if *active {
+            return Err(Error::ProfileAlreadyActive);
+        }
+
+        // A cancelled start may still reach the engine, so only a reported
+        // failure clears the session; otherwise a stop is needed.
+        *active = true;
+        if let Err(error) = self
+            .call_utility::<(), _>(
+                "profile",
+                (true, profile_prefix, delay_iterations, max_iterations),
+            )
+            .await
+        {
+            *active = false;
+            return Err(error);
+        }
         Ok(())
     }
 
     /// Stop profiling the engine.
     pub async fn stop_profile(&self, profile_prefix: Option<&str>) -> Result<()> {
+        let mut active = self.profile_active.lock().await;
         self.call_utility::<(), _>("profile", (false, profile_prefix)).await?;
+        *active = false;
         Ok(())
     }
 

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-experimental support for data-parallel inference with torchrun
+"""experimental support for data-parallel inference with torchrun
 Note the data load balancing and distribution is done out of the vllm engine,
 no internal lb supported in external_launcher mode.
 

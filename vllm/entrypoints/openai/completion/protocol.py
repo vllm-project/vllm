@@ -10,20 +10,23 @@ from pydantic import Field, model_validator
 
 import vllm.envs as envs
 from vllm.config import ModelConfig
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     AnyResponseFormat,
-    OpenAIBaseModel,
-    PerRequestTimingMetrics,
+    MMPayload,
+    PerRequestMetrics,
     StopParam,
     StreamOptions,
-    UsageInfo,
+    resolve_return_mm_kwargs_alias,
     structured_outputs_from_response_format,
+    validate_cache_salt,
     validate_structural_tag_response_format,
     validate_structured_outputs_structural_tag,
 )
+from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
+from vllm.outputs import WeightVersionSpan
 from vllm.renderers import TokenizeParams
 from vllm.sampling_params import (
     BeamSearchParams,
@@ -55,12 +58,12 @@ class CompletionRequest(OpenAIBaseModel):
         | None
     ) = None
     echo: bool | None = False
-    frequency_penalty: float | None = 0.0
+    frequency_penalty: float | None = None
     logit_bias: dict[str, float] | None = None
     logprobs: int | None = None
     max_tokens: int | None = 16
     n: int = 1
-    presence_penalty: float | None = 0.0
+    presence_penalty: float | None = None
     seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
     stop: StopParam = []
     stream: bool | None = False
@@ -75,12 +78,13 @@ class CompletionRequest(OpenAIBaseModel):
     top_k: int | None = None
     min_p: float | None = None
     repetition_penalty: float | None = None
+    watermarking: bool | None = None
     length_penalty: float = 1.0
     stop_token_ids: list[int] | None = []
     include_stop_str_in_output: bool = False
     ignore_eos: bool = False
     min_tokens: int = 0
-    skip_special_tokens: bool = True
+    skip_special_tokens: bool | None = None
     spaces_between_special_tokens: bool = True
     truncate_prompt_tokens: Annotated[int, Field(ge=-1, le=_INT64_MAX)] | None = None
     truncation_side: Literal["left", "right"] | None = Field(
@@ -175,6 +179,15 @@ class CompletionRequest(OpenAIBaseModel):
             "need to map generated text back to input tokens."
         ),
     )
+    return_weight_versions: bool = Field(
+        default=False,
+        description=(
+            "If true, each choice includes weight_versions: the weight-version "
+            "label that sampled each half-open range of its output tokens. "
+            "When streaming, only the last chunk of each choice includes it. "
+            "Beam search does not return it."
+        ),
+    )
     routed_experts_prompt_start: int = Field(
         default=0,
         ge=0,
@@ -196,9 +209,32 @@ class CompletionRequest(OpenAIBaseModel):
         ),
     )
 
+    mm_payload: MMPayload = Field(
+        default="tensors",
+        description=(
+            "What the render response's `features` carry for multimodal "
+            "items. 'tensors' serializes the processed tensors into "
+            "`kwargs_data` and `mm_metadata`. 'none' sets both to null for "
+            "callers that need only the token layout and item hashes, such as "
+            "cache-aware routers. Do not send a 'none' response to "
+            "`/inference/v1/generate` which reads a null `kwargs_data` as "
+            "every item being cached. Only supported on the render endpoints. "
+            "Ignored on regular generation endpoints."
+        ),
+    )
+    return_mm_kwargs: bool | None = Field(
+        default=None,
+        deprecated="return_mm_kwargs is deprecated in favor of the mm_payload field",
+        description=(
+            "Deprecated alias: false is the same as `mm_payload='none'`. "
+            "Ignored when `mm_payload` is set."
+        ),
+    )
+
     cache_salt: str | None = Field(
         default=None,
         min_length=1,
+        max_length=1024,
         description=(
             "If specified, the prefix cache will be salted with the provided "
             "string to prevent an attacker to guess prompts in multi-user "
@@ -276,6 +312,8 @@ class CompletionRequest(OpenAIBaseModel):
     # Default sampling parameters for completion requests
     _DEFAULT_SAMPLING_PARAMS: dict = {
         "repetition_penalty": 1.0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
         "temperature": 1.0,
         "top_p": 1.0,
         "top_k": 0,
@@ -294,13 +332,21 @@ class CompletionRequest(OpenAIBaseModel):
         if (temperature := self.temperature) is None:
             temperature = default_sampling_params.get("temperature", 1.0)
 
+        if (skip_special_tokens := self.skip_special_tokens) is None:
+            skip_special_tokens = default_sampling_params.get(
+                "skip_special_tokens", True
+            )
+
         return BeamSearchParams(
             beam_width=n,
+            allowed_token_ids=self.allowed_token_ids,
             max_tokens=max_tokens,
             ignore_eos=self.ignore_eos,
             temperature=temperature,
+            watermarking=self.watermarking,
             length_penalty=self.length_penalty,
             include_stop_str_in_output=self.include_stop_str_in_output,
+            skip_special_tokens=skip_special_tokens,
         )
 
     def extract_structured_outputs(self) -> StructuredOutputsParams | None:
@@ -318,28 +364,15 @@ class CompletionRequest(OpenAIBaseModel):
         if default_sampling_params is None:
             default_sampling_params = {}
 
-        # Default parameters
-        if (repetition_penalty := self.repetition_penalty) is None:
-            repetition_penalty = default_sampling_params.get(
-                "repetition_penalty",
-                self._DEFAULT_SAMPLING_PARAMS["repetition_penalty"],
+        # Priority: user -> server default -> OpenAI default
+        sampling_params = {
+            name: (
+                value
+                if (value := getattr(self, name)) is not None
+                else default_sampling_params.get(name, default)
             )
-        if (temperature := self.temperature) is None:
-            temperature = default_sampling_params.get(
-                "temperature", self._DEFAULT_SAMPLING_PARAMS["temperature"]
-            )
-        if (top_p := self.top_p) is None:
-            top_p = default_sampling_params.get(
-                "top_p", self._DEFAULT_SAMPLING_PARAMS["top_p"]
-            )
-        if (top_k := self.top_k) is None:
-            top_k = default_sampling_params.get(
-                "top_k", self._DEFAULT_SAMPLING_PARAMS["top_k"]
-            )
-        if (min_p := self.min_p) is None:
-            min_p = default_sampling_params.get(
-                "min_p", self._DEFAULT_SAMPLING_PARAMS["min_p"]
-            )
+            for name, default in self._DEFAULT_SAMPLING_PARAMS.items()
+        }
 
         # Merge server-default stop_token_ids (e.g., model-specific tokens
         # like </call> for gpt-oss) with any request-specified ones
@@ -359,6 +392,11 @@ class CompletionRequest(OpenAIBaseModel):
 
         echo_without_generation = self.echo and self.max_tokens == 0
 
+        if (skip_special_tokens := self.skip_special_tokens) is None:
+            skip_special_tokens = default_sampling_params.get(
+                "skip_special_tokens", True
+            )
+
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
             # Pass in kv_transfer_params via extra_args
@@ -368,13 +406,8 @@ class CompletionRequest(OpenAIBaseModel):
             extra_args["ec_transfer_params"] = self.ec_transfer_params
         return SamplingParams.from_optional(
             n=self.n,
-            presence_penalty=self.presence_penalty,
-            frequency_penalty=self.frequency_penalty,
-            repetition_penalty=repetition_penalty,
-            temperature=temperature,
-            top_p=top_p,
-            top_k=top_k,
-            min_p=min_p,
+            **sampling_params,
+            watermarking=self.watermarking,
             seed=self.seed,
             stop=self.stop,
             stop_token_ids=stop_token_ids,
@@ -384,7 +417,7 @@ class CompletionRequest(OpenAIBaseModel):
             min_tokens=self.min_tokens,
             prompt_logprobs=prompt_logprobs,
             logprob_token_ids=self.logprob_token_ids or None,
-            skip_special_tokens=self.skip_special_tokens,
+            skip_special_tokens=skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
             output_kind=RequestOutputKind.DELTA
@@ -401,6 +434,19 @@ class CompletionRequest(OpenAIBaseModel):
             thinking_token_budget=self.thinking_token_budget,
             routed_experts_prompt_start=self.routed_experts_prompt_start,
         )
+
+    @model_validator(mode="before")
+    @classmethod
+    def apply_return_mm_kwargs_alias(cls, data: Any) -> Any:
+        return resolve_return_mm_kwargs_alias(data)
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_cache_salt_support(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        validate_cache_salt(data.get("cache_salt"))
+        return data
 
     @model_validator(mode="before")
     @classmethod
@@ -482,6 +528,17 @@ class CompletionRequest(OpenAIBaseModel):
             raise VLLMValidationError(
                 "`logprob_token_ids` is not supported with beam search.",
                 parameter="logprob_token_ids",
+            )
+
+        if (
+            data.get("use_beam_search")
+            and data.get("echo")
+            and data.get("logprobs") is not None
+        ):
+            raise VLLMValidationError(
+                "`echo` with `logprobs` is not supported with beam search "
+                "because beam search does not compute prompt logprobs.",
+                parameter="echo",
             )
 
         if (
@@ -641,6 +698,8 @@ class CompletionResponseChoice(OpenAIBaseModel):
     # ``None`` if (a) the request was aborted before any forward pass,
     # or (b) ``enable_return_routed_experts`` is off server-side.
     routed_experts: str | None = None
+    # Contiguous weight version spans over output-token indexes.
+    weight_versions: list[WeightVersionSpan] | None = None
 
 
 class CompletionResponse(OpenAIBaseModel):
@@ -660,7 +719,7 @@ class CompletionResponse(OpenAIBaseModel):
     ec_transfer_params: dict[str, Any] | None = Field(
         default=None, description="ECTransfer parameters."
     )
-    metrics: PerRequestTimingMetrics | None = None
+    metrics: PerRequestMetrics | None = None
 
 
 class CompletionResponseStreamChoice(OpenAIBaseModel):
@@ -680,6 +739,8 @@ class CompletionResponseStreamChoice(OpenAIBaseModel):
     # prompt tokens is put into choice to align with CompletionResponseChoice
     prompt_token_ids: list[int] | None = None
     token_ids: list[int] | None = None
+    # Set on the final chunk only; covers the whole output.
+    weight_versions: list[WeightVersionSpan] | None = None
 
 
 class CompletionStreamResponse(OpenAIBaseModel):
@@ -692,4 +753,4 @@ class CompletionStreamResponse(OpenAIBaseModel):
     # Set only on the final chunk of a stream to mirror non-streaming responses
     # without the per-chunk serialization overhead.
     system_fingerprint: str | None = None
-    metrics: PerRequestTimingMetrics | None = None
+    metrics: PerRequestMetrics | None = None

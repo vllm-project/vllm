@@ -31,7 +31,6 @@ from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     async_tensor_h2d,
-    is_quantized_kv_cache,
     is_torch_equal_or_newer,
 )
 from vllm.v1.attention.backend import (
@@ -43,7 +42,12 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, EncoderOnlyAttentionSpec
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    EncoderOnlyAttentionSpec,
+    KVCacheLayout,
+    is_quantized_kv_cache,
+)
 
 logger = init_logger(__name__)
 
@@ -102,6 +106,10 @@ class FlexAttentionBackend(AttentionBackend):
         return "FLEX_ATTENTION"
 
     @classmethod
+    def supports_rswa(cls) -> bool:
+        return True
+
+    @classmethod
     def supports_sliding_window(cls) -> bool:
         return True
 
@@ -119,6 +127,12 @@ class FlexAttentionBackend(AttentionBackend):
         return True
 
     @classmethod
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+        # Flex flattens the (B, N) block/token axes into a single token dim, which
+        # only LBNHC's strides allow as a zero-copy view of the layer cache.
+        return (KVCacheLayout.LBNHC,)
+
+    @classmethod
     def supports_mm_prefix(cls) -> bool:
         """FlexAttention supports full attention for image tokens."""
         return True
@@ -128,38 +142,15 @@ class FlexAttentionBackend(AttentionBackend):
         return FlexAttentionImpl
 
     @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        # K and V are packed into the content dim: logical (B, H, N, 2*hs).
-        return (num_blocks, num_kv_heads, block_size, 2 * head_size)
-
-    @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        if include_num_layers_dimension:
-            return (1, 0, 3, 2, 4)
-        return (0, 2, 1, 3)
-
-    @staticmethod
     def get_builder_cls() -> type["FlexAttentionMetadataBuilder"]:
         return FlexAttentionMetadataBuilder
-
-    @staticmethod
-    def use_cascade_attention(*args, **kwargs) -> bool:
-        return False
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return []
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [MultipleOf(16)]
 
 
@@ -170,8 +161,7 @@ def physical_to_logical_mapping(
     block_size: int,
     total_blocks: int,
 ) -> torch.Tensor:
-    """
-    Creates an inverse mapping from physical block locations to logical indices.
+    """Creates an inverse mapping from physical block locations to logical indices.
 
     The original block_table maps from logical blocks to physical locations:
 
@@ -244,6 +234,7 @@ def physical_to_logical_mapping(
         A tensor of shape [max_reqs, total_blocks] where each entry
         physical_to_logical[req_id, physical_block] contains the logical
         block index for that physical block, or -1 if unused.
+
     """
     max_reqs, max_num_blocks = block_table.shape
     device = block_table.device
@@ -280,8 +271,7 @@ def unique_static_unsorted(
     ignored_val: int = 0,  # value to ignore
     pad_val: int = -1,  # sentinel for unused slots
 ) -> torch.Tensor:
-    """
-    - Keeps the first occurrence of each non-zero value while preserving order,
+    """- Keeps the first occurrence of each non-zero value while preserving order,
       then left-packs those uniques and fills the rest with `pad_val`.
     - Returns (packed, keep_mask) with the *same shape* as `x`.
     - Requires that all values be in the range [0, M]
@@ -291,6 +281,7 @@ def unique_static_unsorted(
 
     Example:
     x =[3, 1, 0, 1, 2], M=3, ignored_val=0 => [3, 1, 2, -1, -1]
+
     """
     if not (-1 <= pad_val <= M):
         raise ValueError("`pad_val` must lie in [-1, M]")
@@ -354,6 +345,7 @@ class BlockSparsityHint(NamedTuple):
         hint_fn: (q_block_idx [num_tokens, 1], kv_block_idx [1, num_kv_blocks],
             block_size int) -> bool Tensor [num_tokens, num_kv_blocks].
             Returns True for block pairs that may contain non-masked elements.
+
     """
 
     hint_fn: _block_sparsity_hint_signature
@@ -378,12 +370,6 @@ class FlexAttentionMetadata:
     seq_lens: torch.Tensor
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
-
-    use_cascade: bool
-    common_prefix_len: int
-    cu_prefix_query_lens: torch.Tensor | None
-    prefix_kv_lens: torch.Tensor | None
-    suffix_kv_lens: torch.Tensor | None
 
     # Block info
     total_cache_tokens: int
@@ -440,6 +426,7 @@ class FlexAttentionMetadata:
 
         Returns:
             tuple of (is_valid, logical_q_idx, logical_kv_idx)
+
         """
         # Map query indices to corresponding request indices
         q_req = request_lookup[q_idx]
@@ -517,7 +504,6 @@ class FlexAttentionMetadata:
         Note that the sliding window mask here is bidirectional, we need
         to mask it with the bidirectional/causal mask for encoder/decoder.
         """
-
         if self.sliding_window is None:
             raise ValueError("sliding_window must be set for sliding window attention")
 
@@ -545,7 +531,6 @@ class FlexAttentionMetadata:
 
     def get_prefix_lm_mask_mod(self) -> _mask_mod_signature:
         """Creates the prefix LM mask_mod function for FlexAttention."""
-
         assert self.doc_ids is not None
         request_lookup = self.doc_ids
 
@@ -592,7 +577,6 @@ class FlexAttentionMetadata:
         far-away generated tokens that fall outside the window and outside the
         prefix.
         """
-
         assert self.doc_ids is not None
         assert self.rswa_prefix_lens is not None
         assert self.rswa_window is not None
@@ -837,11 +821,6 @@ class FlexAttentionMetadata:
         )
 
     def __post_init__(self):
-        assert self.use_cascade is False, "Not implemented yet."
-        assert self.common_prefix_len == 0, "Not implemented yet."
-        assert self.cu_prefix_query_lens is None, "Not implemented yet."
-        assert self.prefix_kv_lens is None, "Not implemented yet."
-        assert self.suffix_kv_lens is None, "Not implemented yet."
         # Create a lookup mapping from query indices -> request number
         self.doc_ids = _offsets_to_doc_ids_tensor(
             self.query_start_loc_cpu, self.query_start_loc.device
@@ -916,6 +895,12 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             self.max_num_rswa_query_groups, dtype=torch.int32, device=device
         )
         self.persistent_offset_tensor = torch.empty(
+            max_num_seqs, dtype=torch.int32, device=device
+        )
+        self.persistent_query_start_loc = torch.empty(
+            max_num_seqs + 1, dtype=torch.int32, device=device
+        )
+        self.persistent_seq_lens = torch.empty(
             max_num_seqs, dtype=torch.int32, device=device
         )
         # Persistent buffer for R-SWA per-request prefix lengths so the device
@@ -1029,16 +1014,6 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         slot_mapping = common_attn_metadata.slot_mapping
         num_blocks_per_seq = cdiv(seq_lens, self.block_size)
 
-        use_cascade = common_prefix_len > 0
-        cu_prefix_query_lens = None
-        prefix_kv_lens = None
-        suffix_kv_lens = None
-        if use_cascade:
-            raise NotImplementedError(
-                "Cascade prefix attention is not yet implemented "
-                "for FlexAttention backend"
-            )
-
         block_size = self.kv_cache_spec.block_size
         max_possible_seq_len = self.model_config.max_model_len
         num_gpu_blocks = self.cache_config.num_gpu_blocks
@@ -1088,19 +1063,18 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             else self.persistent_kv_num_blocks
         )
 
-        inverse_block_table = copy_to_persistent(
-            self.persistent_physical_to_logical, inverse_block_table
-        )
+        copy_to_persistent(self.persistent_physical_to_logical, inverse_block_table)
 
         offset_tensor = common_attn_metadata.compute_num_computed_tokens()
-        offset_tensor = copy_to_persistent(self.persistent_offset_tensor, offset_tensor)
+        copy_to_persistent(self.persistent_offset_tensor, offset_tensor)
+        copy_to_persistent(self.persistent_query_start_loc, query_start_loc)
+        copy_to_persistent(self.persistent_seq_lens, seq_lens)
 
         rswa_prefix_lens = common_attn_metadata.rswa_prefix_lens
         if use_rswa and rswa_prefix_lens is not None:
             assert self.persistent_rswa_prefix_lens is not None
-            rswa_prefix_lens = copy_to_persistent(
-                self.persistent_rswa_prefix_lens, rswa_prefix_lens
-            )
+            copy_to_persistent(self.persistent_rswa_prefix_lens, rswa_prefix_lens)
+            rswa_prefix_lens = self.persistent_rswa_prefix_lens
 
         uses_paged_kv = not isinstance(self.kv_cache_spec, EncoderOnlyAttentionSpec)
         logical_mask_mod = (
@@ -1121,23 +1095,20 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             sliding_window=sliding_window,
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
-            query_start_loc=query_start_loc,
+            # Mask closures only index active requests, so retain full-capacity
+            # tensor shapes to avoid recompiling when the batch shrinks to one.
+            query_start_loc=self.persistent_query_start_loc,
             query_start_loc_cpu=query_start_loc_cpu,
             max_seq_len=max_seq_len,
-            seq_lens=seq_lens,
+            seq_lens=self.persistent_seq_lens,
             block_table=block_table_tensor,
             slot_mapping=slot_mapping,
-            use_cascade=use_cascade,
-            common_prefix_len=common_prefix_len,
-            cu_prefix_query_lens=cu_prefix_query_lens,
-            prefix_kv_lens=prefix_kv_lens,
-            suffix_kv_lens=suffix_kv_lens,
             block_size=block_size,
             max_possible_sequence_length=max_possible_seq_len,
             num_reqs=num_reqs,
-            physical_to_logical=inverse_block_table,
+            physical_to_logical=self.persistent_physical_to_logical,
             total_cache_tokens=total_cache_tokens,
-            decode_offset=offset_tensor,
+            decode_offset=self.persistent_offset_tensor,
             num_blocks_per_seq=num_blocks_per_seq,
             uses_paged_kv=uses_paged_kv,
             # FIXME(Isotr0py): direct build has issue to build bidirectional
@@ -1164,9 +1135,6 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
                 out.block_mask = out.build_block_mask()
 
         return out
-
-    def use_cascade_attention(self, *args, **kwargs) -> bool:
-        return False
 
 
 class FlexAttentionImpl(AttentionImpl):
@@ -1289,14 +1257,22 @@ class FlexAttentionImpl(AttentionImpl):
         """Forward pass with FLexAttention.
 
         Args:
+            layer: The attention layer, providing the q/k/v quantization scales.
             query: shape = [num_tokens, num_heads, head_size]
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
                 [num_blocks, num_kv_heads, block_size, 2 * head_size]
             attn_metadata: Metadata for attention.
+            output: Tensor that the attention result is written into.
+            output_scale: Scale for fused output quantization; not supported
+                by this backend.
+            output_block_scale: Block scale for fused output quantization;
+                not supported by this backend.
+
         Returns:
             shape = [num_tokens, num_heads * head_size]
+
         """
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(

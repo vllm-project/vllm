@@ -40,8 +40,13 @@ class LamportCopy:
         m: cutlass.Int32,
         stream: cuda.CUstream,
     ):
+        fragments = m * cutlass.Int32(self.hidden_dim // VEC_BF16)
+        grid_ctas = cutlass.min(
+            cutlass.Int32(self.ctas),
+            cute.ceil_div(fragments, self.threads),
+        )
         self.kernel(symmetric_mailbox, local_output, m).launch(
-            grid=(self.ctas, 1, 1),
+            grid=(grid_ctas, 1, 1),
             block=(self.threads, 1, 1),
             stream=stream,
             use_pdl=True,
@@ -54,14 +59,15 @@ class LamportCopy:
         local_output: cute.Tensor,
         m: cutlass.Int32,
     ):
-        # The CTA may be scheduled early, but mailbox inspection must not pass
-        # the producer GEMM's programmatic completion point.
-        cute.arch.griddepcontrol_wait()
+        # The Lamport marker carries producer readiness, so polling can begin
+        # before the producer grid reaches ordinary completion.
+        cute.arch.griddepcontrol_launch_dependents()
 
         tidx, _, _ = cute.arch.thread_idx()
         block, _, _ = cute.arch.block_idx()
+        grid_x, _, _ = cute.arch.grid_dim()
         thread = cutlass.Int64(block * self.threads + tidx)
-        stride = cutlass.Int64(self.ctas * self.threads)
+        stride = cutlass.Int64(grid_x * self.threads)
         fragments = cutlass.Int64(m) * cutlass.Int64(self.hidden_dim // VEC_BF16)
 
         fragment = thread
@@ -79,21 +85,6 @@ class LamportCopy:
 
             destination = cutlass.Int64((local_output.iterator + element).toint())
             store_global_u32x4(destination, packed, volatile=False)
-            fragment = fragment + stride
-
-        # The returned ordinary tensor is complete. A same-stream successor
-        # may overlap the mailbox cleanup below.
-        cute.arch.griddepcontrol_launch_dependents()
-
-        fragment = thread
-        while fragment < fragments:
-            element = fragment * VEC_BF16
-            source = cute.make_ptr(
-                cutlass.BFloat16,
-                (symmetric_mailbox.iterator + element).llvm_ptr,
-                cute.AddressSpace.gmem,
-                assumed_align=16,
-            )
             store_lamport_sentinel_128(source)
             fragment = fragment + stride
 

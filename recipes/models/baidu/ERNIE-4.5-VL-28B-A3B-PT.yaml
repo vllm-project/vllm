@@ -1,0 +1,163 @@
+meta:
+  title: "ERNIE-4.5-VL"
+  slug: "ernie-4.5-vl"
+  provider: "Ernie (Baidu)"
+  description: "Baidu ERNIE 4.5 VL MoE vision-language models (28B-A3B, 424B-A47B) with heterogeneous text/vision experts"
+  date_added: 2025-09-03
+  date_updated: 2026-04-17
+  tasks:
+    - multimodal
+  related_recipes:
+    - baidu/ERNIE-4.5-21B-A3B-PT
+  hardware:
+    mi300x: verified
+    mi325x: verified
+    mi355x: verified
+
+model:
+  model_id: "baidu/ERNIE-4.5-VL-28B-A3B-PT"
+  min_vllm_version: "0.11.0"
+  architecture: moe
+  parameter_count: "28B"
+  active_parameters: "3B"
+  context_length: 131072
+  base_args:
+    - "--trust-remote-code"
+  base_env: {}
+
+features:
+  text_only:
+    description: "Skip loading the vision encoder for text-only workloads — frees VRAM for KV cache. Mutually exclusive with encoder_parallel."
+    args:
+      - "--language-model-only"
+  encoder_parallel:
+    description: "Run the vision encoder in data-parallel mode — avoids TP comm overhead on the small encoder. Mutually exclusive with text_only."
+    args:
+      - "--mm-encoder-tp-mode"
+      - "data"
+
+opt_in_features:
+  - text_only
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 67
+    description: "BF16 weights; fits on 1x80GB GPU (28B VL variant)"
+
+  "424b":
+    model_id: "baidu/ERNIE-4.5-VL-424B-A47B-PT"
+    precision: bf16
+    vram_minimum_gb: 1120
+    description: "424B total / 47B active; 8x140GB BF16 or 16x80GB BF16"
+    extra_args:
+      - "--trust-remote-code"
+      - "--tensor-parallel-size"
+      - "8"
+
+  "424b_fp8":
+    model_id: "baidu/ERNIE-4.5-VL-424B-A47B-PT"
+    precision: fp8
+    vram_minimum_gb: 640
+    description: "424B with FP8 online quantization + CPU offload for 8x80GB testing"
+    extra_args:
+      - "--trust-remote-code"
+      - "--tensor-parallel-size"
+      - "8"
+      - "--quantization"
+      - "fp8"
+      - "--cpu-offload-gb"
+      - "50"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+  - multi_node_tep
+  - multi_node_dep
+
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+hardware_overrides: {}
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  ERNIE 4.5 VL is Baidu's multimodal MoE model with heterogeneous experts (separate text
+  and vision experts). Because of the heterogeneous architecture, **torch.compile and CUDA
+  graphs are not supported**.
+
+  - `baidu/ERNIE-4.5-VL-28B-A3B-PT` — 28B total / 3B active (1x80GB)
+  - `baidu/ERNIE-4.5-VL-424B-A47B-PT` — 424B total / 47B active (8x140GB BF16, 8x80GB FP8+offload, or 16x80GB BF16)
+
+  ## Prerequisites
+
+  - vLLM: support added to main branch recently; install latest
+  - Hardware depends on variant
+
+  ### Install vLLM (CUDA)
+
+  ```bash
+  uv venv --python 3.12 --seed
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend auto
+  ```
+
+  ### Install vLLM (AMD ROCm MI300X/MI325X/MI355X)
+
+  ```bash
+  uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/
+  ```
+
+  ## Launch commands
+
+  28B on 1x80GB:
+
+  ```bash
+  vllm serve baidu/ERNIE-4.5-VL-28B-A3B-PT --trust-remote-code
+  ```
+
+  424B BF16 on 8x140GB:
+
+  ```bash
+  vllm serve baidu/ERNIE-4.5-VL-424B-A47B-PT \
+    --trust-remote-code \
+    --tensor-parallel-size 8
+  ```
+
+  424B with FP8 + CPU offload on 8x80GB (testing only):
+
+  ```bash
+  vllm serve baidu/ERNIE-4.5-VL-424B-A47B-PT \
+    --trust-remote-code \
+    --tensor-parallel-size 8 \
+    --quantization fp8 \
+    --cpu-offload-gb 50
+  ```
+
+  28B on AMD MI300X+:
+
+  ```bash
+  VLLM_ROCM_USE_AITER=1 SAFETENSORS_FAST_GPU=1 \
+    vllm serve baidu/ERNIE-4.5-VL-28B-A3B-PT \
+    --tensor-parallel-size 4 \
+    --gpu-memory-utilization 0.9 \
+    --trust-remote-code
+  ```
+
+  ## Benchmarking
+
+  ```bash
+  vllm bench serve \
+    --model baidu/ERNIE-4.5-VL-28B-A3B-PT \
+    --dataset-name random \
+    --random-input-len 8000 --random-output-len 1000 \
+    --request-rate 10 --num-prompts 16 --ignore-eos --trust-remote-code
+  ```
+
+  ## References
+
+  - [ERNIE-4.5-VL-28B-A3B-PT](https://huggingface.co/baidu/ERNIE-4.5-VL-28B-A3B-PT)
+  - [ERNIE-4.5-VL-424B-A47B-PT](https://huggingface.co/baidu/ERNIE-4.5-VL-424B-A47B-PT)
