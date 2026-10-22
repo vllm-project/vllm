@@ -3,15 +3,18 @@
 
 import json
 import os
+import sys
 import tempfile
+from contextlib import contextmanager
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import torch
 from safetensors.torch import save_file
 
 from vllm.config.load import LoadConfig
-from vllm.model_executor.model_loader import DefaultModelLoader
+from vllm.model_executor.model_loader import DefaultModelLoader, weight_utils
 from vllm.model_executor.model_loader.weight_utils import (
     filter_duplicate_safetensors_files,
     filter_safetensors_files_by_weight_name,
@@ -111,7 +114,7 @@ def test_filter_by_weight_name_drops_shards_without_wanted_weights(mtp_checkpoin
 
 
 def test_loader_does_not_read_shards_the_model_skips(mtp_checkpoint, monkeypatch):
-    """Whole-file loaders such as InstantTensor only see the kept shards."""
+    """InstantTensor only sees shards with at least one wanted tensor."""
     opened: list[list[str]] = []
 
     def fake_iterator(hf_weights_files, *args, **kwargs):
@@ -137,6 +140,118 @@ def test_loader_does_not_read_shards_the_model_skips(mtp_checkpoint, monkeypatch
         ["model-00002-of-00003.safetensors", "model-00003-of-00003.safetensors"],
         sorted(f.name for f in mtp_checkpoint.glob("*.safetensors")),
     ]
+
+
+@pytest.mark.parametrize("selection", [None, "mtp", "all", "empty", "remote"])
+@pytest.mark.parametrize("prefix", ["", "draft."])
+@pytest.mark.parametrize("local_ids", [None, {0}])
+def test_instanttensor_filters_before_native_io(
+    tmp_path, monkeypatch, selection, prefix, local_ids
+):
+    """Intersect MTP and EP selections before native I/O and source prefixes."""
+    weights = {
+        name: torch.ones(4)
+        for name in (
+            "model.layers.0.weight",
+            "model.embed_tokens.weight",
+            "lm_head.weight",
+            "mtp.layers[0].weight",
+            "mtp.layers0.weight",
+            "mtp.mlp.experts.0.gate_proj.weight",
+            "mtp.mlp.experts.1.gate_proj.weight",
+            "mtp.mlp.experts.1.gate_proj.weight_scale",
+            "mtp.mlp.experts.1.gate_proj.input_scale",
+            "mtp.mlp.shared_experts.gate_proj.weight",
+            "mtp.mlp.experts.gate_proj.weight",
+        )
+    }
+    save_file(weights, tmp_path / "model.safetensors")
+    wanted = {
+        "model.embed_tokens.weight",
+        "lm_head.weight",
+        "mtp.layers[0].weight",
+        "mtp.mlp.experts.0.gate_proj.weight",
+        "mtp.mlp.experts.1.gate_proj.weight",
+        "mtp.mlp.experts.1.gate_proj.weight_scale",
+        "mtp.mlp.shared_experts.gate_proj.weight",
+    }
+    selected = set(weights) if selection in (None, "all") else wanted
+    if selection == "empty":
+        selected = set()
+    elif selection == "remote":
+        selected = {"mtp.mlp.experts.1.gate_proj.weight"}
+    expected = selected - (
+        {"mtp.mlp.experts.1.gate_proj.weight"} if local_ids is not None else set()
+    )
+    process_group = object()
+    opened = []
+    progress = MagicMock()
+    monkeypatch.setattr(weight_utils, "tqdm", progress)
+
+    @contextmanager
+    def fake_open(files, *, tensor_filter, process_group, **kwargs):
+        opened.append((tensor_filter, process_group, kwargs))
+        names = weights if tensor_filter is None else tensor_filter
+        tensors = {name: weights[name] for name in names}
+        yield SimpleNamespace(
+            total_tensor_size=sum(
+                t.numel() * t.element_size() for t in tensors.values()
+            ),
+            tensors=lambda: iter(tensors.items()),
+        )
+
+    monkeypatch.setitem(
+        sys.modules, "instanttensor", SimpleNamespace(safe_open=fake_open)
+    )
+    monkeypatch.setattr(
+        weight_utils,
+        "current_platform",
+        SimpleNamespace(is_cuda=lambda: True, current_device=lambda: 0),
+    )
+    monkeypatch.setattr(
+        weight_utils,
+        "get_world_group",
+        lambda: SimpleNamespace(world_size=8, device_group=process_group),
+    )
+
+    class Drafter(torch.nn.Module):
+        def is_unused_checkpoint_weight(self, name):
+            return name not in selected
+
+    model = torch.nn.Module() if selection is None else Drafter()
+    loader = DefaultModelLoader(LoadConfig(load_format="instanttensor"))
+    loader.local_expert_ids = local_ids
+    model_config = SimpleNamespace(model=str(tmp_path), revision=None)
+    if prefix:
+        source = DefaultModelLoader.Source(
+            str(tmp_path),
+            revision=None,
+            prefix=prefix,
+            is_unused_weight=getattr(model, "is_unused_checkpoint_weight", None),
+        )
+        result = dict(loader._get_weights_iterator(source))
+    else:
+        result = dict(loader.get_all_weights(model_config, model))
+    assert result.keys() == {prefix + name for name in expected}
+    for name, tensor in result.items():
+        torch.testing.assert_close(tensor, weights[name.removeprefix(prefix)])
+    if not expected:
+        assert opened == []
+        progress.assert_not_called()
+    else:
+        assert len(opened) == 1
+        tensor_filter, group, kwargs = opened[0]
+        assert kwargs["copy"] is True
+        assert kwargs["tensor_name_match_mode"] == "exact"
+        assert progress.call_args.kwargs["total"] == sum(
+            weights[name].numel() * weights[name].element_size() for name in expected
+        )
+        if selection is None and local_ids is None:
+            assert tensor_filter is None
+            assert group is process_group
+        else:
+            assert set(tensor_filter) == expected
+            assert group is None
 
 
 def test_secondary_source_with_explicit_patterns_skips_backbone_index(tmp_path):

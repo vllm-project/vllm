@@ -22,6 +22,8 @@ from vllm.platforms import current_platform
     ("weight_name", "local_ids", "collective"),
     [
         ("mlp.experts.gate_proj.weight", {0}, True),
+        ("model.embed_tokens.weight", set(), True),
+        ("mlp.experts.1.gate_proj.weight_scale", {0}, True),
         ("mlp.experts.0.gate_proj.weight", {0}, False),
         ("mlp.experts.0.gate_proj.weight", set(), False),
     ],
@@ -45,7 +47,7 @@ def test_instanttensor_ep_collective_loading(
     monkeypatch.setattr(weight_utils, "get_world_group", lambda: group)
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
     monkeypatch.setattr(current_platform, "current_device", lambda: 0)
-    list(instanttensor_weights_iterator([str(path)], False, local_expert_ids=local_ids))
+    list(instanttensor_weights_iterator([str(path)], False, local_ids))
     kwargs = native_open.call_args.kwargs
     assert kwargs["process_group"] is (group.device_group if collective else None)
 
@@ -98,6 +100,29 @@ def test_instanttensor_model_loader():
         assert instanttensor_tensor.dtype == hf_safetensors_tensors[name].dtype
         assert instanttensor_tensor.shape == hf_safetensors_tensors[name].shape
         assert torch.all(instanttensor_tensor.eq(hf_safetensors_tensors[name]))
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="InstantTensor requires NVIDIA GPUs",
+)
+@pytest.mark.parametrize("selected", [None, {"mtp.layers[0].weight"}, set()])
+def test_instanttensor_selected_tensors(tmp_path, selected):
+    weights = {
+        name: torch.arange(1024, dtype=torch.float32) + index
+        for index, name in enumerate(
+            ("model.layers.0.weight", "mtp.layers[0].weight", "mtp.layers0.weight")
+        )
+    }
+    path = tmp_path / "model.safetensors"
+    save_file(weights, path)
+    is_unused = None if selected is None else lambda name: name not in selected
+    result = dict(
+        instanttensor_weights_iterator([str(path)], False, is_unused_weight=is_unused)
+    )
+    assert result.keys() == (weights.keys() if selected is None else selected)
+    for name, tensor in result.items():
+        torch.testing.assert_close(tensor.cpu(), weights[name])
 
 
 if __name__ == "__main__":

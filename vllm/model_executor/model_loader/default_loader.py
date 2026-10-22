@@ -81,8 +81,9 @@ class DefaultModelLoader(BaseModelLoader):
         """If defined, weights will load exclusively using these patterns."""
 
         is_unused_weight: Callable[[str], bool] | None = None
-        """If defined, safetensors shards holding only weights whose checkpoint
-        name (before *prefix*) it accepts are not read."""
+        """Identifies unused checkpoint weights, before applying *prefix*.
+        Used to skip whole safetensors shards and individual InstantTensor reads.
+        """
 
     counter_before_loading_weights: float = 0.0
     counter_after_loading_weights: float = 0.0
@@ -319,6 +320,7 @@ class DefaultModelLoader(BaseModelLoader):
                     hf_weights_files,
                     self.load_config.use_tqdm_on_load,
                     local_expert_ids=self.local_expert_ids,
+                    is_unused_weight=source.is_unused_weight,
                 )
             else:
                 if extra_config.get("enable_multithread_load"):
