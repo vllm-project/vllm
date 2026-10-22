@@ -38,6 +38,7 @@ from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import (
@@ -323,15 +324,19 @@ class KimiRoutedOutputTransform(nn.Module):
         Args:
             hidden_states: Routed expert output in latent space.
             residual: Optional tensor of the up-projection's output shape to
-                accumulate into. It is consumed in the GEMM's beta-add
-                epilogue, so adding it costs no extra kernel.
+                accumulate into. Unquantized projections fuse the addition
+                into the GEMM epilogue.
 
         """
         if self.norm is not None:
             hidden_states = self.norm(hidden_states)
-        if residual is not None:
+        if residual is not None and isinstance(
+            self.up_proj.quant_method, UnquantizedLinearMethod
+        ):
             return residual.addmm_(hidden_states, self.up_proj.weight.t())
         hidden_states, _ = self.up_proj(hidden_states)
+        if residual is not None:
+            return residual.add_(hidden_states)
         return hidden_states
 
 
