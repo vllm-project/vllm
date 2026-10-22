@@ -169,6 +169,24 @@ llm = LLM("Qwen/Qwen3-8B", enable_sleep_mode=True, enable_nccl_comm_suspend=True
 
 or `vllm serve <model> --enable-sleep-mode --enable-nccl-comm-suspend`.
 
+#### Choosing a sleep-mode backend
+
+`sleep_mode_backend` selects how GPU memory is freed and restored. The default
+is the built-in `cumem` backend. Plugins can register other backends with
+`SleepModeBackendFactory.register_backend` from a `vllm.general_plugins` entry
+point, and you select one by name:
+
+```python
+llm = LLM("Qwen/Qwen3-8B", enable_sleep_mode=True, sleep_mode_backend="my_backend")
+```
+
+or `vllm serve <model> --enable-sleep-mode --sleep-mode-backend my_backend`.
+
+An unregistered name is not caught at startup; it fails the first time the
+backend is used, such as on the first sleep. CUDA graph offloading and
+`release_kv_cache_memory()` have their own backend requirements, described
+above.
+
 ### Online Serving
 
 To enable sleep mode in a vLLM server you need to initialize it with the flag `VLLM_SERVER_DEV_MODE=1` and pass `--enable-sleep-mode` to the vLLM server.
