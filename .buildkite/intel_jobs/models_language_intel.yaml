@@ -5,16 +5,11 @@ steps:
 - label: ":intel: (BMG) Language Models (Hybrid)"
   key: language-models-hybrid
   timeout_in_minutes: 40
-  device: intel_gpu
-  agent_tags:
-    label: production
-    gpu: 1+
-    mem: 24+
-  no_plugin: true
-  working_dir: "."
+  device: intel_gpu_k8s
+  num_devices: 1
+  resource_claim_template: b70-1
+  working_dir: "/workspace/vllm/"
   env:
-    REGISTRY: "public.ecr.aws/q9t5s3a7"
-    REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
   - vllm/v1/core/
@@ -28,31 +23,22 @@ steps:
   - vllm/platforms/xpu.py
   - tests/models/language/generation/test_hybrid.py
   commands:
-    - >-
-      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'cd tests &&
-      pytest -v -s models/language/generation/test_hybrid.py -k apc'
+    - cd tests
+    - pytest -v -s models/language/generation/test_hybrid.py -k apc
 
 - label: ":intel: (BMG) Language Models (Pooling)"
   key: language-models-pooling
   timeout_in_minutes: 30
-  device: intel_gpu
-  agent_tags:
-    label: production
-    gpu: 1+
-    mem: 16+
-  no_plugin: true
-  working_dir: "."
+  device: intel_gpu_k8s
+  num_devices: 1
+  resource_claim_template: b70-1
+  working_dir: "/workspace/vllm/"
   env:
-    REGISTRY: "public.ecr.aws/q9t5s3a7"
-    REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
   optional: true
   source_file_dependencies:
   - vllm/
   - tests/models/language/pooling
   commands:
-    - >-
-      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'cd tests &&
-      pytest -v -s models/language/pooling/test_auto_prefix_cache_support.py'
+    - cd tests
+    - pytest -v -s models/language/pooling/test_auto_prefix_cache_support.py
