@@ -5,6 +5,7 @@ import mmap
 from collections import deque
 from contextlib import nullcontext
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock, call
 
 import numpy as np
@@ -30,7 +31,7 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.backend import CUDAHiSparseBackend
-from vllm.v1.hisparse.runtime import HiSparseCacheHandle
+from vllm.v1.hisparse.runtime import HiSparseCacheHandle, HiSparseRuntime
 from vllm.v1.hisparse.types import SparseKVPageTransfer, SparseKVRowMirror
 from vllm.v1.worker.utils import (
     bind_kv_cache,
@@ -1444,7 +1445,9 @@ def test_hisparse_release_synchronizes_before_unregister(monkeypatch):
         cache_ops=object(),
     )
 
-    hisparse_runtime_module.release_pinned_state([runtime], pending)
+    hisparse_runtime_module.release_pinned_state(
+        [cast(HiSparseRuntime, runtime)], pending
+    )
 
     assert backend.mock_calls == [call.synchronize(), call.unpin_tensor(registered)]
     assert pending == []
@@ -1745,10 +1748,12 @@ def test_hisparse_speculative_group_stages_followers_with_separate_events(
     follower = SimpleNamespace(
         _swap_rows=MagicMock(), _layer_ready_event=None, _swap_staged=False
     )
+    leader_ready_event = MagicMock()
+    follower_ready_event = MagicMock()
     leader.backend = SimpleNamespace(
         current_stream=MagicMock(),
         stream_context=lambda *a, **kw: nullcontext(),
-        create_event=MagicMock(side_effect=lambda: MagicMock()),
+        create_event=MagicMock(side_effect=[leader_ready_event, follower_ready_event]),
     )
     leader.index_group = SimpleNamespace(
         logical_topk_ready=None,
@@ -1757,8 +1762,9 @@ def test_hisparse_speculative_group_stages_followers_with_separate_events(
         row_indices=torch.arange(16),
         followers=[follower],
     )
-    leader._resolve_residency = MagicMock()
-    leader._swap_rows = MagicMock()
+    monkeypatch.setattr(leader, "_resolve_residency", MagicMock())
+    swap_rows = MagicMock()
+    monkeypatch.setattr(leader, "_swap_rows", swap_rows)
     leader._layer_ready_event = None
     leader._swap_staged = False
     rows = slice(0, 16)
@@ -1775,16 +1781,15 @@ def test_hisparse_speculative_group_stages_followers_with_separate_events(
         num_valid_rows=torch.tensor(12),
     )
     assert leader._swap_staged
-    leader._swap_rows.assert_called_once_with(rows)
-    leader._layer_ready_event.record.assert_called_once_with(
-        leader.index_group.copy_stream
-    )
+    swap_rows.assert_called_once_with(rows)
+    assert leader._layer_ready_event is leader_ready_event
+    leader_ready_event.record.assert_called_once_with(leader.index_group.copy_stream)
     assert leader.index_group.request_ids[-4:].tolist() == [-1] * 4
     assert follower._swap_staged == prefetch
     if prefetch:
         follower._swap_rows.assert_called_once_with(rows)
-        assert follower._layer_ready_event is not leader._layer_ready_event
-        follower._layer_ready_event.record.assert_called_once_with(
+        assert follower._layer_ready_event is follower_ready_event
+        follower_ready_event.record.assert_called_once_with(
             leader.index_group.copy_stream
         )
     else:

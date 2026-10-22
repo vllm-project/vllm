@@ -550,7 +550,7 @@ def test_hisparse_prepares_views_before_binding(monkeypatch):
     backend = CUDAHiSparseBackend()
     backing = torch.zeros(8)
     caches = {"layer": backing}
-    context = {}
+    context: dict[str, Any] = {}
     pool = SimpleNamespace(shared_region=None, registered=None)
     calls = []
 
