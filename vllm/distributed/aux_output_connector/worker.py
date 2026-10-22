@@ -91,12 +91,7 @@ class PendingAuxOutput:
             return host.numpy()
 
         if self.routed_experts_gpu is not None:
-            if self.indexer_gpu is None:
-                self.routed_experts = self.routed_experts_gpu.to(
-                    "cpu", non_blocking=True
-                ).numpy()
-            else:
-                self.routed_experts = copy_rows(self.routed_experts_gpu)
+            self.routed_experts = copy_rows(self.routed_experts_gpu)
         if self.indexer_gpu is not None:
             self.indexer = copy_rows(self.indexer_gpu)
 
