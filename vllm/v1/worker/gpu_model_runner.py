@@ -1421,6 +1421,9 @@ class GPUModelRunner(
                 # The request is resumed from preemption.
                 # Replace the existing block IDs with the new ones.
                 req_state.block_ids = new_block_ids
+                # Its recurrent state is recomputed, so re-anchor the ReplaySSM
+                # ring at re-admission.
+                req_state.replayssm_decode_base = None
 
             if req_index is None:
                 # The request is not in the persistent batch.
