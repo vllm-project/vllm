@@ -90,6 +90,7 @@ _QWEN3_OMNI_TARGET_ARCHITECTURES = frozenset(
     }
 )
 _QWEN3_OMNI_DSPARK_ARCHITECTURE = "Qwen3OmniDSparkModel"
+_MUSE_SPARK_DSPARK_ARCHITECTURE = "MuseSparkDSparkModel"
 
 
 def _is_qwen3_omni_target(model_config: ModelConfig) -> bool:
@@ -677,6 +678,18 @@ class SpeculativeConfig:
     @staticmethod
     def hf_config_override(hf_config: PreTrainedConfig) -> PreTrainedConfig:
         initial_architecture = hf_config.architectures[0]
+        if initial_architecture == "RadioMBartPrefixForCausalLM" and getattr(
+            getattr(hf_config, "decoder", None), "causal_vision_prefix", False
+        ):
+            hf_config.model_type = "mtp"
+            hf_config.update(
+                {
+                    "architectures": ["ParseAuxMTPModel"],
+                    "n_predict": 1,
+                    "num_nextn_predict_layers": 1,
+                }
+            )
+            return hf_config
         use_v32_mtp = hf_config.model_type in ("deepseek_v32", "glm_moe_dsa")
         if hf_config.model_type == "dots3_note":
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
@@ -1370,6 +1383,8 @@ class SpeculativeConfig:
                     or "Qwen3DSparkModel" in self.draft_model_config.architectures
                     or _QWEN3_OMNI_DSPARK_ARCHITECTURE
                     in self.draft_model_config.architectures
+                    or _MUSE_SPARK_DSPARK_ARCHITECTURE
+                    in self.draft_model_config.architectures
                     or "Gemma4DSparkModel" in self.draft_model_config.architectures
                     or (
                         "DSparkDraftModel" in self.draft_model_config.architectures
@@ -1453,6 +1468,8 @@ class SpeculativeConfig:
                     "Qwen3DSparkModel" not in self.draft_model_config.architectures
                     and _QWEN3_OMNI_DSPARK_ARCHITECTURE
                     not in self.draft_model_config.architectures
+                    and _MUSE_SPARK_DSPARK_ARCHITECTURE
+                    not in self.draft_model_config.architectures
                     and "Gemma4DSparkModel" not in self.draft_model_config.architectures
                     and "K3DSparkModel" not in self.draft_model_config.architectures
                 ):
@@ -1491,6 +1508,11 @@ class SpeculativeConfig:
                 n_predict = getattr(
                     self.draft_model_config.hf_config, "n_predict", None
                 )
+                if (
+                    "ParseAuxMTPModel" in self.draft_model_config.architectures
+                    and self.num_speculative_tokens not in (None, 1)
+                ):
+                    raise ValueError("Parse 3.5 has only one trained MTP step")
                 if self.use_dspark():
                     if self.num_speculative_tokens is None:
                         # DSpark's parallel width is independent of MTP stages.
