@@ -1020,6 +1020,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
 
         main_slot_mapping = fwd_slot_mapping[self.layer_name]
         index_slot_mapping = fwd_slot_mapping[self.indexer.index_cache.prefix]
+        prefetch_index_history = False
         if self.indexer.index_cache.tp_shard > 1:
             attn_metadata = get_forward_context().attn_metadata
             assert isinstance(attn_metadata, dict)
@@ -1029,6 +1030,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             )
             assert index_md.index_slot_mapping is not None
             index_slot_mapping = index_md.index_slot_mapping
+            prefetch_index_history = index_md.decode is not None
         # FlashInfer autotunes the GEMMs its dummy runs call: take the unfused
         # path there so qkv_proj is tuned for the M < 512 fallback.
         if isinstance(hidden_states, QuantizedActivation):
@@ -1097,7 +1099,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
                 kv_v_scale=self._v_scale if self.use_nvfp4_kv else None,
                 write_qkv=not q_is_fp8,
                 # CP scoring reads step metadata before waiting for this writer.
-                enable_pdl=self.indexer.index_cache.tp_shard == 1,
+                enable_pdl=not prefetch_index_history,
             )
 
         output = torch.empty((num_tokens, self.q_size), dtype=dtype, device=device)

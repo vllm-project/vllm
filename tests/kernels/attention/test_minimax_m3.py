@@ -2350,7 +2350,9 @@ def test_sharded_decode_prefetch_waits_for_current_qk(world):
         q.zero_()
         shard[-1].zero_()
         # Ordinary launch fences metadata; the scorer alone opts into PDL.
-        delayed_writer[(1,)](q, shard[-1], q.numel(), qlen // world * 128)
+        delayed_writer[(1,)](
+            q, shard[-1], q.numel(), qlen // world * 128, launch_pdl=False
+        )
         minimax_m3_index_decode_score_sharded_cutedsl(
             q,
             shard,
@@ -2380,8 +2382,9 @@ def test_sharded_decode_prefetch_waits_for_current_qk(world):
 )
 @pytest.mark.parametrize("world", [2, 4])
 @pytest.mark.parametrize("init_blocks,local_blocks", [(0, 0), (1, 1), (3, 4)])
+@pytest.mark.parametrize("tagged", [False, True])
 def test_sharded_select_publish_reuses_slots_with_ties(
-    world, init_blocks, local_blocks
+    world, init_blocks, local_blocks, tagged
 ):
     from vllm.models.minimax_m3.nvidia.ops.index_decode_score_sharded import (
         MAX_K_TILES,
@@ -2399,7 +2402,20 @@ def test_sharded_select_publish_reuses_slots_with_ties(
         -5, 6, (world, tokens, heads, MAX_K_TILES), device="cuda"
     ).float()
     recv = [
-        torch.zeros((3, world, hpr, capacity, 33), device="cuda", dtype=torch.int32)
+        torch.zeros(
+            (3, world, hpr, capacity, 32 if tagged else 33),
+            device="cuda",
+            dtype=torch.int64 if tagged else torch.int32,
+        )
+        for _ in range(world)
+    ]
+    # Cross uint32 wrap and skip the zero reserved for uninitialized windows.
+    publish_generations = [
+        torch.full((3, heads, capacity), -2, dtype=torch.int32, device="cuda")
+        for _ in range(world)
+    ]
+    expected_generations = [
+        torch.full((3, hpr, capacity), -2, dtype=torch.int32, device="cuda")
         for _ in range(world)
     ]
     bases = torch.tensor([r.data_ptr() for r in recv], device="cuda", dtype=torch.int64)
@@ -2422,6 +2438,8 @@ def test_sharded_select_publish_reuses_slots_with_ties(
                     init_blocks=init_blocks,
                     local_blocks=local_blocks,
                     spin_limit=1 << 20,
+                    use_pdl=True,
+                    generations=publish_generations[rank] if tagged else None,
                 )
             for owner, r in enumerate(recv):
                 minimax_m3_index_merge_candidates(
@@ -2432,6 +2450,10 @@ def test_sharded_select_publish_reuses_slots_with_ties(
                     init_blocks=init_blocks,
                     local_blocks=local_blocks,
                     spin_limit=1 << 20,
+                    use_pdl=True,
+                    expected_generations=(
+                        expected_generations[owner][slot] if tagged else None
+                    ),
                 )
 
     launch()
@@ -2448,11 +2470,15 @@ def test_sharded_select_publish_reuses_slots_with_ties(
                 ids = torch.cat(
                     [r[slot, rank, :, :tokens, 16:32].transpose(0, 1) for r in recv],
                     dim=1,
+                ).to(torch.int32)
+                values = (
+                    torch.cat(
+                        [r[slot, rank, :, :tokens, :16].transpose(0, 1) for r in recv],
+                        dim=1,
+                    )
+                    .to(torch.int32)
+                    .view(torch.float32)
                 )
-                values = torch.cat(
-                    [r[slot, rank, :, :tokens, :16].transpose(0, 1) for r in recv],
-                    dim=1,
-                ).view(torch.float32)
                 _assert_sharded_topk(
                     ids, scores[rank], valid, init_blocks, local_blocks
                 )
@@ -2460,8 +2486,20 @@ def test_sharded_select_publish_reuses_slots_with_ties(
                 expected.masked_fill_(ids < 0, -float("inf"))
                 torch.testing.assert_close(values, expected, rtol=0, atol=0)
         assert errors.item() == 0
-        for r in recv:
-            assert torch.count_nonzero(r[..., 32]).item() == 0
+        for owner, r in enumerate(recv):
+            if tagged:
+                actual_gen = (r[:, :, :, :tokens] >> 32) & 0xFFFFFFFF
+                expected_gen = expected_generations[owner][:, None, :, :tokens, None]
+                torch.testing.assert_close(
+                    actual_gen, (expected_gen.long() & 0xFFFFFFFF).expand_as(actual_gen)
+                )
+                for generations in publish_generations:
+                    torch.testing.assert_close(
+                        generations[:, owner * hpr : (owner + 1) * hpr],
+                        expected_generations[owner],
+                    )
+            else:
+                assert torch.count_nonzero(r[..., 32]).item() == 0
             assert torch.count_nonzero(r[..., tokens:, :]).item() == 0
 
 

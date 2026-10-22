@@ -503,6 +503,11 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
                 assert comm is not None
                 assert nd <= comm.max_decode_tokens
                 slot_set = comm.slot_set(self.index_k_ordinal)
+                tagged = (
+                    comm.tagged_enabled
+                    and comm.num_layers > 1
+                    and md.prefill_msa is None
+                )
                 scores = comm.scores[:nd]
                 sharded_score.minimax_m3_index_decode_score_sharded_cutedsl(
                     index_q[:nd],
@@ -519,7 +524,7 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
                 sharded_score.minimax_m3_index_select_publish_candidates(
                     scores,
                     num_valid_pages[:nd],
-                    comm.recv_bases,
+                    comm.tagged_recv_bases if tagged else comm.recv_bases,
                     slot_set,
                     comm.rank,
                     comm.max_decode_tokens,
@@ -530,9 +535,10 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
                     local_blocks=self.local_blocks,
                     spin_limit=SPIN_LIMIT,
                     use_pdl=True,
+                    generations=comm.publish_generations if tagged else None,
                 )
                 sharded_score.minimax_m3_index_merge_candidates(
-                    comm.recv[slot_set],
+                    (comm.tagged_recv if tagged else comm.recv)[slot_set],
                     num_valid_pages[:nd],
                     buf[:nd],
                     comm.errors,
@@ -540,6 +546,9 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
                     local_blocks=self.local_blocks,
                     spin_limit=SPIN_LIMIT,
                     use_pdl=True,
+                    expected_generations=(
+                        comm.expected_generations[slot_set] if tagged else None
+                    ),
                 )
             else:
                 from vllm.models.minimax_m3.nvidia.ops import (
@@ -881,7 +890,8 @@ def get_comm(
 class IndexKShardComm:
     """Symmetric receive slots shared by every sharded indexer layer.
 
-    Each ``recv[set, src, h, t]`` holds 16 scores, 16 block IDs and a ready flag.
+    Tagged rows carry 16 score/ID pairs. Mixed and single-layer calls retain
+    ready/empty rows; a tagged slot needs an intervening exchange before reuse.
     """
 
     def __init__(self, vllm_config: VllmConfig, total_index_heads: int) -> None:
@@ -907,8 +917,31 @@ class IndexKShardComm:
                 self.max_decode_tokens,
                 2 * TOPK + 1,
             )
-            self.recv = symm_mem.empty(shape, dtype=torch.int32, device=self.device)
-            self.recv.zero_()
+            rows = NUM_SLOT_SETS * total_index_heads * self.max_decode_tokens
+            legacy_words = rows * (2 * TOPK + 1)
+            self._recv_storage = symm_mem.empty(
+                (legacy_words + rows * 4 * TOPK,),
+                dtype=torch.int32,
+                device=self.device,
+            )
+            self._recv_storage.zero_()
+            self.recv = self._recv_storage[:legacy_words].view(shape)
+            self.tagged_recv = (
+                self._recv_storage[legacy_words:]
+                .view(torch.int64)
+                .view(*shape[:-1], 2 * TOPK)
+            )
+            self.tagged_enabled = symm_mem.get_backend(self.device) in (None, "CUDA")
+            self.publish_generations = torch.zeros(
+                (NUM_SLOT_SETS, total_index_heads, self.max_decode_tokens),
+                dtype=torch.int32,
+                device=self.device,
+            )
+            self.expected_generations = torch.zeros(
+                (NUM_SLOT_SETS, self.hpr, self.max_decode_tokens),
+                dtype=torch.int32,
+                device=self.device,
+            )
             self.scores = torch.empty(
                 (self.max_decode_tokens, total_index_heads, MAX_K_TILES),
                 dtype=torch.float32,
@@ -917,21 +950,29 @@ class IndexKShardComm:
             self.recv_bases = torch.empty(
                 self.world, dtype=torch.int64, device=self.device
             )
+            self.tagged_recv_bases = torch.empty_like(self.recv_bases)
             self.errors = torch.zeros(1, dtype=torch.int32, device=self.device)
             self.num_layers = 0
             torch.accelerator.synchronize(self.device)
-        handle = symm_mem.rendezvous(self.recv, group.device_group.group_name)
+        handle = symm_mem.rendezvous(self._recv_storage, group.device_group.group_name)
         with _local_init():
             assert handle is not None
             self.handle = handle
             bases = [int(p) for p in handle.buffer_ptrs]
             assert bases[self.rank] == self.recv.data_ptr()
             self.recv_bases.copy_(torch.tensor(bases, dtype=torch.int64, device="cpu"))
+            self.tagged_recv_bases.copy_(
+                torch.tensor(
+                    [base + legacy_words * 4 for base in bases],
+                    dtype=torch.int64,
+                    device="cpu",
+                )
+            )
             torch.accelerator.synchronize(self.device)
         logger.info_once(
             "MiniMax M3 index-K shard exchange: %.1f MiB symmetric receive slots "
             "(max %d decode tokens)",
-            self.recv.numel() * 4 / (1 << 20),
+            self._recv_storage.numel() * 4 / (1 << 20),
             self.max_decode_tokens,
         )
 
@@ -941,7 +982,7 @@ class IndexKShardComm:
         return self.num_layers - 1
 
     def slot_set(self, ordinal: int) -> int:
-        """Rotate neighboring layers; publisher backpressure protects slot reuse."""
+        """Adjacent layers, including the step boundary, use different slots."""
         n = self.num_layers
         if n % 2 == 0:
             return ordinal % 2
