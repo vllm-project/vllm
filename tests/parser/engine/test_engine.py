@@ -1019,7 +1019,6 @@ class TestTerminalAliases:
 
 
 def test_drop_info_is_built_once_across_requests():
-    """Per-request engines reuse the special-token drop lexer and parse alike."""
     tokenizer = get_tokenizer(
         tokenizer_name="mistralai/Mistral-Small-3.2-24B-Instruct-2506",
         tokenizer_mode="mistral",
