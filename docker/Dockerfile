@@ -760,6 +760,7 @@ RUN PYTHON_VERSION_STR=$(echo ${PYTHON_VERSION} | sed 's/\.//g') && \
 # Install Python and system dependencies
 RUN apt-get update -y \
     && apt-get install -y --no-install-recommends \
+        ca-certificates \
         software-properties-common \
         curl \
         sudo \
