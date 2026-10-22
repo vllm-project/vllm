@@ -506,7 +506,7 @@ def _spec_requests():
 
 
 def test_eagle3_verify_steps_match_native(vllm_runner, model_dir, draft_dir, capfd):
-    """EAGLE3 (random draft) with --monokernel under FULL graphs: the verify
+    """EAGLE3 (random draft) with --specialized-decode under FULL graphs: the verify
     steps of 1-4 requests (4, 8, 12 padded to 16, and 16 rows) run the fused
     launches (the device epoch moves on); the target's full-vocabulary
     logprobs along the generated tokens match native eager teacher-forced on
