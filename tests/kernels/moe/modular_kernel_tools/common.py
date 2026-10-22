@@ -1,14 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+
 import vllm._custom_ops as ops
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from tests.kernels.moe.utils import make_test_weights, per_token_cast_to_fp8
+from tests.kernels.moe.utils import (
+    _interleave_gate_up_rows,
+    make_test_weights,
+    per_token_cast_to_fp8,
+)
 from tests.kernels.quantization.nvfp4_utils import (
     FLOAT4_E2M1_MAX,
     FLOAT8_E4M3_MAX,
@@ -43,6 +50,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+    kMxfp4Dynamic,
+    kMxfp4Static,
 )
 from vllm.utils.import_utils import (
     has_aiter,
@@ -79,8 +88,8 @@ class Config:
     dtype: torch.dtype
     quant_config: TestMoEQuantConfig | None
 
-    prepare_finalize_type: mk.FusedMoEPrepareAndFinalize
-    fused_experts_type: mk.FusedMoEExperts
+    prepare_finalize_type: type[mk.FusedMoEPrepareAndFinalizeModular]
+    fused_experts_type: type[mk.FusedMoEExpertsModular]
 
     world_size: int
 
@@ -116,6 +125,7 @@ class Config:
         s += " Quant:\n"
         if self.quant_config is not None:
             s += f"     q_dtype={self.quant_dtype}\n"
+            s += f"     w_dtype={self.weight_dtype}\n"
             s += f"     q_block_shape={self.quant_block_shape}\n"
             s += f"     q_per_out_ch_quant={self.is_per_out_ch_quant}\n"
             s += f"     q_per_act_token={self.is_per_act_token_quant}\n"
@@ -132,6 +142,15 @@ class Config:
     def quant_dtype(self) -> torch.dtype | str | None:
         assert self.quant_config is not None
         return self.quant_config.quant_dtype
+
+    @property
+    def weight_dtype(self) -> torch.dtype | str | None:
+        """Weight quant dtype, defaulting to quant_dtype when unset. Falls
+        back outright if quant_config is a production FusedMoEQuantConfig
+        (e.g. via cli_args.py), which has no weight_dtype field."""
+        assert self.quant_config is not None
+        wd = getattr(self.quant_config, "weight_dtype", None)
+        return wd if wd is not None else self.quant_dtype
 
     @property
     def is_per_act_token_quant(self) -> bool:
@@ -167,6 +186,9 @@ class Config:
         vllm_config.model_config = SimpleNamespace(
             enforce_eager=True,
             is_moe=True,
+            enable_sleep_mode=False,
+            sleep_mode_backend="cumem",
+            sleep_mode_offload_cudagraph=False,
         )
         vllm_config.parallel_config.data_parallel_size = self.world_size
         vllm_config.parallel_config.enable_expert_parallel = True
@@ -199,14 +221,42 @@ class Config:
             else kFp8StaticTensorSym,
         )
 
+    def mxfp4_quant_key_pair(self) -> tuple[QuantKey, QuantKey | None]:
+        """Derive the (weight_quant_key, activation_quant_key) pair an mxfp4
+        quant config of this shape corresponds to (W4A16 when activations
+        are unquantized, W4A4 when they are also mxfp4)."""
+        return kMxfp4Static, (kMxfp4Dynamic if self.quant_dtype == "mxfp4" else None)
+
+    @property
+    def is_w4a16_mxfp4(self) -> bool:
+        """True for the asymmetric W4A16 mxfp4 case (mxfp4 weight, unquantized
+        activation), as opposed to the symmetric W4A4 case (both mxfp4)."""
+        return self.quant_dtype is None and self.weight_dtype == "mxfp4"
+
+    @property
+    def mxfp4_backend(self) -> "Mxfp4MoeBackend":
+        """The AITER mxfp4 kernel backend this config's (weight, activation)
+        dtype pair maps to."""
+        from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+
+        assert self.weight_dtype == "mxfp4"
+        return (
+            Mxfp4MoeBackend.AITER
+            if self.is_w4a16_mxfp4
+            else Mxfp4MoeBackend.AITER_MXFP4_MXFP4
+        )
+
     def fe_supports_quant_scheme(self) -> bool:
         """Check if the fused experts class supports this quant config.
         See https://github.com/ROCm/aiter/issues/2419 for AITER gaps."""
-        if self.quant_config is None or self.quant_dtype is None:
+        if self.quant_config is None or self.weight_dtype is None:
             return True
-        if not is_fp8(self.quant_dtype):
+        if self.weight_dtype == "mxfp4":
+            w_key, a_key = self.mxfp4_quant_key_pair()
+        elif is_fp8(self.quant_dtype):
+            w_key, a_key = self.fp8_quant_key_pair()
+        else:
             return True
-        w_key, a_key = self.fp8_quant_key_pair()
         fe_cls = self.fused_experts_type
         if hasattr(fe_cls, "_supports_quant_scheme"):
             try:
@@ -292,7 +342,7 @@ class Config:
             return False, f"Bad quant_config {self.quant_config}."
 
         # check type support
-        if self.quant_dtype is None:
+        if self.weight_dtype is None:
             if (
                 self.dtype not in self.pf_supported_types()
                 or self.dtype not in self.fe_supported_types()
@@ -303,15 +353,17 @@ class Config:
                     f"{self.fe_supported_types()}."
                 )
         else:
-            if (
-                self.quant_dtype not in self.pf_supported_types()
-                or self.quant_dtype not in self.fe_supported_types()
-            ):
-                return False, (
-                    f"Unsupported quant type {self.quant_dtype} "
-                    f"not in {self.pf_supported_types()} and "
-                    f"{self.fe_supported_types()}."
-                )
+            dtypes_to_check = {self.quant_dtype, self.weight_dtype} - {None}
+            for dtype in dtypes_to_check:
+                if (
+                    dtype not in self.pf_supported_types()
+                    or dtype not in self.fe_supported_types()
+                ):
+                    return False, (
+                        f"Unsupported quant type {dtype} "
+                        f"not in {self.pf_supported_types()} and "
+                        f"{self.fe_supported_types()}."
+                    )
 
         # Check quant scheme compatibility with fused experts class
         if not self.fe_supports_quant_scheme():
@@ -438,7 +490,7 @@ class WeightTensors:
             n=config.N,
             k=config.K,
             in_dtype=config.dtype,
-            quant_dtype=config.quant_dtype,
+            quant_dtype=config.weight_dtype,
             block_shape=config.quant_block_shape,
             # or config.is_per_out_ch_quant
             per_out_ch_quant=config.is_per_act_token_quant,
@@ -478,6 +530,20 @@ class RankTensors:
 
         if config.quant_dtype is None:
             return a, None
+
+        if config.quant_dtype == "mxfp4":
+            # Quantize and dequantize using the real mxfp4 kernels so the
+            # dequantized input is already a fixed point of this
+            # quantization (same rationale as the FP8 branches below). Must
+            # be checked before the FP8 per-tensor/per-token branches, since
+            # those conditions also evaluate true for this config.
+            from triton_kernels.numerics_details.mxfp import (
+                downcast_to_mxfp,
+                upcast_from_mxfp,
+            )
+
+            a_q, a_scales = downcast_to_mxfp(a, torch.uint8, axis=-1)
+            return upcast_from_mxfp(a_q, a_scales, dtype, axis=-1), None
 
         # We dequant and use that as hidden_states so the tests are stable.
         # quantizing and dequantizing yield slightly different results
@@ -607,6 +673,29 @@ def reference_moe_impl(
         quant_dtype = None
         per_act_token_quant = False
         block_shape = None
+    elif config.weight_dtype == "mxfp4":
+        from triton_kernels.numerics_details.mxfp import upcast_from_mxfp
+
+        dtype = config.dtype
+        a = rank_tensors.hidden_states
+        w1_q, w1_scale_q = weights.w1, weights.w1_scale
+        if config.is_w4a16_mxfp4:
+            assert config.activation == MoEActivation.SWIGLUOAI
+            # SwigluOAIAndMul expects gate/up interleaved row order
+            # (x[..., ::2], x[..., 1::2]), not the contiguous [gate; up]
+            # halves that `weights.w1` is generated in. Mirror the same
+            # reorder `_maybe_convert_weights_for_experts()` applies before
+            # the real MK-path AITER kernel call.
+            w1_q = _interleave_gate_up_rows(w1_q)
+            w1_scale_q = _interleave_gate_up_rows(w1_scale_q)
+        w1 = upcast_from_mxfp(w1_q, w1_scale_q, dtype, axis=-1)
+        w2 = upcast_from_mxfp(weights.w2, weights.w2_scale, dtype, axis=-1)
+        a_scale = None
+        w1_scale = None
+        w2_scale = None
+        quant_dtype = None
+        per_act_token_quant = False
+        block_shape = None
     else:
         a = rank_tensors.hidden_states
         a_scale = rank_tensors.hidden_states_scale
@@ -702,11 +791,31 @@ def make_modular_kernel(
     return modular_kernel
 
 
+def _shuffle_weights_for_aiter(rank_weights: WeightTensors) -> WeightTensors:
+    """Pre-shuffle weights so AITER selects its prebuilt `preshuffle_on` module.
+
+    Production shuffles in `process_weights_after_loading`; this harness builds its
+    tensors directly, so without this every call asks for a `preshuffle_off` module
+    that is not prebuilt, and JIT-compiles a kernel the image already ships.
+    """
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    w1, w2 = rocm_aiter_ops.shuffle_weights(rank_weights.w1, rank_weights.w2)
+    w1.is_shuffled = True
+    w2.is_shuffled = True
+    return replace(rank_weights, w1=w1, w2=w2)
+
+
 def _maybe_convert_weights_for_experts(
     config: Config,
     rank_weights: WeightTensors,
 ) -> WeightTensors:
     """Convert weights to expert-specific format (e.g., TrtLLM BlockMajorK)."""
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterExperts,
+        AiterFp8ChannelExperts,
+        AiterFp8TensorExperts,
+    )
     from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
         Fp8MoeBackend,
         convert_to_fp8_moe_kernel_format,
@@ -714,6 +823,52 @@ def _maybe_convert_weights_for_experts(
 
     fe_type = config.fused_experts_type
     fe_name = getattr(fe_type, "__name__", "")
+
+    if issubclass(fe_type, AiterExperts) and config.weight_dtype == "mxfp4":
+        from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+            convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
+        )
+
+        assert rank_weights.w1_scale is not None
+        assert rank_weights.w2_scale is not None
+
+        # The converter mutates its w13/w2 weight and scale args in place, and
+        # rank_weights is a view into the shared master WeightTensors, so
+        # everything passed in must be a fresh tensor.
+        if config.is_w4a16_mxfp4:
+            w1 = _interleave_gate_up_rows(rank_weights.w1)
+            w1_scale = _interleave_gate_up_rows(rank_weights.w1_scale)
+        else:
+            w1 = rank_weights.w1.clone()
+            w1_scale = rank_weights.w1_scale.clone()
+        w2 = rank_weights.w2.clone()
+        w2_scale = rank_weights.w2_scale.clone()
+
+        w1, w2, w1_scale, w2_scale, _, _ = (
+            convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
+                mxfp4_backend=config.mxfp4_backend,
+                layer=torch.nn.Module(),
+                w13_weight=w1,
+                w2_weight=w2,
+                w13_weight_scale=w1_scale,
+                w2_weight_scale=w2_scale,
+            )
+        )
+        return WeightTensors(w1=w1, w2=w2, w1_scale=w1_scale, w2_scale=w2_scale)
+
+    # AITER's prebuilt modules carry a gfx950 instance table even on gfx942 and reject
+    # intermediate sizes that are not a multiple of 256, but only for the fp8 per-tensor
+    # and per-token schemes. Those shapes keep JIT-compiling until
+    # https://github.com/ROCm/aiter/issues/5766 is fixed.
+    if issubclass(fe_type, AiterExperts) and (
+        config.quant_dtype is None
+        or config.quant_block_shape is not None
+        or (
+            issubclass(fe_type, (AiterFp8TensorExperts, AiterFp8ChannelExperts))
+            and rank_weights.w2.size(-1) % 256 == 0
+        )
+    ):
+        return _shuffle_weights_for_aiter(rank_weights)
 
     backend: Fp8MoeBackend | None = None
     if fe_name == "TrtLlmFp8ExpertsModular":
@@ -773,19 +928,34 @@ def run_modular_kernel(
     else:
         gscale = None
 
-    quant_config = FusedMoEQuantConfig.make(
-        config.quant_dtype,
-        w1_scale=rank_weights.w1_scale,
-        w2_scale=rank_weights.w2_scale,
-        a1_scale=rank_tensors.hidden_states_scale,
-        g1_alphas=(1 / rank_weights.w1_gs) if rank_weights.w1_gs is not None else None,
-        g2_alphas=(1 / rank_weights.w2_gs) if rank_weights.w2_gs is not None else None,
-        a1_gscale=gscale,
-        a2_gscale=gscale,
-        block_shape=config.quant_block_shape,
-        per_act_token_quant=config.is_per_act_token_quant,
-        per_out_ch_quant=config.is_per_out_ch_quant,
-    )
+    if config.weight_dtype == "mxfp4":
+        from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+            make_mxfp4_moe_quant_config,
+        )
+
+        quant_config = make_mxfp4_moe_quant_config(
+            config.mxfp4_backend,
+            w1_scale=rank_weights.w1_scale,
+            w2_scale=rank_weights.w2_scale,
+        )
+    else:
+        quant_config = FusedMoEQuantConfig.make(
+            config.quant_dtype,
+            w1_scale=rank_weights.w1_scale,
+            w2_scale=rank_weights.w2_scale,
+            a1_scale=rank_tensors.hidden_states_scale,
+            g1_alphas=(1 / rank_weights.w1_gs)
+            if rank_weights.w1_gs is not None
+            else None,
+            g2_alphas=(1 / rank_weights.w2_gs)
+            if rank_weights.w2_gs is not None
+            else None,
+            a1_gscale=gscale,
+            a2_gscale=gscale,
+            block_shape=config.quant_block_shape,
+            per_act_token_quant=config.is_per_act_token_quant,
+            per_out_ch_quant=config.is_per_out_ch_quant,
+        )
 
     mk = make_modular_kernel(config, vllm_config, quant_config)
 

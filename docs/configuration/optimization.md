@@ -79,6 +79,21 @@ llm = LLM(model="meta-llama/Llama-3.1-8B-Instruct", max_num_batched_tokens=16384
 
 See related papers for more details (<https://arxiv.org/pdf/2401.08671> or <https://arxiv.org/pdf/2308.16369>).
 
+### ROCm DSA Prefill Indexer
+
+On AMD `gfx950` GPUs, the AITER DSA prefill indexer automatically shards query
+rows across tensor-parallel ranks when the longest prefill sequence in the
+batch reaches 16,384 tokens. This requires AITER MLA to be enabled through
+`VLLM_ROCM_USE_AITER=1` and `VLLM_ROCM_USE_AITER_MLA=1`; no separate CP indexer
+environment variable is needed.
+
+The threshold uses the sequence length, including cached context, rather than
+the number of query rows in a prefill chunk. Candidate-block indexers and
+batches whose chunks all have fewer query rows than TP ranks use replicated
+execution. Other GPU architectures also use replicated execution. This
+optimization distributes indexer computation; it does not expand KV cache
+capacity.
+
 ## Parallelism Strategies
 
 vLLM supports multiple parallelism strategies that can be combined to optimize performance across different hardware configurations.

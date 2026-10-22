@@ -2,11 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Self
 
 import torch
 from pydantic import ConfigDict, Field, model_validator
-from typing_extensions import Self
 
 from vllm import envs
 from vllm.config.utils import config
@@ -136,6 +135,14 @@ class LoRAConfig:
         return self
 
     def verify_with_model_config(self, model_config: ModelConfig):
+        if not model_config.is_lora_supported:
+            raise ValueError(
+                f"LoRA is not supported for {model_config.architecture} "
+                f"({model_config.model}). Supported models implement the "
+                "`SupportsLoRA` interface. Run this model without "
+                "`enable_lora`."
+            )
+
         if self.lora_dtype in (None, "auto"):
             self.lora_dtype = model_config.dtype
         elif isinstance(self.lora_dtype, str):

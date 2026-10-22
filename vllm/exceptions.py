@@ -62,6 +62,12 @@ class VLLMNotFoundError(VLLMClientError):
     pass
 
 
+class ChatTemplateResolutionError(VLLMClientError):
+    """Raised when chat template resolution fails."""
+
+    pass
+
+
 class LoRAAdapterNotFoundError(VLLMNotFoundError):
     """Exception raised when a LoRA adapter is not found.
 

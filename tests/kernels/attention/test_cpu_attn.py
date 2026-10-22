@@ -10,7 +10,7 @@ import torch
 
 from vllm.model_executor.kernels.linear.zentorch_utils import has_zentorch_op
 from vllm.platforms import CpuArchEnum, current_platform
-from vllm.utils.torch_utils import set_random_seed
+from vllm.utils.torch_utils import set_default_torch_num_threads, set_random_seed
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.cpu_attn import _get_attn_isa
 from vllm.v1.attention.backends.zentorch_sdpa import (
@@ -52,7 +52,7 @@ SEQ_LENS = [  # (q_len, kv_len)
 _FP8_ATOL = {"fp8_e4m3": 0.2, "fp8_e5m2": 0.3}
 _FP8_RTOL = 0.1
 ENCODER_SEQ_LENS = [
-    [1, 678, 2367, 145, 4162, 36, 7812],
+    [1, 4, 678, 2367, 145, 4162, 36, 7812],
 ]
 # Uniform (dense zentorch_sdpa call) and ragged (per-sequence loop).
 ZEN_ENCODER_SEQ_LENS = [
@@ -905,6 +905,49 @@ def test_should_not_use_zentorch_sdpa(attn_type: str, dtype: torch.dtype) -> Non
     assert not should_use_zentorch_sdpa(attn_type, dtype)
 
 
+@pytest.mark.skipif(
+    current_platform.get_cpu_architecture() != CpuArchEnum.X86,
+    reason="FP8 KV cache requires x86",
+)
+@pytest.mark.parametrize(
+    "kv_cache_dtype,fp8_dtype",
+    [("fp8_e4m3", torch.float8_e4m3fn), ("fp8_e5m2", torch.float8_e5m2)],
+)
+def test_cpu_attn_fp8_cache_write_rounding(
+    kv_cache_dtype: str, fp8_dtype: torch.dtype
+) -> None:
+    """Cache bytes must round ties to even, including exponent boundaries."""
+    info = torch.finfo(fp8_dtype)
+    subnormal = info.tiny * info.eps
+    values = torch.tensor(
+        [
+            0,
+            1 + info.eps / 2,
+            1 + 1.5 * info.eps,
+            2 - info.eps / 2,
+            subnormal / 2,
+            0.75 * subnormal,
+            1.5 * subnormal,
+            info.tiny - subnormal / 2,
+        ]
+    )
+    key = torch.cat((values, -values)).repeat(2).reshape(1, 1, 32)
+    key_cache = torch.empty((1, 1, 32, 32), dtype=torch.uint8)
+    value_cache = torch.empty_like(key_cache)
+    cpu_attn_reshape_and_cache(
+        key,
+        key,
+        key_cache,
+        value_cache,
+        torch.tensor([0]),
+        "vec",
+        kv_cache_dtype=kv_cache_dtype,
+    )
+    expected = key.to(fp8_dtype).view(torch.uint8).flatten()
+    torch.testing.assert_close(key_cache[0, 0, :, 0], expected, rtol=0, atol=0)
+    torch.testing.assert_close(value_cache[0, 0, 0], expected, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8_e4m3", "fp8_e5m2"])
 @pytest.mark.parametrize("seq_lens", SEQ_LENS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
@@ -1359,6 +1402,60 @@ def test_varlen_with_paged_kv_dynamic_causal(
         isa=isa,
         kv_cache_dtype=kv_cache_dtype,
         dynamic_causal=dynamic_causal,
+    )
+
+
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8_e4m3"])
+@pytest.mark.parametrize(
+    ("seq_lens", "num_heads", "head_size", "num_blocks"),
+    [
+        pytest.param(
+            [(5, 513), (1, 193), (4, 4097)],
+            (32, 4),
+            128,
+            64,
+            id="mixed_5_1_4",
+        ),
+        pytest.param([(4, 8192)], (8, 1), 128, 256, id="q4_singleton"),
+        pytest.param(
+            [(16, 8192)],
+            (32, 8),
+            128,
+            128,
+            id="q16_singleton_split_reduction",
+        ),
+        pytest.param([(16, 8192)], (16, 1), 256, 256, id="q16_single_kv"),
+        pytest.param(
+            [(17, 8192)] * 4,
+            (32, 8),
+            128,
+            128,
+            id="q17_b4_fragments",
+        ),
+    ],
+)
+@pytest.mark.skipif(not torch.cpu._is_amx_tile_supported(), reason="no AMX support.")
+@set_default_torch_num_threads(4)
+def test_amx_spec_decode_gqa_correctness(
+    kv_cache_dtype: str,
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    num_blocks: int,
+) -> None:
+    varlen_with_paged_kv(
+        seq_lens=seq_lens,
+        num_heads=num_heads,
+        head_size=head_size,
+        sliding_window=None,
+        dtype=torch.bfloat16,
+        block_size=32,
+        soft_cap=None,
+        num_blocks=num_blocks,
+        use_alibi=True,
+        use_sink=True,
+        isa="amx",
+        kv_cache_dtype=kv_cache_dtype,
     )
 
 

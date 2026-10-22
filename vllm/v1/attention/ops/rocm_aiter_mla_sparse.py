@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
 import importlib
+import inspect
 import math
 from collections.abc import Callable
 from importlib.util import find_spec
@@ -24,14 +25,38 @@ from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if current_platform.is_rocm():
-    from vllm.platforms.rocm import _ON_GFX942, _ON_GFX950
+    from vllm.platforms.rocm import _GCN_ARCH, _ON_GFX942, _ON_GFX950
 else:
+    _GCN_ARCH = ""
     _ON_GFX942 = False
     _ON_GFX950 = False
 
 logger = init_logger(__name__)
 
 FP8_DTYPE = current_platform.fp8_dtype()
+
+# Shortest prefill sequence, in tokens, from which splitting the indexer
+# prefill rows across TP ranks beats replicating them, keyed by GPU arch.
+# gfx950 was measured on MI355X; unlisted archs keep the replicated path.
+_CP_INDEXER_MIN_SEQ_LEN: dict[str, int] = {
+    "gfx950": 16384,
+}
+
+
+def use_cp_indexer(max_prefill_seq_len: int) -> bool:
+    """Whether to split the indexer prefill rows of a batch across TP ranks.
+
+    The metadata builder widens its logits budget on the same decision, so both
+    must pass the batch's ``max_prefill_seq_len``.
+    """
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    min_seq_len = _CP_INDEXER_MIN_SEQ_LEN.get(_GCN_ARCH.split(":")[0])
+    return (
+        min_seq_len is not None
+        and max_prefill_seq_len >= min_seq_len
+        and bool(rocm_aiter_ops.is_mla_enabled())
+    )
 
 
 def _m_split_stripes(
@@ -751,10 +776,55 @@ def paged_mqa_logits_module():
     if paged_mqa_logits_module_path is not None:
         try:
             module = importlib.import_module(paged_mqa_logits_module_path)
-            return module
-        except ImportError:
+        except ImportError as error:
+            logger.warning_once(
+                "AITER paged-MQA logits module %s could not be imported: %s",
+                paged_mqa_logits_module_path,
+                str(error),
+            )
             return None
+        if _ON_GFX942 or _ON_GFX950:
+            function_name = "deepgemm_fp8_paged_mqa_logits"
+            required_parameters = {
+                "Preshuffle",
+                "KVBlockSize",
+                "ChunkK",
+                "WavePerEU",
+            }
+        else:
+            function_name = "deepgemm_fp8_paged_mqa_logits_stage1"
+            required_parameters = {"ChunkQ"}
+        function = getattr(module, function_name, None)
+        if not callable(function) or not _accepts_parameters(
+            function, required_parameters
+        ):
+            logger.warning_once(
+                "AITER paged-MQA logits module %s lacks a compatible %s API.",
+                paged_mqa_logits_module_path,
+                function_name,
+            )
+            return None
+        return module
     return None
+
+
+def _per_sequence_context_lens(context_lens: torch.Tensor) -> torch.Tensor:
+    # AITER takes one length per sequence: the last column of a (B, next_n) table.
+    # TODO: remove once AITER accepts (B, next_n) context_lens (ROCm/aiter#6153).
+    if context_lens.dim() == 2 and context_lens.shape[1] > 1:
+        return context_lens[:, -1].contiguous()
+    return context_lens
+
+
+def _accepts_parameters(function: Callable, required: set[str]) -> bool:
+    try:
+        parameters = inspect.signature(function).parameters
+    except (TypeError, ValueError):
+        return False
+    return required.issubset(parameters) or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
 
 
 def rocm_fp8_paged_mqa_logits(
@@ -776,8 +846,8 @@ def rocm_fp8_paged_mqa_logits(
         kv_cache_fp8: Paged KV-cache in packed FP8+scale layout with shape
             [num_blocks, block_size, 1, D+4], dtype `torch.uint8`.
         weights: Tensor of shape [B * next_n, H], dtype `torch.float32`.
-        context_lens: Tensor of shape [B], dtype int32; effective context length
-            for each batch element.
+        context_lens: Tensor of shape [B] or [B, next_n], dtype int32; effective
+            context length for each batch element, or for each of its Q rows.
         block_tables: Tensor of shape [B, max_blocks], dtype int32; maps logical
             block indices to physical blocks in the paged cache.
         schedule_metadata: Returned by `get_paged_mqa_logits_metadata`;
@@ -817,6 +887,10 @@ def rocm_fp8_paged_mqa_logits(
 
     if aiter_paged_mqa_logits_module is not None:
         if _ON_GFX942 or _ON_GFX950:
+            logger.info_once(
+                "Using AITER paged-MQA logits from %s.",
+                aiter_paged_mqa_logits_module.__name__,
+            )
             deepgemm_fp8_paged_mqa_logits = (
                 aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits
             )
@@ -829,7 +903,7 @@ def rocm_fp8_paged_mqa_logits(
                 kv_cache_fp8,
                 weights,
                 out_logits,
-                context_lens,
+                _per_sequence_context_lens(context_lens),
                 block_tables,
                 max_model_len,
                 ChunkK=256,
@@ -851,13 +925,18 @@ def rocm_fp8_paged_mqa_logits(
             kv_cache_fp8,
             weights,
             out_qk,
-            context_lens,
+            _per_sequence_context_lens(context_lens),
             block_tables,
             max_model_len,
             ChunkQ=heads,
         )
         return out_qk.sum(dim=0)
     else:
+        logger.warning_once(
+            "AITER paged-MQA logits is unavailable; using the PyTorch "
+            "fallback. Set VLLM_ROCM_USE_AITER=1 and ensure "
+            "aiter.ops.triton.attention.pa_mqa_logits is importable."
+        )
         return fp8_paged_mqa_logits_torch(
             q_fp8, kv_cache_fp8, weights, context_lens, block_tables, max_model_len
         )
@@ -975,7 +1054,9 @@ def rocm_fp8_mqa_logits(
 
     if aiter_mqa_logits_module is not None:
         fp8_mqa_logits = aiter_mqa_logits_module.fp8_mqa_logits
-        return fp8_mqa_logits(q, k_fp8, scale, weights, cu_seqlen_ks, cu_seqlen_ke)
+        return fp8_mqa_logits(
+            q, k_fp8, scale, weights, cu_seqlen_ks, cu_seqlen_ke, clean_logits=False
+        )
     else:
         return fp8_mqa_logits_torch(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke)
 
@@ -1265,18 +1346,14 @@ def rocm_aiter_sparse_attn_indexer(
         tp_group = get_tp_group()
         tp_rank = tp_group.rank_in_group
         tp_world_size = tp_group.world_size
-        # Candidate-block batches stay replicated: the auxiliary state they
-        # build is not covered by the Top-K-only collective below.
-        use_m_split = (
-            rocm_aiter_ops.is_cp_indexer_enabled() and candidate_blocks is None
-        )
         prefill_metadata = layer_attn_metadata.prefill
         assert prefill_metadata is not None
-        # Choose once per batch so short tails also have one writer when
-        # larger chunks require a collective. Entirely small batches replicate.
-        any_m_split = (
-            use_m_split
+        # Candidate-block batches stay replicated: the auxiliary state they
+        # build is not covered by the Top-K-only collective below.
+        sequence_shard_indexer = (
+            candidate_blocks is None
             and tp_world_size > 1
+            and use_cp_indexer(prefill_metadata.max_prefill_seq_len)
             and any(
                 chunk.token_end - chunk.token_start >= tp_world_size
                 for chunk in prefill_metadata.chunks
@@ -1304,59 +1381,28 @@ def rocm_aiter_sparse_attn_indexer(
             )
 
             chunk_m = chunk.token_end - chunk.token_start
-            if any_m_split:
-                # Each rank takes one stripe from each half of the M range,
-                # mirrored so rank r pairs its cheap low-index stripe with an
-                # expensive high-index one. Causal cost grows with row index,
-                # so this leaves every rank ~M**2/2/tp of work rather than
-                # handing the last rank all the expensive rows.
-                for local_off, local_m in _m_split_stripes(
-                    chunk_m, tp_rank, tp_world_size
-                ):
-                    local_start = chunk.token_start + local_off
-                    local_end = local_start + local_m
-                    logits = rocm_fp8_mqa_logits(
-                        q_fp8[local_start:local_end],
-                        (k_fp8, k_scale.view(torch.float32)),
-                        weights[local_start:local_end],
-                        chunk.cu_seqlen_ks[local_off : local_off + local_m],
-                        chunk.cu_seqlen_ke[local_off : local_off + local_m],
-                    )
-
-                    num_rows = logits.shape[0]
-                    topk_indices = topk_indices_buffer[
-                        local_start:local_end, :topk_tokens
-                    ]
-                    if rocm_aiter_ops.is_indexer_top_k_supported(
-                        is_prefill=True,
-                        compress_ratio=compress_ratio,
-                        num_rows=num_rows,
-                    ):
-                        _launch_aiter_top_k_per_row_prefill(
-                            logits,
-                            chunk.cu_seqlen_ks[local_off : local_off + local_m],
-                            chunk.cu_seqlen_ke[local_off : local_off + local_m],
-                            topk_indices,
-                            topk_tokens,
-                        )
-                    else:
-                        torch.ops._C.top_k_per_row_prefill(
-                            logits,
-                            chunk.cu_seqlen_ks[local_off : local_off + local_m],
-                            chunk.cu_seqlen_ke[local_off : local_off + local_m],
-                            topk_indices,
-                            num_rows,
-                            logits.stride(0),
-                            logits.stride(1),
-                            topk_tokens,
-                        )
-            else:
+            # Under the M-split each rank takes one stripe from each half of
+            # the M range, mirrored so rank r pairs its cheap low-index stripe
+            # with an expensive high-index one. Causal cost grows with row
+            # index, so this leaves every rank ~M**2/2/tp of work rather than
+            # handing the last rank all the expensive rows. Otherwise every
+            # rank scores the whole chunk.
+            local_rows = (
+                _m_split_stripes(chunk_m, tp_rank, tp_world_size)
+                if sequence_shard_indexer
+                else [(0, chunk_m)]
+            )
+            for local_off, local_m in local_rows:
+                local_start = chunk.token_start + local_off
+                local_end = local_start + local_m
+                local_ks = chunk.cu_seqlen_ks[local_off : local_off + local_m]
+                local_ke = chunk.cu_seqlen_ke[local_off : local_off + local_m]
                 logits = rocm_fp8_mqa_logits(
-                    q_fp8[chunk.token_start : chunk.token_end],
+                    q_fp8[local_start:local_end],
                     (k_fp8, k_scale.view(torch.float32)),
-                    weights[chunk.token_start : chunk.token_end],
-                    chunk.cu_seqlen_ks,
-                    chunk.cu_seqlen_ke,
+                    weights[local_start:local_end],
+                    local_ks,
+                    local_ke,
                 )
                 if candidate_blocks is not None:
                     from vllm.model_executor.layers.sparse_attn_indexer import (
@@ -1364,29 +1410,25 @@ def rocm_aiter_sparse_attn_indexer(
                         _select_candidate_blocks,
                     )
 
-                    chunk_candidates = candidate_blocks[
-                        chunk.token_start : chunk.token_end
-                    ]
+                    local_candidates = candidate_blocks[local_start:local_end]
                     if candidate_write:
                         _select_candidate_blocks(
                             logits,
-                            chunk.cu_seqlen_ks,
-                            chunk.cu_seqlen_ke,
-                            chunk_candidates.shape[1],
+                            local_ks,
+                            local_ke,
+                            local_candidates.shape[1],
                             candidate_block_size,
-                            chunk_candidates,
+                            local_candidates,
                         )
                     else:
                         _apply_candidate_mask(
                             logits,
-                            chunk.cu_seqlen_ks,
-                            chunk.cu_seqlen_ke,
-                            chunk_candidates,
+                            local_ks,
+                            local_ke,
+                            local_candidates,
                             candidate_block_size,
                         )
-                topk_indices = topk_indices_buffer[
-                    chunk.token_start : chunk.token_end, :topk_tokens
-                ]
+                topk_indices = topk_indices_buffer[local_start:local_end, :topk_tokens]
 
                 num_rows = logits.shape[0]
 
@@ -1394,19 +1436,21 @@ def rocm_aiter_sparse_attn_indexer(
                     is_prefill=True,
                     compress_ratio=compress_ratio,
                     num_rows=num_rows,
+                    max_valid_seq_len=chunk.max_seqlen_k,
+                    topk_tokens=topk_tokens,
                 ):
                     _launch_aiter_top_k_per_row_prefill(
                         logits,
-                        chunk.cu_seqlen_ks,
-                        chunk.cu_seqlen_ke,
+                        local_ks,
+                        local_ke,
                         topk_indices,
                         topk_tokens,
                     )
                 else:
                     torch.ops._C.top_k_per_row_prefill(
                         logits,
-                        chunk.cu_seqlen_ks,
-                        chunk.cu_seqlen_ke,
+                        local_ks,
+                        local_ke,
                         topk_indices,
                         num_rows,
                         logits.stride(0),
@@ -1416,24 +1460,13 @@ def rocm_aiter_sparse_attn_indexer(
 
         # Every row in this collective has exactly one writer, including
         # short tail chunks. Other ranks retain the -1 sentinel.
-        if any_m_split:
+        if sequence_shard_indexer:
             prefill_start = num_decode_tokens
             prefill_end = hidden_states.shape[0]
             buf_slice = topk_indices_buffer[prefill_start:prefill_end, :topk_tokens]
-            if buf_slice.is_contiguous():
-                dist.all_reduce(
-                    buf_slice,
-                    op=dist.ReduceOp.MAX,
-                    group=tp_group.device_group,
-                )
-            else:
-                tmp = buf_slice.contiguous()
-                dist.all_reduce(
-                    tmp,
-                    op=dist.ReduceOp.MAX,
-                    group=tp_group.device_group,
-                )
-                buf_slice.copy_(tmp)
+            tmp = buf_slice.contiguous()
+            dist.all_reduce(tmp, op=dist.ReduceOp.MAX, group=tp_group.device_group)
+            buf_slice.copy_(tmp)
 
     if has_decode:
         decode_metadata = layer_attn_metadata.decode
@@ -1515,6 +1548,7 @@ def rocm_aiter_sparse_attn_indexer(
             compress_ratio=compress_ratio,
             num_rows=num_rows,
             max_valid_seq_len=max_compressed_seq_len,
+            topk_tokens=topk_tokens,
         ) and not rocm_aiter_ops.dsv4_indexer_prefers_native_top_k(
             num_rows=num_rows,
             num_columns=logits.shape[1],

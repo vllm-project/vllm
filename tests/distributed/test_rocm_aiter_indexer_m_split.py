@@ -3,15 +3,15 @@
 """Multi-GPU correctness of the sparse-MLA indexer M-split.
 
 ``rocm_aiter_sparse_attn_indexer`` normally has every TP rank score every
-prefill query row and reach the same Top-K. With
-``VLLM_ROCM_USE_AITER_CP_INDEXER=1`` the rows are dealt across the ranks as
-mirrored stripes -- rank ``r`` takes stripe ``r`` of the first half and stripe
-``tp - 1 - r`` of the second -- and the batch is rebuilt with an
-``all_reduce(MAX)`` over a ``-1``-filled Top-K buffer.
+prefill query row and reach the same Top-K. Once the longest prefill sequence
+reaches the GPU arch's threshold (``_CP_INDEXER_MIN_SEQ_LEN``) the rows are dealt
+across the ranks as mirrored stripes -- rank ``r`` takes stripe ``r`` of the
+first half and stripe ``tp - 1 - r`` of the second -- and the batch is rebuilt
+with an ``all_reduce(MAX)`` over a ``-1``-filled Top-K buffer.
 
 Every test runs the real op -- real Triton/AITER kernels, real collective --
-over byte-identical inputs with the feature off and then on. The flag is the
-only variable, so any difference in the Top-K buffer is the feature.
+over byte-identical inputs with the feature off and then on. The threshold is
+the only variable, so any difference in the Top-K buffer is the feature.
 
 Run `pytest tests/distributed/test_rocm_aiter_indexer_m_split.py`.
 """
@@ -59,7 +59,7 @@ SHAPES = (
     #
     # small stripes, well above the 2*tp branch point
     (2000, 8192, 1, TOPK_TOKENS),
-    # same, split into chunks so the any_m_split guard sees more than one
+    # same, split into chunks so the sequence_shard_indexer guard sees more than one
     (2000, 8192, 3, TOPK_TOKENS),
     # A sharded chunk and a tiny tail must still have one writer per row.
     (17, 8192, (16, 1), TOPK_TOKENS),
@@ -140,7 +140,9 @@ def _build_inputs(num_tokens, context, num_chunks, device):
         num_decode_tokens=0,
         num_prefills=1,
         num_prefill_tokens=num_tokens,
-        prefill=DeepseekV32IndexerPrefillMetadata(chunks=chunks),
+        prefill=DeepseekV32IndexerPrefillMetadata(
+            chunks=chunks, max_prefill_seq_len=context
+        ),
     )
 
     q_fp8 = (torch.randn(num_tokens, NUM_HEADS, HEAD_DIM, device=device) * 0.3).to(
@@ -273,20 +275,26 @@ def _assert_topk_equivalent(sharded, replicated, logits, row_starts, row_ends):
 
 
 def _run_indexer(m, enabled, inputs, config, device, width=TOPK_TOKENS):
-    """One forward of the real op with the feature flag forced on or off."""
+    """One forward of the real op, with the threshold just met or just missed."""
     kv_cache, metadata, q_fp8, weights = inputs
     num_tokens = q_fp8.shape[0]
     context = metadata.max_seq_len
 
-    # is_cp_indexer_enabled() also requires AITER MLA, so the master switch has
-    # to be on for both runs; only the CP knob distinguishes them.
+    # use_cp_indexer() also requires AITER MLA, so it has to be on for both
+    # runs. The arch is pinned so only the threshold distinguishes them,
+    # whatever GPU the test runs on.
     m.setenv("VLLM_ROCM_USE_AITER", "1")
     m.setenv("VLLM_ROCM_USE_AITER_MLA", "1")
-    m.setenv("VLLM_ROCM_USE_AITER_CP_INDEXER", "1" if enabled else "0")
     rocm_aiter_ops.refresh_env_variables()
+    m.setattr(mla_sparse, "_GCN_ARCH", "gfx950")
+    m.setitem(
+        mla_sparse._CP_INDEXER_MIN_SEQ_LEN,
+        "gfx950",
+        context if enabled else context + 1,
+    )
     # Without this the feature silently stays off and every comparison passes
     # by doing the same thing twice.
-    assert bool(rocm_aiter_ops.is_cp_indexer_enabled()) is enabled
+    assert mla_sparse.use_cp_indexer(metadata.prefill.max_prefill_seq_len) is enabled
 
     topk_indices_buffer = torch.zeros(
         (num_tokens, width), dtype=torch.int32, device=device
@@ -456,6 +464,22 @@ def test_m_split(tp_size, shape):
         cleanup_dist_env_and_memory()
 
 
+@pytest.mark.parametrize(
+    ("arch", "seq_len", "expected"),
+    [
+        ("gfx950", 16384, True),
+        ("gfx950", 16383, False),
+        ("gfx950:sramecc+:xnack-", 16384, True),
+        ("gfx942", 65536, False),
+    ],
+)
+def test_cp_indexer_threshold(monkeypatch, arch, seq_len, expected):
+    """Only listed archs split rows, and only from their threshold on."""
+    monkeypatch.setattr(mla_sparse, "_GCN_ARCH", arch)
+    monkeypatch.setattr(rocm_aiter_ops, "is_mla_enabled", lambda: True)
+    assert mla_sparse.use_cp_indexer(seq_len) is expected
+
+
 @pytest.mark.parametrize("tp_size", [1, 2, 8])
 @pytest.mark.parametrize("rows", [0, 1, 2, 7, 8, 9, 15, 16, 17, 63, 2000, 9000])
 def test_m_split_stripes_cover_rows_once(tp_size, rows):
@@ -477,7 +501,7 @@ def test_m_split_chunk_budget(tp_size, queries, budget_rows):
     contexts = torch.tensor([1024] * len(queries), dtype=torch.int32)
     budget = budget_rows * 1024 * 4
     chunks = DeepseekV32IndexerMetadataBuilder._split_indexer_prefill_chunks(
-        contexts, torch.tensor(queries), 4096, budget, m_split_world_size=tp_size
+        contexts, torch.tensor(queries), 4096, budget, m_split_tp_size=tp_size
     )
     split = tp_size > 1 and any(q.stop - q.start >= tp_size for _, q in chunks)
     assert sum(q.stop - q.start for _, q in chunks) == sum(queries)
