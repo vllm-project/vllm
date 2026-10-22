@@ -210,7 +210,7 @@ variants:
     vram_minimum_gb: 155
     description: "FP8 Dynamic W8A8; model-card baseline uses 2x H100 with MTP or DSpark"
     tp: { hopper: 2, blackwell: 1 }
-    extra_args: ["--gpu-memory-utilization", "0.89", "--prefix-match-unit", "64", "--block-size", "64", "--compilation-config", "{\"max_cudagraph_capture_size\":192}", "--enable-expert-parallel", "--max-num-seqs", "128", "--max-model-len", "114688", "--max-num-batched-tokens", "16384", "--enable-prefix-caching", "--async-scheduling", "--mamba-backend", "flashinfer", "--mamba-ssm-cache-dtype", "float16", "--enable-mamba-cache-stochastic-rounding", "--mamba-cache-philox-rounds", "5", "--chat-template-content-format", "string", "--mamba-cache-mode", "align", "--enable-mamba-fine-grained-prefix-cache"]
+    extra_args: ["--gpu-memory-utilization", "0.89", "--prefix-match-unit", "64", "--block-size", "64", "--compilation-config", "{\"max_cudagraph_capture_size\":192}", "--enable-expert-parallel", "--max-num-seqs", "128", "--max-model-len", "114688", "--max-num-batched-tokens", "16384", "--enable-prefix-caching", "--async-scheduling", "--mamba-backend", "flashinfer", "--mamba-ssm-cache-dtype", "float16", "--enable-mamba-cache-stochastic-rounding", "--mamba-cache-philox-rounds", "5", "--chat-template-content-format", "string", "--mamba-cache-mode", "align", "--enable-mamba-shared-prefix-checkpoint"]
   bf16:
     model_id: "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16"
     precision: bf16
