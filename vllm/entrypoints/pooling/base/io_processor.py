@@ -189,14 +189,6 @@ class PoolingIOProcessor:
         num_requests = len(prompts_seq)
         pooling_task = ctx.pooling_task
 
-        parsed_prompts = [
-            (
-                prompt
-                if isinstance(prompt, bytes)
-                else parse_model_prompt(self.model_config, prompt)
-            )
-            for prompt in prompts_seq
-        ]
         tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(
             **(ctx.tokenization_kwargs or {})
         )
@@ -207,15 +199,12 @@ class PoolingIOProcessor:
         else:
             pooling_params = ctx.pooling_params
 
-        # Clone to avoid modifying the caller's pooling parameters.
-        params_seq = [
-            param.clone() for param in self._params_to_seq(pooling_params, num_requests)
-        ]
+        params_seq = self._params_to_seq(pooling_params, num_requests)
 
+        # Validate up-front so that an invalid task is reported before any
+        # request is added to the engine.
         for param in params_seq:
-            if param.task is None:
-                param.task = pooling_task
-            elif pooling_task == "plugin":
+            if param.task is None or pooling_task == "plugin":
                 # `plugin` task uses io_processor.parse_data to verify inputs.
                 # We actually allow plugin to overwrite pooling_task.
                 pass
@@ -227,13 +216,27 @@ class PoolingIOProcessor:
         seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
 
         def request_factory() -> RequestGenerator:
+            # Parse and clone one request at a time so that the engine can
+            # start working before the remaining prompts are preprocessed.
             for i in range(num_requests):
+                prompt = prompts_seq[i]
+                parsed_prompt = (
+                    prompt
+                    if isinstance(prompt, bytes)
+                    else parse_model_prompt(self.model_config, prompt)
+                )
+
+                # Clone to avoid modifying the caller's pooling parameters.
+                param = params_seq[i].clone()
+                if param.task is None:
+                    param.task = pooling_task
+
                 yield EncodeCMPLRenderParams(
-                    prompts=parsed_prompts[i],
+                    prompts=parsed_prompt,
                     tok_params=tok_params,
                     prompt_extras=None,
                     skip_mm_cache=False,
-                    params=params_seq[i],
+                    params=param,
                     lora_requests=seq_lora_requests[i],
                     priorities=seq_priority[i],
                 )

@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections import deque
 from collections.abc import Callable, Sequence
+from concurrent.futures import Future
 from typing import Any
 
 from tqdm.auto import tqdm
@@ -30,6 +32,7 @@ from .typing import (
     OfflineOutputsContext,
     OfflinePluginInputsContext,
     OfflineScoringInputsContext,
+    PoolingEngineInput,
     RequestFactory,
 )
 
@@ -430,21 +433,34 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         outputs: list[PoolingRequestOutput] = []
         added_request_ids: set[str] = set()
 
-        it = self._executor.map(io_processor.render, request_factory())
+        # Render ahead of the engine, but never more than the number of
+        # requests the loop is about to add. Submitting everything up front
+        # (as `Executor.map` does) would keep the engine idle until the last
+        # prompt has been preprocessed.
+        requests_it = request_factory()
+        pending: deque[Future[PoolingEngineInput]] = deque()
+
+        def prefetch() -> None:
+            while len(pending) < max_requests_in_core:
+                try:
+                    request = next(requests_it)
+                except StopIteration:
+                    return
+                pending.append(self._executor.submit(io_processor.render, request))
 
         try:
             while num_waited_requests or self.llm_engine.has_unfinished_requests():
+                prefetch()
                 requests = []
                 for _ in range(max_requests_in_core - num_requests_in_core):
                     if num_waited_requests == 0:
                         break
-                    try:
-                        request = next(it)
-                        requests.append(request)
-                    except StopIteration:
+
+                    if not pending:
                         num_waited_requests = 0
                         break
 
+                    requests.append(pending.popleft().result())
                     num_waited_requests -= 1
                     num_requests_in_core += 1
 
@@ -480,6 +496,8 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             raise
 
         finally:
+            for future in pending:
+                future.cancel()
             if use_tqdm:
                 pbar.close()
 
