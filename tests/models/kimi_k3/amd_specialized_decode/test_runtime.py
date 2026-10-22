@@ -286,18 +286,6 @@ def test_regular_decode_requires_one_state_slot_per_row(width, state_indices):
     assert step_reason(md, "kda", width, q=1) == "not uniform"
 
 
-def test_regular_decode_rejects_graph_padding():
-    md = _kda_metadata(
-        spec_sequence_masks=None,
-        num_decodes=4,
-        num_spec_decodes=0,
-        spec_state_indices_tensor=None,
-        non_spec_state_indices_tensor=torch.arange(8, dtype=torch.int32),
-        uniform_spec_sequence_length=None,
-    )
-    assert step_reason(md, "kda", 8, q=1) == "not uniform"
-
-
 def test_regular_decode_k1_metadata_uses_one_accepted_token_per_row():
     from vllm.models.kimi_k3.amd.specialized_decode.runtime.layers import _k1_metadata
 

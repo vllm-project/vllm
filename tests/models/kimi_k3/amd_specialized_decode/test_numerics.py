@@ -400,7 +400,7 @@ def _moe_args(mw):
     }
 
 
-def _k2_inputs(rank: int, device):
+def _k2_inputs(rank: int, device, tokens: int):
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import (
         HIDDEN,
         PROJ,
@@ -409,10 +409,10 @@ def _k2_inputs(rank: int, device):
     gc = torch.Generator(device=device).manual_seed(11)
     gr = torch.Generator(device=device).manual_seed(200 + rank)
     return {
-        "core": _randn(gr, 8, PROJ),
+        "core": _randn(gr, tokens, PROJ),
         "w_o": _randn(gr, HIDDEN, PROJ, scale=0.02),
-        "prefix": _randn(gc, 8, HIDDEN, scale=2.0),
-        "blocks": _randn(gc, 8, 8, HIDDEN, scale=2.0),
+        "prefix": _randn(gc, tokens, HIDDEN, scale=2.0),
+        "blocks": _randn(gc, tokens, 8, HIDDEN, scale=2.0),
         "ares_nw": (1 + _randn(gc, HIDDEN, scale=0.1, dtype=torch.float32)).to(bf),
         "ares_qk": _randn(gc, HIDDEN, scale=0.05),
         "in_nw": (1 + _randn(gc, HIDDEN, scale=0.1, dtype=torch.float32)).to(bf),
@@ -422,7 +422,12 @@ def _k2_inputs(rank: int, device):
 def _k2_launch(runner, w, mw, prefix, out, reset: bool, nb: int = 4):
     from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
 
-    key = k2.K2Build(tokens=8, nblocks=nb + int(reset), reset=reset, **runner.fault)
+    key = k2.K2Build(
+        tokens=w["core"].size(0),
+        nblocks=nb + int(reset),
+        reset=reset,
+        **runner.fault,
+    )
     k2.k2_launch(
         key,
         core=w["core"],
@@ -449,13 +454,13 @@ def _init_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
     return device
 
 
-@ray.remote(num_gpus=1, max_calls=1)
 def _k2_worker(
     monkeypatch: pytest.MonkeyPatch,
     tp_size: int,
     pp_size: int,
     rank: int,
     distributed_init_port: str,
+    tokens: int,
 ) -> None:
     device = _init_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port)
 
@@ -464,10 +469,10 @@ def _k2_worker(
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import HIDDEN
     from vllm.models.kimi_k3.amd.specialized_decode.runtime.runner import MonoRunner
 
-    S, nb = 8, 4
+    S, nb = tokens, 4
     runner = MonoRunner(device)
     mw = _moe_weights(rank, device)
-    w = _k2_inputs(rank, device)
+    w = _k2_inputs(rank, device, tokens)
 
     for reset in (False, True):
         runner.step_begin()
@@ -520,10 +525,37 @@ def _k2_worker(
     assert not runner.health.any() and not runner.flags.any()
 
 
+def _k2_worker_for(tokens: int):
+    @ray.remote(num_gpus=1, max_calls=1)
+    def worker(
+        monkeypatch: pytest.MonkeyPatch,
+        tp_size: int,
+        pp_size: int,
+        rank: int,
+        distributed_init_port: str,
+    ) -> None:
+        _k2_worker(
+            monkeypatch,
+            tp_size,
+            pp_size,
+            rank,
+            distributed_init_port,
+            tokens,
+        )
+
+    return worker
+
+
+K2_WORKERS = {tokens: _k2_worker_for(tokens) for tokens in (1, 4, 8)}
+
+
 @needs_gfx950
 @multi_gpu_test(num_gpus=8)
-def test_k2_tp8_matches_vllm_ops_and_replays(monkeypatch: pytest.MonkeyPatch) -> None:
-    multi_process_parallel(monkeypatch, 8, 1, _k2_worker)
+@pytest.mark.parametrize("tokens", [1, 4, 8])
+def test_k2_tp8_matches_vllm_ops_and_replays(
+    monkeypatch: pytest.MonkeyPatch, tokens: int
+) -> None:
+    multi_process_parallel(monkeypatch, 8, 1, K2_WORKERS[tokens])
 
 
 STALLED = 3
@@ -556,7 +588,7 @@ def _fault_worker(
         "fault_ticks": WAIT_TICKS * 3 // 2,
     }
     mw = _moe_weights(rank, device)
-    w = _k2_inputs(rank, device)
+    w = _k2_inputs(rank, device, 8)
     out = torch.empty(8, HIDDEN, dtype=bf, device=device)
     runner.step_begin()  # epoch 1: no stall
     _k2_launch(runner, w, mw, w["prefix"].clone(), out, reset=True)
