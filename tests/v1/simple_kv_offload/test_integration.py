@@ -55,6 +55,7 @@ def _flush_gpu_cache(llm: LLM, sampling_params: SamplingParams, seed: int = 0):
     block_size = cache_config.block_size
     # Use 1.2x GPU capacity to give the lazy cursor enough scheduling steps
     # to walk past all target blocks near the tail of the free queue.
+    assert num_gpu_blocks is not None
     total_tokens_needed = int(num_gpu_blocks * block_size * 1.5)
 
     # Use token-id prompts so each filler is unique (no prefix sharing).

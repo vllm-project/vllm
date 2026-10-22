@@ -19,11 +19,11 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <hip/hip_fp8.h>
 #include <hip/hip_bf16.h>
-#include "../cuda_compat.h"
+#include "core/cuda_compat.h"
 
 #include <algorithm>
-#include "../attention/dtype_fp8.cuh"
-#include "../quantization/w8a8/fp8/amd/quant_utils.cuh"
+#include "core/vec_dtypes/dtype_fp8.cuh"
+#include "quantization/w8a8/fp8/amd/quant_utils.cuh"
 
 // ROCm 6.2 compatibility: map OCP fp8 types to FNUZ variants if OCP is absent
 #if !defined(HIP_FP8_TYPE_OCP)
@@ -59,6 +59,37 @@ enum class MFMAType {
   Fp4 = 2,
 };
 
+// Score masking is insufficient for unwritten V padding: 0 * NaN is NaN.
+template <typename cache_t, typename Vec>
+__device__ __forceinline__ Vec mask_v_cache_padding(Vec values,
+                                                    const int first_token_idx,
+                                                    const int seq_len) {
+  constexpr int NUM_ELEMS = sizeof(Vec) / sizeof(cache_t);
+  if (first_token_idx + NUM_ELEMS <= seq_len) {
+    return values;
+  }
+  if (first_token_idx >= seq_len) {
+    return Vec{};
+  }
+  constexpr int WORD_BYTES = sizeof(uint64_t);
+  constexpr int NUM_WORDS = sizeof(Vec) / WORD_BYTES;
+  static_assert(sizeof(Vec) % WORD_BYTES == 0);
+  const int valid_bytes = (seq_len - first_token_idx) * sizeof(cache_t);
+  uint64_t* words = reinterpret_cast<uint64_t*>(&values);
+#pragma unroll
+  for (int i = 0; i < NUM_WORDS; i++) {
+    const int word_valid_bytes = valid_bytes - i * WORD_BYTES;
+    const uint64_t word_mask =
+        word_valid_bytes >= WORD_BYTES
+            ? UINT64_MAX
+            : (word_valid_bytes <= 0
+                   ? 0
+                   : (uint64_t{1} << (word_valid_bytes * 8)) - 1);
+    words[i] &= word_mask;
+  }
+  return values;
+}
+
 #if defined(__HIP__GFX9__)
 
   #define GCN_MFMA_INSTR1 __builtin_amdgcn_mfma_f32_16x16x4f32
@@ -81,6 +112,30 @@ typedef bit16x4 _B16x4;
 typedef struct _B16x8 {
   _B16x4 xy[2];
 } _B16x8;
+
+__device__ __forceinline__ _B16x8
+mask_16b_v_cache_boundary(_B16x8 values, const int valid_bytes) {
+  // The caller guarantees 0 < valid_bytes < 16.
+  uint64_t* words = reinterpret_cast<uint64_t*>(&values);
+  if (valid_bytes <= 8) {
+    const uint64_t low_mask =
+        valid_bytes == 8 ? UINT64_MAX : (uint64_t{1} << (valid_bytes * 8)) - 1;
+    words[0] &= low_mask;
+    words[1] = 0;
+  } else {
+    const uint64_t high_mask = (uint64_t{1} << ((valid_bytes - 8) * 8)) - 1;
+    words[1] &= high_mask;
+  }
+  return values;
+}
+
+__device__ __forceinline__ uint2
+mask_8b_v_cache_boundary(uint2 values, const int valid_bytes) {
+  // The caller guarantees 0 < valid_bytes < 8.
+  uint64_t* word = reinterpret_cast<uint64_t*>(&values);
+  *word &= (uint64_t{1} << (valid_bytes * 8)) - 1;
+  return values;
+}
 
 using _B8x8 = uint2;
 using _B8x4 = int32_t;  // used in builtins
@@ -287,22 +342,6 @@ typedef union u64_cvt {
   int64_t i64;
 } _T8x8;
 
-__device__ __forceinline__ _B8x8 convert_b16x8(const _B16x8& input,
-                                               _T8x8& Mtemp) {
-  _T8x8 Qtmp8x8;
-
-  for (int i = 0; i < 2; i++) {
-    floatx4 q_out = {0, 0, 0, 0};
-    q_out = gcn_mfma16x16x16_instr<_Float16, 0, 0, 0>(Mtemp.b64, input.xy[i],
-                                                      q_out);
-    Qtmp8x8.b16x4[i * 2] =
-        __builtin_amdgcn_cvt_pk_fp8_f32(q_out[0], q_out[1], 0, false);
-    Qtmp8x8.b16x4[i * 2 + 1] =
-        __builtin_amdgcn_cvt_pk_fp8_f32(q_out[2], q_out[3], 0, false);
-  }
-  return Qtmp8x8.b8x8;
-}
-
 __device__ float warpReduceMax(float val) {
   for (int offset = warpSize / 2; offset > 0; offset /= 2) {
     val = max(
@@ -316,9 +355,10 @@ __device__ float warpReduceMax(float val) {
 // clang-format off
 template <typename scalar_t, typename cache_t,
           vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
-          int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED, int GQA_RATIO, MFMAType MFMA_TYPE>
+          int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED, int GQA_RATIO, MFMAType MFMA_TYPE,
+          bool USE_INTERLEAVED_V_CACHE>
 __global__
-__launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
+__launch_bounds__(NUM_THREADS, 4) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const scalar_t* __restrict__ q,         // [num_seqs, num_heads, head_size]
     const cache_t* __restrict__ k_cache,    // [num_blocks, num_kv_heads, head_size/x, block_size, x]
     const cache_t* __restrict__ v_cache,    // [num_blocks, num_kv_heads, head_size, block_size]
@@ -554,26 +594,59 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
 
   _B16x8 Vlocal[VTLOOP][VHELOOP][VTLANELOOP];  // this could be B8x16 too
 
-  const cache_t* v_ptr = v_cache + wg_start_kv_head_idx * kv_head_stride +
-                         ((rowid * VTOKENS_PER_LANE) % BLOCK_SIZE);
+  // KX_V = number of contiguous token elements per interleaved chunk
+  // (e.g. 8 for bf16, 16 for fp8). This is also the 'x' dimension size.
+  constexpr int KX_V = 16 / sizeof(cache_t);
 
-  // v fetches are 16head elems across lanes x 16 tokens per lane
-  for (int vhe_depth = 0; vhe_depth < VHELOOP; vhe_depth++) {
-    const int vhead_elem = vhe_depth * NWARPS * 16 + warpid * 16 + lane16id;
-    const cache_t* v_ptr2 = v_ptr + vhead_elem * BLOCK_SIZE;
-
-    for (int vtoken_depth = 0; vtoken_depth < VTLOOP; vtoken_depth++) {
-      for (int vfetch_depth = 0; vfetch_depth < VTLANELOOP; vfetch_depth++) {
+  if constexpr (USE_INTERLEAVED_V_CACHE) {
+    // Interleaved V-cache layout: [num_blocks, num_heads, block_size/x,
+    // head_dim, x] Address for v[block][head][token t][dim d]:
+    //   chunk = t / x,  sub = t % x
+    //   addr = base + chunk * head_dim * x + d * x + sub
+    // Each 16B fetch reads KX_V contiguous elements within a single chunk, so
+    // a lane's token offset must land on a chunk boundary. This holds only
+    // when BLOCK_SIZE is a multiple of KX_V.
+    static_assert(BLOCK_SIZE % KX_V == 0,
+                  "Interleaved V-cache read requires BLOCK_SIZE % KX_V == 0");
+    const cache_t* v_ptr_head = v_cache + wg_start_kv_head_idx * kv_head_stride;
+    for (int vhe_depth = 0; vhe_depth < VHELOOP; vhe_depth++) {
+      const int vhead_elem = vhe_depth * NWARPS * 16 + warpid * 16 + lane16id;
+      for (int vtoken_depth = 0; vtoken_depth < VTLOOP; vtoken_depth++) {
         const int vblock_depth = 0;
         const int64_t vblock_number = static_cast<int64_t>(
             vphysical_block_number[vtoken_depth][vblock_depth]);
-        const cache_t* v_ptr3 = v_ptr2 + (vblock_number * kv_block_stride);
-
-        const cache_t* v_fetch_ptr =
-            v_ptr3 + vfetch_depth * CONTIGUOUS_KV_ELEMS_16B_LOAD;
-        const _B16x8* v_fetch_ptr_16B =
-            reinterpret_cast<const _B16x8*>(v_fetch_ptr);
-        Vlocal[vtoken_depth][vhe_depth][vfetch_depth] = *v_fetch_ptr_16B;
+        const cache_t* v_block_ptr =
+            v_ptr_head + vblock_number * kv_block_stride;
+        for (int vfetch_depth = 0; vfetch_depth < VTLANELOOP; vfetch_depth++) {
+          const int bo = ((rowid * VTOKENS_PER_LANE) % BLOCK_SIZE) +
+                         vfetch_depth * CONTIGUOUS_KV_ELEMS_16B_LOAD;
+          const int bo_chunk = bo / KX_V;  // which chunk of x tokens
+          const cache_t* v_fetch_ptr =
+              v_block_ptr + (bo_chunk * HEAD_SIZE + vhead_elem) * KX_V +
+              (bo % KX_V);
+          Vlocal[vtoken_depth][vhe_depth][vfetch_depth] =
+              *reinterpret_cast<const _B16x8*>(v_fetch_ptr);
+        }
+      }
+    }
+  } else {
+    const cache_t* v_ptr = v_cache + wg_start_kv_head_idx * kv_head_stride +
+                           ((rowid * VTOKENS_PER_LANE) % BLOCK_SIZE);
+    for (int vhe_depth = 0; vhe_depth < VHELOOP; vhe_depth++) {
+      const int vhead_elem = vhe_depth * NWARPS * 16 + warpid * 16 + lane16id;
+      const cache_t* v_ptr2 = v_ptr + vhead_elem * BLOCK_SIZE;
+      for (int vtoken_depth = 0; vtoken_depth < VTLOOP; vtoken_depth++) {
+        for (int vfetch_depth = 0; vfetch_depth < VTLANELOOP; vfetch_depth++) {
+          const int vblock_depth = 0;
+          const int64_t vblock_number = static_cast<int64_t>(
+              vphysical_block_number[vtoken_depth][vblock_depth]);
+          const cache_t* v_ptr3 = v_ptr2 + (vblock_number * kv_block_stride);
+          const cache_t* v_fetch_ptr =
+              v_ptr3 + vfetch_depth * CONTIGUOUS_KV_ELEMS_16B_LOAD;
+          const _B16x8* v_fetch_ptr_16B =
+              reinterpret_cast<const _B16x8*>(v_fetch_ptr);
+          Vlocal[vtoken_depth][vhe_depth][vfetch_depth] = *v_fetch_ptr_16B;
+        }
       }
     }
   }
@@ -789,29 +862,72 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
   _B16x4 outelems[VHELOOP];
   // Softmax V mfma
   // v layout: 16he across lanes x 16 tokens per lane
-  for (int vhe_depth = 0; vhe_depth < VHELOOP; vhe_depth++) {
-    floatx4 tmp_out = {0};
-
-    for (int vtoken_depth = 0; vtoken_depth < VTLOOP; vtoken_depth++) {
-      if constexpr (KV_DTYPE == vllm::Fp8KVCacheDataType::kAuto) {
+  if constexpr (KV_DTYPE == vllm::Fp8KVCacheDataType::kAuto) {
+    for (int vhe_depth = 0; vhe_depth < VHELOOP; vhe_depth++) {
+      floatx4 tmp_out = {0};
+      for (int vtoken_depth = 0; vtoken_depth < VTLOOP; vtoken_depth++) {
         for (int vfetch_depth = 0; vfetch_depth < VTLANELOOP; vfetch_depth++) {
+          if (__builtin_expect(partition_start_token_idx + T_PAR_SIZE > seq_len,
+                               0)) {
+            const int vglobal_fetch_start =
+                partition_start_token_idx +
+                vtoken_depth * VTOKENS_PER_LANE * ROWS_PER_WARP +
+                rowid * VTOKENS_PER_LANE +
+                vfetch_depth * CONTIGUOUS_KV_ELEMS_16B_LOAD;
+            if (vglobal_fetch_start >= seq_len) {
+              continue;
+            }
+            if (vglobal_fetch_start + CONTIGUOUS_KV_ELEMS_16B_LOAD > seq_len) {
+              Vlocal[vtoken_depth][vhe_depth][vfetch_depth] =
+                  mask_16b_v_cache_boundary(
+                      Vlocal[vtoken_depth][vhe_depth][vfetch_depth],
+                      (seq_len - vglobal_fetch_start) * sizeof(cache_t));
+            }
+          }
           for (int i = 0; i < ELEMS8_ELEMS4_RATIO; i++) {
             const int offset = rowid * VTLANELOOP * ELEMS8_ELEMS4_RATIO +
                                vfetch_depth * ELEMS8_ELEMS4_RATIO + i;
             const int offset1 = offset % ROWS_PER_WARP;
             const int offset2 = offset / ROWS_PER_WARP;
-            // output format is 16 qheads across 16 lanes, 16 head elems spread
-            // across 4 rows
             tmp_out = gcn_mfma16x16x16_instr<scalar_t, 0, 0, 0>(
                 Vlocal[vtoken_depth][vhe_depth][vfetch_depth].xy[i],
                 shared_logits[vtoken_depth][offset2][lane16id][offset1],
                 tmp_out);
           }
         }
-        // KV cache fp8
-      } else {
+      }
+      outelems[vhe_depth] = from_floatx4<scalar_t>(tmp_out);
+    }
+  } else {
+    const int valid_vtoken_depths =
+        min(VTLOOP, DIVIDE_ROUND_UP(seq_len - partition_start_token_idx,
+                                    VTOKENS_PER_LANE * ROWS_PER_WARP));
+    for (int vhe_depth = 0; vhe_depth < VHELOOP; vhe_depth++) {
+      floatx4 tmp_out = {0};
+      for (int vtoken_depth = 0; vtoken_depth < VTLOOP; vtoken_depth++) {
         for (int vfetch_depth = 0; vfetch_depth < VTLANELOOP; vfetch_depth++) {
           _B16x8 Vtmp = Vlocal[vtoken_depth][vhe_depth][vfetch_depth];
+          if (__builtin_expect(partition_start_token_idx + T_PAR_SIZE > seq_len,
+                               0)) {
+            if (vtoken_depth >= valid_vtoken_depths) {
+              continue;
+            }
+            if (vtoken_depth + 1 == valid_vtoken_depths) {
+              const int vglobal_fetch_start =
+                  partition_start_token_idx +
+                  vtoken_depth * VTOKENS_PER_LANE * ROWS_PER_WARP +
+                  rowid * VTOKENS_PER_LANE +
+                  vfetch_depth * CONTIGUOUS_KV_ELEMS_16B_LOAD;
+              if (vglobal_fetch_start >= seq_len) {
+                continue;
+              }
+              if (vglobal_fetch_start + CONTIGUOUS_KV_ELEMS_16B_LOAD >
+                  seq_len) {
+                Vtmp = mask_16b_v_cache_boundary(Vtmp,
+                                                 seq_len - vglobal_fetch_start);
+              }
+            }
+          }
           // reinterpret V format as 16 elements of 8bits
           _B8x16 Vtmp8x16 = *reinterpret_cast<_B8x16*>(&Vtmp);
           for (int j = 0; j < ELEMS16_ELEMS8_RATIO; j++) {
@@ -856,12 +972,9 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
           }
         }
       }
-    }
-    // apply post Softmax V mfma v_scale
-    if constexpr (KV_DTYPE != vllm::Fp8KVCacheDataType::kAuto) {
       tmp_out *= *v_scale;
+      outelems[vhe_depth] = from_floatx4<scalar_t>(tmp_out);
     }
-    outelems[vhe_depth] = from_floatx4<scalar_t>(tmp_out);
   }
 
   __syncthreads();
@@ -917,7 +1030,8 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
 template <typename scalar_t, typename cache_t,
           vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
           int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED,
-          int GQA_RATIO>
+          int GQA_RATIO,
+          bool USE_INTERLEAVED_V_CACHE>
 __global__
 __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     const scalar_t* __restrict__ q,         // [num_seqs, num_heads, head_size]
@@ -1098,25 +1212,41 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
       }
     }
 
+    // KX_V = number of contiguous token elements per interleaved chunk
+    constexpr int KX_V = 16 / sizeof(cache_t);
     const cache_t* v_ptr = v_cache + wg_start_kv_head_idx * kv_head_stride;
-    // fetch vcache in kv cache auto case
+    // fetch vcache in kv cache auto case (bf16/fp16)
     if constexpr (KV_DTYPE == vllm::Fp8KVCacheDataType::kAuto) {
       const _B16x8* v_ptrh8 = reinterpret_cast<const _B16x8*>(v_ptr);
-      // iterate over each v block
       for (int b = 0; b < VBLOCKS; b++) {
-        // int32 physical_block_number leads to overflow when multiplied with
-        // kv_block_stride
         const int64_t vphysical_block_number =
             static_cast<int64_t>(vphysical_blocks[b]);
         const _B16x8* v_ptrh8b =
             v_ptrh8 + (vphysical_block_number * kv_block_stride) / 8;
-        // iterate over each head elem (within head_size)
         for (int h = 0; h < VHELOOP; h++) {
           const int head_size_elem = h * WARP_SIZE + laneid;
-          const _B16x8* v_ptrh8be = v_ptrh8b + head_size_elem * BLOCK_SIZE / 8;
-          // iterate over all velems within block
-          for (int d = 0; d < BLOCK_SIZE / 8; d++) {
-            Vlocal[h][b * BLOCK_SIZE / 8 + d] = v_ptrh8be[d];
+          if constexpr (USE_INTERLEAVED_V_CACHE) {
+            // Interleaved layout: [num_blocks, num_heads, block_size/x,
+            // head_dim, x] Iterate over chunks of x tokens; within each chunk,
+            // x values for the same head_size_elem are contiguous (16-byte
+            // aligned).
+            for (int bo_chunk = 0; bo_chunk < BLOCK_SIZE / KX_V; bo_chunk++) {
+              const _B16x8* v_chunk =
+                  v_ptrh8b + (bo_chunk * HEAD_SIZE + head_size_elem) * KX_V / 8;
+              for (int xd = 0; xd < KX_V / 8; xd++) {
+                Vlocal[h][b * BLOCK_SIZE / 8 + bo_chunk * (KX_V / 8) + xd] =
+                    v_chunk[xd];
+              }
+            }
+          } else {
+            // Standard PagedAttention layout: [num_blocks, num_heads, head_dim,
+            // block_size] All block_size tokens for one head_size_elem are
+            // contiguous.
+            const _B16x8* v_ptrh8be =
+                v_ptrh8b + head_size_elem * BLOCK_SIZE / 8;
+            for (int d = 0; d < BLOCK_SIZE / 8; d++) {
+              Vlocal[h][b * BLOCK_SIZE / 8 + d] = v_ptrh8be[d];
+            }
           }
         }
       }
@@ -1124,21 +1254,29 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     // fetch vcache in fp8 case
     else {  // if constexpr (KV_DTYPE != vllm::Fp8KVCacheDataType::kAuto)
       const _B8x8* v_ptrh8 = reinterpret_cast<const _B8x8*>(v_ptr);
-      // iterate over each v block
       for (int b = 0; b < VBLOCKS; b++) {
-        // int32 physical_block_number leads to overflow when multiplied with
-        // kv_block_stride
         const int64_t vphysical_block_number =
             static_cast<int64_t>(vphysical_blocks[b]);
         const _B8x8* v_ptrh8b =
             v_ptrh8 + (vphysical_block_number * kv_block_stride) / 8;
-        // iterate over each head elem (within head_size)
         for (int h = 0; h < VHELOOP; h++) {
           const int head_size_elem = h * WARP_SIZE + laneid;
-          const _B8x8* v_ptrh8be = v_ptrh8b + head_size_elem * BLOCK_SIZE / 8;
-          // iterate over all velems within block
-          for (int d = 0; d < BLOCK_SIZE / 8; d++) {
-            Vlocalb8[h][b * BLOCK_SIZE / 8 + d] = v_ptrh8be[d];
+          if constexpr (USE_INTERLEAVED_V_CACHE) {
+            // Same interleaved addressing as bf16 above, but with fp8
+            // elements (KX_V=16, using _B8x8 loads instead of _B16x8).
+            for (int bo_chunk = 0; bo_chunk < BLOCK_SIZE / KX_V; bo_chunk++) {
+              const _B8x8* v_chunk =
+                  v_ptrh8b + (bo_chunk * HEAD_SIZE + head_size_elem) * KX_V / 8;
+              for (int xd = 0; xd < KX_V / 8; xd++) {
+                Vlocalb8[h][b * BLOCK_SIZE / 8 + bo_chunk * (KX_V / 8) + xd] =
+                    v_chunk[xd];
+              }
+            }
+          } else {
+            const _B8x8* v_ptrh8be = v_ptrh8b + head_size_elem * BLOCK_SIZE / 8;
+            for (int d = 0; d < BLOCK_SIZE / 8; d++) {
+              Vlocalb8[h][b * BLOCK_SIZE / 8 + d] = v_ptrh8be[d];
+            }
           }
         }
       }
@@ -1334,15 +1472,37 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
       }
     }
   } else {  // warp in context
+  #define SV_mfma_value(x, value)                               \
+    for (int qh = 0; qh < QHLOOP; qh++) {                       \
+      acc[qh] = gcn_mfma4x4x4_instr<scalar_t, 4, 2 * x, 0>(     \
+          logits[qh], value.xy[0], acc[qh]);                    \
+      acc[qh] = gcn_mfma4x4x4_instr<scalar_t, 4, 2 * x + 1, 0>( \
+          logits[qh], value.xy[1], acc[qh]);                    \
+    }
+
   #define SV_mfma(x)                                                  \
     if constexpr (KV_DTYPE != vllm::Fp8KVCacheDataType::kAuto) {      \
       Vlocal[vh][x] = convert_b8x8_custom<scalar_t>(Vlocalb8[vh][x]); \
     }                                                                 \
-    for (int qh = 0; qh < QHLOOP; qh++) {                             \
-      acc[qh] = gcn_mfma4x4x4_instr<scalar_t, 4, 2 * x, 0>(           \
-          logits[qh], Vlocal[vh][x].xy[0], acc[qh]);                  \
-      acc[qh] = gcn_mfma4x4x4_instr<scalar_t, 4, 2 * x + 1, 0>(       \
-          logits[qh], Vlocal[vh][x].xy[1], acc[qh]);                  \
+    SV_mfma_value(x, Vlocal[vh][x])
+
+  #define SV_mfma_tail(x)                                                     \
+    if (x * 8 < valid_warp_tokens) {                                          \
+      _B16x8 Vtmp;                                                            \
+      if constexpr (KV_DTYPE == vllm::Fp8KVCacheDataType::kAuto) {            \
+        Vtmp = Vlocal[vh][x];                                                 \
+        if ((x + 1) * 8 > valid_warp_tokens) {                                \
+          Vtmp = mask_16b_v_cache_boundary(                                   \
+              Vtmp, (valid_warp_tokens - x * 8) * sizeof(cache_t));           \
+        }                                                                     \
+      } else {                                                                \
+        _B8x8 Vtmp8 = Vlocalb8[vh][x];                                        \
+        if ((x + 1) * 8 > valid_warp_tokens) {                                \
+          Vtmp8 = mask_8b_v_cache_boundary(Vtmp8, valid_warp_tokens - x * 8); \
+        }                                                                     \
+        Vtmp = convert_b8x8_custom<scalar_t>(Vtmp8);                          \
+      }                                                                       \
+      SV_mfma_value(x, Vtmp)                                                  \
     }
 
     for (int vh = 0; vh < VHELOOP; vh++) {
@@ -1350,18 +1510,28 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
       for (int qh = 0; qh < QHLOOP; qh++) {
         acc[qh] = {0};
       }
-      // SoftMax-V calculation
-      // logits -> token dimension is distributed across lanes
-      // Vlocal -> token dimension is depthwise within lane
-      // uses mfma instruction block broadcast for logits
-      SV_mfma(0);
-      SV_mfma(1);
-      SV_mfma(2);
-      SV_mfma(3);
-      SV_mfma(4);
-      SV_mfma(5);
-      SV_mfma(6);
-      SV_mfma(7);
+      // SoftMax-V calculation. Skip fully invalid V vectors in the partial
+      // tail warp, and only mask the one vector crossing seq_len.
+      if (__builtin_expect(warp_start_token_idx + WARP_SIZE > seq_len, 0)) {
+        const int valid_warp_tokens = seq_len - warp_start_token_idx;
+        SV_mfma_tail(0);
+        SV_mfma_tail(1);
+        SV_mfma_tail(2);
+        SV_mfma_tail(3);
+        SV_mfma_tail(4);
+        SV_mfma_tail(5);
+        SV_mfma_tail(6);
+        SV_mfma_tail(7);
+      } else {
+        SV_mfma(0);
+        SV_mfma(1);
+        SV_mfma(2);
+        SV_mfma(3);
+        SV_mfma(4);
+        SV_mfma(5);
+        SV_mfma(6);
+        SV_mfma(7);
+      }
 
       for (int qh = 0; qh < QHLOOP; qh++) {
         if constexpr (KV_DTYPE != vllm::Fp8KVCacheDataType::kAuto) {
@@ -1373,6 +1543,8 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     }
 
   #undef SV_mfma
+  #undef SV_mfma_tail
+  #undef SV_mfma_value
   }  // warp in context
 
   __syncthreads();
@@ -1718,7 +1890,8 @@ __device__ __forceinline__ _B16x8 from_floatx8(const floatx8& inp) {
 template <typename scalar_t, typename cache_t,
           vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
           int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED, int GQA_RATIO,
-          MFMAType MFMA_TYPE>
+          MFMAType MFMA_TYPE,
+          bool USE_INTERLEAVED_V_CACHE>
 __global__
 __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const scalar_t* __restrict__ q,       // [num_seqs, num_heads, head_size]
@@ -1963,6 +2136,24 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
     }
   }
 
+  if (partition_start_token_idx + T_PAR_SIZE > seq_len) {
+    for (int vhe_depth = 0; vhe_depth < VHELOOP; vhe_depth++) {
+      for (int vtoken_depth = 0; vtoken_depth < VTLOOP; vtoken_depth++) {
+        for (int vfetch_depth = 0; vfetch_depth < VTLANELOOP; vfetch_depth++) {
+          const int vglobal_fetch_start =
+              partition_start_token_idx +
+              vtoken_depth * VTOKENS_PER_LANE * ROWS_PER_WARP +
+              vfetch_depth * CONTIGUOUS_KV_ELEMS_16B_LOAD;
+          Vlocal[vtoken_depth][vhe_depth][vfetch_depth / 2]
+              .xy[vfetch_depth % 2] = mask_v_cache_padding<cache_t>(
+              Vlocal[vtoken_depth][vhe_depth][vfetch_depth / 2]
+                  .xy[vfetch_depth % 2],
+              vglobal_fetch_start, seq_len);
+        }
+      }
+    }
+  }
+
   floatx8 dout[TLOOP];
   // qk wmma
   for (int token_depth = 0; token_depth < TLOOP; token_depth++) {
@@ -2154,8 +2345,8 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
 
 template <typename scalar_t, typename cache_t,
           vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
-          int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED,
-          int GQA_RATIO>
+          int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED, int GQA_RATIO,
+          bool USE_INTERLEAVED_V_CACHE>
 __global__
 __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     const scalar_t* __restrict__ q,       // [num_seqs, num_heads, head_size]
@@ -2437,23 +2628,6 @@ __device__ __forceinline__ float to_float(const T& inp) {
 }
 
 template <typename T>
-__device__ __forceinline__ float to_float_b16(const bit16_t& inp) {
-  union tmpcvt {
-    bit16_t u;
-    _Float16 f;
-    __hip_bfloat16 b;
-  } t16;
-  t16.u = inp;
-  if constexpr (std::is_same<T, _Float16>::value) {
-    return (float)t16.f;
-  } else if constexpr (std::is_same<T, __hip_bfloat16>::value) {
-    return __bfloat162float(t16.b);
-  } else {
-    static_assert(false, "unsupported 16b dtype");
-  }
-}
-
-template <typename T>
 __device__ __forceinline__ T from_float(const float& inp) {
   if constexpr (std::is_same<T, _Float16>::value) {
     return (_Float16)inp;
@@ -2497,7 +2671,8 @@ __device__ __forceinline__ _B16x8 from_floatx8(const floatx8& inp) {
 template <typename scalar_t, typename cache_t,
           vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
           int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED, int GQA_RATIO,
-          MFMAType MFMA_TYPE>
+          MFMAType MFMA_TYPE,
+          bool USE_INTERLEAVED_V_CACHE>
 __global__
 __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const scalar_t* __restrict__ q,       // [num_seqs, num_heads, head_size]
@@ -2741,6 +2916,24 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
     }
   }
 
+  if (partition_start_token_idx + T_PAR_SIZE > seq_len) {
+    for (int vhe_depth = 0; vhe_depth < VHELOOP; vhe_depth++) {
+      for (int vtoken_depth = 0; vtoken_depth < VTLOOP; vtoken_depth++) {
+        for (int vfetch_depth = 0; vfetch_depth < VTLANELOOP; vfetch_depth++) {
+          const int vglobal_fetch_start =
+              partition_start_token_idx +
+              vtoken_depth * VTOKENS_PER_LANE * ROWS_PER_WARP +
+              rowid * VTOKENS_PER_LANE +
+              vfetch_depth * CONTIGUOUS_KV_ELEMS_16B_LOAD;
+          Vlocal[vtoken_depth][vhe_depth][vfetch_depth] =
+              mask_v_cache_padding<cache_t>(
+                  Vlocal[vtoken_depth][vhe_depth][vfetch_depth],
+                  vglobal_fetch_start, seq_len);
+        }
+      }
+    }
+  }
+
   floatx8 dout[TLOOP];
   // qk wmma
   for (int token_depth = 0; token_depth < TLOOP; token_depth++) {
@@ -2898,8 +3091,8 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
 
 template <typename scalar_t, typename cache_t,
           vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
-          int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED,
-          int GQA_RATIO>
+          int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED, int GQA_RATIO,
+          bool USE_INTERLEAVED_V_CACHE>
 __global__
 __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     const scalar_t* __restrict__ q,       // [num_seqs, num_heads, head_size]
@@ -3129,7 +3322,8 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
 template <typename scalar_t, typename cache_t,
           vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
           int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED,
-          int GQA_RATIO, MFMAType MFMA_TYPE>
+          int GQA_RATIO, MFMAType MFMA_TYPE,
+          bool USE_INTERLEAVED_V_CACHE>
 __global__
 __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const scalar_t* __restrict__ q,         // [num_seqs, num_heads, head_size]
@@ -3156,7 +3350,8 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma16_kernel(
 template <typename scalar_t, typename cache_t,
           vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
           int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED,
-          int GQA_RATIO>
+          int GQA_RATIO,
+          bool USE_INTERLEAVED_V_CACHE>
 __global__
 __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     const scalar_t* __restrict__ q,          // [num_seqs, num_heads, head_size]
@@ -3198,10 +3393,11 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
 
 #endif
 
+// clang-format off
 #define LAUNCH_CUSTOM_ATTENTION_MFMA16(GQA_RATIO)                              \
-  paged_attention_ll4mi_QKV_mfma16_kernel<T, KVT, KV_DTYPE, OUTT, BLOCK_SIZE,  \
-                                          HEAD_SIZE, NTHR, ALIBI_ENABLED,      \
-                                          GQA_RATIO, MFMA_TYPE>                \
+  paged_attention_ll4mi_QKV_mfma16_kernel<                                     \
+      T, KVT, KV_DTYPE, OUTT, BLOCK_SIZE, HEAD_SIZE, NTHR, ALIBI_ENABLED,      \
+      GQA_RATIO, MFMA_TYPE, USE_INTERLEAVED_V_CACHE>                           \
       <<<grid, block, 0, stream>>>(                                            \
           query_ptr, key_cache_ptr, value_cache_ptr, num_kv_heads, scale,      \
           block_tables_ptr, seq_lens_ptr, query_start_loc_ptr,                 \
@@ -3210,15 +3406,16 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
           max_ctx_blocks, k_scale_ptr, v_scale_ptr);
 
 #define LAUNCH_CUSTOM_ATTENTION_MFMA4(GQA_RATIO)                               \
-  paged_attention_ll4mi_QKV_mfma4_kernel<T, KVT, KV_DTYPE, OUTT, BLOCK_SIZE,   \
-                                         HEAD_SIZE, NTHR, ALIBI_ENABLED,       \
-                                         GQA_RATIO>                            \
+  paged_attention_ll4mi_QKV_mfma4_kernel<                                      \
+      T, KVT, KV_DTYPE, OUTT, BLOCK_SIZE, HEAD_SIZE, NTHR, ALIBI_ENABLED,      \
+      GQA_RATIO, USE_INTERLEAVED_V_CACHE>                                      \
       <<<grid, block, 0, stream>>>(                                            \
           query_ptr, key_cache_ptr, value_cache_ptr, num_kv_heads, scale,      \
           block_tables_ptr, seq_lens_ptr, query_start_loc_ptr,                 \
           max_num_blocks_per_seq, alibi_slopes_ptr, q_stride, kv_block_stride, \
           kv_head_stride, exp_sums_ptr, max_logits_ptr, tmp_out_ptr, out_ptr,  \
           max_ctx_blocks, k_scale_ptr, v_scale_ptr);
+// clang-format on
 
 #define LAUNCH_CUSTOM_REDUCTION(NPAR_LOOPS)                                 \
   paged_attention_ll4mi_reduce_kernel<T, OUTT, HEAD_SIZE, HEAD_SIZE,        \
@@ -3229,7 +3426,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
 
 template <typename T, typename KVT, vllm::Fp8KVCacheDataType KV_DTYPE,
           int BLOCK_SIZE, int HEAD_SIZE, typename OUTT, int PARTITION_SIZE_OLD,
-          bool ALIBI_ENABLED, MFMAType MFMA_TYPE>
+          bool ALIBI_ENABLED, MFMAType MFMA_TYPE, bool USE_INTERLEAVED_V_CACHE>
 void paged_attention_custom_launcher(
     torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,
     torch::Tensor& tmp_out, torch::Tensor& query, torch::Tensor& key_cache,
@@ -3385,7 +3582,7 @@ void paged_attention_custom_launcher(
 
 template <typename T, typename KVT, vllm::Fp8KVCacheDataType KV_DTYPE,
           int BLOCK_SIZE, int HEAD_SIZE, typename OUTT, int PARTITION_SIZE_OLD,
-          bool ALIBI_ENABLED, MFMAType MFMA_TYPE>
+          bool ALIBI_ENABLED, MFMAType MFMA_TYPE, bool USE_INTERLEAVED_V_CACHE>
 void paged_attention_custom_launcher_navi(
     torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,
     torch::Tensor& tmp_out, torch::Tensor& query, torch::Tensor& key_cache,
@@ -3556,21 +3753,42 @@ void paged_attention_custom_launcher_navi(
   }
 }
 
-#define CALL_CUSTOM_LAUNCHER(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, OUTT,   \
-                             PSIZE, ALIBI_ENABLED, MFMA_TYPE)               \
-  if (!is_navi) {                                                           \
-    paged_attention_custom_launcher<T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,  \
-                                    OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE>( \
-        out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,  \
-        num_kv_heads, scale, block_tables, seq_lens, query_start_loc,       \
-        max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale);        \
-  } else {                                                                  \
-    paged_attention_custom_launcher_navi<T, KVT, KV_DTYPE, BLK_SIZE,        \
-                                         HEAD_SIZE, OUTT, PSIZE,            \
-                                         ALIBI_ENABLED, MFMA_TYPE>(         \
-        out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,  \
-        num_kv_heads, scale, block_tables, seq_lens, query_start_loc,       \
-        max_seq_len, alibi_slopes, k_scale, v_scale);                       \
+// USE_INTERLEAVED_V_CACHE gates the V-cache read path at compile time.
+// Currently only the GFX9 kernels (MI300x/MI325x/MI350x/MI355x) have the
+// actual interleaved V-fetch logic implemented.  The GFX11 (RDNA 3) and
+// GFX12 (RDNA 4) mfma16 kernels do NOT support interleaved V-cache addressing.
+// The template parameter is carried on all variants for compilation
+// compatibility; a TORCH_CHECK prevents dispatch to NAVI with interleaved V.
+// TODO: implement interleaved V-cache support in the NAVI (GFX11/GFX12)
+// kernels if shuffle KV cache layout is needed on RDNA GPUs.
+#define CALL_CUSTOM_LAUNCHER(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, OUTT,    \
+                             PSIZE, ALIBI_ENABLED, MFMA_TYPE)                \
+  if (use_interleaved_v_cache) {                                             \
+    TORCH_CHECK(!is_navi,                                                    \
+                "Reading interleaved V-cache layout from paged decode "      \
+                "attention not supported on NAVI GPUs");                     \
+    paged_attention_custom_launcher<T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,   \
+                                    OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE,   \
+                                    true>(                                   \
+        out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,   \
+        num_kv_heads, scale, block_tables, seq_lens, query_start_loc,        \
+        max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale);         \
+  } else {                                                                   \
+    if (!is_navi) {                                                          \
+      paged_attention_custom_launcher<T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, \
+                                      OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE, \
+                                      false>(                                \
+          out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache, \
+          num_kv_heads, scale, block_tables, seq_lens, query_start_loc,      \
+          max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale);       \
+    } else {                                                                 \
+      paged_attention_custom_launcher_navi<T, KVT, KV_DTYPE, BLK_SIZE,       \
+                                           HEAD_SIZE, OUTT, PSIZE,           \
+                                           ALIBI_ENABLED, MFMA_TYPE, false>( \
+          out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache, \
+          num_kv_heads, scale, block_tables, seq_lens, query_start_loc,      \
+          max_seq_len, alibi_slopes, k_scale, v_scale);                      \
+    }                                                                        \
   }
 
 #define CALL_CUSTOM_LAUNCHER_ALIBI(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,    \
@@ -3667,7 +3885,8 @@ void paged_attention(
     const std::string& kv_cache_dtype, torch::Tensor& k_scale,
     torch::Tensor& v_scale,
     const std::optional<torch::Tensor>& fp8_out_scale,
-    const std::string& mfma_type) {
+    const std::string& mfma_type,
+    bool use_interleaved_v_cache) {
   // clang-format on
   bool is_navi = is_navi_gpu();
   const int head_size = query.size(2);

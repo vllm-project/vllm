@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
+from tests.models.utils import build_model_context
 from vllm.config.ec_transfer import ECRole, ECTransferConfig
 from vllm.config.model import ModelConfig
 from vllm.config.multimodal import MultiModalConfig
@@ -17,19 +19,39 @@ from vllm.transformers_utils.model_arch_config_convertor import (
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
+@pytest.mark.parametrize(
+    "model_id,limit_mm_per_prompt,expected",
+    [
+        ("Qwen/Qwen2-0.5B-Instruct", {}, False),
+        ("Qwen/Qwen2.5-VL-3B-Instruct", {}, True),
+        ("Qwen/Qwen2.5-VL-3B-Instruct", {"image": 0, "video": 0}, False),
+        ("Qwen/Qwen2.5-VL-3B-Instruct", {"image": 0}, True),
+    ],
+)
+@pytest.mark.core_model
+def test_supports_multimodal_inputs(model_id, limit_mm_per_prompt, expected):
+    """Test supports_multimodal_inputs returns correct boolean for various
+    configs."""
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt=limit_mm_per_prompt,
+    )
+    assert ctx.model_config.supports_multimodal_inputs is expected
+
+
 def test_mm_encoder_attn_backend_str_conversion():
-    config = MultiModalConfig(mm_encoder_attn_backend="FLASH_ATTN")  # type: ignore[arg-type]
+    config = MultiModalConfig(mm_encoder_attn_backend="FLASH_ATTN")
     assert config.mm_encoder_attn_backend == AttentionBackendEnum.FLASH_ATTN
 
 
 def test_mm_encoder_attn_backend_invalid():
     with pytest.raises(ValueError):
-        MultiModalConfig(mm_encoder_attn_backend="not_a_backend")  # type: ignore[arg-type]
+        MultiModalConfig(mm_encoder_attn_backend="not_a_backend")
 
 
 def test_mm_hasher_algorithm_invalid():
     with pytest.raises(ValueError, match="mm_hasher_algorithm"):
-        MultiModalConfig(mm_hasher_algorithm="md5")  # type: ignore[arg-type]
+        MultiModalConfig(mm_hasher_algorithm="md5")
 
 
 def test_mm_encoder_attn_backend_hash_updates():
@@ -84,63 +106,37 @@ def test_mm_encoder_attn_dtype_hash_updates(tmp_path):
     assert fp8_hash != fp8_static_hash
 
 
+_MULTIMODAL_MODEL = "llava-hf/llava-1.5-7b-hf"
+_TEXT_ONLY_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+
+
 def _make_mm_prefix_model_config(
+    model: str = _MULTIMODAL_MODEL,
     *,
     language_model_only: bool = False,
 ) -> ModelConfig:
-    model_config = MagicMock(spec=ModelConfig)
-    model_config.multimodal_config = MultiModalConfig(
-        language_model_only=language_model_only
-    )
-    # Bind real helper methods onto the mock.
-    model_config._supports_multimodal_for_mm_prefix = (
-        ModelConfig._supports_multimodal_for_mm_prefix.__get__(
-            model_config, ModelConfig
-        )
-    )
-    return model_config
-
-
-@pytest.mark.parametrize("supports_mm", [True, False])
-def test_supports_multimodal_for_mm_prefix_uses_registry(supports_mm: bool):
-    model_config = _make_mm_prefix_model_config()
-
-    with patch(
-        "vllm.multimodal.MULTIMODAL_REGISTRY.supports_multimodal_inputs",
-        return_value=supports_mm,
-    ) as mocked:
-        assert model_config._supports_multimodal_for_mm_prefix() is supports_mm
-        mocked.assert_called_once_with(model_config)
-
-    # Sticky cache — registry must not be consulted again.
-    with patch(
-        "vllm.multimodal.MULTIMODAL_REGISTRY.supports_multimodal_inputs",
-        side_effect=AssertionError("should use cache"),
-    ):
-        assert model_config._supports_multimodal_for_mm_prefix() is supports_mm
+    return ModelConfig(model, language_model_only=language_model_only)
 
 
 def test_supports_multimodal_for_mm_prefix_before_multimodal_config():
-    model_config = _make_mm_prefix_model_config()
-    model_config.multimodal_config = None
+    """A text-only model never builds a multimodal config, so the early
+    return must neither clear mm_prefix nor write the sticky cache."""
+    model_config = _make_mm_prefix_model_config(_TEXT_ONLY_MODEL)
+    assert model_config.multimodal_config is None
 
     assert model_config._supports_multimodal_for_mm_prefix() is True
-    assert not hasattr(model_config, "_supports_multimodal_inputs_cached")
+    assert not getattr(model_config, "_supports_multimodal_inputs_cache", None)
 
 
 def test_language_model_only_disables_via_supports_multimodal_inputs():
     """language_model_only zeros all limits, so registry reports text-only."""
     model_config = _make_mm_prefix_model_config(language_model_only=True)
 
-    with patch(
-        "vllm.multimodal.MULTIMODAL_REGISTRY.supports_multimodal_inputs",
-        return_value=False,
-    ):
-        assert model_config._supports_multimodal_for_mm_prefix() is False
+    assert model_config._supports_multimodal_for_mm_prefix() is False
 
 
 def test_convertor_clears_mm_prefix_when_multimodal_disabled():
-    hf_config = PretrainedConfig(
+    hf_config = PreTrainedConfig(
         model_type="gemma3",
         architectures=["Gemma3ForConditionalGeneration"],
     )
@@ -159,23 +155,19 @@ def test_convertor_clears_mm_prefix_when_multimodal_disabled():
 def test_sticky_cache_survives_text_subconfig_regeneration():
     """with_hf_config deepcopies the cached decision onto text submodules."""
     model_config = _make_mm_prefix_model_config()
-    with patch(
-        "vllm.multimodal.MULTIMODAL_REGISTRY.supports_multimodal_inputs",
-        return_value=False,
-    ):
-        assert model_config._supports_multimodal_for_mm_prefix() is False
+    assert model_config._supports_multimodal_for_mm_prefix() is True
 
-    # Simulate deepcopy onto a Gemma4ForCausalLM-like config that would
-    # otherwise fail registry lookup / return False incorrectly.
-    text_config = _make_mm_prefix_model_config()
-    text_config._supports_multimodal_inputs_cached = (
-        model_config._supports_multimodal_inputs_cached
-    )
-    with patch(
-        "vllm.multimodal.MULTIMODAL_REGISTRY.supports_multimodal_inputs",
-        side_effect=AssertionError("must not re-query registry"),
-    ):
-        assert text_config._supports_multimodal_for_mm_prefix() is False
+    # `with_hf_config` deep-copies this config and swaps `hf_config` for a
+    # text-only submodule (e.g. Gemma4ForCausalLM).
+    text_config = copy.deepcopy(model_config)
+    text_config.hf_config = model_config.hf_text_config
+    assert text_config._supports_multimodal_for_mm_prefix() is True
+
+    # Without the copied cache the submodule architecture has no registered
+    # multimodal processor, so re-querying the registry wrongly settles on
+    # text-only and would clear mm_prefix.
+    del text_config._supports_multimodal_inputs_cache
+    assert text_config._supports_multimodal_for_mm_prefix() is False
 
 
 @pytest.mark.parametrize(
@@ -194,6 +186,287 @@ def test_mm_processor_device_type_normalizes(device: object, expected: str | Non
     kwargs = {} if device is None else {"device": device}
     config = MultiModalConfig(mm_processor_kwargs=kwargs)
     assert config.get_mm_processor_device_type() == expected
+
+
+def test_merge_mm_processor_kwargs_scoped_precedence():
+    configured = {
+        "size": {
+            "shortest_edge": 64,
+            "longest_edge": 512,
+        },
+        "do_resize": True,
+        "padding": False,
+        "images_kwargs": {
+            "size": {"longest_edge": 1024},
+            "do_resize": False,
+        },
+        "videos_kwargs": {
+            "size": {"longest_edge": 2048},
+        },
+    }
+    inference = {
+        "size": {"shortest_edge": 128},
+        "do_resize": True,
+        "images_kwargs": {
+            "size": {"shortest_edge": 256},
+        },
+    }
+
+    config = MultiModalConfig(
+        mm_processor_kwargs=configured,
+        mm_device_do_normalize=False,
+    )
+
+    assert config.merge_mm_processor_kwargs(inference) == {
+        "size": {
+            "shortest_edge": 128,
+            "longest_edge": 512,
+        },
+        "do_resize": True,
+        "padding": False,
+        "images_kwargs": {
+            "size": {
+                "shortest_edge": 256,
+                "longest_edge": 1024,
+            },
+            "do_resize": True,
+        },
+        "videos_kwargs": {
+            "size": {
+                "shortest_edge": 128,
+                "longest_edge": 2048,
+            },
+        },
+    }
+
+
+def test_merge_mm_processor_kwargs_preserves_scoped_siblings_and_precedence():
+    config = MultiModalConfig(
+        mm_processor_kwargs={
+            "size": {
+                "shortest_edge": 100,
+                "longest_edge": 1000,
+            },
+            "videos_kwargs": {
+                "fps": 2,
+                "size": {"longest_edge": 1200},
+            },
+        },
+        mm_device_do_normalize=False,
+    )
+
+    assert config.merge_mm_processor_kwargs(
+        {
+            "size": {"longest_edge": 1800},
+            "videos_kwargs": {
+                "size": {"shortest_edge": 200},
+            },
+        }
+    ) == {
+        "size": {
+            "shortest_edge": 100,
+            "longest_edge": 1800,
+        },
+        "videos_kwargs": {
+            "fps": 2,
+            "size": {
+                "shortest_edge": 200,
+                "longest_edge": 1800,
+            },
+        },
+    }
+
+
+def test_merge_mm_processor_kwargs_mapping_vs_replacement():
+    config = MultiModalConfig(
+        mm_processor_kwargs={
+            "size": {"shortest_edge": 64},
+            "images_kwargs": {"size": {"longest_edge": 1024}},
+        },
+        mm_device_do_normalize=False,
+    )
+
+    assert config.merge_mm_processor_kwargs({"size": 7}) == {
+        "size": 7,
+        "images_kwargs": {"size": 7},
+    }
+    assert config.merge_mm_processor_kwargs({"size": {}}) == {
+        "size": {"shortest_edge": 64},
+        "images_kwargs": {
+            "size": {
+                "shortest_edge": 64,
+                "longest_edge": 1024,
+            },
+        },
+    }
+
+
+_EMPTY_IMAGE_SCOPE_KWARGS: tuple[dict[str, object], ...] = (
+    {},
+    {"images_kwargs": None},
+    {"images_kwargs": {}},
+)
+
+
+@pytest.mark.parametrize("configured", _EMPTY_IMAGE_SCOPE_KWARGS)
+@pytest.mark.parametrize("inference", _EMPTY_IMAGE_SCOPE_KWARGS)
+def test_merge_mm_processor_kwargs_empty_scopes_are_absent(
+    configured: dict[str, object],
+    inference: dict[str, object],
+):
+    config = MultiModalConfig(
+        mm_processor_kwargs=configured,
+        mm_device_do_normalize=False,
+    )
+
+    assert config.merge_mm_processor_kwargs(inference) == {}
+
+
+@pytest.mark.parametrize("empty_inference", _EMPTY_IMAGE_SCOPE_KWARGS)
+def test_merge_mm_processor_kwargs_empty_inference_scope_preserves_config_merge(
+    empty_inference: dict[str, object],
+):
+    config = MultiModalConfig(
+        mm_processor_kwargs={
+            "images_kwargs": {
+                "size": {
+                    "shortest_edge": 64,
+                    "longest_edge": 512,
+                },
+            },
+        },
+        mm_device_do_normalize=False,
+    )
+    inference = {
+        "size": {"shortest_edge": 128},
+        **empty_inference,
+    }
+
+    assert config.merge_mm_processor_kwargs(inference) == {
+        "size": {"shortest_edge": 128},
+        "images_kwargs": {
+            "size": {
+                "shortest_edge": 128,
+                "longest_edge": 512,
+            },
+        },
+    }
+
+
+@pytest.mark.parametrize("empty_config", _EMPTY_IMAGE_SCOPE_KWARGS)
+def test_merge_mm_processor_kwargs_empty_config_scope_allows_inference_merge(
+    empty_config: dict[str, object],
+):
+    config = MultiModalConfig(
+        mm_processor_kwargs={
+            "size": {"longest_edge": 512},
+            **empty_config,
+        },
+        mm_device_do_normalize=False,
+    )
+
+    assert config.merge_mm_processor_kwargs(
+        {
+            "size": {"shortest_edge": 128},
+            "images_kwargs": {"size": {"longest_edge": 1024}},
+        }
+    ) == {
+        "size": {
+            "shortest_edge": 128,
+            "longest_edge": 512,
+        },
+        "images_kwargs": {
+            "size": {
+                "shortest_edge": 128,
+                "longest_edge": 1024,
+            },
+        },
+    }
+
+
+@pytest.mark.parametrize("non_mapping_scope", [False, 0, "", [], 123])
+def test_merge_mm_processor_kwargs_falsey_non_mapping_scopes_are_not_empty(
+    non_mapping_scope: object,
+):
+    config = MultiModalConfig(
+        mm_processor_kwargs={"images_kwargs": non_mapping_scope},
+        mm_device_do_normalize=False,
+    )
+
+    for empty_inference in _EMPTY_IMAGE_SCOPE_KWARGS:
+        assert config.merge_mm_processor_kwargs(empty_inference) == {
+            "images_kwargs": non_mapping_scope
+        }
+
+
+@pytest.mark.parametrize(
+    ("configured_scope", "inference_scope", "expected_scope"),
+    [
+        (123, {"size": {"shortest_edge": 128}}, {"size": {"shortest_edge": 128}}),
+        ({"size": {"shortest_edge": 64}}, 123, 123),
+        (123, 456, 456),
+    ],
+)
+def test_merge_mm_processor_kwargs_non_mapping_scope_precedence(
+    configured_scope: object,
+    inference_scope: object,
+    expected_scope: object,
+):
+    config = MultiModalConfig(
+        mm_processor_kwargs={"images_kwargs": configured_scope},
+        mm_device_do_normalize=False,
+    )
+
+    merged = config.merge_mm_processor_kwargs({"images_kwargs": inference_scope})
+
+    assert merged["images_kwargs"] == expected_scope
+
+
+def test_merge_mm_processor_kwargs_none_leaf_is_explicit():
+    config = MultiModalConfig(mm_device_do_normalize=False)
+
+    assert config.merge_mm_processor_kwargs({"images_kwargs": {"do_resize": None}}) == {
+        "images_kwargs": {"do_resize": None}
+    }
+
+
+def test_merge_mm_processor_kwargs_normalize_and_ownership():
+    configured: dict[str, object] = {
+        "images_kwargs": {
+            "size": {"shortest_edge": 64},
+        },
+    }
+    inference: dict[str, object] = {
+        "do_normalize": True,
+        "do_rescale": True,
+        "images_kwargs": {
+            "size": {"longest_edge": 1024},
+        },
+    }
+    configured_before = copy.deepcopy(configured)
+    inference_before = copy.deepcopy(inference)
+
+    config = MultiModalConfig(
+        mm_processor_kwargs=configured,
+        mm_device_do_normalize=True,
+    )
+    merged = config.merge_mm_processor_kwargs(inference)
+
+    assert merged["do_normalize"] is False
+    assert merged["do_rescale"] is False
+    assert configured == configured_before
+    assert inference == inference_before
+    assert config.mm_processor_kwargs == configured_before
+
+    images_kwargs = merged["images_kwargs"]
+    assert isinstance(images_kwargs, dict)
+    size = images_kwargs["size"]
+    assert isinstance(size, dict)
+    size["shortest_edge"] = 999
+
+    assert configured == configured_before
+    assert inference == inference_before
+    assert config.mm_processor_kwargs == configured_before
 
 
 def _validate_mm_processor_device(*, device: str, ec_role: ECRole | None) -> None:
@@ -287,7 +560,7 @@ def _resolve_mm_processor_device(
     """Run the `auto` resolution and report where the processor ended up."""
     mm_config = MultiModalConfig(
         mm_processor_kwargs={} if device is None else {"device": device},
-        mm_tensor_ipc=mm_tensor_ipc,  # type: ignore[arg-type]
+        mm_tensor_ipc=mm_tensor_ipc,
     )
     model_config = MagicMock(spec=ModelConfig)
     model_config.multimodal_config = mm_config
@@ -329,6 +602,34 @@ def test_auto_mm_processor_device_leaves_an_explicit_request_alone():
     assert _resolve_mm_processor_device(ec_role="ec_producer", device="cpu") == "cpu"
 
 
+@pytest.mark.parametrize(
+    ("ec_role", "expected"),
+    [
+        (None, False),
+        ("ec_consumer", False),
+        ("ec_both", False),
+        ("ec_producer", True),
+    ],
+)
+def test_ec_producer_only_enables_mm_encoder_only(
+    ec_role: ECRole | None, expected: bool
+):
+    mm_config = MultiModalConfig()
+    model_config = MagicMock(spec=ModelConfig)
+    model_config.multimodal_config = mm_config
+    vllm_config = MagicMock(spec=VllmConfig)
+    vllm_config.model_config = model_config
+    vllm_config.ec_transfer_config = (
+        None
+        if ec_role is None
+        else ECTransferConfig(ec_connector="ECExampleConnector", ec_role=ec_role)
+    )
+
+    VllmConfig._resolve_mm_encoder_only(vllm_config)
+
+    assert mm_config.mm_encoder_only is expected
+
+
 def test_vllm_config_runs_the_mm_processor_device_check():
     """Startup must reach the check; the rule itself is covered above.
 
@@ -347,3 +648,85 @@ def test_vllm_config_runs_the_mm_processor_device_check():
         pytest.raises(ValueError, match="also runs the language model"),
     ):
         VllmConfig._validate_mm_processor_device(vllm_config)
+
+
+def _resolve_mm_video_decode_device(
+    *,
+    ec_role: ECRole | None,
+    mm_tensor_ipc: str = "torch_shm",
+    device: str | None = None,
+    video_kwargs: dict | None = None,
+    torchcodec_available: bool = True,
+) -> dict:
+    """Run processor-device then video-decode-device resolution and report
+    the resulting video media IO kwargs."""
+    mm_config = MultiModalConfig(
+        mm_processor_kwargs={} if device is None else {"device": device},
+        mm_tensor_ipc=mm_tensor_ipc,
+        media_io_kwargs={} if video_kwargs is None else {"video": dict(video_kwargs)},
+    )
+    model_config = MagicMock(spec=ModelConfig)
+    model_config.multimodal_config = mm_config
+    vllm_config = MagicMock(spec=VllmConfig)
+    vllm_config.model_config = model_config
+    vllm_config.ec_transfer_config = (
+        None
+        if ec_role is None
+        else ECTransferConfig(ec_connector="ECExampleConnector", ec_role=ec_role)
+    )
+
+    with (
+        patch("vllm.platforms.current_platform.device_type", "cuda"),
+        patch(
+            "vllm.utils.import_utils.check_torchcodec_available",
+            side_effect=None if torchcodec_available else ImportError("torchcodec"),
+        ),
+    ):
+        VllmConfig._resolve_mm_processor_device(vllm_config)
+        VllmConfig._resolve_mm_video_decode_device(vllm_config)
+    return mm_config.media_io_kwargs.get("video", {})
+
+
+def test_auto_video_decode_uses_nvdec_on_encoder_instance():
+    """The processor runs on the accelerator there, so decoded frames should
+    stay on-device too."""
+    assert _resolve_mm_video_decode_device(ec_role="ec_producer") == {
+        "backend": "torchcodec",
+        "device": "cuda",
+    }
+
+
+@pytest.mark.parametrize("ec_role", [None, "ec_consumer", "ec_both"])
+def test_auto_video_decode_stays_on_cpu_off_encoder_instance(
+    ec_role: ECRole | None,
+):
+    """The processor stays on CPU off encode-only instances, so video
+    decoding should too."""
+    assert _resolve_mm_video_decode_device(ec_role=ec_role) == {}
+
+
+def test_auto_video_decode_follows_explicit_processor_device():
+    assert _resolve_mm_video_decode_device(ec_role="ec_producer", device="cpu") == {}
+    assert _resolve_mm_video_decode_device(ec_role="ec_producer", device="cuda") == {
+        "backend": "torchcodec",
+        "device": "cuda",
+    }
+
+
+def test_auto_video_decode_respects_explicit_media_io_kwargs():
+    assert _resolve_mm_video_decode_device(
+        ec_role="ec_producer", video_kwargs={"backend": "opencv"}
+    ) == {"backend": "opencv"}
+    assert _resolve_mm_video_decode_device(
+        ec_role="ec_producer", video_kwargs={"device": "cpu"}
+    ) == {"device": "cpu"}
+
+
+def test_auto_video_decode_skipped_without_torchcodec():
+    assert (
+        _resolve_mm_video_decode_device(
+            ec_role="ec_producer",
+            torchcodec_available=False,
+        )
+        == {}
+    )

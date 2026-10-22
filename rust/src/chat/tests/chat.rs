@@ -10,10 +10,10 @@ use futures::StreamExt as _;
 use tokio::time::timeout;
 use vllm_chat::{
     AssistantBlockKind, AssistantContentBlock, AssistantMessageExt as _, ChatBackend, ChatEvent,
-    ChatLlm, ChatMessage, ChatRenderer, ChatRequest, ChatRole, ChatTextBackend, ChatTool,
-    ChatToolChoice, DefaultChatOutputProcessor, DynChatOutputProcessor, DynChatRenderer,
-    FinishReason, GenerationPromptMode, NewChatOutputProcessorOptions, ParserSelection,
-    RenderedPrompt, SamplingParams,
+    ChatLlm, ChatMessage, ChatRenderer, ChatRequest, ChatRequestProcessor, ChatRole,
+    ChatTextBackend, ChatTool, ChatToolChoice, DefaultChatOutputProcessor, DynChatOutputProcessor,
+    DynChatRenderer, FinishReason, GenerationPromptMode, NewChatOutputProcessorOptions,
+    ParserSelection, RenderedPrompt, ResolvedToolContext, SamplingParams,
 };
 use vllm_engine_core_client::protocol::logprobs::{
     Logprobs, MaybeWireLogprobs, PositionLogprobs, TokenLogprob,
@@ -227,6 +227,7 @@ impl ChatBackend for FakeChatBackend {
             self.tokenizer(),
             options.tool_call_parser,
             options.reasoning_parser,
+            options.tool_strict_level,
         )?))
     }
 }
@@ -238,6 +239,10 @@ impl ChatRenderer for FakeChatBackend {
         }
 
         let mut prompt = String::new();
+        if !request.tools().is_empty() {
+            let names = request.tools().iter().map(|tool| tool.name.as_str());
+            prompt.push_str(&format!("tools: {}\n", names.collect::<Vec<_>>().join(",")));
+        }
         for message in &request.messages {
             prompt.push_str(message.role().as_str());
             prompt.push_str(": ");
@@ -250,6 +255,7 @@ impl ChatRenderer for FakeChatBackend {
 
         Ok(RenderedPrompt {
             prompt: Prompt::Text(prompt),
+            media_order: None,
             effective_template_kwargs: request.chat_options.template_kwargs.clone(),
         })
     }
@@ -295,6 +301,7 @@ fn sample_tool_request(request_id: &str) -> ChatRequest {
             "required": ["city"],
         }),
         strict: None,
+        defer_loading: None,
     }];
     request.tool_context = vllm_chat::ResolvedToolContext::new(
         &request.messages,
@@ -393,6 +400,7 @@ async fn chat_streams_text_events() {
             index: 0,
             kind: AssistantBlockKind::Text,
             delta: "H".to_string(),
+            token_count: None,
         }
     );
     assert_eq!(
@@ -401,6 +409,7 @@ async fn chat_streams_text_events() {
             index: 0,
             kind: AssistantBlockKind::Text,
             delta: "i".to_string(),
+            token_count: None,
         }
     );
     assert_eq!(
@@ -500,6 +509,7 @@ async fn chat_stream_waits_for_complete_utf8_before_emitting() {
             index: 0,
             kind: AssistantBlockKind::Text,
             delta: "你".to_string(),
+            token_count: None,
         }
     );
     assert_eq!(
@@ -586,6 +596,7 @@ async fn chat_stream_flushes_held_text_on_finish() {
             index: 0,
             kind: AssistantBlockKind::Text,
             delta: "ok st".to_string(),
+            token_count: None,
         }
     );
     assert_eq!(
@@ -773,6 +784,7 @@ async fn chat_stream_preserves_terminal_stop_token_when_requested() {
             index: 0,
             kind: AssistantBlockKind::Text,
             delta: "Hi!".to_string(),
+            token_count: None,
         }
     );
     assert_eq!(
@@ -880,6 +892,7 @@ async fn chat_stream_separates_reasoning_blocks_automatically() {
             index: 0,
             kind: AssistantBlockKind::Reasoning,
             delta: "reason ".to_string(),
+            token_count: Some(7),
         }
     );
     assert_eq!(
@@ -888,6 +901,7 @@ async fn chat_stream_separates_reasoning_blocks_automatically() {
             index: 0,
             kind: AssistantBlockKind::Reasoning,
             delta: "more".to_string(),
+            token_count: Some(4),
         }
     );
     assert_eq!(
@@ -912,6 +926,7 @@ async fn chat_stream_separates_reasoning_blocks_automatically() {
             index: 1,
             kind: AssistantBlockKind::Text,
             delta: "answer".to_string(),
+            token_count: None,
         }
     );
     assert_eq!(
@@ -927,12 +942,15 @@ async fn chat_stream_separates_reasoning_blocks_automatically() {
     match next_semantic(&mut stream).await {
         Some(Ok(ChatEvent::Done {
             message,
+            usage,
             finish_reason,
             ..
         })) => {
             assert_eq!(message.reasoning().unwrap(), "reason more");
             assert_eq!(message.text(), "answer");
             assert_eq!(finish_reason, FinishReason::Length);
+            // 7 tokens for "reason " plus 4 for "more"; markers are excluded.
+            assert_eq!(usage.reasoning_tokens, 11);
         }
         other => panic!("unexpected final event: {other:?}"),
     }
@@ -1000,6 +1018,8 @@ async fn chat_collectors_return_structured_message_and_visible_text() {
         message.usage.output_token_count,
         "<think>inner</think>outer".len()
     );
+    // 5 tokens for "inner"; markers are excluded.
+    assert_eq!(message.usage.reasoning_tokens, 5);
 
     let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
@@ -1079,6 +1099,7 @@ async fn chat_explicitly_disables_reasoning_parser() {
     assert_eq!(message.message.reasoning(), None);
     assert_eq!(message.message.text(), "<think>reason more</think>answer");
     assert_eq!(message.finish_reason, FinishReason::Length);
+    assert_eq!(message.usage.reasoning_tokens, 0);
 
     let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
@@ -1379,6 +1400,7 @@ async fn chat_stream_and_collect_preserve_prompt_and_sample_logprobs() {
             index: 0,
             kind: AssistantBlockKind::Text,
             delta: "H".to_string(),
+            token_count: None,
         }
     );
     assert_eq!(
@@ -1599,4 +1621,48 @@ async fn chat_rejects_tool_requests_when_tool_parser_is_disabled() {
     let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
     chat.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn processor_excludes_request_tools_for_tool_choice_none_when_configured() {
+    let tool = |name: &str| ChatTool {
+        name: name.to_string(),
+        description: None,
+        parameters: serde_json::json!({"type": "object"}),
+        strict: None,
+        defer_loading: None,
+    };
+    let render = async |tool_choice, exclude| {
+        let mut request = sample_request("exclude-tools");
+        request.messages.insert(
+            0,
+            ChatMessage::developer("Dynamic tools.", Some(vec![tool("lookup")])),
+        );
+        request.tool_context = ResolvedToolContext::new(
+            &request.messages,
+            vec![tool("get_weather")],
+            Some(tool_choice),
+            true,
+        )
+        .unwrap();
+        let processor = ChatRequestProcessor::render_only(Arc::new(FakeChatBackend::new()))
+            .with_exclude_tools_when_tool_choice_none(exclude);
+        let text_request = processor.prepare_for_tokenization(request).await.unwrap();
+        let Prompt::Text(prompt) = text_request.prompt else {
+            panic!("expected a text prompt");
+        };
+        prompt.lines().next().unwrap().to_string()
+    };
+
+    // Like Python, tools stay in the prompt for `none` unless the server opts out.
+    assert_eq!(
+        render(ChatToolChoice::None, false).await,
+        "tools: get_weather,lookup"
+    );
+    // Opting out drops request-level tools only; message-scoped ones belong to the history.
+    assert_eq!(render(ChatToolChoice::None, true).await, "tools: lookup");
+    assert_eq!(
+        render(ChatToolChoice::Auto, true).await,
+        "tools: get_weather,lookup"
+    );
 }

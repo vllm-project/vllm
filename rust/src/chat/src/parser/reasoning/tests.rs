@@ -15,17 +15,15 @@ fn factory_contains_and_lists_registered_parsers() {
     assert!(factory.contains(names::SEED_OSS));
     assert!(factory.contains(names::STEP3P5));
     assert!(factory.contains(names::MINIMAX_M3));
-    assert!(factory.contains(names::GEMMA4));
     assert!(factory.list().contains(&names::QWEN3.to_string()));
     assert!(factory.list().contains(&names::DEEPSEEK_V4.to_string()));
     assert!(factory.list().contains(&names::SEED_OSS.to_string()));
     assert!(factory.list().contains(&names::STEP3P5.to_string()));
     assert!(factory.list().contains(&names::MINIMAX_M3.to_string()));
-    assert!(factory.list().contains(&names::GEMMA4.to_string()));
 }
 
 #[test]
-fn factory_resolves_deepseek_v4_to_qwen3_alias() {
+fn factory_resolves_deepseek_v4() {
     let factory = ReasoningParserFactory::new();
     assert_eq!(
         factory.resolve_name_for_model("deepseek-ai/DeepSeek-V4"),
@@ -34,6 +32,10 @@ fn factory_resolves_deepseek_v4_to_qwen3_alias() {
     assert_eq!(
         factory.resolve_name_for_model("deepseek_v4"),
         Some(names::DEEPSEEK_V4)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("deepseek-ai/DeepSeek-V4.1-Flash"),
+        Some(names::DEEPSEEK_V41)
     );
 }
 
@@ -111,4 +113,64 @@ fn factory_rejects_unknown_parser_names() {
         Err(error) => error,
     };
     assert!(error.to_string().contains("choose from"));
+}
+
+#[test]
+fn factory_distinguishes_glm_reasoning_framing() {
+    let factory = ReasoningParserFactory::new();
+    for model in ["zai-org/GLM-4.5", "zai-org/GLM-4.6"] {
+        assert_eq!(factory.resolve_name_for_model(model), Some(names::GLM45));
+    }
+    for model in ["zai-org/GLM-4.7-Flash", "zai-org/GLM-5.2-FP8"] {
+        assert_eq!(factory.resolve_name_for_model(model), Some(names::GLM47));
+    }
+}
+
+#[test]
+fn step5_preserves_reasoning_and_content_whitespace_across_chunks() {
+    use vllm_tokenizer::{DecodedText, Tokenizer as _};
+
+    let tokenizer = Arc::new(
+        TestTokenizer::new()
+            .with_regular_token("<think>", 256)
+            .with_regular_token("</think>", 257),
+    );
+    let factory = ReasoningParserFactory::new();
+    let prompt = tokenizer.encode("<|im_start|>assistant\n<think>", false).unwrap();
+    let wire = "\nreasoning\n</think>\n\nanswer\n";
+    for model in [
+        "stepfun-ai/Step-5-Preview",
+        "stepfun-ai/Step-5-Preview-BF16",
+        "step5",
+    ] {
+        for split in wire.char_indices().map(|(index, _)| index).chain(std::iter::once(wire.len()))
+        {
+            let mut parser = factory
+                .create(
+                    factory.resolve_name_for_model(model).unwrap(),
+                    tokenizer.clone(),
+                )
+                .unwrap();
+            parser.initialize(&prompt).unwrap();
+            let mut reasoning = String::new();
+            let mut content = String::new();
+            for delta in [
+                parser.push(DecodedText::unattributed(&wire[..split])).unwrap(),
+                parser.push(DecodedText::unattributed(&wire[split..])).unwrap(),
+                parser.finish().unwrap(),
+            ] {
+                if let Some(text) = delta.reasoning {
+                    reasoning.push_str(&text.text);
+                }
+                if let Some(text) = delta.content {
+                    content.push_str(&text.text);
+                }
+            }
+            assert_eq!(
+                (reasoning.as_str(), content.as_str()),
+                ("\nreasoning\n", "\n\nanswer\n"),
+                "{model} split {split}"
+            );
+        }
+    }
 }

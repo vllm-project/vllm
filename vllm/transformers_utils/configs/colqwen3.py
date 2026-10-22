@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-ColQwen3 configuration that extends Qwen3VLConfig with embedding projection
+"""ColQwen3 configuration that extends Qwen3VLConfig with embedding projection
 fields. This allows ColQwen3 models to be loaded without trust_remote_code
 by mapping their custom model_type (colqwen3, ops_colqwen3, etc.) to a
 standard config class that vLLM understands.
