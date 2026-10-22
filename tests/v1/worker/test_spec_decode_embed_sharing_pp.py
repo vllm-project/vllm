@@ -297,3 +297,67 @@ def test_m3_weight_transfer_updates_embedding_ownership(make_m3_draft, initial_e
     eagle_utils.maybe_share_target_embed(draft, draft.model, target)
     assert draft.model.embed_tokens is original
     torch.testing.assert_close(original.weight, torch.full((VOCAB, HIDDEN), 3.0))
+
+
+@pytest.fixture
+def nemotron_draft(monkeypatch, default_vllm_config):
+    from vllm.model_executor.models import nemotron_h_mtp as mtp
+
+    hf_config = SimpleNamespace(
+        vocab_size=VOCAB,
+        hidden_size=HIDDEN,
+        num_hidden_layers=1,
+        num_nextn_predict_layers=1,
+        mtp_hybrid_override_pattern="*",
+    )
+    hf_config.get_text_config = lambda: hf_config
+    config = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            draft_model_config=SimpleNamespace(hf_config=hf_config),
+        ),
+        parallel_config=SimpleNamespace(eplb_config=None),
+        cache_config=None,
+        compilation_config=SimpleNamespace(mode=0),
+    )
+    monkeypatch.setattr(mtp, "VocabParallelEmbedding", nn.Embedding)
+    monkeypatch.setattr(mtp, "get_draft_quant_config", lambda _: None)
+    monkeypatch.setattr(
+        mtp.NemotronHMTP, "_find_quant_config", staticmethod(lambda **_: None)
+    )
+    monkeypatch.setattr(
+        mtp,
+        "NemotronHMTPAttentionDecoderLayer",
+        lambda **_: nn.Linear(1, 1, bias=False),
+    )
+    return mtp.NemotronHMTP(vllm_config=config)
+
+
+@pytest.mark.parametrize("prefix", ["", "language_model."])
+def test_nemotron_only_reports_loaded_mtp_weights(nemotron_draft, prefix):
+    weights = [
+        (prefix + "mtp.layers.0.weight", torch.ones(1, 1)),
+        (prefix + "backbone.embeddings.weight", torch.zeros(VOCAB, HIDDEN)),
+        (prefix + "lm_head.weight", torch.zeros(VOCAB, HIDDEN)),
+    ]
+    assert not nemotron_draft.is_unused_checkpoint_weight(weights[0][0])
+    assert all(nemotron_draft.is_unused_checkpoint_weight(k) for k, _ in weights[1:])
+    assert nemotron_draft.load_weights(weights) == {"model.layers.0.weight"}
+    assert nemotron_draft.model.embed_tokens is None
+    assert nemotron_draft.lm_head is None
+
+
+@pytest.mark.parametrize("pp_size", [1, 2])
+def test_nemotron_shares_target_embedding_and_refit(
+    monkeypatch, nemotron_draft, pp_size
+):
+    """PP must preserve the target's embedding identity through a refit."""
+    monkeypatch.setattr(eagle_utils, "get_pp_group", _fake_pp(pp_size))
+    target = _inner(_embed(fill=2.0))
+    eagle_utils.maybe_share_target_embed(nemotron_draft, nemotron_draft.model, target)
+    assert nemotron_draft.model.embed_tokens is target.embed_tokens
+    with torch.no_grad():
+        target.embed_tokens.weight.fill_(3.0)
+    torch.testing.assert_close(
+        nemotron_draft.get_input_embeddings(torch.tensor([1])),
+        torch.full((1, HIDDEN), 3.0),
+    )
