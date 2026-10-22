@@ -521,6 +521,7 @@ To score local K and exchange Top16 candidates instead, use
 `--attention-config '{"indexer_kv_dtype":"fp8","indexer_cache_sharding":"on","indexer_prefill_cp":"local_score"}'`.
 Set `indexer_prefill_cp` to `gather` for the comparison path on the same cache layout.
 Both paths preserve logical 128-token block IDs; decode and main attention are
-unchanged. The local prefill path uses the Triton scorer, bounds temporary scores
-to 256 queries and the batch context length, and exchanges candidates with NCCL.
+unchanged. The local prefill path uses the Triton scorer with up to 1024 queries
+per compute chunk and at most 32 MiB of score scratch. Candidates accumulate in
+reusable buffers for one NCCL exchange per layer.
 There is no automatic path selection; compare full-model performance for your workload.
