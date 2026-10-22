@@ -9,6 +9,7 @@ import vllm.lora.ops.torch_ops as torch_ops
 import vllm.lora.ops.triton_ops as triton_ops
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.lora.ops.triton_ops import LoRAKernelMeta
+from vllm.lora.ops.triton_ops.lora_kernel_metadata import remap_lora_ids
 from vllm.lora.ops.triton_ops.utils import _LORA_A_PTR_DICT, _LORA_B_PTR_DICT
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
@@ -423,6 +424,80 @@ test_params = {
 DTYPES = [torch.float16, torch.bfloat16]
 DEVICES = [f"{DEVICE_TYPE}:{0}"]
 SEED = [0]
+
+
+@pytest.mark.parametrize("slots", [[7, 2**40], [2**40, 7], [0, 2**40, 7, 0]])
+@pytest.mark.parametrize("device", ["cpu", *DEVICES])
+def test_dispatched_lora_ids_follow_local_slots(slots, device):
+    """Remote identities must select the right weights despite opposite load order."""
+    ids = torch.tensor([7, 0, 2**40, 7, -1], dtype=torch.int64, device=device)
+    slot_ids = torch.tensor(slots, dtype=torch.int64, device=device)
+    result = remap_lora_ids(ids, slot_ids)
+    expected = torch.tensor(
+        [slots.index(7), -1, slots.index(2**40), slots.index(7), -1],
+        dtype=torch.int32,
+        device=device,
+    )
+    assert result.dtype == torch.int32
+    assert torch.equal(result, expected)
+
+
+def test_dispatched_lora_ids_require_residency():
+    """A missing adapter must fail instead of silently dropping the expert delta."""
+    with pytest.raises(RuntimeError, match="not resident"):
+        remap_lora_ids(
+            torch.tensor([7, 9], device="cpu"), torch.tensor([7, 0], device="cpu")
+        )
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Requires CUDA/HIP graph capture"
+)
+def test_dispatched_lora_ids_graph_replay(device):
+    """Graph replay must read current slot identities, not capture-time order."""
+    ids = torch.tensor([7, 0, 9], dtype=torch.int64, device=device)
+    slots = torch.tensor([7, 9], dtype=torch.int64, device=device)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        remap_lora_ids(ids, slots)
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        output = remap_lora_ids(ids, slots)
+    for order in ([9, 7], [7, 9]):
+        slots.copy_(torch.tensor(order, dtype=torch.int64, device=device))
+        graph.replay()
+        assert torch.equal(
+            output,
+            torch.tensor([order.index(7), -1, order.index(9)], device=device),
+        )
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_dispatched_lora_metadata_tracks_slot_changes(device):
+    """Slot reassignment and a shorter base batch must not reuse stale identities."""
+    from vllm.config.lora import LoRAConfig
+    from vllm.lora.layers import LoRAMapping
+    from vllm.lora.punica_wrapper.punica_gpu import PunicaWrapperGPU
+
+    wrapper = PunicaWrapperGPU(
+        max_num_batched_tokens=8,
+        max_batches=8,
+        device=device,
+        lora_config=LoRAConfig(max_loras=2),
+    )
+    mapping = LoRAMapping((7, 9, 0), (7, 9, 0), is_prefill=True)
+    for slots in ([7, 9], [9, 7]):
+        wrapper.update_metadata(mapping, slots, 3, 32000)
+        actual = remap_lora_ids(wrapper.token_lora_ids[:3], wrapper.slot_lora_ids)
+        expected = torch.tensor(
+            [slots.index(7), slots.index(9), -1], device=device, dtype=torch.int32
+        )
+        assert torch.equal(actual, expected)
+    wrapper.update_metadata(LoRAMapping((0,), (0,), is_prefill=True), [9, 7], 3, 32000)
+    assert torch.count_nonzero(wrapper.token_lora_ids).item() == 0
 
 
 @pytest.mark.parametrize("batches", test_params["batches"])

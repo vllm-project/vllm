@@ -4,8 +4,11 @@
 
 import shutil
 from collections.abc import Sequence
+from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 import pytest
+import requests
 import torch
 from safetensors.torch import load_file, save_file
 
@@ -13,7 +16,10 @@ import vllm
 from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
 
-from ..utils import multi_gpu_test
+from ..utils import RemoteOpenAIServer, multi_gpu_test
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu_worker import Worker
 
 MODEL_PATH = "allenai/OLMoE-1B-7B-0125-Instruct"
 
@@ -48,6 +54,17 @@ EXPECTED_BASE_MODEL_OUTPUT = [
     ),
 ]
 
+PROMPTS = [
+    PROMPT_TEMPLATE.format(context="How many candidates are there?"),
+    PROMPT_TEMPLATE.format(context="Count the number of candidates."),
+    PROMPT_TEMPLATE.format(
+        context="Which poll resource provided the most number of candidate information?"  # noqa: E501
+    ),
+    PROMPT_TEMPLATE.format(
+        context="Return the poll resource associated with the most candidates."
+    ),
+]
+
 
 def _output_matches(generated: str, accepted: str | Sequence[str]) -> bool:
     if isinstance(accepted, str):
@@ -61,17 +78,6 @@ def generate_and_test(
     lora_id: list[int | None] | int | None,
     compare_lower: bool = False,
 ) -> None:
-    prompts = [
-        PROMPT_TEMPLATE.format(context="How many candidates are there?"),
-        PROMPT_TEMPLATE.format(context="Count the number of candidates."),
-        PROMPT_TEMPLATE.format(
-            context="Which poll resource provided the most number of candidate information?"  # noqa: E501
-        ),
-        PROMPT_TEMPLATE.format(
-            context="Return the poll resource associated with the most candidates."
-        ),
-    ]
-
     lora_request = None
     if isinstance(lora_id, int):
         lora_request = LoRARequest(str(lora_id), lora_id, lora_path)
@@ -82,7 +88,7 @@ def generate_and_test(
         ]
 
     sampling_params = vllm.SamplingParams(temperature=0, max_tokens=64)
-    outputs = llm.generate(prompts, sampling_params, lora_request=lora_request)
+    outputs = llm.generate(PROMPTS, sampling_params, lora_request=lora_request)
     # Print the outputs.
     generated_texts: list[str] = []
     for output in outputs:
@@ -181,6 +187,163 @@ def test_olmoe_lora_mixed_random(
     sampling_params = vllm.SamplingParams(temperature=0, max_tokens=64)
     outputs = llm.generate(prompts, sampling_params, lora_request=lora_requests)
     assert outputs[0].outputs[0].text.strip().startswith(EXPECTED_LORA_OUTPUT[0])
+
+
+@pytest.mark.parametrize("use_v2", [False, True])
+@multi_gpu_test(num_gpus=2)
+def test_olmoe_lora_idle_peer(olmoe_lora_files, use_v2):
+    """Static expert adapters must survive first-idle and active-idle transitions."""
+    args = [
+        "--data-parallel-size",
+        "2",
+        "--enable-lora",
+        "--max-loras",
+        "1",
+        "--max-lora-rank",
+        "8",
+        "--lora-modules",
+        f"sql={olmoe_lora_files}",
+        "--max-model-len",
+        "1024",
+        "--max-num-batched-tokens",
+        "512",
+        "--max-num-seqs",
+        "16",
+        "--no-enable-prefix-caching",
+        "--enforce-eager",
+    ]
+    with (
+        RemoteOpenAIServer(
+            MODEL_PATH,
+            args,
+            env_dict={"VLLM_USE_V2_MODEL_RUNNER": str(int(use_v2))},
+        ) as server,
+        server.get_client() as client,
+    ):
+        for rank in (0, 1, 0):
+            completion = client.completions.create(
+                model="sql",
+                prompt=PROMPTS,
+                max_tokens=64,
+                temperature=0,
+                extra_headers={"X-data-parallel-rank": str(rank)},
+            )
+            assert len(completion.choices) == len(EXPECTED_LORA_OUTPUT)
+            for choice in completion.choices:
+                assert _output_matches(
+                    choice.text.strip(), EXPECTED_LORA_OUTPUT[choice.index]
+                ), f"DP rank {rank}, prompt {choice.index}: {choice.text!r}"
+
+
+class LoRASlotOrderWorkerExtension:
+    def preload_lora_slots(self, paths: list[str], reverse_peer: bool):
+        from vllm.distributed import get_dp_group
+
+        worker = cast("Worker", self)
+        group = get_dp_group()
+        for adapter_id in list(worker.list_loras()):
+            worker.remove_lora(adapter_id)
+        order = [1, 2]
+        if reverse_peer and group.rank_in_group == 1:
+            order.reverse()
+        for adapter_id in order:
+            assert worker.add_lora(
+                LoRARequest(str(adapter_id), adapter_id, paths[adapter_id - 1])
+            )
+        orders = [None] * group.world_size
+        torch.distributed.all_gather_object(orders, order, group=group.cpu_group)
+        return orders
+
+
+@multi_gpu_test(num_gpus=2)
+def test_olmoe_lora_slot_order(olmoe_lora_files, tmp_path):
+    """Different remote slots must preserve each adapter's teacher-forced scores."""
+    opposite = tmp_path / "opposite"
+    shutil.copytree(olmoe_lora_files, opposite)
+    weights = load_file(str(Path(olmoe_lora_files) / "adapter_model.safetensors"))
+    expert_b = [name for name in weights if "experts" in name and "lora_B" in name]
+    assert any(weights[name].count_nonzero().item() for name in expert_b)
+    for name in expert_b:
+        weights[name] = -weights[name]
+    save_file(weights, str(opposite / "adapter_model.safetensors"))
+    paths = [str(olmoe_lora_files), str(opposite)]
+    args = [
+        "--api-server-count",
+        "1",
+        "--data-parallel-size",
+        "2",
+        "--enable-lora",
+        "--max-loras",
+        "2",
+        "--max-lora-rank",
+        "8",
+        "--lora-modules",
+        f"sql={paths[0]}",
+        f"opposite={paths[1]}",
+        "--max-model-len",
+        "1024",
+        "--max-num-batched-tokens",
+        "512",
+        "--max-num-seqs",
+        "16",
+        "--no-enable-prefix-caching",
+        "--enforce-eager",
+        "--worker-extension-cls",
+        "tests.lora.test_olmoe_tp.LoRASlotOrderWorkerExtension",
+    ]
+    with (
+        RemoteOpenAIServer(
+            MODEL_PATH,
+            args,
+            env_dict={
+                "VLLM_USE_V2_MODEL_RUNNER": "1",
+                "VLLM_SERVER_DEV_MODE": "1",
+                "VLLM_BATCH_INVARIANT": "1",
+            },
+        ) as server,
+        server.get_client() as client,
+    ):
+        scores: dict[tuple[int, str], list[float]] = {}
+        for reverse in (False, True):
+            requests.post(
+                server.url_for("pause"), params={"mode": "wait"}, timeout=30
+            ).raise_for_status()
+            response = requests.post(
+                server.url_for("collective_rpc"),
+                json={"method": "preload_lora_slots", "args": [paths, reverse]},
+                timeout=90,
+            )
+            response.raise_for_status()
+            results = response.json()["results"]
+            assert results
+            for orders in results:
+                assert orders == [[1, 2], [2, 1] if reverse else [1, 2]]
+            requests.post(server.url_for("resume"), timeout=30).raise_for_status()
+            for rank in (0, 1):
+                for name in ("sql", "opposite"):
+                    completion = client.completions.create(
+                        model=name,
+                        prompt=PROMPTS,
+                        temperature=0,
+                        max_tokens=1,
+                        extra_headers={"X-data-parallel-rank": str(rank)},
+                        extra_body={"prompt_logprobs": 0},
+                    )
+                    current = [
+                        next(iter(entry.values()))["logprob"]
+                        for choice in sorted(completion.choices, key=lambda c: c.index)
+                        for entry in choice.model_dump()["prompt_logprobs"]
+                        if entry is not None
+                    ]
+                    assert current
+                    if reverse:
+                        assert current == scores[rank, name], (
+                            f"Slot-order changed scores on DP rank {rank}, "
+                            f"adapter {name}"
+                        )
+                    else:
+                        scores[rank, name] = current
+            assert scores[0, "sql"] != scores[0, "opposite"]
 
 
 @pytest.mark.skipif(
