@@ -2242,7 +2242,8 @@ def qwen_gdn_attention_core(
         qkv_or_qkvz is [q, k, v, z], b_or_ba is [b, a], a_or_z_out is the
         z output buffer (mutated in-place).
 
-    ``core_attn_out`` is always mutated in-place.
+    Convolution may overwrite the QKV input. ``core_attn_out`` is always
+    mutated in-place.
     """
     layer_name = _resolve_layer_name(layer_name)
     forward_context: ForwardContext = get_forward_context()
@@ -2266,7 +2267,7 @@ def qwen_gdn_attention_core(
 direct_register_custom_op(
     op_name="qwen_gdn_attention_core",
     op_func=qwen_gdn_attention_core,
-    mutates_args=["a_or_z_out", "core_attn_out"],
+    mutates_args=["qkv_or_qkvz", "a_or_z_out", "core_attn_out"],
 )
 
 
@@ -2290,5 +2291,5 @@ def qwen_gdn_attention_core_fused_norm_packed(
 direct_register_custom_op(
     op_name="qwen_gdn_attention_core_fused_norm_packed",
     op_func=qwen_gdn_attention_core_fused_norm_packed,
-    mutates_args=["core_attn_out"],
+    mutates_args=["mixed_qkvz", "core_attn_out"],
 )
