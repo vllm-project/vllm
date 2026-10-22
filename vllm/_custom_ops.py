@@ -3453,6 +3453,51 @@ def dsv3_fused_a_gemm(
     torch.ops._C.dsv3_fused_a_gemm(output, mat_a, mat_b, enable_pdl)
 
 
+def dspark_markov_walk(
+    w2_res: torch.Tensor,
+    w2_str: torch.Tensor,
+    row_scale: torch.Tensor,
+    w1_rows: torch.Tensor,
+    base_logits: torch.Tensor,
+    anchor_ids: torch.Tensor,
+    anchor_stride: int,
+    idx_mapping: torch.Tensor,
+    temperature: torch.Tensor | None,
+    seeds: torch.Tensor,
+    pos: torch.Tensor,
+    draft_tokens: torch.Tensor,
+    draft_logits: torch.Tensor | None,
+    state: torch.Tensor,
+    num_steps: int,
+    tiles: int,
+    stream_mask: int,
+) -> None:
+    """DSpark Markov walk in one launch with int8 W2 on chip (sm_90a).
+
+    The layouts come from
+    ``vllm.v1.worker.gpu.spec_decode.dspark.markov_walk``.
+    """
+    torch.ops._C.dspark_markov_walk(
+        w2_res,
+        w2_str,
+        row_scale,
+        w1_rows,
+        base_logits,
+        anchor_ids,
+        anchor_stride,
+        idx_mapping,
+        temperature,
+        seeds,
+        pos,
+        draft_tokens,
+        draft_logits,
+        state,
+        num_steps,
+        tiles,
+        stream_mask,
+    )
+
+
 def weight_packed_linear_cpu(
     x: torch.Tensor,
     packed_weight: torch.Tensor,

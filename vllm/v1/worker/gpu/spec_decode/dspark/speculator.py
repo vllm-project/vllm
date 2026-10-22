@@ -32,6 +32,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import init_logger
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
+from vllm.v1.worker.gpu.spec_decode.dspark.markov_walk import DSparkMarkovWalker
 from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
 
 logger = init_logger(__name__)
@@ -80,6 +81,8 @@ class DSparkSpeculator(DFlashSpeculator):
         )
 
         self.use_confidence_head: bool = False
+        # One-launch Markov walk (dspark_markov_quantization="int8").
+        self._markov_walker: DSparkMarkovWalker | None = None
 
     def load_draft_model(
         self,
@@ -111,7 +114,37 @@ class DSparkSpeculator(DFlashSpeculator):
             # The acceptance estimator is not needed when a trained confidence head
             # is available.
             self.use_acceptance_estimator = False
+        if self.speculative_config.dspark_markov_quantization == "int8":
+            self._markov_walker = self._build_markov_walker(model)
         return model
+
+    def _build_markov_walker(self, model: torch.nn.Module) -> DSparkMarkovWalker:
+        def fail(reason: str) -> ValueError:
+            return ValueError(f"dspark_markov_quantization='int8': {reason}.")
+
+        # Both read every step's logits, which the kernel never materializes.
+        if self.draft_watermarker is not None:
+            raise fail("draft watermarking is not supported")
+        if self.use_acceptance_estimator:
+            raise fail(
+                "adaptive verification needs a confidence head (the online "
+                "acceptance estimator is not supported)"
+            )
+        head = getattr(getattr(model, "model", None), "markov_head", None)
+        logits_processor = getattr(model, "logits_processor", None)
+        if head is None or logits_processor is None:
+            raise fail(f"{type(model).__name__} has no vanilla Markov head")
+        if logits_processor.soft_cap is not None:
+            raise fail("a logit soft cap is not supported")
+        w2 = head.markov_w2.weight[: head.markov_w2.org_vocab_size]
+        walker = DSparkMarkovWalker(
+            head.markov_w1.weight,
+            w2,
+            self.num_speculative_steps,
+            logit_scale=logits_processor.scale,
+        )
+        walker.warmup()
+        return walker
 
     def _sample_logits(
         self,
@@ -176,6 +209,12 @@ class DSparkSpeculator(DFlashSpeculator):
         vocab_size = base_logits.shape[-1]
         base_logits = base_logits.view(num_reqs, n_spec, vocab_size)
 
+        if self._markov_walker is not None and self._markov_walker.supports(
+            num_reqs, base_logits
+        ):
+            self._walk_markov_fused(num_reqs, sample_hidden, base_logits)
+            return
+
         idx_map = self.sample_idx_mapping[:num_sample].view(num_reqs, n_spec)
         sample_pos = self.sample_pos[:num_sample].view(num_reqs, n_spec)
         confidence_markov_embeds = []
@@ -203,6 +242,45 @@ class DSparkSpeculator(DFlashSpeculator):
             confidence = self.model.compute_confidence(
                 sample_hidden,
                 torch.stack(confidence_markov_embeds, dim=1).flatten(0, 1),
+            )
+            self.draft_token_confidence_probs[:num_reqs] = confidence.view(
+                num_reqs, n_spec
+            )
+
+    def _walk_markov_fused(
+        self,
+        num_reqs: int,
+        sample_hidden: torch.Tensor,
+        base_logits: torch.Tensor,
+    ) -> None:
+        """All Markov steps in one launch (dspark_markov_quantization="int8")."""
+        assert self._markov_walker is not None
+        n_spec = self.num_speculative_steps
+        num_sample = num_reqs * n_spec
+        # The anchor of request i is input_ids[i * num_query_per_req]. Greedy
+        # drafting ignores the temperature; probabilistic drafting caches the
+        # logits of every sampled row for rejection sampling.
+        self._markov_walker.walk(
+            base_logits,
+            self.input_buffers.input_ids,
+            self.num_query_per_req,
+            self.sample_idx_mapping[:num_sample],
+            self.temperature if self.draft_logits is not None else None,
+            self.seeds,
+            self.sample_pos[:num_sample],
+            self.draft_tokens,
+            self.draft_logits,
+        )
+        if self.use_confidence_head:
+            # Step i's Markov input is the token before it: the anchor, then
+            # the first n_spec - 1 draft tokens.
+            anchor = self.input_buffers.input_ids[self._anchor_idx[:num_reqs]]
+            prev = torch.cat(
+                [anchor.unsqueeze(1).long(), self.draft_tokens[:num_reqs, :-1]],
+                dim=1,
+            )
+            confidence = self.model.compute_confidence(
+                sample_hidden, self.model.markov_embed(prev.flatten())
             )
             self.draft_token_confidence_probs[:num_reqs] = confidence.view(
                 num_reqs, n_spec

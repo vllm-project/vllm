@@ -617,6 +617,12 @@ class SpeculativeConfig:
     """For Qwen3 DSpark drafting, evaluate the Markov projection only for the
     top-k base-logit candidates. Requires draft tensor parallel size 1."""
 
+    dspark_markov_quantization: Literal["int8"] | None = None
+    """Run DSpark's sequential Markov walk as one persistent kernel that keeps
+    an int8 copy of the Markov projection on chip, instead of one
+    full-vocabulary GEMV, add and sample per draft token. sm_90 only. The
+    target verifies the draft, so only the acceptance length can change."""
+
     fly_window_size: int | None = Field(default=None, ge=1)
     """Number of subsequent native acceptance decisions checked by FLy.
     If unset, defaults to ``min(6, num_speculative_tokens - 1)``."""
@@ -1859,6 +1865,17 @@ class SpeculativeConfig:
                 raise ValueError(
                     "draft_lm_head_quantization needs the lm_head to run in the "
                     f"model dtype, got head_dtype={draft.head_dtype}."
+                )
+
+        if self.dspark_markov_quantization is not None:
+            if self.method != "dspark":
+                raise ValueError(
+                    "dspark_markov_quantization is only supported by DSpark."
+                )
+            if self.dspark_draft_topk is not None:
+                raise ValueError(
+                    "dspark_markov_quantization and dspark_draft_topk cannot "
+                    "be combined."
                 )
 
         if self.num_speculative_tokens <= 0:

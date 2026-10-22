@@ -324,6 +324,16 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "dsv3_fused_a_gemm(Tensor! output, Tensor mat_a, Tensor mat_b, "
       "bool enable_pdl=False) -> ()");
 
+  // DSpark Markov walk, int8 W2 on chip (sm_90a); conditionally compiled so
+  // impl registration is in source file (dspark_markov_walk.cu)
+  ops.def(
+      "dspark_markov_walk(Tensor w2_res, Tensor w2_str, Tensor row_scale, "
+      "Tensor w1_rows, Tensor base_logits, Tensor anchor_ids, "
+      "int anchor_stride, Tensor idx_mapping, Tensor? temperature, "
+      "Tensor seeds, Tensor pos, Tensor! draft_tokens, "
+      "Tensor!? draft_logits, Tensor! state, int num_steps, int tiles, "
+      "int stream_mask) -> ()");
+
   // BF16/FP32 x FP32 -> FP32 router GEMM for H=3072, E=256, M<=32 (SM90+).
   // conditionally compiled so impl registration is in source file
   ops.def("fp32_router_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");

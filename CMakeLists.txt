@@ -787,6 +787,20 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
                    "(requires SM90+ and CUDA >= 12.0).")
   endif()
 
+  # DSpark Markov walk with int8 W2 kept on chip (wgmma, sm_90a only)
+  cuda_archs_loose_intersection(DSPARK_MARKOV_WALK_ARCHS "9.0a" "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND DSPARK_MARKOV_WALK_ARCHS)
+    set(DSPARK_MARKOV_WALK_SRCS "csrc/dspark_markov_walk.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${DSPARK_MARKOV_WALK_SRCS}"
+      CUDA_ARCHS "${DSPARK_MARKOV_WALK_ARCHS}")
+    list(APPEND VLLM_STABLE_EXT_SRC "${DSPARK_MARKOV_WALK_SRCS}")
+    message(STATUS "Building dspark_markov_walk for archs: ${DSPARK_MARKOV_WALK_ARCHS}")
+  else()
+    message(STATUS "Not building dspark_markov_walk as no compatible archs found "
+                   "(requires sm_90a and CUDA >= 12.0).")
+  endif()
+
   #
   # CUTLASS scaled_mm kernels (moved from _C to _C_stable_libtorch)
   #
