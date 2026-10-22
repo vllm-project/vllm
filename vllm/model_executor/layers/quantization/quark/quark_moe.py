@@ -109,6 +109,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8StaticTensorAsym,
     kInt8StaticTensorSym,
     kMxfp4Dynamic,
+    kMxfp4Static,
+    kMxfp6E2M3Dynamic,
+    kMxfp6E2M3Static,
+    kMxfp6E3M2Dynamic,
+    kMxfp6E3M2Static,
     kMxfp8Dynamic,
     kMxfp8Static,
     kNvfp4Dynamic,
@@ -1558,13 +1563,21 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
 
 
 class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
+    # MXFP8 experts are handled by QuarkW8A8Mxfp8MoEMethod; this path only
+    # implements the packed MXFP4 / MXFP6 elements.
     supported_activation_quant_keys = [
-        *_ACTIVATION_QUANT_KEY_MAP.values(),
+        kMxfp4Dynamic,
+        kMxfp6E3M2Dynamic,
+        kMxfp6E2M3Dynamic,
         kFp8DynamicTensorSym,
         kFp8StaticTensorSym,
         None,
     ]
-    supported_weight_quant_keys = [*_WEIGHT_QUANT_KEY_MAP.values()]
+    supported_weight_quant_keys = [
+        kMxfp4Static,
+        kMxfp6E3M2Static,
+        kMxfp6E2M3Static,
+    ]
 
     def __init__(
         self,
@@ -1597,9 +1610,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             raise ValueError(
                 f"Unsupported OCP MX dtype combination for MoE: "
                 f"input_dtype={self.input_dtype}, weight_dtype={self.weight_dtype}. "
-                f"MXFP8 experts are not supported by QuarkOCP_MX_MoEMethod (W8A8 "
-                f"MXFP8 experts use QuarkW8A8Mxfp8MoEMethod). Supported MoE "
-                f"weight dtypes here are mxfp4, mxfp6_e3m2, and mxfp6_e2m3."
+                f"Supported MoE weight dtypes are mxfp4, mxfp6_e3m2, and mxfp6_e2m3."
             )
 
         # TODO(bowenbao): refactor and introduce backends for other OCP MX schemes,
