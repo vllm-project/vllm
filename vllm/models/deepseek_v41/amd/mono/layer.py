@@ -113,6 +113,8 @@ class MonoBuild:
             and self.ratio == 2
             and (self.experts, self.topk, self.ug_groups, self.swa_width)
             == (EXPERTS, TOPK, 2, WINDOW)
+            # the shared offload needs that many CTAs (``moe.DSH_RANKS``)
+            and moe.DSH_RANKS <= BLOCKS
         )
 
 

@@ -411,7 +411,21 @@ def _check_layers(rank: int, tp: int, device) -> None:
         return sc.topk(6, dim=1).indices.sort(1).values
 
     steps = []  # each case's launches, on fixed buffers, for the replay stress
-    for ratio, R, T in ((1, 1, 6), (2, 2, 6), (2, 6, 6), (2, 8, 6)):
+    gate_bias = moe.gate.e_score_correction_bias
+    # ``hot``: the router's bias on six experts, so every row picks the same six:
+    # a down round's rows then overflow its LDS block (``fits`` false in
+    # ``moe.down_round_pipe``, which the random routing never reaches)
+    for ratio, R, T, hot in (
+        (1, 1, 6, False),
+        (2, 2, 6, False),
+        (2, 6, 6, False),
+        (2, 8, 6, False),
+        (2, 6, 6, True),
+    ):
+        saved_bias = gate_bias.detach().clone()
+        if hot:
+            gate_bias.data[:6] += 100.0
+        bias = gate_bias.float()
         with set_current_vllm_config(VllmConfig()):
             rope = build_deepseek_v4_rope(
                 cfg, head_dim=HEAD_DIM, rope_head_dim=ROPE,
@@ -582,6 +596,7 @@ def _check_layers(rank: int, tp: int, device) -> None:
             return [*whole, *ffn]
 
         steps.append(step)
+        gate_bias.data.copy_(saved_bias)
 
     # ---- the hand-off protocol under back-to-back launches: both step widths
     # alternating in one graph, every replay bit for bit the first's
