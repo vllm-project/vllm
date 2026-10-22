@@ -1771,6 +1771,43 @@ def test_engram_cpu_offload_default():
     assert EngramConfig().cpu_offload is True
 
 
+def test_engram_disk_offload_replaces_cpu_offload():
+    config = EngramConfig(disk_offload=True)
+    assert config.disk_offload and not config.cpu_offload
+
+
+@pytest.mark.parametrize(
+    "option", ["dp_shared_memory", "use_thp", "embedding_across_dp"]
+)
+def test_engram_disk_offload_rejects_host_options(option):
+    with pytest.raises(ValueError, match="disk_offload cannot be combined"):
+        EngramConfig(disk_offload=True, **{option: True})
+
+
+@pytest.mark.parametrize(
+    "architecture,supported",
+    [("DeepseekV41ForCausalLM", True), ("Qwen4ExpForCausalLM", False)],
+)
+def test_engram_disk_offload_model_and_parallel_support(architecture, supported):
+    model = cast(
+        ModelConfig,
+        SimpleNamespace(
+            architecture=architecture,
+            hf_text_config=SimpleNamespace(engram_layer_ids=[1], ple_layer_ids=[1]),
+        ),
+    )
+    config = EngramConfig(disk_offload=True)
+    if supported:
+        config.verify_model_config(model)
+    else:
+        with pytest.raises(ValueError, match="DeepSeek V4.1 Engram tables only"):
+            config.verify_model_config(model)
+    parallel = ParallelConfig()
+    parallel.enable_elastic_ep = True
+    with pytest.raises(ValueError, match="disk_offload.*elastic EP"):
+        config.verify_parallel_config(parallel)
+
+
 def test_engram_config_defaults_to_none():
     config = VllmConfig()
     assert config.engram_config is None

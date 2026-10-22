@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import bisect
 import inspect
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -697,6 +698,224 @@ def test_engram_head_shards_reconstruct_checkpoint(
         torch.testing.assert_close(
             module.embed(ids), padded[rank * chunk : (rank + 1) * chunk], rtol=0, atol=0
         )
+
+
+def _write_engram_checkpoint(path, layer_id, weight, scales, sharded):
+    """Save one layer's table and scales the way DeepSeek V4.1 ships them."""
+    from safetensors.torch import save_file
+
+    weight_key = f"layers.{layer_id}.engram.embed.weight"
+    scale_key = f"layers.{layer_id}.engram.embed.scale"
+    filler = {"layers.0.attn.weight": torch.ones(3, 5)}
+    if not sharded:
+        save_file(
+            {**filler, weight_key: weight, scale_key: scales}, path / "m.safetensors"
+        )
+        return
+    save_file({**filler, scale_key: scales}, path / "model-00001.safetensors")
+    save_file({weight_key: weight}, path / "model-00002.safetensors")
+    weight_map = dict.fromkeys(filler, "model-00001.safetensors")
+    weight_map |= {scale_key: "model-00001.safetensors"}
+    weight_map |= {weight_key: "model-00002.safetensors"}
+    (path / "model.safetensors.index.json").write_text(
+        json.dumps({"metadata": {}, "weight_map": weight_map})
+    )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
+@pytest.mark.parametrize("sharded", [False, True])
+@pytest.mark.parametrize("packed", [False, True])
+@pytest.mark.parametrize("tp_size", [1, 2, 4, 8])
+def test_engram_disk_offload_reconstructs_checkpoint(
+    tp_size, packed, sharded, tmp_path, monkeypatch
+):
+    """Rows read from the checkpoint files must match the in-memory lookup bit
+    for bit, per TP shard, including padded heads and rows other ranks own."""
+    head_sizes = (17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73)
+    num_rows, dim, layer_id = sum(head_sizes), 64, 3
+    torch.manual_seed(0)
+    weight = torch.randn(num_rows + 7, dim).to(torch.float8_e4m3fn)
+    scales = torch.randint(120, 134, (num_rows + 7, dim // 32), dtype=torch.uint8)
+    _write_engram_checkpoint(tmp_path, layer_id, weight, scales, sharded)
+    hashes = torch.empty(9, len(head_sizes), dtype=torch.int32, device="cuda")
+    start = 0
+    for head, size in enumerate(head_sizes):
+        hashes[:, head].random_(start, start + size)
+        hashes[0, head] = start
+        hashes[-1, head] = start + size - 1
+        hashes[4, head] = hashes[3, head]  # repeated rows are read once
+        start += size
+    expected = _reference_lookup(weight.cuda(), scales.cuda(), hashes, 0, num_rows)
+    monkeypatch.setattr(
+        engram_ops, "get_tensor_model_parallel_world_size", lambda: tp_size
+    )
+    shards = []
+    for rank in range(tp_size):
+        monkeypatch.setattr(
+            engram_ops, "get_tensor_model_parallel_rank", lambda rank=rank: rank
+        )
+        layer = ParallelEngramEmbedding(
+            num_rows + 7,
+            dim,
+            head_sizes,
+            disk_offload=True,
+            layer_id=layer_id,
+            max_tokens=len(hashes),
+        )
+        assert layer.weight.numel() == 0  # nothing allocated for the table
+        layer.weight.weight_loader(layer.weight, weight)
+        layer.weight_scale_inv.weight_loader(layer.weight_scale_inv, scales)
+        layer.map_checkpoint(tmp_path)
+        width = dim + dim // 32 if packed else dim
+        out = torch.empty(
+            len(hashes),
+            layer.part_n_hash_cols,
+            width,
+            device="cuda",
+            dtype=torch.uint8 if packed else torch.bfloat16,
+        )
+        layer.lookup(hashes, out)
+        if packed:
+            values = out[..., :dim].view(torch.float8_e4m3fn)
+            out = dequant_mxfp8_to_bf16(values, out[..., dim:])
+        shards.append(out)
+        if rank == 0 and not packed:
+            # The staged path the decoder layers use, through its eager break.
+            module = Engram.__new__(Engram)
+            torch.nn.Module.__init__(module)
+            module.embed_tokens = layer
+            module.use_sequence_parallel = False
+            module.staged_rows = torch.empty_like(out)
+            module.prepare_embeddings(hashes)
+            assert torch.equal(module.staged_rows, out)
+    gathered = torch.cat(shards, dim=1)
+    assert torch.equal(gathered[:, : len(head_sizes)], expected)
+    assert torch.count_nonzero(gathered[:, len(head_sizes) :]) == 0
+
+
+@pytest.mark.parametrize(
+    "mode,breakable,ok",
+    [
+        ("NONE", False, True),
+        ("PIECEWISE", True, True),
+        ("PIECEWISE", False, False),
+        ("FULL", True, False),
+        ("FULL_AND_PIECEWISE", True, False),
+        ("FULL_AND_PIECEWISE", False, False),
+    ],
+)
+def test_engram_disk_offload_graph_modes(mode, breakable, ok, monkeypatch):
+    """The disk lookup is an eager break: only eager and breakable PIECEWISE
+    graphs can replay it, so every other mode fails at model construction."""
+    from vllm.config import CUDAGraphMode
+
+    config = SimpleNamespace(
+        engram_config=SimpleNamespace(
+            disk_offload=True,
+            cpu_offload=False,
+            dp_shared_memory=False,
+            use_thp=False,
+        ),
+        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode[mode]),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=16),
+    )
+    monkeypatch.setattr(engram_ops, "get_current_vllm_config", lambda: config)
+    monkeypatch.setattr(engram_ops, "is_breakable_cudagraph_enabled", lambda: breakable)
+    monkeypatch.setattr(engram_ops, "ParallelEngramEmbedding", lambda *a, **k: k)
+    layout = SimpleNamespace(
+        num_embeddings=[100], head_dim=64, primes=[[[47, 53]]], layer_ids=[3]
+    )
+    create = Engram._create_embedding
+    if ok:
+        assert create(Engram.__new__(Engram), layout, 0)["disk_offload"]
+    else:
+        with pytest.raises(ValueError, match="cudagraph_mode=PIECEWISE"):
+            create(Engram.__new__(Engram), layout, 0)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
+def test_engram_disk_offload_breakable_graph_replay(tmp_path, monkeypatch):
+    """Under breakable capture the disk lookup is one eager segment, and each
+    replay reads the hash ids the step wrote into the captured buffer."""
+    import vllm.envs as envs
+    from vllm.compilation.breakable_cudagraph import (
+        BreakableCUDAGraphCapture,
+        eager_break_during_capture,
+    )
+
+    head_sizes = (17, 19, 23, 29)
+    num_rows, dim, layer_id, tokens = sum(head_sizes), 64, 3, 8
+    torch.manual_seed(0)
+    weight = torch.randn(num_rows, dim).to(torch.float8_e4m3fn)
+    scales = torch.randint(120, 134, (num_rows, dim // 32), dtype=torch.uint8)
+    _write_engram_checkpoint(tmp_path, layer_id, weight, scales, sharded=False)
+    monkeypatch.setattr(engram_ops, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(engram_ops, "get_tensor_model_parallel_rank", lambda: 0)
+    layer = ParallelEngramEmbedding(
+        num_rows,
+        dim,
+        head_sizes,
+        disk_offload=True,
+        layer_id=layer_id,
+        max_tokens=tokens,
+    )
+    layer.map_checkpoint(tmp_path)
+    module = Engram.__new__(Engram)
+    torch.nn.Module.__init__(module)
+    module.embed_tokens = layer
+    module.use_sequence_parallel = False
+    module.staged_rows = torch.empty(
+        tokens, len(head_sizes), dim, dtype=torch.bfloat16, device="cuda"
+    )
+    # Engram was imported before breakable graphs were enabled.
+    monkeypatch.setattr(envs, "VLLM_USE_BREAKABLE_CUDAGRAPH", True)
+    lookup = eager_break_during_capture(inspect.unwrap(Engram._lookup_from_disk))
+    monkeypatch.setattr(module, "_lookup_from_disk", lookup.__get__(module, Engram))
+
+    hashes = torch.empty(tokens, len(head_sizes), dtype=torch.int32, device="cuda")
+
+    def new_step():
+        start = 0
+        for head, size in enumerate(head_sizes):
+            hashes[:, head].random_(start, start + size)
+            start += size
+
+    new_step()
+    # The captured segment after the break reads the rows the lookup staged.
+    consumed = torch.empty_like(module.staged_rows)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    graph = BreakableCUDAGraphCapture()
+    with torch.cuda.stream(stream), graph:
+        module.prepare_embeddings(hashes)
+        consumed.copy_(module.staged_rows)
+    torch.cuda.current_stream().wait_stream(stream)
+    assert graph.num_eager_breaks == 1
+    for _ in range(3):
+        new_step()
+        graph.replay()
+        expected = _reference_lookup(weight.cuda(), scales.cuda(), hashes, 0, num_rows)
+        assert torch.equal(consumed, expected)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
+def test_engram_disk_offload_rejects_missing_table(tmp_path, monkeypatch):
+    monkeypatch.setattr(engram_ops, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(engram_ops, "get_tensor_model_parallel_rank", lambda: 0)
+    weight = torch.zeros(40, 64).to(torch.float8_e4m3fn)
+    scales = torch.zeros(40, 2, dtype=torch.uint8)
+    _write_engram_checkpoint(tmp_path, 3, weight, scales, sharded=False)
+    layer = ParallelEngramEmbedding(
+        40, 64, (17, 19), disk_offload=True, layer_id=5, max_tokens=4
+    )
+    with pytest.raises(ValueError, match="layer 5's table or scales are missing"):
+        layer.map_checkpoint(tmp_path)
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")

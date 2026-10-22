@@ -67,7 +67,12 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
-from ..common.engram import Engram, EngramLayout, NgramHashState
+from ..common.engram import (
+    Engram,
+    EngramLayout,
+    NgramHashState,
+    map_engram_disk_tables,
+)
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
 
 if typing.TYPE_CHECKING:
@@ -1415,6 +1420,9 @@ class DeepseekV41LLMForCausalLM(
         loader = AutoWeightsLoader(self)
         loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
         self.process_weights_after_loading()
+        map_engram_disk_tables(
+            islice(self.model.layers, self.model.start_layer, self.model.end_layer)
+        )
         return loaded_params
 
     def process_weights_after_loading(self) -> None:
