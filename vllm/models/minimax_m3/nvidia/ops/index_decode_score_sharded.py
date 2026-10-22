@@ -473,22 +473,27 @@ def _index_k_publish_candidates_kernel(
     HPR: tl.constexpr,
     MAX_TILES: tl.constexpr,
     SPIN: tl.constexpr,
+    PUBLISH: tl.constexpr = True,
 ):
     t = tl.program_id(0)
     h = tl.program_id(1)
-    peer = tl.load(recv_bases + h // HPR).to(tl.pointer_type(tl.int32))
-    row = peer + (((slot * W + rank) * HPR + h % HPR) * t_max + t) * 33
+    if PUBLISH:
+        peer = tl.load(recv_bases + h // HPR).to(tl.pointer_type(tl.int32))
+        row = peer + (((slot * W + rank) * HPR + h % HPR) * t_max + t) * 33
+    else:
+        row = recv_bases + (h * t_max + t) * 33
     ready = row + 32
-    seen = tl.atomic_add(ready, 0, sem="acquire", scope="sys")
-    spins = 0
-    while (seen != 0) & (spins < SPIN):
+    if PUBLISH:
         seen = tl.atomic_add(ready, 0, sem="acquire", scope="sys")
-        spins += 1
-    if seen != 0:
-        tl.atomic_add(err_ptr, 1)
-        tl.inline_asm_elementwise(
-            "trap; mov.u32 $0, 0;", "=r", [], dtype=tl.int32, is_pure=False, pack=1
-        )
+        spins = 0
+        while (seen != 0) & (spins < SPIN):
+            seen = tl.atomic_add(ready, 0, sem="acquire", scope="sys")
+            spins += 1
+        if seen != 0:
+            tl.atomic_add(err_ptr, 1)
+            tl.inline_asm_elementwise(
+                "trap; mov.u32 $0, 0;", "=r", [], dtype=tl.int32, is_pure=False, pack=1
+            )
     k = tl.arange(0, 16)
     ids = tl.load(indices_ptr + t * index_stride_t + h * index_stride_h + k)
     valid = (ids >= 0) & (ids < MAX_TILES)
@@ -499,8 +504,11 @@ def _index_k_publish_candidates_kernel(
     )
     tl.store(row + k, scores.to(tl.int32, bitcast=True))
     tl.store(row + 16 + k, tl.where(valid, ids, -1))
-    tl.debug_barrier()
-    tl.atomic_xchg(ready, 1, sem="release", scope="sys")
+    if PUBLISH:
+        tl.debug_barrier()
+        tl.atomic_xchg(ready, 1, sem="release", scope="sys")
+    else:
+        tl.store(ready, 1)
 
 
 @triton.jit
@@ -606,6 +614,35 @@ def minimax_m3_index_publish_candidates(
         HPR=heads_per_rank,
         MAX_TILES=MAX_K_TILES,
         SPIN=spin_limit,
+        num_warps=4,
+    )
+
+
+def minimax_m3_index_pack_candidates(
+    scores: torch.Tensor, candidates: torch.Tensor
+) -> None:
+    """Fill score/ID/ready rows in a head-major prefill send buffer."""
+    heads, tokens, row_size = candidates.shape
+    assert row_size == CANDIDATE_ROW_SIZE and candidates.stride(-1) == 1
+    assert scores.shape[:2] == (tokens, heads) and scores.stride(-1) == 1
+    indices = candidates[..., TOPK : 2 * TOPK]
+    _index_k_publish_candidates_kernel[(tokens, heads)](
+        scores,
+        indices,
+        candidates,
+        0,
+        0,
+        candidates.stride(0) // CANDIDATE_ROW_SIZE,
+        None,
+        scores.stride(0),
+        scores.stride(1),
+        indices.stride(1),
+        indices.stride(0),
+        W=1,
+        HPR=heads,
+        MAX_TILES=scores.shape[-1],
+        SPIN=0,
+        PUBLISH=False,
         num_warps=4,
     )
 
