@@ -283,13 +283,13 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
 
         if self.indexer is not None and not self.skip_topk:
             self._run_indexer(q_c, index_q_fp8, index_weights_out)
-        if self.indexer_capture is not None:
-            assert self.topk_indices_buffer is not None
-            self.indexer_capture.capture(
-                self.topk_indices_buffer[
-                    : len(q_c), : self.indexer_capture.rows.shape[1]
-                ]
-            )
+            if self.indexer_capture is not None:
+                assert self.topk_indices_buffer is not None
+                self.indexer_capture.capture(
+                    self.topk_indices_buffer[
+                        : len(q_c), : self.indexer_capture.rows.shape[1]
+                    ]
+                )
 
         if attn_metadata is None:
             output.zero_()

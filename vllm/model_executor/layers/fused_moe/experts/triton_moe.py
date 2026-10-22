@@ -195,6 +195,18 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
 
+    def _apply_router_weight_in_gemm2(self, apply_router_weight_on_input: bool) -> bool:
+        return not apply_router_weight_on_input
+
+    def _finalize_expert_output(
+        self,
+        expert_output: torch.Tensor,
+        output: torch.Tensor,
+        topk_ids: torch.Tensor | None = None,
+        expert_map: torch.Tensor | None = None,
+    ) -> None:
+        self.moe_sum(expert_output, output, topk_ids, expert_map)
+
     def activation(
         self,
         activation: MoEActivation,
@@ -544,7 +556,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 sorted_token_ids,
                 expert_ids,
                 num_tokens_post_padded,
-                not apply_router_weight_on_input,
+                self._apply_router_weight_in_gemm2(apply_router_weight_on_input),
                 1,
                 config,
                 compute_type=compute_type,
@@ -605,7 +617,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 )
 
         # separate function is required for MoE + LoRA
-        self.moe_sum(intermediate_cache3, output, topk_ids, expert_map)
+        self._finalize_expert_output(intermediate_cache3, output, topk_ids, expert_map)
 
     def moe_sum(
         self,

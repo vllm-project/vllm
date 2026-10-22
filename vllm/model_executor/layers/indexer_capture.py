@@ -18,9 +18,8 @@ if TYPE_CHECKING:
 
 
 class IndexerCaptureSink:
-    def __init__(self, rows: torch.Tensor, valid: torch.Tensor) -> None:
+    def __init__(self, rows: torch.Tensor) -> None:
         self.rows = rows
-        self.valid = valid
 
     def capture(self, indices: torch.Tensor, token_start: int = 0) -> None:
         if indices.ndim != 2 or indices.shape[1] != self.rows.shape[1]:
@@ -31,7 +30,6 @@ class IndexerCaptureSink:
         if not len(indices):
             return
         self.rows[token_start:end].copy_(indices)
-        self.valid[token_start:end].fill_(True)
 
 
 class IndexerCaptureSource(Protocol):
@@ -43,7 +41,6 @@ class IndexerCaptureSource(Protocol):
 @dataclass
 class IndexerSnapshot:
     rows: torch.Tensor
-    valid: torch.Tensor
     slot: int
 
 
@@ -100,35 +97,22 @@ class IndexerCapturer:
             dtype=torch.int32,
             device=current_platform.device_type,
         )
-        self.valid = torch.zeros(
-            (len(self.device_buffer), len(sources)),
-            dtype=torch.bool,
-            device=self.device_buffer.device,
-        )
         num_slots = config.max_concurrent_batches if output_rank else 0
         self._snapshot_rows = [
             torch.empty_like(self.device_buffer) for _ in range(num_slots)
         ]
-        self._snapshot_valid = [torch.empty_like(self.valid) for _ in range(num_slots)]
         self._free_snapshot_slots = list(range(num_slots))
         self._sources = sources
         for column, source in enumerate(sources):
-            source.indexer_capture = IndexerCaptureSink(
-                self.device_buffer[:, column], self.valid[:, column]
-            )
-
-    def begin_step(self) -> None:
-        self.valid.zero_()
+            source.indexer_capture = IndexerCaptureSink(self.device_buffer[:, column])
 
     def snapshot(self, num_rows: int) -> IndexerSnapshot:
         assert 0 <= num_rows <= len(self.device_buffer)
         assert self._free_snapshot_slots, "Indexer snapshots were not consumed in order"
         slot = self._free_snapshot_slots.pop()
         rows = self._snapshot_rows[slot][:num_rows]
-        valid = self._snapshot_valid[slot][:num_rows]
         rows.copy_(self.device_buffer[:num_rows])
-        valid.copy_(self.valid[:num_rows])
-        return IndexerSnapshot(rows, valid, slot)
+        return IndexerSnapshot(rows, slot)
 
     def release_snapshot(self, slot: int) -> None:
         assert (
@@ -144,10 +128,8 @@ class IndexerCapturer:
             source.indexer_capture = None
         self._sources.clear()
         self._snapshot_rows.clear()
-        self._snapshot_valid.clear()
         self._free_snapshot_slots.clear()
         del self.device_buffer
-        del self.valid
 
 
 def configure_indexer_capture(

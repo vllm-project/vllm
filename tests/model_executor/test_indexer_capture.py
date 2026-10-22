@@ -17,12 +17,9 @@ pytestmark = pytest.mark.cpu_test
 
 def test_raw_capture_preserves_selection_order_and_padding():
     consumed = torch.tensor([[8, 2, -1, 4], [0, -1, -1, -1]], dtype=torch.int32)
-    sink = IndexerCaptureSink(
-        torch.empty_like(consumed), torch.zeros(2, dtype=torch.bool)
-    )
+    sink = IndexerCaptureSink(torch.empty_like(consumed))
     sink.capture(consumed)
     assert torch.equal(sink.rows, consumed)
-    assert sink.valid.all()
 
 
 def test_capture_snapshots_survive_shared_buffer_reuse(monkeypatch):
@@ -56,20 +53,20 @@ def test_capture_snapshots_survive_shared_buffer_reuse(monkeypatch):
     )
     capture = IndexerCapturer(model, config)
     shared = torch.tensor([[3, 1], [4, 2]], dtype=torch.int32)
-    capture.begin_step()
     assert first.indexer_capture is not None
     first.indexer_capture.capture(shared)
     shared.add_(10)
     assert second.indexer_capture is not None
     second.indexer_capture.capture(shared)
     snapshot = capture.snapshot(2)
-    validity = snapshot.valid
-    capture.begin_step()
     shared.zero_()
     first.indexer_capture.capture(shared)
-    assert validity.all()
+    shared.add_(20)
+    second.indexer_capture.capture(shared)
     next_snapshot = capture.snapshot(2)
-    assert not next_snapshot.valid[:, 1].any()
+    assert torch.equal(
+        next_snapshot.rows, torch.tensor([[[0, 0], [20, 20]], [[0, 0], [20, 20]]])
+    )
     with pytest.raises(AssertionError, match="not consumed"):
         capture.snapshot(2)
     capture.release_snapshot(next_snapshot.slot)

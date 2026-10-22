@@ -720,6 +720,8 @@ optuna==3.6.1
     # via genai-perf
 orjson==3.11.7
     # via
+    #   -c requirements/common.txt
+    #   -r requirements/test/../common.txt
     #   -r requirements/test/rocm.in
     #   genai-perf
     #   kaleido

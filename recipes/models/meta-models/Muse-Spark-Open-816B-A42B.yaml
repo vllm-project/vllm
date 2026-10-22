@@ -76,7 +76,7 @@ features:
       dspark:
         label: "DSpark"
         description: "Seven-token DSpark profile used for BF16, MXFP4, and NVFP4."
-        variants: [bf16, bf16_online_mxfp4, mxfp4, default]
+        variants: [bf16, mxfp4, default]
         args:
           - "--speculative-config"
           - '{"method":"dspark","model":"Inferact/Muse-Spark-Open-DSpark","num_speculative_tokens":7,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":true}'
@@ -114,31 +114,6 @@ variants:
           - "4096"
           - "--gpu-memory-utilization"
           - "0.95"
-  bf16_online_mxfp4:
-    model_id: "meta-models/Muse-Spark-Open-816B-A42B"
-    precision: mxfp4
-    label: "BF16 → MXFP4"
-    # Experts of layers 1-60 are rounded to MXFP4 at load; attention, dense
-    # projections, first/last-layer experts and lm_head stay BF16:
-    # (773B x 0.5 + 43B x 2) x 1.2
-    vram_minimum_gb: 567
-    supported_hardware: [mi350x, mi355x]
-    description: "The BF16 checkpoint with the routed experts of layers 1-60 quantized to OCP MXFP4 at load time (gfx950), running on the AITER MXFP4 MoE kernels. Avoids a second download."
-    hardware_overrides:
-      amd:
-        extra_args:
-          - "--attention-backend"
-          - "ROCM_AITER_FA"
-          - "--max-model-len"
-          - "32768"
-          - "--max-num-seqs"
-          - "128"
-          - "--max-num-batched-tokens"
-          - "8192"
-          - "--gpu-memory-utilization"
-          - "0.90"
-        extra_env:
-          VLLM_ROCM_MUSE_MOE_ONLINE_QUANT: "mxfp4"
   mxfp4:
     model_id: "amd/Muse-Spark-Open-816B-A42B-Quark-MXFP4"
     precision: mxfp4

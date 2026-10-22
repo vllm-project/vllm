@@ -9,10 +9,13 @@ from unittest.mock import Mock
 
 import pytest
 import torch
-from fastapi.responses import JSONResponse, ORJSONResponse
+from fastapi.responses import ORJSONResponse
+from transformers import BertConfig, BertTokenizerFast
 
 from vllm import PoolingParams
-from vllm.config import PoolerConfig
+from vllm.config import DeviceConfig, ModelConfig, PoolerConfig, VllmConfig
+from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.pooling.embed.io_processor import (
     JinaRankingTokenEmbedIOProcessor,
     TokenEmbedIOProcessor,
@@ -31,6 +34,7 @@ from vllm.entrypoints.pooling.typing import (
     OfflineOutputsContext,
     PoolingServeContext,
 )
+from vllm.entrypoints.pooling.utils import encode_pooling_output_float_or_ndarray
 from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.outputs import (
     EmbeddingRequestOutput,
@@ -41,6 +45,9 @@ from vllm.outputs import (
 )
 from vllm.pooling_params import LateChunkingParams
 from vllm.renderers import TokenizeParams
+from vllm.renderers.chat_utils import ChatTemplateConfig
+from vllm.renderers.hf import HfRenderer
+from vllm.v1.engine.input_processor import InputProcessor
 
 
 @pytest.fixture
@@ -390,20 +397,49 @@ def test_embed_preserves_task_validation(runner, task, supported_tasks, error):
     llm._run_tiling_engine.assert_not_called()
 
 
+@pytest.fixture
+def token_embedding_serving(tmp_path):
+    BertConfig(
+        architectures=["BertModel"],
+        hidden_size=4,
+        num_attention_heads=1,
+        num_hidden_layers=1,
+        intermediate_size=8,
+    ).save_pretrained(tmp_path)
+    model_config = ModelConfig(
+        model=str(tmp_path),
+        runner="pooling",
+        dtype="float32",
+        max_model_len=32,
+        pooler_config=PoolerConfig(task="token_embed"),
+    )
+    config = VllmConfig(
+        model_config=model_config, device_config=DeviceConfig(device="cpu")
+    )
+    renderer = HfRenderer(config, tokenizer=BertTokenizerFast(vocab={"[UNK]": 0}))
+    engine = Mock(
+        spec=EngineClient,
+        model_config=model_config,
+        vllm_config=config,
+        renderer=renderer,
+        input_processor=InputProcessor(config, renderer),
+    )
+    try:
+        yield ServingTokenEmbedding(
+            engine,
+            OpenAIServingModels(engine, []),
+            request_logger=None,
+            chat_template_config=ChatTemplateConfig(),
+        )
+    finally:
+        renderer.shutdown()
+
+
 @pytest.mark.parametrize("chunk_size", [None, 1])
-@pytest.mark.parametrize(
-    "response_cls, dtype",
-    [
-        (JSONResponse, torch.float32),
-        (ORJSONResponse, torch.float32),
-        (ORJSONResponse, torch.bfloat16),
-    ],
-)
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_token_embedding_response_preserves_ndarray_and_optional_ranges(
-    late_chunk_processor, chunk_size, response_cls, dtype
+    late_chunk_processor, token_embedding_serving, chunk_size, dtype
 ):
-    if response_cls is ORJSONResponse:
-        pytest.importorskip("orjson")
     ctx = _online_chunk_context("a b", chunk_size=chunk_size)
     processor = late_chunk_processor
     ctx.engine_inputs = [
@@ -415,20 +451,14 @@ def test_token_embedding_response_preserves_ndarray_and_optional_ranges(
     output.outputs.data = data
     ctx.final_res_batch = [output]
     processor.post_process_online(ctx)
-    serving = object.__new__(ServingTokenEmbedding)
-    serving.json_response_cls = response_cls
-
-    with mock.patch.object(
-        response_cls, "render", autospec=True, side_effect=response_cls.render
-    ) as render:
-        response = serving._build_response(ctx)
-    encoded = render.call_args.args[1]["data"][0]["embedding"]
-    if response_cls is ORJSONResponse and dtype == torch.float32:
-        # An ndarray must reach the renderer, without Pydantic expanding it.
-        assert torch.equal(torch.from_numpy(encoded), data)
+    response = token_embedding_serving._build_response(ctx)
     body = json.loads(response.body)
     TokenEmbeddingResponse.model_validate(body)
     item = body["data"][0]
+    expected = ORJSONResponse(
+        {"embedding": encode_pooling_output_float_or_ndarray(output)}
+    )
+    assert item["embedding"] == json.loads(expected.body)["embedding"]
     torch.testing.assert_close(torch.tensor(item["embedding"], dtype=dtype), data)
     if chunk_size is None:
         assert "late_chunking" not in item
@@ -440,10 +470,9 @@ def test_token_embedding_response_preserves_ndarray_and_optional_ranges(
         assert item["late_chunking"]["chunks"][0]["char_range"] is None
 
 
-@pytest.mark.parametrize("response_cls", [JSONResponse, ORJSONResponse])
-def test_online_chunk_ranges_are_per_document(late_chunk_processor, response_cls):
-    if response_cls is ORJSONResponse:
-        pytest.importorskip("orjson")
+def test_online_chunk_ranges_are_per_document(
+    late_chunk_processor, token_embedding_serving
+):
     processor = late_chunk_processor
     ctx = _online_chunk_context(["a b", "xy z"])
 
@@ -472,9 +501,7 @@ def test_online_chunk_ranges_are_per_document(late_chunk_processor, response_cls
     ctx.final_res_batch = [_chunk_output(0), _chunk_output(1)]
     processor.post_process_online(ctx)
 
-    serving = object.__new__(ServingTokenEmbedding)
-    serving.json_response_cls = response_cls
-    body = json.loads(serving._build_response(ctx).body)
+    body = json.loads(token_embedding_serving._build_response(ctx).body)
     assert body["usage"]["prompt_tokens"] == 8
     assert [item["index"] for item in body["data"]] == [0, 1]
     assert [item["embedding"] for item in body["data"]] == [
