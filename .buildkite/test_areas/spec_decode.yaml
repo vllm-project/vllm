@@ -88,8 +88,9 @@ steps:
       - tests/v1/e2e/spec_decode/
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (B200) Spec Decode Eagle Nightly"
+- label: ":nvidia: (B200) [Nightly] Spec Decode Eagle"
   key: spec-decode-eagle-nightly-b200
+  automatic_shard: true
   timeout_in_minutes: 25
   device: b200-k8s
   optional: true
@@ -102,6 +103,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) Spec Decode Eagle Nightly"
+      automatic_shard: true
       dind: false
       device: mi355_1
       num_devices: 1
@@ -137,9 +139,9 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/speculators/
   mirror:
     amd:
-      label: ":amd: (MI300) Spec Decode Speculators"
+      label: ":amd: (MI355 DPX) Spec Decode Speculators"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 40
       depends_on:
       - image-build-amd
@@ -167,9 +169,9 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/mtp/gemma4/
   mirror:
     amd:
-      label: ":amd: (MI300) Spec Decode MTP Gemma4"
+      label: ":amd: (MI355 DPX) Spec Decode MTP Gemma4"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 40
       depends_on:
       - image-build-amd
@@ -198,9 +200,9 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/mtp/mimo/
   mirror:
     amd:
-      label: ":amd: (MI300) Spec Decode MTP DeepSeek + MiMo"
+      label: ":amd: (MI355 DPX) Spec Decode MTP DeepSeek + MiMo"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 40
       depends_on:
       - image-build-amd
@@ -228,9 +230,9 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/mtp/qwen3_5/
   mirror:
     amd:
-      label: ":amd: (MI300) Spec Decode MTP Qwen3.5"
+      label: ":amd: (MI355 DPX) Spec Decode MTP Qwen3.5"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 40
       depends_on:
       - image-build-amd
@@ -244,8 +246,9 @@ steps:
       - tests/v1/e2e/spec_decode/
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (B200) Spec Decode Speculators + MTP Nightly"
+- label: ":nvidia: (B200) [Nightly] Spec Decode Speculators + MTP"
   key: spec-decode-speculators-mtp-nightly-b200
+  automatic_shard: true
   timeout_in_minutes: 30
   device: b200-k8s
   optional: true
@@ -260,6 +263,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) Spec Decode Speculators + MTP Nightly"
+      automatic_shard: true
       dind: false
       device: mi355_1
       num_devices: 1
@@ -309,24 +313,24 @@ steps:
       - tests/v1/e2e/spec_decode/
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H200 MIG 18GB) Spec Decode Draft Model Shard %N"
+- label: ":nvidia: (H200 MIG 18GB) Spec Decode Draft Model"
   key: spec-decode-draft-model
+  automatic_shard: true
   timeout_in_minutes: 60
   device: h200_18gb
-  parallelism: 4
   source_file_dependencies:
     - vllm/v1/spec_decode/
     - vllm/v1/worker/gpu/spec_decode/
     - tests/v1/e2e/spec_decode/
   commands:
-    - pytest -v -s v1/e2e/spec_decode/draft_model/ --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+    - pytest -v -s v1/e2e/spec_decode/draft_model/
   mirror:
     amd:
-      label: ":amd: (MI355 DPX) Spec Decode Draft Model Shard %N"
+      label: ":amd: (MI355 DPX) Spec Decode Draft Model"
+      automatic_shard: true
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 60
-      parallelism: 2
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -338,7 +342,7 @@ steps:
       - tests/v1/e2e/spec_decode/
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (B200) Spec Decode Draft Model Nightly"
+- label: ":nvidia: (B200) [Nightly] Spec Decode Draft Model"
   key: spec-decode-draft-model-nightly-b200
   timeout_in_minutes: 40
   device: b200-k8s
@@ -371,7 +375,7 @@ steps:
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H100) Speculators Correctness Nightly"
+- label: ":nvidia: (H100) [Nightly] Speculators Correctness"
   key: speculators-correctness
   timeout_in_minutes: 30
   device: h100
@@ -387,9 +391,9 @@ steps:
     - pytest -v -s v1/spec_decode/test_speculators_correctness.py -m slow_test
   mirror:
     amd:
-      label: ":amd: (MI300) Speculators Correctness Nightly"
+      label: ":amd: (MI355 DPX) Speculators Correctness Nightly"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 40
       depends_on:
       - image-build-amd
@@ -397,7 +401,7 @@ steps:
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (B200) Spec Decode DeepSeek MTP Parallel Load"
+- label: ":nvidia: (B200) [Nightly] Spec Decode DeepSeek MTP Parallel Load"
   key: spec-decode-deepseek-mtp-parallel-load-2xb200-2xmi300
   timeout_in_minutes: 30
   device: b200-k8s
@@ -434,8 +438,9 @@ steps:
       - tests/v1/e2e/spec_decode/test_mtp_parallel_load.py
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H200 MIG 35GB) Spec Decode AL DFlash Nightly"
+- label: ":nvidia: (H200 MIG 35GB) [Nightly] Spec Decode AL DFlash"
   key: spec-decode-dflash-nightly
+  automatic_shard: true
   timeout_in_minutes: 90
   device: h200_35gb
   optional: true
@@ -452,9 +457,10 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k "not dflash2"
   mirror:
     amd:
-      label: ":amd: (MI300) Spec Decode AL DFlash Nightly"
+      label: ":amd: (MI355 DPX) Spec Decode AL DFlash Nightly"
+      automatic_shard: true
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 120
       commands:
       - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k "not dflash2"
@@ -475,7 +481,7 @@ steps:
       - tests/v1/e2e/spec_decode/
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (B200) Spec Decode AL DFlash2 Nightly"
+- label: ":nvidia: (B200) [Nightly] Spec Decode AL DFlash2"
   key: spec-decode-dflash2-nightly-b200
   timeout_in_minutes: 60
   device: b200-k8s
@@ -516,7 +522,7 @@ steps:
       - vllm/model_executor/kernels/linear/
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H200 MIG 35GB) Spec Decode AL DSpark Nightly"
+- label: ":nvidia: (H200 MIG 35GB) [Nightly] Spec Decode AL DSpark"
   key: spec-decode-dspark-nightly
   timeout_in_minutes: 60
   device: h200_35gb
@@ -531,9 +537,9 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dspark/
   mirror:
     amd:
-      label: ":amd: (MI300) Spec Decode AL DSpark Nightly"
+      label: ":amd: (MI355 DPX) Spec Decode AL DSpark Nightly"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 90
       depends_on:
       - image-build-amd
@@ -556,7 +562,7 @@ steps:
       - tests/v1/e2e/spec_decode/
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H200 MIG 35GB) Spec Decode AL MTP + Other Acceptance Nightly"
+- label: ":nvidia: (H200 MIG 35GB) [Nightly] Spec Decode AL MTP + Other Acceptance"
   key: spec-decode-mtp-other-acceptance-nightly
   timeout_in_minutes: 35
   device: h200_35gb
