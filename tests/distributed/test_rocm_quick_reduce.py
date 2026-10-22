@@ -8,6 +8,7 @@ import os
 import queue
 import traceback
 from functools import lru_cache
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal
 from unittest.mock import patch
@@ -323,6 +324,8 @@ def _log_prompt_summaries() -> None:
 def _get_model_path() -> str:
     try:
         path = hf_api().snapshot_download(repo_id=MODEL_NAME, local_files_only=True)
+        if not any(Path(path).glob("*.safetensors")):
+            raise FileNotFoundError(f"no weights in cached snapshot: {path}")
         _log(f"using cached model snapshot: {path}")
         return path
     except Exception:
