@@ -549,121 +549,104 @@ __device__ void norm_and_quant(
 // Single-pass register-resident RMSNorm + dynamic per-block quantization
 // kernel for hidden_size <= 8192 and group_size in {64, 128}.
 // Loads input, residual, and weight once into registers, updates residual
-// in-place on Pass 1, computes RMS via warp + shared-memory block reduction,
-// and computes each group's absmax via sub-warp butterfly reduction
-// (VLLM_SHFL_XOR_SYNC_WIDTH) in registers without a second or third global
-// memory read.
+// in-place on Pass 1, computes RMS via cub::BlockReduce, and computes each
+// group's absmax via sub-warp butterfly reduction (VLLM_SHFL_XOR_SYNC_WIDTH)
+// in registers without a second or third global memory read.
 template <typename scalar_t, typename scalar_out_t, bool has_residual = false,
           bool is_scale_transposed = false, int32_t group_size = 128,
-          int32_t VEC_PER_THREAD = 2>
+          int32_t VEC_PER_THREAD = 2, int32_t VEC_SIZE = 4>
 __device__ void rms_norm_per_block_quant_single_pass(
     scalar_out_t* __restrict__ out, float* __restrict__ scales,
     scalar_t const* __restrict__ input, scalar_t const* __restrict__ weight,
     float const* scale_ub, float const var_epsilon, int32_t const hidden_size,
     int32_t const input_stride, scalar_t* __restrict__ residual = nullptr,
     int64_t outer_scale_stride = 1) {
-  constexpr int VEC_SIZE = 4;
   constexpr int ELEMS_PER_THREAD = VEC_SIZE * VEC_PER_THREAD;
   constexpr int THREADS_PER_GROUP = group_size / ELEMS_PER_THREAD;
+  static_assert(VEC_SIZE == 4 || VEC_SIZE == 8, "VEC_SIZE must be 4 or 8");
+  static_assert(VEC_SIZE * sizeof(scalar_t) <= 16,
+                "Vector load size must not exceed 16 bytes");
   static_assert(group_size % ELEMS_PER_THREAD == 0,
                 "group_size must be divisible by ELEMS_PER_THREAD");
   static_assert(THREADS_PER_GROUP >= 1 && THREADS_PER_GROUP <= 32 &&
                     (THREADS_PER_GROUP & (THREADS_PER_GROUP - 1)) == 0,
                 "THREADS_PER_GROUP must be a power of two in [1, 32]");
 
+  using vec_t = vec_n_t<scalar_t, VEC_SIZE>;
+  using q8_vec_t = q8_n_t<scalar_out_t, VEC_SIZE>;
+
   int64_t const input_token_offset =
       blockIdx.x * static_cast<int64_t>(input_stride);
   int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
 
-  vec4_t<scalar_t> const* vec_input =
-      reinterpret_cast<vec4_t<scalar_t> const*>(&input[input_token_offset]);
-  vec4_t<scalar_t> const* vec_weight =
-      reinterpret_cast<vec4_t<scalar_t> const*>(weight);
-  vec4_t<scalar_t>* vec_residual = nullptr;
+  vec_t const* vec_input =
+      reinterpret_cast<vec_t const*>(&input[input_token_offset]);
+  vec_t const* vec_weight = reinterpret_cast<vec_t const*>(weight);
+  vec_t* vec_residual = nullptr;
   if constexpr (has_residual) {
-    vec_residual = reinterpret_cast<vec4_t<scalar_t>*>(&residual[token_offset]);
+    vec_residual = reinterpret_cast<vec_t*>(&residual[token_offset]);
   }
 
-  int32_t const num_vec_elems = hidden_size >> 2;
+  int32_t const num_vec_elems = hidden_size / VEC_SIZE;
   int32_t const vec_base = threadIdx.x * VEC_PER_THREAD;
   bool const active = (vec_base < num_vec_elems);
 
-  vec4_t<float> x_vals[VEC_PER_THREAD];
-  vec4_t<scalar_t> w_vals[VEC_PER_THREAD];
+  float x_vals[VEC_PER_THREAD][VEC_SIZE];
+  vec_t w_vals[VEC_PER_THREAD];
   float ss = 0.0f;
 
   if (active) {
 #pragma unroll
     for (int v = 0; v < VEC_PER_THREAD; ++v) {
-      vec4_t<scalar_t> const in = vec_input[vec_base + v];
+      vec_t const in = vec_input[vec_base + v];
       w_vals[v] = vec_weight[vec_base + v];
 
       if constexpr (has_residual) {
-        vec4_t<scalar_t> r = vec_residual[vec_base + v];
+        vec_t r = vec_residual[vec_base + v];
 #pragma unroll
         for (int j = 0; j < VEC_SIZE; ++j) {
-          float sum =
+          float const sum =
               static_cast<float>(in.val[j]) + static_cast<float>(r.val[j]);
           r.val[j] = static_cast<scalar_t>(sum);
-          x_vals[v].val[j] = static_cast<float>(r.val[j]);
-          ss += x_vals[v].val[j] * x_vals[v].val[j];
+          x_vals[v][j] = sum;
+          ss += sum * sum;
         }
         vec_residual[vec_base + v] = r;
       } else {
 #pragma unroll
         for (int j = 0; j < VEC_SIZE; ++j) {
-          x_vals[v].val[j] = static_cast<float>(in.val[j]);
-          ss += x_vals[v].val[j] * x_vals[v].val[j];
+          float const val = static_cast<float>(in.val[j]);
+          x_vals[v][j] = val;
+          ss += val * val;
         }
       }
     }
   }
 
-#pragma unroll
-  for (int mask = WARP_SIZE / 2; mask >= 1; mask >>= 1) {
-    ss += VLLM_SHFL_XOR_SYNC(ss, mask);
-  }
+  using BlockReduce = cub::BlockReduce<float, 1024>;
+  __shared__ typename BlockReduce::TempStorage reduceStore;
+  ss = BlockReduce(reduceStore).Reduce(ss, CubAddOp{}, blockDim.x);
 
-  __shared__ float s_warp_sums[32];
   __shared__ float s_rms;
-  int const warp_id = threadIdx.x / WARP_SIZE;
-  int const lane_id = threadIdx.x % WARP_SIZE;
-  int const num_warps = blockDim.x / WARP_SIZE;
-
-  if (lane_id == 0) {
-    s_warp_sums[warp_id] = ss;
+  if (threadIdx.x == 0) {
+    s_rms = rsqrtf(ss / hidden_size + var_epsilon);
   }
   __syncthreads();
-
-  if (warp_id == 0) {
-    float block_ss = (lane_id < num_warps) ? s_warp_sums[lane_id] : 0.0f;
-#pragma unroll
-    for (int mask = WARP_SIZE / 2; mask >= 1; mask >>= 1) {
-      block_ss += VLLM_SHFL_XOR_SYNC(block_ss, mask);
-    }
-    if (lane_id == 0) {
-      s_rms = rsqrtf(block_ss / static_cast<float>(hidden_size) + var_epsilon);
-    }
-  }
-  __syncthreads();
-
-  if (!active) {
-    return;
-  }
 
   float const rms = s_rms;
-  vec4_t<float> x_norm[VEC_PER_THREAD];
+  float x_norm[VEC_PER_THREAD][VEC_SIZE];
   float local_absmax = 0.0f;
 
+  if (active) {
 #pragma unroll
-  for (int v = 0; v < VEC_PER_THREAD; ++v) {
+    for (int v = 0; v < VEC_PER_THREAD; ++v) {
 #pragma unroll
-    for (int j = 0; j < VEC_SIZE; ++j) {
-      scalar_t const norm_elem =
-          static_cast<scalar_t>(x_vals[v].val[j] * rms) * w_vals[v].val[j];
-      float const val = static_cast<float>(norm_elem);
-      x_norm[v].val[j] = val;
-      local_absmax = fmaxf(local_absmax, fabsf(val));
+      for (int j = 0; j < VEC_SIZE; ++j) {
+        float const val = static_cast<float>(
+            static_cast<scalar_t>(x_vals[v][j] * rms) * w_vals[v].val[j]);
+        x_norm[v][j] = val;
+        local_absmax = fmaxf(local_absmax, fabsf(val));
+      }
     }
   }
 
@@ -673,6 +656,10 @@ __device__ void rms_norm_per_block_quant_single_pass(
     group_absmax =
         fmaxf(group_absmax,
               VLLM_SHFL_XOR_SYNC_WIDTH(group_absmax, mask, THREADS_PER_GROUP));
+  }
+
+  if (!active) {
+    return;
   }
 
   constexpr float qmax = quant_type_max_v<scalar_out_t>;
@@ -698,15 +685,14 @@ __device__ void rms_norm_per_block_quant_single_pass(
   // matching per_token_group_quant_8bit and norm_and_quant.
   float const inv_scale = 1.0f / group_scale;
 
-  q8x4_t<scalar_out_t>* vec_output =
-      reinterpret_cast<q8x4_t<scalar_out_t>*>(&out[token_offset]);
+  q8_vec_t* vec_output = reinterpret_cast<q8_vec_t*>(&out[token_offset]);
 
 #pragma unroll
   for (int v = 0; v < VEC_PER_THREAD; ++v) {
-    q8x4_t<scalar_out_t> q_out;
+    q8_vec_t q_out;
 #pragma unroll
     for (int j = 0; j < VEC_SIZE; ++j) {
-      q_out.val[j] = ScaledQuant<scalar_out_t, true>::quant_fn(x_norm[v].val[j],
+      q_out.val[j] = ScaledQuant<scalar_out_t, true>::quant_fn(x_norm[v][j],
                                                                inv_scale);
     }
     vec_output[vec_base + v] = q_out;

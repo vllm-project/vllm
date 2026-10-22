@@ -49,6 +49,7 @@ EPS = 1e-6
 
 
 def _is_valid_config(
+    num_tokens: int,
     hidden_size: int,
     has_scale_ub: bool,
     quant_dtype: torch.dtype,
@@ -66,7 +67,7 @@ def _is_valid_config(
     if (
         group_size is not None
         and tma_alignment != 0
-        and hidden_size // group_size[1] % tma_alignment == 0
+        and num_tokens % tma_alignment == 0
     ):
         return False
     return not (has_scale_ub and quant_dtype != current_platform.fp8_dtype())
@@ -119,6 +120,7 @@ RMS_NORM_CONFIGS = [
         [(None, 0), *itertools.product(GROUP_SIZES, TMA_ALIGNMENTS)],
     )
     if _is_valid_config(
+        num_tokens,
         hidden_size,
         has_scale_ub,
         quant_dtype,

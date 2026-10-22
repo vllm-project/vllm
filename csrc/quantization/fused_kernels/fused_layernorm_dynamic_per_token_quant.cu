@@ -131,7 +131,7 @@ __global__ void rms_norm_per_block_quant_kernel(
 
 template <typename scalar_t, typename scalar_out_t, bool has_residual = false,
           bool is_scale_transposed = false, int32_t group_size = 128,
-          int32_t VEC_PER_THREAD = 2>
+          int32_t VEC_PER_THREAD = 2, int32_t VEC_SIZE = 4>
 __global__ void rms_norm_per_block_quant_single_pass_kernel(
     scalar_out_t* __restrict__ out,       // [..., hidden_size]
     float* __restrict__ scales,           // [num_tokens, hidden_size /
@@ -145,8 +145,9 @@ __global__ void rms_norm_per_block_quant_single_pass_kernel(
     int64_t outer_scale_stride = 1) {
   vllm::vectorized::rms_norm_per_block_quant_single_pass<
       scalar_t, scalar_out_t, has_residual, is_scale_transposed, group_size,
-      VEC_PER_THREAD>(out, scales, input, weight, scale_ub, var_epsilon,
-                      hidden_size, input_stride, residual, outer_scale_stride);
+      VEC_PER_THREAD, VEC_SIZE>(out, scales, input, weight, scale_ub,
+                                var_epsilon, hidden_size, input_stride,
+                                residual, outer_scale_stride);
 }
 
 }  // namespace vllm
@@ -276,9 +277,31 @@ void rms_norm_per_block_quant_dispatch(
                               warp_size,
                               ((req_threads + warp_size - 1) / warp_size) *
                                   warp_size);
+                          if constexpr (sizeof(scalar_in_t) == 2) {
+                            if (input_stride % 8 == 0) {
+                              vllm::rms_norm_per_block_quant_single_pass_kernel<
+                                  scalar_in_t, scalar_t, has_residual,
+                                  transpose_scale, gs, 1, 8>
+                                  <<<grid, dim3(block_size), 0, stream>>>(
+                                      out.mutable_data_ptr<scalar_t>(),
+                                      scales.mutable_data_ptr<float>(),
+                                      input.const_data_ptr<scalar_in_t>(),
+                                      weight.const_data_ptr<scalar_in_t>(),
+                                      scale_ub.has_value()
+                                          ? scale_ub->const_data_ptr<float>()
+                                          : nullptr,
+                                      var_epsilon, hidden_size, input_stride,
+                                      has_residual
+                                          ? residual->mutable_data_ptr<
+                                                scalar_in_t>()
+                                          : nullptr,
+                                      scales.stride(1));
+                              return;
+                            }
+                          }
                           vllm::rms_norm_per_block_quant_single_pass_kernel<
                               scalar_in_t, scalar_t, has_residual,
-                              transpose_scale, gs, 2>
+                              transpose_scale, gs, 2, 4>
                               <<<grid, dim3(block_size), 0, stream>>>(
                                   out.mutable_data_ptr<scalar_t>(),
                                   scales.mutable_data_ptr<float>(),
@@ -299,9 +322,31 @@ void rms_norm_per_block_quant_dispatch(
                               warp_size,
                               ((req_threads + warp_size - 1) / warp_size) *
                                   warp_size);
+                          if constexpr (sizeof(scalar_in_t) == 2) {
+                            if (input_stride % 8 == 0) {
+                              vllm::rms_norm_per_block_quant_single_pass_kernel<
+                                  scalar_in_t, scalar_t, has_residual,
+                                  transpose_scale, gs, 2, 8>
+                                  <<<grid, dim3(block_size), 0, stream>>>(
+                                      out.mutable_data_ptr<scalar_t>(),
+                                      scales.mutable_data_ptr<float>(),
+                                      input.const_data_ptr<scalar_in_t>(),
+                                      weight.const_data_ptr<scalar_in_t>(),
+                                      scale_ub.has_value()
+                                          ? scale_ub->const_data_ptr<float>()
+                                          : nullptr,
+                                      var_epsilon, hidden_size, input_stride,
+                                      has_residual
+                                          ? residual->mutable_data_ptr<
+                                                scalar_in_t>()
+                                          : nullptr,
+                                      scales.stride(1));
+                              return;
+                            }
+                          }
                           vllm::rms_norm_per_block_quant_single_pass_kernel<
                               scalar_in_t, scalar_t, has_residual,
-                              transpose_scale, gs, 4>
+                              transpose_scale, gs, 4, 4>
                               <<<grid, dim3(block_size), 0, stream>>>(
                                   out.mutable_data_ptr<scalar_t>(),
                                   scales.mutable_data_ptr<float>(),
