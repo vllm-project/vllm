@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use criterion::{BatchSize, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use vllm_parser::tool::test_utils::{split_by_chars, test_tools};
+use vllm_parser::tool::test_utils::test_tools;
 use vllm_parser::tool::{DeepSeekV32ToolParser, Tool, ToolParser};
+use vllm_tokenizer::test_utils::TestTokenizer;
 
 mod utils;
-use utils::{feed_parser, test_tokenizer};
+use utils::{attributed_chunks, feed_attributed_parser};
 
 const CHUNK_CHARS: usize = 7;
 const LONG_NORMAL_TEXT_REPEATS: usize = 2048;
@@ -39,8 +41,14 @@ fn long_normal_text_fixture() -> String {
     line.repeat(LONG_NORMAL_TEXT_REPEATS)
 }
 
-fn parser(tools: &[Tool]) -> Box<dyn ToolParser> {
-    DeepSeekV32ToolParser::create(tools, test_tokenizer())
+/// DeepSeek V3.2 has `｜DSML｜` as a special token, so the parser guards its
+/// markers with it.
+fn tokenizer() -> TestTokenizer {
+    TestTokenizer::new().with_special_token("｜DSML｜", 256)
+}
+
+fn parser(tools: &[Tool], tokenizer: &TestTokenizer) -> Box<dyn ToolParser> {
+    DeepSeekV32ToolParser::create(tools, Arc::new(tokenizer.clone()))
         .expect("DeepSeek V3.2 parser should initialize")
 }
 
@@ -53,7 +61,14 @@ fn run_stream_group(
     expected_normal_text: &str,
     expected_calls_len: usize,
 ) {
-    let chunks = split_by_chars(text, chunk_chars);
+    let tokenizer = tokenizer();
+    let chunks = attributed_chunks(&tokenizer, text, chunk_chars);
+
+    // Check the fixture once, outside the measurement: a marker lost to
+    // missing attribution would silently turn every call into text.
+    let result = feed_attributed_parser(&mut *parser(tools, &tokenizer), chunks.clone());
+    assert_eq!(result.0, expected_normal_text, "{name}");
+    assert_eq!(result.1, expected_calls_len, "{name}");
 
     let mut group = c.benchmark_group(name);
     group.sample_size(50);
@@ -62,23 +77,19 @@ fn run_stream_group(
     group.throughput(Throughput::Bytes(text.len() as u64));
 
     group.bench_function("reuse_parser", |b| {
-        let mut parser = parser(tools);
-        b.iter(|| {
-            let result = feed_parser(&mut *parser, black_box(&chunks));
-            debug_assert_eq!(result.0, expected_normal_text);
-            debug_assert_eq!(result.1, expected_calls_len);
-            black_box(result);
-        })
+        let mut parser = parser(tools, &tokenizer);
+        b.iter_batched(
+            || chunks.clone(),
+            |chunks| black_box(feed_attributed_parser(&mut *parser, black_box(chunks))),
+            BatchSize::SmallInput,
+        )
     });
 
     group.bench_function("create_parser", |b| {
         b.iter_batched(
-            || parser(tools),
-            |mut parser| {
-                let result = feed_parser(&mut *parser, black_box(&chunks));
-                debug_assert_eq!(result.0, expected_normal_text);
-                debug_assert_eq!(result.1, expected_calls_len);
-                black_box(result);
+            || (parser(tools, &tokenizer), chunks.clone()),
+            |(mut parser, chunks)| {
+                black_box(feed_attributed_parser(&mut *parser, black_box(chunks)))
             },
             BatchSize::SmallInput,
         )
