@@ -267,15 +267,6 @@ class PyNcclCommunicator:
             abort_thread = threading.Thread(target=_abort, daemon=True)
             abort_thread.start()
             abort_thread.join(timeout=5.0)
-            if abort_thread.is_alive():
-                # Returning here leaves the communicator and every shareable
-                # buffer it exported alive, which is invisible from Python and
-                # matters: a rank that is refused an IPC export on a later
-                # reconfiguration is holding close to 6 GiB of them.
-                logger.warning(
-                    "ncclCommAbort did not return within 5 s, so this "
-                    "communicator and its buffers are still live"
-                )
             self.available = False
             self.disabled = True
 
