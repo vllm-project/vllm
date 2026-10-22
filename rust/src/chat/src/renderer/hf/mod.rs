@@ -228,7 +228,7 @@ impl HfChatRenderer {
             None
         };
 
-        let tools = request.tool_parsing_enabled().then(|| to_template_tools(request.tools()));
+        let tools = (!request.tools().is_empty()).then(|| to_template_tools(request.tools()));
         trace!(
             message_count = messages.len(),
             content_format = ?effective_template.content_format(),
@@ -1273,12 +1273,21 @@ mod tests {
             .chat_options
             .template_kwargs
             .insert("enable_thinking".to_string(), Value::Bool(true));
+        request.chat_options.template_kwargs.extend([
+            ("reasoning_effort".to_string(), Value::Null),
+            ("mode".to_string(), Value::String("auto".to_string())),
+        ]);
 
         let renderer = HfChatRenderer::new(
-            Some("{{ enable_thinking }}|{{ default_only }}".to_string()),
+            Some(
+                "{{ enable_thinking }}|{{ default_only }}|{{ reasoning_effort is none }}|{{ mode }}"
+                    .to_string(),
+            ),
             HashMap::from([
                 ("enable_thinking".to_string(), Value::Bool(false)),
                 ("default_only".to_string(), Value::String("x".to_string())),
+                ("reasoning_effort".to_string(), Value::String("medium".to_string())),
+                ("mode".to_string(), Value::String("strict".to_string())),
             ]),
             ChatTemplateContentFormatOption::Auto,
         )
@@ -1286,7 +1295,7 @@ mod tests {
 
         let rendered = renderer.render(&request).unwrap().prompt;
 
-        assert_eq!(rendered, Prompt::Text("True|x".to_string()));
+        assert_eq!(rendered, Prompt::Text("True|x|True|auto".to_string()));
     }
 
     #[test]
@@ -1477,7 +1486,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_template_exposes_tools_to_templates_when_auto_enabled() {
+    fn chat_template_exposes_tools_to_templates_for_any_tool_choice() {
         let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
         let tools = vec![ChatTool {
             name: "get_weather".to_string(),
@@ -1490,21 +1499,25 @@ mod tests {
             strict: None,
             defer_loading: None,
         }];
-        request.tool_context = crate::request::ResolvedToolContext::new(
-            &request.messages,
-            tools,
-            Some(ChatToolChoice::Auto),
-            true,
-        )
-        .expect("tool context should resolve");
+        // Matches Python: `tool_choice=none` still renders tools unless the
+        // server drops them via `--exclude-tools-when-tool-choice-none`.
+        for tool_choice in [ChatToolChoice::Auto, ChatToolChoice::None] {
+            request.tool_context = crate::request::ResolvedToolContext::new(
+                &request.messages,
+                tools.clone(),
+                Some(tool_choice),
+                true,
+            )
+            .expect("tool context should resolve");
 
-        let rendered = render(
-            Some("{{ tools[0].function.name }}|{{ tools[0].function.parameters.required[0] }}"),
-            &request,
-        )
-        .unwrap();
+            let rendered = render(
+                Some("{{ tools[0].function.name }}|{{ tools[0].function.parameters.required[0] }}"),
+                &request,
+            )
+            .unwrap();
 
-        assert_eq!(rendered, "get_weather|city");
+            assert_eq!(rendered, "get_weather|city");
+        }
     }
 
     #[test]
