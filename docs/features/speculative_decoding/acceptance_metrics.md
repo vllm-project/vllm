@@ -105,30 +105,8 @@ For example, a five-token proposal shortened to three verification positions
 adds five to the draft counter and three to the verified counter. The mean
 verified draft width can be estimated by dividing the verified draft tokens by the draft steps over the same time window.
 
-The counter `vllm:spec_decode_num_verified_draft_tokens_per_pos_total` reports
-the same verified tokens by zero-based draft `position`. Verifying a prefix of
-three draft tokens increments positions `0`, `1`, and `2` once each; verifying
-zero draft tokens increments none of the position counters. Their sum equals
-`vllm:spec_decode_num_verified_draft_tokens_total`. These counters are exposed
-only when adaptive verification is enabled.
-
-For the fraction of drafting events that verified each position, aggregate
-across engines before dividing:
-
-```promql
-sum by (model_name, position) (
-  rate(vllm:spec_decode_num_verified_draft_tokens_per_pos_total{model_name="$model_name"}[$__rate_interval])
-)
-/ ignoring(position) group_left
-sum by (model_name) (
-  rate(vllm:spec_decode_num_drafts_total{model_name="$model_name"}[$__rate_interval])
-)
-```
-
-For zero-based position `p`, this estimates `P(verified draft length > p)` over
-the counted drafting events. Summing these fractions gives the mean verified
-draft width. Events with no proposed draft tokens are not counted by
-`num_drafts`.
+The per-position counter `vllm:spec_decode_num_verified_draft_tokens_per_pos_total`
+uses a zero-based `position` label and sums to the scalar verified count.
 
 With async scheduling and structured outputs, grammar-invalid draft positions may
 still be sent to the target verifier. These positions are excluded from
