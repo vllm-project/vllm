@@ -301,6 +301,7 @@ def test_trtllm_fp4_moe_no_graph(
             per_token_activation=per_token_activation,
         )
         if activation == MoEActivation.SITU:
+            assert isinstance(trtllm_experts.fused_experts, TrtLlmNvFp4ExpertsModular)
             torch.testing.assert_close(
                 trtllm_experts.fused_experts.g1_scale_c, quant_config.a2_gscale
             )
@@ -316,6 +317,7 @@ def test_trtllm_fp4_moe_no_graph(
             expert_map=None,
             apply_router_weight_on_input=False,
         )
+        assert isinstance(trtllm_output, torch.Tensor)
 
         # Reference: round-trip activations and weights through FP4
         # quant/dequant so the comparison isolates kernel/activation behavior
@@ -348,6 +350,8 @@ def test_trtllm_fp4_moe_no_graph(
             (e, (2 if is_gated_act else 1) * n, k), device="cuda", dtype=dtype
         )
         w2_d = torch.empty((e, k, n), device="cuda", dtype=dtype)
+        assert quant_config.g1_alphas is not None
+        assert quant_config.g2_alphas is not None
         for idx in range(e):
             w1_d[idx] = dequantize_nvfp4_to_dtype(
                 w1_q_linear[idx],
