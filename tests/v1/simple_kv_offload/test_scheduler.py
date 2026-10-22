@@ -93,6 +93,8 @@ def _make_kv_cache_config(
     register_all_kvcache_specs(
         vllm_config=None
     )  # Ensure specs are registered for tests
+    total_size = _BYTES_PER_BLOCK * num_blocks * num_groups
+    byte_offset = 0
     for g in range(num_groups):
         layer_names = [f"layer_{g}"]
         spec = (
@@ -119,12 +121,14 @@ def _make_kv_cache_config(
         )
         tensors.append(
             KVCacheTensor(
-                size=_BYTES_PER_BLOCK * num_blocks,
+                size=total_size,
                 layers=layer_names,
                 layer_stride=_BYTES_PER_BLOCK * num_blocks,
                 block_stride=_BYTES_PER_BLOCK,
+                offset=byte_offset,
             )
         )
+        byte_offset += _BYTES_PER_BLOCK * num_blocks
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=tensors,
@@ -2389,6 +2393,26 @@ def test_cp_lazy_target_blocks_scaling(cp_world_size: int) -> None:
             f"cp_world_size={cp_world_size}: target_cp={target_cp} should be "
             f"less than target_base={target_base}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Test 18: PP / spec-decode sizing alignment
+# ---------------------------------------------------------------------------
+def test_scheduler_uses_worker_aligned_num_cpu_blocks() -> None:
+    """Authoritative worker-aligned sizing overrides config-only estimates."""
+    num_gpu_blocks = 16
+    cpu_capacity = 4 * _BYTES_PER_BLOCK
+    light = _make_kv_cache_config(num_gpu_blocks, num_groups=1)
+
+    sched = SimpleCPUOffloadScheduler(
+        vllm_config=_make_vllm_config(),
+        kv_cache_config=light,
+        cpu_capacity_bytes=cpu_capacity,
+        scheduler_block_size=BLOCK_SIZE,
+        hash_block_size=BLOCK_SIZE,
+        aligned_num_cpu_blocks=1,
+    )
+    assert sched.num_cpu_blocks == 1
 
 
 def _make_hybrid_attention_mamba_scheduler(
