@@ -632,19 +632,35 @@ def test_ec_producer_only_enables_mm_encoder_only(
 
 
 @pytest.mark.parametrize(
-    ("language_model_only", "expected"), [(False, True), (True, False)]
+    ("role", "language_model_only", "enable_mm_embeds", "expected"),
+    [
+        ("kv_consumer", False, False, True),
+        # Text-only P/D decode: no MM infrastructure.
+        ("kv_consumer", True, False, False),
+        # EPD decode that skips the encoder but still takes embeddings.
+        ("kv_consumer", True, True, True),
+        ("ec_consumer", True, False, True),
+    ],
 )
-def test_kv_consumer_accepts_mm_embeds_unless_language_model_only(
-    language_model_only: bool, expected: bool
+def test_consumer_resolves_mm_embedding_inputs(
+    role: str, language_model_only: bool, enable_mm_embeds: bool, expected: bool
 ):
-    mm_config = MultiModalConfig(language_model_only=language_model_only)
+    mm_config = MultiModalConfig(
+        language_model_only=language_model_only, enable_mm_embeds=enable_mm_embeds
+    )
     model_config = MagicMock(spec=ModelConfig)
     model_config.multimodal_config = mm_config
     vllm_config = MagicMock(spec=VllmConfig)
     vllm_config.model_config = model_config
-    vllm_config.ec_transfer_config = None
-    vllm_config.kv_transfer_config = KVTransferConfig(
-        kv_connector="ExampleConnector", kv_role="kv_consumer"
+    vllm_config.ec_transfer_config = (
+        ECTransferConfig(ec_connector="ECExampleConnector", ec_role=role)
+        if role == "ec_consumer"
+        else None
+    )
+    vllm_config.kv_transfer_config = (
+        KVTransferConfig(kv_connector="ExampleConnector", kv_role=role)
+        if role == "kv_consumer"
+        else None
     )
 
     VllmConfig._resolve_mm_embedding_inputs(vllm_config)
