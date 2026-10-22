@@ -754,8 +754,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         ):
             return (
                 "the fused AITER kernel requires a BF16 GDN model with K=V=128, "
-                "2 or 3 value heads per key head, conv width 4, SiLU gating and "
-                "a BF16 convolution cache"
+                "2 or 3 value heads per key head, conv width 4, SiLU gating, "
+                "a BF16 convolution cache and a BF16 or FP32 recurrent state"
             )
         if not isinstance(self.out_proj.quant_method, UnquantizedLinearMethod):
             # The kernel emits the normed output, so the norm cannot be fused
@@ -2046,7 +2046,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             attn_metadata.spec_sequence_masks is None
             and attn_metadata.num_prefills == 0
             and attn_metadata.num_decodes > 0
-            and self.kv_cache[1].dtype is torch.float32
         ):
             return self._forward_core_decode_aiter_fused(
                 qkvz=qkvz,
