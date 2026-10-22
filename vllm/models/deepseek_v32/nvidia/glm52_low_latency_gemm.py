@@ -100,7 +100,9 @@ _SM107_QKV_A_PROJECTION = GLM52ProjectionSpec(
     cute_configs=(
         (1, SkinnyGemmConfig(1, 256, 4, k_unroll=2)),
         (2, SkinnyGemmConfig(2, 128, 2, k_unroll=2)),
+        (3, SkinnyGemmConfig(3, 128, 2, k_unroll=2)),
         (4, SkinnyGemmConfig(4, 128, 2, k_unroll=2)),
+        (5, SkinnyGemmConfig(5, 128, 2)),
     ),
     dsv3_tokens=frozenset(range(6, 9)),
 )
@@ -112,6 +114,7 @@ _SM107_EH_PROJECTION = GLM52ProjectionSpec(
     cute_configs=(
         (1, SkinnyGemmConfig(1, 256, 2, vector_width=4, static_k=12288)),
         (2, SkinnyGemmConfig(2, 64, 4, k_unroll=4)),
+        (3, SkinnyGemmConfig(3, 64, 2, k_unroll=2)),
         (4, SkinnyGemmConfig(4, 128, 4)),
     ),
 )
@@ -123,7 +126,9 @@ _SM107_Q_B_TP4_PROJECTION = GLM52ProjectionSpec(
     cute_configs=(
         (1, SkinnyGemmConfig(1, 128, 4, k_unroll=2)),
         (2, SkinnyGemmConfig(2, 128, 4, k_unroll=2)),
+        (3, SkinnyGemmConfig(3, 128, 4, k_unroll=2)),
         (4, SkinnyGemmConfig(4, 64, 4, k_unroll=4)),
+        (5, SkinnyGemmConfig(5, 64, 2, k_unroll=2)),
         (6, SkinnyGemmConfig(6, 64, 2, k_unroll=2)),
     ),
 )
@@ -135,6 +140,7 @@ _SM107_O_PROJ_TP4_PROJECTION = GLM52ProjectionSpec(
     cute_configs=(
         (1, SkinnyGemmConfig(1, 128, 3, k_unroll=4)),
         (2, SkinnyGemmConfig(2, 64, 4, k_unroll=4)),
+        (3, SkinnyGemmConfig(3, 128, 4)),
     ),
 )
 
@@ -145,7 +151,9 @@ _SM107_WK_WEIGHTS_PROJECTION = GLM52ProjectionSpec(
     cute_configs=(
         (1, SkinnyGemmConfig(1, 256, 1, k_unroll=2, static_k=6144)),
         (2, SkinnyGemmConfig(2, 256, 1, k_unroll=2, static_k=6144)),
+        (3, SkinnyGemmConfig(3, 256, 1, k_unroll=2)),
         (4, SkinnyGemmConfig(4, 256, 1, k_unroll=2)),
+        (5, SkinnyGemmConfig(5, 128, 2, k_unroll=2)),
         (6, SkinnyGemmConfig(6, 256, 1, k_unroll=2)),
         (8, SkinnyGemmConfig(8, 256, 1, k_unroll=2)),
         (12, SkinnyGemmConfig(12, 256, 1, k_unroll=2)),
@@ -160,7 +168,9 @@ _SM107_SHARED_GATE_UP_TP4_PROJECTION = GLM52ProjectionSpec(
     cute_configs=(
         (1, SkinnyGemmConfig(1, 256, 2, k_unroll=2)),
         (2, SkinnyGemmConfig(2, 256, 2, k_unroll=2)),
+        (3, SkinnyGemmConfig(3, 256, 2, k_unroll=2)),
         (4, SkinnyGemmConfig(4, 128, 1, k_unroll=2)),
+        (5, SkinnyGemmConfig(5, 128, 2, k_unroll=2)),
         (6, SkinnyGemmConfig(6, 128, 1, k_unroll=2)),
         (8, SkinnyGemmConfig(8, 128, 2, k_unroll=2)),
     ),
@@ -173,6 +183,7 @@ _SM107_SHARED_DOWN_TP4_PROJECTION = GLM52ProjectionSpec(
     cute_configs=(
         (1, SkinnyGemmConfig(1, 64, 6, k_unroll=4)),
         (2, SkinnyGemmConfig(2, 64, 4, k_unroll=4)),
+        (3, SkinnyGemmConfig(3, 64, 4)),
         (4, SkinnyGemmConfig(4, 32, 4, k_unroll=2)),
         (6, SkinnyGemmConfig(6, 32, 4, k_unroll=2)),
     ),
