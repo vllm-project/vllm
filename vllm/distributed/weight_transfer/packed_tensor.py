@@ -227,9 +227,6 @@ def packed_nccl_broadcast_consumer(
         [] for _ in range(num_buffers)
     ]
     packing_tensor_sizes: list[int] = [0 for _ in range(num_buffers)]
-    packed_tensors: list[torch.Tensor] = [
-        torch.empty(0, dtype=torch.uint8, device=device) for _ in range(num_buffers)
-    ]
     caller_stream = torch.cuda.current_stream()
     prev_received: torch.Event | None = None
 
@@ -238,14 +235,13 @@ def packed_nccl_broadcast_consumer(
         packed = torch.empty(
             packing_tensor_sizes[buffer_idx], dtype=torch.uint8, device=device
         )
-        packed_tensors[buffer_idx] = packed
         group.broadcast(packed, src=src)
 
         # post_unpack_func may keep the unpacked views and read them from a later
         # pack's callback, on another slot stream. Chaining the ready events
         # orders every callback after all earlier receives, and record_stream
-        # keeps the allocator from reissuing this buffer to the next receive
-        # while such a read is still pending.
+        # keeps the allocator from reissuing this buffer once it is freed while
+        # the broadcast or such a read is still pending.
         if prev_received is not None:
             streams[buffer_idx].wait_event(prev_received)
         prev_received = torch.Event()

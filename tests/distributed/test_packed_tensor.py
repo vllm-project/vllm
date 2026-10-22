@@ -289,34 +289,49 @@ class TestPackedBroadcastRoundtrip:
             assert torch.allclose(unpacked, original_tensor, rtol=1e-4, atol=1e-6)
 
 
+# Long enough (~1 s on current GPUs) that the host always gets through the
+# checked window first; the tests assert that it did.
+SLEEP_CYCLES = 2_000_000_000
+
+
 class DelayedFirstBroadcastGroup:
     """Fills each pack with its sentinel on the current (slot) stream; the
-    first pack is zeroed and its sentinel lands only after a GPU sleep."""
-
-    SLEEP_CYCLES = 200_000_000  # ~0.1 s on current GPUs
+    first pack is zeroed and its sentinel lands only after a GPU sleep, at
+    ``first_received``."""
 
     def __init__(self, sentinels: list[float]):
         self.sentinels = sentinels
+        self.first_received = torch.Event()
         self.calls = 0
 
     def broadcast(self, tensor, src):
         dst = tensor.view(torch.float32)
         if self.calls == 0:
             dst.zero_()
-            torch.cuda._sleep(self.SLEEP_CYCLES)
+            torch.cuda._sleep(SLEEP_CYCLES)
         dst.fill_(self.sentinels[self.calls])
+        if self.calls == 0:
+            self.first_received.record()
         self.calls += 1
 
 
 class SentinelBroadcastGroup:
-    """Immediately fills each pack with its own sentinel."""
+    """Immediately fills each pack with its own sentinel, recording each pack's
+    address and whether ``pending`` (once set) was still incomplete."""
 
     def __init__(self, sentinels: list[float]):
         self.sentinels = sentinels
+        self.pending: torch.Event | None = None
+        self.ptrs: list[int] = []
+        self.pending_at_receive: list[bool] = []
         self.calls = 0
 
     def broadcast(self, tensor, src):
         tensor.view(torch.float32).fill_(self.sentinels[self.calls])
+        self.ptrs.append(tensor.data_ptr())
+        self.pending_at_receive.append(
+            self.pending is not None and not self.pending.query()
+        )
         self.calls += 1
 
 
@@ -339,12 +354,14 @@ class TestPackedBroadcastDeferredConsumer:
         torch.accelerator.synchronize()
 
         retained: list[torch.Tensor] = []
+        read_enqueued_before_receive: list[bool] = []
 
         def post_unpack_func(tensor_list):
             [(_, tensor)] = tensor_list
             if not retained:
                 retained.append(tensor)
             else:
+                read_enqueued_before_receive.append(not group.first_received.query())
                 observed.copy_(retained[0])
 
         packed_nccl_broadcast_consumer(
@@ -359,6 +376,9 @@ class TestPackedBroadcastDeferredConsumer:
         torch.accelerator.synchronize()
 
         assert group.calls == 2
+        assert read_enqueued_before_receive == [True], (
+            "the first receive finished before the deferred read was enqueued"
+        )
         torch.testing.assert_close(observed, torch.full_like(observed, expected))
 
     @pytest.mark.parametrize(
@@ -393,9 +413,11 @@ class TestPackedBroadcastDeferredConsumer:
                 return
             retained.append(tensor)
             if len(retained) == packs_per_layer:
-                torch.cuda._sleep(DelayedFirstBroadcastGroup.SLEEP_CYCLES)
+                torch.cuda._sleep(SLEEP_CYCLES)
                 for i, t in enumerate(retained):
                     observed[i].copy_(t)
+                group.pending = torch.Event()
+                group.pending.record()
                 retained.clear()
                 replayed = True
 
@@ -411,6 +433,17 @@ class TestPackedBroadcastDeferredConsumer:
         torch.accelerator.synchronize()
 
         assert group.calls == num_packs
+        # Receives before the host next waits on the replay's slot stream.
+        window = range(packs_per_layer, packs_per_layer + num_buffers - 1)
+        assert all(group.pending_at_receive[i] for i in window), (
+            "the replay finished before every receive in the window was issued"
+        )
+        pack_bytes = numel * 4
+        for i in window:
+            for j in range(packs_per_layer):
+                assert abs(group.ptrs[i] - group.ptrs[j]) >= pack_bytes, (
+                    f"pack {i} reused pack {j}'s buffer while the replay was pending"
+                )
         expected = torch.tensor(sentinels[:packs_per_layer], device="cuda")
         torch.testing.assert_close(
             observed, expected.unsqueeze(1).expand_as(observed), rtol=0, atol=0
