@@ -513,27 +513,29 @@ def _get_backend_priorities(
     backends = []
     # Keep ROCM_ATTN disabled for KV connectors until connector transfer
     # semantics are validated for its asymmetric native K/V cache views.
-    use_rocm_attn = not use_kv_connector
-    # Spec decode and hybrid models put ROCM_ATTN on its slower Triton path.
-    spec_or_hybrid = use_spec_decode or is_hybrid
-    if use_rocm_attn and not spec_or_hybrid:
+    if not use_kv_connector:
         backends.append(AttentionBackendEnum.ROCM_ATTN)
     if rocm_aiter_ops.is_mha_enabled():
         backends.append(AttentionBackendEnum.ROCM_AITER_FA)
-    # ROCM_AITER_UNIFIED_ATTN gives wrong output on gfx950 for some KV cache
-    # sizes until the aiter pin includes the fix (#62606), so rank
-    # TRITON_ATTN above it there for now.
-    triton_first = on_gfx950()
-    if triton_first:
-        backends.append(AttentionBackendEnum.TRITON_ATTN)
     if is_aiter_found_and_supported():
         backends.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
     elif rocm_aiter_ops.is_rdna_aiter_enabled():
         backends.insert(0, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
-    if not triton_first:
-        backends.append(AttentionBackendEnum.TRITON_ATTN)
-    if use_rocm_attn and spec_or_hybrid:
-        backends.append(AttentionBackendEnum.ROCM_ATTN)
+    backends.append(AttentionBackendEnum.TRITON_ATTN)
+
+    # Spec decode and hybrid models put ROCM_ATTN on its slower Triton path.
+    rocm_attn = AttentionBackendEnum.ROCM_ATTN
+    if (use_spec_decode or is_hybrid) and rocm_attn in backends:
+        backends.remove(rocm_attn)
+        backends.append(rocm_attn)
+
+    # TODO(#62606): remove once the aiter pin includes ROCm/aiter#6661.
+    # ROCM_AITER_UNIFIED_ATTN gives wrong output on gfx950 for some KV cache
+    # sizes, so rank TRITON_ATTN right above it there.
+    unified = AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN
+    if on_gfx950() and unified in backends:
+        backends.remove(AttentionBackendEnum.TRITON_ATTN)
+        backends.insert(backends.index(unified), AttentionBackendEnum.TRITON_ATTN)
     backends.append(AttentionBackendEnum.TURBOQUANT)
     backends.append(AttentionBackendEnum.ULTRAQUANT)
 
