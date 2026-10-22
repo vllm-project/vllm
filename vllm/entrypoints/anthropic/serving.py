@@ -34,6 +34,7 @@ from vllm.entrypoints.anthropic.protocol import (
     AnthropicTool,
     AnthropicToolChangeDefinition,
     AnthropicUsage,
+    translate_error_type,
 )
 from vllm.entrypoints.generate.base.protocol import (
     JsonSchemaResponseFormat,
@@ -49,7 +50,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
+from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.logger import init_logger
@@ -59,6 +60,16 @@ from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.renderers.online_renderer import OnlineRenderer
 
 logger = init_logger(__name__)
+
+
+class _StreamError(Exception):
+    """Carries the ErrorInfo from an upstream ErrorResponse through the stream
+    converter so the SSE ``error`` event can reuse its status code to pick the
+    Anthropic error type."""
+
+    def __init__(self, error_info: ErrorInfo) -> None:
+        super().__init__(error_info.message)
+        self.error_info = error_info
 
 
 def _build_anthropic_usage(
@@ -1018,7 +1029,7 @@ class AnthropicServingMessages(OpenAIServingChat):
 
             async for origin_chunk in generator:
                 if isinstance(origin_chunk, ErrorResponse):
-                    raise RuntimeError(origin_chunk.error.message)
+                    raise _StreamError(origin_chunk.error)
                 if first_item:
                     chunk = AnthropicStreamEvent(
                         type="message_start",
@@ -1218,11 +1229,19 @@ class AnthropicServingMessages(OpenAIServingChat):
             logger.exception("Error in message stream converter.")
             for event in stop_active_block():
                 yield event
+            if isinstance(e, _StreamError):
+                # Reuse the ErrorResponse status code so the SSE error event
+                # uses the same Anthropic vocabulary as the non-streaming
+                # path (e.g. overloaded_error, not_found_error). The message
+                # was already sanitized by create_error_response upstream.
+                error_type = translate_error_type(e.error_info.code)
+                message = e.error_info.message
+            else:
+                error_type = "api_error"
+                message = sanitize_message(str(e))
             error_response = AnthropicStreamEvent(
                 type="error",
-                error=AnthropicError(
-                    type="internal_error", message=sanitize_message(str(e))
-                ),
+                error=AnthropicError(type=error_type, message=message),
             )
             data = error_response.model_dump_json(exclude_unset=True)
             yield wrap_data_with_event(data, "error")
