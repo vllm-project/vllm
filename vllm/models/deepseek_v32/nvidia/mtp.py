@@ -21,6 +21,7 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.model_loader.mtp_validation import (
     is_mtp_completeness_check_enabled,
+    validate_mtp_embed_tokens_loaded,
 )
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
@@ -491,4 +492,5 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
                     f"MTP speculative decoding layer {layer_idx} weights "
                     f"missing from checkpoint."
                 )
+        validate_mtp_embed_tokens_loaded(loaded_params, self.model.mtp_start_layer_idx)
         return loaded_params

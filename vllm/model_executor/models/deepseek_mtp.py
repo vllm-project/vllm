@@ -25,6 +25,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.mtp_validation import (
     is_mtp_completeness_check_enabled,
+    validate_mtp_embed_tokens_loaded,
 )
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
@@ -531,6 +532,7 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
                     f"or disable speculative decoding."
                 )
 
+        validate_mtp_embed_tokens_loaded(loaded_params, self.model.mtp_start_layer_idx)
         return loaded_params
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
