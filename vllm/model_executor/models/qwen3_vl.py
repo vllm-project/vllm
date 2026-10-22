@@ -52,7 +52,7 @@ from vllm.compilation.decorators import (
     should_torch_compile_mm_encoder,
     support_torch_compile,
 )
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.multimodal import (
     MultiModalConfig,
     MultiModalDummyOptions,
@@ -60,7 +60,7 @@ from vllm.config.multimodal import (
     VideoPruningMethod,
 )
 from vllm.distributed import get_pp_group, parallel_state
-from vllm.inputs import MultiModalDataDict
+from vllm.inputs import MultiModalDataDict, MultiModalHashes
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
 from vllm.model_executor.layers.attention.mm_encoder_attention import (
@@ -81,6 +81,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.hasher import MultiModalHasher
 from vllm.multimodal.image_prune.rate import (
     compute_retained_tokens_count as rate_compute_retained_tokens_count,
 )
@@ -100,6 +101,7 @@ from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
+    ProcessorInputs,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
@@ -154,7 +156,7 @@ from .qwen2_vl import (
     Qwen2VLProcessingInfo,
     _create_qwen2vl_field_factory,
 )
-from .qwen3 import Qwen3ForCausalLM, Qwen3Model
+from .qwen3 import Qwen3DecoderLayer, Qwen3ForCausalLM, Qwen3Model
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -1348,6 +1350,67 @@ def _replace_video_token_placeholders(
 
 
 class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo]):
+    def _get_per_video_kwargs(
+        self, kwargs: Mapping[str, object], num_videos: int | None = None
+    ) -> dict[str, list[Any]]:
+        merged = self.info._merge_and_resolve_mm_processor_kwargs(kwargs)
+        per_video_kwargs = {
+            key: value
+            for key, value in merged.get("videos_kwargs", {}).items()
+            if key in ("fps", "num_frames") and isinstance(value, list)
+        }
+        if num_videos:
+            for key, values in per_video_kwargs.items():
+                if len(values) < num_videos:
+                    raise ValueError(
+                        f"{key} must have at least {num_videos} entries "
+                        "(one per video); "
+                        f"got {len(values)}."
+                    )
+        return per_video_kwargs
+
+    def _get_mm_hashes(self, inputs: ProcessorInputs) -> MultiModalHashes:
+        hashes = dict(super()._get_mm_hashes(inputs))
+        per_video_kwargs = self._get_per_video_kwargs(
+            inputs.hf_processor_mm_kwargs, len(hashes.get("video", []))
+        )
+        if per_video_kwargs and "video" in hashes:
+            algorithm = self.info.ctx.get_mm_config().mm_hasher_algorithm
+            hashes["video"] = [
+                MultiModalHasher.hash_kwargs(
+                    algorithm,
+                    mm_hash=mm_hash,
+                    **{key: values[i] for key, values in per_video_kwargs.items()},
+                )
+                for i, mm_hash in enumerate(hashes["video"])
+            ]
+        return hashes
+
+    def _get_cache_missing_processor_kwargs(
+        self,
+        inputs: ProcessorInputs,
+        mm_is_cached: Mapping[str, list[bool]],
+    ) -> Mapping[str, object]:
+        per_video_kwargs = self._get_per_video_kwargs(
+            inputs.hf_processor_mm_kwargs, len(mm_is_cached.get("video", []))
+        )
+        if not per_video_kwargs or "video" not in mm_is_cached:
+            return inputs.hf_processor_mm_kwargs
+        kwargs = self.info._merge_and_resolve_mm_processor_kwargs(
+            inputs.hf_processor_mm_kwargs
+        )
+        kwargs["videos_kwargs"].update(
+            {
+                key: [
+                    value
+                    for value, hit in zip(values, mm_is_cached["video"])
+                    if not hit
+                ]
+                for key, values in per_video_kwargs.items()
+            }
+        )
+        return kwargs
+
     @staticmethod
     def _expands_only_video_token(hf_processor: ProcessorMixin) -> bool:
         """Transformers>=5.10 processors override `replace_video_token`
@@ -1418,6 +1481,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
         video_input_ids_lst: list[list[int]] = []
         if videos := hf_data.pop("videos", []):
             assert isinstance(videos, list)
+            self._get_per_video_kwargs(hf_kwargs, len(videos))
             video_grid_thw_lst = []
             pixel_values_videos_lst = []
             timestamps_per_video = []
@@ -1550,6 +1614,9 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
             non_video_scoped_kwargs = dict(non_video_mm_kwargs["videos_kwargs"])
             non_video_scoped_kwargs.pop("fps", None)
             non_video_scoped_kwargs.pop("num_frames", None)
+            # The context merges model defaults again when calling HF.
+            for key in self._get_per_video_kwargs({}):
+                non_video_scoped_kwargs[key] = None
             non_video_mm_kwargs["videos_kwargs"] = non_video_scoped_kwargs
         processed_data = self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**non_video_mm_kwargs),
@@ -1759,6 +1826,22 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
         return PromptUpdateDetails.from_seq(all_token_ids)
 
 
+def mrope_positions_factor(vllm_config: VllmConfig) -> int:
+    # Video pruning keeps the positions of the tokens it drops. A drafter gets
+    # the target's positions, so it follows the target.
+    spec = vllm_config.speculative_config
+    model_config = (spec and spec.target_model_config) or vllm_config.model_config
+    mm_config = model_config.multimodal_config
+    pruned = mm_config is not None and mm_config.is_multimodal_pruning_enabled()
+    return 4 if pruned else 1
+
+
+class Qwen3VLDecoderLayer(Qwen3DecoderLayer):
+    def __init__(self, **kwargs) -> None:
+        factor = mrope_positions_factor(get_current_vllm_config())
+        super().__init__(**kwargs, mrope_positions_factor=factor)
+
+
 @support_torch_compile(
     dynamic_arg_dims={
         "input_ids": 0,
@@ -1772,6 +1855,8 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
     }
 )
 class Qwen3LLMModel(Qwen3Model):
+    decoder_layer_type = Qwen3VLDecoderLayer
+
     def forward(
         self,
         input_ids: torch.Tensor | None,

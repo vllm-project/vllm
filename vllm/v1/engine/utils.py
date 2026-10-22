@@ -23,9 +23,10 @@ from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.utils import numa_utils
 from vllm.utils.network_utils import (
-    get_open_port,
+    ZmqListener,
     get_open_zmq_ipc_path,
     get_tcp_uri,
+    make_zmq_listener,
     zmq_socket_ctx,
 )
 from vllm.utils.system_utils import get_mp_context, set_env_var
@@ -83,7 +84,17 @@ class CoreEngine:
 
 
 @dataclass
+class EngineZmqBindAddresses:
+    """Frontend endpoints before their owning sockets bind."""
+
+    inputs: list[str]
+    outputs: list[str]
+
+
+@dataclass
 class EngineZmqAddresses:
+    """Resolved frontend endpoints advertised to engine processes."""
+
     # ZMQ input socket addresses for each front-end client (requests)
     inputs: list[str]
     # ZMQ output socket addresses for each front-end client (responses)
@@ -96,6 +107,27 @@ class EngineZmqAddresses:
     # Not used by engine, just relayed to front-end in handshake response.
     # Only required for external DP LB case.
     frontend_stats_publish_address: str | None = None
+
+
+@dataclass
+class EngineZmqListeners:
+    inputs: list[ZmqListener]
+    outputs: list[ZmqListener]
+
+    @property
+    def addresses(self) -> EngineZmqAddresses:
+        return EngineZmqAddresses(
+            inputs=[listener.address for listener in self.inputs],
+            outputs=[listener.address for listener in self.outputs],
+        )
+
+    def cleanup(self) -> None:
+        for listener in (*self.inputs, *self.outputs):
+            listener.cleanup()
+
+    def __del__(self) -> None:
+        with contextlib.suppress(Exception):
+            self.cleanup()
 
 
 @dataclass
@@ -258,6 +290,7 @@ class CoreEngineProcManager:
         self._finalizer = weakref.finalize(self, shutdown, self.processes)
         self.manager_stopped = threading.Event()
         self.failed_proc_name: str | None = None
+        self._coord_store: object | None = None
 
         # All ranks share this config object: capture the user-provided
         # --device-ids list before the per-rank shard overwrites it. Mutating
@@ -1079,22 +1112,16 @@ class CoreEngineActorManager:
             ray.util.remove_placement_group(pg)
 
 
-def get_engine_zmq_addresses(
+def get_engine_zmq_bind_addresses(
     vllm_config: VllmConfig,
     num_api_servers: int = 1,
-    *,
-    defer_api_server_ports: bool = True,
-) -> EngineZmqAddresses:
-    """Allocate ZMQ addresses for engine-client communication.
+) -> EngineZmqBindAddresses:
+    """Create ZMQ endpoint templates for engine-client communication.
 
-    By default each TCP address is a ``tcp://host:0`` placeholder; the
-    consumer (API-server child or single-process ``MPClient``) binds, then
-    recovers the kernel-assigned port via ``getsockopt(zmq.LAST_ENDPOINT)``
-    and writes it back into ``addresses`` before the engine handshake.
-
-    Set ``defer_api_server_ports=False`` only when the consumer cannot
-    report a bound port back (e.g. the Rust front-end). IPC paths are
-    unaffected."""
+    Each TCP address is a ``tcp://host:0`` placeholder. A single-process
+    ``MPClient`` binds its own ZMQ sockets. Cross-process frontends use
+    ``bind_engine_zmq_listeners`` so the supervisor binds raw listeners before
+    launching engines and transfers listener ownership to each frontend."""
     parallel_config = vllm_config.parallel_config
     local_engine_count = parallel_config.data_parallel_size_local
     local_start_index = parallel_config.data_parallel_rank_local
@@ -1113,18 +1140,45 @@ def get_engine_zmq_addresses(
         offline_mode or local_engines_only or (local_engine_count == dp_size)
     )
     # NOTE(yongji): handling scaling from intra-node to inter-node
-    if parallel_config.enable_elastic_ep:
+    if parallel_config.enable_elastic_ep and (
+        not local_engines_only or parallel_config.data_parallel_rank == 0
+    ):
         client_local_only = False
 
     def _addr() -> str:
         if client_local_only:
             return get_open_zmq_ipc_path()
-        return get_tcp_uri(host, 0 if defer_api_server_ports else get_open_port())
+        return get_tcp_uri(host, 0)
 
-    return EngineZmqAddresses(
+    return EngineZmqBindAddresses(
         inputs=[_addr() for _ in range(num_api_servers)],
         outputs=[_addr() for _ in range(num_api_servers)],
     )
+
+
+def bind_engine_zmq_listeners(
+    vllm_config: VllmConfig,
+    num_api_servers: int = 1,
+) -> EngineZmqListeners:
+    """Bind frontend transport listeners before launching engines."""
+    bind_addresses = get_engine_zmq_bind_addresses(
+        vllm_config,
+        num_api_servers,
+    )
+    inputs: list[ZmqListener] = []
+    outputs: list[ZmqListener] = []
+    try:
+        inputs.extend(
+            make_zmq_listener(address, zmq.ROUTER) for address in bind_addresses.inputs
+        )
+        outputs.extend(
+            make_zmq_listener(address, zmq.PULL) for address in bind_addresses.outputs
+        )
+        return EngineZmqListeners(inputs=inputs, outputs=outputs)
+    except BaseException:
+        for listener in (*inputs, *outputs):
+            listener.cleanup()
+        raise
 
 
 FrontendProcess = BaseProcess | _SubprocessWrapper
@@ -1177,6 +1231,32 @@ def launch_core_engines(
         vllm_config.needs_dp_coordinator and not offline_mode and dp_rank == 0
     )
 
+    coord_store = None
+
+    create_coord_store = (
+        parallel_config.enable_elastic_ep
+        and parallel_config.data_parallel_backend != "ray"
+        and dp_rank == 0
+        and not parallel_config._coord_store_port
+    )
+
+    if create_coord_store:
+        from vllm.distributed.utils import create_tcp_store
+
+        coord_store = create_tcp_store(
+            host,
+            0,
+            is_master=True,
+            world_size=-1,
+            wait_for_workers=False,
+        )
+        parallel_config._coord_store_port = coord_store.port
+        logger.info(
+            "Created Elastic EP coordination TCPStore on %s:%d",
+            host,
+            coord_store.port,
+        )
+
     if run_coordinator:
         coordinator = DPCoordinator(
             parallel_config,
@@ -1192,12 +1272,13 @@ def launch_core_engines(
         )
 
         logger.info("Started DP Coordinator process (PID: %d)", coordinator.proc.pid)
+        if coord_store is not None:
+            coordinator._coord_store = coord_store
     else:
         coordinator = None
 
     # Hold a coordination TCPStore (alive for this frame) so engines pick DP
     # master ports at bind time; pre-allocated ports can be taken before use.
-    coord_store = None
     if (
         dp_size > 1
         and not offline_mode
@@ -1292,6 +1373,13 @@ def launch_core_engines(
             )
         else:
             local_engine_manager = None
+
+        if (
+            coord_store is not None
+            and coordinator is None
+            and (local_engine_manager is not None)
+        ):
+            local_engine_manager._coord_store = coord_store
 
         launch = CoreEngineLaunch(
             local_engine_manager, coordinator, addresses, tensor_queue
@@ -1423,21 +1511,33 @@ def wait_for_engine_startup(
 
         if status == "HELLO" and engine.state == CoreEngineState.NEW:
             # Send init message with DP config info.
+            parallel_config_payload: dict[str, int | str | list[int]] = {}
+            if coordinated_dp and not (
+                parallel_config.local_engines_only
+                and parallel_config.data_parallel_rank > 0
+            ):
+                parallel_config_payload = {
+                    k: getattr(parallel_config, k)
+                    for k in (
+                        "data_parallel_master_ip",
+                        "data_parallel_master_port",
+                        "_data_parallel_master_port_list",
+                        "_coord_store_port",
+                        "data_parallel_size",
+                    )
+                }
+                if (
+                    parallel_config.enable_elastic_ep
+                    and not parallel_config._coord_store_port
+                ):
+                    raise RuntimeError(
+                        "Elastic EP startup requires a coordination TCPStore "
+                        "port before engine handshake."
+                    )
             init_message = msgspec.msgpack.encode(
                 EngineHandshakeMetadata(
                     addresses=launch.addresses,
-                    parallel_config={
-                        k: getattr(parallel_config, k)
-                        for k in (
-                            "data_parallel_master_ip",
-                            "data_parallel_master_port",
-                            "_data_parallel_master_port_list",
-                            "_coord_store_port",
-                            "data_parallel_size",
-                        )
-                    }
-                    if coordinated_dp
-                    else {},
+                    parallel_config=parallel_config_payload,
                 )
             )
             handshake_socket.send_multipart((eng_identity, init_message), copy=False)
@@ -1445,6 +1545,18 @@ def wait_for_engine_startup(
             start_pending[0 if local else 1] += 1
             engine.state = CoreEngineState.CONNECTED
         elif status == "READY" and engine.state == CoreEngineState.CONNECTED:
+            coord_store_port = msg.get("coord_store_port")
+            if coord_store_port is not None and local:
+                parallel_config._coord_store_port = coord_store_port
+            num_redundant_experts = msg.get("num_redundant_experts")
+            if num_redundant_experts is not None and local:
+                parallel_config.eplb_config.num_redundant_experts = (
+                    num_redundant_experts
+                )
+            elastic_ep_max_dp_size = msg.get("elastic_ep_max_dp_size")
+            if elastic_ep_max_dp_size is not None and local:
+                parallel_config.elastic_ep_max_dp_size = elastic_ep_max_dp_size
+
             # Validate config hash consistency across DP workers for MoE models.
             if coordinated_dp:
                 worker_config_hash = msg.get("parallel_config_hash")

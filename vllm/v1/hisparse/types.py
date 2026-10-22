@@ -28,6 +28,15 @@ class SparseKVRowMirror:
     num_rows: int
 
 
+@dataclass(frozen=True)
+class SparseKVResidencyUpdate:
+    """GPU block ids of some of a request's resident pages, per resident group.
+    A null block id means the page is read from the host."""
+
+    pages: list[int]
+    block_ids: tuple[list[int], ...]
+
+
 @dataclass
 class SparseKVOffloadCommand:
     """Opaque scheduler-to-worker command for one model step."""
