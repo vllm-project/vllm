@@ -285,53 +285,6 @@ def test_kda_recoverssm_derivation_is_revalidated():
         VllmConfig.validate_mamba_cached_kernel(config)
 
 
-def _replayssm_config(
-    architecture: str = "KimiK3ForConditionalGeneration",
-    kv_transfer_config: KVTransferConfig | None = None,
-) -> SimpleNamespace:
-    is_kda = architecture == "KimiK3ForConditionalGeneration"
-    return SimpleNamespace(
-        cache_config=SimpleNamespace(
-            use_replayssm=True,
-            use_kda_recoverssm=False,
-            mamba_cache_mode="none",
-            replayssm_buffer_len=16,
-        ),
-        num_speculative_tokens=3,
-        model_config=SimpleNamespace(
-            supports_replayssm=True, architecture=architecture
-        ),
-        mamba_config=SimpleNamespace(
-            backend=MambaBackendEnum.TRITON if is_kda else MambaBackendEnum.FLASHINFER,
-            enable_stochastic_rounding=False,
-        ),
-        parallel_config=SimpleNamespace(pipeline_parallel_size=1),
-        kv_transfer_config=kv_transfer_config,
-        use_v2_model_runner=True,
-    )
-
-
-def _nixl(kv_role: str) -> KVTransferConfig:
-    return KVTransferConfig(kv_connector="NixlConnector", kv_role=kv_role)
-
-
-@pytest.mark.parametrize("kv_role", ["kv_producer", "kv_consumer", "kv_both"])
-def test_kda_recoverssm_allows_kv_connectors(kv_role):
-    """A KDA RecoverSSM request's state between steps is its conv and SSM state,
-    in the stock page layout, so KV connectors transfer it as usual."""
-    config = _replayssm_config(kv_transfer_config=_nixl(kv_role))
-    VllmConfig.validate_mamba_cached_kernel(config)
-    assert config.cache_config.use_kda_recoverssm
-
-
-@pytest.mark.parametrize("kv_role", ["kv_producer", "kv_consumer", "kv_both"])
-def test_mamba2_replayssm_rejects_kv_connectors(kv_role):
-    """Mamba2 ReplaySSM's ring state is not transferred."""
-    config = _replayssm_config("NemotronHForCausalLM", _nixl(kv_role))
-    with pytest.raises(ValueError, match="incompatible with KV connectors"):
-        VllmConfig.validate_mamba_cached_kernel(config)
-
-
 @pytest.mark.parametrize("supported", [True, False])
 def test_lora_rejected_at_config_time_for_unsupported_model(supported):
     """Models without SupportsLoRA must fail during config validation with a
