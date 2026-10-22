@@ -142,8 +142,8 @@ def test_an_unknown_backend_is_refused():
         specialized_decode_config(cfg)
 
 
-def test_supported_config_is_accepted(on_mi355x):
-    assert specialized_decode_config(_vllm_config()) == DecodeConfig(q=8)
+def test_supported_config_is_accepted(supported_vllm_config):
+    assert specialized_decode_config(supported_vllm_config) == DecodeConfig(q=8)
 
 
 @pytest.fixture

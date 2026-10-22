@@ -13,7 +13,6 @@ from dataclasses import dataclass
 
 import torch
 
-from vllm.config import KVTransferConfig
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -90,6 +89,7 @@ def unsupported(vllm_config) -> list[str]:
         vllm_config.cache_config,
     )
     spec, oc = vllm_config.speculative_config, vllm_config.offload_config
+    kv = vllm_config.kv_transfer_config
     checks = (
         (pc.tensor_parallel_size != TP, f"TP {pc.tensor_parallel_size} (TP{TP} only)"),
         (pc.pipeline_parallel_size != 1, "pipeline parallelism"),
@@ -104,8 +104,14 @@ def unsupported(vllm_config) -> list[str]:
         # the kernels read one batch's attention metadata per step
         (pc.use_ubatching, "DBO (dual-batch overlap)"),
         (vllm_config.lora_config is not None, "LoRA"),
+        # MoRIIO consumers finish loads before execution, without per-layer hooks.
         (
-            not supports_kv_transfer(vllm_config.kv_transfer_config),
+            kv is not None
+            and (
+                kv.kv_connector != "MoRIIOConnector"
+                or kv.kv_connector_module_path is not None
+                or kv.kv_role != "kv_consumer"
+            ),
             "KV transfer connectors other than a MoRIIO consumer",
         ),
         (
@@ -164,15 +170,6 @@ def unsupported(vllm_config) -> list[str]:
     if getattr(mc.hf_text_config, "attn_res_block_size", None) is None:
         reasons.append("models without AttnRes")
     return reasons + platform_reasons()
-
-
-def supports_kv_transfer(config: KVTransferConfig | None) -> bool:
-    # MoRIIO consumers finish loads before execution, without per-layer hooks.
-    return config is None or (
-        config.kv_connector == "MoRIIOConnector"
-        and config.kv_connector_module_path is None
-        and config.kv_role == "kv_consumer"
-    )
 
 
 def text_shapes(text) -> tuple:
