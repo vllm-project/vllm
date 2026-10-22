@@ -21,6 +21,7 @@ from vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe import (
 )
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
 from vllm.models.kimi_k3.nvidia import latent_moe_runner
 from vllm.models.kimi_k3.nvidia.ops.latent_moe_tail import KimiK3LatentMoETailOp
@@ -68,7 +69,8 @@ def test_tail_fusion_requires_supported_topology(
     transform = SimpleNamespace(
         norm=SimpleNamespace(weight=norm_weight, variance_epsilon=EPS),
         up_proj=SimpleNamespace(
-            weight=SimpleNamespace(shape=(HIDDEN_SIZE, LATENT_SIZE))
+            weight=SimpleNamespace(shape=(HIDDEN_SIZE, LATENT_SIZE)),
+            quant_method=UnquantizedLinearMethod(),
         ),
     )
 

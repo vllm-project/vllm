@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
+import asyncio
 import copy
 import inspect
 import itertools
@@ -20,14 +21,8 @@ import jinja2.sandbox
 import torch
 from typing_extensions import override
 
-from vllm.entrypoints.chat_utils import (
-    PROMPT_EMBEDS_PLACEHOLDER_TOKEN,
-    ChatTemplateResolutionError,
-    load_chat_template,
-    parse_chat_messages,
-    parse_chat_messages_async,
-)
-from vllm.exceptions import VLLMValidationError
+from vllm import envs
+from vllm.exceptions import ChatTemplateResolutionError, VLLMValidationError
 from vllm.inputs import EmbedsPrompt
 from vllm.inputs.engine import MultiModalInput
 from vllm.logger import init_logger
@@ -44,6 +39,12 @@ from vllm.multimodal.processing.processor import (
     apply_token_matches,
     find_mm_placeholders,
 )
+from vllm.renderers.chat_utils import (
+    PROMPT_EMBEDS_PLACEHOLDER_TOKEN,
+    load_chat_template,
+    parse_chat_messages,
+    parse_chat_messages_async,
+)
 from vllm.tokenizers.hf import HfTokenizer, maybe_make_thread_pool
 from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
 from vllm.transformers_utils.processor import cached_get_processor
@@ -57,17 +58,17 @@ if TYPE_CHECKING:
     from collections.abc import Set
 
     from vllm.config import ModelConfig, VllmConfig
-    from vllm.entrypoints.chat_utils import (
-        ChatCompletionMessageParam,
-        ChatTemplateContentFormat,
-        ChatTemplateContentFormatOption,
-        ConversationMessage,
-    )
     from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict, TokensPrompt
     from vllm.inputs.engine import TokensInput
     from vllm.multimodal.processing.processor import (
         MultiModalPromptUpdates,
         ResolvedPromptUpdate,
+    )
+    from vllm.renderers.chat_utils import (
+        ChatCompletionMessageParam,
+        ChatTemplateContentFormat,
+        ChatTemplateContentFormatOption,
+        ConversationMessage,
     )
 
     from .inputs import DictPrompt
@@ -277,8 +278,12 @@ def resolve_chat_template(
     if tools is None:
         chat_template = _try_get_processor_chat_template(
             tokenizer,
-            revision=model_config.revision,
-            code_revision=model_config.code_revision,
+            revision=model_config.tokenizer_revision,
+            code_revision=(
+                model_config.code_revision
+                if model_config.tokenizer == model_config.model
+                else None
+            ),
             trust_remote_code=model_config.trust_remote_code,
         )
         if chat_template is not None:
@@ -318,6 +323,11 @@ def _is_var_access(node: jinja2.nodes.Node, varname: str) -> bool:
     if isinstance(node, jinja2.nodes.Name):
         return node.ctx == "load" and node.name == varname
 
+    # `ns.rest` matches the dotted alias "ns.rest".
+    if isinstance(node, jinja2.nodes.Getattr) and "." in varname:
+        base, _, attr = varname.rpartition(".")
+        return node.attr == attr and _is_var_access(node.node, base)
+
     return False
 
 
@@ -355,11 +365,26 @@ def _is_var_or_elems_access(
     return _is_attr_access(node, varname, key) if key else _is_var_access(node, varname)
 
 
+def _attr_dotted_name(node: jinja2.nodes.Node) -> str | None:
+    """Render an attribute-assignment target like ``ns.rest`` as a dotted name."""
+    if isinstance(node, jinja2.nodes.NSRef):
+        return f"{node.name}.{node.attr}"
+    parts = []
+    while isinstance(node, jinja2.nodes.Getattr):
+        parts.append(node.attr)
+        node = node.node
+    if isinstance(node, jinja2.nodes.Name):
+        parts.append(node.name)
+        return ".".join(reversed(parts))
+    return None
+
+
 def _iter_nodes_assign_var_or_elems(root: jinja2.nodes.Node, varname: str):
     # Global variable that is implicitly defined at the root
     yield root, varname
 
     # Iterative BFS
+    seen = {varname}
     related_varnames = deque([varname])
     while related_varnames:
         related_varname = related_varnames.popleft()
@@ -368,13 +393,40 @@ def _iter_nodes_assign_var_or_elems(root: jinja2.nodes.Node, varname: str):
             lhs = assign_ast.target
             rhs = assign_ast.node
 
-            if _is_var_or_elems_access(rhs, related_varname):
-                assert isinstance(lhs, jinja2.nodes.Name)
+            if isinstance(lhs, jinja2.nodes.Name) and _is_var_or_elems_access(
+                rhs, related_varname
+            ):
                 yield assign_ast, lhs.name
 
                 # Avoid infinite looping for self-assignment
-                if lhs.name != related_varname:
+                if lhs.name != related_varname and lhs.name not in seen:
+                    seen.add(lhs.name)
                     related_varnames.append(lhs.name)
+
+            # Namespace aliases: `namespace(rest=messages)` or `ns.rest = messages`.
+            aliases: list[str] = []
+            if (
+                isinstance(lhs, jinja2.nodes.Name)
+                and isinstance(rhs, jinja2.nodes.Call)
+                and isinstance(rhs.node, jinja2.nodes.Name)
+                and rhs.node.name == "namespace"
+            ):
+                aliases = [
+                    f"{lhs.name}.{kwarg.key}"
+                    for kwarg in rhs.kwargs
+                    if _is_var_or_elems_access(kwarg.value, related_varname)
+                ]
+            elif isinstance(
+                lhs, (jinja2.nodes.Getattr, jinja2.nodes.NSRef)
+            ) and _is_var_or_elems_access(rhs, related_varname):
+                dotted = _attr_dotted_name(lhs)
+                aliases = [dotted] if dotted is not None else []
+
+            for alias in aliases:
+                yield assign_ast, alias
+                if alias != related_varname and alias not in seen:
+                    seen.add(alias)
+                    related_varnames.append(alias)
 
 
 # NOTE: The proper way to handle this is to build a CFG so that we can handle
@@ -965,6 +1017,44 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 self.tokenizer, config.model_config.renderer_num_workers + 1
             )
 
+    def _replace_executor(self) -> None:
+        """Replace the inner render pool after a stuck worker.
+
+        Called after a render timeout so that the stuck thread (which CPython
+        cannot interrupt) does not permanently block all subsequent renders.
+        The executor *object* is kept so ``make_async`` wrappers bound at
+        init (tokenize, decode, pooling, derender) keep submitting work.
+        The old inner pool is abandoned with wait=False — its thread will
+        eventually finish or be reaped on process exit.
+        """
+        self._executor.replace_inner()
+        logger.warning(
+            "Chat template render timed out — executor pool replaced "
+            "(%d worker(s)). The stuck thread may continue consuming "
+            "CPU until the process exits.",
+            self.model_config.renderer_num_workers,
+        )
+
+    async def _render_with_timeout(self, coro):
+        """Run a template-rendering coroutine with a timeout.
+
+        On timeout, replaces the executor so subsequent renders are not
+        permanently blocked by the stuck thread.
+        """
+        timeout = envs.VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT
+        if timeout <= 0:
+            return await coro
+        try:
+            return await asyncio.wait_for(coro, timeout=timeout)
+        except TimeoutError:
+            self._replace_executor()
+            raise TimeoutError(
+                f"Chat template rendering timed out after "
+                f"{timeout}s. This may indicate a malicious or "
+                f"excessively complex template. Adjust "
+                f"VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT to override."
+            ) from None
+
     def _can_produce_offsets(self) -> bool:
         # Only fast tokenizers expose offset_mapping.
         return self.tokenizer is not None and self.tokenizer.is_fast
@@ -1120,11 +1210,13 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 logger.warning_once(_TOKENIZE_OVERRIDE_WARNING)
             chat_template_kwargs["tokenize"] = True
 
-        prompt_raw = await self._apply_chat_template_async(
-            model_config,
-            tokenizer,
-            conversation,
-            **chat_template_kwargs,
+        prompt_raw = await self._render_with_timeout(
+            self._apply_chat_template_async(
+                model_config,
+                tokenizer,
+                conversation,
+                **chat_template_kwargs,
+            )
         )
 
         # NOTE: use_unified_vision_chunk is currently specific to Kimi-K2.5
