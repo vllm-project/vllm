@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+import msgspec
 import pytest
 import torch
 import zmq.asyncio
@@ -1595,6 +1596,152 @@ def test_pull_completion_requires_local_blocks(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", ["error", "exception", "finish"])
+async def test_peer_failure_only_settles_its_pending_requests(terminal):
+    """Partial and duplicate replies must not release another peer's targets."""
+    with mooncake_register_worker(_make_test_kv_cache_config()) as (worker, _):
+        metas = {
+            f"d-req-{i}": PullReqMeta(
+                d_req_id=f"d-req-{i}",
+                transfer_id=f"xfer-{i}",
+                local_block_ids=[[i]],
+                remote_engine_id="p-engine",
+                remote_bootstrap_addr="http://bootstrap:33333",
+                pull_tasks_count=2,
+            )
+            for i in range(1, 4)
+        }
+        requests = list(metas.values())
+        partial = MooncakeXferResponse(
+            status=MooncakeXferResponseStatus.CONTINUE,
+            ok_reqs=["d-req-1"],
+            err_reqs=["d-req-2"],
+            err_msg="one request failed",
+        )
+        end = (
+            RuntimeError("connection lost")
+            if terminal == "exception"
+            else worker._encoder.encode(
+                MooncakeXferResponse(
+                    status=(
+                        MooncakeXferResponseStatus.FINISH
+                        if terminal == "finish"
+                        else MooncakeXferResponseStatus.ERROR
+                    ),
+                    err_msg="peer finished",
+                )
+            )
+        )
+        sock = mooncake_connector.make_zmq_socket.return_value.__enter__.return_value
+        sock.recv.side_effect = [worker._encoder.encode(partial)] * 2 + [end]
+        await worker.receive_kv_from_single_worker("tcp://producer:1234", metas)
+        assert [meta.pull_tasks_count for meta in requests] == [1, 1, 1]
+        assert [meta.failed for meta in requests] == [False, True, True]
+        assert worker.finished_recving_reqs == set()
+        assert worker.get_block_ids_with_load_errors() == {2, 3}
+        worker.process_pulling_result(
+            MooncakeXferResponse(
+                status=MooncakeXferResponseStatus.FINISH, ok_reqs=list(metas)
+            ),
+            metas,
+        )
+        assert worker.finished_recving_reqs == {meta.d_req_id for meta in requests}
+        assert all(meta.pull_tasks_count == 0 for meta in requests)
+        worker.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_peer_succeeds", [True, False])
+async def test_expired_peer_finish_settles_pending_receive(first_peer_succeeds):
+    """An expired peer's omitted result must not strand the decoder's blocks."""
+    config = _make_test_kv_cache_config()
+    with mooncake_register_worker(config, kv_role="kv_producer") as (producer, _):
+        try:
+            producer.kv_caches_base_addr = [0x1000]
+            producer.block_len_per_layer = [256]
+            producer.kv_block_len_per_layer = [256]
+            producer.registered_layer_names = ["model.layers.0.self_attn"]
+            producer.registered_layer_indices = [0]
+            send_meta = SendBlockMeta(
+                p_req_id="p-req-1",
+                transfer_id="xfer-req-1",
+                local_block_ids=[[1]],
+                ready=asyncio.Event(),
+                expire_time=time.perf_counter() - 1,
+            )
+            send_meta.ready.set()
+            producer.reqs_need_send[send_meta.transfer_id] = send_meta
+
+            async def expire_before_send():
+                assert await producer.fetch_finished_sending_reqs() == {"p-req-1"}
+
+            metadata = _xfer_meta(
+                [
+                    _region(
+                        0x2000,
+                        row_offset=-1,
+                        layer_name=producer.registered_layer_names[0],
+                    )
+                ],
+                {"d-req-1": (send_meta.transfer_id, [[100]])},
+            )
+            sock = AsyncMock(spec=zmq.asyncio.Socket, send_multipart=AsyncMock())
+            with (
+                patch.object(send_meta.ready, "wait", side_effect=expire_before_send),
+                patch.object(producer, "_send_blocks") as send,
+            ):
+                await producer.send_kv_to_decode(b"consumer", sock, metadata)
+                send.assert_not_called()
+            assert send_meta.transfer_id not in producer.reqs_need_send
+            sock.send_multipart.assert_awaited_once()
+            _, payload = sock.send_multipart.call_args.args[0]
+            response = producer._xfer_resp_decoder.decode(payload)
+            assert response.status == MooncakeXferResponseStatus.FINISH
+            assert not response.ok_reqs
+            assert not response.err_reqs
+        finally:
+            producer.shutdown()
+            producer.is_kv_consumer = True
+
+    with mooncake_register_worker(config) as (worker, _):
+        try:
+            meta = PullReqMeta(
+                d_req_id="d-req-1",
+                transfer_id="xfer-req-1",
+                local_block_ids=[[100]],
+                remote_engine_id="p-engine",
+                remote_bootstrap_addr="http://bootstrap:33333",
+                pull_tasks_count=2,
+            )
+            worker.process_pulling_result(
+                MooncakeXferResponse(
+                    status=MooncakeXferResponseStatus.FINISH,
+                    ok_reqs=[meta.d_req_id] if first_peer_succeeds else None,
+                    err_reqs=None if first_peer_succeeds else [meta.d_req_id],
+                ),
+                {meta.d_req_id: meta},
+            )
+            assert meta.pull_tasks_count == 1
+            assert worker.finished_recving_reqs == set()
+            sock = (
+                mooncake_connector.make_zmq_socket.return_value.__enter__.return_value
+            )
+            sock.recv.return_value = payload
+            await worker.receive_kv_from_single_worker(
+                "tcp://producer:1234", {meta.d_req_id: meta}
+            )
+            assert meta.pull_tasks_count == 0
+            assert meta.failed
+            assert worker.finished_recving_reqs == {meta.d_req_id}
+            assert worker.get_block_ids_with_load_errors() == {100}
+            stats = worker.get_kv_connector_stats()
+            assert stats is not None
+            assert stats.reduce()["Num failed recvs"] == 1
+        finally:
+            worker.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_kv_consumuer(monkeypatch):
     """Simulates a Consumer Worker (Decoder) initiating a pull from a Producer.
 
@@ -2227,6 +2374,215 @@ def test_prepare_transfer_regions_reuses_success_and_error():
     assert worker._prepared_transfer_regions == {}
     worker._prepare_transfer_regions(meta)
     assert calls == 6
+
+
+def _short_xfer_meta(worker, layout_id: int, req_blocks: dict) -> MooncakeXferMetadata:
+    return MooncakeXferMetadata(
+        remote_hostname="peer",
+        remote_port=9,
+        remote_tp_size=worker.tp_size,
+        remote_tp_rank=0,
+        remote_pp_size=worker.pp_size,
+        layout_id=layout_id,
+        req_blocks=req_blocks,
+        kv_caches_base_addr=[],
+        block_lens=[],
+        kv_block_lens=[],
+    )
+
+
+@pytest.mark.asyncio
+async def test_steady_pull_omits_layout_and_unknown_id_asks_for_resend():
+    """A later pull is much smaller, and an unseen layout_id is not guessed."""
+    n = 146
+    names = [f"model.layers.{i}.self_attn" for i in range(n)]
+    req_blocks = {"d": ("xfer", [[1, 2, 3]])}
+    full = MooncakeXferMetadata(
+        remote_hostname="h",
+        remote_port=1,
+        remote_tp_size=4,
+        remote_tp_rank=0,
+        layout_id=1,
+        req_blocks=req_blocks,
+        kv_caches_base_addr=list(range(n)),
+        block_lens=[4096] * n,
+        kv_block_lens=[3000] * n,
+        registered_layer_names=names,
+        registered_layer_indices=list(range(n)),
+        registered_group_indices=[i % 5 for i in range(n)],
+        registered_shared_group_ids=[[] for _ in range(n)],
+        registered_row_offsets=[i * 100 for i in range(n)],
+    )
+    steady = MooncakeXferMetadata(
+        remote_hostname="h",
+        remote_port=1,
+        remote_tp_size=4,
+        remote_tp_rank=0,
+        layout_id=1,
+        req_blocks=req_blocks,
+        kv_caches_base_addr=[],
+        block_lens=[],
+        kv_block_lens=[],
+    )
+    encoder = msgspec.msgpack.Encoder()
+    full_bytes = len(encoder.encode(full))
+    steady_bytes = len(encoder.encode(steady))
+    assert steady_bytes < full_bytes * 0.2
+
+    worker, _, regions, _ = _register_sliced_packed_mla([0, 1])
+    calls = 0
+    original = worker._get_transfer_regions
+
+    def counting(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    worker._get_transfer_regions = counting
+
+    def handshake(layout_id: int) -> MooncakeXferMetadata:
+        return _xfer_meta(
+            regions,
+            req_blocks,
+            remote_hostname="peer",
+            remote_port=9,
+            remote_tp_size=worker.tp_size,
+            remote_pp_size=worker.pp_size,
+            layout_id=layout_id,
+        )
+
+    prepared = worker._prepare_transfer_regions(handshake(1))
+    assert prepared[2] is None
+    assert calls == 2
+    stored = worker._layout_by_peer[worker._peer_layout_key(handshake(1))]
+    assert stored == (prepared[0], prepared[1])
+
+    # Same layout under a new id hits the tuple cache and must still be stored.
+    worker._prepare_transfer_regions(handshake(3))
+    assert calls == 2
+    assert worker._peer_layout_key(handshake(3)) in worker._layout_by_peer
+
+    sock = MagicMock()
+    sock.send_multipart = AsyncMock()
+    await worker.send_kv_to_decode(b"d", sock, _short_xfer_meta(worker, 5, req_blocks))
+    _, payload = sock.send_multipart.call_args[0][0]
+    response = worker._xfer_resp_decoder.decode(payload)
+    assert response.status == MooncakeXferResponseStatus.LAYOUT_MISS
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_peer_layouts_evict_least_recently_used(monkeypatch):
+    """Stale layout ids are bounded, and an evicted peer is asked to resend."""
+    monkeypatch.setattr(mooncake_connector, "_MAX_PEER_LAYOUTS", 2)
+    worker, _, regions, _ = _register_sliced_packed_mla([0])
+    req_blocks = {"d": ("xfer", [[1]])}
+
+    def handshake(layout_id: int) -> MooncakeXferMetadata:
+        return _xfer_meta(
+            regions,
+            req_blocks,
+            remote_hostname="peer",
+            remote_port=9,
+            remote_tp_size=worker.tp_size,
+            remote_pp_size=worker.pp_size,
+            layout_id=layout_id,
+        )
+
+    worker._prepare_transfer_regions(handshake(1))
+    worker._prepare_transfer_regions(handshake(3))
+    assert worker._lookup_peer_layout(_short_xfer_meta(worker, 1, req_blocks))
+    worker._prepare_transfer_regions(handshake(5))
+
+    assert worker._lookup_peer_layout(_short_xfer_meta(worker, 1, req_blocks))
+    assert worker._lookup_peer_layout(_short_xfer_meta(worker, 5, req_blocks))
+    sock = MagicMock()
+    sock.send_multipart = AsyncMock()
+    await worker.send_kv_to_decode(b"d", sock, _short_xfer_meta(worker, 3, req_blocks))
+    _, payload = sock.send_multipart.call_args[0][0]
+    response = worker._xfer_resp_decoder.decode(payload)
+    assert response.status == MooncakeXferResponseStatus.LAYOUT_MISS
+
+
+class _ScriptedSock:
+    def __init__(self, responses: list[bytes], sent: list[bytes]):
+        self._responses = responses
+        self._sent = sent
+
+    def setsockopt(self, *_args, **_kwargs):
+        return None
+
+    async def send(self, data: bytes):
+        self._sent.append(data)
+
+    async def recv(self):
+        return self._responses.pop(0)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+
+def _single_pull() -> dict[str, PullReqMeta]:
+    return {
+        "d": PullReqMeta(
+            d_req_id="d",
+            transfer_id="t",
+            local_block_ids=[[1]],
+            remote_engine_id="p",
+            remote_bootstrap_addr="http://bootstrap",
+        )
+    }
+
+
+async def _pull_once(worker, addr: str, responses: list[MooncakeXferResponse]):
+    sent: list[bytes] = []
+    encoded = [worker._encoder.encode(response) for response in responses]
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
+        "mooncake_connector.make_zmq_socket",
+        return_value=_ScriptedSock(encoded, sent),
+    ):
+        await worker.receive_kv_from_single_worker(addr, _single_pull())
+    return sent
+
+
+@pytest.mark.asyncio
+async def test_pull_resends_layout_when_prefill_forgot_it():
+    worker, _, _, _ = _register_sliced_packed_mla([0])
+    addr = "tcp://peer:1"
+    worker._acked_layout_peers.add(addr)
+    sent = await _pull_once(
+        worker,
+        addr,
+        [
+            MooncakeXferResponse(status=MooncakeXferResponseStatus.LAYOUT_MISS),
+            MooncakeXferResponse(
+                status=MooncakeXferResponseStatus.FINISH,
+                ok_reqs=["d"],
+                layout_id=worker._kv_layout_id,
+            ),
+        ],
+    )
+    assert len(sent) == 2
+    assert len(sent[1]) > len(sent[0])
+    assert addr in worker._acked_layout_peers
+
+
+@pytest.mark.asyncio
+async def test_pull_keeps_layout_for_prefill_that_does_not_echo_it():
+    """A prefill without layout_id support never gets a layout-less pull."""
+    worker, _, _, _ = _register_sliced_packed_mla([0])
+    addr = "tcp://old-peer:1"
+    finish = MooncakeXferResponse(
+        status=MooncakeXferResponseStatus.FINISH, ok_reqs=["d"]
+    )
+    first = await _pull_once(worker, addr, [finish])
+    assert addr not in worker._acked_layout_peers
+    second = await _pull_once(worker, addr, [finish])
+    assert len(second[0]) == len(first[0])
 
 
 def test_coalesce_keeps_a_run_inside_its_starting_row():
