@@ -54,6 +54,7 @@ from vllm.v1.simple_kv_offload.metrics import (
     MetricName,
     SimpleCPUOffloadStats,
 )
+from vllm.v1.simple_kv_offload.sizing import gpu_total_bytes
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -151,6 +152,8 @@ class SimpleCPUOffloadScheduler:
         lazy_offload: bool = False,
         disk_capacity_bytes: int = 0,
         use_page_cache: bool = False,
+        num_cpu_blocks: int | None = None,
+        aligned_num_cpu_blocks: int | None = None,
     ):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
@@ -170,7 +173,7 @@ class SimpleCPUOffloadScheduler:
         # Derive a CPU KVCacheConfig from the GPU config and build a coordinator
         assert kv_cache_config is not None
         self.cpu_kv_cache_config = self._derive_cpu_config(
-            kv_cache_config, offload_capacity
+            kv_cache_config, offload_capacity, num_cpu_blocks, aligned_num_cpu_blocks
         )
         self.num_cpu_blocks = self.cpu_kv_cache_config.num_blocks
         self.prefix_cacheable_group_ids = (
@@ -216,6 +219,7 @@ class SimpleCPUOffloadScheduler:
             scheduler_block_size=self.block_size,
             hash_block_size=self.hash_block_size,
             allow_partial_hash_hits=not lazy_offload,
+            num_prefill_lookahead=vllm_config.num_prefill_lookahead_tokens,
         )
         self.group_block_sizes = self.cpu_coordinator.group_block_sizes
         # FA group's own resolved block_size; divides scheduler_block_size (the
@@ -277,20 +281,39 @@ class SimpleCPUOffloadScheduler:
 
     @staticmethod
     def _derive_cpu_config(
-        gpu_config: "KVCacheConfig", cpu_capacity_bytes: int
+        gpu_config: "KVCacheConfig",
+        cpu_capacity_bytes: int,
+        num_cpu_blocks: int | None = None,
+        aligned_num_cpu_blocks: int | None = None,
     ) -> "KVCacheConfig":
         """Derive a CPU KVCacheConfig from the GPU config.
-        Same kv_cache_groups, num_blocks scaled by CPU/GPU memory ratio."""
+        Same kv_cache_groups, num_blocks scaled by CPU/GPU memory ratio.
+
+        An explicit ``num_cpu_blocks`` is checked against local capacity.
+        ``aligned_num_cpu_blocks`` comes from the live worker allocations and
+        is used as-is when no explicit count is configured."""
         # Import here to avoid potential circular imports
         from vllm.v1.kv_cache_interface import KVCacheTensor
 
         assert len(gpu_config.kv_cache_tensors) > 0
 
-        # Every KVCacheTensor describes placement within the same backing allocation,
-        # so its size is the total GPU KV cache size.
-        gpu_total_bytes = gpu_config.kv_cache_tensors[0].size
         num_gpu_blocks = gpu_config.num_blocks
-        num_cpu_blocks = max(1, num_gpu_blocks * cpu_capacity_bytes // gpu_total_bytes)
+        local_capacity = (
+            num_gpu_blocks * cpu_capacity_bytes // gpu_total_bytes(gpu_config)
+        )
+        if num_cpu_blocks is None:
+            num_cpu_blocks = (
+                aligned_num_cpu_blocks
+                if aligned_num_cpu_blocks is not None
+                else max(1, local_capacity)
+            )
+        elif (
+            type(num_cpu_blocks) is not int or not 0 < num_cpu_blocks <= local_capacity
+        ):
+            raise ValueError(
+                f"num_cpu_blocks={num_cpu_blocks!r} must be between 1 and "
+                f"local offload capacity {local_capacity}"
+            )
         # Create CPU kv_cache_tensors mirroring GPU by scaling size proportionally.
         cpu_tensors = [
             KVCacheTensor(
@@ -837,19 +860,6 @@ class SimpleCPUOffloadScheduler:
         )
         request = state.request
         confirmed_tokens = request.num_computed_tokens - request.num_output_placeholders
-        # Truncate to the granularity a lookup can actually land on. With
-        # fine-grained hits that is hash_block_size; otherwise hits only land on
-        # the scheduler block (the group LCM). Using the LCM unconditionally
-        # would drop whole blocks that sit between the last LCM boundary and a
-        # reachable fine-grained boundary, so the other groups would hold that
-        # boundary and this one would not, and the joint hybrid lookup would
-        # reconcile to zero.
-        store_alignment = (
-            self.hash_block_size
-            if self.cpu_coordinator.enable_partial_hash_hits
-            else self.block_size
-        )
-        aligned_tokens = confirmed_tokens // store_alignment * store_alignment
         num_free = self.cpu_block_pool.get_num_free_blocks()
 
         for g, group_gpu_ids in enumerate(block_ids_by_group):
@@ -864,7 +874,11 @@ class SimpleCPUOffloadScheduler:
             # num_stored_blocks can be stale and omit evicted blocks in
             # the middle of the request.
             group_size = self.group_block_sizes[g]
-            ready = min(len(group_gpu_ids), aligned_tokens // group_size)
+            # Mimic the GPU KV cache manager's cacheable prefix.
+            cacheable_tokens = self.cpu_coordinator.get_num_cacheable_tokens(
+                confirmed_tokens, g
+            )
+            ready = min(len(group_gpu_ids), cacheable_tokens // group_size)
             resolved_hashes = resolve_block_hashes(
                 request.block_hashes, self.hash_block_size, group_size
             )
