@@ -22,7 +22,7 @@ use llm_multimodal::{
     FrameSampling, ImageFrame, MediaConnector, MediaConnectorConfig, MediaContentPart,
     MediaItemInfo, Modality, ModelMetadata, ModelProcessorSpec, PreProcessorConfig,
     PreprocessedEncoderInputs, PromptReplacement, Tokenizer as TokenResolver, TrackedMedia,
-    VideoClip, VisionPreProcessor,
+    VideoClip, VisionPreProcessor, VisionPreprocessingContext,
 };
 use serde::{Deserialize, Serialize};
 use thiserror_ext::AsReport as _;
@@ -593,6 +593,46 @@ impl MultimodalModelInfo {
             Modality::ImageEmbeds => None,
         }
     }
+
+    /// Request-scoped context for preprocessing one prompt's images.
+    ///
+    /// The token budget is `max_model_len` less the prompt's text tokens: those
+    /// outside the rendered placeholder markers, which expansion replaces.
+    /// Python's tiler takes the same `max_model_len - text_prompt_length`, but
+    /// the Python frontend calls the processor on placeholder-only dummy text,
+    /// so no prompt text is subtracted there; sizing against the actual prompt
+    /// is what the tiler's interface intends.
+    fn vision_preprocessing_context(
+        &self,
+        prompt_token_ids: &[u32],
+        max_model_len: Option<usize>,
+    ) -> VisionPreprocessingContext {
+        let Some(max_model_len) = max_model_len else {
+            return VisionPreprocessingContext::default();
+        };
+        let markers = [&self.image, &self.video]
+            .into_iter()
+            .flatten()
+            .map(|support| &support.placeholder)
+            .chain(self.audio.as_ref().map(|support| &support.placeholder))
+            .map(|placeholder| placeholder.marker_token_ids.as_slice())
+            .collect::<Vec<_>>();
+
+        let mut text_prompt_len = 0;
+        let mut rest = prompt_token_ids;
+        while !rest.is_empty() {
+            match markers.iter().find(|marker| rest.starts_with(marker)) {
+                Some(marker) => rest = &rest[marker.len()..],
+                None => {
+                    text_prompt_len += 1;
+                    rest = &rest[1..];
+                }
+            }
+        }
+        VisionPreprocessingContext {
+            token_budget: Some(max_model_len.saturating_sub(text_prompt_len)),
+        }
+    }
 }
 
 /// Finalize a rendered chat prompt into text-generation input.
@@ -605,6 +645,7 @@ pub(crate) async fn finalize_rendered_prompt(
     rendered: RenderedPrompt,
     info: Option<&MultimodalModelInfo>,
     model_dtype: ModelDtype,
+    max_model_len: Option<usize>,
 ) -> Result<(Prompt, Option<MmFeatures>)> {
     let media_parts = extract_media_parts(request, rendered.media_order.as_deref())?;
     if media_parts.is_empty() {
@@ -620,7 +661,12 @@ pub(crate) async fn finalize_rendered_prompt(
         Prompt::TokenIds(token_ids) => token_ids,
     };
     let prepared = info
-        .prepare_multimodal(media_parts, &mut prompt_token_ids, model_dtype)
+        .prepare_multimodal(
+            media_parts,
+            &mut prompt_token_ids,
+            model_dtype,
+            max_model_len,
+        )
         .instrument(mm_request_span(&request.request_id))
         .await?;
 
@@ -813,18 +859,22 @@ impl MultimodalModelInfo {
     /// changes both the final prompt and the offsets recorded in
     /// `PlaceholderRange`.
     ///
-    /// The expanded prompt's length is validated against `max_model_len`
-    /// downstream, when text generation resolves the request's max tokens.
+    /// `max_model_len`, when known, is the token budget image processors may
+    /// size the prompt's images by, less its text tokens. The expanded
+    /// prompt's length is validated against `max_model_len` downstream, when
+    /// text generation resolves the request's max tokens.
     pub(crate) async fn prepare_multimodal(
         &self,
         media_parts: Vec<MediaContentPart>,
         prompt_token_ids: &mut Vec<u32>,
         model_dtype: ModelDtype,
+        max_model_len: Option<usize>,
     ) -> Result<MmFeatures> {
         if media_parts.is_empty() {
             return Ok(Vec::new());
         }
-        self.prepare_multimodal_timed(media_parts, prompt_token_ids, model_dtype).await
+        self.prepare_multimodal_timed(media_parts, prompt_token_ids, model_dtype, max_model_len)
+            .await
     }
 
     /// Timed body of [`Self::prepare_multimodal`]; each stage is a `tracing`
@@ -840,15 +890,24 @@ impl MultimodalModelInfo {
         media_parts: Vec<MediaContentPart>,
         prompt_token_ids: &mut Vec<u32>,
         model_dtype: ModelDtype,
+        max_model_len: Option<usize>,
     ) -> Result<MmFeatures> {
         let media_parts_len = media_parts.len();
         self.validate_mm_limits(&media_parts)?;
+        let image_context = self.vision_preprocessing_context(prompt_token_ids, max_model_len);
         let fetched = self.fetch_media(media_parts).await?;
 
         let mut prepared = Vec::new();
         if !fetched.images.is_empty() {
-            prepared
-                .push(self.prepare_images(fetched.images, fetched.image_uuids, model_dtype).await?);
+            prepared.push(
+                self.prepare_images(
+                    fetched.images,
+                    fetched.image_uuids,
+                    model_dtype,
+                    image_context,
+                )
+                .await?,
+            );
         }
         if !fetched.videos.is_empty() {
             prepared
@@ -1223,10 +1282,25 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn nemotron_preprocessing_builds_engine_features() {
-        use vllm_engine_core_client::protocol::multimodal::MmKwargValue;
+    #[test]
+    fn vision_token_budget_excludes_placeholder_markers() {
+        let info = qwen3_vl_info();
+        let budget = |prompt: &[u32], max_model_len| {
+            info.vision_preprocessing_context(prompt, max_model_len).token_budget
+        };
 
+        assert_eq!(
+            budget(
+                &[11, QWEN3_IMAGE_PAD_ID, 12, QWEN3_VIDEO_PAD_ID, 13],
+                Some(4096)
+            ),
+            Some(4096 - 3)
+        );
+        assert_eq!(budget(&[11, 12, 13], Some(2)), Some(0));
+        assert_eq!(budget(&[11], None), None);
+    }
+
+    fn nemotron_omni_info() -> MultimodalModelInfo {
         let tokenizer = TestTokenizer::new()
             .with_regular_token("<image>", 1018)
             .with_regular_token("<img>", 1019)
@@ -1253,7 +1327,7 @@ mod tests {
             config,
             tokenizer: TokenizerResolver(Arc::new(tokenizer)),
         };
-        let info = MultimodalModelInfo::from_loaded(
+        MultimodalModelInfo::from_loaded(
             context,
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
@@ -1261,7 +1335,14 @@ mod tests {
             HashMap::new(),
         )
         .unwrap()
-        .expect("Nemotron-H Omni multimodal support");
+        .expect("Nemotron-H Omni multimodal support")
+    }
+
+    #[tokio::test]
+    async fn nemotron_preprocessing_builds_engine_features() {
+        use vllm_engine_core_client::protocol::multimodal::MmKwargValue;
+
+        let info = nemotron_omni_info();
         let media = MediaContentPart::ImageUrl {
             url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=".to_string(),
             detail: None,
@@ -1272,7 +1353,7 @@ mod tests {
         tokens.push(1018);
 
         let features = info
-            .prepare_multimodal(vec![media], &mut tokens, ModelDtype::Float32)
+            .prepare_multimodal(vec![media], &mut tokens, ModelDtype::Float32, None)
             .await
             .unwrap();
         assert_eq!(features.len(), 1);
@@ -1300,6 +1381,51 @@ mod tests {
             data["image_grid_hw"].data.as_ref(),
             Some(MmKwargValue::Tensor(tensor)) if tensor.shape == [2]
         ));
+    }
+
+    #[tokio::test]
+    async fn nemotron_image_grid_fits_the_vision_token_budget() {
+        use vllm_engine_core_client::protocol::multimodal::MmKwargValue;
+
+        /// Prepare a 640x480 image after 100 text tokens, returning its
+        /// placeholder length and patch count.
+        async fn prepare(
+            info: &MultimodalModelInfo,
+            max_model_len: Option<usize>,
+        ) -> (usize, usize) {
+            let media = MediaContentPart::ImageUrl {
+                url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAoAAAAHgAQAAAAAdquFJAAAAPUlEQVR42u3BAQ0AAADCoPdPbQ43oAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADgzwCX4AABS8wbSgAAAABJRU5ErkJggg==".to_string(),
+                detail: None,
+                uuid: None,
+                max_long_side_pixel: None,
+            };
+            let mut tokens = vec![11; 100];
+            tokens.push(1018);
+            let features = info
+                .prepare_multimodal(vec![media], &mut tokens, ModelDtype::Float32, max_model_len)
+                .await
+                .unwrap();
+            let feature = &features[0];
+            let Some(MmKwargValue::Tensor(pixel_values)) =
+                feature.data.as_ref().unwrap()["pixel_values"].data.as_ref()
+            else {
+                panic!("pixel_values should be a tensor");
+            };
+            (feature.mm_position.length, pixel_values.shape[0])
+        }
+
+        let info = nemotron_omni_info();
+        // Without a budget, or with one the image fits beside the 100 text
+        // tokens, it keeps its 30x40 patch grid: 300 tokens inside `<img>`.
+        assert_eq!(prepare(&info, None).await, (302, 1200));
+        assert_eq!(prepare(&info, Some(404)).await, (302, 1200));
+        // 303 tokens left, one short of those 300 plus the tiler's 4-token
+        // reserve: the grid shrinks to 30x38.
+        assert_eq!(prepare(&info, Some(403)).await, (287, 1140));
+        // No room left: the image still gets the minimum grid of 28x36, as
+        // Python's tiler does, and the length check refuses the prompt
+        // downstream.
+        assert_eq!(prepare(&info, Some(100)).await, (254, 1008));
     }
 
     #[test]
