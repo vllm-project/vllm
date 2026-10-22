@@ -35,19 +35,20 @@ def _build():
     import cutlass
     import cutlass.cute as cute
     from cuda.bindings.driver import CUstream
-    from cutlass import Float32, Int32, Int64, Uint32, const_expr
+    from cutlass import Float32, Int32, Int64, Uint32
     from cutlass.cutlass_dsl import dsl_user_op
 
     from .cute_primitives import (
+        alloc_reduce,
+        cta_reduce,
         decode,
-        ld_u8,
         ld_x16,
+        load_rows,
         mma,
         ptx,
         round_bf16,
         scale_pair,
         silu_mul,
-        st_dsmem_f32,
         st_out,
     )
 
@@ -67,66 +68,6 @@ def _build():
             loc=loc,
             ip=ip,
         )
-
-    @dsl_user_op
-    def ld_w8p(addr: Int64, *, loc=None, ip=None):
-        # Weight words with a 128-byte L2 prefetch: a lane's later chunks of
-        # the same row follow in 32-byte steps.
-        return list(
-            ptx(
-                "ld.global.nc.L1::no_allocate.L2::128B.v2.u32 {$0, $1}, [$2];",
-                "=r,=r,l",
-                [addr],
-                (Uint32,) * 2,
-                loc=loc,
-                ip=ip,
-            )
-        )
-
-    @cute.jit
-    def load_rows(
-        w_base,
-        s_base,
-        row,
-        KC: cutlass.Constexpr,
-        CPW: cutlass.Constexpr,
-        c_begin,
-        t,
-        qs,
-        ss,
-        q_off: cutlass.Constexpr,
-        s_off: cutlass.Constexpr,
-    ):
-        """Weight words / scale bytes of rows (row, row + 8) for CPW chunks."""
-        kb = KC * 32
-        wbase = w_base + Int64(row) * kb + c_begin * 32 + t * 8
-        row8 = row + 8
-        sb_g = (
-            s_base
-            + Int64(row // 128) * (KC * 512)
-            + (row % 32) * 16
-            + ((row % 128) // 32) * 4
-            + t
-            + c_begin * 512
-        )
-        sb_g8 = (
-            s_base
-            + Int64(row8 // 128) * (KC * 512)
-            + (row8 % 32) * 16
-            + ((row8 % 128) // 32) * 4
-            + t
-            + c_begin * 512
-        )
-        for c in cutlass.range_constexpr(CPW):
-            qa = ld_w8p(wbase + c * 32)
-            qb = ld_w8p(wbase + 8 * kb + c * 32)
-            q0 = q_off + c * 4
-            qs[q0 + 0] = qa[0]
-            qs[q0 + 1] = qa[1]
-            qs[q0 + 2] = qb[0]
-            qs[q0 + 3] = qb[1]
-            ss[s_off + c * 2] = ld_u8(sb_g + c * 512)
-            ss[s_off + c * 2 + 1] = ld_u8(sb_g8 + c * 512)
 
     @cute.jit
     def gemv_pass(
@@ -156,58 +97,6 @@ def _build():
                 )
                 for i in cutlass.range_constexpr(4):
                     acc[a_off + i] = r[i]
-
-    def alloc_reduce(smem, NA, WARPS, SPLIT):
-        red = smem.allocate_tensor(
-            Float32,
-            cute.make_layout((WARPS, NA, 32), stride=(NA * 32, 32, 1)),
-            byte_alignment=16,
-        )
-        part = smem.allocate_tensor(
-            Float32,
-            cute.make_layout((SPLIT, NA, 32), stride=(NA * 32, 32, 1)),
-            byte_alignment=16,
-        )
-        return red, part
-
-    @cute.jit
-    def cta_reduce(
-        acc,
-        NA: cutlass.Constexpr,
-        WARPS: cutlass.Constexpr,
-        SPLIT: cutlass.Constexpr,
-        warp,
-        lane,
-        rank,
-        red,
-        part,
-    ):
-        """Sum each lane's NA accumulators over the CTA's warps and the
-        cluster's CTAs (fixed order) into warp 0 of cluster rank 0."""
-        if const_expr(WARPS > 1):
-            for i in cutlass.range_constexpr(NA):
-                red[warp, i, lane] = acc[i]
-            cute.arch.sync_threads()
-        if const_expr(SPLIT > 1):
-            cute.arch.cluster_wait()
-        if warp == 0:
-            for i in cutlass.range_constexpr(NA):
-                v = acc[i]
-                for w2 in cutlass.range_constexpr(1, WARPS):
-                    v = v + red[w2, i, lane]
-                acc[i] = v
-            if const_expr(SPLIT > 1):
-                for i in cutlass.range_constexpr(NA):
-                    st_dsmem_f32(part.iterator + (rank * NA + i) * 32 + lane, acc[i])
-        if const_expr(SPLIT > 1):
-            cute.arch.cluster_arrive()
-            cute.arch.cluster_wait()
-            if warp == 0 and rank == 0:
-                for i in cutlass.range_constexpr(NA):
-                    v = part[0, i, lane]
-                    for r2 in cutlass.range_constexpr(1, SPLIT):
-                        v = v + part[r2, i, lane]
-                    acc[i] = v
 
     class GateUp:
         def __init__(self, h, inter, si, topk):
@@ -296,9 +185,22 @@ def _build():
                 gsv = gs[e]
                 tok = p // self.topk
                 o_off = Int64(p) * INTER + nb * 16
-                load_rows(w_base, s_base, row_g, KC, CPW, c_begin, t, qs, ss, 0, 0)
                 load_rows(
-                    w_base, s_base, row_u, KC, CPW, c_begin, t, qs, ss, CPW * 4, CPW * 2
+                    w_base, s_base, row_g, KC, CPW, c_begin, t, qs, ss, 0, 0, True
+                )
+                load_rows(
+                    w_base,
+                    s_base,
+                    row_u,
+                    KC,
+                    CPW,
+                    c_begin,
+                    t,
+                    qs,
+                    ss,
+                    CPW * 4,
+                    CPW * 2,
+                    True,
                 )
             else:
                 # Shared expert: static weights, loaded before the wait.
@@ -311,13 +213,25 @@ def _build():
                 s_base = ssh.iterator.toint()
                 gsv = gssh[0]
                 o_off = Int64(tok) * SI + c0
-                load_rows(w_base, s_base, row_g, KC, CPW, c_begin, t, qs, ss, 0, 0)
                 load_rows(
-                    w_base, s_base, row_u, KC, CPW, c_begin, t, qs, ss, CPW * 4, CPW * 2
+                    w_base, s_base, row_g, KC, CPW, c_begin, t, qs, ss, 0, 0, True
+                )
+                load_rows(
+                    w_base,
+                    s_base,
+                    row_u,
+                    KC,
+                    CPW,
+                    c_begin,
+                    t,
+                    qs,
+                    ss,
+                    CPW * 4,
+                    CPW * 2,
+                    True,
                 )
                 cute.arch.griddepcontrol_wait()
-            if const_expr(SPLIT > 1):
-                cute.arch.cluster_arrive_relaxed()
+            cute.arch.cluster_arrive_relaxed()
             x_base = x.iterator.toint() + (Int64(tok) * H + c_begin * 64 + t * 16) * 2
             valid = Int32(g == 0)
             acc = cute.make_rmem_tensor((8,), Float32)
@@ -436,6 +350,7 @@ def _build():
                     ss,
                     j * CPW * 4,
                     j * CPW * 2,
+                    True,
                 )
                 gsv[j] = gs[e]
                 twv[j] = tw[tok * TOPK + j]
@@ -451,10 +366,10 @@ def _build():
                 ss,
                 TOPK * CPW * 4,
                 TOPK * CPW * 2,
+                True,
             )
             gss = gssd[0]
-            if const_expr(SPLIT > 1):
-                cute.arch.cluster_arrive_relaxed()
+            cute.arch.cluster_arrive_relaxed()
             cute.arch.griddepcontrol_wait()
             valid = Int32(g == 0)
             NA: cutlass.Constexpr = (TOPK + 1) * 4
@@ -501,10 +416,21 @@ def _build():
     return GateUp, DownCombine
 
 
-def _fake(dtype, shape, div):
+def _fakes(*specs) -> list:
+    """Compile-time tensors: (dtype, divisibility) is 1-D of symbolic size,
+    (dtype, divisibility, shape) has that shape."""
+    import cutlass
+    import cutlass.cute as cute
     from quack.compile_utils import make_fake_tensor
 
-    return make_fake_tensor(dtype, shape, divisibility=div)
+    return [
+        make_fake_tensor(
+            getattr(cutlass, spec[0]),
+            spec[2] if len(spec) > 2 else (cute.sym_int(),),
+            divisibility=spec[1],
+        )
+        for spec in specs
+    ]
 
 
 def _flat_bytes(t: torch.Tensor) -> torch.Tensor:
@@ -517,6 +443,20 @@ def _stream():
     from cuda.bindings.driver import CUstream
 
     return CUstream(torch.cuda.current_stream().cuda_stream)
+
+
+def _compile(key: tuple, fakes: list, *scalars):
+    """Compile kernel ``key = (kind, h, inter, si, topk)`` into ``_compiled``."""
+    global _classes
+    import cutlass.cute as cute
+
+    if _classes is None:
+        _classes = _build()
+    kern = _classes[key[0] == "down"](*key[1:])
+    fn = _compiled[key] = cute.compile(
+        kern, *fakes, *scalars, _stream(), options="--enable-tvm-ffi"
+    )
+    return fn
 
 
 def gate_up(
@@ -536,12 +476,6 @@ def gate_up(
     and in the same launch sact[t] = silu_and_mul(bf16((x[t] @ Wsh^T) * gssh))
     for the shared expert (ModelOpt [gate; up] uint8 [2 SI, H/2], flat
     128x4-swizzled scales)."""
-    global _classes
-    import cutlass
-    import cutlass.cute as cute
-
-    if _classes is None:
-        _classes = _build()
     m, h = x.shape
     p, topk = ids.numel(), ids.shape[1]
     inter = w1.shape[1] // 2
@@ -549,24 +483,22 @@ def gate_up(
     key = ("gu", h, inter, si, topk)
     fn = _compiled.get(key)
     if fn is None:
-        sym = cute.sym_int
-        kern = _classes[0](h, inter, si, topk)
-        fn = _compiled[key] = cute.compile(
-            kern,
-            _fake(cutlass.BFloat16, (sym(),), 8),
-            _fake(cutlass.Int32, (sym(),), 1),
-            _fake(cutlass.Uint8, (sym(),), 16),
-            _fake(cutlass.Uint8, (sym(),), 4),
-            _fake(cutlass.Float32, (sym(),), 1),
-            _fake(cutlass.BFloat16, (sym(),), 1),
-            _fake(cutlass.Uint8, (sym(),), 16),
-            _fake(cutlass.Uint8, (sym(),), 4),
-            _fake(cutlass.Float32, (1,), 1),
-            _fake(cutlass.BFloat16, (sym(),), 1),
+        fn = _compile(
+            key,
+            _fakes(
+                ("BFloat16", 8),
+                ("Int32", 1),
+                ("Uint8", 16),
+                ("Uint8", 4),
+                ("Float32", 1),
+                ("BFloat16", 1),
+                ("Uint8", 16),
+                ("Uint8", 4),
+                ("Float32", 1, (1,)),
+                ("BFloat16", 1),
+            ),
             1,
             1,
-            _stream(),
-            options="--enable-tvm-ffi",
         )
     fn(
         x.view(-1),
@@ -600,12 +532,6 @@ def down_combine(
 ) -> None:
     """out[t] = bf16(bf16(sum_j tw * bf16(act_j @ W2[e_j]^T * alpha2)) +
     bf16(sact[t] @ Wsd^T * gssd))."""
-    global _classes
-    import cutlass
-    import cutlass.cute as cute
-
-    if _classes is None:
-        _classes = _build()
     m, topk = ids.shape
     h = w2.shape[1]
     inter = w2.shape[2] * 2
@@ -613,24 +539,22 @@ def down_combine(
     key = ("down", h, inter, si, topk)
     fn = _compiled.get(key)
     if fn is None:
-        sym = cute.sym_int
-        kern = _classes[1](h, inter, si, topk)
-        fn = _compiled[key] = cute.compile(
-            kern,
-            _fake(cutlass.BFloat16, (sym(),), 8),
-            _fake(cutlass.Int32, (sym(),), 1),
-            _fake(cutlass.Float32, (sym(),), 1),
-            _fake(cutlass.Uint8, (sym(),), 16),
-            _fake(cutlass.Uint8, (sym(),), 4),
-            _fake(cutlass.Float32, (sym(),), 1),
-            _fake(cutlass.BFloat16, (sym(),), 8),
-            _fake(cutlass.Uint8, (sym(),), 16),
-            _fake(cutlass.Uint8, (sym(),), 4),
-            _fake(cutlass.Float32, (1,), 1),
-            _fake(cutlass.BFloat16, (sym(),), 1),
+        fn = _compile(
+            key,
+            _fakes(
+                ("BFloat16", 8),
+                ("Int32", 1),
+                ("Float32", 1),
+                ("Uint8", 16),
+                ("Uint8", 4),
+                ("Float32", 1),
+                ("BFloat16", 8),
+                ("Uint8", 16),
+                ("Uint8", 4),
+                ("Float32", 1, (1,)),
+                ("BFloat16", 1),
+            ),
             1,
-            _stream(),
-            options="--enable-tvm-ffi",
         )
     fn(
         act.view(-1),

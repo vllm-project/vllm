@@ -65,6 +65,22 @@ def ld_w8(addr: Int64, *, loc=None, ip=None):
 
 
 @dsl_user_op
+def ld_w8p(addr: Int64, *, loc=None, ip=None):
+    # ``ld_w8`` with a 128-byte L2 prefetch: a lane's later chunks of the same
+    # row follow in 32-byte steps.
+    return list(
+        ptx(
+            "ld.global.nc.L1::no_allocate.L2::128B.v2.u32 {$0, $1}, [$2];",
+            "=r,=r,l",
+            [addr],
+            (Uint32,) * 2,
+            loc=loc,
+            ip=ip,
+        )
+    )
+
+
+@dsl_user_op
 def ld_w16(addr: Int64, *, loc=None, ip=None):
     return list(
         ptx(
@@ -304,3 +320,109 @@ def fma(a, b, c, *, loc=None, ip=None):
         loc=loc,
         ip=ip,
     )
+
+
+@cute.jit
+def load_rows(
+    w_base,
+    s_base,
+    row,
+    KC: cutlass.Constexpr,
+    CPW: cutlass.Constexpr,
+    c_begin,
+    t,
+    qs,
+    ss,
+    q_off: cutlass.Constexpr,
+    s_off: cutlass.Constexpr,
+    PREFETCH: cutlass.Constexpr = False,
+):
+    """NVFP4 weight words / scale bytes of rows (row, row + 8) for CPW chunks
+    from ``c_begin`` (ModelOpt weight, 128x4-swizzled scales)."""
+    kb = KC * 32
+    wbase = w_base + Int64(row) * kb + c_begin * 32 + t * 8
+    row8 = row + 8
+    sb_g = (
+        s_base
+        + Int64(row // 128) * (KC * 512)
+        + (row % 32) * 16
+        + ((row % 128) // 32) * 4
+        + t
+        + c_begin * 512
+    )
+    sb_g8 = (
+        s_base
+        + Int64(row8 // 128) * (KC * 512)
+        + (row8 % 32) * 16
+        + ((row8 % 128) // 32) * 4
+        + t
+        + c_begin * 512
+    )
+    for c in cutlass.range_constexpr(CPW):
+        if cutlass.const_expr(PREFETCH):
+            qa = ld_w8p(wbase + c * 32)
+            qb = ld_w8p(wbase + 8 * kb + c * 32)
+        else:
+            qa = ld_w8(wbase + c * 32)
+            qb = ld_w8(wbase + 8 * kb + c * 32)
+        q0 = q_off + c * 4
+        qs[q0 + 0] = qa[0]
+        qs[q0 + 1] = qa[1]
+        qs[q0 + 2] = qb[0]
+        qs[q0 + 3] = qb[1]
+        ss[s_off + c * 2] = ld_u8(sb_g + c * 512)
+        ss[s_off + c * 2 + 1] = ld_u8(sb_g8 + c * 512)
+
+
+def alloc_reduce(smem, NA, WARPS, SPLIT):
+    red = smem.allocate_tensor(
+        Float32,
+        cute.make_layout((WARPS, NA, 32), stride=(NA * 32, 32, 1)),
+        byte_alignment=16,
+    )
+    part = smem.allocate_tensor(
+        Float32,
+        cute.make_layout((SPLIT, NA, 32), stride=(NA * 32, 32, 1)),
+        byte_alignment=16,
+    )
+    return red, part
+
+
+@cute.jit
+def cta_reduce(
+    acc,
+    NA: cutlass.Constexpr,
+    WARPS: cutlass.Constexpr,
+    SPLIT: cutlass.Constexpr,
+    warp,
+    lane,
+    rank,
+    red,
+    part,
+):
+    """Sum each lane's NA accumulators over the CTA's warps and the cluster's
+    CTAs (fixed order) into warp 0 of cluster rank 0. With SPLIT > 1 the
+    caller must have issued ``cluster_arrive_relaxed``."""
+    for i in cutlass.range_constexpr(NA):
+        red[warp, i, lane] = acc[i]
+    cute.arch.sync_threads()
+    if cutlass.const_expr(SPLIT > 1):
+        cute.arch.cluster_wait()
+    if warp == 0:
+        for i in cutlass.range_constexpr(NA):
+            v = acc[i]
+            for w2 in cutlass.range_constexpr(1, WARPS):
+                v = v + red[w2, i, lane]
+            acc[i] = v
+        if cutlass.const_expr(SPLIT > 1):
+            for i in cutlass.range_constexpr(NA):
+                st_dsmem_f32(part.iterator + (rank * NA + i) * 32 + lane, acc[i])
+    if cutlass.const_expr(SPLIT > 1):
+        cute.arch.cluster_arrive()
+        cute.arch.cluster_wait()
+        if warp == 0 and rank == 0:
+            for i in cutlass.range_constexpr(NA):
+                v = part[0, i, lane]
+                for r2 in cutlass.range_constexpr(1, SPLIT):
+                    v = v + part[r2, i, lane]
+                acc[i] = v

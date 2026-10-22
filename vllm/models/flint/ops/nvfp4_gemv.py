@@ -36,16 +36,6 @@ class GemvConfig:
     split: int
 
 
-def _default_config(n: int, k: int, bf16: bool = False) -> GemvConfig:
-    chunks = k // _CHUNK
-    warps = 8 if chunks % 8 == 0 else 4
-    blocks = n // 16
-    split = 2 if blocks < 256 and chunks % (2 * warps) == 0 else 1
-    if bf16 and chunks % (2 * split * warps) == 0:
-        split *= 2  # keep the 4x larger per-lane weight fragments in registers
-    return GemvConfig(warps, split)
-
-
 _C = GemvConfig
 _Table = dict[tuple[int, int], dict[int, GemvConfig]]
 # Tuned on GB200 (CUDA-graph replay, weights rotated past L2): config per
@@ -81,11 +71,7 @@ def _table(silu_mul: bool, bf16: bool) -> _Table:
 
 
 def _configs(n: int, k: int, silu_mul: bool, bf16: bool) -> dict[int, GemvConfig]:
-    tuned = _table(silu_mul, bf16).get((n, k))
-    if tuned is not None:
-        return tuned
-    cfg = _default_config(n // 2 if silu_mul else n, k, bf16)
-    return {1: cfg, 2: cfg}
+    return _table(silu_mul, bf16)[(n, k)]
 
 
 def tuned(n: int, k: int, silu_mul: bool = False, bf16: bool = False) -> bool:
@@ -102,19 +88,6 @@ def pick_nt(
     return min(nts) if nts else None
 
 
-def max_m(n: int, k: int, silu_mul: bool = False, bf16: bool = False) -> int:
-    return 8 * max(_configs(n, k, silu_mul, bf16))
-
-
-def supports(n: int, k: int, silu_mul: bool = False, bf16: bool = False) -> bool:
-    if n % 128 or k % _CHUNK or (silu_mul and n % 32):
-        return False
-    return all(
-        (k // _CHUNK) % (cfg.warps * cfg.split) == 0
-        for cfg in _configs(n, k, silu_mul, bf16).values()
-    )
-
-
 def _build_kernel_class():
     import cutlass
     import cutlass.cute as cute
@@ -122,16 +95,16 @@ def _build_kernel_class():
     from cutlass import Float32, Int32, Int64, Uint32, const_expr
 
     from .cute_primitives import (
+        alloc_reduce,
+        cta_reduce,
         decode,
-        ld_u8,
-        ld_w8,
         ld_w16,
         ld_x16,
+        load_rows,
         mma,
         round_bf16,
         scale_pair,
         silu_mul,
-        st_dsmem_f32,
         st_out,
     )
 
@@ -215,7 +188,6 @@ def _build_kernel_class():
             ss = cute.make_rmem_tensor((RB * CPW * 2,), Uint32)
             for rb in cutlass.range_constexpr(RB):
                 row_g = nb * 16 + g + rb * n_out
-                row_g8 = row_g + 8
                 if const_expr(BF16W):
                     # 16 BF16 weights of rows g and g + 8 per chunk.
                     wbase = (
@@ -229,35 +201,19 @@ def _build_kernel_class():
                             for i in cutlass.range_constexpr(4):
                                 qs[q0 + h * 4 + i] = wv[i]
                 else:
-                    wbase = (
-                        w.iterator.toint() + Int64(row_g) * KB + c_begin * 32 + t * 8
+                    load_rows(
+                        w.iterator.toint(),
+                        s.iterator.toint(),
+                        row_g,
+                        KC,
+                        CPW,
+                        c_begin,
+                        t,
+                        qs,
+                        ss,
+                        rb * CPW * QW,
+                        rb * CPW * 2,
                     )
-                    sbase_g = (
-                        s.iterator.toint()
-                        + Int64(row_g // 128) * (KC * 512)
-                        + (row_g % 32) * 16
-                        + ((row_g % 128) // 32) * 4
-                        + t
-                        + c_begin * 512
-                    )
-                    sbase_g8 = (
-                        s.iterator.toint()
-                        + Int64(row_g8 // 128) * (KC * 512)
-                        + (row_g8 % 32) * 16
-                        + ((row_g8 % 128) // 32) * 4
-                        + t
-                        + c_begin * 512
-                    )
-                    for c in cutlass.range_constexpr(CPW):
-                        qa = ld_w8(wbase + c * 32)
-                        qb = ld_w8(wbase + 8 * KB + c * 32)
-                        q0 = (rb * CPW + c) * QW
-                        qs[q0 + 0] = qa[0]
-                        qs[q0 + 1] = qa[1]
-                        qs[q0 + 2] = qb[0]
-                        qs[q0 + 3] = qb[1]
-                        ss[(rb * CPW + c) * 2] = ld_u8(sbase_g + c * 512)
-                        ss[(rb * CPW + c) * 2 + 1] = ld_u8(sbase_g8 + c * 512)
             gsv = Float32(1.0)
             if const_expr(not BF16W):
                 gsv = gs[0]
@@ -314,42 +270,9 @@ def _build_kernel_class():
                 cute.arch.griddepcontrol_launch_dependents()
 
             smem = cutlass.memory.SmemAllocator()
-            red = smem.allocate_tensor(
-                Float32,
-                cute.make_layout((WARPS, NA, 32), stride=(NA * 32, 32, 1)),
-                byte_alignment=16,
-            )
-            part = smem.allocate_tensor(
-                Float32,
-                cute.make_layout((SPLIT, NA, 32), stride=(NA * 32, 32, 1)),
-                byte_alignment=16,
-            )
-            if const_expr(WARPS > 1):
-                for i in cutlass.range_constexpr(NA):
-                    red[warp, i, lane] = acc[i]
-                cute.arch.sync_threads()
-            if const_expr(SPLIT > 1):
-                cute.arch.cluster_wait()
-            if warp == 0:
-                for i in cutlass.range_constexpr(NA):
-                    v = acc[i]
-                    for w2 in cutlass.range_constexpr(1, WARPS):
-                        v = v + red[w2, i, lane]
-                    acc[i] = v
-                if const_expr(SPLIT > 1):
-                    for i in cutlass.range_constexpr(NA):
-                        slot = part.iterator + (rank * NA + i) * 32 + lane
-                        st_dsmem_f32(slot, acc[i])
-            if const_expr(SPLIT > 1):
-                cute.arch.cluster_arrive()
-                cute.arch.cluster_wait()
+            red, part = alloc_reduce(smem, NA, WARPS, SPLIT)
+            cta_reduce(acc, NA, WARPS, SPLIT, warp, lane, rank, red, part)
             if warp == 0 and rank == 0:
-                if const_expr(SPLIT > 1):
-                    for i in cutlass.range_constexpr(NA):
-                        v = part[0, i, lane]
-                        for r2 in cutlass.range_constexpr(1, SPLIT):
-                            v = v + part[r2, i, lane]
-                        acc[i] = v
                 obase = out.iterator.toint()
                 for nt in cutlass.range_constexpr(NT):
                     for i in cutlass.range_constexpr(4):
@@ -409,11 +332,9 @@ def _launch(x, w, s, gs, n, silu_mul, pdl, bf16) -> torch.Tensor:
 
     m, k = x.shape
     assert m > 0 and x.stride(1) == 1 and x.dtype == torch.bfloat16
-    assert supports(n, k, silu_mul, bf16), (n, k, silu_mul, bf16)
+    nt = pick_nt(n, k, m, silu_mul, bf16)
+    assert nt is not None, (n, k, m, silu_mul, bf16)
     out = torch.empty(m, n // 2 if silu_mul else n, dtype=x.dtype, device=x.device)
-    nts = _configs(n, k, silu_mul, bf16)
-    # Beyond the largest tile: re-read the weight per tile of tokens.
-    nt = min((nt for nt in nts if 8 * nt >= m), default=max(nts))
     fn = _get_compiled(n, k, nt, silu_mul, pdl, bf16)
     fn(
         x,
@@ -441,8 +362,8 @@ def nvfp4_gemv(
     """Small-M W4A16 GEMM: ``x @ dequant(weight).T * global_scale``.
 
     Args:
-        x: BF16 ``[M, K]`` activations with unit inner stride. Tuned for
-            ``M <= max_m(N, K)``; larger M re-reads the weight per token tile.
+        x: BF16 ``[M, K]`` activations with unit inner stride; ``(N, K)``
+            and M must be covered by the tuned tables (``pick_nt``).
         weight: uint8 ``[N, K / 2]`` packed E2M1 codes (ModelOpt layout).
         weight_scale: 128x4-swizzled E4M3 block scales (``swizzle_blockscale``).
         global_scale: FP32 scalar tensor (one element).
@@ -521,9 +442,9 @@ def _dequant_kernel():
 
     @triton.jit
     def kernel(
-        w_ptr, s_ptr, out_ptr, row0, K: tl.constexpr, BR: tl.constexpr, BK: tl.constexpr
+        w_ptr, s_ptr, out_ptr, K: tl.constexpr, BR: tl.constexpr, BK: tl.constexpr
     ):
-        r = row0 + tl.program_id(0) * BR + tl.arange(0, BR)
+        r = tl.program_id(0) * BR + tl.arange(0, BR)
         kb = tl.program_id(1) * BK
         b = tl.load(
             w_ptr
@@ -541,11 +462,7 @@ def _dequant_kernel():
         sidx += ((r % 32) * 16 + ((r % 128) // 32) * 4)[:, None] + g[None, :] % 4
         sc = tl.load(s_ptr + sidx).to(tl.float32)
         v = tl.reshape(v * 8.507059173023462e37 * sc[:, :, None], (BR, BK))
-        out = (
-            out_ptr
-            + (r - row0)[:, None].to(tl.int64) * K
-            + (kb + tl.arange(0, BK))[None, :]
-        )
+        out = out_ptr + r[:, None].to(tl.int64) * K + (kb + tl.arange(0, BK))[None, :]
         tl.store(out, v.to(tl.bfloat16))
 
     return kernel
@@ -554,22 +471,19 @@ def _dequant_kernel():
 _dequant = None
 
 
-def dequantize_rows(
-    weight: torch.Tensor, weight_scale: torch.Tensor, row0: int, rows: int
-) -> torch.Tensor:
-    """Exact BF16 ``e2m1 * e4m3`` of weight rows ``[row0, row0 + rows)``
-    (global scale not applied); ``weight_scale`` is 128x4-swizzled."""
+def dequantize_rows(weight: torch.Tensor, weight_scale: torch.Tensor) -> torch.Tensor:
+    """Exact BF16 ``e2m1 * e4m3`` of all weight rows (global scale not
+    applied); ``weight_scale`` is 128x4-swizzled."""
     global _dequant
     if _dequant is None:
         _dequant = _dequant_kernel()
-    k = weight.shape[1] * 2
+    rows, k = weight.shape[0], weight.shape[1] * 2
     assert rows % 16 == 0 and k % 256 == 0
     out = torch.empty(rows, k, dtype=torch.bfloat16, device=weight.device)
     _dequant[(rows // 16, k // 256)](
         weight,
         weight_scale.view(torch.float8_e4m3fn).view(-1),
         out,
-        row0,
         k,
         16,
         256,

@@ -20,15 +20,15 @@ pytestmark = pytest.mark.skipif(
     reason="SM100 only",
 )
 
-# (N, K): qkv, o_proj, dense gate_up/down, shared gate_up/down.
-SHAPES = [
-    (5120, 2048),
-    (2048, 4096),
-    (12288, 2048),
-    (2048, 6144),
-    (2048, 2048),
-    (2048, 1024),
-]
+
+def _cases(table):
+    """(N, K, M) for each tuned shape: M within the first token tile, and a
+    partial and a full largest tile."""
+    return [
+        (n, k, m)
+        for (n, k), cfgs in table.items()
+        for m in sorted({1, 5, 8 * max(cfgs) - 3, 8 * max(cfgs)})
+    ]
 
 
 def _nvfp4(n: int, k: int, seed: int = 0):
@@ -61,8 +61,7 @@ def _check(out, ref):
     assert (err <= tol).all(), f"max err {err.max().item()}"
 
 
-@pytest.mark.parametrize("m", [1, 3, 8, 13, 16, 27, 32])
-@pytest.mark.parametrize("n,k", SHAPES)
+@pytest.mark.parametrize("n,k,m", _cases(nvfp4_gemv._TUNED))
 def test_gemv_matches_dequantized_reference(n, k, m):
     w, s, gs = _nvfp4(n, k)
     x = torch.randn(m, k, dtype=torch.bfloat16, device="cuda")
@@ -73,7 +72,7 @@ def test_gemv_matches_dequantized_reference(n, k, m):
 def test_gemv_dequantizes_every_code_exactly():
     """A one-hot activation reads back single dequantized weights bit-exactly:
     all 16 E2M1 codes times all finite E4M3 scales, incl. subnormals."""
-    n, k = 256, 4096
+    n, k = 2048, 4096
     w = torch.arange(256, dtype=torch.uint8, device="cuda").repeat(n, k // 512)
     w = w[torch.randperm(n, device="cuda")]
     s = (torch.arange(n * k // 16, device="cuda") % 127).to(torch.uint8)
@@ -96,20 +95,18 @@ def test_gemv_strided_input():
     _check(out, _reference(x, w, s, gs))
 
 
-@pytest.mark.parametrize("m", [1, 5, 16, 32])
-@pytest.mark.parametrize("n,k", [(2048, 2048), (12288, 2048)])
+@pytest.mark.parametrize("n,k,m", _cases(nvfp4_gemv._TUNED_SILU_MUL))
 def test_gemv_silu_mul_matches_unfused(n, k, m):
-    """The fused gate_up + SiLU-and-mul epilogue equals the unfused reference
-    applied to the BF16 GEMM output."""
+    """The fused gate_up + SiLU-and-mul epilogue equals SiLU-and-mul applied to
+    the BF16-rounded GEMM output."""
     w, s, _ = _nvfp4(n, k)
-    s = swizzle_blockscale(s)
     gs = torch.tensor(1e-5, device="cuda")  # gate/up values of O(1-10)
     gen = torch.Generator(device="cuda").manual_seed(m)
     x = torch.randn(m, k, dtype=torch.bfloat16, device="cuda", generator=gen)
-    ref = _silu_and_mul_ref(nvfp4_gemv.nvfp4_gemv(x, w, s, gs))
-    out = nvfp4_gemv.nvfp4_gemv(x, w, s, gs, silu_mul=True)
-    # The two GEMMs split K differently, so a gate/up value can differ by one
-    # BF16 ulp, which SiLU amplifies for negative gates (~3% at -8).
+    ref = _silu_and_mul_ref(_reference(x, w, s, gs).bfloat16())
+    out = nvfp4_gemv.nvfp4_gemv(x, w, swizzle_blockscale(s), gs, silu_mul=True)
+    # FP32 vs float64 sums can round a gate/up value one BF16 ulp apart, which
+    # SiLU amplifies for negative gates (~3% at -8).
     err = (out.float() - ref.float()).abs()
     close = err <= 2**-7 * ref.float().abs() + 1e-6
     assert close.float().mean() > 0.999
@@ -127,8 +124,7 @@ def test_merged_global_scale_mismatch_raises():
         list(check_merged_global_scales(bad))
 
 
-@pytest.mark.parametrize("m", [1, 7, 16])
-@pytest.mark.parametrize("n,k", SHAPES)
+@pytest.mark.parametrize("n,k,m", _cases(nvfp4_gemv._TUNED_BF16))
 def test_bf16_gemv_matches_reference(n, k, m):
     w = torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
     x = torch.randn(m, k, dtype=torch.bfloat16, device="cuda")
@@ -141,7 +137,7 @@ def test_bf16_gemv_silu_mul():
     gen = torch.Generator(device="cuda").manual_seed(0)
     w = torch.randn(n, k, dtype=torch.bfloat16, device="cuda", generator=gen) * 0.05
     x = torch.randn(4, k, dtype=torch.bfloat16, device="cuda", generator=gen)
-    ref = _silu_and_mul_ref(nvfp4_gemv.bf16_gemv(x, w))
+    ref = _silu_and_mul_ref((x.double() @ w.double().t()).bfloat16())
     out = nvfp4_gemv.bf16_gemv(x, w, silu_mul=True)
     err = (out.float() - ref.float()).abs()
     assert (err <= 2**-7 * ref.float().abs() + 1e-6).float().mean() > 0.999
@@ -158,7 +154,6 @@ def test_large_m_dequant_gemm_matches_reference():
         weight=w,
         flint_weight_scale=swizzle_blockscale(s),
         flint_global_scale=float(gs),
-        flint_nk=(n, k),
     )
     x = torch.randn(256, k, dtype=torch.bfloat16, device="cuda")
     _check(_dequant_gemm(layer, x), _reference(x, w, s, gs))

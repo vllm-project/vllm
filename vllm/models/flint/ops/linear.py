@@ -69,10 +69,9 @@ class FlintNvFp4LinearKernel(FlashInferCuteDslNvFp4W4A16LinearKernel):
     ) -> torch.Tensor:
         assert bias is None
         x_2d = x.reshape(-1, x.shape[-1])
-        n, k = layer.flint_nk
-        if x_2d.shape[0] >= _DEQUANT_MIN_M.get((n, k), 1 << 62):
+        if x_2d.shape[0] >= _DEQUANT_MIN_M:
             out = _dequant_gemm(layer, x_2d)
-            return out.view(*x.shape[:-1], n)
+            return out.view(*x.shape[:-1], out.shape[-1])
         if _use_gemv(layer, x_2d, silu_mul=False):
             out = nvfp4_gemv.nvfp4_gemv(
                 x_2d,
@@ -118,25 +117,14 @@ class FlintBf16LinearMethod(UnquantizedLinearMethod):
 # Token counts from which exact BF16 dequantization + cuBLAS beats FlashInfer
 # CuTe-DSL in the full model (GB200). At 8192 tokens it wins in isolation
 # (o_proj 107 -> 86 us) but loses in-model (dequant ~9 us under contention).
-_DEQUANT_MIN_M = {
-    shape: 16384
-    for shape in (
-        (5120, 2048),
-        (2048, 4096),
-        (12288, 2048),
-        (2048, 6144),
-        (2048, 2048),
-        (2048, 1024),
-    )
-}
+_DEQUANT_MIN_M = 16384
 
 
 def _dequant_gemm(layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
     """``bf16(fp32(x @ bf16(e2m1 * e4m3).T) * global)`` via cuBLAS: the global
     scale is the GEMM alpha, applied to the FP32 accumulator."""
-    n, k = layer.flint_nk
-    w = nvfp4_gemv.dequantize_rows(layer.weight, layer.flint_weight_scale, 0, n)
-    out = torch.empty(x.shape[0], n, dtype=torch.bfloat16, device=x.device)
+    w = nvfp4_gemv.dequantize_rows(layer.weight, layer.flint_weight_scale)
+    out = torch.empty(x.shape[0], w.shape[0], dtype=torch.bfloat16, device=x.device)
     matmul = torch.backends.cuda.matmul
     prev = matmul.allow_bf16_reduced_precision_reduction
     matmul.allow_bf16_reduced_precision_reduction = False  # FP32 split-K sums
@@ -155,15 +143,13 @@ def _setup_gemv(layer: nn.Module, n: int, k: int, pdl: bool, bf16: bool) -> None
     ] * 2 and nvfp4_gemv.tuned(n, k, silu_mul=True, bf16=bf16)
     for silu_mul in (False, True):
         if layer.flint_gemv_silu_mul if silu_mul else layer.flint_gemv:
-            assert nvfp4_gemv.supports(n, k, silu_mul, bf16)
             nvfp4_gemv.warmup(n, k, silu_mul=silu_mul, pdl=pdl, bf16=bf16)
             logger.info_once(
-                "Flint dense %s%s (N=%d, K=%d): M<=%d -> Flint CuTe GEMV",
+                "Flint dense %s%s (N=%d, K=%d) -> Flint CuTe GEMV for small M",
                 "BF16" if bf16 else "W4A16",
                 " + SiLU-and-mul" if silu_mul else "",
                 n,
                 k,
-                nvfp4_gemv.max_m(n, k, silu_mul, bf16),
             )
 
 
