@@ -12,8 +12,8 @@ Sweeps expert count at a fixed hidden width (default 6144). Two timed regions
 * ``metadata_and_quant``: ``get_cutlass_moe_mm_data`` → ``shuffle_rows`` → quant.
 * ``both``: run ``quant`` then ``metadata_and_quant``.
 
-Routing uses 32 rows (two tokens on experts 0..15). GEMMs are outside the timed
-region.
+Routing uses 32 rows (4 tokens, topk 8, two picks per expert 0..15). GEMMs are
+outside the timed region.
 
 Run from a CUDA-built vLLM checkout, for example:
 
@@ -40,10 +40,10 @@ from vllm import _custom_ops as ops  # noqa: E402
 from vllm.triton_utils import triton  # noqa: E402
 
 ROUTED_ROWS = 32
-TOPK = 1
+TOPK = 8
 DEFAULT_HIDDEN_SIZE = 6144
-INTERMEDIATE_IN = 1024
-INTERMEDIATE_OUT = 512
+DEFAULT_MOE_INTERMEDIATE_SIZE = 2048
+DEFAULT_TP_SIZE = 4
 DEFAULT_EXPERT_COUNTS = (16, 32, 64, 128, 256)
 
 
@@ -94,7 +94,9 @@ def routing_offsets(
 
 
 def decode_topk_ids(rows: int = ROUTED_ROWS) -> torch.Tensor:
-    """Two tokens per expert 0..15; token order shuffled (fixed seed)."""
+    """Two picks per expert 0..15 across 4 tokens (topk=8); shuffled (fixed seed)."""
+    if rows % TOPK != 0:
+        raise ValueError(f"routed rows {rows} must be divisible by topk {TOPK}")
     expert_ids: list[int] = []
     for expert in range(16):
         expert_ids.extend([expert, expert])
@@ -103,7 +105,7 @@ def decode_topk_ids(rows: int = ROUTED_ROWS) -> torch.Tensor:
     gen.manual_seed(0)
     perm = torch.randperm(rows, generator=gen, device="cuda")
     ordered = torch.tensor(expert_ids, device="cuda", dtype=torch.int32)
-    return ordered[perm].unsqueeze(1)
+    return ordered[perm].view(rows // TOPK, TOPK)
 
 
 def benchmark_invoke(invoke, rep: int) -> float:
@@ -338,17 +340,33 @@ def parse_timed_region(raw: str) -> TimedRegion:
         raise ValueError(f"timed-region must be one of: {choices}") from None
 
 
+def intermediate_dims(moe_intermediate_size: int, tp_size: int) -> tuple[int, int]:
+    if moe_intermediate_size % tp_size != 0:
+        raise ValueError(
+            f"moe intermediate size {moe_intermediate_size} must be divisible "
+            f"by tp size {tp_size}"
+        )
+    n_per_rank = moe_intermediate_size // tp_size
+    return 2 * n_per_rank, n_per_rank
+
+
 def build_cases(
     experts: tuple[int, ...],
     hidden_size: int,
+    moe_intermediate_size: int,
+    tp_size: int,
 ) -> list[tuple[Case, torch.Tensor]]:
+    intermediate_in, intermediate_out = intermediate_dims(
+        moe_intermediate_size, tp_size
+    )
     cases: list[tuple[Case, torch.Tensor]] = []
     hidden_input = torch.randn(
         (ROUTED_ROWS, hidden_size), device="cuda", dtype=torch.bfloat16
     )
     intermediate_input = torch.randn(
-        (ROUTED_ROWS, INTERMEDIATE_IN), device="cuda", dtype=torch.bfloat16
+        (ROUTED_ROWS, intermediate_in), device="cuda", dtype=torch.bfloat16
     )
+    w1_n = 2 * intermediate_out
     for expert_count in experts:
         cases.append(
             (
@@ -357,9 +375,9 @@ def build_cases(
                     hidden_size,
                     False,
                     expert_count,
-                    mm_n=4096,
+                    mm_n=w1_n,
                     mm_k=hidden_size,
-                    is_gated=False,
+                    is_gated=True,
                 ),
                 hidden_input,
             )
@@ -368,11 +386,11 @@ def build_cases(
             (
                 Case(
                     "silu_and_mul_mxfp4_experts_quant",
-                    INTERMEDIATE_OUT,
+                    intermediate_out,
                     True,
                     expert_count,
                     mm_n=hidden_size,
-                    mm_k=INTERMEDIATE_OUT,
+                    mm_k=intermediate_out,
                     is_gated=True,
                 ),
                 intermediate_input,
@@ -419,6 +437,24 @@ def main() -> None:
         help=f"hidden activation width K (default: {DEFAULT_HIDDEN_SIZE})",
     )
     parser.add_argument(
+        "--tp-size",
+        type=int,
+        default=DEFAULT_TP_SIZE,
+        help=(
+            "tensor-parallel size; shards moe intermediate per rank "
+            f"(default: {DEFAULT_TP_SIZE})"
+        ),
+    )
+    parser.add_argument(
+        "--moe-intermediate-size",
+        type=int,
+        default=DEFAULT_MOE_INTERMEDIATE_SIZE,
+        help=(
+            "total MoE intermediate size before TP; per-rank N is this divided "
+            f"by --tp-size (default: {DEFAULT_MOE_INTERMEDIATE_SIZE})"
+        ),
+    )
+    parser.add_argument(
         "--experts",
         type=parse_expert_counts,
         default=DEFAULT_EXPERT_COUNTS,
@@ -447,6 +483,23 @@ def main() -> None:
         parser.error("--rep must be positive")
     if args.hidden_size < 128 or args.hidden_size % 128 != 0:
         parser.error("--hidden-size must be a multiple of 128 and >= 128")
+    if args.tp_size < 1:
+        parser.error("--tp-size must be positive")
+    if args.moe_intermediate_size < args.tp_size:
+        parser.error("--moe-intermediate-size must be >= --tp-size")
+    if args.moe_intermediate_size % args.tp_size != 0:
+        parser.error("--moe-intermediate-size must be divisible by --tp-size")
+    try:
+        intermediate_in, intermediate_out = intermediate_dims(
+            args.moe_intermediate_size, args.tp_size
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    if intermediate_out < 32 or intermediate_out % 32 != 0:
+        parser.error(
+            "per-rank MoE intermediate (moe-intermediate-size / tp-size) "
+            "must be a multiple of 32 and >= 32"
+        )
     if not torch.cuda.is_available():
         parser.error("requires a CUDA GPU")
     capability = torch.cuda.get_device_capability()
@@ -457,11 +510,17 @@ def main() -> None:
     if not args.skip_metadata_check:
         verify_sorted_id_writer(num_experts=256)
 
-    cases = build_cases(args.experts, args.hidden_size)
+    cases = build_cases(
+        args.experts,
+        args.hidden_size,
+        args.moe_intermediate_size,
+        args.tp_size,
+    )
     print(f"GPU: {torch.cuda.get_device_name()} (SM{capability[0]}{capability[1]})")
     print(
         f"hidden={ROUTED_ROWS}x{args.hidden_size}, "
-        f"intermediate={ROUTED_ROWS}x{INTERMEDIATE_IN}->{INTERMEDIATE_OUT}, "
+        f"intermediate={ROUTED_ROWS}x{intermediate_in}->{intermediate_out} "
+        f"(moe_intermediate={args.moe_intermediate_size}, tp={args.tp_size}), "
         f"topk={TOPK}"
     )
 
