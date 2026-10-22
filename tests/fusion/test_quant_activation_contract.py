@@ -176,3 +176,10 @@ def test_as_quantized_activation_validates_key():
         as_quantized_activation(qa, None)
     assert as_quantized_activation(torch.zeros(2, 4), kFp8StaticTensorSym) is None
     assert as_quantized_activation(qa, kFp8StaticTensorSym) is qa
+
+
+def test_fp8_linear_method_exposes_input_quant_key():
+    from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
+
+    assert "expose_input_quant_key" in Fp8LinearMethod.create_weights.__code__.co_names
+

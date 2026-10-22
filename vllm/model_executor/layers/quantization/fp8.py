@@ -32,7 +32,7 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     resolve_fp8_moe_weight_block_shape,
     select_fp8_moe_backend,
 )
-from vllm.model_executor.layers.fusion import expose_input_quant_key
+from vllm.model_executor.layers.fusion.quant_activation import expose_input_quant_key
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
