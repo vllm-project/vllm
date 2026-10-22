@@ -3050,6 +3050,7 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
     kv_k_scale: torch.Tensor | None = None,
     kv_v_scale: torch.Tensor | None = None,
     write_qkv: bool = True,
+    enable_pdl: bool = True,
 ) -> None:
     """Fused MiniMax-M3 attention pre-processing (in-place).
 
@@ -3121,6 +3122,7 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
         kv_k_scale,
         kv_v_scale,
         write_qkv,
+        enable_pdl,
     )
 
 
