@@ -66,6 +66,7 @@ from vllm.model_executor.models.transformers.fusers.attention import (
 from vllm.model_executor.models.transformers.utils import (
     attrsetter,
     can_enable_torch_compile,
+    disable_noop_dynamic_rope,
     get_feature_request_tip,
     init_on_device_without_buffers,
     log_replacement,
@@ -182,6 +183,8 @@ class Base(
         self._create_hf_to_vllm_mapper()
         # Remove layers not on this pipeline parallel rank
         self.pipeline_parallel()
+        # Skip the device sync of dynamic rope where it can never rescale
+        disable_noop_dynamic_rope(self.model.get_decoder(), vllm_config)
         # Substitute remaining layers with vLLM's layers as needed
         self.recursive_replace()
         # Create attention instances for KV cache allocation
@@ -282,6 +285,7 @@ class Base(
             dynamic_arg_dims=dynamic_arg_dims,
             enable_if=enable_if,
             is_encoder=is_encoder,
+            use_aot_compile=False,
         )(cls)
 
     def _decorate_for_torch_compile(self):
@@ -544,7 +548,7 @@ class Base(
                         "num_nextn_predict_layers",  # Most models
                         "mtp_num_hidden_layers",  # Qwen 3.5
                     )
-                    n_predict = getattr_iter(self.text_config, names, 0)
+                    n_predict = getattr_iter(self.text_config, names, 0) or 0
                     for i in range(num_hidden_layers, num_hidden_layers + n_predict):
                         mtp_prefix = f"{prefix}.{i}."
                         if mtp_prefix not in self.ignore_unexpected_prefixes:
