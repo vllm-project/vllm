@@ -9,6 +9,9 @@ Times ``mxfp4_experts_quant`` (hidden 6144) and ``silu_and_mul_mxfp4_experts_qua
 routing uses 32 rows (2 tokens on each of the first 16 experts), matching a small
 decode batch. Routing metadata and GEMMs are outside the timed region.
 
+For MXFP4 vs standalone NVFP4 (``scaled_fp4_quant``) on the hidden shape, use
+``benchmark_mxfp4_experts_activation_quant_nvfp4_control.py``.
+
 Run from a CUDA-built vLLM checkout, for example:
 
     .venv/bin/python benchmarks/kernels/benchmark_mxfp4_experts_activation_quant.py
@@ -154,28 +157,6 @@ def benchmark_mxfp4(
     return baseline_us, direct_id_us
 
 
-def benchmark_nvfp4(
-    inputs: torch.Tensor,
-    graph_nodes: int,
-    samples: int,
-) -> float:
-    rows, width = inputs.shape
-    output = torch.empty((rows, width // 2), dtype=torch.uint8, device="cuda")
-    output_scales = torch.empty((rows, width // 16), dtype=torch.uint8, device="cuda")
-    global_scale = torch.tensor(1.0, dtype=torch.float32, device="cuda")
-
-    def invoke() -> None:
-        torch.ops._C.scaled_fp4_quant.out(
-            inputs,
-            global_scale,
-            False,
-            output=output,
-            output_scale=output_scales,
-        )
-
-    return benchmark_graph(invoke, graph_nodes, samples)
-
-
 def verify_sorted_id_writer(num_experts: int) -> None:
     """Check the routing sort writes the expected sorted expert ID at each row."""
     topk_ids = torch.arange(ROUTED_ROWS, device="cuda", dtype=torch.int32) % num_experts
@@ -230,7 +211,6 @@ def main() -> None:
         ),
     )
     parser.add_argument("--skip-metadata-check", action="store_true")
-    parser.add_argument("--skip-nvfp4", action="store_true")
     args = parser.parse_args()
     if args.graph_nodes < 1 or args.samples < 1:
         parser.error("--graph-nodes and --samples must be positive")
@@ -291,10 +271,6 @@ def main() -> None:
             f"{case.kernel},{case.experts},sorted_expert_id,"
             f"{direct_id_us:.4f},{baseline_us / direct_id_us:.4f}"
         )
-
-    if not args.skip_nvfp4:
-        latency = benchmark_nvfp4(hidden_input, args.graph_nodes, args.samples)
-        print(f"scaled_fp4_quant,-,standalone,{latency:.4f},")
 
 
 if __name__ == "__main__":
