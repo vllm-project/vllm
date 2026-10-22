@@ -38,7 +38,10 @@ from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
     gather_initial_states,
 )
 from vllm.model_executor.layers.mamba.ops.scatter_states import scatter_states
-from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    set_cached_tensor,
+    sharded_weight_loader,
+)
 from vllm.model_executor.utils import (
     maybe_disable_graph_partition,
     set_weight_attrs,
@@ -392,15 +395,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         merged = torch.cat(
             [_w(self.q_conv1d), _w(self.k_conv1d), _w(self.v_conv1d)], dim=0
         ).contiguous()
-        cached = self._merged_conv_weight
-        if (
-            cached is not None
-            and cached.shape == merged.shape
-            and cached.dtype == merged.dtype
-        ):
-            cached.copy_(merged)
-        else:
-            self._merged_conv_weight = merged
+        set_cached_tensor(self, "_merged_conv_weight", merged)
 
     def _flashkda_prefill(
         self,
