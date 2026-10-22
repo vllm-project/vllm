@@ -261,12 +261,6 @@ Known issues:
     * [examples/tool_chat_template_mistral_parallel.jinja](../../examples/tool_chat_template_mistral_parallel.jinja) - this is a "better" version that adds a tool-use system prompt
       when tools are provided, that results in much better reliability when working with parallel tool calling.
 
-!!! note
-    With `--tokenizer-mode mistral` and a Tekken v11+ tokenizer, tool calls are constrained by mistral-common's grammar.
-    With `tool_choice="required"` or a named tool, the output starts with the tool call, after an optional `[THINK]` block on tokenizers that have one, and a named tool is called once.
-    A JSON `response_format` or `structured_outputs` is ignored for these choices.
-    Tool names and argument schemas are enforced only for tools with `strict: true`.
-
 Recommended flags:
 
 1. To use the official Mistral AI's format:

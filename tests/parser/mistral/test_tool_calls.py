@@ -5,7 +5,6 @@ import json
 from collections.abc import Generator
 from unittest.mock import MagicMock, patch
 
-import llguidance
 import partial_json_parser
 import pytest
 import regex as re
@@ -17,9 +16,6 @@ from mistral_common.protocol.instruct.tool_calls import (
 )
 from mistral_common.protocol.instruct.tool_calls import (
     NamedToolChoice as MistralNamedToolChoice,
-)
-from mistral_common.protocol.instruct.tool_calls import (
-    Tool as MistralTool,
 )
 from mistral_common.protocol.instruct.tool_calls import (
     ToolChoice as MistralToolChoice,
@@ -65,13 +61,6 @@ def mistral_pre_v11_tokenizer():
 @pytest.fixture(scope="module")
 def mistral_tokenizer():
     MODEL = "mistralai/Mistral-Small-3.2-24B-Instruct-2506"
-    return get_tokenizer(tokenizer_name=MODEL, tokenizer_mode="mistral")
-
-
-@pytest.fixture(scope="module")
-def mistral_think_tokenizer():
-    """v13 Magistral tokenizer with `[THINK]`/`[/THINK]` special tokens."""
-    MODEL = "mistralai/Magistral-Small-2509"
     return get_tokenizer(tokenizer_name=MODEL, tokenizer_mode="mistral")
 
 
@@ -180,8 +169,7 @@ def fix_tool_call_tokenization(
 def encode_mistral_output(tokenizer: MistralTokenizer, text: str) -> list[int]:
     """Encode generated output with control markers as their special-token ids.
 
-    Real generation emits ``[TOOL_CALLS]``, ``[ARGS]``, ``[THINK]`` and
-    ``[/THINK]`` as single control tokens.
+    Real generation emits ``[TOOL_CALLS]``/``[ARGS]`` as single control tokens.
     Encoding the marker *strings* can instead glue them to neighbours (e.g.
     ``}[``) and yield literal text tokens, which the id-based engine never sees.
     Split on the markers and insert their special ids so the token stream
@@ -191,11 +179,9 @@ def encode_mistral_output(tokenizer: MistralTokenizer, text: str) -> list[int]:
     marker_ids = {
         "[TOOL_CALLS]": vocab.get("[TOOL_CALLS]"),
         "[ARGS]": vocab.get("[ARGS]"),
-        "[THINK]": vocab.get("[THINK]"),
-        "[/THINK]": vocab.get("[/THINK]"),
     }
     ids: list[int] = []
-    for part in re.split(r"(\[TOOL_CALLS\]|\[ARGS\]|\[THINK\]|\[/THINK\])", text):
+    for part in re.split(r"(\[TOOL_CALLS\]|\[ARGS\])", text):
         if part in marker_ids:
             marker_id = marker_ids[part]
             # Fall back to text encoding here and the id-based engine path
@@ -1845,7 +1831,7 @@ def _make_request(**kwargs) -> ChatCompletionRequest:
             MistralNamedToolChoice.model_validate(
                 {"type": "function", "function": {"name": "get_weather"}}
             ),
-            False,
+            True,
         ),
         (
             {"tool_choice": "auto", "parallel_tool_calls": False},
@@ -2144,116 +2130,6 @@ def test_grammar_from_parser_set_by_adjust_request(
     result = mistral_tool_parser.adjust_request(request)
     assert isinstance(result, ChatCompletionRequest)
     assert result._grammar_from_parser is True
-
-
-_NAMED_TOOL_CHOICE = {"type": "function", "function": {"name": "get_weather"}}
-_PROSE = "Which city do you mean?"
-_THINK = "[THINK]The user wants the weather in Paris.[/THINK]"
-_WEATHER_CALL = '[TOOL_CALLS]get_weather[ARGS]{"city": "Paris"}'
-
-
-def _adjusted_grammar(tokenizer: MistralTokenizer, **request_kwargs) -> str:
-    result = MistralToolParser(tokenizer).adjust_request(
-        _make_request(**request_kwargs)
-    )
-    assert result.structured_outputs is not None
-    assert result.structured_outputs.grammar is not None
-    return result.structured_outputs.grammar
-
-
-def _num_accepted_tokens(
-    tokenizer: MistralTokenizer, grammar: str, token_ids: list[int]
-) -> int:
-    matcher = llguidance.LLMatcher(
-        tokenizer.llg_tokenizer, llguidance.grammar_from("grammar", grammar)
-    )
-    assert not matcher.is_error(), matcher.get_error()
-    return matcher.validate_tokens(token_ids)
-
-
-@pytest.mark.parametrize(
-    "tokenizer_fixture",
-    ["mistral_tokenizer", "mistral_think_tokenizer"],
-    ids=["base_grammar", "think_grammar"],
-)
-@pytest.mark.parametrize(
-    "tool_choice", ["required", _NAMED_TOOL_CHOICE], ids=["required", "named"]
-)
-def test_adjust_request_forced_tool_choice_starts_with_call(
-    request: pytest.FixtureRequest, tokenizer_fixture: str, tool_choice: str | dict
-) -> None:
-    """A forced tool choice must start with the call, optionally after [THINK]."""
-    tokenizer = request.getfixturevalue(tokenizer_fixture)
-    grammar = _adjusted_grammar(tokenizer, tool_choice=tool_choice)
-    prose_then_call = encode_mistral_output(tokenizer, _PROSE + _WEATHER_CALL)
-    call = encode_mistral_output(tokenizer, _WEATHER_CALL) + [tokenizer.eos_token_id]
-
-    assert _num_accepted_tokens(tokenizer, grammar, prose_then_call) == 0
-    assert _num_accepted_tokens(tokenizer, grammar, call) == len(call)
-
-    if tokenizer_fixture == "mistral_think_tokenizer":
-        think = encode_mistral_output(tokenizer, _THINK)
-        accepted = _num_accepted_tokens(tokenizer, grammar, think + call)
-        assert accepted == len(think + call)
-        accepted = _num_accepted_tokens(tokenizer, grammar, think + prose_then_call)
-        assert accepted == len(think)
-
-
-def test_adjust_request_named_tool_choice_single_call(
-    mistral_tokenizer: MistralTokenizer,
-) -> None:
-    """A named tool is called only once; a second call is rejected."""
-    grammar = _adjusted_grammar(mistral_tokenizer, tool_choice=_NAMED_TOOL_CHOICE)
-    call = encode_mistral_output(mistral_tokenizer, _WEATHER_CALL)
-
-    accepted = _num_accepted_tokens(mistral_tokenizer, grammar, call + call)
-    assert accepted == len(call)
-
-
-@pytest.mark.parametrize("tool_choice", ["auto", "none"])
-def test_adjust_request_auto_and_none_grammars_unchanged(
-    mistral_think_tokenizer: MistralTokenizer, tool_choice: str
-) -> None:
-    """auto/none keep mistral-common's stock grammar."""
-    factory = mistral_think_tokenizer.grammar_factory
-    stock_grammar = factory.get_lark_from_jinja(
-        template=factory.select_jinja_template(),
-        mode=MistralToolChoiceEnum(tool_choice),
-        tools=[MistralTool.from_openai(tool) for tool in SAMPLE_TOOLS_DICTS],
-        json_schema=None,
-        parallel_tool_calls=True,
-    )
-    grammar = _adjusted_grammar(mistral_think_tokenizer, tool_choice=tool_choice)
-
-    assert grammar == stock_grammar
-
-
-@pytest.mark.parametrize(
-    "tool_choice,json_constraint",
-    [
-        ("required", {"response_format": {"type": "json_object"}}),
-        (_NAMED_TOOL_CHOICE, {"response_format": {"type": "json_object"}}),
-        ("required", {"structured_outputs": {"json": {"type": "object"}}}),
-        ("required", {"structured_outputs": {"json_object": True}}),
-        (_NAMED_TOOL_CHOICE, {"structured_outputs": {"json_object": True}}),
-    ],
-    ids=[
-        "required-response_format",
-        "named-response_format",
-        "required-structured_outputs_json",
-        "required-structured_outputs_json_object",
-        "named-structured_outputs_json_object",
-    ],
-)
-def test_adjust_request_forced_tool_choice_drops_json_constraint(
-    mistral_tokenizer: MistralTokenizer, tool_choice: str | dict, json_constraint: dict
-) -> None:
-    """A forced tool choice drops any JSON constraint."""
-    grammar = _adjusted_grammar(
-        mistral_tokenizer, tool_choice=tool_choice, **json_constraint
-    )
-
-    assert grammar == _adjusted_grammar(mistral_tokenizer, tool_choice=tool_choice)
 
 
 @pytest.mark.parametrize("driver", ["legacy", "engine"])
