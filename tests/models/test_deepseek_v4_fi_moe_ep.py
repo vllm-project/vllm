@@ -12,6 +12,7 @@ from vllm.config.kernel import (
     FLASHINFER_MOE_EP_BACKENDS,
     FLASHINFER_MOE_EP_CUTEDSL,
     FLASHINFER_MOE_EP_DEEP_GEMM,
+    FLASHINFER_MOE_EP_SM90,
     MEGA_MOE_BACKENDS,
     NATIVE_MEGA_MOE_BACKENDS,
     PASSTHROUGH_ALL2ALL_BACKEND,
@@ -146,6 +147,7 @@ def _megakernel_moe(moe_backend: str, **overrides) -> SimpleNamespace:
         routing_method=RoutingMethodType.DeepseekV4,
         router_logits_dtype=torch.float32,
         hidden_dim=256,
+        intermediate_size=256,
         is_lora_enabled=False,
         skip_final_all_reduce=False,
         in_dtype=torch.bfloat16,
@@ -177,9 +179,45 @@ def megakernel_host(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     )
     monkeypatch.setattr(fi_ep, "get_current_vllm_config", lambda: config)
     monkeypatch.setattr(
+        fi_ep.current_platform,
+        "get_device_capability",
+        lambda: SimpleNamespace(major=10, minor=0),
+    )
+    monkeypatch.setattr(
         FlashInferMoeEpExperts, "_supports_current_device", staticmethod(lambda: True)
     )
     return config
+
+
+def test_sm90_backend_preserves_packed_mxfp4_weights():
+    """The Hopper adapter must not dequantize the checkpoint before Humming."""
+    tensors = [torch.zeros(2, 128, 64, dtype=torch.uint8) for _ in range(4)]
+    weights = fi_ep.mxfp4_moe_ep_weights(FLASHINFER_MOE_EP_SM90, *tensors)
+    assert (weights.w13, weights.w2, weights.w13_scale, weights.w2_scale) == tuple(
+        tensors
+    )
+
+
+def test_sm90_backend_rejects_incompatible_device_and_recipe(
+    megakernel_host, monkeypatch
+):
+    moe = _megakernel_moe(FLASHINFER_MOE_EP_SM90)
+    supported, reason = _is_supported(moe, kMxfp4Static, None)
+    assert not supported and "device capability" in reason
+    monkeypatch.setattr(
+        fi_ep.current_platform,
+        "get_device_capability",
+        lambda: SimpleNamespace(major=9, minor=0),
+    )
+    assert _is_supported(moe, kMxfp4Static, None) == (True, "")
+    assert "NVFP4 weights" in _is_supported(moe, kNvfp4Static, kNvfp4Dynamic)[1]
+    moe.routing_method = RoutingMethodType.Default
+    assert "routing method" in _is_supported(moe, kMxfp4Static, None)[1]
+    moe.routing_method = RoutingMethodType.DeepseekV4
+    megakernel_host.parallel_config.enable_eplb = True
+    assert "EPLB" in _is_supported(moe, kMxfp4Static, None)[1]
+    blackwell = _megakernel_moe(FLASHINFER_MOE_EP_CUTEDSL)
+    assert "device capability" in _is_supported(blackwell, kMxfp4Static, None)[1]
 
 
 def test_megakernel_requires_expert_parallel(megakernel_host):

@@ -15,6 +15,7 @@ from vllm.config.kernel import (
     FLASHINFER_MOE_EP_BACKENDS,
     FLASHINFER_MOE_EP_CUTEDSL,
     FLASHINFER_MOE_EP_DEEP_GEMM,
+    FLASHINFER_MOE_EP_SM90,
 )
 from vllm.distributed import get_ep_group
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
@@ -30,14 +31,14 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
     from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 
-FlashInferMoeEpKernel = Literal["cutedsl", "deep_gemm"]
+FlashInferMoeEpKernel = Literal["cutedsl", "deep_gemm", "sm90"]
 FlashInferMoeEpWeightFormat = Literal["nvfp4", "mxfp4"]
 _WEIGHT_FORMATS: dict[QuantKey | None, FlashInferMoeEpWeightFormat] = {
     kNvfp4Static: "nvfp4",
     kMxfp4Static: "mxfp4",
 }
 
-_SUPPORTED_CAPABILITIES = frozenset({(10, 0), (10, 3)})
+_SUPPORTED_CAPABILITIES = frozenset({(9, 0), (10, 0), (10, 3)})
 
 
 def supports_current_device() -> bool:
@@ -71,6 +72,7 @@ _E2M1_LUT = (
 class FlashInferMoeEpBackendSpec:
     kernel: FlashInferMoeEpKernel
     weight_formats: frozenset[FlashInferMoeEpWeightFormat]
+    capabilities: frozenset[tuple[int, int]] = frozenset({(10, 0), (10, 3)})
 
 
 @dataclass(frozen=True)
@@ -97,6 +99,11 @@ _BACKEND_SPECS = {
     FLASHINFER_MOE_EP_DEEP_GEMM: FlashInferMoeEpBackendSpec(
         kernel="deep_gemm",
         weight_formats=frozenset({"mxfp4"}),
+    ),
+    FLASHINFER_MOE_EP_SM90: FlashInferMoeEpBackendSpec(
+        kernel="sm90",
+        weight_formats=frozenset({"mxfp4"}),
+        capabilities=frozenset({(9, 0)}),
     ),
 }
 
@@ -131,6 +138,12 @@ def flashinfer_moe_ep_unsupported_reasons(
     """
     spec = flashinfer_moe_ep_backend_spec(moe.moe_backend)
     unsupported: list[str] = []
+    capability = current_platform.get_device_capability()
+    if (
+        capability is None
+        or (capability.major, capability.minor) not in spec.capabilities
+    ):
+        unsupported.append(f"device capability {capability}")
     weight_format = _WEIGHT_FORMATS.get(weight_key)
     if weight_format is None:
         unsupported.append(f"weight scheme {weight_key}")
@@ -147,7 +160,7 @@ def flashinfer_moe_ep_unsupported_reasons(
     if moe.swiglu_alpha is not None or moe.swiglu_beta is not None:
         unsupported.append("custom SwiGLU alpha or beta")
     if (
-        spec.kernel == "deep_gemm"
+        spec.kernel in ("deep_gemm", "sm90")
         and moe.routing_method is not RoutingMethodType.DeepseekV4
     ):
         unsupported.append(f"routing method {moe.routing_method.name}")
@@ -157,8 +170,12 @@ def flashinfer_moe_ep_unsupported_reasons(
         unsupported.append("runtime weight transfer")
     if vllm_config.parallel_config.enable_dbo:
         unsupported.append("dual batch overlap")
-    if spec.kernel == "deep_gemm" and vllm_config.parallel_config.enable_eplb:
+    if spec.kernel in ("deep_gemm", "sm90") and (
+        vllm_config.parallel_config.enable_eplb
+    ):
         unsupported.append("EPLB")
+    if spec.kernel == "sm90" and (moe.hidden_dim % 128 or moe.intermediate_size % 128):
+        unsupported.append("hidden/intermediate dimensions not divisible by 128")
     return tuple(unsupported)
 
 
@@ -231,7 +248,7 @@ def mxfp4_moe_ep_weights(
     w2_scale: torch.Tensor,
 ) -> FlashInferMoeEpWeights:
     spec = flashinfer_moe_ep_backend_spec(moe_backend)
-    if spec.kernel == "deep_gemm":
+    if spec.kernel in ("deep_gemm", "sm90"):
         return FlashInferMoeEpWeights(w13, w2, w13_scale, w2_scale)
     return FlashInferMoeEpWeights(
         w13=_dequant_mxfp4_experts(w13, w13_scale),
@@ -297,6 +314,19 @@ class FlashInferMoeEp:
         if epilogue is None:
             epilogue = FlashInferMoeEpEpilogue()
         ep_group = get_ep_group()
+        max_num_tokens = moe.max_num_tokens
+        # SP pads every TP shard equally, so all EP ranks select the same
+        # workspace without a host collective (including during graph capture).
+        bucket_workspaces = (
+            spec.kernel == "sm90"
+            and moe.sp_size == ep_group.world_size
+            and moe.dp_size == 1
+            and moe.pcp_size == 1
+        )
+        if bucket_workspaces:
+            max_num_tokens = (
+                max(moe.max_num_tokens, moe.max_capture_size) + moe.sp_size - 1
+            ) // moe.sp_size
         bootstrap = api.BootstrapConfig(
             world_size=ep_group.world_size,
             rank=ep_group.rank_in_group,
@@ -305,7 +335,7 @@ class FlashInferMoeEp:
         )
         fleet_params = api.FleetParams(
             num_experts=moe.num_experts,
-            max_tokens_per_rank=moe.max_num_tokens,
+            max_tokens_per_rank=max_num_tokens,
             token_hidden_size=moe.hidden_dim,
         )
         weight_pack = api.MoEWeightPack(
@@ -330,6 +360,18 @@ class FlashInferMoeEp:
                 fc1_norm_const=None,
                 knobs=None,
             )
+        elif spec.kernel == "sm90":
+            from flashinfer.moe_ep import (
+                Sm90_Fp8_Mxfp4_Bf16_PullCutedsl_MegaMoeConfig,
+            )
+
+            if not apply_topk_in_fc1:
+                raise ValueError("SM90 MegaMoE requires pre-FC2 router weights")
+            megakernel = Sm90_Fp8_Mxfp4_Bf16_PullCutedsl_MegaMoeConfig(
+                intermediate_size=moe.intermediate_size,
+                top_k=moe.experts_per_token,
+                gate_up_clamp=moe.swiglu_limit,
+            )
         else:
             megakernel = api.DeepGemmMegaMoeConfig(
                 intermediate_size=moe.intermediate_size,
@@ -352,9 +394,12 @@ class FlashInferMoeEp:
         )
         self._device = weights.w13.device
         self._hidden_size = moe.hidden_dim
-        self._max_num_tokens = moe.max_num_tokens
+        self._max_num_tokens = max_num_tokens
+        self._workspace_buckets: list[tuple[int, Any]] = []
+        self._bucket_workspaces = bucket_workspaces
         self._num_experts = moe.num_experts
         self._top_k = moe.experts_per_token
+        self._topk_indices_dtype = torch.int64 if spec.kernel == "sm90" else torch.int32
         self._epilogue: FlashInferMoeEpEpilogue | None = epilogue
         self._return_workspace_view = moe.routing_method is RoutingMethodType.DeepseekV4
 
@@ -368,7 +413,7 @@ class FlashInferMoeEp:
 
     @property
     def topk_indices_dtype(self) -> torch.dtype:
-        return torch.int32
+        return self._topk_indices_dtype
 
     @property
     def is_monolithic(self) -> bool:
@@ -383,7 +428,7 @@ class FlashInferMoeEp:
         epilogue = cast(FlashInferMoeEpEpilogue, self._epilogue)
         return self._moe_ep_tensors_cls(
             hidden_states=hidden_states,
-            topk_ids=topk_ids,
+            topk_ids=topk_ids.to(self.topk_indices_dtype),
             topk_weights=topk_weights,
             fc1_alpha=epilogue.fc1_alpha,
             fc2_alpha=epilogue.fc2_alpha,
@@ -404,6 +449,11 @@ class FlashInferMoeEp:
                 f"the workspace supports at most {self._max_num_tokens}"
             )
         tensors = self._tensors(hidden_states, topk_ids, topk_weights)
+        for capacity, workspace in self._workspace_buckets:
+            if hidden_states.shape[0] <= capacity:
+                return self._mega_layer.forward(
+                    tensors, workspace=workspace, return_workspace_view=True
+                )
         if self._return_workspace_view and getattr(
             self._mega_layer, "supports_output_view", False
         ):
@@ -421,7 +471,9 @@ class FlashInferMoeEp:
             device=self._device,
         )
         topk_ids = (
-            torch.arange(self._top_k, dtype=torch.int32, device=self._device)
+            torch.arange(
+                self._top_k, dtype=self.topk_indices_dtype, device=self._device
+            )
             .mul_(self._num_experts // self._top_k)
             .view(1, self._top_k)
         )
@@ -431,7 +483,15 @@ class FlashInferMoeEp:
             dtype=torch.float32,
             device=self._device,
         )
-        self._mega_layer.warmup(self._tensors(hidden_states, topk_ids, topk_weights))
+        tensors = self._tensors(hidden_states, topk_ids, topk_weights)
+        self._mega_layer.warmup(tensors)
+        if self._bucket_workspaces and not self._workspace_buckets:
+            capacity = 128
+            while capacity < self._max_num_tokens:
+                workspace = self._mega_layer.create_workspace(capacity)
+                self._mega_layer.warmup(tensors, workspace=workspace)
+                self._workspace_buckets.append((capacity, workspace))
+                capacity *= 4
 
     def kernel_weights(
         self,
@@ -443,7 +503,9 @@ class FlashInferMoeEp:
         """
         if self._mega_layer is None:
             raise RuntimeError("FlashInfer MoE-EP layer was destroyed")
-        (fc1_weight, fc1_sf), (fc2_weight, fc2_sf) = self._mega_layer._transformed
+        fc1, fc2 = self._mega_layer._transformed
+        fc1_weight, fc1_sf = fc1[:2]
+        fc2_weight, fc2_sf = fc2[:2]
         return (
             _expert_major_bytes(fc1_weight),
             _expert_major_bytes(fc1_sf),
@@ -454,7 +516,16 @@ class FlashInferMoeEp:
     def expert_weight_views(self) -> tuple[torch.Tensor, ...]:
         """Every per-expert tensor the kernel reads: weights plus epilogue."""
         epilogue = cast(FlashInferMoeEpEpilogue, self._epilogue)
-        vectors = (epilogue.fc1_alpha, epilogue.fc2_alpha, epilogue.fc1_norm_const)
+        vectors: tuple[torch.Tensor | None, ...] = (
+            epilogue.fc1_alpha,
+            epilogue.fc2_alpha,
+            epilogue.fc1_norm_const,
+        )
+        if self._mega_layer is not None:
+            fc1, fc2 = self._mega_layer._transformed
+            if len(fc1) == 4:
+                # SM90 Humming stores an additional residual scale per expert.
+                vectors = (*vectors, fc1[3], fc2[3])
         return (*self.kernel_weights(), *(v for v in vectors if v is not None))
 
     def destroy(self) -> None:
@@ -463,6 +534,7 @@ class FlashInferMoeEp:
             return
         mega_layer.destroy()
         self._mega_layer = None
+        self._workspace_buckets.clear()
         self._epilogue = None
 
     def __del__(self) -> None:
