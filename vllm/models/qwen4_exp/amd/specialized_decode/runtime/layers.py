@@ -208,6 +208,32 @@ def _block_out(state):
     return torch.empty_like(state), msq
 
 
+def gdn_verify_core(a, x) -> torch.Tensor:
+    """``QwenGatedDeltaNetAttention.forward_hip`` up to out_proj's input on an
+    MTP verify step (vLLM's GDN core applies the spec-decode metadata: each
+    draft's state slot, the accepted-token offsets) -> core [S, NV HD]. The
+    gated norm is ``RMSNormGated``'s Triton kernel, one launch."""
+    from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+        _encode_layer_name,
+    )
+
+    n = x.size(0)
+    qkvz, _ = a.in_proj_qkvz(x)
+    ba, _ = a.in_proj_ba(x)
+    heads = a.num_v_heads // a.tp_size
+    core = x.new_empty(n, heads, a.head_v_dim)
+    z = torch.empty_like(core)
+    torch.ops.vllm.qwen_gdn_attention_core(
+        qkvz.view(n, -1),
+        ba.view(n, -1),
+        z,
+        core,
+        layer_name=_encode_layer_name(a.prefix),
+        use_aiter=True,
+    )
+    return a.norm.forward_cuda(core, z).reshape(n, -1)
+
+
 def qsa_core(attn, x, positions) -> tuple[torch.Tensor, torch.Tensor]:
     """``Qwen4ExpQSAAttention.forward`` up to the output gate (the o_proj block
     applies it to o_proj's input) -> (attention output [S, heads HD], gate)."""

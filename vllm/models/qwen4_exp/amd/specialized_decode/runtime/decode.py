@@ -26,7 +26,13 @@ connection's mix as one more (``mono.front``):
 
 The PLE layers, the final mixer and the embedding stay vLLM's. Stock defers
 each HC combine to the next mix; the blocks materialize it with the same bf16
-rounding, so the PLE layers and the final mixer read a plain state."""
+rounding, so the PLE layers and the final mixer read a plain state.
+
+With MTP every planned step is a verify step: a request's rows are its
+consecutive tokens, so a GDN layer runs vLLM's in_proj, GDN core (on the
+spec-decode metadata) and gated norm in place of the GDN block
+(``gdn_verify_core``); the rest is as above. The drafter's input, the state
+before the final mixer, goes to the buffer the stock forward fills."""
 
 import os
 from collections.abc import Callable
@@ -51,6 +57,7 @@ from vllm.models.qwen4_exp.amd.specialized_decode.runtime.guards import (
 )
 from vllm.models.qwen4_exp.amd.specialized_decode.runtime.layers import (
     Launcher,
+    gdn_verify_core,
     qsa_core,
 )
 from vllm.models.qwen4_exp.amd.specialized_decode.runtime.routing import step_reason
@@ -59,10 +66,12 @@ logger = init_logger(__name__)
 
 
 class Step(NamedTuple):
-    """A planned step: ``width`` rows, one decode token a request."""
+    """A planned step: ``width`` rows, one decode token a request, or (MTP,
+    ``verify``) whole requests of num_speculative_tokens + 1 rows."""
 
     width: int
     attn_metadata: dict[str, Any]  # by layer name
+    verify: bool
 
 
 def agree(reasons: list[str], group, what: str) -> None:
@@ -134,10 +143,13 @@ class SpecializedDecode:
         )
         self._kv: tuple[int, int] | None = None
         logger.info(
-            "%s: %d layers, widths 1-%d, %d builds; other steps run vLLM's decode",
+            "%s: %d layers, widths %d-%d step %d, %d builds; other steps run "
+            "vLLM's decode",
             NAME,
             len(model.layers),
-            config.max_tokens,
+            config.widths[0],
+            config.widths[-1],
+            config.q,
             len(builds),
         )
 
@@ -152,7 +164,7 @@ class SpecializedDecode:
                 for hc in (layer.attn_hyper_connection, layer.mlp_hyper_connection):
                     for m in (False, True):
                         keys.add((front.build, la.front_key(hc, s, m)))
-                if layer.layer_type == "linear_attention":
+                if layer.layer_type == "linear_attention" and self.config.q == 1:
                     keys.add((blocks.build_gdn, la.gdn_key(layer, s)))
                 keys.add((blocks.build_oproj, la.oproj_key(layer, s)))
         return sorted(keys, key=lambda bk: repr(bk[1]))
@@ -175,7 +187,11 @@ class SpecializedDecode:
         if self._kv_key() is None:
             return
         tp = get_tp_group()
-        agree(cache_reasons(self.model, tp.world_size), tp.cpu_group, "the KV caches")
+        agree(
+            cache_reasons(self.model, tp.world_size, self.config.q),
+            tp.cpu_group,
+            "the KV caches",
+        )
         self._kv = self._kv_key()
 
     def plan(
@@ -193,13 +209,16 @@ class SpecializedDecode:
           graphs, and taking one would leave them uncaptured for the prefills
           of that size;
         - more than ``max_tokens`` rows;
-        - steps that are not pure decode steps (``step_reason``).
+        - steps that are not pure decode steps, with MTP not pure verify steps
+          of whole uniform requests (``step_reason``).
 
         Eager steps run the kernels too. Every predicate is the same on all TP
         ranks: the kernels' mailboxes need every rank on one path. Under FULL
         graphs this runs at capture only and the plan is baked in; a replay
         with fewer requests than its graph pads rows with NULL_BLOCK_ID state
-        indices, which the GDN block skips."""
+        indices, which the GDN block skips (with MTP, whole requests with the
+        null state slot and one accepted token, as vLLM's GDN core serves
+        them)."""
         if intermediate_tensors is not None or self._kv is None or input_ids is None:
             return None
         if not is_forward_context_available() or in_piecewise_cudagraph():
@@ -208,7 +227,8 @@ class SpecializedDecode:
         if not 1 <= width <= self.config.max_tokens:
             return None
         md = get_forward_context().attn_metadata
-        if step_reason(md, self.gdn_prefix, width) is not None:
+        q = self.config.q
+        if step_reason(md, self.gdn_prefix, width, q) is not None:
             return None
         assert isinstance(md, dict)
         if self._kv_key() != self._kv:
@@ -217,7 +237,7 @@ class SpecializedDecode:
                 "(ModelState.initialize_kv_cache)"
             )
         logger.info_once("%s: first specialized step (%d rows)", NAME, width)
-        return Step(width, md)
+        return Step(width, md, q > 1)
 
     def run(
         self,
@@ -246,7 +266,9 @@ class SpecializedDecode:
                 layer, layer.attn_hyper_connection, state, msq, la.attn_scratch
             )
             gate = None
-            if layer.layer_type == "linear_attention":
+            if layer.layer_type == "linear_attention" and step.verify:
+                core = gdn_verify_core(layer.linear_attn, x)
+            elif layer.layer_type == "linear_attention":
                 core = la.gdn(layer, md, x)
             else:
                 core, gate = qsa_core(layer.self_attn, x, positions)
@@ -255,6 +277,8 @@ class SpecializedDecode:
                 layer, layer.mlp_hyper_connection, state, msq, la.mlp_scratch
             )
             state, msq = la.moe(layer, x, state, inj)
+        if model._mtp_hidden_buffer is not None:
+            model._mtp_hidden_buffer[: state.size(0)].copy_(state)
         _, h, _ = model.hyper_connection_mixer.mix(state)
         return h
 

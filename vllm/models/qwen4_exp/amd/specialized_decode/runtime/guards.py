@@ -58,7 +58,7 @@ def _fp4_reasons(name: str, linear, rows: int, k: int) -> list[str]:
 
 
 def gdn_conv_state(attn) -> tuple[torch.Tensor, torch.Tensor]:
-    """A GDN layer's (conv state [slots, CONV, 3], recurrent state)."""
+    """A GDN layer's (conv state [slots, CONV, entries], recurrent state)."""
     conv_state, rstate = attn.kv_cache
     if not is_conv_state_dim_first():
         conv_state = conv_state.transpose(-1, -2)
@@ -177,22 +177,21 @@ def model_reasons(model, tp: int) -> list[str]:
     return reasons
 
 
-def cache_reasons(model, tp: int) -> list[str]:
-    """Every reason the kernels cannot update the GDN states vLLM bound."""
+def cache_reasons(model, tp: int, q: int = 1) -> list[str]:
+    """Every reason the kernels cannot update the GDN states vLLM bound (with
+    MTP, ``q`` > 1, the conv state also keeps the drafts' entries)."""
     lay = L.Layout(tp)
+    conv = (lay.CONV, L.CONV_W - 1 + q - 1)
     by_reason: dict[str, list[int]] = {}
     for layer in model.layers:
         if layer.layer_type != "linear_attention":
             continue
         conv_state, rstate = gdn_conv_state(layer.linear_attn)
         why = []
-        if conv_state.dtype != L.CONV_DTYPE or conv_state.shape[1:] != (
-            lay.CONV,
-            L.CONV_W - 1,
-        ):
+        if conv_state.dtype != L.CONV_DTYPE or conv_state.shape[1:] != conv:
             why.append(
                 f"conv state {conv_state.dtype} {tuple(conv_state.shape[1:])}, "
-                f"needs bf16 ({lay.CONV}, {L.CONV_W - 1})"
+                f"needs bf16 {conv}"
             )
         if rstate.dtype != L.STATE_DTYPE or rstate.shape[1:] != (lay.NV, L.HD, L.HD):
             why.append(

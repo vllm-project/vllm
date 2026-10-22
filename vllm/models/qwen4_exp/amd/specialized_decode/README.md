@@ -29,6 +29,14 @@ Supported:
   padding rows are inert); PIECEWISE steps, prefill, mixed and wider steps run
   vLLM's forward. Past 16 rows the MoE block spills and the stock decode is
   faster;
+- MTP (`--speculative-config '{"method": "mtp", "num_speculative_tokens": N}'`,
+  N <= 15): verify steps of whole requests, N + 1 rows each, up to 16 rows
+  (at N = 3, up to 4 requests). A request's rows are consecutive tokens, so the
+  GDN layers of a verify step run vLLM's in_proj, GDN core (on the spec-decode
+  metadata) and gated norm in place of the GDN block; the HC fronts, the QSA
+  layers and the o_proj and MoE blocks run as on a decode step. The drafter
+  reads the state before the final mixer, which the step leaves where the
+  stock forward does;
 - the checkpoint's shapes (`mono/layout.py`, `SHAPES`) and formats: online
   MXFP4 GDN projections in the layout of whichever AITER FP4 GEMM vLLM picked
   for the shape (ASM or Triton), quantizing their inputs as that GEMM does,
@@ -43,8 +51,10 @@ Default-deny, in three stages, each reporting every reason in one error:
 - config, in the model's `__init__` (`runtime/__init__.py`, `unsupported`):
   TP other than 2, PP, DP, EP, EPLB, DCP, PCP, DBO, HC/MoE sequence
   parallelism, LoRA, KV connectors, routed-expert capture, speculative
-  decoding (MTP and EAGLE3 included), sleep mode, CPU weight offload, weight
-  updates, GDN prefix caching, other cache dtypes, an unfused shared expert,
+  decoding other than MTP, more than 15 speculative tokens, adaptive
+  verification, dynamic speculative decoding, MTP without AITER's Triton GDN
+  kernels, sleep mode, CPU weight offload, weight updates, GDN prefix
+  caching, other cache dtypes, an unfused shared expert,
   the V1 runner, `STOCK_TORCH_COMPILE`, other model shapes, and a platform
   other than unpartitioned gfx950;
 - model, after load (`runtime/guards.py`, `model_reasons`): every layer's
@@ -59,7 +69,8 @@ The TP ranks agree on every stage, so a rank never refuses alone. Without
 
 `plan()` runs once a forward: it returns a `Step` for a pure decode step of
 1-16 rows whose GDN metadata (identical on every rank) has int32 state indices
-covering the rows, and None otherwise (vLLM's forward runs). Every kernel is
+covering the rows, with MTP for a pure verify step of whole uniform requests
+filling the rows, and None otherwise (vLLM's forward runs). Every kernel is
 compiled when the executor is built (FlyDSL's `COMPILE_ONLY`), not on the
 first step of a width.
 

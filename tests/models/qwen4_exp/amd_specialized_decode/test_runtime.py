@@ -70,10 +70,20 @@ def _vllm_config(monokernel=True, **parallel):
     )
 
 
+def _spec_config(method="mtp", tokens=3, adaptive=False, dynamic=False):
+    return SimpleNamespace(
+        method=method,
+        num_speculative_tokens=tokens,
+        enable_adaptive_verification=adaptive,
+        uses_dynamic_speculative_decoding=lambda: dynamic,
+    )
+
+
 @pytest.fixture
 def supported_platform(monkeypatch):
     monkeypatch.setenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "1")
     monkeypatch.setattr(runtime, "platform_reasons", lambda: [])
+    monkeypatch.setattr(runtime, "gdn_aiter_triton_available", lambda: True)
 
 
 def test_off_without_monokernel():
@@ -88,12 +98,44 @@ def test_supported_config(supported_platform):
     assert config.widths == tuple(range(1, 17))
 
 
+@pytest.mark.parametrize(
+    "tokens, widths", [(1, (2, 4, 6, 8, 10, 12, 14, 16)), (3, (4, 8, 12, 16))]
+)
+def test_mtp_config(supported_platform, tokens, widths):
+    config = _vllm_config()
+    config.speculative_config = _spec_config(tokens=tokens)
+    got = runtime.specialized_decode_config(config)
+    assert got == runtime.DecodeConfig(q=tokens + 1)
+    assert got.widths == widths
+
+
+def test_mtp_refusals(supported_platform, monkeypatch):
+    def reasons(**spec):
+        config = _vllm_config()
+        config.speculative_config = _spec_config(**spec)
+        return runtime.unsupported(config)
+
+    assert reasons() == []
+    assert reasons(tokens=15) == []
+    cases = {
+        "speculative decoding method 'eagle3' (MTP only)": dict(method="eagle3"),
+        "more than 15 speculative tokens": dict(tokens=16),
+        "adaptive verification": dict(adaptive=True),
+        "dynamic speculative decoding": dict(dynamic=True),
+    }
+    for why, spec in cases.items():
+        got = reasons(**spec)
+        assert got == [why], (why, got)
+    monkeypatch.setattr(runtime, "gdn_aiter_triton_available", lambda: False)
+    assert reasons() == ["MTP without AITER's Triton GDN kernels"]
+
+
 def test_refusals_report_every_reason(supported_platform, monkeypatch):
     monkeypatch.setenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "0")
     config = _vllm_config(tensor_parallel_size=4, enable_expert_parallel=True)
     config.cache_config.mamba_cache_mode = "align"
     config.cache_config.mamba_ssm_cache_dtype = "auto"
-    config.speculative_config = SimpleNamespace(method="mtp")
+    config.speculative_config = _spec_config(method="ngram")
     config.lora_config = SimpleNamespace()
     config.use_v2_model_runner = False
     config.model_config.hf_text_config = _text_config(
@@ -106,7 +148,7 @@ def test_refusals_report_every_reason(supported_platform, monkeypatch):
         "TP 4 (TP2 only)",
         "expert parallelism",
         "LoRA",
-        "speculative decoding",
+        "speculative decoding method 'ngram' (MTP only)",
         "GDN prefix caching (mamba_cache_mode 'align'",
         "GDN cache dtypes",
         "an unfused shared expert",
@@ -215,3 +257,32 @@ def _gdn_metadata(decodes=4, prefills=0, spec=0, indices=None):
 )
 def test_step_reason(md, width, why):
     assert step_reason(md, "gdn", width) == why
+
+
+def _verify_metadata(reqs=2, q=4, uniform=True, decodes=0, prefills=0):
+    return SimpleNamespace(
+        num_prefills=prefills,
+        num_decodes=decodes,
+        num_spec_decodes=reqs,
+        spec_sequence_masks=torch.ones(reqs, dtype=torch.bool) if reqs else None,
+        spec_state_indices_tensor=torch.zeros(reqs, q, dtype=torch.int32),
+        uniform_spec_sequence_length=q if uniform else None,
+    )
+
+
+@pytest.mark.parametrize(
+    "md, width, why",
+    [
+        ({"gdn": _verify_metadata(2)}, 8, None),
+        ({"gdn": _verify_metadata(4)}, 16, None),
+        ({"gdn": _gdn_metadata(4)}, 4, "not spec-verify"),
+        ({"gdn": _verify_metadata(0)}, 4, "not spec-verify"),
+        ({"gdn": _verify_metadata(2, prefills=1)}, 9, "not pure decode"),
+        ({"gdn": _verify_metadata(2, decodes=1)}, 9, "not pure verify"),
+        ({"gdn": _verify_metadata(2, uniform=False)}, 8, "not uniform"),
+        ({"gdn": _verify_metadata(2, q=3)}, 6, "not uniform"),
+        ({"gdn": _verify_metadata(2)}, 12, "not uniform"),
+    ],
+)
+def test_verify_step_reason(md, width, why):
+    assert step_reason(md, "gdn", width, q=4) == why

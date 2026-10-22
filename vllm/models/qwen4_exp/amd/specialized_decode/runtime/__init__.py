@@ -23,14 +23,17 @@ NAME = "Qwen3.8-Flash-Next specialized decode (--monokernel)"
 
 @dataclass(frozen=True)
 class DecodeConfig:
+    # rows a request decodes a step: 1, or num_speculative_tokens + 1 with MTP
+    q: int = 1
     # rows a launch serves; a wider step runs vLLM's decode
     max_tokens: int = L.MAX_TOKENS
 
     @property
     def widths(self) -> tuple[int, ...]:
-        """Every row count up to ``max_tokens``: eager steps and FULL graph
-        capture sizes alike (a graph's pad rows are inert in the kernels)."""
-        return tuple(range(1, self.max_tokens + 1))
+        """The rows a launch serves: whole requests up to ``max_tokens`` rows,
+        eager steps and FULL graph capture sizes alike (a graph's pad rows are
+        inert in the kernels; with MTP a replay pads whole requests)."""
+        return tuple(range(self.q, self.max_tokens + 1, self.q))
 
 
 def specialized_decode_config(vllm_config) -> DecodeConfig | None:
@@ -51,7 +54,8 @@ def specialized_decode_config(vllm_config) -> DecodeConfig | None:
             "use FULL decode graphs",
             NAME,
         )
-    return DecodeConfig()
+    spec = vllm_config.speculative_config
+    return DecodeConfig(q=1 if spec is None else spec.num_speculative_tokens + 1)
 
 
 def unsupported(vllm_config) -> list[str]:
@@ -73,7 +77,7 @@ def unsupported(vllm_config) -> list[str]:
         vllm_config.parallel_config,
         vllm_config.cache_config,
     )
-    oc = vllm_config.offload_config
+    spec, oc = vllm_config.speculative_config, vllm_config.offload_config
     checks = (
         (pc.tensor_parallel_size != TP, f"TP {pc.tensor_parallel_size} (TP{TP} only)"),
         (pc.pipeline_parallel_size != 1, "pipeline parallelism"),
@@ -102,8 +106,29 @@ def unsupported(vllm_config) -> list[str]:
             "CPU weight offload",
         ),
         (vllm_config.weight_transfer_config is not None, "weight updates"),
-        # the GDN block runs plain decode rows, one token a request
-        (vllm_config.speculative_config is not None, "speculative decoding"),
+        # a verify step runs whole uniform requests of num_speculative_tokens + 1
+        # rows; the drafter reads the pre-mixer state the MTP method keeps
+        (
+            spec is not None and spec.method != "mtp",
+            f"speculative decoding method {getattr(spec, 'method', None)!r} (MTP only)",
+        ),
+        (
+            spec is not None and spec.num_speculative_tokens + 1 > L.MAX_TOKENS,
+            f"more than {L.MAX_TOKENS - 1} speculative tokens",
+        ),
+        (
+            spec is not None and spec.enable_adaptive_verification,
+            "adaptive verification",
+        ),
+        (
+            spec is not None and spec.uses_dynamic_speculative_decoding(),
+            "dynamic speculative decoding",
+        ),
+        # a verify step's GDN layers run vLLM's GDN core on AITER's Triton path
+        (
+            spec is not None and not gdn_aiter_triton_available(),
+            "MTP without AITER's Triton GDN kernels",
+        ),
         # the GDN block reads and writes one state slot a request in place
         (
             cc.mamba_cache_mode != "none",
@@ -155,6 +180,14 @@ def unsupported(vllm_config) -> list[str]:
     if layers > L.MAX_LAYERS:
         reasons.append(f"{layers} decoder layers (at most {L.MAX_LAYERS})")
     return reasons + platform_reasons()
+
+
+def gdn_aiter_triton_available() -> bool:
+    from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+        GDN_AITER_TRITON_AVAILABLE,
+    )
+
+    return GDN_AITER_TRITON_AVAILABLE
 
 
 def text_shapes(text) -> tuple:
