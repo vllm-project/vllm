@@ -163,6 +163,8 @@ class XpuMemAllocator:
     def _python_free_callback(self, ptr: int) -> HandleType:
         data = self.pointer_to_data.pop(ptr)
         data.cpu_backup_tensor = None
+        # Drain pending kernels before the allocation is unmapped.
+        torch.accelerator.synchronize(data.handle[0])
         logger.debug("Freed %s bytes for %s at %s", data.handle[1], data.tag, ptr)
         return data.handle
 
@@ -229,9 +231,7 @@ class XpuMemAllocator:
             )
 
         gc.collect()
-        xpu_empty_cache = getattr(torch.xpu, "empty_cache", None)
-        if callable(xpu_empty_cache):
-            xpu_empty_cache()
+        torch.accelerator.empty_cache()
 
     def discard(self, tags: tuple[str, ...] | str) -> None:
         """Discard mapped allocations with the given tags without CPU backup."""
