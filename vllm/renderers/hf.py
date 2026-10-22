@@ -22,14 +22,7 @@ import torch
 from typing_extensions import override
 
 from vllm import envs
-from vllm.entrypoints.chat_utils import (
-    PROMPT_EMBEDS_PLACEHOLDER_TOKEN,
-    ChatTemplateResolutionError,
-    load_chat_template,
-    parse_chat_messages,
-    parse_chat_messages_async,
-)
-from vllm.exceptions import VLLMValidationError
+from vllm.exceptions import ChatTemplateResolutionError, VLLMValidationError
 from vllm.inputs import EmbedsPrompt
 from vllm.inputs.engine import MultiModalInput
 from vllm.logger import init_logger
@@ -46,6 +39,12 @@ from vllm.multimodal.processing.processor import (
     apply_token_matches,
     find_mm_placeholders,
 )
+from vllm.renderers.chat_utils import (
+    PROMPT_EMBEDS_PLACEHOLDER_TOKEN,
+    load_chat_template,
+    parse_chat_messages,
+    parse_chat_messages_async,
+)
 from vllm.tokenizers.hf import HfTokenizer, maybe_make_thread_pool
 from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
 from vllm.transformers_utils.processor import cached_get_processor
@@ -59,17 +58,17 @@ if TYPE_CHECKING:
     from collections.abc import Set
 
     from vllm.config import ModelConfig, VllmConfig
-    from vllm.entrypoints.chat_utils import (
-        ChatCompletionMessageParam,
-        ChatTemplateContentFormat,
-        ChatTemplateContentFormatOption,
-        ConversationMessage,
-    )
     from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict, TokensPrompt
     from vllm.inputs.engine import TokensInput
     from vllm.multimodal.processing.processor import (
         MultiModalPromptUpdates,
         ResolvedPromptUpdate,
+    )
+    from vllm.renderers.chat_utils import (
+        ChatCompletionMessageParam,
+        ChatTemplateContentFormat,
+        ChatTemplateContentFormatOption,
+        ConversationMessage,
     )
 
     from .inputs import DictPrompt
@@ -324,6 +323,11 @@ def _is_var_access(node: jinja2.nodes.Node, varname: str) -> bool:
     if isinstance(node, jinja2.nodes.Name):
         return node.ctx == "load" and node.name == varname
 
+    # `ns.rest` matches the dotted alias "ns.rest".
+    if isinstance(node, jinja2.nodes.Getattr) and "." in varname:
+        base, _, attr = varname.rpartition(".")
+        return node.attr == attr and _is_var_access(node.node, base)
+
     return False
 
 
@@ -361,11 +365,26 @@ def _is_var_or_elems_access(
     return _is_attr_access(node, varname, key) if key else _is_var_access(node, varname)
 
 
+def _attr_dotted_name(node: jinja2.nodes.Node) -> str | None:
+    """Render an attribute-assignment target like ``ns.rest`` as a dotted name."""
+    if isinstance(node, jinja2.nodes.NSRef):
+        return f"{node.name}.{node.attr}"
+    parts = []
+    while isinstance(node, jinja2.nodes.Getattr):
+        parts.append(node.attr)
+        node = node.node
+    if isinstance(node, jinja2.nodes.Name):
+        parts.append(node.name)
+        return ".".join(reversed(parts))
+    return None
+
+
 def _iter_nodes_assign_var_or_elems(root: jinja2.nodes.Node, varname: str):
     # Global variable that is implicitly defined at the root
     yield root, varname
 
     # Iterative BFS
+    seen = {varname}
     related_varnames = deque([varname])
     while related_varnames:
         related_varname = related_varnames.popleft()
@@ -374,13 +393,40 @@ def _iter_nodes_assign_var_or_elems(root: jinja2.nodes.Node, varname: str):
             lhs = assign_ast.target
             rhs = assign_ast.node
 
-            if _is_var_or_elems_access(rhs, related_varname):
-                assert isinstance(lhs, jinja2.nodes.Name)
+            if isinstance(lhs, jinja2.nodes.Name) and _is_var_or_elems_access(
+                rhs, related_varname
+            ):
                 yield assign_ast, lhs.name
 
                 # Avoid infinite looping for self-assignment
-                if lhs.name != related_varname:
+                if lhs.name != related_varname and lhs.name not in seen:
+                    seen.add(lhs.name)
                     related_varnames.append(lhs.name)
+
+            # Namespace aliases: `namespace(rest=messages)` or `ns.rest = messages`.
+            aliases: list[str] = []
+            if (
+                isinstance(lhs, jinja2.nodes.Name)
+                and isinstance(rhs, jinja2.nodes.Call)
+                and isinstance(rhs.node, jinja2.nodes.Name)
+                and rhs.node.name == "namespace"
+            ):
+                aliases = [
+                    f"{lhs.name}.{kwarg.key}"
+                    for kwarg in rhs.kwargs
+                    if _is_var_or_elems_access(kwarg.value, related_varname)
+                ]
+            elif isinstance(
+                lhs, (jinja2.nodes.Getattr, jinja2.nodes.NSRef)
+            ) and _is_var_or_elems_access(rhs, related_varname):
+                dotted = _attr_dotted_name(lhs)
+                aliases = [dotted] if dotted is not None else []
+
+            for alias in aliases:
+                yield assign_ast, alias
+                if alias != related_varname and alias not in seen:
+                    seen.add(alias)
+                    related_varnames.append(alias)
 
 
 # NOTE: The proper way to handle this is to build a CFG so that we can handle
@@ -1000,7 +1046,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             return await coro
         try:
             return await asyncio.wait_for(coro, timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._replace_executor()
             raise TimeoutError(
                 f"Chat template rendering timed out after "
