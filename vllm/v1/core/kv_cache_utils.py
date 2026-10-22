@@ -960,10 +960,7 @@ def get_num_hash_lookahead_tokens(vllm_config: VllmConfig) -> int:
         or not vllm_config.cache_config.enable_prefix_caching
     ):
         return 0
-    # HiSparse is not validated with lookahead hashes.
-    if vllm_config.attention_config.hisparse_config is not None:
-        return 0
-    # KV connectors keep the legacy hashes.
+    # KV connectors, including HiSparse's, keep the legacy hashes.
     if vllm_config.kv_transfer_config is not None:
         return 0
     # The drafter's KV at a block's last position reads this far ahead.

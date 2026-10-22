@@ -1134,7 +1134,6 @@ def test_lookahead_block_hash_keeps_mm_inputs_for_next_block(
             {"disable_lookahead_block_hashes": True}, 0, id="disabled-by-config"
         ),
         pytest.param({"kv_connector": True}, 0, id="kv-connector"),
-        pytest.param({"hisparse": True}, 0, id="hisparse"),
     ],
 )
 def test_num_hash_lookahead_tokens(overrides: dict[str, Any], expected: int):
@@ -1156,9 +1155,6 @@ def test_num_hash_lookahead_tokens(overrides: dict[str, Any], expected: int):
                 "num_prefill_lookahead_tokens", 1
             ),
             kv_transfer_config=object() if overrides.get("kv_connector") else None,
-            attention_config=SimpleNamespace(
-                hisparse_config=object() if overrides.get("hisparse") else None
-            ),
         ),
     )
 
