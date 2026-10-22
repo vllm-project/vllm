@@ -47,6 +47,7 @@ def deepseek_v41_config(thinking: bool = False) -> ParserEngineConfig:
             _dsml_arg_converter,
             param_re=_PARAM_RE,
             partial_param_re=_PARTIAL_PARAM_RE,
+            param_start=DSML_PARAM_START,
         ),
         arg_value_extender=functools.partial(
             _dsml_arg_value_extender,

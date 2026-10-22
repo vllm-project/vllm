@@ -1335,6 +1335,21 @@ class TestArgValueExtender:
     def test_no_extender_unless_open_string_value(self, raw_args):
         assert _dsml_arg_value_extender(raw_args) is None
 
+    @pytest.mark.parametrize(
+        "partial_tag", ['<｜DSML｜parameter name="j', "<｜DSML｜parameter na"]
+    )
+    def test_holds_back_partial_tag_after_gt(self, partial_tag):
+        raw_args = (
+            "<" + _PARAM_OPEN.format(name="k", is_str="true") + "a > b" + partial_tag
+        )
+        assert json.loads(_dsml_arg_converter(raw_args, True)) == {"k": "a > b"}
+        assert _dsml_arg_value_extender(raw_args) is None
+
+    def test_arms_on_value_ending_in_newline(self):
+        raw_args = "<" + _PARAM_OPEN.format(name="k", is_str="true") + "def f():\n"
+        assert json.loads(_dsml_arg_converter(raw_args, True)) == {"k": "def f():\n"}
+        assert _dsml_arg_value_extender(raw_args) is not None
+
 
 # ── Malformed DSML markup must not leak into content (#51914) ─────────
 

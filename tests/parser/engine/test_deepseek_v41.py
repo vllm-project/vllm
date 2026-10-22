@@ -148,6 +148,16 @@ def test_python_argument_conversion_and_partial_values():
     }
 
 
+@pytest.mark.parametrize(
+    "partial_tag", ['<｜DSML｜ parameter name="j', "<｜DSML｜ parameter na"]
+)
+def test_partial_tag_after_gt_is_held_back(partial_tag):
+    converter = deepseek_v41_config().arg_converter
+    raw = '<｜DSML｜ parameter name="k" string="true">a > b' + partial_tag
+    assert json.loads(converter(raw, True)) == {"k": "a > b"}
+    assert deepseek_v41_config().arg_value_extender(raw) is None
+
+
 def test_long_string_argument_streams_before_close():
     # Regression for #52846: a string body has no ">" so it used to be
     # buffered until the closing parameter tag arrived.
