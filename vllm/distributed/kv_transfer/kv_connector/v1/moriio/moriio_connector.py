@@ -82,6 +82,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_layout import (
     is_mla_cache_layer,
     iter_layer_registration_regions,
     kda_conv_ssm,
+    validate_transfer_block_ids,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_tp_mapping import (
     MoRIIOWriteTPMapping,
@@ -3426,8 +3427,7 @@ class MoRIIOConnectorWorker:
         none, and MoRI cannot open an xGMI session to a peer GPU whose device
         index this process does not see, so xGMI reads the fixed source.
         """
-        moriio_config = getattr(self, "moriio_config", None)
-        return getattr(moriio_config, "backend", "rdma") != "xgmi"
+        return self.moriio_config.backend != "xgmi"
 
     def _resolve_read_source(self, meta: ReqMeta) -> tuple[int, bool]:
         """Resolve (chosen_tp, flexible) for reading this request's KV.
@@ -3720,11 +3720,12 @@ class MoRIIOConnectorWorker:
                 f"Layer {layer_name} holds {local_layout.num_heads} KV heads per "
                 f"rank here and {remote_layout.num_heads} on the peer"
             )
-        if len(local_block_ids) > len(remote_block_ids):
-            raise ValueError(
-                "local_block_ids longer than remote_block_ids: "
-                f"{len(local_block_ids)} > {len(remote_block_ids)}"
-            )
+        validate_transfer_block_ids(
+            local_block_ids,
+            remote_block_ids,
+            self.num_blocks,
+            remote_moriio_meta.num_blocks,
+        )
         # The prefill side is the source: compute its offsets as local and swap.
         source_offsets, local_offsets, sizes = compute_head_slice_offsets(
             remote_layout,
@@ -3995,6 +3996,8 @@ class MoRIIOConnectorWorker:
     ) -> None:
         if self.mode == MoRIIOMode.WRITE:
             return
+        # 0 means the peer did not advertise its TP size: homogeneous TP.
+        remote_tp_size = int(remote_tp_size) or self.world_size
 
         # Read from the prefill rank that actually computed this request's KV
         # (forwarded by the proxy). Hardcoding DP0 reads from a different rank's
@@ -4015,9 +4018,9 @@ class MoRIIOConnectorWorker:
         # once released, including the ones whose identical copy is not read.
         holders = (
             (eff_tp,)
-            if int(remote_tp_size) == self.world_size
+            if remote_tp_size == self.world_size
             else get_moriio_read_holder_tp_ranks(
-                self.tp_rank, self.world_size, int(remote_tp_size)
+                self.tp_rank, self.world_size, remote_tp_size
             )
         )
         notify_ports = tuple(
@@ -4113,7 +4116,7 @@ class MoRIIOConnectorWorker:
                     local_layer_blocks,
                     remote_layer_blocks,
                     remote_moriio_meta,
-                    int(remote_tp_size),
+                    remote_tp_size,
                     remote_dp_engine_id,
                 )
                 statuses.append(
