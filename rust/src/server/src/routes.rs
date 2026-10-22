@@ -61,7 +61,7 @@ async fn disabled_scale_out() -> (StatusCode, Json<ErrorResponse>) {
                 message: SCALE_OUT_DISABLED_MESSAGE.to_string(),
                 error_type: "PermissionDeniedError".to_string(),
                 param: None,
-                code: Some("403".to_string()),
+                code: StatusCode::FORBIDDEN.as_u16(),
             },
         }),
     )
@@ -82,7 +82,7 @@ async fn not_supported(method: Method, path: MatchedPath) -> (StatusCode, Json<E
                 ),
                 error_type: "NotImplementedError".to_string(),
                 param: None,
-                code: Some("501".to_string()),
+                code: 501,
             },
         }),
     )
