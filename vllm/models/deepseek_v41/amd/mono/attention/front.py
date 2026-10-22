@@ -288,11 +288,14 @@ def quant_x_half(c, regs, n):
 
 
 @traced
-def stage_wqkv(c, task, part, ops, t0, n, live):
+def stage_wqkv(c, task, part, ops, t0, n, live, settle=False):
     """Rows 16 task .. of wqkv over K half ``part`` against tokens t0 .. t0 + n
-    -> fp32 partials QKVP[part] (``live``: a CTA with a wqkv part)."""
+    -> fp32 partials QKVP[part] (``live``: a CTA with a wqkv part; ``settle``:
+    ``back.stage_woa``'s)."""
     tid, red = c["tid"], c["red"]
     gemv_mfmas(c, HIDDEN, c["xl"], c["xsl"], red, ops, rows=n, nsteps=KSTEPS)
+    if const_expr(settle):
+        rocdl.s_waitcnt(vmcnt=0)
     gpu.barrier()
     if (tid < ROWS * n) & live:
         r = tid % ROWS
@@ -497,15 +500,17 @@ def wqb_pos(c, t0, n):
 
 
 @traced
-def stage_wqb(c, task0, bops, t0, n, rope):
+def stage_wqb(c, task0, bops, t0, n, rope, settle=False):
     """Rows 16 (task0 + BLOCKS k) .. of the rank's H x 512 query rows, every
     task k of the CTA: GEMVs -> bf16 -> GPT-J RoPE of a head's dims 448..
-    (fp32) -> bf16 -> q."""
+    (fp32) -> bf16 -> q (``settle``: ``back.stage_woa``'s)."""
     tid, red, d = c["tid"], c["red"], c["d"]
     a = c["args"]
     nt = len(bops)
     for k in range_constexpr(nt):
         gemv_mfmas(c, Q_RANK, c["qxl"], c["qxsl"], red + k * RED, bops[k], rows=n)
+    if const_expr(settle):
+        rocdl.s_waitcnt(vmcnt=0)
     gpu.barrier()
     per = ROWS * n // 2  # bf16 pairs a task
     if tid < nt * per:
@@ -697,7 +702,8 @@ def run_front(c, key, bid, x8_given=False, before_wqkv=None, after_wqkv=None):
                 if const_expr(ti + 1 < len(tiles)):
                     t1, n1 = tiles[ti + 1]
                     regs = rows_loads(c, *xw, *xg, t1, n1, pred=has_wqkv)
-                stage_wqkv(c, task, part, kops, t0, n, has_wqkv)
+                settle = ti + 1 < len(tiles)
+                stage_wqkv(c, task, part, kops, t0, n, has_wqkv, settle=settle)
         bops = wqb_weights()
     else:
         await_flags(c, c["xrdy"], s, lambda u: WQKV_KPARTS * u + part)
@@ -742,5 +748,6 @@ def run_front(c, key, bid, x8_given=False, before_wqkv=None, after_wqkv=None):
         rows_store(c, regs, QX_WORDS, Q_RANK // 32, c["qxl"], c["qxsl"], n)
         if const_expr(ti + 1 < len(tiles)):
             regs = rows_loads(c, *qx, *tiles[ti + 1])
-        stage_wqb(c, wqb_task, bops, t0, n, ropes[ti])
+        settle = key.tuned and ti + 1 < len(tiles)
+        stage_wqb(c, wqb_task, bops, t0, n, ropes[ti], settle=settle)
     stamp(c, 4)
