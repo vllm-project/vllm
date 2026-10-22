@@ -19,7 +19,12 @@ def requires_aux_hidden_states(spec_config: SpeculativeConfig) -> bool:
             or {}
         )
         return eagle_config.get("use_aux_hidden_state", True)
-    return spec_config.method in ("dflash", "dspark", "extract_hidden_states")
+    return spec_config.method in (
+        "dflash",
+        "dspark",
+        "longspark",
+        "extract_hidden_states",
+    )
 
 
 def set_eagle3_aux_hidden_state_layers(
