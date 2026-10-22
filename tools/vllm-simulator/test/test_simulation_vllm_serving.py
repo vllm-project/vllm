@@ -11,7 +11,7 @@ Two modes are covered:
 - NON_BLOCKING: the hijacked `vllm bench serve` client
   (vllm_simulator.simulation.bench_serving) replays the traffic logically
   through simulation.created_time, and the benchmark result is substituted
-  with the backend-dumped simulation metrics
+  with the simulation metrics computed from the server's per-request stats
   (test_vllm_serving_non_blocking).
 """
 
@@ -35,20 +35,34 @@ SERVER_PORT = 18100
 
 
 class VLLMServingRunner:
-    def __init__(self, model: str, port: int = SERVER_PORT, env_overrides: dict | None = None, **extra_args):
+    def __init__(
+        self,
+        model: str,
+        port: int = SERVER_PORT,
+        env_overrides: dict | None = None,
+        **extra_args,
+    ):
         cmd = [
             sys.executable,
             "-m",
             "vllm_simulator.simulation.vllm.launch_server",
-            "--model", model,
-            "--port", str(port),
-            "--dtype", "float16",
-            "--load-format", "dummy",
+            "--model",
+            model,
+            "--port",
+            str(port),
+            "--dtype",
+            "float16",
+            "--load-format",
+            "dummy",
             "--enforce-eager",
-            "--block-size", "16",
-            "--gpu-memory-utilization", "0.9",
-            "--max-model-len", "8192",
-            "--num-gpu-blocks-override", "1000000",
+            "--block-size",
+            "16",
+            "--gpu-memory-utilization",
+            "0.9",
+            "--max-model-len",
+            "8192",
+            "--num-gpu-blocks-override",
+            "1000000",
         ]
         for k, v in extra_args.items():
             flag = "--" + k.replace("_", "-")
@@ -64,9 +78,7 @@ class VLLMServingRunner:
             env.update(env_overrides)
         self.port = port
         self.base_url = f"http://localhost:{port}"
-        self.server_proc = subprocess.Popen(
-            cmd, env=env, preexec_fn=os.setsid
-        )
+        self.server_proc = subprocess.Popen(cmd, env=env, preexec_fn=os.setsid)
 
         # Wait for server to be ready
         dur = 0
@@ -79,6 +91,7 @@ class VLLMServingRunner:
                 pass
             time.sleep(1)
             dur += 1
+        self.shutdown()
         raise RuntimeError("Failed to start vLLM simulation server.")
 
     def completions(self, prompt: str, max_tokens: int = 10) -> dict:
@@ -145,83 +158,121 @@ def test_vllm_serving_non_blocking():
     The client (vllm_simulator.simulation.bench_serving) does not pace
     requests in real time; each request carries simulation.created_time and
     the server replays the traffic against its virtual clock. The client then
-    substitutes the backend-dumped simulation metrics into the result.
+    computes metrics from stats returned with each non-streaming completion
+    or chat response, with no separate stats endpoint.
     """
     num_prompts = 8
     request_rate = 10
-    output_dir = tempfile.mkdtemp(prefix="sim_non_blocking_output_")
     result_dir = tempfile.mkdtemp(prefix="sim_non_blocking_result_")
 
     runner = VLLMServingRunner(
         model=MODEL_PATH,
         port=SERVER_PORT + 1,
-        env_overrides={
-            "VLLM_SIMULATOR_OUTPUT_MODE": "NON_BLOCKING",
-            "VLLM_SIMULATOR_OUTPUT_DIR": output_dir,
-        },
-        # No --profiler-config needed: the EngineArgs hook internally
-        # defaults profiler="cuda" so /start_profile & /stop_profile (the
-        # sim round markers) are registered.
+        env_overrides={"VLLM_SIMULATOR_OUTPUT_MODE": "NON_BLOCKING"},
     )
 
     try:
-        env = os.environ.copy()
-        env["VLLM_SIMULATOR_OUTPUT_DIR"] = output_dir
-        cmd = [
-            sys.executable,
-            "-m",
-            "vllm_simulator.simulation.bench_serving",
-            "--backend", "openai",
-            "--base-url", runner.base_url,
-            "--model", MODEL_PATH,
-            "--dataset-name", "random",
-            "--num-prompts", str(num_prompts),
-            "--random-input-len", "64",
-            "--random-output-len", "8",
-            "--request-rate", str(request_rate),
-            "--seed", "0",
-            "--percentile-metrics", "ttft,tpot,itl,e2el",
-            "--save-result",
-            "--result-filename", "bench_result.json",
-            "--result-dir", result_dir,
-            "--disable-tqdm",
-        ]
-        proc = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=600)
-        print(proc.stdout)
-        print(proc.stderr, file=sys.stderr)
-        assert proc.returncode == 0, f"bench_serving failed:\n{proc.stderr}"
+        for backend in ("openai", "openai-chat"):
+            filename = f"bench_{backend}.json"
+            cmd = [
+                sys.executable,
+                "-m",
+                "vllm_simulator.simulation.bench_serving",
+                "--backend",
+                backend,
+                "--endpoint",
+                (
+                    "/v1/chat/completions"
+                    if backend == "openai-chat"
+                    else "/v1/completions"
+                ),
+                "--base-url",
+                runner.base_url,
+                "--model",
+                MODEL_PATH,
+                "--dataset-name",
+                "random",
+                "--num-prompts",
+                str(num_prompts),
+                "--random-input-len",
+                "64",
+                "--random-output-len",
+                "8",
+                "--request-rate",
+                str(request_rate),
+                "--seed",
+                "0",
+                "--percentile-metrics",
+                "ttft,tpot,itl,e2el",
+                "--metric-percentiles",
+                "50,75,99",
+                "--num-warmups",
+                "2",
+                "--ready-check-timeout-sec",
+                "60",
+                "--ignore-eos",
+                "--save-result",
+                "--save-detailed",
+                "--result-filename",
+                filename,
+                "--result-dir",
+                result_dir,
+                "--disable-tqdm",
+            ]
+            if backend == "openai-chat":
+                cmd.extend(["--goodput", "ttft:10000", "tpot:10000", "e2el:10000"])
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            print(proc.stdout)
+            print(proc.stderr, file=sys.stderr)
+            assert proc.returncode == 0, f"{backend} failed:\n{proc.stderr}"
+            assert " Simulation Metrics " in proc.stdout
+            with open(os.path.join(result_dir, filename)) as f:
+                result = json.load(f)
 
-        # The backend stats dump must have been found and substituted.
-        assert " Simulation Metrics " in proc.stdout, (
-            "simulation metrics were not substituted into the benchmark result"
+            # The readiness check and warmups must not count toward results.
+            assert result["completed"] == result["num_requests"] == num_prompts
+            assert result["total_output_tokens"] == num_prompts * 8
+            assert result["duration"] > 0
+            assert result["output_throughput"] > 0
+            assert result["mean_ttft_ms"] > 0
+            assert result["mean_e2el_ms"] > 0
+            assert result["p75_ttft_ms"] >= result["p50_ttft_ms"]
+            assert "prompt_tokens_local_cache_hit_ratio" in result
+            if backend == "openai-chat":
+                assert (
+                    abs(result["request_goodput"] - result["request_throughput"]) < 1e-6
+                )
+            else:
+                assert result["request_goodput"] is None
+            assert len(result["ttfts"]) == num_prompts
+            assert (
+                abs(sum(result["ttfts"]) / num_prompts * 1000 - result["mean_ttft_ms"])
+                < 1e-6
+            )
+
+        # The previous round reset the virtual clock, so this non-streaming
+        # request is replayed from its own created_time.
+        created_time = 0.5
+        resp = requests.post(
+            f"{runner.base_url}/v1/completions",
+            json={
+                "model": MODEL_PATH,
+                "prompt": "Hello world",
+                "max_tokens": 4,
+                "ignore_eos": True,
+                "vllm_xargs": {
+                    "simulation": json.dumps(
+                        {"created_time": created_time, "total_request": 1}
+                    ),
+                },
+            },
+            timeout=60,
         )
-
-        with open(os.path.join(result_dir, "bench_result.json")) as f:
-            result = json.load(f)
-
-        # Simulation-substituted fields.
-        assert result["completed"] == num_prompts
-        assert result["num_requests"] == num_prompts
-        assert result["duration"] > 0
-        assert result["output_throughput"] > 0
-        assert result["mean_ttft_ms"] > 0
-        assert result["mean_e2el_ms"] > 0
-        # Sim-only extra stats prove the result came from the backend dump.
-        assert "prompt_tokens_local_cache_hit_ratio" in result
-
-        # Backend per-request stats: all requests replayed by created_time.
-        stats_path = os.path.join(output_dir, "request.jsonl")
-        with open(stats_path) as f:
-            req_stats = [json.loads(line) for line in f if line.strip()]
-        assert len(req_stats) == num_prompts
-        # request_rate=10 -> logical arrivals spread over ~0.8 virtual seconds.
-        assert any(r["created_time"] > 0 for r in req_stats), (
-            "expected non-zero created_time for rate-limited replay"
-        )
-        assert all(
-            r["created_time"] >= 0 and len(r["gen_token_latencies"]) > 0
-            for r in req_stats
-        )
+        resp.raise_for_status()
+        stats = resp.json()["kv_transfer_params"]["simulation"]
+        assert stats["created_time"] == created_time
+        assert len(stats["gen_token_latencies"]) == 4
+        assert stats["last_event_time"] > created_time
 
         print("\n[PASS] test_vllm_serving_non_blocking passed!")
     finally:

@@ -281,7 +281,12 @@ class C_WorkerHook(BaseHook):
             target.sample_tokens = wrapped_sample_tokens
 
         def override_profile(
-            self, is_start: bool = True, profile_prefix: str | None = None
+            self,
+            is_start: bool = True,
+            profile_prefix: str | None = None,
+            *,
+            delay_iterations: int | None = None,
+            max_iterations: int | None = None,
         ):
             global BATCH_INFOS, _COLLECTING_BATCHES
 
@@ -323,14 +328,25 @@ class C_EngineCoreHook(BaseHook):
         original_profile = target.profile
 
         def wrapped_profile(
-            self, is_start: bool = True, profile_prefix: str | None = None
+            self,
+            is_start: bool = True,
+            profile_prefix: str | None = None,
+            delay_iterations: int | None = None,
+            max_iterations: int | None = None,
         ):
             global REQUEST_INFOS, _COLLECTING_REQUESTS
+
+            # Omit unset controls for compatibility with older vLLM versions.
+            profile_kwargs = {}
+            if delay_iterations is not None:
+                profile_kwargs["delay_iterations"] = delay_iterations
+            if max_iterations is not None:
+                profile_kwargs["max_iterations"] = max_iterations
 
             if is_start:
                 REQUEST_INFOS = {}
                 _COLLECTING_REQUESTS = True
-                return original_profile(self, is_start, profile_prefix)
+                return original_profile(self, is_start, profile_prefix, **profile_kwargs)
 
             _COLLECTING_REQUESTS = False
             request_infos = REQUEST_INFOS
@@ -349,7 +365,7 @@ class C_EngineCoreHook(BaseHook):
                     f.write(json.dumps(row, cls=CustomJsonEncoder) + "\n")
             print(f"Request data has been saved to {path}")
 
-            return original_profile(self, is_start, profile_prefix)
+            return original_profile(self, is_start, profile_prefix, **profile_kwargs)
 
         target.profile = wrapped_profile
 

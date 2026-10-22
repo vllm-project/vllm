@@ -2,24 +2,19 @@
 VLLMWorker - AsyncLLM-backed BaseWorker for the simulation benchmarks.
 
 Hooks are installed before importing vLLM.  Stats are recorded in the
-EngineCoreProc child, dumped to VLLM_SIMULATOR_OUTPUT_DIR at each
-trigger_simulation() round boundary and read back by get_*_stats().
+EngineCoreProc child and returned with each finished request's output.
 """
 
 import asyncio
-import json
 import os
 import uuid
 
 from vllm_simulator.simulation.benchmark import BaseWorker, GenericRequest
-from vllm_simulator.utils import get_logger
 from vllm_simulator.simulation.vllm.startup import init_hook
+from vllm_simulator.utils import get_logger
 
 # Environment must be set before vllm import
 os.environ.setdefault("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION", "1")
-
-# Captured before any worker writes its own per-worker default below.
-_USER_OUTPUT_DIR = os.environ.get("VLLM_SIMULATOR_OUTPUT_DIR")
 
 init_hook()
 
@@ -60,13 +55,6 @@ class VLLMWorker(BaseWorker):
     ):
         super().__init__(name)
 
-        # Inherited by the engine-core child.  An explicit env value wins;
-        # otherwise each worker gets its own directory.
-        os.environ["VLLM_SIMULATOR_OUTPUT_DIR"] = (
-            _USER_OUTPUT_DIR or f"/tmp/vllm_simulator/{name}"
-        )
-        self.output_dir = os.path.realpath(os.environ["VLLM_SIMULATOR_OUTPUT_DIR"])
-
         if engine_args.enforce_eager == AsyncEngineArgs.enforce_eager:
             engine_args.enforce_eager = True
 
@@ -75,11 +63,8 @@ class VLLMWorker(BaseWorker):
         self._llm = AsyncLLM.from_engine_args(engine_args)
         logger.info("[VLLMWorker] Initialized with model=%s", engine_args.model)
 
-        # trigger_simulation alternates start/stop profile (round boundaries)
-        self._profile_is_start = True
-
-    async def async_generate(self, req: GenericRequest):
-        """Stream a single request through the engine; returns the final output."""
+    async def async_generate(self, req: GenericRequest) -> dict:
+        """Stream a single request through the engine; returns its stats."""
         # Pass simulation metadata (created_time) via extra_args
         extra_args = None
         if req.custom_params:
@@ -100,23 +85,17 @@ class VLLMWorker(BaseWorker):
         # Callers that join stats across engines (PD) pin the request id;
         # it is kept verbatim since request-id randomization is disabled.
         request_id = req.custom_params.get("request_id") or uuid.uuid4().hex
+        req.custom_params["request_id"] = request_id
 
         final_output = None
-        async for output in self._llm.generate(
-            prompt, sp, request_id=request_id
-        ):
+        async for output in self._llm.generate(prompt, sp, request_id=request_id):
             final_output = output
-        return final_output
 
-    async def trigger_simulation(self):
-        """Round separator: profile() in the engine-core child dumps
-        request/iteration stats to VLLM_SIMULATOR_OUTPUT_DIR and resets
-        them for the next round."""
-        if self._profile_is_start:
-            await self._llm.start_profile()
-        else:
-            await self._llm.stop_profile()
-        self._profile_is_start = not self._profile_is_start
+        params = final_output.kv_transfer_params if final_output else None
+        stats = (params or {}).get("simulation")
+        if stats is None:
+            raise RuntimeError(f"[VLLMWorker] {self.name}: no stats for {request_id}")
+        return {**stats, "rid": final_output.request_id}
 
     async def flush_cache(self):
         """Clear the device prefix cache and the KV connector cache.
@@ -126,26 +105,8 @@ class VLLMWorker(BaseWorker):
         if not await self._llm.reset_prefix_cache(reset_connector=True):
             raise RuntimeError(f"[VLLMWorker] {self.name}: cache reset failed")
 
-    def _load_jsonl(self, filename: str) -> list[dict]:
-        data = []
-        file_path = os.path.join(self.output_dir, filename)
-        if os.path.exists(file_path):
-            with open(file_path) as f:
-                for line in f:
-                    if line.strip():
-                        data.append(json.loads(line))
-        else:
-            logger.error(f"The statistics data({file_path}) does not exist.")
-        return data
-
-    def get_request_stats(self) -> list[dict]:
-        return self._load_jsonl("request.jsonl")
-
-    def get_iteration_stats(self) -> list[dict]:
-        return self._load_jsonl("iteration.jsonl")
-
-    def generate(self, req: GenericRequest):
-        """Generate output for a single request (sync).
+    def generate(self, req: GenericRequest) -> dict:
+        """Generate output for a single request (sync); returns its stats.
 
         Only safe as the first generate entrypoint on this worker: AsyncLLM
         binds its output handler to the loop of the first generate() call.

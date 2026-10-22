@@ -5,27 +5,37 @@ Hijacks ``vllm.benchmarks.serve`` so that:
 1. The client never sleeps between requests; each request carries
    ``simulation.created_time`` and the server replays arrivals from it
    (see ``C_VLLMEngineCoreHook``).
-2. Reported metrics are aggregated by ``calc_metrics`` from the
-   ``request.jsonl`` dumped by the server's profile hook.
+2. Non-streaming completions/chat responses return per-request stats in
+   ``kv_transfer_params["simulation"]``. Native benchmark latency metrics use
+   the simulated token latencies; ``calc_metrics`` supplies duration,
+   throughput, and cache-hit metrics.
 
 Usage:
     python -m vllm_simulator.simulation.bench_serving [vllm bench serve args...]
 
-Requires the simulator server (``vllm_simulator.simulation.vllm.launch_server``),
-which uses /start_profile and /stop_profile as round markers.
+Requires the simulator server (``vllm_simulator.simulation.vllm.launch_server``).
 """
 
-import argparse
+import inspect
 import json
-import os
-from typing import AsyncGenerator, Literal
+import time
+import traceback
+from collections.abc import AsyncGenerator
+from contextvars import ContextVar
+from typing import Literal
 
+import aiohttp
 import numpy as np
+
 from vllm.benchmarks import serve
 from vllm.benchmarks.datasets import SampleRequest
-
-from vllm_simulator.simulation.manager import Envs
+from vllm.benchmarks.lib import endpoint_request_func as request_funcs
 from vllm_simulator.simulation.utils import calc_metrics
+
+# Enabled by get_request only after readiness checks and warmups finish.
+_REQUEST_STATS: ContextVar[list[dict] | None] = ContextVar(
+    "simulation_request_stats", default=None
+)
 
 
 # Same arrival model as ``serve.get_request``, but the cumulative delay becomes
@@ -48,6 +58,7 @@ async def override_get_request(
 
     total_requests = len(input_requests)
     assert total_requests > 0, "No requests provided."
+    _REQUEST_STATS.set([])
 
     request_rates: list[float] = []
     delay_ts: list[float] = []
@@ -98,18 +109,107 @@ async def override_get_request(
         overrides = dict(request.request_overrides or {})
         overrides["vllm_xargs"] = {
             **overrides.get("vllm_xargs", {}),
-            "simulation": json.dumps({
-                "created_time": delay_ts[request_index],
-                "total_request": total_requests,
-            }),
+            "simulation": json.dumps(
+                {
+                    "created_time": delay_ts[request_index],
+                    "total_request": total_requests,
+                }
+            ),
         }
         request.request_overrides = overrides
         yield request, request_rates[request_index]
 
 
-# Replace client-side metrics with the simulated ones from ``request.jsonl``,
-# dumped on the /stop_profile that ``serve.benchmark`` issues before returning.
-# The client-side result is kept if the file is missing.
+async def async_request_simulation(
+    request_func_input: request_funcs.RequestFuncInput,
+    session: aiohttp.ClientSession,
+    pbar=None,
+) -> request_funcs.RequestFuncOutput:
+    """Return simulated token timings from a non-streaming response."""
+    output = request_funcs.RequestFuncOutput(
+        prompt_len=request_func_input.prompt_len, start_time=time.perf_counter()
+    )
+    rows = _REQUEST_STATS.get()
+    try:
+        api_url = request_func_input.api_url
+        is_chat = api_url.endswith("/chat/completions")
+        request_funcs._validate_api_url(api_url, "Simulation API", "completions")
+        payload = {
+            "model": request_func_input.model_name or request_func_input.model,
+        }
+        if is_chat:
+            payload["messages"] = (
+                request_func_input.chat_messages
+                if request_func_input.chat_messages is not None
+                else request_funcs._get_chat_messages(request_func_input)
+            )
+            payload["max_completion_tokens"] = request_func_input.output_len
+        else:
+            payload.update(
+                prompt=request_func_input.prompt,
+                repetition_penalty=1.0,
+                max_tokens=request_func_input.output_len,
+                logprobs=request_func_input.logprobs,
+            )
+        request_funcs._update_payload_common(payload, request_func_input)
+        payload["stream"] = False
+        payload.pop("stream_options", None)
+        if payload.get("n", 1) != 1:
+            raise ValueError("Simulation stats require n=1.")
+
+        # Readiness checks and warmups are independent one-request rounds.
+        # Override any metadata left on a reused dataset by an earlier run.
+        if rows is None:
+            payload["vllm_xargs"] = {
+                **payload.get("vllm_xargs", {}),
+                "simulation": json.dumps({"created_time": 0, "total_request": 1}),
+            }
+        headers = request_funcs._get_headers("application/json")
+        request_funcs._update_headers_common(headers, request_func_input)
+        async with session.post(api_url, json=payload, headers=headers) as response:
+            if response.status != 200:
+                output.error = f"HTTP {response.status}: {await response.text()}"
+                return output
+            data = await response.json()
+
+        stats = (data.get("kv_transfer_params") or {}).get("simulation")
+        if not isinstance(stats, dict) or not stats.get("gen_token_latencies"):
+            raise ValueError(
+                "Response has no simulation request stats; use the simulator server."
+            )
+        if len(data["choices"]) != 1:
+            raise ValueError("Simulation stats require a single prompt and choice.")
+        choice = data["choices"][0]
+        output.generated_text = (
+            choice["message"].get("content") if is_chat else choice.get("text")
+        ) or ""
+        usage = data["usage"]
+        output.prompt_len = usage["prompt_tokens"]
+        output.output_tokens = usage["completion_tokens"]
+        latencies = stats["gen_token_latencies"]
+        output.ttft = latencies[0]
+        output.itl = latencies[1:]
+        output.latency = sum(latencies)
+        output.tpot = float(np.mean(output.itl)) if output.itl else 0.0
+        output.success = True
+        if rows is not None:
+            rows.append(
+                {
+                    **stats,
+                    "input_length": output.prompt_len,
+                    "output_length": output.output_tokens,
+                }
+            )
+    except Exception:
+        output.error = traceback.format_exc()
+    finally:
+        if pbar is not None:
+            pbar.update(1)
+    return output
+
+
+# Native latency calculations already consume the simulated RequestFuncOutput.
+# Only wall-clock duration/throughputs and simulation-only metrics need replacing.
 _BASE_RESULT_KEYS = {
     "duration": "duration",
     "completed": "completed",
@@ -118,14 +218,6 @@ _BASE_RESULT_KEYS = {
     "request_throughput": "request_throughput",
     "output_throughput": "output_throughput",
     "total_throughput": "total_token_throughput",
-}
-
-# vLLM serve result name -> calc_metrics name.
-_LATENCY_METRICS = {
-    "ttft": "ttft",
-    "tpot": "tpot",
-    "itl": "itl",
-    "e2el": "e2e_latency",
 }
 
 # Simulation-only stats worth keeping in the result json.
@@ -140,33 +232,11 @@ _EXTRA_RESULT_KEYS = (
 )
 
 
-def _load_simulation_metrics() -> dict | None:
-    """Aggregate per-request stats dumped by the server-side profile hook."""
-    stats_path = os.path.join(Envs.output_dir(), "request.jsonl")
-    if not os.path.exists(stats_path):
-        return None
-    with open(stats_path) as f:
-        rows = [json.loads(line) for line in f if line.strip()]
-    if not rows:
-        return None
-    return calc_metrics(rows)
-
-
 def _apply_simulation_metrics(result: dict, sim: dict) -> None:
+    if result.get("request_goodput") is not None:
+        result["request_goodput"] *= result["duration"] / sim["duration"]
     for sim_key, result_key in _BASE_RESULT_KEYS.items():
         result[result_key] = sim[sim_key]
-    for vllm_name, sim_name in _LATENCY_METRICS.items():
-        # Percentile keys exist only when selected via --percentile-metrics /
-        # --metric-percentiles; override the ones present in the result.
-        for stat in ("mean", "median", "std", "p90", "p95", "p99"):
-            result_key = f"{stat}_{vllm_name}_ms"
-            sim_key = f"{stat}_{sim_name}_ms"
-            if result_key in result and sim_key in sim:
-                result[result_key] = sim[sim_key]
-        # calc_metrics reports the median instead of p50.
-        p50_key = f"p50_{vllm_name}_ms"
-        if p50_key in result:
-            result[p50_key] = sim[f"median_{sim_name}_ms"]
     for key in _EXTRA_RESULT_KEYS:
         if key in sim:
             result[key] = sim[key]
@@ -176,18 +246,37 @@ original_benchmark = serve.benchmark
 
 
 async def wrapped_benchmark(*args, **kwargs):
-    result = await original_benchmark(*args, **kwargs)
-
-    sim_metrics = _load_simulation_metrics()
-    if sim_metrics is None:
-        print(
-            "[simulation] No backend request stats found under "
-            f"{Envs.output_dir()}, keeping client-side metrics. Launch the "
-            "server with a profiler configured so that /start_profile and "
-            "/stop_profile are registered."
+    options = inspect.signature(original_benchmark).bind(*args, **kwargs)
+    options.apply_defaults()
+    backend = options.arguments["endpoint_type"]
+    if backend not in ("openai", "vllm", "openai-chat"):
+        raise ValueError("Simulation supports openai, vllm, and openai-chat backends.")
+    if (backend == "openai-chat") != options.arguments["api_url"].endswith(
+        "/chat/completions"
+    ):
+        raise ValueError(
+            "Use --endpoint /v1/chat/completions for openai-chat, "
+            "or /v1/completions for openai/vllm."
         )
-        return result
+    concurrency = options.arguments["max_concurrency"]
+    if concurrency and concurrency < len(options.arguments["input_requests"]):
+        raise ValueError(
+            "Simulation replay needs all requests in flight; omit --max-concurrency "
+            "or set it to at least the number of requests."
+        )
+    if options.arguments["probe_request_rate"]:
+        raise ValueError("Simulation replay does not support probe requests.")
 
+    token = _REQUEST_STATS.set(None)
+    try:
+        result = await original_benchmark(*args, **kwargs)
+        rows = _REQUEST_STATS.get() or []
+    finally:
+        _REQUEST_STATS.reset(token)
+    if not rows:
+        raise RuntimeError("No simulation request stats returned by the benchmark.")
+
+    sim_metrics = calc_metrics(rows)
     _apply_simulation_metrics(result, sim_metrics)
 
     print("{s:{c}^{n}}".format(s=" Simulation Metrics ", n=50, c="="))
@@ -204,18 +293,10 @@ async def wrapped_benchmark(*args, **kwargs):
     return result
 
 
-original_main_async = serve.main_async
-
-
-async def wrapped_main_async(args: argparse.Namespace):
-    # Profile routes are the round markers, so profiling is always on.
-    args.profile = True
-    return await original_main_async(args)
-
-
+for backend in ("openai", "vllm", "openai-chat"):
+    serve.ASYNC_REQUEST_FUNCS[backend] = async_request_simulation
 serve.get_request = override_get_request
 serve.benchmark = wrapped_benchmark
-serve.main_async = wrapped_main_async
 
 
 if __name__ == "__main__":

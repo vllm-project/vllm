@@ -1,5 +1,6 @@
 import json
 import typing
+from copy import deepcopy
 from typing import Optional
 
 from vllm_simulator.simulation.manager.env import Envs
@@ -38,8 +39,14 @@ class ConfigManager:
         from Worker.init_device."""
         cls._model_config = vllm_config.model_config
         cls._scheduler_config = resolve_scheduler_config(vllm_config)
+        if cls._scheduler_config.pp_size != 1:
+            raise ValueError("Pipeline-parallel simulation supports only pp_size=1")
+
         # The configuration from the external config file has higher priority.
         external_config = cls._get_raw_config().get("scheduler", {})
+        external_pp_size = external_config.get("pp_size", 1)
+        if external_pp_size != 1:
+            raise ValueError("Pipeline-parallel simulation supports only pp_size=1")
         for field_name in [
             "tp_size",
             "dp_size",
@@ -74,7 +81,10 @@ class ConfigManager:
                 hbm_capacity_gb=acc_info.get("hbm_capacity_gb"),
             )
         else:
-            logger.info(f"Device info initialized: {hw}")
+            hw = deepcopy(hw)
+            if acc_info.get("hbm_capacity_gb") is not None:
+                hw.hbm_capacity_gb = acc_info["hbm_capacity_gb"]
+            logger.info("Device info initialized: %s", hw)
         return hw
 
     @classmethod

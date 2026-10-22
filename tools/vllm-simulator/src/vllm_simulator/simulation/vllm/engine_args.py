@@ -1,18 +1,11 @@
 """
-EngineArgs hook: force all parallelism to 1, disable async scheduling and
-default the profiler.
+EngineArgs hook: force all parallelism to 1 and disable async scheduling.
 
 The simulated parallelism comes from the simulator config
 (VLLM_SIMULATOR_CONFIG_PATH) and only feeds the time predictor.
 
 Async scheduling runs EngineCore.step_with_batch_queue, bypassing the hooked
 EngineCore.step that releases parked requests.
-
-profiler="cuda" makes the API server register /start_profile and
-/stop_profile, used as benchmark round markers; the hijacked
-EngineCore.profile never starts a real profiler.  The mutation is in place
-because the CLI default is a shared ProfilerConfig instance and
-from_cli_args runs before build_app.
 """
 
 from vllm_simulator.hook import BaseHook
@@ -48,10 +41,6 @@ class C_VLLMEngineArgsHook(BaseHook):
             self.distributed_executor_backend = "uni"
 
             self.async_scheduling = False
-
-            # Respect an explicit --profiler-config.
-            if self.profiler_config.profiler is None:
-                self.profiler_config.profiler = "cuda"
 
             original_post_init(self)
             logger.info(

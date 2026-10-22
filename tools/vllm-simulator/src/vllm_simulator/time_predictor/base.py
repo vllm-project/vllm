@@ -64,3 +64,11 @@ class InferTimePredictor(ABC):
     def predict_sample_tokens_time(self, total_tokens: int) -> float:
         """Return the sample_tokens (RPC-2) time in seconds; 0 if not modelled."""
         return 0.0
+
+    def predict_step_time(self, batch: ScheduleBatch) -> tuple[float, float]:
+        """Return the forward and sample_tokens times for one engine step."""
+        total_tokens = sum(req.extend_length for req in batch.reqs)
+        return (
+            self.predict_infer_time(batch),
+            self.predict_sample_tokens_time(total_tokens),
+        )

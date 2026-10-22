@@ -23,8 +23,9 @@ pip install .
 This example runs inference simulation using a synthetic random workload. You may also replay real-world traces (e.g., `--dataset-name timed_trace`).
 
 #### Launch the Simulation Server
-Run the following command from the project root directory (the folder containing this `README.md`):
+The example uses `NON_BLOCKING` (the default). Run from the project root:
 ```bash
+VLLM_SIMULATOR_OUTPUT_MODE=NON_BLOCKING \
 python3 -m vllm_simulator.simulation.vllm.launch_server \
   --model "Qwen/Qwen3-32B-FP8" \
   --sim-config-path test/assets/config_vllm.json
@@ -33,12 +34,11 @@ python3 -m vllm_simulator.simulation.vllm.launch_server \
 > **Notes**:
 > - Use `--sim-config-path` to specify the simulation configuration file, which is equivalent to the system environment variable `VLLM_SIMULATOR_CONFIG_PATH`.
 > - The server accepts standard vLLM serving arguments (`--max-model-len`, `--gpu-memory-utilization`, etc.). Do **not** configure TP/EP parallelism here; see the `scheduler` section of the config file below.
-> - The simulator uses `/start_profile` and `/stop_profile` as benchmark round markers (dump + reset simulation stats). vLLM only registers those routes when a profiler is configured, so the EngineArgs hook internally defaults the profiler to `"cuda"`—no `--profiler-config` needed. It stays inert: the hijacked `EngineCore.profile` never reaches the real profiler.
 > - `CUDA_VISIBLE_DEVICES` defaults to `""` inside the simulator so vLLM's platform detection stays consistent with the simulated environment.
 > - The provided [config file](test/assets/config_vllm.json) is for testing. Adjust the accelerator and other parameters to match your actual deployment scenario for higher fidelity.
 
-#### Run the Simulation Benchmark
-The benchmark client is a hijacked `vllm bench serve` and accepts the same arguments:
+#### Run the Benchmark
+For `NON_BLOCKING`, use the simulator's adapted benchmark client:
 ```bash
 python3 -m vllm_simulator.simulation.bench_serving \
     --backend openai \
@@ -53,6 +53,13 @@ python3 -m vllm_simulator.simulation.bench_serving \
 ```
 
 The client does not pace requests in real time. Instead, every request carries a logical arrival timestamp (`simulation.created_time`), and the server replays the traffic pattern against its (virtual) simulation clock. Add `--save-result` (optionally with `--result-dir` / `--result-filename`) to persist the result JSON with the simulation metrics.
+
+The following apply only to the NON_BLOCKING benchmark client:
+- Supported backends: `openai` / `vllm` (completions), or `openai-chat` with `--endpoint /v1/chat/completions`. Requests use `stream: false` to return simulation stats.
+- Readiness checks and warmups are excluded from measured stats. Replay needs all requests in flight: omit `--max-concurrency` or set it to at least `--num-prompts`. Probe requests are unsupported.
+- Missing simulation stats are reported as failed requests, not replaced with client-side timings.
+
+For `BLOCKING`, set `VLLM_SIMULATOR_OUTPUT_MODE=BLOCKING` when launching the same server, then replace the benchmark command above with native `vllm bench serve`.
 
 You have now completed an inference simulation using framework interception.
 
@@ -78,7 +85,7 @@ Mean E2EL (ms):                          3431.84
 ==================================================
 ```
 
-> The "Serving Benchmark Result" block is computed from client-side timings and is **not meaningful** in simulation mode. The authoritative numbers are the "Simulation Metrics" block and the saved result JSON, which are aggregated from the per-request stats dumped by the server (via `calc_metrics`); fields such as `mean_ttft_ms`, `p99_tpot_ms`, throughputs, and KV-cache hit ratios in the result JSON are substituted accordingly.
+> Latency statistics in "Serving Benchmark Result" use simulated token latencies returned in the responses. Its duration, throughput, and peak concurrency diagnostics still use client wall time. The authoritative simulated duration, throughput, goodput, and KV-cache hit ratios are in "Simulation Metrics" and the saved result JSON (aggregated with `calc_metrics`).
 
 ---
 ## Usage
@@ -88,27 +95,15 @@ vllm_simulator uses **dynamic interception** to hijack the execution flow of vLL
 - **Platform / Worker**: stub CUDA operations and KV-cache allocation so the engine runs on CPU while preserving GPU deployment semantics. The model runner is replaced by a stand-in for Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1` is forced; the V1 runner is not modelled).
 - **EngineCore** (`vllm.v1.engine.core.EngineCore`): holds requests in a future queue and dispatches them by `simulation.created_time`; records per-request queueing and prefix-cache hit stats.
 - **Executor** (`UniProcExecutor.execute_model`): accounts the predicted GPU span of each step (AIConfigurator prediction + sampler/logprobs compensation) and advances the simulation clock.
-- **EngineCore.profile**: `/start_profile` and `/stop_profile` double as benchmark round markers—each call dumps `request.jsonl` / `iteration.jsonl` to the output directory and resets the stats.
+- **Per-request stats**: each finished request's stats are returned in its output's `kv_transfer_params["simulation"]` (`RequestOutput` for in-process runners, non-streaming OpenAI responses). Once every received request has finished, the engine resets the virtual clock; no explicit round marker is needed. Per-step iteration stats and optional CPU overhead are logged at DEBUG level without retaining an iteration history.
 
 Key environment variables:
 
 | Variable | Meaning | Default |
 | --- | --- | --- |
 | `VLLM_SIMULATOR_CONFIG_PATH` | Simulation config JSON (see below) | — (required) |
-| `VLLM_SIMULATOR_OUTPUT_MODE` | `NON_BLOCKING` (virtual-clock replay) or `BLOCKING` (engine sleeps the predicted GPU span in real time) | `NON_BLOCKING` |
-| `VLLM_SIMULATOR_OUTPUT_DIR` | Where the server dumps `request.jsonl` / `iteration.jsonl`; the benchmark client reads them from here | `/tmp/vllm_simulator/output/` |
-| `VLLM_SIMULATOR_MAX_DECODE_STEPS` | Force every request's output length | unset |
-
-The benchmark client and the server must share the same `VLLM_SIMULATOR_OUTPUT_DIR`.
-
-- For supported launch options, run:
-  ```bash
-  python -m vllm_simulator.simulation.vllm.launch_server --help
-  ```
-- For benchmark options, run:
-  ```bash
-  python -m vllm_simulator.simulation.bench_serving --help
-  ```
+| `VLLM_SIMULATOR_OUTPUT_MODE` | `NON_BLOCKING` (virtual-clock replay) or `BLOCKING` (real-time request handling) | `NON_BLOCKING` |
+| `VLLM_SIMULATOR_MAX_TOKENS` | Force every request's output length (`ignore_eos=True`) | unset |
 
 ---
 ### Data Collection (Collector)
@@ -150,8 +145,8 @@ The config file is a JSON file with three main sections:
 {
     "platform": {
         "accelerator": {
-            "name": "b300_sxm",
-            "hbm_capacity_gb": 80000
+            "name": "h20_sxm",
+            "hbm_capacity_gb": 96
         }
     },
     "predictor": {

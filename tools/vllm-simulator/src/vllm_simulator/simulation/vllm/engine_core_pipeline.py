@@ -2,25 +2,30 @@
 Engine-core hooks that drive one simulated engine step:
 
 - C_VLLMEngineCoreHook: readiness-based request dispatch, BLOCKING-mode
-  request stats and profile()-driven stats export.
+  request stats, returning finished requests' stats on their outputs and
+  resetting the round state once the engine drains.
 - C_VLLMSchedulerHook: counts parked requests as unfinished so the busy
   loop keeps stepping.
 - C_VLLMExecutorHook: inits the time predictor, accounts the predicted GPU
-  span at execute_model and records queue/hit, iteration and per-token stats.
+  span at execute_model, records queue/hit and per-token stats, and logs
+  per-step iteration stats at DEBUG level.
 
-The hooks share the module-level request/iteration stats.
+The hooks share the module-level request stats.
 """
 
 import heapq
 import json
 import math
-import os
 import time
 from dataclasses import asdict, dataclass, field
 
 from vllm_simulator.hook import BaseHook
-from vllm_simulator.simulation.manager import ConfigManager, StateManager, Envs
-from vllm_simulator.simulation.types import IterationStats, RequestStats, SimulationMode
+from vllm_simulator.simulation.manager import ConfigManager, Envs, StateManager
+from vllm_simulator.simulation.types import (
+    IterationStats,
+    RequestStats,
+    SimulationMode,
+)
 from vllm_simulator.simulation.vllm.utils import kv_hit_split
 from vllm_simulator.time_predictor import ScheduleBatch, ScheduleRequest
 from vllm_simulator.utils import get_logger
@@ -28,19 +33,16 @@ from vllm_simulator.utils import get_logger
 logger = get_logger()
 
 # When set, overrides max_tokens (with ignore_eos) for every request.
-_MAX_DECODE_STEPS = int(v) if (v := os.environ.get("VLLM_SIMULATOR_MAX_DECODE_STEPS")) is not None else None
+_MAX_TOKENS = Envs.max_tokens()
 _SIM_MODE = SimulationMode(Envs.simulation_mode())
 
 # Per-request stats keyed by request id; one engine per process.
 _REQUEST_STATS: dict[str, RequestStats] = {}
-# One record per forward step, appended by C_VLLMExecutorHook.
-_ITERATION_STATS: list[IterationStats] = []
 
 
 @dataclass(slots=True)
 class _CPUOverheadStep:
     predictor_time: float = 0.0
-    iteration: IterationStats | None = None
     emitted: list[str] = field(default_factory=list)
 
 
@@ -56,6 +58,42 @@ def _new_request_stats(request, created_time, queue_start, last_event_time):
     st.input_length = request.num_prompt_tokens
     st.output_length = request.max_tokens
     return st
+
+
+def _attach_request_stats(engine_core_outputs) -> None:
+    """Hand finished requests' stats to the frontend.
+
+    kv_transfer_params is the only free-form per-request field carried
+    end-to-end (RequestOutput and non-streaming OpenAI responses).
+    """
+    for outputs in engine_core_outputs.values():
+        for output in outputs.outputs:
+            if not output.finished:
+                continue
+            st = _REQUEST_STATS.pop(output.request_id, None)
+            if st is not None:
+                output.kv_transfer_params = {
+                    **(output.kv_transfer_params or {}),
+                    "simulation": asdict(st),
+                }
+
+
+def _end_round_if_drained(scheduler) -> None:
+    """Reset the per-round state once every received request has finished.
+
+    Replaces an explicit round marker: the virtual clock restarts from 0 for
+    the next round's created_times.  Skipped while a NON_BLOCKING round is
+    still being received.
+    """
+    dispatcher = ReqDispatcher()
+    if scheduler.has_unfinished_requests() or (
+        dispatcher.seq_counter and not dispatcher.all_received
+    ):
+        return
+    # Leftovers are aborted requests only.
+    _REQUEST_STATS.clear()
+    StateManager.reset()
+    dispatcher.reset()
 
 
 class ReqDispatcher:
@@ -115,7 +153,7 @@ class ReqDispatcher:
         Pretokenized replay skips frontend preparation and input delivery.
         Using queue_start preserves that delay; dispatching at created_time
         would make the request eligible too early. This overhead can be tens
-        of milliseconds: significant for short TTFTs, but often negligible 
+        of milliseconds: significant for short TTFTs, but often negligible
         when TTFT is on the order of seconds.
         created_time remains the TTFT origin and the dispatch fallback when
         queue_start is absent.
@@ -197,10 +235,10 @@ class C_VLLMEngineCoreHook(BaseHook):
         dispatcher.original_core_add_request = original_add_request
 
         def wrapped_init(self, vllm_config, *args, **kwargs):
-            """Reset replay state and stats."""
+            """Reset replay state, stats and the virtual clock."""
             ReqDispatcher().reset()
             _REQUEST_STATS.clear()
-            _ITERATION_STATS.clear()
+            StateManager.reset()
 
             original_init(self, vllm_config, *args, **kwargs)
             self._sim_cpu_overhead_enabled = ConfigManager.cpu_overhead_enabled()
@@ -208,11 +246,11 @@ class C_VLLMEngineCoreHook(BaseHook):
 
         def wrapped_add_request(self, request, request_wave=0):
             """Park NON_BLOCKING simulation requests; forward the rest."""
-            if _MAX_DECODE_STEPS is not None:
+            if _MAX_TOKENS is not None:
                 if request.sampling_params is not None:
-                    request.sampling_params.max_tokens = _MAX_DECODE_STEPS
+                    request.sampling_params.max_tokens = _MAX_TOKENS
                     request.sampling_params.ignore_eos = True
-                request.max_tokens = _MAX_DECODE_STEPS
+                request.max_tokens = _MAX_TOKENS
 
             created_time = None
             queue_start = None
@@ -233,7 +271,7 @@ class C_VLLMEngineCoreHook(BaseHook):
                 now = time.time()
                 _new_request_stats(
                     request,
-                    created_time=created_time if created_time is not None else now,
+                    created_time=request.arrival_time,
                     queue_start=now,
                     last_event_time=now,
                 )
@@ -244,7 +282,8 @@ class C_VLLMEngineCoreHook(BaseHook):
             dispatcher.add(request, request_wave, created_time, queue_start)
 
         def wrapped_step(self, *args, **kwargs):
-            """Dispatch due future-queue requests before each engine step."""
+            """Dispatch due future-queue requests before each engine step;
+            return finished requests' stats on their outputs."""
             if _SIM_MODE == SimulationMode.NON_BLOCKING and dispatcher.all_received:
                 dispatcher.dispatch(self)
 
@@ -263,8 +302,14 @@ class C_VLLMEngineCoreHook(BaseHook):
                 or not dispatcher.all_received
                 or not getattr(self, "_sim_cpu_overhead_enabled", False)
             ):
-                return original_step(self, *args, **kwargs)
+                result = original_step(self, *args, **kwargs)
+            else:
+                result = step_with_cpu_overhead(self, *args, **kwargs)
+            _attach_request_stats(result[0])
+            _end_round_if_drained(self.scheduler)
+            return result
 
+        def step_with_cpu_overhead(self, *args, **kwargs):
             # Start after dispatch/idle waits; predictor work is excluded below.
             step = _CPUOverheadStep()
             dispatcher.cpu_step = step
@@ -275,10 +320,7 @@ class C_VLLMEngineCoreHook(BaseHook):
                 dispatcher.cpu_step = None
             cpu_overhead = max(time.perf_counter() - start - step.predictor_time, 0.0)
             StateManager.step_global_clock(cpu_overhead)
-            if step.iteration is None:
-                step.iteration = IterationStats()
-                _ITERATION_STATS.append(step.iteration)
-            step.iteration.cpu_overhead = cpu_overhead
+            logger.debug("[CPUOverhead] %.6fs", cpu_overhead)
             event_time = StateManager.get_global_clock()
             for req_id in step.emitted:
                 st = _REQUEST_STATS.get(req_id)
@@ -290,43 +332,6 @@ class C_VLLMEngineCoreHook(BaseHook):
         target.__init__ = wrapped_init
         target.add_request = wrapped_add_request
         target.step = wrapped_step
-
-        # profile() is the benchmark round separator: dump stats to
-        # VLLM_SIMULATOR_OUTPUT_DIR and reset.  Merged here because only the
-        # first hook matching a class is applied.  The signature must match
-        # the native one: the utility RPC always sends (is_start,
-        # profile_prefix).
-        def wrapped_profile(
-            self,
-            is_start: bool = True,
-            profile_prefix: str | None = None,
-            delay_iterations: int | None = None,
-            max_iterations: int | None = None,
-        ):
-            req_stats = list(_REQUEST_STATS.values())
-            output_dir = Envs.output_dir()
-            with open(os.path.join(output_dir, "request.jsonl"), "w") as f:
-                for item in req_stats:
-                    f.write(json.dumps(asdict(item), default=str) + "\n")
-            with open(os.path.join(output_dir, "iteration.jsonl"), "w") as f:
-                for item in _ITERATION_STATS:
-                    f.write(json.dumps(asdict(item), default=str) + "\n")
-
-            logger.info(
-                "[ProfileHook] Exported %d requests, %d iterations to %s",
-                len(req_stats),
-                len(_ITERATION_STATS),
-                output_dir,
-            )
-
-            _REQUEST_STATS.clear()
-            _ITERATION_STATS.clear()
-            # Runs in the engine-core process, the only place this state is
-            # reachable under AsyncLLM.
-            StateManager.reset()
-            ReqDispatcher().reset()
-
-        target.profile = wrapped_profile
 
 
 class C_VLLMExecutorHook(BaseHook):
@@ -347,9 +352,7 @@ class C_VLLMExecutorHook(BaseHook):
             # Worker.init_device (inside) resolves the ConfigManager state.
             original_init_executor(self)
             self._sim_predictor = ConfigManager.get_inference_time_predictor()
-            logger.info(
-                "%s initialized for vLLM.", type(self._sim_predictor).__name__
-            )
+            logger.info("%s initialized for vLLM.", type(self._sim_predictor).__name__)
 
         def wrapped_execute_model(self, scheduler_output, *args, **kwargs):
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens
@@ -420,20 +423,19 @@ class C_VLLMExecutorHook(BaseHook):
             cpu_step = ReqDispatcher().cpu_step
             predictor_start = time.perf_counter() if cpu_step is not None else 0.0
             predictor = self._sim_predictor
-            predicted_latency = float(
-                predictor.predict_infer_time(simulation_batch)
+            predicted_latency, sample_tokens_latency = predictor.predict_step_time(
+                simulation_batch
             )
+            predicted_latency = float(predicted_latency)
+            sample_tokens_latency = float(sample_tokens_latency)
 
             # Logprobs cost missing from a baseline collected without them;
             # active only with logprobs_cost_us_per_token > 0.
             logprobs_latency = predictor.logprobs_cost_s_per_token * logprobs_tokens
 
             # RPC-2 (sample_tokens) span, kept separate from the RPC-1-only
-            # predicted_latency so both stay auditable in iteration.jsonl.
+            # predicted_latency so both stay auditable in DEBUG logs.
             total_tokens = sum(num_scheduled_tokens.values())
-            sample_tokens_latency = float(
-                predictor.predict_sample_tokens_time(total_tokens)
-            )
             if cpu_step is not None:
                 cpu_step.predictor_time += time.perf_counter() - predictor_start
 
@@ -444,9 +446,7 @@ class C_VLLMExecutorHook(BaseHook):
                 logprobs_latency=logprobs_latency,
                 total_tokens=total_tokens,
             )
-            _ITERATION_STATS.append(iter_stats)
-            if cpu_step is not None:
-                cpu_step.iteration = iter_stats
+            logger.debug("[IterationStats] %s", iter_stats)
             full_step_latency = iter_stats.full_step_latency
 
             if _SIM_MODE == SimulationMode.BLOCKING:
@@ -476,5 +476,7 @@ class C_VLLMExecutorHook(BaseHook):
 
         target._init_executor = wrapped_init_executor
         target.execute_model = wrapped_execute_model
-        logger.info("[vLLM Hijack] UniProcExecutor hook installed "
-                    "(simulated GPU span at execute_model)")
+        logger.info(
+            "[vLLM Hijack] UniProcExecutor hook installed "
+            "(simulated GPU span at execute_model)"
+        )

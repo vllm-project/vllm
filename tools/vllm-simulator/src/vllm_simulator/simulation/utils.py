@@ -11,7 +11,9 @@ if typing.TYPE_CHECKING:
     from vllm.config import ModelConfig
 
 
-def profile_device_available_bytes(model: "ModelConfig", device: AcceleratorInfo, scheduler_config: SchedulerConfig) -> int:
+def profile_device_available_bytes(
+    model: "ModelConfig", device: AcceleratorInfo, scheduler_config: SchedulerConfig
+) -> int:
 
     perf_model = get_perf_model(scheduler_config, model)
     weights = 0
@@ -27,7 +29,9 @@ def profile_device_available_bytes(model: "ModelConfig", device: AcceleratorInfo
     return int(rest_memory)
 
 
-def calc_metrics(requests: list[Union[RequestStats, dict]]) -> dict:
+def calc_metrics(
+    requests: list[Union[RequestStats, dict]], duration_start_time: float = 0.0
+) -> dict:
     stat_fields = {f.name for f in fields(RequestStats)}
     requests = [
         RequestStats(**{k: v for k, v in req.items() if k in stat_fields})
@@ -56,7 +60,7 @@ def calc_metrics(requests: list[Union[RequestStats, dict]]) -> dict:
             tpots.append(np.mean(req.gen_token_latencies[1:]))
         itls.extend(req.gen_token_latencies[1:])
         e2e_latencies.append(sum(req.gen_token_latencies))
-        total_dur_s = max(total_dur_s, req.last_event_time)
+        total_dur_s = max(total_dur_s, req.last_event_time - duration_start_time)
         total_input += req.input_length
         total_output += req.output_length
         total_local_cache_hit += req.local_kv_hit_len

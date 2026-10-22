@@ -5,15 +5,10 @@ behind RoundRobinPolicy: every request carries an explicit created_time
 (0..N-1), and the per-request stats must show the exact round-robin
 worker distribution.
 
-Two deviations from the single-worker tests are required:
-- BLOCKING mode: the NON_BLOCKING future queue lives in class-level hook state
-  shared by every Scheduler in the process, so with multiple engines any
-  engine may dispatch (and finish) another engine's request. BLOCKING
-  bypasses the future queue; each engine only runs the requests enqueued
-  to it.
-- Request-id randomization is re-enabled: vllm_worker disables it by
-  default and each LLM numbers its requests from 0, so three engines in
-  one process would collide in the shared per-request stats.
+Each AsyncLLM owns a separate EngineCore process. The test uses NON_BLOCKING
+mode to verify that every worker receives its own arrival-barrier count rather
+than the global request count. Request-ID randomization is enabled to verify
+that returned stats are normalized to the external request ID.
 """
 
 import os
@@ -25,7 +20,7 @@ from transformers import AutoTokenizer
 os.environ["VLLM_SIMULATOR_CONFIG_PATH"] = (
     os.path.dirname(__file__) + "/assets/config_vllm.json"
 )
-os.environ["VLLM_SIMULATOR_OUTPUT_MODE"] = "BLOCKING"
+os.environ["VLLM_SIMULATOR_OUTPUT_MODE"] = "NON_BLOCKING"
 os.environ["VLLM_DISABLE_REQUEST_ID_RANDOMIZATION"] = "0"
 
 from vllm_simulator.simulation.benchmark import (
@@ -62,12 +57,14 @@ def _create_workers(model_path, num_workers=NUM_WORKERS):
 
 def _create_requests(model_path, num_workers):
     tokenizer = AutoTokenizer.from_pretrained(model_path)
-    requests = from_sample_requests(RandomDataset().sample(
-        tokenizer=tokenizer,
-        num_requests=num_workers * 10,
-        input_len=128,
-        output_len=1,
-    ))
+    requests = from_sample_requests(
+        RandomDataset().sample(
+            tokenizer=tokenizer,
+            num_requests=num_workers * 10,
+            input_len=128,
+            output_len=1,
+        )
+    )
     for idx, req in enumerate(requests):
         req.custom_params["created_time"] = idx
     return requests
@@ -78,9 +75,14 @@ def test_benchmark_round_robin():
     np.random.seed(0)
 
     workers = _create_workers(MODEL_PATH)
-    runner = MultiInstanceBenchmarkRunner(
-        workers=workers, lb_proxy=RoundRobinPolicy()
-    )
+    try:
+        MultiInstanceBenchmarkRunner([workers[0], workers[0]])
+    except ValueError as exc:
+        assert "unique" in str(exc)
+    else:
+        raise AssertionError("Duplicate worker names must be rejected")
+
+    runner = MultiInstanceBenchmarkRunner(workers=workers, lb_proxy=RoundRobinPolicy())
 
     benchmark_config = BenchmarkConfig(ignore_request_timestamp=False)
     requests = _create_requests(MODEL_PATH, len(workers))

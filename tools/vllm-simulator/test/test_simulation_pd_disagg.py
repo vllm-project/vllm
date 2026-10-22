@@ -60,18 +60,31 @@ def test_pd_disagg_benchmark():
         ),
         name="decode0",
     )
+    decode_name = decode_worker.name
+    decode_worker.name = prefill_worker.name
+    try:
+        PDDisaggBenchmarkRunner([prefill_worker], [decode_worker])
+    except ValueError as exc:
+        assert "unique" in str(exc)
+    else:
+        raise AssertionError("Duplicate PD worker names must be rejected")
+    finally:
+        decode_worker.name = decode_name
+
     runner = PDDisaggBenchmarkRunner(
         prefill_workers=[prefill_worker], decode_workers=[decode_worker]
     )
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
-    requests = from_sample_requests(RandomDataset().sample(
-        tokenizer=tokenizer,
-        num_requests=NUM_PROMPTS,
-        input_len=384,
-        output_len=OUTPUT_LEN,
-        range_ratio={"input": 1 / 3, "output": 0.0},
-    ))
+    requests = from_sample_requests(
+        RandomDataset().sample(
+            tokenizer=tokenizer,
+            num_requests=NUM_PROMPTS,
+            input_len=384,
+            output_len=OUTPUT_LEN,
+            range_ratio={"input": 1 / 3, "output": 0.0},
+        )
+    )
 
     metrics = runner.benchmark(
         BenchmarkConfig(request_rate=10, ignore_request_timestamp=True),
@@ -79,8 +92,8 @@ def test_pd_disagg_benchmark():
     )
     assert metrics["completed"] == NUM_PROMPTS
 
-    prefill_stats = {s["rid"]: s for s in prefill_worker.get_request_stats()}
-    decode_stats = {s["rid"]: s for s in decode_worker.get_request_stats()}
+    prefill_stats = runner.prefill_stats
+    decode_stats = runner.decode_stats
     merged = runner.get_request_stats()
     assert len(merged) == NUM_PROMPTS
 
@@ -93,6 +106,22 @@ def test_pd_disagg_benchmark():
         assert len(stat["gen_token_latencies"]) == d["output_length"]
         assert stat["gen_token_latencies"][0] > sum(p["gen_token_latencies"])
         assert stat["last_event_time"] == d["last_event_time"]
+
+    original_generate = decode_worker.async_generate
+
+    async def missing_stats(_req):
+        return None
+
+    decode_worker.async_generate = missing_stats
+    phase_req = runner._phase_request(requests[0], total_request=1)
+    try:
+        runner.loop.run_until_complete(runner._run_phase("decode_worker", [phase_req]))
+    except RuntimeError as exc:
+        assert "no request stats" in str(exc)
+    else:
+        raise AssertionError("Missing decode stats must fail the benchmark")
+    finally:
+        decode_worker.async_generate = original_generate
 
     runner.shutdown()
 
