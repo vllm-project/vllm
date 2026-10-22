@@ -7,7 +7,6 @@ from fastapi.responses import Response
 
 from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
-from vllm.v1.engine import CheckpointState
 from vllm.v1.engine.exceptions import EngineDeadError
 
 logger = init_logger(__name__)
@@ -29,12 +28,6 @@ async def health(raw_request: Request) -> Response:
         return Response(status_code=200)
     try:
         await client.check_health()
+        return Response(status_code=200)
     except EngineDeadError:
         return Response(status_code=503)
-    # Process checkpoints need sleep mode. While one is in progress the engine
-    # does not serve, so keep it out of rotation.
-    if client.vllm_config.model_config.enable_sleep_mode:
-        state, _ = await client.checkpoint_state()
-        if state != CheckpointState.RUNNING:
-            return Response(status_code=503)
-    return Response(status_code=200)
