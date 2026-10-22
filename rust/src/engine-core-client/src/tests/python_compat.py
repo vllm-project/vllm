@@ -52,6 +52,19 @@ class EngineCoreSamplingParams(msgspec.Struct, dict=True, omit_defaults=True):
     output_kind: RequestOutputKind = RequestOutputKind.DELTA
 
 
+class KvHintAction(msgspec.Struct, frozen=True):
+    action_id: str
+    action_type: str
+    action_version: str
+    payload: dict[str, object]
+
+
+class KvHintsEnvelope(msgspec.Struct, frozen=True):
+    protocol_version: str
+    message_id: str
+    actions: list[KvHintAction]
+
+
 class EngineCoreRequest(
     msgspec.Struct,
     array_like=True,
@@ -78,6 +91,14 @@ class EngineCoreRequest(
     reasoning_parser_kwargs: dict[str, object] | None = None
     abort_immediately: bool = False
     session_id: str | None = None
+    kv_hints: KvHintsEnvelope | None = None
+
+
+@dataclass(frozen=True)
+class RequestError:
+    code: str
+    message: str
+    retryable: bool = False
 
 
 class EngineCoreOutput(
@@ -102,6 +123,8 @@ class EngineCoreOutput(
     mm_cache_miss_hashes: list[str] | None = None
     new_sampling_mask: object | None = None
     spec_decode_metrics: object | None = None
+    prompt_token_id_logprobs: object | None = None
+    error: RequestError | None = None
 
 
 class ExtendedEngineCoreOutput(EngineCoreOutput):
@@ -124,6 +147,7 @@ class EngineCoreOutputs(
     finished_requests: set[str] | None = None
     wave_complete: int | None = None
     start_wave: int | None = None
+    weight_version: str | None = None
 
 
 request = EngineCoreRequest(
@@ -153,6 +177,18 @@ request = EngineCoreRequest(
     arrival_time=42.5,
     client_index=0,
     session_id="session-1",
+    kv_hints=KvHintsEnvelope(
+        protocol_version="0.1",
+        message_id="msg-1",
+        actions=[
+            KvHintAction(
+                action_id="action-1",
+                action_type="example.action",
+                action_version="1.0",
+                payload={"key": "value"},
+            )
+        ],
+    ),
 )
 
 # All defaults -> empty map. Regression guard for the sparse-map decode.
@@ -209,10 +245,17 @@ outputs = EngineCoreOutputs(
         EngineCoreOutput(
             request_id="req-1",
             new_token_ids=[7, 8],
-            finish_reason=FinishReason.LENGTH,
+            finish_reason=FinishReason.ERROR,
+            error=RequestError("engine_paused", "Generation is paused.", True),
+            routed_experts=[
+                np.arange(4, dtype=np.uint8).reshape(2, 1, 2).dtype.str,
+                [2, 1, 2],
+                msgspec.msgpack.Ext(3, np.arange(4, dtype=np.uint8).tobytes()),
+            ],
         )
     ],
     finished_requests={"req-1"},
+    weight_version="v7",
 )
 
 extended_outputs = EngineCoreOutputs(
@@ -225,6 +268,7 @@ extended_outputs = EngineCoreOutputs(
         )
     ],
     finished_requests=outputs.finished_requests,
+    weight_version=outputs.weight_version,
 )
 extended_outputs_bytes = msgspec.msgpack.encode(extended_outputs)
 # The ordinary frontend's schema ignores even non-default extension values.
@@ -234,13 +278,9 @@ sampling_mask_wire = [
     [
         "<i4",
         [5],
-        msgpack.ExtType(3, np.array([2, 12, 16, 17, 18], dtype=np.int32).tobytes()),
+        msgspec.msgpack.Ext(3, np.array([2, 12, 16, 17, 18], dtype=np.int32).tobytes()),
     ],
-    [
-        "<i8",
-        [2],
-        msgpack.ExtType(3, np.array([0, 5], dtype=np.int64).tobytes()),
-    ],
+    None,
     None,
 ]
 outputs_with_sampling_mask = EngineCoreOutputs(

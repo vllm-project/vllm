@@ -4,6 +4,7 @@
 
 import asyncio
 import json
+from math import lcm
 from uuid import uuid4
 
 import httpx
@@ -12,6 +13,7 @@ from openai.types.chat import ChatCompletionMessageParam
 from prometheus_client.parser import text_string_to_metric_families
 
 from tests.utils import RemoteOpenAIServer
+from vllm.utils.math_utils import round_down
 
 MODEL = "Qwen/Qwen3.5-0.8B"
 NUM_CONVERSATIONS = 8
@@ -32,6 +34,29 @@ def _user_turns(conversation: int) -> list[str]:
         "Which readings should an operator investigate first? Explain briefly.",
         "Suggest two checks the operator should perform next.",
     ]
+
+
+async def _scheduler_block_size(client: httpx.AsyncClient) -> int:
+    """Return the coarsest boundary an expected cache hit can land on.
+
+    Mirrors ``scheduler_block_size`` in ``resolve_kv_cache_block_sizes``, which
+    the engine keeps internal: the LCM of the resolved group block sizes. A
+    finer ``prefix_match_unit`` only adds hits, so this stays conservative.
+    """
+    response = await client.get("/metrics")
+    response.raise_for_status()
+    for family in text_string_to_metric_families(response.text):
+        for sample in family.samples:
+            if sample.name != "vllm:cache_config_info":
+                continue
+            sizes = [
+                int(value)
+                for name in ("block_size", "mamba_block_size")
+                if (value := sample.labels.get(name, "None")) != "None"
+            ]
+            assert sizes, f"no block size in {sample.labels}"
+            return lcm(*sizes)
+    raise AssertionError("missing vllm:cache_config_info metric")
 
 
 async def _prefix_cache_counters(
@@ -83,13 +108,13 @@ def server(request):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "server, min_hit_rate",
-    # MTP re-prefills an extra block; both floors reject one more missed block.
-    [pytest.param(False, 0.90, id="base"), pytest.param(True, 0.75, id="mtp")],
+    "server, dropped_blocks",
+    # MTP's prefill lookahead pollutes the tail block, so EAGLE drops one.
+    [pytest.param(False, 0, id="base"), pytest.param(True, 1, id="mtp")],
     indirect=["server"],
 )
 async def test_prefix_cache_hit_rate(
-    server: RemoteOpenAIServer, min_hit_rate: float
+    server: RemoteOpenAIServer, dropped_blocks: int
 ) -> None:
     # Isolate sessions so another conversation cannot hide a cache miss.
     salts = [uuid4().hex for _ in range(NUM_CONVERSATIONS)]
@@ -102,6 +127,8 @@ async def test_prefix_cache_hit_rate(
         server.get_async_client() as client,
         httpx.AsyncClient(base_url=server.url_root, timeout=METRICS_TIMEOUT) as metrics,
     ):
+        block_size = await _scheduler_block_size(metrics)
+        print(f"{block_size=}")
 
         async def run_conversation(session: int, *, replay: bool) -> tuple[int, int]:
             history = histories[session]
@@ -126,15 +153,30 @@ async def test_prefix_cache_hit_rate(
                 assert cached is not None, context
                 assert 0 <= cached < prompt, context
                 assert prompt >= MIN_PROMPT_TOKENS, context
-                if not replay and turn == 0:
-                    assert cached == 0, context
-                else:
-                    assert cached / prompt >= min_hit_rate, (
-                        f"{context}, {min_hit_rate=}"
-                    )
                 if replay:
                     assert prompt == prompt_lengths[session][turn], context
+                    # The identical request computed this whole prompt, but at
+                    # least one token is always recomputed.
+                    computed = prompt - 1
+                elif turn:
+                    computed = prompt_lengths[session][turn - 1]
                 else:
+                    assert cached == 0, context
+                    computed = 0
+                # Every token below the last reachable boundary must be reused.
+                floor = max(
+                    0, round_down(computed, block_size) - dropped_blocks * block_size
+                )
+                print(
+                    f"{session=} {turn=} {replay=} {prompt=} {cached=} {floor=} "
+                    f"hit_rate={cached / prompt:.4f}"
+                )
+                assert cached >= floor, (
+                    f"{context}, {computed=}, {block_size=}, "
+                    f"hit_rate={cached / prompt:.4f}, "
+                    f"expected_hit_rate={floor / prompt:.4f}"
+                )
+                if not replay:
                     prompt_lengths[session].append(prompt)
                     history.append(
                         {

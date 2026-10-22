@@ -11,7 +11,7 @@ import torch.nn as nn
 from transformers import BatchFeature, CLIPVisionConfig
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
@@ -268,17 +268,15 @@ class DeepseekOCRDummyInputsBuilder(BaseDummyInputsBuilder[DeepseekOCRProcessing
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-
         max_image_size = self.info.get_image_size_with_most_features()
 
         return {
             "image": self._get_dummy_images(
                 width=max_image_size.width,
                 height=max_image_size.height,
-                num_images=num_images,
+                num_images=mm_counts.get("image", 0),
             )
         }
 
@@ -459,8 +457,6 @@ class DeepseekOCRForCausalLM(
             return None
         assert isinstance(pixel_values, torch.Tensor)
         assert images_crop is None or isinstance(images_crop, torch.Tensor)
-        if torch.sum(pixel_values).item() == 0:
-            return None
 
         # Use actual tensor spatial dim instead of hardcoded
         # vision_config.image_size (1024). The vision encoders (SAM & CLIP)

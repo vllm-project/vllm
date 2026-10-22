@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from vllm.config import ModelConfig, VllmConfig
+from vllm.config.kv_events import KVEventsConfig
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
@@ -21,6 +22,7 @@ from vllm.tasks import SupportedTask
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest, FaultToleranceResult
+from vllm.v1.kv_hints import KvHintsEnvelope
 
 if TYPE_CHECKING:
     from vllm.v1.engine import PauseMode
@@ -34,7 +36,7 @@ class StreamingInput:
     where inputs are provided via an async generator.
     """
 
-    prompt: EngineInput
+    prompt: PromptType | EngineInput
     sampling_params: SamplingParams | None = None
 
 
@@ -59,8 +61,16 @@ class EngineClient(ABC):
     def errored(self) -> bool: ...
 
     @property
+    def should_keep_api_server_alive(self) -> bool:
+        return False
+
+    @property
     @abstractmethod
     def dead_error(self) -> BaseException: ...
+
+    def get_kv_event_sources(self) -> dict[int, KVEventsConfig]:
+        """KV-event publisher config of each engine, keyed by DP rank."""
+        return {}
 
     def check_admission(  # noqa: B027
         self, n: int = 1, request_id: str | None = None
@@ -97,6 +107,7 @@ class EngineClient(ABC):
         priority: int = 0,
         data_parallel_rank: int | None = None,
         session_id: str | None = None,
+        kv_hints: KvHintsEnvelope | None = None,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
@@ -155,8 +166,14 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def start_profile(self) -> None:
-        """Start profiling the engine."""
+    async def start_profile(
+        self,
+        profile_prefix: str | None = None,
+        *,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
+    ) -> None:
+        """Start profiling with optional per-session overrides."""
         ...
 
     @abstractmethod
@@ -187,8 +204,13 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def wake_up(self, tags: list[str] | None = None) -> None:
-        """Wake up the engine."""
+    async def release_kv_cache_memory(self) -> None:
+        """Discard KV cache physical GPU memory. Requires a completed pause."""
+        ...
+
+    @abstractmethod
+    async def wake_up(self, tags: list[str] | None = None) -> bool:
+        """Wake the tagged resources; return whether every engine is fully awake."""
         ...
 
     @abstractmethod
@@ -206,7 +228,6 @@ class EngineClient(ABC):
         self,
         *,
         mode: "PauseMode" = "abort",
-        wait_for_inflight_requests: bool = False,
         clear_cache: bool = True,
     ) -> None:
         """Pause new generation/encoding requests.
@@ -218,7 +239,6 @@ class EngineClient(ABC):
                 - ``"wait"``: Wait for in-flight requests to complete.
                 - ``"keep"``: Freeze requests in queue; they resume on
                   :meth:`resume_generation`.
-            wait_for_inflight_requests: DEPRECATED. Use ``mode="wait"`` instead.
             clear_cache: DEPRECATED. Whether to clear KV and prefix caches
                 after draining.
 
@@ -246,6 +266,12 @@ class EngineClient(ABC):
         """Scale the engine."""
         raise NotImplementedError
 
+    async def get_external_elastic_ep_status(
+        self,
+    ) -> dict[str, str | int | None] | None:
+        """Return shared external Elastic EP operation status, if enabled."""
+        return None
+
     async def collective_rpc(
         self,
         method: str,
@@ -254,6 +280,10 @@ class EngineClient(ABC):
         kwargs: dict | None = None,
     ):
         """Perform a collective RPC call to the given path."""
+        raise NotImplementedError
+
+    async def compute_weight_checksums(self) -> list[dict[str, str]]:
+        """Return rank-qualified weight digests from every worker of every engine."""
         raise NotImplementedError
 
     async def handle_fault(
@@ -274,6 +304,10 @@ class EngineClient(ABC):
         self, init_request: WeightTransferInitRequest
     ) -> None:
         """Initialize weight transfer for RL training."""
+        raise NotImplementedError
+
+    async def shutdown_weight_transfer_engine(self) -> None:
+        """Release the trainer connection without shutting down inference."""
         raise NotImplementedError
 
     async def start_weight_update(self) -> None:

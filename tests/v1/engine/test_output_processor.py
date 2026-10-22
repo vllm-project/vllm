@@ -3,9 +3,12 @@
 
 import math
 import time
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, Mock
 
+import numpy as np
+import prometheus_client
 import pytest
+import torch
 
 from tests.v1.engine.utils import (
     NUM_PROMPT_LOGPROBS_UNDER_TEST,
@@ -15,9 +18,18 @@ from tests.v1.engine.utils import (
     MockEngineCore,
 )
 from vllm import PoolingParams
+from vllm.config.watermarking import WatermarkConfig
+from vllm.exceptions import RetryableRequestError, VLLMValidationError
 from vllm.logprobs import FlatLogprobs, Logprob, PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
-from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.outputs import (
+    CompletionOutput,
+    PoolingRequestOutput,
+    RequestError,
+    RequestOutput,
+    SamplingMask,
+    WeightVersionSpan,
+)
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.v1.engine import (
@@ -32,8 +44,13 @@ from vllm.v1.engine.output_processor import (
     OutputProcessor,
     RequestOutputCollector,
     RequestState,
+    StreamingInputOutputCollector,
 )
+from vllm.v1.engine.parallel_sampling import ParentRequest
+from vllm.v1.metrics.loggers import PrometheusStatLogger
+from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import IterationStats, PrefillStats, SchedulerStats
+from vllm.v1.outputs import SamplingMaskLists
 
 
 @pytest.mark.parametrize("flat_logprobs", [False, True])
@@ -59,6 +76,32 @@ def test_delta_output_without_new_tokens_returns_empty_logprobs(
 
     assert isinstance(output.logprobs, FlatLogprobs if flat_logprobs else list)
     assert len(output.logprobs) == 0
+
+
+def test_completion_output_preserves_each_sampling_mask_position() -> None:
+    state = RequestState.__new__(RequestState)
+    state.detokenizer = MagicMock()
+    state.detokenizer.get_next_output_text.return_value = ""
+    state.logprobs_processor = MagicMock()
+    state.logprobs_processor.logprobs = None
+    state.logprobs_processor.cumulative_logprob = None
+    state.output_kind = RequestOutputKind.DELTA
+    state.request_index = 0
+    state.sampling_mask_chunks = [
+        SamplingMaskLists(
+            token_ids=np.array([10, 11, 20]),
+            offsets=np.array([0, 2, 3]),
+        ),
+        SamplingMaskLists(token_ids=np.array([30, 31, 32])),
+    ]
+    state.routed_experts_chunks = []
+    state.spec_decode_metrics = None
+    state.weight_version_starts = []
+
+    output = state._new_completion_output([1, 2, 3], FinishReason.LENGTH, None)
+
+    assert output.sampling_mask is not None
+    assert output.sampling_mask.token_ids == [[10, 11], [20], [30, 31, 32]]
 
 
 def _ref_convert_id_to_token(
@@ -177,7 +220,8 @@ def test_incremental_detokenization(
 def test_remote_prefill_cached_tokens_override(do_remote_prefill: bool):
     """P/D disaggregation: num_cached_tokens should report the P worker's
     cache hits (passed via kv_transfer_params) instead of the local count,
-    which sees the KVs pulled from the remote prefill as a ~100% hit."""
+    which sees the KVs pulled from the remote prefill as a ~100% hit.
+    """
     output_processor = OutputProcessor(tokenizer=None, log_stats=False)
 
     prompt_tokens = [1, 2, 3, 4, 5, 6, 7, 8]
@@ -1133,6 +1177,95 @@ def test_iteration_stats(dummy_test_vectors):
     assert iteration_stats.num_generation_tokens == num_active
 
 
+def test_watermark_status_partitions_finished_requests(dummy_test_vectors):
+    """Each finished request gets exactly one watermark status."""
+    output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=True)
+    prompt_token_ids = dummy_test_vectors.prompt_tokens[0]
+
+    def make_request(
+        request_id: str,
+        sampling_params: SamplingParams | None = None,
+        pooling_params: PoolingParams | None = None,
+    ) -> EngineCoreRequest:
+        return EngineCoreRequest(
+            request_id=request_id,
+            external_req_id=f"{request_id}-ext",
+            prompt_token_ids=prompt_token_ids,
+            mm_features=None,
+            arrival_time=0,
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+            sampling_params=sampling_params,
+            pooling_params=pooling_params,
+        )
+
+    # The frontend resolves the flags before the request reaches the
+    # OutputProcessor; set them as it does.
+    def resolved(watermarking: bool, skipped: bool, n: int = 1) -> SamplingParams:
+        params = SamplingParams(n=n, watermarking=watermarking)
+        params._watermarking_skipped = skipped
+        return params
+
+    finish_reasons = {
+        "wm": FinishReason.ABORT,
+        "skip": FinishReason.STOP,
+        # A re-resolved request can carry both flags; it is watermarked.
+        "sticky": FinishReason.STOP,
+        "off": FinishReason.ERROR,
+        "pool": FinishReason.STOP,
+    }
+    output_processor.add_request(make_request("wm", resolved(True, False)), None)
+    output_processor.add_request(make_request("skip", resolved(False, True)), None)
+    output_processor.add_request(make_request("sticky", resolved(True, True)), None)
+    output_processor.add_request(make_request("off", resolved(False, False)), None)
+    output_processor.add_request(
+        make_request("pool", pooling_params=PoolingParams(task="embed")), None
+    )
+    parent_req = ParentRequest(make_request("parent", resolved(True, False, n=2)))
+    for idx in range(2):
+        child_id, child_params = parent_req.get_child_info(idx)
+        output_processor.add_request(
+            make_request(child_id, child_params), None, parent_req, idx
+        )
+        finish_reasons[child_id] = FinishReason.LENGTH
+
+    outputs = [
+        EngineCoreOutput(
+            request_id=request_id,
+            new_token_ids=[] if request_id == "pool" else [prompt_token_ids[0]],
+            pooling_output=torch.tensor([1.0]) if request_id == "pool" else None,
+            finish_reason=finish_reason,
+        )
+        for request_id, finish_reason in finish_reasons.items()
+    ]
+    iteration_stats = IterationStats()
+    output_processor.process_outputs(outputs, time.monotonic(), iteration_stats)
+
+    vllm_config = dummy_test_vectors.vllm_config
+    vllm_config.watermark_config = WatermarkConfig(key=42)
+    try:
+        PrometheusStatLogger(vllm_config).record(
+            scheduler_stats=None, iteration_stats=iteration_stats
+        )
+        totals: dict[str, dict[str, float]] = {}
+        for metric in prometheus_client.REGISTRY.collect():
+            for sample in metric.samples:
+                if sample.name in (
+                    "vllm:watermark_requests_total",
+                    "vllm:request_success_total",
+                ):
+                    label = sample.labels.get("status", "all")
+                    by_label = totals.setdefault(sample.name, {})
+                    by_label[label] = by_label.get(label, 0) + sample.value
+    finally:
+        unregister_vllm_metrics()
+
+    status = totals["vllm:watermark_requests_total"]
+    assert status == {"watermarked": 4, "skipped": 1, "not_watermarked": 2}
+    assert sum(status.values()) == totals["vllm:request_success_total"]["all"]
+
+
 @pytest.mark.parametrize("log_stats", [True, False])
 def test_lora_request_tracking(log_stats: bool, dummy_test_vectors):
     """Test LoRA request lifecycle tracking through waiting -> running -> finished."""
@@ -1306,6 +1439,7 @@ def test_lora_request_tracking(log_stats: bool, dummy_test_vectors):
 async def test_request_output_collector():
     NUM_REQS = 3
     TEXT = "a"
+    routed_experts = np.arange(12, dtype=np.uint8).reshape(2, 3, 2)
 
     def make_outputs() -> list[RequestOutput]:
         return [
@@ -1321,6 +1455,9 @@ async def test_request_output_collector():
                         token_ids=[idx],
                         cumulative_logprob=(idx + 1 * 1.0),
                         logprobs=[{"a": idx, "b": idx}],
+                        routed_experts=(
+                            routed_experts if idx == NUM_REQS - 1 else None
+                        ),
                         finish_reason="length" if (idx == NUM_REQS - 1) else None,
                     )
                 ],
@@ -1373,6 +1510,7 @@ async def test_request_output_collector():
 
     assert output.finished
     assert output.outputs[0].finish_reason == "length"
+    np.testing.assert_array_equal(output.outputs[0].routed_experts, routed_experts)
     # Text, token_ids, and logprobs should get merged.
     assert output.outputs[0].text == TEXT * num_to_put
     for tok_0, tok_1 in zip(output.outputs[0].token_ids, list(range(num_to_put))):
@@ -1382,6 +1520,46 @@ async def test_request_output_collector():
     # Cumulative logprobs should be the last one.
     cumulative_logprob_expected = 1.0 * num_to_put
     assert output.outputs[0].cumulative_logprob == cumulative_logprob_expected
+
+
+def test_routed_experts_are_accumulated_until_finish():
+    state = RequestState(
+        request_id="request-int",
+        external_req_id="request",
+        parent_req=None,
+        request_index=0,
+        lora_request=None,
+        output_kind=RequestOutputKind.DELTA,
+        prompt="prompt",
+        prompt_token_ids=[1, 2, 3, 4],
+        prompt_embeds=None,
+        logprobs_processor=Mock(
+            logprobs=None,
+            cumulative_logprob=0.0,
+            pop_prompt_logprobs=Mock(return_value=None),
+        ),
+        detokenizer=Mock(get_next_output_text=Mock(return_value="")),
+        max_tokens_param=2,
+        arrival_time=0.0,
+        queue=None,
+        log_stats=False,
+        stream_interval=1,
+    )
+    prompt_chunk = np.arange(24, dtype=np.uint8).reshape(4, 3, 2)
+    decode_chunk = np.arange(12, dtype=np.uint8).reshape(2, 3, 2) + 24
+    state.routed_experts_chunks.append(prompt_chunk)
+
+    partial = state.make_request_output([5], None, None, None)
+    assert partial is not None
+    assert partial.outputs[0].routed_experts is None
+
+    state.routed_experts_chunks.append(decode_chunk)
+    finished = state.make_request_output([6], None, FinishReason.LENGTH, None)
+    assert finished is not None
+    np.testing.assert_array_equal(
+        finished.outputs[0].routed_experts,
+        np.concatenate((prompt_chunk, decode_chunk)),
+    )
 
 
 @pytest.mark.asyncio
@@ -1467,6 +1645,137 @@ async def test_cumulative_output_collector_n():
     assert third[0].text == "c"
 
 
+def _make_boundary_output(
+    token_id: int, finish_reason: str | None, finished: bool = False
+) -> RequestOutput:
+    return RequestOutput(
+        request_id="my-request-id",
+        prompt=None,
+        prompt_token_ids=[1, 2, 3],
+        prompt_logprobs=None,
+        outputs=[
+            CompletionOutput(
+                index=0,
+                text="a",
+                token_ids=[token_id],
+                cumulative_logprob=None,
+                logprobs=None,
+                finish_reason=finish_reason,
+            )
+        ],
+        finished=finished,
+    )
+
+
+@pytest.mark.asyncio
+async def test_streaming_input_collector_preserves_chunk_boundary():
+    """A pending chunk-boundary marker (finish_reason on a non-finished
+    output) must not be erased by merging the next chunk's output into it."""
+    collector = StreamingInputOutputCollector(
+        RequestOutputKind.DELTA, request_id="my-request-id-int"
+    )
+
+    collector.put(_make_boundary_output(0, "stop"))
+    collector.put(_make_boundary_output(1, None))
+    collector.put(_make_boundary_output(2, None))
+
+    boundary = await collector.get()
+    assert boundary.outputs[0].finish_reason == "stop"
+    assert boundary.outputs[0].token_ids == [0]
+
+    following = await collector.get()
+    assert following.outputs[0].finish_reason is None
+    assert following.outputs[0].token_ids == [1, 2]
+
+    assert collector.output is None
+    assert not collector._backlog
+    assert not collector.ready.is_set()
+
+
+def _make_streaming_input_request(
+    request_id: str, prompt_token_ids: list[int]
+) -> EngineCoreRequest:
+    """One chunk of a streaming-input (resumable) request."""
+    return EngineCoreRequest(
+        request_id=request_id,
+        prompt_token_ids=prompt_token_ids,
+        mm_features=None,
+        sampling_params=SamplingParams(
+            detokenize=False, output_kind=RequestOutputKind.DELTA
+        ),
+        pooling_params=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        resumable=True,
+        external_req_id=f"{request_id}-ext",
+    )
+
+
+def _add_streaming_request_with_queued_chunk(
+    processor: OutputProcessor, request_id: str
+) -> RequestOutputCollector:
+    queue = RequestOutputCollector(RequestOutputKind.DELTA, request_id=request_id)
+    processor.add_request(
+        _make_streaming_input_request(request_id, [1, 2, 3]), None, queue=queue
+    )
+    processor.add_request(_make_streaming_input_request(request_id, [7, 8]), None)
+    return queue
+
+
+def test_streaming_input_stop_is_chunk_boundary():
+    """STOP is a per-chunk boundary: finished is forced False, the queued
+    chunk is applied, and the request state stays alive."""
+    processor = OutputProcessor(None, log_stats=False)
+    queue = _add_streaming_request_with_queued_chunk(processor, "stream-req")
+
+    processed = processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id="stream-req",
+                new_token_ids=[4],
+                finish_reason=FinishReason.STOP,
+            )
+        ]
+    )
+
+    assert processed.reqs_to_abort == []
+    assert processor.get_num_unfinished_requests() == 1
+    output = queue.get_nowait()
+    assert output is not None
+    assert output.finished is False
+    assert output.outputs[0].finish_reason == "stop"
+    req_state = processor.request_states["stream-req"]
+    assert req_state.prompt_token_ids is not None
+    assert req_state.prompt_token_ids[-2:] == [7, 8]
+
+
+@pytest.mark.parametrize("finish_reason", [FinishReason.ABORT, FinishReason.ERROR])
+def test_streaming_input_abort_error_is_terminal(finish_reason: FinishReason):
+    """ABORT/ERROR is terminal, not a chunk boundary: finished stays True,
+    the state is freed, and an abort is routed back to the engine core."""
+    processor = OutputProcessor(None, log_stats=False)
+    queue = _add_streaming_request_with_queued_chunk(processor, "stream-req")
+
+    processed = processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id="stream-req",
+                new_token_ids=[],
+                finish_reason=finish_reason,
+            )
+        ]
+    )
+
+    assert processor.get_num_unfinished_requests() == 0
+    assert processed.reqs_to_abort == ["stream-req"]
+    output = queue.get_nowait()
+    assert output is not None
+    assert output.finished is True
+    assert output.outputs[0].finish_reason == str(finish_reason)
+
+
 @pytest.mark.parametrize("runner", ["generate", "pooling"])
 @pytest.mark.parametrize("abort_by", ["internal", "external"])
 def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
@@ -1502,3 +1811,252 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
             output_processor.abort_requests([request.request_id], internal=True)
         else:
             output_processor.abort_requests([request.external_req_id], internal=False)
+
+
+@pytest.mark.parametrize("runner", ["generate", "pooling"])
+@pytest.mark.parametrize(
+    "error,exception_type",
+    [
+        (
+            RequestError(code="engine_paused", message="paused", retryable=True),
+            RetryableRequestError,
+        ),
+        (
+            RequestError(code="validation_error", message="incompatible backend"),
+            VLLMValidationError,
+        ),
+    ],
+)
+@pytest.mark.skip_global_cleanup
+def test_request_rejected_by_engine(runner: str, error, exception_type):
+    """A request the engine rejects on arrival (e.g. while paused) raises its
+    corresponding exception to the caller, leaves no stats behind, and ends a
+    streaming-input session, including any input chunks sent since."""
+    output_processor = OutputProcessor(tokenizer=None, log_stats=True)
+    request = EngineCoreRequest(
+        request_id="request-0",
+        external_req_id="external-0",
+        prompt_token_ids=[1, 2],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams() if runner == "generate" else None,
+        pooling_params=PoolingParams(task="embed") if runner == "pooling" else None,
+        resumable=runner == "generate",
+    )
+    queue = RequestOutputCollector(RequestOutputKind.FINAL_ONLY, request.request_id)
+    output_processor.add_request(request, None, queue=queue)
+    iteration_stats = IterationStats()
+
+    result = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request.request_id, [], finish_reason=FinishReason.ERROR, error=error
+            )
+        ],
+        iteration_stats=iteration_stats,
+    )
+
+    assert not output_processor.has_request(request.request_id)
+    assert result.reqs_to_abort == ([request.request_id] if request.resumable else [])
+    assert not iteration_stats.finished_requests
+    assert not iteration_stats.time_to_first_tokens_iter
+    with pytest.raises(exception_type, match=error.message):
+        queue.get_nowait()
+
+
+@pytest.mark.parametrize("output_kind", list(RequestOutputKind))
+def test_sampling_masks_follow_output_kind(output_kind):
+    state = RequestState.__new__(RequestState)
+    state.detokenizer = MagicMock()
+    state.detokenizer.get_next_output_text.return_value = ""
+    state.logprobs_processor = MagicMock()
+    state.logprobs_processor.logprobs = None
+    state.logprobs_processor.cumulative_logprob = None
+    state.output_kind = output_kind
+    state.request_index = 0
+    state.sampling_mask_chunks = []
+    state.routed_experts_chunks = []
+    state.spec_decode_metrics = None
+    state.weight_version_starts = []
+
+    supports = [[10, 11], [20], [30, 31]]
+    masks = []
+    for position, support in enumerate(supports):
+        state.sampling_mask_chunks.append(SamplingMaskLists(np.asarray(support)))
+        finish = FinishReason.LENGTH if position == len(supports) - 1 else None
+        mask = state._new_completion_output([support[0]], finish, None).sampling_mask
+        masks.append(mask.token_ids if mask is not None else None)
+
+    if output_kind == RequestOutputKind.DELTA:
+        assert masks == [[support] for support in supports]
+    else:
+        assert masks == [None, None, supports]
+
+
+def test_request_output_add_merges_delta_sampling_masks():
+    def delta(token_ids, sampling_mask):
+        completion = CompletionOutput(
+            index=0,
+            text="",
+            token_ids=token_ids,
+            cumulative_logprob=None,
+            logprobs=None,
+            sampling_mask=sampling_mask,
+        )
+        return RequestOutput(
+            request_id="request",
+            prompt=None,
+            prompt_token_ids=[1],
+            prompt_logprobs=None,
+            outputs=[completion],
+            finished=False,
+        )
+
+    merged = delta([], None)
+    merged.add(delta([10], SamplingMask([[10, 11]])), aggregate=True)
+    merged.add(delta([20], SamplingMask([[20]])), aggregate=True)
+
+    assert merged.outputs[0].token_ids == [10, 20]
+    assert merged.outputs[0].sampling_mask.token_ids == [[10, 11], [20]]
+
+
+@pytest.mark.skip_global_cleanup
+def test_pooling_cache_miss_is_a_request_error_and_batch_continues():
+    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    requests = [
+        EngineCoreRequest(
+            request_id=f"request-{idx}-int",
+            external_req_id=f"request-{idx}",
+            prompt_token_ids=[1, 2],
+            mm_features=None,
+            arrival_time=0,
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+            sampling_params=None,
+            pooling_params=PoolingParams(task="embed"),
+        )
+        for idx in range(2)
+    ]
+    for request in requests:
+        output_processor.add_request(request, prompt=None)
+
+    processed = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id=requests[0].request_id,
+                new_token_ids=[],
+                finish_reason=FinishReason.ERROR,
+                mm_cache_miss_hashes=["missing-hash"],
+            ),
+            EngineCoreOutput(
+                request_id=requests[1].request_id,
+                new_token_ids=[],
+                pooling_output=torch.tensor([1.0, 2.0]),
+                finish_reason=FinishReason.STOP,
+            ),
+        ]
+    )
+
+    assert len(processed.request_outputs) == 2
+    failed, succeeded = processed.request_outputs
+    assert isinstance(failed, PoolingRequestOutput)
+    assert failed.error is not None
+    assert failed.error.code == "multimodal_cache_miss"
+    assert failed.error.retryable
+    assert isinstance(succeeded, PoolingRequestOutput)
+    assert succeeded.error is None
+    assert torch.equal(succeeded.outputs.data, torch.tensor([1.0, 2.0]))
+
+
+@pytest.mark.skip_global_cleanup
+def test_async_pooling_cache_miss_does_not_fail_output_processor():
+    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    request = EngineCoreRequest(
+        request_id="request-int",
+        external_req_id="request",
+        prompt_token_ids=[1, 2],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=None,
+        pooling_params=PoolingParams(task="embed"),
+    )
+    queue = RequestOutputCollector(
+        output_kind=RequestOutputKind.FINAL_ONLY,
+        request_id=request.request_id,
+    )
+    output_processor.add_request(request, prompt=None, queue=queue)
+
+    processed = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id=request.request_id,
+                new_token_ids=[],
+                finish_reason=FinishReason.ERROR,
+                mm_cache_miss_hashes=["missing-hash"],
+            )
+        ]
+    )
+
+    assert processed.request_outputs == []
+    output = queue.get_nowait()
+    assert isinstance(output, PoolingRequestOutput)
+    assert output.error is not None
+    assert output.error.retryable
+    assert not output_processor.has_unfinished_requests()
+
+
+@pytest.mark.parametrize(
+    "output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY]
+)
+@pytest.mark.parametrize(
+    "steps,expected",
+    [
+        # Merge adjacent equal labels; A -> B -> A remains three spans.
+        (
+            [("v7", [10, 11]), ("v7", [12]), ("v8", [13, 14]), ("v7", [15])],
+            [("v7", 0, 3), ("v8", 3, 5), ("v7", 5, 6)],
+        ),
+        # An output without tokens has no spans.
+        ([], []),
+    ],
+)
+def test_weight_version_spans(output_kind: RequestOutputKind, steps, expected):
+    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    queue = RequestOutputCollector(output_kind, request_id="request-0-int")
+    request = EngineCoreRequest(
+        request_id="request-0-int",
+        external_req_id="request-0",
+        prompt_token_ids=[1, 2, 3],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(detokenize=False, output_kind=output_kind),
+        pooling_params=None,
+    )
+    output_processor.add_request(request, prompt=None, queue=queue)
+
+    for i, (weight_version, token_ids) in enumerate(steps):
+        # Copy: merging deltas extends token lists in place.
+        output = EngineCoreOutput(
+            request_id="request-0-int", new_token_ids=list(token_ids)
+        )
+        output_processor.process_outputs([output], weight_version=weight_version)
+        if i == 0 and output_kind == RequestOutputKind.DELTA:
+            intermediate = queue.get_nowait()
+            assert intermediate is not None
+            assert intermediate.outputs[0].weight_versions is None
+
+    # Unread deltas merge into the abort output without losing spans.
+    output_processor.abort_requests(["request-0"], internal=False)
+    final = queue.get_nowait()
+    assert final is not None and final.finished
+    assert final.outputs[0].weight_versions == [WeightVersionSpan(*s) for s in expected]

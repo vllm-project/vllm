@@ -5,8 +5,8 @@
 Mirrors test_serving_tokens.py but exercises the multimodal piping
 using Qwen/Qwen3-VL-2B-Instruct end-to-end via the server's /render ->
 /generate -> /detokenize path. Intentionally avoids running the HF
-processor in the pytest parent process to keep os.fork() in sibling
-tests (e.g. test_weight_transfer_llm.py) deadlock-free.
+processor in the pytest parent process to keep os.fork() in other
+tests (e.g. entrypoints/rl/weight_transfer/test_offline.py) deadlock-free.
 """
 
 import httpx

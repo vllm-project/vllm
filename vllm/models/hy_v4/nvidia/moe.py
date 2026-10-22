@@ -4,7 +4,7 @@
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
@@ -87,7 +87,7 @@ class HYV4MoEFused(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         enable_eplb: bool = False,

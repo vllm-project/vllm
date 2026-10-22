@@ -24,6 +24,9 @@ pub enum ChatRole {
     User,
     Assistant,
     ToolResponse,
+    /// Role outside the standard set, passed to chat templates unchanged.
+    #[serde(untagged)]
+    Custom(String),
 }
 
 /// One text-only chat content part in OpenAI-style block format.
@@ -212,6 +215,10 @@ pub enum ChatMessage {
         content: ChatContent,
         tool_call_id: String,
     },
+    /// Message content under a role outside the standard set, passed to chat
+    /// templates unchanged.
+    #[serde(untagged)]
+    Custom { role: String, content: ChatContent },
 }
 
 impl ChatMessage {
@@ -230,6 +237,7 @@ impl ChatMessage {
                      use ChatMessage::tool_response() instead"
                 )
             }
+            ChatRole::Custom(role) => Self::custom(role, content),
         }
     }
 
@@ -286,6 +294,14 @@ impl ChatMessage {
         }
     }
 
+    /// Construct one chat message with a role outside the standard set.
+    pub fn custom(role: impl Into<String>, content: impl Into<ChatContent>) -> Self {
+        Self::Custom {
+            role: role.into(),
+            content: content.into(),
+        }
+    }
+
     /// Return the chat role of this message.
     pub fn role(&self) -> ChatRole {
         match self {
@@ -294,6 +310,7 @@ impl ChatMessage {
             Self::User { .. } => ChatRole::User,
             Self::Assistant { .. } => ChatRole::Assistant,
             Self::ToolResponse { .. } => ChatRole::ToolResponse,
+            Self::Custom { role, .. } => ChatRole::Custom(role.clone()),
         }
     }
 
@@ -303,7 +320,8 @@ impl ChatMessage {
             Self::System { content }
             | Self::Developer { content, .. }
             | Self::User { content }
-            | Self::ToolResponse { content, .. } => content.try_flatten_to_text(),
+            | Self::ToolResponse { content, .. }
+            | Self::Custom { content, .. } => content.try_flatten_to_text(),
             Self::Assistant { content } => Ok(content.text()),
         }
     }
@@ -315,7 +333,8 @@ impl ChatMessage {
             Self::System { .. }
             | Self::Developer { .. }
             | Self::User { .. }
-            | Self::ToolResponse { .. } => None,
+            | Self::ToolResponse { .. }
+            | Self::Custom { .. } => None,
         }
     }
 
@@ -325,7 +344,8 @@ impl ChatMessage {
             Self::System { content }
             | Self::Developer { content, .. }
             | Self::User { content }
-            | Self::ToolResponse { content, .. } => content.has_multimodal(),
+            | Self::ToolResponse { content, .. }
+            | Self::Custom { content, .. } => content.has_multimodal(),
             Self::Assistant { .. } => false,
         }
     }
@@ -374,7 +394,9 @@ pub struct ChatOptions {
     pub generation_prompt_mode: GenerationPromptMode,
 
     /// Per-request Jinja chat template override. When set, this template is
-    /// used instead of the model's default chat template.
+    /// used instead of the model's default chat template. Only the HF renderer
+    /// honors it, and only with `--trust-request-chat-template`; native
+    /// renderers ignore it.
     pub chat_template: Option<String>,
 
     /// Model-specific reasoning effort, typically `none`, `minimal`, `low`,
@@ -433,6 +455,17 @@ pub enum ChatToolChoice {
     Function {
         name: String,
     },
+}
+
+impl From<&ChatToolChoice> for xgrammar_structural_tag::ToolChoice {
+    fn from(tool_choice: &ChatToolChoice) -> Self {
+        match tool_choice {
+            ChatToolChoice::None => Self::none(),
+            ChatToolChoice::Auto => Self::auto(),
+            ChatToolChoice::Required => Self::required(),
+            ChatToolChoice::Function { name } => Self::function(name.clone()),
+        }
+    }
 }
 
 /// Resolved tool state shared by rendering, output parsing, and constraints.
@@ -508,6 +541,17 @@ impl ResolvedToolContext {
     /// Return whether tool output parsing is active for this request.
     pub fn parsing_enabled(&self) -> bool {
         !matches!(self.tool_choice, ChatToolChoice::None) && !self.effective_tools.is_empty()
+    }
+
+    /// Drop request-level tools when `tool_choice` is `none`, so they are not
+    /// rendered into the prompt. Message-scoped tools stay, as they are part of
+    /// the chat history.
+    pub(crate) fn exclude_initial_tools_if_none(&mut self) {
+        if matches!(self.tool_choice, ChatToolChoice::None) {
+            // `new` places request-level tools first in `effective_tools`.
+            self.effective_tools.drain(..self.initial_tools.len());
+            self.initial_tools.clear();
+        }
     }
 }
 
@@ -648,6 +692,22 @@ impl ChatRequest {
         self.tool_context.parsing_enabled()
     }
 
+    /// Return how many parsed tool calls may be surfaced, or `None` for no
+    /// limit.
+    ///
+    /// With tool parsing off (e.g. `tool_choice=none`), calls a parser still
+    /// recognizes are dropped rather than surfaced, matching Python's parser
+    /// engine.
+    pub(crate) fn max_tool_calls(&self) -> Option<usize> {
+        if !self.tool_parsing_enabled() {
+            Some(0)
+        } else if !self.parallel_tool_calls() {
+            Some(1)
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn parse_template_bool(&self, key: &str) -> Result<Option<bool>> {
         match self.chat_options.template_kwargs.get(key) {
             None => Ok(None),
@@ -662,13 +722,14 @@ impl ChatRequest {
 impl ChatRole {
     /// Return the chat-template role string used by the current text-only chat
     /// backend.
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             Self::System => "system",
             Self::Developer => "developer",
             Self::User => "user",
             Self::Assistant => "assistant",
             Self::ToolResponse => "tool_response",
+            Self::Custom(role) => role,
         }
     }
 }
@@ -769,6 +830,7 @@ mod tests {
                     "properties": {"city": {"type": "string"}},
                 }),
                 strict: Some(true),
+                defer_loading: None,
             }]),
         );
 
@@ -783,6 +845,7 @@ mod tests {
             description: None,
             parameters: json!({"type": "object"}),
             strict: None,
+            defer_loading: None,
         }
     }
 

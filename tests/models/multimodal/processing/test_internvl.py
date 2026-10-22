@@ -6,7 +6,7 @@ from collections.abc import Mapping
 
 import pytest
 from PIL import Image
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import rescale_image_size
@@ -17,7 +17,7 @@ from ...utils import build_model_context
 
 
 def _get_expected_num_patches(
-    config: PretrainedConfig,
+    config: PreTrainedConfig,
     image: Image.Image,
     num_imgs: int,
     min_num: int,

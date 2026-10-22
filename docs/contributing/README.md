@@ -41,16 +41,17 @@ If you are only developing vLLM's Python code, install vLLM using:
 
 ```bash
 VLLM_USE_PRECOMPILED=1 uv pip install -e .
+vllm download-kernels
 ```
 
 To rebuild only the Rust frontend binary:
 
 ```bash
-./build_rust.sh          # release build
-./build_rust.sh --debug  # faster build for development
+./tools/build_rust.sh          # release build
+./tools/build_rust.sh --debug  # faster build for development
 ```
 
-If you are developing vLLM's Python and CUDA/C++ code, install Pytorch first:
+If you are developing vLLM's Python and CUDA/C++ code, install PyTorch first:
 
 ```bash
 uv pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu129
@@ -74,7 +75,7 @@ For an optimized workflow when iterating on C++/CUDA kernels, see the [Increment
 For JIT kernel warmup conventions, see [JIT Kernel Warmup](./jit_kernel_warmup.md).
 
 !!! tip
-    vLLM is compatible with Python versions 3.10 to 3.13. However, vLLM's default [Dockerfile](../../docker/Dockerfile) ships with Python 3.12 and tests in CI (except `mypy`) are run with Python 3.12.
+    vLLM is compatible with Python versions 3.11 to 3.14. However, vLLM's default [Dockerfile](../../docker/Dockerfile) ships with Python 3.12 and tests in CI (except `mypy`) are run with Python 3.12.
 
     Therefore, we recommend developing with Python 3.12 to minimise the chance of your local environment clashing with our CI environment.
 
@@ -89,20 +90,17 @@ pre-commit install
 
 vLLM's `pre-commit` hooks will now run automatically every time you commit.
 
+When running ShellCheck or markdownlint directly, or configuring an editor
+integration, use the configuration files in `tools/pre_commit/`:
+`--rcfile=tools/pre_commit/.shellcheckrc` for ShellCheck and
+`--config tools/pre_commit/.markdownlint.yaml` for markdownlint-cli2.
+
 !!! tip "Tips"
     You can manually run the `pre-commit` hooks using:
 
     ```bash
     pre-commit run     # runs on staged files
     pre-commit run -a  # runs on all files (short for --all-files)
-    ```
-
-    ---
-
-    Some `pre-commit` hooks only run in CI. If you need to, you can run them locally with:
-
-    ```bash
-    pre-commit run --hook-stage manual mypy-3.11
     ```
 
 ### Documentation
@@ -129,6 +127,9 @@ API_AUTONAV_EXCLUDE=vllm mkdocs serve  # API ref off (~15 seconds)
 
 Once you see a `Serving on http://<address>:<port>/` line in the logs, the live preview is ready!
 Open that address in your browser to see it — `http://127.0.0.1:8000/` by default, or whichever host/port you passed to `-a`.
+
+On pull requests, Read the Docs builds a documentation preview only if the PR changes files that affect the docs (e.g. `docs/`, `examples/` or `mkdocs.yaml`) and the `pre-commit` checks have not failed.
+Changes to `vllm/` alone do not trigger a build, so if your PR changes the API or CLI reference, add the `build-docs` label to force one.
 
 For additional features and advanced configurations, refer to the:
 
@@ -259,8 +260,24 @@ The PR needs to meet the following code quality standards:
   understand the code.
 - Include sufficient tests to ensure the project stays correct and robust. This
   includes both unit tests and integration tests.
-- Please add documentation to `docs/` if the PR modifies the user-facing behaviors of vLLM.
-  It helps vLLM users understand and utilize the new features or changes.
+- Document user-visible changes in the same PR; see
+  [Documenting User-Visible Changes](#documenting-user-visible-changes).
+
+### Documenting User-Visible Changes
+
+If a PR changes what users can run, configure, or observe, update the rendered
+docs in the same PR; code comments, tests, and PR descriptions alone are not
+found by users or their agents. CLI arguments, config fields, and environment
+variables are documented in their docstring, `help=` text, or
+`environment_variables` comment, which generate the reference pages. Everything
+else goes on its page under `docs/` (feature, model, hardware, deprecation),
+linked from its index. Lead with what it is, how to enable it, and the default,
+using the names users search for.
+
+To check, ask a fresh agent a user question (e.g. "What does `VLLM_FOO` do?")
+three times, limited in turn to web search, GitHub, and a local checkout (before
+merge: the docs preview and the PR branch). If it cannot find and quote the
+docs, fix the docs.
 
 ### Adding or Changing Kernels
 
@@ -299,15 +316,23 @@ review process:
 
 - After the PR is submitted, the PR will be assigned to a reviewer. Every
   reviewer will pick up the PRs based on their expertise and availability.
+  Official reviews can be performed by any of the
+  [reviewers](../community/reviewers.md) or
+  [committers](../governance/committers.md); committers perform the final
+  merge. To find someone to review your PR, see the reviewers' and
+  committers' areas of expertise or ask in the `#pr-reviews` channel on
+  [Slack](https://slack.vllm.ai).
 - After the PR is assigned, the reviewer will provide status updates every 2-3
   days. If the PR is not reviewed within 7 days, please feel free to ping the
   reviewer or the vLLM team.
 - After the review, the reviewer will put an `action-required` label on the PR
   if there are changes required. The contributor should address the comments and
   ping the reviewer to re-review the PR.
-- Please respond to all comments within a reasonable time frame. If a comment
+- Please respond to all comments within a reasonable time frame. Address each
+  piece of reviewer feedback with a change or an explanation. If a comment
   isn't clear or you disagree with a suggestion, feel free to ask for
-  clarification or discuss the suggestion.
+  clarification or discuss the suggestion. If you and a reviewer can't reach
+  agreement, a committer can help decide.
 - Note that not all CI checks will be executed due to limited computational
   resources. Reviewers with write access and configured trusted contributors
   can comment `/ci run` for upstream CI or `/amd-ci run` for AMD CI only when
@@ -320,9 +345,15 @@ review process:
   in the upstream repository. Your branch must contain every commit currently
   on that branch: **zero commits behind**. This also applies to PRs targeting
   release branches or another PR's branch.
-- If the PR is behind, the bot reports the count without creating a new build.
-  Merge or rebase onto the latest target branch, then rerun the command. If the
-  target branch advances in the meantime, update your branch and try again.
+- If the PR is behind, the bot merges the target branch into your PR branch
+  (like the **Update branch** button) and runs CI on the resulting merge commit.
+  Pull the branch before pushing more changes. This needs **Allow edits by
+  maintainers** enabled on fork PRs. If the merge conflicts or is not allowed,
+  the bot reports the count without creating a new build; merge or rebase onto
+  the latest target branch yourself, then rerun the command.
+- PR authors without write access cannot start another full run (including
+  `--allow-stale`) on a commit that already has a CI build. Push new changes,
+  use `/ci retry` to rerun failed jobs, or ask a reviewer with write access.
 - To run CI on an outdated branch at your own risk, append `--allow-stale` to
   any run command, for example `/ci run --allow-stale` or
   `/amd-ci run all --allow-stale`. The same authorization requirements apply.
@@ -330,9 +361,8 @@ review process:
   failures. Before merging, merge or rebase onto the latest target branch and
   rerun CI without `--allow-stale` on the latest PR commit.
 - Retrying or cancelling builds does not check branch freshness.
-- These commands do not modify your branch or enforce merge requirements.
-  Direct Buildkite launches are outside this workflow. No additional token is
-  needed.
+- Apart from that merge, these commands do not modify your branch or enforce
+  merge requirements. Direct Buildkite launches are outside this workflow.
 
 Maintainers must configure required Buildkite status checks on the latest PR
 commit and enable GitHub's
