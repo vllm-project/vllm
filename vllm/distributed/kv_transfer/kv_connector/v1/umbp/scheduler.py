@@ -17,7 +17,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadat
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
+from vllm.v1.core.kv_cache_coordinator import (
+    get_kv_cache_coordinator,
+    replay_boundaries,
+)
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -474,9 +477,12 @@ class UMBPStoreConnectorScheduler:
         assert self.codec is not None
         objects: dict[int, list[tuple[bytes, tuple[str, ...]]]] = {}
         keys: list[str] = []
+        lookup_limit = request.num_tokens - 1
+        if self.use_eagle and self._lookup_coordinator is not None:
+            lookup_limit = min(request.num_tokens, len(hashes) * self.hash_block_size)
         for group_id, unit in self._lookup_units.items():
             group_objects = []
-            for token_end in range(local_tokens + unit, request.num_tokens, unit):
+            for token_end in range(local_tokens + unit, lookup_limit + 1, unit):
                 block_hash = self._object_hash_at_token_end(hashes, token_end)
                 rank_keys = _rank_keys(self.codec, self.topology, block_hash, group_id)
                 group_objects.append((block_hash, rank_keys))
@@ -1081,7 +1087,11 @@ class UMBPStoreConnectorScheduler:
             return None
         num_prompt_tokens = getattr(request, "num_prompt_tokens", None)
         reachable_boundaries = (
-            () if num_prompt_tokens is None else (num_prompt_tokens - 1,)
+            ()
+            if num_prompt_tokens is None
+            else replay_boundaries(
+                num_prompt_tokens, self.block_size, use_eagle=self.use_eagle
+            )
         )
         mask = manager_cls.reachable_block_mask(
             start_block=indices.start,
