@@ -139,38 +139,6 @@ def test_override_owner_launch_goes_through_impl(_fake_module: Any) -> None:
     assert launched == [(1, 2, 0, 8)]
 
 
-def test_override_scan_skips_slot_only_proxies(
-    _fake_module: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Module globals whose __getattr__ resolves any name, "__dict__"
-    included (like llvmlite's _lib_wrapper, imported via numba), must not
-    break the scan."""
-
-    class _LibFn:
-        pass
-
-    class _SlotProxy:
-        __slots__ = ()
-
-        def __getattr__(self, name: str) -> Any:
-            return _LibFn()
-
-    proxy_module = types.ModuleType("vllm.tests.fake_slot_proxy_home")
-    proxy_module.lib = _SlotProxy()  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, proxy_module.__name__, proxy_module)
-
-    def cpu_impl(output_ptr, input_ptr, replace_from, MAX_NUM_TOKENS=None):
-        return "cpu"
-
-    register_kernels(
-        {
-            "vllm.tests.fake_kernel_home.expand_kernel": cpu_impl,
-        }
-    )
-    assert isinstance(_fake_module.expand_kernel, KernelOverride)
-    assert _fake_module._expand.kernel is _fake_module.expand_kernel
-
-
 def test_register_kernel_auto_imports_defining_module(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

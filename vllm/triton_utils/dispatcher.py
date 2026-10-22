@@ -134,15 +134,9 @@ def _rebind_kernels(
             # JIT warmup owners (e.g. _DecoratedTritonJitKernel) hold the
             # kernel as an instance attribute; read the instance dict directly
             # so module-level __getattr__ hooks are never triggered, and so
-            # this scan needs no dependency on the warmup machinery. Bypass
-            # __getattr__ too: slot-only proxies (e.g. llvmlite's _lib_wrapper,
-            # loaded by numba) forward "__dict__" to an unrelated object.
-            try:
-                instance_dict = object.__getattribute__(value, "__dict__")
-            except AttributeError:
-                instance_dict = None
-            if isinstance(instance_dict, Mapping):
-                wrapper = lookup(instance_dict.get("kernel"))
+            # this scan needs no dependency on the warmup machinery.
+            if hasattr(value, "__dict__"):
+                wrapper = lookup(vars(value).get("kernel"))
             if wrapper is None:
                 continue
             value.kernel = wrapper
