@@ -1493,6 +1493,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Setting this too high can result in a higher variance of
     # inter-message latencies. Setting it too low can negatively impact
     # TTFT and overall throughput.
+    # Must be a positive integer (default: 128); zero or negative values
+    # raise ValueError when read.
     "VLLM_V1_OUTPUT_PROC_CHUNK_SIZE": get_v1_output_proc_chunk_size,
     # If set, vLLM will disable the MLA attention optimizations.
     "VLLM_MLA_DISABLE": lambda: bool(int(os.getenv("VLLM_MLA_DISABLE", "0"))),
