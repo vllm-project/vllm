@@ -4376,6 +4376,7 @@ steps:
       kernels/test_flex_attention.py
       kernels/test_fp32_router_gemm.py
       kernels/test_fused_deepseek_v32_norm_rope.py
+      kernels/test_fused_indexer_q_dispatch.py
       kernels/test_fused_indexer_q_rope_quant.py
       kernels/test_fused_inv_rope_fp8_quant.py
       kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
@@ -4424,6 +4425,7 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s kernels/attention/test_triton_unified_attention_diffkv.py
+
 
 - label: ":amd: (MI355) MiniMax Reduce RMS Kernels" # TBD
   timeout_in_minutes: 45

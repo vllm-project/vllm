@@ -80,6 +80,11 @@ from vllm.models.deepseek_v4.amd.mega_moe import (
     DeepseekV4AiterMegaMoEExperts,
     finalize_mega_moe_weights,
 )
+from vllm.models.deepseek_v4.amd.mega_moe_tp import (
+    DeepseekV4TPMegaMoEExperts,
+    DeepseekV4TPMegaMoERunner,
+    validate_tp_mega_moe,
+)
 from vllm.models.deepseek_v4.amd.rocm import DeepseekV4ROCMAiterMLAAttention
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx950, on_gfx1250
@@ -597,6 +602,11 @@ class DeepseekV4MoE(nn.Module):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.prefix = prefix
+        self.use_tp_mega_moe = (
+            vllm_config.kernel_config.moe_backend == "aiter_mega_moe_tp"
+        )
+        if self.use_tp_mega_moe:
+            validate_tp_mega_moe(vllm_config)
 
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
         self.hidden_size = config.hidden_size
@@ -769,7 +779,9 @@ class DeepseekV4MoE(nn.Module):
             swiglu_limit=self.swiglu_limit,
             router_logits_dtype=torch.float32,
             routed_experts_cls=(
-                DeepseekV4HeterogeneousSharedRoutedExperts
+                DeepseekV4TPMegaMoEExperts
+                if self.use_tp_mega_moe
+                else DeepseekV4HeterogeneousSharedRoutedExperts
                 if self.fuse_heterogeneous_shared_expert
                 else None
             ),
@@ -781,6 +793,7 @@ class DeepseekV4MoE(nn.Module):
                 if self.fuse_heterogeneous_shared_expert
                 else None
             ),
+            runner_cls=(DeepseekV4TPMegaMoERunner if self.use_tp_mega_moe else None),
         )
 
     def forward(
@@ -1114,7 +1127,13 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.hc_dim = self.hc_mult * config.hidden_size
         self.rms_norm_eps = config.rms_norm_eps
 
-        aux_stream_list = [torch.cuda.Stream() for _ in range(3)]
+        # MegaMoeTP owns all CUs. Keep attention/indexer auxiliaries on the
+        # current stream as well as the shared MLP; no host synchronization.
+        aux_stream_list = (
+            None
+            if vllm_config.kernel_config.moe_backend == "aiter_mega_moe_tp"
+            else [torch.cuda.Stream() for _ in range(3)]
+        )
 
         self.device = current_platform.device_type
         # Reserved topk indices buffer for all Indexer layers to reuse.
