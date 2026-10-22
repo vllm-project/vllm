@@ -167,8 +167,7 @@ def unsupported(vllm_config) -> list[str]:
 
 
 def supports_kv_transfer(config: KVTransferConfig | None) -> bool:
-    # MoRIIO completes READs before forward and WRITE receives before admission;
-    # neither consumer needs the per-layer hooks specialized layers bypass.
+    # MoRIIO consumers finish loads before execution, without per-layer hooks.
     return config is None or (
         config.kv_connector == "MoRIIOConnector"
         and config.kv_connector_module_path is None

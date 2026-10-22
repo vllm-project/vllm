@@ -146,13 +146,9 @@ Hybrid READ keeps its existing single-transferable-attention-group requirement. 
 
 ### Kimi-K3 specialized decode
 
-Kimi-K3 on MI355X supports `--additional-config '{"decode_backend":"latency_specialized"}'` on a MoRIIO READ or WRITE consumer. Use `VLLM_USE_V2_MODEL_RUNNER=1`, TP8, DCP1 or DCP8, DSpark with up to seven speculative tokens, and BF16 convolution / FP32 recurrent state on both instances. Keep the producer on the default decode backend and use the same transfer mode and cache layouts on both instances.
+Kimi-K3 on MI355X supports specialized decode on built-in MoRIIO READ and WRITE consumers. Set `--additional-config '{"decode_backend":"latency_specialized"}'` on the consumer and keep the producer on the default `decode_backend=auto`.
 
-`decode_backend=auto` is the default and uses stock decode. See [supported deployments](https://github.com/vllm-project/vllm/blob/main/vllm/models/kimi_k3/amd/specialized_decode/README.md#supported-deployments) for the full restrictions.
-
-The specialized kernels serve pure speculative verification steps of at most eight token rows. For example, with seven speculative tokens and `--max-num-seqs 1`, a verification step has eight rows; use `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,8]}'` on the consumer. Prefill, mixed, and wider steps use the regular model layers. All transferred attention and recurrent states are ready before the forward, so FULL graph replay does not need per-layer transfer hooks.
-
-Producers using the specialized backend and other connectors remain unsupported.
+Use matching transfer modes and cache layouts. See [supported deployments](https://github.com/vllm-project/vllm/blob/main/vllm/models/kimi_k3/amd/specialized_decode/README.md#supported-deployments) for the hardware, state dtype, and execution requirements.
 
 ### Different prefill and decode TP sizes
 
