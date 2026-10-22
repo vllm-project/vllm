@@ -19,7 +19,7 @@ instead of embedding feature-specific logic directly.
 import functools
 import gc
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager
 from copy import deepcopy
 from dataclasses import replace
@@ -44,6 +44,10 @@ from vllm.distributed.parallel_state import get_dcp_group, get_pp_group
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsCapturer,
+    bind_routed_experts_capturer,
+)
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
@@ -362,8 +366,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Expert parallelism load balancer.
         self.eplb = EPLBController(self.parallel_config, self.device)
-        # The AuxOutput Connector owns R3 capture, copying, and storage.
+        # The runner owns capture; the connector owns copying and storage.
         self.aux_output_connector: AuxOutputWorkerConnector | None = None
+        self.routed_experts_capturer: RoutedExpertsCapturer | None = None
+        self._unbind_routed_experts_capturer: Callable[[], None] | None = None
 
         set_offloader(create_offloader(self.vllm_config.offload_config))
 
@@ -381,6 +387,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # on the last PP rank.
             tasks.extend(PoolingRunner.get_supported_tasks(self.model))
         return tuple(tasks)
+
+    def initialize_routed_experts_capturer(self) -> None:
+        """Allocate and bind R3 outside the weights pool, before profiling."""
+        if (
+            not self.vllm_config.aux_output_config.enable_return_routed_experts
+            or self.routed_experts_capturer is not None
+        ):
+            return
+        capturer = RoutedExpertsCapturer(self.max_num_tokens, self.vllm_config)
+        self._unbind_routed_experts_capturer = bind_routed_experts_capturer(
+            self.model, capturer
+        )
+        self.routed_experts_capturer = capturer
 
     def load_model(
         self,
@@ -818,8 +837,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             # AuxOutput connector requires resolved kv_cache_config.
             if self.vllm_config.aux_output_config.enabled:
+                assert self.routed_experts_capturer is not None
                 self.aux_output_connector = get_aux_output_connector(
-                    self.model, self.vllm_config, kv_cache_config
+                    self.vllm_config,
+                    kv_cache_config,
+                    routed_experts_capturer=self.routed_experts_capturer,
                 )
 
     def _init_kv_zero_meta(self) -> None:
@@ -2369,13 +2391,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
         torch.accelerator.synchronize()
-        if current_platform.is_rocm():
+        if current_platform.is_rocm() or self.routed_experts_capturer is not None:
+            # R3 callbacks and buffers must outlive graphs that captured them.
             # RCCL's ncclCommAbort waits for live graphs that captured the comm:
             # https://github.com/ROCm/rocm-systems/issues/13018
             CUDAGraphWrapper.clear_all_graphs()
             BreakableCUDAGraphWrapper.clear_all_graphs()
         if self.aux_output_connector is not None:
             self.aux_output_connector.close()
+            self.aux_output_connector = None
+        if (
+            self.routed_experts_capturer is not None
+            and self.cudagraph_manager is not None
+        ):
+            self.cudagraph_manager.release_graphs()
         set_offloader(None)
         self.cudagraph_manager = None
         self.fast_prefill = None
@@ -2398,6 +2427,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if draft_model := getattr(speculator, "model", None):
                 clear_layer_kv_caches(draft_model.modules())
             self.speculator = None
+        if self._unbind_routed_experts_capturer is not None:
+            self._unbind_routed_experts_capturer()
+            self._unbind_routed_experts_capturer = None
+        self.routed_experts_capturer = None
         if hasattr(self, "model"):
             clear_layer_kv_caches(self.model.modules())
             del self.model

@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from functools import partial
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 import torch
 
@@ -178,19 +178,29 @@ class RoutedExpertsSink:
 def bind_routed_experts_capturer(
     model: torch.nn.Module,
     capturer: RoutedExpertsCapturer,
-) -> None:
-    """Attach capture callbacks to the target model's MoE routers."""
+) -> Callable[[], None]:
+    """Attach capture callbacks and return an idempotent ownership-aware cleanup.
+
+    Validate all routers and allocate sinks before modifying the model.
+    Cleanup restores previous bindings unless another component replaced them.
+    """
     from vllm.model_executor.layers.fused_moe.layer import MoERunner
     from vllm.model_executor.layers.fused_moe.modular_kernel import (
         FusedMoEExpertsMonolithic,
     )
     from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 
-    num_bound = 0
+    bindings: list[tuple[Any, str, Any, Any]] = []
     for module in model.modules():
         if isinstance(module, RoutedExpertsCaptureSource):
-            module.capture_fn = partial(capturer.capture, module.layer_id)
-            num_bound += 1
+            bindings.append(
+                (
+                    module,
+                    "capture_fn",
+                    module.capture_fn,
+                    partial(capturer.capture, module.layer_id),
+                )
+            )
             continue
         if not isinstance(module, MoERunner):
             continue
@@ -208,18 +218,43 @@ def bind_routed_experts_capturer(
                     "Routed-experts capture is not supported with monolithic "
                     f"MoE kernel {type(fused_experts).__name__}."
                 )
-            module.routed_experts.routing_sink = RoutedExpertsSink(
-                fused_experts.moe_config, capture_fn
+            bindings.append(
+                (
+                    module.routed_experts,
+                    "routing_sink",
+                    module.routed_experts.routing_sink,
+                    RoutedExpertsSink(fused_experts.moe_config, capture_fn),
+                )
             )
-            num_bound += 1
         elif isinstance(module.router, BaseRouter):
-            module.router.set_capture_fn(capture_fn)
-            num_bound += 1
+            bindings.append(
+                (module.router, "capture_fn", module.router.capture_fn, capture_fn)
+            )
         else:
             raise ValueError(
                 "Routed-experts capture is not supported with router "
                 f"{type(module.router).__name__}."
             )
 
-    if num_bound == 0:
+    if not bindings:
         raise ValueError("No supported MoE router found for routed-experts capture.")
+
+    def unbind() -> None:
+        for target, attr, previous, installed in reversed(bindings):
+            if getattr(target, attr) is installed:
+                if isinstance(target, BaseRouter):
+                    target.set_capture_fn(previous)
+                else:
+                    setattr(target, attr, previous)
+        bindings.clear()
+
+    try:
+        for target, attr, _, installed in bindings:
+            if isinstance(target, BaseRouter):
+                target.set_capture_fn(installed)
+            else:
+                setattr(target, attr, installed)
+    except BaseException:
+        unbind()
+        raise
+    return unbind
