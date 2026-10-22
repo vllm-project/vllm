@@ -834,9 +834,12 @@ def _reference(
                 f"{moved:.4g} for len {len(prompt)}); a wrong prefix would go "
                 "unnoticed"
             )
-        # Determinism of the reference itself (served from its prefix cache).
-        again = _first_step(url, arch.model, prompts[-1])
-        print(f"[noise] repeat distance={_distance(refs[-1], again)}")
+        # Determinism of the reference itself (served from its prefix cache),
+        # for every prompt so a P/D mismatch at any length can be told apart
+        # from noise.
+        for prompt, ref in zip(prompts, refs):
+            again = _distance(ref, _first_step(url, arch.model, prompt))
+            print(f"[noise] len={len(prompt)} repeat distance={again}")
     return Reference(prompts, refs, arch.hybrid, case.read_mode)
 
 
@@ -853,10 +856,14 @@ def _pd_distances(
         decode,
     ):
         hits_before = _external_hits(decode)
-        distances = [
-            _distance(expected, _first_step(proxy_url, arch.model, prompt))
-            for prompt, expected in zip(ref.prompts, ref.logprobs)
-        ]
+        distances = []
+        for prompt, expected in zip(ref.prompts, ref.logprobs):
+            got = _first_step(proxy_url, arch.model, prompt)
+            distances.append(_distance(expected, got))
+            if not distances[-1] <= TOLERANCE:
+                # Keep the evidence: a wrong prefix and numerical noise look
+                # the same in the distance alone.
+                print(f"[pd] {case.id} len={len(prompt)} ref={expected} got={got}")
         hits = _external_hits(decode) - hits_before
     lengths = [len(p) for p in ref.prompts]
     print(f"[pd] {case.id} lens={lengths} distances={distances} external_hits={hits}")
