@@ -608,6 +608,12 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
     # eager build() is needed between steps or between the batches that replay
     # it, whether the graph holds one draft forward or a multi-step loop.
     supports_draft_decode_metadata_update: bool = False
+    # Whether build() of a uniform decode batch replayed by a FULL CUDA graph
+    # launches only capture-safe work into persistent buffers and reads no host
+    # value that the batch shape does not fix. Lets the model runner record the
+    # build once per decode batch shape at CUDA graph capture and replay it on
+    # every step of that shape instead of rebuilding.
+    supports_recorded_decode_build: bool = False
 
     @abstractmethod
     def __init__(

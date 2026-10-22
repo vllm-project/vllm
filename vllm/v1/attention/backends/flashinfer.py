@@ -1021,6 +1021,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             == FlashInferDecodeKernel.TRTLLM_GEN
             and not self.use_dcp
         )
+        # A trtllm-gen decode build only wraps the device seq_lens, block table
+        # and query_start_loc; its host inputs are fixed by the batch shape.
+        self.supports_recorded_decode_build = self.supports_draft_decode_metadata_update
         self._init_reorder_batch_threshold(
             1,
             supports_spec_as_decode=(
