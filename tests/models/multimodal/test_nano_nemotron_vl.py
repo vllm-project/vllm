@@ -115,7 +115,7 @@ def test_nemotron_cpu_normalized_pixels_bypass_input_norm():
 
 @pytest.mark.parametrize("modality", ["image", "video", "dynamic_image"])
 def test_nemotron_processor_defers_normalization_to_device(
-    modality: str,
+    modality: str, default_vllm_config
 ):
     dynamic_image = modality == "dynamic_image"
     config = SimpleNamespace(
@@ -170,6 +170,22 @@ def test_nemotron_processor_defers_normalization_to_device(
     assert raw_values.dtype == torch.uint8
     assert cpu_values.dtype == torch.bfloat16
     assert raw_values.shape == cpu_values.shape
+
+    # Normalizing on the device hands the encoder the same dtype as the CPU
+    # path. Values differ only where the uint8 resize rounds or clips the
+    # bicubic overshoot: a few elements by several levels, tiny on average.
+    model = object.__new__(NemotronH_Nano_VL_V2)
+    nn.Module.__init__(model)
+    model.input_norm = FusedMMInputNorm(
+        config.norm_mean, config.norm_std, 1.0 / 255.0
+    ).to(_DEVICE)
+    model.llm_dtype = config.dtype
+    if dynamic_image:
+        cpu_values = DynamicResolutionImageTiler.stack([cpu_values], config.patch_size)
+        raw_values = DynamicResolutionImageTiler.stack([raw_values], config.patch_size)
+    device_values = model._normalize_pixel_values(raw_values.to(_DEVICE)).cpu()
+    assert device_values.dtype == cpu_values.dtype
+    assert (device_values.float() - cpu_values.float()).abs().mean() < 0.01
 
 
 def test_nemotron_processor_rejects_partial_normalization():
