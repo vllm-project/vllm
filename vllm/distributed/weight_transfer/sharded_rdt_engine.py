@@ -51,7 +51,6 @@ results behind the choices here.
 
 import time
 from collections.abc import Callable
-from contextlib import nullcontext
 from dataclasses import dataclass, field, fields
 from math import prod
 from typing import TYPE_CHECKING, Any, TypeAlias, cast
@@ -1895,27 +1894,18 @@ class ShardedRDTWeightTransferEngine(
                     self._quant_queue.put((chunk.quant, ready))
 
     def _run_quant(self, layers: "list[Any]", ready: "torch.Event") -> None:
-        """Quant/kernel-copy/reset the given COMPLETED leaf modules, exactly as
-        _layerwise_process. Runs on the quant thread's own stream, ordered after
-        the modules' scatters via ``ready``; touches only the scattered params
-        (never a receive slot), so it can overlap subsequent chunks' RDMA and
-        scatters. ``info.reset()`` is what makes finalize skip the layer —
-        drain_pending joins the quant queue before finalize runs."""
-        from vllm.model_executor.layers.quantization.base_config import (
-            QuantizeMethodBase,
-        )
-        from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
-        from vllm.model_executor.layers.quantization.online.moe_base import (
-            OnlineMoEMethodBase,
-        )
+        """Quant/kernel-copy/reset the given COMPLETED leaf modules through the
+        same ``_process_loaded_layer`` as _layerwise_process. Runs on the quant
+        thread's own stream, ordered after the modules' scatters via ``ready``;
+        touches only the scattered params (never a receive slot), so it can
+        overlap subsequent chunks' RDMA and scatters. The ``info.reset()`` in
+        there is what makes finalize skip the layer — drain_pending joins the
+        quant queue before finalize runs."""
         from vllm.model_executor.model_loader.reload.layerwise import (
             LAYERWISE_INFO,
-            _copy_and_restore_kernel_tensors,
+            _process_loaded_layer,
         )
         from vllm.model_executor.model_loader.reload.utils import get_layer_tensors
-        from vllm.model_executor.model_loader.utils import (
-            online_quantization_timing_context,
-        )
 
         stream = self._quant_stream or self._proc_stream
         assert stream is not None  # created in _ensure_proc_worker before use
@@ -1934,26 +1924,7 @@ class ShardedRDTWeightTransferEngine(
                 for tensor in get_layer_tensors(layer).values():
                     if tensor.is_cuda:
                         tensor.record_stream(stream)
-                quant_method = getattr(layer, "quant_method", None)
-                if isinstance(quant_method, QuantizeMethodBase):
-                    if hasattr(layer, "_already_called_process_weights_after_loading"):
-                        delattr(layer, "_already_called_process_weights_after_loading")
-                    timing_context = (
-                        online_quantization_timing_context(layer, quant_method)
-                        if isinstance(
-                            quant_method, (OnlineLinearBase, OnlineMoEMethodBase)
-                        )
-                        else nullcontext()
-                    )
-                    with timing_context:
-                        quant_method.process_weights_after_loading(layer)
-                    if hasattr(layer, "update_param_tp_status"):
-                        layer.update_param_tp_status()
-                # Copy into persistent kernel storage (preserves cudagraph refs).
-                if info.kernel_tensors is not None:
-                    _copy_and_restore_kernel_tensors(layer, info)
-                # Reset so finalize_layerwise_reload skips this (loaded) layer.
-                info.reset()
+                _process_loaded_layer(layer, info)
 
     def _quant_worker_loop(self) -> None:
         """Dedicated quant thread: drains (completed_modules, scatter-done event)

@@ -353,11 +353,6 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
     # Materialize layer tensors onto device
     materialize_layer(layer, info)
 
-    # Reset online quantization flag so process_weights_after_loading
-    # will run again during reload
-    if hasattr(layer, "_already_called_process_weights_after_loading"):
-        delattr(layer, "_already_called_process_weights_after_loading")
-
     # Unwrap layerwise loading wrappers
     for param in get_layer_tensors(layer).values():
         param.weight_loader = _get_original_loader(param)
@@ -367,6 +362,24 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
         param = getattr(layer, name)
         args.arguments["param"] = param
         param.weight_loader(*args.args, **args.kwargs)
+
+    _process_loaded_layer(layer, info)
+    logger.debug("%s: Processed", layer.__class__.__name__)
+
+
+def _process_loaded_layer(layer: torch.nn.Module, info: LayerReloadingInfo) -> None:
+    """Finish a layer whose weights are all loaded: run its quant method's
+    processing, copy the result into the persistent kernel storage and reset
+    its reload info.
+
+    Shared by ``_layerwise_process`` and the sharded-RDT engine's quant stream,
+    which loads a layer's weights by scattering into it instead of through the
+    buffered loaders but finishes it exactly the same way.
+    """
+    # Reset online quantization flag so process_weights_after_loading
+    # will run again during reload
+    if hasattr(layer, "_already_called_process_weights_after_loading"):
+        delattr(layer, "_already_called_process_weights_after_loading")
 
     # Process weights (quantization, repacking, etc.)
     quant_method = getattr(layer, "quant_method", None)
@@ -398,7 +411,6 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
         _copy_and_restore_kernel_tensors(layer, info)
 
     info.reset()
-    logger.debug("%s: Processed", layer.__class__.__name__)
 
 
 def _get_original_loader(tensor: torch.Tensor) -> Callable:
