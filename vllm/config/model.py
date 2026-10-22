@@ -315,7 +315,11 @@ class ModelConfig:
     outputs use the full lm_head. Requires an unquantized, unsharded lm_head and
     raises otherwise. Adds an FP8 copy of the lm_head to model memory. Gains
     are largest on GPUs where the lm_head is a large share of the step (e.g.
-    DGX Spark); on HBM GPUs it can be slower than the full lm_head."""
+    DGX Spark); on HBM GPUs it can be slower than the full lm_head. On AMD Zen
+    CPUs with zentorch the copy is per-row INT8, the lm_head must be BF16, and
+    only all-greedy batches are screened; a batch where more than 1/16 of the
+    vocabulary survives the screen uses the full lm_head. Requires Model Runner
+    V2."""
     disable_sliding_window: bool = False
     """Whether to disable sliding window. If True, we will disable the sliding
     window functionality of the model, capping to sliding window size. If the
