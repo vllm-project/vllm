@@ -1035,10 +1035,12 @@ class EplbState:
 
         The wait is bounded. Draining takes well under a second when the async
         worker is healthy, but a rank that stops producing results leaves the
-        others reducing a flag that can never reach the group size, and a
-        reconfiguration was seen spinning here for two hours without printing
-        anything at all. Failing with the state of this rank is strictly more
-        useful than waiting forever.
+        others reducing a flag that can never reach the group size, and then
+        nobody leaves and nothing is printed. The same shape was caught in
+        _wait_for_all_transfers, where a peer whose GPU faulted left its READ
+        in PROC and the survivors spun until the deadline there fired. Failing
+        with the state of this rank is strictly more useful than waiting
+        forever.
         """
         if not self.is_async:
             return
@@ -1062,11 +1064,11 @@ class EplbState:
                 else:
                     time.sleep(0.001)
                 elapsed = time.perf_counter() - started
-                worker = self.async_worker
-                worker_state = (
-                    "alive" if worker is not None and worker.is_alive() else "gone"
-                )
                 if timeout > 0 and elapsed > timeout:
+                    worker = self.async_worker
+                    worker_state = (
+                        "alive" if worker is not None and worker.is_alive() else "gone"
+                    )
                     raise RuntimeError(
                         f"Draining the async EPLB worker for model {model_key} "
                         f"did not finish within {timeout:.0f} s "
