@@ -733,6 +733,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_PORT": get_vllm_port,
     # path used for ipc when the frontend api server is running in
     # multi-processing mode to communicate with the backend engine process.
+    # If socket paths under it would exceed the Unix socket path limit (about
+    # 107 bytes), as with deep per-job TMPDIRs on clusters, a private directory
+    # under /tmp is used instead.
     "VLLM_RPC_BASE_PATH": lambda: os.getenv(
         "VLLM_RPC_BASE_PATH", tempfile.gettempdir()
     ),
