@@ -3,6 +3,7 @@
 
 import types
 from dataclasses import dataclass, replace
+from typing import NotRequired, TypedDict
 
 import pytest
 import torch
@@ -1522,10 +1523,21 @@ def test_trtllm_gen_mxfp8_block_scale_moe(
 # -----------------------------------------------------------------------------
 # ROCm Oracle-based kernel execution tests
 # -----------------------------------------------------------------------------
+class RocmBackendConfig(TypedDict):
+    activation: str
+    rtol: float
+    percent: float
+    requires_aiter: bool
+    requires_gfx950: bool
+    requires_gfx1250: NotRequired[bool]
+    interleaved_layout: NotRequired[bool]
+    act_type: NotRequired[str]
+
+
 # TODO: Further tighten the accuracy threshold.
 # - More accurate ref moe to include activation quantization
 # - Check aiter kernel accuracy. E.g., quant / dequant details.
-ROCM_BACKEND_CONFIGS = {
+ROCM_BACKEND_CONFIGS: dict[str, RocmBackendConfig] = {
     "TRITON": {
         "activation": "SWIGLUOAI",
         "rtol": 0.3,
@@ -1814,6 +1826,7 @@ def test_rocm_mxfp4_moe_oracle(
                 apply_router_weight_on_input=False,
             )
 
+    assert isinstance(out, torch.Tensor)
     # Verify output is valid (no NaN/Inf) and has expected shape
     assert out.shape == (num_tokens, hidden_size), f"Unexpected shape: {out.shape}"
     assert not torch.any(torch.isnan(out)), "Output contains NaN"
@@ -2255,6 +2268,7 @@ def test_aiter_mxfp4_monolithic_rejects_expert_parallel(
 
     assert supported is not use_ep
     if use_ep:
+        assert reason is not None
         assert "parallel config" in reason
 
 
