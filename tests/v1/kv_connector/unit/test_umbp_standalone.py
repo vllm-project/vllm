@@ -152,7 +152,7 @@ def server(monkeypatch) -> _Server:
     cpp = SimpleNamespace(
         UMBPClient=lambda config: _Client(pool, config),
         UMBPConfig=lambda: SimpleNamespace(dram=SimpleNamespace()),
-        UMBPStandaloneProcessConfig=SimpleNamespace,
+        UMBPStandaloneProcessConfig=lambda: SimpleNamespace(lookup_timeout_ms=1000),
         UMBPDeploymentMode=_DeploymentMode,
         MemoryLocationType=SimpleNamespace(CPU="cpu", GPU="gpu"),
     )
@@ -292,6 +292,9 @@ def test_config_rejects_options_the_server_owns(option):
     ("options", "match"),
     [
         ({"startup_timeout_ms": 0}, "startup_timeout_ms"),
+        ({"lookup_timeout_ms": 0}, "lookup_timeout_ms"),
+        ({"lookup_timeout_ms": -1}, "lookup_timeout_ms"),
+        ({"lookup_timeout_ms": True}, "lookup_timeout_ms"),
         ({"master_address": "x"}, "distributed-only"),
         ({"endpoint": "tcp://127.0.0.1:5555"}, "endpoint"),
     ],
@@ -306,17 +309,35 @@ def test_factory_builds_the_standalone_runtime():
     assert isinstance(runtime, StandaloneRuntime)
 
 
-def test_client_targets_the_server_without_sizing_a_local_pool(server):
-    runtime = _runtime(startup_timeout_ms=500)
+@pytest.mark.parametrize("lookup_timeout_ms", [None, 25])
+def test_client_targets_the_server_without_sizing_a_local_pool(
+    server, lookup_timeout_ms
+):
+    options = (
+        {} if lookup_timeout_ms is None else {"lookup_timeout_ms": lookup_timeout_ms}
+    )
+    runtime = _runtime(startup_timeout_ms=500, **options)
     handle = runtime.create_scheduler_handle("ns", RankTopology(), None)
 
     config = server.clients[0].config
     assert config.standalone_process.address == "unix://" + ENDPOINT
     assert config.standalone_process.auto_start is False
     assert config.standalone_process.startup_timeout_ms == 500
+    assert config.standalone_process.lookup_timeout_ms == (
+        1000 if lookup_timeout_ms is None else lookup_timeout_ms
+    )
     assert vars(config.dram) == {}
     handle.close()
     assert server.clients[0].closed
+
+
+def test_standalone_requires_mori_with_bounded_lookups(server, monkeypatch):
+    monkeypatch.setattr(
+        sys.modules["mori.cpp"], "UMBPStandaloneProcessConfig", SimpleNamespace
+    )
+    with pytest.raises(RuntimeError, match="lookup_timeout_ms support"):
+        _runtime().create_scheduler_handle("ns", RankTopology(), None)
+    assert not server.clients
 
 
 def test_unreachable_server_fails_at_startup(server):
