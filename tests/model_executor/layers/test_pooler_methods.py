@@ -28,6 +28,7 @@ from vllm.model_executor.layers.pooler.tokwise.methods import (
     get_tok_pooling_method,
 )
 from vllm.model_executor.layers.pooler.tokwise.poolers import TokenPooler
+from vllm.platforms import current_platform
 from vllm.pooling_params import LateChunkingParams, PoolingParams
 from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingCursor, PoolingMetadata, PoolingStates
@@ -53,7 +54,7 @@ def _make_pooling_cursor(
     else:
         seq_lens_cpu = torch.tensor(seq_lens, dtype=torch.long)
 
-    cumsum = torch.zeros(len(prompt_lens) + 1, dtype=torch.long, device=device)
+    cumsum = torch.zeros(len(prompt_lens) + 1, dtype=torch.long)
     torch.cumsum(num_scheduled_tokens_cpu, dim=0, out=cumsum[1:])
 
     return PoolingCursor(
@@ -194,6 +195,49 @@ class TestLastPool:
 # MeanPool
 # ---------------------------------------------------------------------------
 class TestMeanPool:
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+    def test_ragged_strided_hidden_states(self, dtype):
+        lengths = [1, 31, 32, 33, 65]
+        width = 131
+        torch.manual_seed(0)
+        backing = torch.randn(
+            2 * sum(lengths),
+            2 * width,
+            dtype=dtype,
+            device=current_platform.device_type,
+        )
+        hidden = backing[::2, ::2]
+        metadata = _make_metadata(lengths, device=hidden.device)
+
+        out = MeanPool()(hidden, metadata)
+        expected = torch.stack(
+            [
+                sequence.double().mean(dim=0).float()
+                for sequence in hidden.split(lengths)
+            ]
+        )
+
+        assert out.shape == (len(lengths), width)
+        assert out.dtype == torch.float32
+        torch.testing.assert_close(out, expected, rtol=1e-5, atol=2e-7)
+
+        if current_platform.is_cuda():
+            from vllm.model_executor.layers.pooler.seqwise.mean_pool import (
+                segmented_mean,
+            )
+
+            cursor = metadata.pooling_cursor
+            assert cursor is not None
+            args = (
+                hidden,
+                cursor.first_token_indices_gpu,
+                cursor.last_token_indices_gpu,
+            )
+            torch.testing.assert_close(
+                segmented_mean(*args), expected, rtol=1e-5, atol=2e-7
+            )
+            torch.library.opcheck(torch.ops.vllm.segmented_mean, args)
+
     def test_computes_mean(self):
         hidden = torch.tensor(
             [[1.0, 2.0], [3.0, 4.0], [10.0, 20.0]], dtype=torch.float32
