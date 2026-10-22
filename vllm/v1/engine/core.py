@@ -51,6 +51,7 @@ from vllm.utils.gc_utils import (
 from vllm.utils.hashing import get_hash_fn_by_name
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.system_utils import decorate_logs, set_process_title
+from vllm.utils.watch_dog import get_watch_dog, start_watch_dog
 from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.core.kv_cache_planning import get_kv_cache_configs
 from vllm.v1.core.kv_cache_utils import (
@@ -359,6 +360,21 @@ class EngineCore:
             kv_cache_config.cache_hit_alignment_tokens = cache_hit_alignment_tokens
 
         self.model_executor.initialize_from_config(kv_cache_configs)
+        kv_transfer_config = vllm_config.kv_transfer_config
+        if (
+            kv_transfer_config is not None
+            and kv_transfer_config.has_connector("SimpleCPUOffloadConnector")
+            and vllm_config.cache_config.enable_prefix_caching
+        ):
+            aligned_num_cpu_blocks = (
+                self.model_executor.get_simple_cpu_offload_num_blocks()
+            )
+            assert aligned_num_cpu_blocks is not None, (
+                "SimpleCPUOffloadConnector workers must report their block count"
+            )
+            vllm_config.cache_config.simple_cpu_offload_num_blocks = (
+                aligned_num_cpu_blocks
+            )
         if not envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
             self.model_executor.compile_or_warm_up_model()
 
@@ -1498,6 +1514,8 @@ class EngineCoreProc(EngineCore):
                     "[shutdown] EngineCore: trigger received signal=%s",
                     signal_name,
                 )
+                if signum == signal.SIGTERM:
+                    get_watch_dog().handle_failure(signal_name)
                 # Record the request first so it survives the construction window.
                 shutdown_requested = True
                 if engine_core is not None:
@@ -1536,6 +1554,7 @@ class EngineCoreProc(EngineCore):
             # later signal can still wake an idle busy loop.
             signal_callback = SignalCallback(wakeup_engine)
 
+            start_watch_dog(f"engine_{dp_rank}", vllm_config.watchdog_config, logger)
             engine_core.run_busy_loop()
 
         except SystemExit as e:
@@ -1628,7 +1647,8 @@ class EngineCoreProc(EngineCore):
                     waited = True
             block = self.process_input_queue_block
             try:
-                req = self.input_queue.get(block=block)
+                with get_watch_dog().disable():
+                    req = self.input_queue.get(block=block)
                 self._handle_client_request(*req)
             except queue.Empty:
                 break
@@ -1645,6 +1665,8 @@ class EngineCoreProc(EngineCore):
 
     def _process_engine_step(self) -> bool:
         """Called only when there are unfinished local requests."""
+        get_watch_dog().feed()
+
         # Step the engine core.
         outputs, model_executed = self.step_fn()
         # Put EngineCoreOutputs into the output queue.
