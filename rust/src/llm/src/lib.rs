@@ -2,9 +2,11 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::num::NonZeroU32;
+use std::time::Duration;
 
 use tracing::Span;
 use vllm_engine_core_client::EngineCoreClient;
+use vllm_metrics::METRICS;
 
 mod error;
 mod inflight;
@@ -45,6 +47,7 @@ impl Llm {
     /// Create a new minimal LLM facade from an already connected engine-core
     /// client.
     pub fn new(client: EngineCoreClient) -> Self {
+        METRICS.request.set_max_model_len(client.max_model_len());
         Self {
             client,
             randomize_request_id: true,
@@ -54,17 +57,16 @@ impl Llm {
         }
     }
 
-    /// Enable or disable periodic stats logging.
-    pub fn with_log_stats(mut self, enabled: bool) -> Self {
-        if enabled {
-            let stats_logger = StatsLogger::start(
+    /// Enable periodic stats logging at the given interval, or disable it with
+    /// `None`. A zero interval logs as often as the timer allows.
+    pub fn with_log_stats(mut self, interval: Option<Duration>) -> Self {
+        self.stats_logger = interval.map(|interval| {
+            StatsLogger::start(
                 self.client.model_name().to_string(),
                 self.client.engine_indices(),
-            );
-            self.stats_logger = Some(stats_logger);
-        } else {
-            self.stats_logger = None;
-        }
+                interval,
+            )
+        });
         self
     }
 
