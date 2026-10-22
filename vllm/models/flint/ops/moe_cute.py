@@ -26,38 +26,6 @@ def _tactic(num_tokens: int):
     return (((128, 8, 256), (2, 1), True), ((128, 8, 256), (2, 1), True))
 
 
-def prepare_weights(
-    w13: torch.Tensor,
-    w13_scale: torch.Tensor,
-    w2: torch.Tensor,
-    w2_scale: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """ModelOpt NVFP4 expert weights -> FlashInfer W4A16 layouts.
-
-    GEMM1 rows go from [gate; up] to [up; gate] interleaved in 64-row groups;
-    block scales go to the 6D MMA layout. Returns (w1, w1_sf, w2, w2_sf).
-    """
-
-    def interleave(x: torch.Tensor) -> torch.Tensor:
-        e, rows, cols = x.shape
-        x = torch.cat([x[:, rows // 2 :], x[:, : rows // 2]], 1)
-        x = x.view(e, 2, rows // 128, 64, cols).transpose(1, 2)
-        return x.contiguous().view(e, rows, cols)
-
-    def mma_scales(s: torch.Tensor) -> torch.Tensor:
-        e, rows, groups = s.shape
-        assert rows % 128 == 0 and groups % 4 == 0
-        s = s.view(torch.uint8).view(e, rows // 128, 4, 32, groups // 4, 4)
-        s = s.permute(0, 1, 4, 3, 2, 5).contiguous().view(torch.float8_e4m3fn)
-        # Physical (E, m_tiles, k_tiles, 32, 4, 4) as logical
-        # (32, 4, m_tiles, 4, k_tiles, E).
-        return s.permute(3, 4, 1, 5, 2, 0)
-
-    w1 = interleave(w13)
-    w1_sf = mma_scales(interleave(w13_scale.view(torch.uint8)))
-    return w1, w1_sf, w2.contiguous(), mma_scales(w2_scale)
-
-
 def grouped_moe(
     x: torch.Tensor,
     topk_ids: torch.Tensor,

@@ -69,7 +69,6 @@ from .ops.moe import (
     LLMoEWeights,
     flint_moe_ll,
     ll_weights_from_layers,
-    make_route_counter,
 )
 from .ops.norm import RMSNorm, silu_and_mul
 from .ops.qk_norm_rope import qk_norm_rope_cache
@@ -178,7 +177,6 @@ class FlintSparseMoeBlock(nn.Module):
         self.bf16_decode: FlintBf16DecodeMoE | None = None
         self._ll_weights: LLMoEWeights | None = None
         if self.use_flint_kernel:
-            self.register_buffer("ll_counter", make_route_counter(), persistent=False)
             self.experts = FlintNvfp4Experts(
                 config.num_experts,
                 config.hidden_size,
@@ -229,7 +227,7 @@ class FlintSparseMoeBlock(nn.Module):
             norm.variance_epsilon,
             self._ll_weights,
             self.top_k,
-            self.ll_counter,
+            self.experts.route_counter,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:

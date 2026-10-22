@@ -19,7 +19,7 @@ Decode (few tokens): three Triton kernels, (1) router GEMV + top-k, (2) per
 + weighted combine + shared-expert add. Larger batches: cuBLAS router GEMM +
 Triton top-k, FlashInfer's SM100 W4A16 grouped GEMMs (see ``moe_cute``) and a
 Triton combine. Both paths read the same weights in FlashInfer's layout (see
-``moe_cute.prepare_weights``).
+``FlintMoEWeights.from_modelopt``).
 """
 
 from collections.abc import Iterable
@@ -29,6 +29,15 @@ import regex as re
 import torch
 from torch import nn
 
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
+    interleave_linear_and_gate,
+    nvfp4_swizzled_scale_to_cutedsl_mma_view,
+    reorder_w13_to_w31_for_flashinfer_cutedsl,
+)
+from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    swizzle_blockscale,
+)
 from vllm.triton_utils import tl, tldevice, triton
 from vllm.utils.torch_utils import aux_stream, current_stream
 
@@ -104,7 +113,7 @@ def _dequant8(q, s):
 @triton.jit
 def _dequant_rows(q, s, BN: tl.constexpr, BK: tl.constexpr):
     """[BN, BK / 8] int32 code words + per-word E4M3 scales -> [BN, BK] bf16
-    (value * scale * 2^-8), K in natural order."""
+    (value * scale, exact), K in natural order."""
     o = _dequant8(q, s)
     w = tl.join(
         tl.join(tl.join(o[0], o[4]), tl.join(o[2], o[6])),
@@ -167,8 +176,26 @@ def _topk_row(
 
 
 @triton.jit
-def _route_gemv_kernel(
+def _add_rms_norm(a_ptr, r_ptr, w_ptr, t, eps, H: tl.constexpr):
+    """``norm.fused_add_rms_norm`` for row t: (bf16 residual, bf16 out), both
+    from the unrounded fp32 sum s = a + r."""
+    offs = tl.arange(0, H)
+    a = tl.load(a_ptr + t * H + offs).to(tl.float32)
+    r = tl.load(r_ptr + t * H + offs).to(tl.float32)
+    s = a + r
+    inv = _rsqrt(tl.sum(s * s, axis=0) / H + eps)
+    w = tl.load(w_ptr + offs).to(tl.float32)
+    return s.to(tl.bfloat16), (s * inv * w).to(tl.bfloat16)
+
+
+@triton.jit
+def _router_kernel(
     x_ptr,
+    res_ptr,
+    ln_w_ptr,
+    eps,
+    res_out_ptr,
+    xn_ptr,
     wr_ptr,
     logits_ptr,
     ids_ptr,
@@ -178,37 +205,51 @@ def _route_gemv_kernel(
     E: tl.constexpr,
     TOPK: tl.constexpr,
     EB: tl.constexpr,
+    FUSE_NORM: tl.constexpr,
 ):
-    """Router GEMV (bf16 logits) + top-k. Grid (M, E // EB).
+    """Router GEMV (bf16 logits) of experts [pe * EB, + EB) for token t, then
+    top-k by the token's last program. Grid (M, E // EB), or (M * E // EB,)
+    with FUSE_NORM, where the GEMV input is ``norm.fused_add_rms_norm`` of x and
+    res (program pe == 0 writes the residual and normed rows). Router weights
+    are fetched before the PDL dependency wait.
 
-    The last program of each token does the top-k; it is found with a per-token
-    atomic counter that is never reset (the low bits of the signed int32 count;
-    wraparound-safe since the program count is a power of two), so the buffer
-    must be zeroed once at allocation and only used by launches serialized on
-    one stream.
+    The last program is found with a per-token atomic counter that is never
+    reset (the low bits of the signed int32 count; wraparound-safe since the
+    program count is a power of two), so the buffer must be zeroed once at
+    allocation and only used by launches serialized on one stream.
     """
-    m = tl.program_id(0)
-    pe = tl.program_id(1)
+    NR: tl.constexpr = E // EB
+    tl.static_assert((NR & (NR - 1)) == 0)
+    if FUSE_NORM:
+        t = tl.program_id(0) // NR
+        pe = tl.program_id(0) % NR
+    else:
+        t = tl.program_id(0)
+        pe = tl.program_id(1)
     offs_e = pe * EB + tl.arange(0, EB)
     offs_k = tl.arange(0, H)
     w = tl.load(wr_ptr + offs_e[:, None] * H + offs_k[None, :]).to(tl.float32)
-    # Launched with PDL: the router weights are fetched while the producer of
-    # x finishes.
     tl.extra.cuda.gdc_wait()
-    x = tl.load(x_ptr + m * H + offs_k).to(tl.float32)
+    if FUSE_NORM:
+        s, xn = _add_rms_norm(x_ptr, res_ptr, ln_w_ptr, t, eps, H)
+        if pe == 0:
+            tl.store(res_out_ptr + t * H + offs_k, s)
+            tl.store(xn_ptr + t * H + offs_k, xn)
+        x = xn.to(tl.float32)
+    else:
+        x = tl.load(x_ptr + t * H + offs_k).to(tl.float32)
     logits = tl.sum(w * x[None, :], axis=1).to(tl.bfloat16)
-    tl.store(logits_ptr + m * E + offs_e, logits)
+    tl.store(logits_ptr + t * E + offs_e, logits)
     tl.debug_barrier()
-    count = tl.atomic_add(counter_ptr + m, 1, sem="acq_rel")
-    tl.static_assert(((E // EB) & (E // EB - 1)) == 0)
-    if (count & (E // EB - 1)) == E // EB - 1:
+    count = tl.atomic_add(counter_ptr + t, 1, sem="acq_rel")
+    if (count & (NR - 1)) == NR - 1:
         offs = tl.arange(0, E)
-        vals = tl.load(logits_ptr + m * E + offs, volatile=True)
+        vals = tl.load(logits_ptr + t * E + offs, volatile=True)
         _topk_row(
             vals,
             offs,
-            ids_ptr + m * TOPK,
-            tw_ptr + m * TOPK,
+            ids_ptr + t * TOPK,
+            tw_ptr + t * TOPK,
             E,
             TOPK,
             triton.next_power_of_2(TOPK),
@@ -302,7 +343,6 @@ def _down_gemv_kernel(
     INTER: tl.constexpr,
     TOPK: tl.constexpr,
     BN: tl.constexpr,
-    HAS_SHARED: tl.constexpr,
 ):
     """out[t] = bf16(bf16(sum_j tw[t, j] * y_j) + shared[t]) with
     y_j = bf16(act[t * TOPK + j] @ W2[e_j]^T), weighted sum in fp32.
@@ -331,10 +371,8 @@ def _down_gemv_kernel(
         gs = tl.load(gs_ptr + e)
         y = (tl.sum(acc, axis=1) * gs).to(tl.bfloat16).to(tl.float32)
         out += tl.load(tw_ptr + p) * y
-    out = out.to(tl.bfloat16)
-    if HAS_SHARED:
-        shared = tl.load(shared_ptr + t * H + rows).to(tl.float32)
-        out = (out.to(tl.float32) + shared).to(tl.bfloat16)
+    shared = tl.load(shared_ptr + t * H + rows).to(tl.float32)
+    out = (out.to(tl.bfloat16).to(tl.float32) + shared).to(tl.bfloat16)
     tl.store(out_ptr + t * H + rows, out)
 
 
@@ -348,7 +386,6 @@ def _combine_kernel(
     H: tl.constexpr,
     TOPK: tl.constexpr,
     BH: tl.constexpr,
-    HAS_SHARED: tl.constexpr,
 ):
     """out[t] = bf16(bf16(sum_j tw[t, j] * y[perm[t * TOPK + j]]) + shared[t]),
     weighted sum in fp32.
@@ -363,10 +400,8 @@ def _combine_kernel(
         row = tl.load(perm_ptr + t * TOPK + j).to(tl.int64)
         y = tl.load(y_ptr + row * H + offs).to(tl.float32)
         acc += tl.load(tw_ptr + t * TOPK + j) * y
-    out = acc.to(tl.bfloat16)
-    if HAS_SHARED:
-        shared = tl.load(shared_ptr + t * H + offs).to(tl.float32)
-        out = (out.to(tl.float32) + shared).to(tl.bfloat16)
+    shared = tl.load(shared_ptr + t * H + offs).to(tl.float32)
+    out = (acc.to(tl.bfloat16).to(tl.float32) + shared).to(tl.bfloat16)
     tl.store(out_ptr + t * H + offs, out)
 
 
@@ -436,7 +471,6 @@ def _down_gemv_bf16_kernel(
     INTER: tl.constexpr,
     TOPK: tl.constexpr,
     BN: tl.constexpr,
-    HAS_SHARED: tl.constexpr,
 ):
     """BF16 experts: out[t] = bf16(bf16(sum_j tw[t, j] * y_j) + shared[t]),
     y_j = bf16(act[t * TOPK + j] @ W2[e_j]^T).
@@ -460,10 +494,8 @@ def _down_gemv_bf16_kernel(
         a = tl.load(a_ptrs + tl.zeros([BN, INTER], dtype=tl.int32)).to(tl.float32)
         y = tl.sum(w * a, axis=1).to(tl.bfloat16).to(tl.float32)
         out += tl.load(tw_ptr + p) * y
-    out = out.to(tl.bfloat16)
-    if HAS_SHARED:
-        shared = tl.load(shared_ptr + t * H + rows).to(tl.float32)
-        out = (out.to(tl.float32) + shared).to(tl.bfloat16)
+    shared = tl.load(shared_ptr + t * H + rows).to(tl.float32)
+    out = (out.to(tl.bfloat16).to(tl.float32) + shared).to(tl.bfloat16)
     tl.store(out_ptr + t * H + rows, out)
 
 
@@ -504,7 +536,7 @@ def flint_moe_bf16_decode(
     row_maps: tuple[torch.Tensor, torch.Tensor],
     top_k: int,
     counter: torch.Tensor,
-    shared_output: torch.Tensor | None = None,
+    shared_output: torch.Tensor,
     shared_ready: torch.cuda.Event | None = None,
 ) -> torch.Tensor:
     """Decode-path MoE on TRTLLM-layout BF16 experts (w13 [E, 2I, H], w2
@@ -531,7 +563,6 @@ def flint_moe_bf16_decode(
         launch_pdl=True,
     )
     out = torch.empty_like(x)
-    has_shared = shared_output is not None
     if shared_ready is not None:
         shared_ready.wait(current_stream())
     bn = 1 if num_tokens <= 2 else 2
@@ -541,13 +572,12 @@ def flint_moe_bf16_decode(
         tw,
         w2,
         row_maps[1],
-        shared_output if has_shared else out,
+        shared_output,
         out,
         H=hidden,
         INTER=inter,
         TOPK=top_k,
         BN=bn,
-        HAS_SHARED=has_shared,
         num_warps=1,
         launch_pdl=True,
     )
@@ -577,13 +607,17 @@ class FlintMoEWeights:
     ) -> "FlintMoEWeights":
         """From ModelOpt tensors: w13 [E, 2I, H/2] ([gate; up]), w13_scale
         [E, 2I, H/16], w2 [E, H, I/2], w2_scale [E, H, I/16], fp32 [E]."""
-        w1, w1_sf, w2, w2_sf = moe_cute.prepare_weights(w13, w13_scale, w2, w2_scale)
+        w1, w1_sf = reorder_w13_to_w31_for_flashinfer_cutedsl(
+            MoEActivation.SILU, w13, w13_scale
+        )
+        w1 = interleave_linear_and_gate(w1, group_size=64, dim=1)
+        w1_sf = interleave_linear_and_gate(w1_sf, group_size=64, dim=1)
         return cls(
             w1,
-            w1_sf,
+            nvfp4_swizzled_scale_to_cutedsl_mma_view(swizzle_blockscale(w1_sf)),
             w13_scale_2.float().contiguous(),
-            w2,
-            w2_sf,
+            w2.contiguous(),
+            nvfp4_swizzled_scale_to_cutedsl_mma_view(swizzle_blockscale(w2_scale)),
             w2_scale_2.float().contiguous(),
         )
 
@@ -614,7 +648,12 @@ def route(
             num_tokens, num_experts, dtype=torch.bfloat16, device=x.device
         )
         eb = 2
-        _route_gemv_kernel[(num_tokens, num_experts // eb)](
+        _router_kernel[(num_tokens, num_experts // eb)](
+            x,
+            x,
+            x,
+            0.0,
+            x,
             x,
             router_weight,
             logits,
@@ -625,6 +664,7 @@ def route(
             E=num_experts,
             TOPK=top_k,
             EB=eb,
+            FUSE_NORM=False,
             num_warps=4,
             launch_pdl=True,
         )
@@ -642,10 +682,10 @@ def flint_moe(
     weights: FlintMoEWeights,
     top_k: int,
     counter: torch.Tensor,
-    shared_output: torch.Tensor | None = None,
+    shared_output: torch.Tensor,
     shared_ready: torch.cuda.Event | None = None,
 ) -> torch.Tensor:
-    """Routed-expert MoE output (+ shared_output) for BF16 x [M, H].
+    """Routed-expert MoE output + shared_output for BF16 x [M, H].
 
     counter: buffer from ``make_route_counter``. shared_ready: event the
     current stream waits on before the first read of shared_output (which
@@ -656,8 +696,6 @@ def flint_moe(
     assert x.dtype == torch.bfloat16 and x.is_contiguous()
     ids, tw = route(x, router_weight, top_k, counter)
     out = torch.empty_like(x)
-    has_shared = shared_output is not None
-    shared = shared_output if has_shared else out
     if num_tokens <= DECODE_MAX_TOKENS:
         act = torch.empty(num_tokens * top_k, inter, dtype=x.dtype, device=x.device)
         _gate_up_gemv_kernel[(num_tokens * top_k, inter)](
@@ -685,13 +723,12 @@ def flint_moe(
             weights.w2.view(torch.int32),
             weights.w2_sf,
             weights.w2_alpha,
-            shared,
+            shared_output,
             out,
             H=hidden,
             INTER=inter,
             TOPK=top_k,
             BN=bn,
-            HAS_SHARED=has_shared,
             num_warps=1,
             launch_pdl=True,
         )
@@ -714,12 +751,11 @@ def flint_moe(
         y,
         perm,
         tw,
-        shared,
+        shared_output,
         out,
         H=hidden,
         TOPK=top_k,
         BH=bh,
-        HAS_SHARED=has_shared,
         num_warps=4,
         launch_pdl=True,
     )
@@ -732,18 +768,16 @@ _EXPERT_PARAM = re.compile(
 
 
 def _start_shared(
-    shared: torch.Tensor | nn.Module | None,
+    shared: torch.Tensor | nn.Module,
     x: torch.Tensor,
     fork: torch.cuda.Event,
     join: torch.cuda.Event,
-) -> tuple[torch.Tensor | None, torch.cuda.Event | None]:
+) -> tuple[torch.Tensor, torch.cuda.Event | None]:
     """Run a shared-expert module on the auxiliary stream (fork/join events,
     CUDA-graph safe). Returns (output, event to wait on before reading it)."""
     if not isinstance(shared, nn.Module):
         return shared, None
     stream = aux_stream()
-    if stream is None:
-        return shared(x), None
     fork.record(current_stream())
     with torch.cuda.stream(stream):
         fork.wait(stream)
@@ -800,7 +834,7 @@ class FlintBf16DecodeMoE(nn.Module):
         hidden_states: torch.Tensor,
         router_weight: torch.Tensor,
         routed_experts: nn.Module,
-        shared: torch.Tensor | nn.Module | None = None,
+        shared: torch.Tensor | nn.Module,
     ) -> torch.Tensor:
         if not self._checked:
             self._check(routed_experts)
@@ -865,18 +899,16 @@ class FlintNvfp4Experts(nn.Module):
             if m is None:
                 raise ValueError(f"Unexpected Flint expert weight: {name}")
             e, proj, kind = int(m.group(1)), m.group(2), m.group(3)
-            suffix = kind.removeprefix("weight")
+            param_name = ("w2_" if proj == "down_proj" else "w13_") + kind
+            param = getattr(self, param_name)
             if proj == "down_proj":
-                param = getattr(self, "w2_weight" + suffix)
                 param.data[e].copy_(w)
             elif kind == "weight_scale_2":
-                param = self.w13_weight_scale_2
                 param.data[e, int(proj == "up_proj")].copy_(w)
             else:
-                param = getattr(self, "w13_weight" + suffix)
                 rows = slice(inter, 2 * inter) if proj == "up_proj" else slice(inter)
                 param.data[e, rows].copy_(w)
-            loaded.add(next(n for n, p in self.named_parameters() if p is param))
+            loaded.add(param_name)
             self._loaded_names.add(name)
         if len(self._loaded_names) == 9 * self.num_experts:
             self._repack()
@@ -905,7 +937,7 @@ class FlintNvfp4Experts(nn.Module):
         self,
         hidden_states: torch.Tensor,
         router_weight: torch.Tensor,
-        shared: torch.Tensor | nn.Module | None = None,
+        shared: torch.Tensor | nn.Module,
     ) -> torch.Tensor:
         """shared: shared-expert output, or the shared-expert module, which
         then runs on the auxiliary stream concurrently with the routed path."""
@@ -927,72 +959,6 @@ class FlintNvfp4Experts(nn.Module):
 
 # Largest batch for which the fused decode MoE block beats the regular path.
 LL_MOE_MAX_TOKENS = 2
-
-
-@triton.jit
-def _add_rms_norm(a_ptr, r_ptr, w_ptr, t, eps, H: tl.constexpr):
-    """``norm.fused_add_rms_norm`` for row t: (bf16 residual, bf16 out), both
-    from the unrounded fp32 sum s = a + r."""
-    offs = tl.arange(0, H)
-    a = tl.load(a_ptr + t * H + offs).to(tl.float32)
-    r = tl.load(r_ptr + t * H + offs).to(tl.float32)
-    s = a + r
-    inv = _rsqrt(tl.sum(s * s, axis=0) / H + eps)
-    w = tl.load(w_ptr + offs).to(tl.float32)
-    return s.to(tl.bfloat16), (s * inv * w).to(tl.bfloat16)
-
-
-@triton.jit
-def _ll_router_kernel(
-    attn_ptr,
-    res_ptr,
-    ln_w_ptr,
-    eps,
-    res_out_ptr,
-    xn_ptr,
-    wr_ptr,
-    logits_ptr,
-    ids_ptr,
-    tw_ptr,
-    counter_ptr,
-    H: tl.constexpr,
-    E: tl.constexpr,
-    TOPK: tl.constexpr,
-    EB: tl.constexpr,
-):
-    """Program (t, pe): fused add + RMSNorm of token t (program (t, 0) writes
-    the residual and normed rows), router GEMV of experts [pe * EB, + EB),
-    top-k by the token's last program. Router weights are prefetched before
-    the dependency wait."""
-    pid = tl.program_id(0)
-    NR: tl.constexpr = E // EB
-    offs_k = tl.arange(0, H)
-    t = pid // NR
-    pe = pid % NR
-    offs_e = pe * EB + tl.arange(0, EB)
-    w = tl.load(wr_ptr + offs_e[:, None] * H + offs_k[None, :]).to(tl.float32)
-    tl.extra.cuda.gdc_wait()
-    s, xn = _add_rms_norm(attn_ptr, res_ptr, ln_w_ptr, t, eps, H)
-    if pe == 0:
-        tl.store(res_out_ptr + t * H + offs_k, s)
-        tl.store(xn_ptr + t * H + offs_k, xn)
-    logits = tl.sum(w * xn.to(tl.float32)[None, :], axis=1).to(tl.bfloat16)
-    tl.store(logits_ptr + t * E + offs_e, logits)
-    tl.debug_barrier()
-    count = tl.atomic_add(counter_ptr + t, 1, sem="acq_rel")
-    tl.static_assert((NR & (NR - 1)) == 0)
-    if (count & (NR - 1)) == NR - 1:
-        offs = tl.arange(0, E)
-        vals = tl.load(logits_ptr + t * E + offs, volatile=True)
-        _topk_row(
-            vals,
-            offs,
-            ids_ptr + t * TOPK,
-            tw_ptr + t * TOPK,
-            E,
-            TOPK,
-            triton.next_power_of_2(TOPK),
-        )
 
 
 @dataclass
@@ -1048,7 +1014,7 @@ def flint_moe_ll(
     act = torch.empty(m * top_k, ew.intermediate_size, dtype=bf16, device=dev)
     out = torch.empty_like(attn_out)
     eb = 2
-    _ll_router_kernel[(m * (num_experts // eb),)](
+    _router_kernel[(m * (num_experts // eb),)](
         attn_out,
         residual,
         ln_weight,
@@ -1064,6 +1030,7 @@ def flint_moe_ll(
         E=num_experts,
         TOPK=top_k,
         EB=eb,
+        FUSE_NORM=True,
         num_warps=2,
         launch_pdl=True,
     )

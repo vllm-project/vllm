@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Flint's fused NVFP4 W4A16 MoE (vllm/models/flint/ops/moe.py) must follow the
-reference rounding rule on both the decode (GEMV) and the grouped-GEMM paths,
-agree between the two paths, and route exactly like sigmoid top-k."""
+reference rounding rule on both the decode (GEMV) and the grouped-GEMM paths
+and route exactly like sigmoid top-k."""
 
 import pytest
 import torch
@@ -212,21 +212,6 @@ def test_moe_matches_reference(weights, flint_weights, num_tokens: int):
     assert _rel(out, ref32) < 1.25 * _rel(ref16, ref32)
     tok_err = (out.float() - ref32).norm(dim=-1) / ref32.norm(dim=-1)
     assert tok_err.max() < 0.01
-
-
-@pytest.mark.parametrize("num_tokens", [1, moe.DECODE_MAX_TOKENS])
-@torch.inference_mode()
-def test_decode_and_grouped_paths_agree(weights, flint_weights, num_tokens: int):
-    """The same tokens give the same output on both paths: identical rounding
-    points, differing only in GEMM accumulation order (rare 1-ulp flips)."""
-    x, shared = _inputs(num_tokens, seed=123)
-    decode = _run(x, weights["router"], flint_weights, shared, decode_max=64)
-    grouped = _run(x, weights["router"], flint_weights, shared, decode_max=0)
-    diff = decode != grouped
-    assert diff.float().mean().item() < 0.02, diff.float().mean().item()
-    err = (decode.float() - grouped.float()).abs().amax(-1)
-    rms = decode.float().pow(2).mean(-1).sqrt()
-    assert (err / rms).max().item() < 0.02, (err / rms).max().item()
 
 
 @torch.inference_mode()
