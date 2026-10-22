@@ -161,7 +161,6 @@ class ElasticEPScalingExecutor:
         self._staged_moe_quant_methods: dict[nn.Module, FusedMoEMethodBase] = {}
         self._prepared_eplb_communicator: EplbCommunicator | None = None
         # Groups held back because a shrunk communicator still runs on them.
-        self._deferred_parent_groups: list[GroupCoordinator] = []
         self._async_executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="ElasticEPAsync"
         )
@@ -253,19 +252,11 @@ class ElasticEPScalingExecutor:
         from vllm.platforms import current_platform
 
         current_platform.set_device(self.worker.device)
-        self._destroy_released_parent_groups()
         for group in groups:
-            if group is None:
-                continue
-            if self._defer_for_shrink_child(group):
-                continue
-            group.destroy()
+            if group is not None:
+                group.destroy()
 
     def _start_group_cleanup(self, groups: tuple[GroupCoordinator | None, ...]) -> None:
-        # Only `_retire_groups` can hand this an empty tuple, by having already
-        # done the work. Goes away with the flag, and then this is `main` again.
-        if not groups:
-            return
         assert self._group_cleanup_future is None
         self._group_cleanup_future = self._async_executor.submit(
             self._destroy_retired_groups, groups
@@ -275,57 +266,6 @@ class ElasticEPScalingExecutor:
         if (future := self._group_cleanup_future) is not None:
             self._group_cleanup_future = None
             future.result()
-
-    def _destroy_released_parent_groups(self) -> None:
-        """Retire deferred groups once their last child has gone.
-
-        A deferred group is one retirement behind, which is the earliest point
-        at which its child can already be dead, and leaving it to a later one
-        would hold the buffers for the rest of the process.
-        """
-        if not self._deferred_parent_groups:
-            return
-        still_held = []
-        for group in self._deferred_parent_groups:
-            communicator = getattr(group, "device_communicator", None)
-            pynccl_comm = getattr(communicator, "pynccl_comm", None)
-            if pynccl_comm is not None and pynccl_comm.has_live_shrink_children:
-                still_held.append(group)
-                continue
-            group.destroy()
-        logger.warning(
-            "[EEP-DEBUG] retired %d deferred parent group(s), %d still held",
-            len(self._deferred_parent_groups) - len(still_held),
-            len(still_held),
-        )
-        self._deferred_parent_groups = still_held
-
-    def _defer_for_shrink_child(self, group: GroupCoordinator) -> bool:
-        """Hold back a group whose communicator a shrunk child is running on.
-
-        `ncclCommShrink` with NCCL_COMM_SHRINK_SHARE_RESOURCES=1 gives the child
-        the parent's buffers rather than its own, so retiring the parent here
-        frees memory a live communicator is still using. Both surviving ranks
-        faulted five seconds after a scale down that did exactly that.
-
-        This exists only because the shrink does, so if the trio goes then so
-        does this. While it stays, deferring is only ever right for a group
-        that actually has a child, because holding anything else back would
-        keep buffers alive for no reason.
-        """
-        if os.getenv("VLLM_EEP_SHRINK_KEEP_PARENT") != "1":
-            return False
-        communicator = getattr(group, "device_communicator", None)
-        pynccl_comm = getattr(communicator, "pynccl_comm", None)
-        if pynccl_comm is None or not pynccl_comm.has_live_shrink_children:
-            return False
-        self._deferred_parent_groups.append(group)
-        logger.warning(
-            "[EEP-DEBUG] keeping a retired group alive because a shrunk "
-            "communicator still runs on its resources, %d deferred so far",
-            len(self._deferred_parent_groups),
-        )
-        return True
 
     @contextmanager
     def _watchdog(self, label: str) -> Iterator[None]:
@@ -421,58 +361,6 @@ class ElasticEPScalingExecutor:
         from vllm.distributed.elastic_ep import rocm_debug
 
         logger.warning("[EEP-DEBUG] ipc after %s: %s", label, rocm_debug.ipc_health())
-
-    def _retire_groups(
-        self, groups: tuple[GroupCoordinator | None, ...]
-    ) -> tuple[GroupCoordinator | None, ...]:
-        """Destroy the groups the reconfiguration replaced, right here.
-
-        This has to happen before the first collective on the new groups, and
-        it has to be synchronous. RCCL exports IPC handles when it sets up the
-        P2P transport for a new communicator, and on MI355 the export is
-        refused with hsa_status 4097 whenever the communicators of the previous
-        configuration are still alive: three passes that only waited two
-        seconds here were refused, five that destroyed the groups were not.
-        Handing the teardown to a background thread is not enough either, since
-        it then runs while the new transport is being set up, which faulted the
-        GPU with a write to a read-only page.
-
-        Every one of those measurements predates the expert arena registration
-        fix, and the run of 21 October showed they were measuring that fix
-        instead: six passes retired nothing and none was refused, against zero
-        of three before the arena stopped being deregistered under a live
-        reader. The read-only page fault quoted above is the same one the arena
-        controls produced, so it was failure 2 all along.
-
-        So this is now the control arm rather than the default. With the flag
-        unset the replaced groups go back to the background cleanup `main`
-        already has, which is what should ship. The flag survives for one more
-        run because the eager cases cannot speak for captured graphs, where a
-        released graph still holds pointers into the arena.
-
-        Returns the groups still needing cleanup, which is nothing when this
-        has already done it.
-        """
-        live = sum(1 for group in groups if group is not None)
-        if not live:
-            return ()
-        if os.getenv("VLLM_EEP_GROUP_RETIRE") != "1":
-            # So a pass that took the background path can be told from one that
-            # did not. Drop with the rest of the diagnostics.
-            logger.info(
-                "[Elastic EP] Handed %d replaced group(s) to the background "
-                "cleanup, synchronous retirement is off",
-                live,
-            )
-            return groups
-        started = time.perf_counter()
-        self._destroy_retired_groups(groups)
-        logger.info(
-            "[Elastic EP] Retired %d stale group(s) in %.3f s",
-            live,
-            time.perf_counter() - started,
-        )
-        return ()
 
     def _dump_group_pressure(self, label: str) -> None:
         """Record what is alive at the moments where the refusal happens.
@@ -750,7 +638,16 @@ class ElasticEPScalingExecutor:
             module._replace_quant_method(staged_quant_method)
         self._staged_moe_quant_methods.clear()
 
+    @staticmethod
+    def _count_live_graphs() -> int:
+        return sum(1 for o in gc.get_objects() if isinstance(o, torch.cuda.CUDAGraph))
+
     def _release_cuda_graphs(self) -> None:
+        graphs_before = (
+            self._count_live_graphs()
+            if os.getenv("VLLM_EEP_DEBUG_LIVE_GRAPHS") == "1"
+            else 0
+        )
         manager = getattr(self.worker.model_runner, "cudagraph_manager", None)
         speculator = getattr(self.worker.model_runner, "speculator", None)
         if manager is not None:
@@ -776,11 +673,11 @@ class ElasticEPScalingExecutor:
 
         gc.collect()
         if os.getenv("VLLM_EEP_DEBUG_LIVE_GRAPHS") == "1":
-            self._report_live_graphs()
+            self._report_live_graphs(graphs_before)
         torch.accelerator.synchronize()
         torch.accelerator.empty_cache()
 
-    def _report_live_graphs(self) -> None:
+    def _report_live_graphs(self, graphs_before: int) -> None:
         """Count graphs that outlived the release and name what holds them.
 
         rocm-systems#13018 reports that RCCL teardown waits without a bound on
@@ -791,10 +688,20 @@ class ElasticEPScalingExecutor:
         The branch above only reaches the containers it knows about and the
         breakable registry only when a runner exists, so the referrer types
         are the half of the answer that says where to look.
+
+        `graphs_before` is what makes the zero case worth anything. Without it
+        this reported "none outlived" in the eager passes too, where the log
+        says `Cudagraph is disabled under eager mode`, so eighteen passes
+        measured that a case with no graphs has no graphs and I read it as the
+        release being complete. A zero only says something next to a non zero
+        before count.
         """
         graphs = [o for o in gc.get_objects() if isinstance(o, torch.cuda.CUDAGraph)]
         if not graphs:
-            logger.warning("[EEP-DEBUG] no captured graph outlived the release")
+            logger.warning(
+                "[EEP-DEBUG] none of the %d captured graph(s) outlived the release",
+                graphs_before,
+            )
             return
         holders: dict[str, int] = {}
         for graph in graphs:
@@ -803,8 +710,9 @@ class ElasticEPScalingExecutor:
                 holders[name] = holders.get(name, 0) + 1
         ranked = sorted(holders.items(), key=lambda item: -item[1])[:8]
         logger.warning(
-            "[EEP-DEBUG] %d captured graph(s) outlived the release, held by %s",
+            "[EEP-DEBUG] %d of %d captured graph(s) outlived the release, held by %s",
             len(graphs),
+            graphs_before,
             ", ".join(f"{name} x{count}" for name, count in ranked),
         )
 
@@ -831,7 +739,7 @@ class ElasticEPScalingExecutor:
         retired_groups = _replace_active_groups(
             world=None, dp=None, ep=None, eplb=None, node_count=None
         )
-        self._start_group_cleanup(self._retire_groups(retired_groups))
+        self._start_group_cleanup(retired_groups)
         # Finish collective cleanup before this worker is shut down.
         self._wait_for_group_cleanup()
 
@@ -967,12 +875,11 @@ class ElasticEPScalingExecutor:
             )
 
     def commit_scale_up(self, is_existing_worker: bool) -> None:
-        retired_groups: tuple[GroupCoordinator | None, ...] = ()
         with self._watchdog("commit_scale_up"):
             with self._timed("scale_up switch"):
                 if is_existing_worker:
                     self.broadcast_expert_mapping()
-                    retired_groups = self._retire_groups(self.switch_and_prepare())
+                    retired_groups = self.switch_and_prepare()
                 else:
                     mapping = self.receive_expert_mapping()
                     self.worker.model_runner.setup_eplb_from_mapping(mapping)
@@ -988,10 +895,10 @@ class ElasticEPScalingExecutor:
                     self.warm_and_capture()
             with self._timed("scale_up reshuffle"):
                 self._perform_eplb_reshuffle(async_op=True)
-            self._start_group_cleanup(retired_groups)
+            if is_existing_worker:
+                self._start_group_cleanup(retired_groups)
 
     def commit_scale_down(self, new_dp_size: int, removing: bool) -> None:
-        retired_groups: tuple[GroupCoordinator | None, ...] = ()
         with self._watchdog("commit_scale_down"):
             with self._timed("scale_down reshuffle"):
                 self.perform_scale_down_eplb_reshuffle(new_dp_size)
@@ -1000,7 +907,7 @@ class ElasticEPScalingExecutor:
                     self.switch_and_remove()
             else:
                 with self._timed("scale_down switch"):
-                    retired_groups = self._retire_groups(self.switch_and_prepare())
+                    retired_groups = self.switch_and_prepare()
                 if current_platform.is_rocm():
                     with self._timed("scale_down empty_cache"):
                         groups = {"dp": get_dp_group(), "ep": get_ep_group()}

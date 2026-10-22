@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import socket
 import struct
-from typing import TYPE_CHECKING, Any, Optional
+from typing import Any, Optional
 
 import torch
 from torch.distributed import Backend, ProcessGroup, Store
@@ -24,9 +24,6 @@ from vllm.distributed.utils import (
 )
 from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
-
-if TYPE_CHECKING:
-    from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 
 logger = init_logger(__name__)
 
@@ -84,7 +81,6 @@ class StatelessGroupCoordinator(GroupCoordinator):
         global_rank: int = 0,
         global_world_size: int = 1,
         use_all2all: bool = False,
-        shrink_from: "tuple[PyNcclCommunicator, list[int]] | None" = None,
     ):
         group_name = group_name or "anonymous"
         self.unique_name = _get_unique_name(group_name)
@@ -204,7 +200,6 @@ class StatelessGroupCoordinator(GroupCoordinator):
                 global_world_size=global_world_size,
                 tcp_store_group=self.tcp_store_group,
                 use_all2all=use_all2all,
-                shrink_from=shrink_from,
             )
 
         self.mq_broadcaster = None

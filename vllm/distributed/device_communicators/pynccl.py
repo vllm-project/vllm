@@ -12,7 +12,6 @@ from torch.distributed import ProcessGroup, ReduceOp
 
 import vllm.envs as envs
 from vllm.distributed.device_communicators.pynccl_wrapper import (
-    NCCL_SHRINK_DEFAULT,
     NCCL_UNIQUE_ID_BYTES,
     NCCLLibrary,
     buffer_type,
@@ -102,12 +101,6 @@ def register_nccl_symmetric_ops(pynccl_comm):
 class PyNcclCommunicator:
     # None for communicators built via `from_unique_id_bytes` (no process group).
     group: ProcessGroup | StatelessProcessGroup | None
-
-    # Set on both ends by `from_parent_shrink`. Class level so that every
-    # instance has them, including the ones built through `__new__` and the
-    # paths that return early before any instance attribute is assigned.
-    _shrink_parent: "PyNcclCommunicator | None" = None
-    _shrink_children: int = 0
 
     def __init__(
         self,
@@ -264,96 +257,6 @@ class PyNcclCommunicator:
         self._init_comm(device)
         return self
 
-    @classmethod
-    def from_parent_shrink(
-        cls,
-        parent: "PyNcclCommunicator",
-        exclude_ranks: list[int],
-        device: int | str | torch.device,
-        group: ProcessGroup | StatelessProcessGroup | None = None,
-        flags: int = NCCL_SHRINK_DEFAULT,
-    ) -> "PyNcclCommunicator":
-        """Derive a smaller communicator from `parent` by dropping ranks.
-
-        Only the ranks that remain take part, which is what this is for: a
-        reconfiguration that shrinks the world is driven by the survivors, and
-        the ranks on their way out are gone before the smaller groups are
-        built. ncclCommSplit cannot serve that, since it is collective over
-        every rank of the parent.
-
-        The point is not fewer round trips. Standing up a fresh communicator
-        makes RCCL set up a new P2P transport, which exports IPC handles, and
-        on MI355 that export is refused outright once a process has
-        reconfigured once. A child derived from a live parent inherits the
-        transport instead of building one, so with
-        NCCL_COMM_SHRINK_SHARE_RESOURCES=1 there is nothing new to export.
-
-        `exclude_ranks` are ranks of the parent communicator, not global
-        ranks, and must be identical on every surviving rank.
-        """
-        if not parent.available or parent.disabled:
-            raise RuntimeError("cannot shrink a communicator that is not available")
-        if not parent.nccl.has_symbol("ncclCommShrink"):
-            raise RuntimeError(
-                "the loaded NCCL/RCCL library does not export ncclCommShrink"
-            )
-        if not exclude_ranks:
-            raise ValueError("exclude_ranks is empty, so there is nothing to shrink")
-        if parent.rank in exclude_ranks:
-            raise ValueError(
-                f"rank {parent.rank} is in exclude_ranks, so it is not a survivor "
-                "and must not call this"
-            )
-        unknown = [r for r in exclude_ranks if not 0 <= r < parent.world_size]
-        if unknown:
-            raise ValueError(
-                f"exclude_ranks {unknown} are not ranks of a communicator of "
-                f"size {parent.world_size}"
-            )
-
-        survivors = [r for r in range(parent.world_size) if r not in exclude_ranks]
-
-        self = cls.__new__(cls)
-        self.nccl = parent.nccl
-        self.nccl_version = parent.nccl_version
-        self.unique_id = parent.unique_id
-        self.group = group
-        self.available = True
-        self.disabled = False
-        self._suspended = False
-        # Ranks keep their relative order in the child, so a survivor's
-        # position in that list is its new rank.
-        self.rank = survivors.index(parent.rank)
-        self.world_size = len(survivors)
-
-        if isinstance(device, int):
-            device = torch.device(f"cuda:{device}")
-        elif isinstance(device, str):
-            device = torch.device(device)
-        assert isinstance(device, torch.device)
-        self.device = device
-
-        # With NCCL_COMM_SHRINK_SHARE_RESOURCES=1 the child runs on buffers the
-        # parent owns, so destroying the parent first pulls them out from under
-        # a live user. Record the link in both directions so a teardown can see
-        # it: the count tells a holder of the parent that it is not free to go,
-        # and the reference keeps the parent from being collected meanwhile.
-        self._shrink_parent = parent
-        parent._shrink_children += 1
-
-        with torch.accelerator.device_index(device.index):
-            self.comm = self.nccl.ncclCommShrink(parent.comm, exclude_ranks, flags)
-
-            if _warmup_deferred():
-                return self
-
-            stream = current_stream()
-            data = torch.zeros(1, device=device)
-            self.all_reduce(data)
-            stream.synchronize()
-            del data
-        return self
-
     def destroy(self):
         if self.available and not self.disabled:
             # ncclCommAbort can block until all CUDA graphs that
@@ -385,15 +288,6 @@ class PyNcclCommunicator:
                 )
             self.available = False
             self.disabled = True
-        parent = self._shrink_parent
-        if parent is not None:
-            parent._shrink_children = max(0, parent._shrink_children - 1)
-            self._shrink_parent = None
-
-    @property
-    def has_live_shrink_children(self) -> bool:
-        """Whether a communicator derived from this one is still running on it."""
-        return self._shrink_children > 0
 
     def all_reduce(
         self,

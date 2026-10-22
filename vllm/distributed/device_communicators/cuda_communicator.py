@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from typing import TYPE_CHECKING
-
 import torch
 from torch.distributed import ProcessGroup
 
@@ -27,9 +25,6 @@ from ..utils import StatelessProcessGroup
 from .aiter_custom_all_reduce import AiterCustomAllreduce
 from .base_device_communicator import DeviceCommunicatorBase
 
-if TYPE_CHECKING:
-    from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
-
 logger = init_logger(__name__)
 
 # Since NCCL 2.29.2, ncclSymkPickKernel accepts registered input with
@@ -48,7 +43,6 @@ class CudaCommunicator(DeviceCommunicatorBase):
         global_world_size: int | None = None,
         tcp_store_group: StatelessProcessGroup | None = None,
         use_all2all: bool = False,
-        shrink_from: "tuple[PyNcclCommunicator, list[int]] | None" = None,
     ):
         super().__init__(
             cpu_group,
@@ -111,22 +105,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         self.pynccl_comm: PyNcclCommunicator | None = None
         if self.world_size > 1:
-            group = self.cpu_group if tcp_store_group is None else tcp_store_group
-            if shrink_from is not None:
-                # Derived from a live communicator rather than bootstrapped, so
-                # the transport it already has is inherited instead of built,
-                # and with NCCL_COMM_SHRINK_SHARE_RESOURCES=1 most of what a
-                # fresh one would export is never exported. See the caller in
-                # standby_state for why that is worth asking for.
-                parent, exclude_ranks = shrink_from
-                self.pynccl_comm = PyNcclCommunicator.from_parent_shrink(
-                    parent, exclude_ranks, device=self.device, group=group
-                )
-            else:
-                self.pynccl_comm = PyNcclCommunicator(
-                    group=group,
-                    device=self.device,
-                )
+            self.pynccl_comm = PyNcclCommunicator(
+                group=self.cpu_group if tcp_store_group is None else tcp_store_group,
+                device=self.device,
+            )
             if is_symmetric_memory_enabled():
                 register_nccl_symmetric_ops(self.pynccl_comm)
 

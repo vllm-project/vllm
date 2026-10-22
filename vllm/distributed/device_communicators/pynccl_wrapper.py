@@ -53,13 +53,6 @@ class ncclUniqueId(ctypes.Structure):
 
 NCCL_UNIQUE_ID_BYTES = ctypes.sizeof(ncclUniqueId)
 
-# ncclCommShrink flags.
-NCCL_SHRINK_DEFAULT = 0x00
-# Terminate whatever the parent still has in flight before shrinking it. The
-# default expects a quiet parent, so this is the flag to reach for when the
-# shrink runs next to a communicator that is still serving.
-NCCL_SHRINK_ABORT = 0x01
-
 
 # Mirror of NCCL's versioned ncclCommProperties_t (nccl_device/core.h,
 # v2.31.2-1, 144 bytes). ncclCommQueryProperties fills fields gated by the
@@ -341,28 +334,6 @@ class NCCLLibrary:
         # shutdown when peer ranks may already be gone.
         # ncclResult_t  ncclCommAbort(ncclComm_t comm);
         Function("ncclCommAbort", ncclResult_t, [ncclComm_t]),
-        # ncclResult_t ncclCommShrink(
-        #   ncclComm_t comm, int* excludeRanksList, int excludeRanksCount,
-        #   ncclComm_t* newcomm, ncclConfig_t* config, int shrinkFlags);
-        # Derives a smaller communicator from an existing one by dropping
-        # ranks, so the survivors keep the transport they already set up
-        # instead of standing one up from scratch. The config is passed as
-        # NULL to inherit the parent's, which also keeps ncclConfig_t out of
-        # this file: its layout is versioned and the one attribute worth
-        # setting, shrinkShare, is overridable through
-        # NCCL_COMM_SHRINK_SHARE_RESOURCES.
-        Function(
-            "ncclCommShrink",
-            ncclResult_t,
-            [
-                ncclComm_t,
-                ctypes.POINTER(ctypes.c_int),
-                ctypes.c_int,
-                ctypes.POINTER(ncclComm_t),
-                ctypes.c_void_p,
-                ctypes.c_int,
-            ],
-        ),
         # ncclResult_t ncclCommSuspend(ncclComm_t comm, int flags);
         Function("ncclCommSuspend", ncclResult_t, [ncclComm_t, ctypes.c_int]),
         # ncclResult_t ncclCommResume(ncclComm_t comm);
@@ -458,11 +429,6 @@ class NCCLLibrary:
                     elif func.name == "ncclGetLastError":
                         # Only used to enrich error messages.
                         continue
-                    elif func.name == "ncclCommShrink":
-                        # Added in NCCL 2.27 and RCCL 2.30. Callers check
-                        # has_symbol() before using it and fall back to a
-                        # fresh ncclCommInitRank.
-                        continue
                     elif func.name in ("ncclCommSuspend", "ncclCommResume"):
                         # RCCL doesn't export these; NCCL >= 2.29.7 does, and
                         # vLLM's CUDA path already requires that version.
@@ -535,33 +501,6 @@ class NCCLLibrary:
             )
         )
         return comm
-
-    def ncclCommShrink(
-        self,
-        comm: ncclComm_t,
-        exclude_ranks: list[int],
-        flags: int = NCCL_SHRINK_DEFAULT,
-    ) -> ncclComm_t:
-        """Derive a communicator from `comm` without `exclude_ranks`.
-
-        Collective over the ranks that remain, and only over those: the ranks
-        being dropped do not call it, which is what makes this usable where
-        ncclCommSplit is not. Ranks keep their relative order in the child, so
-        a parent rank's position among the survivors is its new rank.
-        """
-        exclude = (ctypes.c_int * len(exclude_ranks))(*exclude_ranks)
-        new_comm = ncclComm_t()
-        self.NCCL_CHECK(
-            self._funcs["ncclCommShrink"](
-                comm,
-                exclude,
-                len(exclude_ranks),
-                ctypes.byref(new_comm),
-                None,
-                flags,
-            )
-        )
-        return new_comm
 
     def ncclAllReduce(
         self,

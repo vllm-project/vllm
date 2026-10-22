@@ -85,10 +85,9 @@ steps:
       device: mi355_4
       # This asks for 180 but does not get it. The run on 20 October was sent
       # SIGTERM at 90.5 minutes with no teardown line, so something outside the
-      # step caps it there. A healthy pass now costs about three minutes, but
-      # cuda_graphs_heavy has never run, and a pass that hangs holds the whole
-      # 840 s pytest budget, so the eager passes are ordered first to make sure
-      # their answer survives even if the graph passes eat the rest.
+      # step caps it there. Build 96482 fit seven passes into 27m45s, three of
+      # them on captured graphs, so six have room, but a pass that hangs still
+      # holds the whole 840 s pytest budget.
       timeout_in_minutes: 180
       working_dir: /vllm-workspace/tests
       depends_on:
@@ -103,48 +102,40 @@ steps:
       - requirements/kv_connectors_rocm.txt
       commands:
       - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-      # Pass 31. Build 96433 ran nine passes, three eager cases against three arms,
-      # and all nine passed. Two questions were answered and a third was opened.
+      # Pass 32. The branch no longer carries the shrink trio, the deferred
+      # parent machinery or the synchronous group retirement. All three are
+      # deleted rather than gated, because each was measured to be unnecessary
+      # and the last venue that could have rescued any of them was captured
+      # graphs, which build 96482 settled.
       #
-      # Answered: the group retirement is not the fix for failure 1. Six passes ran
-      # with it off and none was refused, against zero of three before the arena
-      # registration fix, so failures 1 and 2 were the same defect. Also answered:
-      # the EngineDeadError at shutdown is caught, six races and zero tracebacks.
+      # What that run showed: the background cleanup main already has passed
+      # three of three on cuda_graphs_heavy and six of six overall, and it is
+      # cheaper than the synchronous retirement by about 12.8 s per scale cycle
+      # under graphs. The shrink made no difference under graphs either, 0.202 s
+      # out of 29, which was its last chance. So there is nothing left to gate.
       #
-      # Opened: those six passes retired nothing at all, which is not what should
-      # ship, because main already cleans the replaced groups up in a background
-      # thread and this branch had deleted that. The branch now restores it, so the
-      # arm with VLLM_EEP_GROUP_RETIRE unset is the background cleanup rather than
-      # no cleanup. That combination has never run since the arena fix, which is why
-      # the known eager cases are repeated here instead of being taken on trust.
+      # With the flags gone the passes are identical, so this run is a
+      # regression check on a deletion of about 250 lines rather than a
+      # comparison. Two per case, one of each case first.
       #
-      # Also withdrawn: the shrink trio is not an optimisation. Its apparent gain was
-      # softening the cost of the retirement, and with the retirement gone the
-      # difference is 0.067 s across three cases, in favour of removing it. It stays
-      # for this run only because captured graphs change the teardown path.
-      #
-      # So: four cheap eager passes to prove the background cleanup, then three on
-      # cuda_graphs_heavy, the only case never attempted. The first graph pass keeps
-      # the synchronous retirement as a control, so that if all three graph passes
-      # fail I can tell the case apart from the cleanup. Captured graphs are also the
-      # only remaining way I can see to break the arena fix, since a released graph
-      # holds pointers into the arena outside any single step, and the probe that
-      # watches for exactly that has fired across four runs without ever seeing a
-      # real graph.
-      #
-      # One case per pass, deliberately: this is a diagnostic branch and the arms
-      # only mean something if nothing else differs between them.
-      # Pass 1 of 7: enforce_eager_none, background cleanup, shrink.
-      - EEP_PASS=1of7 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 PYTHONFAULTHANDLER=1 NCCL_DEBUG=WARN VLLM_EEP_USE_COMM_SHRINK=1 NCCL_COMM_SHRINK_SHARE_RESOURCES=1 VLLM_EEP_SHRINK_KEEP_PARENT=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,PYTHONFAULTHANDLER,NCCL_DEBUG,VLLM_EEP_USE_COMM_SHRINK,NCCL_COMM_SHRINK_SHARE_RESOURCES,VLLM_EEP_SHRINK_KEEP_PARENT pytest -v -s --timeout=840 --timeout-method=thread distributed/test_elastic_ep.py -k "enforce_eager_none" || true
-      # Pass 2 of 7: enforce_eager_none, background cleanup, no shrink.
-      - EEP_PASS=2of7 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 PYTHONFAULTHANDLER=1 NCCL_DEBUG=WARN VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,PYTHONFAULTHANDLER,NCCL_DEBUG pytest -v -s --timeout=840 --timeout-method=thread distributed/test_elastic_ep.py -k "enforce_eager_none" || true
-      # Pass 3 of 7: enforce_eager_heavy, background cleanup, shrink.
-      - EEP_PASS=3of7 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 PYTHONFAULTHANDLER=1 NCCL_DEBUG=WARN VLLM_EEP_USE_COMM_SHRINK=1 NCCL_COMM_SHRINK_SHARE_RESOURCES=1 VLLM_EEP_SHRINK_KEEP_PARENT=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,PYTHONFAULTHANDLER,NCCL_DEBUG,VLLM_EEP_USE_COMM_SHRINK,NCCL_COMM_SHRINK_SHARE_RESOURCES,VLLM_EEP_SHRINK_KEEP_PARENT pytest -v -s --timeout=840 --timeout-method=thread distributed/test_elastic_ep.py -k "enforce_eager_heavy" || true
-      # Pass 4 of 7: enforce_eager_heavy, background cleanup, no shrink.
-      - EEP_PASS=4of7 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 PYTHONFAULTHANDLER=1 NCCL_DEBUG=WARN VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,PYTHONFAULTHANDLER,NCCL_DEBUG pytest -v -s --timeout=840 --timeout-method=thread distributed/test_elastic_ep.py -k "enforce_eager_heavy" || true
-      # Pass 5 of 7: cuda_graphs_heavy, retirement, shrink.
-      - EEP_PASS=5of7 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 PYTHONFAULTHANDLER=1 NCCL_DEBUG=WARN VLLM_EEP_GROUP_RETIRE=1 VLLM_EEP_USE_COMM_SHRINK=1 NCCL_COMM_SHRINK_SHARE_RESOURCES=1 VLLM_EEP_SHRINK_KEEP_PARENT=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,PYTHONFAULTHANDLER,NCCL_DEBUG,VLLM_EEP_GROUP_RETIRE,VLLM_EEP_USE_COMM_SHRINK,NCCL_COMM_SHRINK_SHARE_RESOURCES,VLLM_EEP_SHRINK_KEEP_PARENT pytest -v -s --timeout=840 --timeout-method=thread distributed/test_elastic_ep.py -k "cuda_graphs_heavy and not nixl_ep" || true
-      # Pass 6 of 7: cuda_graphs_heavy, background cleanup, shrink.
-      - EEP_PASS=6of7 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 PYTHONFAULTHANDLER=1 NCCL_DEBUG=WARN VLLM_EEP_USE_COMM_SHRINK=1 NCCL_COMM_SHRINK_SHARE_RESOURCES=1 VLLM_EEP_SHRINK_KEEP_PARENT=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,PYTHONFAULTHANDLER,NCCL_DEBUG,VLLM_EEP_USE_COMM_SHRINK,NCCL_COMM_SHRINK_SHARE_RESOURCES,VLLM_EEP_SHRINK_KEEP_PARENT pytest -v -s --timeout=840 --timeout-method=thread distributed/test_elastic_ep.py -k "cuda_graphs_heavy and not nixl_ep" || true
-      # Pass 7 of 7: cuda_graphs_heavy, background cleanup, no shrink.
-      - EEP_PASS=7of7 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 PYTHONFAULTHANDLER=1 NCCL_DEBUG=WARN VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,PYTHONFAULTHANDLER,NCCL_DEBUG pytest -v -s --timeout=840 --timeout-method=thread distributed/test_elastic_ep.py -k "cuda_graphs_heavy and not nixl_ep" || true
+      # The one new thing is the graph probe. It now counts the graphs that
+      # exist before the release and reports that number in both branches. That
+      # matters because the old probe only had a negative branch, so it printed
+      # "no captured graph outlived the release" in the eager passes too, where
+      # the log says Cudagraph is disabled under eager mode. Eighteen passes of
+      # that told me nothing, and I had read it as proof the release was
+      # complete. The graph passes here should show a non zero before count; if
+      # they do not, the probe is looking in the wrong place and goes without a
+      # verdict. Either way it goes after this run.
+      # Pass 1 of 6: enforce_eager_none.
+      - EEP_PASS=1of6 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 PYTHONFAULTHANDLER=1 NCCL_DEBUG=WARN VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,PYTHONFAULTHANDLER,NCCL_DEBUG pytest -v -s --timeout=840 --timeout-method=thread distributed/test_elastic_ep.py -k "enforce_eager_none" || true
+      # Pass 2 of 6: enforce_eager_heavy.
+      - EEP_PASS=2of6 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 PYTHONFAULTHANDLER=1 NCCL_DEBUG=WARN VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,PYTHONFAULTHANDLER,NCCL_DEBUG pytest -v -s --timeout=840 --timeout-method=thread distributed/test_elastic_ep.py -k "enforce_eager_heavy" || true
+      # Pass 3 of 6: cuda_graphs_heavy.
+      - EEP_PASS=3of6 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 PYTHONFAULTHANDLER=1 NCCL_DEBUG=WARN VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,PYTHONFAULTHANDLER,NCCL_DEBUG pytest -v -s --timeout=840 --timeout-method=thread distributed/test_elastic_ep.py -k "cuda_graphs_heavy and not nixl_ep" || true
+      # Pass 4 of 6: enforce_eager_none.
+      - EEP_PASS=4of6 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 PYTHONFAULTHANDLER=1 NCCL_DEBUG=WARN VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,PYTHONFAULTHANDLER,NCCL_DEBUG pytest -v -s --timeout=840 --timeout-method=thread distributed/test_elastic_ep.py -k "enforce_eager_none" || true
+      # Pass 5 of 6: enforce_eager_heavy.
+      - EEP_PASS=5of6 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 PYTHONFAULTHANDLER=1 NCCL_DEBUG=WARN VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,PYTHONFAULTHANDLER,NCCL_DEBUG pytest -v -s --timeout=840 --timeout-method=thread distributed/test_elastic_ep.py -k "enforce_eager_heavy" || true
+      # Pass 6 of 6: cuda_graphs_heavy.
+      - EEP_PASS=6of6 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_COMM_TEARDOWN=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 PYTHONFAULTHANDLER=1 NCCL_DEBUG=WARN VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_COMM_TEARDOWN,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,PYTHONFAULTHANDLER,NCCL_DEBUG pytest -v -s --timeout=840 --timeout-method=thread distributed/test_elastic_ep.py -k "cuda_graphs_heavy and not nixl_ep" || true
