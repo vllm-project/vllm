@@ -202,7 +202,7 @@ direct_register_custom_op(
     op_func=_moe_forward,
     mutates_args=["hidden_states"],
     fake_impl=_moe_forward_fake,
-    tags=(torch.Tag.needs_fixed_stride_order,),
+    tags=(torch.Tag.needs_exact_strides,),
 )
 
 
@@ -210,7 +210,7 @@ direct_register_custom_op(
     op_name="moe_forward_shared",
     op_func=_moe_forward_shared,
     fake_impl=_moe_forward_shared_fake,
-    tags=(torch.Tag.needs_fixed_stride_order,),
+    tags=(torch.Tag.needs_exact_strides,),
 )
 
 
