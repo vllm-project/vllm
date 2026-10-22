@@ -945,8 +945,11 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 )
             return ws
 
-        self._wqa_wkv_scale = _prep(self.fused_wqa_wkv)
-        self._wo_b_scale = _prep(self.wo_b)
+        # With the Triton block-scaled GEMM opted in, the linears' own kernel
+        # preshuffles and runs these, so keep the CK B-preshuffle path out.
+        if not rocm_aiter_ops.is_triton_blockscale_gemm_enabled():
+            self._wqa_wkv_scale = _prep(self.fused_wqa_wkv)
+            self._wo_b_scale = _prep(self.wo_b)
         if _ON_GFX950 and envs.VLLM_ROCM_USE_AITER_FP8BMM:
             self._prepare_fp8_wo_a()
 
@@ -1188,9 +1191,13 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             kv_weight=self.kv_norm.weight.data,
             kv_epsilon=self.eps,
             group_size=128,
-            # gfx1250's B-preshuffle GEMMs take column-major activation
-            # scales; gfx950 keeps row-major for its CK blockscale GEMM.
-            transpose_scale=get_cdna_version() >= 5,
+            # The Triton/Gluon block-scaled GEMMs take column-major activation
+            # scales; gfx950's CK GEMM reads them row-major, so gfx950 only
+            # transposes when its wq_b runs on Triton.
+            transpose_scale=(
+                get_cdna_version() >= 5
+                or rocm_aiter_ops.is_triton_blockscale_gemm_enabled()
+            ),
         )
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:

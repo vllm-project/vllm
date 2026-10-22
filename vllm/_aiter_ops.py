@@ -2149,6 +2149,8 @@ class rocm_aiter_ops:
         VLLM_ROCM_USE_AITER_MOE_SITUV2: SiTUv2 FlyDSL MoE activation
             dtype (a16w4 | a8w4 | a4w4).
         VLLM_ROCM_USE_AITER_TRITON_GEMM: Controls Triton unquantized GEMM.
+        VLLM_ROCM_USE_AITER_TRITON_BLOCKSCALE_GEMM: Triton instead of CK for
+            FP8 block-scaled linears (gfx950).
 
     Note:
         The environment variables are assigned when the module is imported,
@@ -2221,6 +2223,7 @@ class rocm_aiter_ops:
     _MOE_SITUV2 = _resolve_situv2_activation()
     # TODO: Consolidate under _LINEAR_ENABLED
     _TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
+    _TRITON_BLOCKSCALE_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_BLOCKSCALE_GEMM
     # Lazily probed: whether aiter.topk_softmax supports the
     # num_shared_experts / shared_expert_scoring_func args (7-arg form).
     _TOPK_SOFTMAX_FUSED_SIGMOID: bool | None = None
@@ -2250,6 +2253,7 @@ class rocm_aiter_ops:
         cls._MOE_SITUV2 = _resolve_situv2_activation()
         _sync_aiter_situv2_moe_env()
         cls._TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
+        cls._TRITON_BLOCKSCALE_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_BLOCKSCALE_GEMM
         cls._MOE_DISPATCH_POLICY = envs.VLLM_ROCM_AITER_MOE_DISPATCH_POLICY
 
     @staticmethod
@@ -2613,6 +2617,26 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_triton_gemm_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._TRITON_UNQUANT_GEMM
+
+    @classmethod
+    @if_aiter_supported
+    def is_triton_blockscale_gemm_enabled(cls) -> bool:
+        """FP8 block-scaled linears on aiter Triton instead of CK (gfx950).
+
+        gfx1250 has no CK path and always takes Triton/Gluon, so this only
+        changes gfx950.
+        """
+        if not cls._TRITON_BLOCKSCALE_GEMM:
+            return False
+        from vllm.platforms.rocm import on_gfx950
+
+        if cls.is_linear_fp8_enabled() and on_gfx950():
+            return True
+        logger.warning_once(
+            "VLLM_ROCM_USE_AITER_TRITON_BLOCKSCALE_GEMM only changes gfx950 with "
+            "the AITER linear path enabled; ignoring it."
+        )
+        return False
 
     @classmethod
     @if_aiter_supported

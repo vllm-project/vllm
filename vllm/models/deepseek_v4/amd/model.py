@@ -151,6 +151,10 @@ class DeepseekV4MLP(nn.Module):
         # forward() falls back to the standard gate_up_proj linear
         if on_gfx1250():
             return
+        # Opted into the Triton block-scaled GEMM: the linear's own kernel
+        # handles gate_up, so skip the CK B-preshuffle.
+        if rocm_aiter_ops.is_triton_blockscale_gemm_enabled():
+            return
         from vllm.model_executor.layers.quantization.utils.fp8_utils import (
             _upcast_e8m0_to_fp32,
             get_fp8_block_weight_scale,
