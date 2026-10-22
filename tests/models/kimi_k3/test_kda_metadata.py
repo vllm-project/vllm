@@ -261,7 +261,7 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
     # Creating the commit context is the first metadata path that consumes the
     # builder's layer_names. Mock only the GPU-cache-dependent constructor.
     builder.recoverssm_context = None
-    forward_layer = Mock(recoverssm_verify=None)
+    forward_layer = Mock(recoverssm_backend="triton")
     builder.vllm_config.compilation_config.static_forward_context["layer.0"] = (
         forward_layer
     )
@@ -1124,7 +1124,7 @@ def test_recoverssm_layer_keeps_records_outside_kv_cache(
         config, default_vllm_config, prefix="model.layers.0.self_attn"
     )
     # The CuTe kernels need 128-wide heads: this layer runs the Triton ones.
-    assert layer.recoverssm_verify is None
+    assert layer.recoverssm_backend == "triton"
     assert len(layer.get_state_shape()) == len(layer.get_state_dtype()) == 2
     records = layer.recoverssm_records
     assert records is not None

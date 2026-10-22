@@ -3,6 +3,7 @@
 
 from collections.abc import Callable
 from dataclasses import replace
+from typing import Literal
 
 import torch
 from einops import rearrange
@@ -591,8 +592,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
 
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         super().bind_kv_cache(kv_cache)
-        if self.recoverssm_verify is not None:
+        if self.recoverssm_backend == "cute":
             # Compile before CUDA graph capture (shared by all KDA layers).
+            assert self.recoverssm_verify is not None
             self.recoverssm_verify.compile()
             compile_state_commit(
                 self.local_num_heads,
@@ -730,9 +732,10 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             self.gate_lower_bound,
             self.use_recoverssm,
         )
-        # RecoverSSM: this layer's verify records of a speculative step, and the
-        # CuTe verify (short convolution fused in) where it runs, else the Triton
-        # convolution and verify.
+        # RecoverSSM: this layer's verify records of a speculative step, and its
+        # verify and commit kernels: "cute" (SM10x, the short convolution fused
+        # into the verify) where they can run, else "triton".
+        self.recoverssm_backend: Literal["cute", "triton"] | None = None
         self.recoverssm_records: KDARecoverSSMRecords | None = None
         self.recoverssm_verify: CuteRecoverSSMVerify | None = None
         if self.use_recoverssm:
@@ -755,7 +758,8 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 conv_weight_dtype=self.conv1d.weight.dtype,
                 lower_bound=self.gate_lower_bound,
             )
-            if reason is not None:
+            self.recoverssm_backend = "triton" if reason is not None else "cute"
+            if self.recoverssm_backend == "triton":
                 logger.info_once(
                     "Using the Triton KDA RecoverSSM verify and commit: the CuTe "
                     "kernels cannot run (%s).",
@@ -985,10 +989,10 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         records = self.recoverssm_records
         assert records is not None
         conv_state, state = self.kv_cache[:2]
-        verify = self.recoverssm_verify
-        if verify is not None:
+        if self.recoverssm_backend == "cute":
+            assert self.recoverssm_verify is not None
             assert self.gate_lower_bound is not None
-            if verify(
+            if self.recoverssm_verify(
                 mixed_qkv=mixed_qkv,
                 raw_gate=raw_g[0].flatten(-2),
                 raw_beta=raw_beta[0],
@@ -1005,6 +1009,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 out=out[0].flatten(-2),
             ):
                 return out
+            # The CuTe verify declined misaligned activations: a mixed batch's
+            # speculative tokens can start at an odd row of a projection whose
+            # rows are not 16-byte aligned (e.g. the beta of the projection
+            # overlap path under graph capture). The Triton verify runs instead,
+            # leaving the same conv state, records and SSM state.
 
         if not is_conv_state_dim_first():
             conv_state = conv_state.transpose(-1, -2)

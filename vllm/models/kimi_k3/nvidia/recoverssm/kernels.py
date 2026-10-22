@@ -15,13 +15,11 @@ The kernels compile when the KV cache is bound, before CUDA graph capture;
 nothing compiles under capture.
 """
 
-from collections.abc import Sequence
 from functools import cache
 from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
@@ -30,8 +28,6 @@ if TYPE_CHECKING:
         KDARecoverSSMCommitContext,
         KDARecoverSSMRecords,
     )
-
-logger = init_logger(__name__)
 
 K = 128  # KDA head dim (keys = values)
 CONV_WIDTH = 4
@@ -147,13 +143,19 @@ def _aligned(*tensors: torch.Tensor) -> bool:
     return all(tensor.data_ptr() % 16 == 0 for tensor in tensors)
 
 
-def _check_state_strides(state: torch.Tensor) -> None:
-    # The state streams in by TMA: K-element rows of contiguous heads, slots a
-    # multiple of 16 bytes apart.
+def _check_layouts(state: torch.Tensor, *tensors: torch.Tensor) -> None:
+    """The KV cache pages, records and parameters the CuTe kernels read: the
+    state streams in by TMA (K-element rows of contiguous heads, slots a multiple
+    of 16 bytes apart), and every tensor starts on a 16-byte boundary."""
     if state.stride()[1:] != (K * K, K, 1) or state.stride(0) * 2 % 16:
         raise ValueError(
-            f"KDA RecoverSSM CuTe verify: state strides {state.stride()} need "
+            f"KDA RecoverSSM CuTe kernels: state strides {state.stride()} need "
             "contiguous heads and 16-byte aligned slots"
+        )
+    if not _aligned(state, *tensors):
+        raise ValueError(
+            "KDA RecoverSSM CuTe kernels: the KV cache pages, records and "
+            "parameters must start on 16-byte boundaries"
         )
 
 
@@ -223,16 +225,14 @@ class CuteRecoverSSMVerify:
         [slots, 3HK, Q + 2] (dim first) or [slots, Q + 2, 3HK] page view.
         Request ``b`` writes its verify records to row ``b`` of ``records``.
 
-        Returns False without launching when a tensor does not start on a
-        16-byte boundary (the kernels assume it, e.g. for an odd token offset
-        into the projection rows): the caller then runs the Triton verify."""
+        Returns False without launching when an activation does not start on a
+        16-byte boundary (e.g. for an odd token offset into projection rows that
+        are not 16-byte aligned): the caller then runs the Triton verify."""
         correction, key_gate = records.correction, records.key_gate
-        static = (A_log, dt_bias, state, correction, key_gate, conv_state, conv_weight)
+        static = (state, A_log, dt_bias, correction, key_gate, conv_state, conv_weight)
         key = tuple((t.data_ptr(), t.stride()) for t in static)
         if key not in self._checked:
-            _check_state_strides(state)
-            if not _aligned(*static):
-                return False
+            _check_layouts(*static)
             self._checked.add(key)
         if not _aligned(
             mixed_qkv,
@@ -351,23 +351,6 @@ class CuteRecoverSSMStateCommit:
             torch.float32,
         )
         self.context = context
-
-    @staticmethod
-    def unsupported_reason(states: Sequence[torch.Tensor]) -> str | None:
-        """Why the CuTe commit cannot fold these state pages (None: it can). The
-        rest of its inputs are those of the CuTe verify."""
-        for state in states:
-            # Pages are bulk-copied 16 bytes at a time.
-            if (
-                state.stride()[1:] != (K * K, K, 1)
-                or state.stride(0) * state.element_size() % 16
-                or not _aligned(state)
-            ):
-                return (
-                    f"a state page view with strides {state.stride()} is not a "
-                    "16-byte aligned one with contiguous heads"
-                )
-        return None
 
     def __call__(self, state_indices: torch.Tensor, batch: int, align: bool) -> None:
         context = self.context

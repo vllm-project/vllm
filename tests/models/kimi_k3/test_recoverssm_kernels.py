@@ -336,8 +336,8 @@ def test_cute_verify_pad_slot_id():
 
 @torch.inference_mode()
 def test_cute_verify_rejects_unsupported_state_pages():
-    """The CuTe verify rejects a state page the TMA cannot stream and declines a
-    misaligned one (the caller then runs the Triton verify)."""
+    """The CuTe verify rejects state pages the TMA cannot stream: padded value
+    rows, or a page off a 16-byte boundary."""
     heads, window, batch = 16, 5, 2
     _, query_start, mixed_qkv, raw_gate, raw_beta = _inputs(
         batch, heads, window, False, 0, 0
@@ -369,9 +369,8 @@ def test_cute_verify_rejects_unsupported_state_pages():
         verify(**{**args, "state": padded})
     # A state 8 bytes off a 16-byte boundary.
     shifted = torch.zeros(state.numel() + 8, device=DEVICE, dtype=torch.bfloat16)
-    assert not verify(
-        **{**args, "state": shifted[4 : 4 + state.numel()].view(state.shape)}
-    )
+    with pytest.raises(ValueError, match="16-byte boundaries"):
+        verify(**{**args, "state": shifted[4 : 4 + state.numel()].view(state.shape)})
 
 
 def _layer(pages, records: KDARecoverSSMRecords, heads: int) -> SimpleNamespace:
