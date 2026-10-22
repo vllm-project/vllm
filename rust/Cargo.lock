@@ -1856,7 +1856,6 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots",
 ]
 
 [[package]]
@@ -2395,7 +2394,7 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 [[package]]
 name = "llm-multimodal"
 version = "1.14.0"
-source = "git+https://github.com/smg-project/llm-multimodal?rev=c8d9ffbf74fe0755a286117d1a5a2415f86ae21a#c8d9ffbf74fe0755a286117d1a5a2415f86ae21a"
+source = "git+https://github.com/smg-project/llm-multimodal?rev=7b7f59ec853560d6ae04911cf466404d49d1c7c8#7b7f59ec853560d6ae04911cf466404d49d1c7c8"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -2403,7 +2402,7 @@ dependencies = [
  "bytes",
  "cc",
  "fast_image_resize",
- "hf-hub",
+ "futures",
  "image",
  "libloading",
  "ndarray",
@@ -3796,8 +3795,6 @@ dependencies = [
  "native-tls",
  "percent-encoding",
  "pin-project-lite",
- "quinn",
- "rustls",
  "rustls-pki-types",
  "serde",
  "serde_json",
@@ -3805,7 +3802,6 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-native-tls",
- "tokio-rustls",
  "tokio-util",
  "tower",
  "tower-http",
@@ -3815,7 +3811,6 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams 0.4.2",
  "web-sys",
- "webpki-roots",
 ]
 
 [[package]]
@@ -3997,7 +3992,6 @@ checksum = "758025cb5fccfd3bc2fd74708fd4682be41d99e5dff73c377c0646c6012c73a4"
 dependencies = [
  "aws-lc-rs",
  "once_cell",
- "ring",
  "rustls-pki-types",
  "rustls-webpki",
  "subtle",
@@ -6402,15 +6396,6 @@ name = "webpki-root-certs"
 version = "1.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b96554aa2acc8ccdb7e1c9a58a7a68dd5d13bccc69cd124cb09406db612a1c9b"
-dependencies = [
- "rustls-pki-types",
-]
-
-[[package]]
-name = "webpki-roots"
-version = "1.0.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
 dependencies = [
  "rustls-pki-types",
 ]

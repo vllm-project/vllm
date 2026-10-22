@@ -316,27 +316,6 @@ fn load_preprocessor_config(
     Ok(Some(config))
 }
 
-/// Merge the model spec's checkpoint-owned processor kwargs into a
-/// preprocessor config's `extra` map without overwriting existing keys.
-///
-/// Most specs declare an empty object here; Nemotron-H Omni surfaces its
-/// config.json downsample ratio and patch limits this way so the stateless
-/// vision processor can resolve them per call.
-fn merge_processor_kwargs(
-    spec: &'static dyn ModelProcessorSpec,
-    context: &MultimodalModelContext,
-    config: &mut PreProcessorConfig,
-) -> Result<()> {
-    let kwargs = spec.processor_kwargs(&context.metadata())?;
-    let Some(kwargs) = kwargs.as_object() else {
-        return Ok(());
-    };
-    for (key, value) in kwargs {
-        config.extra.entry(key.clone()).or_insert_with(|| value.clone());
-    }
-    Ok(())
-}
-
 /// Request-scoped fetched media, split per modality with tracker UUID
 /// metadata preserved in request order.
 struct FetchedMedia {
@@ -422,14 +401,10 @@ impl MultimodalModelInfo {
     /// preprocessor configs.
     fn from_loaded(
         context: MultimodalModelContext,
-        mut preprocessor_config: PreProcessorConfig,
-        mut video_preprocessor_config: PreProcessorConfig,
+        preprocessor_config: PreProcessorConfig,
+        video_preprocessor_config: PreProcessorConfig,
         limit_mm_per_prompt: MmLimitPerPrompt,
     ) -> Result<Option<Self>> {
-        if let Some(spec) = context.resolve_model_spec() {
-            merge_processor_kwargs(spec, &context, &mut preprocessor_config)?;
-            merge_processor_kwargs(spec, &context, &mut video_preprocessor_config)?;
-        }
         let (image, video) = Self::resolve_vision_lanes(
             &context,
             preprocessor_config.clone(),

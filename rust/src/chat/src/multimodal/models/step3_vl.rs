@@ -12,8 +12,6 @@
 
 use std::collections::HashMap;
 
-use serde_json::{Value, json};
-
 use llm_multimodal::registry::RegistryResult;
 use llm_multimodal::{
     FieldLayout, Modality, ModelMetadata, ModelProcessorSpec, ModelSpecificValue,
@@ -35,7 +33,7 @@ impl Step3VLVisionSpec {
     const PATCH_NEWLINE_TOKEN: &'static str = "<patch_newline>";
 
     // Defaults from Step3VLImageProcessor; the processor reads overrides from
-    // PreProcessorConfig extras, and `processor_kwargs` exposes these knobs.
+    // PreProcessorConfig extras and falls back to these values.
     const NUM_IMAGE_FEATURE_SIZE: usize = 169;
     const NUM_PATCH_FEATURE_SIZE: usize = 81;
 
@@ -93,16 +91,6 @@ impl ModelProcessorSpec for Step3VLVisionSpec {
         _metadata: &ModelMetadata,
     ) -> RegistryResult<HashMap<Modality, usize>> {
         Ok(HashMap::from([(Modality::Image, usize::MAX)]))
-    }
-
-    fn processor_kwargs(&self, _metadata: &ModelMetadata) -> RegistryResult<Value> {
-        Ok(json!({
-            "image_size": 728,
-            "patch_size": 504,
-            "num_image_feature_size": Self::NUM_IMAGE_FEATURE_SIZE,
-            "num_patch_feature_size": Self::NUM_PATCH_FEATURE_SIZE,
-            "enable_patch": true,
-        }))
     }
 
     fn prompt_replacements(
@@ -175,7 +163,7 @@ impl ModelProcessorSpec for Step3VLVisionSpec {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use llm_multimodal::registry::ModelRegistryError;
     use llm_multimodal::{ImageSize, Tokenizer};
