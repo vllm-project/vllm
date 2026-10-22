@@ -77,7 +77,7 @@ def test_sleep_preservation_restores_private_draft_not_shared_target():
     expected = draft.private.weight.detach().clone()
     pointer = draft.private.weight.data_ptr()
     worker = object.__new__(gpu_worker.Worker)
-    worker.get_draft_model = lambda: draft
+    worker.get_draft_model = lambda: draft  # type: ignore[method-assign]
     assert set(worker._get_sleep_parameters(target)) == {
         "weight",
         "draft.private.weight",
@@ -102,7 +102,7 @@ def test_sleep_preservation_allows_empty_draft_but_rejects_target_typo(
     if draft is not None:
         draft.shared = target.weight
     worker = object.__new__(gpu_worker.Worker)
-    worker.get_draft_model = lambda: draft
+    worker.get_draft_model = lambda: draft  # type: ignore[method-assign]
     worker.model_config = SimpleNamespace(sleep_preserve_parameter_names=["draft.*"])
     worker._save_sleep_parameters(target)
     assert worker._sleep_saved_parameters == {}
