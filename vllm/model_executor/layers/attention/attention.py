@@ -486,6 +486,8 @@ class Attention(nn.Module, AttentionLayerBase):
                 compilation_config.static_forward_context,
             )
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
+        # Set by models that write KV before calling attention with key=None.
+        self.kv_cache_update_bypass = False
         # Gemma4: clamp mm_prefix bidirectional ranges by the sliding window
         # (read by the Triton backend impl). Default False for all other models.
         self.mm_prefix_clamp_sliding_window = mm_prefix_clamp_sliding_window

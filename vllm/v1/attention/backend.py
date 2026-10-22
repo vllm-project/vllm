@@ -91,6 +91,9 @@ class AttentionBackend(ABC):
     # Does attention's forward() include kv cache update?
     forward_includes_kv_cache_update: bool = True
 
+    # Can forward() run with key/value omitted after a fused op wrote the cache?
+    supports_kv_cache_update_bypass: bool = False
+
     @staticmethod
     def get_supported_kernel_block_sizes(
         kv_cache_spec: "KVCacheSpec | None" = None,
