@@ -356,7 +356,6 @@ def test_non_streaming_derender_initializes_parser_prefix(
     [
         ("eos", False, True),
         ("stop_token_id", False, True),
-        ("stop_string", False, False),
         ("eos", True, False),
     ],
 )
@@ -371,7 +370,6 @@ async def test_parsed_derender_leaves_out_stop_token_like_engine(
     last_id, stop_reason = {
         "eos": (eos, None),
         "stop_token_id": (bang, bang),
-        "stop_string": (bang, "!"),
     }[stop]
 
     parser = MagicMock()
@@ -608,6 +606,9 @@ class TestDetokenizeDelta:
             (False, False, True, True, (False, False)),
             (True, False, True, True, (False, False)),
             (True, True, True, True, (False, True)),
+            (None, False, False, True, (True, True)),
+            (None, False, False, False, (True, False)),
+            (None, False, True, True, (False, False)),
         ],
     )
     def test_decode_params_mirror_engine(
@@ -1093,7 +1094,7 @@ class TestStreamLogprobs:
         self, derenderer, tokenizer
     ):
         """text_offset continues across chunks instead of restarting at 0."""
-        token_ids = tokenizer.encode("hello world")[:6]
+        token_ids = tokenizer.encode("hello world", add_special_tokens=False)[:6]
         mid = len(token_ids) // 2
 
         chunk1, state = await derenderer.derender_completion_stream(
@@ -1110,8 +1111,67 @@ class TestStreamLogprobs:
             state=state,
         )
 
-        assert chunk1.choices[0].logprobs.text_offset[0] == 0
-        assert chunk2.choices[0].logprobs.text_offset[0] == len(chunk1.choices[0].text)
+        logprobs1 = chunk1.choices[0].logprobs
+        logprobs2 = chunk2.choices[0].logprobs
+        assert logprobs1 is not None and logprobs2 is not None
+        assert logprobs1.text_offset[0] == 0
+        # Logprob tokens may retain a leading space absent from response text.
+        assert logprobs2.text_offset[0] == sum(len(token) for token in logprobs1.tokens)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("skip_special_tokens", [False, True])
+    @pytest.mark.parametrize("chunk_size", [1, 2])
+    async def test_completion_offsets_include_skipped_special_tokens(
+        self, derenderer, tokenizer, skip_special_tokens, chunk_size
+    ):
+        """Offsets track reported logprob tokens, not filtered response text."""
+        token_ids = [
+            *tokenizer.encode("hello", add_special_tokens=False),
+            tokenizer.eos_token_id,
+            *tokenizer.encode(" world", add_special_tokens=False),
+        ]
+        request = CompletionRequest(
+            model=MODEL_NAME,
+            prompt="Hi",
+            logprobs=1,
+            ignore_eos=True,
+            skip_special_tokens=skip_special_tokens,
+        )
+        batch_choices, _, _ = await derenderer.derender_completion(
+            [
+                GenerateTokensResponse(
+                    request_id="test-offset-parity",
+                    choices=[
+                        GenerateTokensChoice(
+                            index=0,
+                            token_ids=token_ids,
+                            logprobs=_generate_logprobs(token_ids),
+                            finish_reason="stop",
+                        )
+                    ],
+                )
+            ],
+            completion_request=request,
+        )
+        batch_logprobs = batch_choices[0].logprobs
+        assert batch_logprobs is not None
+        stream_offsets = []
+        state = None
+        for start in range(0, len(token_ids), chunk_size):
+            ids = token_ids[start : start + chunk_size]
+            chunk, state = await derenderer.derender_completion_stream(
+                model=MODEL_NAME,
+                generate_chunk=_make_stream_chunk(
+                    ids, logprobs=_generate_logprobs(ids)
+                ),
+                state=state,
+                completion_request=request,
+            )
+            logprobs = chunk.choices[0].logprobs
+            assert logprobs is not None
+            assert len(logprobs.tokens) == len(ids)
+            stream_offsets.extend(logprobs.text_offset)
+        assert stream_offsets == batch_logprobs.text_offset
 
     @pytest.mark.asyncio
     async def test_stream_logprob_state_stays_bounded(self, derenderer, tokenizer):
@@ -1970,6 +2030,42 @@ class TestServingDerenderStreamValidation:
         )
         result = await serving.derender_chat_stream_response(request)
         assert not isinstance(result, ErrorResponse)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("parser_configured", [False, True])
+    async def test_chat_stop_strings_rejected(self, parser_configured):
+        """A stop string can complete after its start was already streamed,
+        so streaming derender rejects stop strings instead of leaking them."""
+        serving = self._make_serving(parser_configured=parser_configured)
+        request = DerenderChatStreamRequest(
+            stream=True,
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk([1, 2]),
+            chat_request=_chat_request(stop=["three"]),
+            prompt_token_ids=[1],
+        )
+        result = await serving.derender_chat_stream_response(request)
+        assert isinstance(result, ErrorResponse)
+        assert result.error.code == 400
+        assert "output_mode=text" in result.error.message
+        serving.online_derenderer.derender_chat_stream.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_completion_stop_strings_rejected(self):
+        serving = self._make_serving(parser_configured=False)
+        request = DerenderCompletionStreamRequest(
+            stream=True,
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk([1, 2]),
+            completion_request=CompletionRequest(
+                model=MODEL_NAME, prompt="hi", stop="three"
+            ),
+        )
+        result = await serving.derender_completion_stream_response(request)
+        assert isinstance(result, ErrorResponse)
+        assert result.error.code == 400
+        assert "output_mode=text" in result.error.message
+        serving.online_derenderer.derender_completion_stream.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_missing_prompt_token_ids_with_parser_rejected(self):

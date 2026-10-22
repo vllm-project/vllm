@@ -3,13 +3,16 @@
 
 """Tests for the /render endpoints that expose prompt preprocessing."""
 
+import json
 from http import HTTPStatus
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
+import orjson
 import pytest
 import pytest_asyncio
+from fastapi.responses import JSONResponse
 
 from tests.utils import RemoteLaunchRenderServer
 from vllm.entrypoints.anthropic.protocol import (
@@ -25,10 +28,51 @@ from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.scale_out.render.api_router import router
 from vllm.entrypoints.scale_out.render.serving import ServingRender
+from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+    GenerateRequest,
+    MultiModalFeatures,
+    PlaceholderRangeInfo,
+)
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.entrypoints.serve.utils.api_utils import create_json_response
 from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.sampling_params import SamplingParams
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+GPT_OSS_MODEL_NAME = "openai/gpt-oss-20b"
+
+
+@pytest.mark.parametrize("multiple", [False, True])
+@pytest.mark.skip_global_cleanup
+def test_render_response_serializes_multimodal_data_with_orjson(monkeypatch, multiple):
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        token_offsets=[(0, 1), (1, 2), (2, 3)],
+        sampling_params=SamplingParams(max_tokens=1, logit_bias={1: -1.0}),
+        model="测试模型",
+        features=MultiModalFeatures(
+            mm_hashes={"image": ["hash"]},
+            mm_placeholders={"image": [PlaceholderRangeInfo(offset=1, length=1)]},
+            kwargs_data={"image": ["abc" * 10000]},
+        ),
+    )
+    result = [request, request] if multiple else request
+    content = (
+        [request.model_dump(), request.model_dump()]
+        if multiple
+        else request.model_dump()
+    )
+
+    expected = json.loads(JSONResponse(content=content).body)
+    encode_json = MagicMock(wraps=orjson.dumps)
+    monkeypatch.setattr(orjson, "dumps", encode_json)
+    response = create_json_response(result)
+
+    encode_json.assert_called_once()
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/json"
+    assert int(response.headers["content-length"]) == len(response.body)
+    assert json.loads(response.body) == expected
 
 
 def _build_serving_render() -> ServingRender:
@@ -1012,3 +1056,28 @@ async def test_messages_render_error_invalid_model(client):
     assert response.status_code == 404
     data = response.json()
     assert "error" in data
+
+
+@pytest.fixture(scope="module")
+def gpt_oss_server():
+    with RemoteLaunchRenderServer(GPT_OSS_MODEL_NAME, []) as remote_server:
+        yield remote_server
+
+
+@pytest.mark.asyncio
+async def test_tokenize_matches_chat_render_for_gpt_oss(gpt_oss_server):
+    """GPT-OSS chats are rendered with Harmony in /tokenize, as on the chat route."""
+    messages = [
+        {"role": "system", "content": "Answer in one word."},
+        {"role": "user", "content": "What is the capital of France?"},
+    ]
+    async with httpx.AsyncClient(
+        base_url=gpt_oss_server.url_for(""), timeout=30.0
+    ) as client:
+        render = await client.post(
+            "/v1/chat/completions/render", json={"messages": messages}
+        )
+        tokenize = await client.post("/tokenize", json={"messages": messages})
+
+    assert render.status_code == tokenize.status_code == 200
+    assert tokenize.json()["tokens"] == render.json()["token_ids"]
