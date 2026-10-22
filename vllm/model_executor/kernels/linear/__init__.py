@@ -841,11 +841,13 @@ def init_int8_linear_kernel(
     is_static_input_scheme: bool,
     input_symmetric: bool,
     module_name: str,
+    is_fused_module: bool = False,
 ) -> Int8ScaledMMLinearKernel:
     config = Int8ScaledMMLinearLayerConfig(
         is_channelwise=is_channelwise,
         is_static_input_scheme=is_static_input_scheme,
         input_symmetric=input_symmetric,
+        is_fused_module=is_fused_module,
     )
 
     kernel_type = choose_scaled_mm_linear_kernel(
