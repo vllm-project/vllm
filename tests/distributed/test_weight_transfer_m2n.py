@@ -432,6 +432,7 @@ class TestSourceTopology:
             (((0, 4),), (0,), 1),
             (((0, 1), (0, 1)), (0, 1), 2),
             (((0, 1), (1, 2)), (0, 1), 2),
+            (((0,), (1, 2)), (0, 1), 2),
             (((0,), (1,)), (0, 0), 2),
             (((0,),), (0,), 2),
             (((0,),), (1, 0), 2),
@@ -922,12 +923,22 @@ class TestWireTypes:
             allow_full_fallback=False,
         )
 
-        assert M2N_WIRE_SCHEMA_VERSION == 5
+        assert M2N_WIRE_SCHEMA_VERSION == 6
         assert param.to_dict()["allow_full_fallback"] is False
         assert self._init_info(
             params=[param.to_dict()],
             source_digest=source_plan_digest([param]),
         ).parse_wire_params() == (param,)
+
+    def test_rejects_previous_wire_schema(self):
+        with pytest.raises(ValueError, match="unsupported nccl_m2n init schema"):
+            self._init_info(schema_version=5).parse_wire_params()
+
+    def test_worker_none_selects_automatic_destination_meshes(self):
+        info = self._init_info(dst_mesh_dims=None)
+
+        assert info.destination_mesh_dims == (2, 1)
+        assert info.destination_mesh_constraint is None
 
     def test_uid_selects_data_plane_without_removing_metadata_rendezvous(self):
         info = self._init_info(nccl_unique_id_b64=VALID_UID_B64)
@@ -1264,13 +1275,13 @@ class TestWireTypes:
         destination = M2NDestination(
             name="w",
             mode=M2NDestinationMode.FULL_FALLBACK,
+            mesh_dims=(2, 1),
             placements=REPLICATED,
             local_shape=(16, 16),
             tensor=None,
         )
 
         def prepare_destination(engine, **_kwargs):
-            engine._destination_shard_index = 0
             engine._parameter_destinations = [destination]
 
         monkeypatch.setattr(
@@ -1329,13 +1340,13 @@ class TestWireTypes:
         destination = M2NDestination(
             name="w",
             mode=M2NDestinationMode.FULL_FALLBACK,
+            mesh_dims=(2, 1),
             placements=REPLICATED,
             local_shape=(16, 16),
             tensor=None,
         )
 
         def prepare_destination(engine, **_kwargs):
-            engine._destination_shard_index = 0
             engine._parameter_destinations = [destination]
 
         monkeypatch.setattr(
@@ -1373,17 +1384,6 @@ class TestWireTypes:
             b"\x00" * 128,
             members=(0, 1, 2),
         )
-
-    def test_destination_mesh_must_cover_the_workers(self):
-        """The trainer declares the inference mesh, so one that does not cover
-        the workers is a preflight error rather than a mismatched collective."""
-        engine = object.__new__(M2NWeightTransferEngine)
-        engine._dst_mesh = M2NMesh((3, 1), 1)
-        with pytest.raises(ValueError, match="dst_mesh_dims"):
-            engine._prepare_destination_plan(
-                metadata_rank=1,
-                num_workers=2,
-            )
 
     def test_source_mesh_must_cover_its_group_on_worker(self):
         engine = object.__new__(M2NWeightTransferEngine)
@@ -1460,7 +1460,6 @@ class TestWireTypes:
 
         def prepare_destination_plan(engine, **_kwargs):
             engine._parameter_destinations = []
-            engine._destination_shard_index = 0
             engine._staging_pool = Mock()
             engine._uses_load_weights = True
 
@@ -1498,9 +1497,7 @@ class TestWireTypes:
 
         prepare_runtime.assert_not_called()
         make_communicator.assert_not_called()
-        assert engine._dst_mesh is None
         assert engine._parameter_destinations == []
-        assert engine._destination_shard_index is None
         assert engine._staging_pool is None
         assert not engine._uses_load_weights
 
@@ -1532,13 +1529,13 @@ class TestWireTypes:
                 M2NDestination(
                     param.name,
                     M2NDestinationMode.FULL_FALLBACK,
+                    (1, 1),
                     REPLICATED,
                     param.shape,
                     None,
                 )
                 for param in params
             ]
-            engine._destination_shard_index = 0
             engine._staging_pool = Mock()
             engine._uses_load_weights = True
 
@@ -1620,9 +1617,7 @@ class TestWireTypes:
         assert engine._route_streams == {}
         assert engine._routes == ()
         assert engine._handle is None
-        assert engine._dst_mesh is None
         assert engine._parameter_destinations == []
-        assert engine._destination_shard_index is None
         assert engine._staging_pool is None
         assert not engine._uses_load_weights
 
@@ -1668,8 +1663,11 @@ class TestWireTypes:
             (param,),
             M2NSourceTopology.single_group(32, 1),
         )
-        engine._dst_mesh = M2NMesh((1, 4), 32)
-        engine._prepare_destination_plan(metadata_rank=32, num_workers=4)
+        engine._prepare_destination_plan(
+            local_worker_rank=0,
+            num_workers=4,
+            dst_mesh_dims=(1, 4),
+        )
 
     def test_sharded_destination_builds_before_complete_plan_agreement(
         self, monkeypatch
@@ -1677,6 +1675,7 @@ class TestWireTypes:
         destination = M2NDestination(
             "w",
             M2NDestinationMode.IN_PLACE,
+            (1, 4),
             (REPLICATE, 0),
             (8, 8),
             torch.empty(8, 8),
@@ -1757,6 +1756,7 @@ class TestWireTypes:
             M2NDestination(
                 "pair.weight",
                 M2NDestinationMode.FULL_FALLBACK,
+                (1, 1),
                 REPLICATED,
                 (1,),
                 None,
@@ -1764,6 +1764,7 @@ class TestWireTypes:
             M2NDestination(
                 "direct",
                 M2NDestinationMode.IN_PLACE,
+                (1, 1),
                 REPLICATED,
                 (1,),
                 direct,
@@ -1771,6 +1772,7 @@ class TestWireTypes:
             M2NDestination(
                 "pair.scale",
                 M2NDestinationMode.FULL_FALLBACK,
+                (1, 1),
                 REPLICATED,
                 (1,),
                 None,
@@ -1780,7 +1782,7 @@ class TestWireTypes:
         _set_pp1_worker_transport(engine, len(names), stream=stream)
         reshard_order = []
 
-        def reshard(comm, stream, route_dst_mesh, meta, placements, buffer):
+        def reshard(comm, stream, meta, destination, buffer):
             reshard_order.append(meta.name)
             buffer.fill_(len(reshard_order))
 
@@ -1805,21 +1807,23 @@ class TestWireTypes:
         engine._next_parameter_index = 0
         layout = M2NLayout(M2NMesh((1, 1), 0), REPLICATED)
         engine._metas = [
-            M2NParamMeta("a", torch.float32, (1,), layout),
-            M2NParamMeta("b", torch.float32, (1,), layout),
+            M2NParamMeta("a", torch.float32, (4,), layout),
+            M2NParamMeta("b", torch.float32, (4,), layout),
         ]
         engine._parameter_destinations = [
             M2NDestination(
                 "a",
                 M2NDestinationMode.IN_PLACE,
-                REPLICATED,
-                (1,),
-                torch.zeros(1),
+                (2, 2),
+                (REPLICATE, 0),
+                (2,),
+                torch.zeros(2),
             ),
             M2NDestination(
                 "b",
                 M2NDestinationMode.IN_PLACE,
-                REPLICATED,
+                (1, 4),
+                (REPLICATE, 0),
                 (1,),
                 torch.zeros(1),
             ),
@@ -1831,9 +1835,13 @@ class TestWireTypes:
         engine.receive_weights(M2NWeightTransferUpdateInfo(names=["b"]))
 
         assert engine._reshard.call_count == 2
-        assert [call.args[3].name for call in engine._reshard.call_args_list] == [
+        assert [call.args[2].name for call in engine._reshard.call_args_list] == [
             "a",
             "b",
+        ]
+        assert [call.args[3].mesh_dims for call in engine._reshard.call_args_list] == [
+            (2, 2),
+            (1, 4),
         ]
 
     def test_trainer_rank_must_be_a_trainer_rank(self):
@@ -1880,7 +1888,42 @@ class TestWireTypes:
             num_trainer_ranks=2,
             rank=0,
         )
+        engine = M2NTrainerWeightTransferEngine(
+            client=Mock(), source=ManifestM2NWeightSource([]), is_sender=True
+        )
+
         assert info.destination_mesh_dims == (4, 1)
+        assert info.destination_mesh_constraint == (4, 1)
+        assert engine._worker_init_info(info)["dst_mesh_dims"] == [4, 1]
+
+    def test_automatic_destination_mesh_is_an_explicit_opt_in(self):
+        info = M2NTrainerInitInfo(
+            master_address="127.0.0.1",
+            master_port=1234,
+            world_size=6,
+            num_trainer_ranks=2,
+            rank=0,
+            auto_dst_mesh=True,
+        )
+        engine = M2NTrainerWeightTransferEngine(
+            client=Mock(), source=ManifestM2NWeightSource([]), is_sender=True
+        )
+
+        assert info.destination_mesh_dims == (4, 1)
+        assert info.destination_mesh_constraint is None
+        assert "dst_mesh_dims" not in engine._worker_init_info(info)
+
+    def test_automatic_destination_mesh_rejects_a_fixed_mesh(self):
+        with pytest.raises(ValueError, match="cannot be combined"):
+            M2NTrainerInitInfo(
+                master_address="127.0.0.1",
+                master_port=1234,
+                world_size=6,
+                num_trainer_ranks=2,
+                rank=0,
+                auto_dst_mesh=True,
+                dst_mesh_dims=(1, 4),
+            )
 
     def test_sender_is_trainer_rank_zero(self):
         """Trainer rank 0 drives the inference control plane."""
@@ -2094,6 +2137,7 @@ class TestWorkerStagingLifecycle:
             M2NDestination(
                 "weight",
                 M2NDestinationMode.FULL_FALLBACK,
+                (1, 1),
                 REPLICATED,
                 (4,),
                 None,
@@ -2145,6 +2189,7 @@ class TestWorkerStagingLifecycle:
             M2NDestination(
                 meta.name,
                 M2NDestinationMode.IN_PLACE,
+                (1, 1),
                 REPLICATED,
                 (1,),
                 torch.zeros(1, device=engine.device),
@@ -2182,7 +2227,7 @@ class TestWorkerStagingLifecycle:
         engine.model_update_group = communicators[0]
         engine._route_streams = streams
         engine._reshard = Mock(
-            side_effect=lambda _comm, _stream, _mesh, meta, *_: events.append(
+            side_effect=lambda _comm, _stream, meta, *_: events.append(
                 f"reshard:{meta.name}"
             )
         )
@@ -2191,12 +2236,66 @@ class TestWorkerStagingLifecycle:
 
         assert engine._param_routes == (1, 0)
         calls = engine._reshard.call_args_list
-        assert [reshard.args[3].name for reshard in calls] == ["second", "first"]
+        assert [reshard.args[2].name for reshard in calls] == ["second", "first"]
         assert calls[0].args[0] is communicators[0]
         assert calls[1].args[0] is communicators[1]
         streams[0].synchronize.assert_called_once_with()
         streams[1].synchronize.assert_called_once_with()
         assert events == ["reshard:second", "reshard:first", "sync:0", "sync:1"]
+
+    def test_worker_reshard_uses_each_parameters_destination_mesh(self):
+        engine = self._engine()
+        engine._m2n = _fake_m2n()
+        engine._source_topology = M2NSourceTopology.single_group(2, 3)
+        communicator = object()
+        stream = Mock()
+        layout = M2NLayout(M2NMesh((2, 1), 0), REPLICATED)
+        destinations = [
+            M2NDestination(
+                "tp2",
+                M2NDestinationMode.IN_PLACE,
+                (2, 2),
+                (REPLICATE, 0),
+                (2,),
+                torch.zeros(2),
+            ),
+            M2NDestination(
+                "ep4",
+                M2NDestinationMode.IN_PLACE,
+                (1, 4),
+                (REPLICATE, 0),
+                (1,),
+                torch.zeros(1),
+            ),
+            M2NDestination(
+                "replicated",
+                M2NDestinationMode.IN_PLACE,
+                (4, 1),
+                REPLICATED,
+                (4,),
+                torch.zeros(4),
+            ),
+        ]
+
+        for destination in destinations:
+            meta = M2NParamMeta(destination.name, torch.float32, (4,), layout)
+            assert destination.tensor is not None
+            engine._reshard(
+                communicator,
+                stream,
+                meta,
+                destination,
+                destination.tensor,
+            )
+
+        calls = engine._m2n.reshard.call_args_list
+        assert [item.kwargs["dst_mesh"] for item in calls] == [
+            ((2, 2), 2),
+            ((1, 4), 2),
+            ((4, 1), 2),
+        ]
+        assert all(item.args[2] is communicator for item in calls)
+        stream.synchronize.assert_not_called()
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     def test_staged_pair_rebinds_and_orders_all_reuse_streams(self, monkeypatch):
@@ -2205,7 +2304,6 @@ class TestWorkerStagingLifecycle:
         engine.model = model
         engine.model_config = SimpleNamespace(quantization=None, dtype=torch.float32)
         engine.parallel_config = SimpleNamespace(pipeline_parallel_size=1)
-        engine._dst_mesh = M2NMesh((1, 2), 1)
         layout = M2NLayout(M2NMesh((1, 1), 0), REPLICATED)
         names = ["gate_up.weight", "down.weight"]
         shapes = [(4, 6, 4), (4, 4, 3)]
@@ -2214,7 +2312,11 @@ class TestWorkerStagingLifecycle:
             for name, shape in zip(names, shapes)
         ]
         _set_pp1_worker_transport(engine, len(names), dst_mesh_dims=(1, 2))
-        engine._prepare_destination_plan(metadata_rank=1, num_workers=2)
+        engine._prepare_destination_plan(
+            local_worker_rank=0,
+            num_workers=2,
+            dst_mesh_dims=(1, 2),
+        )
         engine._routes = (
             M2NTransferRoute(
                 source_group_index=0,
@@ -2273,7 +2375,7 @@ class TestWorkerStagingLifecycle:
             lambda *_args, **_kwargs: consumer_stream,
         )
         engine._reshard = (
-            lambda _comm, _stream, _mesh, _meta, _placements, buffer: buffer.fill_(
+            lambda _comm, _stream, _meta, _destination, buffer: buffer.fill_(
                 len(model.loaded) + 1
             )
         )
@@ -2322,7 +2424,6 @@ class TestWorkerStagingLifecycle:
         engine.model = model
         engine.model_config = SimpleNamespace(quantization=None, dtype=torch.float32)
         engine.parallel_config = SimpleNamespace(pipeline_parallel_size=1)
-        engine._dst_mesh = M2NMesh((1, 2), 1)
         layout = M2NLayout(M2NMesh((1, 1), 0), REPLICATED)
         names = ["gate_up.weight", "down.weight"]
         engine._metas = [
@@ -2330,13 +2431,17 @@ class TestWorkerStagingLifecycle:
             for name, shape in zip(names, [(4, 6, 4), (4, 4, 3)])
         ]
         _set_pp1_worker_transport(engine, len(names), dst_mesh_dims=(1, 2))
-        engine._prepare_destination_plan(metadata_rank=1, num_workers=2)
+        engine._prepare_destination_plan(
+            local_worker_rank=0,
+            num_workers=2,
+            dst_mesh_dims=(1, 2),
+        )
         monkeypatch.setattr(
             "vllm.model_executor.model_loader.reload.initialize_layerwise_reload",
             lambda _: None,
         )
         engine._reshard = (
-            lambda _comm, _stream, _mesh, _meta, _placements, buffer: buffer.fill_(1)
+            lambda _comm, _stream, _meta, _destination, buffer: buffer.fill_(1)
         )
         group = engine.model_update_group
         handle = engine._handle
@@ -2395,6 +2500,7 @@ class TestDestinationPlan:
             name="weight",
             mode=M2NDestinationMode.IN_PLACE.value,
             dtype_name="float32",
+            mesh_dims=(1, 2),
             placements=(REPLICATE, 0),
             local_shape=(2, 3),
             semantic_id=None,
@@ -2403,13 +2509,27 @@ class TestDestinationPlan:
             num_shards=2,
         )
 
+    def test_wire_destination_round_trip_requires_mesh_dims(self):
+        destination = self._sharded(0)
+        record = destination.to_dict()
+
+        assert M2NWireDestination.from_dict(record) == destination
+        for mutation in (
+            lambda value: value.pop("mesh_dims"),
+            lambda value: value.update(unexpected=True),
+        ):
+            invalid = dict(record)
+            mutation(invalid)
+            with pytest.raises(ValueError, match="invalid M2N wire destination"):
+                M2NWireDestination.from_dict(invalid)
+
     @staticmethod
     def _envelopes(
         first: M2NWireDestination,
         second: M2NWireDestination,
         *,
         source_digest: str | None = None,
-        dst_mesh_dims: tuple[int, int] = (1, 2),
+        dst_mesh_dims: tuple[int, int] | None = (1, 2),
         dst_mesh_start_rank: int = 1,
     ) -> list[dict]:
         digest = source_digest or source_plan_digest([TestDestinationPlan._param()])
@@ -2420,7 +2540,9 @@ class TestDestinationPlan:
                 "error": None,
                 "plan": plan,
                 "source_digest": digest,
-                "dst_mesh_dims": list(dst_mesh_dims),
+                "dst_mesh_dims": (
+                    None if dst_mesh_dims is None else list(dst_mesh_dims)
+                ),
                 "dst_mesh_start_rank": dst_mesh_start_rank,
             }
 
@@ -2442,6 +2564,7 @@ class TestDestinationPlan:
             params=[param],
             metas=[self._meta(param)],
             dst_mesh=M2NMesh((1, 2), 1),
+            dst_mesh_constraint=(1, 2),
             local_plan=None,
             local_error=None,
         )
@@ -2486,6 +2609,7 @@ class TestDestinationPlan:
             source_topology=topology,
             metas=[self._meta(param)],
             dst_mesh=M2NMesh((1, 2), 1),
+            dst_mesh_constraint=(1, 2),
             local_plan=None,
             local_error=None,
         )
@@ -2494,6 +2618,7 @@ class TestDestinationPlan:
         assert len(hashed_payloads) == 1
         payload = hashed_payloads[0]
         assert payload["source_topology"] == topology.to_dict()
+        assert payload["dst_mesh_constraint"] == [1, 2]
         assert payload["transfer_routes"] == [
             {
                 "source_group_index": 0,
@@ -2503,6 +2628,54 @@ class TestDestinationPlan:
                 "dst_mesh_start_rank": 1,
             }
         ]
+
+    def test_commit_digest_changes_with_parameter_mesh(self):
+        param = M2NWireParam("weight", "float32", (8, 3), (1, 1), REPLICATED)
+        digest = source_plan_digest([param])
+
+        def token_for_mesh(mesh_dims):
+            shard_count = mesh_dims[1]
+
+            def destination(rank):
+                return M2NWireDestination(
+                    name="weight",
+                    mode=M2NDestinationMode.IN_PLACE.value,
+                    dtype_name="float32",
+                    mesh_dims=mesh_dims,
+                    placements=(REPLICATE, 0),
+                    local_shape=(8 // shard_count, 3),
+                    semantic_id=None,
+                    shard_dim=0,
+                    shard_index=rank % shard_count,
+                    num_shards=shard_count,
+                )
+
+            def envelope(plan):
+                return {
+                    "ok": True,
+                    "error": None,
+                    "plan": plan,
+                    "source_digest": digest,
+                    "dst_mesh_dims": None,
+                    "dst_mesh_start_rank": 1,
+                }
+
+            group = self._successful_group(
+                [envelope(None)]
+                + [envelope([destination(rank).to_dict()]) for rank in range(4)]
+            )
+            return agree_destination_plan(
+                group,
+                source_digest=digest,
+                params=[param],
+                metas=[self._meta(param)],
+                dst_mesh=M2NMesh((4, 1), 1),
+                dst_mesh_constraint=None,
+                local_plan=None,
+                local_error=None,
+            )[1]
+
+        assert token_for_mesh((2, 2)) != token_for_mesh((1, 4))
 
     def test_destination_commit_digest_must_match(self):
         param = self._param()
@@ -2525,6 +2698,7 @@ class TestDestinationPlan:
                 params=[param],
                 metas=[self._meta(param)],
                 dst_mesh=M2NMesh((1, 2), 1),
+                dst_mesh_constraint=(1, 2),
                 local_plan=None,
                 local_error=None,
             )
@@ -2542,6 +2716,7 @@ class TestDestinationPlan:
                     name="valid",
                     mode=M2NDestinationMode.IN_PLACE.value,
                     dtype_name="float32",
+                    mesh_dims=(1, 4),
                     placements=(REPLICATE, 0),
                     local_shape=(8, 8),
                     semantic_id=None,
@@ -2553,6 +2728,7 @@ class TestDestinationPlan:
                     name="invalid",
                     mode=M2NDestinationMode.IN_PLACE.value,
                     dtype_name="float32",
+                    mesh_dims=(1, 4),
                     placements=(REPLICATE, 1),
                     local_shape=(32, 2),
                     semantic_id=None,
@@ -2586,6 +2762,7 @@ class TestDestinationPlan:
                 params=params,
                 metas=[self._meta(param) for param in params],
                 dst_mesh=dst_mesh,
+                dst_mesh_constraint=dst_mesh.dims,
                 local_plan=None,
                 local_error=None,
             )
@@ -2605,33 +2782,142 @@ class TestDestinationPlan:
                 params=[param],
                 metas=[self._meta(param)],
                 dst_mesh=M2NMesh((1, 2), 1),
+                dst_mesh_constraint=(1, 2),
+                local_plan=None,
+                local_error=None,
+            )
+
+    def test_parameter_mesh_must_cover_all_workers(self):
+        param = self._param()
+        invalid = M2NWireDestination(
+            name="weight",
+            mode=M2NDestinationMode.FULL_FALLBACK.value,
+            dtype_name="float32",
+            mesh_dims=(1, 1),
+            placements=REPLICATED,
+            local_shape=param.shape,
+            semantic_id=None,
+            shard_dim=None,
+            shard_index=0,
+            num_shards=1,
+        )
+        group = self._successful_group(
+            self._envelopes(invalid, invalid, dst_mesh_dims=None)
+        )
+
+        with pytest.raises(RuntimeError, match="does not cover 2 workers"):
+            agree_destination_plan(
+                group,
+                source_digest=source_plan_digest([param]),
+                params=[param],
+                metas=[self._meta(param)],
+                dst_mesh=M2NMesh((2, 1), 1),
+                dst_mesh_constraint=None,
+                local_plan=None,
+                local_error=None,
+            )
+
+    def test_worker_parameter_mesh_disagreement_fails_before_nccl(self):
+        param = self._param()
+        replicated = M2NWireDestination(
+            name="weight",
+            mode=M2NDestinationMode.IN_PLACE.value,
+            dtype_name="float32",
+            mesh_dims=(2, 1),
+            placements=REPLICATED,
+            local_shape=param.shape,
+            semantic_id=None,
+            shard_dim=None,
+            shard_index=0,
+            num_shards=1,
+        )
+        group = self._successful_group(
+            self._envelopes(self._sharded(0), replicated, dst_mesh_dims=None)
+        )
+
+        with pytest.raises(RuntimeError, match="destination fields.*mesh_dims"):
+            agree_destination_plan(
+                group,
+                source_digest=source_plan_digest([param]),
+                params=[param],
+                metas=[self._meta(param)],
+                dst_mesh=M2NMesh((2, 1), 1),
+                dst_mesh_constraint=None,
+                local_plan=None,
+                local_error=None,
+            )
+
+    def test_sharded_plan_must_honor_the_fixed_mesh_constraint(self):
+        param = M2NWireParam("weight", "float32", (8, 3), (1, 1), REPLICATED)
+        digest = source_plan_digest([param])
+
+        def envelope(plan):
+            return {
+                "ok": True,
+                "error": None,
+                "plan": plan,
+                "source_digest": digest,
+                "dst_mesh_dims": [1, 4],
+                "dst_mesh_start_rank": 1,
+            }
+
+        def destination(worker_rank):
+            return M2NWireDestination(
+                name="weight",
+                mode=M2NDestinationMode.IN_PLACE.value,
+                dtype_name="float32",
+                mesh_dims=(2, 2),
+                placements=(REPLICATE, 0),
+                local_shape=(4, 3),
+                semantic_id=None,
+                shard_dim=0,
+                shard_index=worker_rank % 2,
+                num_shards=2,
+            )
+
+        group = self._successful_group(
+            [envelope(None)]
+            + [envelope([destination(rank).to_dict()]) for rank in range(4)]
+        )
+        with pytest.raises(RuntimeError, match="expected fixed destination mesh"):
+            agree_destination_plan(
+                group,
+                source_digest=digest,
+                params=[param],
+                metas=[self._meta(param)],
+                dst_mesh=M2NMesh((1, 4), 1),
+                dst_mesh_constraint=(1, 4),
                 local_plan=None,
                 local_error=None,
             )
 
     @pytest.mark.parametrize("caller_rank", [0, 1, 2])
-    def test_destination_mesh_disagreement_fails_on_every_rank(self, caller_rank):
+    def test_destination_mesh_constraint_disagreement_fails_on_every_rank(
+        self, caller_rank
+    ):
         param = self._param()
         group = Mock(rank=caller_rank, world_size=3)
         first = self._sharded(0)
         second = self._sharded(1)
         local_plans = [None, [first], [second]]
         envelopes = self._envelopes(self._sharded(0), self._sharded(1))
-        envelopes[2]["dst_mesh_dims"] = [2, 1]
+        envelopes[2]["dst_mesh_dims"] = None
         group.all_gather_obj.side_effect = lambda envelope: (
             envelopes
             if envelope == envelopes[caller_rank]
             else pytest.fail("caller published the wrong destination envelope")
         )
         local_mesh = M2NMesh((2, 1), 1) if caller_rank == 2 else M2NMesh((1, 2), 1)
+        local_constraint = None if caller_rank == 2 else (1, 2)
 
-        with pytest.raises(RuntimeError, match="destination mesh disagrees"):
+        with pytest.raises(RuntimeError, match="destination mesh constraint disagrees"):
             agree_destination_plan(
                 group,
                 source_digest=source_plan_digest([param]),
                 params=[param],
                 metas=[self._meta(param)],
                 dst_mesh=local_mesh,
+                dst_mesh_constraint=local_constraint,
                 local_plan=local_plans[caller_rank],
                 local_error=None,
             )
@@ -2663,6 +2949,7 @@ class TestDestinationPlan:
                 params=[local_param],
                 metas=[self._meta(local_param)],
                 dst_mesh=M2NMesh((1, 2), 1),
+                dst_mesh_constraint=(1, 2),
                 local_plan=local_plans[caller_rank],
                 local_error=None,
             )
@@ -2678,6 +2965,7 @@ class TestDestinationPlan:
                 params=[],
                 metas=[],
                 dst_mesh=M2NMesh((1, 1), 1),
+                dst_mesh_constraint=(1, 1),
                 local_plan=None,
                 local_error=None,
             )
@@ -2688,6 +2976,7 @@ class TestDestinationPlan:
             name="weight",
             mode=M2NDestinationMode.FULL_FALLBACK.value,
             dtype_name="float32",
+            mesh_dims=(2, 1),
             placements=REPLICATED,
             local_shape=(4, 3),
             semantic_id=None,
@@ -2704,6 +2993,7 @@ class TestDestinationPlan:
                 params=[param],
                 metas=[self._meta(param)],
                 dst_mesh=M2NMesh((1, 2), 1),
+                dst_mesh_constraint=(1, 2),
                 local_plan=None,
                 local_error=None,
             )
@@ -2716,6 +3006,7 @@ class TestDestinationPlan:
                 name="weight",
                 mode=M2NDestinationMode.SHARDED_STAGING.value,
                 dtype_name="float32",
+                mesh_dims=(1, 2),
                 placements=(REPLICATE, 0),
                 local_shape=(2, 3),
                 semantic_id="test.weight.v1",
@@ -2735,6 +3026,7 @@ class TestDestinationPlan:
                 params=[param],
                 metas=[self._meta(param)],
                 dst_mesh=M2NMesh((1, 2), 1),
+                dst_mesh_constraint=(1, 2),
                 local_plan=None,
                 local_error=None,
             )
@@ -2763,6 +3055,7 @@ class TestDestinationPlan:
                 params=[param],
                 metas=[self._meta(param)],
                 dst_mesh=M2NMesh((1, 1), 1),
+                dst_mesh_constraint=(1, 1),
                 local_plan=[invalid_destination],
                 local_error=None,
             )
@@ -2855,8 +3148,21 @@ class TestTrainerSourceContract:
         engine._m2n = _fake_m2n()
         engine._handle = Mock()
         engine._metas = source.metadata()
-        engine._dst_mesh = M2NMesh((1, 1), 1)
-        engine._dst_placements = [REPLICATED] * len(engine._metas)
+        engine._destination_plan = [
+            M2NWireDestination(
+                name=meta.name,
+                mode=M2NDestinationMode.IN_PLACE.value,
+                dtype_name="float32",
+                mesh_dims=(1, 1),
+                placements=REPLICATED,
+                local_shape=meta.shape,
+                semantic_id=None,
+                shard_dim=None,
+                shard_index=0,
+                num_shards=1,
+            )
+            for meta in engine._metas
+        ]
         engine._trainer_rank = 0
         if engine._metas:
             engine._source_topology = M2NSourceTopology.single_group(
@@ -3017,7 +3323,21 @@ class TestTrainerSourceContract:
         stream = Mock()
         engine._route_communicators = {1: communicator}
         engine._route_streams = {1: stream}
-        engine._dst_placements = [REPLICATED, REPLICATED]
+        engine._destination_plan = [
+            M2NWireDestination(
+                name=meta.name,
+                mode=M2NDestinationMode.IN_PLACE.value,
+                dtype_name="float32",
+                mesh_dims=(1, 1),
+                placements=REPLICATED,
+                local_shape=meta.shape,
+                semantic_id=None,
+                shard_dim=None,
+                shard_index=0,
+                num_shards=1,
+            )
+            for meta in metas
+        ]
         monkeypatch.setattr(torch.cuda, "stream", _fake_cuda_stream_context)
         monkeypatch.setattr(torch.accelerator, "synchronize", Mock())
         monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
@@ -3028,6 +3348,68 @@ class TestTrainerSourceContract:
         reshard_call = engine._m2n.reshard.call_args
         assert reshard_call.args[0] is second
         assert reshard_call.args[2] is communicator
+        stream.synchronize.assert_called_once_with()
+
+    def test_trainer_uses_mixed_destination_meshes_on_one_route(self, monkeypatch):
+        names = ("tp2", "ep4", "replicated")
+        layout = M2NLayout(M2NMesh((2, 1), 0), REPLICATED)
+        metas = [M2NParamMeta(name, torch.float32, (4,), layout) for name in names]
+        buffers = [(name, _BufferLike(shape=(4,))) for name in names]
+        topology = M2NSourceTopology.single_group(2, len(metas))
+        source = _GroupedM2NSource(metas, [], topology, {0: buffers})
+        engine = M2NTrainerWeightTransferEngine(
+            client=Mock(), source=source, is_sender=False
+        )
+        engine._m2n = _fake_m2n()
+        engine._handle = object()
+        engine._trainer_rank = 0
+        engine._prepare_source_plan(source, num_trainer_ranks=2)
+        engine._routes = build_m2n_transfer_routes(
+            topology,
+            num_trainer_ranks=2,
+            world_size=6,
+            dst_mesh_dims=(4, 1),
+        )
+        engine._param_routes = build_m2n_param_routes(engine._routes, len(metas))
+        engine._transfer_waves = build_m2n_transfer_waves(
+            engine._routes, [None] * len(metas)
+        )
+        communicator = Mock(comm=1)
+        stream = Mock()
+        engine._route_communicators = {0: communicator}
+        engine._route_streams = {0: stream}
+        engine._destination_plan = [
+            M2NWireDestination(
+                name=name,
+                mode=M2NDestinationMode.IN_PLACE.value,
+                dtype_name="float32",
+                mesh_dims=mesh_dims,
+                placements=placements,
+                local_shape=local_shape,
+                semantic_id=None,
+                shard_dim=shard_dim,
+                shard_index=0,
+                num_shards=mesh_dims[1],
+            )
+            for name, mesh_dims, placements, local_shape, shard_dim in (
+                ("tp2", (2, 2), (REPLICATE, 0), (2,), 0),
+                ("ep4", (1, 4), (REPLICATE, 0), (1,), 0),
+                ("replicated", (4, 1), REPLICATED, (4,), None),
+            )
+        ]
+        monkeypatch.setattr(torch.cuda, "stream", _fake_cuda_stream_context)
+        monkeypatch.setattr(torch.accelerator, "synchronize", Mock())
+        monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
+
+        engine._send()
+
+        calls = engine._m2n.reshard.call_args_list
+        assert [item.kwargs["dst_mesh"] for item in calls] == [
+            ((2, 2), 2),
+            ((1, 4), 2),
+            ((4, 1), 2),
+        ]
+        assert all(item.args[2] is communicator for item in calls)
         stream.synchronize.assert_called_once_with()
 
     def test_partial_trainer_initialization_releases_transport_resources(
@@ -3082,6 +3464,7 @@ class TestTrainerSourceContract:
                         M2NDestination(
                             meta.name,
                             M2NDestinationMode.FULL_FALLBACK,
+                            (1, 1),
                             REPLICATED,
                             meta.shape,
                             None,
@@ -3160,8 +3543,7 @@ class TestTrainerSourceContract:
         assert engine._handle is None
         assert engine._destination_plan == []
         assert engine._destination_commit_token == ""
-        assert engine._dst_placements == []
-        assert engine._dst_mesh is None
+        assert engine._destination_mesh_constraint is None
 
     @pytest.mark.parametrize(
         "rpc_failure",
@@ -3611,7 +3993,7 @@ class TestTrainerSourceContract:
                 M2NLayout(M2NMesh((1, 1), 0), REPLICATED),
             ),
         ]
-        engine._dst_mesh = M2NMesh((1, 2), 2)
+        engine._destination_mesh_constraint = None
         engine._source_topology = M2NSourceTopology(
             groups=((0,), (1,)), param_groups=(0, 1)
         )
@@ -3629,6 +4011,7 @@ class TestTrainerSourceContract:
                 name="replicated",
                 mode=M2NDestinationMode.FULL_FALLBACK.value,
                 dtype_name="float32",
+                mesh_dims=(2, 1),
                 placements=REPLICATED,
                 local_shape=(4,),
                 semantic_id=None,
@@ -3640,6 +4023,7 @@ class TestTrainerSourceContract:
                 name="sharded",
                 mode=M2NDestinationMode.IN_PLACE.value,
                 dtype_name="float16",
+                mesh_dims=(1, 2),
                 placements=(REPLICATE, 0),
                 local_shape=(3,),
                 semantic_id=None,
@@ -3653,6 +4037,11 @@ class TestTrainerSourceContract:
 
         assert summary["source_digest"] == "source-digest"
         assert summary["destination_commit_token"] == ("m2n-plan:destination-digest")
+        assert summary["destination_mesh_constraint"] is None
+        assert summary["destination_mesh_counts"] == [
+            {"dims": [2, 1], "parameter_count": 1},
+            {"dims": [1, 2], "parameter_count": 1},
+        ]
         assert summary["logical_global_bytes"] == 28
         assert summary["planned_receiver_payload_bytes"] == 44
         assert summary["destination_mode_counts"] == {
@@ -3988,7 +4377,7 @@ def _m2n_worker_receive(
                 self.weight.output_dim = 0
                 self.weight.weight_loader = MethodType(
                     ColumnParallelLinear.weight_loader,
-                    MagicMock(tp_size=world_size - 1),
+                    MagicMock(tp_size=world_size - 1, tp_rank=worker_rank),
                 )
 
         def load_weights(self, weights):
@@ -4336,7 +4725,7 @@ def _semantic_worker_receive(
 _MULTI_ROUTE_NAMES = ("param_0", "param_1", "param_2", "param_3")
 _MULTI_ROUTE_SHAPE = (8, 4)
 _MULTI_ROUTE_TOPOLOGY = M2NSourceTopology(
-    groups=((0,), (1, 2)),
+    groups=((0,), (1,)),
     param_groups=(1, 1, 0, 0),
 )
 _MULTI_ROUTE_ROUNDS = 2
@@ -4768,7 +5157,7 @@ def test_m2n_transfer_with_disjoint_source_groups(_isolated_multi_route_ray):
 
     expected_routes = [
         {"members": [0, 3], "param_indices": [2, 3]},
-        {"members": [1, 2, 3], "param_indices": [0, 1]},
+        {"members": [1, 3], "param_indices": [0, 1]},
     ]
     expected_waves = [
         {"issue": [2, 0], "consume": 0},
@@ -4779,12 +5168,12 @@ def test_m2n_transfer_with_disjoint_source_groups(_isolated_multi_route_ray):
     assert [result["joined_routes"] for result in trainer_results] == [
         [0],
         [1],
-        [1],
+        [],
     ]
     assert [result["group_rounds"] for result in trainer_results] == [
         {0: 2, 1: 0},
         {0: 0, 1: 2},
-        {0: 0, 1: 2},
+        {0: 0, 1: 0},
     ]
     for result in trainer_results:
         assert result["routes"] == expected_routes
@@ -4830,7 +5219,7 @@ def test_m2n_transfer_to_generic_rank_local_semantic_targets():
     summary, *results = ray.get([trainer, *workers], timeout=300)
 
     logical_bytes = SHAPE[0] * SHAPE[1] * 4
-    assert summary["wire_schema_version"] == 5
+    assert summary["wire_schema_version"] == 6
     assert summary["destination_mode_counts"] == {"sharded_staging": 1}
     assert summary["logical_global_bytes"] == logical_bytes
     assert summary["planned_receiver_payload_bytes"] == logical_bytes
@@ -4856,12 +5245,12 @@ class _Model(torch.nn.Module):
         self.column = torch.nn.Parameter(torch.zeros(8, 16))
         self.column.output_dim = 0
         self.column.weight_loader = MethodType(
-            ColumnParallelLinear.weight_loader, Mock(tp_size=2)
+            ColumnParallelLinear.weight_loader, Mock(tp_size=2, tp_rank=0)
         )
         self.row = torch.nn.Parameter(torch.zeros(16, 8))
         self.row.input_dim = 1
         self.row.weight_loader = MethodType(
-            RowParallelLinear.weight_loader, Mock(tp_size=2)
+            RowParallelLinear.weight_loader, Mock(tp_size=2, tp_rank=0)
         )
         self.norm = torch.nn.Parameter(torch.zeros(16))
         self.norm.weight_loader = default_weight_loader
@@ -4875,23 +5264,23 @@ class _MixedModel(torch.nn.Module):
         self.proj.weight = torch.nn.Parameter(torch.zeros(16, 8))
         self.proj.weight.input_dim = 1
         self.proj.weight.weight_loader = MethodType(
-            RowParallelLinear.weight_loader, Mock(tp_size=2)
+            RowParallelLinear.weight_loader, Mock(tp_size=2, tp_rank=0)
         )
         self.proj.bias = torch.nn.Parameter(torch.zeros(16))
         self.other = torch.nn.Module()
         self.other.weight = torch.nn.Parameter(torch.zeros(16, 8))
         self.other.weight.input_dim = 1
         self.other.weight.weight_loader = MethodType(
-            RowParallelLinear.weight_loader, Mock(tp_size=2)
+            RowParallelLinear.weight_loader, Mock(tp_size=2, tp_rank=0)
         )
 
 
 def _resolve(names, dtypes, shapes, **kwargs):
     defaults = dict(
         num_workers=2,
-        shard_axis_size=2,
+        local_worker_rank=0,
+        dst_mesh_dims=(1, 2),
         allow_direct=True,
-        destination_shard_index=0,
         allow_full_fallback=[True] * len(names),
     )
     defaults.update(kwargs)
@@ -4899,17 +5288,22 @@ def _resolve(names, dtypes, shapes, **kwargs):
 
 
 class _AtomicSemanticModel(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, *, num_shards=2, shard_index=0):
         super().__init__()
         self.resolve_calls = 0
         self.loaded = []
         self.fail_consumers = False
+        self.num_shards = num_shards
+        self.shard_index = shard_index
 
     def resolve_sharded_weight_target(self, relative_name, request):
         self.resolve_calls += 1
         if relative_name not in {"gate_up.weight", "down.weight"}:
             return None
-        local_shape = (request.global_shape[0] // 2, *request.global_shape[1:])
+        local_shape = (
+            request.global_shape[0] // self.num_shards,
+            *request.global_shape[1:],
+        )
 
         def consume(weight):
             if self.fail_consumers:
@@ -4923,8 +5317,8 @@ class _AtomicSemanticModel(torch.nn.Module):
                 dtype=request.dtype,
                 shard_dim=0,
                 local_shape=local_shape,
-                shard_index=0,
-                num_shards=2,
+                shard_index=self.shard_index,
+                num_shards=self.num_shards,
             ),
             retention_key=self,
             consume=consume,
@@ -4945,8 +5339,8 @@ class TestDestinationResolution:
             dtypes=[torch.float32],
             shapes=[(4, 3)],
             num_workers=2,
-            shard_axis_size=2,
-            destination_shard_index=0,
+            local_worker_rank=0,
+            dst_mesh_dims=(1, 2),
             allow_direct=True,
         )
 
@@ -4974,7 +5368,6 @@ class TestDestinationResolution:
         pipeline_parallel_size,
     ):
         engine = object.__new__(M2NWeightTransferEngine)
-        engine._dst_mesh = M2NMesh((1, 2), 1)
         engine._metas = [
             M2NParamMeta(
                 "gate_up.weight",
@@ -4990,7 +5383,11 @@ class TestDestinationResolution:
         )
         engine.device = torch.device("cuda:0")
 
-        engine._prepare_destination_plan(metadata_rank=1, num_workers=2)
+        engine._prepare_destination_plan(
+            local_worker_rank=0,
+            num_workers=2,
+            dst_mesh_dims=(1, 2),
+        )
 
         [destination] = engine._parameter_destinations
         assert destination.mode is M2NDestinationMode.FULL_FALLBACK
@@ -5005,8 +5402,8 @@ class TestDestinationResolution:
                 [torch.float32],
                 [(4, 6, 4)],
                 num_workers=2,
-                shard_axis_size=2,
-                destination_shard_index=0,
+                local_worker_rank=0,
+                dst_mesh_dims=(1, 2),
                 allow_direct=True,
                 allow_full_fallback=[False],
             )
@@ -5018,8 +5415,8 @@ class TestDestinationResolution:
             [torch.float32, torch.float32],
             [(4, 6, 4), (4, 4, 3)],
             num_workers=2,
-            shard_axis_size=2,
-            destination_shard_index=0,
+            local_worker_rank=0,
+            dst_mesh_dims=(1, 2),
             allow_direct=True,
             allow_full_fallback=[False, False],
         )
@@ -5049,8 +5446,8 @@ class TestDestinationResolution:
             [torch.float32] * 4,
             [(4, 6, 4), (4, 4, 3), (4, 3), (4, 3)],
             num_workers=2,
-            shard_axis_size=2,
-            destination_shard_index=0,
+            local_worker_rank=0,
+            dst_mesh_dims=(1, 2),
             allow_direct=True,
             allow_full_fallback=[False, False, True, True],
         )
@@ -5069,13 +5466,142 @@ class TestDestinationResolution:
     def test_sharded_parameter_resolves_to_its_tp_dim(self, name, expected_dim):
         [destination] = _resolve([name], [torch.float32], [(16, 16)])
         assert destination.mode is M2NDestinationMode.IN_PLACE
+        assert destination.mesh_dims == (1, 2)
         assert destination.placements == (REPLICATE, expected_dim)
+
+    @pytest.mark.parametrize(
+        ("name", "shape", "expected_mode", "expected_mesh"),
+        [
+            ("column", (16, 16), M2NDestinationMode.IN_PLACE, (2, 2)),
+            ("row", (16, 16), M2NDestinationMode.IN_PLACE, (2, 2)),
+            ("norm", (16,), M2NDestinationMode.IN_PLACE, (4, 1)),
+            (
+                "missing.weight",
+                (16, 16),
+                M2NDestinationMode.FULL_FALLBACK,
+                (4, 1),
+            ),
+        ],
+    )
+    def test_automatic_direct_and_fallback_meshes(
+        self, name, shape, expected_mode, expected_mesh
+    ):
+        [destination] = _resolve(
+            [name],
+            [torch.float32],
+            [shape],
+            num_workers=4,
+            dst_mesh_dims=None,
+        )
+
+        assert destination.mode is expected_mode
+        assert destination.mesh_dims == expected_mesh
+
+    def test_automatic_semantic_target_uses_its_native_shard_count(self):
+        destinations = resolve_parameter_destinations(
+            _AtomicSemanticModel(num_shards=4),
+            ["gate_up.weight", "down.weight"],
+            [torch.float32, torch.float32],
+            [(8, 6, 4), (8, 4, 3)],
+            num_workers=4,
+            local_worker_rank=0,
+            dst_mesh_dims=None,
+            allow_direct=True,
+            allow_full_fallback=[False, False],
+        )
+
+        assert {destination.mesh_dims for destination in destinations} == {(1, 4)}
+
+    @pytest.mark.parametrize("allow_fallback", [True, False])
+    def test_fixed_mesh_tp_count_mismatch_uses_fallback_policy(self, allow_fallback):
+        kwargs = dict(
+            model=_Model(),
+            names=["column"],
+            dtypes=[torch.float32],
+            shapes=[(16, 16)],
+            num_workers=4,
+            local_worker_rank=0,
+            dst_mesh_dims=(1, 4),
+            allow_direct=True,
+            allow_full_fallback=[allow_fallback],
+        )
+        if not allow_fallback:
+            with pytest.raises(ValueError, match="requires a sharded destination"):
+                resolve_parameter_destinations(**kwargs)
+            return
+
+        [destination] = resolve_parameter_destinations(**kwargs)
+        assert destination.mode is M2NDestinationMode.FULL_FALLBACK
+        assert destination.mesh_dims == (4, 1)
+
+    @pytest.mark.parametrize("allow_fallback", [True, False])
+    def test_tp_rank_mismatch_uses_fallback_policy(self, allow_fallback):
+        model = _Model()
+        model.column.weight_loader.__self__.tp_rank = 1
+        kwargs = dict(
+            model=model,
+            names=["column"],
+            dtypes=[torch.float32],
+            shapes=[(16, 16)],
+            num_workers=4,
+            local_worker_rank=0,
+            dst_mesh_dims=None,
+            allow_direct=True,
+            allow_full_fallback=[allow_fallback],
+        )
+        if not allow_fallback:
+            with pytest.raises(ValueError, match="requires a sharded destination"):
+                resolve_parameter_destinations(**kwargs)
+            return
+
+        [destination] = resolve_parameter_destinations(**kwargs)
+        assert destination.mode is M2NDestinationMode.FULL_FALLBACK
+
+    @pytest.mark.parametrize(
+        ("model", "global_rows", "dst_mesh_dims", "match"),
+        [
+            (
+                _AtomicSemanticModel(num_shards=2),
+                8,
+                (1, 4),
+                "fixed destination mesh shard axis",
+            ),
+            (
+                _AtomicSemanticModel(num_shards=2, shard_index=1),
+                8,
+                None,
+                "reports shard index",
+            ),
+            (
+                _AtomicSemanticModel(num_shards=3),
+                9,
+                None,
+                "does not divide",
+            ),
+        ],
+    )
+    def test_semantic_count_and_rank_mismatches_fail_closed(
+        self, model, global_rows, dst_mesh_dims, match
+    ):
+        with pytest.raises(ValueError, match=match):
+            resolve_parameter_destinations(
+                model,
+                ["gate_up.weight", "down.weight"],
+                [torch.float32, torch.float32],
+                [(global_rows, 6, 4), (global_rows, 4, 3)],
+                num_workers=4,
+                local_worker_rank=0,
+                dst_mesh_dims=dst_mesh_dims,
+                allow_direct=True,
+                allow_full_fallback=[True, True],
+            )
 
     def test_replicated_parameter_needs_no_placement(self):
         """A parameter every rank holds in full is REPLICATED, so it works
         whatever way the inference mesh happens to be factored."""
         [destination] = _resolve(["norm"], [torch.float32], [(16,)])
         assert destination.mode is M2NDestinationMode.IN_PLACE
+        assert destination.mesh_dims == (2, 1)
         assert destination.placements is REPLICATED
 
     def test_direct_destination_is_the_live_parameter(self):
@@ -5086,9 +5612,9 @@ class TestDestinationResolution:
             [torch.float32],
             [(16, 16)],
             num_workers=2,
-            shard_axis_size=2,
+            local_worker_rank=0,
+            dst_mesh_dims=(1, 2),
             allow_direct=True,
-            destination_shard_index=0,
             allow_full_fallback=[True],
         )
         assert destination.name == "column"
@@ -5137,16 +5663,15 @@ class TestDestinationResolution:
             [torch.float32],
             [(16, 16)],
             num_workers=2,
-            shard_axis_size=2,
+            local_worker_rank=0,
+            dst_mesh_dims=(1, 2),
             allow_direct=True,
-            destination_shard_index=0,
             allow_full_fallback=[True],
         )
         assert destination.mode is M2NDestinationMode.FULL_FALLBACK
 
     def test_fallback_parameter_demotes_only_direct_siblings_in_same_module(self):
         engine = object.__new__(M2NWeightTransferEngine)
-        engine._dst_mesh = M2NMesh((1, 2), 1)
         layout = M2NLayout(M2NMesh((1, 1), 0), REPLICATED)
         names = ["proj.weight", "proj.bias", "other.weight"]
         shapes = [(16, 16), (16,), (16, 16)]
@@ -5159,13 +5684,20 @@ class TestDestinationResolution:
         engine.parallel_config = SimpleNamespace(pipeline_parallel_size=1)
         engine.device = torch.device("cuda:0")
 
-        engine._prepare_destination_plan(metadata_rank=1, num_workers=2)
+        engine._prepare_destination_plan(
+            local_worker_rank=0,
+            num_workers=2,
+            dst_mesh_dims=(1, 2),
+        )
 
         assert [destination.mode for destination in engine._parameter_destinations] == [
             M2NDestinationMode.FULL_FALLBACK,
             M2NDestinationMode.FULL_FALLBACK,
             M2NDestinationMode.IN_PLACE,
         ]
+        assert [
+            destination.mesh_dims for destination in engine._parameter_destinations
+        ] == [(2, 1), (2, 1), (1, 2)]
 
     def test_unknown_loader_falls_back_despite_matching_name_and_shape(self):
         model = _Model()
@@ -5176,9 +5708,9 @@ class TestDestinationResolution:
             [torch.float32],
             [(16,)],
             num_workers=2,
-            shard_axis_size=2,
+            local_worker_rank=0,
+            dst_mesh_dims=(1, 2),
             allow_direct=True,
-            destination_shard_index=0,
             allow_full_fallback=[True],
         )
         assert not destination.direct
@@ -5192,9 +5724,9 @@ class TestDestinationResolution:
             [torch.float32],
             [(16,)],
             num_workers=2,
-            shard_axis_size=2,
+            local_worker_rank=0,
+            dst_mesh_dims=(1, 2),
             allow_direct=True,
-            destination_shard_index=0,
             allow_full_fallback=[True],
         )
         assert not destination.direct
@@ -5213,9 +5745,9 @@ class TestDestinationResolution:
             [torch.float32],
             [(16,)],
             num_workers=2,
-            shard_axis_size=2,
+            local_worker_rank=0,
+            dst_mesh_dims=(1, 2),
             allow_direct=True,
-            destination_shard_index=0,
             allow_full_fallback=[True],
         )
         assert not destination.direct
@@ -5229,9 +5761,9 @@ class TestDestinationResolution:
             [torch.float32],
             [(16,)],
             num_workers=2,
-            shard_axis_size=2,
+            local_worker_rank=0,
+            dst_mesh_dims=(1, 2),
             allow_direct=True,
-            destination_shard_index=0,
             allow_full_fallback=[True],
         )
         assert not destination.direct
@@ -5245,9 +5777,9 @@ class TestDestinationResolution:
             [torch.float32],
             [(16, 16)],
             num_workers=2,
-            shard_axis_size=2,
+            local_worker_rank=0,
+            dst_mesh_dims=(1, 2),
             allow_direct=True,
-            destination_shard_index=0,
             allow_full_fallback=[True],
         )
         assert not destination.direct
@@ -5261,9 +5793,9 @@ class TestDestinationResolution:
             [torch.float32],
             [(16, 16)],
             num_workers=2,
-            shard_axis_size=2,
+            local_worker_rank=0,
+            dst_mesh_dims=(1, 2),
             allow_direct=True,
-            destination_shard_index=0,
             allow_full_fallback=[True],
         )
         assert not destination.direct
