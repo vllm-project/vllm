@@ -13,7 +13,6 @@ import pytest
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from tests.kernels.utils import torch_experts
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -54,7 +53,7 @@ from .modular_kernel_tools.parallel_utils import (
     ProcessGroupInfo,
     parallel_launch_with_config,
 )
-from .utils import _interleave_gate_up_rows, check_accuracy, make_test_weights
+from .utils import check_accuracy, make_test_weights
 
 has_any_multi_gpu_package = (
     has_deep_ep() or has_deep_gemm() or has_flashinfer_cutlass_fused_moe()
@@ -1096,40 +1095,33 @@ _PADDING_INTERMEDIATE_PAD_EXPECTED_MXFP4_W4A4 = 256
 
 
 def _slice_unpadded_mxfp4_weights(
-    weights: WeightTensors,
-    config: Config,
-    k_unpadded: int,
-    n_unpadded: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Derive the unpadded sub-block of padded MXFP4 WeightTensors as plain
-    bf16 tensors.
+    weights: WeightTensors, k_unpadded: int, n_unpadded: int
+) -> WeightTensors:
+    """MXFP4 counterpart to _slice_unpadded_weights: slices the packed
+    uint8/block-scale WeightTensors directly (no dequant needed), so the
+    result can feed reference_moe_impl the same way the fp8 path does.
 
-    Unlike _slice_unpadded_weights (fp8), MXFP4 can't be sliced directly:
     downcast_to_mxfp() packs 2 elements/byte along the quantized axis (K for
-    w1, N for w2) with 32-element scale blocks. So each weight is sliced on
-    its unpacked axis, dequantized via upcast_from_mxfp, then sliced again on
-    the now-unpacked axis. W1's gate/up interleave (W4A16 only, mirroring
-    reference_moe_impl's mxfp4 branch) happens between the two w1 slices,
-    since _slice_gate_up_rows expects pre-interleave [gate; up] row order.
+    w1, N for w2); its scale blocks are 32-wide (MXFP_BLOCK_SIZE). This
+    file's MXFP4 padding constants are multiples of both (lcm=64), so the
+    packed-axis slice always lands on a byte/scale-block boundary. The
+    unpacked axis (N for w1, K for w2) slices the same way
+    _slice_unpadded_weights does. W1's gate/up interleave is left to
+    reference_moe_impl, which expects pre-interleave [gate; up] row order.
     """
-    from triton_kernels.numerics_details.mxfp import upcast_from_mxfp
-
     assert weights.w1_scale is not None and weights.w2_scale is not None, (
         "mxfp4 weights must carry block scales"
     )
+    assert k_unpadded % 64 == 0 and n_unpadded % 64 == 0
 
-    w1_q = _slice_gate_up_rows(weights.w1, n_unpadded)
-    w1_scale_q = _slice_gate_up_rows(weights.w1_scale, n_unpadded)
-    if config.is_w4a16_mxfp4:
-        w1_q = _interleave_gate_up_rows(w1_q)
-        w1_scale_q = _interleave_gate_up_rows(w1_scale_q)
-    w1 = upcast_from_mxfp(w1_q, w1_scale_q, config.dtype, axis=-1)[..., :k_unpadded]
+    w1 = _slice_gate_up_rows(weights.w1[:, :, : k_unpadded // 2], n_unpadded)
+    w1_scale = _slice_gate_up_rows(
+        weights.w1_scale[:, :, : k_unpadded // 32], n_unpadded
+    )
+    w2 = weights.w2[:, :k_unpadded, : n_unpadded // 2]
+    w2_scale = weights.w2_scale[:, :k_unpadded, : n_unpadded // 32]
 
-    w2_q = weights.w2[:, :k_unpadded, :]
-    w2_scale_q = weights.w2_scale[:, :k_unpadded, :]
-    w2 = upcast_from_mxfp(w2_q, w2_scale_q, config.dtype, axis=-1)[..., :n_unpadded]
-
-    return w1, w2
+    return WeightTensors(w1=w1, w2=w2, w1_scale=w1_scale, w2_scale=w2_scale)
 
 
 def _aiter_padding_matrix_worker_mxfp4(
@@ -1182,22 +1174,16 @@ def _aiter_padding_matrix_worker_mxfp4(
         "hidden_dim_unpadded-wide output slice."
     )
 
-    w1, w2 = _slice_unpadded_mxfp4_weights(
-        weights, padded_config, _PADDING_K_UNPADDED_MXFP4, _PADDING_N_UNPADDED_MXFP4
+    unpadded_weights = _slice_unpadded_mxfp4_weights(
+        weights, _PADDING_K_UNPADDED_MXFP4, _PADDING_N_UNPADDED_MXFP4
     )
     unpadded_rank_tensors = _slice_unpadded_rank_tensors(
         rank_tensors, _PADDING_K_UNPADDED_MXFP4
     )
 
     with set_current_vllm_config(vllm_config):
-        ref_out = torch_experts(
-            a=unpadded_rank_tensors.hidden_states,
-            w1=w1,
-            w2=w2,
-            topk_weight=unpadded_rank_tensors.topk_weights,
-            topk_ids=unpadded_rank_tensors.topk_ids,
-            global_num_experts=padded_config.E,
-            activation=padded_config.activation,
+        ref_out = reference_moe_impl(
+            padded_config, unpadded_weights, unpadded_rank_tensors
         )
 
     if padded_config.is_w4a16_mxfp4:
