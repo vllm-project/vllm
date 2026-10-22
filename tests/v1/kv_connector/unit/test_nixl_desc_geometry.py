@@ -1201,6 +1201,45 @@ def test_mla_hybrid_large_ppl_geometry(num_tokens):
 
 
 @pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "num_tokens", [2, 127, 128, 129, 895, 896, 897, 1023, 1024, 1025, 1793, 2049]
+)
+def test_recoverssm_prefill_only_block_sizes(num_tokens):
+    """Kimi-K3 KDA RecoverSSM: the decode Mamba page also holds the verify
+    records, so its attention block (1024 tokens) is larger than that of a
+    --kda-recoverssm-prefill-only instance (896) with the same conv and SSM
+    state (TP8 prefill -> TP1 decode); they pair in gcd-sized (128) units."""
+    _run_hetero_case(
+        local_block=1024,
+        kernel=1024,
+        remote_block=896,
+        remote_kernel=896,
+        num_tokens=num_tokens,
+        tp_size=8,
+    )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("remote_ssm_sizes", [(28, 32), (24, 36)])
+def test_mismatched_mamba_state_sizes_rejected(remote_ssm_sizes):
+    """The remote conv descriptors use the local conv decomposition, so a peer
+    storing a different conv or SSM state per TP shard (e.g. another number of
+    speculative tokens) must fail the handshake, not transfer garbage."""
+    worker = _make_mla_hybrid_worker(
+        local_block_size=12, kernel_block_size=4, num_logical_blocks=8
+    )
+    meta_r = _make_remote_meta(
+        worker,
+        remote_block_size=8,
+        remote_kernel_block_size=4,
+        remote_num_logical=12,
+        remote_ssm_sizes=remote_ssm_sizes,
+    )
+    with pytest.raises(RuntimeError, match="state sizes differ"):
+        worker.add_remote_agent(meta_r, remote_tp_rank=0, remote_tp_size=2)
+
+
+@pytest.mark.cpu_test
 def test_mismatched_mla_kernel_page_rejected_for_mla_hybrid():
     """The MLA per-token page is TP-independent, so kernel block lengths
     differing by anything other than the block-size ratio must fail the

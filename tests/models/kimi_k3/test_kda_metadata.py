@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import fields
+from math import prod
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -15,6 +16,7 @@ from tests.v1.attention.utils import (
 )
 from vllm.config import SpeculativeConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.models.kimi_k3.nvidia.kda import KimiK3DeltaAttention
 from vllm.models.kimi_k3.nvidia.kda_metadata import (
     KimiK3KDAAttentionBackend,
     KimiK3KDAMetadata,
@@ -23,6 +25,9 @@ from vllm.models.kimi_k3.nvidia.kda_metadata import (
     stage_spec_decode_metadata,
 )
 from vllm.models.kimi_k3.nvidia.model import KimiLinearForCausalLM
+from vllm.models.kimi_k3.nvidia.recoverssm.layout import recoverssm_records_in_page
+from vllm.platforms import current_platform
+from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.v1.attention.backend import AttentionMetadataBuilder
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionBackend,
@@ -102,6 +107,7 @@ def _make_builder(
     disable_eagle_block_drop: bool = False,
     cache_hit_alignment_tokens: int | None = None,
     hash_block_size: int | None = None,
+    recoverssm_prefill_only: bool = False,
 ) -> AttentionMetadataBuilder:
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B",
@@ -123,6 +129,7 @@ def _make_builder(
     vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
     vllm_config.cache_config.use_replayssm = use_recoverssm
     vllm_config.cache_config.use_kda_recoverssm = use_recoverssm
+    vllm_config.cache_config.kda_recoverssm_prefill_only = recoverssm_prefill_only
     vllm_config.cache_config.prefix_match_unit = prefix_match_unit
     hash_block_size = hash_block_size or prefix_match_unit or mamba_block_size
     vllm_config.cache_config.hash_block_size = hash_block_size
@@ -170,6 +177,7 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
             mamba_cache_dtype="auto",
             mamba_ssm_cache_dtype="auto",
             use_kda_recoverssm=True,
+            kda_recoverssm_prefill_only=False,
         ),
         parallel_config=SimpleNamespace(tensor_parallel_size=1),
         speculative_config=SimpleNamespace(num_speculative_tokens=2),
@@ -204,6 +212,7 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
         cache_config=SimpleNamespace(
             mamba_cache_mode="align",
             use_kda_recoverssm=True,
+            kda_recoverssm_prefill_only=False,
             prefix_match_unit=None,
         ),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
@@ -258,7 +267,7 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
     # Creating the commit context is the first metadata path that consumes the
     # builder's layer_names. Mock only the GPU-cache-dependent constructor.
     builder.recoverssm_context = None
-    forward_layer = Mock()
+    forward_layer = Mock(recoverssm_verify=None)
     builder.vllm_config.compilation_config.static_forward_context["layer.0"] = (
         forward_layer
     )
@@ -293,6 +302,7 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
         [forward_layer],
         spec_query_len=3,
         max_num_reqs=builder.vllm_config.scheduler_config.max_num_seqs,
+        cute_state_commit=False,
     )
 
 
@@ -1087,3 +1097,139 @@ def test_cudagraph_capture_batch_stays_decode_only():
     assert staged is not None
     assert staged.data_ptr() == builder.non_spec_state_indices_tensor.data_ptr()
     torch.testing.assert_close(staged, common_attn_metadata.block_table_tensor[:, 0])
+
+
+def _recoverssm_layout_config(prefill_only: bool) -> SimpleNamespace:
+    return SimpleNamespace(
+        model_config=SimpleNamespace(
+            dtype=torch.bfloat16,
+            hf_config=SimpleNamespace(
+                linear_attn_config={
+                    "num_heads": 4,
+                    "head_dim": 32,
+                    "short_conv_kernel_size": 4,
+                }
+            ),
+        ),
+        cache_config=SimpleNamespace(
+            mamba_cache_dtype="auto",
+            mamba_ssm_cache_dtype="auto",
+            use_kda_recoverssm=True,
+            kda_recoverssm_prefill_only=prefill_only,
+        ),
+        parallel_config=SimpleNamespace(tensor_parallel_size=1),
+        speculative_config=SimpleNamespace(num_speculative_tokens=2),
+    )
+
+
+@pytest.mark.parametrize("prefill_only", [False, True])
+def test_recoverssm_records_leave_prefill_only_pages(prefill_only: bool):
+    config = _recoverssm_layout_config(prefill_only)
+    assert recoverssm_records_in_page(config.cache_config) != prefill_only
+    shapes = KimiLinearForCausalLM.get_mamba_state_shape_from_config(config)
+    dtypes = KimiLinearForCausalLM.get_mamba_state_dtype_from_config(config)
+
+    config.cache_config.use_kda_recoverssm = False
+    assert not recoverssm_records_in_page(config.cache_config)
+    stock_shapes = KimiLinearForCausalLM.get_mamba_state_shape_from_config(config)
+    stock_dtypes = KimiLinearForCausalLM.get_mamba_state_dtype_from_config(config)
+
+    # A prefill-only page is the stock conv + SSM page; otherwise RecoverSSM
+    # appends its correction and key/gate records (one window of 1 + 2 tokens).
+    assert shapes[:2] == stock_shapes
+    assert dtypes[:2] == stock_dtypes
+    if prefill_only:
+        assert len(shapes) == len(dtypes) == 2
+    else:
+        assert shapes[2:] == ((4, 3, 32), (4, 3, 64))
+        assert dtypes[2:] == (torch.float32, torch.bfloat16)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Kimi-K3 NVIDIA KDA layer")
+@pytest.mark.parametrize("prefill_only", [False, True])
+def test_recoverssm_layer_binds_page_records(
+    monkeypatch: pytest.MonkeyPatch, default_vllm_config, prefill_only: bool
+):
+    monkeypatch.setattr(
+        "vllm.distributed.parallel_state.get_tp_group",
+        lambda: SimpleNamespace(world_size=1, rank_in_group=0),
+    )
+    default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    default_vllm_config.speculative_config = SimpleNamespace(num_speculative_tokens=2)
+    default_vllm_config.cache_config.use_replayssm = True
+    default_vllm_config.cache_config.use_kda_recoverssm = True
+    default_vllm_config.cache_config.kda_recoverssm_prefill_only = prefill_only
+    # The Triton kernels: the CuTe ones need 128-wide heads.
+    default_vllm_config.additional_config = {"kda_recoverssm_backend": "triton"}
+    config = KimiLinearConfig(
+        hidden_size=16,
+        linear_attn_config={
+            "kda_layers": [0],
+            "full_attn_layers": [],
+            "head_dim": 32,
+            "num_heads": 4,
+            "short_conv_kernel_size": 4,
+            "use_full_rank_gate": True,
+        },
+    )
+    layer = KimiK3DeltaAttention(
+        config, default_vllm_config, prefix="model.layers.0.self_attn"
+    )
+    assert layer.recoverssm_records_in_page != prefill_only
+    assert layer.recoverssm_verify is None
+
+    page_shapes = layer.get_state_shape()
+    page_dtypes = layer.get_state_dtype()
+    assert len(page_shapes) == (2 if prefill_only else 4)
+    state_bytes = [
+        prod(shape) * dtype.itemsize for shape, dtype in zip(page_shapes, page_dtypes)
+    ]
+    num_slots, padding = 3, 64
+    page_bytes = sum(state_bytes) + padding
+    layer.bind_kv_cache(torch.zeros((num_slots, 1, 1, page_bytes), dtype=torch.int8))
+
+    assert len(layer.kv_cache) == len(page_shapes)
+    if prefill_only:
+        assert layer.recoverssm_records is None
+        return
+    records = layer.recoverssm_records
+    assert records is not None
+    assert records.correction is layer.kv_cache[2]
+    assert records.key_gate is layer.kv_cache[3]
+    # Page views: one (padded) page per slot, stored after conv and SSM state.
+    for record, dtype in zip((records.correction, records.key_gate), page_dtypes[2:]):
+        assert record.stride(0) * dtype.itemsize == page_bytes
+    assert records.correction.shape == (num_slots, 4, 3, 32)
+    assert records.key_gate.shape == (num_slots, 4, 3, 64)
+
+
+@pytest.mark.parametrize("prefill_only", [False, True])
+def test_recoverssm_prefill_only_instance_skips_commit(prefill_only: bool):
+    """A prefill-only instance's spec-decode batches are dummy or warmup runs
+    (it admits only max_tokens=1 requests): no commit runs after them."""
+    batch = BatchSpec(seq_lens=[40], query_lens=[3])
+    common_attn_metadata = create_common_attn_metadata(
+        batch, BLOCK_SIZE, DEVICE
+    ).replace(is_prefilling=torch.tensor([False]))
+    builder = _make_builder(
+        KimiK3KDAMetadataBuilder,
+        num_speculative_tokens=2,
+        full_cuda_graph=False,
+        use_recoverssm=True,
+        recoverssm_prefill_only=prefill_only,
+    )
+    actual = builder.build(
+        0,
+        common_attn_metadata,
+        num_decode_draft_tokens_cpu=torch.tensor([2], dtype=torch.int32),
+        num_accepted_tokens=torch.ones(1, dtype=torch.int32),
+    )
+    assert actual.num_spec_decodes == 1
+    actual.commit_recoverssm_state(torch.tensor([2], dtype=torch.int32))
+    if prefill_only:
+        assert actual.recoverssm_commit is None
+        assert actual.recoverssm_context is None
+        builder.recoverssm_context.commit.assert_not_called()
+    else:
+        assert actual.recoverssm_commit is not None
+        builder.recoverssm_context.commit.assert_called_once()

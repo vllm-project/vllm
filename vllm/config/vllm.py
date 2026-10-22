@@ -3415,6 +3415,7 @@ class VllmConfig:
     def validate_mamba_cached_kernel(self) -> "VllmConfig":
         if not self.cache_config.use_replayssm:
             self.cache_config.use_kda_recoverssm = False
+            _validate_kda_recoverssm_prefill_only(self)
             return self
 
         kda_architectures = (
@@ -3451,13 +3452,10 @@ class VllmConfig:
                     "SSM state caches, not --enable-mamba-cache-stochastic-"
                     "rounding, which requires an explicit float16 cache"
                 )
-            if (
-                self.cache_config.mamba_cache_mode == "align"
-                and not self.use_v2_model_runner
-            ):
-                raise ValueError(
-                    "RecoverSSM with prefix caching requires VLLM_USE_V2_MODEL_RUNNER=1"
-                )
+            if not self.use_v2_model_runner:
+                # Only Model Runner V2 folds the accepted tokens into the state
+                # after sampling (commit_recoverssm_state).
+                raise ValueError("RecoverSSM requires VLLM_USE_V2_MODEL_RUNNER=1")
             if self.parallel_config.pipeline_parallel_size > 1:
                 raise ValueError(
                     "RecoverSSM currently requires pipeline_parallel_size=1"
@@ -3498,15 +3496,60 @@ class VllmConfig:
                 "Triton ReplaySSM requires Model Runner V1; use "
                 "--mamba-backend flashinfer or Model Runner V1"
             )
+        _validate_kda_recoverssm_prefill_only(self)
         if (
             self.kv_transfer_config is not None
             and self.kv_transfer_config.is_kv_transfer_instance
+            # Between steps a KDA RecoverSSM request's state is its conv and SSM
+            # state, stored in the Mamba page in the same layout as without
+            # RecoverSSM, so the connectors transfer it as usual. The verify
+            # records stored after it are scratch space for one step: each
+            # verify writes them and the commit after it reads them.
+            and not self.cache_config.use_kda_recoverssm
         ):
             raise ValueError(
                 "--use-replayssm is incompatible with KV connectors "
                 "(P/D disaggregation, KV cache offload)"
             )
         return self
+
+
+def _validate_kda_recoverssm_prefill_only(config: VllmConfig) -> None:
+    if not config.cache_config.kda_recoverssm_prefill_only:
+        return
+    if not config.cache_config.use_kda_recoverssm:
+        raise ValueError(
+            "--kda-recoverssm-prefill-only requires KDA RecoverSSM "
+            "(--use-replayssm with speculative decoding on a Kimi-K3 model)"
+        )
+    kv_transfer_config = config.kv_transfer_config
+    if kv_transfer_config is None or not kv_transfer_config.is_kv_producer:
+        role = (
+            "no KV connector"
+            if kv_transfer_config is None
+            else f"kv_role {kv_transfer_config.kv_role!r}"
+        )
+        raise ValueError(
+            "--kda-recoverssm-prefill-only marks a P/D prefill instance and "
+            f"requires kv_role 'kv_producer' or 'kv_both'; got {role}"
+        )
+    connectors = [kv_transfer_config.kv_connector]
+    if kv_transfer_config.kv_connector == "MultiConnector":
+        connectors = [
+            connector.get("kv_connector")
+            for connector in kv_transfer_config.kv_connector_extra_config.get(
+                "connectors", []
+            )
+        ]
+    if "NixlConnector" not in connectors:
+        # A prefill-only Mamba page is smaller than the decode instance's.
+        # NIXL describes the conv and SSM state as separate regions with
+        # each side's page stride; other connectors copy whole pages.
+        raise ValueError(
+            "--kda-recoverssm-prefill-only requires the NixlConnector (alone "
+            "or in a MultiConnector) to transfer Mamba state to decode "
+            f"instances, whose pages are larger; got {connectors}"
+        )
 
 
 _current_vllm_config: VllmConfig | None = None

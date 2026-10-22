@@ -160,6 +160,18 @@ class InputProcessor:
                 self.structured_outputs_config,
                 self.tokenizer,
             )
+            if (
+                self.vllm_config.cache_config.kda_recoverssm_prefill_only
+                and params.max_tokens != 1
+            ):
+                # Its Mamba pages have no room for the verify records: a request
+                # that decodes here would verify draft tokens.
+                raise VLLMValidationError(
+                    "This instance only prefills for P/D decode instances "
+                    "(--kda-recoverssm-prefill-only): requests must set "
+                    f"max_tokens=1, got {params.max_tokens}.",
+                    parameter="max_tokens",
+                )
             if params.prompt_logprob_token_ids is not None:
                 if not self.vllm_config.use_v2_model_runner:
                     raise VLLMValidationError(

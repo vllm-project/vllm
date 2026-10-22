@@ -8,9 +8,12 @@ from typing import Any
 
 import torch
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+
+logger = init_logger(__name__)
 
 
 @triton.jit
@@ -754,6 +757,9 @@ class KDARecoverSSMCommitContext:
     dt_bias: torch.Tensor
     lower_bound: float | None
     spec_query_len: int
+    # The CuTe state fold (``CuteRecoverSSMStateCommit``) replacing the Triton
+    # one outside align mode; None keeps the Triton fold.
+    state_commit: Any = None
 
     @classmethod
     def create(
@@ -762,21 +768,22 @@ class KDARecoverSSMCommitContext:
         *,
         spec_query_len: int,
         max_num_reqs: int,
+        cute_state_commit: bool = False,
     ) -> "KDARecoverSSMCommitContext":
         if not layers:
             raise ValueError("KDA RecoverSSM commit requires at least one layer")
-        if any(len(layer.kv_cache) != 4 for layer in layers):
+        if any(layer.recoverssm_records is None for layer in layers):
             raise ValueError(
-                "KDA RecoverSSM pages must contain conv, state, correction, "
-                "and key/gate"
+                "KDA RecoverSSM commit requires verify records in the Mamba pages "
+                "(not a --kda-recoverssm-prefill-only instance)"
             )
 
         conv_states = [layer.kv_cache[0] for layer in layers]
         if not is_conv_state_dim_first():
             conv_states = [state.transpose(-1, -2) for state in conv_states]
         checkpoints = [layer.kv_cache[1] for layer in layers]
-        correction_caches = [layer.kv_cache[2] for layer in layers]
-        kg_caches = [layer.kv_cache[3] for layer in layers]
+        correction_caches = [layer.recoverssm_records.correction for layer in layers]
+        kg_caches = [layer.recoverssm_records.key_gate for layer in layers]
         A_log = [layer.A_log for layer in layers]
         dt_bias = [
             layer.dt_bias.view(layer.local_num_heads, layer.head_dim)
@@ -867,7 +874,7 @@ class KDARecoverSSMCommitContext:
                 device=device,
             )
 
-        return cls(
+        context = cls(
             conv_states=tuple(conv_states),
             conv_state_base_addrs=_base_addrs(conv_states),
             conv_state_block_strides=_block_strides(conv_states),
@@ -906,6 +913,26 @@ class KDARecoverSSMCommitContext:
             lower_bound=lower_bounds.pop(),
             spec_query_len=spec_query_len,
         )
+        if cute_state_commit:
+            from vllm.models.kimi_k3.nvidia.recoverssm.kernels import (
+                CuteRecoverSSMStateCommit,
+            )
+
+            reason = CuteRecoverSSMStateCommit.unsupported_reason(
+                checkpoints,
+                correction_caches,
+                kg_caches,
+                context.A_log,
+                spec_query_len,
+                context.lower_bound,
+            )
+            if reason is None:
+                context.state_commit = CuteRecoverSSMStateCommit(context)
+            else:
+                logger.warning_once(
+                    "KDA RecoverSSM keeps the Triton state commit: %s", reason
+                )
+        return context
 
     def commit(
         self,
@@ -1010,6 +1037,9 @@ class KDARecoverSSMCommitContext:
             num_warps=4,
         )
 
+        if self.state_commit is not None and block_table is None:
+            self.state_commit(state_indices, batch)
+            return
         state_ref = self.checkpoints[0]
         _, num_heads, value_dim, key_dim = state_ref.shape
         block_k = triton.next_power_of_2(key_dim)

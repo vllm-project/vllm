@@ -57,6 +57,7 @@ from vllm.models.kimi_k3.nvidia.ops.third_party.kda import (
 from vllm.models.kimi_k3.nvidia.ops.third_party.kda import (
     fused_recurrent_kda as fused_recurrent_kda_nvidia,
 )
+from vllm.models.kimi_k3.nvidia.recoverssm.layout import RecoverSSMRecords
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 from vllm.utils.flashinfer import flashinfer_fused_kda_decode
@@ -129,6 +130,7 @@ def test_kda_recoverssm_config_state_layout():
             mamba_cache_dtype="auto",
             mamba_ssm_cache_dtype="auto",
             use_kda_recoverssm=True,
+            kda_recoverssm_prefill_only=False,
         ),
         parallel_config=SimpleNamespace(tensor_parallel_size=1),
         speculative_config=SimpleNamespace(num_speculative_tokens=2),
@@ -822,6 +824,7 @@ def test_kda_recoverssm_verify_and_group_commit(
                 correction_cache,
                 kg_cache,
             ),
+            recoverssm_records=RecoverSSMRecords(correction_cache, kg_cache),
             A_log=A_log,
             dt_bias=dt_bias,
             local_num_heads=num_heads,

@@ -74,7 +74,11 @@ def test_trace_longer_than_remaining_context_is_truncated():
     assert params.max_tokens == 4
 
 
-def _validate(enable_trace_replay: bool) -> None:
+def _validate(
+    enable_trace_replay: bool,
+    params: SamplingParams | None = None,
+    kda_recoverssm_prefill_only: bool = False,
+) -> None:
     """Run _validate_params' trace gating with the rest of verify() stubbed."""
     processor = SimpleNamespace(
         model_config=SimpleNamespace(
@@ -83,6 +87,9 @@ def _validate(enable_trace_replay: bool) -> None:
             is_diffusion=False,
         ),
         vllm_config=SimpleNamespace(
+            cache_config=SimpleNamespace(
+                kda_recoverssm_prefill_only=kda_recoverssm_prefill_only
+            ),
             reasoning_config=None,
             # Engine has no watermark configuration.
             _check_supports_watermarking=lambda params: False,
@@ -94,7 +101,8 @@ def _validate(enable_trace_replay: bool) -> None:
         tokenizer=None,
         validate_logits_processors_params=lambda params: None,
     )
-    params = SamplingParams(trace_decode_token_ids=[1, 2, 3])
+    if params is None:
+        params = SamplingParams(trace_decode_token_ids=[1, 2, 3])
     with patch.object(SamplingParams, "verify"):
         InputProcessor._validate_params(processor, params, ("generate",))
 
@@ -116,3 +124,18 @@ def test_trace_replay_requires_v2_model_runner():
 
     with pytest.raises(ValueError, match="trace replay requires Model Runner V2"):
         VllmConfig._verify_trace_replay_config(config)
+
+
+@pytest.mark.parametrize("max_tokens", [None, 2, 16])
+def test_prefill_only_instance_rejects_decode_requests(max_tokens):
+    """A --kda-recoverssm-prefill-only instance has no room for verify records,
+    so requests that would decode (and verify draft tokens) there are rejected
+    at admission."""
+    params = SamplingParams(max_tokens=max_tokens)
+    with pytest.raises(VLLMValidationError, match="max_tokens=1"):
+        _validate(False, params, kda_recoverssm_prefill_only=True)
+    _validate(False, params, kda_recoverssm_prefill_only=False)
+
+
+def test_prefill_only_instance_accepts_prefill_requests():
+    _validate(False, SamplingParams(max_tokens=1), kda_recoverssm_prefill_only=True)
