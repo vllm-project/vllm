@@ -30,7 +30,6 @@ from vllm.distributed.aux_output_connector.store import (
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
-    bind_routed_experts_capturer,
 )
 from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 
@@ -81,21 +80,17 @@ class PendingAuxOutput:
 
 
 class AuxOutputWorkerConnector:
-    """Own capture, request tails, and backend resources on the output worker."""
+    """Own snapshots, request tails, and backend resources on the output worker."""
 
     def __init__(
         self,
         *,
         vllm_config: VllmConfig,
-        model: torch.nn.Module,
         kv_cache_config: KVCacheConfig,
+        routed_experts_capturer: RoutedExpertsCapturer,
     ) -> None:
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-        capturer = RoutedExpertsCapturer(
-            max_num_batched_tokens=max_num_batched_tokens, vllm_config=vllm_config
-        )
-        bind_routed_experts_capturer(model, capturer)
-        self._capturer = capturer
+        self._capturer = routed_experts_capturer
         self._store: BackgroundBlockObjectStore | None = None
         self._buffer: RoutedExpertsBuffer | None = None
         self._requests: dict[str, _WorkerRequestState] = {}
@@ -406,10 +401,13 @@ class AuxOutputWorkerConnector:
 
 
 def get_aux_output_connector(
-    model: torch.nn.Module, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
+    vllm_config: VllmConfig,
+    kv_cache_config: KVCacheConfig,
+    *,
+    routed_experts_capturer: RoutedExpertsCapturer,
 ) -> AuxOutputWorkerConnector:
     return AuxOutputWorkerConnector(
-        model=model,
+        routed_experts_capturer=routed_experts_capturer,
         kv_cache_config=kv_cache_config,
         vllm_config=vllm_config,
     )

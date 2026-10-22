@@ -607,6 +607,11 @@ class Worker(WorkerBase):
         ):
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
 
+        if self.use_v2_model_runner:
+            # R3 buffers must survive weight discard and be counted by profiling.
+            model_runner = cast("GPUModelRunnerV2", self.model_runner)
+            model_runner.initialize_routed_experts_capturer()
+
         if has_ec_transfer():
             get_ec_transfer().start_worker_services()
 
