@@ -112,7 +112,14 @@ def fp4_bmm(monkeypatch):
 
 @pytest.fixture
 def on_mi355x(monkeypatch):
-    monkeypatch.setattr(runtime, "platform_reasons", lambda: [])
+    monkeypatch.setattr(runtime, "platform_reasons", lambda _: [])
+    monkeypatch.setattr(runtime, "gfx942", lambda: False)
+
+
+@pytest.fixture
+def on_mi325x(monkeypatch):
+    monkeypatch.setattr(runtime, "platform_reasons", lambda _: [])
+    monkeypatch.setattr(runtime, "gfx942", lambda: True)
 
 
 @pytest.mark.parametrize(
@@ -362,10 +369,38 @@ def test_dcp1_without_m1_is_refused(on_mi355x):
     assert len(reasons) == 1 and "DCP1 without M1 (an fp8 KV cache)" in reasons[0]
 
 
-def test_every_refusal_is_reported_at_once(monkeypatch):
-    monkeypatch.setattr(
-        runtime, "platform_reasons", lambda: ["this GPU (gfx950 / MI355X only)"]
+@pytest.mark.parametrize(
+    "seqs, k, reason",
+    [
+        (1, 7, None),
+        (2, 3, None),
+        (4, 1, None),
+        (2, 7, "max_num_seqs 2 at 7"),
+        (8, 1, "max_num_seqs 8 at 1"),
+        (1, 15, "more than 7 speculative tokens"),
+    ],
+)
+def test_gfx942_serves_8_rows_at_dcp1_without_m1(on_mi325x, seqs, k, reason):
+    """gfx942's int4 MoE stages hold 8 rows. It has no M1, so its MLA layers run
+    vLLM's ops, at DCP1 too (a BF16 KV cache)."""
+    cfg = _vllm_config(
+        **{
+            "parallel_config.decode_context_parallel_size": 1,
+            "cache_config.cache_dtype": "auto",
+            "scheduler_config.max_num_seqs": seqs,
+            "speculative_config.num_speculative_tokens": k,
+        }
     )
+    reasons = runtime.unsupported(cfg)
+    if reason is not None:
+        assert len(reasons) == 1 and reason in reasons[0], reasons
+        return
+    assert reasons == []
+    assert specialized_decode_config(cfg) == DecodeConfig(q=k + 1, m1=False, rows=8)
+
+
+def test_every_refusal_is_reported_at_once(monkeypatch):
+    monkeypatch.setattr(runtime, "platform_reasons", lambda _: ["this GPU"])
     cfg = _vllm_config(
         **{"parallel_config.tensor_parallel_size": 4, "use_v2_model_runner": False}
     )
@@ -373,6 +408,48 @@ def test_every_refusal_is_reported_at_once(monkeypatch):
         specialized_decode_config(cfg)
     for reason in ("TP 4", "V1 model runner", "this GPU", "decode_backend=auto"):
         assert reason in str(e.value)
+
+
+@pytest.mark.parametrize(
+    "arch, cus, int4, env_arch, reason",
+    [
+        ("gfx950", 256, False, None, None),
+        ("gfx942", 304, True, None, None),
+        ("gfx942", 304, True, "gfx942:xnack-", None),
+        ("gfx942", 304, False, None, "gfx942 without packed-int4 routed experts"),
+        ("gfx942", 80, True, None, "80 CUs (a partitioned GPU"),
+        ("gfx942", 304, True, "gfx950", "ARCH=gfx950"),
+        ("gfx950", 256, False, "gfx942", "ARCH=gfx942"),
+        ("gfx90a", 104, True, None, "this GPU"),
+    ],
+)
+def test_gpu_refusals(monkeypatch, arch, cus, int4, env_arch, reason):
+    """gfx942 has no MXFP4 MFMA: its kernels read vLLM's packed-int4 requant of
+    the routed experts. Every CTA needs a CU of its own. FlyDSL builds for
+    $ARCH, while the refusals and vLLM's MoE follow the GPU."""
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kInt4Static32,
+    )
+    from vllm.platforms import current_platform, rocm
+
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
+    monkeypatch.setattr(rocm, "on_gfx950", lambda: arch == "gfx950")
+    monkeypatch.setattr(rocm, "on_gfx942", lambda: arch == "gfx942")
+    props = SimpleNamespace(
+        multi_processor_count=cus, gcnArchName=f"{arch}:sramecc+:xnack-"
+    )
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda *_: props)
+    if env_arch is None:
+        monkeypatch.delenv("ARCH", raising=False)
+    else:
+        monkeypatch.setenv("ARCH", env_arch)
+    moe = SimpleNamespace(weight=kInt4Static32 if int4 else None)
+    cfg = _vllm_config(**{"model_config.quantization_config": SimpleNamespace(moe=moe)})
+    reasons = runtime.unsupported(cfg)
+    if reason is None:
+        assert not reasons, reasons
+    else:
+        assert len(reasons) == 1 and reason in reasons[0], reasons
 
 
 def test_piecewise_graphs_only_warn(on_mi355x):

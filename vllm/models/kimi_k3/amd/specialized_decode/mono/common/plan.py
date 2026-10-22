@@ -84,15 +84,15 @@ def symbol_params(key) -> dict:
 
 # The execution model every mono kernel is written for.
 #
-# One CTA per CU of an MI355X, all of them co-resident -- a spin wait on another
-# CTA can only make progress if that CTA is running, so the runner refuses a GPU
-# with another CU count -- and THREADS threads each.
+# One CTA per CU of an MI355X (256 CUs; an MI300X / MI325X has 304, the rest
+# idle), all of them co-resident -- a spin wait on another CTA can only make
+# progress if that CTA is running, so the runner refuses a GPU with fewer CUs --
+# and THREADS threads each. A CU's LDS is ``arch.LDS_BYTES``.
 #
 
 BLOCKS = 256
 THREADS = 512
 WAVES = THREADS // 64
-LDS_BYTES = 160 * 1024  # a CU's LDS: one CTA's whole
 
 
 def first_task(bid, base):
