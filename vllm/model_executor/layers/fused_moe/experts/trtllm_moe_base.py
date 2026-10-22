@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEActivationFormat,
@@ -118,8 +119,9 @@ class TrtLlmExpertsBase(FusedMoEExperts):
         ``None`` keeps FlashInfer's per-call workspace allocation.
         """
         if (
+            not envs.VLLM_FLASHINFER_MOE_USE_WORKSPACE
             # A caller-owned workspace requires finalized output.
-            not do_finalize
+            or not do_finalize
             or not has_flashinfer_trtllm_fused_moe_workspace()
             or not is_workspace_manager_initialized()
             # Unexpectedly large batches keep the per-call allocation rather
