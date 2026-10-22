@@ -177,7 +177,7 @@ def _check_indexer_forwards(config, device, rank, comm):
                     ].contiguous()
                 )
 
-    def check(metadata, queries, num_tokens):
+    def check_local(metadata, queries, num_tokens):
         run(False, metadata, queries)
         for reference, sharded in zip(*layers):
             torch.testing.assert_close(
@@ -199,6 +199,22 @@ def _check_indexer_forwards(config, device, rank, comm):
             )
         assert comm.errors.item() == 0
         assert torch.count_nonzero(comm.recv[..., 32]).item() == 0
+
+    def check(metadata, queries, num_tokens):
+        error = None
+        try:
+            check_local(metadata, queries, num_tokens)
+        except AssertionError as failure:
+            error = failure
+        # No rank starts publishing the next phase before every snapshot completes.
+        ok = torch.tensor([int(error is None)], dtype=torch.int32, device="cpu")
+        torch.distributed.all_reduce(
+            ok, op=torch.distributed.ReduceOp.MIN, group=comm.group.cpu_group
+        )
+        if not ok.item():
+            raise AssertionError(
+                f"Indexer validation failed on a TP rank: {error}"
+            ) from error
 
     batches = [
         BatchSpec(seq_lens=[129, 2305], query_lens=[1, 1]),
