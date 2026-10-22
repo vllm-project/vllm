@@ -306,7 +306,7 @@ def test_next_step_does_not_consume_pending_output(monkeypatch):
 
     assert result.sampled_token_ids == [[7]]
     np.testing.assert_array_equal(
-        result.aux_output_connector_output["request"].routed_experts_rows, rows.numpy()
+        result.aux_output_connector_output["request"].routed_rows, rows.numpy()
     )
     process_output.assert_called_once()
     assert worker._pending_outputs == []
@@ -337,7 +337,7 @@ def test_finished_request_teardown_waits_for_pending_output(num_pending):
 
     for i, pending in enumerate(pending_outputs):
         output = worker.process_output(pending)
-        np.testing.assert_array_equal(output["request"].routed_experts_rows, rows)
+        np.testing.assert_array_equal(output["request"].routed_rows, rows)
         if i + 1 < num_pending:
             assert "request" in worker._requests
             assert worker._store._references
@@ -451,8 +451,8 @@ def test_worker_ignores_cudagraph_query_padding():
         query_start_loc=np.array([0, 1, 2, 2], dtype=np.int32),
     )
 
-    np.testing.assert_array_equal(output["first"].routed_experts_rows, logical[:1])
-    np.testing.assert_array_equal(output["second"].routed_experts_rows, logical[1:])
+    np.testing.assert_array_equal(output["first"].routed_rows, logical[:1])
+    np.testing.assert_array_equal(output["second"].routed_rows, logical[1:])
     worker.close()
 
 
@@ -606,7 +606,7 @@ def test_worker_data_plane_publishes_blocks_and_reuses_prefix():
     )
     output = _process_output(worker, first, logical[:8], ["first"], np.array([0]))
     assert output is not None
-    np.testing.assert_array_equal(output["first"].routed_experts_rows, logical[:8])
+    np.testing.assert_array_equal(output["first"].routed_rows, logical[:8])
 
     second = _metadata(
         generation=0,
@@ -615,7 +615,7 @@ def test_worker_data_plane_publishes_blocks_and_reuses_prefix():
     )
     output = _process_output(worker, second, logical[8:], ["second"], np.array([0]))
     assert output is not None
-    np.testing.assert_array_equal(output["second"].routed_experts_rows, logical)
+    np.testing.assert_array_equal(output["second"].routed_rows, logical)
     worker.close()
 
 
@@ -742,16 +742,14 @@ def test_worker_replays_rejected_speculative_gap():
         np.array([0]),
     )
 
-    np.testing.assert_array_equal(
-        first_output["request"].routed_experts_rows, logical[:1]
-    )
+    np.testing.assert_array_equal(first_output["request"].routed_rows, logical[:1])
     assert queued_output["request"].token_start == 1
     np.testing.assert_array_equal(
-        queued_output["request"].routed_experts_rows,
+        queued_output["request"].routed_rows,
         logical[1:2],
     )
     np.testing.assert_array_equal(
-        rolled_back_output["request"].routed_experts_rows,
+        rolled_back_output["request"].routed_rows,
         logical[2:],
     )
     assert worker._requests["request"].capture_cursor == len(logical)
@@ -814,8 +812,8 @@ def test_worker_publishes_entire_batch_before_materializing_prefix():
     )
 
     assert output is not None
-    np.testing.assert_array_equal(output["consumer"].routed_experts_rows, logical)
-    np.testing.assert_array_equal(output["producer"].routed_experts_rows, logical[:4])
+    np.testing.assert_array_equal(output["consumer"].routed_rows, logical)
+    np.testing.assert_array_equal(output["producer"].routed_rows, logical[:4])
     worker.close()
 
 
@@ -837,7 +835,7 @@ def test_worker_defers_full_block_until_kv_hash_arrives():
     )
 
     assert output is not None
-    np.testing.assert_array_equal(output["request"].routed_experts_rows, logical[:4])
+    np.testing.assert_array_equal(output["request"].routed_rows, logical[:4])
     assert worker._requests["request"].pending_blocks[0][0] == 0
 
     block_hash = b"a" * 32
@@ -849,7 +847,7 @@ def test_worker_defers_full_block_until_kv_hash_arrives():
     output = _process_output(worker, second, logical[4:], ["request"], np.array([0]))
 
     assert output is not None
-    np.testing.assert_array_equal(output["request"].routed_experts_rows, logical[4:])
+    np.testing.assert_array_equal(output["request"].routed_rows, logical[4:])
     assert not worker._requests["request"].pending_blocks
     assert worker._store is not None
     np.testing.assert_array_equal(
@@ -1083,7 +1081,7 @@ def test_worker_does_not_rematerialize_emitted_rows():
     output = _process_output(worker, second, logical[4:], ["request"], np.array([0]))
 
     assert output is not None
-    np.testing.assert_array_equal(output["request"].routed_experts_rows, logical[4:])
+    np.testing.assert_array_equal(output["request"].routed_rows, logical[4:])
     worker._store.get_concatenated.assert_not_called()
     worker.close()
 
@@ -1100,7 +1098,7 @@ def test_worker_resumes_from_scheduler_emit_boundary():
     output = _process_output(worker, resumed, logical[4:], ["request"], np.array([0]))
 
     assert output["request"].token_start == 4
-    np.testing.assert_array_equal(output["request"].routed_experts_rows, logical[4:])
+    np.testing.assert_array_equal(output["request"].routed_rows, logical[4:])
     assert worker._requests["request"].emit_cursor == 5
     worker.close()
 
@@ -1131,7 +1129,7 @@ def test_worker_emits_mid_block_chunked_prefill():
     )
     output = _process_output(worker, second, logical[2:], ["request"], np.array([0]))
 
-    np.testing.assert_array_equal(output["request"].routed_experts_rows, logical)
+    np.testing.assert_array_equal(output["request"].routed_rows, logical)
     worker.close()
 
 
@@ -1161,7 +1159,7 @@ def test_worker_emits_published_block_and_mid_block_tail():
     )
     output = _process_output(worker, second, logical[6:], ["request"], np.array([0]))
 
-    np.testing.assert_array_equal(output["request"].routed_experts_rows, logical)
+    np.testing.assert_array_equal(output["request"].routed_rows, logical)
     worker.close()
 
 
@@ -1188,7 +1186,7 @@ def test_worker_output_does_not_alias_released_tail_buffer():
     )
 
     output = _process_output(worker, second, logical[2:], ["request"], np.array([0]))
-    emitted = output["request"].routed_experts_rows
+    emitted = output["request"].routed_rows
     expected = logical.copy()
 
     replacement = np.full_like(logical, 99)
@@ -2017,11 +2015,11 @@ def test_indexer_shares_spec_acceptance_and_shm_prefix_lifecycle(enable_r3):
         indexer_rows=indexer,
     )["producer"]
     np.testing.assert_array_equal(output.indexer_rows, indexer[:4])
-    assert len(output.routed_experts_rows) == 4
+    assert len(output.routed_rows) == 4
     if enable_r3:
-        np.testing.assert_array_equal(output.routed_experts_rows, routing[:4])
+        np.testing.assert_array_equal(output.routed_rows, routing[:4])
     else:
-        assert output.routed_experts_rows.shape == (4, 0)
+        assert output.routed_rows.shape == (4, 0)
     # A different request skips the cached prefix's forward entirely.
     cached = _metadata(0, [_request_metadata("cached", 4, 1, 0, [b"a" * 32])], {})
     output = _process_output(
@@ -2034,7 +2032,7 @@ def test_indexer_shares_spec_acceptance_and_shm_prefix_lifecycle(enable_r3):
     )["cached"]
     np.testing.assert_array_equal(output.indexer_rows, indexer[:5])
     if enable_r3:
-        np.testing.assert_array_equal(output.routed_experts_rows, routing[:5])
+        np.testing.assert_array_equal(output.routed_rows, routing[:5])
     worker.close()
 
 
@@ -2048,7 +2046,7 @@ def test_preemption_rewinds_an_unpublished_partial_block():
         "request"
     ]
     assert output.token_start == 3
-    np.testing.assert_array_equal(output.routed_experts_rows, rows[3:])
+    np.testing.assert_array_equal(output.routed_rows, rows[3:])
     worker.close()
 
 

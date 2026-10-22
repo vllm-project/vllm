@@ -34,8 +34,8 @@ use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
 use vllm_server::{
     ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
-    DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL, HttpListenerMode, LoraModulePath,
-    ParserSelection, RenderConfig, RendererSelection,
+    CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL,
+    HttpListenerMode, LoraModulePath, ParserSelection, RenderConfig, RendererSelection,
 };
 use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
 
@@ -437,6 +437,18 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub disable_log_stats: bool,
 
+    /// Custom Prometheus histogram bucket boundaries, as a JSON mapping from
+    /// bucket-family key to a list of strictly increasing, positive, finite
+    /// upper bounds. When a family key is present, its list replaces the
+    /// default buckets for every histogram in that family; families not listed
+    /// keep their defaults. Known families: `request_latency`,
+    /// `time_to_first_token`, `inter_token_latency`, `iteration_tokens`,
+    /// `request_params_n`, `request_num_preemptions`, `request_tokens`,
+    /// `kv_cache_residency`.
+    #[arg(long, value_parser = parse_json::<CustomHistogramBuckets>, default_value = "{}", value_name = "JSON")]
+    #[serde(default)]
+    pub custom_histogram_buckets: CustomHistogramBuckets,
+
     /// Seconds between periodic engine statistics logs (default 10). Like
     /// Python, it is set only through `VLLM_LOG_STATS_INTERVAL`.
     #[arg(long, hide = true, env = "VLLM_LOG_STATS_INTERVAL")]
@@ -664,6 +676,7 @@ impl SharedRuntimeArgs {
             tls,
             api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
+            custom_histogram_buckets: self.custom_histogram_buckets,
             log_stats_interval,
             disable_request_id_randomization: self.disable_request_id_randomization,
             shutdown_timeout,
@@ -739,6 +752,7 @@ impl SharedRuntimeArgs {
             tls,
             api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
+            custom_histogram_buckets: self.custom_histogram_buckets,
             log_stats_interval,
             disable_request_id_randomization: self.disable_request_id_randomization,
             shutdown_timeout,

@@ -135,7 +135,7 @@ strategy_hardware:
 hardware_overrides:
   hopper:
     extra_args:
-      - "--no-enable-flashinfer-autotune"
+      - "--disable-flashinfer-autotune"
   blackwell:
     # FP8 KV cache only works on Blackwell for this model; Hopper runs BF16 KV.
     extra_args:

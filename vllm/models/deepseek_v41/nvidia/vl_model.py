@@ -273,11 +273,8 @@ class DeepseekV41ForCausalLM(
             is_multimodal=is_multimodal,
         )
 
-    @staticmethod
-    def get_model_state_cls():
-        from .model_state import DeepseekV41ModelState
-
-        return DeepseekV41ModelState
+    def get_model_state_cls(self):
+        return self.language_model.get_model_state_cls()
 
     @property
     def token_lookback_depth(self) -> int:

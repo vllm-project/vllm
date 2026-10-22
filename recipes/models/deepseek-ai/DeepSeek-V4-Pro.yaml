@@ -183,7 +183,7 @@ hardware_overrides:
       - "0.95"
       - "--max-num-seqs"
       - "512"
-      - "--no-enable-flashinfer-autotune"
+      - "--disable-flashinfer-autotune"
       - "--compilation-config"
       - '{"mode": 0, "cudagraph_mode": "FULL_DECODE_ONLY"}'
   blackwell:
@@ -214,14 +214,14 @@ strategy_overrides:
     hardware_overrides:
       hopper:
         extra_args:
-          - "--no-enable-flashinfer-autotune"
+          - "--disable-flashinfer-autotune"
       blackwell:
         # Replaces recipe-level blackwell override: keeps the FP4 indexer cache
         # but drops any variant-level --moe-backend selection (TP-only uses
         # the default MoE backend).
         extra_args:
           - "--attention_config.indexer_kv_dtype=mxfp4"
-          - "--no-enable-flashinfer-autotune"
+          - "--disable-flashinfer-autotune"
   single_node_tep:
     extra_args:
       - "--compilation-config"
@@ -485,7 +485,7 @@ guide: |
   ```text
   --tokenizer-mode deepseek_v4 --trust-remote-code
   --kv-cache-dtype fp8 --block-size 256
-  --no-disable-hybrid-kv-cache-manager --no-enable-flashinfer-autotune
+  --no-disable-hybrid-kv-cache-manager --disable-flashinfer-autotune
   --attention-config '{"backend":"FLASHINFER_MLA_SPARSE_DSV4","use_prefill_query_quantization":true,"indexer_kv_dtype":"mxfp4"}'
   --speculative-config '{"method":"dspark","num_speculative_tokens":6,"draft_sample_method":"probabilistic","rejection_sample_method":"block"}'
   ```
@@ -675,7 +675,7 @@ guide: |
     --numa-bind --numa-bind-nodes 0 0 1 1
     --tokenizer-mode deepseek_v4 --trust-remote-code
     --max-model-len 1048576 --kv-cache-dtype fp8 --block-size 256
-    --no-disable-hybrid-kv-cache-manager --no-enable-flashinfer-autotune
+    --no-disable-hybrid-kv-cache-manager --disable-flashinfer-autotune
     --attention-config '{"backend":"FLASHINFER_MLA_SPARSE_DSV4","use_prefill_query_quantization":true,"indexer_kv_dtype":"mxfp4"}'
     --speculative-config '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","rejection_sample_method":"block"}'
   )
