@@ -973,6 +973,9 @@ def test_online_processing_waits_for_late_registered_bias():
     assert torch.equal(quant_method.bias_at_process, loaded_bias)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="Kimi K3 NVIDIA KDA is CUDA-only"
+)
 @pytest.mark.parametrize("num_heads", [96, 128])
 @pytest.mark.parametrize("tp_rank", [0, 3])
 @pytest.mark.parametrize(
