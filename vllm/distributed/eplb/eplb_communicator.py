@@ -8,6 +8,7 @@ import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from datetime import timedelta
+from typing import Any
 
 import numpy as np
 import torch
@@ -41,6 +42,47 @@ logger = init_logger(__name__)
 def has_nixl() -> bool:
     """Whether the optional NIXL package is available."""
     return nixl_utils.NixlWrapper is not None
+
+
+class _ArenaAgent:
+    """The one NIXL agent in this process that has an expert arena registered.
+
+    A registration belongs to an agent, so reusing the registration means
+    reusing the agent. The expert arena is fixed for the life of the worker,
+    since a reconfiguration only re-points views at the same preallocated
+    pages, so the agent and its registration are too.
+
+    Two agents over one arena is a use after free waiting to happen: both hold
+    the identical pages, and whichever is collected first deregisters memory
+    the other may still be reading, which surfaces as a memory fault partway
+    through the expert reads.
+
+    Peers are keyed by their metadata rather than removed and re-added, because
+    the agent name is stable for the life of the worker and a reconfiguration
+    gathers the very same metadata back.
+    """
+
+    def __init__(self, agent: Any) -> None:
+        self.agent = agent
+        self.registered_descs: list[object] = []
+        # Address ranges this agent has registered, so a reconfiguration can
+        # tell what is already covered. The expert weights always are; the
+        # receive buffers are checked rather than assumed.
+        self.registered_ranges: list[tuple[int, int]] = []
+        self.remote_names: dict[bytes, str] = {}
+        self.users = 0
+
+    def covers(self, tensor: torch.Tensor) -> bool:
+        lo = tensor.data_ptr()
+        hi = lo + tensor.numel() * tensor.element_size()
+        return any(lo >= r_lo and hi <= r_hi for r_lo, r_hi in self.registered_ranges)
+
+
+# (device, arena start, arena end) -> the agent that owns that registration.
+# Communicators are only built on the worker's main thread, during startup and
+# during a reconfiguration, so this needs no lock. The async EPLB worker uses
+# the communicator it is handed and never creates one.
+_ARENA_AGENTS: dict[tuple[int, int, int], _ArenaAgent] = {}
 
 
 class EplbCommunicator(ABC):
@@ -362,17 +404,26 @@ class NixlEplbCommunicator(EplbCommunicator):
             if nixl_agent_config is not None
             else None
         )
-        self._nixl_wrapper = nixl_wrapper_cls(self._make_agent_name(), config)
+        self._cuda_device_id = int(self._device.index or 0)
+        # One agent per expert arena per process, see `_ArenaAgent`. A
+        # reconfiguration lands on the arena that is already registered, so it
+        # reuses that agent instead of building a second one over the same
+        # pages.
+        self._arena_key = self._expert_arena_key()
+        arena_agent = _ARENA_AGENTS.get(self._arena_key)
+        if arena_agent is None:
+            arena_agent = _ArenaAgent(nixl_wrapper_cls(self._make_agent_name(), config))
+            _ARENA_AGENTS[self._arena_key] = arena_agent
+        arena_agent.users += 1
+        self._arena_agent = arena_agent
+        self._nixl_wrapper = arena_agent.agent
         self._nixl_memory_type = "VRAM"
-        # NIXL registration handles; deregistered in __del__.
-        self._registered_descs: list[object] = []
         self._remote_agents: dict[int, str] = {}
         # peer -> (layer, tensor) -> (base_ptr, bytes_per_expert, dev_id).
         self._remote_send_meta: dict[
             int, dict[tuple[int, int], tuple[int, int, int]]
         ] = {}
 
-        self._cuda_device_id = int(self._device.index or 0)
         self._init_step("buffers", self._init_registered_buffers)
         self._init_remote_state()
         self._log_initialized()
@@ -493,9 +544,32 @@ class NixlEplbCommunicator(EplbCommunicator):
                 continue
             peer_metadata = gathered_metadata[peer]
             assert peer_metadata is not None
-            self._remote_agents[peer] = self._nixl_wrapper.add_remote_agent(
-                peer_metadata
-            )
+            # The peer agent is now stable for the life of its worker, so a
+            # reconfiguration gathers metadata this agent already knows. Adding
+            # it twice would mean two entries over one peer, and removing
+            # either would pull the rkeys out from under the live one.
+            known = self._arena_agent.remote_names.get(peer_metadata)
+            if known is None:
+                known = self._nixl_wrapper.add_remote_agent(peer_metadata)
+                self._arena_agent.remote_names[peer_metadata] = known
+            self._remote_agents[peer] = known
+
+    def _expert_arena_key(self) -> tuple[int, int, int]:
+        """The device and address span the peers read expert weights from.
+
+        A span rather than the exact tensor list, because a reconfiguration
+        re-points the views and only has to land on the same arena, not on the
+        same tensor objects.
+        """
+        lo = min(
+            tensor.data_ptr() for layer in self._all_expert_weights for tensor in layer
+        )
+        hi = max(
+            tensor.data_ptr() + tensor.numel() * tensor.element_size()
+            for layer in self._all_expert_weights
+            for tensor in layer
+        )
+        return (self._cuda_device_id, lo, hi)
 
     def _init_registered_buffers(self) -> None:
         all_tensors: list[torch.Tensor] = []
@@ -503,9 +577,21 @@ class NixlEplbCommunicator(EplbCommunicator):
             all_tensors.extend(layer_tensors)
         all_tensors.extend(self._expert_buffer)
 
-        descs = self._nixl_wrapper.get_reg_descs(all_tensors)
+        # Register only what this agent does not already hold. On a first build
+        # that is everything; on a reconfiguration it is normally nothing, and
+        # at most the receive buffers if they were reallocated.
+        pending = [t for t in all_tensors if not self._arena_agent.covers(t)]
+        if not pending:
+            return
+
+        descs = self._nixl_wrapper.get_reg_descs(pending)
         self._nixl_wrapper.register_memory(descs)
-        self._registered_descs.append(descs)
+        self._arena_agent.registered_descs.append(descs)
+        for tensor in pending:
+            lo = tensor.data_ptr()
+            self._arena_agent.registered_ranges.append(
+                (lo, lo + tensor.numel() * tensor.element_size())
+            )
 
     def _exchange_remote_send_meta(self) -> None:
         """Exchange per-layer per-tensor metadata so receivers can compute
@@ -643,6 +729,16 @@ class NixlEplbCommunicator(EplbCommunicator):
             self._layer_idx = None
 
     def __del__(self) -> None:
+        # At interpreter shutdown the module globals this body needs, down to
+        # `contextlib` itself, may already be None, and every worker exit then
+        # prints a traceback per communicator. Nothing here is worth that, so
+        # the whole teardown is guarded without touching a module global.
+        try:  # noqa: SIM105 `contextlib` is exactly what may be gone here
+            self._teardown()
+        except BaseException:  # noqa: BLE001
+            pass
+
+    def _teardown(self) -> None:
         with contextlib.suppress(Exception):
             for local_h, remote_h, xfer_h in self._xfer_entries:
                 with contextlib.suppress(Exception):
@@ -651,16 +747,33 @@ class NixlEplbCommunicator(EplbCommunicator):
                     self._nixl_wrapper.release_dlist_handle(local_h)
                 with contextlib.suppress(Exception):
                     self._nixl_wrapper.release_dlist_handle(remote_h)
+        self._remote_agents.clear()
         with contextlib.suppress(Exception):
-            for descs in self._registered_descs:
-                with contextlib.suppress(Exception):
-                    self._nixl_wrapper.deregister_memory(descs)
-            self._registered_descs.clear()
-        with contextlib.suppress(Exception):
-            for agent_name in self._remote_agents.values():
-                with contextlib.suppress(Exception):
-                    self._nixl_wrapper.remove_remote_agent(agent_name)
-            self._remote_agents.clear()
+            self._release_arena_agent()
+
+    def _release_arena_agent(self) -> None:
+        """Give up this communicator's share of the agent that owns the arena.
+
+        A reconfiguration builds the replacement before dropping this object,
+        so the count goes to two and back to one and the registration is never
+        touched. It reaches zero only when expert parallelism itself is going
+        away, and then nothing local or remote is reading any more, so that is
+        the one point where deregistering is both safe and necessary.
+        """
+        agent = self._arena_agent
+        agent.users -= 1
+        if agent.users > 0:
+            return
+        _ARENA_AGENTS.pop(self._arena_key, None)
+        for name in agent.remote_names.values():
+            with contextlib.suppress(Exception):
+                agent.agent.remove_remote_agent(name)
+        agent.remote_names.clear()
+        for descs in agent.registered_descs:
+            with contextlib.suppress(Exception):
+                agent.agent.deregister_memory(descs)
+        agent.registered_descs.clear()
+        agent.registered_ranges.clear()
 
 
 class PyNcclEplbCommunicator(EplbCommunicator):
