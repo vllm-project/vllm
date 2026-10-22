@@ -272,10 +272,9 @@ class RDNA3Mxfp4Experts(mk.FusedMoEExpertsModular):
         else:
             self.activation(activation, act_out, w1_out)
 
-        # down GEMM. The kernel's fused output_topk reduce is wrong under TP
-        # (each rank's down-proj is a partial the layer all-reduces afterwards);
-        # a per-expert bias likewise needs adding before the reduction. In both
-        # cases write unreduced rows and reduce in Python instead.
+        # down GEMM. A per-expert bias has to be added before the top-k
+        # reduction, so that case writes unreduced rows and reduces here. TP>1
+        # takes the same path until the fused reduce is validated there.
         unfused = w2_bias is not None or self.moe_config.moe_parallel_config.tp_size > 1
         if unfused:
             w2_out = gemm_out[: total * K].view(total, K)
