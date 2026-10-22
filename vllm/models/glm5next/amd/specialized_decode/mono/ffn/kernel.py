@@ -35,8 +35,8 @@ from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import Int32, Int64, T
 
-from vllm.models.common.mono import abi
-from vllm.models.glm5next.amd.ops.mono.config import (
+from vllm.models.glm5next.amd.specialized_decode.mono import abi
+from vllm.models.glm5next.amd.specialized_decode.mono.config import (
     EPS,
     FP8_MAX,
     FWHT_SCALE,
@@ -69,7 +69,7 @@ from vllm.models.glm5next.amd.ops.mono.config import (
     V_DIM,
     FlashShard,
 )
-from vllm.models.glm5next.amd.ops.mono.ffn.layout import (
+from vllm.models.glm5next.amd.specialized_decode.mono.ffn.layout import (
     DSA_TAB,
     FGB_TILE,
     IN_TILE,
@@ -105,7 +105,7 @@ from vllm.models.glm5next.amd.ops.mono.ffn.layout import (
     stage_tasks,
     ug_task_rounds,
 )
-from vllm.models.glm5next.amd.ops.mono.layout import (
+from vllm.models.glm5next.amd.specialized_decode.mono.layout import (
     BLOCKS,
     CM_DEV,
     CM_SYS,
@@ -119,7 +119,7 @@ from vllm.models.glm5next.amd.ops.mono.layout import (
     WAVES,
     atom_mxfp4_scale_index,
 )
-from vllm.models.glm5next.amd.ops.mono.ops import (
+from vllm.models.glm5next.amd.specialized_decode.mono.ops import (
     bpermute_i32,
     div_rn,
     fp8_pack4,
@@ -129,15 +129,19 @@ from vllm.models.glm5next.amd.ops.mono.ops import (
     wave_umax_dpp,
     write_lane_i32,
 )
-from vllm.models.glm5next.amd.ops.mono.ops import exp as _exp
-from vllm.models.glm5next.amd.ops.mono.ops import fp8_to_bf16x8 as _fp8_to_bf16x8
-from vllm.models.glm5next.amd.ops.mono.ops import rcp as _rcp
-from vllm.models.glm5next.amd.ops.mono.ops import rsq as _rsq
-from vllm.models.glm5next.amd.ops.mono.ops import rsrc as _rsrc
-from vllm.models.glm5next.amd.ops.mono.ops import uniform as _uniform
-from vllm.models.glm5next.amd.ops.mono.ops import uniform_f32 as _uniform_f32
-from vllm.models.glm5next.amd.ops.mono.ops import xred as _xred
-from vllm.models.glm5next.amd.ops.mono.ops import xshfl as _xshfl
+from vllm.models.glm5next.amd.specialized_decode.mono.ops import exp as _exp
+from vllm.models.glm5next.amd.specialized_decode.mono.ops import (
+    fp8_to_bf16x8 as _fp8_to_bf16x8,
+)
+from vllm.models.glm5next.amd.specialized_decode.mono.ops import rcp as _rcp
+from vllm.models.glm5next.amd.specialized_decode.mono.ops import rsq as _rsq
+from vllm.models.glm5next.amd.specialized_decode.mono.ops import rsrc as _rsrc
+from vllm.models.glm5next.amd.specialized_decode.mono.ops import uniform as _uniform
+from vllm.models.glm5next.amd.specialized_decode.mono.ops import (
+    uniform_f32 as _uniform_f32,
+)
+from vllm.models.glm5next.amd.specialized_decode.mono.ops import xred as _xred
+from vllm.models.glm5next.amd.specialized_decode.mono.ops import xshfl as _xshfl
 
 # 5-key descending sorting network (lane's router candidates)
 SORT5 = ((0, 1), (3, 4), (2, 4), (2, 3), (0, 3), (0, 2), (1, 4), (1, 3), (1, 2))

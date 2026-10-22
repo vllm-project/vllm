@@ -66,7 +66,7 @@ def _exact_moe(x, gate, bias, w13, s13, w2, s2, shared):
     (gate_up, scale, down, scale) MXFP4 shards."""
     """fp32 MoE on dequantized MXFP4 weights and unquantized inputs, vLLM's
     routing (sigmoid + bias, top-8, renormalized, x2.5) and SwiGLU clamp."""
-    from vllm.models.glm5next.amd.ops.mono.config import (
+    from vllm.models.glm5next.amd.specialized_decode.mono.config import (
         ROUTE_SCALE,
         SWIGLU_LIMIT,
         TOP_K,
@@ -125,8 +125,7 @@ def _check(rank: int, tp: int, device) -> None:
     from vllm.engine.arg_utils import EngineArgs
     from vllm.forward_context import set_forward_context
     from vllm.model_executor.model_loader.utils import process_weights_after_loading
-    from vllm.models.glm5next.amd.mono.weights import layer_weights
-    from vllm.models.glm5next.amd.ops.mono.config import (
+    from vllm.models.glm5next.amd.specialized_decode.mono.config import (
         GLOBAL_INTER,
         HC_MULT,
         HIDDEN,
@@ -134,7 +133,13 @@ def _check(rank: int, tp: int, device) -> None:
         N_EXPERTS,
         TOP_K,
     )
-    from vllm.models.glm5next.amd.ops.mono.ffn.op import FlashFfnOp, FlashFfnRuntime
+    from vllm.models.glm5next.amd.specialized_decode.mono.ffn.op import (
+        FlashFfnOp,
+        FlashFfnRuntime,
+    )
+    from vllm.models.glm5next.amd.specialized_decode.runtime.weights import (
+        layer_weights,
+    )
     from vllm.models.glm5next.common.model import Glm5NextMoE
     from vllm.utils.torch_utils import set_default_torch_dtype
 

@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.models.glm5next.amd.ops.mono.config import (
+from vllm.models.glm5next.amd.specialized_decode.mono.config import (
     HC_MULT,
     HIDDEN,
     N_EXPERTS,
@@ -19,7 +19,7 @@ from vllm.models.glm5next.amd.ops.mono.config import (
 if TYPE_CHECKING:
     from torch import nn
 
-    from vllm.models.glm5next.amd.ops.mono.ffn.op import (
+    from vllm.models.glm5next.amd.specialized_decode.mono.ffn.op import (
         FlashDsaWeights,
         FlashFfnWeights,
         FlashKdaWeights,
@@ -85,7 +85,9 @@ def _mxfp4_rows(name: str, linear: nn.Module, rows: int, k: int):
 
 
 def _shared_expert(mlp: nn.Module, inter: int):
-    from vllm.models.glm5next.amd.ops.mono.packing import pack_shared_expert
+    from vllm.models.glm5next.amd.specialized_decode.mono.packing import (
+        pack_shared_expert,
+    )
 
     gate_up = _mxfp4_rows("gate_up_proj", mlp.gate_up_proj, 2 * inter, HIDDEN)
     down = _mxfp4_rows("down_proj", mlp.down_proj, HIDDEN, inter)
@@ -93,8 +95,8 @@ def _shared_expert(mlp: nn.Module, inter: int):
 
 
 def layer_weights(layer: nn.Module, inter: int) -> FlashFfnWeights:
-    from vllm.models.glm5next.amd.ops.mono.ffn.op import FlashFfnWeights
-    from vllm.models.glm5next.amd.ops.mono.packing import pack_bf16
+    from vllm.models.glm5next.amd.specialized_decode.mono.ffn.op import FlashFfnWeights
+    from vllm.models.glm5next.amd.specialized_decode.mono.packing import pack_bf16
 
     why = experts_backend_reason(layer)
     if why is not None:
@@ -186,7 +188,7 @@ def _proj(name: str, linear: nn.Module, rows: int, cols: int):
 def dsa_weights(layer: nn.Module, tp: int) -> FlashDsaWeights:
     """A sparse-attention layer's attention side as views of vLLM's parameters;
     W_UK^T is packed once from kv_b_proj into [H, 512, 256] bf16."""
-    from vllm.models.glm5next.amd.ops.mono.config import (
+    from vllm.models.glm5next.amd.specialized_decode.mono.config import (
         INDEX_DIM,
         INDEX_HEADS,
         KPOOL,
@@ -196,7 +198,7 @@ def dsa_weights(layer: nn.Module, tp: int) -> FlashDsaWeights:
         V_DIM,
         FlashShard,
     )
-    from vllm.models.glm5next.amd.ops.mono.ffn.op import FlashDsaWeights
+    from vllm.models.glm5next.amd.specialized_decode.mono.ffn.op import FlashDsaWeights
 
     attn = layer.self_attn
     idx = attn.indexer
@@ -261,8 +263,11 @@ def dsa_weights(layer: nn.Module, tp: int) -> FlashDsaWeights:
 def kda_weights(layer: nn.Module, tp: int) -> FlashKdaWeights:
     """A KDA layer's attention side, as views of vLLM's row-major bf16 projections;
     the q | k | v conv taps are packed once into one [3P, 4] tensor."""
-    from vllm.models.glm5next.amd.ops.mono.config import KDA_DIM, FlashShard
-    from vllm.models.glm5next.amd.ops.mono.ffn.op import FlashKdaWeights
+    from vllm.models.glm5next.amd.specialized_decode.mono.config import (
+        KDA_DIM,
+        FlashShard,
+    )
+    from vllm.models.glm5next.amd.specialized_decode.mono.ffn.op import FlashKdaWeights
 
     attn = layer.self_attn
     shard = FlashShard(tp)

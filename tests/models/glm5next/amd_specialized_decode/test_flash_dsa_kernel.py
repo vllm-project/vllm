@@ -70,7 +70,7 @@ class _Dsa:
     this rank's shard, in vLLM's post-load layouts."""
 
     def __init__(self, rank: int, tp: int, device, fp8=(True, True, True)) -> None:
-        from vllm.models.glm5next.amd.ops.mono.config import (
+        from vllm.models.glm5next.amd.specialized_decode.mono.config import (
             HC_MULT,
             HIDDEN,
             INDEX_DIM,
@@ -135,7 +135,9 @@ class _Dsa:
         )
 
     def weights(self):
-        from vllm.models.glm5next.amd.ops.mono.ffn.op import FlashDsaWeights
+        from vllm.models.glm5next.amd.specialized_decode.mono.ffn.op import (
+            FlashDsaWeights,
+        )
 
         return FlashDsaWeights(
             hc_fn=self.hc_fn,
@@ -166,8 +168,13 @@ class _Caches:
     the step's row table."""
 
     def __init__(self, S: int, device, seed: int, kv_fp8: bool = False) -> None:
-        from vllm.models.glm5next.amd.ops.mono.config import INDEX_DIM, KV_LORA
-        from vllm.models.glm5next.amd.ops.mono.ffn.layout import ROW_WORDS
+        from vllm.models.glm5next.amd.specialized_decode.mono.config import (
+            INDEX_DIM,
+            KV_LORA,
+        )
+        from vllm.models.glm5next.amd.specialized_decode.mono.ffn.layout import (
+            ROW_WORDS,
+        )
 
         g = torch.Generator(device=device).manual_seed(seed)
         per = MAX_LEN // BLOCK
@@ -215,7 +222,9 @@ class _Caches:
         self.rows = rows
 
     def caches(self):
-        from vllm.models.glm5next.amd.ops.mono.ffn.op import FlashDsaCaches
+        from vllm.models.glm5next.amd.specialized_decode.mono.ffn.op import (
+            FlashDsaCaches,
+        )
 
         return FlashDsaCaches(self.kv, self.idx, self.tail, self.k_scale)
 
@@ -262,7 +271,7 @@ def _check(rank: int, tp: int, device, fp8, kv_fp8: bool = False) -> None:
     from vllm.models.glm5next.amd.ops.kpool_compress import (
         kpool_decode_update_and_maybe_write_cache_batched,
     )
-    from vllm.models.glm5next.amd.ops.mono.config import (
+    from vllm.models.glm5next.amd.specialized_decode.mono.config import (
         HC_MULT,
         HIDDEN,
         INDEX_DIM,
@@ -277,7 +286,10 @@ def _check(rank: int, tp: int, device, fp8, kv_fp8: bool = False) -> None:
         TOPK_TOKENS,
         V_DIM,
     )
-    from vllm.models.glm5next.amd.ops.mono.ffn.op import FlashFfnOp, FlashFfnRuntime
+    from vllm.models.glm5next.amd.specialized_decode.mono.ffn.op import (
+        FlashFfnOp,
+        FlashFfnRuntime,
+    )
     from vllm.models.glm5next.nvidia.ops.kpool_compress import fwht128_quant_fp8
 
     lay, dsa = _Layer(rank, tp, device), _Dsa(rank, tp, device, fp8)

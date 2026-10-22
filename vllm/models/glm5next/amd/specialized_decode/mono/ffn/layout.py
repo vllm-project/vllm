@@ -6,7 +6,7 @@
 
 """Compile-time storage layout and CTA schedule of the GLM-5.3-Flash FFN launch."""
 
-from vllm.models.glm5next.amd.ops.mono.config import (
+from vllm.models.glm5next.amd.specialized_decode.mono.config import (
     HC_MULT,
     HIDDEN,
     INDEX_DIM,
@@ -20,7 +20,7 @@ from vllm.models.glm5next.amd.ops.mono.config import (
     V_DIM,
     FlashShard,
 )
-from vllm.models.glm5next.amd.ops.mono.layout import (
+from vllm.models.glm5next.amd.specialized_decode.mono.layout import (
     BLOCKS,
     ROUTER_TILE,
     ROW_TILE,
