@@ -129,6 +129,7 @@ class EngramPrefetch:
             hidden_states.stride(0),
             hidden_states.stride(1),
             hidden_states.stride(2),
+            0,
             kv.stride(0),
             kv.stride(1),
             engram.q_weight.stride(0),
@@ -145,6 +146,7 @@ class EngramPrefetch:
             HC_MULT=hc_mult,
             BLOCK_SIZE=block_size,
             HAS_MASK=token_mask is not None,
+            KV_RANK_COLS=0,
             num_warps=8 if block_size >= 2048 else 4,
         )
         return output

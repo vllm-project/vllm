@@ -1186,6 +1186,17 @@ class ParallelEngramEmbedding(nn.Module):
         return out[:, : self.n_hash_cols]
 
 
+@triton.jit
+def _kv_column_offset(cols, kv_stride_r, kv_stride_d, KV_RANK_COLS: tl.constexpr):
+    """Offset of `wkv` output columns; with KV_RANK_COLS the output is the
+    rank-major all-gather `[rank][token][KV_RANK_COLS]` of the column shards."""
+    if KV_RANK_COLS > 0:
+        return (cols // KV_RANK_COLS) * kv_stride_r + (
+            cols % KV_RANK_COLS
+        ) * kv_stride_d
+    return cols * kv_stride_d
+
+
 @triton.jit(do_not_specialize=["num_kv_tokens"])
 def _fused_engram_post_wkv_kernel(
     hidden_states,
@@ -1198,6 +1209,7 @@ def _fused_engram_post_wkv_kernel(
     hidden_stride_t,
     hidden_stride_h,
     hidden_stride_d,
+    kv_stride_r,
     kv_stride_t,
     kv_stride_d,
     q_stride_h,
@@ -1214,6 +1226,7 @@ def _fused_engram_post_wkv_kernel(
     HC_MULT: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     HAS_MASK: tl.constexpr,
+    KV_RANK_COLS: tl.constexpr,
 ):
     program_idx = tl.program_id(0)
     token_idx = program_idx // HC_MULT
@@ -1232,8 +1245,11 @@ def _fused_engram_post_wkv_kernel(
         mask=dim_valid,
         other=0.0,
     ).to(tl.float32)
+    key_cols = hc_idx * DIM + dim_offsets
     key = tl.load(
-        kv + source_idx * kv_stride_t + (hc_idx * DIM + dim_offsets) * kv_stride_d,
+        kv
+        + source_idx * kv_stride_t
+        + _kv_column_offset(key_cols, kv_stride_r, kv_stride_d, KV_RANK_COLS),
         mask=source_valid & dim_valid,
         other=0.0,
     ).to(tl.float32)
@@ -1263,8 +1279,11 @@ def _fused_engram_post_wkv_kernel(
         )
         gate = tl.where(active, gate, 0.0)
 
+    value_cols = HC_MULT * DIM + dim_offsets
     value = tl.load(
-        kv + source_idx * kv_stride_t + (HC_MULT * DIM + dim_offsets) * kv_stride_d,
+        kv
+        + source_idx * kv_stride_t
+        + _kv_column_offset(value_cols, kv_stride_r, kv_stride_d, KV_RANK_COLS),
         mask=source_valid & dim_valid,
         other=0.0,
     ).to(tl.float32)
@@ -1530,6 +1549,9 @@ class Engram(nn.Module):
     _prefetch_stream: torch.cuda.Stream | None = None
     _prefetch_done: torch.cuda.Event | None = None
     _batch: EngramBatch | None = None
+    # This step's gathered WKV output, already computed off the main stream in
+    # the rank-major layout `[rank][token][output_size_per_partition]`.
+    _ahead_kv: torch.Tensor | None = None
 
     def __init__(
         self,
@@ -1689,10 +1711,20 @@ class Engram(nn.Module):
         """hidden_states: [T, hc_mult, dim]; hash_ids: [T, n_hash_cols] (all
         tokens, pre sequence-parallel shard); token_mask: [T], False shuts
         the gate so those positions pass through untouched."""
-        if self._batch is not None:
-            kv = self.wkv(self._batch.wkv_input(self, hash_ids.shape[0]))
+        kv_rank_cols = 0
+        if self._ahead_kv is not None:
+            kv, self._ahead_kv = self._ahead_kv, None
+            assert kv.shape[1] == hash_ids.shape[0]
+            kv_rank_cols = kv.shape[2]
+            kv_stride_r, kv_stride_t, kv_stride_d = kv.stride()
         else:
-            kv = self.wkv(self.embed(hash_ids).flatten(-2))
+            if self._batch is not None:
+                kv = self.wkv(self._batch.wkv_input(self, hash_ids.shape[0]))
+            else:
+                kv = self.wkv(self.embed(hash_ids).flatten(-2))
+            assert kv.ndim == 2
+            kv_stride_r = 0
+            kv_stride_t, kv_stride_d = kv.stride()
         num_kv_tokens = hash_ids.shape[0]
         assert token_mask is None or token_mask.shape == (num_kv_tokens,)
         if self.use_sequence_parallel:
@@ -1707,7 +1739,9 @@ class Engram(nn.Module):
 
         num_tokens, hc_mult, dim = hidden_states.shape
         assert hc_mult == self.hc_mult and dim == self.dim
-        assert kv.ndim == 2 and kv.shape[1] == (hc_mult + 1) * dim
+        assert kv.shape[-1] * (kv.shape[0] if kv_rank_cols else 1) == (
+            (hc_mult + 1) * dim
+        )
         output = torch.empty_like(hidden_states)
         if num_tokens == 0:
             return output
@@ -1726,8 +1760,9 @@ class Engram(nn.Module):
             hidden_states.stride(0),
             hidden_states.stride(1),
             hidden_states.stride(2),
-            kv.stride(0),
-            kv.stride(1),
+            kv_stride_r,
+            kv_stride_t,
+            kv_stride_d,
             self.q_weight.stride(0),
             self.q_weight.stride(1),
             self.k_weight.stride(0),
@@ -1742,6 +1777,7 @@ class Engram(nn.Module):
             HC_MULT=hc_mult,
             BLOCK_SIZE=block_size,
             HAS_MASK=token_mask is not None,
+            KV_RANK_COLS=kv_rank_cols,
             num_warps=num_warps,
         )
         return output
