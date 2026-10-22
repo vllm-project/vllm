@@ -197,13 +197,15 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
         # kernel's shape is frozen at capture. Filled with -inf per forward in
         # build(); the valid/padding partition is a per-forward constant, so
         # every layer overwrites the same valid tiles before its own top-k.
-        self.unified_scores_buffer = torch.empty(
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            self.num_index_heads,
-            MAX_K_TILES,
-            dtype=torch.float32,
-            device=device,
-        )
+        self.unified_scores_buffer: torch.Tensor | None = None
+        if not self.prefill_local_score:
+            self.unified_scores_buffer = torch.empty(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                self.num_index_heads,
+                MAX_K_TILES,
+                dtype=torch.float32,
+                device=device,
+            )
 
     def build(
         self,
@@ -252,8 +254,10 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
         # reset to the -inf sentinel once here and shared by every layer (the
         # tile dim is the capture-time constant MAX_K_TILES).
         max_k_tiles = MAX_K_TILES
-        unified_scores = self.unified_scores_buffer[:num_tokens]
-        unified_scores.fill_(_SCORE_SENTINEL)
+        unified_scores = None
+        if self.unified_scores_buffer is not None:
+            unified_scores = self.unified_scores_buffer[:num_tokens]
+            unified_scores.fill_(_SCORE_SENTINEL)
 
         decode: MiniMaxM3IndexerDecodeMetadata | None = None
         if num_decodes > 0:
@@ -450,7 +454,6 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
         # shared by all layers) and resets it to the sentinel each forward, so
         # the top-k never picks an unwritten tile.
         unified_scores = md.unified_scores
-        assert unified_scores is not None
         num_valid_pages = md.topk_num_valid_pages
         assert num_valid_pages is not None
         from vllm.third_party.fmha_sm100.api import sparse_topk_select
@@ -515,6 +518,7 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
                     minimax_m3_index_decode_score_cutedsl,
                 )
 
+                assert unified_scores is not None
                 decode_score = (
                     minimax_m3_index_decode_score_cutedsl
                     if self.num_index_heads * d.max_decode_query_len <= 32
@@ -552,6 +556,7 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
         elif md.prefill_msa is not None:
             from vllm.third_party.fmha_sm100.api import _fmha_sm100
 
+            assert unified_scores is not None
             p = md.prefill_msa
             prefill_q = index_q[nd:]
             if p.gather_pages is not None:
@@ -581,6 +586,7 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
 
         start = nd if sharded else 0
         if start < num_tokens and not local_prefill:
+            assert unified_scores is not None
             sparse_topk_select(
                 unified_scores[start:],
                 self.topk_blocks,
