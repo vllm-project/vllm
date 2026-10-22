@@ -60,6 +60,8 @@ pub struct ApiServerOptions {
     pub enable_log_requests: bool,
     /// When `true`, include prompt token cache details in response usage.
     pub enable_prompt_tokens_details: bool,
+    /// When `true`, force usage reporting on every streaming request.
+    pub enable_force_include_usage: bool,
     /// Include request timing metrics in OpenAI chat and completion responses.
     pub enable_per_request_metrics: bool,
     /// When `true`, set `X-Request-Id` on every HTTP response.
