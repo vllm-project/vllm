@@ -10,10 +10,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from transformers import PretrainedConfig
+from transformers import CLIPVisionConfig, LlamaConfig, LlavaConfig, PreTrainedConfig
 
 from tests.v1.kv_connector.unit.offloading_connector.utils import MockOffloadingSpec
-from vllm.config import KVTransferConfig, ParallelConfig, VllmConfig
+from vllm.config import KVTransferConfig, ModelConfig, ParallelConfig, VllmConfig
+from vllm.config.quantization import QuantizationConfigArgs
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
     build_offloading_config,
 )
@@ -21,6 +22,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     SchedulerOffloadConfig,
 )
 from vllm.platforms import current_platform
+from vllm.v1.core.kv_cache_planning import kv_cache_groups_tp_replicas
 from vllm.v1.core.kv_cache_utils import (
     generate_scheduler_kv_cache_config,
     get_kv_cache_model_config_hash,
@@ -75,7 +77,8 @@ def _make_vllm_config(
             decode_context_parallel_size=decode_context_parallel_size,
         )
     config.kv_events_config = None
-    config.use_v2_model_runner = False
+    config.ec_transfer_config = None
+    config.use_v2_model_runner = True
     config.kv_transfer_config = KVTransferConfig(
         kv_connector="OffloadingConnector",
         kv_role="kv_both",
@@ -107,7 +110,7 @@ def _make_kv_cache_config() -> KVCacheConfig:
 
 def _make_identity_config() -> VllmConfig:
     config = _make_vllm_config()
-    config.model_config.hf_text_config = PretrainedConfig(
+    config.model_config.hf_text_config = PreTrainedConfig(
         max_position_embeddings=16,
         rope_parameters={
             "full_attention": {
@@ -121,7 +124,62 @@ def _make_identity_config() -> VllmConfig:
     )
     config.model_config.dtype = torch.bfloat16
     config.model_config.max_model_len = 16
+    config.model_config.hf_config = config.model_config.hf_text_config
+    config.model_config.quantization = None
+    config.model_config.quantization_config = None
     return config
+
+
+@pytest.fixture
+def model_identity_config(tmp_path) -> ModelConfig:
+    text_config = LlamaConfig(
+        architectures=["LlamaForCausalLM"],
+        hidden_size=8,
+        intermediate_size=16,
+        num_hidden_layers=1,
+        num_attention_heads=1,
+        num_key_value_heads=1,
+        max_position_embeddings=16,
+    )
+    config = LlavaConfig(
+        architectures=["LlavaForConditionalGeneration"],
+        text_config=text_config,
+        vision_config=CLIPVisionConfig(
+            hidden_size=8,
+            intermediate_size=16,
+            num_hidden_layers=1,
+            num_attention_heads=1,
+        ),
+    )
+    config.save_pretrained(tmp_path)
+    return ModelConfig(model=str(tmp_path), dtype="bfloat16", max_model_len=16)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("quantization", "fp8"),
+        ("quantization_config", {"linear": "fp8_per_tensor_dynamic"}),
+        (
+            "quantization_config",
+            QuantizationConfigArgs(linear="fp8_per_tensor_dynamic"),
+        ),
+    ],
+)
+def test_runtime_quantization_overrides_isolate_model_identity(
+    model_identity_config, field, value
+):
+    original = get_kv_cache_model_config_hash(model_identity_config)
+    setattr(model_identity_config, field, value)
+    assert get_kv_cache_model_config_hash(model_identity_config) != original
+
+
+def test_multimodal_projector_settings_isolate_model_identity(model_identity_config):
+    original = get_kv_cache_model_config_hash(model_identity_config)
+    text_config = model_identity_config.hf_text_config.to_dict()
+    model_identity_config.hf_config.projector_hidden_act = "silu"
+    assert model_identity_config.hf_text_config.to_dict() == text_config
+    assert get_kv_cache_model_config_hash(model_identity_config) != original
 
 
 def _identity_mapper(config: VllmConfig, kv_config: KVCacheConfig) -> FileMapper:
@@ -186,9 +244,9 @@ def test_metadata_and_mapping_order_preserve_model_identity():
     }
     serialized.update(metadata)
     serialized["decoder"] = {**metadata, "hidden_size": 8}
-    # PretrainedConfig.to_dict itself drops or rewrites some metadata. Return
+    # PreTrainedConfig.to_dict itself drops or rewrites some metadata. Return
     # the serialized values directly to exercise our own metadata filtering.
-    config.model_config.hf_text_config = SimpleNamespace(to_dict=lambda: serialized)
+    config.model_config.hf_config = SimpleNamespace(to_dict=lambda: serialized)
     before = copy.deepcopy(serialized)
     expected = get_kv_cache_model_config_hash(config.model_config)
     assert serialized == before
@@ -316,7 +374,7 @@ def test_engine_snapshots_identity_before_model_loading(connector, should_snapsh
             nullcontext()
             if should_snapshot
             else patch.object(
-                config.model_config.hf_text_config,
+                config.model_config.hf_config,
                 "to_dict",
                 side_effect=AssertionError(
                     "Unrelated connectors must not snapshot HF config"
@@ -435,6 +493,7 @@ def _mla_spec(
     return MLAAttentionSpec(
         block_size=block_size,
         num_kv_heads=1,
+        max_tp_shards=1,
         head_size=head_size,
         dtype=dtype,
         tokens_per_state=tokens_per_state,
@@ -551,7 +610,7 @@ def _parallelism_agnostic(
     kv_cache_groups: list[KVCacheGroupSpec],
     *,
     canonical: bool = False,
-    v2: bool = False,
+    v2: bool = True,
 ) -> bool:
     config = _make_vllm_config(
         extra_config={"canonical_layout": True} if canonical else None
@@ -575,7 +634,7 @@ def _replicated_layout(
     prefill_context_parallel_size: int = 1,
     decode_context_parallel_size: int = 1,
     use_mla: bool = True,
-    use_v2_model_runner: bool = False,
+    use_v2_model_runner: bool = True,
     distributed_executor_backend: Any = "mp",
     nnodes: int = 1,
     world_size: int | None = None,
@@ -592,7 +651,184 @@ def _replicated_layout(
     config.parallel_config.nnodes = nnodes
     if world_size is not None:
         config.parallel_config.world_size = world_size
-    return build_offloading_config(config, kv_cache_config).replicated_layout
+    kv_cache_config.kv_tp_replicas = kv_cache_groups_tp_replicas(
+        kv_cache_config.kv_cache_groups,
+        config.parallel_config.tensor_parallel_size,
+        config.parallel_config.decode_context_parallel_size,
+    )
+
+    # Scheduler and Worker offload config
+    worker_offload_config = build_offloading_config(config, kv_cache_config)
+    scheduler_offload_config = build_offloading_config(
+        config, generate_scheduler_kv_cache_config([kv_cache_config])
+    )
+    # Verify that the Worker and Scheduler agree on replication.
+    # and worker-bytes-per-block
+    assert (
+        worker_offload_config.replicated_layout
+        == scheduler_offload_config.replicated_layout
+    )
+    assert (
+        worker_offload_config.worker_kv_bytes_per_block
+        == scheduler_offload_config.worker_kv_bytes_per_block
+    )
+
+    return worker_offload_config.replicated_layout
+
+
+_SWA_MLA_PAGE = SlidingWindowMLASpec(
+    block_size=16,
+    num_kv_heads=1,
+    max_tp_shards=1,
+    head_size=512,
+    dtype=torch.float32,
+    sliding_window=128,
+).page_size_bytes
+
+
+def _make_swa_mla_kv_cache_config(
+    num_blocks: int = 4,
+) -> KVCacheConfig:
+    """Single SlidingWindowMLASpec group — DSV4 sliding-window layers."""
+    spec = SlidingWindowMLASpec(
+        block_size=16,
+        num_kv_heads=1,
+        max_tp_shards=1,
+        head_size=512,
+        dtype=torch.float32,
+        sliding_window=128,
+    )
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=_SWA_MLA_PAGE * num_blocks,
+                layers=["layer"],
+                layer_stride=_SWA_MLA_PAGE * num_blocks,
+                block_stride=_SWA_MLA_PAGE,
+            )
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(["layer"], spec)],
+    )
+
+
+def _make_dsv4_flash_kv_cache_config(num_blocks: int = 4) -> KVCacheConfig:
+    """Minimal fake of DeepSeek-V4-Flash's five UniformTypeKVCacheSpecs groups.
+
+    The real model has the following groups (layer counts from runtime logs);
+    2 per group is enough to exercise the structural properties that govern
+    replicated_layout:
+        group[0]: 22 SlidingWindowMLASpec layers, sliding_window=128
+        group[1]: 21 SlidingWindowMLASpec layers, sliding_window=128
+        group[2]: 62 MLAAttentionSpec layers  (MLA + indexer.k_cache)
+        group[3]: 42 SlidingWindowMLASpec layers, sliding_window=8
+        group[4]: 20 SlidingWindowMLASpec layers, sliding_window=128
+    All inner specs have num_kv_heads=1 → every group is TP-replicated.
+    """
+    block_size = 16
+    dtype = torch.float32
+    head_size = 512
+
+    def _swa_group(tag: str, sw: int) -> KVCacheGroupSpec:
+        names = [f"{tag}_0", f"{tag}_1"]
+        spec = SlidingWindowMLASpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            max_tp_shards=1,
+            head_size=head_size,
+            dtype=dtype,
+            sliding_window=sw,
+        )
+        return KVCacheGroupSpec(
+            names,
+            UniformTypeKVCacheSpecs(
+                block_size=block_size,
+                kv_cache_specs={name: spec for name in names},
+            ),
+        )
+
+    def _mla_group(tag: str) -> KVCacheGroupSpec:
+        names = [f"{tag}_0", f"{tag}_1"]
+        spec = MLAAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            max_tp_shards=1,
+            head_size=head_size,
+            dtype=dtype,
+        )
+        return KVCacheGroupSpec(
+            names,
+            UniformTypeKVCacheSpecs(
+                block_size=block_size,
+                kv_cache_specs={name: spec for name in names},
+            ),
+        )
+
+    groups = [
+        _swa_group("swa_128a", 128),  # group[0]: SWA-MLA, sw=128
+        _swa_group("swa_128b", 128),  # group[1]: SWA-MLA, sw=128
+        _mla_group("mla"),  # group[2]: MLA + indexer layers
+        _swa_group("swa_8", 8),  # group[3]: SWA-MLA, sw=8
+        _swa_group("swa_128c", 128),  # group[4]: SWA-MLA, sw=128
+    ]
+    # All specs share the same page size (num_kv_heads=1, head_size=512, fp32).
+    page = MLAAttentionSpec(
+        block_size=block_size, num_kv_heads=1, head_size=head_size, dtype=dtype
+    ).page_size_bytes
+    all_layers = [name for g in groups for name in g.layer_names]
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=page * len(all_layers) * num_blocks,
+                layers=all_layers,
+                layer_stride=page * num_blocks,
+                block_stride=page,
+            )
+        ],
+        kv_cache_groups=groups,
+    )
+
+
+def _make_dsv3_2_kv_cache_config(num_blocks: int = 4) -> KVCacheConfig:
+    """Minimal fake of DeepSeek-V3.2-Exp's single UniformTypeKVCacheSpecs group.
+
+    The real model has 1 group (layer counts from runtime logs):
+        group[0]: 122 MLAAttentionSpec layers (self_attn.attn + indexer.k_cache)
+    All inner specs have num_kv_heads=1 → the group is TP-replicated.
+
+    GLM-5.3 has the same topology (one UniformType group of MLAAttentionSpec
+    layers, num_kv_heads=1) with 99 layers instead of 122, so this config
+    covers both models.
+    """
+    block_size = 16
+    names = [f"mla_{i}" for i in range(4)]  # 4 layers; real model has 122
+    spec = MLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        max_tp_shards=1,
+        head_size=512,
+        dtype=torch.float32,
+    )
+    group = KVCacheGroupSpec(
+        names,
+        UniformTypeKVCacheSpecs(
+            block_size=block_size,
+            kv_cache_specs={name: spec for name in names},
+        ),
+    )
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=spec.page_size_bytes * len(names) * num_blocks,
+                layers=names,
+                layer_stride=spec.page_size_bytes * num_blocks,
+                block_stride=spec.page_size_bytes,
+            )
+        ],
+        kv_cache_groups=[group],
+    )
 
 
 @pytest.mark.parametrize("packed", [False, True])
@@ -859,35 +1095,64 @@ def test_replicated_layout_enabled_for_pure_mla_tp_mp_single_node(
     )
 
 
+@pytest.mark.parametrize("world_size", [2, 4])
+def test_replicated_layout_enabled_for_swa_mla(world_size: int):
+    """SlidingWindowMLASpec groups are also replicated and qualify."""
+    assert _replicated_layout(
+        _make_swa_mla_kv_cache_config(),
+        tensor_parallel_size=world_size,
+    )
+
+
+@pytest.mark.parametrize("world_size", [2, 4, 8])
+def test_replicated_layout_dsv4_flash(world_size: int):
+    """DeepSeek-V4-Flash: all 5 UniformType groups are MLA/SWA-MLA with
+    num_kv_heads=1, so replicated_layout must be True under TP/mp single-node."""
+    assert _replicated_layout(
+        _make_dsv4_flash_kv_cache_config(),
+        tensor_parallel_size=world_size,
+    )
+
+
+@pytest.mark.parametrize("world_size", [2, 4, 8])
+def test_replicated_layout_dsv3_2(world_size: int):
+    """DeepSeek-V3.2 / GLM-5.3: single UniformType group of MLAAttentionSpec
+    layers (122 and 99 respectively), num_kv_heads=1 → replicated_layout must
+    be True under TP/mp single-node."""
+    assert _replicated_layout(
+        _make_dsv3_2_kv_cache_config(),
+        tensor_parallel_size=world_size,
+    )
+
+
+def test_replicated_layout_enabled_for_uniform_wrapper_mla():
+    """UniformTypeKVCacheSpecs wrapping MLA layers of different sizes qualifies:
+    each layer is replicated and the page accounting sums correctly."""
+    mla_layers = ["layer0", "layer1"]
+    spec = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={"layer0": _mla_spec(), "layer1": _mla_spec(head_size=256)},
+    )
+    total_page = spec.page_size_bytes
+    num_blocks = 4
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=total_page * num_blocks,
+                layers=mla_layers,
+                layer_stride=total_page * num_blocks,
+                block_stride=total_page,
+            )
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(mla_layers, spec)],
+    )
+    assert _replicated_layout(kv_cache_config)
+
+
 @pytest.mark.parametrize(
     ("kv_cache_config", "case"),
     [
-        (
-            KVCacheConfig(
-                num_blocks=4,
-                kv_cache_tensors=[
-                    KVCacheTensor(
-                        size=_MLA_PAGE * 4,
-                        layers=["layer"],
-                        layer_stride=_MLA_PAGE * 4,
-                        block_stride=_MLA_PAGE,
-                    )
-                ],
-                kv_cache_groups=[
-                    KVCacheGroupSpec(
-                        ["layer"],
-                        SlidingWindowMLASpec(
-                            block_size=16,
-                            num_kv_heads=1,
-                            head_size=512,
-                            dtype=torch.float32,
-                            sliding_window=128,
-                        ),
-                    )
-                ],
-            ),
-            "sliding-window-mla",
-        ),
         (
             KVCacheConfig(
                 num_blocks=4,
@@ -912,40 +1177,6 @@ def test_replicated_layout_enabled_for_pure_mla_tp_mp_single_node(
                 ],
             ),
             "hidden-state",
-        ),
-        (
-            # One group, two page sizes: layer1's run starts past layer0's region.
-            KVCacheConfig(
-                num_blocks=4,
-                kv_cache_tensors=[
-                    KVCacheTensor(
-                        size=(_MLA_PAGE + _HALF_MLA_PAGE) * 4,
-                        layers=["layer0"],
-                        layer_stride=_MLA_PAGE * 4,
-                        block_stride=_MLA_PAGE,
-                    ),
-                    KVCacheTensor(
-                        size=(_MLA_PAGE + _HALF_MLA_PAGE) * 4,
-                        layers=["layer1"],
-                        layer_stride=_HALF_MLA_PAGE * 4,
-                        block_stride=_HALF_MLA_PAGE,
-                        offset=_MLA_PAGE * 4,
-                    ),
-                ],
-                kv_cache_groups=[
-                    KVCacheGroupSpec(
-                        ["layer0", "layer1"],
-                        UniformTypeKVCacheSpecs(
-                            block_size=16,
-                            kv_cache_specs={
-                                "layer0": _mla_spec(),
-                                "layer1": _mla_spec(head_size=256),
-                            },
-                        ),
-                    )
-                ],
-            ),
-            "uniform-wrapper",
         ),
         (
             # Overlaid groups with different page sizes: a block is a window of
@@ -997,6 +1228,84 @@ def test_replicated_layout_enabled_for_pure_mla_tp_mp_single_node(
             ),
             "mla-mamba-hybrid",
         ),
+    ],
+    ids=[
+        "hidden-state",
+        "mla-full-hybrid",
+        "mla-mamba-hybrid",
+    ],
+)
+def test_replicated_layout_excludes_unproven_cache_shapes(
+    kv_cache_config: KVCacheConfig,
+    case: str,
+):
+    assert not _replicated_layout(kv_cache_config), case
+
+
+@pytest.mark.parametrize(
+    ("kv_cache_config", "case"),
+    [
+        (
+            KVCacheConfig(
+                num_blocks=4,
+                kv_cache_tensors=[
+                    KVCacheTensor(
+                        size=_MLA_PAGE * 4,
+                        layers=["layer"],
+                        layer_stride=_MLA_PAGE * 4,
+                        block_stride=_MLA_PAGE,
+                    )
+                ],
+                kv_cache_groups=[
+                    KVCacheGroupSpec(
+                        ["layer"],
+                        SlidingWindowMLASpec(
+                            block_size=16,
+                            num_kv_heads=1,
+                            max_tp_shards=1,
+                            head_size=512,
+                            dtype=torch.float32,
+                            sliding_window=128,
+                        ),
+                    )
+                ],
+            ),
+            "sliding-window-mla",
+        ),
+        (
+            # One group, two page sizes: layer1's run starts past layer0's region.
+            KVCacheConfig(
+                num_blocks=4,
+                kv_cache_tensors=[
+                    KVCacheTensor(
+                        size=(_MLA_PAGE + _HALF_MLA_PAGE) * 4,
+                        layers=["layer0"],
+                        layer_stride=_MLA_PAGE * 4,
+                        block_stride=_MLA_PAGE,
+                    ),
+                    KVCacheTensor(
+                        size=(_MLA_PAGE + _HALF_MLA_PAGE) * 4,
+                        layers=["layer1"],
+                        layer_stride=_HALF_MLA_PAGE * 4,
+                        block_stride=_HALF_MLA_PAGE,
+                        offset=_MLA_PAGE * 4,
+                    ),
+                ],
+                kv_cache_groups=[
+                    KVCacheGroupSpec(
+                        ["layer0", "layer1"],
+                        UniformTypeKVCacheSpecs(
+                            block_size=16,
+                            kv_cache_specs={
+                                "layer0": _mla_spec(),
+                                "layer1": _mla_spec(head_size=256),
+                            },
+                        ),
+                    )
+                ],
+            ),
+            "uniform-wrapper",
+        ),
         (
             KVCacheConfig(
                 num_blocks=4,
@@ -1019,31 +1328,54 @@ def test_replicated_layout_enabled_for_pure_mla_tp_mp_single_node(
     ],
     ids=[
         "sliding-window-mla",
-        "hidden-state",
         "uniform-wrapper",
-        "mla-full-hybrid",
-        "mla-mamba-hybrid",
         "multi-group-mla",
     ],
 )
-def test_replicated_layout_excludes_unproven_cache_shapes(
+def test_replicated_layout_supported_cache_shapes(
     kv_cache_config: KVCacheConfig,
     case: str,
 ):
-    assert not _replicated_layout(kv_cache_config), case
+    assert _replicated_layout(kv_cache_config), case
 
 
-def test_replicated_layout_rejects_bare_mla_with_mixed_page_accounting():
+@pytest.mark.parametrize(
+    ("main_spec", "add_spec", "expected"),
+    [
+        (
+            _mla_spec(head_size=512),
+            _mla_spec(head_size=128, dtype=torch.uint8),  # indexer.k_cache spec
+            True,
+        ),
+        (
+            _mla_spec(head_size=512),
+            _full_attention_spec(),
+            False,
+        ),
+    ],
+    ids=["uniform-mla-indexer", "uniform-mla-fa"],
+)
+def test_replicated_layout_for_dsa_style_groups(
+    main_spec: KVCacheSpec, add_spec: KVCacheSpec, expected: bool
+):
+    """KV Cache groups with packed-specs inside a UniformTypeKVCacheSpec."""
     num_blocks = 4
-    main_spec = _mla_spec(head_size=512)
-    indexer_spec = _mla_spec(head_size=128, dtype=torch.uint8)
     main_layers = [f"main_{i}" for i in range(61)]
-    indexer_layers = [f"indexer_{i}" for i in range(61)]
-    # A DSA-style group: the main pages and the smaller indexer pages are packed one
-    # after the other, so a block holds more than 61 MLA pages.
+    add_layers = [f"add_{i}" for i in range(61)]
+
     main_bytes = main_spec.page_size_bytes * len(main_layers)
-    indexer_bytes = indexer_spec.page_size_bytes * len(indexer_layers)
-    size = (main_bytes + indexer_bytes) * num_blocks
+    add_bytes = add_spec.page_size_bytes * len(add_layers)
+    size = (main_bytes + add_bytes) * num_blocks
+
+    kv_cache_specs = {
+        **{layer: main_spec for layer in main_layers},
+        **{layer: add_spec for layer in add_layers},
+    }
+    layer_names = main_layers + add_layers
+    group_spec: KVCacheSpec = UniformTypeKVCacheSpecs(
+        block_size=16, kv_cache_specs=kv_cache_specs
+    )
+
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=[
@@ -1055,16 +1387,16 @@ def test_replicated_layout_rejects_bare_mla_with_mixed_page_accounting():
             ),
             KVCacheTensor(
                 size=size,
-                layers=indexer_layers,
-                layer_stride=indexer_spec.page_size_bytes * num_blocks,
-                block_stride=indexer_spec.page_size_bytes,
+                layers=add_layers,
+                layer_stride=add_spec.page_size_bytes * num_blocks,
+                block_stride=add_spec.page_size_bytes,
                 offset=main_bytes * num_blocks,
             ),
         ],
-        kv_cache_groups=[KVCacheGroupSpec(main_layers + indexer_layers, main_spec)],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names, group_spec)],
     )
 
-    assert not _replicated_layout(kv_cache_config)
+    assert _replicated_layout(kv_cache_config) == expected
 
 
 @pytest.mark.parametrize(
@@ -1099,7 +1431,10 @@ def test_replicated_layout_parallel_gate(kwargs: dict[str, Any], case: str):
 
 
 def test_parallelism_agnostic_for_single_full_attention_group():
-    assert _parallelism_agnostic([KVCacheGroupSpec(["l0"], _full_attention_spec())])
+    # The direct (non-canonical) parallelism-agnostic layout is MRV1-only.
+    assert _parallelism_agnostic(
+        [KVCacheGroupSpec(["l0"], _full_attention_spec())], v2=False
+    )
 
 
 _SWA_SPEC = SlidingWindowSpec(
@@ -1112,6 +1447,7 @@ _SWA_SPEC = SlidingWindowSpec(
 _SWA_MLA_SPEC = SlidingWindowMLASpec(
     block_size=16,
     num_kv_heads=1,
+    max_tp_shards=1,
     head_size=576,
     dtype=torch.float32,
     sliding_window=128,
@@ -1140,7 +1476,9 @@ def _uniform_group(*specs: KVCacheSpec) -> KVCacheGroupSpec:
     ],
 )
 def test_parallelism_agnostic_excluded(kv_cache_groups: list[KVCacheGroupSpec]):
-    assert not _parallelism_agnostic(kv_cache_groups)
+    # The direct layout is never parallelism-agnostic on MRV2, so check the
+    # MRV1 gate.
+    assert not _parallelism_agnostic(kv_cache_groups, v2=False)
 
 
 @pytest.mark.parametrize(
@@ -1171,8 +1509,54 @@ def test_parallelism_agnostic_excluded(kv_cache_groups: list[KVCacheGroupSpec]):
 def test_canonical_layout_gate(kv_cache_groups, certified):
     """The canonical layout certifies portability group by group; none of
     these shapes are portable in the direct layout."""
-    assert not _parallelism_agnostic(kv_cache_groups)
+    assert not _parallelism_agnostic(kv_cache_groups, v2=False)
     assert _parallelism_agnostic(kv_cache_groups, canonical=True) is certified
+
+
+@pytest.mark.parametrize(
+    ("spec"),
+    [_SWA_MLA_SPEC, _mla_spec(tokens_per_state=2)],
+    ids=["swa", "compressed-mla"],
+)
+def test_uncertifiable_canonical_layout_resets_replication(spec: KVCacheSpec):
+    def _get_offloading_config(canonical: bool):
+        config = _make_vllm_config(
+            tensor_parallel_size=2,
+            extra_config={"canonical_layout": True} if canonical else None,
+        )
+        config.model_config.use_mla = True
+
+        PAGE = spec.page_size_bytes
+        kv_config = KVCacheConfig(
+            num_blocks=4,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=PAGE * 4,
+                    layers=["layer"],
+                    layer_stride=PAGE * 4,
+                    block_stride=PAGE,
+                )
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(["layer"], spec),
+            ],
+        )
+
+        kv_config.kv_tp_replicas = kv_cache_groups_tp_replicas(
+            kv_config.kv_cache_groups,
+            config.parallel_config.tensor_parallel_size,
+            config.parallel_config.decode_context_parallel_size,
+        )
+
+        return build_offloading_config(config, kv_config)
+
+    offload_config = _get_offloading_config(canonical=False)
+    assert offload_config.replicated_layout
+    assert not offload_config.parallel.is_parallelism_agnostic
+
+    canon_offload_config = _get_offloading_config(canonical=True)
+    assert not canon_offload_config.replicated_layout
+    assert not canon_offload_config.parallel.is_parallelism_agnostic
 
 
 def test_canonical_layout_certifies_v2_model_runner():
@@ -1180,7 +1564,7 @@ def test_canonical_layout_certifies_v2_model_runner():
     registration, so the static gate must not depend on the model-runner
     version — the v2 runner is the case the canonical layout exists for."""
     groups = _groups(_full_attention_spec())
-    assert _parallelism_agnostic(groups, canonical=True, v2=True)
+    assert _parallelism_agnostic(groups, canonical=True)
 
 
 @pytest.mark.parametrize("tp_size", [1, 2, 4])
@@ -1223,7 +1607,6 @@ def test_canonical_mla_dsa_rows_are_tp_independent(tp_size, scheduler):
 
 def test_parallelism_agnostic_disabled_on_v2_model_runner():
     config = _make_vllm_config()
-    config.use_v2_model_runner = True
     kv_cache_config = KVCacheConfig(
         num_blocks=0,
         kv_cache_tensors=[],

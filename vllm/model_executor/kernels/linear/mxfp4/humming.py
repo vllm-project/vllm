@@ -3,20 +3,18 @@
 
 import torch
 
-from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.utils.humming_utils import (
+from vllm.model_executor.layers.quantization.utils.humming import (
     apply_humming_linear,
     convert_linear_layer_to_humming_standard,
     get_humming_linear_compute_config,
     prepare_humming_linear_layer_config,
+    quant_key_to_input_schema,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp4Dynamic
 from vllm.platforms import current_platform
+from vllm.utils.humming import create_humming_locks
 from vllm.utils.import_utils import has_humming
 
 from .base import MxFp4LinearKernel, MxFp4LinearLayerConfig
-
-logger = init_logger(__name__)
 
 
 class HummingMxFp4LinearKernel(MxFp4LinearKernel):
@@ -39,14 +37,10 @@ class HummingMxFp4LinearKernel(MxFp4LinearKernel):
 
     @classmethod
     def can_implement(cls, config: MxFp4LinearLayerConfig) -> tuple[bool, str | None]:
-        if config.activation_quant_key not in (None, kMxfp4Dynamic):
-            return False, "only supports MXFP4 dynamic or unquantized activations"
-        if config.activation_quant_key is not None:
-            logger.warning_once(
-                "HummingMxFp4LinearKernel is a weight-only (A16) kernel; "
-                "the requested activation quantization (%s) is ignored.",
-                config.activation_quant_key,
-            )
+        try:
+            quant_key_to_input_schema(config.activation_quant_key)
+        except ValueError as error:
+            return False, str(error)
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -62,9 +56,20 @@ class HummingMxFp4LinearKernel(MxFp4LinearKernel):
         }
 
         convert_linear_layer_to_humming_standard(layer=layer, name_map=name_map)
-        self.layer_config = prepare_humming_linear_layer_config(layer, quant_config)
+        act_key = self.config.activation_quant_key
+        input_schema = quant_key_to_input_schema(act_key)
+        # Keep checkpoint-declared FP8 activations instead of falling back to
+        # A16 for group-scaled weights.
+        self.layer_config = prepare_humming_linear_layer_config(
+            layer,
+            quant_config,
+            input_schema=input_schema,
+            allow_input_schema_fallback=(
+                act_key is None or act_key.dtype != current_platform.fp8_dtype()
+            ),
+        )
         self.compute_config = get_humming_linear_compute_config()
-        self.locks = torch.zeros(1024, dtype=torch.int32, device=layer.weight.device)
+        self.locks = create_humming_locks(layer.weight.device)
 
     def apply_weights(
         self,
@@ -75,6 +80,7 @@ class HummingMxFp4LinearKernel(MxFp4LinearKernel):
         return apply_humming_linear(
             layer,
             x,
+            skip_bias_add=bias is None,
             layer_config=self.layer_config,
             compute_config=self.compute_config,
             locks=self.locks,

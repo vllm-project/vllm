@@ -108,9 +108,27 @@ vllm serve <model> \
 | `store_threshold` | no | `0` | single-tier | Min lookups before a block is offloaded. Values ≥ 2 are rejected by `TieringOffloadingSpec`. |
 | `max_tracker_size` | no | `64000` | single-tier | Max entries in the lookup tracker. |
 | `secondary_tiers` | no | `[]` | multi-tier | List of secondary tier configs (see below). |
+| `tier_poll_interval_s` | no | `0.001` | multi-tier | Pause between tier-poll rounds for tiers that must be serviced between engine steps (currently `p2p`). See [Threading model](#threading-model). Set to `0` to disable the thread and service those tiers once per engine step instead. |
 | `offload_prompt_only` | no | `true` | both | If `true`, only prompt (prefill) blocks are offloaded; decode blocks are skipped. |
 | `self_describing_kv_events` | no | `false` | both | Opt-in. When `true` *and* KV cache events are enabled (`--kv-events-config` with `enable_kv_cache_events`), the connector emits self-describing block-granular `BlockStored`/`BlockRemoved` payloads (constituent block hashes, whole-chunk `token_ids`, per-block `block_size`, parent hash, LoRA + group/cache-spec metadata) instead of the placeholder fallback, so external KV-event consumers can index offloaded blocks. Inert unless events are enabled. With `TieringOffloadingSpec`, a CPU promotion is self-describing when a local request observes its primary-tier `HIT` before event translation; otherwise its stored event may retain the placeholder, while a later `HIT` can backfill metadata for removal. Pending-removal/re-promotion races and externally initiated promotions may also produce placeholders, and consumers must ignore removals for unknown hashes. Partial recurrent tails emit the hash-aligned portion from the physical block start through the tail boundary. Other sliding-window/SSM chunks keep the placeholder fallback. In chunk mode (`block_size` > GPU block size, or `blocks_per_chunk` > 1), overlapping chunks re-announce shared per-block hashes, so consumers must reference-count (deduplicate) repeated store/remove announcements. |
 | `spec_module_path` | no | — | both | Python import path for a custom `OffloadingSpec` not in the built-in registry. Required only when `spec_name` is not built-in (advanced). |
+
+## Info Metric Labels
+
+The connector publishes one Prometheus gauge, `vllm:kv_offload_config_info`, and always sets it to 1. The labels hold static facts of the offloading configuration, so a user reads the resolved numbers instead of the launch flags. The gauge appears from the first scheduler step, so an idle engine exposes no series. Each engine reports its own configuration, and not the instance total.
+
+The gauge holds one series for each configuration that the manager reports. A manager that holds one configuration gives one series. A manager that holds several adds a label of its own, which tells the series apart.
+
+| Label | Declared by | Meaning | Notes |
+| --- | --- | --- | --- |
+| `tier` | `TieringOffloadingSpec` | The tier that this series reports. | `<index>:<type>`. Index `0` is the CPU primary tier, and a secondary tier index starts at 1. `<type>` is the `type` key of the tier config, such as `1:fs`. |
+| `cpu_num_chunks` | `CPUOffloadingSpec` or `TieringOffloadingSpec` | Chunk slots in the CPU tier. | Chunks, not GPU blocks. `cpu_bytes_to_use` divided by the bytes of one chunk. |
+
+The spec declares the label names in the API server process, and the manager fills the values in the engine process. The names of every series bind once, at the declaration. A label that one series owns reads empty on every other series.
+
+`CPUOffloadingSpec` publishes `cpu_num_chunks` on its one series. `TieringOffloadingSpec` publishes it on the `0:primary` series. For a worked example of a secondary tier, the `example` tier publishes one label, `example_info`.
+
+A manager adds a label with `config_info_keys()` of its spec and `config_info()` of its own class. A name that a manager fills and the spec does not declare is dropped, and the engine log then holds one warning line.
 
 ## Custom Eviction Policies
 
@@ -152,15 +170,30 @@ Set the optional `locality` tier field to `LOCAL` or `REMOTE` to describe the ti
 
 ### Model Configuration and Cache Reuse
 
-The filesystem, object-store and P2P tiers include a model configuration fingerprint when identifying compatible KV blocks. It captures the Hugging Face text configuration, model computation dtype and construction-time `max_model_len` before loading the model. The metadata fields `_commit_hash`, `_name_or_path` and `transformers_version` are excluded.
+The filesystem, object-store and P2P tiers include a model configuration fingerprint when identifying compatible KV blocks. It captures the complete Hugging Face configuration, including multimodal settings outside the text configuration, model computation dtype, construction-time `max_model_len`, and runtime `quantization` and `quantization_config` overrides before loading the model. The HF metadata fields `_commit_hash`, `_name_or_path` and `transformers_version` are excluded recursively.
 
 Changing RoPE settings can change the cached keys even with identical weights and token IDs. Such changes use a separate filesystem directory or object-key namespace. The same configuration can reuse its namespace across restarts. This separation also applies to canonical cache layouts: rearranging the stored tensors does not make different positional encodings compatible.
 
-The fingerprint conservatively includes the full text configuration. Changes to output-related HF fields, or to `max_model_len` when it only acts as a limit for a particular model, can therefore cause extra cache misses. Keep these settings consistent across instances intended to share cached prefixes. The fingerprint identifies configuration; it does not verify weight contents or every runtime quantization or kernel choice.
+The fingerprint conservatively includes the full HF configuration. Changes to output-only HF fields, or to `max_model_len` when it only acts as a limit for a particular model, therefore select a cold filesystem or object-store namespace. For P2P, those same changes **reject the connection**, even when the cached KV would otherwise be compatible. Keep these settings consistent across instances intended to share cached prefixes.
+
+Matching fingerprints cover only the recorded configuration inputs. They assume **unchanged weights and a compatible runtime**; they do not verify checkpoint contents or every kernel and quantization implementation choice. Excluding source paths, revisions and Transformers version metadata does not make different weights or runtime versions compatible. Deployments sharing a cache must enforce those assumptions separately.
 
 When upgrading from a version without this fingerprint, filesystem and object-store tiers start with a cold namespace. Existing files and objects remain intact and are not read as a fallback. Plan for the initial prefill and storage cost while the new namespace fills.
 
 P2P uses the same configuration in its handshake fingerprint. When both peers advertise nonempty fingerprints, a mismatch is rejected, including between old and new versions with different fingerprint fields. During a rolling upgrade, route transfers between peers with matching fingerprints. The existing compatibility behavior still accepts an absent peer fingerprint, so this change does not guarantee isolation from every legacy or custom peer.
+
+### Threading model
+
+Tier methods run in the scheduler process, under the tiering manager's lock, so they are never entered concurrently. They are not always called from the same thread, though.
+
+Most tiers only ever see the scheduler thread, which holds the lock for the length of one engine step. A tier whose counterpart is not driven by the engine — the `p2p` tier, answering a remote peer — needs servicing while the engine is busy running the model, because otherwise a peer's lookup or fetch waits for the next step boundary. On a saturated rank that wait can be seconds, dwarfing the transfer it gates. Such tiers set `tolerates_off_thread_polling`, and the tiering manager runs one tier-poll thread that, once per `tier_poll_interval_s`, polls them for finished jobs and lets them serve external requests. A tier that implements `serve_external_requests()` without setting the flag is served once per engine step only.
+
+Two consequences worth knowing:
+
+- Any tier can be reached from that thread indirectly, because serving a peer looks keys up through the tiering manager, which fans out to the other tiers. Tier state must therefore not assume a particular thread, only that the manager lock is held.
+- Work the thread deliberately leaves alone is batched per step: a promotion it initiates is submitted at the next `on_schedule_end()`, not immediately.
+
+Setting `tier_poll_interval_s` to `0` disables the thread; opted-in tiers then get serviced once per engine step, as they were before it existed.
 
 ### Filesystem (FS)
 
@@ -395,6 +428,35 @@ Example (OpenAI-compatible completions request):
   }
 }
 ```
+
+## Explicit pool sizing for `SimpleCPUOffloadConnector`
+
+`SimpleCPUOffloadConnector` accepts an optional `num_cpu_blocks` in
+`kv_connector_extra_config`. The scheduler and every worker use this exact
+number of offload blocks instead of automatic sizing from
+`cpu_bytes_to_use_per_rank` or `cpu_bytes_to_use / world_size`.
+Use the same positive integer on all ranks, chosen
+to fit the smallest per-worker capacity. This supports pipeline stages with
+different KV cache sizes without adding a collective during initialization.
+
+```json
+{
+  "kv_connector": "SimpleCPUOffloadConnector",
+  "kv_role": "kv_both",
+  "kv_connector_extra_config": {
+    "cpu_bytes_to_use_per_rank": 1073741824,
+    "num_cpu_blocks": 64,
+    "lazy_offload": false
+  }
+}
+```
+
+The example count must be adjusted for the model, KV layout, and parallelism.
+The configured byte budget remains an upper bound: startup fails if the
+requested count exceeds a worker's capacity. For the `disk` backend the count
+selects disk slots and is checked against `disk_capacity_bytes`. Omitting
+`num_cpu_blocks` preserves automatic per-worker sizing. This option applies
+to `SimpleCPUOffloadConnector`, separately from `OffloadingConnector` above.
 
 ## Further Reading
 

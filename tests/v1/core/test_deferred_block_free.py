@@ -417,7 +417,7 @@ def test_abort_mid_prefill_defers_free():
     chunk is still in flight must withhold its blocks.
     """
     scheduler = create_scheduler(
-        model=MODEL, async_scheduling=True, long_prefill_token_threshold=16
+        model=MODEL, async_scheduling=True, max_num_batched_tokens=16
     )
     scheduler.defer_block_free = True
     pool = scheduler.kv_cache_manager.block_pool

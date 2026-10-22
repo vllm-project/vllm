@@ -55,7 +55,6 @@ if not current_platform.is_cuda():
     )
 
 from vllm.utils.math_utils import cdiv
-from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseTRTLLMBackend,
 )
@@ -118,10 +117,12 @@ def _run_sparse_backend_vs_sdpa(
     block_size: int,
     num_heads: int,
     device: torch.device,
+    monkeypatch: pytest.MonkeyPatch,
     force_future_dominance: bool = False,
     qk_nope_head_dim: int = 128,
     v_head_dim: int = 128,
     stale_cpu_query_lens: list[int] | None = None,
+    capture_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Run a sparse-MLA backend with the given per-token indices and compute a
     dense per-token SDPA reference over the SAME indices.
@@ -178,14 +179,22 @@ def _run_sparse_backend_vs_sdpa(
     )
     del model_config.hf_config.index_topk  # Composite configs only nest this field.
     model_config.dtype = dtype
-    model_config.get_num_attention_heads = MethodType(
-        lambda self, parallel_config: num_heads, model_config
+    monkeypatch.setattr(
+        model_config,
+        "get_num_attention_heads",
+        MethodType(lambda self, parallel_config: num_heads, model_config),
     )
-    model_config.get_num_kv_heads = MethodType(
-        lambda self, parallel_config: 1, model_config
+    monkeypatch.setattr(
+        model_config,
+        "get_num_kv_heads",
+        MethodType(lambda self, parallel_config: 1, model_config),
     )
-    model_config.get_head_size = MethodType(lambda self: head_size, model_config)
-    model_config.get_sliding_window = MethodType(lambda self: None, model_config)
+    monkeypatch.setattr(
+        model_config, "get_head_size", MethodType(lambda self: head_size, model_config)
+    )
+    monkeypatch.setattr(
+        model_config, "get_sliding_window", MethodType(lambda self: None, model_config)
+    )
 
     kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
 
@@ -394,9 +403,25 @@ def _run_sparse_backend_vs_sdpa(
         metadata.num_actual_tokens, num_heads * v_head_dim, dtype=dtype, device=device
     )
     with torch.inference_mode():
+        impl.record_logical_topk_ready()
         backend_output = mock_layer.forward_impl(
             query_vllm, kv_c_vllm, k_pe_vllm, kv_cache, metadata, out_buffer
         )
+        if capture_graph:
+            device_boundaries = common_attn_metadata.query_start_loc.clone()
+            common_attn_metadata.query_start_loc.copy_(
+                common_attn_metadata.query_start_loc_cpu
+            )
+            metadata = builder.build(0, common_attn_metadata)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                impl.record_logical_topk_ready()
+                backend_output = mock_layer.forward_impl(
+                    query_vllm, kv_c_vllm, k_pe_vllm, kv_cache, metadata, out_buffer
+                )
+            common_attn_metadata.query_start_loc.copy_(device_boundaries)
+            builder.build(0, common_attn_metadata)
+            graph.replay()
     return backend_output, sdpa_reference, causal_reference
 
 
@@ -409,7 +434,7 @@ def _skip_if_backend_unavailable(backend_cls, kv_cache_dtype: str, block_size: i
         and kv_cache_dtype != "fp8_ds_mla"
     ):
         pytest.skip("FlashMLA Sparse fp8 only supports fp8_ds_mla kv-cache dtype")
-    if block_size not in backend_cls.get_supported_kernel_block_sizes():
+    if not backend_cls.supports_block_size(block_size):
         pytest.skip(
             f"{backend_cls.get_name()} does not support block_size={block_size}"
         )
@@ -423,22 +448,20 @@ def _skip_if_backend_unavailable(backend_cls, kv_cache_dtype: str, block_size: i
             pytest.skip("FlashInferMLASparseTRTLLMBackend requires SM 10.x capability")
 
 
-def test_flashinfer_sparse_mla_adaptive_varlen_matches_sdpa(
+@pytest.mark.parametrize("query_lens", [[1, 7, 3, 5], [1, 7, 8, 0]])
+def test_flashinfer_sparse_mla_adaptive_varlen_graph_matches_sdpa(
     default_vllm_config,
     dist_init,
     workspace_init,
+    query_lens,
+    monkeypatch,
 ):
-    """Adaptive request boundaries must drive SM100 sparse index conversion."""
+    """Replay uses device boundaries, including empty padding, despite stale CPU."""
     backend_cls = FlashInferMLASparseTRTLLMBackend
     _skip_if_backend_unavailable(backend_cls, "fp8", 64)
-    assert (
-        backend_cls.get_builder_cls().get_cudagraph_support(None, None)
-        == AttentionCGSupport.ALWAYS
-    )
 
     device = torch.device(DEVICE_TYPE)
     seq_lens = [257, 270, 265, 276]
-    query_lens = [1, 7, 3, 5]
     sparse_indices = _build_dspark_noncausal_indices(
         seq_lens,
         query_lens,
@@ -456,9 +479,11 @@ def test_flashinfer_sparse_mla_adaptive_varlen_matches_sdpa(
         64,
         16,
         device,
+        monkeypatch=monkeypatch,
         qk_nope_head_dim=192,
         v_head_dim=256,
         stale_cpu_query_lens=[4, 4, 4, 4],
+        capture_graph=True,
     )
 
     torch.testing.assert_close(
@@ -493,6 +518,7 @@ def test_dspark_noncausal_sparse_mla_matches_sdpa(
     kv_cache_dtype,
     block_size,
     num_heads,
+    monkeypatch,
 ):
     """Non-causal (window ∪ block, future-pointing) per-token indices must match
     a dense SDPA reference over the same indices, for both sparse-MLA backends."""
@@ -527,6 +553,7 @@ def test_dspark_noncausal_sparse_mla_matches_sdpa(
         block_size,
         num_heads,
         device,
+        monkeypatch=monkeypatch,
     )
 
     assert backend_output.shape == sdpa_reference.shape
@@ -553,6 +580,7 @@ def test_dspark_noncausal_differs_from_causal(
     backend_cls,
     config_name,
     block_size,
+    monkeypatch,
 ):
     """Differentiation guard: prove the backend genuinely attends to the
     future-pointing indices (not silently applying a causal mask, and not merely
@@ -586,6 +614,7 @@ def test_dspark_noncausal_differs_from_causal(
         block_size,
         128,
         device,
+        monkeypatch=monkeypatch,
         force_future_dominance=True,
     )
 
@@ -669,6 +698,7 @@ def test_dsv41_flashinfer_dspark_window_matches_reference(
         ),
         block_table=torch.arange(48, device=device, dtype=torch.int32).view(3, -1),
         block_size=128,
+        replay_start=torch.zeros(3, device=device, dtype=torch.int32),
         flashinfer_sparse_index_cache={},
         max_decode_query_len=5,
     )

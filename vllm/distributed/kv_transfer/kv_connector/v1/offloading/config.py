@@ -157,15 +157,10 @@ def build_offloading_config(
     )
     replicated_layout = (
         vllm_config.model_config.use_mla
-        # Exact type: fail closed on wrappers and sliding-window variants.
-        and type(single_group_spec) is MLAAttentionSpec
-        # Page accounting: one MLA page per layer, no packed/mixed rows.
-        and worker_kv_bytes_per_block > 0
-        and worker_kv_bytes_per_block
-        == single_group_spec.page_size_bytes
-        * len(kv_cache_config.kv_cache_groups[0].layer_names)
-        # Safe MVP boundary: TP-only, no other parallel axes.
         and parallel_config.tensor_parallel_size > 1
+        and kv_cache_config.kv_tp_replicas == parallel_config.tensor_parallel_size
+        and worker_kv_bytes_per_block > 0
+        # Safe MVP boundary: TP-only, no other parallel axes.
         and parallel_config.pipeline_parallel_size == 1
         and parallel_config.prefill_context_parallel_size == 1
         and parallel_config.decode_context_parallel_size == 1
@@ -233,9 +228,10 @@ def build_offloading_config(
             and parallel_config.world_size == tp_size
         )
 
-    if canonical_layout and is_parallelism_agnostic:
+    if canonical_layout:
         replicated_layout = (
-            all(
+            is_parallelism_agnostic
+            and all(
                 type(spec) is MLAAttentionSpec
                 for _, group in selected_groups
                 for spec in iter_layer_specs(group.kv_cache_spec)
