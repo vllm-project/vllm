@@ -43,7 +43,7 @@ def _indexer_sharding(monkeypatch, tp_size, pp_size, rank, distributed_init_port
             block_size=128,
             max_model_len=4096,
             max_num_seqs=4,
-            max_num_batched_tokens=512,
+            max_num_batched_tokens=1536,
             hf_config_override={
                 "sparse_attention_config": {
                     "sparse_num_index_heads": 4,
@@ -148,7 +148,7 @@ def _check_indexer_forwards(config, device, rank, comm):
                     indexer_kv_dtype="fp8",
                     index_k_shard=world if sharded else 1,
                     topk_indices_buffer=torch.empty(
-                        (512, local_heads, 16), dtype=torch.int32, device=device
+                        (1536, local_heads, 16), dtype=torch.int32, device=device
                     ),
                 )
                 for layer in range(5)
@@ -227,8 +227,8 @@ def _check_indexer_forwards(config, device, rank, comm):
         BatchSpec(seq_lens=[129, 2305], query_lens=[1, 1]),
         BatchSpec(seq_lens=[128, 2306], query_lens=[4, 4]),
         BatchSpec(seq_lens=[128, 2307], query_lens=[8, 8]),
-        BatchSpec(seq_lens=[2305, 2561, 2691, 2720], query_lens=[1, 1, 259, 127]),
-        BatchSpec(seq_lens=[2691], query_lens=[259]),
+        BatchSpec(seq_lens=[2305, 2561, 2691, 2720], query_lens=[1, 1, 1027, 127]),
+        BatchSpec(seq_lens=[2691], query_lens=[1027]),
         BatchSpec(seq_lens=[129, 2305], query_lens=[1, 1]),
     ]
     for batch in batches:
@@ -273,7 +273,7 @@ def _check_indexer_forwards(config, device, rank, comm):
             query[:, :, :7] = (1 << bits) * (
                 1 - 2 * (((head_codes ^ (layer * 7)) >> bits) & 1)
             )
-            query[256:] *= -1
+            query[msa.PREFILL_CHUNK_SIZE :] *= -1
             queries.append(query.to(torch.float8_e4m3fn))
         metadata = [builder.build(0, common) for builder in builders]
 
@@ -298,7 +298,9 @@ def _check_indexer_forwards(config, device, rank, comm):
         else:
             builders[1].prefill_local_score = True
             metadata[1] = builders[1].build(0, common)
-            assert metadata[1].prefill_msa.local_scores.shape[0] <= 256
+            scratch = metadata[1].prefill_msa.local_scores
+            assert scratch.shape[0] <= msa.PREFILL_CHUNK_SIZE
+            assert scratch.numel() * scratch.element_size() <= msa.PREFILL_SCORE_BYTES
             # Reuse scratch across layers and steps, then return to gather.
             exchanges.clear()
             with pytest.MonkeyPatch.context() as patch:
