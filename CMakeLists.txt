@@ -1578,7 +1578,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   # and makes both mold and lld fail with "relocation R_X86_64_PC32 against
   # .eh_frame out of range". --offload-compress keeps the device debug info
   # (so the RelWithDebInfo build type is unchanged) while shrinking the
-  # fatbin ~20x: 2.05 GiB -> 95.8 MiB, module 2.2 GB -> 126 MiB.
+  # fatbin ~20x (2103 MiB -> 95.8 MiB, module ~2200 MiB -> 125.9 MiB).
   set(VLLM_ROCM_EXT_FLAGS ${VLLM_GPU_FLAGS} --offload-compress)
 
   # skinny_gemms*.cu are built on gfx9/gfx11 ISA (MFMA, dot2/dot4, legacy
