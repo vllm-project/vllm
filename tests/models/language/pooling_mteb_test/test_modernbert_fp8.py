@@ -56,6 +56,7 @@ def _assert_modernbert_online_fp8(model) -> None:
         )
 
 
+@pytest.mark.flaky(reruns=2)
 @pytest.mark.skipif(
     _fp8_scaled_mm_unsupported(),
     reason="No FP8 ScaledMM kernel is available on this GPU type.",

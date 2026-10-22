@@ -15,8 +15,10 @@ from vllm.models.qwen4_exp.nvidia import (
 )
 from vllm.models.qwen4_exp.nvidia.ops import qsa as qsa_ops
 from vllm.models.qwen4_exp.nvidia.ops import qsa_indexer as qsa_indexer_ops
+from vllm.models.qwen4_exp.nvidia.qsa import qsa_kv_cache_dtype
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
+from vllm.v1.worker.utils import clear_layer_kv_caches
 
 requires_qsa_kernels = pytest.mark.skipif(
     not current_platform.is_cuda() or not HAS_TRITON,
@@ -55,16 +57,24 @@ def test_qsa_mtp_index_share_updates_cache_but_skips_selection(
             rope_position_offset=0,
         ),
         compressed_key_cache=SimpleNamespace(kv_cache=torch.empty(0)),
-        use_fused_pre_indexer=True,
         rotary_emb=SimpleNamespace(cos_sin_cache=torch.empty(0)),
         q_layernorm=SimpleNamespace(weight=torch.ones(1), variance_epsilon=1e-6),
         k_layernorm=SimpleNamespace(weight=torch.ones(1)),
         compress_ratio=2,
     )
+    attn = SimpleNamespace(
+        use_fused_qsa_prepare=True,
+        kv_cache=torch.empty(0, 1, 1, 2),
+        kv_cache_dtype="auto",
+        q_norm=SimpleNamespace(weight=torch.ones(1), variance_epsilon=1e-6),
+        k_norm=SimpleNamespace(weight=torch.ones(1)),
+        _k_scale_float=1.0,
+        _v_scale_float=1.0,
+    )
 
     monkeypatch.setattr(
         indexer_qsa,
-        "qsa_pre_indexer",
+        "qsa_prepare",
         lambda *args, **kwargs: updates.append((args, kwargs)),
     )
     monkeypatch.setattr(
@@ -78,11 +88,14 @@ def test_qsa_mtp_index_share_updates_cache_but_skips_selection(
         lambda *args, **kwargs: selections.append((args, kwargs)),
     )
 
-    actual = indexer_qsa.QSAIndexer.forward(
+    actual, _ = indexer_qsa.QSAIndexer.forward(
         indexer,
         torch.zeros(2, 2),
         torch.tensor([7, 8]),
         rows,
+        attn=attn,
+        qkv=torch.zeros(2, 4),
+        slot_mapping=torch.arange(2),
     )
 
     assert actual is rows
@@ -203,7 +216,14 @@ def _qsa_sparse_paged_attention_reference(
     block_table: torch.Tensor,
     token_to_req: torch.Tensor,
     softmax_scale: float,
+    k_scale: float = 1.0,
+    v_scale: float = 1.0,
 ) -> torch.Tensor:
+    """Dense reference for QSA sparse paged attention.
+
+    Mirrors the kernel's dequant: fp8-e4m3 K/V caches are dequantized with the
+    per-tensor k_scale/v_scale host floats; bf16 caches use unit scales.
+    """
     output = torch.zeros_like(q)
     repeats = q.shape[1] // k_cache.shape[2]
     page_size = k_cache.shape[1]
@@ -215,13 +235,15 @@ def _qsa_sparse_paged_attention_reference(
         request = token_to_req[row].long()
         pages = block_table[request, logical // page_size].long()
         offsets = logical % page_size
-        keys = k_cache[pages, offsets].repeat_interleave(repeats, dim=1)
-        values = v_cache[pages, offsets].repeat_interleave(repeats, dim=1)
-        scores = torch.einsum("hd,khd->hk", q[row].float(), keys.float())
-        probabilities = torch.softmax(scores * softmax_scale, dim=-1)
-        output[row] = torch.einsum("hk,khd->hd", probabilities, values.float()).to(
-            q.dtype
+        keys = (k_cache[pages, offsets].float() * k_scale).repeat_interleave(
+            repeats, dim=1
         )
+        values = (v_cache[pages, offsets].float() * v_scale).repeat_interleave(
+            repeats, dim=1
+        )
+        scores = torch.einsum("hd,khd->hk", q[row].float(), keys)
+        probabilities = torch.softmax(scores * softmax_scale, dim=-1)
+        output[row] = torch.einsum("hk,khd->hd", probabilities, values).to(q.dtype)
     return output
 
 
@@ -293,7 +315,7 @@ def test_qsa_circular_buffer_metadata_keeps_only_each_requests_suffix() -> None:
     builder.k_work_metadata_buffer = torch.empty(0, 2, dtype=torch.int32, device=device)
     query_start_loc = torch.tensor([0, 7, 13, 13], dtype=torch.int32, device=device)
     token_to_req = torch.tensor([0] * 7 + [1] * 6 + [0] * 3, device=device)
-    block_table = torch.tensor([[1], [0], [2]], dtype=torch.int32, device=device)
+    block_table = torch.tensor([[1], [3], [2]], dtype=torch.int32, device=device)
     common = SimpleNamespace(
         num_actual_tokens=16,
         num_reqs=3,
@@ -318,16 +340,20 @@ def test_qsa_circular_buffer_metadata_keeps_only_each_requests_suffix() -> None:
         4,
         -1,
         -1,
-        3,
-        0,
-        1,
-        2,
+        15,
+        12,
+        13,
+        14,
         -1,
         -1,
         -1,
     ]
 
     assert metadata.slot_mapping.tolist() == expected
+
+    # A dummy batch puts every request on the null block, which owns no ring.
+    block_table.zero_()
+    assert builder.build(0, common).slot_mapping.tolist() == [-1] * 16
 
 
 @pytest.mark.parametrize("chunk_start", list(range(8)))
@@ -345,7 +371,7 @@ def test_qsa_circular_buffer_survives_one_speculative_step(chunk_start: int) -> 
     query_len = num_spec + 1
 
     slots = qsa_cache.circular_qsa_slot_mapping(
-        torch.tensor([[0]], dtype=torch.int32),
+        torch.tensor([[1]], dtype=torch.int32),
         torch.zeros(query_len, dtype=torch.int32),
         torch.arange(chunk_start, chunk_start + query_len),
         capacity,
@@ -353,10 +379,12 @@ def test_qsa_circular_buffer_survives_one_speculative_step(chunk_start: int) -> 
     )
 
     committed = torch.arange(chunk_start - chunk_start % compress_ratio, chunk_start)
-    assert set(slots.tolist()).isdisjoint((committed % capacity).tolist())
+    assert set((slots % capacity).tolist()).isdisjoint((committed % capacity).tolist())
 
 
-def _qsa_key_cache(block_size: int, compress_ratio: int) -> qsa_cache.QSAKeyStateCache:
+def _qsa_key_cache(
+    block_size: int, compress_ratio: int, **kwargs
+) -> qsa_cache.QSAKeyStateCache:
     return qsa_cache.QSAKeyStateCache(
         head_size=64,
         dtype=torch.bfloat16,
@@ -366,6 +394,7 @@ def _qsa_key_cache(block_size: int, compress_ratio: int) -> qsa_cache.QSAKeyStat
             compilation_config=SimpleNamespace(static_forward_context={})
         ),
         compress_ratio=compress_ratio,
+        **kwargs,
     )
 
 
@@ -393,6 +422,23 @@ def test_qsa_state_caches_adapt_the_unified_logical_layout() -> None:
     assert compressed_cache.kv_cache.data_ptr() == compressed_view.data_ptr()
 
 
+def test_clearing_qsa_key_cache_releases_its_storage() -> None:
+    """Profiling teardown clears `kv_cache`; no derived view may keep it alive."""
+    raw_cache = _qsa_key_cache(
+        block_size=32, compress_ratio=4, cache_rope_positions=True
+    )
+    kv = torch.zeros(2, 1, 8, raw_cache.head_size, dtype=torch.bfloat16)
+    references_before_bind = torch._C._storage_Use_Count(kv.untyped_storage()._cdata)
+    raw_cache.bind_kv_cache(kv)
+    assert raw_cache.key_cache.shape[-1] == 64
+    assert raw_cache.rope_position_cache.dtype == torch.int64
+
+    clear_layer_kv_caches([raw_cache])
+
+    references = torch._C._storage_Use_Count(kv.untyped_storage()._cdata)
+    assert references == references_before_bind
+
+
 @pytest.mark.parametrize(
     ("compress_ratio", "num_spec", "expected"),
     [(4, 0, 4), (4, 1, 8), (4, 3, 8), (4, 4, 8), (4, 5, 12), (2, 3, 6)],
@@ -405,6 +451,19 @@ def test_qsa_ring_capacity_covers_one_speculative_step(
         block_size=48, compress_ratio=compress_ratio
     ).get_kv_cache_spec(SimpleNamespace(num_speculative_tokens=num_spec))
     assert spec.block_size == expected
+
+
+def test_qsa_kv_cache_dtype_honors_skip_layers() -> None:
+    """``--kv-cache-dtype-skip-layers`` keeps the listed QSA layers unquantized.
+
+    The MTP layer's own attention is the one that matters on Flash-Next: FP8
+    there cuts draft acceptance at depth while the target layers stay FP8.
+    """
+    cache_config = SimpleNamespace(cache_dtype="fp8", kv_cache_dtype_skip_layers=["48"])
+    assert qsa_kv_cache_dtype(cache_config, "mtp.layers.48.self_attn") == "auto"
+    assert qsa_kv_cache_dtype(cache_config, "model.layers.47.self_attn") == "fp8"
+    cache_config.kv_cache_dtype_skip_layers = []
+    assert qsa_kv_cache_dtype(cache_config, "mtp.layers.48.self_attn") == "fp8"
 
 
 @requires_qsa_kernels
@@ -482,7 +541,6 @@ def test_qsa_unfused_cache_update_ignores_padded_qk() -> None:
         _metadata=lambda: (raw_metadata, compressed_metadata),
         skip_topk=True,
         index_kv_heads=1,
-        use_fused_pre_indexer=False,
         index_n_heads=1,
         index_head_dim=64,
         indexer_dtype=torch.bfloat16,
@@ -505,6 +563,7 @@ def test_qsa_unfused_cache_update_ignores_padded_qk() -> None:
         torch.cat((torch.ones_like(padded_keys), padded_keys), dim=-1),
         torch.zeros(8, dtype=torch.long, device=device),
         torch.full((5, 5), -1, dtype=torch.int32, device=device),
+        attn=SimpleNamespace(use_fused_qsa_prepare=False),
     )
     torch.testing.assert_close(raw_cache[0, :, 0], keys[[4, 1, 2, 3]])
     expected_compressed = torch.zeros_like(compressed_cache)
@@ -906,22 +965,28 @@ def test_qsa_block_expansion_correctness() -> None:
         "page_size",
         "use_prefill_config",
         "num_requests",
+        "fp8",
     ),
     [
         # Production page sizes from hybrid-cache block alignment: 784/800
         # at TP4 and 1568/1600 at TP1/TP2 (no-MTP / MTP num_spec=3). Head
         # splits are per-rank TP1/TP2/TP4; the largest batch runs both
         # use_prefill_config variants.
-        pytest.param(1, 24, 2, 1600, True, 2, id="tp1_r1"),
-        pytest.param(16, 12, 1, 1600, True, 3, id="tp2_r16"),
-        pytest.param(32, 6, 1, 800, True, 5, id="tp4_r32"),
-        pytest.param(128, 24, 2, 1568, True, 7, id="tp1_r128"),
-        pytest.param(257, 6, 1, 800, True, 13, id="tp4_r257"),
-        pytest.param(513, 6, 1, 784, True, 17, id="tp4_r513"),
-        pytest.param(700, 6, 1, 800, True, 23, id="tp4_r700"),
-        pytest.param(1024, 24, 2, 1600, True, 33, id="tp1_r1024"),
-        pytest.param(2048, 24, 2, 1600, True, 63, id="tp1_r2048_prefill"),
-        pytest.param(2048, 24, 2, 1600, False, 63, id="tp1_r2048_uniform"),
+        pytest.param(1, 24, 2, 1600, True, 2, False, id="tp1_r1"),
+        pytest.param(16, 12, 1, 1600, True, 3, False, id="tp2_r16"),
+        pytest.param(32, 6, 1, 800, True, 5, False, id="tp4_r32"),
+        pytest.param(128, 24, 2, 1568, True, 7, False, id="tp1_r128"),
+        pytest.param(257, 6, 1, 800, True, 13, False, id="tp4_r257"),
+        pytest.param(513, 6, 1, 784, True, 17, False, id="tp4_r513"),
+        pytest.param(700, 6, 1, 800, True, 23, False, id="tp4_r700"),
+        pytest.param(1024, 24, 2, 1600, True, 33, False, id="tp1_r1024"),
+        pytest.param(2048, 24, 2, 1600, True, 63, False, id="tp1_r2048_prefill"),
+        pytest.param(2048, 24, 2, 1600, False, 63, False, id="tp1_r2048_uniform"),
+        # fp8_e4m3 K/V caches on the TP1 head split.
+        pytest.param(1, 24, 2, 1600, True, 2, True, id="tp1_r1_fp8"),
+        pytest.param(128, 24, 2, 1568, True, 7, True, id="tp1_r128_fp8"),
+        pytest.param(2048, 24, 2, 1600, True, 63, True, id="tp1_r2048_prefill_fp8"),
+        pytest.param(2048, 24, 2, 1600, False, 63, True, id="tp1_r2048_uniform_fp8"),
     ],
 )
 def test_qsa_sparse_paged_attention_correctness(
@@ -931,8 +996,18 @@ def test_qsa_sparse_paged_attention_correctness(
     page_size: int,
     use_prefill_config: bool,
     num_requests: int,
+    fp8: bool,
 ) -> None:
+    """QSA sparse paged attention matches the dense reference.
+
+    fp8 only changes the K/V cache dtype (e4m3 with a per-tensor scale pair) and
+    the scales; the reference dequantizes the same cache with those scales, so
+    both paths compare the production kernel against the reference on identical
+    inputs. fp8=True additionally covers the host-side scale folding.
+    """
     torch.manual_seed(2)
+    # One QSA attention problem: bf16 Q and paged K/V, a packed selection with
+    # the trailing count column, block table and row-to-request map.
     head_dim = 256
     num_selected_pages = 64
     # Keep the newest page outside the synthetic top-k as causal headroom.
@@ -1013,8 +1088,18 @@ def test_qsa_sparse_paged_attention_correctness(
         indexer_budget,
         logical_indices,
     )
-    assert logical_indices.shape == (num_rows, selection_width + 1)
-    scale = q.shape[-1] ** -0.5
+
+    scale = head_dim**-0.5
+
+    if fp8:
+        # A fixed non-unit pair (k != v) exercises the host-side scale folding
+        # and catches a k/v swap; scales are host floats, as the layer exposes
+        # them. Stored values are the scaled ones, as reshape_and_cache does.
+        k_scale, v_scale = 0.5, 2.0
+        k_cache = (k_cache / k_scale).to(torch.float8_e4m3fn)
+        v_cache = (v_cache / v_scale).to(torch.float8_e4m3fn)
+    else:
+        k_scale, v_scale = 1.0, 1.0
 
     actual = qsa_ops.qsa_sparse_paged_attention(
         q,
@@ -1024,6 +1109,8 @@ def test_qsa_sparse_paged_attention_correctness(
         block_table,
         token_to_req,
         use_prefill_config=use_prefill_config,
+        k_scale=k_scale,
+        v_scale=v_scale,
         output_gate=output_gate,
     )
     expected = _qsa_sparse_paged_attention_reference(
@@ -1034,6 +1121,8 @@ def test_qsa_sparse_paged_attention_correctness(
         block_table,
         token_to_req,
         scale,
+        k_scale=k_scale,
+        v_scale=v_scale,
     )
     expected = expected * torch.sigmoid(output_gate)
 

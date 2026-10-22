@@ -71,8 +71,7 @@ def _get_audio_output_lengths_for_tower(
     merge_factor: int,
     conv_params: list[tuple[int, int, int]],
 ) -> torch.Tensor:
-    """
-    Calculate the output lengths after audio processing.
+    """Calculate the output lengths after audio processing.
 
     The output length accounts for:
     1. Convolution layers (downsampling)
@@ -86,6 +85,7 @@ def _get_audio_output_lengths_for_tower(
 
     Returns:
         Output lengths after all processing [batch_size]
+
     """
     # First, calculate the output length after convolutions
     if hasattr(audio_tower, "_get_feat_extract_output_lengths"):

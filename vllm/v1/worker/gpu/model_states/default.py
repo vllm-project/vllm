@@ -14,7 +14,10 @@ from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.rope import get_rope_state
-from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.gpu.model_states.interface import (
+    ModelSpecificAttnMetadata,
+    ModelState,
+)
 from vllm.v1.worker.gpu.model_states.mm_pruning import maybe_create_mm_pruner
 from vllm.v1.worker.gpu.model_states.prompt_embeds import PromptEmbedsState
 from vllm.v1.worker.gpu.states import RequestState
@@ -171,6 +174,7 @@ class DefaultModelState(ModelState):
         kv_cache_config: KVCacheConfig,
         for_capture: bool = False,
         ubatch_idx: int = 0,
+        model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     ) -> dict[str, Any]:
         if cudagraph_mode == CUDAGraphMode.FULL:
             # Use padded sizes - padding is handled by model_runner.prepare_attn.
@@ -208,9 +212,7 @@ class DefaultModelState(ModelState):
                     self.model, "mm_prefix_clamp_sliding_window", False
                 )
                 or getattr(hf_text_config, "mm_prefix_clamp_sliding_window", False),
-                span_pad=getattr(
-                    hf_text_config, "mm_prefix_span_leading_pad_modulus", 0
-                ),
+                span_pad=getattr(self.model, "mm_prefix_span_leading_pad_modulus", 0),
             )
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
@@ -235,5 +237,6 @@ class DefaultModelState(ModelState):
             req_idx=input_batch.idx_mapping_np,
             ubatch_idx=ubatch_idx,
             fast_prefill=input_batch.fast_prefill,
+            model_specific_attn_metadata=model_specific_attn_metadata,
         )
         return attn_metadata

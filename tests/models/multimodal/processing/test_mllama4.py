@@ -23,11 +23,9 @@ def test_profiling(model_id: str, max_model_len: int):
         model_config_kwargs=model_config_kwargs,
         limit_mm_per_prompt=mm_counts,
     )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
 
-    mm_inputs = MULTIMODAL_REGISTRY.get_dummy_mm_inputs(
-        ctx.model_config,
-        mm_counts=mm_counts,
-    )
+    mm_inputs = processor.get_dummy_mm_inputs(mm_counts)
 
     hf_config = ctx.get_hf_config(Llama4Config)
     image_size = hf_config.vision_config.image_size

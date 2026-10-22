@@ -104,6 +104,9 @@ pub struct EngineCoreReadyResponse {
     /// Whether the engine has a speculative draft model that can be updated.
     #[serde(default)]
     pub supports_draft_weight_updates: bool,
+    /// Full-attention block size in tokens after initialization, or unavailable.
+    #[serde(default)]
+    pub effective_attention_block_size: Option<u64>,
 }
 
 /// Frontend-owned ZMQ addresses that are sent to the engine during startup
