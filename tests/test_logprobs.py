@@ -336,3 +336,11 @@ def test_flat_logprobs_column_views() -> None:
     check()
     assert token_ids_view == [1, 2, 3, 4, 5, 6, 9, 10, 11]
     assert flat.token_ids != "123456"
+
+
+def test_flat_logprobs_equality_compares_every_rank() -> None:
+    a, b = FlatLogprobs(), FlatLogprobs()
+    a.append_fast([1, 2, 3], [0.0, -1.0, -2.0], [5, 1, 2], [None] * 3)
+    b.append_fast([1, 2, 3], [0.0, -1.0, -2.0], [5, 1, 7], [None] * 3)
+    assert a != b
+    assert a == a[:]

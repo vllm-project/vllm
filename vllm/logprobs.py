@@ -551,7 +551,8 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
                 self._logprobs.view(), other._logprobs.view(), equal_nan=True
             )
             and np.array_equal(
-                self._entry_ranks(0, len(self)), other._entry_ranks(0, len(other))
+                self._entry_ranks(0, self.num_entries),
+                other._entry_ranks(0, other.num_entries),
             )
             and self.decoded_tokens == other.decoded_tokens
         )
