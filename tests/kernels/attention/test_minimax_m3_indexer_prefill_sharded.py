@@ -40,6 +40,7 @@ def test_fmha_prefill_shard_scores(query_lens, prefixes):
     query = torch.randint(-2, 3, (total_q, heads, 128), device="cuda").to(
         torch.float8_e4m3fn
     )
+    query[..., 0] = 16
     cache = torch.randint(-2, 3, (blocks, 128, 128), device="cuda").to(
         torch.float8_e4m3fn
     )
@@ -51,12 +52,16 @@ def test_fmha_prefill_shard_scores(query_lens, prefixes):
         device=query.device,
     )
     scores = torch.empty((total_q, heads, (blocks + 15) // 16 * 16), device="cuda")
-    valid = torch.empty_like(scores, dtype=torch.uint8)
-    for _ in range(2):
+    for iteration in range(2):
         query = (-query.float()).to(query.dtype)
+        # Future keys must not win before the last query, including page padding.
+        for req, length in enumerate(lengths):
+            page = table[req, (length - 1) // 128]
+            tail = (length - 1) % 128
+            cache[page, tail:] = 0
+            cache[page, tail:, 0] = -256 if iteration == 0 else 256
         for rank in range(2):
             scores.fill_(float("nan"))
-            valid.fill_(255)
             fmha_index_score_sharded(
                 query,
                 cache[:, rank::2].contiguous(),
@@ -64,7 +69,6 @@ def test_fmha_prefill_shard_scores(query_lens, prefixes):
                 plan,
                 rank=rank,
                 max_score=scores,
-                valid_score=valid,
                 sm_scale=1.0,
             )
             reference = torch.full_like(scores, -float("inf"))
@@ -85,4 +89,3 @@ def test_fmha_prefill_shard_scores(query_lens, prefixes):
                     reference[start : start + qlen, :, block] = dots.amax(-1)
                 start += qlen
             torch.testing.assert_close(scores, reference, rtol=0, atol=0)
-            torch.testing.assert_close(valid, reference.isfinite().to(torch.uint8))

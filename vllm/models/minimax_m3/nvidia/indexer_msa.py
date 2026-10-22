@@ -125,7 +125,6 @@ class MiniMaxM3IndexerMSAPrefillMetadata:
     gather_pages: torch.Tensor | None = None
     local_chunks: list[MiniMaxM3IndexerMSAPrefillChunk] | None = None
     local_scores: torch.Tensor | None = None
-    local_valid: torch.Tensor | None = None
     candidate_buffers: torch.Tensor | None = None
 
 
@@ -324,7 +323,6 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                     )
             local_chunks = None
             local_scores = None
-            local_valid = None
             candidate_buffers = None
             if self.prefill_local_score:
                 local_chunks = []
@@ -395,8 +393,6 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                     dtype=torch.float32,
                     device=seq_lens.device,
                 )
-                if self.index_k_tp == 2:
-                    local_valid = torch.empty_like(local_scores, dtype=torch.uint8)
                 candidate_buffers = torch.empty(
                     2,
                     heads,
@@ -416,7 +412,6 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                 gather_pages=gather_pages,
                 local_chunks=local_chunks,
                 local_scores=local_scores,
-                local_valid=local_valid,
                 candidate_buffers=candidate_buffers,
             )
 
@@ -666,7 +661,6 @@ def prefill_local_score(
         if chunk.plan is not None:
             from vllm.third_party.fmha_sm100.api import fmha_index_score_sharded
 
-            assert metadata.local_valid is not None
             fmha_index_score_sharded(
                 query,
                 kv,
@@ -674,7 +668,6 @@ def prefill_local_score(
                 chunk.plan,
                 rank=comm.rank,
                 max_score=scores,
-                valid_score=metadata.local_valid[:tokens],
                 sm_scale=1.0,
             )
         else:
