@@ -908,7 +908,6 @@ def test_ipc_cache_key_tracks_kv_quantization(
 
 def _warmup_cache_request(config_hash: str = "a" * 64, **overrides) -> dict:
     request = {
-        "cmd": "get_seed",
         "kind": "flashinfer_autotune",
         "config_hash": config_hash,
         "dp_rank": 0,
@@ -930,8 +929,9 @@ def test_warmup_cache_request_validation_and_miss(tmp_path, monkeypatch):
         return SeedTransport([FlashInferWarmupCache()]).handle_request(request)
 
     assert handle("not a dict")["status"] == "error"
-    assert handle(_warmup_cache_request(cmd="release"))["status"] == "error"
     assert handle(_warmup_cache_request(kind="bogus"))["status"] == "error"
+    # A request missing the kind entirely is rejected, not resolved.
+    assert handle({"token": "t"})["status"] == "error"
     # A path traversal or malformed hash must never reach the filesystem.
     assert handle(_warmup_cache_request(config_hash="../x"))["status"] == "error"
     assert handle(_warmup_cache_request(config_hash="A" * 64))["status"] == "error"
@@ -998,7 +998,10 @@ def test_remote_warmup_cache_listener(tmp_path, monkeypatch):
     try:
         cases = [
             (_warmup_cache_request(config_hash, token="wrong"), "error"),
-            ({"cmd": "release", "token": "test-secret"}, "error"),
+            (
+                _warmup_cache_request(config_hash, kind="weights", token="test-secret"),
+                "error",
+            ),
             (_warmup_cache_request(config_hash, token="test-secret"), "ok"),
             (_warmup_cache_request("f" * 64, token="test-secret"), "miss"),
         ]

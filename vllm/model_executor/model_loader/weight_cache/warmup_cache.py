@@ -22,7 +22,7 @@ warmup when any file of a multi-file kind fails validation.
 
 import gc
 import json
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, TypeGuard
 
 import regex as re
 import torch
@@ -118,7 +118,12 @@ class FlashInferWarmupCache(WarmupCache):
             "rank": get_world_group().rank_in_group,
         }
 
-    def validate_request(self, request: Any) -> dict[str, Any]:
+    def resolve(self, request: dict[str, Any]) -> dict[str, Any] | None:
+        from vllm.model_executor.warmup.flashinfer_autotune_cache import (
+            flashinfer_autotune_filename,
+            flashinfer_autotune_root,
+        )
+
         config_hash = request.get("config_hash")
         if not isinstance(config_hash, str) or not _CONFIG_HASH_RE.fullmatch(
             config_hash
@@ -127,16 +132,9 @@ class FlashInferWarmupCache(WarmupCache):
         dp_rank, rank = request.get("dp_rank"), request.get("rank")
         if not (_is_valid_rank(dp_rank) and _is_valid_rank(rank)):
             raise ValueError("invalid rank")
-        return {"config_hash": config_hash, "dp_rank": dp_rank, "rank": rank}
 
-    def resolve(self, params: dict[str, Any]) -> dict[str, Any] | None:
-        from vllm.model_executor.warmup.flashinfer_autotune_cache import (
-            flashinfer_autotune_filename,
-            flashinfer_autotune_root,
-        )
-
-        filename = flashinfer_autotune_filename(params["dp_rank"], params["rank"])
-        path = flashinfer_autotune_root() / params["config_hash"] / filename
+        filename = flashinfer_autotune_filename(dp_rank, rank)
+        path = flashinfer_autotune_root() / config_hash / filename
         if not path.is_file():
             return None
         return {filename: json.loads(path.read_bytes())}
@@ -189,7 +187,7 @@ class FlashInferWarmupCache(WarmupCache):
         logger.info("Installed remote FlashInfer autotune table: %s", cache_path)
 
 
-def _is_valid_rank(value: Any) -> bool:
+def _is_valid_rank(value: Any) -> TypeGuard[int]:
     if isinstance(value, bool) or not isinstance(value, int):
         return False
     return 0 <= value < _MAX_RANK
