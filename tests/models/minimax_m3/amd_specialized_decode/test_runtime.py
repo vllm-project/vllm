@@ -38,19 +38,22 @@ from vllm.models.minimax_m3.common.sparse_attention import (
 
 
 def _metadata(rows, *, decode_tokens=None, prefills=0, query_len=1, padded=0):
+    """A decode-first step: ``decode_tokens`` rows of requests ``query_len``
+    rows each (an EAGLE3 verify step: 1 + num_speculative_tokens)."""
     decode_tokens = rows if decode_tokens is None else decode_tokens
+    requests = decode_tokens // query_len
     metadata = MiniMaxM3SparseMetadata(
-        seq_lens=torch.ones(rows, dtype=torch.int32),
+        seq_lens=torch.ones(requests, dtype=torch.int32),
         max_seq_len=1,
         slot_mapping=torch.arange(rows),
         num_actual_tokens=decode_tokens,
-        num_decodes=decode_tokens,
+        num_decodes=requests,
         num_decode_tokens=decode_tokens,
         num_prefills=prefills,
         num_prefill_tokens=prefills,
         decode=MiniMaxM3SparseDecodeMetadata(
-            seq_lens=torch.ones(decode_tokens, dtype=torch.int32),
-            block_table=torch.zeros(decode_tokens, 1, dtype=torch.int32),
+            seq_lens=torch.ones(requests, dtype=torch.int32),
+            block_table=torch.zeros(requests, 1, dtype=torch.int32),
             decode_query_len=query_len,
         ),
     )
@@ -74,7 +77,15 @@ NONE, FULL = CUDAGraphMode.NONE, CUDAGraphMode.FULL
         (1, NONE, None, False),
         (1, NONE, _metadata(1, prefills=1), False),
         (1, NONE, _metadata(1, decode_tokens=2), False),
-        (4, NONE, _metadata(4, query_len=2), False),
+        # EAGLE3 verify steps (4 rows a request): rows like any other
+        (4, FULL, _metadata(4, query_len=4), True),
+        (8, NONE, _metadata(8, query_len=4), True),
+        (12, FULL, _metadata(12, query_len=4), True),
+        (16, FULL, _metadata(16, query_len=4), True),
+        (16, FULL, _metadata(16, decode_tokens=12, query_len=4, padded=4), True),
+        (20, FULL, _metadata(20, query_len=4), False),
+        (8, NONE, _metadata(8, prefills=1, query_len=4), False),
+        (8, CUDAGraphMode.PIECEWISE, _metadata(8, query_len=4), False),
     ],
 )
 def test_step_routing(rows, mode, metadata, mono):
@@ -150,6 +161,17 @@ def test_config_refusals_report_every_reason():
         assert reason in str(error.value)
     with pytest.raises(ValueError, match="sparse attention on layers 3"):
         specialized_decode_config(_vllm_config(layers=3))
+
+
+@pytest.mark.parametrize("method", ["eagle3", "ngram", "mtp", "draft_model"])
+def test_only_eagle3_speculation_is_accepted(method):
+    config = _vllm_config()
+    config.speculative_config = SimpleNamespace(method=method)
+    if method == "eagle3":
+        assert specialized_decode_config(config) is not None
+    else:
+        with pytest.raises(ValueError, match="only EAGLE3"):
+            specialized_decode_config(config)
 
 
 def _parameter(shape, dtype, *, meta=True):

@@ -18,6 +18,7 @@ steps:
   - pytest -v -s distributed/test_shm_broadcast.py
   - pytest -v -s distributed/test_shm_buffer.py
   - pytest -v -s distributed/test_shm_storage.py
+  - pytest -v -s distributed/aux_output_connector/test_store.py
   mirror:
     amd:
       label: ':amd: (MI300) Distributed Comm Ops'
@@ -36,6 +37,7 @@ steps:
       - pytest -v -s distributed/test_shm_broadcast.py
       - pytest -v -s distributed/test_shm_buffer.py
       - pytest -v -s distributed/test_shm_storage.py
+      - pytest -v -s distributed/aux_output_connector/test_store.py
 
 - label: ":nvidia: (L4) Sharded RDT Weight Transfer"
   key: sharded-rdt-weight-transfer
