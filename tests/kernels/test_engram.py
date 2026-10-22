@@ -565,9 +565,20 @@ def _reference_lookup(weight, scale_inv, ids, start, end, block=32):
     return values.masked_fill(mask.unsqueeze(-1), 0)
 
 
-def _make_embedding(cpu_offload, rows=4096, dim=256, block=32):
+_E2M1_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
+
+
+def _decode_e2m1(packed):
+    """[rows, dim // 2] uint8 -> [rows, dim] fp32; even column in the low nibble."""
+    lut = torch.tensor(_E2M1_VALUES, device=packed.device)
+    nibbles = torch.stack([packed & 0xF, packed >> 4], dim=-1).flatten(-2).long()
+    return torch.where(nibbles & 0x8 != 0, -1.0, 1.0) * lut[nibbles & 0x7]
+
+
+def _make_embedding(cpu_offload, rows=4096, dim=256, block=32, packed_fp4=False):
     layer = ParallelEngramEmbedding.__new__(ParallelEngramEmbedding)
     torch.nn.Module.__init__(layer)
+    layer.packed_fp4 = packed_fp4
     layer.dim, layer.block_size, layer.tp_size = dim, block, 1
     layer.dp_size = 1
     layer.n_hash_cols = layer.part_n_hash_cols = 24
@@ -585,12 +596,19 @@ def _make_embedding(cpu_offload, rows=4096, dim=256, block=32):
         {"device": "cpu", "pin_memory": True} if cpu_offload else {"device": "cuda"}
     )
     owned = layer.vocab_end_idx - layer.vocab_start_idx
-    layer.weight = torch.empty(owned, dim, dtype=torch.float8_e4m3fn, **kwargs)
+    if packed_fp4:
+        layer.weight = torch.empty(owned, dim // 2, dtype=torch.uint8, **kwargs)
+    else:
+        layer.weight = torch.empty(owned, dim, dtype=torch.float8_e4m3fn, **kwargs)
     layer.weight_scale_inv = torch.empty(
         owned, dim // block, dtype=torch.uint8, **kwargs
     )
     torch.manual_seed(0)
-    layer.weight.copy_((torch.randn(owned, dim) * 4).to(torch.float8_e4m3fn))
+    if packed_fp4:
+        # Every byte value, so all 16 nibbles appear in both halves.
+        layer.weight.copy_(torch.randint(0, 256, (owned, dim // 2), dtype=torch.uint8))
+    else:
+        layer.weight.copy_((torch.randn(owned, dim) * 4).to(torch.float8_e4m3fn))
     layer.weight_scale_inv.copy_(
         torch.randint(120, 134, (owned, dim // block), dtype=torch.uint8)
     )
@@ -823,6 +841,100 @@ def test_engram_shared_prefetch_stream_waits_per_layer():
     torch.accelerator.synchronize()
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
+@pytest.mark.parametrize("cpu_offload", [False, True])
+@pytest.mark.parametrize("background", [False, True])
+@pytest.mark.parametrize("num_tokens", [1, 7, 256])
+def test_engram_mxfp4_lookup_matches_torch(cpu_offload, background, num_tokens):
+    """Packed E2M1 rows with UE8M0 scales must dequantize bit-exactly like the
+    torch reference, from HBM and from pinned host memory, with zeros for rows
+    another TP rank owns."""
+    layer = _make_embedding(cpu_offload, packed_fp4=True)
+    cols, rows = 24, layer.part_num_embeddings
+    ids = torch.randint(0, rows, (num_tokens, cols), dtype=torch.int32, device="cuda")
+    expected = _reference_lookup(
+        _decode_e2m1(layer.weight.cuda()),
+        layer.weight_scale_inv.cuda(),
+        ids,
+        layer.vocab_start_idx,
+        layer.vocab_end_idx,
+    )
+    out = torch.empty(num_tokens, cols, layer.dim, dtype=torch.bfloat16, device="cuda")
+    layer.lookup(ids, out, background=background)
+    assert torch.equal(out, expected)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.parametrize("cpu_offload", [False, True])
+def test_engram_packed_weight_is_half_width_uint8(monkeypatch, cpu_offload):
+    monkeypatch.setattr(engram_ops, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(engram_ops, "get_tensor_model_parallel_rank", lambda: 0)
+    dim, head_sizes = 256, (31,) * 24
+    with torch.device("cuda"):
+        layer = ParallelEngramEmbedding(
+            sum(head_sizes),
+            dim,
+            head_sizes,
+            cpu_offload=cpu_offload,
+            packed_fp4=True,
+        )
+    assert layer.weight.shape == (layer.part_num_embeddings, dim // 2)
+    assert layer.weight.dtype == torch.uint8
+
+
+@pytest.mark.parametrize(
+    "quant_config,expected",
+    [
+        (None, False),
+        ({"engram_embed_quant": "mxfp4"}, True),
+    ],
+)
+def test_engram_embedding_format_follows_checkpoint_config(
+    monkeypatch, quant_config, expected
+):
+    """quantization_config.engram_embed_quant selects packed MXFP4; checkpoints
+    without the key keep the FP8 layout."""
+    from vllm.config import EngramConfig
+
+    seen = {}
+    monkeypatch.setattr(
+        engram_ops,
+        "ParallelEngramEmbedding",
+        lambda *args, **kwargs: seen.update(kwargs),
+    )
+    hf_config = SimpleNamespace()
+    if quant_config is not None:
+        hf_config.quantization_config = quant_config
+    vllm_config = SimpleNamespace(
+        engram_config=EngramConfig(),
+        model_config=SimpleNamespace(hf_config=hf_config),
+    )
+    monkeypatch.setattr(engram_ops, "get_current_vllm_config", lambda: vllm_config)
+    layout = SimpleNamespace(num_embeddings=(72,), head_dim=32, primes=(((3,) * 4,),))
+    module = Engram.__new__(Engram)
+    module._create_embedding(layout, 0)
+    assert seen["packed_fp4"] is expected
+
+
+def test_engram_rejects_unknown_embedding_format(monkeypatch):
+    from vllm.config import EngramConfig
+
+    vllm_config = SimpleNamespace(
+        engram_config=EngramConfig(),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(
+                quantization_config={"engram_embed_quant": "nvfp4"}
+            )
+        ),
+    )
+    monkeypatch.setattr(engram_ops, "get_current_vllm_config", lambda: vllm_config)
+    layout = SimpleNamespace(num_embeddings=(72,), head_dim=32, primes=(((3,) * 4,),))
+    with pytest.raises(ValueError, match="engram_embed_quant"):
+        Engram.__new__(Engram)._create_embedding(layout, 0)
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
 @pytest.mark.parametrize("cpu_offload", [None, False])
 def test_engram_constructor_honors_offload(monkeypatch, cpu_offload):
@@ -842,6 +954,7 @@ def test_engram_constructor_honors_offload(monkeypatch, cpu_offload):
         if cpu_offload is None
         else EngramConfig(cpu_offload=cpu_offload),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace()),
     )
     offloaded = vllm_config.engram_config.cpu_offload
     monkeypatch.setattr(engram_ops, "get_current_vllm_config", lambda: vllm_config)
