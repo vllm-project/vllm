@@ -11,6 +11,8 @@ from typing import Any, final
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.config import get_current_vllm_config_or_none
+from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.ops.xpu_ops import bgmv_expand, bgmv_expand_slice, bgmv_shrink
 from vllm.lora.utils import get_captured_lora_counts
@@ -47,6 +49,16 @@ class PunicaWrapperXPU(PunicaWrapperBase):
 
         self.lora_config = kwargs["lora_config"]
         self.max_loras = self.lora_config.max_loras
+        config = get_current_vllm_config_or_none()
+        self._active_rank_available = (
+            config is not None
+            and config.compilation_config.mode == CompilationMode.NONE
+            and config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+            and not self.lora_config.fully_sharded_loras
+            and hasattr(torch.ops._xpu_C, "lora_linear")
+        )
+        self._active_rank_enabled = False
+        self._active_adapter_indices: tuple[int, ...] = ()
 
         # Compute captured LoRA counts for cudagraph specialization.
         captured_lora_counts = get_captured_lora_counts(
@@ -80,6 +92,14 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         **kwargs,
     ):
         self.is_prefill = mapping.is_prefill
+        if self._active_rank_available:
+            active_ids = {i for i in mapping.index_mapping if i > 0}
+            self._active_adapter_indices = tuple(
+                i
+                for i, adapter_id in enumerate(lora_index_to_id)
+                if adapter_id in active_ids
+            )
+            self._active_rank_enabled = bool(self._active_adapter_indices)
         self._update_base_metadata(mapping, lora_index_to_id, max_loras, vocab_size)
 
         # Prepare kernel metadata tensors
@@ -255,8 +275,8 @@ class PunicaWrapperXPU(PunicaWrapperBase):
             scale (float): Scaling factor.
             output_slices (tuple[int, ...]): Every slice's size.
             buffer (Optional[torch.Tensor]): Defaults to None.
-            **kwargs: Accepts `add_inputs` (bool, defaults to True); any other
-                keys are ignored.
+            **kwargs: Accepts `add_inputs` (bool, defaults to True) and
+                `adapter_ranks` (slot-to-loaded-rank mapping). Other keys are ignored.
 
         """
         assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
@@ -265,7 +285,32 @@ class PunicaWrapperXPU(PunicaWrapperBase):
             "To minimize overhead, the buffer should be created by "
             ".add_lora_linear() instead of being passed in."
         )
+        if self._active_rank_available and not self._active_rank_enabled:
+            return
         r = lora_b_stacked[0].size(-1)
+        adapter_ranks = kwargs.pop("adapter_ranks", None)
+        if self._active_rank_enabled and adapter_ranks is not None:
+            rank = max(
+                (adapter_ranks.get(i, r) for i in self._active_adapter_indices),
+                default=r,
+            )
+            if (
+                0 < rank < r
+                and x.is_contiguous()
+                and y.is_contiguous()
+                and all(w.is_contiguous() for w in (*lora_a_stacked, *lora_b_stacked))
+            ):
+                torch.ops._xpu_C.lora_linear(
+                    x,
+                    lora_a_stacked,
+                    lora_b_stacked,
+                    y,
+                    self.token_mapping_meta.token_lora_mapping[: x.size(0)],
+                    scale,
+                    rank,
+                    kwargs.pop("add_inputs", True),
+                )
+                return
         buffer = torch.zeros(  # type: ignore
             (len(output_slices), x.size(0), r),
             dtype=x.dtype,

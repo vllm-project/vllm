@@ -468,6 +468,12 @@ vllm serve model --enable-lora --max-lora-rank 64
 vllm serve model --enable-lora --max-lora-rank 256
 ```
 
+On Intel XPU, eager execution with non-sharded LoRA can compute at the largest
+adapter rank used by the current batch while retaining storage sized by
+`max_lora_rank`. This optimization is automatic when `vllm-xpu-kernels` provides
+the `lora_linear` operator. Graph, compiled, fully sharded, and older-kernel
+configurations retain the existing execution path.
+
 ### Restricting LoRA to Specific Modules
 
 The `--lora-target-modules` parameter allows you to restrict which model modules have LoRA applied at deployment time. This is useful for performance tuning when you only need LoRA on specific layers:
