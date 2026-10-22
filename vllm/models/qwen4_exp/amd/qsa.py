@@ -131,6 +131,12 @@ class Qwen4ExpQSAFlashAttentionBackend(FlashAttentionBackend):
 class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
     """Run paged sparse GQA with the QSA Triton kernel."""
 
+    # The QSA reads its KV cache through the Triton kernel below, never
+    # through the FlashAttention library, so the constructor's flash-attn
+    # kv-cache support probe does not apply (the classmethods on the
+    # backend above cover selection; this covers construction).
+    kv_reads_bypass_flash_attn = True
+
     supports_dcp: bool = False
     supports_pcp: bool = False
 
