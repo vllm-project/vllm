@@ -945,12 +945,13 @@ class Scheduler(SchedulerInterface):
                     duplicate_encoder_inputs,
                 )
 
-        # Record the LoRAs in scheduled_running_reqs
+        # Record the LoRAs of all running requests, including those not
+        # scheduled in this step, which can join a later batch.
         scheduled_loras: set[int] = set()
         if self.lora_config:
             scheduled_loras = set(
                 req.lora_request.lora_int_id
-                for req in scheduled_running_reqs
+                for req in self.running
                 if req.lora_request and req.lora_request.lora_int_id > 0
             )
             assert len(scheduled_loras) <= self.lora_config.max_loras
@@ -1125,8 +1126,13 @@ class Scheduler(SchedulerInterface):
                         num_computed_tokens = 0
                         load_kv_async = False
 
-                    # Skip request with pending mm encoding prefetches
-                    if self._ec_transfer_pending(request, num_computed_tokens):
+                    # Include encoder inputs needed to replay the prefix tail.
+                    ec_computed_tokens = num_computed_tokens
+                    if not window_loaded:
+                        ec_computed_tokens = max(
+                            0, num_computed_tokens - self.prefix_replay_tokens
+                        )
+                    if self._ec_transfer_pending(request, ec_computed_tokens):
                         skip_request(request_queue)
                         continue
 
