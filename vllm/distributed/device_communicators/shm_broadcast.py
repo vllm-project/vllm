@@ -45,7 +45,6 @@ from vllm.utils.network_utils import (
 
 logger = init_logger(__name__)
 
-
 SPINLOOP_EXT_ENABLED = False
 if envs.VLLM_USE_SPINLOOP_EXT:
     try:
@@ -408,8 +407,8 @@ def _rebuild_tensor(buf: Any, shape: tuple[int, ...], dtype_str: str) -> torch.T
     Counterpart of `_reduce_tensor`. Note that pickle passes the original
     buffer-providing object from `loads(buffers=...)` straight to this
     function (no `PickleBuffer` wrapper on the receiving side), so `buf` is
-    a `zmq.Frame`, a `memoryview` of a shared-memory ring chunk, or `bytes`
-    if the buffer was serialized in-band.
+    a `zmq.Frame`, an owned `bytearray` from the shared-memory ring, or
+    `bytes`/`bytearray` if the buffer was serialized in-band.
     """
     dtype = getattr(torch, dtype_str)
     assert isinstance(dtype, torch.dtype)
@@ -423,11 +422,8 @@ def _rebuild_tensor(buf: Any, shape: tuple[int, ...], dtype_str: str) -> torch.T
         except ValueError:
             # Empty or read-only frame buffer; fall through to the copy path.
             pass
-    # Shared-memory ring buffer chunks are reused by the writer once all
-    # readers have marked them read, so we must copy out of them. bytearray
-    # (vs bytes) keeps the resulting tensor writable, matching normal tensor
-    # semantics.
-    raw = bytearray(buf)
+    # dequeue already owns SHM buffers. Copy other buffers to keep them writable.
+    raw = buf if isinstance(buf, bytearray) else bytearray(buf)
     if not raw:
         assert 0 in shape
         return torch.empty(shape, dtype=dtype)
@@ -830,6 +826,46 @@ class MessageQueue:
                     return True
             return False
 
+    def _wait_until_readable(
+        self,
+        metadata_buffer,
+        read_timeout: ReadTimeoutWithWarnings,
+    ) -> bool:
+        """Wait for the current block to be readable by this reader."""
+
+        def check_readable():
+            memory_fence()
+            read_flag = metadata_buffer[self.local_reader_rank + 1]
+            written_flag = metadata_buffer[0]
+            return not (not written_flag or read_flag)
+
+        if SPINLOOP_EXT_ENABLED and not check_readable():
+            spinloop(
+                metadata_buffer[0 : self.local_reader_rank + 1],
+                check_readable,
+                timeout=SPINLOOP_TIMEOUT_SECONDS,
+            )
+
+        if check_readable():
+            return True
+
+        # this block is either
+        # (1) not written
+        # (2) already read by this reader
+
+        # for readers, `self.current_idx` is the next block to read
+        # if this block is not ready,
+        # we need to wait until it is written
+        self._spin_condition.wait(timeout_ms=read_timeout.timeout_ms())
+
+        if self.shutting_down:
+            raise RuntimeError("cancelled")
+
+        # if we wait for a long time, log a message
+        if read_timeout.should_warn():
+            logger.info(LONG_WAIT_TIME_LOG_MSG, VLLM_RINGBUFFER_WARNING_INTERVAL)
+        return False
+
     @contextmanager
     def acquire_read(
         self,
@@ -842,39 +878,7 @@ class MessageQueue:
         )
         with self.buffer.get_metadata(self.current_idx) as metadata_buffer:
             while True:
-
-                def check():
-                    memory_fence()
-                    read_flag = metadata_buffer[self.local_reader_rank + 1]
-                    written_flag = metadata_buffer[0]
-                    return not (not written_flag or read_flag)
-
-                if SPINLOOP_EXT_ENABLED and not check():
-                    spinloop(
-                        metadata_buffer[0 : self.local_reader_rank + 1],
-                        check,
-                        timeout=SPINLOOP_TIMEOUT_SECONDS,
-                    )
-
-                if not check():
-                    # this block is either
-                    # (1) not written
-                    # (2) already read by this reader
-
-                    # for readers, `self.current_idx` is the next block to read
-                    # if this block is not ready,
-                    # we need to wait until it is written
-                    self._spin_condition.wait(timeout_ms=read_timeout.timeout_ms())
-
-                    if self.shutting_down:
-                        raise RuntimeError("cancelled")
-
-                    # if we wait for a long time, log a message
-                    if read_timeout.should_warn():
-                        logger.info(
-                            LONG_WAIT_TIME_LOG_MSG, VLLM_RINGBUFFER_WARNING_INTERVAL
-                        )
-
+                if not self._wait_until_readable(metadata_buffer, read_timeout):
                     continue
                 # found a block that is not read by this reader
                 # let caller read from the buffer
@@ -981,7 +985,9 @@ class MessageQueue:
                         buf_offset = offset + 4
                         buf_len = from_bytes_big(buf[offset:buf_offset])
                         offset = buf_offset + buf_len
-                        all_buffers.append(buf[buf_offset:offset])
+                        buffer = buf[buf_offset:offset]
+                        # Out-of-band arrays may outlive this reusable ring slot.
+                        all_buffers.append(buffer if i == 0 else bytearray(buffer))
                     obj = pickle.loads(all_buffers[0], buffers=all_buffers[1:])
             if overflow:
                 obj = MessageQueue.recv(self.local_socket, timeout)
