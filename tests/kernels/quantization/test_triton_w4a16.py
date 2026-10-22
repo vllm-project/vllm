@@ -503,8 +503,6 @@ def test_triton_w4a16_gemm_rows_past_int32_offsets(K, N):
     if not torch.cuda.is_available():
         pytest.skip("CUDA/HIP device not available")
     M = 2**31 // max(K, N) + 128
-    if torch.cuda.mem_get_info()[0] < 2 * M * (K + N) + 2**30:
-        pytest.skip("not enough device memory")
 
     set_random_seed(0)
     G = 128
