@@ -191,25 +191,24 @@ def gdn_inputs(
     num_tokens: int,
     num_heads: tuple[int, int],
     head_dims: tuple[int, int],
+    dtype: torch.dtype = torch.bfloat16,
 ) -> tuple[torch.Tensor, ...]:
     num_qk_heads, num_v_heads = num_heads
     head_dim, v_head_dim = head_dims
     q_shape = (1, num_tokens, num_qk_heads, head_dim)
     q_numel = num_tokens * num_qk_heads * head_dim
-    q = tensor_cache(q_numel, torch.bfloat16).view(q_shape)
-    k = tensor_cache(q_numel, torch.bfloat16).view(q_shape)
+    q = tensor_cache(q_numel, dtype).view(q_shape)
+    k = tensor_cache(q_numel, dtype).view(q_shape)
 
     v_shape = (1, num_tokens, num_v_heads, v_head_dim)
-    v = tensor_cache(num_tokens * num_v_heads * v_head_dim, torch.bfloat16).view(
-        v_shape
-    )
+    v = tensor_cache(num_tokens * num_v_heads * v_head_dim, dtype).view(v_shape)
 
     gate_shape = (num_tokens, num_v_heads)
     gate_numel = num_tokens * num_v_heads
-    a = tensor_cache(gate_numel, torch.bfloat16).view(gate_shape)
-    b = tensor_cache(gate_numel, torch.bfloat16).view(gate_shape)
+    a = tensor_cache(gate_numel, dtype).view(gate_shape)
+    b = tensor_cache(gate_numel, dtype).view(gate_shape)
     A_log = tensor_cache(num_v_heads, torch.float32)
-    dt_bias = tensor_cache(num_v_heads, torch.bfloat16)
+    dt_bias = tensor_cache(num_v_heads, dtype)
     return q, k, v, a, b, A_log, dt_bias
 
 
@@ -310,12 +309,14 @@ def test_chunk_gated_delta_rule_cpu(
     num_heads: tuple[int, int],
     head_dims: tuple[int, int],
     state_dtype: torch.dtype,
+    act_dtype: torch.dtype = torch.bfloat16,
 ) -> None:
     total_tokens = sum(seq_lens)
     q, k, v, a, b, A_log, dt_bias = gdn_inputs(
         num_tokens=total_tokens,
         num_heads=num_heads,
         head_dims=head_dims,
+        dtype=act_dtype,
     )
     _, num_v_heads = num_heads
     head_dim, v_head_dim = head_dims
@@ -462,14 +463,31 @@ def test_chunk_gated_delta_rule_cpu_two_call_split(
     torch.testing.assert_close(out_split, out_full, atol=2e-2, rtol=2e-2)
 
 
-def _conv_inputs(total_tokens: int):
-    x = tensor_cache(total_tokens * CONV_DIM, torch.bfloat16).view(
-        total_tokens, CONV_DIM
+@pytest.mark.parametrize("seq_lens", [[1, 2, 3], [CHUNK_SIZE + 1]])
+@pytest.mark.parametrize("state_dtype", [torch.float32, torch.float16])
+@torch.inference_mode()
+def test_chunk_gated_delta_rule_cpu_fp16_activations(
+    seq_lens: list[int],
+    state_dtype: torch.dtype,
+) -> None:
+    """Float16 query, key, value, and beta must take the chunked kernel.
+
+    ``PREFILL_DTYPE_CASES`` named ``fp16-representative`` varies only the
+    recurrent state. Activations there stay bfloat16.
+    """
+    test_chunk_gated_delta_rule_cpu(
+        seq_lens=seq_lens,
+        num_heads=(2, 4),
+        head_dims=(64, 64),
+        state_dtype=state_dtype,
+        act_dtype=torch.float16,
     )
-    weight = tensor_cache(CONV_DIM * CONV_KERNEL, torch.bfloat16).view(
-        CONV_DIM, CONV_KERNEL
-    )
-    bias = tensor_cache(CONV_DIM, torch.bfloat16)
+
+
+def _conv_inputs(total_tokens: int, dtype: torch.dtype = torch.bfloat16):
+    x = tensor_cache(total_tokens * CONV_DIM, dtype).view(total_tokens, CONV_DIM)
+    weight = tensor_cache(CONV_DIM * CONV_KERNEL, dtype).view(CONV_DIM, CONV_KERNEL)
+    bias = tensor_cache(CONV_DIM, dtype)
     return x, weight, bias
 
 
@@ -1117,8 +1135,9 @@ def test_batch_memcpy_cpu_fallback() -> None:
 
 
 # ---------------------------------------------------------------------------
-# C++ conv (conv.cpp) uses AArch64BF16 or VDPBF16PS, not AMX tiles, so it can
-# run on any AVX-512BF16 CPU; weight is packed on this same predicate at load time.
+# C++ conv (conv.cpp) is selected on AArch64 BF16 or AVX-512BF16. BF16 uses
+# VDPBF16PS; FP16 uses cvtph + fmadd. Neither uses AMX tiles. The FP16
+# specialization is compiled only into the AVX-512 build.
 # ---------------------------------------------------------------------------
 
 _HAS_AVX512_BF16 = torch.cpu._is_avx512_bf16_supported()
@@ -1345,15 +1364,22 @@ def test_causal_conv1d_update_cpu_ds_adapter_wide_multi_token_copyback(
     torch.testing.assert_close(recorded["num_accepted_tokens"], num_accepted_tokens)
 
 
+def _skip_unless_conv_dtype_supported(dtype: torch.dtype) -> None:
+    if dtype is torch.float16 and not _HAS_AVX512_BF16:
+        pytest.skip("FP16 causal-conv tinygemm is compiled only for AVX-512")
+
+
 @pytest.mark.skipif(
     not (_HAS_AVX512_BF16 or gdn_attention.is_arm_bf16()),
     reason="C++ causal_conv1d requires AVX-512BF16 or Arm BF16 support",
 )
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("seq_lens", CONV_EQUIV_SEQ_LENS)
 @torch.inference_mode()
-def test_conv_cpp_matches_torch(seq_lens):
-    """C++ causal_conv1d_fwd_cpu matches the torch fallback within bf16 tol."""
-    x, weight, bias = _conv_inputs(sum(seq_lens))
+def test_conv_cpp_matches_torch(seq_lens, dtype):
+    """C++ causal_conv1d_fwd_cpu matches the torch fallback."""
+    _skip_unless_conv_dtype_supported(dtype)
+    x, weight, bias = _conv_inputs(sum(seq_lens), dtype)
     out_torch, state_torch = _run_prefill_torch(x, weight, bias, seq_lens)
     out_cpp, state_cpp = _run_prefill_cpp(x, weight, bias, seq_lens)
     torch.testing.assert_close(out_cpp, out_torch, atol=1e-2, rtol=1e-2)
@@ -1364,11 +1390,13 @@ def test_conv_cpp_matches_torch(seq_lens):
     not (_HAS_AVX512_BF16 or gdn_attention.is_arm_bf16()),
     reason="C++ causal_conv1d requires AVX-512BF16 or Arm BF16 support",
 )
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("seq_lens", CONV_EQUIV_SEQ_LENS)
 @torch.inference_mode()
-def test_conv_cpp_no_worse_than_torch_vs_fp32(seq_lens):
+def test_conv_cpp_no_worse_than_torch_vs_fp32(seq_lens, dtype):
     """Swapping torch -> C++ conv must not increase error vs an fp32 oracle."""
-    x, weight, bias = _conv_inputs(sum(seq_lens))
+    _skip_unless_conv_dtype_supported(dtype)
+    x, weight, bias = _conv_inputs(sum(seq_lens), dtype)
     oracle = _conv_fp32_oracle(x, weight, bias, seq_lens)
     out_torch, _ = _run_prefill_torch(x, weight, bias, seq_lens)
     out_cpp, _ = _run_prefill_cpp(x, weight, bias, seq_lens)
@@ -1384,13 +1412,15 @@ def test_conv_cpp_no_worse_than_torch_vs_fp32(seq_lens):
     not (_HAS_AVX512_BF16 or gdn_attention.is_arm_bf16()),
     reason="C++ causal_conv1d requires AVX-512BF16 or Arm BF16 support",
 )
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("seq_lens", CONV_EQUIV_SEQ_LENS)
 @torch.inference_mode()
-def test_conv_cpp_weight_packed_matches_torch(seq_lens):
+def test_conv_cpp_weight_packed_matches_torch(seq_lens, dtype):
     """The exact runtime prefill sequence (packed weight + SD-layout
     conv_state view + is_weight_packed=True) must match the torch fallback. Validates
     the native packing + layout handoff."""
-    x, weight, bias = _conv_inputs(sum(seq_lens))
+    _skip_unless_conv_dtype_supported(dtype)
+    x, weight, bias = _conv_inputs(sum(seq_lens), dtype)
     out_torch, _ = _run_prefill_torch(x, weight, bias, seq_lens)
     out_weight_packed, _ = _run_prefill_cpp(
         x, weight, bias, seq_lens, is_weight_packed=True
