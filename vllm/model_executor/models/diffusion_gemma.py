@@ -347,7 +347,7 @@ class DiffusionGemmaForConditionalGeneration(
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality == "image":
-            return "<image_soft_token>"
+            return "<|image|>"
         if modality == "video":
             return "<|video|>"
         raise ValueError(f"Unsupported modality: {modality}")
