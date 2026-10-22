@@ -1222,10 +1222,11 @@ class MLADualRMSPerTokenQuantPattern(
 class MLAQkvAProjDualRMSPerTokenQuantPattern(MLADualRMSPerTokenQuantPattern):
     """Fuse the MLA input projection ``fused_qkv_a_proj`` GEMM,
     q-latent RMSNorm + FP8 per-token quant and kv-latent RMSNorm into
-    ``fused_mla_qkv_a_proj_dual_rms_norm_per_token_quant``.
+    ``fused_mla_qkv_a_proj_dual_rms_norm_per_token_quant``. Other weight shapes
+    keep the GEMM and get ``fused_mla_dual_rms_norm_per_token_quant``.
     """
 
-    GEMM_OP = torch.ops.vllm.rocm_aiter_triton_gemm_a8w8.default
+    GEMM_OP = torch.ops.vllm._rocm_aiter_preshuffled_per_token_w8a8_gemm.default
     QKV_A_PROJ_OP = (
         torch.ops.vllm.fused_mla_qkv_a_proj_dual_rms_norm_per_token_quant.default
     )
@@ -1264,6 +1265,7 @@ class MLAQkvAProjDualRMSPerTokenQuantPattern(MLADualRMSPerTokenQuantPattern):
     @property
     def replacement(self):
         eps = self._epsilon
+        dual_rms_norm_quant = super().replacement
 
         def _replacement(
             x: torch.Tensor,
@@ -1273,6 +1275,11 @@ class MLAQkvAProjDualRMSPerTokenQuantPattern(MLADualRMSPerTokenQuantPattern):
             q_weight: torch.Tensor,
             kv_weight: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            if tuple(weight.shape) != (2112, 7168):
+                projected = self.GEMM_OP(
+                    x, weight, x_scale, weight_scale, None, torch.bfloat16
+                )
+                return dual_rms_norm_quant(projected, q_weight, kv_weight)
             at = self.QKV_A_PROJ_OP(
                 x, x_scale, weight, weight_scale, q_weight, kv_weight, eps, eps
             )

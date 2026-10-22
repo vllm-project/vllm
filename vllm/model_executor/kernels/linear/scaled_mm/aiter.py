@@ -198,9 +198,7 @@ class AiterPreshuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             layer,
             w_name,
             torch.nn.Parameter(
-                w.t()
-                if self.config.weight_shape == (2112, 7168)
-                else rocm_aiter_ops.shuffle_weight(w.t().contiguous()).data,
+                rocm_aiter_ops.shuffle_weight(w.t().contiguous()).data,
                 requires_grad=False,
             ),
         )
@@ -216,8 +214,6 @@ class AiterPreshuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         bias: torch.Tensor | None,
         output_shape: list,
     ) -> torch.Tensor:
-        if self.config.weight_shape == (2112, 7168):
-            return rocm_aiter_ops.triton_gemm_a8w8(A, B, As, Bs, bias, out_dtype)
         return rocm_aiter_ops.preshuffled_per_token_w8a8_gemm(
             A, B, As, Bs, bias, out_dtype
         )

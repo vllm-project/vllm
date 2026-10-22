@@ -949,30 +949,6 @@ def _rocm_aiter_preshuffled_per_token_w8a8_gemm_fake(
     return torch.empty(m, n, dtype=output_dtype, device=A.device)
 
 
-def _rocm_aiter_triton_gemm_a8w8_impl(
-    A: torch.Tensor,
-    B: torch.Tensor,
-    As: torch.Tensor,
-    Bs: torch.Tensor,
-    bias: torch.Tensor | None = None,
-    output_dtype: torch.dtype = torch.float16,
-) -> torch.Tensor:
-    from aiter.ops.triton.gemm_a8w8 import gemm_a8w8
-
-    return gemm_a8w8(A, B, As, Bs.view(1, -1), bias, output_dtype)
-
-
-def _rocm_aiter_triton_gemm_a8w8_fake(
-    A: torch.Tensor,
-    B: torch.Tensor,
-    As: torch.Tensor,
-    Bs: torch.Tensor,
-    bias: torch.Tensor | None = None,
-    output_dtype: torch.dtype = torch.float16,
-) -> torch.Tensor:
-    return torch.empty(A.shape[0], B.shape[0], dtype=output_dtype, device=A.device)
-
-
 def _rocm_aiter_hipb_mm_fp8_impl(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -1846,14 +1822,30 @@ def _fused_mla_qkv_a_proj_dual_rms_norm_per_token_quant_impl(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """MLA per-token FP8 fused_qkv_a_proj + q/kv RMSNorm + q per-token quant."""
     from aiter.ops.triton.fused_fp8_quant import fused_reduce_rms_fp8_group_quant
-    from aiter.ops.triton.gemm_a8w8 import gemm_a8w8
+    from aiter.ops.triton.gemm_a8w8 import gemm_a8w8_preshuffle
 
     from vllm.triton_utils import triton
 
     q_dim, kv_dim = q_weight.shape[0], kv_weight.shape[0]
-    # (NUM_KSPLIT, M, N) fp32 partials, or (M, N) bf16 if the config has no split
-    y = gemm_a8w8(x, weight, x_scale, weight_scale.view(1, -1), skip_reduce=True)
+    if x.shape[0] > 512:
+        y = _rocm_aiter_preshuffled_per_token_w8a8_gemm_impl(
+            x, weight, x_scale, weight_scale, None, torch.bfloat16
+        )
+    else:
+        # (NUM_KSPLIT, M, N) fp32 partials, or (M, N) bf16 if the config has no split
+        y = gemm_a8w8_preshuffle(
+            x,
+            weight.view(weight.shape[0] // 16, -1),
+            x_scale,
+            weight_scale.view(1, -1),
+            skip_reduce=True,
+        )
     q, kv, k_pe = y.split([q_dim, kv_dim, weight.shape[0] - q_dim - kv_dim], dim=-1)
+    if 512 < x.shape[0] < 1024:
+        q_out, q_scale, kv_normed = _fused_mla_dual_rms_norm_per_token_quant_impl(
+            q, q_weight, kv, kv_weight, q_epsilon, kv_epsilon
+        )
+        return q_out, q_scale, kv_normed, k_pe.contiguous()
     split_k = y.dim() == 3
     (q_out, q_scale), _, kv_normed, _, k_pe_out = fused_reduce_rms_fp8_group_quant(
         q,
@@ -3221,12 +3213,6 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
-                op_name="rocm_aiter_triton_gemm_a8w8",
-                op_func=_rocm_aiter_triton_gemm_a8w8_impl,
-                fake_impl=_rocm_aiter_triton_gemm_a8w8_fake,
-            )
-
-            direct_register_custom_op(
                 op_name="rocm_aiter_hipb_mm_fp8",
                 op_func=_rocm_aiter_hipb_mm_fp8_impl,
                 fake_impl=_rocm_aiter_hipb_mm_fp8_fake,
@@ -3564,19 +3550,6 @@ class rocm_aiter_ops:
         output_dtype: torch.dtype = torch.float16,
     ) -> torch.Tensor:
         return torch.ops.vllm._rocm_aiter_preshuffled_per_token_w8a8_gemm(
-            A, B, As, Bs, bias, output_dtype
-        )
-
-    @staticmethod
-    def triton_gemm_a8w8(
-        A: torch.Tensor,
-        B: torch.Tensor,
-        As: torch.Tensor,
-        Bs: torch.Tensor,
-        bias: torch.Tensor | None = None,
-        output_dtype: torch.dtype = torch.float16,
-    ) -> torch.Tensor:
-        return torch.ops.vllm.rocm_aiter_triton_gemm_a8w8(
             A, B, As, Bs, bias, output_dtype
         )
 
