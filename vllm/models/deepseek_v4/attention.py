@@ -764,13 +764,13 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 index_weights,
             )
 
-        if self.indexer_capture is not None:
-            assert self.topk_indices_buffer is not None
-            self.indexer_capture.capture(
-                self.topk_indices_buffer[
-                    : len(hidden_states), : self.indexer_capture.rows.shape[1]
-                ]
-            )
+            if self.indexer_capture is not None:
+                assert self.topk_indices_buffer is not None
+                self.indexer_capture.capture(
+                    self.topk_indices_buffer[
+                        : len(hidden_states), : self.indexer_capture.rows.shape[1]
+                    ]
+                )
 
         # MLA attention writes into the pre-allocated `out` buffer
         # (see _alloc_attn_out).

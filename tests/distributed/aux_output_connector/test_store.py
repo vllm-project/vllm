@@ -187,7 +187,6 @@ def _make_worker(
             shape_per_token=indexer_shape,
             fixed_bytes_per_token=int(np.prod(indexer_shape)) * 4,
             namespace="synthetic-indexer",
-            begin_step=lambda: None,
             release_snapshot=lambda slot: None,
             close=lambda: None,
         )
@@ -417,7 +416,6 @@ def _process_output(
     if worker._indexer is not None:
         worker._indexer.snapshot = lambda n: SimpleNamespace(
             rows=torch.from_numpy(indexer_rows[:n].copy()),
-            valid=torch.ones((n, 1), dtype=torch.bool),
             slot=0,
         )
     metadata = step.metadata if isinstance(step, _WorkerStep) else step
