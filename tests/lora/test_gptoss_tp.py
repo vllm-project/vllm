@@ -177,6 +177,9 @@ def test_gpt_oss_lora_tp2(
 ):
     _enable_deterministic_lora_shrink(monkeypatch)
 
+    # TP>1 with CUDA graph produces garbage output on XPU.
+    extra_kwargs = {"enforce_eager": True} if current_platform.is_xpu() else {}
+
     llm = vllm.LLM(
         MODEL_PATH,
         max_model_len=1024,
@@ -193,6 +196,7 @@ def test_gpt_oss_lora_tp2(
         compilation_config=vllm.config.CompilationConfig(
             cudagraph_specialize_lora=False,
         ),
+        **extra_kwargs,
     )
 
     generate_and_test(llm, gptoss20b_lora_files, lora_id=1)

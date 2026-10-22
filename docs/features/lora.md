@@ -248,6 +248,16 @@ Now, you can specify a base_model_name alongside the name and path using JSON fo
 
 To provide the backward compatibility support, you can still use the old key-value format (name=path), but the `base_model_name` will remain unspecified in that case.
 
+## MXFP4 MoE LoRA on Intel XPU
+
+The native XPU MXFP4 expert backend supports LoRA (for example GPT-OSS
+adapters). Enable adapters with `--enable-lora` and configure them as
+described above.
+
+This path requires unquantized expert inputs and applies routing weights to
+expert outputs. Adapter checkpoint naming and 2D/3D layout requirements still
+apply.
+
 ## Mixing 2D and 3D MoE LoRA Adapters
 
 To serve 2D-format(based on `megatron`) and 3D-format (based on `peft`) adapters from the same engine instance, start the server with `--enable-mixed-moe-lora-format`
