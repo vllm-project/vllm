@@ -85,6 +85,8 @@ class TestUnixSocketScenario:
         msg = str(exc_info.value)
         assert str(uds_path) in msg
         assert "stale socket file" in msg
+        # errno is preserved so out-of-tree callers can still branch on it.
+        assert exc_info.value.errno == errno.EADDRINUSE
         # Must NOT reuse TCP-oriented wording.
         assert "--port" not in msg
         assert "SO_REUSEPORT" not in msg
@@ -119,7 +121,7 @@ class TestTcpBindScenario:
             assert bound_port != 0
             assert listen_address == f"http://127.0.0.1:{bound_port}"
         finally:
-            sock.close()
+            cleanup_listen_socket(sock)
 
     @pytest.mark.parametrize("host", [None, ""])
     def test_default_host_is_0000(self, host):
@@ -129,7 +131,7 @@ class TestTcpBindScenario:
             bound_port = sock.getsockname()[1]
             assert listen_address == f"http://0.0.0.0:{bound_port}"
         finally:
-            sock.close()
+            cleanup_listen_socket(sock)
 
     def test_hostname_preserved(self):
         # ``--host localhost`` must be preserved, not rewritten to
@@ -141,7 +143,7 @@ class TestTcpBindScenario:
             bound_port = sock.getsockname()[1]
             assert listen_address == f"http://localhost:{bound_port}"
         finally:
-            sock.close()
+            cleanup_listen_socket(sock)
 
     def test_ipv6_address_is_bracketed(self, ipv6_loopback_available):
         if not ipv6_loopback_available:
@@ -154,7 +156,7 @@ class TestTcpBindScenario:
             bound_port = sock.getsockname()[1]
             assert listen_address == f"http://[::1]:{bound_port}"
         finally:
-            sock.close()
+            cleanup_listen_socket(sock)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -177,7 +179,7 @@ class TestSslScenario:
             bound_port = sock.getsockname()[1]
             assert listen_address == f"https://127.0.0.1:{bound_port}"
         finally:
-            sock.close()
+            cleanup_listen_socket(sock)
 
     def test_partial_ssl_files_stays_http(self):
         # Only one of keyfile/certfile: must NOT report https.
@@ -191,7 +193,7 @@ class TestSslScenario:
         try:
             assert listen_address.startswith("http://")
         finally:
-            sock.close()
+            cleanup_listen_socket(sock)
 
     def test_default_ssl_params_fall_back_to_http(self):
         # ``ssl_keyfile`` / ``ssl_certfile`` default to ``None``; omitting them
@@ -202,7 +204,7 @@ class TestSslScenario:
         try:
             assert listen_address.startswith("http://")
         finally:
-            sock.close()
+            cleanup_listen_socket(sock)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -259,6 +261,8 @@ class TestReusePortScenario:
         msg = str(exc_info.value)
         assert "not supported" in msg
         assert "--api-server-count" in msg
+        # errno must survive so supervisors can still match ENOPROTOOPT.
+        assert exc_info.value.errno == errno.ENOPROTOOPT
         assert exc_info.value.__cause__ is err
 
     def test_unsupported_platform_without_reuse_port_propagates(self):
@@ -291,6 +295,7 @@ class TestPortConflictScenario:
         msg = str(exc_info.value)
         assert f"Port {port}" in msg
         assert "unknown process" in msg
+        assert exc_info.value.errno == errno.EADDRINUSE
 
     def test_message_preserves_original_error_and_queries_port(self):
         err = OSError(errno.EADDRINUSE, "Address already in use")
@@ -305,6 +310,7 @@ class TestPortConflictScenario:
             setup_listen_address(host="127.0.0.1", port=8000, reuse_port=False)
 
         assert exc_info.value.__cause__ is err
+        assert exc_info.value.errno == errno.EADDRINUSE
         assert "Port 8000" in str(exc_info.value)
         find_mock.assert_called_once_with(8000)
 
@@ -326,6 +332,7 @@ class TestPortConflictScenario:
             setup_listen_address(host="127.0.0.1", port=8000, reuse_port=False)
 
         msg = str(exc_info.value)
+        assert exc_info.value.errno == errno.EADDRINUSE
         assert "pid=4321" in msg
         assert "name='nginx'" in msg
         assert "cmd='nginx -g daemon off;'" in msg
@@ -348,6 +355,7 @@ class TestPortConflictScenario:
         msg = str(exc_info.value)
         assert "unknown process (query failed)" in msg
         assert "Port 8000" in msg
+        assert exc_info.value.errno == errno.EADDRINUSE
 
     def test_hint_suggests_reuse_port_when_not_enabled(self):
         err = OSError(errno.EADDRINUSE, "Address already in use")
@@ -360,6 +368,7 @@ class TestPortConflictScenario:
                 setup_listen_address(host="127.0.0.1", port=8000, reuse_port=False)
 
         msg = str(exc_info.value)
+        assert exc_info.value.errno == errno.EADDRINUSE
         assert "SO_REUSEPORT" in msg
         assert "--api-server-count > 1" in msg
 
@@ -379,6 +388,7 @@ class TestPortConflictScenario:
                 setup_listen_address(host="127.0.0.1", port=8000, reuse_port=True)
 
         msg = str(exc_info.value)
+        assert exc_info.value.errno == errno.EADDRINUSE
         assert "SO_REUSEPORT" in msg  # mention is fine
         # Must NOT tell the user to enable SO_REUSEPORT — they already did.
         assert "enable" not in msg.lower()
@@ -397,11 +407,17 @@ class TestPermissionScenario:
         err = OSError(errno.EACCES, "Permission denied")
 
         with mock.patch(f"{_MODULE}.create_server_socket", side_effect=err):
-            with pytest.raises(OSError, match="Permission denied binding") as exc_info:
+            # ``OSError(errno.EACCES, msg)`` auto-maps to ``PermissionError``;
+            # asserting the subclass guards against regressing to a plain
+            # ``OSError(msg)`` (which would silently drop the mapping).
+            with pytest.raises(
+                PermissionError, match="Permission denied binding"
+            ) as exc_info:
                 setup_listen_address(host="127.0.0.1", port=80, reuse_port=False)
 
         msg = str(exc_info.value)
         assert "127.0.0.1:80" in msg
+        assert exc_info.value.errno == errno.EACCES
         assert exc_info.value.__cause__ is err
 
 

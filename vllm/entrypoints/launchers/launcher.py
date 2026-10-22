@@ -328,7 +328,7 @@ def terminate_if_errored(server: uvicorn.Server, engine: EngineClient):
 
 
 @instrument(span_name="API server setup")
-def setup_server(args, *, reuse_port: bool):
+def setup_server(args, *, reuse_port: bool) -> tuple[str, socket.socket]:
     """Validate API server args and create the server socket."""
     log_version_and_model(logger, VLLM_VERSION, args.model)
     log_non_default_args(args)

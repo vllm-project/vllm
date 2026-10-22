@@ -56,11 +56,12 @@ def setup_listen_address(
             # port") would be confusing for UDS, so give path-specific ones.
             if e.errno == errno.EADDRINUSE:
                 raise OSError(
+                    e.errno,
                     f"Unix socket {uds!r} already exists. Another "
                     f"process may be listening on it, or a previous run left "
                     f"a stale socket file. Remove the file (rm {uds}) "
                     f"if no process is using it, or pass a different --uds "
-                    f"path."
+                    f"path.",
                 ) from e
             raise
         listen_address = f"unix:{uds}"
@@ -88,17 +89,20 @@ def setup_listen_address(
                         "(--api-server-count > 1)."
                     )
                 raise OSError(
-                    f"Port {port} is already in use (holder: {holder}). {hint}"
+                    e.errno,
+                    f"Port {port} is already in use (holder: {holder}). {hint}",
                 ) from e
             if e.errno == errno.EACCES:
                 raise OSError(
-                    f"Permission denied binding to {host or '0.0.0.0'}:{port}."
+                    e.errno,
+                    f"Permission denied binding to {host or '0.0.0.0'}:{port}.",
                 ) from e
             if e.errno == errno.ENOPROTOOPT and reuse_port:
                 raise OSError(
+                    e.errno,
                     "SO_REUSEPORT is not supported on this platform. "
                     "Cannot use --api-server-count > 1 here; use a single "
-                    "API server."
+                    "API server.",
                 ) from e
             raise
 
@@ -135,7 +139,7 @@ def cleanup_listen_socket(sock: socket.socket, uds_path: str | None = None) -> N
     with contextlib.suppress(OSError):
         sock.close()
     if uds_path:
-        with contextlib.suppress(FileNotFoundError, OSError):
+        with contextlib.suppress(OSError):
             os.unlink(uds_path)
 
 
