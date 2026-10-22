@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
@@ -282,6 +282,7 @@ class UMBPStoreConnectorScheduler:
             else None
         )
         self._lookup_pool = _LookupBlockPool(self.hash_block_size)
+        self._local_cache_lookup: Callable[[int, bytes], bool] | None = None
         if self._lookup_coordinator is not None:
             self._lookup_coordinator.block_pool = self._lookup_pool
             for manager in self._lookup_coordinator.single_type_managers:
@@ -317,6 +318,17 @@ class UMBPStoreConnectorScheduler:
 
     def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
         self._gpu_block_pool = gpu_block_pool
+
+    def bind_local_cache_lookup(self, lookup: Callable[[int, bytes], bool]) -> None:
+        self._local_cache_lookup = lookup
+
+    def _has_local_block(self, group_id: int, block_hash: bytes) -> bool:
+        if self._local_cache_lookup is not None:
+            return self._local_cache_lookup(group_id, block_hash)
+        pool = self._gpu_block_pool
+        return pool is not None and bool(
+            pool.get_cached_block(cast(BlockHash, block_hash), [group_id])
+        )
 
     def bind_namespace(
         self, runtime: UMBPSchedulerHandle, codec: BlockIdentityCodec
@@ -499,10 +511,23 @@ class UMBPStoreConnectorScheduler:
                 }
                 for group_id in self.kv_cache_config.prefix_cacheable_group_ids
             ]
-            skipped_hashes = local_tokens // self.hash_block_size
+            if local_tokens:
+                for group_index, group_id in enumerate(
+                    self.kv_cache_config.prefix_cacheable_group_ids
+                ):
+                    for token_end in range(
+                        self._lookup_units[group_id],
+                        local_tokens + 1,
+                        self._lookup_units[group_id],
+                    ):
+                        block_hash = self._object_hash_at_token_end(
+                            request_hashes, token_end
+                        )
+                        if self._has_local_block(group_id, block_hash):
+                            pool.hits[group_index].add(block_hash)
             hit_blocks, hit_length, _ = coordinator.find_longest_cache_hit(
-                cast(list[BlockHash], request_hashes)[skipped_hashes:],
-                max_external_tokens,
+                cast(list[BlockHash], request_hashes),
+                local_tokens + max_external_tokens,
             )
             block_hashes_by_group = tuple(
                 tuple(
@@ -513,7 +538,7 @@ class UMBPStoreConnectorScheduler:
                 )
                 for group_blocks in hit_blocks
             )
-            return hit_length, block_hashes_by_group
+            return max(0, hit_length - local_tokens), block_hashes_by_group
         finally:
             self._reset_lookup_coordinator()
 
@@ -823,12 +848,11 @@ class UMBPStoreConnectorScheduler:
             for group_index, group_id in enumerate(group_ids):
                 group_block_size = self.group_block_sizes[group_id]
                 start_block = local_tokens // group_block_size
-                for relative_index, block_hash in enumerate(
+                for block_index, block_hash in enumerate(
                     spec.block_hashes_by_group[group_index]
                 ):
-                    if block_hash is None:
+                    if block_index < start_block or block_hash is None:
                         continue
-                    block_index = start_block + relative_index
                     block_id = block_groups[group_index][block_index]
                     if block_id == NULL_BLOCK_ID:
                         raise RuntimeError(

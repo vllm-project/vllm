@@ -229,6 +229,16 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         self.connector_scheduler.bind_gpu_block_pool(gpu_block_pool)
 
+    def bind_kv_cache_manager(self, kv_cache_manager: Any) -> None:
+        super().bind_kv_cache_manager(kv_cache_manager)
+        assert self.connector_scheduler is not None
+
+        def local_cache_hit(group_id: int, block_hash: bytes) -> bool:
+            manager = kv_cache_manager.coordinator.single_type_managers[group_id]
+            return bool(manager.block_pool.get_cached_block(block_hash, [group_id]))
+
+        self.connector_scheduler.bind_local_cache_lookup(local_cache_hit)
+
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:

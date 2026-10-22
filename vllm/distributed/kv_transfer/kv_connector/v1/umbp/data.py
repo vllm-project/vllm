@@ -626,6 +626,7 @@ class LoadSpec:
 
     local_tokens: int
     external_tokens: int
+    # Group block indices start at the beginning of the request.
     block_hashes_by_group: tuple[tuple[bytes | None, ...], ...] = ()
 
     @property
