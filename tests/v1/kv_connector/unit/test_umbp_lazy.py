@@ -15,6 +15,7 @@ from tests.v1.kv_connector.umbp_test_utils import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.data import (
     BlockIdentityCodec,
+    RankTopology,
     StoreEventResult,
     UMBPConnectorWorkerMetadata,
     UMBPNamespace,
@@ -137,6 +138,38 @@ def test_lazy_offload_rechecks_authoritative_runtime_residency():
     assert [plan.key for plan in third.store_plans] == [first.store_plans[0].key]
     assert len(handle.queries) == 3
     scheduler.close()
+
+
+def test_lazy_offload_repairs_a_missing_nonzero_rank():
+    codec = BlockIdentityCodec(UMBPNamespace("lazy-rank-residency"))
+    topology = RankTopology(tp_size=2)
+    rank_keys = codec.keys_for_topology(b"a", topology, (0,))
+    handle = _SchedulerHandle({rank_keys[0]: True})
+    scheduler = UMBPStoreConnectorScheduler(
+        _vllm_config({"lazy_offload": True}, tensor_parallel_size=2, world_size=2),
+        _kv_cache_config(),
+        handle,
+        codec,
+        topology,
+    )
+    block = _block(4, b"a")
+    pool, _ = _pool([None, None, None, None, block], [block])
+    scheduler.bind_gpu_block_pool(pool)
+    try:
+        metadata = scheduler.build_connector_meta(make_scheduler_output())
+        assert [plan.block_id for plan in metadata.store_plans] == [4]
+        assert handle.queries == [list(rank_keys)]
+        scheduler.update_connector_output(
+            SimpleNamespace(
+                kv_connector_worker_meta=UMBPConnectorWorkerMetadata(
+                    store_events={metadata.store_event: StoreEventResult(2)},
+                ),
+            )
+        )
+        handle.hits = dict.fromkeys(rank_keys, True)
+        assert not scheduler.build_connector_meta(make_scheduler_output()).store_plans
+    finally:
+        scheduler.close()
 
 
 @pytest.mark.parametrize("failure", ["exception", "wrong-length"])
