@@ -167,6 +167,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.compilation_config = vllm_config.compilation_config
         self.speculative_config = vllm_config.speculative_config
+        self._adaptive_verification = bool(
+            self.speculative_config
+            and self.speculative_config.enable_adaptive_verification
+        )
         self.checkpoint_builder = MambaPrefillCheckpointBuilder(
             vllm_config, kv_cache_spec
         )
@@ -418,7 +422,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             non_spec_sequence_masks_cpu = ~spec_sequence_masks_cpu
             query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
             spec_query_lens_cpu = query_lens_cpu[spec_sequence_masks_cpu]
-            if spec_query_lens_cpu.numel() > 0:
+            if (
+                spec_query_lens_cpu.numel() > 0
+                and not self._adaptive_verification
+            ):
                 first_spec_sequence_length = int(spec_query_lens_cpu[0])
                 if first_spec_sequence_length > 0 and bool(
                     torch.all(spec_query_lens_cpu == first_spec_sequence_length)
@@ -828,10 +835,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         )
 
         num_accepted_tokens = torch.diff(m.query_start_loc)
-        if (
-            self.vllm_config.speculative_config is not None
-            and self.vllm_config.speculative_config.enable_adaptive_verification
-        ):
+        if self._adaptive_verification:
             # Replay may turn captured one-token requests into fewer multi-token requests,
             # so adaptive verification must capture the speculative path.
             num_decode_draft_tokens_cpu = torch.full_like(

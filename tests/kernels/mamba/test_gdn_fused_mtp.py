@@ -298,6 +298,7 @@ def test_fused_model_path_matches_reference(
         batch, BLOCK_SIZE, device, arange_block_indices=True
     )
     if device_query_lens is not None:
+        # Simulate adaptive verification token reallocation
         assert sum(device_query_lens) == sum(query_lens)
         device_query_start_loc = torch.zeros(
             len(device_query_lens) + 1, dtype=torch.int32, device=device

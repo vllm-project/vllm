@@ -20,6 +20,7 @@ kernel is documented to replicate.
 
 from types import ModuleType
 
+import pytest
 import torch
 
 # Bootstrap the glm5next package before importing kpool_compress directly: its
@@ -59,23 +60,19 @@ SELECT_K = TOPK_TOKENS // KPOOL
 
 def test_decode_scatter_discards_full_graph_token_padding():
     """Adaptive verification can leave fewer live tokens than the graph size."""
-    decode_lens = torch.tensor([3, 3, 0, 0, 0, 0, 0, 0], dtype=torch.int64)
-    # Ten padding tokens is deliberately larger than lmax. They must alias a
-    # valid discard cell instead of indexing columns 0..9 in a width-3 row.
-    tokens = torch.arange(16, dtype=torch.int32)
-    scatter_indices = _build_decode_scatter_indices(decode_lens, 8, 16)
+    decode_lens = torch.tensor([3, 3, 0, 0], dtype=torch.int64)
+    # Six padding tokens is deliberately larger than lmax. They must alias a
+    # valid discard cell instead of indexing columns 0..5 in a width-3 row.
+    tokens = torch.arange(12, dtype=torch.int32)
+    scatter_indices = _build_decode_scatter_indices(decode_lens, 4, 12)
 
     out = _scatter_decode_tokens_by_request(
-        tokens, -1, num_requests=8, lmax=3, scatter_indices=scatter_indices
+        tokens, -1, num_requests=4, lmax=3, scatter_indices=scatter_indices
     )
 
     assert out.tolist() == [
         [0, 1, 2],
         [3, 4, 5],
-        [-1, -1, -1],
-        [-1, -1, -1],
-        [-1, -1, -1],
-        [-1, -1, -1],
         [-1, -1, -1],
         [-1, -1, -1],
     ]
@@ -93,40 +90,32 @@ def test_decode_scatter_without_graph_padding_is_unchanged():
     assert out.tolist() == [[0, -1, -1], [1, 2, 3], [4, 5, -1]]
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
 @torch.inference_mode()
 def test_decode_scatter_cuda_graph_replays_with_smaller_live_budget():
-    if not current_platform.is_cuda():
-        return
-
-    decode_lens = torch.full((8,), 2, dtype=torch.int64, device="cuda")
-    tokens = torch.arange(16, dtype=torch.int32, device="cuda")
+    decode_lens = torch.full((4,), 3, dtype=torch.int64, device="cuda")
+    tokens = torch.arange(12, dtype=torch.int32, device="cuda")
 
     def run_scatter():
-        scatter_indices = _build_decode_scatter_indices(decode_lens, 8, 16)
+        scatter_indices = _build_decode_scatter_indices(decode_lens, 4, 12)
         return _scatter_decode_tokens_by_request(
-            tokens, -1, num_requests=8, lmax=3, scatter_indices=scatter_indices
+            tokens, -1, num_requests=4, lmax=3, scatter_indices=scatter_indices
         )
 
     # Warm allocation and repeat_interleave kernels before capture.
     run_scatter()
-    torch.cuda.synchronize()
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         out = run_scatter()
 
     decode_lens.copy_(
-        torch.tensor([3, 3, 0, 0, 0, 0, 0, 0], dtype=torch.int64, device="cuda")
+        torch.tensor([3, 3, 0, 0], dtype=torch.int64, device="cuda")
     )
     graph.replay()
-    torch.cuda.synchronize()
 
     assert out.cpu().tolist() == [
         [0, 1, 2],
         [3, 4, 5],
-        [-1, -1, -1],
-        [-1, -1, -1],
-        [-1, -1, -1],
-        [-1, -1, -1],
         [-1, -1, -1],
         [-1, -1, -1],
     ]
