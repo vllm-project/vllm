@@ -123,6 +123,7 @@
 /vllm/v1/worker/gpu @WoosukKwon @njhill @yewentao256
 /vllm/v1/worker/gpu/kv_connector.py @orozery
 /vllm/v1/worker/gpu/model_states/mamba_hybrid.py @WoosukKwon @njhill @yewentao256 @ZJY0516
+/vllm/v1/worker/gpu/spec_decode @WoosukKwon @njhill @yewentao256 @TheEpicDolphin
 
 # CI & building
 /.buildkite @Harry-Chen @khluu
@@ -164,6 +165,9 @@
 /requirements/docs.txt @hmellor
 .readthedocs.yaml @hmellor
 mkdocs.yaml @hmellor
+
+# Model recipes
+/recipes @esmeetu
 
 # Linting
 /tools/pre_commit/.markdownlint.yaml @hmellor

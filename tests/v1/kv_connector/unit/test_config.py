@@ -5,7 +5,12 @@
 
 import pytest
 
-from vllm.config import CacheConfig, KVTransferConfig, ParallelConfig, VllmConfig
+from vllm.config import (
+    CacheConfig,
+    KVTransferConfig,
+    ParallelConfig,
+    VllmConfig,
+)
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 
 pytestmark = pytest.mark.cpu_test
@@ -80,6 +85,7 @@ def test_kv_connector(
         return
 
     kv_transfer_config = vllm_config.kv_transfer_config
+    assert kv_transfer_config is not None
     kv_connector_extra_config = kv_transfer_config.kv_connector_extra_config
 
     assert kv_transfer_config.kv_connector == expected_backend
@@ -160,7 +166,8 @@ def test_kv_connector_allows_expandable_segments_with_cumem_allocator(
 @pytest.mark.parametrize(
     ("kv_connector", "extra_config", "env"),
     [
-        ("NixlConnector", {}, None),
+        ("NixlConnector", {"backends": ["LIBFABRIC"]}, None),
+        ("NixlPushConnector", {}, None),
         ("MooncakeConnector", {"mooncake_protocol": "tcp"}, None),
         ("MooncakeConnector", {}, "MC_USE_TENT"),
     ],
@@ -203,6 +210,7 @@ def test_kv_offloading_size_only_uses_native_default():
     )
 
     kv_transfer_config = vllm_config.kv_transfer_config
+    assert kv_transfer_config is not None
     kv_connector_extra_config = kv_transfer_config.kv_connector_extra_config
     assert kv_transfer_config.kv_connector == "OffloadingConnector"
     assert kv_transfer_config.kv_role == "kv_both"
