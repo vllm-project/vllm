@@ -82,12 +82,7 @@ logger = init_logger(__name__)
 
 
 class ExceptionWithKVConnectorOutput(Exception):
-    """Exception that carries KV connector output for fault tolerance.
-
-    When a worker fails but KV transfer state needs to be preserved,
-    this exception is used to pass the kv_connector_output along with
-    the error information.
-    """
+    """Carries a worker's KV connector output along with its failure."""
 
     def __init__(self, error_msg: str, kv_connector_output: KVConnectorOutput | None):
         super().__init__(error_msg)
@@ -484,8 +479,6 @@ class MultiprocExecutor(Executor):
                 else:
                     responses.append(result)
 
-            # If any worker failed, extract KV connector outputs, merge them,
-            # then raise exception
             if has_failure:
                 kv_connector_outputs: list[KVConnectorOutput | None] = []
                 for resp in responses:
@@ -1069,8 +1062,6 @@ class WorkerProc:
                     output = e
 
         if isinstance(output, ExceptionWithKVConnectorOutput):
-            # FT scenario: worker failed but we extracted KV connector state
-            # so that KV transfer progress is not lost.
             result: tuple[WorkerProc.ResponseStatus, Any] = (
                 WorkerProc.ResponseStatus.FAILURE_WITH_KV_OUTPUT,
                 output.kv_connector_output,

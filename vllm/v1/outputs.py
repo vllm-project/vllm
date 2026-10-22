@@ -364,10 +364,10 @@ class AsyncModelRunnerOutput(ABC):
 
     @abstractmethod
     def get_kv_connector_output(self) -> KVConnectorOutput | None:
-        """Get the KV connector output for this async output.
+        """Get the underlying kv_connector_output.
 
-        This method should return the pending KV connector output without
-        consuming it, or None if there is no pending output.
+        When get_output() fails, this is used to salvage the step's KV
+        output instead of losing it with the failure.
         """
         pass
 

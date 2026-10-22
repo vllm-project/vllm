@@ -232,8 +232,6 @@ def test_replay_preserves_get_and_clear_fields():
     assert kv.invalid_block_ids == {7}
     assert kv.kv_connector_worker_meta.tags == {"salvaged", "recovered"}
     assert kv.kv_cache_events is not None
-    # Salvaged events are dropped at salvage time; only the live worker's
-    # events survive.
     all_token_ids = sorted(
         tuple(e.token_ids) for e in kv.kv_cache_events.get_all_events()
     )
@@ -279,19 +277,13 @@ def test_salvaged_kv_cache_events_do_not_raise_quorum():
     events = aggregated.kv_connector_output.kv_cache_events
     assert events is not None
     assert events.get_number_of_workers() == 2
-    # Mirror the LMCache consumer: the live workers' event survives; the
-    # salvaged E0 vote was dropped and never enters the quorum.
+    # Mirror the LMCache consumer's take_events.
     assert [e.token_ids for e in lmcache_published(events)] == [[5, 6, 7, 8]]
 
 
 def test_salvaged_votes_dropped_live_votes_unaffected_lmcache_exact_quorum():
-    """Failed rank's event votes arrive at the next step (LMCache).
-
-    The salvaged vote is dropped, so the surviving worker's vote for the
-    same block is published normally under LMCache's exact-match quorum
-    (count == num_workers): a dropped salvaged vote can never overshoot
-    the threshold and take a legitimate live event down with it.
-    """
+    """A dropped salvaged vote must not take a live event down with it
+    (LMCache exact-match quorum)."""
     aggregator = KVOutputAggregator(expected_finished_count=2)
 
     # Failed step: worker 0's vote for block E is salvaged.
@@ -307,18 +299,12 @@ def test_salvaged_votes_dropped_live_votes_unaffected_lmcache_exact_quorum():
 
     events = aggregated.kv_connector_output.kv_cache_events
     assert events is not None
-    # Only the live vote is present; it meets the exact-match quorum (1 of
-    # 1 worker) and is published.
     assert len(events.get_all_events()) == 1
     assert [e.token_ids for e in lmcache_published(events)] == [[1, 2, 3, 4]]
 
 
 def test_salvaged_votes_dropped_live_votes_unaffected_mooncake_quorum():
-    """Failed rank's event votes arrive at the next step (MooncakeStore).
-
-    The salvaged vote is dropped; the surviving worker's vote is published
-    on its own under MooncakeStore's >= quorum.
-    """
+    """Same as the LMCache test, under MooncakeStore's >= quorum."""
     aggregator = KVOutputAggregator(expected_finished_count=2)
 
     # Failed step: worker 0's vote for block E is salvaged.
@@ -339,11 +325,7 @@ def test_salvaged_votes_dropped_live_votes_unaffected_mooncake_quorum():
 
 
 def test_salvaged_event_votes_are_one_shot():
-    """Salvaged event votes are dropped at salvage time and never leak.
-
-    They cannot surface at a later step's quorum, even if the replay step
-    itself is quiet.
-    """
+    """Salvaged votes must not leak into a later step's quorum."""
     aggregator = KVOutputAggregator(expected_finished_count=2)
 
     # Failed step: worker 0's vote for block E0 is salvaged.

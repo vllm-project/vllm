@@ -73,9 +73,6 @@ class KVOutputAggregator:
         self._failed_recving_pending = set[str]()
         self._expected_finished_count = expected_finished_count
 
-        # KV connector outputs salvaged from failed workers (fault
-        # tolerance scenario), replayed through the normal aggregation
-        # loop at the next aggregate() call.
         self._salvaged_outputs: list[KVConnectorOutput] = []
 
     @classmethod
@@ -104,10 +101,6 @@ class KVOutputAggregator:
                     finished_set.add(req_id)
                     del remaining_count_dict[req_id]
 
-        # Replay KV connector outputs salvaged from failed workers (fault
-        # tolerance scenario) through the normal aggregation loop below, so
-        # no transfer progress is lost. Their kv_cache_events were already
-        # dropped at salvage time (see ft_defer_kv_connector_outputs).
         finished_sending = set[str]()
         finished_recving = set[str]()
         aggregated_kv_connector_stats = None
@@ -122,6 +115,8 @@ class KVOutputAggregator:
             assert o is not None
             kv_outputs.append(o.kv_connector_output)
 
+        # Salvaged outputs from failed workers join this round so their
+        # transfer progress isn't lost.
         for kv_output in chain(salvaged, kv_outputs):
             if not kv_output:
                 continue
@@ -207,17 +202,11 @@ class KVOutputAggregator:
     def ft_defer_kv_connector_outputs(
         self, kv_connector_outputs: list[KVConnectorOutput | None]
     ) -> None:
-        """Stash KV connector outputs of failed workers (fault tolerance).
+        """Stash KV connector outputs from failed workers for replay at the
+        next aggregate().
 
-        Stashed outputs are replayed through the normal aggregation loop at
-        the next aggregate() call, so no transfer progress is lost.
-
-        kv_cache_events are dropped to keep the FT path simple. The impact
-        is limited: a dropped event only costs a cache miss until its
-        blocks are stored again, and without FT the failed step's events
-        would be lost with the whole instance anyway. Replaying them
-        instead could perturb the live workers' event quorum (e.g. drop a
-        legitimate event under an exact-match quorum).
+        kv_cache_events are dropped: replaying them could break the live
+        workers' event quorum, and a missed event only costs a cache miss.
         """
         for o in kv_connector_outputs:
             if o is not None:

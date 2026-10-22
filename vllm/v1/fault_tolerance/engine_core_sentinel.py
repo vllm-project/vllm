@@ -107,11 +107,8 @@ class EngineCoreSentinel:
         self._push_status()
 
     def _drain_batch_queue(self) -> None:
-        """Drain the batch queue instead of clearing it directly.
-
-        Consume the get-and-clear kv_connector_output of pre-fault steps
-        via update_from_output() with an empty SchedulerOutput (all
-        requests were aborted, so only connector bookkeeping runs).
+        """Drain the batch queue, feeding leftover kv_connector_outputs to
+        the scheduler via update_from_output() with an empty SchedulerOutput.
         """
         engine = self.engine
         if engine.batch_queue is None:
@@ -123,9 +120,8 @@ class EngineCoreSentinel:
             try:
                 model_output = future.result()
             except Exception as e:
-                # Failed step: kv_connector_output has already been merged
-                # into the executor's KVOutputAggregator (in get_response),
-                # so it is safe to drop the exception here.
+                # Safe to drop: the KV output was already salvaged by the
+                # executor.
                 logger.warning(
                     "[FT] Dropping exception from batch queue during fault "
                     "handling: %s",

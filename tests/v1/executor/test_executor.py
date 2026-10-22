@@ -271,8 +271,6 @@ def test_collective_rpc_worker_failure_merges_kv_output(enable_ft):
         future.result()
 
     if enable_ft:
-        # Outputs from the failed and the surviving worker are salvaged and
-        # stashed for replay; the votes complete at the next aggregate().
         assert len(aggregator._salvaged_outputs) == 2
         aggregated = aggregator.aggregate(
             [
@@ -280,7 +278,9 @@ def test_collective_rpc_worker_failure_merges_kv_output(enable_ft):
                 ModelRunnerOutput(req_ids=[], req_id_to_index={}),
             ]
         )
+        assert aggregated is not None
         kv = aggregated.kv_connector_output
+        assert kv is not None
         assert kv.finished_recving == {"req1"}
         assert kv.invalid_block_ids == {7}
     else:
