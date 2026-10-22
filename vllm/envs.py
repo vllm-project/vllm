@@ -154,6 +154,8 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
+    # Experimental gfx950 MiMo FP8 blockscale SwiGLU/down-projection mono kernel.
+    VLLM_ROCM_MIMO_MONO_MLP: bool = False
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
@@ -1393,6 +1395,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION",
         "NONE",
         ["FP", "INT8", "INT6", "INT4", "INT3", "NONE"],
+    ),
+    "VLLM_ROCM_MIMO_MONO_MLP": lambda: (
+        os.getenv("VLLM_ROCM_MIMO_MONO_MLP", "False").lower() in ("true", "1")
     ),
     # Custom quick allreduce kernel for MI3* cards
     # Due to the lack of the bfloat16 asm instruction, bfloat16
