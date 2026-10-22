@@ -67,11 +67,9 @@ def _resolve_standalone_options(config: UMBPRuntimeConfig) -> dict[str, Any]:
     if not isinstance(endpoint, str) or not endpoint:
         raise ValueError("standalone UMBP requires endpoint")
     normalize_endpoint(endpoint)
-    if "startup_timeout_ms" in options and (
-        type(options["startup_timeout_ms"]) is not int
-        or options["startup_timeout_ms"] <= 0
-    ):
-        raise ValueError("startup_timeout_ms must be a positive integer")
+    for name in ("startup_timeout_ms", "lookup_timeout_ms"):
+        if name in options and (type(options[name]) is not int or options[name] <= 0):
+            raise ValueError(f"{name} must be a positive integer")
     server_options = sorted(
         name
         for name in options
@@ -107,6 +105,11 @@ def _build_client(options: dict[str, Any]) -> Any:
     standalone.address = address
     standalone.auto_start = False
     standalone.startup_timeout_ms = int(options.get("startup_timeout_ms", 30000))
+    if not hasattr(standalone, "lookup_timeout_ms"):
+        raise RuntimeError(
+            "Standalone UMBP requires MORI with lookup_timeout_ms support"
+        )
+    standalone.lookup_timeout_ms = int(options.get("lookup_timeout_ms", 1000))
     client_config.standalone_process = standalone
 
     try:
