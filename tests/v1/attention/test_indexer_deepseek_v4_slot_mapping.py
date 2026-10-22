@@ -667,3 +667,69 @@ def test_indexer_prefill_budget_matches_compressed_workspace(compress_ratio):
     assert len(chunks) > 1
     for req_slice, _ in chunks:
         assert int(compressed_seq_lens[req_slice].sum()) <= workspace_rows
+
+
+@pytest.mark.parametrize(
+    "seq_lens,query_lens,workspace_size,expected",
+    [
+        # 250 fp32 logits: 15 rows x 30 total keys would split, but the logits
+        # are 15 rows x 10 keys wide.
+        ([10, 10, 10], [5, 5, 5], 100, [(slice(0, 3), slice(0, 15))]),
+        # The K workspace still bounds the total keys.
+        (
+            [50, 50, 50],
+            [1, 1, 1],
+            100,
+            [(slice(0, 2), slice(0, 2)), (slice(2, 3), slice(0, 1))],
+        ),
+        # A request wider than the budget is cut at its own width: 2 rows.
+        (
+            [100, 10],
+            [5, 5],
+            1000,
+            [
+                (slice(0, 1), slice(0, 2)),
+                (slice(0, 1), slice(2, 4)),
+                (slice(0, 1), slice(4, 5)),
+                (slice(1, 2), slice(0, 5)),
+            ],
+        ),
+    ],
+)
+def test_split_indexer_prefill_chunks_compressed_logits(
+    seq_lens, query_lens, workspace_size, expected
+):
+    chunks = DeepseekV32IndexerMetadataBuilder._split_indexer_prefill_chunks(
+        torch.tensor(seq_lens),
+        torch.tensor(query_lens),
+        workspace_size,
+        max_logits_bytes=1000,
+        compressed_logits=True,
+    )
+    assert chunks == expected
+
+
+def test_compressed_logits_chunks_fit_budget_in_fewer_chunks():
+    """Every query row is planned once, each chunk fits the K workspace and
+    its [rows, longest request] logits fit the budget, and the plan needs
+    fewer chunks than budgeting rows x total keys."""
+    gen = torch.Generator().manual_seed(0)
+    seq_lens = torch.randint(1, 16384, (32,), generator=gen)
+    query_lens = torch.randint(1, 512, (32,), generator=gen)
+    workspace_size, max_logits_bytes = 1 << 22, 512 << 20
+    split = DeepseekV32IndexerMetadataBuilder._split_indexer_prefill_chunks
+    dense = split(seq_lens, query_lens, workspace_size, max_logits_bytes)
+    chunks = split(
+        seq_lens, query_lens, workspace_size, max_logits_bytes, compressed_logits=True
+    )
+    assert len(chunks) < len(dense)
+
+    first_row = [0, *query_lens.cumsum(0).tolist()]
+    rows: list[int] = []
+    for reqs, query in chunks:
+        assert int(seq_lens[reqs].sum()) <= workspace_size
+        num_rows = query.stop - query.start
+        assert num_rows * int(seq_lens[reqs].max()) * 4 <= max_logits_bytes
+        start = first_row[reqs.start]
+        rows += range(start + query.start, start + query.stop)
+    assert rows == list(range(first_row[-1]))
