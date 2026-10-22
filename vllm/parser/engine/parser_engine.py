@@ -37,6 +37,7 @@ from vllm.tool_parsers.utils import (
     extract_types_from_schema,
     find_tool_name,
     find_tool_properties,
+    schema_admits_any_value,
 )
 
 if TYPE_CHECKING:
@@ -170,8 +171,13 @@ class _ArgsRewriter:
             self._out.append(text[i:j])
         return j
 
-    def _scan_string(self, i: int) -> tuple[str, int] | None:
-        """Return ``(value, end)`` for the closed string at *i*, else None."""
+    def _scan_string(self, i: int) -> tuple[str | None, int] | None:
+        """Return ``(value, end)`` for the closed string at *i*, else None.
+
+        *value* is ``None`` when the string is closed but not valid JSON
+        (e.g. an invalid escape); callers copy it verbatim instead of
+        giving up on everything after it.
+        """
         text = self._text
         escape = False
         for j in range(i + 1, len(text)):
@@ -185,7 +191,7 @@ class _ArgsRewriter:
                     try:
                         return json.loads(text[i : j + 1]), j + 1
                     except ValueError:
-                        return None
+                        return None, j + 1
                 return text[i + 1 : j], j + 1
         return None
 
@@ -220,7 +226,7 @@ class _ArgsRewriter:
                 return self._truncated(i)
             out.append(":")
             i = self._skip_ws(i + 1)
-            i = self._value(i, props.get(key) if props else None)
+            i = self._value(i, props.get(key) if props and key is not None else None)
             if i >= len(text):
                 return i
             i = self._skip_ws(i)
@@ -272,7 +278,7 @@ class _ArgsRewriter:
             if scanned is None:
                 return self._truncated(i)
             value, j = scanned
-            if isinstance(schema, dict):
+            if value is not None and isinstance(schema, dict):
                 coerced, changed = coerce_typed_value(value, schema)
                 if changed:
                     out.append(json.dumps(coerced, ensure_ascii=False))
@@ -293,15 +299,23 @@ class _ArgsRewriter:
             # Not valid JSON as a bare literal; the quoted string form is.
             out.append(f'"{literal}"')
             return j
-        if isinstance(schema, dict) and self._delimited(j):
+        if (
+            isinstance(schema, dict)
+            and self._delimited(j)
+            and not schema_admits_any_value(schema)
+        ):
             types = extract_types_from_schema(schema, fallback=[])
             if types and _literal_type(literal) is not None:
-                # Coerce from the literal text and compare serializations:
-                # integral floats normalize (5.0 -> 5) and values whose type
-                # the schema does not admit are re-encoded (5 -> "5").
+                # Integral floats normalize (5.0 -> 5) and values whose type
+                # the schema does not admit are re-encoded (5 -> "5").  A
+                # numeric literal that no declared type can represent
+                # (1e999 under "number") comes back as its own text: leave it
+                # verbatim rather than turn a number field into a string.
                 coerced = coerce_to_schema_type(literal, types)
                 dumped = json.dumps(coerced, ensure_ascii=False)
-                if dumped != literal:
+                if dumped != literal and not (
+                    isinstance(coerced, str) and "string" not in types
+                ):
                     out.append(dumped)
                     return j
         out.append(text[i:j])
@@ -584,7 +598,8 @@ class ParserEngine(Parser):
 
         Values are coerced via :func:`coerce_typed_value` and non-finite
         float literals are replaced by their quoted string form, so the
-        arguments stay valid JSON, whether or not a schema is available.
+        object's values stay valid JSON, whether or not a schema is
+        available.
         Everything else is kept verbatim — see :class:`_ArgsRewriter` for
         why re-serializing instead would break streamed arguments.  A
         truncated object is corrected as far as its complete tokens allow.
@@ -1250,14 +1265,10 @@ class ParserEngine(Parser):
             return None
 
         prev = slot.streamed_json
-        if slot.name:
-            safe_json, value_streams = self._streaming_safe_args(
-                current_json, slot.name, slot.string_keys
-            )
-        else:
-            safe_json, value_streams = self._safe_arg_prefix(
-                current_json, slot.string_keys
-            )
+        # Reached only once the name was accepted, so slot.name is set.
+        safe_json, value_streams = self._streaming_safe_args(
+            current_json, slot.name, slot.string_keys
+        )
 
         if not safe_json:
             return None

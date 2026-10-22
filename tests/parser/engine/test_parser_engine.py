@@ -878,14 +878,51 @@ class TestFixArgTypes:
         original = '{"count": 7, "extra": 5}'
         assert engine._fix_arg_types(original, "f") == original
 
-    def test_untyped_union_param_keeps_emitted_type(self):
-        """An untyped branch of a union must not inject a string type that
-        stringifies the model's typed value.
+    @pytest.mark.parametrize(
+        ("branch", "input_json"),
+        [
+            ({"type": "string"}, '{"value": 5}'),
+            ({"type": "string"}, '{"value": 5.0}'),
+            ({"type": "boolean"}, '{"value": 1}'),
+        ],
+        ids=["string_branch_int", "string_branch_float", "boolean_branch_int"],
+    )
+    def test_untyped_union_param_keeps_emitted_type(self, branch, input_json):
+        """An untyped branch of a union must not inject a sibling branch's
+        type that rewrites the model's typed value.
+
+        The branch must be one that actually coerces; a ``null`` branch
+        would leave the literal unchanged whether or not the untyped
+        admission is honored.
         """
-        tool = _make_tool("f", {"value": {"anyOf": [{"type": "null"}, {}]}})
+        tool = _make_tool("f", {"value": {"anyOf": [branch, {}]}})
         engine = _make_engine(tools=[tool])
-        result = engine._fix_arg_types('{"value": 5}', "f")
-        assert json.loads(result) == {"value": 5}
+        assert engine._fix_arg_types(input_json, "f") == input_json
+
+    @pytest.mark.parametrize("numeric_type", ["integer", "number"])
+    def test_overflowing_number_literal_under_numeric_schema_stays_verbatim(
+        self, numeric_type
+    ):
+        """A numeric literal no declared type can represent is still valid
+        JSON; it must not be re-encoded as a quoted copy of itself, which
+        would turn a number field into a string.
+        """
+        tool = _make_tool("f", {"n": {"type": numeric_type}})
+        engine = _make_engine(tools=[tool])
+        assert engine._fix_arg_types('{"n": 1e999}', "f") == '{"n": 1e999}'
+
+    def test_invalid_escape_keeps_later_corrections(self):
+        """A closed string that is not valid JSON is copied verbatim; it must
+        not stop correction of the members after it.
+        """
+        tool = _make_tool(
+            "f",
+            {"count": {"type": "integer"}, "note": {"type": "string"}},
+        )
+        engine = _make_engine(tools=[tool])
+        args = '{"a": "\\x41", "count": "5", "note": NaN}'
+        expected = '{"a": "\\x41", "count": 5, "note": "NaN"}'
+        assert engine._fix_arg_types(args, "f") == expected
 
     def test_untyped_union_param_keeps_emitted_string(self):
         """A union admitting any value must not coerce a string argument to
