@@ -44,6 +44,9 @@ _active_binding: contextvars.ContextVar[_CaptureBinding | None] = (
 _skip_capture_tracing: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "vllm_skip_graph_capture_tracing", default=False
 )
+_shape_open: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "vllm_graph_capture_shape_open", default=False
+)
 
 
 @contextmanager
@@ -123,6 +126,66 @@ def graph_capture_profiler(
         _active_binding.reset(token)
 
 
+def _label(kind: str, num_tokens: int, mode: str, binding: _CaptureBinding) -> str:
+    if binding.label_prefix:
+        return f"{kind}_{num_tokens}_{binding.label_prefix}_{mode}"
+    return f"{kind}_{num_tokens}_{mode}"
+
+
+@contextmanager
+def _profiled(binding: _CaptureBinding) -> Iterator[None]:
+    """Enter the binding's profiler, unless a shape session already holds it."""
+    if _shape_open.get():
+        yield
+        return
+    token = _shape_open.set(True)
+    try:
+        with binding.profiler:
+            yield
+    finally:
+        _shape_open.reset(token)
+
+
+@contextmanager
+def graph_capture_shape() -> Iterator[None]:
+    """Hold one profiler session open across a graph shape's warm-up and capture.
+
+    Without it each ``graph_capture_step`` opens its own session. Inside it,
+    ``graph_capture_warmup`` and ``graph_capture_step`` record into the same
+    session, so a shape's warm-up and capture land in one trace file. Does
+    nothing outside a ``graph_capture_profiler`` block.
+    """
+    binding = _active_binding.get()
+    if binding is None:
+        yield
+        return
+    with _profiled(binding):
+        yield
+
+
+@contextmanager
+def graph_capture_warmup(num_tokens: int, mode: str) -> Iterator[None]:
+    """Profile the eager warm-up that precedes a graph shape's capture.
+
+    Records a ``warmup_{num_tokens}_{mode}`` annotation (with the binding's
+    prefix, as ``graph_capture_step`` does). A captured graph records its
+    launches without running them, so the capture alone carries no kernel
+    names; the warm-up runs the same forward eagerly for the same batch
+    descriptor, so its kernels name the launches the capture records. Use it
+    inside ``graph_capture_shape`` so both land in the same trace. Does nothing
+    outside a ``graph_capture_profiler`` block.
+    """
+    binding = _active_binding.get()
+    if binding is None:
+        yield
+        return
+    with (
+        _profiled(binding),
+        torch.profiler.record_function(_label("warmup", num_tokens, mode, binding)),
+    ):
+        yield
+
+
 @contextmanager
 def graph_capture_step(num_tokens: int, mode: str) -> Iterator[None]:
     """Profile the capture of a single graph shape.
@@ -130,16 +193,16 @@ def graph_capture_step(num_tokens: int, mode: str) -> Iterator[None]:
     Records a ``capture_{num_tokens}_{mode}`` annotation, or
     ``capture_{num_tokens}_{label_prefix}_{mode}`` when the active binding
     sets a prefix. Does nothing outside a ``graph_capture_profiler`` block, so
-    capture loops can call this unconditionally.
+    capture loops can call this unconditionally. Inside ``graph_capture_shape``
+    it records into that shape's session instead of opening its own.
     """
     binding = _active_binding.get()
     if binding is None:
         yield
         return
 
-    if binding.label_prefix:
-        label = f"capture_{num_tokens}_{binding.label_prefix}_{mode}"
-    else:
-        label = f"capture_{num_tokens}_{mode}"
-    with binding.profiler, torch.profiler.record_function(label):
+    with (
+        _profiled(binding),
+        torch.profiler.record_function(_label("capture", num_tokens, mode, binding)),
+    ):
         yield
