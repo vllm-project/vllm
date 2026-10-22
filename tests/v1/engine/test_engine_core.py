@@ -875,8 +875,15 @@ def test_pause_synchronizes_device_before_cache_reset(deferred: bool):
 
 def _checkpoint_engine_core_proc(pause_state: PauseState) -> EngineCoreProc:
     core = _pausable_engine_core_proc()
-    core.model_executor.suspend.return_value = None
+    core.model_executor.is_suspended = False
+    core.model_executor.suspend.side_effect = lambda: setattr(
+        core.model_executor, "is_suspended", True
+    )
+    core.model_executor.resume.side_effect = lambda: setattr(
+        core.model_executor, "is_suspended", False
+    )
     core._checkpoint_scheduler_pause_state = None
+    core._checkpoint_suspend_future = None
     core.scheduler.pause_state = pause_state
     core.scheduler.finish_requests.return_value = []
     core.scheduler.set_pause_state.side_effect = lambda state: setattr(
@@ -938,3 +945,73 @@ def test_checkpoint_resume_failure_retains_scheduler_pause():
     core.resume()
     assert core.scheduler.pause_state == PauseState.UNPAUSED
     assert core._checkpoint_scheduler_pause_state is None
+
+
+@pytest.mark.parametrize("deferred", [False, True])
+def test_checkpoint_suspend_is_idempotent(deferred):
+    """Repeated suspends must not synchronize a checkpointed CUDA process."""
+    core = _checkpoint_engine_core_proc(PauseState.UNPAUSED)
+    core.engines_running = deferred
+
+    result = core.suspend(mode="wait")
+    if deferred:
+        assert isinstance(result, Future)
+        assert core.suspend(mode="wait") is result
+        assert len(core._idle_state_callbacks) == 1
+        core.model_executor.collective_rpc.assert_not_called()
+        core.engines_running = False
+        core._notify_idle_state_callbacks()
+        assert result.result(timeout=0) is None
+
+    assert core.is_checkpoint_suspended()
+    assert core.suspend(mode="wait") is None
+    core.model_executor.collective_rpc.assert_called_once_with("synchronize_device")
+    core.model_executor.suspend.assert_called_once_with()
+
+
+@pytest.mark.parametrize("pause_state", list(PauseState))
+def test_checkpoint_resume_rejects_pending_suspend(pause_state):
+    """An early resume must not enable scheduling before the suspend callback."""
+    core = _checkpoint_engine_core_proc(pause_state)
+    core.engines_running = True
+    result = core.suspend(mode="wait")
+    assert isinstance(result, Future)
+
+    with pytest.raises(RuntimeError, match="suspension is still in progress"):
+        core.resume()
+    core.model_executor.resume.assert_not_called()
+    core.resume_scheduler.assert_not_called()
+    assert core.is_scheduler_paused()
+    assert not result.done()
+
+    core.engines_running = False
+    core._notify_idle_state_callbacks()
+    assert result.result(timeout=0) is None
+    assert core.is_checkpoint_suspended()
+    assert core.is_scheduler_paused()
+
+    core.resume()
+    assert not core.is_checkpoint_suspended()
+    assert core.scheduler.pause_state == pause_state
+
+
+@pytest.mark.parametrize("failure_stage", ["pause", "suspend"])
+def test_checkpoint_resume_after_deferred_suspend_failure(failure_stage):
+    """A failed suspension must not leave resume blocked on a pending future."""
+    core = _checkpoint_engine_core_proc(PauseState.UNPAUSED)
+    core.engines_running = True
+    failing_method = (
+        core._reset_caches if failure_stage == "pause" else core.model_executor.suspend
+    )
+    failing_method.side_effect = RuntimeError("suspend failed")
+    result = core.suspend(mode="wait")
+    assert isinstance(result, Future)
+
+    core.engines_running = False
+    core._notify_idle_state_callbacks()
+    with pytest.raises(RuntimeError, match="suspend failed"):
+        result.result(timeout=0)
+
+    core.resume()
+    assert not core.is_checkpoint_suspended()
+    assert core.scheduler.pause_state == PauseState.UNPAUSED

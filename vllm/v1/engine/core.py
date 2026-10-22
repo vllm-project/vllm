@@ -144,6 +144,7 @@ class EngineCore:
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
         self._checkpoint_scheduler_pause_state: PauseState | None = None
+        self._checkpoint_suspend_future: Future[Any] | None = None
         self._pooler_config_logged = False
         if executor_fail_callback is not None:
             self.model_executor.register_failure_callback(executor_fail_callback)
@@ -1058,6 +1059,14 @@ class EngineCore:
             mode: Pause mode - how to deal with any existing requests.
 
         """
+        if (
+            self._checkpoint_suspend_future is not None
+            and not self._checkpoint_suspend_future.done()
+        ):
+            return self._checkpoint_suspend_future
+        if self.model_executor.is_suspended:
+            return None
+
         pause_state = self.scheduler.pause_state
         pause_future = self.pause_scheduler(mode=mode, clear_cache=True)
         if self._checkpoint_scheduler_pause_state is None:
@@ -1069,6 +1078,7 @@ class EngineCore:
             return None
 
         future = Future[Any]()
+        self._checkpoint_suspend_future = future
 
         def pause_complete(f: Future):
             try:
@@ -1082,7 +1092,20 @@ class EngineCore:
         return future
 
     def resume(self) -> None:
-        """Resume GPU state from CUDA checkpoint."""
+        """Resume GPU state from CUDA checkpoint.
+
+        Raises:
+            RuntimeError: Checkpoint suspension is still in progress.
+
+        """
+        if (
+            self._checkpoint_suspend_future is not None
+            and not self._checkpoint_suspend_future.done()
+        ):
+            raise RuntimeError(
+                "Cannot resume while checkpoint suspension is still in progress. "
+                "Wait for suspend() to complete before resuming."
+            )
         self.model_executor.resume()
         pause_state = self._checkpoint_scheduler_pause_state
         if pause_state is not None:
@@ -1092,6 +1115,7 @@ class EngineCore:
                 # Restore a pause held before checkpoint suspension.
                 self.scheduler.set_pause_state(pause_state)
             self._checkpoint_scheduler_pause_state = None
+        self._checkpoint_suspend_future = None
 
     def is_checkpoint_suspended(self) -> bool:
         """Check if engine is checkpoint-suspended."""
