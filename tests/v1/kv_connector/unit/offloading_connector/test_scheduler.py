@@ -334,6 +334,7 @@ def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
     recurrent_event = events_by_group[1]
     assert recurrent_event.block_size == 0
     assert recurrent_event.token_ids == []
+    assert recurrent_event.kv_cache_spec_kind == "mamba"
     assert len(recurrent_event.block_hashes) == 1
     assert recurrent_event.parent_block_hash is None
 
@@ -2501,14 +2502,19 @@ class TestMaximalPrefixLookup:
         "pending_result",
         [LookupResult.RETRY, LookupResult.HIT_PENDING],
     )
-    def test_pending_result_is_not_recorded(
+    def test_pending_result_records_only_allocated_primary(
         self,
         pending_result: LookupResult,
     ):
         sched = _make_scheduler_with_lookup({1: pending_result})
 
         assert _maximal_lookup(sched, to_keys([1])) is None
-        _as_mock(sched._events_tracker.record_lookup).assert_not_called()
+        if pending_result is LookupResult.HIT_PENDING:
+            _as_mock(sched._events_tracker.record_lookup).assert_called_once_with(
+                _LOOKUP_REQ, _LOOKUP_GROUP_CONFIG, 0, to_keys([1])[0]
+            )
+        else:
+            _as_mock(sched._events_tracker.record_lookup).assert_not_called()
 
     def test_retry_defers(self):
         keys = to_keys([1, 2])
@@ -2544,12 +2550,10 @@ class TestMaximalPrefixLookup:
         )
         assert _maximal_lookup(sched, keys) is None
         assert _as_mock(sched.manager.lookup).call_count == 2
-        _as_mock(sched._events_tracker.record_lookup).assert_called_once_with(
-            _LOOKUP_REQ,
-            _LOOKUP_GROUP_CONFIG,
-            1,
-            keys[1],
-        )
+        assert _as_mock(sched._events_tracker.record_lookup).call_args_list == [
+            call(_LOOKUP_REQ, _LOOKUP_GROUP_CONFIG, i, key)
+            for i, key in enumerate(keys)
+        ]
 
     def test_hit_pending_does_not_stop_scan(self):
         """HIT_PENDING defers but does not break — scan continues until miss."""
@@ -2558,7 +2562,9 @@ class TestMaximalPrefixLookup:
         )
         assert _maximal_lookup(sched, to_keys([1, 2, 3])) is None
         assert _as_mock(sched.manager.lookup).call_count == 2
-        _as_mock(sched._events_tracker.record_lookup).assert_not_called()
+        _as_mock(sched._events_tracker.record_lookup).assert_called_once_with(
+            _LOOKUP_REQ, _LOOKUP_GROUP_CONFIG, 0, to_keys([1])[0]
+        )
 
     def test_retry_stops_at_miss(self):
         """RETRY is treated as hit for iteration, but miss stops the scan."""
