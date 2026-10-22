@@ -356,16 +356,15 @@ class FlintAttention(nn.Module):
         attn_output = torch.empty_like(q)
         if plan is not None:
             self._run_decode_attention(q, attn_output, *plan)
-            output, _ = self.o_proj(attn_output)
-            return output
-        _, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        unified_attention_with_output(
-            q.view(num_tokens, self.num_heads, self.head_dim),
-            k.view(num_tokens, self.num_kv_heads, self.head_dim),
-            v.view(num_tokens, self.num_kv_heads, self.head_dim),
-            attn_output.view(num_tokens, self.num_heads, self.head_dim),
-            self.attn.layer_name,
-        )
+        else:
+            _, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            unified_attention_with_output(
+                q.view(num_tokens, self.num_heads, self.head_dim),
+                k.view(num_tokens, self.num_kv_heads, self.head_dim),
+                v.view(num_tokens, self.num_kv_heads, self.head_dim),
+                attn_output.view(num_tokens, self.num_heads, self.head_dim),
+                self.attn.layer_name,
+            )
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -440,7 +439,7 @@ class FlintAttention(nn.Module):
             return None
         k_cache, v_cache, layer_slots = self._cache_views()
         plan = self._decode_plan()
-        if k_cache is None or v_cache is None or layer_slots is None or plan is None:
+        if layer_slots is None or plan is None:
             return None
         layer = self.qkv_proj
         bf16w = layer.weight.dtype == torch.bfloat16

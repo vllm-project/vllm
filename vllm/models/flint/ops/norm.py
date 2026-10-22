@@ -69,7 +69,7 @@ def _launch_norm(x, residual, weight, eps, out):
             eps,
             H=h,
             HAS_RESIDUAL=residual is not None,
-            num_warps=4 if h <= 2048 else 8,
+            num_warps=4,
         )
 
 

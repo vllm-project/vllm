@@ -35,6 +35,7 @@ from .cute_primitives import (
     bf16x2,
     fma,
     lds_f32,
+    mma,
     ptx,
     smem_addr,
     stg_bf16,
@@ -236,31 +237,6 @@ def _st_cluster_f32(addr, a, *, loc=None, ip=None):
         "st.shared::cluster.f32 [$0], $1;",
         "r,f,~{memory}",
         [Uint32(addr), Float32(a)],
-        loc=loc,
-        ip=ip,
-    )
-
-
-@dsl_user_op
-def _mma(a0, a1, a2, a3, b0, b1, c0, c1, c2, c3, *, loc=None, ip=None):
-    return ptx(
-        "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
-        "{$0,$1,$2,$3}, {$4,$5,$6,$7}, {$8,$9}, {$10,$11,$12,$13};",
-        "=f,=f,=f,=f,r,r,r,r,r,r,f,f,f,f",
-        [
-            Uint32(a0),
-            Uint32(a1),
-            Uint32(a2),
-            Uint32(a3),
-            Uint32(b0),
-            Uint32(b1),
-            Float32(c0),
-            Float32(c1),
-            Float32(c2),
-            Float32(c3),
-        ],
-        (Float32,) * 4,
-        effects=False,
         loc=loc,
         ip=ip,
     )
@@ -761,35 +737,32 @@ class _FlintDecodeAttention:
         # weights replace l in ml_smem, the per-head scaled max and sum follow.
         warp = tid // 32
         lane = tid % 32
-        for hh in cutlass.range_constexpr(
-            _GQA // self.num_warps if self.num_warps < _GQA else 1
-        ):
+        for hh in cutlass.range_constexpr(_GQA // self.num_warps):
             h = warp + hh * self.num_warps
-            if h < _GQA:
-                NL = (NSPLIT + 31) // 32
-                mloc = [_neg_inf()] * NL
-                for r in cutlass.range_constexpr(NL):
-                    sidx = lane + 32 * r
-                    if sidx < num_splits:
-                        mloc[r] = lds_f32(ml_smem + (sidx * 16 + h) * 4)
-                mh = mloc[0]
-                for r in cutlass.range_constexpr(1, NL):
-                    mh = cute.arch.fmax(mh, mloc[r])
-                for off in cutlass.range_constexpr(5):
-                    mh = cute.arch.fmax(mh, cute.arch.shuffle_sync_bfly(mh, 1 << off))
-                mh_s = mh * scale_log2
-                lh = Float32(0.0)
-                for r in cutlass.range_constexpr(NL):
-                    sidx = lane + 32 * r
-                    if sidx < num_splits:
-                        corr = _ex2(fma(mloc[r], scale_log2, -mh_s))
-                        lh = lh + corr * lds_f32(ml_smem + (sidx * 16 + 8 + h) * 4)
-                        sts_f32(ml_smem + (sidx * 16 + 8 + h) * 4, corr)
-                for off in cutlass.range_constexpr(5):
-                    lh = lh + cute.arch.shuffle_sync_bfly(lh, 1 << off)
-                if lane == 0:
-                    sts_f32(ml_smem + (NSPLIT * 16 + h) * 4, mh_s)
-                    sts_f32(ml_smem + (NSPLIT * 16 + 8 + h) * 4, lh)
+            NL = (NSPLIT + 31) // 32
+            mloc = [_neg_inf()] * NL
+            for r in cutlass.range_constexpr(NL):
+                sidx = lane + 32 * r
+                if sidx < num_splits:
+                    mloc[r] = lds_f32(ml_smem + (sidx * 16 + h) * 4)
+            mh = mloc[0]
+            for r in cutlass.range_constexpr(1, NL):
+                mh = cute.arch.fmax(mh, mloc[r])
+            for off in cutlass.range_constexpr(5):
+                mh = cute.arch.fmax(mh, cute.arch.shuffle_sync_bfly(mh, 1 << off))
+            mh_s = mh * scale_log2
+            lh = Float32(0.0)
+            for r in cutlass.range_constexpr(NL):
+                sidx = lane + 32 * r
+                if sidx < num_splits:
+                    corr = _ex2(fma(mloc[r], scale_log2, -mh_s))
+                    lh = lh + corr * lds_f32(ml_smem + (sidx * 16 + 8 + h) * 4)
+                    sts_f32(ml_smem + (sidx * 16 + 8 + h) * 4, corr)
+            for off in cutlass.range_constexpr(5):
+                lh = lh + cute.arch.shuffle_sync_bfly(lh, 1 << off)
+            if lane == 0:
+                sts_f32(ml_smem + (NSPLIT * 16 + h) * 4, mh_s)
+                sts_f32(ml_smem + (NSPLIT * 16 + 8 + h) * 4, lh)
         cute.arch.sync_threads()
         m_all_s = lds_f32(ml_smem + (NSPLIT * 16 + eh) * 4)
         l_all = lds_f32(ml_smem + (NSPLIT * 16 + 8 + eh) * 4)
@@ -889,18 +862,17 @@ class _FlintDecodeAttention:
         for c in cutlass.range_constexpr(8):
             i = c // 2
             h = c % 2
-            frag = (
+            a = (
                 kv[4 * i + 2 * h],
                 kv[16 + 4 * i + 2 * h],
                 kv[4 * i + 2 * h + 1],
                 kv[16 + 4 * i + 2 * h + 1],
-                qf[4 * i + 2 * h],
-                qf[4 * i + 2 * h + 1],
             )
+            b0, b1 = qf[4 * i + 2 * h], qf[4 * i + 2 * h + 1]
             if cutlass.const_expr(c % 2 == 0):
-                sa = list(_mma(*frag, *sa))
+                sa = mma(sa, a, b0, b1)
             else:
-                sb = list(_mma(*frag, *sb))
+                sb = mma(sb, a, b0, b1)
         s0 = sa[0] + sb[0]
         s1 = sa[1] + sb[1]
         s2 = sa[2] + sb[2]
@@ -956,17 +928,16 @@ class _FlintDecodeAttention:
             vb = kv[32 + 4 * (1 * 2 + hh) + wi]
             vc = kv[32 + 4 * (2 * 2 + hh) + wi]
             vd = kv[32 + 4 * (3 * 2 + hh) + wi]
-            acc[4 * j], acc[4 * j + 1], acc[4 * j + 2], acc[4 * j + 3] = _mma(
-                _prmt(va, vb, 0x5410),
-                _prmt(va, vb, 0x7632),
-                _prmt(vc, vd, 0x5410),
-                _prmt(vc, vd, 0x7632),
+            acc[4 * j], acc[4 * j + 1], acc[4 * j + 2], acc[4 * j + 3] = mma(
+                (acc[4 * j], acc[4 * j + 1], acc[4 * j + 2], acc[4 * j + 3]),
+                (
+                    _prmt(va, vb, 0x5410),
+                    _prmt(va, vb, 0x7632),
+                    _prmt(vc, vd, 0x5410),
+                    _prmt(vc, vd, 0x7632),
+                ),
                 b0,
                 b1,
-                acc[4 * j],
-                acc[4 * j + 1],
-                acc[4 * j + 2],
-                acc[4 * j + 3],
             )
         return mn0, mn1, l0, l1
 

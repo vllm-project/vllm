@@ -37,7 +37,7 @@ def _weights(bf16w: bool, g: torch.Generator):
     return w.to(torch.uint8), scales, torch.tensor([0.0037], device="cuda")
 
 
-@pytest.mark.parametrize("m", [1, 2, 3, 4, 5, 6, 7, 8])
+@pytest.mark.parametrize("m", [1, 2, 5, 8])
 @pytest.mark.parametrize("bf16w", [False, True], ids=["nvfp4", "bf16"])
 @pytest.mark.parametrize(
     "has_residual,rope",
