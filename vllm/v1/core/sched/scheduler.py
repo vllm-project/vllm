@@ -451,7 +451,7 @@ class Scheduler(SchedulerInterface):
             self.perf_metrics = ModelMetrics(vllm_config)
 
         self.aux_output_connector = (
-            AuxOutputSchedulerConnector()
+            AuxOutputSchedulerConnector(self.hash_block_size)
             if vllm_config.aux_output_config.enabled
             else None
         )
@@ -941,12 +941,13 @@ class Scheduler(SchedulerInterface):
                     duplicate_encoder_inputs,
                 )
 
-        # Record the LoRAs in scheduled_running_reqs
+        # Record the LoRAs of all running requests, including those not
+        # scheduled in this step, which can join a later batch.
         scheduled_loras: set[int] = set()
         if self.lora_config:
             scheduled_loras = set(
                 req.lora_request.lora_int_id
-                for req in scheduled_running_reqs
+                for req in self.running
                 if req.lora_request and req.lora_request.lora_int_id > 0
             )
             assert len(scheduled_loras) <= self.lora_config.max_loras
@@ -1270,8 +1271,10 @@ class Scheduler(SchedulerInterface):
                     )
 
                     if num_new_tokens == 0:
-                        # The request cannot be scheduled.
-                        break
+                        # The request cannot be scheduled. Requeue it so it does
+                        # not stall the requests behind it.
+                        skip_request(request_queue)
+                        continue
 
                 # During async KV load, no forward pass is run yet.
                 # Allocate speculative lookahead slots later to avoid
@@ -2007,11 +2010,12 @@ class Scheduler(SchedulerInterface):
                 # NOTE(woosuk): We assume that the encoder input tokens should
                 # be processed altogether, as the encoder usually uses
                 # bidirectional attention.
-                if num_computed_tokens + shift_computed_tokens < start_pos:
+                if num_computed_tokens < start_pos:
                     # We only schedule the decoder tokens just before the
-                    # encoder input.
-                    num_new_tokens = start_pos - (
-                        num_computed_tokens + shift_computed_tokens
+                    # encoder input. No drafter shift here: its read-ahead into
+                    # this unencoded input falls back to token embeddings.
+                    num_new_tokens = min(
+                        num_new_tokens, start_pos - num_computed_tokens
                     )
                 else:
                     # Because of prefix caching, num_computed_tokens is greater
@@ -2606,11 +2610,6 @@ class Scheduler(SchedulerInterface):
         if not cached_encoder_input_ids:
             return
 
-        # Defer the free by the drafter's look-ahead so an entry stays
-        # referenced until the drafter's read-ahead has also passed it,
-        # mirroring the shift the encoder scheduling path applies.
-        spec_lookahead = self.num_prefill_lookahead
-
         # Here, we use list(set) to avoid modifying the set while iterating
         # over it.
         for input_id in list(cached_encoder_input_ids):
@@ -2623,12 +2622,13 @@ class Scheduler(SchedulerInterface):
                 # KVs have been calculated and cached already.
                 self._free_encoder_input(request, input_id)
             elif (
-                start_pos + num_tokens + spec_lookahead
+                start_pos + num_tokens
                 <= request.num_computed_tokens - request.num_output_placeholders
             ):
-                # Processed, stored in the decoder KV cache, and far enough past
-                # the placeholder range (plus the drafter's look-ahead) that no
-                # rejection or drafter gather can reference it.
+                # Processed, stored in the decoder KV cache, and past the
+                # placeholder range with no pending rejection that could roll
+                # back into it. The drafter only reads ahead of
+                # num_computed_tokens, so it cannot reference this input either.
                 self._free_encoder_input(request, input_id)
 
     def _free_encoder_input(self, request: Request, input_id: int) -> None:
@@ -2701,6 +2701,9 @@ class Scheduler(SchedulerInterface):
     def get_kv_cache_usage(self) -> float:
         """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
         return self.kv_cache_manager.usage
+
+    def has_request(self, request_id: str) -> bool:
+        return request_id in self.requests
 
     def add_request(self, request: Request) -> None:
         existing = self.requests.get(request.request_id)
