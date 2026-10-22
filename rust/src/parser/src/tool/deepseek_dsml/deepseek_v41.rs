@@ -12,12 +12,13 @@ use crate::tool::{Result, StructuralTagBuilder, Tool, ToolParser, ToolParserOutp
 pub struct DeepSeekV41ToolParser(DeepSeekDsmlToolParser);
 
 impl ToolParser for DeepSeekV41ToolParser {
-    fn create(tools: &[Tool], _tokenizer: DynTokenizer) -> Result<Box<dyn ToolParser>>
+    fn create(tools: &[Tool], tokenizer: DynTokenizer) -> Result<Box<dyn ToolParser>>
     where
         Self: Sized + 'static,
     {
         Ok(Box::new(Self(DeepSeekDsmlToolParser::new(
             tools,
+            tokenizer.as_ref(),
             DsmlTokens::V41,
         ))))
     }

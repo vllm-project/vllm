@@ -13,9 +13,9 @@ use openai_protocol::common::{Function as OpenAiFunction, Tool as OpenAiTool};
 use tool_parser::traits::ToolParser as ExternalToolParser;
 pub(super) use unified::{attributed_chunks, feed_unified_parser};
 use vllm_parser::tool::test_utils::collect_stream;
-use vllm_parser::tool::{Tool, ToolParser};
-use vllm_tokenizer::DynTokenizer;
+use vllm_parser::tool::{Tool, ToolParser, ToolParserOutput};
 use vllm_tokenizer::test_utils::TestTokenizer;
+use vllm_tokenizer::{DecodedText, DynTokenizer};
 
 pub(super) fn openai_tools(tools: &[Tool]) -> Vec<OpenAiTool> {
     tools
@@ -40,6 +40,21 @@ pub(super) fn test_tokenizer() -> DynTokenizer {
 pub(super) fn feed_parser(parser: &mut dyn ToolParser, chunks: &[&str]) -> (String, usize) {
     let result = collect_stream(parser, chunks);
     (result.normal_text(), result.calls().len())
+}
+
+/// Feed token-attributed chunks (see [`attributed_chunks`]) through a tool
+/// parser and return its normal text and call count.
+pub(super) fn feed_attributed_parser(
+    parser: &mut dyn ToolParser,
+    chunks: Vec<DecodedText>,
+) -> (String, usize) {
+    let mut output = ToolParserOutput::default();
+    for chunk in chunks {
+        parser.parse_into(chunk, &mut output).expect("chunk should parse");
+    }
+    output.append(parser.finish().expect("stream should finish"));
+    let output = output.coalesce();
+    (output.normal_text(), output.calls().len())
 }
 
 pub(super) fn feed_external_parser(

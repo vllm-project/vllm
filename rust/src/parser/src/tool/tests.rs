@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::sync::Arc;
+
+use vllm_tokenizer::test_utils::TestTokenizer;
 use vllm_tokenizer::{DecodedText, DynTokenizer};
 
 use super::{Result, Tool, ToolCallDelta, ToolParser, ToolParserEvent, ToolParserOutput};
@@ -177,19 +180,33 @@ pub(super) fn assert_tool_framing_preserves_body_whitespace<P: ToolParser + 'sta
     framing: &str,
     call: &str,
 ) {
-    use super::test_utils::{collect_stream, test_tokenizer, test_tools};
+    assert_tool_framing_preserves_body_whitespace_with::<P>(TestTokenizer::new(), framing, call);
+}
 
+/// [`assert_tool_framing_preserves_body_whitespace`] for a parser that resolves
+/// marker tokens from `tokenizer`, fed attributed output.
+pub(super) fn assert_tool_framing_preserves_body_whitespace_with<P: ToolParser + 'static>(
+    tokenizer: TestTokenizer,
+    framing: &str,
+    call: &str,
+) {
+    use super::test_utils::{collect_attributed_stream, test_tools};
+
+    let tokenizer: DynTokenizer = Arc::new(tokenizer);
+    let collect_stream = |parser: &mut dyn ToolParser, chunks: &[&str]| {
+        collect_attributed_stream(parser, tokenizer.as_ref(), chunks)
+    };
     let body = "  before\n";
     let wire = format!("{body}{framing}{call}");
     for split in wire.char_indices().map(|(i, _)| i).chain(std::iter::once(wire.len())) {
-        let mut parser = P::create(&test_tools(), test_tokenizer()).unwrap();
+        let mut parser = P::create(&test_tools(), tokenizer.clone()).unwrap();
         let output = collect_stream(parser.as_mut(), &[&wire[..split], &wire[split..]]);
         assert_eq!(output.normal_text(), body, "split {split}");
         assert_eq!(output.calls().len(), 1, "split {split}");
         assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
     }
     let plain = "  no tool\n\n<to";
-    let mut parser = P::create(&test_tools(), test_tokenizer()).unwrap();
+    let mut parser = P::create(&test_tools(), tokenizer.clone()).unwrap();
     assert_eq!(
         collect_stream(parser.as_mut(), &[plain]).normal_text(),
         plain
