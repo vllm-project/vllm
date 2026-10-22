@@ -39,7 +39,7 @@ class AuxOutputConnectorMetadata:
 class AuxRequestOutput:
     token_start: int
     """Logical token offset of the first row in both payloads."""
-    routed_experts_rows: np.ndarray
+    routed_rows: np.ndarray
     """Routed expert IDs per token, or zero-width rows when disabled."""
     indexer_rows: np.ndarray | None = None
     """Raw or encoded indexer selections per token, or None when disabled."""
@@ -139,7 +139,7 @@ class AuxOutputSchedulerConnector:
             f"auxiliary output worker output is missing {request_id}"
         )
         request_output = output[request_id]
-        routed_experts_rows = request_output.routed_experts_rows
+        routed_rows = request_output.routed_rows
         token_end = request.num_tokens - 1
         local_end = token_end - request_output.token_start
         if local_end < 0:
@@ -148,15 +148,15 @@ class AuxOutputSchedulerConnector:
                 f"request={request_id}, token_end={token_end}, "
                 f"output_start={request_output.token_start}, "
                 "output_end="
-                f"{request_output.token_start + len(routed_experts_rows)}"
+                f"{request_output.token_start + len(routed_rows)}"
             )
             return None
-        assert local_end <= len(routed_experts_rows), (
+        assert local_end <= len(routed_rows), (
             "auxiliary output worker output has an invalid token range: "
             f"request={request_id}, token_end={token_end}, "
             f"output_start={request_output.token_start}, "
             "output_end="
-            f"{request_output.token_start + len(routed_experts_rows)}"
+            f"{request_output.token_start + len(routed_rows)}"
         )
         if not self._enable_routed_experts:
             return None
@@ -169,7 +169,7 @@ class AuxOutputSchedulerConnector:
             )
             - request_output.token_start,
         )
-        return routed_experts_rows[start:local_end]
+        return routed_rows[start:local_end]
 
     def take_indexer_output(
         self,
