@@ -370,7 +370,7 @@ def test_flashinfer_cutedsl_fp4_moe(
         )
 
         def run():
-            return cutedsl_experts.apply(
+            out = cutedsl_experts.apply(
                 hidden_states=padded_hidden_states,
                 w1=w1_cutedsl,
                 w2=w2_cutedsl,
@@ -380,7 +380,9 @@ def test_flashinfer_cutedsl_fp4_moe(
                 global_num_experts=e,
                 expert_map=None,
                 apply_router_weight_on_input=False,
-            )[:, :k]
+            )
+            assert isinstance(out, torch.Tensor)
+            return out[:, :k]
 
         cutedsl_output = run()
         assert cutedsl_output.dtype == dtype

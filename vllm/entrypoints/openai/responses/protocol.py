@@ -41,6 +41,9 @@ from openai.types.responses import (
 )
 from openai.types.responses import ResponseCreatedEvent as OpenAIResponseCreatedEvent
 from openai.types.responses import (
+    ResponseIncompleteEvent as OpenAIResponseIncompleteEvent,
+)
+from openai.types.responses import (
     ResponseInProgressEvent as OpenAIResponseInProgressEvent,
 )
 from openai.types.responses.response import IncompleteDetails, ToolChoice
@@ -50,6 +53,7 @@ from openai_harmony import Message as OpenAIHarmonyMessage
 from pydantic import (
     BeforeValidator,
     Field,
+    PrivateAttr,
     ValidationError,
     field_serializer,
     model_validator,
@@ -57,9 +61,11 @@ from pydantic import (
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.generate.base.protocol import (
+    MMPayload,
     PerRequestMetrics,
     StopParam,
     TopLogprobsParam,
+    resolve_return_mm_kwargs_alias,
     validate_cache_salt,
 )
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
@@ -264,7 +270,7 @@ class ResponsesRequest(OpenAIBaseModel):
     min_p: float | None = None
     truncation: Literal["auto", "disabled"] | None = "disabled"
     user: str | None = None
-    skip_special_tokens: bool = True
+    skip_special_tokens: bool | None = None
     include_stop_str_in_output: bool = False
     presence_penalty: float | None = Field(
         default=None,
@@ -332,15 +338,25 @@ class ResponsesRequest(OpenAIBaseModel):
             "if the served model does not use priority scheduling."
         ),
     )
-    return_mm_kwargs: bool = Field(
-        default=True,
+    mm_payload: MMPayload = Field(
+        default="tensors",
         description=(
-            "If false, the render response's `features` set `kwargs_data` "
-            "and `mm_metadata` to null, for callers that need only the token "
-            "layout and item hashes, such as cache-aware routers. Do not send "
-            "such a response to `/inference/v1/generate`, which reads a null "
-            "`kwargs_data` as every item being cached. Only supported on the "
-            "render endpoints; ignored on regular generation endpoints."
+            "What the render response's `features` carry for multimodal "
+            "items. 'tensors' serializes the processed tensors into "
+            "`kwargs_data` and `mm_metadata`. 'none' sets both to null for "
+            "callers that need only the token layout and item hashes, such as "
+            "cache-aware routers. Do not send a 'none' response to "
+            "`/inference/v1/generate` which reads a null `kwargs_data` as "
+            "every item being cached. Only supported on the render endpoints. "
+            "Ignored on regular generation endpoints."
+        ),
+    )
+    return_mm_kwargs: bool | None = Field(
+        default=None,
+        deprecated="return_mm_kwargs is deprecated in favor of the mm_payload field",
+        description=(
+            "Deprecated alias: false is the same as `mm_payload='none'`. "
+            "Ignored when `mm_payload` is set."
         ),
     )
     cache_salt: str | None = Field(
@@ -448,11 +464,19 @@ class ResponsesRequest(OpenAIBaseModel):
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         return TokenizeParams(
             max_total_tokens=model_config.max_model_len,
-            max_output_tokens=self.max_output_tokens or 0,
+            max_output_tokens=self.max_output_tokens,
             truncate_prompt_tokens=-1 if self.truncation != "disabled" else None,
             max_total_tokens_param="max_model_len",
             max_output_tokens_param="max_output_tokens",
         )
+
+    _grammar_from_parser: bool = PrivateAttr(default=False)
+    """CAUTION: Should only be set by the parser's adjust_request."""
+
+    _parser_structured_outputs: StructuredOutputsParams | None = PrivateAttr(
+        default=None
+    )
+    """Parser-derived constraints that preserve the public request's text metadata."""
 
     _DEFAULT_SAMPLING_PARAMS = {
         "temperature": 1.0,
@@ -463,6 +487,8 @@ class ResponsesRequest(OpenAIBaseModel):
 
     def extract_structured_outputs(self) -> StructuredOutputsParams | None:
         """Normalize request constraints into ``StructuredOutputsParams``."""
+        if self._parser_structured_outputs is not None:
+            return self._parser_structured_outputs
         if self.text is None or self.text.format is None:
             return self.structured_outputs
 
@@ -523,6 +549,11 @@ class ResponsesRequest(OpenAIBaseModel):
         if (frequency_penalty := self.frequency_penalty) is None:
             frequency_penalty = default_sampling_params.get("frequency_penalty", 0.0)
 
+        if (skip_special_tokens := self.skip_special_tokens) is None:
+            skip_special_tokens = default_sampling_params.get(
+                "skip_special_tokens", True
+            )
+
         stop = self.stop if self.stop else []
         if isinstance(stop, str):
             stop = [stop]
@@ -555,7 +586,7 @@ class ResponsesRequest(OpenAIBaseModel):
             logit_bias=self.logit_bias,
             extra_args=extra_args,
             skip_clone=True,  # Created fresh per request, safe to skip clone
-            skip_special_tokens=self.skip_special_tokens,
+            skip_special_tokens=skip_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
         )
 
@@ -567,6 +598,11 @@ class ResponsesRequest(OpenAIBaseModel):
             isinstance(self.include, list)
             and "message.output_text.logprobs" in self.include
         )
+
+    @model_validator(mode="before")
+    @classmethod
+    def apply_return_mm_kwargs_alias(cls, data: Any) -> Any:
+        return resolve_return_mm_kwargs_alias(data)
 
     @model_validator(mode="before")
     @classmethod
@@ -927,6 +963,10 @@ class ResponseCompletedEvent(OpenAIResponseCompletedEvent):
     response: ResponsesResponse  # type: ignore[override]
 
 
+class ResponseIncompleteEvent(OpenAIResponseIncompleteEvent):
+    response: ResponsesResponse  # type: ignore[override]
+
+
 class ResponseCreatedEvent(OpenAIResponseCreatedEvent):
     response: ResponsesResponse  # type: ignore[override]
 
@@ -939,6 +979,7 @@ StreamingResponsesResponse: TypeAlias = (
     ResponseCreatedEvent
     | ResponseInProgressEvent
     | ResponseCompletedEvent
+    | ResponseIncompleteEvent
     | ResponseOutputItemAddedEvent
     | ResponseOutputItemDoneEvent
     | ResponseContentPartAddedEvent
