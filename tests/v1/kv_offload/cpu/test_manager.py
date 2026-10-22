@@ -531,6 +531,7 @@ def test_cpu_manager():
     verify_events(
         cpu_manager.take_events(),
         expected_stores=({3, 4, 5}, {6, 7, 8}),
+        # Failed write of 9 never announced residency, so it needs no removal.
         expected_evictions=({4, 5, 3}, {8}),
     )
 
@@ -1077,6 +1078,26 @@ class TestARCPolicy:
         # verify events
         events = list(cpu_manager.take_events())
         assert len(events) > 0  # should have store and eviction events
+
+
+def test_take_events_skips_failed_store_and_drains_once():
+    """A failed store announces nothing; a partially consumed drain never replays."""
+    manager = make_cpu_manager(num_chunks=4, cache_policy="lru", enable_events=True)
+
+    assert manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX) is not None
+    manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX, success=False)
+    assert list(manager.take_events()) == []
+
+    assert manager.prepare_store(to_keys([1]), _EMPTY_REQ_CTX) is not None
+    manager.complete_store(to_keys([1]), _EMPTY_REQ_CTX)
+    assert manager.prepare_store(to_keys([3]), _EMPTY_REQ_CTX) is not None
+    manager.complete_store(to_keys([3]), _EMPTY_REQ_CTX)
+
+    drain = iter(manager.take_events())
+    first = next(drain)
+    assert not first.removed and first.keys == to_keys([1])
+    assert list(manager.take_events()) == []
+    assert [event.keys for event in drain] == [to_keys([3])]
 
 
 def test_filter_reused_manager():

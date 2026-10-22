@@ -456,9 +456,10 @@ class CPUOffloadingManager(OffloadingManager):
 
     @override
     def take_events(self) -> Iterable[OffloadingEvent]:
-        if self.events is not None:
-            yield from self.events
-            self.events.clear()
+        if self.events is None:
+            return
+        events, self.events = self.events, []
+        yield from events
 
     @override
     def config_info(self) -> Sequence[ConfigInfoMapping]:

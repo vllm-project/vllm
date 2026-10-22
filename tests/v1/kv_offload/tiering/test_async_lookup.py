@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for AsyncLookupManager."""
 
+import queue
 import threading
 from collections.abc import Iterable
 
@@ -19,6 +20,16 @@ def _ctx(req_id: str = "r1") -> ReqContext:
     return ReqContext(req_id=req_id)
 
 
+class _SignalingQueue(queue.SimpleQueue):
+    """Sets ``ready`` once a posted batch is visible to drain_results()."""
+
+    ready: threading.Event
+
+    def put(self, item, block=True, timeout=None):
+        super().put(item, block, timeout)
+        self.ready.set()
+
+
 class InMemoryLookupManager(AsyncLookupManager):
     """Test subclass backed by an in-memory set."""
 
@@ -26,15 +37,15 @@ class InMemoryLookupManager(AsyncLookupManager):
         super().__init__(tier_type="test")
         self._existing = existing_keys or set()
         self._results_ready = threading.Event()
+        self._pending_results = _SignalingQueue()
+        self._pending_results.ready = self._results_ready
         self.batch_lookup_calls = 0
 
     def batch_lookup(
         self, keys: list[OffloadKey], req_context: ReqContext
     ) -> Iterable[bool]:
         self.batch_lookup_calls += 1
-        results = [k in self._existing for k in keys]
-        self._results_ready.set()
-        return results
+        return [k in self._existing for k in keys]
 
 
 class TestAsyncLookupManager:

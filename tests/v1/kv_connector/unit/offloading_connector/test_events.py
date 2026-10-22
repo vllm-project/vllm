@@ -26,6 +26,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     GroupOffloadConfig,
 )
+from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -44,6 +45,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.kv_offload.base import (
     Locality,
+    LookupResult,
     Medium,
     OffloadingEvent,
     OffloadingKVEventsConfig,
@@ -51,7 +53,9 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     make_offload_key,
 )
+from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
+from vllm.v1.request import Request
 
 _CPU_MEDIUM = Medium.CPU
 _FULL_ATTENTION_EVENT_SPEC = OffloadingEventGroupSpec(
@@ -267,6 +271,29 @@ def test_take_events_forwards_locality_to_placeholder_store():
     assert isinstance(events[0], BlockStored)
     assert events[0].block_size == 0
     assert events[0].locality == "REMOTE"
+
+
+@pytest.mark.parametrize(
+    "kind,window", [("mamba", None), ("sliding_window", 16), (None, None)]
+)
+@pytest.mark.parametrize("self_describing", [False, True])
+def test_placeholder_group_classification(kind, window, self_describing):
+    tracker = OffloadingEventsTracker(
+        OffloadingKVEventsConfig(True, self_describing),
+        {0: OffloadingEventGroupSpec(kind, window)},
+    )
+    key = make_offload_key(_hash(0), 0)
+    # A removal can arrive before any store metadata is available.
+    removed, stored = tracker.take_events(
+        [_removed_event([key], ownership="kvcr"), _stored_event([key])]
+    )
+    assert (stored.block_size, stored.token_ids) == (0, [])
+    assert (stored.kv_cache_spec_kind, stored.kv_cache_spec_sliding_window) == (
+        (kind, window) if self_describing else (None, None)
+    )
+    # Removals stay group_idx + hash only; consumers classify from the store.
+    assert removed.ownership == "kvcr"
+    assert not hasattr(removed, "kv_cache_spec_kind")
 
 
 def test_partial_tail_event_describes_hash_aligned_physical_block_prefix():
@@ -813,6 +840,42 @@ def test_primary_removal_before_secondary_store_uses_only_key(
     assert stored.ownership == "kvcr"
     assert final_removal.block_hashes == [_wire_hash(_hash(3))]
     assert final_removal.ownership == "kvcr"
+
+
+@pytest.mark.parametrize("success", [False, True])
+def test_pending_promotion_uses_request_context(success):
+    tracker = _tracker()
+    req = Request(
+        request_id="pending-promotion",
+        prompt_token_ids=[1, 2, 3, 4],
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hasher=lambda _: [_hash(0)],
+    )
+    ctx = ReqContext(req_id=req.request_id)
+    group = _group_config()
+    tracker.on_new_request(ctx, req, (group,))
+    key = make_offload_key(req.block_hashes[0], group.group_idx)
+    primary = CPUOffloadingManager(
+        num_chunks=1, enable_events=True, self_describing_kv_events=True
+    )
+    primary.on_new_request(ctx)
+    assert primary.prepare_store([key], ctx) is not None
+    assert primary.lookup(key, ctx) is LookupResult.HIT_PENDING
+
+    [inventory] = tracker.take_events([_stored_event([key], ownership="kvcr")])
+    assert inventory.block_size == 0
+
+    primary.complete_store([key], ctx, success=success)
+    events = list(tracker.take_events(primary.take_events()))
+    if success:
+        [stored] = events
+        assert isinstance(stored, BlockStored)
+        assert stored.block_size == 4
+        assert stored.token_ids == list(req.all_token_ids)
+        assert stored.block_hashes == [_wire_hash(_hash(0))]
+    else:
+        assert events == []
 
 
 def test_removal_needs_no_request_context_or_prior_store():
