@@ -138,6 +138,22 @@ _MSGSPEC_FLOATS_MATCH_REPR = _msgspec_floats_match_repr()
 async def render_tokens_logprobs(
     sampled_token_ids: Sequence[int],
     container: FlatLogprobs,
+    lock: asyncio.Lock | None = None,
+) -> list[bytes] | None:
+    """See :func:`_render_tokens_logprobs`. Renders of more than one block
+    hold ``lock``: they all run on the event loop's thread, so interleaving
+    them adds no throughput, only memory, as each holds its partial output.
+    """
+    rows = container.rows()
+    if lock is None or rows is None or rows[0].size <= RENDER_BLOCK_ENTRIES:
+        return await _render_tokens_logprobs(sampled_token_ids, container)
+    async with lock:
+        return await _render_tokens_logprobs(sampled_token_ids, container)
+
+
+async def _render_tokens_logprobs(
+    sampled_token_ids: Sequence[int],
+    container: FlatLogprobs,
 ) -> list[bytes] | None:
     """Render the ``GenerateLogProbs`` JSON of one choice, as parts whose
     concatenation is the JSON.

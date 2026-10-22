@@ -143,6 +143,7 @@ class ServingTokens(GenerateBaseServing):
         )
         self.online_renderer = online_renderer
         self.online_derenderer = online_derenderer
+        self.render_lock = asyncio.Lock()
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_log_outputs = enable_log_outputs
         self.force_no_detokenize = force_no_detokenize
@@ -490,7 +491,9 @@ class ServingTokens(GenerateBaseServing):
                 rendered = None
                 top_logprobs: GenericSequence[dict[int, Logprob] | None] = out_logprobs
                 if isinstance(out_logprobs, FlatLogprobs) and not text_mode:
-                    rendered = await render_tokens_logprobs(token_ids, out_logprobs)
+                    rendered = await render_tokens_logprobs(
+                        token_ids, out_logprobs, self.render_lock
+                    )
                     if rendered is None:
                         # Irregular rows: the per-entry path. Iterating once
                         # is cheaper than indexing each position.

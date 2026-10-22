@@ -350,3 +350,34 @@ async def test_large_render_yields_to_the_event_loop(monkeypatch):
     ticker.cancel()
     assert ticks - before >= 9
     assert blocked.body == whole.body
+
+
+@pytest.mark.asyncio
+async def test_large_renders_run_one_at_a_time(monkeypatch):
+    """Multi-block renders on one server do not interleave (interleaving only
+    holds more partial output at once); a single-block render does not wait."""
+    serving = _build_serving_tokens(_mock_engine())
+    monkeypatch.setattr(logprobs_render, "RENDER_BLOCK_ENTRIES", 16)
+    render = logprobs_render._render_tokens_logprobs
+    events = []
+
+    async def traced(sampled_token_ids, container):
+        events.append(("start", len(sampled_token_ids)))
+        parts = await render(sampled_token_ids, container)
+        events.append(("end", len(sampled_token_ids)))
+        return parts
+
+    monkeypatch.setattr(logprobs_render, "_render_tokens_logprobs", traced)
+    await asyncio.gather(
+        _serve_full(serving, _rows(40, 4)),
+        _serve_full(serving, _rows(41, 4)),
+        _serve_full(serving, _rows(3, 4)),
+    )
+    assert events == [
+        ("start", 40),
+        ("start", 3),
+        ("end", 3),
+        ("end", 40),
+        ("start", 41),
+        ("end", 41),
+    ]
