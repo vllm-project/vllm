@@ -110,6 +110,151 @@ def test_align_trtllm_fp4_moe_hidden_dim_pads_to_256_multiple():
     assert torch.count_nonzero(out_w2_scale[:, hidden_dim:, :]) == 0
 
 
+def test_prepare_gated_unaligned_pads_to_64_and_updates_config(monkeypatch):
+    # Qwen3.8-Flash-Next at TP=4: intermediate 640/4 = 160 per rank. The
+    # swizzled block scales follow a 128-row SF atom on the stacked gate+up
+    # dim, so 160 pads to 192 (not 256) and moe_config must follow.
+    monkeypatch.setattr(flashinfer_fp4_moe, "swizzle_blockscale", lambda x: x)
+
+    num_experts, intermediate, hidden_dim = 2, 160, 32
+    layer = SimpleNamespace(
+        activation=SimpleNamespace(is_gated=True),
+        moe_config=SimpleNamespace(
+            moe_parallel_config=SimpleNamespace(enable_eplb=False),
+            intermediate_size_per_partition=intermediate,
+        ),
+    )
+    gate = torch.ones((num_experts, intermediate, hidden_dim // 2), dtype=torch.uint8)
+    up = torch.full_like(gate, 2)
+    w13 = torch.cat((gate, up), dim=1)
+    w13_scale = torch.full(
+        (num_experts, 2 * intermediate, hidden_dim // 16), 3, dtype=torch.float8_e4m3fn
+    )
+    w2 = torch.full((num_experts, hidden_dim, intermediate // 2), 5, dtype=torch.uint8)
+    w2_scale = torch.full(
+        (num_experts, hidden_dim, intermediate // 16), 6, dtype=torch.float8_e4m3fn
+    )
+    weight_scale = torch.ones(num_experts)
+
+    outputs = prepare_nvfp4_moe_layer_for_fi_or_cutlass(
+        backend=NvFp4MoeBackend.FLASHINFER_CUTLASS,
+        layer=layer,
+        w13=w13,
+        w13_scale=w13_scale,
+        w13_scale_2=weight_scale,
+        a13_scale=torch.ones(num_experts),
+        w2=w2,
+        w2_scale=w2_scale,
+        w2_scale_2=weight_scale,
+        a2_scale=torch.ones(num_experts),
+        is_act_and_mul=True,
+    )
+    out_w13, out_w13_scale, out_w2, out_w2_scale = (
+        outputs[0],
+        outputs[1],
+        outputs[4],
+        outputs[5],
+    )
+
+    assert layer.moe_config.intermediate_size_per_partition == 192
+    assert out_w13.shape == (num_experts, 2 * 192, hidden_dim // 2)
+    assert out_w13_scale.shape == (num_experts, 2 * 192, hidden_dim // 16)
+    assert out_w2.shape == (num_experts, hidden_dim, 192 // 2)
+    assert out_w2_scale.shape == (num_experts, hidden_dim, 192 // 16)
+    # Gate and up stay in separate halves, each zero-padded to 192 rows.
+    torch.testing.assert_close(out_w13[:, :intermediate], up)
+    torch.testing.assert_close(out_w13[:, 192 : 192 + intermediate], gate)
+    assert torch.count_nonzero(out_w13[:, intermediate:192]) == 0
+    assert torch.count_nonzero(out_w13[:, 192 + intermediate :]) == 0
+
+
+def test_prepare_gated_aligned_is_noop(monkeypatch):
+    monkeypatch.setattr(flashinfer_fp4_moe, "swizzle_blockscale", lambda x: x)
+
+    num_experts, intermediate, hidden_dim = 2, 192, 32
+    layer = SimpleNamespace(
+        activation=SimpleNamespace(is_gated=True),
+        moe_config=SimpleNamespace(
+            moe_parallel_config=SimpleNamespace(enable_eplb=False),
+            intermediate_size_per_partition=intermediate,
+        ),
+    )
+    w13 = torch.ones(
+        (num_experts, 2 * intermediate, hidden_dim // 2), dtype=torch.uint8
+    )
+    w13_scale = torch.full(
+        (num_experts, 2 * intermediate, hidden_dim // 16), 3, dtype=torch.float8_e4m3fn
+    )
+    w2 = torch.ones((num_experts, hidden_dim, intermediate // 2), dtype=torch.uint8)
+    w2_scale = torch.full(
+        (num_experts, hidden_dim, intermediate // 16), 6, dtype=torch.float8_e4m3fn
+    )
+    weight_scale = torch.ones(num_experts)
+
+    outputs = prepare_nvfp4_moe_layer_for_fi_or_cutlass(
+        backend=NvFp4MoeBackend.FLASHINFER_CUTLASS,
+        layer=layer,
+        w13=w13,
+        w13_scale=w13_scale,
+        w13_scale_2=weight_scale,
+        a13_scale=torch.ones(num_experts),
+        w2=w2,
+        w2_scale=w2_scale,
+        w2_scale_2=weight_scale,
+        a2_scale=torch.ones(num_experts),
+        is_act_and_mul=True,
+    )
+
+    assert layer.moe_config.intermediate_size_per_partition == 192
+    assert outputs[0] is w13
+    assert outputs[1] is w13_scale
+    assert outputs[4] is w2
+    assert outputs[5] is w2_scale
+
+
+def test_prepare_non_gated_pads_to_128(monkeypatch):
+    # Non-gated weights stack to I rows, so the SF atom forces I % 128.
+    monkeypatch.setattr(flashinfer_fp4_moe, "swizzle_blockscale", lambda x: x)
+
+    num_experts, intermediate, hidden_dim = 2, 160, 32
+    layer = SimpleNamespace(
+        activation=SimpleNamespace(is_gated=False),
+        moe_config=SimpleNamespace(
+            moe_parallel_config=SimpleNamespace(enable_eplb=False),
+            intermediate_size_per_partition=intermediate,
+        ),
+    )
+    w13 = torch.ones((num_experts, intermediate, hidden_dim // 2), dtype=torch.uint8)
+    w13_scale = torch.full(
+        (num_experts, intermediate, hidden_dim // 16), 3, dtype=torch.float8_e4m3fn
+    )
+    w2 = torch.ones((num_experts, hidden_dim, intermediate // 2), dtype=torch.uint8)
+    w2_scale = torch.full(
+        (num_experts, hidden_dim, intermediate // 16), 6, dtype=torch.float8_e4m3fn
+    )
+    weight_scale = torch.ones(num_experts)
+
+    outputs = prepare_nvfp4_moe_layer_for_fi_or_cutlass(
+        backend=NvFp4MoeBackend.FLASHINFER_CUTLASS,
+        layer=layer,
+        w13=w13,
+        w13_scale=w13_scale,
+        w13_scale_2=weight_scale,
+        a13_scale=torch.ones(num_experts),
+        w2=w2,
+        w2_scale=w2_scale,
+        w2_scale_2=weight_scale,
+        a2_scale=torch.ones(num_experts),
+        is_act_and_mul=False,
+    )
+
+    assert layer.moe_config.intermediate_size_per_partition == 256
+    assert outputs[0].shape == (num_experts, 256, hidden_dim // 2)
+    assert outputs[1].shape == (num_experts, 256, hidden_dim // 16)
+    assert outputs[4].shape == (num_experts, hidden_dim, 256 // 2)
+    assert outputs[5].shape == (num_experts, hidden_dim, 256 // 16)
+
+
 def test_align_trtllm_fp4_moe_intermediate_pads_gate_and_up_separately():
     # Qwen3.8-Flash-Next has intermediate_size=640. At TP4 each rank owns
     # 160 values, which TRTLLM pads to the next 64-value boundary (192).

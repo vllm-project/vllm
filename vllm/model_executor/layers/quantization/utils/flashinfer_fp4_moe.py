@@ -369,6 +369,20 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
     else:
         a13_scale = a13_scale.max(dim=1).values.to(torch.float32)
 
+    # Align weights for FI NVFP4 MoE kernels (shared by all backends above).
+    # The swizzled block scales follow a 128-row SF atom along the stacked
+    # gate+up dim (2*I when gated, I otherwise), so the per-projection
+    # intermediate must be a multiple of 64 when gated and 128 when not.
+    # Padded rows are zero -> outputs unchanged. Consumers constructed later
+    # (e.g. the vLLM CUTLASS experts wrapper, which derives its GEMM shape
+    # from moe_config) read the padded size from moe_config, so keep it in
+    # sync with the weight shapes.
+    min_alignment = 64 if is_gated else 128
+    w13, w13_scale, w2, w2_scale, padded_intermediate = align_fp4_moe_weights_for_fi(
+        w13, w13_scale, w2, w2_scale, is_act_and_mul, min_alignment
+    )
+    layer.moe_config.intermediate_size_per_partition = padded_intermediate
+
     # Shuffle weights and scales for FI TRTLLM NVFP4 MoE kernels.
     if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
         w13, w13_scale, w2, w2_scale, padded_hidden = (
@@ -377,21 +391,6 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
         if layer.moe_config.hidden_dim_unpadded is None:
             layer.moe_config.hidden_dim_unpadded = layer.moe_config.hidden_dim
         layer.moe_config.hidden_dim = padded_hidden
-
-        # Align weights for FI NVFP4 MoE kernels.
-        # FlashInfer's TRT-LLM block-scale shuffle asserts the gate/up row dim
-        # (= up_mult * padded_intermediate, up_mult=2 when gated) is a multiple of
-        # 128. So gated needs padded_intermediate % 64 (2*64=128); the old value 16
-        # left 2*intermediate a multiple of only 32, so an NVFP4 MoE whose rank-local
-        # intermediate is not 128-aligned at TP>1 (e.g. Gemma-4-26B-A4B at tp4) hit
-        # `assert M % 128 == 0`. Padded rows are zero -> outputs unchanged.
-        min_alignment = 64 if is_gated else 128
-        w13, w13_scale, w2, w2_scale, padded_intermediate = (
-            align_fp4_moe_weights_for_fi(
-                w13, w13_scale, w2, w2_scale, is_act_and_mul, min_alignment
-            )
-        )
-        layer.moe_config.intermediate_size_per_partition = padded_intermediate
 
         w13, w13_scale, w2, w2_scale = prepare_static_weights_for_trtllm_fp4_moe(
             w13,
@@ -404,10 +403,7 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
             is_gated_activation=is_gated,
         )
     else:
-        # Align intermediate size to 128 before swizzling block scales.
-        w13, w13_scale, w2, w2_scale, _ = align_fp4_moe_weights_for_fi(
-            w13, w13_scale, w2, w2_scale, is_act_and_mul, min_alignment=128
-        )
+        # Swizzle the block scales for other FI NVFP4 MoE kernels.
         w13_scale = swizzle_blockscale(w13_scale)
         w2_scale = swizzle_blockscale(w2_scale)
 
