@@ -165,9 +165,7 @@ def _create_gdn_builder(
         vllm_config.speculative_config = SpeculativeConfig(
             method="ngram",
             num_speculative_tokens=num_speculative_tokens,
-        )
-        vllm_config.speculative_config.enable_adaptive_verification = (
-            adaptive_verification
+            enable_adaptive_verification=adaptive_verification,
         )
     mamba_spec = MambaSpec(
         block_size=BLOCK_SIZE,
@@ -309,7 +307,9 @@ def test_full_cudagraph_spec_metadata_uses_request_count():
 
 def test_adaptive_verification_uses_device_query_boundaries():
     """GDN keeps the CPU batch plan while executing the GPU's ragged plan."""
-    builder = _create_gdn_builder(num_speculative_tokens=3)
+    builder = _create_gdn_builder(
+        num_speculative_tokens=3, adaptive_verification=True
+    )
     batch = BatchSpec(seq_lens=[80, 96, 112], query_lens=[3, 3, 3])
     common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE)
     device_query_start_loc = torch.tensor([0, 1, 5, 9], dtype=torch.int32)
@@ -332,6 +332,7 @@ def test_adaptive_verification_uses_device_query_boundaries():
     torch.testing.assert_close(meta.spec_query_start_loc, device_query_start_loc)
     assert meta.num_spec_decode_tokens == 9
     assert meta.num_spec_decodes == 3
+    assert meta.uniform_spec_sequence_length is None
 
 
 def test_adaptive_cudagraph_capture_uses_spec_decode_path():
