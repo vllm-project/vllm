@@ -41,7 +41,8 @@ class SpeculatorConfig:
     builtin_method: ClassVar[str | None] = None
     # Fully-qualified name of the V2 `BaseSpeculator` subclass, if any.
     speculator_class: ClassVar[str | None] = None
-    # Method-specific `SpeculativeConfig` options that this speculator accepts.
+    # Method-specific `SpeculativeConfig` options that this speculator accepts
+    # (e.g. "speculator_options" for a custom speculator's own options).
     supported_options: ClassVar[frozenset[str]] = frozenset()
 
     # Drafts from the target's hidden states (EAGLE-style): reads the next

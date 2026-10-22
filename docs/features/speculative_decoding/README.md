@@ -75,6 +75,14 @@ from vllm.v1.worker.gpu.spec_decode.eagle.config import Eagle3SpeculatorConfig
 
 class MySpeculatorConfig(Eagle3SpeculatorConfig):
     speculator_class = "my_package.speculator.MySpeculator"
+    # Accept options in `speculator_options` (validated in `apply_options`).
+    supported_options = frozenset({"speculator_options"})
+
+    @classmethod
+    def apply_options(cls, spec):
+        options = spec.speculator_options or {}
+        if unknown := options.keys() - {"my_option"}:
+            raise ValueError(f"Unknown speculator_options: {sorted(unknown)}")
 
 
 # my_package/__init__.py, registered as a `vllm.general_plugins` entry point
@@ -91,9 +99,13 @@ vllm serve <target-model> \
   --speculative-config '{
     "method": "my_spec",
     "model": "<draft-model>",
-    "num_speculative_tokens": 3
+    "num_speculative_tokens": 3,
+    "speculator_options": {"my_option": 1}
   }'
 ```
+
+The speculator reads its options from
+`vllm_config.speculative_config.speculator_options`.
 
 ### V1 Custom Proposer Backend
 
