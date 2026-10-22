@@ -2173,8 +2173,9 @@ def test_decode_index_score_cutedsl_correctness(
     ]
     + [(2, q, 8, 1) for q in (1, 3, 8)],
 )
+@pytest.mark.parametrize("fused_publish", [False, True])
 def test_sharded_decode_index_score_matches_reference(
-    world, decode_query_len, max_decode_query_len, split_k
+    world, decode_query_len, max_decode_query_len, split_k, fused_publish
 ):
     pytest.importorskip("cutlass")
     from vllm.third_party.fmha_sm100.api import sparse_topk_select
@@ -2184,6 +2185,7 @@ def test_sharded_decode_index_score_matches_reference(
         minimax_m3_index_decode_score_sharded_cutedsl,
         minimax_m3_index_merge_candidates,
         minimax_m3_index_publish_candidates,
+        minimax_m3_index_select_publish_candidates,
     )
 
     torch.manual_seed(0)
@@ -2243,27 +2245,43 @@ def test_sharded_decode_index_score_matches_reference(
                 split_k=split_k,
             )
             torch.maximum(all_scores, scores, out=all_scores)
-            sparse_topk_select(
-                scores,
-                16,
-                num_valid_pages=valid,
-                force_begin_blocks=1,
-                force_end_blocks=1,
-                output=local_ids,
-                max_score_layout="THK",
-            )
-            minimax_m3_index_publish_candidates(
-                scores,
-                local_ids,
-                bases,
-                1,
-                rank,
-                total_q,
-                errors,
-                world_size=world,
-                heads_per_rank=heads_per_rank,
-                spin_limit=1 << 20,
-            )
+            if fused_publish:
+                minimax_m3_index_select_publish_candidates(
+                    scores,
+                    valid,
+                    bases,
+                    1,
+                    rank,
+                    total_q,
+                    errors,
+                    world_size=world,
+                    heads_per_rank=heads_per_rank,
+                    init_blocks=1,
+                    local_blocks=1,
+                    spin_limit=1 << 20,
+                )
+            else:
+                sparse_topk_select(
+                    scores,
+                    16,
+                    num_valid_pages=valid,
+                    force_begin_blocks=1,
+                    force_end_blocks=1,
+                    output=local_ids,
+                    max_score_layout="THK",
+                )
+                minimax_m3_index_publish_candidates(
+                    scores,
+                    local_ids,
+                    bases,
+                    1,
+                    rank,
+                    total_q,
+                    errors,
+                    world_size=world,
+                    heads_per_rank=heads_per_rank,
+                    spin_limit=1 << 20,
+                )
         for owner, r in enumerate(recv):
             head = owner * heads_per_rank
             minimax_m3_index_merge_candidates(
@@ -2281,6 +2299,97 @@ def test_sharded_decode_index_score_matches_reference(
         for r in recv:
             assert torch.count_nonzero(r[..., 32]).item() == 0
             assert torch.count_nonzero(r[[0, 2]]).item() == 0
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="Sharded index decode requires Blackwell.",
+)
+@pytest.mark.parametrize("world", [2, 4])
+@pytest.mark.parametrize("init_blocks,local_blocks", [(0, 0), (1, 1), (3, 4)])
+def test_sharded_select_publish_reuses_slots_with_ties(
+    world, init_blocks, local_blocks
+):
+    from vllm.models.minimax_m3.nvidia.ops.index_decode_score_sharded import (
+        MAX_K_TILES,
+        minimax_m3_index_merge_candidates,
+        minimax_m3_index_select_publish_candidates,
+    )
+
+    torch.manual_seed(17)
+    valid = torch.tensor(
+        [0, 1, 15, 16, 17, 33, 1279, 1280, 8192], device="cuda", dtype=torch.int32
+    )
+    tokens, heads = valid.numel(), 4
+    capacity, hpr = tokens + 2, heads // world
+    scores = torch.randint(
+        -5, 6, (world, tokens, heads, MAX_K_TILES), device="cuda"
+    ).float()
+    recv = [
+        torch.zeros((3, world, hpr, capacity, 33), device="cuda", dtype=torch.int32)
+        for _ in range(world)
+    ]
+    bases = torch.tensor([r.data_ptr() for r in recv], device="cuda", dtype=torch.int64)
+    errors = torch.zeros(1, device="cuda", dtype=torch.int32)
+    output = torch.empty((tokens, heads, 16), device="cuda", dtype=torch.int32)
+
+    def launch():
+        for slot in range(3):
+            for rank in range(world):
+                minimax_m3_index_select_publish_candidates(
+                    scores[rank],
+                    valid,
+                    bases,
+                    slot,
+                    rank,
+                    capacity,
+                    errors,
+                    world_size=world,
+                    heads_per_rank=hpr,
+                    init_blocks=init_blocks,
+                    local_blocks=local_blocks,
+                    spin_limit=1 << 20,
+                )
+            for owner, r in enumerate(recv):
+                minimax_m3_index_merge_candidates(
+                    r[slot],
+                    valid,
+                    output[:, owner * hpr : (owner + 1) * hpr],
+                    errors,
+                    init_blocks=init_blocks,
+                    local_blocks=local_blocks,
+                    spin_limit=1 << 20,
+                )
+
+    launch()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        launch()
+    for step in range(3):
+        scores.copy_(scores.roll(17 + step, -1).neg())
+        valid.copy_(valid.roll(1))
+        graph.replay()
+        _assert_sharded_topk(output, scores.amax(0), valid, init_blocks, local_blocks)
+        for slot in range(3):
+            for rank in range(world):
+                ids = torch.cat(
+                    [r[slot, rank, :, :tokens, 16:32].transpose(0, 1) for r in recv],
+                    dim=1,
+                )
+                values = torch.cat(
+                    [r[slot, rank, :, :tokens, :16].transpose(0, 1) for r in recv],
+                    dim=1,
+                ).view(torch.float32)
+                _assert_sharded_topk(
+                    ids, scores[rank], valid, init_blocks, local_blocks
+                )
+                expected = scores[rank].gather(-1, ids.clamp_min(0).long())
+                expected.masked_fill_(ids < 0, -float("inf"))
+                torch.testing.assert_close(values, expected, rtol=0, atol=0)
+        assert errors.item() == 0
+        for r in recv:
+            assert torch.count_nonzero(r[..., 32]).item() == 0
+            assert torch.count_nonzero(r[..., tokens:, :]).item() == 0
 
 
 def _assert_sharded_topk(actual, scores, num_valid, init_blocks, local_blocks):
