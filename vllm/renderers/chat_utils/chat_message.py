@@ -274,7 +274,7 @@ def parse_chat_message_content_mm_part(
             )
             image_embeds = image_params.get("image_embeds", None)
             return "image_embeds", image_embeds
-        if "audio_embeds" in part:
+        if "audio_embeds" in part and part_type != "video_embeds":
             # "audio_embeds" could be None if UUID is provided.
             audio_params = cast(  # type: ignore[assignment]
                 ChatCompletionContentPartAudioEmbedsParam, part
@@ -503,7 +503,8 @@ def parse_chat_message_content_part(
         content = (
             cast(MultiModalEmbedsPayload, content) if content is not None else None
         )
-        mm_parser.parse_video_embeds(content, uuid)
+        audio_embeds = cast(MultiModalEmbedsPayload | None, part.get("audio_embeds"))
+        mm_parser.parse_video_embeds(content, uuid, audio_embeds)
         modality = "video"
     elif part_type == "prompt_embeds":
         if not content:
@@ -720,10 +721,9 @@ def _postprocess_messages(messages: list[ConversationMessage]) -> None:
                                 # leave the conversation unrecoverable. Coerce
                                 # to an empty object so the turn can proceed.
                                 logger.warning(
-                                    "Tool call %r has arguments that are not valid "
+                                    "Tool call has arguments that are not valid "
                                     "JSON (%d chars); coercing to an empty object "
                                     "so the conversation can continue.",
-                                    function.get("name"),
                                     len(content),
                                 )
                                 parsed = None
@@ -736,9 +736,8 @@ def _postprocess_messages(messages: list[ConversationMessage]) -> None:
                                 # "42", "true").
                                 # Chat templates require a mapping.
                                 logger.warning(
-                                    "Tool call %r arguments decoded to %s, not a "
+                                    "Tool call arguments decoded to %s, not a "
                                     "JSON object; coercing to an empty object.",
-                                    function.get("name"),
                                     type(parsed).__name__,
                                 )
                             parsed = {}

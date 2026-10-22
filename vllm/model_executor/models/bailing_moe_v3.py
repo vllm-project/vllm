@@ -538,6 +538,26 @@ class BailingMoeV3MLAAttention(nn.Module):
             g_out = self.num_heads * self.v_head_dim
         else:
             g_out = 0
+        block_size = (
+            quant_config.weight_block_size
+            if _is_block_fp8_config(quant_config)
+            else None
+        )
+        self.replicate_g_proj = (
+            self.gated_attention_proj_granularity_type == "head_wise"
+            and tp_size > 1
+            and block_size is not None
+            and g_out <= block_size[0]
+            and not _is_fp8_module_excluded(quant_config, f"{prefix}.g_proj")
+            and self.num_local_heads % block_size[0] != 0
+        )
+        # A gate spanning at most one FP8 row block cannot split its scales
+        # across TP ranks. Replicate it and select each rank's heads instead.
+        self.g_proj_start = (
+            get_tensor_model_parallel_rank() * self.num_local_heads
+            if self.replicate_g_proj
+            else 0
+        )
         self.g_proj = (
             ColumnParallelLinear(
                 self.hidden_size,
@@ -545,6 +565,7 @@ class BailingMoeV3MLAAttention(nn.Module):
                 bias=False,
                 quant_config=quant_config,
                 prefix=f"{prefix}.g_proj",
+                disable_tp=self.replicate_g_proj,
             )
             if g_out > 0
             else None
@@ -593,9 +614,12 @@ class BailingMoeV3MLAAttention(nn.Module):
     def forward(self, hidden_states: torch.Tensor, positions: torch.Tensor):
         attn_out = self.mla_attn(positions, hidden_states)
         if self.g_proj is not None:
-            gate = torch.sigmoid(self.g_proj(hidden_states)[0].float()).to(
-                hidden_states.dtype
-            )
+            gate = self.g_proj(hidden_states)[0]
+            if self.replicate_g_proj:
+                gate = gate[
+                    ..., self.g_proj_start : self.g_proj_start + self.num_local_heads
+                ]
+            gate = torch.sigmoid(gate.float()).to(hidden_states.dtype)
             if self.gated_attention_proj_granularity_type == "head_wise":
                 attn_out = attn_out.view(-1, self.num_local_heads, self.v_head_dim)
                 attn_out = attn_out * gate.unsqueeze(-1)
@@ -1388,7 +1412,10 @@ class BailingMoeV3Model(nn.Module):
 
 
 class BailingMoeV3ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
-    hf_to_vllm_mapper = WeightsMapper(orig_to_new_substr={".attention.": ".self_attn."})
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={".attention.": ".self_attn."},
+        orig_to_new_prefix={"attention.": "self_attn."},
+    )
 
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
