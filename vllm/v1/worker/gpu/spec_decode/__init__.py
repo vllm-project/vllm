@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, cast
 
 import torch
 
 from vllm.config import VllmConfig
+from vllm.v1.spec_decode.registry import get_speculative_method
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.states import RequestState
@@ -18,6 +20,18 @@ def init_speculator(
     """Build the speculator for this config."""
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
+    registered = get_speculative_method(speculative_config.method)
+    if registered is not None:
+        from vllm.v1.worker.gpu.spec_decode.speculator import BaseSpeculator
+
+        cls = registered.resolve_speculator_cls()
+        if not issubclass(cls, BaseSpeculator):
+            raise TypeError(
+                f"Registered speculator {registered.speculator_cls!r} must "
+                "inherit BaseSpeculator"
+            )
+        factory = cast(Callable[[VllmConfig, torch.device], BaseSpeculator], cls)
+        return factory(vllm_config, device)
     if speculative_config.method == "extract_hidden_states":
         from vllm.v1.worker.gpu.spec_decode.extract_hidden_states import (
             ExtractHiddenStatesSpeculator,

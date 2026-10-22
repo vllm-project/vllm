@@ -13,12 +13,31 @@ from vllm.config.cache import CacheDType
 from vllm.config.kernel import MoEBackend
 from vllm.config.model import HfOverrides, ModelConfig
 from vllm.config.parallel import ParallelConfig
-from vllm.config.utils import config, replace
+from vllm.config.utils import config, normalize_value, replace
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_hf_text_config
 from vllm.utils.hashing import safe_hash
 from vllm.utils.import_utils import LazyLoader, has_arctic_inference
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.spec_decode.registry import (
+    DFlashModelTypes as DFlashModelTypes,
+)
+from vllm.v1.spec_decode.registry import (
+    DSparkModelTypes as DSparkModelTypes,
+)
+from vllm.v1.spec_decode.registry import (
+    EagleModelTypes as EagleModelTypes,
+)
+from vllm.v1.spec_decode.registry import (
+    MTPModelTypes,
+    SpeculativeMethod,
+    SpeculativeMethodSpec,
+    get_speculative_method,
+    registered_speculative_methods,
+)
+from vllm.v1.spec_decode.registry import (
+    NgramGPUTypes as NgramGPUTypes,
+)
 
 if TYPE_CHECKING:
     from transformers import PreTrainedConfig
@@ -35,51 +54,6 @@ else:
 
 logger = init_logger(__name__)
 
-MTPModelTypes = Literal[
-    "deepseek_mtp",
-    "dots3_note_mtp",
-    "mimo_mtp",
-    "mimo_v2_mtp",
-    "glm4_moe_mtp",
-    "glm4_moe_lite_mtp",
-    "glm_ocr_mtp",
-    "ernie_mtp",
-    "nemotron_h_mtp",
-    "exaone_moe_mtp",
-    "exaone4_5_mtp",
-    "qwen3_next_mtp",
-    "qwen4_exp_mtp",
-    "qwen3_5_mtp",
-    "longcat_flash_mtp",
-    "bailing_hybrid_v3_mtp",
-    "minimax_m3_mtp",
-    "bailing_hybrid_mtp",
-    "mtp",
-    "kimi_k3_mtp",
-    "pangu_ultra_moe_mtp",
-    "step3p5_mtp",
-    "step5_mtp",
-    "hy_v3_mtp",
-    "hy_v4_mtp",
-    "gemma4_mtp",
-    "inkling_mtp",
-    "glm5_next_mtp",
-]
-NgramGPUTypes = Literal["ngram_gpu"]
-DFlashModelTypes = Literal["dflash"]
-DSparkModelTypes = Literal["dspark"]
-EagleModelTypes = Literal[
-    "eagle", "eagle3", "extract_hidden_states", MTPModelTypes, DFlashModelTypes
-]
-SpeculativeMethod = Literal[
-    "ngram",
-    "draft_model",
-    "suffix",
-    "custom_class",
-    EagleModelTypes,
-    NgramGPUTypes,
-    DSparkModelTypes,
-]
 RejectionSampleMethod = Literal["standard", "synthetic", "block", "fly"]
 DraftSampleMethod = Literal["greedy", "probabilistic"]
 
@@ -395,14 +369,21 @@ class SpeculativeConfig:
     model: str | None = None
     """The name of the draft model, eagle head, or additional weights, if
     provided."""
-    method: SpeculativeMethod | None = None
+    method: SpeculativeMethod | str | None = None
     """The name of the speculative method to use. If users provide and set the
     `model` param, the speculative method type will be detected automatically
     if possible, if `model` param is not provided, the method name must be
     provided.
 
     If using `ngram` method, the related configuration `prompt_lookup_max` and
-    `prompt_lookup_min` should be considered."""
+    `prompt_lookup_min` should be considered.
+
+    A name that a plugin registered with `register_speculative_method` is also
+    accepted (Model Runner V2 only)."""
+    method_config: dict[str, Any] = Field(default_factory=dict)
+    """Options for a method registered with `register_speculative_method`.
+    vLLM does not read them: the registered method's `configure` hook and its
+    speculator do. Built-in methods ignore this field."""
     draft_tensor_parallel_size: int | None = Field(default=None, ge=1)
     """The degree of the tensor parallelism for the draft model. Can only be 1
     or the same as the target model's tensor parallel size."""
@@ -640,13 +621,17 @@ class SpeculativeConfig:
         factors: list[Any] = []
         # Eagle3 and extract_hidden_states affect the computation graph because
         # they return intermediate hidden states in addition to the final hidden state.
+        registered = self.registered_method()
         uses_aux_hidden_states = self.method in (
             "eagle3",
             "extract_hidden_states",
             "dflash",
             "dspark",
-        )
+        ) or (registered is not None and registered.uses_aux_hidden_states)
         factors.append(uses_aux_hidden_states)
+        if registered is not None:
+            # The registered method decides what its options change.
+            factors.append((self.method, normalize_value(self.method_config)))
         if self.method == "dspark":
             factors.append(self.enable_adaptive_verification)
 
@@ -1239,6 +1224,10 @@ class SpeculativeConfig:
                         "method='custom_class' requires 'model' to contain the "
                         "custom proposer module path (e.g., 'my_module.MyProposer')."
                     )
+            elif self.registered_method() is not None:
+                # A registered method may need no draft model; its `configure`
+                # hook decides what is required.
+                pass
             else:
                 raise ValueError(
                     "num_speculative_tokens was provided but without speculative model."
@@ -1360,7 +1349,10 @@ class SpeculativeConfig:
                 )
 
                 # Automatically detect the method
-                if self.method in ("eagle", "eagle3", "dflash", "dspark"):
+                if (
+                    self.method in ("eagle", "eagle3", "dflash", "dspark")
+                    or self.registered_method() is not None
+                ):
                     pass
                 # examples:
                 # yuhuili/EAGLE-LLaMA3-Instruct-8B
@@ -1530,7 +1522,10 @@ class SpeculativeConfig:
                             f" must be divisible by {n_predict=}"
                         )
 
-                if self.num_speculative_tokens is None:
+                registered = self.registered_method()
+                if self.num_speculative_tokens is None and (
+                    registered is None or registered.configure is None
+                ):
                     raise ValueError(
                         "A speculative model was provided, but "
                         "`num_speculative_tokens` was not provided"
@@ -1619,6 +1614,10 @@ class SpeculativeConfig:
                 "the draft logits, which use_local_argmax_reduction never "
                 "materializes. Disable one of them."
             )
+
+        registered = self.registered_method()
+        if registered is not None and registered.configure is not None:
+            registered.configure(self)
 
         return self
 
@@ -1818,6 +1817,20 @@ class SpeculativeConfig:
                 vllm_config = replace(vllm_config, **{config_name: sub_config})
         return vllm_config
 
+    @field_validator("method", mode="after")
+    @classmethod
+    def _validate_method_name(cls, value: str | None) -> str | None:
+        """Accept built-in methods and names registered by a plugin."""
+        if value is None or value in get_args(SpeculativeMethod):
+            return value
+        if get_speculative_method(value) is not None:
+            return value
+        raise ValueError(
+            f"Unknown speculative method '{value}'. Built-in methods: "
+            f"{list(get_args(SpeculativeMethod))}; registered by plugins: "
+            f"{registered_speculative_methods()}."
+        )
+
     @field_validator("attention_backend", mode="before")
     @classmethod
     def _parse_attention_backend(cls, value: Any) -> Any:
@@ -1829,6 +1842,17 @@ class SpeculativeConfig:
 
     @model_validator(mode="after")
     def _verify_args(self) -> Self:
+        if (
+            self.registered_method() is not None
+            and self.draft_model_config is not None
+            and self.target_parallel_config is not None
+            and self.draft_tensor_parallel_size
+            != self.target_parallel_config.tensor_parallel_size
+        ):
+            raise ValueError(
+                "Plugin speculators use the target's tensor-parallel group; "
+                "draft_tensor_parallel_size must match tensor_parallel_size."
+            )
         if self.tensor_parallel_size is not None:
             raise ValueError(
                 "'tensor_parallel_size' is not a valid argument in the "
@@ -2005,11 +2029,18 @@ class SpeculativeConfig:
             == "step3p5_mtp"
         )
 
+    def registered_method(self) -> SpeculativeMethodSpec | None:
+        """The spec a plugin registered for ``method``, if any."""
+        return get_speculative_method(self.method)
+
     def use_eagle(self) -> bool:
         # NOTE: This method is usually a stand-in for "speculative decoding using
         # target model hidden states"
         # TODO(ben): Refactor this so the naming is clearer
-        return self.method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
+        if self.method in ("eagle", "eagle3", "mtp", "dflash", "dspark"):
+            return True
+        registered = self.registered_method()
+        return registered is not None and registered.uses_target_hidden_states
 
     def use_eagle_block_drop(self) -> bool:
         """Whether volatile trailing cache blocks should be discarded."""
@@ -2062,6 +2093,7 @@ class SpeculativeConfig:
                 "extract_hidden_states",
                 "custom_class",
             )
+            or self.draft_model_config is None
             else self.draft_model_config.model
         )
         num_spec_tokens = self.num_speculative_tokens

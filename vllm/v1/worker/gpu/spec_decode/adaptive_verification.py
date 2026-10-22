@@ -447,6 +447,59 @@ class AdaptiveVerificationManager:
         )
 
 
+def check_varlen_verify_graph_support(
+    *,
+    attn_groups: list[list["AttentionGroup"]],
+    vllm_config: "VllmConfig",
+    max_query_len: int,
+    reason: str,
+    remedy: str,
+    target_layer_names: set[str] | None = None,
+    additional_attn_cg_support: tuple[AttentionCGSupport, str | None] | None = None,
+) -> None:
+    """Raise unless the target's decode cudagraphs replay varlen batches.
+
+    Varlen decode graphs replay any per-request query length from 1 to
+    ``max_query_len``, so every target attention backend must support that.
+
+    Args:
+        attn_groups: The runner's attention groups.
+        vllm_config: The engine config.
+        max_query_len: The widest per-request query length the graphs replay.
+        reason: What needs varlen decode graphs; starts the error message.
+        remedy: How to avoid the error; ends the error message.
+        target_layer_names: Layers of the target model; other groups (the
+            drafter's) are not checked. None checks every group.
+        additional_attn_cg_support: Support level and backend name of a group
+            built outside ``init_attn_backend``, if any.
+
+    Raises:
+        ValueError: A target backend cannot replay such batches.
+
+    """
+    unsupported: tuple[str | None, int | None] | None = (
+        get_varlen_cudagraph_unsupported_backend(
+            attn_groups,
+            vllm_config,
+            max_query_len,
+            checked_layer_names=target_layer_names,
+        )
+    )
+    if unsupported is None and additional_attn_cg_support is not None:
+        # Groups built outside init_attn_backend report only their support
+        # level, and without a bound only ALWAYS replays varlen batches.
+        additional_support, additional_backend = additional_attn_cg_support
+        if additional_support != AttentionCGSupport.ALWAYS:
+            unsupported = additional_backend, None
+    if unsupported is not None:
+        backend, bound = unsupported
+        allowed = "none" if bound is None else f"at most {bound}"
+        raise ValueError(
+            f"{reason} replays decode cudagraphs whose per-request query lengths "
+            f"vary up to {max_query_len}, but {backend} allows {allowed}. {remedy}"
+        )
+
+
 def maybe_create_adaptive_verification_manager(
     *,
     enable_adaptive_verification: bool,
@@ -475,31 +528,17 @@ def maybe_create_adaptive_verification_manager(
             "use a backend that does."
         )
 
-    # The runner's decode_query_len, the width varlen decode graphs capture.
-    max_query_len = req_states.num_speculative_steps + num_bonus_tokens
-    unsupported: tuple[str | None, int | None] | None = (
-        get_varlen_cudagraph_unsupported_backend(
-            attn_groups,
-            vllm_config,
-            max_query_len,
-            checked_layer_names=target_layer_names,
-        )
+    check_varlen_verify_graph_support(
+        attn_groups=attn_groups,
+        vllm_config=vllm_config,
+        # The runner's decode_query_len, the width varlen decode graphs capture.
+        max_query_len=req_states.num_speculative_steps + num_bonus_tokens,
+        reason="Adaptive verification",
+        remedy="Pass enable_adaptive_verification=false in the speculative "
+        "config, or use a backend that does.",
+        target_layer_names=target_layer_names,
+        additional_attn_cg_support=additional_attn_cg_support,
     )
-    if unsupported is None and additional_attn_cg_support is not None:
-        # Groups built outside init_attn_backend report only their support
-        # level, and without a bound only ALWAYS replays varlen batches.
-        additional_support, additional_backend = additional_attn_cg_support
-        if additional_support != AttentionCGSupport.ALWAYS:
-            unsupported = additional_backend, None
-    if unsupported is not None:
-        backend, bound = unsupported
-        allowed = "none" if bound is None else f"at most {bound}"
-        raise ValueError(
-            "Adaptive verification replays decode cudagraphs whose per-request "
-            f"query lengths vary up to {max_query_len}, but {backend} allows "
-            f"{allowed}. Pass enable_adaptive_verification=false in the "
-            "speculative config, or use a backend that does."
-        )
 
     return AdaptiveVerificationManager(
         req_states,

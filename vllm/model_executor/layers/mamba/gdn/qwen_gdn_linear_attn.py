@@ -41,6 +41,10 @@ from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointExporter,
 )
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
+from vllm.model_executor.layers.mamba.gdn.verify_extension import (
+    GDNSpecRows,
+    LinearAttnVerifyExtension,
+)
 from vllm.model_executor.layers.mamba.mamba_mixer2 import mamba_v2_sharded_weight_loader
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
@@ -1535,6 +1539,43 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out=core_attn_out,
         )
 
+    def _forward_spec_rows(
+        self,
+        verify_extension: LinearAttnVerifyExtension,
+        attn_metadata: GDNAttentionMetadata,
+        mixed_qkv: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        conv_state: torch.Tensor,
+        conv_weights: torch.Tensor,
+        ssm_state: torch.Tensor,
+        out: torch.Tensor,
+    ) -> None:
+        """Hand the spec-decode rows to the speculative method's extension."""
+        verify_extension.forward_spec_rows(
+            GDNSpecRows(
+                layer_name=self.prefix,
+                mixed_qkv=mixed_qkv,
+                a=a,
+                b=b,
+                conv_state=conv_state,
+                conv_weight=conv_weights,
+                conv_bias=self.conv1d.bias,
+                activation=self.activation,
+                ssm_state=ssm_state,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                num_k_heads=self.num_k_heads // self.tp_size,
+                num_v_heads=self.num_v_heads // self.tp_size,
+                head_k_dim=self.head_k_dim,
+                head_v_dim=self.head_v_dim,
+                state_indices=attn_metadata.spec_state_indices_tensor,
+                num_accepted_tokens=attn_metadata.num_accepted_tokens,
+                query_start_loc=attn_metadata.spec_query_start_loc,
+                out=out,
+            )
+        )
+
     def _forward_core(
         self,
         mixed_qkv: torch.Tensor,
@@ -1548,6 +1589,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             mixed_qkv: packed [q, k, v] projection (num_tokens, qkv_dim)
             b: beta gating vector                   (num_tokens, num_heads)
             a: alpha gating vector                  (num_tokens, num_heads)
+               (b and a may be strided views; the kernels get contiguous ones)
             core_attn_out: Pre-allocated output buffer for attention results.
 
         """
@@ -1571,8 +1613,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         ):
             return self._forward_core_decode_non_spec(
                 mixed_qkv=mixed_qkv,
-                b=b,
-                a=a,
+                b=b.contiguous(),
+                a=a.contiguous(),
                 core_attn_out=core_attn_out,
                 attn_metadata=attn_metadata,
             )
@@ -1606,6 +1648,30 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             self.conv1d.weight.size(0), self.conv1d.weight.size(2)
         )
 
+        verify_extension = attn_metadata.verify_extension
+        if (
+            verify_extension is not None
+            and spec_sequence_masks is not None
+            and attn_metadata.num_prefills == 0
+            and attn_metadata.num_decodes == 0
+        ):
+            # Only spec-decode rows: the extension reads the projections as
+            # they are and writes the layer's output buffer.
+            self._forward_spec_rows(
+                verify_extension,
+                attn_metadata,
+                mixed_qkv,
+                a,
+                b,
+                conv_state,
+                conv_weights,
+                ssm_state,
+                core_attn_out[:num_actual_tokens],
+            )
+            return
+        b = b.contiguous()
+        a = a.contiguous()
+
         if spec_sequence_masks is not None:
             if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
                 mixed_qkv_spec = mixed_qkv
@@ -1625,20 +1691,39 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if spec_sequence_masks is not None:
             # spec_state_indices_tensor is always set when spec_sequence_masks is set
             assert spec_state_indices_tensor is not None
-            mixed_qkv_spec = causal_conv1d_update(
-                mixed_qkv_spec,
-                conv_state,
-                conv_weights,
-                self.conv1d.bias,
-                self.activation,
-                conv_state_indices=spec_state_indices_tensor[:, 0][  # type: ignore[index]
-                    : attn_metadata.num_spec_decodes  # type: ignore[attr-defined]
-                ],
-                num_accepted_tokens=num_accepted_tokens,
-                query_start_loc=spec_query_start_loc,
-                max_query_len=spec_state_indices_tensor.size(-1),
-                validate_data=False,
-            )
+            if verify_extension is not None:
+                extension_out_spec = mixed_qkv_spec.new_empty(
+                    mixed_qkv_spec.shape[0],
+                    self.num_v_heads // self.tp_size,
+                    self.head_v_dim,
+                )
+                self._forward_spec_rows(
+                    verify_extension,
+                    attn_metadata,
+                    mixed_qkv_spec,
+                    a_spec,
+                    b_spec,
+                    conv_state,
+                    conv_weights,
+                    ssm_state,
+                    extension_out_spec,
+                )
+                mixed_qkv_spec = None
+            else:
+                mixed_qkv_spec = causal_conv1d_update(
+                    mixed_qkv_spec,
+                    conv_state,
+                    conv_weights,
+                    self.conv1d.bias,
+                    self.activation,
+                    conv_state_indices=spec_state_indices_tensor[:, 0][  # type: ignore[index]
+                        : attn_metadata.num_spec_decodes  # type: ignore[attr-defined]
+                    ],
+                    num_accepted_tokens=num_accepted_tokens,
+                    query_start_loc=spec_query_start_loc,
+                    max_query_len=spec_state_indices_tensor.size(-1),
+                    validate_data=False,
+                )
 
         # 1.2: Process the remaining part
         conv_input_non_spec = mixed_qkv_non_spec
@@ -1737,7 +1822,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # 2. Recurrent attention
 
         # 2.1: Process the multi-query part
-        if spec_sequence_masks is not None:
+        if spec_sequence_masks is not None and verify_extension is not None:
+            core_attn_out_spec = extension_out_spec.unsqueeze(0)
+            last_recurrent_state = None
+        elif spec_sequence_masks is not None:
             core_attn_out_spec, last_recurrent_state = (
                 fused_sigmoid_gating_delta_rule_update(
                     A_log=self.A_log,
@@ -2131,7 +2219,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     ) -> bool:
         state_indices = attn_metadata.spec_state_indices_tensor
         return (
-            attn_metadata.spec_sequence_masks is not None
+            attn_metadata.verify_extension is None
+            and attn_metadata.spec_sequence_masks is not None
             and attn_metadata.num_decodes == 0
             and attn_metadata.num_spec_decodes > 0
             and self.kv_cache[1].dtype in FUSED_GDN_STATE_DTYPES
@@ -2210,8 +2299,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             return
         self._forward_core(
             mixed_qkv=mixed_qkv,
-            b=b.contiguous(),
-            a=a.contiguous(),
+            b=b,
+            a=a,
             core_attn_out=core_attn_out,
         )
         num_actual_tokens = attn_metadata.num_actual_tokens

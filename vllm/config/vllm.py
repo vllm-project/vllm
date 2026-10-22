@@ -26,6 +26,7 @@ from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils import random_uuid
 from vllm.utils.hashing import safe_hash
+from vllm.v1.spec_decode.registry import get_speculative_method
 
 from .attention import AttentionConfig, HiSparseConfig
 from .aux_output import AuxOutputConfig
@@ -640,6 +641,9 @@ class VllmConfig:
             # Fill-in drafting uses a bonus query plus one query per draft token.
             # DSpark's anchor-sampling layout does not need the extra slot.
             return self.num_speculative_tokens + 1
+        registered = get_speculative_method(speculative_config.method)
+        if registered is not None and registered.num_lookahead_tokens is not None:
+            return registered.num_lookahead_tokens(speculative_config)
         if speculative_config.use_eagle() or speculative_config.uses_draft_model():
             # Anchor-sampling DSpark drafts a block of num_speculative_tokens
             # query tokens in which the anchor itself is the first prediction
@@ -721,6 +725,21 @@ class VllmConfig:
             if envs.VLLM_USE_V2_MODEL_RUNNER is False:
                 logger.info_once(
                     "Watermarking requires Model Runner V2 and overrides "
+                    "VLLM_USE_V2_MODEL_RUNNER=0."
+                )
+            return True
+
+        speculative_config = getattr(self, "speculative_config", None)
+        if (
+            speculative_config is not None
+            and get_speculative_method(speculative_config.method) is not None
+        ):
+            # Plugin-registered speculative methods only have a Model Runner V2
+            # integration point (BaseSpeculator).
+            if envs.VLLM_USE_V2_MODEL_RUNNER is False:
+                raise ValueError(
+                    f"Speculative method '{speculative_config.method}' was "
+                    "registered by a plugin and requires Model Runner V2; remove "
                     "VLLM_USE_V2_MODEL_RUNNER=0."
                 )
             return True
@@ -1524,6 +1543,34 @@ class VllmConfig:
         # Models may have supplied their own DCP defaults above; anything still
         # unset falls back to the stock ones.
         self.parallel_config.set_dcp_defaults()
+
+        if self.speculative_config is not None:
+            method = self.speculative_config.registered_method()
+            if method is not None:
+                parallel = self.parallel_config
+                unsupported = []
+                if (
+                    parallel.pipeline_parallel_size > 1
+                    and not method.supports_pipeline_parallelism
+                ):
+                    unsupported.append("pipeline parallelism")
+                if (
+                    parallel.data_parallel_size > 1
+                    and not method.supports_data_parallelism
+                ):
+                    unsupported.append("data parallelism")
+                if (
+                    parallel.prefill_context_parallel_size > 1
+                    or parallel.decode_context_parallel_size > 1
+                ) and not method.supports_context_parallelism:
+                    unsupported.append("context parallelism")
+                if parallel.enable_dbo and not method.supports_dbo:
+                    unsupported.append("dual batch overlap")
+                if unsupported:
+                    raise ValueError(
+                        f"Speculative method {self.speculative_config.method!r} "
+                        f"has not opted into {', '.join(unsupported)}."
+                    )
 
         if self.model_config is not None:
             self.model_config.verify_with_parallel_config(self.parallel_config)
@@ -3130,6 +3177,14 @@ class VllmConfig:
 
         blockers: list[str] = []
         tp_size = self.parallel_config.tensor_parallel_size
+
+        if self.speculative_config is not None:
+            method = self.speculative_config.registered_method()
+            if method is not None and not method.supports_batch_sharded_sampling:
+                blockers.append(
+                    "the registered speculative verifier has not opted into "
+                    "batch-sharded sampling"
+                )
 
         if tp_size <= 1:
             blockers.append("tensor_parallel_size is 1, so there is nothing to shard")

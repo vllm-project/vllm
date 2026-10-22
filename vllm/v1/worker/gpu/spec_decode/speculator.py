@@ -41,6 +41,9 @@ from vllm.v1.worker.utils import AttentionGroup
 if TYPE_CHECKING:
     from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
     from vllm.v1.worker.gpu.pcp_manager import PCPManager
+    from vllm.v1.worker.gpu.sample.output import SamplerOutput
+    from vllm.v1.worker.gpu.sample.sampler import Sampler
+    from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
 
 logger = init_logger(__name__)
 
@@ -60,6 +63,12 @@ def _target_feeds_hc_residual(vllm_config: VllmConfig) -> bool:
 
 class BaseSpeculator(ABC):
     num_query_per_req: int = 1
+    # The number of tokens the target verifies per request changes from step to
+    # step (up to ``decode_query_len``), so decode CUDA graphs are captured for
+    # variable per-request query lengths instead of one uniform width. Adaptive
+    # verification turns this on by itself; a speculator that sizes its own
+    # verify batches (for example, a tree whose size changes) sets it here.
+    uses_varlen_verify_graphs: bool = False
     # Extra query slots reserved per request outside the regular queries.
     num_extra_query_per_req: int = 0
 
@@ -101,6 +110,63 @@ class BaseSpeculator(ABC):
         num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
         pass
+
+    def make_rejection_sampler(self, sampler: "Sampler") -> "RejectionSampler | None":
+        """Return the sampler that verifies this speculator's drafts.
+
+        Called once when the model runner builds its samplers. Return ``None``
+        (the default) to keep vLLM's chain ``RejectionSampler``. A replacement
+        is called like ``RejectionSampler.__call__``,
+        ``(logits, input_batch, draft_logits, invalid_drafts) -> SamplerOutput``,
+        and must keep the contract the runner relies on: ``sampled_token_ids``
+        holds the accepted tokens then the bonus token for each request,
+        ``num_sampled`` counts them, and ``num_rejected`` is the number of
+        scheduled query tokens that were not committed (so that
+        ``num_computed_tokens`` advances by ``num_sampled``). A verifier for
+        trees or other non-chain drafts can do that here.
+        """
+        return None
+
+    def prepare_verify_inputs(  # noqa: B027
+        self,
+        input_batch: InputBatch,
+        model_inputs: dict[str, Any],
+        *,
+        dummy_run: bool = False,
+    ) -> None:
+        """Adjust the target forward's inputs just before it runs.
+
+        Called once per target forward (also for capture and profiling dummy
+        runs, with ``dummy_run=True``), after ``positions`` and the slot
+        mappings were computed from the chain layout (``positions[i] =
+        num_computed + i``, one KV slot per query token) and after the attention
+        metadata was built. The default does nothing.
+
+        A speculator that verifies a tree can rewrite the positions in place
+        here (siblings share a position; the KV slots stay chain slots because
+        they were already computed): ``input_batch.positions`` and
+        ``model_inputs["positions"]``, which is another tensor for models with
+        multi-dimensional RoPE. It can also stage the inputs its attention backend
+        reads, such as which earlier rows each row attends to. Writes must go to
+        the existing buffers so CUDA graph replays see them.
+        """
+
+    def post_accept(  # noqa: B027
+        self,
+        input_batch: InputBatch,
+        sampler_output: "SamplerOutput",
+        num_sampled: torch.Tensor,
+        num_rejected: torch.Tensor,
+    ) -> None:
+        """Called after verification and before the step's state is committed.
+
+        Runs on the model runner's stream after ``num_sampled`` /
+        ``num_rejected`` are known and before ``num_computed_tokens`` advance
+        and ``propose`` runs. The default does nothing. A tree verifier uses it
+        to move the KV entries of the accepted path (which are not contiguous
+        in the chain slots) to the slots the next step expects, and to remember
+        which tree node was accepted.
+        """
 
 
 class DraftModelSpeculator(BaseSpeculator):

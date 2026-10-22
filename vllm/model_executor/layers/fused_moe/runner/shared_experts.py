@@ -72,6 +72,19 @@ class SharedExperts(torch.nn.Module):
                 self._input_ready_event = [torch.cuda.Event(), torch.cuda.Event()]
                 self._output_ready_event = [torch.cuda.Event(), torch.cuda.Event()]
 
+    def disable_aux_stream(self) -> None:
+        """Run this layer's shared expert without an auxiliary-stream fork/join.
+
+        Call before capturing graphs, for example when a conditional graph cannot
+        join the auxiliary stream. This does not disable overlap inside a modular
+        kernel. Outputs from any preceding forward must have been consumed.
+        """
+        if any(output is not None for output in self._output):
+            raise RuntimeError(
+                "Cannot disable the stream with unconsumed shared output"
+            )
+        self._stream = None
+
     # TODO(bnell): Hack for elastic_ep. Get rid of this
     def _set_moe_config(self, new_moe_config: FusedMoEConfig):
         self.moe_config = new_moe_config
