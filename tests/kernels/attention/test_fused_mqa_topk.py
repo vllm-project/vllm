@@ -7,6 +7,7 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
+    FUSED_MQA_TOPK_MAX_ROWS,
     fused_mqa_topk_available,
     fused_mqa_topk_prefill,
 )
@@ -210,6 +211,25 @@ def test_multi_request_chunk_matches_dense(lens, topk):
 
 
 @requires_fused
+@pytest.mark.parametrize("rows", [32768, 32770])
+def test_large_chunk_single_call(rows):
+    """Prefill chunks above 16384 rows (e.g. --max-num-batched-tokens 32768)
+    run in one launch; the per-row workspace grows to fit."""
+    from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
+        get_fused_mqa_topk_workspace,
+    )
+
+    keys = 65536
+    q, k, scales, weights = _inputs(rows, keys, seed=921)
+    starts = torch.zeros(rows, device="cuda", dtype=torch.int32)
+    ends = torch.arange(keys - rows + 1, keys + 1, device="cuda", dtype=torch.int32)
+    out = torch.empty(rows, TOPK, device="cuda", dtype=torch.int32)
+    assert fused_mqa_topk_prefill(q, k, scales, weights, starts, ends, out)
+    assert get_fused_mqa_topk_workspace(q.device, rows).counts.numel() >= rows
+    _check(out, q, k, scales, weights, starts, ends)
+
+
+@requires_fused
 def test_rows_start_at_zero_skips_conversion():
     rows, keys = 32, 8192
     q, k, scales, weights = _inputs(rows, keys)
@@ -271,31 +291,37 @@ def _split(seq_lens, q_lens, fused, offset=0):
     )
 
 
-@pytest.mark.parametrize("fused,expected", [(False, 64), (True, 1)])
-def test_planner_one_fused_call_per_16k_rows(fused, expected):
-    chunks = _split([524288], [16384], fused)
-    assert len(chunks) == expected
-    assert sum(q.stop - q.start for _, q in chunks) == 16384
+@pytest.mark.parametrize("q_rows", [16384, 32768])
+@pytest.mark.parametrize("fused", [False, True])
+def test_planner_one_fused_call_per_chunk(fused, q_rows):
+    # One fused call per FUSED_MQA_TOPK_MAX_ROWS rows (None: per chunk); dense
+    # splits by the logits budget.
+    chunks = _split([524288], [q_rows], fused)
+    cap = FUSED_MQA_TOPK_MAX_ROWS or q_rows
+    assert len(chunks) == (-(-q_rows // cap) if fused else q_rows // 256)
+    assert sum(q.stop - q.start for _, q in chunks) == q_rows
 
 
 def test_planner_fused_any_length_and_short_queries():
     # No length threshold and no minimum query count on the fused path.
     assert _split([524288], [512], True) == [(slice(0, 1), slice(0, 512))]
     assert _split([4096], [4096], True) == [(slice(0, 1), slice(0, 4096))]
-    # Long single-request steps are split at 16384 query rows.
+    # A 40000-row step: split at FUSED_MQA_TOPK_MAX_ROWS (None: one call).
+    cap = FUSED_MQA_TOPK_MAX_ROWS or 40000
     assert _split([65536], [40000], True) == [
-        (slice(0, 1), slice(0, 16384)),
-        (slice(0, 1), slice(16384, 32768)),
-        (slice(0, 1), slice(32768, 40000)),
+        (slice(0, 1), slice(lo, min(lo + cap, 40000))) for lo in range(0, 40000, cap)
     ]
 
 
-def test_planner_packs_requests_up_to_16k_rows():
-    # Four 4K requests fit one fused call (16384 rows); dense needs a split.
+def test_planner_packs_requests_in_one_fused_call():
+    # Requests share one fused call up to the key limit; dense needs a split.
     assert _split([4096] * 4, [4096] * 4, True) == [(slice(0, 4), slice(0, 16384))]
     assert len(_split([4096] * 4, [4096] * 4, False)) > 1
     chunks = _split([524288, 262144], [16384, 9], True, offset=2)
-    assert chunks == [(slice(2, 3), slice(0, 16384)), (slice(3, 4), slice(0, 9))]
+    if FUSED_MQA_TOPK_MAX_ROWS is None or FUSED_MQA_TOPK_MAX_ROWS >= 16393:
+        assert chunks == [(slice(2, 4), slice(0, 16393))]
+    else:  # the second request would push the call past the row cap
+        assert chunks == [(slice(2, 3), slice(0, 16384)), (slice(3, 4), slice(0, 9))]
 
 
 def test_planner_fused_never_packs_past_key_limit():

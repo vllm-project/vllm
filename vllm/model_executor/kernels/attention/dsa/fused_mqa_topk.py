@@ -26,9 +26,15 @@ logger = init_logger(__name__)
 FUSED_MQA_TOPK_HEADS = 32
 FUSED_MQA_TOPK_HEAD_DIM = 128
 FUSED_MQA_TOPK_TOPKS = (512, 1024, 2048)
-# Largest query chunk / gathered key range a single call accepts.
-FUSED_MQA_TOPK_MAX_ROWS = 16384
+# Largest gathered key range a single call accepts (no row limit: the per-row
+# workspace is sized from the call, see get_fused_mqa_topk_workspace).
 FUSED_MQA_TOPK_MAX_KEYS = 1 << 20
+# Rows per fused call. The kernel has no row limit, but prefill chunks above
+# 16384 rows (--max-num-batched-tokens > 16384) are not validated end to end,
+# so the chunk planner splits fused chunks at this many rows. None: one fused
+# call per chunk, any size.
+# TODO: check for other prefill chunk sizes.
+FUSED_MQA_TOPK_MAX_ROWS: int | None = 16384
 
 
 def fused_mqa_topk_min_keys(topk: int) -> int:
@@ -54,8 +60,8 @@ class FusedMQATopKWorkspace:
     indices: torch.Tensor  # [8S, 16384] int32
     retained: torch.Tensor  # [8S, 4096] fp32
     retained_indices: torch.Tensor  # [8S, 4096] int32
-    counts: torch.Tensor  # [16384] int32, per-row candidate counts
-    defer: torch.Tensor  # [16384 / 8] int32, blocks queued for the exact rescan
+    counts: torch.Tensor  # [rows] int32, per-row candidate counts
+    defer: torch.Tensor  # [rows / 8] int32, blocks queued for the exact rescan
 
     def as_args(self) -> tuple[torch.Tensor, ...]:
         return (
@@ -81,11 +87,17 @@ def fused_mqa_topk_available() -> bool:
     )
 
 
-def get_fused_mqa_topk_workspace(device: torch.device) -> FusedMQATopKWorkspace:
+def get_fused_mqa_topk_workspace(
+    device: torch.device, rows: int
+) -> FusedMQATopKWorkspace:
     """Return the per-device workspace, allocating it on first use.
 
-    The block counter is zeroed once; every launch leaves it zeroed again.
+    The per-row part (counts, defer) holds at least ``rows`` query rows and grows
+    when a larger call arrives; the profiling run asks for the largest prefill
+    chunk (max_num_batched_tokens rows) so serving never grows it. The block
+    counter is zeroed once; every launch leaves it zeroed again.
     """
+    rows = (rows + 7) // 8 * 8
     index = (
         device.index
         if device.index is not None
@@ -96,7 +108,6 @@ def get_fused_mqa_topk_workspace(device: torch.device) -> FusedMQATopKWorkspace:
         dev = torch.device("cuda", index)
         num_sms = torch.cuda.get_device_properties(index).multi_processor_count
         slots = _SLOTS_PER_SM * num_sms
-        rows = FUSED_MQA_TOPK_MAX_ROWS
         ws = FusedMQATopKWorkspace(
             counter=torch.zeros(2, dtype=torch.int32, device=dev),
             values=torch.empty(
@@ -122,6 +133,13 @@ def get_fused_mqa_topk_workspace(device: torch.device) -> FusedMQATopKWorkspace:
             nbytes / 2**20,
         )
         _WORKSPACES[index] = ws
+    elif ws.counts.numel() < rows:
+        ws.counts = torch.empty(rows, dtype=torch.int32, device=ws.counts.device)
+        ws.defer = torch.empty(rows // 8, dtype=torch.int32, device=ws.defer.device)
+        logger.info(
+            "Grew the fused MQA+top-k row workspace on cuda:%d to %d rows.", index, rows
+        )
+        _WORKSPACES[index] = ws
     return ws
 
 
@@ -145,7 +163,7 @@ def fused_mqa_topk_supported(
         k.dtype == torch.float8_e4m3fn
         and k.dim() == 2
         and k.shape[1] == FUSED_MQA_TOPK_HEAD_DIM
-        and 0 < q.shape[0] <= FUSED_MQA_TOPK_MAX_ROWS
+        and q.shape[0] > 0
         and 0 < k.shape[0] <= FUSED_MQA_TOPK_MAX_KEYS
         and fused_mqa_topk_config_supported(q, topk_tokens)
     )
@@ -225,7 +243,7 @@ def fused_mqa_topk_prefill(
         if direct
         else torch.empty_like(output, memory_format=torch.contiguous_format)
     )
-    ws = get_fused_mqa_topk_workspace(q.device)
+    ws = get_fused_mqa_topk_workspace(q.device, rows)
     # The kernel emits absolute key indices; the dense top-k (and the sparse
     # attention consumer) use indices relative to the row start. relative=True
     # converts in place (rows with start 0 are skipped on the GPU).

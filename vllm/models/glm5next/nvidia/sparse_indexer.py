@@ -172,7 +172,7 @@ def sparse_attn_indexer_kpool(
                 q_quant, topk_tokens // max(index_kpool, 1)
             )
         ):
-            get_fused_mqa_topk_workspace(q_quant.device)
+            get_fused_mqa_topk_workspace(q_quant.device, q_quant.shape[0])
 
         # Reserve profiler-visible memory for the worst-case decode logits,
         # whose shape is [B * next_n, max_pool_len]. This profiling branch

@@ -121,7 +121,7 @@ void check_tensor(const torch::stable::Tensor& t, int32_t device,
 // 2048: absolute key indices (columns of the logits), or with relative=true
 // indices relative to the row's start (key - start, the top_k_per_row_prefill
 // convention); -1 padded when fewer than K keys are visible.
-// 0 < rows <= 16384, 0 < keys <= 1048576 (the last 8-row block may be partial).
+// 0 < rows, 0 < keys <= 1048576 (the last 8-row block may be partial).
 // Workspace (caller-owned, reused across calls), with B = ceil(rows / 8) and
 // S >= 2 slots per CTA of the persistent grid (one CTA per SM):
 //   counter [2] int32 (zero between calls; the kernel leaves it zeroed),
@@ -158,7 +158,7 @@ void fused_mqa_topk_prefill(
   STD_TORCH_CHECK(k.dim() == 2 && k.size(1) == kHeadDim,
                   "k must be [keys, 128]");
   const int64_t rows = q.size(0), keys = k.size(0);
-  STD_TORCH_CHECK(rows > 0 && rows <= 16384, "rows must be in [1, 16384]");
+  STD_TORCH_CHECK(rows > 0, "rows must be positive");
   STD_TORCH_CHECK(keys > 0 && keys <= (1 << 20),
                   "keys must be in [1, 1048576]");
   const int64_t blocks = (rows + 7) / 8;

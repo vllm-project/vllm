@@ -1378,11 +1378,12 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         sub-chunks on the query dimension (M) to bound peak memory.
 
         With ``use_fused_mqa_topk`` the fused MQA+top-k kernel needs no logits
-        buffer: chunks whose gathered keys fit its 1M-key limit are bounded by
-        its 16384-row limit instead of the logits budget (one fused call per
-        chunk). Requests are never packed past that key limit, so only a single
-        request longer than 1M keys takes the dense, logits-budget path (the
-        profiling run relies on this to skip the dense logits reservation).
+        buffer: chunks whose gathered keys fit its 1M-key limit are not bounded
+        by the logits budget but by FUSED_MQA_TOPK_MAX_ROWS rows (one fused call
+        per chunk; None = no row limit). Requests are never packed past that key
+        limit, so only a single request longer than 1M keys takes the
+        logits-budget path. Chunks the dispatch keeps dense are row-split by the
+        indexer.
 
         Returns list of (req_slice, query_slice) tuples.
         """
@@ -1405,7 +1406,10 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 )
                 new_m, new_n = chunk_m + q, chunk_n + s
                 if fused(new_n):
-                    fits = new_m <= FUSED_MQA_TOPK_MAX_ROWS
+                    fits = (
+                        FUSED_MQA_TOPK_MAX_ROWS is None
+                        or new_m <= FUSED_MQA_TOPK_MAX_ROWS
+                    )
                 else:
                     fits = not use_fused_mqa_topk and new_m * new_n <= max_logits_elems
                 if new_n <= workspace_size and fits:
@@ -1428,7 +1432,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 max(1, max_logits_elems // chunk_n) if chunk_n > 0 else max(1, chunk_m)
             )
             if fused(chunk_n):
-                max_q = FUSED_MQA_TOPK_MAX_ROWS
+                max_q = FUSED_MQA_TOPK_MAX_ROWS or max(1, chunk_m)
             for q_off in range(0, chunk_m, max_q):
                 sub_m = min(max_q, chunk_m - q_off)
                 chunks.append((req_slice, slice(q_off, q_off + sub_m)))
