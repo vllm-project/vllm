@@ -23,6 +23,10 @@ following `quantization.quant_algo` values:
 - `MIXED_PRECISION`: per-layer formats specified by `quantized_layers`
   (use `quantization="modelopt_mixed"`).
 
+For Qwen3-based DFlash and DSpark drafts, `quantized_layers` and exclusion lists
+use the exported checkpoint's module names. vLLM maps these names to the draft's
+module prefix and decoder layer indices before constructing quantized layers.
+
 !!! note
     For NVFP4 checkpoints, vLLM selects a GEMM kernel automatically at load
     time from the backends available on the current platform (CUTLASS,

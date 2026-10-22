@@ -83,6 +83,39 @@ def _add_global_draft_layer_exclusions(
             exclusions.append(global_exclusion)
 
 
+def _map_draft_quant_config(
+    quant_config: QuantizationConfig | None,
+    weight_mapper: WeightsMapper,
+    prefix: str,
+    start_layer_id: int,
+    num_hidden_layers: int,
+) -> None:
+    """Use runtime module names for ModelOpt draft quantization settings."""
+    if quant_config is None:
+        return
+    from vllm.model_executor.layers.quantization.modelopt import ModelOptQuantConfigBase
+
+    if not isinstance(quant_config, ModelOptQuantConfigBase):
+        _add_global_draft_layer_exclusions(
+            quant_config, start_layer_id, num_hidden_layers
+        )
+        return
+    quant_config.apply_vllm_mapper(weight_mapper.get_rename_mapper())
+    root = rf"(?:{re.escape(prefix)}\.)?" if prefix else ""
+    runtime_names = {
+        re.compile(rf"^({root}\*?)layers\.{index}(?=\.|\*|$)"): (
+            rf"\g<1>layers.{start_layer_id + index}"
+        )
+        for index in reversed(range(num_hidden_layers))
+        if start_layer_id
+    }
+    if prefix:
+        runtime_names[re.compile(rf"^(?!\*|{re.escape(prefix)}(?:\.|\*|$))")] = (
+            f"{prefix}."
+        )
+    quant_config.apply_vllm_mapper(WeightsMapper(orig_to_new_regex=runtime_names))
+
+
 def _dflash_layer_causal(config: Qwen3Config, layer_idx: int) -> bool:
     """Resolve explicit causality before falling back to legacy layer defaults."""
     is_causal = getattr(config, "is_causal", None)
@@ -412,13 +445,15 @@ class DFlashQwen3Model(nn.Module):
     decoder_layer_cls = DFlashQwen3DecoderLayer
 
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_substr={
-            "midlayer.": "layers.0.",
+        orig_to_new_regex={
+            re.compile(r"(?<![A-Za-z0-9_])midlayer(?=\.|\*|$)"): "layers.0",
             # Muse-Glimmer-30B-assistant names the aux-hidden-state encoder
             # `encoder.fc` / `encoder.output_norm_enc`; this head calls them
             # `fc` / `hidden_norm`. Same tensors and shapes, different names.
-            "encoder.output_norm_enc.": "hidden_norm.",
-            "encoder.fc.": "fc.",
+            re.compile(r"(?<![A-Za-z0-9_])encoder\.output_norm_enc(?=\.|\*|$)"): (
+                "hidden_norm"
+            ),
+            re.compile(r"(?<![A-Za-z0-9_])encoder\.fc(?=\.|\*|$)"): "fc",
         },
         orig_to_new_stacked={
             ".q_proj": (".qkv_proj", "q"),
@@ -442,8 +477,12 @@ class DFlashQwen3Model(nn.Module):
         self.config = speculative_config.draft_model_config.hf_config
         self.vocab_size = self.config.vocab_size
         self.quant_config = get_draft_quant_config(vllm_config)
-        _add_global_draft_layer_exclusions(
-            self.quant_config, start_layer_id, self.config.num_hidden_layers
+        _map_draft_quant_config(
+            self.quant_config,
+            self.hf_to_vllm_mapper,
+            prefix,
+            start_layer_id,
+            self.config.num_hidden_layers,
         )
 
         drafter_config = getattr(self.config, "eagle_config", {})

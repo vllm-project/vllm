@@ -598,6 +598,147 @@ def test_modelopt_nested_mixed_checkpoint(tmp_path, monkeypatch, vllm_runner):
     assert outputs[1] == outputs[0]
 
 
+def test_modelopt_mixed_dspark_checkpoint(tmp_path, monkeypatch, vllm_runner):
+    """Native draft names select FP8 methods, including offset decoder layers."""
+    from safetensors.torch import save_file
+    from transformers import LlamaConfig, LlamaForCausalLM, Qwen3Config, Qwen3Model
+
+    from vllm import SamplingParams
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    architecture = dict(
+        vocab_size=128,
+        hidden_size=128,
+        intermediate_size=256,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        head_dim=64,
+        max_position_embeddings=64,
+    )
+    target, draft = tmp_path / "target", tmp_path / "draft"
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(0)
+        teacher = LlamaForCausalLM(LlamaConfig(num_hidden_layers=4, **architecture))
+        teacher.to(torch.bfloat16).save_pretrained(target)
+        config = Qwen3Config(num_hidden_layers=1, **architecture)
+        weights = dict(Qwen3Model(config).to(torch.bfloat16).state_dict())
+        del weights["embed_tokens.weight"]
+        for name, shape in (
+            ("fc.weight", (128, 384)),
+            ("markov_head.markov_w1.weight", (128, 128)),
+            ("markov_head.markov_w2.weight", (128, 128)),
+        ):
+            weights[name] = torch.randn(shape, dtype=torch.bfloat16) * 0.01
+        weights["hidden_norm.weight"] = torch.ones(128, dtype=torch.bfloat16)
+    algorithms = {
+        "fc": "FP8_PER_CHANNEL_PER_TOKEN",
+        "markov_head.markov_w2": "FP8",
+        "layers.0.mlp.down_proj": "FP8",
+    }
+    for name, algorithm in algorithms.items():
+        value = weights[f"{name}.weight"].float()
+        per_channel = algorithm == "FP8_PER_CHANNEL_PER_TOKEN"
+        amax = value.abs().amax(dim=1) if per_channel else value.abs().max()
+        scale = amax / torch.finfo(torch.float8_e4m3fn).max
+        divisor = scale[:, None] if per_channel else scale
+        weights[f"{name}.weight"] = (value / divisor).to(torch.float8_e4m3fn)
+        weights[f"{name}.weight_scale"] = scale
+        if not per_channel:
+            weights[f"{name}.input_scale"] = torch.tensor(1.0 / 448)
+    metadata = {
+        "producer": {"name": "modelopt", "version": "0.49.0"},
+        "quantization": {
+            "quant_algo": "MIXED_PRECISION",
+            "kv_cache_quant_algo": None,
+            "quantized_layers": {
+                name: {"quant_algo": algorithm}
+                for name, algorithm in algorithms.items()
+            },
+            "exclude_modules": [],
+        },
+    }
+    config.update(
+        dict(
+            architectures=["Qwen3DSparkModel"],
+            block_size=16,
+            target_layer_ids=[0, 1, 2],
+            markov_rank=128,
+            sample_from_anchor=True,
+            dflash_config={
+                "target_layer_ids": [0, 1, 2],
+                "mask_token_id": 127,
+                "causal": False,
+            },
+            quantization_config=metadata,
+        )
+    )
+    config.save_pretrained(draft)
+    save_file(weights, str(draft / "model.safetensors"))
+    (draft / "hf_quant_config.json").write_text(json.dumps(metadata))
+
+    def check_draft(worker):
+        from vllm.model_executor.layers.quantization.utils.quant_utils import (
+            kFp8DynamicTokenSym,
+            kFp8StaticTokenSym,
+        )
+
+        model = worker.get_draft_model().model
+        for layer, weight_key, activation_key in (
+            (model.fc, kFp8StaticTokenSym, kFp8DynamicTokenSym),
+            (model.markov_head.markov_w2, kFp8StaticTensorSym, kFp8StaticTensorSym),
+            (model.layers[0].mlp.down_proj, kFp8StaticTensorSym, kFp8StaticTensorSym),
+        ):
+            assert isinstance(layer.quant_method, ModelOptLinearMethod)
+            assert layer.quant_method.spec.weight == weight_key
+            assert layer.quant_method.spec.activation == activation_key
+            assert layer.weight.dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz)
+            assert torch.isfinite(layer.weight.float()).all()
+            assert torch.isfinite(layer.weight_scale).all()
+            assert layer.weight_scale.numel() == (128 if layer is model.fc else 1)
+        assert model.markov_head.markov_w1.weight.dtype == torch.bfloat16
+        assert isinstance(
+            model.layers[0].self_attn.qkv_proj.quant_method, UnquantizedLinearMethod
+        )
+
+    params = SamplingParams(temperature=0, max_tokens=8, ignore_eos=True)
+    outputs = []
+    for speculation in (
+        None,
+        dict(method="dspark", model=str(draft), num_speculative_tokens=2),
+    ):
+        with vllm_runner(
+            str(target),
+            speculative_config=speculation,
+            skip_tokenizer_init=True,
+            trust_remote_code=False,
+            dtype="bfloat16",
+            enforce_eager=True,
+            enable_flashinfer_autotune=False,
+            disable_log_stats=False,
+            max_model_len=32,
+            max_num_seqs=1,
+            kv_cache_memory_bytes=16 << 20,
+        ) as llm:
+            if speculation:
+                llm.collective_rpc(check_draft)
+                before = sum(
+                    metric.value
+                    for metric in llm.llm.get_metrics()
+                    if metric.name == "vllm:spec_decode_num_draft_tokens"
+                )
+            outputs.append(llm.generate([[1, 5, 7, 9]], params)[0][0][0])
+            if speculation:
+                after = sum(
+                    metric.value
+                    for metric in llm.llm.get_metrics()
+                    if metric.name == "vllm:spec_decode_num_draft_tokens"
+                )
+                assert after > before
+    assert len(outputs[0]) == 12
+    assert outputs[1] == outputs[0]
+
+
 @pytest.mark.skipif(
     not is_quant_method_supported("modelopt"),
     reason="ModelOpt FP8 is not supported on this GPU type.",

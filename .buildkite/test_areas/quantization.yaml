@@ -10,6 +10,7 @@ steps:
   source_file_dependencies:
   - csrc/
   - vllm/model_executor/layers/quantization
+  - vllm/model_executor/models/qwen3_dflash.py
   - vllm/transformers_utils/model_arch_config_convertor.py
   - vllm/models/deepseek_v41/quant_config.py
   - vllm/utils/humming.py
@@ -34,6 +35,7 @@ steps:
       source_file_dependencies:
       - csrc/
       - vllm/model_executor/layers/quantization
+      - vllm/model_executor/models/qwen3_dflash.py
       - tests/quantization
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
