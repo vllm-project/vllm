@@ -63,7 +63,10 @@ def test_mixed_warmup_disables_watermarking():
         for request in output.scheduled_new_reqs
     ]
     assert len(sampling_params) == 2
-    assert all(params.watermarking is False for params in sampling_params)
+    assert all(
+        params is not None and params.watermarking is False
+        for params in sampling_params
+    )
 
 
 @pytest.mark.parametrize("fail_warmup", [False, True])
