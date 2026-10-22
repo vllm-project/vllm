@@ -99,7 +99,8 @@ def test_deferred_finalize_enabled_before_moe_kernel_setup(
 
     latent_moe_runner.LatentMoERunner()
 
-    assert moe_config.use_deferred_moe_finalize
+    # The stand-in deliberately borrows the real config's property.
+    assert moe_config.use_deferred_moe_finalize  # type: ignore[misc]
     assert moe_config.defer_moe_finalize_max_num_tokens == 128
     assert initialized_with["experts_per_token"] == 16
 

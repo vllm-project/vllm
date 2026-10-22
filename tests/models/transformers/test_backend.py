@@ -694,8 +694,11 @@ def test_attention_layer_index_is_the_modules_own():
     attentions = [
         model.get_submodule(f"layers.{i}.self_attn.{j}") for i in (0, 1) for j in (0, 1)
     ]
-    fusers = [AttentionFuser.match(None, attn) for attn in attentions]
-    assert all(fuser is not None for fuser in fusers)
+    fusers: list[AttentionFuser] = []
+    for attn in attentions:
+        fuser = AttentionFuser.match(None, attn)
+        assert fuser is not None
+        fusers.append(fuser)
     assert [f.layer_index(a) for f, a in zip(fusers, attentions)] == [0, 1, 2, 3]
 
     # Not dispatching to vLLM yet, as a vision tower never would be. The vLLM
