@@ -1110,17 +1110,13 @@ def _slice_unpadded_mxfp4_weights(
     """Derive the unpadded sub-block of padded MXFP4 WeightTensors as plain
     bf16 tensors.
 
-    MXFP4's packed-uint8/block-scale layout can't be sliced to an unpadded
-    K/N the way _slice_unpadded_weights slices fp8: downcast_to_mxfp() packs
-    2 elements/byte along its quantized axis (K for w1, N for w2) and scales
-    have a coarser 32-element block granularity. So each weight is sliced
-    along its *other* (unpacked) axis first, then dequantized via
-    upcast_from_mxfp (which restores the full packed axis), then sliced
-    again on that now-unpacked axis. W1's gate/up interleave (W4A16 only,
-    mirroring reference_moe_impl's mxfp4 branch: SwigluOAIAndMul expects
-    interleaved row order) is applied between the two w1 slicing steps,
-    since _slice_gate_up_rows assumes the pre-interleave contiguous
-    [gate; up] row order.
+    Unlike _slice_unpadded_weights (fp8), MXFP4 can't be sliced directly:
+    downcast_to_mxfp() packs 2 elements/byte along the quantized axis (K for
+    w1, N for w2) with 32-element scale blocks. So each weight is sliced on
+    its unpacked axis, dequantized via upcast_from_mxfp, then sliced again on
+    the now-unpacked axis. W1's gate/up interleave (W4A16 only, mirroring
+    reference_moe_impl's mxfp4 branch) happens between the two w1 slices,
+    since _slice_gate_up_rows expects pre-interleave [gate; up] row order.
     """
     from triton_kernels.numerics_details.mxfp import upcast_from_mxfp
 
@@ -1377,18 +1373,51 @@ def _aiter_token_padding_worker(
         ref_out = reference_moe_impl(config, weights, rank_tensors)
 
     real_rows = [i for i in range(config.Ms) if i not in garbage_rows]
+    fe_name = config.fused_experts_type.__name__
 
     assert torch.isfinite(mk_out[real_rows]).all(), (
-        "Garbage (padding) token rows leaked NaN/Inf into real rows' output "
-        "through AiterExperts."
+        f"Garbage (padding) token rows leaked NaN/Inf into real rows' output "
+        f"through {fe_name}."
     )
+
+    if config.is_w4a16_mxfp4:
+        # AITER_MXFP4_BF16 silently computes the wrong thing for bias-free
+        # SwiGLU-OAI (~55% sign agreement, ~5x-small magnitude on hardware),
+        # instead of raising. Only smoke-test (finite real rows, already
+        # checked above) until the fix in
+        # https://github.com/vllm-project/vllm/pull/59766 lands -- mirrors
+        # rank_worker's existing carve-out for this exact combination.
+        return
+
+    if config.weight_dtype == "mxfp4":
+        # check_accuracy's atol=1e-1 dwarfs the ~1e-2 reference signal, and a
+        # magnitude-only guard can't catch a sign-flipped mk_out (same
+        # magnitude as correct output). Cosine similarity can: measured on
+        # gfx950 across all padding modes, correct runs score 0.79-0.99
+        # (padding adds quantization noise in hidden/both modes) vs. <=0.01 or
+        # negative for zeroed/sign-flipped/decorrelated output.
+        cos_sim = torch.nn.functional.cosine_similarity(
+            mk_out[real_rows].flatten().float(),
+            ref_out[real_rows].flatten().float(),
+            dim=0,
+        )
+        assert cos_sim > 0.5, (
+            f"{fe_name} output (cos_sim={cos_sim:.4f} vs. reference) looks "
+            "degenerate/decorrelated, not just numerically imprecise."
+        )
+        # Looser tolerance than the fp8/unquantized case below: matches
+        # rank_worker's main sweep, which uses the same atol/rtol for mxfp4.
+        check_accuracy(
+            ref_out[real_rows], mk_out[real_rows], atol=1e-1, rtol=1e-1, percent=0.9
+        )
+        return
 
     # ref_out's magnitude here (~1e-3-1e-2) is below atol=3e-2, so a zeroed-out
     # mk_out would still pass the checks below -- guard against that.
     ref_scale = ref_out[real_rows].abs().mean()
     mk_scale = mk_out[real_rows].abs().mean()
     assert mk_scale > 0.5 * ref_scale, (
-        f"AiterExperts output magnitude (mean |mk_out|={mk_scale:.6f}) looks "
+        f"{fe_name} output magnitude (mean |mk_out|={mk_scale:.6f}) looks "
         f"degenerate/zeroed vs. reference (mean |ref_out|={ref_scale:.6f})."
     )
 
@@ -1476,67 +1505,6 @@ def test_aiter_moe_token_padding_garbage_rows(
     )
 
 
-def _aiter_token_padding_worker_mxfp4(
-    pgi: ProcessGroupInfo,
-    vllm_config: VllmConfig,
-    cpu_group,
-    config: Config,
-    weights: WeightTensors,
-    verbose: bool,
-    garbage_rows: dict[int, float],
-):
-    device = torch.device(f"cuda:{pgi.local_rank}")
-    init_workspace_manager(device)
-    set_random_seed(pgi.rank)
-
-    weights = copy.deepcopy(weights)
-    weights.to_current_device()
-
-    rank_tensors = RankTensors.make(config, pgi)
-    _apply_token_padding_garbage_rows(rank_tensors, garbage_rows)
-
-    with set_current_vllm_config(vllm_config):
-        mk_out = run_modular_kernel(pgi, vllm_config, config, weights, rank_tensors)
-        ref_out = reference_moe_impl(config, weights, rank_tensors)
-
-    real_rows = [i for i in range(config.Ms) if i not in garbage_rows]
-
-    assert torch.isfinite(mk_out[real_rows]).all(), (
-        "Garbage (padding) token rows leaked NaN/Inf into real rows' output "
-        "through AiterMxfp4Experts."
-    )
-
-    if config.is_w4a16_mxfp4:
-        # AITER_MXFP4_BF16 silently computes the wrong thing for bias-free
-        # SwiGLU-OAI (~55% sign agreement, ~5x-small magnitude on hardware),
-        # instead of raising. Only smoke-test (finite real rows, already
-        # checked above) until the fix in
-        # https://github.com/vllm-project/vllm/pull/59766 lands -- mirrors
-        # rank_worker's existing carve-out for this exact combination.
-        return
-
-    # check_accuracy's atol=1e-1 dwarfs the ~1e-2 reference signal, and a
-    # magnitude-only guard can't catch a sign-flipped mk_out (same
-    # magnitude as correct output). Cosine similarity can: measured on
-    # gfx950 across all padding modes, correct runs score 0.79-0.99
-    # (padding adds quantization noise in hidden/both modes) vs. <=0.01 or
-    # negative for zeroed/sign-flipped/decorrelated output.
-    cos_sim = torch.nn.functional.cosine_similarity(
-        mk_out[real_rows].flatten().float(),
-        ref_out[real_rows].flatten().float(),
-        dim=0,
-    )
-    assert cos_sim > 0.5, (
-        f"AiterMxfp4Experts output (cos_sim={cos_sim:.4f} vs. reference) "
-        "looks degenerate/decorrelated, not just numerically imprecise."
-    )
-    # Looser tolerance than the fp8/unquantized token padding test: matches
-    # rank_worker's main sweep, which uses the same atol/rtol for mxfp4.
-    check_accuracy(
-        ref_out[real_rows], mk_out[real_rows], atol=1e-1, rtol=1e-1, percent=0.9
-    )
-
-
 @require_aiter_moe
 @pytest.mark.parametrize(
     "quant_config", _PADDING_MXFP4_QUANT_CONFIGS, ids=_PADDING_MXFP4_QUANT_IDS
@@ -1591,7 +1559,7 @@ def test_aiter_moe_token_padding_garbage_rows_mxfp4(
 
     parallel_launch_with_config(
         config.world_size,
-        _aiter_token_padding_worker_mxfp4,
+        _aiter_token_padding_worker,
         vllm_config,
         env_dict,
         config,
