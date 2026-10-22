@@ -461,7 +461,8 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
         cache_root = resolve_flashinfer_autotune_v2_root()
         if is_leader:
             logger.info_once(
-                "Using FlashInfer managed autotune cache (root=%s)",
+                "Using FlashInfer managed autotune cache (root=%s). Pass "
+                "--disable-flashinfer-autotune to skip autotuning.",
                 cache_root if cache_root is not None else "flashinfer default",
             )
         autotune_context = autotune_v2(
@@ -475,7 +476,11 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
             f"{cache_path.stem}_dp{dp_rank}_rank{world.rank_in_group}{cache_path.suffix}"
         )
         if is_leader:
-            logger.info_once("Using FlashInfer autotune cache file: %s", cache_path)
+            logger.info_once(
+                "Using FlashInfer autotune cache file: %s. Pass "
+                "--disable-flashinfer-autotune to skip autotuning.",
+                cache_path,
+            )
 
         if _all_ranks_have_matching_cache(cache_path, tune_group):
             loaded = tuner.load_configs(str(cache_path))
