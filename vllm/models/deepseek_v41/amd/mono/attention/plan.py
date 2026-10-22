@@ -44,6 +44,7 @@ GROUPS = HEAD_DIM // COLS  # 16
 PAIR = 8  # a mailbox (value, tag) pair
 COPIES = 8
 QRDY_STRIDE = 64
+ARDY_MIN_S = 30
 
 
 def flag_stride(n: int) -> int:
@@ -56,6 +57,11 @@ def flag_copy(c, bid, stride):
 
 def on_copy(copy, i):
     return i if isinstance(copy, int) and copy == 0 else copy + i
+
+
+def ardy_tiles(s: int, tuned: bool = False) -> int:
+    nt = len(token_tiles(s))
+    return nt if tuned and nt > 1 and s >= ARDY_MIN_S and s % TILE != 0 else 1
 
 
 def cdiv(a, b):
@@ -176,7 +182,7 @@ def back_scratch(s: int, d: Dims, start: int = 0, tuned: bool = False) -> dict:
     )  # back.chunk_keys
     nchunk = cdiv(KEYS, ck)
     crdy = s * d.heads // 8
-    ardy = (COPIES if tuned else 1) * d.woa_tasks
+    ardy = (COPIES * ardy_tiles(s, True) if tuned else 1) * d.woa_tasks
     return byte_layout(
         [
             ("part", s * nchunk * d.heads * HEAD_DIM * 2),  # bf16 partials
