@@ -970,66 +970,6 @@ def test_update_states_request_unscheduled(model_runner, dist_init):
     assert not _is_req_scheduled(model_runner, req_ids[1])
 
 
-def test_update_states_skipped_request_keeps_num_accepted_tokens(
-    model_runner, dist_init, monkeypatch
-):
-    """A running request skipped for one step gets the accepted-token count
-    of its last step back when it is re-added; a resumed request starts at 1."""
-    monkeypatch.setattr(
-        type(model_runner.model_config), "is_hybrid", property(lambda self: True)
-    )
-    model_runner.num_accepted_tokens_event = torch.Event()
-    model_runner.num_accepted_tokens_event.record()
-    req_ids = ("req_0", "req_1")
-    model_runner._update_states(_schedule_new_request(*req_ids))
-    idx = model_runner.input_batch.req_id_to_index[req_ids[1]]
-    model_runner.input_batch.num_accepted_tokens_cpu[idx] = 3
-
-    # req_1 is not scheduled this step.
-    model_runner._update_states(
-        SchedulerOutput(
-            scheduled_new_reqs=[],
-            scheduled_cached_reqs=CachedRequestData.make_empty(),
-            num_scheduled_tokens={req_ids[0]: 1},
-            total_num_scheduled_tokens=1,
-            scheduled_spec_decode_tokens={},
-            scheduled_encoder_inputs={},
-            finished_req_ids=set(),
-            free_encoder_mm_hashes=[],
-        )
-    )
-    assert model_runner.requests[req_ids[1]].num_accepted_tokens == 3
-
-    # req_1 is scheduled again.
-    model_runner._update_states(
-        _schedule_cached_requests(
-            req_ids=[req_ids[1]],
-            num_scheduled_tokens={req_ids[1]: 1},
-            new_token_ids=[[]],
-            num_computed_tokens=[3],
-            num_output_tokens=[0],
-        )
-    )
-    idx = model_runner.input_batch.req_id_to_index[req_ids[1]]
-    assert int(model_runner.input_batch.num_accepted_tokens_cpu[idx]) == 3
-
-
-def test_update_streaming_request_resets_recurrent_bookkeeping(
-    model_runner, dist_init
-):
-    """A streaming update prefills the new input on top of the state, so the
-    accepted-token count and the ReplaySSM ring origin start over."""
-    req_id = "req_0"
-    model_runner._update_states(_schedule_new_request(req_id))
-    req_state = model_runner.requests[req_id]
-    req_state.num_accepted_tokens = 3
-    req_state.replayssm_decode_base = 3
-
-    model_runner._update_states(_schedule_new_request(req_id))
-    assert req_state.num_accepted_tokens == 1
-    assert req_state.replayssm_decode_base is None
-
-
 def test_update_states_pp_non_async_multi_request_keeps_token_buffers_consistent(
     model_runner, model_runner_2, dist_init, monkeypatch
 ):

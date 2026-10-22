@@ -223,9 +223,12 @@ steps:
   source_file_dependencies:
     - vllm/v1/spec_decode/
     - vllm/v1/worker/gpu/spec_decode/
+    - vllm/v1/worker/gpu_input_batch.py
+    - vllm/v1/worker/gpu_model_runner.py
     - vllm/v1/attention/backends/
     - vllm/transformers_utils/configs/speculators/
     - tests/v1/e2e/spec_decode/
+    - tests/v1/e2e/skipped_step_scheduler.py
   commands:
     - pytest -v -s v1/e2e/spec_decode/mtp/qwen3_5/
   mirror:

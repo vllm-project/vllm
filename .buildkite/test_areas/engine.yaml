@@ -171,6 +171,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
     - tests/v1/e2e/test_replayssm_decode.py
+    - tests/v1/e2e/skipped_step_scheduler.py
     - vllm/config/cache.py
     - vllm/config/vllm.py
     - vllm/model_executor/layers/mamba/
@@ -179,6 +180,7 @@ steps:
     - vllm/v1/attention/backends/mamba_attn.py
     - vllm/v1/spec_decode/
     - vllm/v1/worker/gpu/
+    - vllm/v1/worker/gpu_input_batch.py
     - vllm/v1/worker/gpu_model_runner.py
     - vllm/v1/worker/gpu_worker.py
   commands:
