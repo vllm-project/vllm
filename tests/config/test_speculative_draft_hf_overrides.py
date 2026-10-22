@@ -12,11 +12,13 @@ when the target itself is shrunk — which is what kept spec-decode archs like
 """
 
 import functools
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
 from transformers import Glm5NextConfig, PreTrainedConfig
 
+from vllm.config.model import ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.speculative import SpeculativeConfig
 
@@ -48,11 +50,17 @@ def test_none_overrides_fall_back_to_arch_mapping():
 
 
 def _make_speculative_config(
-    hf_kwargs: dict, architecture: str, **speculative_kwargs
+    hf_kwargs: dict,
+    architecture: str,
+    draft_model_name: str = "draft",
+    **speculative_kwargs,
 ) -> SpeculativeConfig:
     hf_config = SpeculativeConfig.hf_config_override(_make_hf_config(**hf_kwargs))
     draft = MagicMock(
-        hf_config=hf_config, architectures=hf_config.architectures, max_model_len=128
+        hf_config=hf_config,
+        architectures=hf_config.architectures,
+        max_model_len=128,
+        model=draft_model_name,
     )
     draft.registry.inspect_model_cls.return_value = (None, architecture)
     target = MagicMock(max_model_len=128, quantization=None, hf_overrides={})
@@ -111,6 +119,160 @@ def test_dspark_width_is_independent_of_mtp_stages(
     assert config.num_speculative_tokens == 5
     assert getattr(config.draft_model_config.hf_config, "n_predict", None) == n_predict
     assert config.draft_model_config.hf_config.architectures == [architecture]
+
+
+def _lfm2_dspark_hf_kwargs(**overrides) -> dict:
+    config = dict(
+        model_type="qwen3",
+        architectures=["Lfm2DSparkDraftModel"],
+        hidden_size=2048,
+        num_hidden_layers=4,
+        vocab_size=128000,
+        block_size=9,
+        markov_rank=256,
+        rope_is_neox_style=False,
+        enable_confidence_head=True,
+        dflash_config={
+            "mask_token_id": 125017,
+            "target_layer_ids": [2, 9, 17, 21, 27],
+            "num_target_layers": 30,
+        },
+    )
+    config.update(overrides)
+    return config
+
+
+@pytest.mark.cpu_test
+def test_lfm2_dspark_override_maps_architecture_before_registry():
+    """The registry does not know ``Lfm2DSparkDraftModel``.
+
+    ``ModelConfig`` inspects the registry right after applying
+    ``hf_config_override``, so the mapping has to happen inside the override.
+    """
+    hf_config = SpeculativeConfig.hf_config_override(
+        _make_hf_config(**_lfm2_dspark_hf_kwargs())
+    )
+
+    assert hf_config.architectures == ["Qwen3DSparkModel"]
+    assert hf_config.model_type == "qwen3"
+    assert hf_config.is_neox_style is False
+    assert hf_config.confidence_head_with_markov is True
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("with_markov", [True, False])
+def test_lfm2_dspark_preserves_explicit_confidence_layout(with_markov):
+    hf_config = SpeculativeConfig.hf_config_override(
+        _make_hf_config(
+            **_lfm2_dspark_hf_kwargs(confidence_head_with_markov=with_markov)
+        )
+    )
+
+    assert hf_config.confidence_head_with_markov is with_markov
+
+
+@pytest.mark.cpu_test
+def test_lfm2_dspark_draft_model_config_loads_with_override(tmp_path, monkeypatch):
+    """Build a real draft ModelConfig from a local Liquid-shaped config."""
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    config = _lfm2_dspark_hf_kwargs(
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        vocab_size=256,
+        max_position_embeddings=512,
+        rms_norm_eps=1e-6,
+        markov_rank=8,
+        dflash_config={
+            "mask_token_id": 3,
+            "target_layer_ids": [0, 1],
+            "num_target_layers": 2,
+        },
+    )
+    (tmp_path / "config.json").write_text(json.dumps(config))
+
+    with pytest.raises(ValueError, match="Lfm2DSparkDraftModel"):
+        ModelConfig(model=str(tmp_path), runner="draft", skip_tokenizer_init=True)
+
+    draft = ModelConfig(
+        model=str(tmp_path),
+        runner="draft",
+        skip_tokenizer_init=True,
+        hf_overrides=SpeculativeConfig.hf_config_override,
+    )
+    assert draft.architectures == ["Qwen3DSparkModel"]
+    assert draft.architecture == "Qwen3DSparkModel"
+    assert draft.hf_config.is_neox_style is False
+
+
+@pytest.mark.cpu_test
+def test_lfm2_dspark_resolves_to_qwen3_dense_drafter():
+    """Liquid's architecture must become the dense Qwen3 drafter.
+
+    The model name here does not contain "dspark", so resolution has to come
+    from the architecture. The unknown-architecture path would otherwise
+    rewrite the draft to DeepSeek-V4.
+    """
+    config = _make_speculative_config(
+        _lfm2_dspark_hf_kwargs(),
+        "Qwen3DSparkModel",
+        draft_model_name="liquid-draft",
+    )
+    hf_config = config.draft_model_config.hf_config
+
+    assert config.method == "dspark"
+    assert config.num_speculative_tokens == 9
+    assert hf_config.model_type == "qwen3"
+    assert hf_config.architectures == ["Qwen3DSparkModel"]
+    assert hf_config.is_neox_style is False
+    assert hf_config.hidden_size == 2048
+    assert hf_config.num_hidden_layers == 4
+    assert hf_config.vocab_size == 128000
+    assert hf_config.block_size == 9
+    assert hf_config.markov_rank == 256
+    assert hf_config.enable_confidence_head is True
+    assert hf_config.dflash_config == {
+        "mask_token_id": 125017,
+        "target_layer_ids": [2, 9, 17, 21, 27],
+        "num_target_layers": 30,
+    }
+
+
+@pytest.mark.cpu_test
+def test_lfm2_dspark_keeps_explicit_is_neox_style():
+    config = _make_speculative_config(
+        _lfm2_dspark_hf_kwargs(is_neox_style=True),
+        "Qwen3DSparkModel",
+        method="dspark",
+        num_speculative_tokens=9,
+    )
+
+    assert config.draft_model_config.hf_config.is_neox_style is True
+    assert config.draft_model_config.hf_config.architectures == ["Qwen3DSparkModel"]
+
+
+@pytest.mark.cpu_test
+def test_qwen3_dspark_does_not_copy_liquid_rope_field():
+    config = _make_speculative_config(
+        dict(
+            model_type="qwen3",
+            architectures=["DSparkDraftModel"],
+            block_size=7,
+            rope_is_neox_style=False,
+        ),
+        "DSparkDraftModel",
+        method="dspark",
+    )
+
+    hf_config = config.draft_model_config.hf_config
+    assert config.num_speculative_tokens == 7
+    assert hf_config.model_type == "qwen3"
+    assert hf_config.architectures == ["Qwen3DSparkModel"]
+    assert getattr(hf_config, "is_neox_style", None) is None
+    assert getattr(hf_config, "confidence_head_with_markov", None) is None
 
 
 @pytest.mark.cpu_test
