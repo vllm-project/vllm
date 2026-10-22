@@ -657,7 +657,7 @@ class OpenAIServingResponses(GenerateBaseServing):
 
         orig_priority = priority
         sub_request = 0
-        tool_call_count = 0
+        num_tool_calls = 0
         while True:
             # Ensure that each sub-request has a unique request id.
             sub_request_id = f"{request_id}_{sub_request}"
@@ -690,13 +690,14 @@ class OpenAIServingResponses(GenerateBaseServing):
             if not context.need_builtin_tool_call():
                 # The model did not ask for a tool call, so we're done.
                 break
-            if max_tool_calls is not None and tool_call_count >= max_tool_calls:
+            if max_tool_calls is not None and num_tool_calls >= max_tool_calls:
+                # The built-in tool call budget is spent; ignore the call.
                 break
 
             # Call the tool and update the context with the result.
             context.request_metrics_cover_all_generation_turns = False
             tool_output = await context.call_tool()
-            tool_call_count += 1
+            num_tool_calls += 1
             context.append_tool_output(tool_output)
 
             # TODO: uncomment this and enable tool output streaming

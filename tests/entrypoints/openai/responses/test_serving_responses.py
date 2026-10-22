@@ -122,48 +122,6 @@ class MockConversationContext(ConversationContext):
         pass
 
 
-class ToolCallingConversationContext(MockConversationContext):
-    """Context that asks for multiple builtin tool calls."""
-
-    def __init__(self, requested_tool_calls: int):
-        super().__init__()
-        self.requested_tool_calls = requested_tool_calls
-        self.tool_call_count = 0
-
-    def need_builtin_tool_call(self) -> bool:
-        return self.tool_call_count < self.requested_tool_calls
-
-    async def call_tool(self):
-        self.tool_call_count += 1
-        return []
-
-
-class FakeServingForToolCalls:
-    def __init__(self):
-        self.model_config = MagicMock()
-        self.model_config.max_model_len = 100
-        self.engine_client = MagicMock()
-        self.engine_client.generate.side_effect = self._generate
-        self.default_sampling_params = None
-        self.override_max_tokens = None
-
-    def _log_inputs(self, *args, **kwargs):
-        pass
-
-    def _extract_prompt_len(self, engine_input):
-        return len(engine_input["prompt_token_ids"])
-
-    async def _generate(self, *args, **kwargs):
-        yield RequestOutput(
-            request_id="req",
-            prompt=None,
-            prompt_token_ids=[1],
-            prompt_logprobs=None,
-            outputs=[],
-            finished=True,
-        )
-
-
 def test_serialize_message_pydantic_model_returns_dict() -> None:
     msg = ResponseRawMessageAndToken(message="hello", tokens=[1, 2, 3])
 
@@ -384,26 +342,6 @@ def test_response_created_event_uses_public_json_schema_alias() -> None:
     assert event.response.text is not None
     assert event.response.text.format is not None
     assert event.response.text.format.model_dump(by_alias=True)["schema"] == schema
-
-
-@pytest.mark.asyncio
-async def test_generate_with_builtin_tools_honors_max_tool_calls() -> None:
-    serving = FakeServingForToolCalls()
-    context = ToolCallingConversationContext(requested_tool_calls=2)
-
-    generator = OpenAIServingResponses._generate_with_builtin_tools(
-        serving,
-        request_id="req",
-        engine_input=tokens_input([1]),
-        sampling_params=SamplingParams(max_tokens=16),
-        context=context,
-        max_tool_calls=1,
-    )
-    async for _ in generator:
-        pass
-
-    assert context.tool_call_count == 1
-    assert serving.engine_client.generate.call_count == 2
 
 
 @pytest.mark.asyncio
@@ -1141,6 +1079,58 @@ class TestInitializeToolSessions:
             pass
 
         assert max_tokens_per_turn == [10, 10]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("max_tool_calls", [0, 2])
+    async def test_builtin_tool_loop_honors_max_tool_calls(
+        self, serving_responses_instance, max_tool_calls
+    ):
+        """Built-in tool calls past max_tool_calls are ignored, per the spec."""
+
+        class AlwaysToolCallingHarmonyContext(HarmonyContext):
+            def __init__(self):
+                self._messages = []
+                self.request = None
+                self.num_tool_calls = 0
+
+            def append_output(self, output) -> None:
+                pass
+
+            def need_builtin_tool_call(self) -> bool:
+                return True
+
+            async def call_tool(self):
+                # Fail fast instead of hanging if the loop ignores the limit.
+                assert self.num_tool_calls < max_tool_calls
+                self.num_tool_calls += 1
+                return []
+
+            def append_tool_output(self, output) -> None:
+                pass
+
+        async def generate_output(*args, **kwargs):
+            yield MagicMock()
+
+        serving_responses_instance.engine_client.generate.side_effect = generate_output
+        serving_responses_instance.online_renderer.render_responses_harmony_messages = (
+            MagicMock(return_value=tokens_input([1, 2, 3]))
+        )
+        context = AlwaysToolCallingHarmonyContext()
+
+        async for _ in serving_responses_instance._generate_with_builtin_tools(
+            request_id="req",
+            engine_input=tokens_input([1]),
+            sampling_params=SamplingParams(max_tokens=10),
+            context=context,
+            max_tool_calls=max_tool_calls,
+        ):
+            pass
+
+        assert context.num_tool_calls == max_tool_calls
+        assert (
+            serving_responses_instance.engine_client.generate.call_count
+            == max_tool_calls + 1
+        )
 
     @pytest.mark.asyncio
     async def test_initialize_tool_sessions(
