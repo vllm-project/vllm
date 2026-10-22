@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 import pytest
 import torch
@@ -119,3 +119,12 @@ def test_deferred_finalize_collects_results_before_saving(
 
     connector.finalize_step()
     assert events == ["handle", "bind", "start", "results", "wait", "clear"]
+
+
+def test_worker_metadata_is_built_after_polling_completions(monkeypatch):
+    connector = _make_connector(monkeypatch, [])
+    connector.post_forward(set())
+    calls = connector.kv_connector.method_calls
+    assert calls.index(call.get_transfer_results(set())) < calls.index(
+        call.build_connector_worker_meta()
+    )

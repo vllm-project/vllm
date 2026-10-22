@@ -3551,6 +3551,24 @@ def test_prefix_cache_stats_disabled():
     assert manager.prefix_cache_stats is None
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+def test_allocation_tracking_reports_reuse_without_mutating_prior_steps(enabled):
+    pool = BlockPool(num_gpu_blocks=3, enable_caching=False, hash_block_size=16)
+    if enabled:
+        pool.enable_allocation_tracking()
+    blocks = pool.get_new_blocks(2)
+    block_ids = {block.block_id for block in blocks}
+    first_step = pool.take_allocated_block_ids()
+    assert first_step == (block_ids if enabled else set())
+    assert not pool.take_allocated_block_ids()
+
+    pool.free_blocks(blocks)
+    reused = pool.get_new_blocks(2)
+    assert {block.block_id for block in reused} == block_ids
+    assert pool.take_allocated_block_ids() == first_step
+    assert first_step == (block_ids if enabled else set())
+
+
 def test_maybe_evict_cached_block():
     pool = BlockPool(num_gpu_blocks=4, enable_caching=True, hash_block_size=16)
     block_hash0 = make_block_hash_with_group_id(BlockHash(b"10"), 1000)

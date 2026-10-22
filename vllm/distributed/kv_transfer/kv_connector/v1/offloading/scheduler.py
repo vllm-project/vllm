@@ -1366,6 +1366,11 @@ class OffloadingConnectorScheduler:
 
     def _update_req_states(self, scheduler_output: SchedulerOutput) -> None:
         """Update request states from the Scheduler's output."""
+        if block_state := scheduler_output.kv_connector_block_state:
+            self._current_batch_allocated_block_ids.update(
+                block_state.allocated_block_ids
+            )
+
         # new_block_ids_end[req_id][i] = end of pre-existing block_ids for
         # the i-th sliding window group (before this step's extend).
         # Used to detect sliding window blocks that got re-allocated.

@@ -160,6 +160,31 @@ class KVConnectorMetadata(ABC):  # noqa: B024
     pass
 
 
+class NoOpKVConnectorMetadata(KVConnectorMetadata):
+    """Mark a step that must skip connector transfer hooks."""
+
+
+class KVConnectorInitStatus(ABC):
+    """Worker-to-scheduler status for asynchronous connector initialization."""
+
+    @abstractmethod
+    def aggregate(self, other: "KVConnectorInitStatus") -> "KVConnectorInitStatus":
+        """Combine statuses reported by different workers."""
+
+
+@dataclass
+class KVConnectorRankInitStatus(KVConnectorInitStatus):
+    """Initialization status reported by one or more connector ranks."""
+
+    ready_ranks: set[int] = field(default_factory=set)
+
+    def aggregate(self, other: KVConnectorInitStatus) -> KVConnectorInitStatus:
+        assert isinstance(other, KVConnectorRankInitStatus)
+        return KVConnectorRankInitStatus(
+            ready_ranks=self.ready_ranks | other.ready_ranks,
+        )
+
+
 class KVConnectorWorkerMetadata(ABC):
     """Abstract Metadata used to communicate back
     Worker KVConnector -> Scheduler KVConnector.

@@ -19,6 +19,7 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
 from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID
 from vllm.config import KVEventsConfig
 from vllm.distributed.kv_events import MEDIUM_CPU, BlockRemoved, BlockStored
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRankInitStatus
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
     OffloadingWorkerMetadata,
@@ -45,6 +46,7 @@ from vllm.v1.core.kv_cache_utils import (
     make_block_hash_with_group_id,
 )
 from vllm.v1.core.sched.output import (
+    CachedRequestData,
     KVConnectorBlockState,
     NewRequestData,
     SchedulerOutput,
@@ -409,6 +411,72 @@ def test_aligned_boundary_store_flushes_before_block_reuse(cow_reuse):
     assert isinstance(meta, OffloadingConnectorMetadata)
 
     assert meta.jobs_to_flush == {job_id}
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_excluded_request_block_reuse_flushes_pending_store(cached):
+    scheduler = _make_partial_tail_scheduler()
+    _make_partial_tail_request(scheduler)
+    scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    output = SchedulerOutput.make_empty()
+    output.kv_connector_block_state = KVConnectorBlockState(
+        block_ids={}, boundary_state_offloads={"req": [(1, 99, 16)]}
+    )
+    [job_id] = scheduler.build_connector_meta(output).store_jobs
+
+    output = SchedulerOutput.make_empty()
+    if cached:
+        output.scheduled_cached_reqs = CachedRequestData(
+            req_ids=["early"],
+            resumed_req_ids=set(),
+            new_token_ids=[],
+            all_token_ids={},
+            new_block_ids=[([99], [])],
+            num_computed_tokens=[16],
+            num_output_tokens=[0],
+        )
+    else:
+        output.scheduled_new_reqs = [
+            NewRequestData(
+                req_id="early",
+                prompt_token_ids=[0],
+                mm_features=[],
+                sampling_params=None,
+                pooling_params=None,
+                block_ids=([99], []),
+                num_computed_tokens=0,
+                lora_request=None,
+            )
+        ]
+    output.num_scheduled_tokens = {"early": 1}
+    output.kv_connector_block_state = KVConnectorBlockState(
+        block_ids={"early": ([99], [])},
+        boundary_state_offloads={},
+        allocated_block_ids={99},
+    )
+    meta = scheduler.build_connector_meta(output.without_requests({"early"}))
+    assert meta.jobs_to_flush == {job_id}
+
+
+def test_scheduler_reports_allocations_for_connector_ineligible_requests(
+    request_runner,
+):
+    runner = request_runner(block_size=4, num_gpu_blocks=4, async_scheduling=False)
+    connector = runner.scheduler_connector
+    connector.enable_async_init()
+    runner.new_request(token_ids=[1] * 4)
+    connector.update_connector_init_status(KVConnectorRankInitStatus({0}))
+    build_meta = MagicMock(wraps=connector.build_connector_meta)
+    connector.build_connector_meta = build_meta
+    output = runner.scheduler.schedule()
+    connector_output = build_meta.call_args.args[0]
+    assert not connector_output.scheduled_new_reqs
+    assert not connector_output.num_scheduled_tokens
+    allocated = connector_output.kv_connector_block_state.allocated_block_ids
+    assert allocated == set(output.scheduled_new_reqs[0].block_ids[0])
+    assert allocated
 
 
 def test_normal_store_excludes_align_mode_mamba_sources():

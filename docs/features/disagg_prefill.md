@@ -125,6 +125,60 @@ The figure below shows how the worker connector works with the attention module 
 
 ## Third-party contributions
 
+### Asynchronous connector initialization
+
+`KVConnectorBase_V1` connectors are ready by default. A connector that permits
+GPU-only serving during initialization can inherit `SupportsAsyncInit` instead
+(Model Runner V2 only) and implement `is_init_done()`. The hook reports whether
+the current worker's setup has finished; how that setup runs is up to the
+connector. Raise any initialization error from that hook; errors terminate the
+engine.
+
+Readiness is latched: this interface supports startup, not runtime disable or
+reconfiguration. The scheduler activates a connector only after every worker has
+reported ready. Workers continue reporting until the scheduler acknowledges
+readiness by sending real connector metadata. Reports travel with ordinary engine
+steps; initialization alone does not keep an idle engine stepping. After an idle
+period, requests admitted before the scheduler observes readiness are served
+without that connector for their whole lifetime, even if workers have already
+finished initializing. Initialization errors are also observed when stepping
+resumes. Workers raise if setup is not done within
+`VLLM_KV_CONNECTOR_INIT_TIMEOUT` seconds (default 1800), checked on engine steps.
+
+Requests admitted before readiness remain excluded for their whole lifetime,
+including chunked prefill, preemption and completion notifications. With
+`MultiConnector`, eligibility is tracked separately for each child, so ready
+children can serve while others initialize. Only opt into asynchronous startup
+when skipping the connector is valid; a required P/D transfer cannot be skipped.
+
+Scheduler-side callers route request hooks through a handler resolved once per
+connector with `get_request_handler()`, which owns exclusions, metadata filtering
+and completion cleanup. Connector implementations keep their existing hooks;
+`MultiConnector` uses each child's handler to apply the same rules independently.
+
+Request exclusion does not hide physical block reuse. The scheduler-local
+`SchedulerOutput.kv_connector_block_state.allocated_block_ids` includes allocations
+for **all** requests, including asynchronous loads. Allocations are recorded by
+the block pool and drained once per scheduler step. Connectors with pending
+transfers must use these IDs, together with copy-on-write destinations in
+`kv_cache_block_copies`, to fence transfers before GPU memory is overwritten.
+These allocation notifications remain available even when the connector's request
+view is empty.
+
+Initialization does not suppress lifecycle hooks. Metadata reporting, worker
+output updates, statistics, cache reset and shutdown must be safe while the
+connector is initializing. Request transfer hooks are skipped until the
+scheduler sends real metadata. Background allocation or other initialization
+work remains the connector's responsibility.
+
+Async initialization requires Model Runner V2. `SupportsAsyncInit` raises during
+construction if Model Runner V1 is selected, including automatic fallback to V1.
+It also currently rejects multi-rank `external_launcher` and Ray pipeline
+parallelism due to limitations in collecting readiness from every worker in those
+output paths. Synchronous connectors remain supported on Model Runner V1.
+
+### Implementing a connector
+
 Disaggregated prefilling is highly related to infrastructure, so vLLM relies on third-party connectors for production-level disaggregated prefilling (and vLLM team will actively review and merge new PRs for third-party connectors).
 
 We recommend three ways of implementations:

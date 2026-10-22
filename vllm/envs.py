@@ -314,6 +314,7 @@ if TYPE_CHECKING:
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_UVA: bool = False
     VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS: int = 0
+    VLLM_KV_CONNECTOR_INIT_TIMEOUT: int = 1800
     VLLM_WSL2_ENABLE_PIN_MEMORY: bool = False
     VLLM_DISABLE_LOG_LOGO: bool = False
     VLLM_LORA_DISABLE_PDL: bool = False
@@ -2170,6 +2171,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # rocm 7.14/7.15 when batch copy is optimized; CUDA uncapped). Set >0 to override.
     "VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS": lambda: int(
         os.getenv("VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS", "0")
+    ),
+    # Seconds a worker waits for an asynchronously initializing KV connector
+    # (SupportsAsyncInit) to become ready before raising.
+    "VLLM_KV_CONNECTOR_INIT_TIMEOUT": lambda: int(
+        os.getenv("VLLM_KV_CONNECTOR_INIT_TIMEOUT", "1800")
     ),
     # On WSL2 with a compatible kernel (>= 4.19.121), pinned memory is
     # supported but disabled by default due to a small performance regression.
