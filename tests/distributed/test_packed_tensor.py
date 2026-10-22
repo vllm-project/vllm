@@ -289,6 +289,134 @@ class TestPackedBroadcastRoundtrip:
             assert torch.allclose(unpacked, original_tensor, rtol=1e-4, atol=1e-6)
 
 
+class DelayedFirstBroadcastGroup:
+    """Fills each pack with its sentinel on the current (slot) stream; the
+    first pack is zeroed and its sentinel lands only after a GPU sleep."""
+
+    SLEEP_CYCLES = 200_000_000  # ~0.1 s on current GPUs
+
+    def __init__(self, sentinels: list[float]):
+        self.sentinels = sentinels
+        self.calls = 0
+
+    def broadcast(self, tensor, src):
+        dst = tensor.view(torch.float32)
+        if self.calls == 0:
+            dst.zero_()
+            torch.cuda._sleep(self.SLEEP_CYCLES)
+        dst.fill_(self.sentinels[self.calls])
+        self.calls += 1
+
+
+class SentinelBroadcastGroup:
+    """Immediately fills each pack with its own sentinel."""
+
+    def __init__(self, sentinels: list[float]):
+        self.sentinels = sentinels
+        self.calls = 0
+
+    def broadcast(self, tensor, src):
+        tensor.view(torch.float32).fill_(self.sentinels[self.calls])
+        self.calls += 1
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+class TestPackedBroadcastDeferredConsumer:
+    """Consumers that keep unpacked tensors and read them from a later pack's
+    callback, as layerwise reload does, on a different slot stream."""
+
+    def test_deferred_read_is_ordered_after_receive(self):
+        numel = 4
+        state_dict_info = [
+            ("a", ([numel], torch.float32)),
+            ("b", ([numel], torch.float32)),
+        ]
+        # A fresh sentinel per run keeps a stale allocator block that held a
+        # previous run's value from masking an unordered read.
+        expected = float(torch.randint(1, 2**20, ()).item())
+        group = DelayedFirstBroadcastGroup(sentinels=[expected, -expected])
+        observed = torch.full((numel,), -1.0, device="cuda")
+        torch.accelerator.synchronize()
+
+        retained: list[torch.Tensor] = []
+
+        def post_unpack_func(tensor_list):
+            [(_, tensor)] = tensor_list
+            if not retained:
+                retained.append(tensor)
+            else:
+                observed.copy_(retained[0])
+
+        packed_nccl_broadcast_consumer(
+            iterator=iter(state_dict_info),
+            group=group,
+            src=0,
+            post_unpack_func=post_unpack_func,
+            # Smaller than one tensor, so each tensor gets its own pack.
+            buffer_size_bytes=numel * 4 - 1,
+            num_buffers=2,
+        )
+        torch.accelerator.synchronize()
+
+        assert group.calls == 2
+        torch.testing.assert_close(observed, torch.full_like(observed, expected))
+
+    @pytest.mark.parametrize(
+        ("num_buffers", "packs_per_layer"), [(2, 4), (2, 5), (3, 5)]
+    )
+    def test_freed_pack_not_reused_while_replay_pending(
+        self, num_buffers, packs_per_layer
+    ):
+        """Views dropped right after the replay is enqueued (as layerwise
+        reload's ``info.reset()`` does) must not let the next receive reuse a
+        buffer the replay still reads."""
+        num_packs = packs_per_layer + 4
+        # A size unique to this run keeps blocks cached by earlier tests from
+        # being picked instead of the ones this layer frees.
+        numel = 128 * int(torch.randint(1, 64, ()).item())
+        state_dict_info = [
+            (f"w{i}", ([numel], torch.float32)) for i in range(num_packs)
+        ]
+        sentinels = torch.randperm(2**20)[:num_packs].float().tolist()
+        group = SentinelBroadcastGroup(sentinels)
+        observed = torch.full((packs_per_layer, numel), -1.0, device="cuda")
+        torch.accelerator.synchronize()
+        torch.accelerator.empty_cache()
+
+        retained: list[torch.Tensor] = []
+        replayed = False
+
+        def post_unpack_func(tensor_list):
+            nonlocal replayed
+            [(_, tensor)] = tensor_list
+            if replayed:
+                return
+            retained.append(tensor)
+            if len(retained) == packs_per_layer:
+                torch.cuda._sleep(DelayedFirstBroadcastGroup.SLEEP_CYCLES)
+                for i, t in enumerate(retained):
+                    observed[i].copy_(t)
+                retained.clear()
+                replayed = True
+
+        packed_nccl_broadcast_consumer(
+            iterator=iter(state_dict_info),
+            group=group,
+            src=0,
+            post_unpack_func=post_unpack_func,
+            # Smaller than one tensor, so each tensor gets its own pack.
+            buffer_size_bytes=numel * 4 - 1,
+            num_buffers=num_buffers,
+        )
+        torch.accelerator.synchronize()
+
+        assert group.calls == num_packs
+        expected = torch.tensor(sentinels[:packs_per_layer], device="cuda")
+        torch.testing.assert_close(
+            observed, expected.unsqueeze(1).expand_as(observed), rtol=0, atol=0
+        )
+
+
 # --- Unit Tests: unpack_tensor ---
 
 
@@ -296,10 +424,10 @@ class TestPackedBroadcastRoundtrip:
 class TestUnpackTensor:
     """Test the shared unpack_tensor function."""
 
-    def test_unpack_produces_independent_copies(self):
-        """Verify unpacked tensors don't share memory with packed buffer."""
-        original = torch.randn(10, dtype=torch.float32).cuda()
-        packed = original.contiguous().view(torch.uint8).view(-1)
+    def test_unpack_returns_views(self):
+        """Unpacked tensors alias the packed buffer; callers that need
+        independent storage must clone."""
+        packed = torch.randn(10, dtype=torch.float32).cuda().view(torch.uint8)
 
         result = unpack_tensor(
             packed,
@@ -309,11 +437,9 @@ class TestUnpackTensor:
             tensor_sizes=[packed.numel()],
         )
 
-        # Mutate the packed buffer
+        assert result[0][1].data_ptr() == packed.data_ptr()
         packed.zero_()
-
-        # Unpacked tensor should be unaffected
-        assert torch.allclose(result[0][1], original)
+        assert torch.count_nonzero(result[0][1]) == 0
 
 
 # --- Unit Tests: pack_tensors ---
