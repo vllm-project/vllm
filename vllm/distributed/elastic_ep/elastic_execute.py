@@ -18,6 +18,7 @@ from vllm.config import ParallelConfig, set_current_vllm_config
 from vllm.distributed import (
     get_dp_group,
     get_ep_group,
+    get_eplb_group,
     get_pcp_group,
     get_tp_group,
     get_world_group,
@@ -160,6 +161,8 @@ class ElasticEPScalingExecutor:
         )
         self._async_future: Future[None] | None = None
         self._group_cleanup_future: Future[None] | None = None
+        # Whether CUDA graphs were captured while parked, before joining.
+        self._captured_parked = False
 
     @property
     def worker(self):
@@ -693,7 +696,51 @@ class ElasticEPScalingExecutor:
             device=self.worker.device,
         )
 
+    def capture_parked(self) -> None:
+        """Warm up and capture CUDA graphs of a parked rank. Every peer is
+        masked, so this runs without them, and the graphs stay valid once the
+        rank joins."""
+        assert self._can_reuse_fused_moe_kernel()
+        self.warmup_new_worker()
+        self._captured_parked = True
+
+    def join_parked(self, reconfig_request: ReconfigureDistributedRequest) -> None:
+        """Replace the detached groups of a parked rank with the world's
+        groups, then connect NIXL EP and the EPLB communicator. This matches
+        the startup of a scale-up launch step for step, so the running ranks
+        need no change."""
+        self.reconfig_request = reconfig_request
+        parallel_config = self.worker.vllm_config.parallel_config
+        new_dp_size = reconfig_request.new_data_parallel_size
+        assert new_dp_size == parallel_config.data_parallel_size, (
+            "A parked rank joins a world of the size it was started with"
+        )
+        parallel_config.data_parallel_master_ip = (
+            reconfig_request.new_data_parallel_master_ip
+        )
+        parallel_config._coord_store_port = reconfig_request.coord_store_port
+        with set_current_vllm_config(self.worker.vllm_config):
+            create_standby_groups(
+                new_dp_size=new_dp_size,
+                new_world_size_across_dp=parallel_config.world_size * new_dp_size,
+                master_ip=reconfig_request.new_data_parallel_master_ip,
+                coord_store_port=reconfig_request.coord_store_port,
+                use_all2all=parallel_config.use_all2all,
+                enable_eplb=parallel_config.enable_eplb,
+            )
+            # The detached groups hold no resources to destroy.
+            _replace_active_groups(**pop_standby_groups())
+            get_ep_all2all_manager().commit_ep_size()
+            self._prepare_eplb_communicator(get_eplb_group())
+        model_config = self.worker.model_runner.model_config
+        self.worker.model_runner.eplb_state.update_communicator(
+            model_config, self._prepared_eplb_communicator
+        )
+        self._prepared_eplb_communicator = None
+
     def warmup_new_worker(self) -> None:
+        if self._captured_parked:
+            return
         with set_current_vllm_config(self.worker.vllm_config):
             kernel_warmup(self.worker, process_local_only=True)
         if self._can_reuse_fused_moe_kernel():

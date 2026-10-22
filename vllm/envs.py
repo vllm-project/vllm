@@ -329,6 +329,7 @@ if TYPE_CHECKING:
     This allows any model name to be accepted in the 'model' field of requests,
     making the server model-name agnostic. Useful for proxy/gateway scenarios."""
     VLLM_ELASTIC_EP_SCALE_UP_LAUNCH: bool = False
+    VLLM_ELASTIC_EP_JOIN_FILE: str | None = None
     VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = True
     VLLM_XPU_FORCE_N_CONTIG_WEIGHT: bool = False
@@ -2233,6 +2234,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ELASTIC_EP_SCALE_UP_LAUNCH": lambda: bool(
         int(os.getenv("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH", "0"))
     ),
+    # With VLLM_ELASTIC_EP_SCALE_UP_LAUNCH, start the new rank without
+    # contacting the running ranks: load the model, allocate the KV cache and
+    # capture CUDA graphs locally, then join once this JSON file exists. It
+    # names the rank 0 address to join, so the rank can be checkpointed while
+    # it waits and restored elsewhere.
+    "VLLM_ELASTIC_EP_JOIN_FILE": lambda: os.getenv("VLLM_ELASTIC_EP_JOIN_FILE"),
     # Whether to wait for all requests to drain before sending the
     # scaling command in elastic EP.
     "VLLM_ELASTIC_EP_DRAIN_REQUESTS": lambda: bool(
@@ -2409,6 +2416,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_RAY_BUNDLE_INDICES",
         "VLLM_CHAT_TEMPLATE_FUEL",
         "VLLM_ELASTIC_EP_SCALE_UP_LAUNCH",
+        "VLLM_ELASTIC_EP_JOIN_FILE",
         "VLLM_FORCE_AOT_LOAD",
         "S3_ACCESS_KEY_ID",
         "S3_SECRET_ACCESS_KEY",

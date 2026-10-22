@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
+import json
 import os
 import queue
 import signal
@@ -50,7 +51,7 @@ from vllm.utils.gc_utils import (
     maybe_attach_gc_debug_callback,
 )
 from vllm.utils.hashing import get_hash_fn_by_name
-from vllm.utils.network_utils import make_zmq_socket
+from vllm.utils.network_utils import get_tcp_uri, make_zmq_socket
 from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.utils.watch_dog import get_watch_dog, start_watch_dog
 from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
@@ -161,7 +162,14 @@ class EngineCore:
 
         self.available_gpu_memory_for_kv_cache = -1
 
-        if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
+        if envs.VLLM_ELASTIC_EP_JOIN_FILE:
+            # A parked rank has no peers to agree on a KV cache size with.
+            kv_cache_memory_bytes = vllm_config.cache_config.kv_cache_memory_bytes
+            assert kv_cache_memory_bytes, (
+                "VLLM_ELASTIC_EP_JOIN_FILE requires --kv-cache-memory-bytes"
+            )
+            self.available_gpu_memory_for_kv_cache = kv_cache_memory_bytes
+        elif envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
             self._eep_scale_up_before_kv_init()
 
         measure_encoder_output_widths(vllm_config, self.collective_rpc)
@@ -394,6 +402,8 @@ class EngineCore:
             )
         if not envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
             self.model_executor.compile_or_warm_up_model()
+        elif envs.VLLM_ELASTIC_EP_JOIN_FILE:
+            self.collective_rpc("elastic_ep_execute", args=("capture_parked",))
 
         elapsed = time.time() - start
         compile_time = vllm_config.compilation_config.compilation_time
@@ -1241,6 +1251,15 @@ class EngineCoreProc(EngineCore):
             self.tensor_ipc_receiver = TensorIpcReceiver(tensor_queue)
             logger.info("Using tensor IPC queue for multimodal tensor sharing")
 
+        join_file = envs.VLLM_ELASTIC_EP_JOIN_FILE
+        if join_file:
+            # Build the engine before contacting rank 0, so that the process
+            # can be checkpointed while it waits to join.
+            EngineCore.__init__(
+                self, vllm_config, executor_class, log_stats, executor_fail_callback
+            )
+            handshake_address = self._wait_to_join(join_file)
+
         with self._perform_handshakes(
             handshake_address,
             identity,
@@ -1271,13 +1290,16 @@ class EngineCoreProc(EngineCore):
             self.process_input_queue_block = True
             self._init_data_parallel(vllm_config)
 
-            super().__init__(
-                vllm_config,
-                executor_class,
-                log_stats,
-                executor_fail_callback,
-                internal_dp_balancing,
-            )
+            if join_file:
+                self._join_elastic_ep()
+            else:
+                super().__init__(
+                    vllm_config,
+                    executor_class,
+                    log_stats,
+                    executor_fail_callback,
+                    internal_dp_balancing,
+                )
 
             # Initialize fault tolerance settings.
             self.enable_fault_tolerance = (
@@ -1331,6 +1353,45 @@ class EngineCoreProc(EngineCore):
                 refusal := self.checkpoint_prepare()
             ):
                 raise RuntimeError(refusal)
+
+    def _wait_to_join(self, join_file: str) -> str:
+        """Park an elastic EP rank until join_file exists, and return the
+        handshake address of the rank 0 it names. A marker file tells an
+        orchestrator that the process can be checkpointed."""
+        with open(join_file + ".parked", "w") as f:
+            json.dump({"parked_at": time.time(), "pid": os.getpid()}, f)
+        logger.info("[Elastic EP] Parked, waiting for %s", join_file)
+        while not os.path.exists(join_file):
+            time.sleep(0.05)
+        with open(join_file) as f:
+            join = json.load(f)
+        logger.info("[Elastic EP] Joining %s", join)
+        parallel_config = self.vllm_config.parallel_config
+        parallel_config.data_parallel_master_ip = join["data_parallel_master_ip"]
+        parallel_config.data_parallel_rpc_port = join["data_parallel_rpc_port"]
+        return get_tcp_uri(
+            parallel_config.data_parallel_master_ip,
+            parallel_config.data_parallel_rpc_port,
+        )
+
+    def _join_elastic_ep(self) -> None:
+        """Connect a parked rank's workers to the world rank 0 described in
+        the handshake, then run the remaining steps of a scale-up launch.
+        The CUDA graphs captured while parked are kept."""
+        parallel_config = self.vllm_config.parallel_config
+        request = ReconfigureDistributedRequest(
+            new_data_parallel_size=parallel_config.data_parallel_size,
+            new_data_parallel_rank=ReconfigureRankType.KEEP_CURRENT_RANK,
+            new_data_parallel_rank_local=ReconfigureRankType.KEEP_CURRENT_RANK,
+            new_data_parallel_master_ip=parallel_config.data_parallel_master_ip,
+            new_data_parallel_master_port=parallel_config.data_parallel_master_port,
+            new_data_parallel_master_port_list=list(
+                parallel_config._data_parallel_master_port_list
+            ),
+            coord_store_port=parallel_config._coord_store_port,
+        )
+        self.collective_rpc("elastic_ep_execute", args=("join_parked", request))
+        self._eep_scale_up_before_kv_init()
 
     @contextmanager
     def _perform_handshakes(
