@@ -598,6 +598,7 @@ def prefill_local_score(
     """Score bounded query chunks, then exchange their candidates once per layer."""
     from vllm.models.minimax_m3.nvidia.ops.index_decode_score_sharded import (
         minimax_m3_index_merge_candidates,
+        minimax_m3_index_pack_candidates,
     )
     from vllm.third_party.fmha_sm100.api import sparse_topk_select
 
@@ -624,9 +625,8 @@ def prefill_local_score(
             tp=comm.world,
             score_out=scores.transpose(0, 1),
         )
-        candidates = torch.empty(
-            (tokens, heads, TOPK), dtype=torch.int32, device=query.device
-        )
+        chunk_send = send[:, chunk.start : chunk.end]
+        candidates = chunk_send[..., TOPK : 2 * TOPK].transpose(0, 1)
         valid_pages = num_valid_pages[chunk.start : chunk.end]
         sparse_topk_select(
             scores,
@@ -637,12 +637,7 @@ def prefill_local_score(
             output=candidates,
             max_score_layout="THK",
         )
-        values = scores.gather(-1, candidates.clamp_min(0).long())
-        values.masked_fill_(candidates < 0, _SCORE_SENTINEL)
-        chunk_send = send[:, chunk.start : chunk.end]
-        chunk_send[..., :TOPK].copy_(values.transpose(0, 1).view(torch.int32))
-        chunk_send[..., TOPK : 2 * TOPK].copy_(candidates.transpose(0, 1))
-    send[..., -1].fill_(1)
+        minimax_m3_index_pack_candidates(scores, chunk_send)
     send = send.view(comm.world, comm.hpr, total_tokens, 2 * TOPK + 1)
     received = received.view_as(send)
     torch.distributed.all_to_all_single(received, send, group=comm.group.device_group)
