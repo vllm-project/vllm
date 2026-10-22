@@ -1164,6 +1164,12 @@ class FusedMoEKernelModularImpl:
         # process-wide high-water mark; later graph shapes may need this
         # storage for workspace13.
         max_shape_size = max(prod(workspace13_shape), prod(fused_out_shape))
+        if (
+            self.fused_experts.activation_format()
+            == FusedMoEActivationFormat.BatchedExperts
+        ):
+            assert M_full <= fused_out_shape[1]
+            fused_out_shape = (fused_out_shape[0], M_full, fused_out_shape[2])
 
         if current_platform.is_cpu():
             # Every CPU FusedMoEExpertsModular kernel reports zero-sized
