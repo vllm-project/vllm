@@ -746,6 +746,15 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             self.gdn_decode_kernel = "triton"
             self.enable_fused_gdn_spec_decode = False
             self.enable_packed_recurrent_decode = False
+            if self.gdn_xpu_backend == "sycl":
+                # The SYCL op is a fused whole-layer kernel that still keeps
+                # per-draft states in speculative blocks. The RecoverSSM verify
+                # is in the Triton/FLA core, so take forward_xpu's Triton path.
+                logger.info_once(
+                    "GDN RecoverSSM on XPU: using the Triton GDN backend "
+                    "instead of SYCL"
+                )
+                self.gdn_xpu_backend = "triton"
             logger.info_once(
                 "GDN RecoverSSM speculative verify active (spec_query_len %d)",
                 self.num_spec + 1,
