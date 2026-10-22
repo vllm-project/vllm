@@ -14,9 +14,11 @@ from vllm.config.model_arch import (
 from vllm.config.utils import getattr_iter
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
+    CONFIG_FIELD_ALIASES,
     ConfigFormat,
     get_safetensors_params_metadata,
 )
+from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 from vllm.transformers_utils.repo_utils import (
     file_or_path_exists,
     get_hf_file_to_dict,
@@ -89,7 +91,7 @@ class ModelArchConfigConvertorBase:
     def get_head_size(self) -> int:
         if self.is_deepseek_mla():
             # special case for deepseek_v4
-            if hasattr(self.hf_text_config, "compress_ratios"):
+            if get_compress_ratios(self.hf_text_config):
                 return self.hf_text_config.head_dim
             qk_rope_head_dim = self._get_qk_rope_head_dim()
             if not envs.VLLM_MLA_DISABLE:
@@ -148,23 +150,11 @@ class ModelArchConfigConvertorBase:
         return qk_rope_head_dim
 
     def get_total_num_kv_heads(self) -> int:
-        attributes = [
-            # For Falcon:
-            "n_head_kv",
-            "num_kv_heads",
-            # For LLaMA-2:
-            "num_key_value_heads",
-            # For ChatGLM:
-            "multi_query_group_num",
-            # For Step3p5:
-            "num_attention_groups",
-        ]
+        names = CONFIG_FIELD_ALIASES["total_num_kv_heads"]
         # For non-grouped-query attention models, the number of KV heads is
         # equal to the number of attention heads.
         default_factory = self.get_total_num_attention_heads
-        return getattr_iter(
-            self.hf_text_config, attributes, default_factory=default_factory
-        )
+        return getattr_iter(self.hf_text_config, names, default_factory=default_factory)
 
     def get_num_experts_from_block_configs(self) -> int:
         """Check block_configs for heterogeneous models (e.g., NemotronH).
@@ -188,13 +178,7 @@ class ModelArchConfigConvertorBase:
 
     def get_num_experts(self) -> int:
         """Returns the number of experts in the model."""
-        num_expert_names = [
-            "num_experts",  # Jamba
-            "moe_num_experts",  # Dbrx
-            "n_routed_experts",  # DeepSeek
-            "num_local_experts",  # Mixtral
-        ]
-
+        num_expert_names = CONFIG_FIELD_ALIASES["num_experts"]
         num_experts = getattr_iter(self.hf_text_config, num_expert_names, 0)
         if isinstance(num_experts, list):
             # Ernie VL's remote code uses list[int]...
@@ -206,13 +190,7 @@ class ModelArchConfigConvertorBase:
         return num_experts
 
     def get_num_experts_per_token(self) -> int:
-        names = [
-            "num_experts_per_tok",
-            "num_experts_per_token",
-            "top_k_experts",
-            "moe_topk",
-            "moe_top_k",
-        ]
+        names = CONFIG_FIELD_ALIASES["num_experts_per_token"]
         num_experts_per_token = getattr_iter(self.hf_text_config, names, 0)
         if isinstance(num_experts_per_token, list):
             return max(num_experts_per_token, default=0)
@@ -341,7 +319,7 @@ class ModelArchConfigConvertorBase:
             "hy_v4_mtp",
         ):
             # check is deepseek_v4 model
-            if hasattr(self.hf_text_config, "compress_ratios"):
+            if get_compress_ratios(self.hf_text_config):
                 return getattr(self.hf_text_config, "head_dim", None) is not None
             else:
                 return getattr(self.hf_text_config, "kv_lora_rank", None) is not None
@@ -519,14 +497,6 @@ class TerratorchModelArchConfigConvertor(ModelArchConfigConvertorBase):
         return 0
 
 
-class MedusaModelArchConfigConvertor(ModelArchConfigConvertorBase):
-    def get_head_size(self) -> int:
-        return 0
-
-    def get_total_num_kv_heads(self) -> int:
-        return 0
-
-
 class Zamba2ModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def get_head_size(self) -> int:
         return getattr(self.hf_text_config, "attention_head_dim", 0)
@@ -665,6 +635,17 @@ class Qwen3_5ModelArchConfigConvertor(ModelArchConfigConvertorBase):
                 hf_config.joint_head_config = get_hf_file_to_dict(
                     "joint_head_config.json", model_path, revision
                 )
+        elif getattr(hf_config, "architectures", None) == ["Qwen3_5Model"]:
+            # Decision 3.0 checkpoints are a bare backbone plus a code readout
+            # described by decision_config.json.
+            model_path = hf_config.name_or_path
+            if model_path and file_or_path_exists(
+                model_path, "decision_config.json", revision
+            ):
+                hf_config.architectures = ["D3ForSequenceClassification"]
+                hf_config.decision_config = get_hf_file_to_dict(
+                    "decision_config.json", model_path, revision
+                )
         super().__init__(hf_config, hf_text_config, revision)
 
 
@@ -755,6 +736,16 @@ class Qwen3_5MTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
 class Step3p5MTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def get_num_hidden_layers(self) -> int:
         return getattr(self.hf_text_config, "num_nextn_predict_layers", 0)
+
+    def get_per_layer_hf_configs(
+        self,
+    ) -> list[tuple[PreTrainedConfig, PreTrainedConfig]] | None:
+        if (per_layer := super().get_per_layer_hf_configs()) is None:
+            return None
+        # Each MTP layer matches the first main layer of the same type
+        layer_types = self.hf_text_config.layer_types
+        mtp_layer_types = self.hf_text_config.mtp_layer_types or []
+        return [per_layer[layer_types.index(t)] for t in mtp_layer_types]
 
 
 class PanguUltraMoeMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
@@ -861,7 +852,6 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "longcat_flash": LongCatFlashModelArchConfigConvertor,
     "longcat_flash_mtp": LongCatFlashMTPModelArchConfigConvertor,
     "mamba": MambaModelArchConfigConvertor,
-    "medusa": MedusaModelArchConfigConvertor,
     "mimo_mtp": MimoMTPModelArchConfigConvertor,
     "mimo_v2": MimoV2ModelArchConfigConvertor,
     "mimo_v2_flash": MimoV2ModelArchConfigConvertor,

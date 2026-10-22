@@ -7,12 +7,12 @@ from types import SimpleNamespace
 import lm_eval
 import pytest
 import torch
+from transformers import DeepseekV4Config
 
 from tests.utils import large_gpu_mark
 from vllm.distributed.eplb.eplb_state import EplbState, expert_topologies_differ
 from vllm.models.deepseek_v4.common.eplb_util import dspark_draft_supports_eplb
 from vllm.platforms import current_platform
-from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
 from vllm.v1.worker.gpu.eplb_utils import (
     EPLBController,
     draft_model_supports_eplb,
@@ -119,7 +119,7 @@ def _make_dsv4_dspark_hf_config() -> DeepseekV4Config:
         vocab_size=256,
         n_mtp_layers=2,
         enable_confidence_head=False,
-        compress_ratios=[1, 1],
+        layer_types=["sliding_attention"] * 2,
     )
 
 
