@@ -2129,7 +2129,8 @@ class FlashInferImpl(AttentionImpl):
                     f"({was} -> {now}), which FlashInfer takes as a host scalar "
                     "captured in the FULL decode CUDA graph. Reload with the same "
                     "attention/output scales, or decode without FULL CUDA graphs "
-                    "(enforce_eager; attention+quant fusion forces FULL)."
+                    "(enforce_eager; attention+quant fusion forces FULL). This reload "
+                    "was only partly applied; restart the engine."
                 )
 
     def _set_bmm_scales_dev(self, layer: torch.nn.Module, device: torch.device) -> None:
