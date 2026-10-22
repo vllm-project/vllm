@@ -19,6 +19,73 @@ set_random_seed(42)
 MXFP4_BLOCK_SIZE = 32
 
 
+def _mxfp4_experts_quant_for_test(
+    input_tensor: torch.Tensor,
+    expert_offsets: torch.Tensor,
+    blockscale_offsets: torch.Tensor,
+    n_experts: int,
+    sorted_expert_ids: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Call the raw quant op with a compact, zero-initialized scale buffer."""
+    m_numtopk, k = input_tensor.shape
+    scales_k = k // MXFP4_BLOCK_SIZE
+    padded_k = (scales_k + 3) // 4
+    num_sf_rows = int(blockscale_offsets[-1].item())
+    output = torch.empty(
+        m_numtopk, k // 2, device=input_tensor.device, dtype=torch.uint8
+    )
+    output_scales = torch.zeros(
+        num_sf_rows,
+        padded_k,
+        dtype=torch.int32,
+        device=input_tensor.device,
+    )
+    torch.ops._C.mxfp4_experts_quant(
+        output,
+        output_scales,
+        input_tensor,
+        expert_offsets,
+        blockscale_offsets,
+        n_experts,
+        sorted_expert_ids,
+    )
+    return output, output_scales.view(torch.uint8)
+
+
+def _silu_and_mul_mxfp4_experts_quant_for_test(
+    input_tensor: torch.Tensor,
+    expert_offsets: torch.Tensor,
+    blockscale_offsets: torch.Tensor,
+    n_experts: int,
+    sorted_expert_ids: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Call the raw fused quant op with a compact, zero-initialized scale buffer."""
+    m_numtopk, k_times_2 = input_tensor.shape
+    k = k_times_2 // 2
+    scales_k = k // MXFP4_BLOCK_SIZE
+    padded_k = (scales_k + 3) // 4
+    num_sf_rows = int(blockscale_offsets[-1].item())
+    output = torch.empty(
+        m_numtopk, k // 2, device=input_tensor.device, dtype=torch.uint8
+    )
+    output_scales = torch.zeros(
+        num_sf_rows,
+        padded_k,
+        dtype=torch.int32,
+        device=input_tensor.device,
+    )
+    torch.ops._C.silu_and_mul_mxfp4_experts_quant(
+        output,
+        output_scales,
+        input_tensor,
+        expert_offsets,
+        blockscale_offsets,
+        n_experts,
+        sorted_expert_ids,
+    )
+    return output, output_scales.view(torch.uint8)
+
+
 def align(val: int, alignment: int = 128) -> int:
     return int((val + alignment - 1) // alignment * alignment)
 
@@ -535,25 +602,22 @@ def test_mxfp4_experts_quant_sorted_expert_ids_matches_offset_search(
     activations = torch.randn(m, k, device="cuda", dtype=torch.bfloat16) / 5
     sorted_activations = ops.shuffle_rows(activations, input_permutation)
 
-    baseline_out, baseline_sf = ops.mxfp4_experts_quant(
+    baseline_out, baseline_sf = _mxfp4_experts_quant_for_test(
         sorted_activations,
         expert_offsets,
         blockscale_offsets,
         num_experts,
-        topk=topk,
     )
-    direct_out, direct_sf = ops.mxfp4_experts_quant(
+    direct_out, direct_sf = _mxfp4_experts_quant_for_test(
         sorted_activations,
         expert_offsets,
         blockscale_offsets,
         num_experts,
-        topk=topk,
         sorted_expert_ids=sorted_expert_ids,
     )
 
     assert torch.equal(baseline_out, direct_out)
-    num_sf_rows = int(blockscale_offsets[-1].item())
-    assert torch.equal(baseline_sf[:num_sf_rows], direct_sf[:num_sf_rows])
+    assert torch.equal(baseline_sf, direct_sf)
 
 
 @pytest.mark.skipif(
@@ -593,25 +657,22 @@ def test_silu_and_mul_mxfp4_sorted_expert_ids_matches_offset_search():
     gate_up = torch.randn(m, 2 * k, device="cuda", dtype=torch.bfloat16) / 5
     sorted_gate_up = ops.shuffle_rows(gate_up, input_permutation)
 
-    baseline_out, baseline_sf = ops.silu_and_mul_mxfp4_experts_quant(
+    baseline_out, baseline_sf = _silu_and_mul_mxfp4_experts_quant_for_test(
         sorted_gate_up,
         expert_offsets,
         blockscale_offsets,
         num_experts,
-        topk=topk,
     )
-    direct_out, direct_sf = ops.silu_and_mul_mxfp4_experts_quant(
+    direct_out, direct_sf = _silu_and_mul_mxfp4_experts_quant_for_test(
         sorted_gate_up,
         expert_offsets,
         blockscale_offsets,
         num_experts,
-        topk=topk,
         sorted_expert_ids=sorted_expert_ids,
     )
 
     assert torch.equal(baseline_out, direct_out)
-    num_sf_rows = int(blockscale_offsets[-1].item())
-    assert torch.equal(baseline_sf[:num_sf_rows], direct_sf[:num_sf_rows])
+    assert torch.equal(baseline_sf, direct_sf)
 
 
 if __name__ == "__main__":
