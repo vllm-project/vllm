@@ -1354,13 +1354,23 @@ class RoutedExperts(PluggableLayer):
             and name not in NON_EXPERT_WEIGHTS
         )
 
-        return [
-            weight.view(self.local_num_experts, -1)
-            for name, weight in weights
-            if name not in NON_EXPERT_WEIGHTS
-            and weight.shape != torch.Size([])
-            and not name.startswith(NON_EXPERT_PREFIXES)
-        ]
+        # A kernel format can register one tensor under two names (e.g. Humming
+        # FP8 scales). EPLB must register and move each memory region once.
+        expert_weights: list[torch.Tensor] = []
+        seen_regions: set[tuple[int, int]] = set()
+        for name, weight in weights:
+            if (
+                name in NON_EXPERT_WEIGHTS
+                or weight.shape == torch.Size([])
+                or name.startswith(NON_EXPERT_PREFIXES)
+            ):
+                continue
+            region = (weight.data_ptr(), weight.nbytes)
+            if region in seen_regions:
+                continue
+            seen_regions.add(region)
+            expert_weights.append(weight.view(self.local_num_experts, -1))
+        return expert_weights
 
     #
     # Execution
