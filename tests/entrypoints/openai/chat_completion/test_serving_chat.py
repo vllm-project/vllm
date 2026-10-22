@@ -3269,6 +3269,23 @@ def test_chat_kv_transfer_prompt_token_ids_ignored_with_non_text_content(content
     assert request.kv_transfer_params == {"do_remote_prefill": True}
 
 
+def test_chat_kv_transfer_prompt_token_ids_ignored_with_reasoning_embeds():
+    request = ChatCompletionRequest(
+        messages=[
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "some text"}],
+                "reasoning": {"type": "prompt_embeds", "data": "tensor"},
+            }
+        ],
+        kv_transfer_params={
+            "prompt_token_ids": [10, 20, 30],
+            "do_remote_prefill": True,
+        },
+    )
+    assert request.kv_transfer_params == {"do_remote_prefill": True}
+
+
 def test_chat_kv_transfer_prompt_token_ids_allows_text_only_parts():
     """Text-bearing part types are not multimodal, so the ids are kept."""
     request = ChatCompletionRequest(
