@@ -47,6 +47,8 @@ from vllm.v1.kv_cache_interface import (
 
 _PARTITION_SIZE_ROCM = 256
 _CP_TOKENS_PER_ITER_ROCM = 32 * 1024
+# KV cache block size of the NHD views the FlyDSL decode reads.
+FLYDSL_PA_DECODE_BLOCK_SIZE = 64
 if current_platform.is_rocm():
     from vllm.triton_utils import tl, triton
 
@@ -500,6 +502,7 @@ class AiterFlashAttentionMetadataBuilder(
         # batch shape, which build() refreshes in place every step.
         self.use_flydsl_pa_decode = False
         self._flydsl_max_query_len = 1 << 30
+        self._flydsl_num_queries_per_kv = 1
         self._flydsl_plans: dict[tuple[int, int], Any] = {}
         layers = get_layers_from_vllm_config(self.vllm_config, Attention)
         for name, layer in layers.items():
@@ -513,11 +516,9 @@ class AiterFlashAttentionMetadataBuilder(
             if layer.impl.use_flydsl_pa_decode:
                 self.use_flydsl_pa_decode = True
                 self._flydsl_max_query_len = min(
-                    self._flydsl_max_query_len,
-                    rocm_aiter_ops.flydsl_pa_decode_max_query_len(
-                        layer.impl.num_queries_per_kv
-                    ),
+                    self._flydsl_max_query_len, layer.impl.flydsl_max_query_len
                 )
+                self._flydsl_num_queries_per_kv = layer.impl.num_queries_per_kv
             if (
                 layer.kv_sharing_target_layer_name is not None
                 or layer.kv_cache_update_bypass
@@ -683,6 +684,10 @@ class AiterFlashAttentionMetadataBuilder(
         plan = rocm_aiter_ops.flydsl_pa_decode_plan(
             seq_lens,
             self.kv_cache_num_heads,
+            kv_dtype=current_platform.fp8_dtype(),
+            head_size=self.headdim,
+            block_size=FLYDSL_PA_DECODE_BLOCK_SIZE,
+            num_queries_per_kv=self._flydsl_num_queries_per_kv,
             query_length=query_len,
             plan=self._flydsl_plans.get(key),
         )
@@ -1018,7 +1023,7 @@ class AiterFlashAttentionBackend(AttentionBackend):
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         if rocm_aiter_ops.is_flydsl_pa_decode_enabled():
             # FlyDSL decode only takes 64-token pages.
-            return [16, 32, 64]
+            return [16, 32, FLYDSL_PA_DECODE_BLOCK_SIZE]
         return [16, 32]
 
     @classmethod
@@ -1148,6 +1153,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
+        self.flydsl_max_query_len = 0
         self.use_flydsl_pa_decode = self._supports_flydsl_pa_decode()
 
         if attn_type != AttentionType.DECODER:
@@ -1164,11 +1170,19 @@ class AiterFlashAttentionImpl(AttentionImpl):
             return False
         vllm_config = get_current_vllm_config_or_none()
         block_size = vllm_config.cache_config.block_size if vllm_config else 64
+        fp8_kv_cache = self.kv_cache_dtype in ("fp8", "fp8_e4m3")
+        if fp8_kv_cache:
+            self.flydsl_max_query_len = rocm_aiter_ops.flydsl_pa_decode_max_query_len(
+                current_platform.fp8_dtype(),
+                self.head_size,
+                FLYDSL_PA_DECODE_BLOCK_SIZE,
+                self.num_queries_per_kv,
+            )
         requirements = {
             "a KV cache block size that is a multiple of 64": block_size % 64 == 0,
-            "an FP8 (e4m3) KV cache": self.kv_cache_dtype in ("fp8", "fp8_e4m3"),
-            "head size 256": self.head_size == 256,
-            "at most 16 query heads per KV head": self.num_queries_per_kv <= 16,
+            "an FP8 (e4m3) KV cache": fp8_kv_cache,
+            "a head size and query heads per KV head that AITER's NHD decode "
+            "supports": self.flydsl_max_query_len > 0,
             "no ALiBi": self.alibi_slopes is None,
             "no logits soft cap": self.logits_soft_cap == 0,
             "no sliding window": self.sliding_window[0] == -1,
@@ -1557,7 +1571,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             if (
                 self.use_flydsl_pa_decode
                 and attn_metadata.decode_metadata.flydsl_plan is not None
-                and key_cache.shape[1] == 64
+                and key_cache.shape[1] == FLYDSL_PA_DECODE_BLOCK_SIZE
             ):
                 rocm_aiter_ops.flydsl_pa_decode(
                     output=output[:num_decode_tokens],

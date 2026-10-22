@@ -2879,50 +2879,41 @@ class rocm_aiter_ops:
 
     @staticmethod
     @functools.cache
-    def _flydsl_pa_decode_supports_nhd() -> bool:
-        """Whether AITER's FlyDSL pa_decode accepts the NHD KV cache layout.
+    def _flydsl_pa_decode_available() -> bool:
+        """Whether AITER exports the FlyDSL NHD decode API.
 
-        Added in https://github.com/ROCm/aiter/pull/5949, together with the
-        GPU work plan that pa_decode requires. Older AITER builds ship
-        pa_decode for the 5D shuffled layout only.
+        Added in https://github.com/ROCm/aiter/pull/5949. Older AITER builds
+        ship pa_decode for the 5D shuffled layout only.
         """
         try:
-            import inspect
-
-            from aiter.ops.flydsl.kernels.pa_decode_kernel import (
-                compile_pa_decode_tile,
-            )
-            from aiter.ops.flydsl.kernels.pa_decode_plan import (  # noqa: F401
-                plan_pa_decode,
-            )
-            from aiter.ops.flydsl.pa_decode import pa_decode
+            import aiter.ops.flydsl as flydsl
         except ImportError:
             return False
-        return (
-            "nhd_layout" in inspect.signature(compile_pa_decode_tile).parameters
-            and "work_plan" in inspect.signature(pa_decode).parameters
+        return all(
+            hasattr(flydsl, name)
+            for name in (
+                "pa_decode",
+                "plan_pa_decode",
+                "pa_decode_nhd_max_query_length",
+                "pa_decode_default_workgroup_budget",
+            )
         )
 
     @staticmethod
-    @functools.cache
-    def _flydsl_pa_decode_max_query_rows() -> int:
-        """Query rows (query tokens x GQA group) one NHD decode call can take.
+    def flydsl_pa_decode_max_query_len(
+        kv_dtype: torch.dtype, head_size: int, block_size: int, num_queries_per_kv: int
+    ) -> int:
+        """Longest uniform query (1 + speculative tokens) flydsl_pa_decode takes
+        for this layer shape, or 0 if it can't serve the layer."""
+        from aiter.ops.flydsl import pa_decode_nhd_max_query_length
 
-        ROCm/aiter#5949 first took one query token in one 16-row M-tile; it now
-        takes uniform query lengths whose rows fit two M-tiles (32 rows).
-        """
-        try:
-            from aiter.ops.flydsl.kernels.pa_decode.traits import (  # noqa: F401
-                d256_pipe,
-            )
-        except ImportError:
-            return 0
-        return 32
-
-    @classmethod
-    def flydsl_pa_decode_max_query_len(cls, num_queries_per_kv: int) -> int:
-        """Longest uniform query (1 + speculative tokens) for flydsl_pa_decode."""
-        return max(1, cls._flydsl_pa_decode_max_query_rows() // num_queries_per_kv)
+        return pa_decode_nhd_max_query_length(
+            torch.device("cuda"),
+            kv_dtype=kv_dtype,
+            head_dim=head_size,
+            block_size=block_size,
+            query_group_size=num_queries_per_kv,
+        )
 
     @classmethod
     @if_aiter_supported
@@ -2942,7 +2933,7 @@ class rocm_aiter_ops:
                 "ignoring it."
             )
             return False
-        if not cls._flydsl_pa_decode_supports_nhd():
+        if not cls._flydsl_pa_decode_available():
             logger.warning_once(
                 "VLLM_ROCM_USE_AITER_FLYDSL_PA_DECODE is set but the installed "
                 "AITER/FlyDSL has no NHD pa_decode "
@@ -4745,6 +4736,11 @@ class rocm_aiter_ops:
     def flydsl_pa_decode_plan(
         seq_lens: torch.Tensor,
         num_kv_heads: int,
+        *,
+        kv_dtype: torch.dtype,
+        head_size: int,
+        block_size: int,
+        num_queries_per_kv: int,
         query_length: int = 1,
         plan: Any | None = None,
     ) -> Any:
@@ -4759,20 +4755,33 @@ class rocm_aiter_ops:
         Args:
             seq_lens: [num_seqs] contiguous int32 context lengths.
             num_kv_heads: KV heads per rank.
+            kv_dtype: KV cache dtype.
+            head_size: Attention head size.
+            block_size: KV cache block size of the NHD view.
+            num_queries_per_kv: Query heads per KV head.
             query_length: Query tokens per sequence (1 + speculative tokens).
             plan: A plan from an earlier call with the same num_seqs.
 
         """
-        from aiter.ops.flydsl.kernels.pa_decode_plan import plan_pa_decode
+        from aiter.ops.flydsl import (
+            pa_decode_default_workgroup_budget,
+            plan_pa_decode,
+        )
 
         if plan is not None:
             return plan_pa_decode(
                 seq_lens, num_kv_heads, query_length=query_length, plan=plan
             )
-        # One CTA per CU: AITER's default budget for the head-256 NHD pipe.
-        num_cu = torch.cuda.get_device_properties(seq_lens.device).multi_processor_count
+        budget = pa_decode_default_workgroup_budget(
+            seq_lens.device,
+            kv_dtype=kv_dtype,
+            head_dim=head_size,
+            block_size=block_size,
+            query_length=query_length,
+            query_group_size=num_queries_per_kv,
+        )
         return plan_pa_decode(
-            seq_lens, num_kv_heads, workgroup_budget=num_cu, query_length=query_length
+            seq_lens, num_kv_heads, workgroup_budget=budget, query_length=query_length
         )
 
     @staticmethod
@@ -4788,6 +4797,7 @@ class rocm_aiter_ops:
         v_scale: torch.Tensor,
         work_plan: Any,
         query_length: int = 1,
+        max_context_length: int | None = None,
     ) -> None:
         """FP8 paged-attention decode on NHD K/V views.
 
@@ -4810,12 +4820,13 @@ class rocm_aiter_ops:
             work_plan: Plan from flydsl_pa_decode_plan() for these seq_lens.
             query_length: Query tokens per sequence; at most
                 flydsl_pa_decode_max_query_len().
+            max_context_length: Host bound on every context this kernel will
+                see, including CUDA graph replays. None specializes the kernel
+                on the block-table width; never pass a step's max_seq_len.
 
         """
-        from aiter.ops.flydsl.pa_decode import pa_decode
+        from aiter.ops.flydsl import pa_decode
 
-        # max_context_length stays unset so that the kernel is specialized on
-        # the block-table width, not on each step's max_seq_len.
         pa_decode(
             output,
             query,
@@ -4829,6 +4840,7 @@ class rocm_aiter_ops:
             key_scale=k_scale,
             value_scale=v_scale,
             work_plan=work_plan,
+            max_context_length=max_context_length,
         )
 
     @staticmethod

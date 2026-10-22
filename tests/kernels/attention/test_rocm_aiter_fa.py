@@ -1234,14 +1234,15 @@ def test_aiter_fa_flydsl_pa_decode_requirements(monkeypatch):
     assert use_flydsl()
     assert not use_flydsl(kv_cache_dtype="auto")
     assert not use_flydsl(head_size=128)
-    assert not use_flydsl(num_heads=64, num_kv_heads=2)
+    assert not use_flydsl(num_heads=128, num_kv_heads=2)
     assert not use_flydsl(logits_soft_cap=30.0)
     assert not use_flydsl(sliding_window=128)
     assert not use_flydsl(sinks=torch.zeros(16))
 
 
 @pytest.mark.parametrize(
-    "num_heads,query_len", [((8, 1), 1), ((16, 2), 1), ((8, 1), 2), ((8, 1), 4)]
+    "num_heads,query_len",
+    [((8, 1), 1), ((16, 2), 1), ((32, 1), 1), ((8, 1), 2), ((8, 1), 4)],
 )
 def test_aiter_fa_flydsl_pa_decode_matches_reference(monkeypatch, num_heads, query_len):
     """FP8 decode through the FlyDSL kernel matches the reference on the
@@ -1269,13 +1270,13 @@ def test_aiter_fa_flydsl_pa_decode_matches_reference(monkeypatch, num_heads, que
 
     block_size, num_blocks, head_size = 64, 64, 256
     num_q_heads, num_kv_heads = num_heads
-    if query_len > rocm_aiter_ops.flydsl_pa_decode_max_query_len(
-        num_q_heads // num_kv_heads
-    ):
-        pytest.skip("installed AITER takes one query token per FlyDSL decode")
     scale = head_size**-0.5
     k_scale, v_scale = 0.5, 0.25
     cache_dtype = current_platform.fp8_dtype()
+    if query_len > rocm_aiter_ops.flydsl_pa_decode_max_query_len(
+        cache_dtype, head_size, block_size, num_q_heads // num_kv_heads
+    ):
+        pytest.skip(f"installed AITER's FlyDSL decode takes < {query_len} tokens")
     batch_spec = BatchSpec(
         seq_lens=[query_len, 63, 64, 257, 1500], query_lens=[query_len] * 5
     )
