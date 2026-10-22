@@ -663,6 +663,7 @@ optuna==3.6.1
     # via genai-perf
 orjson==3.12.0
     # via
+    #   -r requirements/test/../common.txt
     #   -r requirements/test/cuda.in
     #   genai-perf
 oss-harmony==0.0.11
@@ -1223,7 +1224,7 @@ traitlets==5.16.1
     # via
     #   jupyter-client
     #   jupyter-core
-transformers==5.19.0
+transformers==5.20.2
     # via
     #   -r requirements/test/../common.txt
     #   -r requirements/test/cuda.in

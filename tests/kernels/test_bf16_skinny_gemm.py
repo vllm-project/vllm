@@ -214,7 +214,7 @@ def test_every_dsv3_routed_shape_is_instantiated() -> None:
     }
     assert compiled, "failed to parse the dispatch list"
 
-    specs = [
+    specs: list[k3_gemm.ProjectionSpec | glm52_gemm.GLM52ProjectionSpec] = [
         *KIMI_K3_PROJECTIONS.values(),
         *k3_gemm.KIMI_K3_PROJECTIONS_SM100.values(),
         *k3_gemm.KIMI_K3_PROJECTIONS_SM90.values(),
