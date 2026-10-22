@@ -63,6 +63,26 @@ vllm serve <MODEL> \
 !!! note
     Backend availability depends on how NIXL was built and what plugins are present in your environment. Refer to the [NIXL repository](https://github.com/ai-dynamo/nixl) for available backends and build instructions.
 
+## Sleep mode
+
+`NixlConnector` supports sleep mode with the UCX backend in pull mode.
+Enable `--enable-sleep-mode` on both the prefiller and decoder. Stop submitting
+requests and wait for **both** instances to finish sleeping before reusing their
+GPU memory. A peer that remains awake can retain CUDA IPC mappings to the sleeping
+instance's KV cache.
+
+Sleep destroys the local NIXL agent; wake-up creates a new agent and publishes
+fresh registration metadata. UCX transport selection and caches use their defaults;
+sleep mode does not require `UCX_TLS`, `UCX_RCACHE_ENABLE`, or
+`UCX_CUDA_IPC_CACHE` overrides.
+
+!!! warning
+    Reclaiming CUDA IPC mappings requires a UCX build containing
+    [openucx/ucx#12108](https://github.com/openucx/ucx/pull/12108).
+    Without that fix, KV memory can remain resident even after both instances
+    sleep. Disabling the IPC cache alone does not release mappings still held by
+    remote keys.
+
 ## Basic Usage (on the same host)
 
 ### Producer (Prefiller) Configuration

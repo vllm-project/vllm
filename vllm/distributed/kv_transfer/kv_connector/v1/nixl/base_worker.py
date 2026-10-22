@@ -740,19 +740,8 @@ class NixlBaseConnectorWorker:
                 else nixl_agent_config(num_threads=num_threads, capture_telemetry=True)
             )
 
-        sleep_mode = vllm_config.model_config.enable_sleep_mode and config is not None
-        if sleep_mode:
-            config = nixl_agent_config(backends=[], capture_telemetry=True)
+        self._nixl_agent_config = config
         self.nixl_wrapper = nixl_wrapper_cls(str(uuid.uuid4()), config)
-        if sleep_mode:
-            # Keep slept pages unpinned, for this agent only; UCX_* env vars win.
-            self.nixl_wrapper.create_backend(
-                "UCX",
-                {
-                    "num_threads": str(num_threads),
-                    "engine_config": "RCACHE_ENABLE=n,TLS=^cuda_ipc",
-                },
-            )
         # Map of engine_id -> {(pp_rank, tp_rank): agent_name, ...}.
         # non-PP remote uses pp_rank 0, i.e. (0, tp_rank).
         self._remote_agents: dict[EngineId, dict[tuple[int, int], str]] = defaultdict(
@@ -1951,30 +1940,47 @@ class NixlBaseConnectorWorker:
     def unregister_kv_caches(self) -> None:
         if self._kv_unregistered or not self._registered_descs:
             return
+        if self._recving_transfers:
+            raise RuntimeError(
+                "NIXL transfers must drain before unregistering KV caches"
+            )
+        # The executor has one worker. A barrier also waits for its callbacks.
+        self._handshake_initiation_executor.submit(lambda: None).result()
         self._release_local_xfer_handles()
         # Remote engines hold local handles too; they handshake again on demand.
         for engine_id in list(self._remote_agents):
             self._cleanup_remote_engine(engine_id, log_eviction=False)
         for descs in self._registered_descs:
             self.nixl_wrapper.deregister_memory(descs)
+        # Deregistration alone can leave physical pages in UCX's local cache.
+        self.nixl_wrapper = None
         self._kv_unregistered = True
 
     def restore_kv_caches(self) -> None:
         if not self._kv_unregistered:
             return
-        for descs in self._registered_descs:
-            self.nixl_wrapper.register_memory(descs, backends=self.nixl_backends)
-        self.src_xfer_handles_by_block_size[self.block_size], self.src_blocks_data = (
-            self.register_local_xfer_handler(self.block_size)
-        )
-        # Peers load the new registration from the agent metadata.
-        payload = self.xfer_handshake_metadata
-        assert payload is not None
-        agent_metadata = msgspec.msgpack.decode(
-            payload.agent_metadata_bytes, type=NixlAgentMetadata
-        )
-        agent_metadata.agent_metadata = self.nixl_wrapper.get_agent_metadata()
-        payload.agent_metadata_bytes = msgspec.msgpack.encode(agent_metadata)
+        self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), self._nixl_agent_config)
+        try:
+            for descs in self._registered_descs:
+                self.nixl_wrapper.register_memory(descs, backends=self.nixl_backends)
+            (
+                self.src_xfer_handles_by_block_size[self.block_size],
+                self.src_blocks_data,
+            ) = self.register_local_xfer_handler(self.block_size)
+            # Peers load the new registration from the agent metadata.
+            payload = self.xfer_handshake_metadata
+            assert payload is not None
+            agent_metadata = msgspec.msgpack.decode(
+                payload.agent_metadata_bytes, type=NixlAgentMetadata
+            )
+            agent_metadata.agent_metadata = self.nixl_wrapper.get_agent_metadata()
+            payload.agent_metadata_bytes = msgspec.msgpack.encode(agent_metadata)
+        except Exception:
+            try:
+                self._release_local_xfer_handles()
+            finally:
+                self.nixl_wrapper = None
+            raise
         self._kv_unregistered = False
 
     def _build_mamba_local(self, base_addresses: list[int]) -> np.ndarray:
