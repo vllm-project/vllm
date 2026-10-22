@@ -436,3 +436,127 @@ def test_template_override_tokenizer_still_gets_a_cache(tokenizer):
         assert ids == custom.apply_chat_template(messages, tokenize=True)
     finally:
         renderer.shutdown()
+
+
+@pytest.mark.parametrize("capacity", [0, 0.001])
+@pytest.mark.parametrize("use_async", [False, True])
+def test_deepseek_renderer_preserves_prompt_contract(
+    tokenizer, tmp_path, capacity, use_async
+):
+    from transformers import Qwen3Config
+
+    from vllm.config import DeviceConfig, ModelConfig, VllmConfig
+    from vllm.renderers.deepseek_v4 import DeepseekV4Renderer
+    from vllm.renderers.params import ChatParams
+    from vllm.tokenizers.deepseek_v4 import get_deepseek_v4_tokenizer
+
+    # Local text-only config; this exercises rendering without loading weights.
+    Qwen3Config(
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        vocab_size=400,
+        max_position_embeddings=1024,
+        architectures=["Qwen3ForCausalLM"],
+    ).save_pretrained(tmp_path)
+    model_config = ModelConfig(
+        model=str(tmp_path),
+        tokenizer=str(tmp_path),
+        dtype="float32",
+        max_model_len=1024,
+        enforce_eager=True,
+        tokenizer_cache_gb=capacity,
+    )
+    tokenizer = get_deepseek_v4_tokenizer(tokenizer)
+    renderer = DeepseekV4Renderer(
+        VllmConfig(model_config=model_config, device_config=DeviceConfig(device="cpu")),
+        tokenizer,
+    )
+    messages = [{"role": "user", "content": "hello 你好"}]
+    expected = tokenizer.apply_chat_template(messages)
+    try:
+        for _ in range(2):
+            if use_async:
+                conversation, prompt = asyncio.run(
+                    renderer.render_messages_async(messages, ChatParams())
+                )
+            else:
+                conversation, prompt = renderer.render_messages(messages, ChatParams())
+            assert conversation[-1]["role"] == "user"
+            assert "prompt_token_ids" in prompt
+            assert cast(dict[str, Any], prompt)["prompt_token_ids"] == expected
+        if capacity:
+            cache = renderer._tokenizer_cache
+            assert cache is not None and cache.enabled
+            assert cache.hits > 0
+    finally:
+        renderer.shutdown()
+
+
+def test_async_embedding_visibility_keeps_cache_argument(tokenizer, tmp_path):
+    import io
+
+    import pybase64 as base64
+    import torch
+    from transformers import Qwen3Config
+
+    from vllm.config import DeviceConfig, ModelConfig, VllmConfig
+    from vllm.renderers.hf import HfRenderer
+    from vllm.renderers.params import ChatParams
+
+    Qwen3Config(
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        vocab_size=400,
+        max_position_embeddings=1024,
+        architectures=["Qwen3ForCausalLM"],
+    ).save_pretrained(tmp_path)
+    model_config = ModelConfig(
+        model=str(tmp_path),
+        dtype="float32",
+        max_model_len=1024,
+        enforce_eager=True,
+        enable_prompt_embeds=True,
+    )
+    renderer = HfRenderer(
+        VllmConfig(model_config=model_config, device_config=DeviceConfig(device="cpu")),
+        tokenizer,
+    )
+    tensor = torch.zeros((2, 32))
+    buffer = io.BytesIO()
+    torch.save(tensor, buffer)
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "prompt_embeds",
+                    "data": base64.b64encode(buffer.getvalue()).decode(),
+                }
+            ],
+        }
+    ]
+    params = ChatParams(
+        chat_template="{% for m in messages %}{{ m.content }}{% endfor %}"
+    )
+    try:
+        _, expected = renderer.render_messages(messages, params)
+        _, actual = asyncio.run(renderer.render_messages_async(messages, params))
+        assert "prompt_token_ids" in actual and "prompt_token_ids" in expected
+        actual_prompt = cast(dict[str, Any], actual)
+        expected_prompt = cast(dict[str, Any], expected)
+        assert actual_prompt["prompt_token_ids"] == expected_prompt["prompt_token_ids"]
+        assert "prompt_embeds" in actual and "prompt_embeds" in expected
+        torch.testing.assert_close(
+            actual_prompt["prompt_embeds"],
+            expected_prompt["prompt_embeds"],
+            rtol=0,
+            atol=0,
+        )
+    finally:
+        renderer.shutdown()

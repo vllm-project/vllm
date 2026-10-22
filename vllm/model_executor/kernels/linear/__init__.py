@@ -88,6 +88,9 @@ from vllm.model_executor.kernels.linear.mxfp4.humming import (
 from vllm.model_executor.kernels.linear.mxfp4.marlin import (
     MarlinMxFp4LinearKernel,
 )
+from vllm.model_executor.kernels.linear.mxfp4.pytorch import (
+    TorchMxFp4LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp4.xpu import (
     XPUMxFp4LinearKernel,
 )
@@ -123,6 +126,9 @@ from vllm.model_executor.kernels.linear.mxfp8.humming import (
 from vllm.model_executor.kernels.linear.mxfp8.marlin import (
     MarlinMxfp8LinearKernel,
 )
+from vllm.model_executor.kernels.linear.mxfp8.pytorch import (
+    TorchMxFp8LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
     RocmDotScaledMxfp8LinearKernel,
 )
@@ -135,6 +141,7 @@ from vllm.model_executor.kernels.linear.nvfp4 import (
 )
 from vllm.model_executor.kernels.linear.nvfp4.b12x import (
     B12xNvFp4LinearKernel,
+    B12xNvFp4W4A16LinearKernel,
 )
 from vllm.model_executor.kernels.linear.nvfp4.cutlass import (
     CutlassNvFp4LinearKernel,
@@ -275,6 +282,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
         B12xMxFp4LinearKernel,
         B12xMxfp8LinearKernel,
         B12xNvFp4LinearKernel,
+        B12xNvFp4W4A16LinearKernel,
         B12xTensorFP8ScaledMMLinearKernel,
     },
     "cutlass": {
@@ -336,6 +344,8 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
         ChannelWiseTorchFP8ScaledMMLinearKernel,
         RowWiseTorchFP8ScaledMMLinearKernel,
         BlockWiseTorchFP8ScaledMMLinearKernel,
+        TorchMxFp4LinearKernel,
+        TorchMxFp8LinearKernel,
         TorchNvFp4LinearKernel,
     },
     "aiter": {
@@ -556,6 +566,7 @@ _POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
         EmulationMxfp8LinearKernel,
         HummingMxfp8LinearKernel,
         FlashInferTrtllmMxfp8LinearKernel,
+        TorchMxFp8LinearKernel,
     ],
     PlatformEnum.ROCM: [
         # Native CDNA4 (gfx950) MX linear; is_supported() gates to gfx95x and
@@ -565,6 +576,7 @@ _POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
     ],
     PlatformEnum.XPU: [
         XPUMxFp8LinearKernel,
+        TorchMxFp8LinearKernel,
         EmulationMxfp8LinearKernel,
     ],
 }
@@ -582,6 +594,7 @@ _POSSIBLE_NVFP4_KERNELS: dict[PlatformEnum, list[type[NvFp4LinearKernel]]] = {
         FlashInferCudnnNvFp4LinearKernel,
         FbgemmNvFp4LinearKernel,
         B12xNvFp4LinearKernel,
+        B12xNvFp4W4A16LinearKernel,
         TorchNvFp4LinearKernel,
         EmulationNvFp4LinearKernel,
         HummingNvFp4LinearKernel,
@@ -615,6 +628,7 @@ _POSSIBLE_MXFP4_KERNELS: dict[PlatformEnum, list[type[MxFp4LinearKernel]]] = {
     ],
     PlatformEnum.XPU: [
         XPUMxFp4LinearKernel,
+        TorchMxFp4LinearKernel,
     ],
 }
 
@@ -827,11 +841,13 @@ def init_int8_linear_kernel(
     is_static_input_scheme: bool,
     input_symmetric: bool,
     module_name: str,
+    is_fused_module: bool = False,
 ) -> Int8ScaledMMLinearKernel:
     config = Int8ScaledMMLinearLayerConfig(
         is_channelwise=is_channelwise,
         is_static_input_scheme=is_static_input_scheme,
         input_symmetric=input_symmetric,
+        is_fused_module=is_fused_module,
     )
 
     kernel_type = choose_scaled_mm_linear_kernel(
@@ -1127,6 +1143,7 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
     current platform."""
     config = NvFp4LinearLayerConfig()
     a16_kernels = (
+        B12xNvFp4W4A16LinearKernel,
         FlashInferCuteDslNvFp4W4A16LinearKernel,
         MarlinNvFp4LinearKernel,
         HummingNvFp4LinearKernel,
@@ -1341,6 +1358,7 @@ __all__ = [
     "B12xMxfp8LinearKernel",
     "B12xMxFp4LinearKernel",
     "B12xNvFp4LinearKernel",
+    "B12xNvFp4W4A16LinearKernel",
     "init_mxfp4_linear_kernel",
     "MxFp4LinearKernel",
     "MxFp4LinearLayerConfig",
@@ -1358,6 +1376,7 @@ __all__ = [
     "FlashInferTrtllmMxfp8LinearKernel",
     "MarlinMxfp8LinearKernel",
     "XPUMxFp8LinearKernel",
+    "TorchMxFp8LinearKernel",
     "EmulationMxfp8LinearKernel",
     "CutlassNvFp4LinearKernel",
     "EmulationNvFp4LinearKernel",

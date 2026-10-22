@@ -68,6 +68,7 @@ from vllm.config import (
     StructuredOutputsConfig,
     UVAOffloadConfig,
     VllmConfig,
+    WatchdogConfig,
     WeightTransferConfig,
     get_attr_docs,
 )
@@ -182,6 +183,11 @@ def union_dict_and_str(val: str) -> str | dict[str, str] | None:
     if not re.match(r"(?s)^\s*{.*}\s*$", val):
         return str(val)
     return optional_type(json.loads)(val)
+
+
+def parse_reasoning_parser(val: str) -> str:
+    """Map `none` (any case) to the unset default, as `vllm-rs serve` does."""
+    return "" if val.lower() == "none" else val
 
 
 def is_type(type_hint: TypeHint, type: TypeHintT) -> TypeIs[TypeHintT]:
@@ -453,6 +459,12 @@ _LOG_CONFIG_FILE_DEPRECATION_MESSAGE = (
 )
 
 
+_MAMBA_CACHE_MODE_DEPRECATION_MESSAGE = (
+    "--mamba-cache-mode is deprecated and will be removed in v0.33.0. "
+    "It has no effect: Mamba prefix caching follows --enable-prefix-caching."
+)
+
+
 _DISABLE_CASCADE_ATTN_DEPRECATION_MESSAGE = (
     "--disable-cascade-attn is deprecated and has no effect since cascade "
     "attention has been removed. It will be removed in v0.33.0."
@@ -497,7 +509,7 @@ class EngineArgs:
     load_format: str | LoadFormats = LoadConfig.load_format
     config_format: str = ModelConfig.config_format
     dtype: ModelDType = ModelConfig.dtype
-    kv_cache_dtype: CacheDType = CacheConfig.cache_dtype
+    kv_cache_dtype: CacheDType | str = CacheConfig.cache_dtype
     seed: int = ModelConfig.seed
     max_model_len: int = ModelConfig.max_model_len
     cudagraph_capture_sizes: list[int] | None = (
@@ -799,7 +811,7 @@ class EngineArgs:
     mamba_ssm_cache_dtype: MambaDType = CacheConfig.mamba_ssm_cache_dtype
     mamba_block_size: int | None = get_field(CacheConfig, "mamba_block_size")
     prefix_match_unit: int | None = get_field(CacheConfig, "prefix_match_unit")
-    mamba_cache_mode: MambaCacheMode = CacheConfig.mamba_cache_mode
+    mamba_cache_mode: MambaCacheMode | None = None
     enable_mamba_shared_prefix_checkpoint: bool = (
         CacheConfig.enable_mamba_shared_prefix_checkpoint
     )
@@ -843,6 +855,8 @@ class EngineArgs:
 
     shutdown_timeout: int = 0
 
+    watchdog_config: WatchdogConfig = get_field(VllmConfig, "watchdog_config")
+
     weight_transfer_config: WeightTransferConfig | None = get_field(
         VllmConfig,
         "weight_transfer_config",
@@ -850,7 +864,7 @@ class EngineArgs:
 
     fail_on_environ_validation: bool = False
     gdn_prefill_backend: (
-        Literal["flashinfer", "triton", "cutedsl", "aiter_flydsl"] | None
+        Literal["flashinfer", "triton", "cutedsl", "aiter_flydsl", "sycl"] | None
     ) = None
     kda_prefill_backend: (
         Literal["auto", "triton", "flashkda", "flashinfer", "fused"] | None
@@ -895,6 +909,9 @@ class EngineArgs:
             )
         if isinstance(self.ir_op_priority, dict):
             self.ir_op_priority = IrOpPriorityConfig(**self.ir_op_priority)
+
+        if isinstance(self.watchdog_config, dict):
+            self.watchdog_config = WatchdogConfig(**self.watchdog_config)
 
         from vllm.config.quantization import resolve_quantization_config
 
@@ -1112,6 +1129,10 @@ class EngineArgs:
 
         # Structured outputs arguments
         structured_outputs_kwargs = get_kwargs(StructuredOutputsConfig)
+        structured_outputs_kwargs["reasoning_parser"]["type"] = parse_reasoning_parser
+        structured_outputs_kwargs["reasoning_parser"]["help"] += (
+            "\n\n`none` disables reasoning parsing, the same as leaving it unset."
+        )
         structured_outputs_group = parser.add_argument_group(
             title="StructuredOutputsConfig",
             description=StructuredOutputsConfig.__doc__,
@@ -1407,7 +1428,12 @@ class EngineArgs:
             "--prefix-match-unit", **cache_kwargs["prefix_match_unit"]
         )
         cache_group.add_argument(
-            "--mamba-cache-mode", **cache_kwargs["mamba_cache_mode"]
+            "--mamba-cache-mode",
+            **{
+                **cache_kwargs["mamba_cache_mode"],
+                "default": None,
+                "help": _MAMBA_CACHE_MODE_DEPRECATION_MESSAGE,
+            },
         )
         cache_group.add_argument(
             "--enable-mamba-shared-prefix-checkpoint",
@@ -1874,6 +1900,7 @@ class EngineArgs:
             "--aux-output-config", **vllm_kwargs["aux_output_config"]
         )
         vllm_group.add_argument("--profiler-config", **vllm_kwargs["profiler_config"])
+        vllm_group.add_argument("--watchdog-config", **vllm_kwargs["watchdog_config"])
         vllm_group.add_argument(
             "--optimization-level", **vllm_kwargs["optimization_level"]
         )
@@ -1914,7 +1941,7 @@ class EngineArgs:
         parser.add_argument(
             "--gdn-prefill-backend",
             dest="gdn_prefill_backend",
-            choices=["flashinfer", "triton", "cutedsl", "aiter_flydsl"],
+            choices=["flashinfer", "triton", "cutedsl", "aiter_flydsl", "sycl"],
             default=None,
             help="Select GDN prefill backend.",
         )
@@ -2268,6 +2295,8 @@ class EngineArgs:
         assert self.enable_prefix_caching is not None, (
             "enable_prefix_caching must be set by this point"
         )
+        if self.mamba_cache_mode is not None:
+            logger.warning_once(_MAMBA_CACHE_MODE_DEPRECATION_MESSAGE)
 
         cache_config = CacheConfig(
             block_size=self.block_size,  # type: ignore[arg-type]
@@ -2287,7 +2316,6 @@ class EngineArgs:
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
             mamba_block_size=self.mamba_block_size,
             prefix_match_unit=self.prefix_match_unit,
-            mamba_cache_mode=self.mamba_cache_mode,
             enable_mamba_shared_prefix_checkpoint=(
                 self.enable_mamba_shared_prefix_checkpoint
             ),
@@ -2875,6 +2903,7 @@ class EngineArgs:
             optimization_level=self.optimization_level,
             performance_mode=self.performance_mode,
             weight_transfer_config=self.weight_transfer_config,
+            watchdog_config=self.watchdog_config,
             shutdown_timeout=self.shutdown_timeout,
         )
 
@@ -2921,10 +2950,14 @@ class EngineArgs:
         try:
             device_memory = current_platform.get_device_total_memory()
             device_name = current_platform.get_device_name().lower()
+            # GB10 (DGX Spark, cc 12.1) has the memory but not the compute of
+            # a large discrete GPU, keep it on the small tier.
+            is_gb10 = current_platform.is_device_capability((12, 1))
         except Exception:
             # This is only used to set default_max_num_batched_tokens
             device_memory = 0
             device_name = ""
+            is_gb10 = False
 
         # NOTE(Kuntai): Setting large `max_num_batched_tokens` for A100 reduces
         # throughput, see PR #17885 for more details.
@@ -2939,7 +2972,11 @@ class EngineArgs:
                 UsageContext.LLM_CLASS: 1024,
                 UsageContext.OPENAI_API_SERVER: 1024,
             }
-        elif device_memory >= 70 * GiB_bytes and "a100" not in device_name:
+        elif (
+            device_memory >= 70 * GiB_bytes
+            and "a100" not in device_name
+            and not is_gb10
+        ):
             # For GPUs like H100 and H200, use larger offline defaults.
             default_max_num_batched_tokens = {
                 UsageContext.LLM_CLASS: 16384,
@@ -3218,7 +3255,9 @@ class AsyncEngineArgs(EngineArgs):
             help="Enable logging request information, dependent on log level:\n"
             "- INFO: Request ID, parameters and LoRA request.\n"
             "- DEBUG: Prompt inputs (e.g: text, token IDs).\n"
-            "You can set the minimum log level via `VLLM_LOGGING_LEVEL`.",
+            "You can set the minimum log level via `VLLM_LOGGING_LEVEL`.\n"
+            "You can also set a separate log level for request JSON body "
+            "via `VLLM_REQUEST_BODY_LOG_LEVEL` (default: DEBUG).",
         )
         current_platform.pre_register_and_update(parser)
         return parser
