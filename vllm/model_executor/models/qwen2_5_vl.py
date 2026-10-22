@@ -71,6 +71,9 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.rotary_embedding.common import (
     ApplyRotaryEmb,
 )
+from vllm.model_executor.layers.rotary_embedding.fused_vision_qk_rope import (
+    try_fused_vision_qk_rope,
+)
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
@@ -427,15 +430,27 @@ class Qwen2_5_VisionAttention(nn.Module):
         if rotary_pos_emb_cos is not None and rotary_pos_emb_sin is not None:
             qk, v = qkv[:, :, :2], qkv[:, :, 2]
 
-            qk_reshaped = einops.rearrange(
-                qk, "b s two head head_dim -> (two b) s head head_dim", two=2
-            )
-            qk_reshaped = qk_reshaped.contiguous()
-            qk_rotated = self.apply_rotary_emb(
-                qk_reshaped,
-                rotary_pos_emb_cos,
-                rotary_pos_emb_sin,
-            )
+            qk_rotated = None
+            if current_platform.is_cuda():
+                qk_rotated = try_fused_vision_qk_rope(
+                    x,
+                    rotary_pos_emb_cos,
+                    rotary_pos_emb_sin,
+                    self.num_attention_heads_per_partition,
+                    self.hidden_size_per_attention_head,
+                    is_neox_style=self.apply_rotary_emb.is_neox_style,
+                    enable_fp32_compute=self.apply_rotary_emb.enable_fp32_compute,
+                )
+            if qk_rotated is None:
+                qk_reshaped = einops.rearrange(
+                    qk, "b s two head head_dim -> (two b) s head head_dim", two=2
+                )
+                qk_reshaped = qk_reshaped.contiguous()
+                qk_rotated = self.apply_rotary_emb(
+                    qk_reshaped,
+                    rotary_pos_emb_cos,
+                    rotary_pos_emb_sin,
+                )
             qk_rotated = qk_rotated.view(
                 2,
                 batch_size,
