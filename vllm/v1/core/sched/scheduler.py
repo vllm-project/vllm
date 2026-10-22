@@ -471,6 +471,69 @@ class Scheduler(SchedulerInterface):
         )
         self._kv_fetch_counts: dict[str, int] = dict.fromkeys(KV_FETCH_STAGES, 0)
 
+    def _transition_blocks(self, request: Request) -> int:
+        """Remaining physical demand through the next confirmed transition."""
+        confirmed = max(0, request.num_computed_tokens - request.num_in_flight_tokens)
+        if (
+            request.status != RequestStatus.RUNNING
+            or request.is_finished()
+            or request.has_encoder_inputs
+            or request.num_stale_output_tokens
+        ):
+            return 0
+        managers = self.kv_cache_manager.coordinator.single_type_managers
+        boundary = min(
+            ((confirmed + m.block_size - 1) // m.block_size) * m.block_size + 1
+            for m in managers
+            if isinstance(m.kv_cache_spec, MambaSpec)
+        )
+        target = min(boundary, request.num_prompt_tokens + request.max_tokens - 1)
+        main_end = min(
+            self.max_model_len - 1,
+            max(target + self.num_spec_tokens, request.num_computed_tokens),
+        )
+        slot_end = min(self.max_model_len, main_end + self.num_lookahead_tokens)
+        # Reuse group predictors. Mamba's admission query is read-only; other
+        # groups use uncapped demand, without crediting future block retirement.
+        return sum(
+            max(
+                0,
+                m.get_num_blocks_to_allocate(
+                    request.request_id,
+                    slot_end,
+                    [],
+                    0,
+                    0,
+                    main_end,
+                    apply_admission_cap=isinstance(m.kv_cache_spec, MambaSpec),
+                ),
+            )
+            for m in managers
+        )
+
+    def _running_transition_headroom(self) -> dict[Request, int] | None:
+        if not (
+            self.need_mamba_block_aligned_split
+            and not self.mamba_has_prefill_checkpoint_blocks
+            and self.num_spec_tokens
+            and self.policy == SchedulingPolicy.FCFS
+        ):
+            return None
+        return {r: self._transition_blocks(r) for r in self.running}
+
+    def _transition_reserve(
+        self,
+        needs: dict[Request, int] | None,
+        allocating: Request | None = None,
+    ) -> int:
+        # Derive a feasible FCFS progress guarantee from this round's actual
+        # tables. No owner/epoch survives schedule(), and no future free is used.
+        free = self.kv_cache_manager.block_pool.get_num_free_blocks()
+        for request, blocks in (needs or {}).items():
+            if request.status == RequestStatus.RUNNING and 0 < blocks <= free:
+                return 0 if request is allocating else blocks
+        return 0
+
     def _mamba_block_aligned_split(
         self,
         request: Request,
@@ -711,8 +774,21 @@ class Scheduler(SchedulerInterface):
             defer_prefills = True
 
         # First, schedule the RUNNING requests.
+        transition_needs = self._running_transition_headroom()
+        allow_transition_yield = transition_needs is not None
+        transition_yielded = False
         req_index = 0
-        while req_index < len(self.running) and token_budget > 0:
+        while token_budget > 0:
+            if req_index >= len(self.running):
+                if (
+                    allow_transition_yield
+                    and transition_yielded
+                    and not scheduled_running_reqs
+                ):
+                    allow_transition_yield = False
+                    req_index = 0
+                    continue
+                break
             request = self.running[req_index]
             if input_budget <= draft_slots:
                 break
@@ -829,12 +905,16 @@ class Scheduler(SchedulerInterface):
                 continue
 
             # Schedule newly needed KV blocks for the request.
+            skip_transition = False
+            transition_reserve = self._transition_reserve(transition_needs, request)
             with record_function_or_nullcontext("schedule: allocate_slots"):
                 while True:
                     new_blocks = self.kv_cache_manager.allocate_slots(
                         request,
                         num_new_tokens,
                         num_lookahead_tokens=self.num_lookahead_tokens,
+                        reserved_blocks=transition_reserve,
+                        transition_blocks=(transition_needs or {}).get(request, 0),
                     )
 
                     if new_blocks is not None:
@@ -845,6 +925,11 @@ class Scheduler(SchedulerInterface):
                         self.connector is not None
                         and self.connector.has_pending_block_frees()
                     ):
+                        skip_transition = allow_transition_yield
+                        break
+
+                    if allow_transition_yield:
+                        skip_transition = True
                         break
 
                     # The request cannot be scheduled.
@@ -900,8 +985,13 @@ class Scheduler(SchedulerInterface):
                         break
 
             if new_blocks is None:
-                # Cannot schedule this request.
+                if skip_transition:
+                    transition_yielded = True
+                    req_index += 1
+                    continue
                 break
+            if transition_needs is not None and request in transition_needs:
+                transition_needs[request] = self._transition_blocks(request)
 
             # Schedule the request.
             scheduled_running_reqs.append(request)
@@ -954,7 +1044,11 @@ class Scheduler(SchedulerInterface):
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Next, schedule the WAITING requests.
-        if not preempted_reqs and self._pause_state != PauseState.PAUSED_ALL:
+        if (
+            not transition_yielded
+            and not preempted_reqs
+            and self._pause_state != PauseState.PAUSED_ALL
+        ):
             step_skipped_waiting: deque[Request] = deque()
             step_skipped_kv_holding: deque[Request] = deque()
 
@@ -1313,6 +1407,8 @@ class Scheduler(SchedulerInterface):
                         self._inflight_prefill_reserved_blocks()
                         + self._spec_decode_step_blocks
                     )
+
+                reserved_blocks += self._transition_reserve(transition_needs)
 
                 # Replayed tokens are already counted in the adopted hit; a
                 # chunk that ends inside the replayed range needs no new slots.
