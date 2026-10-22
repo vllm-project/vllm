@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Structured decisions in front of a vLLM DiffusionGemma server.
+"""Structured decisions in front of a vLLM diffusion server.
 
 POST /v1/systemone takes Jev's request body: {"model", "state", "questions"}.
 "questions" maps an id to {"type", "instructions", "criteria"}, where "type"
@@ -83,6 +83,7 @@ import math
 import os
 import random
 import ssl
+import string
 import subprocess
 import threading
 import time
@@ -113,6 +114,21 @@ SCAFFOLD_TEXT = "<|channel>thought\n<channel|>"
 SCAFFOLD = None
 THOUGHT_OPEN = None
 THOUGHT_CLOSE = None
+BACKEND = "gemma"
+MASK_TOKEN_ID = 100
+# vLLM returns exact logprobs for at most 128 logprob_token_ids per request,
+# so one read covers at most this many distinct answer labels.
+MAX_ALTERNATIVES = 128
+# Answer codes in order of use. A-Z come first, so a schema that fit the former
+# 26-alternative limit renders byte-identical prompts. Wider questions continue
+# with a-z and 0-9, then two-letter capitals the tokenizer keeps as one token.
+CODE_ORDER = (
+    list(string.ascii_uppercase)
+    + list(string.ascii_lowercase)
+    + list(string.digits)
+    + [a + b for a in string.ascii_uppercase for b in string.ascii_uppercase]
+)
+CODES = list(string.ascii_uppercase)  # extended by init_tokenizer
 
 
 # ----------------------------------------------------------------------------
@@ -158,20 +174,19 @@ def parse_schema(value):
                 else (str(o), None)
                 for o in opts
             ]
-            labels = [chr(ord("A") + i) for i in range(len(choices))]
         elif kind == "score":
             choices = [(str(level), None) for level in (q.get("levels") or [])]
-            labels = (
-                [str(i + 1) for i in range(len(choices))]
-                if len(choices) <= 9
-                else [chr(ord("A") + i) for i in range(len(choices))]
-            )
         else:
             raise SchemaError(f"question {qid!r}: unknown type {kind!r}")
         if len(choices) < 2:
             raise SchemaError(f"question {qid!r}: needs at least two alternatives")
-        if len(choices) > 26:
-            raise SchemaError(f"question {qid!r}: at most 26 alternatives")
+        widest = min(MAX_ALTERNATIVES, len(CODES))
+        if len(choices) > widest:
+            raise SchemaError(f"question {qid!r}: at most {widest} alternatives")
+        if kind == "score" and len(choices) <= 9:
+            labels = [str(i + 1) for i in range(len(choices))]
+        elif kind != "noul":
+            labels = CODES[: len(choices)]
         deps = q.get("depends_on") or []
         ask_if = q.get("ask_if") or {}
         if not isinstance(deps, list) or not all(isinstance(d, str) for d in deps):
@@ -212,13 +227,17 @@ def parse_schema(value):
                     f"must be among {names}"
                 )
     schedule(qs)  # refuses a cycle
-    samples = value.get("samples", "auto")
+    samples = value.get("samples", 1 if BACKEND == "nemotron" else "auto")
+    if BACKEND == "nemotron" and samples not in (1, "auto"):
+        raise SchemaError("Nemotron masked reads are deterministic; use samples=1")
     if samples == "auto":
         policy = {
             "mode": "auto",
             "max": max(1, min(int(value.get("auto_max", 4)), MAX_SAMPLES)),
             "threshold": float(value.get("auto_threshold", 0.1)),
         }
+        if BACKEND == "nemotron":
+            policy["max"] = 1
     elif isinstance(samples, int) and samples >= 1:
         policy = {"mode": "fixed", "n": min(samples, MAX_SAMPLES)}
     else:
@@ -242,6 +261,8 @@ def parse_schema(value):
     think = value.get("think", 0)
     if isinstance(think, bool) or not isinstance(think, int) or not 0 <= think <= 4096:
         raise SchemaError("schema: think must be a thought budget in tokens, 0 to 4096")
+    if BACKEND == "nemotron" and (think or int(value.get("steps", 1)) != 1):
+        raise SchemaError("Nemotron reads support one masked forward, without thinking")
     return {
         "questions": qs,
         "instructions": value.get("instructions"),
@@ -252,7 +273,13 @@ def parse_schema(value):
         "chunk_rows": chunk_rows,
         "chunk_prompt": chunk_prompt,
         "sequential": sequential,
-        "format": "lines" if len(qs) <= 10 else "indexed",
+        # Codes past Z can merge with a preceding id, so wide questions keep
+        # the "id: label" lines.
+        "format": (
+            "lines"
+            if len(qs) <= 10 or any(len(q["labels"]) > 26 for q in qs)
+            else "indexed"
+        ),
     }
 
 
@@ -316,9 +343,32 @@ def enc(text):
     return TOK.encode(text, add_special_tokens=False)
 
 
+def single_token_codes():
+    """CODE_ORDER past A-Z, kept when the code is one token after "id: "
+    and that token is not already used by an earlier code. The answer template
+    still checks every label in its real position."""
+    reference = len(enc(": A"))
+    codes, seen = [], set()
+    for i, code in enumerate(CODE_ORDER):
+        ids = enc(": " + code)
+        if i < 26 or (len(ids) == reference and ids[-1] not in seen):
+            codes.append(code)
+            seen.add(ids[-1])
+    return codes
+
+
 def init_tokenizer(tok):
-    global TOK, SCAFFOLD, THOUGHT_OPEN, THOUGHT_CLOSE
+    global TOK, SCAFFOLD, THOUGHT_OPEN, THOUGHT_CLOSE, TURN_CLOSE, PAD, CODES
     TOK = tok
+    _template_cache.clear()
+    CODES = single_token_codes()
+    if BACKEND == "nemotron":
+        SCAFFOLD, THOUGHT_OPEN, THOUGHT_CLOSE = [], [], []
+        TURN_CLOSE = TOK.eos_token_id
+        PAD = TOK.pad_token_id if TOK.pad_token_id is not None else TURN_CLOSE
+        if TURN_CLOSE is None:
+            raise ValueError("The Nemotron tokenizer must define eos_token_id")
+        return
     THOUGHT_OPEN = enc("<|channel>thought\n")
     THOUGHT_CLOSE = enc("<channel|>")
     SCAFFOLD = enc(SCAFFOLD_TEXT)
@@ -394,6 +444,8 @@ def template_for(schema, head, lead):
 
 def canvas_width(template):
     """Smallest multiple of CANVAS_STEP that holds the template and the turn close."""
+    if BACKEND == "nemotron":
+        return CANVAS_LEN
     need = len(template) + 1
     return min(CANVAS_LEN, -(-need // CANVAS_STEP) * CANVAS_STEP)
 
@@ -422,13 +474,17 @@ def build_canvas(template, slots, seed):
     canvas = list(template) + [TURN_CLOSE]
     canvas += [PAD] * (canvas_width(template) - len(canvas))
     for s in slots:
-        canvas[s["pos"]] = rng.randrange(VOCAB)
+        canvas[s["pos"]] = (
+            MASK_TOKEN_ID if BACKEND == "nemotron" else rng.randrange(VOCAB)
+        )
     return canvas
 
 
 def label_id_union(slots):
     ids = sorted({i for s in slots for i in s["label_ids"]})
-    return ids[:128]  # vLLM's cap per request. A schema needs far fewer.
+    if len(ids) > 128:
+        raise SchemaError("This read exceeds vLLM's 128 candidate-token limit")
+    return ids
 
 
 def upstream_chat(body, timeout=600):
@@ -535,6 +591,8 @@ def think_chat(sys_text, state_content, budget):
 def one_read(
     schema, template, slots, sys_text, state_content, seed, prefix=None, thinking=False
 ):
+    if BACKEND == "nemotron" and not isinstance(state_content, str):
+        raise SchemaError("Nemotron reads support text states only")
     if prefix is not None:
         return one_read_continuation(schema, template, slots, prefix, seed)
     messages = [
@@ -543,6 +601,7 @@ def one_read(
     ]
     body = {
         "model": ARGS.model,
+        **({"temperature": 0} if BACKEND == "nemotron" else {}),
         "messages": messages,
         "max_tokens": len(template) + 1,
         "logprobs": True,
@@ -579,6 +638,8 @@ def slot_distribution(top, label_ids):
     label's own value plus the argmax token. Read-only logprobs are at
     temperature 1, so the label softmax uses them directly. The entropy is
     over that returned set."""
+    if BACKEND == "nemotron" and any(i not in top for i in label_ids):
+        raise SchemaError("Upstream omitted requested candidate logprobs")
     floor = min(top.values()) - 5.0
     lp_t = [top.get(i, floor) for i in label_ids]
     mx = max(lp_t)
@@ -599,6 +660,7 @@ def one_read_continuation(schema, template, slots, prompt_ids, seed):
     body = {
         "model": ARGS.model,
         "prompt": prompt_ids,
+        **({"temperature": 0} if BACKEND == "nemotron" else {}),
         "max_tokens": len(template) + 1,
         "logprobs": TOPK,
         "logprob_token_ids": label_id_union(slots),
@@ -687,8 +749,9 @@ def schedule(qs):
 
 def chunk_groups(schema, qs):
     """``qs`` split, in order, into the fewest groups whose answer templates
-    fit ``chunk_rows`` (the canvas by default). A question marked alone gets
-    its own group."""
+    fit ``chunk_rows`` (the canvas by default) and use at most
+    MAX_ALTERNATIVES distinct labels. A question marked alone gets its own
+    group."""
     limit = schema.get("chunk_rows") or CANVAS_LEN
     groups, group = [], []
     for q in qs:
@@ -706,7 +769,9 @@ def chunk_groups(schema, qs):
             )
             + 1
         )
-        if rows > limit and group:
+        # Wide questions also split reads at the candidate-token limit.
+        labels = {label for t in trial for label in t["labels"]}
+        if (rows > limit or len(labels) > MAX_ALTERNATIVES) and group:
             groups.append(group)
             group = [q]
         else:
@@ -1493,11 +1558,12 @@ def serve_tls(host, port, cert_dir):
 
 
 def main():
-    global ARGS, CANVAS_LEN, CANVAS_STEP
+    global ARGS, CANVAS_LEN, CANVAS_STEP, BACKEND
     p = argparse.ArgumentParser()
     p.add_argument("--upstream", default="http://127.0.0.1:8010")
     p.add_argument("--model", default="dgemma")
     p.add_argument("--tokenizer", default="/models/dgemma", help="HF id or local path")
+    p.add_argument("--backend", choices=["gemma", "nemotron"], default="gemma")
     p.add_argument("--canvas", type=int, default=64, help="the served canvas length")
     p.add_argument(
         "--canvas-step",
@@ -1524,6 +1590,7 @@ def main():
     ARGS = p.parse_args()
     CANVAS_LEN = ARGS.canvas
     CANVAS_STEP = ARGS.canvas_step
+    BACKEND = ARGS.backend
     init_tokenizer(AutoTokenizer.from_pretrained(ARGS.tokenizer))
     if ARGS.tls_port:
         serve_tls(ARGS.host, ARGS.tls_port, ARGS.cert_dir)

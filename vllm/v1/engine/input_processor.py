@@ -177,17 +177,37 @@ class InputProcessor:
             self.validate_logits_processors_params(params)
 
             if self.model_config.is_diffusion:
+                canvas_length = (
+                    self.diffusion_config.canvas_length
+                    if self.diffusion_config is not None
+                    else None
+                )
+                # Model-specific request options, validated by the HF config.
+                validate_request = getattr(
+                    self.model_config.hf_config, "validate_diffusion_request", None
+                )
+                if validate_request is not None:
+                    validate_request(
+                        params, canvas_length, self.model_config.get_vocab_size()
+                    )
                 # Without --diffusion-config the served canvas is unknown here;
                 # the ids and the read-only normalisation are still checked.
                 validate_diffusion_sampling_params(
                     params,
-                    canvas_length=(
-                        self.diffusion_config.canvas_length
-                        if self.diffusion_config is not None
-                        else None
-                    ),
+                    canvas_length=canvas_length,
                     vocab_size=self.model_config.get_vocab_size(),
+                    per_request_temperature=getattr(
+                        self.model_config.hf_config,
+                        "diffusion_per_request_temperature",
+                        False,
+                    ),
                 )
+            else:
+                validate_request = getattr(
+                    self.model_config.hf_config, "validate_ar_request", None
+                )
+                if validate_request is not None:
+                    validate_request(params)
 
             if self.model_config.return_sampling_mask:
                 if params.temperature <= 0:
