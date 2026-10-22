@@ -1021,6 +1021,9 @@ def _rocm_aiter_triton_gemm_a8w8_blockscale_preshuffle_impl(
     from aiter.ops.triton.gemm_a8w8_blockscale import gemm_a8w8_blockscale_preshuffle
 
     n, k = B.shape
+    x_scale_transposed = As.stride(0) != 1
+    if x_scale_transposed:
+        As = As.transpose(0, 1).contiguous().view(*As.shape)
     return gemm_a8w8_blockscale_preshuffle(
         A,
         B.reshape(n // 16, k * 16),
@@ -1030,7 +1033,7 @@ def _rocm_aiter_triton_gemm_a8w8_blockscale_preshuffle_impl(
         None,  # y
         None,  # config
         False,  # skip_reduce
-        False,  # is_x_scale_transposed (misspelled in aiter)
+        x_scale_transposed,  # is_x_scale_transposed (misspelled in aiter)
     )
 
 
@@ -1819,7 +1822,14 @@ def _fused_mla_dual_rms_norm_group_quant_impl(
 
     mq, nq = q.shape
     q_out = torch.empty((mq, nq), dtype=FP8_DTYPE, device=q.device)
-    q_scale = torch.empty((mq, nq // group_size), dtype=torch.float32, device=q.device)
+    if transpose_scale:
+        q_scale = torch.empty(
+            (nq // group_size, mq), dtype=torch.float32, device=q.device
+        ).transpose(0, 1)
+    else:
+        q_scale = torch.empty(
+            (mq, nq // group_size), dtype=torch.float32, device=q.device
+        )
     kv_normed = torch.empty(kv.shape, dtype=kv.dtype, device=kv.device)
 
     # q -> RMSNorm + FP8 group quant (q slot); kv -> RMSNorm only (k slot).
@@ -1853,7 +1863,15 @@ def _fused_mla_dual_rms_norm_group_quant_fake(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     mq, nq = q.shape
     q_out = torch.empty((mq, nq), dtype=FP8_DTYPE, device=q.device)
-    q_scale = torch.empty((mq, nq // group_size), dtype=torch.float32, device=q.device)
+    # Match the real impl's strides: transpose_scale yields a column-major view.
+    if transpose_scale:
+        q_scale = torch.empty(
+            (nq // group_size, mq), dtype=torch.float32, device=q.device
+        ).transpose(0, 1)
+    else:
+        q_scale = torch.empty(
+            (mq, nq // group_size), dtype=torch.float32, device=q.device
+        )
     kv_normed = torch.empty(kv.shape, dtype=kv.dtype, device=kv.device)
     return q_out, q_scale, kv_normed
 
@@ -4351,8 +4369,13 @@ class rocm_aiter_ops:
             get_gemm_config,
         )
 
+        from vllm.platforms.rocm import on_gfx1250
+
+        backend = "gluon" if on_gfx1250() else "triton"
         # Fake M value for now
-        _, is_tuned = get_gemm_config("GEMM-A8W8_BLOCKSCALE_PRESHUFFLED", 1, n, k)
+        _, is_tuned = get_gemm_config(
+            "GEMM-A8W8_BLOCKSCALE_PRESHUFFLED", 1, n, k, backend=backend
+        )
         return is_tuned
 
     @staticmethod

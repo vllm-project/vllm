@@ -23,7 +23,7 @@ from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4SparseMLAMetadataBuilder,
 )
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import _ON_GFX950, on_gfx1250
+from vllm.platforms.rocm import _ON_GFX950, get_cdna_version, on_gfx1250
 from vllm.triton_utils import tl, triton
 from vllm.utils.multi_stream_utils import execute_in_parallel
 from vllm.v1.attention.backend import (
@@ -1188,7 +1188,9 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             kv_weight=self.kv_norm.weight.data,
             kv_epsilon=self.eps,
             group_size=128,
-            transpose_scale=False,
+            # gfx1250's B-preshuffle GEMMs take column-major activation
+            # scales; gfx950 keeps row-major for its CK blockscale GEMM.
+            transpose_scale=get_cdna_version() >= 5,
         )
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
