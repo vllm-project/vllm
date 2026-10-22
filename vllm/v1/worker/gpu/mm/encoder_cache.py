@@ -9,6 +9,9 @@ class EncoderCache:
     def __init__(self):
         # req_id -> MM features
         self.mm_features: dict[str, list[MultiModalFeatureSpec]] = {}
+        self.mm_prefix_ranges_cache: dict[
+            int | None, dict[str, list[tuple[int, int]]]
+        ] = {}
         # MM hash -> encoder outputs
         self.encoder_outputs: dict[str, torch.Tensor] = {}
 
@@ -18,10 +21,16 @@ class EncoderCache:
     def add_request(
         self, req_id: str, mm_features: list[MultiModalFeatureSpec]
     ) -> None:
+        self._remove_mm_prefix_ranges(req_id)
         self.mm_features[req_id] = mm_features
 
     def remove_request(self, req_id: str) -> None:
         self.mm_features.pop(req_id, None)
+        self._remove_mm_prefix_ranges(req_id)
+
+    def _remove_mm_prefix_ranges(self, req_id: str) -> None:
+        for cached_ranges in self.mm_prefix_ranges_cache.values():
+            cached_ranges.pop(req_id, None)
 
     def reset_mm_cache(self) -> None:
         """Clear the multi-modal cache that was used during profiling,
