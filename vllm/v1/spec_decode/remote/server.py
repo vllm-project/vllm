@@ -1728,7 +1728,14 @@ class _ServerSession:
         budget = self.server.ipc_copy_timeout_s
         if message.execution_timeout_ms is not None:
             budget = min(budget, message.execution_timeout_ms / 1000)
-        return time.monotonic() + budget
+        deadline = time.monotonic() + budget
+        if (
+            isinstance(message, PrefillChunk)
+            and message.execution_group_id == self._prefill_group_id
+            and self._prefill_group_deadline is not None
+        ):
+            deadline = min(deadline, self._prefill_group_deadline)
+        return deadline
 
     def _resolve_features(
         self, frames: list[DataFrame | None], *, deadline: float | None = None

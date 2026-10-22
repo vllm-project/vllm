@@ -12,6 +12,7 @@ import time
 import zlib
 from unittest.mock import Mock
 
+import msgspec
 import pytest
 import torch
 
@@ -570,9 +571,11 @@ def test_cuda_ipc_prefill_ack_requires_completed_import(
     received = torch.tensor([[1.0, 2.0]])
     receiver = Mock()
     copy_budgets = []
+    copy_deadlines = []
 
     def receive(*args, deadline):
         copy_budgets.append(deadline - time.monotonic())
+        copy_deadlines.append(deadline)
         if fail_import:
             raise RuntimeError("copy completion unknown")
         return received
@@ -598,7 +601,16 @@ def test_cuda_ipc_prefill_ack_requires_completed_import(
             capacity_bytes=8,
         )
         feature = DataFrame(100, "float32", (1, 2), b"", descriptor)
-        message = PrefillChunk(sequence, 0, 1, True, 100, frame_checksum([feature]))
+        message = PrefillChunk(
+            sequence,
+            0,
+            1,
+            False,
+            100,
+            frame_checksum([feature]),
+            execution_timeout_ms=1000,
+            execution_group_id=1,
+        )
         if fail_import:
             with pytest.raises(ConnectionClosed):
                 client.call(message, frames=(feature,))
@@ -611,6 +623,17 @@ def test_cuda_ipc_prefill_ack_requires_completed_import(
         assert receiver.receive.call_count == 1
         assert receiver.receive.call_args.args == (descriptor, "float32", (1, 2))
         assert len(copy_budgets) == 1 and 0 < copy_budgets[0] <= 1
+        if not fail_import:
+            feature = msgspec.structs.replace(
+                feature, cuda_ipc=msgspec.structs.replace(descriptor, generation=2)
+            )
+            final = msgspec.structs.replace(
+                message, offset=1, is_final=True, checksum=frame_checksum([feature])
+            )
+            assert client.call(final, frames=(feature,)).status is OK
+            assert len(observed) == 2 and isinstance(observed[1], DeviceFeature)
+            assert observed[1].tensor is received
+            assert copy_deadlines[1] <= copy_deadlines[0]
     finally:
         client.close()
         server.stop()
