@@ -296,7 +296,7 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
         [forward_layer],
         spec_query_len=3,
         max_num_reqs=builder.vllm_config.scheduler_config.max_num_seqs,
-        cute_state_commit=False,
+        backend="triton",
     )
 
 

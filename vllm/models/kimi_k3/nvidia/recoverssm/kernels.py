@@ -7,7 +7,7 @@
   ``cutedsl/verify.py`` otherwise). It writes the outputs, the rolled conv state
   and the verify records, like ``causal_conv1d_update`` followed by
   ``kda_recoverssm_verify``.
-* ``CuteRecoverSSMStateCommit``: the state fold of a prepared commit plan for all
+* ``cute_recoverssm_commit``: the state fold of a prepared commit plan for all
   KDA layers in one launch (``cutedsl/commit.py``), replacing the Triton fold of
   ``KDARecoverSSMCommitContext.commit``.
 
@@ -337,39 +337,38 @@ def compile_state_commit(
     _compile_commit(num_heads, window, _architecture(device), torch.float32, align)
 
 
-class CuteRecoverSSMStateCommit:
-    """The CuTe state fold for a ``KDARecoverSSMCommitContext``'s layers. A
-    commit runs after sampling, outside CUDA graphs: its launch (TVM-FFI, on
-    the current stream) takes the context's tensors as they are."""
-
-    def __init__(self, context: "KDARecoverSSMCommitContext") -> None:
-        state = context.checkpoints[0]
-        _, heads, _, _ = state.shape
-        self.compile_args = (
-            heads,
-            context.spec_query_len,
-            _architecture(state.device),
-            torch.float32,
-        )
-        self.context = context
-
-    def __call__(self, state_indices: torch.Tensor, batch: int, align: bool) -> None:
-        context = self.context
-        assert context.lower_bound is not None
-        _compile_commit(*self.compile_args, align)(
-            context.state_base_addrs,
-            context.correction_cache_base_addrs,
-            context.kg_cache_base_addrs,
-            context.state_block_strides,
-            context.correction_cache_block_strides,
-            context.kg_cache_block_strides,
-            context.A_log,
-            context.dt_bias,
-            state_indices[:batch],
-            context.commit_lens[:batch],
-            context.final_state_indices[:batch],
-            context.boundary_state_indices[:batch],
-            context.boundary_recovery_lens[:batch],
-            context.lower_bound,
-            NULL_BLOCK_ID,
-        )
+def cute_recoverssm_commit(
+    context: "KDARecoverSSMCommitContext",
+    state_indices: torch.Tensor,
+    batch: int,
+    align: bool,
+) -> None:
+    """Fold the accepted tokens of a prepared commit plan into the state of all
+    of ``context``'s layers in one launch. It runs after sampling, outside CUDA
+    graphs, on the current stream (TVM-FFI)."""
+    state = context.checkpoints[0]
+    assert context.lower_bound is not None
+    compiled = _compile_commit(
+        state.shape[1],
+        context.spec_query_len,
+        _architecture(state.device),
+        torch.float32,
+        align,
+    )
+    compiled(
+        context.state_base_addrs,
+        context.correction_cache_base_addrs,
+        context.kg_cache_base_addrs,
+        context.state_block_strides,
+        context.correction_cache_block_strides,
+        context.kg_cache_block_strides,
+        context.A_log,
+        context.dt_bias,
+        state_indices[:batch],
+        context.commit_lens[:batch],
+        context.final_state_indices[:batch],
+        context.boundary_state_indices[:batch],
+        context.boundary_recovery_lens[:batch],
+        context.lower_bound,
+        NULL_BLOCK_ID,
+    )

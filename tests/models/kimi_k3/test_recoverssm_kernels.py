@@ -428,9 +428,11 @@ def test_cute_state_commit_matches_triton(heads, batch, window, monkeypatch):
         for layer, before in zip(layers, initial):
             layer.pages[0].copy_(before[0])
         context = KDARecoverSSMCommitContext.create(
-            layers, spec_query_len=window, max_num_reqs=batch, cute_state_commit=cute
+            layers,
+            spec_query_len=window,
+            max_num_reqs=batch,
+            backend="cute" if cute else "triton",
         )
-        assert (context.state_commit is not None) == cute
         context.commit(accepted, state_indices, query_start)
         torch.accelerator.synchronize()
         results[cute] = [layer.kv_cache[1].clone() for layer in layers]
@@ -488,9 +490,8 @@ def test_recoverssm_steps_match_stock_spec_decode(heads, monkeypatch):
     verify = _compiled_verify(heads, window, True, torch.float32)
     compile_state_commit(heads, window, DEVICE, align=False)
     context = KDARecoverSSMCommitContext.create(
-        [layer], spec_query_len=window, max_num_reqs=batch, cute_state_commit=True
+        [layer], spec_query_len=window, max_num_reqs=batch, backend="cute"
     )
-    assert context.state_commit is not None
     ones = torch.ones(batch, dtype=torch.int32, device=DEVICE)
     accepted = ones.clone()  # the stock path's counts from the previous step
     for _ in range(steps):
@@ -700,7 +701,10 @@ def test_cute_state_commit_align_matches_triton(window, batch, monkeypatch):
         for layer, before in zip(layers, initial):
             layer.pages[0].copy_(before[0])
         context = KDARecoverSSMCommitContext.create(
-            layers, spec_query_len=window, max_num_reqs=batch, cute_state_commit=cute
+            layers,
+            spec_query_len=window,
+            max_num_reqs=batch,
+            backend="cute" if cute else "triton",
         )
         context.commit(
             accepted,

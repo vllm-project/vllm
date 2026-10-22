@@ -4,18 +4,14 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any, Literal
 
 import torch
 
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
+from vllm.models.kimi_k3.nvidia.recoverssm.kernels import cute_recoverssm_commit
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
-
-if TYPE_CHECKING:
-    from vllm.models.kimi_k3.nvidia.recoverssm.kernels import (
-        CuteRecoverSSMStateCommit,
-    )
 
 
 @triton.jit
@@ -768,8 +764,9 @@ class KDARecoverSSMCommitContext:
     dt_bias: torch.Tensor
     lower_bound: float | None
     spec_query_len: int
-    # The CuTe state fold replacing the Triton one; None keeps the Triton fold.
-    state_commit: "CuteRecoverSSMStateCommit | None" = None
+    # The kernel folding the accepted tokens into the state (the commit plan
+    # and the conv state compaction are Triton for both).
+    backend: Literal["cute", "triton"] = "triton"
 
     @classmethod
     def create(
@@ -778,7 +775,7 @@ class KDARecoverSSMCommitContext:
         *,
         spec_query_len: int,
         max_num_reqs: int,
-        cute_state_commit: bool = False,
+        backend: Literal["cute", "triton"] = "triton",
     ) -> "KDARecoverSSMCommitContext":
         if not layers:
             raise ValueError("KDA RecoverSSM commit requires at least one layer")
@@ -848,7 +845,7 @@ class KDARecoverSSMCommitContext:
                 device=device,
             )
 
-        context = cls(
+        return cls(
             conv_states=tuple(conv_states),
             conv_state_base_addrs=_base_addrs(conv_states),
             conv_state_block_strides=_block_strides(conv_states),
@@ -886,14 +883,8 @@ class KDARecoverSSMCommitContext:
             dt_bias=torch.stack(tuple(dt_bias)).contiguous(),
             lower_bound=lower_bounds.pop(),
             spec_query_len=spec_query_len,
+            backend=backend,
         )
-        if cute_state_commit:
-            from vllm.models.kimi_k3.nvidia.recoverssm.kernels import (
-                CuteRecoverSSMStateCommit,
-            )
-
-            context.state_commit = CuteRecoverSSMStateCommit(context)
-        return context
 
     def commit(
         self,
@@ -998,8 +989,10 @@ class KDARecoverSSMCommitContext:
             num_warps=4,
         )
 
-        if self.state_commit is not None:
-            self.state_commit(state_indices, batch, align=block_table is not None)
+        if self.backend == "cute":
+            cute_recoverssm_commit(
+                self, state_indices, batch, align=block_table is not None
+            )
             return
         state_ref = self.checkpoints[0]
         _, num_heads, value_dim, key_dim = state_ref.shape
