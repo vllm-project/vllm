@@ -219,6 +219,10 @@ class AsyncOutput(AsyncModelRunnerOutput):
 
         return self.model_runner_output
 
+    def get_kv_connector_output(self) -> KVConnectorOutput | None:
+        """Get the KV connector output for this async output."""
+        return self.model_runner_output.kv_connector_output
+
 
 class AsyncPoolingOutput(AsyncModelRunnerOutput):
     def __init__(
@@ -262,6 +266,10 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
         self.copy_event.synchronize()
         self.model_runner_output.pooler_output = pooler_output
         return self.model_runner_output
+
+    def get_kv_connector_output(self) -> KVConnectorOutput | None:
+        """Get the KV connector output for this async output."""
+        return self.model_runner_output.kv_connector_output
 
 
 class KVChecksumCopy:
