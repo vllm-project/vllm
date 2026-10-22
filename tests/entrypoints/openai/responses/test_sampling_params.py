@@ -62,6 +62,7 @@ class TestResponsesRequestSamplingParams:
             stop=["END", "STOP"],
             stop_token_ids=[42, 43],
             ignore_eos=True,
+            spaces_between_special_tokens=False,
             vllm_xargs={"custom": "value"},
         )
 
@@ -72,6 +73,7 @@ class TestResponsesRequestSamplingParams:
         assert sampling_params.stop == ["END", "STOP"]
         assert sampling_params.stop_token_ids == [42, 43]
         assert sampling_params.ignore_eos is True
+        assert sampling_params.spaces_between_special_tokens is False
         assert sampling_params.extra_args == {"custom": "value"}
 
     def test_stop_string_conversion(self):
