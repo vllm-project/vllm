@@ -85,3 +85,4 @@ def test_fmha_prefill_shard_scores(query_lens, prefixes):
                     reference[start : start + qlen, :, block] = dots.amax(-1)
                 start += qlen
             torch.testing.assert_close(scores, reference, rtol=0, atol=0)
+            torch.testing.assert_close(valid, reference.isfinite().to(torch.uint8))
