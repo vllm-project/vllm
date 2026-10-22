@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
+import json
 from types import SimpleNamespace
 from unittest import mock
 from unittest.mock import Mock
 
 import pytest
 import torch
+from fastapi.responses import JSONResponse, ORJSONResponse
 
 from vllm import PoolingParams
 from vllm.config import PoolerConfig
@@ -14,14 +17,23 @@ from vllm.entrypoints.pooling.embed.io_processor import (
     JinaRankingTokenEmbedIOProcessor,
     TokenEmbedIOProcessor,
 )
-from vllm.entrypoints.pooling.late_chunking import build_late_chunking_metadata
 from vllm.entrypoints.pooling.offline import PoolingOfflineMixin
+from vllm.entrypoints.pooling.token_embed.late_chunking import (
+    build_late_chunking_metadata,
+)
+from vllm.entrypoints.pooling.token_embed.protocol import (
+    TokenEmbeddingRequest,
+    TokenEmbeddingResponse,
+)
+from vllm.entrypoints.pooling.token_embed.serving import ServingTokenEmbedding
 from vllm.entrypoints.pooling.typing import (
     OfflineEncodeInputsContext,
     OfflineOutputsContext,
+    PoolingServeContext,
 )
-from vllm.exceptions import VLLMValidationError
+from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.outputs import (
+    EmbeddingRequestOutput,
     LateChunk,
     PoolingOutput,
     PoolingRequestOutput,
@@ -36,6 +48,8 @@ def late_chunk_processor():
     processor = object.__new__(TokenEmbedIOProcessor)
     processor.model_config = SimpleNamespace(
         is_encoder_decoder=False,
+        encoder_config={},
+        max_model_len=32,
         architecture="NomicBertModel",
         model_impl="auto",
         is_matryoshka=False,
@@ -188,6 +202,8 @@ def test_late_chunk_ranges_reject_missing_or_invalid_offsets(offsets):
 
 def _mock_chunk_llm(processor, outputs):
     llm = mock.Mock(spec=PoolingOfflineMixin)
+    llm.pooling_task = "token_embed"
+    llm.embed = PoolingOfflineMixin.embed.__get__(llm)
     llm.encode = PoolingOfflineMixin.encode.__get__(llm)
     llm._run_tiling_engine = PoolingOfflineMixin._run_tiling_engine.__get__(llm)
     llm.pooling_io_processors = {"token_embed": processor}
@@ -243,9 +259,7 @@ def test_late_chunk_mapping_preserves_order_mixed_requests_and_errors(
             _chunk_output(0),
         ]
     ]
-    outputs = llm.encode(
-        ["a b"] * 4, pooling_task="token_embed", pooling_params=params, use_tqdm=False
-    )
+    outputs = llm.embed(["a b"] * 4, pooling_params=params, use_tqdm=False)
     assert outputs[0].late_chunking.chunks == [
         LateChunk((0, 2), (0, 1)),
         LateChunk((2, 4), (2, 3)),
@@ -312,3 +326,215 @@ def test_plain_token_embed_skips_chunk_metadata(late_chunk_processor):
     assert not late_chunk_processor.renderer.render_cmpl.call_args.kwargs[
         "tok_params"
     ].return_token_offsets
+
+
+def _online_chunk_context(texts, chunk_size=2):
+    request = TokenEmbeddingRequest(
+        input=texts,
+        late_chunking_params=(
+            {"chunk_size": chunk_size} if chunk_size is not None else None
+        ),
+    )
+    return PoolingServeContext(
+        request=request,
+        model_name="model",
+        request_id="same-client-id",
+        pooling_params=request.to_pooling_params(),
+        lora_request=None,
+        priorities=0,
+        prompt_extras=None,
+    )
+
+
+@pytest.mark.parametrize("task", ["embed", "token_embed"])
+def test_embed_preserves_output_types(task):
+    llm = mock.Mock(spec=PoolingOfflineMixin)
+    llm.pooling_task = task
+    output = _chunk_output(0)
+    if task == "embed":
+        output.outputs.data = output.outputs.data[0]
+    llm.encode.return_value = [output]
+
+    result = PoolingOfflineMixin.embed(llm, "text")[0]
+    assert llm.encode.call_args.kwargs["pooling_task"] == task
+    if task == "token_embed":
+        assert result is output
+    else:
+        assert isinstance(result, EmbeddingRequestOutput)
+        assert result.outputs.embedding == output.outputs.data.tolist()
+
+
+@pytest.mark.parametrize(
+    "runner, task, supported_tasks, error",
+    [
+        ("pooling", "classify", ("classify",), "--convert embed"),
+        (
+            "pooling",
+            "classify",
+            ("classify", "embed"),
+            r'PoolerConfig\(task="embed"\)',
+        ),
+        ("generate", None, ("generate",), "--runner pooling"),
+    ],
+)
+def test_embed_preserves_task_validation(runner, task, supported_tasks, error):
+    llm = mock.Mock(spec=PoolingOfflineMixin)
+    llm.runner_type = runner
+    llm.pooling_task = task
+    llm.supported_tasks = supported_tasks
+    llm.encode = PoolingOfflineMixin.encode.__get__(llm)
+    llm._verify_pooling_task = PoolingOfflineMixin._verify_pooling_task.__get__(llm)
+
+    with pytest.raises(ValueError, match=error):
+        PoolingOfflineMixin.embed(llm, "text", use_tqdm=False)
+    llm._run_tiling_engine.assert_not_called()
+
+
+@pytest.mark.parametrize("chunk_size", [None, 1])
+@pytest.mark.parametrize(
+    "response_cls, dtype",
+    [
+        (JSONResponse, torch.float32),
+        (ORJSONResponse, torch.float32),
+        (ORJSONResponse, torch.bfloat16),
+    ],
+)
+def test_token_embedding_response_preserves_ndarray_and_optional_ranges(
+    late_chunk_processor, chunk_size, response_cls, dtype
+):
+    if response_cls is ORJSONResponse:
+        pytest.importorskip("orjson")
+    ctx = _online_chunk_context("a b", chunk_size=chunk_size)
+    processor = late_chunk_processor
+    ctx.engine_inputs = [
+        processor.render(r) for r in processor.get_request_factory_online(ctx)
+    ]
+    output = _chunk_output(0, rows=4)
+    # Exercise the existing encoder's contiguous-copy and dtype fallback paths.
+    data = (torch.arange(16).reshape(4, 4).to(dtype) / 10).T
+    output.outputs.data = data
+    ctx.final_res_batch = [output]
+    processor.post_process_online(ctx)
+    serving = object.__new__(ServingTokenEmbedding)
+    serving.json_response_cls = response_cls
+
+    with mock.patch.object(
+        response_cls, "render", autospec=True, side_effect=response_cls.render
+    ) as render:
+        response = serving._build_response(ctx)
+    encoded = render.call_args.args[1]["data"][0]["embedding"]
+    if response_cls is ORJSONResponse and dtype == torch.float32:
+        # An ndarray must reach the renderer, without Pydantic expanding it.
+        assert torch.equal(torch.from_numpy(encoded), data)
+    body = json.loads(response.body)
+    TokenEmbeddingResponse.model_validate(body)
+    item = body["data"][0]
+    torch.testing.assert_close(torch.tensor(item["embedding"], dtype=dtype), data)
+    if chunk_size is None:
+        assert "late_chunking" not in item
+        assert not ctx.late_chunking
+        assert not processor.renderer.render_cmpl.call_args.kwargs[
+            "tok_params"
+        ].return_token_offsets
+    else:
+        assert item["late_chunking"]["chunks"][0]["char_range"] is None
+
+
+@pytest.mark.parametrize("response_cls", [JSONResponse, ORJSONResponse])
+def test_online_chunk_ranges_are_per_document(late_chunk_processor, response_cls):
+    if response_cls is ORJSONResponse:
+        pytest.importorskip("orjson")
+    processor = late_chunk_processor
+    ctx = _online_chunk_context(["a b", "xy z"])
+
+    def render_cmpl(**kwargs):
+        text = kwargs["prompts"][0]["prompt"]
+        split = text.index(" ")
+        return [
+            {
+                "type": "token",
+                "prompt_token_ids": [101, 1, 2, 102],
+                "prompt_token_offsets": [
+                    (0, 0),
+                    (0, split),
+                    (split + 1, len(text)),
+                    (0, 0),
+                ],
+            }
+        ]
+
+    processor.renderer.render_cmpl.side_effect = render_cmpl
+    requests = processor.get_request_factory_online(ctx)
+    # Render out of order, as the online thread pool can do.
+    second = processor.render(requests[1])
+    first = processor.render(requests[0])
+    ctx.engine_inputs = [first, second]
+    ctx.final_res_batch = [_chunk_output(0), _chunk_output(1)]
+    processor.post_process_online(ctx)
+
+    serving = object.__new__(ServingTokenEmbedding)
+    serving.json_response_cls = response_cls
+    body = json.loads(serving._build_response(ctx).body)
+    assert body["usage"]["prompt_tokens"] == 8
+    assert [item["index"] for item in body["data"]] == [0, 1]
+    assert [item["embedding"] for item in body["data"]] == [
+        output.outputs.data.tolist() for output in ctx.final_res_batch
+    ]
+    assert [
+        item["late_chunking"]["chunks"][0]["char_range"] for item in body["data"]
+    ] == [[0, 1], [0, 2]]
+    assert first["params"] is second["params"] is ctx.pooling_params
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["success", "error", "cancel"])
+async def test_online_chunk_mapping_survives_reordered_completion_and_failure(
+    late_chunk_processor, outcome
+):
+    processor = late_chunk_processor
+    serving = object.__new__(ServingTokenEmbedding)
+    ctx = _online_chunk_context(["a b", "a b"])
+    ctx.engine_inputs = [
+        processor.render(r) for r in processor.get_request_factory_online(ctx)
+    ]
+    entered = asyncio.Event()
+    closed = asyncio.Event()
+    error = RequestError("test_error", "original error")
+
+    async def results():
+        try:
+            yield 1, _chunk_output(1)
+            if outcome == "cancel":
+                entered.set()
+                await asyncio.Event().wait()
+            yield 0, _chunk_output(0, error=error if outcome == "error" else None)
+        finally:
+            closed.set()
+
+    ctx.result_generator = results()
+    task = asyncio.create_task(serving._collect_batch(ctx))
+    if outcome == "cancel":
+        await entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    elif outcome == "error":
+        with pytest.raises(GenerationError, match="original error"):
+            await task
+        await ctx.result_generator.aclose()
+    else:
+        await task
+        processor.post_process_online(ctx)
+        assert [result.request_id for result in ctx.final_res_batch] == ["0", "1"]
+        assert all(result.late_chunking is not None for result in ctx.final_res_batch)
+    assert closed.is_set()
+
+    # A later request with the same caller ID must get its own mapping.
+    following = _online_chunk_context("a b", chunk_size=1)
+    following.engine_inputs = [
+        processor.render(r) for r in processor.get_request_factory_online(following)
+    ]
+    following.final_res_batch = [_chunk_output(0, rows=4)]
+    processor.post_process_online(following)
+    assert following.final_res_batch[0].late_chunking.chunk_size == 1
+    assert len(following.final_res_batch[0].late_chunking.chunks) == 4
