@@ -5,7 +5,10 @@ from collections.abc import Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, NamedTuple
 
+import numpy as np
+
 from vllm.config import VllmConfig
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.parser.engine.adapters import ParserEngineReasoningAdapter
 from vllm.reasoning import ReasoningParserManager
@@ -20,7 +23,6 @@ from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
 from vllm.v1.structured_output.utils import strip_speculative_padding
 
 if TYPE_CHECKING:
-    import numpy as np
     import numpy.typing as npt
     import torch
 
@@ -49,6 +51,11 @@ class StructuredOutputManager:
 
     def __init__(self, vllm_config: VllmConfig):
         self.backend: StructuredOutputBackend | None = None
+        # FIXME(arpera):
+        # We store backend_name because
+        # currently we support only one backend per engine
+        # This is a known limitation
+        self.backend_name: str | None = None
         # We only store the class of the reasoner in the manager.
         # The parser instance is request-scoped because some reasoning parsers
         # depend on per-request chat-template kwargs.
@@ -127,10 +134,19 @@ class StructuredOutputManager:
         if request.structured_output_request is None:
             return
 
-        if TYPE_CHECKING:
-            assert (
-                request.sampling_params is not None
-                and request.sampling_params.structured_outputs is not None
+        sampling_params = request.sampling_params
+        assert sampling_params is not None
+        structured_outputs = sampling_params.structured_outputs
+        assert structured_outputs is not None
+        request_backend = structured_outputs._backend
+        assert request_backend is not None
+        if self.backend_name is not None and request_backend != self.backend_name:
+            raise VLLMValidationError(
+                "Structured output processing only supports one backend per engine. "
+                f"The engine is already using '{self.backend_name}', but this "
+                f"request resolved to '{request_backend}'. Configure "
+                "`structured_outputs_config.backend` explicitly or use schemas "
+                "supported by the initialized backend."
             )
 
         # Initialize the backend the first time it is needed.
@@ -139,22 +155,20 @@ class StructuredOutputManager:
         # backends on a per-request basis in V1 (for now, anyway...).
         # _backend is set in Processor._validate_structured_output
         if self.backend is None:
-            assert request.sampling_params is not None
-            backend = request.sampling_params.structured_outputs._backend
             vocab_size = self.vllm_config.model_config.get_vocab_size()
-            if backend == "xgrammar":
+            if request_backend == "xgrammar":
                 self.backend = XgrammarBackend(
                     self.vllm_config,
                     tokenizer=self.tokenizer,
                     vocab_size=vocab_size,
                 )
-            elif backend == "guidance":
+            elif request_backend == "guidance":
                 self.backend = GuidanceBackend(
                     self.vllm_config,
                     tokenizer=self.tokenizer,
                     vocab_size=vocab_size,
                 )
-            elif backend == "outlines":
+            elif request_backend == "outlines":
                 from vllm.v1.structured_output.backend_outlines import OutlinesBackend
 
                 self.backend = OutlinesBackend(
@@ -162,7 +176,7 @@ class StructuredOutputManager:
                     tokenizer=self.tokenizer,
                     vocab_size=vocab_size,
                 )
-            elif backend == "lm-format-enforcer":
+            elif request_backend == "lm-format-enforcer":
                 from vllm.v1.structured_output.backend_lm_format_enforcer import (  # noqa: E501
                     LMFormatEnforcerBackend,
                 )
@@ -173,7 +187,10 @@ class StructuredOutputManager:
                     vocab_size=vocab_size,
                 )
             else:
-                raise ValueError(f"Unsupported structured output backend: {backend}")
+                raise ValueError(
+                    f"Unsupported structured output backend: {request_backend}"
+                )
+            self.backend_name = request_backend
 
         grammar: Future[StructuredOutputGrammar] | StructuredOutputGrammar
         if self._use_async_grammar_compilation:
@@ -211,10 +228,16 @@ class StructuredOutputManager:
             raise
 
     def _fill_bitmasks(
-        self, batch: Iterable[tuple[StructuredOutputGrammar, int, bool]]
+        self,
+        batch: Iterable[tuple[StructuredOutputGrammar, int, bool, tuple[int, ...]]],
     ) -> None:
+        """Fill one bitmask row per entry.
+
+        A row the grammar does not constrain allows every token except
+        `masked_ids`, the implicit reasoning ends masked while reasoning.
+        """
         assert self._grammar_bitmask is not None
-        for grammar, index, apply_bitmask in batch:
+        for grammar, index, apply_bitmask, masked_ids in batch:
             if apply_bitmask and not grammar.is_terminated():
                 grammar.fill_bitmask(self._grammar_bitmask, index)
             else:
@@ -222,11 +245,40 @@ class StructuredOutputManager:
                 # reset the relevant part of the bitmask for consequent
                 # requests here.
                 self._grammar_bitmask[index].fill_(self._full_mask)
+                if masked_ids:
+                    row = self._grammar_bitmask[index].numpy().view(np.uint32)
+                    for token_id in masked_ids:
+                        row[token_id >> 5] &= ~np.uint32(1 << (token_id & 31))
 
     def _async_submit_fill_bitmask(
-        self, batch: list[tuple[StructuredOutputGrammar, int, bool]]
+        self, batch: list[tuple[StructuredOutputGrammar, int, bool, tuple[int, ...]]]
     ) -> Future:
         return self.executor_for_fillmask.submit(self._fill_bitmasks, batch)
+
+    def _masked_reasoning_ends(self, request: "Request") -> tuple[int, ...]:
+        """Implicit reasoning-end tokens the grammar rejects as first content.
+
+        Such a token (e.g. a tool-call start) ends reasoning and is also the
+        first content token, so sampling one where the grammar cannot start
+        with it would make the output invalid. These stay masked while the
+        request reasons. The grammar does not advance before reasoning ends,
+        so the set is fixed per request.
+        """
+        structured_req = request.structured_output_request
+        assert structured_req is not None
+        if structured_req.masked_reasoning_end_ids is None:
+            masked: tuple[int, ...] = ()
+            reasoner = self._get_reasoner(request)
+            if isinstance(reasoner, ParserEngineReasoningAdapter):
+                grammar = structured_req.grammar
+                assert isinstance(grammar, StructuredOutputGrammar)
+                masked = tuple(
+                    token_id
+                    for token_id in sorted(reasoner.implicit_reasoning_end_token_ids)
+                    if not grammar.validate_tokens([token_id])
+                )
+            structured_req.masked_reasoning_end_ids = masked
+        return structured_req.masked_reasoning_end_ids
 
     def _get_constraint_bounds(
         self,
@@ -339,6 +391,8 @@ class StructuredOutputManager:
 
         # Covers both speculative decoding and diffusion LLMs (canvas_length).
         max_num_spec_tokens = self.vllm_config.num_speculative_tokens
+        is_diffusion = self.vllm_config.model_config.is_diffusion
+        mask_stride = max_num_spec_tokens + (0 if is_diffusion else 1)
 
         if self._grammar_bitmask is None:
             assert self.backend is not None
@@ -354,7 +408,7 @@ class StructuredOutputManager:
         # Generate a batched bitmask for all structured output requests.
         # When speculative decoding is enabled, we need to include multiple
         # masks for each request, one for each possible bonus token position.
-        # These are stored inline in the tensor and unpacked by the gpu runner.
+        # Each request owns a fixed-width block of `mask_stride` rows.
         cumulative_index = 0
 
         # Optimized parallel filling of bitmasks for
@@ -377,7 +431,10 @@ class StructuredOutputManager:
                 apply_bitmask = (
                     self._get_constraint_bounds(request, ()).constraint_start == 0
                 )
-                batch.append((grammar, cumulative_index, apply_bitmask))
+                masked_ids = (
+                    () if apply_bitmask else self._masked_reasoning_ends(request)
+                )
+                batch.append((grammar, cumulative_index, apply_bitmask, masked_ids))
                 if len(batch) == self.fill_bitmask_parallel_batch_size:
                     promises.append(self._async_submit_fill_bitmask(batch))
                     batch = []
@@ -391,7 +448,8 @@ class StructuredOutputManager:
                 promise.result()
         else:
             # Fallback to serial filling of bitmasks for small-batch-size cases
-            for req_id in structured_output_request_ids:
+            for grammar_idx, req_id in enumerate(structured_output_request_ids):
+                cumulative_index = grammar_idx * mask_stride
                 request = requests[req_id]
                 structured_output_request = request.structured_output_request
 
@@ -405,6 +463,10 @@ class StructuredOutputManager:
                 grammar_start, constraint_start = self._get_constraint_bounds(
                     request, strip_speculative_padding(req_tokens)
                 )
+                # Rows before constraint_start are still reasoning.
+                masked_ids = (
+                    self._masked_reasoning_ends(request) if constraint_start else ()
+                )
                 state_advancements = 0
                 seen_padding = False
                 # Row filled from the last valid grammar state before a draft
@@ -417,7 +479,11 @@ class StructuredOutputManager:
                         cumulative_index += 1
                         continue
                     apply_bitmask = not seen_padding and i >= constraint_start
-                    self._fill_bitmasks(((grammar, cumulative_index, apply_bitmask),))
+                    reasoning = not seen_padding and i < constraint_start
+                    row_masked = masked_ids if reasoning else ()
+                    self._fill_bitmasks(
+                        ((grammar, cumulative_index, apply_bitmask, row_masked),)
+                    )
                     if token == -1:
                         seen_padding = True
                     elif not seen_padding and i >= grammar_start:
@@ -437,22 +503,27 @@ class StructuredOutputManager:
 
                 # Diffusion LLMs don't sample a bonus token after the
                 # scheduled positions, so skip its bitmask in that case.
-                if not (self.vllm_config.model_config.is_diffusion and req_tokens):
+                if not (is_diffusion and req_tokens):
                     if failed_index is not None:
                         bitmask[cumulative_index].copy_(bitmask[failed_index])
                     else:
                         bonus_apply = not seen_padding and constraint_start <= len(
                             req_tokens
                         )
-                        self._fill_bitmasks(((grammar, cumulative_index, bonus_apply),))
+                        bonus_reasoning = not seen_padding and not bonus_apply
+                        bonus_masked = masked_ids if bonus_reasoning else ()
+                        self._fill_bitmasks(
+                            ((grammar, cumulative_index, bonus_apply, bonus_masked),)
+                        )
                     cumulative_index += 1
 
                 if state_advancements > 0:
                     grammar.rollback(state_advancements)
 
         bitmask_tensor = self._grammar_bitmask
-        if cumulative_index < bitmask_tensor.shape[0]:
-            bitmask_tensor = bitmask_tensor[:cumulative_index]
+        num_masks = len(structured_output_request_ids) * mask_stride
+        if num_masks < bitmask_tensor.shape[0]:
+            bitmask_tensor = bitmask_tensor[:num_masks]
 
         # After finishing with the xgrammar operations, we convert to
         # np.ndarray, because that is much more efficient for serialization
