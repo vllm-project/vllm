@@ -12,6 +12,12 @@ import numpy as np
 import pytest
 import torch
 
+from vllm.distributed.aux_output_connector.artifacts import (
+    AuxOutputBuffer,
+    aux_output_keys,
+    materialize_aux_output,
+    publish_aux_output,
+)
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputConnectorMetadata,
     AuxOutputSchedulerConnector,
@@ -19,12 +25,6 @@ from vllm.distributed.aux_output_connector.connector import (
     PackedBlockHashes,
 )
 from vllm.distributed.aux_output_connector.memory import validate_shm_budget
-from vllm.distributed.aux_output_connector.routed_experts import (
-    RoutedExpertsBuffer,
-    materialize_routed_experts,
-    publish_routed_experts,
-    routed_experts_keys,
-)
 from vllm.distributed.aux_output_connector.store import (
     BackgroundBlockObjectStore,
     BlockObject,
@@ -198,7 +198,7 @@ def _make_worker(
     worker._r3_dtype = _DTYPE
     worker._r3_shape = _SHAPE
     worker._store = store
-    worker._buffer = RoutedExpertsBuffer(
+    worker._buffer = AuxOutputBuffer(
         _DTYPE,
         shape,
         _BLOCK_SIZE,
@@ -523,7 +523,7 @@ def test_worker_rejects_mismatched_capture_profile(routing):
 def test_logical_buffer_rejects_noncontiguous_capture(
     initial_start, initial_rows, invalid_start
 ):
-    buffer = RoutedExpertsBuffer(np.dtype("uint8"), (1,), 4, 1, 4, 1)
+    buffer = AuxOutputBuffer(np.dtype("uint8"), (1,), 4, 1, 4, 1)
     if initial_start is not None:
         rows = np.asarray(initial_rows, dtype=np.uint8).reshape(-1, 1)
         assert buffer.capture("request", initial_start, rows) == []
@@ -535,7 +535,7 @@ def test_logical_buffer_rejects_noncontiguous_capture(
 
 
 def test_logical_buffer_captures_one_row_per_decode_step():
-    buffer = RoutedExpertsBuffer(_DTYPE, _SHAPE, _BLOCK_SIZE, 1, 8, 2)
+    buffer = AuxOutputBuffer(_DTYPE, _SHAPE, _BLOCK_SIZE, 1, 8, 2)
     logical = np.arange(_BLOCK_SIZE * 3 * 2, dtype=_DTYPE).reshape(_BLOCK_SIZE, 3, 2)
 
     completed = []
@@ -547,7 +547,7 @@ def test_logical_buffer_captures_one_row_per_decode_step():
 
 
 def test_logical_buffer_copies_borrowed_block_when_retained():
-    buffer = RoutedExpertsBuffer(_DTYPE, _SHAPE, _BLOCK_SIZE, 1, 4, 2)
+    buffer = AuxOutputBuffer(_DTYPE, _SHAPE, _BLOCK_SIZE, 1, 4, 2)
     logical = np.arange(_BLOCK_SIZE * 3 * 2, dtype=_DTYPE).reshape(_BLOCK_SIZE, *_SHAPE)
 
     expected = logical.copy()
@@ -571,14 +571,14 @@ def _make_store(
     )
 
 
-def test_publish_routed_experts_publishes_full_blocks():
+def test_publish_aux_output_publishes_full_blocks():
     store = _make_store(object_nbytes=_BLOCK_SIZE * int(np.prod(_SHAPE)))
-    buffer = RoutedExpertsBuffer(_DTYPE, _SHAPE, _BLOCK_SIZE, 1, 8, 2)
+    buffer = AuxOutputBuffer(_DTYPE, _SHAPE, _BLOCK_SIZE, 1, 8, 2)
     logical = np.arange(8 * 3 * 2, dtype=np.uint8).reshape(8, 3, 2)
     hashes = [b"a" * 32, b"b" * 32]
-    keys = routed_experts_keys(hashes, "0")
+    keys = aux_output_keys(hashes, "0")
     blocks = buffer.capture("request", 0, logical)
-    publish_routed_experts(
+    publish_aux_output(
         store,
         batches=[(keys, blocks)],
         block_size=_BLOCK_SIZE,
@@ -587,7 +587,7 @@ def test_publish_routed_experts_publishes_full_blocks():
     logical[:] = 0
 
     np.testing.assert_array_equal(
-        materialize_routed_experts(
+        materialize_aux_output(
             store,
             keys,
             shape_per_token=_SHAPE,
@@ -655,18 +655,18 @@ def test_worker_matches_kv_eviction_order_after_requests_finish():
 
     assert worker._store is not None
     np.testing.assert_array_equal(
-        materialize_routed_experts(
+        materialize_aux_output(
             worker._store,
-            routed_experts_keys([hashes[1], hashes[3], hashes[4]], "0"),
+            aux_output_keys([hashes[1], hashes[3], hashes[4]], "0"),
             shape_per_token=_SHAPE,
             dtype=_DTYPE,
         ),
         np.concatenate([blocks[1], blocks[3], blocks[4]]),
     )
     with pytest.raises(BlockObjectStoreError, match="does not exist"):
-        materialize_routed_experts(
+        materialize_aux_output(
             worker._store,
-            routed_experts_keys([hashes[2]], "0"),
+            aux_output_keys([hashes[2]], "0"),
             shape_per_token=_SHAPE,
             dtype=_DTYPE,
         )
@@ -855,9 +855,9 @@ def test_worker_defers_full_block_until_kv_hash_arrives():
     assert not worker._requests["request"].pending_blocks
     assert worker._store is not None
     np.testing.assert_array_equal(
-        materialize_routed_experts(
+        materialize_aux_output(
             worker._store,
-            routed_experts_keys([block_hash], "0"),
+            aux_output_keys([block_hash], "0"),
             shape_per_token=_SHAPE,
             dtype=_DTYPE,
         ),
@@ -960,9 +960,9 @@ def test_worker_does_not_pin_unscheduled_prompt_blocks():
     run([second, other], [4, 4], np.concatenate((logical[:4], logical[4:8])))
 
     np.testing.assert_array_equal(
-        materialize_routed_experts(
+        materialize_aux_output(
             worker._store,
-            routed_experts_keys([b"x" * 32], "0"),
+            aux_output_keys([b"x" * 32], "0"),
             shape_per_token=_SHAPE,
             dtype=_DTYPE,
         ),
@@ -993,9 +993,9 @@ def test_worker_publishes_pending_block_without_forward():
     assert not worker._requests["request"].pending_blocks
     assert worker._store is not None
     np.testing.assert_array_equal(
-        materialize_routed_experts(
+        materialize_aux_output(
             worker._store,
-            routed_experts_keys([block_hash], "0"),
+            aux_output_keys([block_hash], "0"),
             shape_per_token=_SHAPE,
             dtype=_DTYPE,
         ),
@@ -1281,9 +1281,9 @@ def test_worker_finish_publishes_keyed_block_and_discards_request_state():
     assert "request" not in worker._buffer._requests
     assert worker._store is not None
     np.testing.assert_array_equal(
-        materialize_routed_experts(
+        materialize_aux_output(
             worker._store,
-            routed_experts_keys([block_hash], "0"),
+            aux_output_keys([block_hash], "0"),
             shape_per_token=_SHAPE,
             dtype=_DTYPE,
         ),
@@ -1667,18 +1667,18 @@ def test_worker_preemption_terminal_keeps_inflight_hashes_for_publish():
 
     assert worker._store is not None
     np.testing.assert_array_equal(
-        materialize_routed_experts(
+        materialize_aux_output(
             worker._store,
-            routed_experts_keys(block_hashes[:1], "0"),
+            aux_output_keys(block_hashes[:1], "0"),
             shape_per_token=_SHAPE,
             dtype=_DTYPE,
         ),
         logical[:_BLOCK_SIZE],
     )
     np.testing.assert_array_equal(
-        materialize_routed_experts(
+        materialize_aux_output(
             worker._store,
-            routed_experts_keys(block_hashes[1:], "0"),
+            aux_output_keys(block_hashes[1:], "0"),
             shape_per_token=_SHAPE,
             dtype=_DTYPE,
         ),
@@ -1722,16 +1722,16 @@ def test_worker_releases_terminal_pins_before_same_step_publish():
 
     assert worker._store is not None
     np.testing.assert_array_equal(
-        materialize_routed_experts(
+        materialize_aux_output(
             worker._store,
-            routed_experts_keys([producer_hash], "0"),
+            aux_output_keys([producer_hash], "0"),
             shape_per_token=_SHAPE,
             dtype=_DTYPE,
         ),
         producer_rows,
     )
     with pytest.raises(BlockObjectStoreError, match="does not exist"):
-        worker._store.get_concatenated(routed_experts_keys([victim_hash], "0"))
+        worker._store.get_concatenated(aux_output_keys([victim_hash], "0"))
     worker.close()
 
 
@@ -1767,9 +1767,9 @@ def test_terminal_request_publishes_hash_discovered_after_last_schedule():
 
     assert worker._store is not None
     np.testing.assert_array_equal(
-        materialize_routed_experts(
+        materialize_aux_output(
             worker._store,
-            routed_experts_keys([block_hash], "0"),
+            aux_output_keys([block_hash], "0"),
             shape_per_token=_SHAPE,
             dtype=_DTYPE,
         ),
