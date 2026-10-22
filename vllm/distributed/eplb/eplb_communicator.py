@@ -394,8 +394,6 @@ class NixlEplbCommunicator(EplbCommunicator):
         # Per-rank expert_id -> physical row; set by set_transfer_context.
         self._expert_to_src_row: list[dict[int, int]] | None = None
         self._layer_idx: int | None = None
-        # (layer, tensor) -> (base_ptr, bytes) as published to the peers.
-        self._published_ptrs: dict[tuple[int, int], tuple[int, int]] = {}
         self.set_stream(None)
 
         nixl_agent_config = nixl_utils.nixl_agent_config
@@ -419,10 +417,9 @@ class NixlEplbCommunicator(EplbCommunicator):
         self._nixl_wrapper = arena_agent.agent
         self._nixl_memory_type = "VRAM"
         self._remote_agents: dict[int, str] = {}
-        # peer -> (layer, tensor) ->
-        # (base_ptr, bytes_per_expert, dev_id, total_bytes, num_rows).
+        # peer -> (layer, tensor) -> (base_ptr, bytes_per_expert, dev_id).
         self._remote_send_meta: dict[
-            int, dict[tuple[int, int], tuple[int, int, int, int, int]]
+            int, dict[tuple[int, int], tuple[int, int, int]]
         ] = {}
 
         self._init_step("buffers", self._init_registered_buffers)
@@ -482,40 +479,12 @@ class NixlEplbCommunicator(EplbCommunicator):
                 if self._stream is not None:
                     self._stream.synchronize()
         self._layer_idx = layer_idx
-        self._check_published_ptrs(layer_idx)
         n = self._num_local_experts
         rank_experts = old_indices[: self._world_size * n].reshape(self._world_size, n)
         self._expert_to_src_row = [
             {int(eid): i for i, eid in enumerate(row) if eid != -1}
             for row in rank_experts
         ]
-
-    def _check_published_ptrs(self, layer_idx: int) -> None:
-        """Confirm this rank's expert weights still sit where it said they do.
-
-        Every peer reads this layer straight out of the addresses handed out
-        once, at init. Nothing re-publishes them, so a reallocation of these
-        tensors afterwards leaves the peers reading an address this rank no
-        longer owns, and a READ served from a freed or reused mapping is a
-        fault on this device, not on theirs. The rank that moved its tensors
-        is the only one that can see it happen, which is why the check lives on
-        the sending side.
-        """
-        for t_idx, t in enumerate(self._all_expert_weights[layer_idx]):
-            published = self._published_ptrs.get((layer_idx, t_idx))
-            if published is None:
-                continue
-            base, nbytes = published
-            if t.data_ptr() == base and t.nbytes == nbytes:
-                continue
-            raise RuntimeError(
-                f"NIXL EPLB expert weights moved after their addresses were "
-                f"published: layer {layer_idx} tensor {t_idx} was "
-                f"{nbytes} byte(s) at 0x{base:x} and is now {t.nbytes} "
-                f"byte(s) at 0x{t.data_ptr():x}. Every peer still reads the "
-                f"old address, so their READs land on memory this rank has "
-                f"released."
-            )
 
     def add_recv(
         self,
@@ -534,36 +503,13 @@ class NixlEplbCommunicator(EplbCommunicator):
 
         local_descs: list[tuple[int, int, int]] = []
         remote_descs: list[tuple[int, int, int]] = []
-        # What the peer registered, as opposed to what this layer reads.
-        valid_bounds: list[tuple[int, int]] = []
         for t_idx, t in enumerate(tensors):
-            (
-                send_base,
-                send_stride,
-                remote_dev,
-                send_total,
-                send_rows,
-            ) = self._remote_send_meta[src_rank][(layer_idx, t_idx)]
+            send_base, send_stride, remote_dev = self._remote_send_meta[src_rank][
+                (layer_idx, t_idx)
+            ]
             assert t.nbytes == send_stride, (
                 f"tensor {t_idx} size {t.nbytes} != remote stride {send_stride}"
             )
-            # A READ past the end of the peer's tensor is not refused: the
-            # address is still a plausible device address, so the peer's GPU
-            # takes the access and faults, which kills that rank with nothing
-            # but an address to show for it and leaves every other rank
-            # spinning on a transfer that will never report DONE. The bound is
-            # known here, before the READ is issued, so check it here.
-            if not 0 <= src_row < send_rows:
-                raise RuntimeError(
-                    f"NIXL EPLB would read outside rank {src_rank}'s expert "
-                    f"weights: layer {layer_idx} tensor {t_idx} expert "
-                    f"{expert_id} resolved to row {src_row}, but that peer "
-                    f"holds {send_rows} row(s). The read would start at "
-                    f"0x{send_base + src_row * send_stride:x}, which is "
-                    f"{(src_row - send_rows + 1) * send_stride} byte(s) past "
-                    f"the end of a {send_total} byte region based at "
-                    f"0x{send_base:x}."
-                )
             local_descs.append(
                 (
                     t.data_ptr(),
@@ -578,7 +524,6 @@ class NixlEplbCommunicator(EplbCommunicator):
                     remote_dev,
                 )
             )
-            valid_bounds.append((send_base, send_base + send_total))
 
         local_h, remote_h, xfer_h = self._create_peer_xfer(
             src_rank, local_descs, remote_descs
@@ -649,27 +594,22 @@ class NixlEplbCommunicator(EplbCommunicator):
     def _exchange_remote_send_meta(self) -> None:
         """Exchange per-layer per-tensor metadata so receivers can compute
         remote RDMA addresses at transfer time."""
-        local_meta: dict[tuple[int, int], tuple[int, int, int, int, int]] = {}
+        local_meta: dict[tuple[int, int], tuple[int, int, int]] = {}
         for layer_idx, layer_tensors in enumerate(self._all_expert_weights):
             for t_idx, t in enumerate(layer_tensors):
                 nbytes_per_expert = t.nbytes // self._num_local_experts
-                self._published_ptrs[(layer_idx, t_idx)] = (t.data_ptr(), t.nbytes)
                 local_meta[(layer_idx, t_idx)] = (
                     t.data_ptr(),
                     nbytes_per_expert,
                     self._cuda_device_id,
-                    t.nbytes,
-                    t.shape[0],
                 )
 
-        # Per-rank map: (layer_idx, tensor_idx) ->
-        # (base_ptr, bytes_per_expert, dev_id, total_bytes, num_rows).
+        # Per-rank map: (layer_idx, tensor_idx) -> (base_ptr, bytes_per_expert, dev_id).
         # add_recv uses base_ptr + src_row * bytes_per_expert to compute
-        # the remote RDMA address for each expert, and total_bytes to confirm
-        # that address is still inside what the peer registered.
-        gathered_meta: list[
-            dict[tuple[int, int], tuple[int, int, int, int, int]] | None
-        ] = [None] * self._world_size
+        # the remote RDMA address for each expert.
+        gathered_meta: list[dict[tuple[int, int], tuple[int, int, int]] | None] = [
+            None
+        ] * self._world_size
         torch.distributed.all_gather_object(
             gathered_meta, local_meta, group=self._cpu_group
         )
@@ -685,21 +625,13 @@ class NixlEplbCommunicator(EplbCommunicator):
                     f"local={sorted(local_keys)}, peer={sorted(peer_keys)}"
                 )
             for key in local_keys:
-                _, local_stride, _, _, local_rows = local_meta[key]
-                _, peer_stride, _, _, peer_rows = peer_meta[key]
+                _, local_stride, _ = local_meta[key]
+                _, peer_stride, _ = peer_meta[key]
                 if local_stride != peer_stride:
                     raise RuntimeError(
                         f"NIXL EPLB nbytes_per_expert mismatch for {key} "
                         f"with rank {peer}: "
                         f"local={local_stride}, peer={peer_stride}"
-                    )
-                if local_rows != peer_rows:
-                    raise RuntimeError(
-                        f"NIXL EPLB expert row count mismatch for {key} "
-                        f"with rank {peer}: "
-                        f"local={local_rows}, peer={peer_rows}. Rows index the "
-                        f"remote read, so a peer holding fewer rows than this "
-                        f"rank expects is read past the end of its tensor."
                     )
             self._remote_send_meta[peer] = peer_meta
 
