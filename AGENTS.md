@@ -154,3 +154,7 @@ vulnerability process.
 - **Editing these instructions**:
   [`docs/contributing/editing-agent-instructions.md`](docs/contributing/editing-agent-instructions.md)
   — Rules for modifying AGENTS.md or any domain-specific guide it references.
+
+- **Sleep/wake and scheduler control**: Before changing these APIs or their
+  callers, read the control request ordering contract in
+  [`docs/features/sleep_mode.md`](docs/features/sleep_mode.md#control-request-ordering).

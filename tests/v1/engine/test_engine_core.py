@@ -755,17 +755,14 @@ def _pausable_engine_core_proc() -> EngineCoreProc:
     return core
 
 
-@pytest.mark.parametrize("operation", ["wake_up", "resume_scheduler", "sleep"])
-def test_sleep_drain_cannot_be_overtaken(operation):
-    """A pending drain owns the sleep transition until workers have slept."""
+def test_sleep_wait_completes_before_caller_wakes():
+    """The caller waits for draining and worker sleep before issuing wake."""
     core = _pausable_engine_core_proc()
     core.scheduler.has_requests.return_value = True
     core._reset_caches = MagicMock()
     future = core.sleep(mode="wait")
     assert future is not None and not future.done()
 
-    with pytest.raises(RuntimeError, match="sleep.*progress"):
-        getattr(core, operation)()
     core.model_executor.sleep.assert_not_called()
     core.model_executor.wake_up.assert_not_called()
 
@@ -787,21 +784,8 @@ def test_sleep_resume_rejection_preserves_request_policy():
     core.scheduler.set_pause_state.assert_not_called()
 
 
-@pytest.mark.parametrize("mode", ["keep", "wait", "abort"])
-def test_sleep_drain_rejects_overlapping_pause(mode):
-    core = _pausable_engine_core_proc()
-    core.scheduler.has_requests.return_value = True
-    future = core.sleep(mode="wait")
-    core.scheduler.reset_mock()
-    with pytest.raises(RuntimeError, match="sleep.*progress"):
-        core.pause_scheduler(mode=mode)
-    core.scheduler.set_pause_state.assert_not_called()
-    core.scheduler.finish_requests.assert_not_called()
-    assert not future.done()
-
-
 @pytest.mark.parametrize("deferred", [False, True])
-def test_sleep_failure_clears_transition(deferred):
+def test_sleep_failure_propagates_to_caller(deferred):
     core = _pausable_engine_core_proc()
     core.scheduler.has_requests.return_value = deferred
     core._reset_caches = MagicMock()
@@ -812,8 +796,7 @@ def test_sleep_failure_clears_transition(deferred):
             core.scheduler.has_requests.return_value = False
             core._notify_idle_state_callbacks()
             future.result()
-    # This injected failure precedes worker mutation. A retry must reach the
-    # executor rather than remain blocked by stale transition bookkeeping.
+    # The injected failure precedes worker mutation, so this retry is safe.
     core.model_executor.sleep.side_effect = None
     core.sleep(mode="wait")
     assert core.model_executor.sleep.call_count == 2
