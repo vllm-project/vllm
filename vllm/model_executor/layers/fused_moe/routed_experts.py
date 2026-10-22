@@ -731,6 +731,14 @@ class RoutedExperts(PluggableLayer):
         )
         # `num_experts` counts logical and redundant experts; fused shared
         # slots are appended after them.
+        # Expert substitution checkpoints name retained experts by their
+        # logical ID, which is not bounded by the number of allocated slots.
+        expert_substitution = getattr(self, "expert_substitution", None)
+        if expert_substitution is not None:
+            num_global_experts = (
+                expert_substitution.num_logical_experts
+                + self.expert_map_manager.num_fused_shared_experts
+            )
         assert global_expert_id < num_global_experts, (
             f"Expert id {global_expert_id} is out of range for "
             f"{self.layer_name}; expected < {num_global_experts}"
