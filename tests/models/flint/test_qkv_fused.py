@@ -81,7 +81,10 @@ def test_matches_unfused_kernels(
         xr, ref_res = norm.fused_add_rms_norm(x.clone(), res.clone(), norm_w, 1e-6)
     else:
         xr = norm.rms_norm(x, norm_w, 1e-6)
-    qkv = nvfp4_gemv.bf16_gemv(xr, w) if bf16w else nvfp4_gemv.nvfp4_gemv(xr, w, ws, gs)
+    if bf16w:
+        qkv = (xr.float() @ w.float().t()).bfloat16()
+    else:
+        qkv = nvfp4_gemv.nvfp4_gemv(xr, w, ws, gs)
     ref_k, ref_v = ref_kv.transpose(1, 2).split(D, dim=-1)
     ref_q = qk_norm_rope_cache(
         qkv, positions, q_w, k_w, 1e-6, cos_sin, ref_k, ref_v, slots, HQ, HKV, D
