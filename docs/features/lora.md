@@ -427,8 +427,6 @@ vllm serve ibm-granite/granite-speech-3.3-2b \
 
 Note: Default multimodal LoRAs are currently only available for `.generate` and chat completions.
 
-In `/v1/chat/completions/batch`, default multimodal LoRAs are selected independently for each conversation. An explicit LoRA adapter specified in `model` takes precedence for every conversation in the batch.
-
 ## Sequence-Classification LoRA Adapters
 
 vLLM supports PEFT sequence-classification adapters that save a complete, single-layer linear classification head through `modules_to_save`. The saved module must be named `score` or `classifier`.
