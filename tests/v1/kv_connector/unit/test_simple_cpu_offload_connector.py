@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import pytest
 
 from tests.v1.kv_connector.unit.utils import create_vllm_config
@@ -18,6 +20,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (
     SimpleCPUOffloadConnector,
 )
+from vllm.v1.engine import core as engine_core_module
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -163,3 +166,50 @@ def test_connector_get_offload_io_stats() -> None:
         kv_cache_config=_make_kv_cache_config(16),
     )
     assert worker_connector.get_offload_io_stats() is None
+@pytest.mark.parametrize(
+    "connector, prefix_caching, worker_blocks, expected_blocks",
+    [
+        (None, True, 37, None),
+        ("NixlConnector", True, 37, None),
+        ("SimpleCPUOffloadConnector", False, 37, None),
+        ("SimpleCPUOffloadConnector", True, 37, 37),
+        ("MultiConnector", True, 37, 37),
+        ("SimpleCPUOffloadConnector", True, None, None),
+    ],
+)
+def test_engine_queries_offload_blocks_only_when_enabled(
+    monkeypatch, connector, prefix_caching, worker_blocks, expected_blocks
+) -> None:
+    """Only active offload queries workers, which must return a block count."""
+    config = create_vllm_config(
+        kv_connector=connector or "SimpleCPUOffloadConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "connectors": [
+                {"kv_connector": "SimpleCPUOffloadConnector", "kv_role": "kv_both"}
+            ]
+        },
+    )
+    if connector is None:
+        config.kv_transfer_config = None
+    config.cache_config.enable_prefix_caching = prefix_caching
+    kv_config = KVCacheConfig(num_blocks=16, kv_cache_tensors=[], kv_cache_groups=[])
+    executor = MagicMock()
+    executor.get_kv_cache_specs.return_value = [{}]
+    executor.get_simple_cpu_offload_num_blocks.return_value = worker_blocks
+    engine = object.__new__(engine_core_module.EngineCore)
+    engine.model_executor = executor
+    monkeypatch.setattr(
+        engine_core_module, "get_kv_cache_configs", lambda *args: [kv_config]
+    )
+
+    if worker_blocks is None:
+        with pytest.raises(AssertionError, match="workers must report"):
+            engine._initialize_kv_caches(config)
+        return
+    engine._initialize_kv_caches(config)
+
+    assert executor.get_simple_cpu_offload_num_blocks.call_count == (
+        expected_blocks is not None
+    )
+    assert config.cache_config.simple_cpu_offload_num_blocks == expected_blocks
