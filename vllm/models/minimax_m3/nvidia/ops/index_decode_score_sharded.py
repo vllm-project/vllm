@@ -552,15 +552,37 @@ def _index_k_merge_candidates_kernel(
     nvalid = tl.minimum(tl.load(valid_ptr + t * valid_stride), MAX_TILES)
     valid = (ids >= 0) & (ids < nvalid)
     scores = tl.where(scores == scores, scores, -float("inf"))
-    equal = (ids[:, None] == ids[None, :]) & valid[:, None] & valid[None, :]
-    scores = tl.max(tl.where(equal, scores[None, :], -float("inf")), 1)
-    first = tl.min(tl.where(equal, k[None, :], W * 16), 1)
-    unique = valid & (k == first)
+    if W != 2:
+        equal = (ids[:, None] == ids[None, :]) & valid[:, None] & valid[None, :]
+        scores = tl.max(tl.where(equal, scores[None, :], -float("inf")), 1)
+        first = tl.min(tl.where(equal, k[None, :], W * 16), 1)
+        unique = valid & (k == first)
     forced = (ids < INIT) | (ids >= tl.maximum(0, nvalid - LOCAL))
     scores = tl.where(forced, float("inf"), scores)
     # Float ordering followed by inverse ID gives a stable cutoff tie break.
     bits = tl.where(scores == 0, 0.0, scores).to(tl.uint32, bitcast=True)
     ordered = tl.where((bits & 0x80000000) != 0, ~bits, bits ^ 0x80000000)
+    if W == 2:
+        # One candidate per lane; retain the maximum on the first matching lane.
+        ordered, leader = tl.inline_asm_elementwise(
+            """{
+                .reg .b32 peers, reversed, first, lane;
+                .reg .pred p;
+                match.any.sync.b32 peers, $2, 0xffffffff;
+                redux.sync.max.u32 $0, $3, peers;
+                brev.b32 reversed, peers;
+                clz.b32 first, reversed;
+                mov.u32 lane, %laneid;
+                setp.eq.u32 p, lane, first;
+                selp.u32 $1, 1, 0, p;
+            }""",
+            constraints="=r,=r,r,r",
+            args=[ids, ordered],
+            dtype=(tl.uint32, tl.int32),
+            is_pure=True,
+            pack=1,
+        )
+        unique = valid & (leader != 0)
     keys = (ordered.to(tl.uint64) << 32) | (0xFFFFFFFF - ids.to(tl.uint32)).to(
         tl.uint64
     )
@@ -715,5 +737,5 @@ def minimax_m3_index_merge_candidates(
         LOCAL=local_blocks,
         MAX_TILES=MAX_K_TILES,
         SPIN=spin_limit,
-        num_warps=4,
+        num_warps=1 if world == 2 else 4,
     )

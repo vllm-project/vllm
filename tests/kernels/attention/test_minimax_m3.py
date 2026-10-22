@@ -2433,7 +2433,8 @@ def test_sharded_candidate_merge_deduplicates_and_forces(
     for rank in range(world):
         scores[rank, 0] = (blocks * 7 + rank * 13) % 53
     scores[min(2, world - 1), 1] = blocks.float()
-    scores[:, 2] = 7
+    scores[:, 2] = 0.0
+    scores[:, 2, :24] = -0.0
     scores[:, 3, :3] = torch.tensor([4, 9, 6])
     scores[:, :, 0] = -2000
     for row, count in enumerate(valid):
@@ -2458,6 +2459,9 @@ def test_sharded_candidate_merge_deduplicates_and_forces(
             recv[1, rank, 0, row, 32] = 1
     recv[1, :, 0, 3, 3] = torch.tensor(1e9).view(torch.int32)
     recv[1, :, 0, 3, 19] = 47
+    order = torch.randperm(16, generator=torch.Generator().manual_seed(17))
+    recv[1, ..., :16] = recv[1, ..., :16].index_select(-1, order)
+    recv[1, ..., 16:32] = recv[1, ..., 16:32].index_select(-1, order)
     recv = recv.cuda()
     before = recv.clone()
     actual = torch.full((len(valid), 1, 16), -9, dtype=torch.int32, device="cuda")
