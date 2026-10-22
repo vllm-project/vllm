@@ -31,13 +31,21 @@ from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
     rocm_mxfp4_indexer_k_store,
 )
+from vllm.v1.worker.workspace import init_workspace_manager, reset_workspace_manager
 
 # DeepSeek-V4-Pro's indexer: 64 heads of 128, ratio 4 with overlap, 256-token
 # blocks, so 64-entry K pages.
 HEADS, HEAD_DIM, RATIO, PAGE = 64, 128, 4, 64
 WIDTH = HEAD_DIM // 2 + HEAD_DIM // 32
-STATE_BLOCK, MAX_POS = 16, 4096
+STATE_BLOCK, MAX_POS, MAX_TOKENS = 16, 4096, 1024
 DEVICE = "cuda"
+
+
+@pytest.fixture(autouse=True)
+def _workspace():
+    init_workspace_manager(torch.device(DEVICE))
+    yield
+    reset_workspace_manager()
 
 
 class _Case:
@@ -116,9 +124,7 @@ class _Case:
         comp._static_forward_context = {
             comp.k_cache_prefix: types.SimpleNamespace(kv_cache=kv_cache)
         }
-        comp._pooled_k = torch.zeros(
-            len(self.positions) + 5, HEAD_DIM, dtype=torch.bfloat16, device=DEVICE
-        )
+        comp.max_num_batched_tokens = MAX_TOKENS
         state_metadata = types.SimpleNamespace(
             slot_mapping=torch.zeros_like(self.positions),
             token_to_req_indices=self.req,
@@ -134,7 +140,7 @@ class _Case:
             {comp.k_cache_prefix: types.SimpleNamespace(slot_mapping=self.kv_slot)},
             {},
         )
-        return comp._pooled_k[: len(self.positions)], kv_cache
+        return comp._pooled_k(len(self.positions)), kv_cache
 
 
 SEQ_LENS = pytest.mark.parametrize("seq_lens", [[37, 300, 5], [1, 260]])

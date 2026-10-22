@@ -17,6 +17,11 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rocm_paged_mxfp4_indexer import RocmSparseAttnIndexer
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    DispatchSpec,
+    TritonWarmupTensor,
+    triton_kernel_dispatcher_with_warmup,
+)
 from vllm.models.deepseek_v4.attention import (
     DeepseekV4Attention,
     DeepseekV4Indexer,
@@ -404,7 +409,17 @@ def _pack_global_topk_ragged_kernel(
     tl.store(global_topk_ragged_ptr + out_start + offset, slot_ids, mask=mask)
 
 
-@triton.jit
+# The strides and the state block size depend on the KV cache layout; keeping
+# them out of the compile key lets one warmup variant serve every deployment.
+@triton.jit(
+    do_not_specialize=[
+        "state_cache_stride0",
+        "state_cache_stride1",
+        "block_table_stride",
+        "block_size",
+        "pooled_k_stride",
+    ]
+)
 def _compress_pool_kernel(
     state_cache_ptr,
     state_cache_stride0,
@@ -415,8 +430,8 @@ def _compress_pool_kernel(
     block_table_ptr,
     block_table_stride,
     block_size,
-    out_ptr,
-    out_stride,
+    pooled_k_ptr,
+    pooled_k_stride,
     HEAD_SIZE: tl.constexpr,
     STATE_WIDTH: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
@@ -460,8 +475,68 @@ def _compress_pool_kernel(
     kv = tl.load(row_base[:, None] + block[None, :], mask=mask_pos[:, None], other=0.0)
     compressed_kv = tl.sum(kv * score, axis=0)
     tl.store(
-        out_ptr + token_idx.to(tl.int64) * out_stride + block,
+        pooled_k_ptr + token_idx.to(tl.int64) * pooled_k_stride + block,
         compressed_kv.to(tl.bfloat16),
+    )
+
+
+def _compress_pool_warmup_inputs(
+    *, head_dim: int, state_width: int, compress_ratio: int, overlap: bool
+) -> list[dict[str, object]]:
+    # ROCm specializes a pointer on whether its storage is at most 2 GB (see
+    # TritonWarmupTensor.ptr_range_bytes). The state cache is a view of the KV
+    # pool, whose size depends on the deployment and is usually far above
+    # 2 GB, so warm up both variants; the other inputs are small buffers.
+    return [
+        dict(
+            state_cache=TritonWarmupTensor(
+                torch.float32,
+                shape=(1, 1, 2 * state_width),
+                ptr_range_bytes=pool_bytes,
+            ),
+            token_to_req_indices=TritonWarmupTensor(torch.int32),
+            positions=TritonWarmupTensor(torch.int64),
+            kv_slot_mapping=TritonWarmupTensor(torch.int64),
+            block_table=TritonWarmupTensor(torch.int32, shape=(1, 1)),
+            block_size=compress_ratio,
+            pooled_k=TritonWarmupTensor(torch.bfloat16, shape=(1, head_dim)),
+            state_width=state_width,
+            compress_ratio=compress_ratio,
+            overlap=overlap,
+        )
+        for pool_bytes in (0, 1 << 32)
+    ]
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_compress_pool_kernel,
+    warmup_inputs=_compress_pool_warmup_inputs,
+)
+def compress_pool(
+    state_cache: torch.Tensor,
+    token_to_req_indices: torch.Tensor,
+    positions: torch.Tensor,
+    kv_slot_mapping: torch.Tensor,
+    block_table: torch.Tensor,
+    block_size: int,
+    pooled_k: torch.Tensor,
+    state_width: int,
+    compress_ratio: int,
+    overlap: bool,
+) -> DispatchSpec:
+    """Pool each boundary token's compressor states into a bf16 row of
+    ``pooled_k``, one program per token. Tensor inputs bind to the kernel's
+    ``<name>_ptr`` arguments; the same launch spec drives the JIT warmup."""
+    return (pooled_k.shape[0],), dict(
+        state_cache_stride0=state_cache.stride(0),
+        state_cache_stride1=state_cache.stride(1),
+        block_table_stride=block_table.stride(0),
+        pooled_k_stride=pooled_k.stride(0),
+        HEAD_SIZE=pooled_k.shape[1],
+        STATE_WIDTH=state_width,
+        COMPRESS_RATIO=compress_ratio,
+        OVERLAP=overlap,
+        num_warps=1,
     )
 
 
@@ -1740,13 +1815,6 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         )
 
 
-@functools.cache
-def _pooled_k_scratch(num_tokens: int, head_dim: int, device: str) -> torch.Tensor:
-    # One buffer for all indexer layers: they run one after another and each
-    # consumes its rows before the next layer writes.
-    return torch.empty(num_tokens, head_dim, dtype=torch.bfloat16, device=device)
-
-
 class DeepseekV4RocmMxfp4Compressor(DeepseekCompressor):
     """The indexer's compressor writing aiter's preshuffled MXFP4 pages: a
     pooling kernel, then aiter's norm + RoPE + MXFP4 cache op, which owns the
@@ -1756,9 +1824,33 @@ class DeepseekV4RocmMxfp4Compressor(DeepseekCompressor):
         super().__init__(vllm_config, **kwargs)
         assert self.head_dim == 128 and self.use_fp4_cache
         self.num_index_heads = vllm_config.model_config.hf_config.index_n_heads
-        self._pooled_k = _pooled_k_scratch(
-            self.max_num_batched_tokens, self.head_dim, self.device
+        if vllm_config.kernel_config.enable_jit_warmup:
+            # Compile at startup instead of on the first boundary token.
+            compress_pool.register_warmup(
+                head_dim=self.head_dim,
+                state_width=self.coff * self.head_dim,
+                compress_ratio=self.compress_ratio,
+                overlap=self.overlap,
+            )
+
+    def _pooled_k(self, num_tokens: int) -> torch.Tensor:
+        # A persistent buffer rather than the shared scratch: in the CSA fork
+        # this runs on an aux stream next to other branches. The indexer
+        # layers run one after another, so they can all share it.
+        scratch = current_workspace_manager().get_persistent(
+            "dsv4_rocm_mxfp4_pooled_k",
+            (self.max_num_batched_tokens, self.head_dim),
+            torch.bfloat16,
         )
+        assert num_tokens <= scratch.shape[0]
+        return scratch[:num_tokens]
+
+    def forward(
+        self, kv_score: torch.Tensor, positions: torch.Tensor, rotary_emb
+    ) -> None:
+        # Claim the scratch on the profiling run, before the workspace locks.
+        self._pooled_k(0)
+        super().forward(kv_score, positions, rotary_emb)
 
     def _compress_norm_rope_store(
         self,
@@ -1773,28 +1865,21 @@ class DeepseekV4RocmMxfp4Compressor(DeepseekCompressor):
         num_tokens = state_metadata.slot_mapping.shape[0]
         if num_tokens == 0:
             return
-        assert num_tokens <= self._pooled_k.shape[0]
         k_cache_metadata = attn_metadata[self.k_cache_prefix]
         kv_slot_mapping = k_cache_metadata.slot_mapping[:num_tokens]
         kv_cache = self._static_forward_context[self.k_cache_prefix].kv_cache
-        pooled_k = self._pooled_k[:num_tokens]
-        _compress_pool_kernel[(num_tokens,)](
+        pooled_k = self._pooled_k(num_tokens)
+        compress_pool(
             state_cache,
-            state_cache.stride(0),
-            state_cache.stride(1),
             state_metadata.token_to_req_indices,
             positions,
             kv_slot_mapping,
             state_metadata.block_table,
-            state_metadata.block_table.stride(0),
             state_metadata.block_size,
             pooled_k,
-            pooled_k.stride(0),
-            HEAD_SIZE=self.head_dim,
-            STATE_WIDTH=state_width,
-            COMPRESS_RATIO=self.compress_ratio,
-            OVERLAP=self.overlap,
-            num_warps=1,
+            state_width,
+            self.compress_ratio,
+            self.overlap,
         )
         rocm_mxfp4_indexer_k_store(
             pooled_k,
