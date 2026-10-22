@@ -2481,6 +2481,50 @@ def _run_spec_verify_steps(scheduler, rounds, num_invalid_per_round=None):
     return req
 
 
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_spec_decode_skips_drafts_instead_of_preempting(async_scheduling: bool):
+    """Under KV cache pressure, a decode is scheduled without its draft tokens
+    rather than preempting another running request to make room for them.
+
+    The pool is exactly full: request a's next token fits in its last block but
+    its drafts need a new one, while request b's token and drafts fit.
+    """
+    scheduler = create_scheduler(
+        num_speculative_tokens=4,
+        num_blocks=6,
+        block_size=16,
+        async_scheduling=async_scheduling,
+    )
+    req_a = create_requests(1, num_tokens=29, max_tokens=8, req_ids=["a"])[0]
+    req_b = create_requests(1, num_tokens=42, max_tokens=8, req_ids=["b"])[0]
+    scheduler.add_request(req_a)
+    scheduler.add_request(req_b)
+
+    output = scheduler.schedule()
+    assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() == 0
+    if not async_scheduling:
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput(
+                req_ids=["a", "b"],
+                req_id_to_index={"a": 0, "b": 1},
+                sampled_token_ids=[[0], [0]],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+            ),
+        )
+        scheduler.update_draft_token_ids(
+            DraftTokenIds(["a", "b"], [[1, 2, 3, 4], [1, 2, 3, 4]])
+        )
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"a": 1, "b": 5}
+    assert "a" not in output.scheduled_spec_decode_tokens
+    assert len(output.scheduled_spec_decode_tokens["b"]) == 4
+    assert req_b.status == RequestStatus.RUNNING
+
+
 def test_per_request_spec_decode_detailed_records_per_step():
     scheduler = create_scheduler(
         num_speculative_tokens=3,

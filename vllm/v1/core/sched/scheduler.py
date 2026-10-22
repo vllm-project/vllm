@@ -840,6 +840,21 @@ class Scheduler(SchedulerInterface):
                         # The request can be scheduled.
                         break
 
+                    # Draft tokens are optional: skip verifying them this step
+                    # rather than preempt a request to make room for them.
+                    num_draft_tokens = (
+                        num_new_tokens
+                        + request.num_computed_tokens
+                        - request.num_tokens
+                        - request.num_output_placeholders
+                    )
+                    if (
+                        0 < num_draft_tokens < num_new_tokens
+                        and self.num_sampled_tokens_per_step > 0
+                    ):
+                        num_new_tokens -= num_draft_tokens
+                        continue
+
                     if (
                         self.connector is not None
                         and self.connector.has_pending_block_frees()

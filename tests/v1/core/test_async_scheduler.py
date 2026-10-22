@@ -633,6 +633,19 @@ def test_reset_prefix_cache_with_inflight_output_under_kv_pressure(pp_size: int)
 
     scheduler._preempt_request = counting_preempt
 
+    # Tokens of steps that return after their request finished and was freed:
+    # the scheduler can no longer drain a stale share for them.
+    late_tokens: dict[str, int] = defaultdict(int)
+    orig_update = scheduler.update_from_output
+
+    def tracking_update(scheduler_output, model_runner_output):
+        for req_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
+            if req_id not in scheduler.requests:
+                late_tokens[req_id] += num_tokens
+        return orig_update(scheduler_output, model_runner_output)
+
+    scheduler.update_from_output = tracking_update
+
     resets = 0
     reset_steps = {6, 14} if pp_size == 1 else {6, 7, 18, 19}
 
@@ -666,8 +679,9 @@ def test_reset_prefix_cache_with_inflight_output_under_kv_pressure(pp_size: int)
             list(req.output_token_ids), engine.emitted[req.request_id]
         )
         _assert_positions_consistent(req, engine)
-        # All stale shares fully drained by the end.
-        assert getattr(req, "num_stale_output_tokens", 0) == 0
+        # All stale shares drained by the end, except for steps that returned
+        # after the request was freed.
+        assert getattr(req, "num_stale_output_tokens", 0) <= late_tokens[req.request_id]
 
 
 def test_requires_kv_delivery_defaults_to_producer_role():
