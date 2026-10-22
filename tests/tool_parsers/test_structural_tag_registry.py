@@ -331,6 +331,7 @@ def test_allowed_tools_constrain_and_parse_calls(mode: str):
 
     request = parser.adjust_request(request)
 
+    assert request.structured_outputs is not None
     grammar = Grammar.from_structural_tag(request.structured_outputs.structural_tag)
     call = _hermes_call("crm__lookup")
     assert _is_grammar_accept_string(grammar, call)
@@ -340,6 +341,7 @@ def test_allowed_tools_constrain_and_parse_calls(mode: str):
     _, content, tool_calls = parser.parse(call, request, enable_auto_tools=True)
 
     assert not content
+    assert tool_calls is not None
     assert [(c.name, json.loads(c.arguments)) for c in tool_calls] == [
         ("crm__lookup", {"id": "1"})
     ]
@@ -357,6 +359,7 @@ def test_allowed_tools_ignore_builtin_entries():
     mixed = parser.adjust_request(mixed)
     builtin_only = parser.adjust_request(builtin_only)
 
+    assert mixed.structured_outputs is not None
     grammar = Grammar.from_structural_tag(mixed.structured_outputs.structural_tag)
     assert _is_grammar_accept_string(grammar, _hermes_call("crm__lookup"))
     assert not _is_grammar_accept_string(grammar, _hermes_call("get_weather"))
@@ -373,6 +376,7 @@ def test_allowed_tools_allow_custom_tools():
 
     request = parser.adjust_request(request)
 
+    assert request.structured_outputs is not None
     grammar = Grammar.from_structural_tag(request.structured_outputs.structural_tag)
     sql_call = (
         '<tool_call>\n{"name": "run_sql", "arguments": {"input": "select 1"}}\n'
