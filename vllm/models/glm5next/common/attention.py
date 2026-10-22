@@ -24,6 +24,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, get_rope
+from vllm.model_executor.model_loader.weight_utils import set_cached_tensor
 from vllm.model_executor.models.deepseek_v2 import (
     DeepSeekV2FusedQkvAProjLinear,
     DeepseekV32IndexerCache,
@@ -303,10 +304,7 @@ class Indexer(nn.Module):
             .contiguous()
             .float()
         )
-        if self._wp_fp32 is not None and self._wp_fp32.shape == wp.shape:
-            self._wp_fp32.copy_(wp)
-        else:
-            self._wp_fp32 = wp
+        set_cached_tensor(self, "_wp_fp32", wp)
 
     def forward(
         self, hidden_states: torch.Tensor, qr: torch.Tensor, positions, rotary_emb

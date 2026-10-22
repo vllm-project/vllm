@@ -3,6 +3,8 @@
 """A multi-tensor weight may be split across load_weights calls (RL weight
 updates send one bucket per call); its parts pair up across calls."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 from torch import nn
@@ -11,6 +13,7 @@ from vllm.model_executor.model_loader.reload import finalize_layerwise_reload
 from vllm.model_executor.model_loader.weight_utils import (
     discard_weight_parts,
     finalize_model_weights,
+    set_cached_tensor,
 )
 from vllm.model_executor.models.deepseek_v2 import _try_load_fp8_indexer_wk
 
@@ -95,6 +98,28 @@ class _HookCounter(nn.Module):
 
     def process_weights_after_loading(self) -> None:
         self.calls += 1
+
+
+@pytest.mark.parametrize(
+    "new,refilled",
+    [
+        (torch.full((2, 3), 2.0), True),
+        (torch.full((3, 3), 2.0), False),
+        (torch.full((2, 3), 2.0, dtype=torch.float64), False),
+        (None, False),
+    ],
+    ids=["same-shape", "reshaped", "new-dtype", "dropped"],
+)
+def test_set_cached_tensor_refills_in_place(new, refilled):
+    """A derived tensor rebuilt on reload keeps the captured address if it can."""
+    owner = SimpleNamespace(cache=torch.zeros(2, 3))
+    cached = owner.cache
+    set_cached_tensor(owner, "cache", new)
+    assert (owner.cache is cached) == refilled
+    if new is not None:
+        torch.testing.assert_close(owner.cache, new)
+    else:
+        assert owner.cache is None
 
 
 def test_reload_finish_runs_model_hook_once():

@@ -26,6 +26,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
+    set_cached_tensor,
 )
 from vllm.model_executor.models.interfaces import EagleModelMixin, SupportsEagle3
 from vllm.multimodal.inputs import NestedTensors
@@ -159,22 +160,23 @@ class DFlashLagunaModel(DFlashQwen3Model, EagleModelMixin):
     ) -> None:
         self._context_qkv_projs = [a.qkv_proj for a in layers_attn]
         self._context_q_sizes = [a.q_size for a in layers_attn]
-        self._kv_weights: torch.Tensor | None = None
-        self._kv_biases: torch.Tensor | None = None
+        kv_weights = kv_biases = None
         if _reads_raw_weights(self._context_qkv_projs):
-            self._kv_weights = torch.stack(
+            kv_weights = torch.stack(
                 [a.qkv_proj.weight[a.q_size :] for a in layers_attn], dim=0
             ).contiguous()
             if has_bias:
-                self._kv_biases = torch.stack(
+                kv_biases = torch.stack(
                     [a.qkv_proj.bias[a.q_size :] for a in layers_attn], dim=0
                 ).contiguous()
-        self._input_layernorm_weights = torch.stack(
-            [layer.input_layernorm.weight.data for layer in self.layers], dim=0
-        ).contiguous()
-        self._k_norm_weights = torch.stack(
-            [a.k_norm.weight.data for a in layers_attn], dim=0
-        ).contiguous()
+        set_cached_tensor(self, "_kv_weights", kv_weights)
+        set_cached_tensor(self, "_kv_biases", kv_biases)
+        input_norms = [layer.input_layernorm.weight.data for layer in self.layers]
+        set_cached_tensor(
+            self, "_input_layernorm_weights", torch.stack(input_norms).contiguous()
+        )
+        k_norms = [a.k_norm.weight.data for a in layers_attn]
+        set_cached_tensor(self, "_k_norm_weights", torch.stack(k_norms).contiguous())
 
     def _project_context_kv(
         self,
