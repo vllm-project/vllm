@@ -328,7 +328,12 @@ class Worker(WorkerBase):
             time.sleep(0.1)
 
         used_bytes = total - free_bytes_after_sleep
-        assert freed_bytes >= 0, "Memory usage increased after sleeping."
+        if freed_bytes < 0:
+            logger.warning(
+                "Device memory usage increased by %s GiB after sleeping. "
+                "Other processes may be using this device.",
+                format_gib(-freed_bytes),
+            )
         logger.info(
             "Sleep mode freed %s GiB memory, %s GiB memory is still in use.",
             format_gib(freed_bytes),
