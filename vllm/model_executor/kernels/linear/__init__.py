@@ -91,7 +91,7 @@ from vllm.model_executor.kernels.linear.mxfp4.marlin import (
 from vllm.model_executor.kernels.linear.mxfp4.pytorch import (
     TorchMxFp4LinearKernel,
 )
-from vllm.model_executor.kernels.linear.mxfp4.rocm import (
+from vllm.model_executor.kernels.linear.mxfp4.rdna3 import (
     Rdna3MxFp4LinearKernel,
 )
 from vllm.model_executor.kernels.linear.mxfp4.xpu import (

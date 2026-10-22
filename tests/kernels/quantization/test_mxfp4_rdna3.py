@@ -1,20 +1,38 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Correctness test for the RDNA3 (gfx1100) MXFP4 weight-only WMMA GEMM.
+"""Correctness tests for the RDNA3 (gfx1100) MXFP4 weight-only kernels: the
+dense GEMM and the ``RDNA3Mxfp4Experts`` fused-MoE backend.
 
 Run inside the ROCm container after building _rocm_C:
-    .venv/bin/python -m pytest tests/kernels/quantization/test_mxfp4_rdna3_wmma.py -v
+    .venv/bin/python -m pytest tests/kernels/quantization/test_mxfp4_rdna3.py -v
 """
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 from vllm.platforms import current_platform
+
+if not current_platform.is_rocm():
+    pytest.skip("RDNA3 MXFP4 kernels are ROCm-only", allow_module_level=True)
+
+from tests.kernels.moe.utils import make_dummy_moe_config  # noqa: E402
+from vllm.model_executor.layers.fused_moe.activation import (  # noqa: E402
+    MoEActivation,
+)
+from vllm.model_executor.layers.fused_moe.config import (  # noqa: E402
+    mxfp4_w4a16_moe_quant_config,
+)
+from vllm.model_executor.layers.fused_moe.experts.rdna3_mxfp4_moe import (  # noqa: E402
+    RDNA3Mxfp4Experts,
+    repack_experts_rdna3,
+)
+from vllm.platforms.rocm import on_gfx1100  # noqa: E402
 
 E2M1_MAG = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=torch.float32)
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_rocm(), reason="RDNA3 MXFP4 WMMA kernel is ROCm-only"
+    not on_gfx1100(), reason="RDNA3 MXFP4 kernels require gfx1100"
 )
 
 
@@ -42,9 +60,6 @@ def _repack(w_packed, scale_e8m0):
 @pytest.mark.parametrize("M", [1, 16, 64, 128])
 @pytest.mark.parametrize("N,K", [(64, 256), (256, 512), (128, 4096)])
 def test_mxfp4_wmma_matches_dequant_reference(dtype, M, N, K):
-    if not hasattr(torch.ops._rocm_C, "mxfp4_gemm_rdna3"):
-        pytest.skip("_rocm_C.mxfp4_gemm_rdna3 not built")
-
     torch.manual_seed(0)
     dev = "cuda"
     # Random E2M1 codes (full 0..255 byte = two 4-bit codes) and mild E8M0
@@ -75,3 +90,105 @@ def test_mxfp4_wmma_matches_dequant_reference(dtype, M, N, K):
         f"error {err.flatten()[worst]:.4f} exceeds the rounding bound "
         f"{tol.flatten()[worst]:.4f} at flat index {worst}"
     )
+
+
+def _swigluoai_interleaved(h: torch.Tensor) -> torch.Tensor:
+    gate = h[..., ::2].clamp(max=7.0)
+    up = h[..., 1::2].clamp(-7.0, 7.0)
+    return (up + 1.0) * gate * torch.sigmoid(1.702 * gate)
+
+
+@pytest.mark.parametrize("M", [1, 3, 16, 64])
+@pytest.mark.parametrize(
+    "activation, with_bias",
+    [
+        # No bias: the down GEMM reduces over top_k in its epilogue.
+        (MoEActivation.SILU, False),
+        # GPT-OSS: interleaved gate/up, per-expert bias, constants not passed
+        # in the quant config (as on the Quark path); reduced in Python.
+        (MoEActivation.SWIGLUOAI, True),
+    ],
+)
+def test_rdna3_mxfp4_experts_match_dequant_reference(M, activation, with_bias):
+    """``RDNA3Mxfp4Experts.apply`` against a dequantize-then-matmul MoE."""
+    E, K, N, top_k = 8, 256, 128, 4
+    dtype = torch.bfloat16
+    dev = "cuda"
+    torch.manual_seed(0)
+
+    def rand_mxfp4(rows, cols):
+        packed = torch.randint(0, 256, (E, rows, cols // 2), dtype=torch.uint8)
+        scale = torch.randint(122, 126, (E, rows, cols // 32), dtype=torch.uint8)
+        return packed.to(dev), scale.to(dev)
+
+    w13, w13_s = rand_mxfp4(2 * N, K)
+    w2, w2_s = rand_mxfp4(K, N)
+    w13_ref = torch.stack([_dequant_ref(w13[e], w13_s[e]) for e in range(E)])
+    w2_ref = torch.stack([_dequant_ref(w2[e], w2_s[e]) for e in range(E)])
+    b13 = torch.randn(E, 2 * N, device=dev) if with_bias else None
+    b2 = torch.randn(E, K, device=dev) if with_bias else None
+
+    x = torch.randn(M, K, device=dev, dtype=dtype)
+    topk_weights, topk_ids = torch.randn(M, E, device=dev).softmax(-1).topk(top_k)
+    topk_ids = topk_ids.to(torch.int32)
+
+    ref = torch.zeros(M, K, device=dev)
+    for m in range(M):
+        for j in range(top_k):
+            e = topk_ids[m, j]
+            h = x[m].float() @ w13_ref[e].t()
+            if with_bias:
+                h = h + b13[e]
+            if activation == MoEActivation.SWIGLUOAI:
+                a = _swigluoai_interleaved(h)
+            else:
+                a = F.silu(h[:N]) * h[N:]
+            y = a.to(dtype).float() @ w2_ref[e].t()
+            if with_bias:
+                y = y + b2[e]
+            ref[m] += topk_weights[m, j] * y
+
+    deinterleave = activation == MoEActivation.SWIGLUOAI
+    b_q13, b_s13 = repack_experts_rdna3(w13, w13_s, deinterleave=deinterleave)
+    b_q2, b_s2 = repack_experts_rdna3(w2, w2_s, deinterleave=False)
+    if deinterleave:
+        b13 = torch.cat([b13[:, ::2], b13[:, 1::2]], dim=1)
+    quant_config = mxfp4_w4a16_moe_quant_config(
+        w1_scale=b_s13,
+        w2_scale=b_s2,
+        w1_bias=None if b13 is None else b13.to(dtype),
+        w2_bias=None if b2 is None else b2.to(dtype),
+    )
+    moe_config = make_dummy_moe_config(
+        num_experts=E,
+        experts_per_token=top_k,
+        hidden_dim=K,
+        intermediate_size=N,
+        in_dtype=dtype,
+        activation=activation,
+    )
+    experts = RDNA3Mxfp4Experts(moe_config, quant_config)
+    ws13, ws2, out_shape = experts.workspace_shapes(
+        M, N, K, top_k, E, E, None, activation
+    )
+    out = torch.empty(out_shape, device=dev, dtype=dtype)
+    experts.apply(
+        out,
+        x,
+        b_q13,
+        b_q2,
+        topk_weights,
+        topk_ids,
+        activation,
+        E,
+        None,
+        None,
+        None,
+        torch.empty(ws13, device=dev, dtype=dtype),
+        torch.empty(ws2, device=dev, dtype=dtype),
+        None,
+        False,
+    )
+
+    rel = (out.float() - ref).norm() / ref.norm()
+    assert rel < 2e-2, f"relative L2 error {rel:.4f}"

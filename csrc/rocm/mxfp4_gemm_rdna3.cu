@@ -960,6 +960,12 @@ torch::Tensor mxfp4_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
               "b_q_weight must be (u)int32");
   TORCH_CHECK(b_scales_e8m0.scalar_type() == torch::kUInt8,
               "b_scales_e8m0 must be uint8 (E8M0)");
+  TORCH_CHECK(
+      b_q_weight.device() == a.device() && b_scales_e8m0.device() == a.device(),
+      "all tensors must be on the same device");
+  TORCH_CHECK(a.is_contiguous() && b_q_weight.is_contiguous() &&
+                  b_scales_e8m0.is_contiguous(),
+              "all tensors must be contiguous");
 
   const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
   auto stream = at::cuda::getCurrentCUDAStream();

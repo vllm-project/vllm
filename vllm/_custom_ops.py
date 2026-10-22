@@ -713,6 +713,27 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "gptq_gemm_rdna3
         )
 
 
+def mxfp4_gemm_rdna3(
+    a: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_scales_e8m0: torch.Tensor,
+) -> torch.Tensor:
+    return torch.ops._rocm_C.mxfp4_gemm_rdna3(a, b_q_weight, b_scales_e8m0)
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "mxfp4_gemm_rdna3"):
+
+    @register_fake("_rocm_C::mxfp4_gemm_rdna3")
+    def _mxfp4_gemm_rdna3_fake(
+        a: torch.Tensor,
+        b_q_weight: torch.Tensor,
+        b_scales_e8m0: torch.Tensor,
+    ) -> torch.Tensor:
+        return torch.empty(
+            (a.size(0), b_q_weight.size(1)), dtype=a.dtype, device=a.device
+        )
+
+
 def moe_gptq_gemm_rdna3(
     a: torch.Tensor,
     c: torch.Tensor,

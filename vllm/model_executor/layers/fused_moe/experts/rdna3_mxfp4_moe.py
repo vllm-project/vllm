@@ -13,15 +13,20 @@ bias + clamped SwiGLU-OAI) by reading everything from ``quant_config``.
 Registered as ``Mxfp4MoeBackend.RDNA3_MXFP4`` in the oracle and gated on gfx1100.
 """
 
+import dataclasses
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
+    apply_moe_activation,
 )
 from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
     FusedMoEParallelConfig,
+    FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
@@ -75,8 +80,33 @@ def repack_experts_rdna3(
     return b_q, b_scale
 
 
+def _first_set(*values: float | None) -> float:
+    return next(v for v in values if v is not None)
+
+
 class RDNA3Mxfp4Experts(mk.FusedMoEExpertsModular):
     """MXFP4 MoE experts on the native RDNA3 HIP kernel (gfx1100 only)."""
+
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+        max_num_tokens: int | None = None,
+        num_dispatchers: int | None = None,
+    ):
+        super().__init__(moe_config, quant_config, max_num_tokens, num_dispatchers)
+        # The repack de-interleaves GPT-OSS's gate/up rows, so SWIGLUOAI runs as
+        # the packed SWIGLUOAI_UNINTERLEAVE. Not every quant path forwards the
+        # SwiGLU constants (gpt_oss.py does not), so fall back to the values
+        # swigluoai_and_mul hardcodes.
+        self.swigluoai_config = dataclasses.replace(
+            self.activation_config,
+            clamp_limit=_first_set(
+                quant_config.gemm1_clamp_limit, moe_config.swiglu_limit, 7.0
+            ),
+            alpha=_first_set(quant_config.gemm1_alpha, moe_config.swiglu_alpha, 1.702),
+            beta=_first_set(quant_config.gemm1_beta, moe_config.swiglu_beta, 1.0),
+        )
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -232,12 +262,15 @@ class RDNA3Mxfp4Experts(mk.FusedMoEExpertsModular):
         if w1_bias is not None:
             w1_out.add_(self._expert_bias_rows(w1_bias, topk_ids, expert_map, dtype))
 
-        # The repack de-interleaves GPT-OSS's gate/up rows, so the contiguous
-        # SwiGLU-OAI variant is the matching primitive; both read alpha/beta/
-        # clamp from the activation config.
         if activation == MoEActivation.SWIGLUOAI:
-            activation = MoEActivation.SWIGLUOAI_UNINTERLEAVE
-        self.activation(activation, act_out, w1_out)
+            apply_moe_activation(
+                MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+                act_out,
+                w1_out,
+                activation_config=self.swigluoai_config,
+            )
+        else:
+            self.activation(activation, act_out, w1_out)
 
         # down GEMM. The kernel's fused output_topk reduce is wrong under TP
         # (each rank's down-proj is a partial the layer all-reduces afterwards);
@@ -279,7 +312,7 @@ class RDNA3Mxfp4Experts(mk.FusedMoEExpertsModular):
                 sti,
                 eid,
                 ntp,
-                top_k,
+                1,
                 block_size_m,
                 not apply_router_weight_on_input,
                 top_k,

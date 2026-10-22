@@ -4,6 +4,7 @@
 import torch
 from torch.nn.parameter import Parameter
 
+from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp4Dynamic
 from vllm.platforms import current_platform
@@ -14,19 +15,9 @@ logger = init_logger(__name__)
 
 _MXFP4_GROUP_SIZE = 32
 
-# Fake/meta impl so the op is traceable under torch.compile + CUDA graphs.
-if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "mxfp4_gemm_rdna3"):
-    try:
-
-        @torch.library.register_fake("_rocm_C::mxfp4_gemm_rdna3")
-        def _mxfp4_gemm_rdna3_fake(a, b_q_weight, b_scales_e8m0):
-            return a.new_empty((a.shape[0], b_q_weight.shape[1]))
-    except RuntimeError:
-        pass  # already registered
-
 
 class Rdna3MxFp4LinearKernel(MxFp4LinearKernel):
-    """Weight-only MXFP4 GEMM for RDNA3 (gfx11xx) via the native HIP kernel
+    """Weight-only MXFP4 GEMM for RDNA3 (gfx1100) via the native HIP kernel
     ``_rocm_C.mxfp4_gemm_rdna3`` (scalar GEMV for decode, WMMA for prefill).
     RDNA3 has no native FP4 matmul, so E2M1 weights are dequantized on the fly
     into the f16/bf16 pipeline (W4A16).
@@ -88,7 +79,7 @@ class Rdna3MxFp4LinearKernel(MxFp4LinearKernel):
         if not x_2d.is_contiguous():
             x_2d = x_2d.contiguous()
 
-        out = torch.ops._rocm_C.mxfp4_gemm_rdna3(x_2d, layer.weight, layer.weight_scale)
+        out = ops.mxfp4_gemm_rdna3(x_2d, layer.weight, layer.weight_scale)
         if bias is not None:
             out = out + bias
         return out.view(out_shape)

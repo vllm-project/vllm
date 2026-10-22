@@ -532,6 +532,17 @@ void moe_mxfp4_gemm_rdna3(torch::Tensor a, torch::Tensor c,
       "a must be half or bfloat16");
   TORCH_CHECK(b_scales_e8m0.scalar_type() == torch::kUInt8,
               "b_scales_e8m0 must be uint8 (E8M0)");
+  for (const auto& t : {c, b_q_weight, b_scales_e8m0, topk_weights,
+                        sorted_token_ids, expert_ids, num_tokens_post_padded}) {
+    TORCH_CHECK(t.numel() == 0 || t.device() == a.device(),
+                "all tensors must be on the same device");
+  }
+  TORCH_CHECK(a.is_contiguous() && c.is_contiguous() &&
+                  b_q_weight.is_contiguous() && b_scales_e8m0.is_contiguous(),
+              "a, c and the weights must be contiguous");
+  TORCH_CHECK(b_q_weight.size(2) % 4 == 0,
+              "N must be a multiple of 4 (vector loads, packed atomics)");
+  TORCH_CHECK(block_size_m > 0, "block_size_m must be positive");
 
   const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
   auto stream = at::cuda::getCurrentCUDAStream();
@@ -544,6 +555,8 @@ void moe_mxfp4_gemm_rdna3(torch::Tensor a, torch::Tensor c,
   int expert_scales_stride =
       (int)(b_scales_e8m0.size(1) * b_scales_e8m0.size(2));
   int num_token_blocks = (int)(sorted_token_ids.size(0) / block_size_m);
+  TORCH_CHECK(expert_ids.size(0) >= num_token_blocks,
+              "expert_ids must have one entry per token block");
 
   const float* topk_w_ptr =
       (topk_weights.numel() > 0) ? topk_weights.data_ptr<float>() : nullptr;

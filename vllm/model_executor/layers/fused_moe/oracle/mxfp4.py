@@ -398,6 +398,7 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
         "xpu": [Mxfp4MoeBackend.XPU],
         "cpu": [Mxfp4MoeBackend.CPU],
         "emulation": [Mxfp4MoeBackend.EMULATION],
+        "rdna3": [Mxfp4MoeBackend.RDNA3_MXFP4],
     }
     if backends := mapping.get(runner_backend):
         return backends
@@ -925,7 +926,6 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
     w13_input_scale: torch.Tensor | None = None,
     w2_input_scale: torch.Tensor | None = None,
     _cache_permute_indices: dict[torch.Size, torch.Tensor] | None = None,
-    gate_up_interleaved: bool = True,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -934,13 +934,7 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
     torch.Tensor | None,
     torch.Tensor | None,
 ]:
-    """Convert loaded weights into backend-specific kernel format.
-
-    ``gate_up_interleaved`` describes the loaded ``w13`` layout: GPT-OSS fuses
-    gate/up row-interleaved ([g0, u0, g1, u1, ...]), while checkpoints with
-    separate gate_proj/up_proj tensors are already contiguous after ``_load_w13``.
-    Backends that only ever see GPT-OSS weights ignore it.
-    """
+    """Convert loaded weights into backend-specific kernel format."""
     if mxfp4_backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
         w13_weight_scale, w2_weight_scale = _pack_deepgemm_mxfp4_scales(
             w13_weight,
@@ -1003,13 +997,14 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             repack_experts_rdna3,
         )
 
+        deinterleave = layer.activation == MoEActivation.SWIGLUOAI
         b_q13, b_s13 = repack_experts_rdna3(
-            w13_weight.data, w13_weight_scale.data, deinterleave=gate_up_interleaved
+            w13_weight.data, w13_weight_scale.data, deinterleave=deinterleave
         )
         b_q2, b_s2 = repack_experts_rdna3(
             w2_weight.data, w2_weight_scale.data, deinterleave=False
         )
-        if gate_up_interleaved and w13_bias is not None:
+        if deinterleave and w13_bias is not None:
             w13_bias = torch.cat(
                 [w13_bias.data[:, ::2], w13_bias.data[:, 1::2]], dim=1
             ).contiguous()
