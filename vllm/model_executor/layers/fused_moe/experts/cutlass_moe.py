@@ -888,7 +888,11 @@ def run_cutlass_moe_mxfp4(
 
     a_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
     c_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
-    sorted_expert_ids = torch.empty_like(a_map)
+    # Below 17 experts the quant kernel uses a cheap linear offset scan; skip
+    # sorted_expert_ids to avoid extra routing writes and ID lookups.
+    sorted_expert_ids: torch.Tensor | None = None
+    if e > 16:
+        sorted_expert_ids = torch.empty_like(a_map)
 
     if apply_router_weight_on_input:
         assert num_topk == 1, (

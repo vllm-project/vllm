@@ -4,28 +4,27 @@
 
 """Benchmark MXFP4 MoE activation quant at GLM-5.3-shaped sizes.
 
-Two timed regions (``--timed-region``):
+Sweeps expert count at a fixed hidden width (default 6144). Two timed regions
+(``--timed-region``):
 
-* ``quant`` (default): ``mxfp4_experts_quant`` / ``silu_and_mul_mxfp4_experts_quant``
-  only, with synthetic routing offsets (kernel isolation).
-* ``metadata_and_quant``: ``get_cutlass_moe_mm_data`` → ``shuffle_rows`` → quant,
-  matching the Cutlass MXFP4 MoE preparation + activation quant sequence.
+* ``quant``: ``mxfp4_experts_quant`` / ``silu_and_mul_mxfp4_experts_quant`` only,
+  with synthetic routing offsets (kernel isolation).
+* ``metadata_and_quant``: ``get_cutlass_moe_mm_data`` → ``shuffle_rows`` → quant.
 * ``both``: run ``quant`` then ``metadata_and_quant``.
 
-Expert count is swept; routing uses 32 rows (two tokens on experts 0..15). GEMMs
-are outside the timed region.
+Routing uses 32 rows (two tokens on experts 0..15). GEMMs are outside the timed
+region.
 
 Run from a CUDA-built vLLM checkout, for example:
 
     .venv/bin/python benchmarks/kernels/benchmark_mxfp4_experts_activation_quant.py
     .venv/bin/python benchmarks/kernels/benchmark_mxfp4_experts_activation_quant.py \\
-        --timed-region metadata_and_quant --experts 256
+        --timed-region both --experts 16,32,64,128,256
 """
 
 from __future__ import annotations
 
 import argparse
-import statistics
 import sys
 from dataclasses import dataclass
 from enum import Enum
@@ -38,11 +37,11 @@ sys.path.insert(0, str(REPO_ROOT))
 
 import vllm._custom_ops  # noqa: E402, F401 -- registers torch.ops._C kernels
 from vllm import _custom_ops as ops  # noqa: E402
+from vllm.triton_utils import triton  # noqa: E402
 
-# GLM-5.3 MXFP4 MoE activation quant shapes (see cutlass MoE path).
 ROUTED_ROWS = 32
 TOPK = 1
-HIDDEN_SIZE = 6144
+DEFAULT_HIDDEN_SIZE = 6144
 INTERMEDIATE_IN = 1024
 INTERMEDIATE_OUT = 512
 DEFAULT_EXPERT_COUNTS = (16, 32, 64, 128, 256)
@@ -107,41 +106,15 @@ def decode_topk_ids(rows: int = ROUTED_ROWS) -> torch.Tensor:
     return ordered[perm].unsqueeze(1)
 
 
-def benchmark_graph(
-    invoke,
-    graph_nodes: int,
-    samples: int,
-) -> float:
-    warmup_stream = torch.cuda.Stream()
-    warmup_stream.wait_stream(torch.cuda.current_stream())
-    with torch.cuda.stream(warmup_stream):
-        for _ in range(5):
-            invoke()
-    torch.accelerator.synchronize()
-
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        for _ in range(graph_nodes):
-            invoke()
-    for _ in range(5):
-        graph.replay()
-    torch.accelerator.synchronize()
-
-    elapsed_us = []
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    for _ in range(samples):
-        start.record()
-        graph.replay()
-        end.record()
-        end.synchronize()
-        elapsed_us.append(start.elapsed_time(end) * 1_000 / graph_nodes)
-    return statistics.median(elapsed_us)
+def benchmark_invoke(invoke, rep: int) -> float:
+    """Median latency in microseconds (CUDA graph replay via Triton)."""
+    quantiles = [0.5, 0.2, 0.8]
+    ms, _, _ = triton.testing.do_bench_cudagraph(invoke, rep=rep, quantiles=quantiles)
+    return ms * 1_000
 
 
 def _quant_tensors(
     case: Case,
-    inputs: torch.Tensor,
     expert_offsets: torch.Tensor,
     blockscale_offsets: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -159,14 +132,11 @@ def _quant_tensors(
 def benchmark_mxfp4_quant_only(
     case: Case,
     inputs: torch.Tensor,
-    graph_nodes: int,
-    samples: int,
+    rep: int,
     sorted_first: bool,
 ) -> tuple[float, float]:
     expert_offsets, blockscale_offsets, expert_ids, _ = routing_offsets(case.experts)
-    output, output_scales = _quant_tensors(
-        case, inputs, expert_offsets, blockscale_offsets
-    )
+    output, output_scales = _quant_tensors(case, expert_offsets, blockscale_offsets)
     op = (
         torch.ops._C.silu_and_mul_mxfp4_experts_quant
         if case.fused_silu_mul
@@ -196,13 +166,13 @@ def benchmark_mxfp4_quant_only(
         )
 
     if sorted_first:
-        direct_id_us = benchmark_graph(invoke_sorted, graph_nodes, samples)
-        baseline_us = benchmark_graph(invoke_offset, graph_nodes, samples)
+        direct_id_us = benchmark_invoke(invoke_sorted, rep)
+        baseline_us = benchmark_invoke(invoke_offset, rep)
     else:
-        baseline_us = benchmark_graph(invoke_offset, graph_nodes, samples)
+        baseline_us = benchmark_invoke(invoke_offset, rep)
         baseline_output = output.clone()
         baseline_scales = output_scales.clone()
-        direct_id_us = benchmark_graph(invoke_sorted, graph_nodes, samples)
+        direct_id_us = benchmark_invoke(invoke_sorted, rep)
         if not (
             torch.equal(output, baseline_output)
             and torch.equal(output_scales, baseline_scales)
@@ -216,8 +186,7 @@ def benchmark_mxfp4_quant_only(
 def benchmark_mxfp4_metadata_and_quant(
     case: Case,
     inputs: torch.Tensor,
-    graph_nodes: int,
-    samples: int,
+    rep: int,
     sorted_first: bool,
 ) -> tuple[float, float]:
     num_experts = case.experts
@@ -230,7 +199,6 @@ def benchmark_mxfp4_metadata_and_quant(
     output_permutation = torch.empty_like(input_permutation)
     sorted_expert_ids = torch.empty_like(input_permutation)
 
-    # Warmup metadata once to size scale buffers.
     torch.ops._C.get_cutlass_moe_mm_data(
         topk_ids,
         expert_offsets,
@@ -245,9 +213,7 @@ def benchmark_mxfp4_metadata_and_quant(
         case.is_gated,
         sorted_expert_ids,
     )
-    output, output_scales = _quant_tensors(
-        case, inputs, expert_offsets, blockscale_offsets
-    )
+    output, output_scales = _quant_tensors(case, expert_offsets, blockscale_offsets)
     op = (
         torch.ops._C.silu_and_mul_mxfp4_experts_quant
         if case.fused_silu_mul
@@ -307,13 +273,13 @@ def benchmark_mxfp4_metadata_and_quant(
         )
 
     if sorted_first:
-        direct_id_us = benchmark_graph(invoke_sorted, graph_nodes, samples)
-        baseline_us = benchmark_graph(invoke_offset, graph_nodes, samples)
+        direct_id_us = benchmark_invoke(invoke_sorted, rep)
+        baseline_us = benchmark_invoke(invoke_offset, rep)
     else:
-        baseline_us = benchmark_graph(invoke_offset, graph_nodes, samples)
+        baseline_us = benchmark_invoke(invoke_offset, rep)
         baseline_output = output.clone()
         baseline_scales = output_scales.clone()
-        direct_id_us = benchmark_graph(invoke_sorted, graph_nodes, samples)
+        direct_id_us = benchmark_invoke(invoke_sorted, rep)
         if not (
             torch.equal(output, baseline_output)
             and torch.equal(output_scales, baseline_scales)
@@ -372,23 +338,30 @@ def parse_timed_region(raw: str) -> TimedRegion:
         raise ValueError(f"timed-region must be one of: {choices}") from None
 
 
-def build_cases(experts: tuple[int, ...]) -> list[tuple[Case, torch.Tensor]]:
+def build_cases(
+    experts: tuple[int, ...],
+    hidden_size: int,
+) -> list[tuple[Case, torch.Tensor]]:
     cases: list[tuple[Case, torch.Tensor]] = []
+    hidden_input = torch.randn(
+        (ROUTED_ROWS, hidden_size), device="cuda", dtype=torch.bfloat16
+    )
+    intermediate_input = torch.randn(
+        (ROUTED_ROWS, INTERMEDIATE_IN), device="cuda", dtype=torch.bfloat16
+    )
     for expert_count in experts:
         cases.append(
             (
                 Case(
                     "mxfp4_experts_quant",
-                    HIDDEN_SIZE,
+                    hidden_size,
                     False,
                     expert_count,
                     mm_n=4096,
-                    mm_k=HIDDEN_SIZE,
+                    mm_k=hidden_size,
                     is_gated=False,
                 ),
-                torch.randn(
-                    (ROUTED_ROWS, HIDDEN_SIZE), device="cuda", dtype=torch.bfloat16
-                ),
+                hidden_input,
             )
         )
         cases.append(
@@ -398,13 +371,11 @@ def build_cases(experts: tuple[int, ...]) -> list[tuple[Case, torch.Tensor]]:
                     INTERMEDIATE_OUT,
                     True,
                     expert_count,
-                    mm_n=HIDDEN_SIZE,
+                    mm_n=hidden_size,
                     mm_k=INTERMEDIATE_OUT,
                     is_gated=True,
                 ),
-                torch.randn(
-                    (ROUTED_ROWS, INTERMEDIATE_IN), device="cuda", dtype=torch.bfloat16
-                ),
+                intermediate_input,
             )
         )
     return cases
@@ -413,12 +384,10 @@ def build_cases(experts: tuple[int, ...]) -> list[tuple[Case, torch.Tensor]]:
 def run_region(
     region: TimedRegion,
     cases: list[tuple[Case, torch.Tensor]],
-    graph_nodes: int,
-    samples: int,
+    rep: int,
     sorted_first: bool,
 ) -> None:
-    label = region.value
-    print(f"timed_region={label}")
+    print(f"timed_region={region.value}")
     print("kernel,experts,variant,median_us,speedup_vs_offset_search")
     bench_fn = (
         benchmark_mxfp4_metadata_and_quant
@@ -426,9 +395,7 @@ def run_region(
         else benchmark_mxfp4_quant_only
     )
     for case, inputs in cases:
-        baseline_us, direct_id_us = bench_fn(
-            case, inputs, graph_nodes, samples, sorted_first
-        )
+        baseline_us, direct_id_us = bench_fn(case, inputs, rep, sorted_first)
         print(f"{case.kernel},{case.experts},offset_search,{baseline_us:.4f},1.0000")
         print(
             f"{case.kernel},{case.experts},sorted_expert_id,"
@@ -439,8 +406,18 @@ def run_region(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--graph-nodes", type=int, default=128)
-    parser.add_argument("--samples", type=int, default=30)
+    parser.add_argument(
+        "--rep",
+        type=int,
+        default=100,
+        help="Repeat count (default: 100)",
+    )
+    parser.add_argument(
+        "--hidden-size",
+        type=int,
+        default=DEFAULT_HIDDEN_SIZE,
+        help=f"hidden activation width K (default: {DEFAULT_HIDDEN_SIZE})",
+    )
     parser.add_argument(
         "--experts",
         type=parse_expert_counts,
@@ -466,8 +443,10 @@ def main() -> None:
     )
     parser.add_argument("--skip-metadata-check", action="store_true")
     args = parser.parse_args()
-    if args.graph_nodes < 1 or args.samples < 1:
-        parser.error("--graph-nodes and --samples must be positive")
+    if args.rep < 1:
+        parser.error("--rep must be positive")
+    if args.hidden_size < 128 or args.hidden_size % 128 != 0:
+        parser.error("--hidden-size must be a multiple of 128 and >= 128")
     if not torch.cuda.is_available():
         parser.error("requires a CUDA GPU")
     capability = torch.cuda.get_device_capability()
@@ -478,10 +457,10 @@ def main() -> None:
     if not args.skip_metadata_check:
         verify_sorted_id_writer(num_experts=256)
 
-    cases = build_cases(args.experts)
+    cases = build_cases(args.experts, args.hidden_size)
     print(f"GPU: {torch.cuda.get_device_name()} (SM{capability[0]}{capability[1]})")
     print(
-        f"shapes: hidden={ROUTED_ROWS}x{HIDDEN_SIZE}, "
+        f"hidden={ROUTED_ROWS}x{args.hidden_size}, "
         f"intermediate={ROUTED_ROWS}x{INTERMEDIATE_IN}->{INTERMEDIATE_OUT}, "
         f"topk={TOPK}"
     )
@@ -493,13 +472,7 @@ def main() -> None:
         regions = [args.timed_region]
 
     for region in regions:
-        run_region(
-            region,
-            cases,
-            args.graph_nodes,
-            args.samples,
-            args.sorted_id_first,
-        )
+        run_region(region, cases, args.rep, args.sorted_id_first)
 
 
 if __name__ == "__main__":

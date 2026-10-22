@@ -215,7 +215,7 @@ __global__ void __launch_bounds__(1024, VLLM_BLOCKS_PER_SM(1024))
 
     if (sorted_expert_ids != nullptr) {
       expert_idx = __ldca(&sorted_expert_ids[rowIdx]);
-      rowIdx_in_expert = rowIdx - __ldca(&input_offset_by_experts[expert_idx]);
+      rowIdx_in_expert = rowIdx - shared_input_offsets[expert_idx];
     } else {
       // Binary search through experts using shared memory
       int left = 0, right = n_experts - 1;
