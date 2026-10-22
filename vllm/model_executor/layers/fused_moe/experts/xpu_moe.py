@@ -453,10 +453,6 @@ class XPUExpertsWNA16(XPUExperts):
 
 
 class XPUExpertsMxFp4(XPUExperts):
-    @staticmethod
-    def supports_lora() -> bool:
-        return False
-
     def __init__(
         self,
         moe_config: FusedMoEConfig,
