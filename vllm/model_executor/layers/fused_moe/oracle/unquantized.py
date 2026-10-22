@@ -19,7 +19,10 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.oracle.base import MoEKernelOracle
+from vllm.model_executor.layers.fused_moe.oracle.base import (
+    MoEKernelOracle,
+    make_fused_moe_experts,
+)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     align_moe_weights_for_fi,
     convert_moe_weights_to_flashinfer_trtllm_block_layout,
@@ -529,41 +532,12 @@ def make_unquantized_moe_kernel(
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
     logger.info_once("Using %s MoE backend", experts_cls.__name__)
 
-    # Fail fast when the selected experts kernel requires the batched-experts
-    # activation format but the prepare/finalize stage produces a different
-    # one (e.g. moe_backend="batched_triton" on CUDA without all2all kernels,
-    # where maybe_make_prepare_finalize falls back to a naive Standard-format
-    # stage on non-XPU platforms).
-    if (
-        experts_cls.activation_format() == mk.FusedMoEActivationFormat.BatchedExperts
-        and prepare_finalize.activation_format
-        != mk.FusedMoEActivationFormat.BatchedExperts
-    ):
-        raise ValueError(
-            f"{experts_cls.__name__} requires the batched-experts activation "
-            "format, but the prepare/finalize stage "
-            f"({prepare_finalize.__class__.__name__}) produces "
-            f"{prepare_finalize.activation_format.name}. "
-            'moe_backend="batched_triton" requires the batched '
-            "prepare/finalize path (all2all kernels or the XPU batched "
-            'opt-in); use moe_backend="triton" instead.'
-        )
-
-    # Create Experts
-    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
-        max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
-        assert max_num_tokens is not None
-        experts = experts_cls(
-            moe_config=moe_config,
-            quant_config=quant_config,
-            max_num_tokens=max_num_tokens,
-            num_dispatchers=prepare_finalize.num_dispatchers(),
-        )
-    else:
-        experts = experts_cls(
-            moe_config=moe_config,
-            quant_config=quant_config,
-        )
+    experts = make_fused_moe_experts(
+        prepare_finalize,
+        experts_cls,
+        moe_config,
+        quant_config,
+    )
 
     kernel = mk.FusedMoEKernel(
         prepare_finalize,

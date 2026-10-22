@@ -16,6 +16,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     int4_w4afp8_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.oracle.base import make_fused_moe_experts
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8DynamicTokenSym,
@@ -265,9 +266,11 @@ def make_w4a8_moe_kernel(
 
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 
-    experts = experts_cls(
-        moe_config=moe_config,
-        quant_config=moe_quant_config,
+    experts = make_fused_moe_experts(
+        prepare_finalize,
+        experts_cls,
+        moe_config,
+        moe_quant_config,
         b_strides1=b_strides1,
         b_strides2=b_strides2,
         group_size=group_size,

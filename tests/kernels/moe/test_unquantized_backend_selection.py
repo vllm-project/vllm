@@ -668,7 +668,10 @@ def test_batched_triton_rejects_non_batched_prepare_finalize():
         _w2=FusedMoEQuantDesc(),
     )
 
-    with pytest.raises(ValueError, match='moe_backend="batched_triton"'):
+    with pytest.raises(
+        ValueError,
+        match="BatchedTritonExperts expects BatchedExperts activations",
+    ):
         make_unquantized_moe_kernel(
             quant_config=quant_config,
             moe_config=moe_config,
