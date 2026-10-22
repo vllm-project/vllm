@@ -155,7 +155,6 @@ class EngineCoreSentinel:
 
     def _clear_contaminated_blocks(self) -> None:
         """Evict KV blocks possibly contaminated by the failed step."""
-
         scheduler = cast(Scheduler, self.engine.scheduler)
         kv_cache_manager = scheduler.kv_cache_manager
         dirty_block_ids: set[int] = set()
