@@ -218,7 +218,9 @@ class AsyncLLM(EngineClient):
         self.output_handler: asyncio.Task | None = None
         # Set once shutdown() is under way, so the output handler can tell a
         # dead engine core apart from an engine core that was asked to stop.
-        self._shutting_down = False
+        # Mutable so the handler can read it without capturing self, which
+        # would keep this object alive past deletion.
+        self._shutting_down_ref = [False]
         try:
             # Start output handler eagerly if we are in the asyncio eventloop.
             asyncio.get_running_loop()
@@ -309,7 +311,7 @@ class AsyncLLM(EngineClient):
         """Shutdown, cleaning up the background proc and IPC."""
         # Before the engine core goes, because the output handler reads it on
         # the event loop while this runs in an executor thread.
-        self._shutting_down = True
+        self._shutting_down_ref[0] = True
         shutdown_prometheus()
 
         if renderer := getattr(self, "renderer", None):
@@ -874,6 +876,7 @@ class AsyncLLM(EngineClient):
         # a circular reference via self.
         self._logger_ref = [self.logger_manager]
         logger_ref = self._logger_ref
+        shutting_down = self._shutting_down_ref
         renderer = self.renderer
         # P0 multi-modal sender ("shadow") cache; None for text-only models.
         mm_processor_cache = renderer.mm_processor_cache
@@ -946,7 +949,7 @@ class AsyncLLM(EngineClient):
                     )
                     output_processor.propagate_error(e)
                     return
-                if self._shutting_down and isinstance(e, EngineDeadError):
+                if shutting_down[0] and isinstance(e, EngineDeadError):
                     # shutdown() stops the engine core before it cancels this
                     # task, and the launcher runs it in an executor so the loop
                     # keeps going in between. A read in flight then finds the
