@@ -2479,6 +2479,8 @@ def test_sharded_candidate_merge_deduplicates_and_forces(
     _assert_sharded_topk(
         actual, scores.max(dim=0).values.unsqueeze(1), counts, init_blocks, local_blocks
     )
+    tie_ids = list(range(1 - init_blocks, 16 - init_blocks)) + [47]
+    assert actual[2, 0].tolist() == tie_ids
     assert errors.item() == 0
     assert torch.count_nonzero(recv[..., 32]).item() == 0
     torch.testing.assert_close(recv[..., :32], before[..., :32], rtol=0, atol=0)
