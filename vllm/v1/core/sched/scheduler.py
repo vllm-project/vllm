@@ -30,6 +30,7 @@ from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.utils import get_mm_features_in_window
+from vllm.outputs import RequestError
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
@@ -249,7 +250,7 @@ class Scheduler(SchedulerInterface):
 
         # Grammar compilation failures to finish as per-request errors in
         # update_from_output.
-        self.grammar_compile_error_reqs: set[str] = set()
+        self.grammar_compile_error_reqs: dict[str, RequestError] = {}
         self.encoder_cache_mismatch_reqs: set[str] = set()
 
         # Encoder-related.
@@ -1126,8 +1127,13 @@ class Scheduler(SchedulerInterface):
                         num_computed_tokens = 0
                         load_kv_async = False
 
-                    # Skip request with pending mm encoding prefetches
-                    if self._ec_transfer_pending(request, num_computed_tokens):
+                    # Include encoder inputs needed to replay the prefix tail.
+                    ec_computed_tokens = num_computed_tokens
+                    if not window_loaded:
+                        ec_computed_tokens = max(
+                            0, num_computed_tokens - self.prefix_replay_tokens
+                        )
+                    if self._ec_transfer_pending(request, ec_computed_tokens):
                         skip_request(request_queue)
                         continue
 
@@ -2288,13 +2294,13 @@ class Scheduler(SchedulerInterface):
                 stopped = True
 
             routed_experts = None
-            indexer_rows = None
+            indexer_topk = None
             indexer_profile = None
             should_emit_output = bool(
                 new_token_ids or pooler_output is not None or stopped
             )
             if self.aux_output_connector is not None and should_emit_output:
-                routed_experts, indexer_rows, indexer_profile = (
+                routed_experts, indexer_topk, indexer_profile = (
                     self.aux_output_connector.take_output(
                         request, model_runner_output.aux_output_connector_output
                     )
@@ -2379,7 +2385,7 @@ class Scheduler(SchedulerInterface):
                         ec_transfer_params=ec_transfer_params,
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
-                        indexer_rows=indexer_rows,
+                        indexer_topk=indexer_topk,
                         indexer_profile=indexer_profile,
                         indexer_output_format=self.vllm_config.aux_output_config.indexer_output_format,
                         num_nans_in_logits=request.num_nans_in_logits,
@@ -2401,8 +2407,9 @@ class Scheduler(SchedulerInterface):
         for request in continuing_reqs:
             self._enqueue_waiting_request(request)
 
-        error_req_ids = set(self.grammar_compile_error_reqs)
-        self.grammar_compile_error_reqs.clear()
+        request_errors = self.grammar_compile_error_reqs
+        self.grammar_compile_error_reqs = {}
+        error_req_ids = set(request_errors)
         error_req_ids.update(self.encoder_cache_mismatch_reqs)
         self.encoder_cache_mismatch_reqs.clear()
         if failed_kv_load_req_ids and not self.recompute_kv_load_failures:
@@ -2424,6 +2431,7 @@ class Scheduler(SchedulerInterface):
                         finish_reason=request.get_finished_reason(),
                         events=request.take_events(),
                         trace_headers=request.trace_headers,
+                        error=request_errors.get(request.request_id),
                     )
                 )
 
@@ -3297,7 +3305,10 @@ class Scheduler(SchedulerInterface):
             if not struct_output_req or struct_output_req.grammar is None:
                 return False
             if isinstance(struct_output_req.grammar, Exception):
-                self.grammar_compile_error_reqs.add(request.request_id)
+                self.grammar_compile_error_reqs[request.request_id] = RequestError(
+                    code="validation_error",
+                    message=f"Invalid structured outputs: {struct_output_req.grammar}",
+                )
                 return False
             # Grammar is ready, promote to waiting state.
             request.status = RequestStatus.WAITING

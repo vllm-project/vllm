@@ -805,7 +805,7 @@ class OutputProcessor:
             stop_reason = engine_core_output.stop_reason
             kv_transfer_params = engine_core_output.kv_transfer_params
             ec_transfer_params = engine_core_output.ec_transfer_params
-            if engine_core_output.indexer_rows is not None:
+            if engine_core_output.indexer_topk is not None:
                 if (
                     req_state.indexer_profile is not None
                     and req_state.indexer_profile != engine_core_output.indexer_profile
@@ -813,7 +813,7 @@ class OutputProcessor:
                     raise ValueError("Indexer profile changed during a request")
                 if req_state.indexer_chunks is None:
                     req_state.indexer_chunks = []
-                req_state.indexer_chunks.append(engine_core_output.indexer_rows)
+                req_state.indexer_chunks.append(engine_core_output.indexer_topk)
                 req_state.indexer_profile = engine_core_output.indexer_profile
                 req_state.indexer_output_format = (
                     engine_core_output.indexer_output_format
@@ -949,9 +949,9 @@ class OutputProcessor:
             )
         if output.routed_experts is not None:
             req_state.routed_experts_chunks[-1] = output.routed_experts[:-num_dropped]
-        if output.indexer_rows is not None:
+        if output.indexer_topk is not None:
             assert req_state.indexer_chunks is not None
-            req_state.indexer_chunks[-1] = output.indexer_rows[:-num_dropped]
+            req_state.indexer_chunks[-1] = output.indexer_topk[:-num_dropped]
 
     def _finish_request(self, req_state: RequestState) -> None:
         req_id = req_state.request_id

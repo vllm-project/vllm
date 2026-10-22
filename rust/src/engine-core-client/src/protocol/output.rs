@@ -151,7 +151,7 @@ pub struct EngineCoreOutput {
     pub error: Option<Box<RequestError>>,
     /// Compact indexer rows, described by the versioned artifact profile.
     #[serde(default)]
-    pub indexer_rows: Option<Box<WireNdArray>>,
+    pub indexer_topk: Option<Box<WireNdArray>>,
     #[serde(default)]
     pub indexer_profile: Option<OpaqueValue>,
     #[serde(default = "default_indexer_output_format")]
@@ -174,6 +174,19 @@ pub struct RequestError {
     pub message: String,
     #[serde(default)]
     pub retryable: bool,
+}
+
+impl RequestError {
+    /// `code` of an error caused by the request itself, e.g. a structured-output
+    /// constraint the engine's backend cannot compile. Python raises
+    /// `VLLMValidationError` for it.
+    pub const VALIDATION_ERROR: &str = "validation_error";
+
+    /// Whether the request itself is invalid, so frontends report a client
+    /// error.
+    pub fn is_validation_error(&self) -> bool {
+        self.code == Self::VALIDATION_ERROR
+    }
 }
 
 /// Raw per-sequence speculative-decoding accumulator.
@@ -226,10 +239,10 @@ impl EngineCoreOutput {
                 .resolve_aux_frame(frames)
                 .map_err(|message| ext_value_decode!("prompt_token_id_logprobs: {message}"))?;
         }
-        if let Some(value) = self.indexer_rows.as_mut() {
+        if let Some(value) = self.indexer_topk.as_mut() {
             value
                 .resolve_aux_frame(frames)
-                .map_err(|message| ext_value_decode!("indexer_rows: {message}"))?;
+                .map_err(|message| ext_value_decode!("indexer_topk: {message}"))?;
         }
         if let Some(value) = self.routed_experts.as_mut() {
             value
@@ -598,9 +611,9 @@ mod tests {
                             spec_decode_metrics: None,
                             prompt_token_id_logprobs: None,
                             error: None,
-                            indexer_rows: None,
+                            indexer_topk: None,
                             indexer_profile: None,
-                            indexer_output_format: "raw",
+                            indexer_output_format: "raw".to_owned(),
                         },
                     ],
                     scheduler_stats: None,
