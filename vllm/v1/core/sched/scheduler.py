@@ -1122,8 +1122,13 @@ class Scheduler(SchedulerInterface):
                         num_computed_tokens = 0
                         load_kv_async = False
 
-                    # Skip request with pending mm encoding prefetches
-                    if self._ec_transfer_pending(request, num_computed_tokens):
+                    # Include encoder inputs needed to replay the prefix tail.
+                    ec_computed_tokens = num_computed_tokens
+                    if not window_loaded:
+                        ec_computed_tokens = max(
+                            0, num_computed_tokens - self.prefix_replay_tokens
+                        )
+                    if self._ec_transfer_pending(request, ec_computed_tokens):
                         skip_request(request_queue)
                         continue
 
