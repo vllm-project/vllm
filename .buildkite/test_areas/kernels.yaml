@@ -44,9 +44,9 @@ steps:
     - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py kernels/test_concat_mla_q.py kernels/test_fused_qk_norm_rope_gate.py
   mirror:
     amd:
-      parallelism: 3
-      label: ":amd: (MI300) Core Operation Kernels Shard %N"
+      label: ":amd: (MI300) Core Operation Kernels"
       dind: false
+      automatic_shard: true
       device: mi300_1
       timeout_in_minutes: 45
       working_dir: "/vllm-workspace/tests"
@@ -65,7 +65,7 @@ steps:
       - vllm/platforms/rocm.py
       - tests/kernels/test_fused_qk_norm_rope_gate.py
       commands:
-      - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py kernels/test_fused_qk_norm_rope_gate.py kernels/test_concat_mla_q.py kernels/test_top_k_per_row.py kernels/test_rocm_fp32_router_gemm.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+      - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py kernels/test_fused_qk_norm_rope_gate.py kernels/test_concat_mla_q.py kernels/test_top_k_per_row.py kernels/test_rocm_fp32_router_gemm.py
 
 - label: ":nvidia: (H100) MiniMax Reduce RMS Kernels"
   key: kernels-minimax-reduce-rms-test-2-gpus
@@ -310,9 +310,11 @@ steps:
           kernels/test_kpool_decode_update_batched.py
           kernels/test_minimax_m3_amd_ops.py
           kernels/test_minimax_m3_sparse_attn_fp8_scale.py
+          kernels/test_muse_spark_router_bf16x3.py
           kernels/test_onednn.py
           kernels/test_relu2_fp8_quant.py
           --deselect=tests/kernels/test_bf16_skinny_gemm.py::test_every_dsv3_routed_shape_is_instantiated
+      - pytest -v -s kernels/test_fused_muse_spark_qknorm_rope_kv_insert.py -k rocm
 
 - label: ":nvidia: (L4) Attention Kernels Shard %N"
   key: kernels-attention-test
