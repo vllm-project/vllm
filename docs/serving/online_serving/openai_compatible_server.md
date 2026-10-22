@@ -174,6 +174,13 @@ see our [Multimodal Inputs](../../features/multimodal_inputs.md) guide for more 
 
 Code example: [examples/basic/online_serving/openai_chat_completion_client.py](../../../examples/basic/online_serving/openai_chat_completion_client.py)
 
+Assistant history messages may include `reasoning` or the deprecated
+`reasoning_content` spelling. When both are present, a non-null `reasoning`
+takes precedence, including an empty string; otherwise, a non-null
+`reasoning_content` supplies the reasoning. This rule also applies to the Rust
+frontend and does not depend on JSON key order. The Rust frontend requires the
+selected reasoning value to be a string or null.
+
 #### Extra parameters
 
 The following [sampling parameters](../../api/README.md#inference-parameters) are supported.

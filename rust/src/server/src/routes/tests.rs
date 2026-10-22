@@ -444,6 +444,7 @@ async fn recv_engine_message(dealer: &mut DealerSocket) -> Vec<Bytes> {
 struct FakeChatBackend {
     model_id: String,
     multimodal_model_info: Option<vllm_chat::multimodal::MultimodalModelInfo>,
+    renderer: Option<DynChatRenderer>,
 }
 
 /// Synthetic BOS id used when `add_special_tokens` is true in tests.
@@ -468,6 +469,7 @@ impl FakeChatBackend {
         Self {
             model_id: "test-model".to_string(),
             multimodal_model_info: None,
+            renderer: None,
         }
     }
 
@@ -475,6 +477,7 @@ impl FakeChatBackend {
         Self {
             model_id: model_id.into(),
             multimodal_model_info: None,
+            renderer: None,
         }
     }
 
@@ -484,6 +487,7 @@ impl FakeChatBackend {
         Self {
             model_id: "test-model".to_string(),
             multimodal_model_info: Some(multimodal_model_info),
+            renderer: None,
         }
     }
 }
@@ -508,7 +512,7 @@ impl TextBackend for FakeChatBackend {
 
 impl ChatBackend for FakeChatBackend {
     fn chat_renderer(&self) -> DynChatRenderer {
-        Arc::new(self.clone())
+        self.renderer.clone().unwrap_or_else(|| Arc::new(self.clone()))
     }
 
     fn multimodal_model_info(&self) -> Option<&vllm_chat::multimodal::MultimodalModelInfo> {
@@ -1444,6 +1448,176 @@ where
         ))),
         engine_task,
     )
+}
+
+#[tokio::test]
+async fn chat_reasoning_aliases_reach_template_and_engine_once() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("config.json"), "{}").unwrap();
+    fs::write(dir.path().join("tokenizer.json"), "{}").unwrap();
+    fs::write(
+        dir.path().join("tokenizer_config.json"),
+        json!({"chat_template": concat!(
+            "{% for m in messages %}{{ m.role }}:{{ m.content }}",
+            "{% if m.reasoning is defined %}[{{ m.reasoning }}]{% endif %}",
+            "{% for t in m.tool_calls|default([]) %}",
+            "{{ t.id }}:{{ t.function.name }}:{{ t.function.arguments|tojson }}{% endfor %};",
+            "{% endfor %}"
+        )})
+        .to_string(),
+    )
+    .unwrap();
+    let files = vllm_text::backend::hf::ResolvedModelFiles::new(dir.path().to_str().unwrap(), None)
+        .await
+        .unwrap();
+    let renderer = vllm_chat::HfChatBackend::from_resolved_model_files(
+        files,
+        "test-model".to_string(),
+        vllm_chat::LoadModelBackendsOptions::default(),
+        Arc::new(fake_chat_tokenizer()),
+    )
+    .unwrap()
+    .chat_renderer();
+    let backend = Arc::new(FakeChatBackend {
+        renderer: Some(renderer),
+        ..FakeChatBackend::new()
+    });
+
+    for (fields, rendered_reasoning) in [
+        (
+            r#", "reasoning":"canonical", "reasoning_content":"legacy""#,
+            "[canonical]",
+        ),
+        (
+            r#", "reasoning_content":"legacy", "reasoning":"canonical""#,
+            "[canonical]",
+        ),
+        (
+            r#", "reasoning":null, "reasoning_content":"legacy""#,
+            "[legacy]",
+        ),
+        (
+            r#", "reasoning_content":"legacy", "reasoning":null"#,
+            "[legacy]",
+        ),
+        (r#", "reasoning":"", "reasoning_content":"legacy""#, ""),
+        (r#", "reasoning":"canonical""#, "[canonical]"),
+        (r#", "reasoning_content":"legacy""#, "[legacy]"),
+        (r#", "reasoning_content":"""#, ""),
+        (r#", "reasoning":"""#, ""),
+        (r#", "reasoning":null"#, ""),
+        (r#", "reasoning_content":null"#, ""),
+        (
+            r#", "reasoning":"canonical", "reasoning_content":null"#,
+            "[canonical]",
+        ),
+        (
+            r#", "reasoning":"same", "reasoning_content":"same""#,
+            "[same]",
+        ),
+        (r#", "reasoning":null, "reasoning_content":null"#, ""),
+        (
+            r#", "reasoning":"canonical", "reasoning_content":{}"#,
+            "[canonical]",
+        ),
+        (r#", "thinking":"thought""#, "[thought]"),
+        ("", ""),
+    ] {
+        let expected = bytes_to_token_ids(format!(
+            "user:hi;assistant:answer{rendered_reasoning}call_1:lookup:{{\"q\": \"hi\"}};tool:result;user:again;"
+        ).as_bytes());
+        let (mut app, engine) =
+            test_app_with_backend_and_engine_request_check(backend.clone(), move |request| {
+                assert_eq!(
+                    request.prompt_token_ids.as_deref(),
+                    Some(expected.as_slice())
+                );
+            })
+            .await;
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{
+                "model":"Qwen/Qwen1.5-0.5B-Chat", "max_tokens":8,
+                "messages":[{{"role":"user","content":"hi"}},
+                    {{"role":"assistant","name":"agent","content":"answer"{fields},
+                      "tool_calls":[{{"id":"call_1","type":"function",
+                        "function":{{"name":"lookup","arguments":"{{\"q\":\"hi\"}}"}}}}]}},
+                    {{"role":"tool","tool_call_id":"call_1","content":"result"}},
+                    {{"role":"user","content":"again"}}]}}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{fields}: {}",
+            String::from_utf8_lossy(&body)
+        );
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["choices"][0]["message"]["content"], "hi");
+        drop(app);
+        engine.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn chat_reasoning_aliases_keep_selected_type_errors() {
+    let (mut app, engine) = test_app_with_engine_handle().await;
+    for (fields, expected_error) in [
+        (
+            r#""reasoning":42,"reasoning_content":"legacy""#,
+            "invalid type",
+        ),
+        (r#""reasoning":false"#, "invalid type"),
+        (r#""reasoning":[],"reasoning_content":null"#, "invalid type"),
+        (r#""reasoning":null,"reasoning_content":{}"#, "invalid type"),
+        (r#""reasoning_content":42"#, "invalid type"),
+        (r#""thinking":false"#, "invalid type"),
+        (
+            r#""reasoning":"canonical","thinking":"thought""#,
+            "duplicate field `reasoning`",
+        ),
+        (
+            r#""reasoning_content":null,"thinking":"thought""#,
+            "duplicate field `reasoning`",
+        ),
+        (
+            r#""reasoning_content":"legacy","thinking":"thought""#,
+            "duplicate field `reasoning`",
+        ),
+    ] {
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"model":"Qwen/Qwen1.5-0.5B-Chat",
+                "messages":[{{"role":"assistant","content":"answer",{fields}}}]}}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{fields}");
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["code"], 400, "{fields}");
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(message.contains(expected_error), "{fields}: {message}");
+    }
+    drop(app);
+    engine.abort_and_join().await;
 }
 
 async fn test_chat_with_engine_handle() -> (ChatLlm, MockEngineTask) {
