@@ -31,7 +31,10 @@ from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2MixtureOfExperts,
     DeepseekV2MoE,
     _try_load_fp8_indexer_wk,
+    finalize_mega_moe_weights,
     get_spec_layer_idx_from_weight_name,
+    mega_moe_routed_experts_prefix,
+    reject_mega_moe_reload,
 )
 from vllm.model_executor.models.interfaces import SupportsPP
 from vllm.model_executor.models.utils import (
@@ -274,6 +277,7 @@ class DeepseekV32MultiTokenPredictor(nn.Module):
 class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        self.model_config = vllm_config.model_config
         self.config = vllm_config.model_config.hf_config
         self.quant_config = vllm_config.quant_config
         self.model = DeepseekV32MultiTokenPredictor(
@@ -363,6 +367,7 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        reject_mega_moe_reload(self, self.model_config)
         stacked_params_mapping = [
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
@@ -377,6 +382,7 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
             num_experts=self.config.n_routed_experts,
+            routed_experts_prefix=mega_moe_routed_experts_prefix(self.moe_mlp_layers),
         )
 
         pp_missing_layer_names = get_pp_missing_layer_names(self)
@@ -497,3 +503,6 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
                     f"missing from checkpoint."
                 )
         return loaded_params
+
+    def process_weights_after_loading(self) -> None:
+        finalize_mega_moe_weights(self.moe_mlp_layers)
