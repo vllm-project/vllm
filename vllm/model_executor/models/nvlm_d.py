@@ -28,7 +28,7 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
     cached_encode,
 )
-from vllm.transformers_utils.processors.internvl import InternVLImageProcessor
+from vllm.transformers_utils.processors.internvl import InternVLChatImageProcessor
 from vllm.transformers_utils.processors.nvlm_d import NVLMProcessor
 
 from .intern_vit import InternVisionModel
@@ -52,7 +52,7 @@ class NVLMProcessingInfo(BaseInternVLProcessingInfo):
         kwargs.setdefault("dynamic_image_size", config.dynamic_image_size)
         kwargs.setdefault("use_thumbnail", config.use_thumbnail)
 
-        return InternVLImageProcessor(**kwargs)
+        return InternVLChatImageProcessor(**kwargs)
 
     def get_hf_processor(self, **kwargs: object) -> NVLMProcessor:
         config = self.get_hf_config()
