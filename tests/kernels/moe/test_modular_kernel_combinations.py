@@ -747,6 +747,82 @@ def test_aiter_moe_dispatch_policy_forwarded_through_apply(dispatch_policy: int)
     )
 
 
+def _channel_tkw1_ownership_worker(
+    pgi: ProcessGroupInfo,
+    vllm_config: VllmConfig,
+    cpu_group,
+    config: Config,
+    weights: WeightTensors,
+    verbose: bool,
+    apply_router_weight_on_input: bool,
+):
+    # AiterFp8ChannelExperts.apply should own the topk=1/
+    # apply_router_weight_on_input dispatch to asm_moe_tkw1 itself, rather
+    # than it being hidden inside the generic AITER expert. See
+    # vllm-project/vllm#54966.
+    with (
+        mock.patch.object(
+            rocm_aiter_ops, "asm_moe_tkw1", wraps=rocm_aiter_ops.asm_moe_tkw1
+        ) as tkw1_mock,
+        mock.patch.object(
+            rocm_aiter_ops, "fused_moe", wraps=rocm_aiter_ops.fused_moe
+        ) as fused_moe_mock,
+    ):
+        rank_worker(pgi, vllm_config, cpu_group, config, weights, verbose)
+
+    if apply_router_weight_on_input:
+        assert tkw1_mock.call_count > 0 and fused_moe_mock.call_count == 0, (
+            "AiterFp8ChannelExperts.apply() should dispatch topk=1/"
+            "apply_router_weight_on_input to rocm_aiter_ops.asm_moe_tkw1, "
+            "not rocm_aiter_ops.fused_moe."
+        )
+    else:
+        assert fused_moe_mock.call_count > 0 and tkw1_mock.call_count == 0, (
+            "AiterFp8ChannelExperts.apply() should dispatch the non-tkw1 "
+            "case to rocm_aiter_ops.fused_moe, not rocm_aiter_ops.asm_moe_tkw1."
+        )
+
+
+@require_aiter_moe
+@pytest.mark.parametrize("topk", [1, 2])
+def test_aiter_fp8_channel_experts_owns_tkw1_dispatch(topk: int):
+    """See https://github.com/vllm-project/vllm/issues/54966 ("Split AITER
+    experts by weight quantization key").
+    """
+    from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+        MoEPrepareAndFinalizeNoDPEPModular,
+    )
+
+    config = Config(
+        Ms=[32],
+        K=2048,
+        N=1024,
+        E=32,
+        topks=[topk],
+        dtype=torch.bfloat16,
+        quant_config=MK_QUANT_CONFIGS[2],  # fp8 channel weights / per-token acts
+        prepare_finalize_type=MoEPrepareAndFinalizeNoDPEPModular,
+        fused_experts_type=AiterFp8ChannelExperts,
+        world_size=1,
+    )
+    assert config.is_valid()[0]
+
+    weights = WeightTensors.make(config)
+    vllm_config, env_dict = config.make_env_data()
+    apply_router_weight_on_input = topk == 1 and config.supports_apply_weight_on_input()
+
+    parallel_launch_with_config(
+        config.world_size,
+        _channel_tkw1_ownership_worker,
+        vllm_config,
+        env_dict,
+        config,
+        weights,
+        False,
+        apply_router_weight_on_input,
+    )
+
+
 # --- 4b: hidden_dim_unpadded/intermediate_size_per_partition_unpadded matrix -
 
 # K/N intentionally unaligned to AITER's 64/128 granularity (unlike the
@@ -1002,6 +1078,21 @@ def test_aiter_moe_padding_matrix(mode: str, quant_config: TestMoEQuantConfig | 
             "GEMM problem'. Only hidden_pad-forcing modes (raw "
             f"hidden_dim={_PADDING_K_PADDED}) are exercised for this quant "
             "scheme."
+        )
+
+    if (
+        quant_config is not None
+        and quant_config.block_shape is None
+        and not pad_intermediate
+    ):
+        pytest.skip(
+            "AITER's fp8 (non-block) CK GEMM kernel does not support the "
+            f"raw (unpadded) intermediate_size={_PADDING_N_UNPADDED} shape "
+            "on this hardware -- it raises 'wrong! device_gemm with the "
+            "specified compilation parameters does not support this GEMM "
+            "problem'. Only intermediate_pad-forcing modes (raw "
+            f"intermediate_size={_PADDING_N_PADDED}) are exercised for this "
+            "quant scheme."
         )
 
     k = _PADDING_K_PADDED if pad_hidden else _PADDING_K_UNPADDED

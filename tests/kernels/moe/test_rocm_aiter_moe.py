@@ -790,6 +790,7 @@ def test_aiter_moe_dispatch_policy_forwarded_to_fused_moe(
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        QuantMethod,
         rocm_aiter_fused_experts,
     )
 
@@ -830,6 +831,7 @@ def test_aiter_moe_dispatch_policy_forwarded_to_fused_moe(
                 topk_weights=case["topk_weights"],
                 topk_ids=case["topk_ids"],
                 moe_config=moe_config,
+                quant_method=QuantMethod.NO,
                 activation=MoEActivation.SILU,
                 moe_sorting_dispatch_policy=rocm_aiter_ops.get_moe_dispatch_policy(),
             )
@@ -887,8 +889,11 @@ def test_aiter_mxfp4_quant_scheme_support_matches_gfx950():
 def test_aiter_fused_moe_mi350_mxfp4_w4a16_accuracy():
     """The gfx950 AITER MXFP4 W4A16 MoE path should match the dequantized
     MXFP4 reference."""
+    from aiter.ops.flydsl.moe_common import GateMode
+
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        QuantMethod,
         rocm_aiter_fused_experts,
     )
 
@@ -909,6 +914,8 @@ def test_aiter_fused_moe_mi350_mxfp4_w4a16_accuracy():
         case.topk_ids,
         activation="swigluoai",
     )
+    # gate_mode/bias mirror AiterMxfp4Experts._extra_fused_moe_kwargs's
+    # non-DSV4 case (this test doesn't opt into VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4).
     out = rocm_aiter_fused_experts(
         hidden_states=case.hidden_states,
         w1=case.w1_kernel,
@@ -918,6 +925,10 @@ def test_aiter_fused_moe_mi350_mxfp4_w4a16_accuracy():
         activation=MoEActivation.SWIGLUOAI,
         quant_config=case.quant_config,
         moe_config=case.moe_config,
+        quant_method=QuantMethod.BLOCK_1X32,
+        gate_mode_override=GateMode.INTERLEAVE.value,
+        bias1=case.quant_config.w1_bias,
+        bias2=case.quant_config.w2_bias,
         expert_mask=None,
     )
 
@@ -937,8 +948,11 @@ def test_aiter_fused_moe_mi350_mxfp4_w4a16_accuracy():
 def test_aiter_fused_moe_mi350_mxfp4_w4a16_determinism():
     """The gfx950 AITER MXFP4 W4A16 MoE path should stay bitwise
     deterministic."""
+    from aiter.ops.flydsl.moe_common import GateMode
+
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        QuantMethod,
         rocm_aiter_fused_experts,
     )
 
@@ -953,6 +967,9 @@ def test_aiter_fused_moe_mi350_mxfp4_w4a16_determinism():
     )
 
     def run_mxfp4_moe():
+        # gate_mode/bias mirror AiterMxfp4Experts._extra_fused_moe_kwargs's
+        # non-DSV4 case (this test doesn't opt into
+        # VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4).
         return rocm_aiter_fused_experts(
             hidden_states=case.hidden_states,
             w1=case.w1_kernel,
@@ -962,6 +979,10 @@ def test_aiter_fused_moe_mi350_mxfp4_w4a16_determinism():
             activation=MoEActivation.SWIGLUOAI,
             quant_config=case.quant_config,
             moe_config=case.moe_config,
+            quant_method=QuantMethod.BLOCK_1X32,
+            gate_mode_override=GateMode.INTERLEAVE.value,
+            bias1=case.quant_config.w1_bias,
+            bias2=case.quant_config.w2_bias,
             expert_mask=None,
         )
 
