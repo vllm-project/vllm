@@ -508,7 +508,7 @@ def test_triton_w4a16_gemm_rows_past_int32_offsets(K, N):
 
     set_random_seed(0)
     G = 128
-    a = torch.randn((M, K), device=device, dtype=torch.bfloat16)
+    a = (0.25 * torch.randn((M, K), device=device)).to(torch.bfloat16)
     w_int4 = torch.randint(0, 16, (K, N), device=device, dtype=torch.int32)
     b_packed = _pack_int4_along_n(w_int4)
     scales = (0.05 * torch.rand((K // G, N), device=device)).to(torch.bfloat16)
@@ -516,8 +516,8 @@ def test_triton_w4a16_gemm_rows_past_int32_offsets(K, N):
     out = triton_w4a16_gemm(
         a=a, b_q=b_packed, scales=scales, qzeros=None, group_size=G, zp_bias=8
     )
-    ref = _w4a16_reference(
-        a[-64:], b_packed, scales, group_size=G, qzeros_gn8=None, zp_bias=8
-    )
+    # Dequantize in bfloat16 as the kernel does, so a long K adds no rounding gap.
+    w = (w_int4 - 8).to(torch.bfloat16) * scales.repeat_interleave(G, dim=0)
+    ref = (a[-64:].float() @ w.float()).to(torch.bfloat16)
 
     torch.testing.assert_close(out[-64:], ref, rtol=1e-2, atol=1e-2)
