@@ -333,11 +333,11 @@ def _check_shared_storage_lifetime_and_failures(failure):
         assert result.value == 0
         return result
 
+    from vllm.models.deepseek_v41.nvidia.ops import engram_host_table
+
     with pytest.MonkeyPatch.context() as patch:
         # Exercise the /dev/shm path even where cuMem tables are used.
-        patch.setattr(
-            engram_ops.DPSharedEngramStorage, "_allocate_cumem", lambda *args: None
-        )
+        patch.setattr(engram_host_table, "share_host_table", lambda *args: None)
         patch.setattr(
             engram_ops,
             "tempfile",
@@ -389,9 +389,10 @@ def _check_shared_storage_lifetime_and_failures(failure):
 def _check_cumem_host_table(failure):
     """Chunked cuMem tables read back across ranks; a failed allocation or
     import on any rank falls back to /dev/shm on all of them."""
-    if not engram_ops._cumem_tables_fit(0):
-        return
     from vllm.models.deepseek_v41.nvidia.ops import engram_host_table
+
+    if not engram_host_table.host_table_fits(0):
+        return
 
     group = get_engram_dp_group()
     # Three 2 MiB chunks, the last one partial.

@@ -770,11 +770,12 @@ def gather_engram_hashes(
     return dp_group.all_gather(hash_ids, dim=0)
 
 
-def _describe(exc: Exception) -> str:
+def describe_error(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
-def _gather_failures(group: GroupCoordinator, error: str | None) -> str:
+def gather_errors(group: GroupCoordinator, error: str | None) -> str:
+    """Each rank's error, joined; empty if every rank succeeded."""
     errors: list[str | None] = [None] * group.world_size
     torch.distributed.all_gather_object(errors, error, group=group.cpu_group)
     return "; ".join(
@@ -782,14 +783,12 @@ def _gather_failures(group: GroupCoordinator, error: str | None) -> str:
     )
 
 
-def _cumem_tables_fit(num_bytes: int) -> bool:
+def _fits_cumem_host_table(num_bytes: int) -> bool:
     if not current_platform.is_cuda():
         return False
-    from vllm.models.deepseek_v41.nvidia.ops import engram_host_table
+    from vllm.models.deepseek_v41.nvidia.ops.engram_host_table import host_table_fits
 
-    return engram_host_table.host_tables_supported() and (
-        engram_host_table.fits_host_numa_node(num_bytes)
-    )
+    return host_table_fits(num_bytes)
 
 
 def _shm_capacity_error(num_bytes: int) -> str | None:
@@ -798,7 +797,7 @@ def _shm_capacity_error(num_bytes: int) -> str | None:
     try:
         check_shm_free_space(num_bytes, allocation_name="Engram tables")
     except Exception as exc:
-        return _describe(exc)
+        return describe_error(exc)
     # tmpfs pages beyond available host memory are faulted in by the OOM killer.
     available = psutil.virtual_memory().available
     if num_bytes > available:
@@ -824,47 +823,17 @@ class DPSharedEngramStorage:
             weight = storage[:weight_bytes].view(torch.float8_e4m3fn).view(-1, dim)
             return weight, storage[weight_bytes:].view(-1, dim // block_size)
 
-        tables = self._allocate_cumem(num_bytes)
+        tables = None
+        if current_platform.is_cuda():
+            from vllm.models.deepseek_v41.nvidia.ops import engram_host_table
+
+            tables = engram_host_table.share_host_table(num_bytes, group)
         self.backing = "/dev/shm" if tables is None else "cuMem"
         if tables is None:
             storage = self._allocate_shm(num_bytes)
             tables = storage, get_accelerator_view_from_cpu_tensor(storage)
         self.weight, self.weight_scale_inv = split(tables[0])
         self._views = split(tables[1])
-
-    def _allocate_cumem(
-        self, num_bytes: int
-    ) -> tuple[torch.Tensor, torch.Tensor] | None:
-        """Map one host-NUMA cuMem table on every rank, or None on all of them."""
-        if not current_platform.is_cuda():
-            return None
-        from vllm.models.deepseek_v41.nvidia.ops import engram_host_table
-
-        group = self.group
-        handles: list = []
-        table = error = None
-        if group.rank_in_group == 0 and engram_host_table.host_tables_supported():
-            try:
-                handles, table = engram_host_table.create_host_table(num_bytes)
-            except Exception as exc:
-                error = _describe(exc)
-        table, error = group.broadcast_object((table, error))
-        tables = None
-        if table is not None:
-            try:
-                tables = engram_host_table.map_host_table(table, handles)
-            except Exception as exc:
-                error = _describe(exc)
-            error = _gather_failures(group, error) or None
-        if error is None:
-            return tables
-        if group.rank_in_group == 0:
-            logger.warning(
-                "Engram host table cannot use host-NUMA cuMem (%s); falling back "
-                "to /dev/shm, whose 64K GPU pages make lookups slower.",
-                error,
-            )
-        return None
 
     def _allocate_shm(self, num_bytes: int) -> torch.Tensor:
         """Map and register one /dev/shm file across a node-local DP group."""
@@ -881,7 +850,7 @@ class DPSharedEngramStorage:
                     backing_file.truncate(num_bytes)
                     path = backing_file.name
                 except Exception as exc:
-                    error = _describe(exc)
+                    error = describe_error(exc)
             path, error = group.broadcast_object((path, error))
             if error is not None:
                 raise RuntimeError(
@@ -893,8 +862,8 @@ class DPSharedEngramStorage:
                 with open(path, "r+b") as file:
                     mapping = mmap.mmap(file.fileno(), num_bytes, flags=mmap.MAP_SHARED)
             except Exception as exc:
-                error = _describe(exc)
-            if failures := _gather_failures(group, error):
+                error = describe_error(exc)
+            if failures := gather_errors(group, error):
                 del mapping
                 raise RuntimeError(
                     "Engram shared-memory initialization failed: " + failures
@@ -921,9 +890,9 @@ class DPSharedEngramStorage:
                         "cudaHostRegister did not pin the shared Engram mapping"
                     )
             except Exception as exc:
-                error = _describe(exc)
+                error = describe_error(exc)
 
-            if failures := _gather_failures(group, error):
+            if failures := gather_errors(group, error):
                 # Dropping the owner runs the finalizer; the mapping then unmaps.
                 del tensor, owner, mapping
                 raise RuntimeError(
@@ -975,7 +944,7 @@ def can_share_engram_tables(layout: EngramLayout, block_size: int = 32) -> bool:
     assert group is not None
     # Only the leader allocates, so every replica follows its check.
     error = None
-    if group.rank_in_group == 0 and not _cumem_tables_fit(num_bytes):
+    if group.rank_in_group == 0 and not _fits_cumem_host_table(num_bytes):
         error = _shm_capacity_error(num_bytes)
     error = group.broadcast_object(error)
     if error is not None:

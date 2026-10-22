@@ -15,7 +15,9 @@ from typing import NamedTuple
 import torch
 from cuda.bindings import driver as cu
 
+from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.logger import init_logger
+from vllm.models.deepseek_v41.common.engram import describe_error, gather_errors
 from vllm.utils.cpu_resource_utils import get_memory_node_info
 from vllm.utils.math_utils import round_up
 
@@ -109,7 +111,10 @@ def host_tables_supported() -> bool:
     return True
 
 
-def fits_host_numa_node(num_bytes: int) -> bool:
+def host_table_fits(num_bytes: int) -> bool:
+    """Whether a table of this size can live on this GPU's host NUMA node."""
+    if not host_tables_supported():
+        return False
     total = get_memory_node_info(_host_numa_id()).total_memory
     return num_bytes <= total * (1 - NODE_RESERVE)
 
@@ -199,3 +204,36 @@ def map_host_table(
         device=torch.device("cuda", device),
     )
     return torch.frombuffer(owner, dtype=torch.uint8), gpu
+
+
+def share_host_table(
+    num_bytes: int, group: GroupCoordinator
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    """Map one table on every rank of a node-local group, or None on all of them.
+
+    Rank 0 creates the table and broadcasts its handles; the others import them.
+    Returns CPU and GPU uint8 views of the table.
+    """
+    handles: list = []
+    table = error = None
+    if group.rank_in_group == 0 and host_tables_supported():
+        try:
+            handles, table = create_host_table(num_bytes)
+        except Exception as exc:
+            error = describe_error(exc)
+    table, error = group.broadcast_object((table, error))
+    if table is not None:
+        views = None
+        try:
+            views = map_host_table(table, handles)
+        except Exception as exc:
+            error = describe_error(exc)
+        if not (error := gather_errors(group, error)):
+            return views
+    if error and group.rank_in_group == 0:
+        logger.warning(
+            "Engram host table cannot use host-NUMA cuMem (%s); falling back "
+            "to /dev/shm, whose 64K GPU pages make lookups slower.",
+            error,
+        )
+    return None
