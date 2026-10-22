@@ -4,7 +4,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_offload.base import BlockIDsLoadStoreSpec, ConfigInfo
+from vllm.v1.kv_offload.config import OffloadingConfig
 
 
 class CPUOffloadingMetrics:
@@ -32,15 +34,39 @@ class CPULoadStoreSpec(BlockIDsLoadStoreSpec):
 class CPUOffloadingInfo(ConfigInfo):
     """Static facts about the CPU offload tier."""
 
-    # Chunk slots in the tier. Chunks, not GPU blocks. See cpu_blocks_per_chunk.
+    # Chunk slots in the tier. Chunks, not GPU blocks.
     cpu_num_chunks: int
-    # GPU blocks for each chunk: the chunk-to-block conversion factor.
+    # GPU blocks for each chunk.
     cpu_blocks_per_chunk: int
-    # Page-aligned bytes of one chunk, or None from a caller that does not
-    # report it. With cpu_num_chunks it gives the exact size of the tier in
-    # bytes, the only capacity that holds for every model shape.
-    cpu_kv_bytes_per_chunk: int | None
-    # Upper bound on the KV tokens the tier holds, over the request lengths up
-    # to max_model_len. None when max_model_len is not known. See
-    # _capacity_tokens_at_max_len in cpu/manager.py.
-    cpu_capacity_tokens_at_max_len: int | None
+    # Size of the tier in bytes, including chunk padding.
+    cpu_kv_cache_size_bytes: int
+    # KV tokens the tier holds for requests of max_model_len tokens. None
+    # when max_model_len is not known.
+    cpu_kv_cache_size_tokens: int | None
+
+    @classmethod
+    def from_config(
+        cls, config: OffloadingConfig, num_chunks: int, kv_bytes_per_chunk: int
+    ) -> "CPUOffloadingInfo":
+        return cls(
+            cpu_num_chunks=num_chunks,
+            cpu_blocks_per_chunk=config.cache.blocks_per_chunk,
+            cpu_kv_cache_size_bytes=num_chunks * kv_bytes_per_chunk,
+            cpu_kv_cache_size_tokens=_kv_cache_size_tokens(config, num_chunks),
+        )
+
+
+def _kv_cache_size_tokens(config: OffloadingConfig, num_chunks: int) -> int | None:
+    """KV tokens the tier holds at max_model_len, like GPU kv_cache_size_tokens."""
+    max_model_len = config.model.max_model_len
+    if max_model_len <= 0 or not config.groups:
+        return None
+    chunks_per_request = 0
+    for group in config.groups:
+        group_chunks = cdiv(
+            max_model_len, group.tokens_per_block * config.cache.blocks_per_chunk
+        )
+        if group.sliding_window_size_in_chunks is not None:
+            group_chunks = min(group_chunks, group.sliding_window_size_in_chunks)
+        chunks_per_request += group_chunks
+    return num_chunks * max_model_len // chunks_per_request

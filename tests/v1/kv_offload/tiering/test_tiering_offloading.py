@@ -40,6 +40,7 @@ from vllm.v1.kv_offload.base import (
     TierMatcher,
     make_offload_key,
 )
+from vllm.v1.kv_offload.cpu.common import CPUOffloadingInfo
 from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
@@ -1771,7 +1772,11 @@ def test_tiering_spec_declares_the_config_info_keys_the_manager_fills():
         primary_tier=CPUPrimaryTierOffloadingManager(
             num_chunks=5,
             mmap_region=mock_region,
-            config=make_offloading_config(blocks_per_chunk=2, max_model_len=1024),
+            info=CPUOffloadingInfo.from_config(
+                make_offloading_config(blocks_per_chunk=2, max_model_len=1024),
+                num_chunks=5,
+                kv_bytes_per_chunk=4096,
+            ),
         ),
         secondary_tiers=[
             MetricsSecondaryTierManager(
@@ -1793,8 +1798,8 @@ def test_tiering_spec_declares_the_config_info_keys_the_manager_fills():
     assert keys == (
         "cpu_num_chunks",
         "cpu_blocks_per_chunk",
-        "cpu_kv_bytes_per_chunk",
-        "cpu_capacity_tokens_at_max_len",
+        "cpu_kv_cache_size_bytes",
+        "cpu_kv_cache_size_tokens",
         "tier",
         "path",
     )

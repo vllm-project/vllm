@@ -18,9 +18,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     ReqId,
     TransferJob,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
-    get_sliding_window_size_in_chunks,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
     OffloadingEventGroupSpec,
     OffloadingEventsTracker,
@@ -175,13 +172,10 @@ class SchedulerOffloadConfig(NamedTuple):
         # architectures like DeepSeek V4 (MLA + SWA groups).
         full_attn_tokens_per_chunk: set[int] = set()
         for group in spec.config.groups:
-            tokens_per_block = group.tokens_per_block
-            kv_spec = kv_cache_config.kv_cache_groups[group.group_id].kv_cache_spec
-            sw = get_sliding_window_size_in_chunks(
-                kv_spec, tokens_per_block * spec.blocks_per_chunk
-            )
-            if sw is None:
-                full_attn_tokens_per_chunk.add(tokens_per_block * spec.blocks_per_chunk)
+            if group.sliding_window_size_in_chunks is None:
+                full_attn_tokens_per_chunk.add(
+                    group.tokens_per_block * spec.blocks_per_chunk
+                )
 
         # Only apply the optimization if there's a single consistent
         # full-attention alignment size.  For pure SWA/Mamba models (no
@@ -240,9 +234,6 @@ class SchedulerOffloadConfig(NamedTuple):
             tokens_per_block = group.tokens_per_block
             kv_cache_group = kv_cache_config.kv_cache_groups[group_id]
             kv_spec = kv_cache_group.kv_cache_spec
-            sw = get_sliding_window_size_in_chunks(
-                kv_spec, tokens_per_block * spec.blocks_per_chunk
-            )
             manager_cls = KVCacheSpecRegistry.get_manager_class(kv_spec)
             assert manager_cls is not None, (
                 f"No manager found for KV cache spec {type(kv_spec).__name__}"
@@ -256,7 +247,7 @@ class SchedulerOffloadConfig(NamedTuple):
                         (tokens_per_block * spec.blocks_per_chunk)
                         // spec.tokens_per_hash
                     ),
-                    sliding_window_size_in_chunks=sw,
+                    sliding_window_size_in_chunks=group.sliding_window_size_in_chunks,
                     kv_cache_spec=kv_spec,
                     manager_cls=manager_cls,
                     kv_event_group_spec=get_offloading_event_group_spec(kv_cache_group),

@@ -45,8 +45,7 @@ from vllm.v1.kv_offload.base import (
     RequestOffloadingContext,
     ScheduleEndContext,
 )
-from vllm.v1.kv_offload.config import OffloadingConfig
-from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
+from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec, CPUOffloadingInfo
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.tiering.base import (
@@ -126,19 +125,17 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         self,
         num_chunks: int,
         mmap_region: SharedOffloadRegion,
-        kv_bytes_per_chunk: int | None = None,
-        config: OffloadingConfig | None = None,
         cache_policy: str = "lru",
         cache_policy_module_path: str | None = None,
         enable_events: bool = False,
+        info: CPUOffloadingInfo | None = None,
     ):
         super().__init__(
             num_chunks=num_chunks,
-            kv_bytes_per_chunk=kv_bytes_per_chunk,
-            config=config,
             cache_policy=cache_policy,
             cache_policy_module_path=cache_policy_module_path,
             enable_events=enable_events,
+            info=info,
         )
         self._mmap_region = mmap_region
         # read/write is for CPU<->secondary transfers,

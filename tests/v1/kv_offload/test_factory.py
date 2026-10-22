@@ -21,7 +21,7 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.config import (
     OffloadingGroupConfig,
 )
-from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
+from vllm.v1.kv_offload.cpu.common import CPUOffloadingInfo
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
@@ -43,7 +43,7 @@ def _create_spec(**kwargs: Any) -> OffloadingSpec:
 def _capacity_tokens(spec: OffloadingSpec) -> str | int | float | bool:
     """The token capacity the manager of the spec publishes as an info label."""
     (info,) = spec.get_manager().config_info()
-    return info["cpu_capacity_tokens_at_max_len"]
+    return info["cpu_kv_cache_size_tokens"]
 
 
 class SingleArgExternalOffloadingSpec(OffloadingSpec):
@@ -207,8 +207,8 @@ def test_cpu_config_info_mirrors_spec_sizing():
         {
             "cpu_num_chunks": spec.num_chunks,
             "cpu_blocks_per_chunk": spec.blocks_per_chunk,
-            "cpu_kv_bytes_per_chunk": spec.kv_bytes_per_chunk,
-            "cpu_capacity_tokens_at_max_len": spec.num_chunks * tokens_per_block,
+            "cpu_kv_cache_size_bytes": spec.num_chunks * spec.kv_bytes_per_chunk,
+            "cpu_kv_cache_size_tokens": spec.num_chunks * tokens_per_block,
         }
     ]
 
@@ -261,49 +261,30 @@ def test_cpu_config_info_no_token_capacity_without_max_model_len():
     assert _capacity_tokens(spec) == "None"
 
 
-def test_cpu_config_info_reports_an_unreported_chunk_size_as_none():
-    """A caller that reports no chunk size must not publish 0 bytes.
-
-    An out-of-tree spec holds a configuration and can build the manager itself.
-    Such a caller passes num_chunks and the configuration, and skips the optional
-    chunk size. A default of 0 would report an empty tier for a full one.
-    A reported 0 keeps its number, because it names an empty tier. See
-    test_cpu_config_info_zero_capacity_is_exact_not_unknown.
-    """
-    manager = CPUOffloadingManager(
-        num_chunks=5,
-        config=make_offloading_config(blocks_per_chunk=2, max_model_len=1024),
-    )
-
-    (labels,) = manager.config_info()
-
-    assert labels["cpu_kv_bytes_per_chunk"] == "None"
-    # The tier still holds 5 slots, so every other fact stays a number.
-    assert labels["cpu_num_chunks"] == 5
-    assert labels["cpu_capacity_tokens_at_max_len"] == 160
-
-
 def test_tiering_primary_tier_publishes_the_cpu_labels():
     """The primary tier must keep the labels, because it renders them itself.
 
     TieringOffloadingManager.config_info() does not touch a primary tier label,
     so a CPU fact keeps one name in both managers. The tiering spec passes the
-    same two arguments as the CPU spec.
+    same config info as the CPU spec.
     """
     primary_tier = CPUPrimaryTierOffloadingManager(
         num_chunks=5,
         mmap_region=MagicMock(),
-        kv_bytes_per_chunk=4096,
-        config=make_offloading_config(blocks_per_chunk=2, max_model_len=1024),
+        info=CPUOffloadingInfo.from_config(
+            make_offloading_config(blocks_per_chunk=2, max_model_len=1024),
+            num_chunks=5,
+            kv_bytes_per_chunk=4096,
+        ),
     )
 
     assert primary_tier.config_info() == [
         {
             "cpu_num_chunks": 5,
             "cpu_blocks_per_chunk": 2,
-            "cpu_kv_bytes_per_chunk": 4096,
+            "cpu_kv_cache_size_bytes": 5 * 4096,
             # 5 slots of 32 tokens each, over a request of 32 chunks.
-            "cpu_capacity_tokens_at_max_len": 160,
+            "cpu_kv_cache_size_tokens": 160,
         }
     ]
 
@@ -334,9 +315,9 @@ def test_tiering_spec_passes_the_cpu_facts_to_the_primary_tier():
             "tier": "0:primary",
             "cpu_num_chunks": spec.num_chunks,
             "cpu_blocks_per_chunk": 2,
-            "cpu_kv_bytes_per_chunk": spec.kv_bytes_per_chunk,
+            "cpu_kv_cache_size_bytes": spec.num_chunks * spec.kv_bytes_per_chunk,
             # 32 tokens for each chunk, over a request of 32 chunks.
-            "cpu_capacity_tokens_at_max_len": spec.num_chunks * 32,
+            "cpu_kv_cache_size_tokens": spec.num_chunks * 32,
         }
     finally:
         manager.shutdown()

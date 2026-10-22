@@ -54,6 +54,7 @@ def _make_vllm_config(
     config.cache_config.cache_dtype = torch.float16
     config.cache_config.prefix_cache_retention_interval = None
     config.model_config.model = "test-model"
+    config.model_config.max_model_len = 4096
     config.model_config.use_mla = False
     # _full_attention_spec's heads at tp=1: the parallelism-agnostic gate
     # requires the head shard to cover the model's KV heads exactly
@@ -796,8 +797,8 @@ def test_group_carries_the_chunks_the_tier_keeps_per_request(
 def test_model_config_carries_the_longest_request():
     """The capacity estimate of a tier holds at max_model_len, so it must travel.
 
-    _build_config_info in vllm/v1/kv_offload/cpu/manager.py reads it. A model
-    config without it leaves the estimate unknown.
+    CPUOffloadingInfo.from_config in vllm/v1/kv_offload/cpu/common.py reads it.
+    A model config without it leaves the estimate unknown.
     """
     vllm_config = _make_vllm_config()
     vllm_config.model_config.max_model_len = 32768
