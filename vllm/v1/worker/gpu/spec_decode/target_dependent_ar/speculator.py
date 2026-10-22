@@ -79,6 +79,16 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         """
         return True
 
+    def _padded_draft_seq_len(
+        self, step: int, batch_desc: BatchExecutionDescriptor
+    ) -> int:
+        # prepare_decode_inputs zeroes the padded rows. Inside a FULL graph,
+        # update_draft_inputs then advances them with the others, once per
+        # draft step already run.
+        if self.advance_draft_positions and batch_desc.cg_mode == CUDAGraphMode.FULL:
+            return min(step - 1, self.max_model_len)
+        return 0
+
     def _configure_decode_metadata_update(self) -> None:
         # With one speculative step there are no draft decode steps to update.
         if self.num_speculative_steps == 1:
