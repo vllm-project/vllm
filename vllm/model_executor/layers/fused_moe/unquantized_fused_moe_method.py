@@ -150,8 +150,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         # can benefit from tensors located far enough from one another in memory.
         # Skip padding when EPLB is enabled because EPLB requires contiguous
         # weights for the view/rearrangement operations.
+        # Pad on the initial load only. On weight updates (e.g. RL weight sync)
+        # CUDA graphs may have captured the parameter addresses, and the
+        # parameters already carry the padded layout that the weight loaders
+        # wrote into in place, so return them unchanged.
+        is_weight_update = self.moe_kernel is not None  # type: ignore[has-type]
         if (
-            envs.VLLM_ROCM_MOE_PADDING
+            not is_weight_update
+            and envs.VLLM_ROCM_MOE_PADDING
             and current_platform.is_rocm()
             and not self.moe.moe_parallel_config.enable_eplb
             and weight.stride(-1) == 1
@@ -221,14 +227,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         # ROCm MoE padding changes the storage layout (same shape, larger
         # row stride), so it can only take effect by rebinding `.data` to the
         # padded storage; copying it back into the original storage would
-        # silently drop it. Rebind on the initial load only. On weight updates
-        # (e.g. RL weight sync) CUDA graphs may have captured the parameter
-        # addresses, and the parameters already carry the padded layout that
-        # the weight loaders wrote into in place, so leave them untouched.
-        is_weight_update = self.moe_kernel is not None  # type: ignore[has-type]
-        if not is_weight_update:
-            layer.w13_weight.data = self._maybe_pad_weight(layer.w13_weight.data)
-            layer.w2_weight.data = self._maybe_pad_weight(layer.w2_weight.data)
+        # silently drop it. `_maybe_pad_weight` returns its input whenever it
+        # does not pad (other platforms, weight updates), so the rebind is a
+        # no-op there.
+        layer.w13_weight.data = self._maybe_pad_weight(layer.w13_weight.data)
+        layer.w2_weight.data = self._maybe_pad_weight(layer.w2_weight.data)
 
         if self.unquantized_backend in [
             UnquantizedMoeBackend.TPU,
