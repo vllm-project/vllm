@@ -17,7 +17,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine.async_llm import AsyncLLM
-from vllm.v1.metrics.reader import Metric
+from vllm.v1.metrics.reader import Counter, Metric
 
 DEEPSEEK_MTP_MAIN_RANDOM = "luccafong/deepseek_mtp_main_random"
 DEEPSEEK_MTP_DRAFT_RANDOM = "luccafong/deepseek_mtp_draft_random"
@@ -117,6 +117,7 @@ def _spec_decode_num_drafts(metrics: list[Metric]) -> int:
     assert counter is not None, (
         "spec_decode_num_drafts metric missing; check disable_log_stats=False"
     )
+    assert isinstance(counter, Counter)
     return int(counter.value)
 
 

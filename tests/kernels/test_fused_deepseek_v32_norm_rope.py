@@ -24,6 +24,7 @@ outputs are checked within 1 representable-step (ULP); bf16 norm/RoPE outputs us
 rtol/atol=1e-2 (the tolerance the sibling deepseek_v4 fused-kernel test uses).
 """
 
+from functools import partial
 from typing import NamedTuple
 
 import pytest
@@ -31,6 +32,7 @@ import torch
 
 from vllm.models.deepseek_v32.common import kernels as K
 from vllm.platforms import current_platform
+from vllm.utils.deep_gemm import mqa_logits_use_mx_scales
 
 FP8 = torch.float8_e4m3fn
 FP8_MAX = 448.0
@@ -113,6 +115,16 @@ def rope(
         r[..., :half] = x1 * cos - x2 * sin
         r[..., half:] = x2 * cos + x1 * sin
     return out
+
+
+def indexer_scales(scale_bytes: torch.Tensor) -> torch.Tensor:
+    """Per-token fp32 scales from the indexer cache's 4 scale bytes per token."""
+    if not mqa_logits_use_mx_scales():
+        return scale_bytes.view(torch.float32)
+    # MX scales: the power-of-two scale's exponent as 4 equal UE8M0 bytes.
+    ue8m0 = scale_bytes.view(-1, 4)
+    assert (ue8m0 == ue8m0[:, :1]).all(), "MX scale bytes differ within a token"
+    return (ue8m0[:, 0].to(torch.int32) << 23).view(torch.float32)
 
 
 def ue8m0_quant(vals: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -242,7 +254,7 @@ def test_fused_norm_rope(
     q_ref, s_ref = ue8m0_quant(ik_ref)
     flat = idx_cache[0].reshape(-1)
     vals = flat[: bs * cfg.index_head_dim].view(FP8).reshape(bs, cfg.index_head_dim)
-    scales = flat[bs * cfg.index_head_dim :].view(torch.float32)
+    scales = indexer_scales(flat[bs * cfg.index_head_dim :])
     assert_fp8(vals[:num_tokens], q_ref, "indexer-K fp8")
     torch.testing.assert_close(scales[:num_tokens], s_ref, rtol=0, atol=0)
 
@@ -317,7 +329,7 @@ def test_fused_norm_rope_packed_indexer_block_stride(cfg: ModelConfig):
         .view(FP8)
         .view(block_size, cfg.index_head_dim)
     )
-    scales = packed[block_size * cfg.index_head_dim :].view(torch.float32)
+    scales = indexer_scales(packed[block_size * cfg.index_head_dim :])
     assert_fp8(values, q_ref, "packed indexer-K fp8")
     torch.testing.assert_close(scales, s_ref, rtol=0, atol=0)
     assert (backing[block_size * idx_row : packed_block_stride] == 0).all()
@@ -624,13 +636,13 @@ def nvfp4_sf_byte(s: torch.Tensor) -> torch.Tensor:
 
 
 @pytest.mark.skipif(
-    not current_platform.is_device_capability(100),
-    reason="nvfp4_ds_mla requires SM100 (Blackwell)",
+    not (current_platform.is_device_capability_family(100)),
+    reason="nvfp4_ds_mla requires SM100 family",
 )
 @pytest.mark.parametrize("cfg", MODEL_CONFIGS, ids=MODEL_IDS)
 @pytest.mark.parametrize("num_tokens", [1, 4, 17, 512])
 def test_fused_norm_rope_nvfp4_ds_mla(num_tokens: int, cfg: ModelConfig):
-    """nvfp4_ds_mla MLA cache layout (FlashMLA sparse, SM100 only).
+    """nvfp4_ds_mla MLA cache layout (FlashMLA sparse, SM100 family).
 
     Per-token 352-byte entry: 256 B of 512 e2m1 NoPE packed 2/byte (low nibble
     = even element) | 64 B unscaled e4m3 RoPE | 32 B byte-permuted e4m3 tile
@@ -880,22 +892,36 @@ def test_fused_q_no_indexer(num_tokens: int, cfg: ModelConfig):
 @pytest.mark.parametrize("cfg", MODEL_CONFIGS, ids=MODEL_IDS)
 @pytest.mark.parametrize("num_tokens", [1, 17, 512])
 @pytest.mark.parametrize("has_indexer", [True, False])
-def test_fused_q_bf16_query(num_tokens: int, has_indexer: bool, cfg: ModelConfig):
+@pytest.mark.parametrize("use_mha", [True, False])
+@pytest.mark.parametrize(
+    "index_interleave,cache_dtype", [(False, torch.float32), (True, torch.bfloat16)]
+)
+@pytest.mark.parametrize("capture", [False, True])
+def test_fused_q_bf16_query(
+    num_tokens: int,
+    has_indexer: bool,
+    use_mha: bool,
+    index_interleave: bool,
+    cache_dtype: torch.dtype,
+    capture: bool,
+    cfg: ModelConfig,
+):
     """bf16-query path (FlashMLA sparse, SM90/SM100): only the RoPE'd q_pe is
-    produced (bf16, unquantized); ql_nope is consumed directly by the caller."""
+    produced; MHA does not need an absorbed ql_nope projection."""
     torch.manual_seed(6)
     dev = "cuda"
     max_pos = 8192
     pos = torch.arange(num_tokens, device=dev, dtype=torch.int64) % max_pos
 
+    # Attention takes q_pe as a strided slice of the full Q projection.
     q_pe = torch.randn(
-        num_tokens, cfg.num_heads, cfg.rope_dim, device=dev, dtype=torch.bfloat16
-    )
+        num_tokens, cfg.num_heads, 4 * cfg.rope_dim, device=dev, dtype=torch.bfloat16
+    )[..., -cfg.rope_dim :]
     ql_nope = torch.randn(
         num_tokens, cfg.num_heads, cfg.kv_lora, device=dev, dtype=torch.bfloat16
     )
     q_scale = torch.tensor([0.37], device=dev, dtype=torch.float32)
-    q_cos_sin = make_cos_sin(max_pos, cfg.rope_dim, dev)
+    q_cos_sin = make_cos_sin(max_pos, cfg.rope_dim, dev).to(cache_dtype)
 
     index_q = index_w = idx_cos_sin = None
     if has_indexer:
@@ -909,23 +935,34 @@ def test_fused_q_bf16_query(num_tokens: int, has_indexer: bool, cfg: ModelConfig
         index_w = torch.randn(
             num_tokens, cfg.index_heads, device=dev, dtype=torch.float32
         )
-        idx_cos_sin = make_cos_sin(max_pos, cfg.rope_dim, dev)
+        idx_cos_sin = make_cos_sin(max_pos, cfg.rope_dim, dev).to(cache_dtype)
 
-    iq_fp8, iw_out, q_pe_out = K.fused_q(
+    run = partial(
+        K.fused_q,
         pos,
         q_pe,
         q_cos_sin,
         index_q,
         idx_cos_sin,
-        ql_nope,
+        q_pe if use_mha else ql_nope,
         q_scale,
         index_w,
         cfg.index_head_dim**-0.5,
         cfg.index_heads**-0.5,
         has_indexer=has_indexer,
-        index_rope_interleave=False,
+        index_rope_interleave=index_interleave,
         quantize_mqa=False,
     )
+
+    iq_fp8, iw_out, q_pe_out = run()
+    if capture:
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            iq_fp8, iw_out, q_pe_out = run()
+        q_pe.mul_(0.5)
+        if index_q is not None:
+            index_q.mul_(1.5)
+        graph.replay()
 
     # MQA query: only the RoPE'd q_pe, bf16, unquantized.
     assert q_pe_out.dtype == torch.bfloat16
@@ -945,7 +982,7 @@ def test_fused_q_bf16_query(num_tokens: int, has_indexer: bool, cfg: ModelConfig
             index_q.float(),
             pos.unsqueeze(-1).expand(num_tokens, cfg.index_heads),
             idx_cos_sin,
-            interleave=False,
+            interleave=index_interleave,
         )
         q_ref, scale_ref = ue8m0_quant(iq_ref)
         assert_fp8(iq_fp8, q_ref, "indexer-Q fp8 (bf16-query path)")

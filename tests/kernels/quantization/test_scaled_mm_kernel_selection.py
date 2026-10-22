@@ -14,6 +14,8 @@ import torch
 
 from vllm.config import KernelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.kernels.linear import (
+    _POSSIBLE_KERNELS,
+    _POSSIBLE_NVFP4_KERNELS,
     AiterInt8ScaledMMLinearKernel,
     CPUInt8ScaledMMLinearKernel,
     HummingFP8ScaledMMLinearKernel,
@@ -26,6 +28,7 @@ from vllm.model_executor.kernels.linear import (
     init_int8_linear_kernel,
     register_linear_kernel,
 )
+from vllm.model_executor.layers.quantization.utils.humming import prioritize_humming
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
@@ -163,6 +166,43 @@ def test_cpu_kernel_accepts_all_configs():
         )
 
 
+@pytest.mark.skipif(
+    not hasattr(torch.ops._C, "int8_scaled_mm_with_quant"),
+    reason="int8_scaled_mm_with_quant is not built",
+)
+def test_cpu_sgl_int8_linear_accepts_3d_input():
+    """The SGL int8 path must accept B x T x D activations (Whisper encoder)."""
+    N, K = 64, 128
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(
+        torch.randint(-127, 128, (N, K), dtype=torch.int8), requires_grad=False
+    )
+    layer.weight_scale = torch.nn.Parameter(
+        torch.rand(N, 1) * 0.01 + 1e-3, requires_grad=False
+    )
+    layer.bias = torch.nn.Parameter(
+        torch.randn(N, dtype=torch.bfloat16), requires_grad=False
+    )
+    config = Int8ScaledMMLinearLayerConfig(
+        is_channelwise=True,
+        is_static_input_scheme=False,
+        input_symmetric=True,
+    )
+    kernel = CPUInt8ScaledMMLinearKernel(
+        config,
+        ("weight", "weight_scale", "input_scale", "input_zero_point", "azp_adj"),
+    )
+    kernel.process_weights_for_sgl(layer)
+    kernel.linear_method = kernel._apply_weights_sgl
+
+    x = torch.randn(2, 3, K, dtype=torch.bfloat16)
+    out = kernel.apply_weights(layer, x, layer.bias)
+    ref = kernel.apply_weights(layer, x.reshape(-1, K), layer.bias)
+
+    assert out.shape == (2, 3, N)
+    torch.testing.assert_close(out, ref.reshape(2, 3, N), rtol=0, atol=0)
+
+
 class OOTInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
     @classmethod
     def is_supported(
@@ -197,3 +237,21 @@ def test_register_oot_linear_kernel(platform_mock):
     assert isinstance(kernel, OOTInt8ScaledMMLinearKernel), (
         "init_int8_linear_kernel should return an instance of the registered kernel"
     )
+
+
+@pytest.mark.parametrize(
+    "possible_kernels", [_POSSIBLE_KERNELS, _POSSIBLE_NVFP4_KERNELS]
+)
+def test_humming_priority_only_reorders_humming_and_marlin(possible_kernels):
+    """Preferring Humming must not demote Marlin below unrelated kernels."""
+    kernels = possible_kernels[PlatformEnum.CUDA]
+    original = list(kernels)
+
+    assert prioritize_humming(kernels, compute_capability=80) == original
+
+    names = [k.__name__ for k in prioritize_humming(kernels, compute_capability=90)]
+    humming = next(i for i, name in enumerate(names) if "Humming" in name)
+    assert "Marlin" in names[humming + 1]
+    del names[humming]
+    assert names == [k.__name__ for k in original if "Humming" not in k.__name__]
+    assert kernels == original

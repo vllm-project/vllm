@@ -259,7 +259,7 @@ def test_w8a8_block_fp8_torch_scaled_mm_matmul():
     stub = BlockWiseTorchFP8ScaledMMLinearKernel.__new__(
         BlockWiseTorchFP8ScaledMMLinearKernel
     )
-    stub.config = types.SimpleNamespace(out_dtype=out_dtype)  # type: ignore[assignment]
+    stub.config = types.SimpleNamespace(out_dtype=out_dtype)
     out = stub.apply_block_scaled_mm(
         A_fp8_cuda.cuda(), B_fp8.cuda(), As_cuda.cuda(), Bs.cuda()
     )

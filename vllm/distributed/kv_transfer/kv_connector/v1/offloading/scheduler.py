@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from collections.abc import Iterable, Sequence
+from collections import Counter
+from collections.abc import Iterable, Iterator, Sequence
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from itertools import chain, islice
 from typing import Any, NamedTuple
@@ -56,6 +58,7 @@ from vllm.v1.kv_offload.base import (
     TierMatcher,
     make_offload_key,
 )
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request, RequestStatus
 
@@ -156,7 +159,7 @@ def resolve_mamba_align_size(
     """Scan all KV cache groups in *spec* and return the single mamba alignment
     size, or None if no group requires mamba alignment.
 
-    For MambaSpec groups in "align" or "all" cache mode the hit window must be
+    For MambaSpec groups in "align" cache mode the hit window must be
     rounded down to a multiple of the offloaded chunk size. Asserts that all
     such groups agree on the same value.
     """
@@ -164,10 +167,7 @@ def resolve_mamba_align_size(
     for group in spec.config.groups:
         tokens_per_block = group.tokens_per_block
         kv_spec = kv_cache_config.kv_cache_groups[group.group_id].kv_cache_spec
-        if isinstance(kv_spec, MambaSpec) and kv_spec.mamba_cache_mode in (
-            "align",
-            "all",
-        ):
+        if isinstance(kv_spec, MambaSpec) and kv_spec.mamba_cache_mode == "align":
             tokens_per_chunk = tokens_per_block * spec.blocks_per_chunk
             assert mamba_align_size is None or mamba_align_size == tokens_per_chunk
             mamba_align_size = tokens_per_chunk
@@ -236,10 +236,9 @@ class SchedulerOffloadConfig(NamedTuple):
         )
         if use_eagle_block_drop and not eagle_groups:
             # No group is annotated as holding drafter layers. This happens
-            # for shared-group MTP models (e.g. Qwen3.5-style), whose drafter
-            # is a regular decoder layer merged into the target's
-            # full-attention group, and for separate-draft models that miss
-            # annotation. Treating every group as a drafter group here makes
+            # when the drafter owns no KV cache (e.g. KV-sharing drafters) or
+            # the model runner does not tag draft layers' KV cache specs.
+            # Treating every group as a drafter group here makes
             # the volatile-tail pop apply to ALL groups, which can zero the
             # whole request's offload hit whenever any group's servable
             # window is a single chunk (issue #52735). Drafter KV served one
@@ -378,6 +377,9 @@ class RequestOffloadState:
     # Fine-grained token boundary selected beyond the last complete offload
     # chunk. It is consumed when the corresponding load is scheduled.
     partial_tail_boundary: int | None = None
+    # Loaded attention keys cover their token positions. Recurrent state
+    # supports the whole reused external prefix.
+    load_key_ranges: list[tuple[int, int, OffloadKey]] = field(default_factory=list)
     # True once on_request_finished has been signaled to the manager.
     finished_signaled: bool = False
 
@@ -572,6 +574,10 @@ class OffloadingConnectorScheduler:
         )
         self.manager: OffloadingManager = spec.get_manager()
         self._connector_stats = OffloadingConnectorStats()
+        # The static config facts ride on the first stats payload of this
+        # process. A Prometheus child holds the values it received, so one
+        # payload is enough.
+        self._info_sent = False
 
         full_attention_groups: list[int] = []
         sliding_window_groups: list[int] = []
@@ -590,8 +596,9 @@ class OffloadingConnectorScheduler:
         sliding_window_groups.sort(key=_sliding_window_sort_key, reverse=True)
 
         # used by _lookup
+        self._full_attention_groups: tuple[int, ...] = tuple(full_attention_groups)
         self._sliding_window_groups: tuple[int, ...] = tuple(sliding_window_groups)
-        self._lookup_groups = tuple(full_attention_groups) + self._sliding_window_groups
+        self._lookup_groups = self._full_attention_groups + self._sliding_window_groups
         self._mamba_align_size: int | None = resolve_mamba_align_size(
             spec, kv_cache_config
         )
@@ -631,7 +638,78 @@ class OffloadingConnectorScheduler:
         # be freed before a request finishes).
         self._block_id_to_pending_jobs: dict[int, set[int]] = {}
 
-        self._events_tracker = OffloadingEventsTracker(spec.kv_events_config)
+        self._events_tracker = OffloadingEventsTracker(
+            spec.kv_events_config,
+            {
+                group.group_idx: group.kv_event_group_spec
+                for group in self.config.kv_group_configs
+            },
+        )
+
+    # Holds the manager lock for the current schedule(), or None between steps.
+    # Read and written only by the scheduler thread, so it needs no
+    # synchronization of its own. Declared on the class so an instance built
+    # without __init__ still reads None rather than raising.
+    _step_region: ExitStack | None = None
+
+    # ------------------------------------------------------------------
+    # Manager exclusion
+    #
+    # The manager is entered from the scheduler thread and, for managers that
+    # run one, from a tier-poll thread. Manager methods never take their
+    # own lock, so the exclusion boundary lives here. manager.lock may be a
+    # no-op for a manager that needs no exclusion; it is entered regardless.
+    #
+    # schedule() holds one region for the whole step: opened by the first
+    # manager-touching hook and closed at the end of build_connector_meta.
+    # That span is required, not tidiness -- get_num_new_matched_tokens
+    # establishes lookup() HITs that update_state_after_alloc later pins with
+    # prepare_load(), and prepare_store() evicts after both. Releasing between
+    # them would let another thread evict a block the step already treated as
+    # present.
+    #
+    # Hooks outside schedule() use a short region instead, so the manager is
+    # free while the engine runs the model.
+    #
+    # The step region outlives any single call, so it cannot be a with-block;
+    # an ExitStack carries the entered lock from open to close instead.
+    # ------------------------------------------------------------------
+
+    def _acquire_step(self) -> None:
+        """Open the step-scoped region. Idempotent within a step."""
+        if self._step_region is not None:
+            return
+        region = ExitStack()
+        region.enter_context(self.manager.lock)
+        self._step_region = region
+
+    def _release_step(self) -> None:
+        """Close the step-scoped region, letting other threads in."""
+        region = self._step_region
+        if region is None:
+            return
+        self._step_region = None
+        region.close()
+
+    @contextmanager
+    def _manager_locked(self) -> Iterator[None]:
+        """Hold the manager for the duration of one hook outside schedule().
+
+        None of these hooks can legitimately run inside the step-scoped region:
+        on_new_request comes from add_request, has_pending_push_work from the
+        engine's liveness check before schedule(), the rest from output
+        processing or a client RPC. So finding the region open here means a
+        previous schedule() raised between _acquire_step() and the release in
+        build_connector_meta. Recover instead of deadlocking.
+        """
+        if self._step_region is not None:
+            logger.error(
+                "Offloading manager lock was left held by a previous "
+                "schedule(); releasing it before continuing."
+            )
+            self._release_step()
+        with self.manager.lock:
+            yield
 
     def _maybe_observe_lookup_async_delay(
         self, req_status: RequestOffloadState
@@ -683,7 +761,7 @@ class OffloadingConnectorScheduler:
         for local_idx, key in enumerate(keys):
             result = self.manager.lookup(key, req_context)
             match result:
-                case LookupResult.HIT:
+                case LookupResult.HIT | LookupResult.HIT_PENDING:
                     self._events_tracker.record_lookup(
                         req,
                         group_config,
@@ -691,9 +769,7 @@ class OffloadingConnectorScheduler:
                         key,
                     )
                     hit_count += 1
-                case LookupResult.HIT_PENDING:
-                    defer_lookup = True
-                    hit_count += 1
+                    defer_lookup |= result is LookupResult.HIT_PENDING
                 case LookupResult.RETRY:
                     # Don't break: keep scanning to let manager kick off
                     # async lookups (until a miss is detected).
@@ -1024,7 +1100,8 @@ class OffloadingConnectorScheduler:
     def on_new_request(self, request: Request) -> None:
         """Called when a new request is added to the scheduler."""
         req_context = _create_req_context(request)
-        offloading_context = self.manager.on_new_request(req_context)
+        with self._manager_locked():
+            offloading_context = self.manager.on_new_request(req_context)
         req_status = RequestOffloadState(
             config=self.config,
             req=request,
@@ -1060,6 +1137,10 @@ class OffloadingConnectorScheduler:
                   (between scheduler steps).
 
         """
+        # First manager-touching hook of a step: opens the step-scoped region,
+        # closed at the end of build_connector_meta.
+        self._acquire_step()
+
         req_status = self._req_status[request.request_id]
         for group_state in req_status.group_states:
             group_state.block_ids.clear()
@@ -1093,11 +1174,70 @@ class OffloadingConnectorScheduler:
 
         return num_hit_tokens, bool(num_hit_tokens)
 
+    def get_external_cache_hit_sources(
+        self,
+        request: Request,
+        num_external_tokens: int,
+    ) -> dict[CacheHitSource, int]:
+        """Split the accepted external hit by the tier each loaded key came from.
+
+        Attention keys cover only their loaded token ranges; recurrent state
+        covers the whole reused prefix. Overlaps report the outermost tier.
+        Uncovered tokens, including omitted sliding-window history, are
+        ``external_unspecified``.
+        """
+        sources: dict[CacheHitSource, int] = {}
+        if num_external_tokens == 0:
+            return sources
+        req_status = self._req_status[request.request_id]
+        start = req_status.num_locally_computed_tokens
+        end = start + num_external_tokens
+
+        events: list[tuple[int, int, CacheHitSource]] = [
+            (end, 0, CacheHitSource.EXTERNAL_UNSPECIFIED)
+        ]
+        for lo, hi, key in req_status.load_key_ranges:
+            lo, hi = max(start, lo), min(end, hi)
+            if lo >= hi:
+                continue
+            source = CacheHitSource(
+                self.manager.get_load_source(key, req_status.req_context)
+            )
+            events.extend(((lo, 1, source), (hi, -1, source)))
+
+        # Sweep endpoints instead of rescanning every range for each interval.
+        active: Counter[CacheHitSource] = Counter()
+        position = start
+        for boundary, delta, source in sorted(events):
+            if boundary > position:
+                tiers = [tier for tier, count in active.items() if count > 0]
+                tier = (
+                    CacheHitSource.outermost(tiers)
+                    if tiers
+                    else CacheHitSource.EXTERNAL_UNSPECIFIED
+                )
+                sources[tier] = sources.get(tier, 0) + boundary - position
+            active[source] += delta
+            position = boundary
+        return sources
+
     def update_state_after_alloc(
         self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
     ):
+        # Track allocated block IDs regardless of num_external_tokens so
+        # re-allocation flush detection sees blocks allocated by other
+        # connectors in a MultiConnector setup.
+        for group_blocks in blocks.blocks:
+            self._current_batch_allocated_block_ids.update(
+                block.block_id for block in group_blocks if block.block_id != 0
+            )
+
         if num_external_tokens == 0:
             return
+
+        # prepare_load() below pins keys that get_num_new_matched_tokens()
+        # already saw as HIT, so both must sit inside the same region.
+        self._acquire_step()
 
         req_status = self._req_status[request.request_id]
 
@@ -1108,6 +1248,7 @@ class OffloadingConnectorScheduler:
             assert partial_tail_boundary == num_cached_tokens
 
         keys_to_load: list[OffloadKey] = []
+        req_status.load_key_ranges.clear()
         dst_block_ids: list[int] = []
         # per group
         group_sizes: list[int] = []
@@ -1117,10 +1258,6 @@ class OffloadingConnectorScheduler:
             req_status.group_states,
         ):
             group_blocks = blocks.blocks[group_config.group_idx]
-            self._current_batch_allocated_block_ids.update(
-                block.block_id for block in group_blocks if block.block_id != 0
-            )
-
             tokens_per_block = group_config.tokens_per_block
             tokens_per_chunk = group_config.tokens_per_chunk
             offload_keys = group_state.offload_keys
@@ -1160,9 +1297,9 @@ class OffloadingConnectorScheduler:
                 )
                 end_chunk_idx = num_chunks - (partial_tail_boundary is not None)
                 assert len(offload_keys) >= end_chunk_idx
-                keys_to_load.extend(offload_keys[start_chunk_idx:end_chunk_idx])
+                group_keys_to_load = offload_keys[start_chunk_idx:end_chunk_idx]
                 if partial_tail_boundary is not None:
-                    keys_to_load.append(
+                    group_keys_to_load.append(
                         self._make_boundary_key(
                             request,
                             group_config.group_idx,
@@ -1170,6 +1307,24 @@ class OffloadingConnectorScheduler:
                             req_status.req_context,
                         )
                     )
+                keys_to_load.extend(group_keys_to_load)
+                if isinstance(group_config.kv_cache_spec, MambaSpec):
+                    req_status.load_key_ranges.extend(
+                        (num_locally_computed_tokens, num_cached_tokens, key)
+                        for key in group_keys_to_load
+                    )
+                else:
+                    for chunk_idx, key in enumerate(
+                        group_keys_to_load, start_chunk_idx
+                    ):
+                        range_start = max(
+                            load_start_gpu_block_idx * tokens_per_block,
+                            chunk_idx * tokens_per_chunk,
+                        )
+                        range_end = min(
+                            num_cached_tokens, (chunk_idx + 1) * tokens_per_chunk
+                        )
+                        req_status.load_key_ranges.append((range_start, range_end, key))
 
             dst_block_ids.extend(
                 block.block_id
@@ -1777,12 +1932,23 @@ class OffloadingConnectorScheduler:
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
+        # A step that scheduled nothing reaches build_connector_meta without
+        # any earlier manager touch, so open the region here too.
+        self._acquire_step()
+        try:
+            return self._build_connector_meta(scheduler_output)
+        finally:
+            # The step is over: hand the manager back.
+            self._release_step()
+
+    def _build_connector_meta(
+        self, scheduler_output: SchedulerOutput
+    ) -> KVConnectorMetadata:
         self._update_req_states(scheduler_output)
         schedule_end_context = ScheduleEndContext(
             new_req_ids=[req.req_id for req in scheduler_output.scheduled_new_reqs],
             preempted_req_ids=scheduler_output.preempted_req_ids or (),
         )
-        self.manager.on_schedule_end(schedule_end_context)
 
         # Flush jobs for preempted requests.
         for req_id in scheduler_output.preempted_req_ids or ():
@@ -1828,6 +1994,12 @@ class OffloadingConnectorScheduler:
         self._current_batch_load_jobs = {}
         self._current_batch_jobs_to_flush = set()
         self._current_batch_allocated_block_ids = set()
+
+        # Last manager call of the step, after every prepare_store and
+        # on_request_finished above. on_schedule_end is documented as running at
+        # the end of the step, and callers rely on that to bound the step's
+        # exclusive access to the manager.
+        self.manager.on_schedule_end(schedule_end_context)
         return meta
 
     def has_pending_push_work(self) -> bool:
@@ -1835,8 +2007,17 @@ class OffloadingConnectorScheduler:
 
         While True, build_connector_meta() and update_connector_output()
         continue to be called even when no requests are scheduled.
+
+        Must use a short region, never the step-scoped one. The engine asks this
+        before schedule() and returns early when the answer is False, so a
+        step-scoped acquire here would never reach build_connector_meta's
+        release and would hold the manager for good -- which is precisely the
+        state an idle engine settles into.
         """
-        return bool(self._jobs) or self.manager.has_pending_work()
+        if self._jobs:
+            return True
+        with self._manager_locked():
+            return self.manager.has_pending_work()
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
         """Update KVConnector state from worker-side connectors output.
@@ -1846,6 +2027,10 @@ class OffloadingConnectorScheduler:
                 connectors output.
 
         """
+        with self._manager_locked():
+            self._update_connector_output(connector_output)
+
+    def _update_connector_output(self, connector_output: KVConnectorOutput):
         meta = connector_output.kv_connector_worker_meta
         if not isinstance(meta, OffloadingWorkerMetadata):
             assert meta is None
@@ -1924,12 +2109,21 @@ class OffloadingConnectorScheduler:
             stats = self._connector_stats
             self._connector_stats = OffloadingConnectorStats()
 
-        manager_stats = self.manager.get_stats()
+        with self._manager_locked():
+            manager_stats = self.manager.get_stats()
         if manager_stats is not None:
             if stats is None:
                 stats = manager_stats
             else:
                 stats.aggregate(manager_stats)
+
+        if not self._info_sent:
+            if stats is None:
+                stats = OffloadingConnectorStats()
+            # Sent even when the manager reports no facts, so that the metric
+            # exists whenever offloading runs.
+            stats.set_info(self.manager.config_info())
+            self._info_sent = True
 
         return stats
 
@@ -1953,8 +2147,9 @@ class OffloadingConnectorScheduler:
             # Untracked request (offloading never started): no in-flight jobs,
             # nothing was deferred, so finalize immediately.
             req_context = _create_req_context(request)
-            self.manager.on_new_request(req_context)
-            self.manager.on_request_finished(req_context)
+            with self._manager_locked():
+                self.manager.on_new_request(req_context)
+                self.manager.on_request_finished(req_context)
             return False, None
 
         self._maybe_observe_lookup_async_delay(req_status)
@@ -1986,7 +2181,16 @@ class OffloadingConnectorScheduler:
             the underlying :class:`OffloadingEvent` stream.
 
         """
-        yield from self._events_tracker.take_events(self.manager.take_events())
+        # Drain the manager eagerly, inside the region. manager.take_events() is
+        # itself a generator whose backing list is cleared once exhausted, so
+        # iterating it lazily would both hold the manager for as long as the
+        # consumer takes and let a concurrent writer append events that the
+        # clear then discards unpublished.
+        with self._manager_locked():
+            manager_events = list(self.manager.take_events())
+        # Still a generator, so callers testing the result for truthiness keep
+        # seeing a non-empty object the way they do today.
+        yield from self._events_tracker.take_events(manager_events)
 
     def reset_cache(self) -> None:
         """Reset the offloading manager cache, evicting all stored chunks."""
@@ -1995,6 +2199,13 @@ class OffloadingConnectorScheduler:
         assert not self._current_batch_jobs_to_flush
         assert not self._current_batch_allocated_block_ids
 
+        # Held for the whole reset. manager.reset_cache() drains tiers by
+        # polling them itself, so a tier-poll thread locked out here loses
+        # nothing; it simply skips rounds until the reset completes.
+        with self._manager_locked():
+            self._reset_cache()
+
+    def _reset_cache(self) -> None:
         # Flush all in-flight jobs
         self._current_batch_jobs_to_flush.update(self._jobs.keys())
 

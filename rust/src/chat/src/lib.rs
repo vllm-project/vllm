@@ -79,8 +79,12 @@ pub struct ChatRequestProcessor {
     tool_call_parser: ParserSelection,
     /// Reasoning parser selection used when preparing generation requests.
     reasoning_parser: ParserSelection,
-    /// Server-side floor for tool-call structural tags.
-    tool_strict_level: ToolStrictLevel,
+    /// Server-side floor for tool-call structural tags, or `None` for the
+    /// tool parser's default level.
+    tool_strict_level: Option<ToolStrictLevel>,
+    /// Whether request-level tools are left out of the prompt when
+    /// `tool_choice` is `none`.
+    exclude_tools_when_tool_choice_none: bool,
 }
 
 impl ChatRequestProcessor {
@@ -93,7 +97,8 @@ impl ChatRequestProcessor {
             max_model_len: Some(max_model_len as usize),
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
-            tool_strict_level: ToolStrictLevel::Auto,
+            tool_strict_level: None,
+            exclude_tools_when_tool_choice_none: false,
         }
     }
 
@@ -105,7 +110,8 @@ impl ChatRequestProcessor {
             max_model_len: None,
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
-            tool_strict_level: ToolStrictLevel::Auto,
+            tool_strict_level: None,
+            exclude_tools_when_tool_choice_none: false,
         }
     }
 
@@ -120,9 +126,17 @@ impl ChatRequestProcessor {
         self
     }
 
-    /// Configure the server-side floor for tool-call structural tags.
-    pub fn with_tool_strict_level(mut self, tool_strict_level: ToolStrictLevel) -> Self {
+    /// Configure the server-side floor for tool-call structural tags, or
+    /// `None` for the tool parser's default level.
+    pub fn with_tool_strict_level(mut self, tool_strict_level: Option<ToolStrictLevel>) -> Self {
         self.tool_strict_level = tool_strict_level;
+        self
+    }
+
+    /// Configure whether request-level tools are left out of the prompt when
+    /// `tool_choice` is `none`.
+    pub fn with_exclude_tools_when_tool_choice_none(mut self, exclude: bool) -> Self {
+        self.exclude_tools_when_tool_choice_none = exclude;
         self
     }
 
@@ -177,10 +191,18 @@ impl ChatRequestProcessor {
         Ok(Some(features))
     }
 
-    async fn prepare_text_request(&self, request: ChatRequest) -> Result<TextRequest> {
+    async fn prepare_text_request(&self, mut request: ChatRequest) -> Result<TextRequest> {
         // Stamp before rendering so render and tokenize count toward TTFT/e2e.
         let arrival_time = vllm_llm::current_unix_timestamp_secs();
-        let mut rendered = self.backend.chat_renderer().render(&request)?;
+        if self.exclude_tools_when_tool_choice_none {
+            request.tool_context.exclude_initial_tools_if_none();
+        }
+        let renderer = self.backend.chat_renderer();
+        let (mut rendered, request) = tokio::task::spawn_blocking(move || {
+            renderer.render(&request).map(|rendered| (rendered, request))
+        })
+        .await
+        .map_err(|e| Error::ChatTemplate(format!("render task join error: {e}")))??;
         let chat_template_kwargs = std::mem::take(&mut rendered.effective_template_kwargs);
         let (prompt, mm_features) = self.finalize_rendered_prompt(&request, rendered).await?;
         Ok(TextRequest {
@@ -290,9 +312,17 @@ impl ChatLlm {
         self
     }
 
-    /// Set the server-side floor for tool-call structural tags.
-    pub fn with_tool_strict_level(mut self, tool_strict_level: ToolStrictLevel) -> Self {
+    /// Set the server-side floor for tool-call structural tags, or `None` for
+    /// the tool parser's default level.
+    pub fn with_tool_strict_level(mut self, tool_strict_level: Option<ToolStrictLevel>) -> Self {
         self.processor.tool_strict_level = tool_strict_level;
+        self
+    }
+
+    /// Set whether request-level tools are left out of the prompt when
+    /// `tool_choice` is `none`.
+    pub fn with_exclude_tools_when_tool_choice_none(mut self, exclude: bool) -> Self {
+        self.processor.exclude_tools_when_tool_choice_none = exclude;
         self
     }
 
@@ -408,6 +438,12 @@ mod tests {
     }
 
     #[test]
+    fn validate_parser_overrides_accepts_explicit_hf() {
+        let selection = ParserSelection::Explicit("hf".to_string());
+        validate_parser_overrides(&selection, &selection).unwrap();
+    }
+
+    #[test]
     fn validate_parser_overrides_accepts_auto_and_none() {
         validate_parser_overrides(&ParserSelection::Auto, &ParserSelection::None).unwrap();
     }
@@ -420,7 +456,7 @@ mod tests {
         )
         .unwrap_err();
 
-        expect_test::expect!["tool parser `definitely_missing_tool_parser` is not registered (choose from: deepseek_v3, deepseek_v31, deepseek_v32, deepseek_v4, deepseek_v41, gemma4, glm45, glm47, granite4, hermes, hy_v3, hy_v4, inkling, internlm, kimi_k2, kimi_k3, llama3_json, llama4_json, mimo, minimax_m2, minimax_m3, mistral, phi4_mini_json, qwen3_coder, qwen3_xml, seed_oss)"].assert_eq(&error.to_report_string());
+        expect_test::expect!["tool parser `definitely_missing_tool_parser` is not registered (choose from: beam, deepseek_v3, deepseek_v31, deepseek_v32, deepseek_v4, deepseek_v41, gemma4, glm45, glm47, granite4, hermes, hf, hy_v3, hy_v4, inkling, internlm, kimi_k2, kimi_k3, llama3_json, llama4_json, mimo, minimax_m2, minimax_m3, mistral, muse, musespark1x, phi4_mini_json, qwen3_coder, qwen3_json, qwen3_xml, seed_oss, step5)"].assert_eq(&error.to_report_string());
     }
 
     #[test]
@@ -431,6 +467,6 @@ mod tests {
         )
         .unwrap_err();
 
-        expect_test::expect!["reasoning parser `definitely_missing_reasoning_parser` is not registered (choose from: cohere_cmd, deepseek_r1, deepseek_v3, deepseek_v4, deepseek_v41, gemma4, glm45, glm47, hy_v3, hy_v4, inkling, kimi, kimi_k2, kimi_k3, mimo, minimax_m2, minimax_m3, nemotron_v3, qwen3, seed_oss, step3, step3p5)"].assert_eq(&error.to_report_string());
+        expect_test::expect!["reasoning parser `definitely_missing_reasoning_parser` is not registered (choose from: beam, cohere_cmd, deepseek_r1, deepseek_v3, deepseek_v4, deepseek_v41, gemma4, glm45, glm47, hf, hy_v3, hy_v4, inkling, kimi, kimi_k2, kimi_k3, mimo, minimax_m2, minimax_m3, muse, musespark1x, nemotron_v3, qwen3, seed_oss, step3, step3p5, step5)"].assert_eq(&error.to_report_string());
     }
 }

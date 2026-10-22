@@ -51,7 +51,7 @@ def make_vllm_config() -> VllmConfig:
     config = VllmConfig(
         structured_outputs_config=StructuredOutputsConfig(backend="xgrammar"),
     )
-    config.model_config = SimpleNamespace(  # type: ignore[assignment]
+    config.model_config = SimpleNamespace(
         hf_config=SimpleNamespace(model_type="plamo3")
     )
     return config
@@ -73,7 +73,7 @@ def test_plamo3_python_tokenizer_compiles_and_accepts_structural_tag():
     tokenizer = Plamo3Tokenizer(["<eos>", *call_tokens])
     backend = XgrammarBackend(
         make_vllm_config(),
-        tokenizer=tokenizer,  # type: ignore[arg-type]
+        tokenizer=tokenizer,
         vocab_size=len(tokenizer.get_vocab()),
     )
     tools = [
@@ -107,7 +107,7 @@ def test_plamo3_grammar_matches_decoded_bytes(value):
     tokenizer = Plamo3Tokenizer(list(dict.fromkeys(["<eos>", value, *pieces])))
     backend = XgrammarBackend(
         make_vllm_config(),
-        tokenizer=tokenizer,  # type: ignore[arg-type]
+        tokenizer=tokenizer,
         vocab_size=len(tokenizer.get_vocab()),
     )
     for tokens in ([value], pieces):
