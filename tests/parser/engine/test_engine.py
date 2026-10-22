@@ -19,7 +19,12 @@ from vllm.parser.engine.parser_engine_config import (
     ParserState,
     Transition,
 )
-from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
+from vllm.parser.engine.streaming_parser_engine import (
+    StreamingParserEngine,
+    _build_drop_info,
+)
+from vllm.parser.mistral import mistral_config
+from vllm.tokenizers import get_tokenizer
 
 
 def _hermes_config() -> ParserEngineConfig:
@@ -1011,3 +1016,20 @@ class TestTerminalAliases:
             EventType.ARG_VALUE_CHUNK,
             EventType.TOOL_CALL_END,
         ]
+
+
+def test_drop_info_is_built_once_across_requests():
+    """Per-request engines reuse the special-token drop lexer and parse alike."""
+    tokenizer = get_tokenizer(
+        tokenizer_name="mistralai/Mistral-Small-3.2-24B-Instruct-2506",
+        tokenizer_mode="mistral",
+    )
+    config = mistral_config(reasoning_encoding="text")
+
+    assert _build_drop_info(config, tokenizer) is _build_drop_info(config, tokenizer)
+
+    text = "Hello[IMG] world"
+    first = StreamingParserEngine(config, tokenizer).parse_complete(text)
+    second = StreamingParserEngine(config, tokenizer).parse_complete(text)
+    assert first == second
+    assert "".join(e.value for e in first) == "Hello world"
