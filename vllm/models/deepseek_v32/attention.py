@@ -34,11 +34,11 @@ from vllm.model_executor.models.deepseek_v2 import (
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.models.deepseek_v32.common.kernels import fused_norm_rope, fused_q
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.ops.pcp import (
     finalize_mla_pcp_decode,
     maybe_gather_mla_latent_cache_inputs,
 )
+from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
@@ -500,6 +500,7 @@ class DeepseekV32Attention(MLAAttention):
                 self.topk_indices_buffer,
                 skip_k_cache_insert=not self.use_pcp,
                 use_pcp=self.use_pcp,
+                pcp_shard_decode_requests=self.pcp_shard_decode_requests,
                 dense_mha_metadata_layer_name=self._dense_mha_metadata_layer_name,
                 dcp_rank=(
                     self.dcp_manager.group.rank_in_group
@@ -535,6 +536,7 @@ class DeepseekV32Attention(MLAAttention):
                     layer_slot_mapping,
                     attn_metadata.num_decode_tokens,
                     True,
+                    pcp_shard_decode_requests=self.pcp_shard_decode_requests,
                 )
             )
             self.impl.do_kv_cache_update(  # type: ignore[attr-defined]

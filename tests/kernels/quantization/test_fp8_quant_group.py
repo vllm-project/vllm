@@ -5,7 +5,10 @@
 import pytest
 import torch
 
-from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.input_quant_fp8 import (
+    _FP8_MIN_SCALING_FACTOR,
+    QuantFP8,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.utils.torch_utils import set_random_seed
 
@@ -186,3 +189,22 @@ def test_quantfp8_group_edge_cases(default_vllm_config, seed: int) -> None:
     assert x_quant_large.shape == x_large.shape
     # FP8 max is typically 448 or 224, so scales should be > 1
     assert (scales_large > 1.0).all(), "Large values should have scales > 1"
+
+    # Test UE8M0 clamping still returns a correctly rounded value
+    quant_op_ue8m0 = QuantFP8(
+        static=False,
+        group_shape=group_shape,
+        column_major_scales=False,
+        use_ue8m0=True,
+    )
+    x_quant_zero_ue8m0, scales_zero_ue8m0 = quant_op_ue8m0.forward_native(
+        x_zero.clone()
+    )
+    assert x_quant_zero_ue8m0.shape == x_zero.shape
+    # 0x807FFFFF selects only the sign and mantissa bits.
+    assert ((scales_zero_ue8m0.view(torch.int32) & 0x807FFFFF) == 0).all(), (
+        "Clamped scales did not have zero sign and mantissa bits."
+    )
+    assert (scales_zero_ue8m0 >= _FP8_MIN_SCALING_FACTOR).all(), (
+        "Clamped scales were not larger than or equal to _FP8_MIN_SCALING_FACTOR."
+    )
