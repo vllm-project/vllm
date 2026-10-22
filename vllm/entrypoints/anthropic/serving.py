@@ -49,6 +49,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.openai.reasoning_effort import ReasoningEffortRounding
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
@@ -229,6 +230,8 @@ class AnthropicServingMessages(OpenAIServingChat):
         enable_log_deltas: bool = True,
         default_chat_template_kwargs: dict[str, Any] | None = None,
         disabled_thinking_effort: AnthropicDisabledThinkingEffortOption = "auto",
+        supported_reasoning_efforts: list[str] | None = None,
+        reasoning_effort_rounding: ReasoningEffortRounding = "down",
     ):
         super().__init__(
             engine_client=engine_client,
@@ -248,6 +251,8 @@ class AnthropicServingMessages(OpenAIServingChat):
             enable_log_outputs=enable_log_outputs,
             enable_log_deltas=enable_log_deltas,
             default_chat_template_kwargs=default_chat_template_kwargs,
+            supported_reasoning_efforts=supported_reasoning_efforts,
+            reasoning_effort_rounding=reasoning_effort_rounding,
         )
         self._merge_inline_system = self._should_merge_inline_system(online_renderer)
         self.disabled_thinking_effort_resolver = DisabledThinkingEffortResolver(
