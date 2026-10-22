@@ -360,6 +360,21 @@ class EngineCore:
             kv_cache_config.cache_hit_alignment_tokens = cache_hit_alignment_tokens
 
         self.model_executor.initialize_from_config(kv_cache_configs)
+        kv_transfer_config = vllm_config.kv_transfer_config
+        if (
+            kv_transfer_config is not None
+            and kv_transfer_config.has_connector("SimpleCPUOffloadConnector")
+            and vllm_config.cache_config.enable_prefix_caching
+        ):
+            aligned_num_cpu_blocks = (
+                self.model_executor.get_simple_cpu_offload_num_blocks()
+            )
+            assert aligned_num_cpu_blocks is not None, (
+                "SimpleCPUOffloadConnector workers must report their block count"
+            )
+            vllm_config.cache_config.simple_cpu_offload_num_blocks = (
+                aligned_num_cpu_blocks
+            )
         if not envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
             self.model_executor.compile_or_warm_up_model()
 
