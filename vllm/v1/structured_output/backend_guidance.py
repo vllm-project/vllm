@@ -196,14 +196,14 @@ class GuidanceBackend(StructuredOutputBackend):
             log_level=int(os.environ.get("LLGUIDANCE_LOG_LEVEL", "1")),
         )
 
-        r = GuidanceGrammar(
+        if err := ll_matcher.get_error():
+            raise ValueError(f"Grammar error: {err}")
+
+        return GuidanceGrammar(
             ll_matcher=ll_matcher,
             ll_tokenizer=self.ll_tokenizer,
             vocab_size=self.vocab_size,
         )
-
-        r.check_error()
-        return r
 
     def allocate_token_bitmask(self, max_num_seqs: int):
         return llguidance_torch.allocate_token_bitmask(
