@@ -57,7 +57,6 @@ from vllm.renderers.chat_utils import (
 )
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.detokenizer_utils import (
-    convert_ids_list_to_tokens,
     convert_prompt_ids_to_tokens,
     detokenize_incrementally,
     get_leading_space_marker,
@@ -1313,16 +1312,22 @@ def _resolve_prompt_logprobs(
     if prompt_logprobs is None:
         return None
 
-    missing = [
-        tid
-        for entry in prompt_logprobs
-        if entry is not None
-        for tid, lp in entry.items()
-        if lp.decoded_token is None
-    ]
+    missing = list(
+        dict.fromkeys(
+            tid
+            for entry in prompt_logprobs
+            if entry is not None
+            for tid, lp in entry.items()
+            if lp.decoded_token is None
+        )
+    )
     if not missing:
         return prompt_logprobs
-    decoded = dict(zip(missing, convert_ids_list_to_tokens(tokenizer, missing)))
+    # Ids with no vocab entry decode to "", as for output logprobs.
+    decoded = {
+        tid: text
+        for tid, (text, _) in zip(missing, decode_token_ids(missing, tokenizer))
+    }
 
     resolved: PromptLogprobs = []
     context_token_ids: list[int] = []
