@@ -3022,11 +3022,15 @@ def _normalize_paired_block_order(
     if len(src_ids) < 2:
         return src_ids, dst_ids
 
-    descending = (np.diff(src_ids) == -1) & (np.diff(dst_ids) == -1)
-    boundaries = np.flatnonzero(np.diff(descending, prepend=False, append=False))
-    if not len(boundaries):
+    descending = (np.diff(np.asarray(src_ids, dtype=np.int64)) == -1) & (
+        np.diff(np.asarray(dst_ids, dtype=np.int64)) == -1
+    )
+    if not descending.any():
         return src_ids, dst_ids
+    if descending.all():
+        return src_ids[::-1], dst_ids[::-1]
 
+    boundaries = np.flatnonzero(np.diff(descending, prepend=False, append=False))
     src_ids, dst_ids = src_ids.copy(), dst_ids.copy()
     for start, stop in boundaries.reshape(-1, 2):
         # A run of descending edges covers one more block than edges.
