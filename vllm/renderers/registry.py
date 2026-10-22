@@ -25,6 +25,7 @@ _VLLM_RENDERERS = {
     "deepseek_v4": ("deepseek_v4", "DeepseekV4Renderer"),
     "deepseek_v41": ("deepseek_v4", "DeepseekV41Renderer"),
     "hf": ("hf", "HfRenderer"),
+    "glm5_next": ("hf", "HfRenderer"),
     "kimi_audio": ("hf", "HfRenderer"),
     "kimi_k3": ("kimi_k3", "KimiK3Renderer"),
     "mistral": ("mistral", "MistralRenderer"),

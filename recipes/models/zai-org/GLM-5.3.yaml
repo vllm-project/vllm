@@ -4,7 +4,7 @@ meta:
   provider: "GLM (Z-AI)"
   description: "GLM-5.3 — Frontier Coding with Emergent Cyber Capabilities"
   date_added: 2026-08-28
-  date_updated: 2026-10-15
+  date_updated: 2026-10-19
   tasks:
     - text
   performance_headline: "Latest GLM-5 series MoE — native FP8 by default, 5-token MTP, 1M context"
@@ -37,11 +37,18 @@ model:
   default_frontend: rust
   docker_image:
     amd: "vllm/vllm-openai-rocm:v0.29.0"
+  install:
+    pip:
+      note: "Native GLM5Next rendering requires a build containing vllm-project/vllm#62424, including its Rust binary. The minimum version alone does not include this support."
+    docker:
+      note: "Use an image containing vllm-project/vllm#62424, including its Rust binary. Older hardware-specific image pins require an updated build for --tokenizer-mode glm5_next."
   architecture: moe
   parameter_count: "743B"
   active_parameters: "39B"
   context_length: 1048576
   base_args:
+    - "--tokenizer-mode"
+    - "glm5_next"
     - "--kv-cache-dtype"
     - "fp8_e4m3"
   base_env: {}
@@ -255,32 +262,41 @@ guide: |
   ## Overview
 
   **GLM-5.3** is the newest model in the GLM-5 series — a ~743B-parameter MoE (39B active) from **Z-AI**.
-  Architecture and serving flags are identical to GLM-5.2; the packaging change is that the
-  **default `zai-org/GLM-5.3` checkpoint is now native FP8** — BF16 weights live under the suffixed `zai-org/GLM-5.3-BF16` repo.
+  The **default `zai-org/GLM-5.3` checkpoint is native FP8** — BF16 weights live under the suffixed `zai-org/GLM-5.3-BF16` repo.
 
   The FP8 checkpoint fits on a single 8xH200 / 8xH20 node and — with FP8 KV cache — reaches the full 1M-token context on 8xB200.
   An NVFP4 checkpoint for Blackwell is published by Inferact (`Inferact/GLM-5.3-NVFP4`).
 
   ## Prerequisites
 
-  - **vLLM 0.28.0** or newer.
+  - **vLLM:** a build containing [native GLM5Next support (#62424)](https://github.com/vllm-project/vllm/pull/62424), including the matching Rust frontend binary.
+  - **Transformers:** 5.15.0 or newer.
   - **GPU:** 8xH200 or 8xH20 (141 GB each) for single-node FP8; 8xB200 (180 GB each) for the full 1M context.
 
   ## Installation
 
-  ```bash
-  uv venv
-  source .venv/bin/activate
-  uv pip install "vllm==0.28.0" --torch-backend=auto
-  uv pip install "transformers>=5.15.0"
-  ```
+  Use a wheel or container built with #62424 for the Rust commands below.
+  The older release and hardware-specific image pins record prior model validation;
+  they need an updated build to use `--tokenizer-mode glm5_next`.
+
+  ## Frontends
+
+  The command builder defaults to **Rust** and adds `--tokenizer-mode glm5_next`.
+  With `VLLM_USE_RUST_FRONTEND=1`, this selects native GLM5Next chat rendering for
+  GLM-5.3, including tool calls and reasoning options.
+
+  Select **Python** in the command builder, or set `VLLM_USE_RUST_FRONTEND=0`,
+  to use the Hugging Face renderer on the same build. On older builds that do not
+  recognize `glm5_next`, also replace `--tokenizer-mode glm5_next` with
+  `--tokenizer-mode auto`.
 
   ## Launching the server
 
   ### FP8 on 8xH200 (standard)
 
   ```bash
-  vllm serve zai-org/GLM-5.3 \
+  VLLM_USE_RUST_FRONTEND=1 vllm serve zai-org/GLM-5.3 \
+    --tokenizer-mode glm5_next \
     --kv-cache-dtype fp8 \
     --tensor-parallel-size 8 \
     --speculative-config.method mtp \
@@ -296,7 +312,9 @@ guide: |
   ```bash
   VLLM_ROCM_USE_AITER=1 \
   VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1 \
+  VLLM_USE_RUST_FRONTEND=1 \
   vllm serve zai-org/GLM-5.3 \
+    --tokenizer-mode glm5_next \
     --kv-cache-dtype fp8_e4m3 \
     --tensor-parallel-size 8 \
     --speculative-config.method mtp \
@@ -311,7 +329,7 @@ guide: |
     --moe-backend aiter
   ```
 
-  On 8x MI325X with `vllm/vllm-openai-rocm:v0.29.0`, this command serves the full
+  Earlier validation on 8x MI325X with `vllm/vllm-openai-rocm:v0.29.0` served
   `--max-model-len 524288` at `--gpu-memory-utilization 0.80`, reporting a 1,477,168-token
   KV cache and 2.82x maximum concurrency. MTP is healthy there: a mean acceptance length of
   2.77 with 5 tokens drafted per step on a ~500-token greedy generation.
@@ -328,7 +346,8 @@ guide: |
   (`--kv-cache-dtype fp8_e4m3`, already in the base flags) roughly halves that budget.
 
   ```bash
-  vllm serve zai-org/GLM-5.3 \
+  VLLM_USE_RUST_FRONTEND=1 vllm serve zai-org/GLM-5.3 \
+    --tokenizer-mode glm5_next \
     --kv-cache-dtype fp8_e4m3 \
     --tensor-parallel-size 8 \
     --speculative-config.method mtp \
@@ -351,7 +370,8 @@ guide: |
   Select the **NVFP4** variant above (Blackwell-only) or run:
 
   ```bash
-  vllm serve Inferact/GLM-5.3-NVFP4 \
+  VLLM_USE_RUST_FRONTEND=1 vllm serve Inferact/GLM-5.3-NVFP4 \
+    --tokenizer-mode glm5_next \
     --tensor-parallel-size 8 \
     --enable-expert-parallel \
     --reasoning-parser glm47 \
@@ -368,7 +388,8 @@ guide: |
   with eight speculative tokens:
 
   ```bash
-  vllm serve zai-org/GLM-5.3 \
+  VLLM_USE_RUST_FRONTEND=1 vllm serve zai-org/GLM-5.3 \
+    --tokenizer-mode glm5_next \
     --tensor-parallel-size 8 \
     --speculative-config '{"method":"dspark","model":"RedHatAI/GLM-5.3-speculator.dspark","num_speculative_tokens":8}'
   ```

@@ -137,34 +137,16 @@ impl HfChatRenderer {
             chat_template,
             ..
         } = load_tokenizer_config(files.tokenizer_config_path.as_deref())?;
-        let mut template = chat_template;
         let special_tokens = (!special_tokens.is_empty()).then_some(special_tokens);
 
-        if let Some(configured_template) = options.chat_template.as_deref() {
-            template = Some(
-                resolve_chat_template(configured_template)
-                    .map_err(|error| Error::ChatTemplate(error.to_report_string()))?,
-            );
-            info!("using configured chat template override");
-        } else if let Some(chat_template_path) = files.chat_template_path.as_deref() {
-            // If independent chat template file(s) exist and contain non-empty content,
-            // they take priority over template entries in the tokenizer config
-            let file_template = load_chat_template(chat_template_path)
+        let template = if let Some(configured_template) = options.chat_template.as_deref() {
+            let template = resolve_chat_template(configured_template)
                 .map_err(|error| Error::ChatTemplate(error.to_report_string()))?;
-
-            if file_template.as_ref().is_some_and(|t| !t.trim().is_empty()) {
-                info!(
-                    path = %chat_template_path.display(),
-                    "loaded dedicated chat template file, overriding tokenizer_config chat_template"
-                );
-                template = file_template;
-            } else {
-                warn!(
-                    path = %chat_template_path.display(),
-                    "ignoring empty dedicated chat template file and falling back to tokenizer_config chat_template"
-                );
-            }
-        }
+            info!("using configured chat template override");
+            Some(template)
+        } else {
+            checkpoint_chat_template(files, chat_template)?
+        };
 
         Ok(Self::new(
             template,
@@ -279,6 +261,38 @@ impl HfChatRenderer {
 impl ChatRenderer for HfChatRenderer {
     fn render(&self, request: &ChatRequest) -> Result<RenderedPrompt> {
         self.apply_chat_template(request)
+    }
+}
+
+/// Load the chat template shipped with the checkpoint.
+pub(crate) fn load_checkpoint_chat_template(files: &ResolvedModelFiles) -> Result<Option<String>> {
+    let config = load_tokenizer_config(files.tokenizer_config_path.as_deref())?;
+    checkpoint_chat_template(files, config.chat_template)
+}
+
+/// If independent chat template file(s) exist and contain non-empty content,
+/// they take priority over template entries in the tokenizer config
+fn checkpoint_chat_template(
+    files: &ResolvedModelFiles,
+    tokenizer_config_template: Option<String>,
+) -> Result<Option<String>> {
+    let Some(chat_template_path) = files.chat_template_path.as_deref() else {
+        return Ok(tokenizer_config_template);
+    };
+    let file_template = load_chat_template(chat_template_path)
+        .map_err(|error| Error::ChatTemplate(error.to_report_string()))?;
+    if file_template.as_ref().is_some_and(|t| !t.trim().is_empty()) {
+        info!(
+            path = %chat_template_path.display(),
+            "loaded dedicated chat template file, overriding tokenizer_config chat_template"
+        );
+        Ok(file_template)
+    } else {
+        warn!(
+            path = %chat_template_path.display(),
+            "ignoring empty dedicated chat template file and falling back to tokenizer_config chat_template"
+        );
+        Ok(tokenizer_config_template)
     }
 }
 
