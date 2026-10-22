@@ -96,6 +96,12 @@ ARG INSTALL_KV_CONNECTORS=false
 # from source and installs it in place of the nixl packages from the KV-connector
 # requirements
 ARG BUILD_NIXL=false
+# NIXL source-build selection: a Git ref in place of the pinned release, the
+# plugins to build, and the libfabric release the LIBFABRIC plugin is compiled
+# against (the wheel excludes libfabric and loads the host's at runtime).
+ARG NIXL_REF=
+ARG NIXL_PLUGINS=UCX
+ARG LIBFABRIC_REF=v2.7.0
 
 #################### BASE BUILD IMAGE ####################
 # prepare basic build environment
@@ -564,6 +570,9 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 # Build NIXL and its NIXL EP extension against the PyTorch installed here when
 # requested. The wheels are installed by the final image, which has no compiler.
 ARG BUILD_NIXL
+ARG NIXL_REF
+ARG NIXL_PLUGINS
+ARG LIBFABRIC_REF
 COPY tools/build_nixl_with_torch215_for_rubin.py /tmp/build_nixl_for_rubin.py
 RUN --mount=type=bind,source=requirements,target=/tmp/vllm-requirements,ro \
     set -eux; \
@@ -571,9 +580,16 @@ RUN --mount=type=bind,source=requirements,target=/tmp/vllm-requirements,ro \
     mkdir -p "${NIXL_WORKSPACE}/dist"; \
     if [ "${BUILD_NIXL}" = "true" ]; then \
         dnf install -y --setopt=install_weak_deps=False autoconf automake libtool; \
+        # NIXL's libfabric utilities link libnuma; the script builds hwloc itself.
+        if echo "${NIXL_PLUGINS}" | grep -qi libfabric; then \
+            dnf install -y --setopt=install_weak_deps=False numactl-devel; \
+        fi; \
         dnf clean all; \
         rm -rf /var/cache/dnf; \
         NIXL_REQUIREMENTS_FILE=/tmp/vllm-requirements/kv_connectors.txt \
+        NIXL_REF="${NIXL_REF}" \
+        NIXL_PLUGINS="${NIXL_PLUGINS}" \
+        LIBFABRIC_REF="${LIBFABRIC_REF}" \
         WHEELS_CACHE_HOME="${NIXL_WORKSPACE}/dist" \
         MAX_JOBS="${max_jobs:-}" \
             python3 /tmp/build_nixl_for_rubin.py --skip-system-deps --build-only; \
@@ -1292,11 +1308,18 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 # the image has a NIXL EP build for its PyTorch version. There is no GPU driver
 # at build time, so check for the extension instead of importing it.
 ARG BUILD_NIXL
+ARG NIXL_PLUGINS
 RUN --mount=type=cache,target=/opt/uv/cache \
     --mount=type=bind,from=extensions-build,source=/tmp/nixl_workspace/dist,target=/tmp/nixl-dist,ro \
     set -eu; \
     if [ "${BUILD_NIXL}" = "true" ]; then \
         ls /tmp/nixl-dist/*.whl; \
+        # The LIBFABRIC plugin loads hwloc from the image and libfabric from the host.
+        if echo "${NIXL_PLUGINS}" | grep -qi libfabric; then \
+            apt-get update -y; \
+            apt-get install -y --no-install-recommends libhwloc15; \
+            rm -rf /var/lib/apt/lists/*; \
+        fi; \
         uv pip uninstall --system nixl nixl-cu12 nixl-cu13; \
         uv pip install --system --no-deps /tmp/nixl-dist/*.whl; \
         python3 -c "import glob, importlib.util as u, os, torch; \

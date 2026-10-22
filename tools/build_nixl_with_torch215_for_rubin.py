@@ -13,6 +13,8 @@ import os
 import shutil
 import subprocess
 import sys
+import tarfile
+import tomllib
 import urllib.request
 
 # --- Configuration ---
@@ -26,6 +28,22 @@ BUILD_TOOLS_DIR = os.path.join("/tmp", "nixl_build_tools")
 UCX_REPO_URL = "https://github.com/openucx/ucx.git"
 NIXL_REPO_URL = "https://github.com/ai-dynamo/nixl.git"
 UCX_REF = os.environ.get("UCX_REF", "v1.23.x")
+# A Git ref of NIXL to build instead of the release tag of NIXL_VERSION.
+NIXL_REF = os.environ.get("NIXL_REF")
+# The LIBFABRIC plugin links libfabric and compiles its dmabuf registration path
+# only against headers that define FI_MR_DMABUF (libfabric 1.20 and newer); with
+# no --libfabric-path this libfabric release is built for the headers and the
+# link, and the runtime loads the host's libfabric (excluded from the wheel).
+LIBFABRIC_DIR = os.path.join("/tmp", "libfabric_source")
+LIBFABRIC_INSTALL_DIR = os.path.join("/tmp", "libfabric_install")
+LIBFABRIC_REPO_URL = "https://github.com/ofiwg/libfabric.git"
+LIBFABRIC_REF = os.environ.get("LIBFABRIC_REF", "v2.7.0")
+# NIXL's libfabric utilities need hwloc 2.5+ API (hwloc_get_local_numanode_objs);
+# the manylinux 2.28 build base ships 2.2, so hwloc is built from source like
+# NIXL's own wheel build does. hwloc is excluded from the wheel too.
+HWLOC_DIR = os.path.join("/tmp", "hwloc_source")
+HWLOC_INSTALL_DIR = os.path.join("/tmp", "hwloc_install")
+HWLOC_VERSION = os.environ.get("HWLOC_VERSION", "2.12.2")
 TEMP_WHEEL_DIR = os.path.join("/tmp", "nixl_temp_wheelhouse")
 NIXL_REQUIREMENTS_FILE = os.environ.get(
     "NIXL_REQUIREMENTS_FILE",
@@ -92,9 +110,15 @@ def get_pinned_nixl_version():
 
 
 def resolve_nixl_version():
-    """Returns the NIXL version to build and where it comes from."""
+    """Returns the NIXL version to build and where it comes from.
+
+    With NIXL_REF and no NIXL_VERSION the version is read from the checkout's
+    pyproject.toml once the ref is checked out, so it is None until then.
+    """
     if os.environ.get("NIXL_VERSION"):
         return os.environ["NIXL_VERSION"], "the NIXL_VERSION environment variable"
+    if NIXL_REF:
+        return None, f"the NIXL_REF {NIXL_REF}"
     pinned_version = get_pinned_nixl_version()
     if pinned_version:
         return pinned_version, os.path.normpath(NIXL_REQUIREMENTS_FILE)
@@ -103,7 +127,7 @@ def resolve_nixl_version():
 
 NIXL_VERSION, NIXL_VERSION_SOURCE = resolve_nixl_version()
 # Version as it appears in wheel file names (tags may carry a "v" prefix).
-NIXL_WHEEL_VERSION = NIXL_VERSION.removeprefix("v")
+NIXL_WHEEL_VERSION = NIXL_VERSION.removeprefix("v") if NIXL_VERSION else None
 
 
 def run_command(command, cwd=".", env=None):
@@ -198,7 +222,7 @@ def is_nixl_installed(build_nixl_ep):
     return result.returncode == 0
 
 
-def install_system_dependencies(build_nixl_ep=False):
+def install_system_dependencies(build_nixl_ep=False, libfabric=False):
     """Installs required system packages using apt-get if run as root."""
     if shutil.which("apt-get") is None:
         print("--> apt-get not found, relying on the build tools in PATH.", flush=True)
@@ -217,7 +241,8 @@ def install_system_dependencies(build_nixl_ep=False):
         print(
             "  patchelf build-essential git cmake ninja-build \
             autotools-dev automake libtool libtool-bin \
-            libibverbs-dev",
+            libibverbs-dev"
+            + (" libnuma-dev" if libfabric else ""),
             flush=True,
         )
         print("---\n", flush=True)
@@ -237,6 +262,9 @@ def install_system_dependencies(build_nixl_ep=False):
         "pkg-config",
         "libibverbs-dev",
     ]
+    if libfabric:
+        # NIXL's libfabric utilities link libnuma (bundled into the wheel).
+        apt_packages.append("libnuma-dev")
     # -base CUDA images lack the headers UCX (NVML) and the torch extension
     # (cuSPARSE/cuSOLVER/cuBLAS, included by ATen/cuda/CUDAContext.h) need.
     cuda_version = get_cuda_version()
@@ -325,19 +353,10 @@ def build_nixl_wheel(ucx_path, build_env, wheel_dir, args):
     else:
         run_command(["git", "fetch", "--tags"], cwd=NIXL_DIR)
     nixl_source_path = os.path.abspath(NIXL_DIR)
-    # Tags are "v<version>" for current releases and bare for older ones.
-    for tag in (f"v{NIXL_WHEEL_VERSION}", NIXL_WHEEL_VERSION):
-        tag_exists = subprocess.run(
-            ["git", "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}"],
-            cwd=nixl_source_path,
-            stdout=subprocess.DEVNULL,
-        )
-        if tag_exists.returncode == 0:
-            run_command(["git", "checkout", "--force", tag], cwd=nixl_source_path)
-            print(f"--> Checked out NIXL version: {tag}", flush=True)
-            break
+    if NIXL_REF:
+        checkout_nixl_ref(nixl_source_path)
     else:
-        raise RuntimeError(f"NIXL has no tag for version {NIXL_WHEEL_VERSION}.")
+        checkout_nixl_release(nixl_source_path)
 
     cuda_version = get_cuda_version()
     if cuda_version is not None:
@@ -357,6 +376,8 @@ def build_nixl_wheel(ucx_path, build_env, wheel_dir, args):
         "build_tests": "false",
         "ucx_path": ucx_path,
     }
+    if args.libfabric_path:
+        meson_options["libfabric_path"] = os.path.abspath(args.libfabric_path)
     cuda_arch_list = args.cuda_arch_list
     if args.build_nixl_ep:
         meson_options["build_nixl_ep"] = "true"
@@ -387,6 +408,96 @@ def build_nixl_wheel(ucx_path, build_env, wheel_dir, args):
         cwd=nixl_source_path,
         env=build_env,
     )
+
+
+def checkout_nixl_ref(nixl_source_path):
+    """Checks out NIXL_REF (a branch, tag or commit) and reads its version."""
+    global NIXL_WHEEL_VERSION
+    for ref in (NIXL_REF, f"origin/{NIXL_REF}"):
+        ref_exists = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+            cwd=nixl_source_path,
+            stdout=subprocess.DEVNULL,
+        )
+        if ref_exists.returncode == 0:
+            run_command(["git", "checkout", "--force", ref], cwd=nixl_source_path)
+            break
+    else:
+        raise RuntimeError(f"NIXL has no ref {NIXL_REF}.")
+    with open(os.path.join(nixl_source_path, "pyproject.toml"), "rb") as pyproject:
+        NIXL_WHEEL_VERSION = tomllib.load(pyproject)["project"]["version"]
+    print(f"--> Checked out NIXL {NIXL_REF}: version {NIXL_WHEEL_VERSION}", flush=True)
+
+
+def checkout_nixl_release(nixl_source_path):
+    """Checks out the release tag of NIXL_WHEEL_VERSION."""
+    # Tags are "v<version>" for current releases and bare for older ones.
+    for tag in (f"v{NIXL_WHEEL_VERSION}", NIXL_WHEEL_VERSION):
+        tag_exists = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}"],
+            cwd=nixl_source_path,
+            stdout=subprocess.DEVNULL,
+        )
+        if tag_exists.returncode == 0:
+            run_command(["git", "checkout", "--force", tag], cwd=nixl_source_path)
+            print(f"--> Checked out NIXL version: {tag}", flush=True)
+            break
+    else:
+        raise RuntimeError(f"NIXL has no tag for version {NIXL_WHEEL_VERSION}.")
+
+
+def build_hwloc(install_path):
+    """Builds hwloc from source for the LIBFABRIC plugin's headers and link."""
+    series = ".".join(HWLOC_VERSION.split(".")[:2])
+    archive = os.path.join("/tmp", f"hwloc-{HWLOC_VERSION}.tar.gz")
+    if not os.path.exists(archive):
+        url = (
+            "https://download.open-mpi.org/release/hwloc/"
+            f"v{series}/hwloc-{HWLOC_VERSION}.tar.gz"
+        )
+        urllib.request.urlretrieve(url, archive)
+    os.makedirs(HWLOC_DIR, exist_ok=True)
+    with tarfile.open(archive) as tar:
+        tar.extractall(HWLOC_DIR, filter="data")
+    source_path = os.path.join(HWLOC_DIR, f"hwloc-{HWLOC_VERSION}")
+    run_command(
+        [
+            "./configure",
+            f"--prefix={install_path}",
+            "--disable-nvml",
+            "--disable-static",
+        ],
+        cwd=source_path,
+    )
+    run_command(["make", "-j", str(MAX_JOBS)], cwd=source_path)
+    run_command(["make", "install"], cwd=source_path)
+
+
+def build_libfabric(install_path):
+    """Builds libfabric from source for the LIBFABRIC plugin's headers and link.
+
+    Only the tcp provider is built: the plugin is linked against this copy but
+    the wheel excludes libfabric, so at runtime it loads the host's libfabric and
+    that one's providers (EFA, verbs, ...).
+    """
+    if not os.path.exists(LIBFABRIC_DIR):
+        run_command(["git", "clone", LIBFABRIC_REPO_URL, LIBFABRIC_DIR])
+    source_path = os.path.abspath(LIBFABRIC_DIR)
+    run_command(["git", "fetch", "--tags", "origin"], cwd=source_path)
+    run_command(["git", "checkout", "--force", LIBFABRIC_REF], cwd=source_path)
+    run_command(["./autogen.sh"], cwd=source_path)
+    run_command(
+        [
+            "./configure",
+            f"--prefix={install_path}",
+            "--enable-only",
+            "--enable-tcp",
+            "--disable-static",
+        ],
+        cwd=source_path,
+    )
+    run_command(["make", "-j", str(MAX_JOBS)], cwd=source_path)
+    run_command(["make", "install"], cwd=source_path)
 
 
 def repair_nixl_wheel(unrepaired_wheel, repaired_dir, ucx_install_path, build_env):
@@ -451,10 +562,14 @@ def install_nixl_wheels(wheels):
 
 def build_and_install_prerequisites(args):
     """Builds UCX and NIXL from source, creating a self-contained wheel."""
-    print(f"--> NIXL version {NIXL_WHEEL_VERSION} (from {NIXL_VERSION_SOURCE})")
+    print(
+        f"--> NIXL version {NIXL_WHEEL_VERSION or '(from ref)'} "
+        f"(from {NIXL_VERSION_SOURCE})"
+    )
     if args.build_nixl_ep is None:
         args.build_nixl_ep = get_cuda_version() is not None and is_torch_available()
-    reuse_existing = not (args.force_reinstall or args.build_only)
+    # A Git ref's version is only known after checkout, so it is always built.
+    reuse_existing = not (args.force_reinstall or args.build_only or NIXL_REF)
     if reuse_existing and is_nixl_installed(args.build_nixl_ep):
         print("--> NIXL is already installed. Nothing to do.", flush=True)
         return
@@ -480,8 +595,11 @@ def build_and_install_prerequisites(args):
          Starting full build process...",
         flush=True,
     )
+    build_libfabric_plugin = "LIBFABRIC" in {
+        plugin.strip().upper() for plugin in (args.nixl_plugins or "").split(",")
+    }
     if not args.skip_system_deps:
-        install_system_dependencies(args.build_nixl_ep)
+        install_system_dependencies(args.build_nixl_ep, build_libfabric_plugin)
     print("\n--> Installing Python build dependencies...", flush=True)
     install_python_build_dependencies()
     print(f"--> Using wheel cache directory: {WHEELS_CACHE_HOME}", flush=True)
@@ -498,6 +616,15 @@ def build_and_install_prerequisites(args):
         print("\n[1/3] Configuring and building UCX from source...", flush=True)
         build_ucx(ucx_install_path)
         print("--- UCX build and install complete ---", flush=True)
+
+    if build_libfabric_plugin and not args.libfabric_path:
+        print(f"\n--> Building libfabric {LIBFABRIC_REF} from source...", flush=True)
+        build_libfabric(os.path.abspath(LIBFABRIC_INSTALL_DIR))
+        args.libfabric_path = os.path.abspath(LIBFABRIC_INSTALL_DIR)
+    if build_libfabric_plugin and not args.hwloc_path:
+        print(f"\n--> Building hwloc {HWLOC_VERSION} from source...", flush=True)
+        build_hwloc(os.path.abspath(HWLOC_INSTALL_DIR))
+        args.hwloc_path = os.path.abspath(HWLOC_INSTALL_DIR)
 
     # -- Step 2: Build NIXL wheel from source --
     print("\n[2/3] Building NIXL wheel from source...", flush=True)
@@ -516,10 +643,17 @@ def build_and_install_prerequisites(args):
     build_env["PYTHONPATH"] = os.pathsep.join(
         filter(None, [BUILD_TOOLS_DIR, build_env.get("PYTHONPATH")])
     )
-    build_env["PKG_CONFIG_PATH"] = os.path.join(ucx_lib_path, "pkgconfig")
+    pkg_config_paths = [os.path.join(ucx_lib_path, "pkgconfig")]
+    ld_paths = [ucx_lib_path, ucx_plugin_path]
+    for prefix in (args.libfabric_path, args.hwloc_path):
+        if prefix:
+            lib_path = os.path.join(os.path.abspath(prefix), "lib")
+            pkg_config_paths.append(os.path.join(lib_path, "pkgconfig"))
+            ld_paths.append(lib_path)
+    build_env["PKG_CONFIG_PATH"] = os.pathsep.join(pkg_config_paths)
     existing_ld_path = os.environ.get("LD_LIBRARY_PATH", "")
-    build_env["LD_LIBRARY_PATH"] = (
-        f"{ucx_lib_path}:{ucx_plugin_path}:{existing_ld_path}".strip(":")
+    build_env["LD_LIBRARY_PATH"] = os.pathsep.join(
+        filter(None, [*ld_paths, existing_ld_path])
     )
     print(f"--> Using LD_LIBRARY_PATH: {build_env['LD_LIBRARY_PATH']}", flush=True)
 
@@ -602,6 +736,20 @@ if __name__ == "__main__":
         default=os.environ.get("NIXL_CUDA_ARCH_LIST"),
         help="Comma-separated CUDA SM targets for NIXL, e.g. 100,103,107. \
         Defaults to the NIXL EP targets the installed nvcc supports.",
+    )
+    parser.add_argument(
+        "--libfabric-path",
+        default=os.environ.get("LIBFABRIC_PATH"),
+        help="Prefix of a libfabric install to build the LIBFABRIC plugin against. \
+        Without it, and with LIBFABRIC among --nixl-plugins, libfabric LIBFABRIC_REF \
+        is built from source for the headers and the link.",
+    )
+    parser.add_argument(
+        "--hwloc-path",
+        default=os.environ.get("HWLOC_PATH"),
+        help="Prefix of an hwloc 2.5+ install for the LIBFABRIC plugin. Without it, \
+        and with LIBFABRIC among --nixl-plugins, hwloc HWLOC_VERSION is built from \
+        source.",
     )
     parser.add_argument(
         "--nixl-plugins",

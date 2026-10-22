@@ -455,7 +455,10 @@ branch, or tag revision.
 Set `BUILD_NIXL=true` to build NIXL from source. NIXL's release wheels do not
 include the NIXL EP extension for the PyTorch nightly used by the Rubin build.
 The build uses the NIXL version pinned in `requirements/kv_connectors.txt` and
-replaces the NIXL packages installed from the KV-connector requirements.
+replaces the NIXL packages installed from the KV-connector requirements. Set
+`NIXL_REF` to build another Git ref, and `NIXL_PLUGINS=UCX,LIBFABRIC` to add the
+LIBFABRIC plugin, compiled against the `LIBFABRIC_REF` libfabric release and
+linked to the host's libfabric at runtime.
 
 For `FINAL_BASE_IMAGE`, use the public, multi-arch
 `nvidia/cuda:13.4.1-base-ubuntu24.04` image. Set `NCCL_VERSION` to 2.32.3 or

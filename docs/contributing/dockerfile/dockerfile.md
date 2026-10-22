@@ -27,7 +27,11 @@ dependencies so dependency resolution cannot restore an older Triton version.
 With `BUILD_NIXL=true`, `extensions-build` also builds NIXL, including its NIXL
 EP extension for the installed PyTorch, with `tools/build_nixl_with_torch215_for_rubin.py`.
 `vllm-openai-base` then replaces the NIXL packages installed from the KV-connector
-requirements with these wheels.
+requirements with these wheels. `NIXL_REF` builds a Git ref instead of the pinned
+release, `NIXL_PLUGINS` selects the plugins (default `UCX`; add `LIBFABRIC` for
+libfabric fabrics such as EFA), and `LIBFABRIC_REF` is the libfabric release the
+LIBFABRIC plugin is compiled against; the wheel excludes libfabric and loads the
+host's at runtime.
 
   > <figure markdown="span">
   >   ![](../../assets/contributing/dockerfile-stages-dependency.png){ align="center" alt="query" width="100%" }
