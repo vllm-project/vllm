@@ -483,8 +483,11 @@ def test_sparse_skip_index_branch(num_tokens, block_size, kv_cache_dtype):
     reason="e4m3 conversion requires CUDA SM89+.",
 )
 @pytest.mark.parametrize("num_tokens", [1, 7, 64, 513])
-@pytest.mark.parametrize("block_size,num_kv_heads", [(16, 4), (64, 4), (128, 1)])
-def test_sparse_full_fp8_index(num_tokens, block_size, num_kv_heads):
+@pytest.mark.parametrize(
+    "block_size,num_kv_heads,tp_shard",
+    [(16, 4, 1), (64, 4, 1), (128, 1, 2), (128, 1, 4)],
+)
+def test_sparse_full_fp8_index(num_tokens, block_size, num_kv_heads, tp_shard):
     torch.manual_seed(1)
     device, dtype, eps = "cuda", torch.bfloat16, 1e-6
     base, max_pos = 5_000_000.0, 4096
@@ -577,21 +580,24 @@ def test_sparse_full_fp8_index(num_tokens, block_size, num_kv_heads):
 
         with set_current_vllm_config(VllmConfig()):
             cache = MiniMaxM3IndexerCache(
-                HEAD_DIM, prefix="index_cache", indexer_kv_dtype="fp8", tp_shard=4
+                HEAD_DIM,
+                prefix="index_cache",
+                indexer_kv_dtype="fp8",
+                tp_shard=tp_shard,
             )
-        for rank in range(4):
+        for rank in range(tp_shard):
             packed = torch.zeros(
                 num_blocks,
                 1,
                 block_size,
-                HEAD_DIM // 4,
+                HEAD_DIM // tp_shard,
                 dtype=torch.float8_e4m3fn,
                 device=device,
             )
             cache.bind_kv_cache(packed)
             assert cache.kv_cache.data_ptr() == packed.data_ptr()
             index_slots = shard_slot_mapping(
-                index_slot_mapping, rank, 4, torch.empty_like(index_slot_mapping)
+                index_slot_mapping, rank, tp_shard, torch.empty_like(index_slot_mapping)
             )
             qkv_sh, kvc_sh, idxc_sh, qo_sh, iq_sh = run(
                 torch.float8_e4m3fn, cache.kv_cache, index_slots
@@ -603,7 +609,7 @@ def test_sparse_full_fp8_index(num_tokens, block_size, num_kv_heads):
             ):
                 assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
             assert torch.equal(
-                idxc_sh.view(torch.uint8), idxc_fp[:, rank::4].view(torch.uint8)
+                idxc_sh.view(torch.uint8), idxc_fp[:, rank::tp_shard].view(torch.uint8)
             )
 
 

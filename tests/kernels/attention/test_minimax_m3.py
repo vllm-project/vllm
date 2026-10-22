@@ -1541,10 +1541,16 @@ def test_decode_index_score_cutedsl_correctness(
     reason="Sharded index decode score requires Blackwell.",
 )
 @pytest.mark.parametrize(
-    "decode_query_len,max_decode_query_len", [(1, 1), (1, 8), (3, 8), (8, 8)]
+    "world,decode_query_len,max_decode_query_len,split_k",
+    [
+        (world, q, max_q, 128)
+        for world in (2, 4)
+        for q, max_q in ((1, 1), (1, 8), (3, 8), (8, 8))
+    ]
+    + [(2, q, 8, 1) for q in (1, 3, 8)],
 )
 def test_sharded_decode_index_score_matches_reference(
-    decode_query_len, max_decode_query_len
+    world, decode_query_len, max_decode_query_len, split_k
 ):
     pytest.importorskip("cutlass")
     from vllm.third_party.fmha_sm100.api import sparse_topk_select
@@ -1557,25 +1563,28 @@ def test_sharded_decode_index_score_matches_reference(
     )
 
     torch.manual_seed(0)
-    world, head_dim = 4, HEAD_DIM
-    seq_lens = torch.tensor([129, 4097, 0], device="cuda", dtype=torch.int32)
-    num_pages = 3 * 33
+    heads, head_dim = 4, HEAD_DIM
+    heads_per_rank = heads // world
+    seq_lens = torch.tensor([97, 129, 4097, 0], device="cuda", dtype=torch.int32)
+    num_pages = 4 * 33
     block_table = torch.randperm(num_pages, device="cuda", dtype=torch.int32).view(
-        3, 33
+        4, 33
     )
     total_q = seq_lens.numel() * decode_query_len
-    q = torch.randn(total_q, world, head_dim, device="cuda").to(torch.float8_e4m3fn)
+    q = torch.randn(total_q, heads, head_dim, device="cuda").to(torch.float8_e4m3fn)
     kv = torch.randn(num_pages, BLOCK_SIZE, head_dim, device="cuda").to(q.dtype)
-    # Local destinations isolate score/head routing from the real TP4 transport test.
+    # Local destinations isolate score/head routing from the real TP transport test.
     recv = [
-        torch.zeros((3, world, 1, total_q, 33), device="cuda", dtype=torch.int32)
+        torch.zeros(
+            (3, world, heads_per_rank, total_q, 33), device="cuda", dtype=torch.int32
+        )
         for _ in range(world)
     ]
     bases = torch.tensor([r.data_ptr() for r in recv], device="cuda", dtype=torch.int64)
     errors = torch.zeros(1, device="cuda", dtype=torch.int32)
-    scores = torch.full((total_q, world, MAX_K_TILES), -float("inf"), device="cuda")
+    scores = torch.full((total_q, heads, MAX_K_TILES), -float("inf"), device="cuda")
     all_scores = torch.empty_like(scores)
-    local_ids = torch.empty((total_q, world, 16), dtype=torch.int32, device="cuda")
+    local_ids = torch.empty((total_q, heads, 16), dtype=torch.int32, device="cuda")
     actual = torch.empty_like(local_ids)
     positions = (
         seq_lens.repeat_interleave(decode_query_len)
@@ -1584,12 +1593,12 @@ def test_sharded_decode_index_score_matches_reference(
     )
     valid = (positions // BLOCK_SIZE + 1).clamp_min(0).int()
     expected = torch.full_like(scores.transpose(0, 1), -float("inf"))
-    active_q = 2 * decode_query_len
+    active_q = 3 * decode_query_len
     expected[:, :active_q] = _reference_decode_index_score(
         q[:active_q],
         kv,
-        block_table[:2],
-        seq_lens[:2],
+        block_table[:3],
+        seq_lens[:3],
         decode_query_len,
         MAX_K_TILES,
     )
@@ -1607,6 +1616,7 @@ def test_sharded_decode_index_score_matches_reference(
                 decode_query_len,
                 max_decode_query_len,
                 scores,
+                split_k=split_k,
             )
             torch.maximum(all_scores, scores, out=all_scores)
             sparse_topk_select(
@@ -1627,14 +1637,15 @@ def test_sharded_decode_index_score_matches_reference(
                 total_q,
                 errors,
                 world_size=world,
-                heads_per_rank=1,
+                heads_per_rank=heads_per_rank,
                 spin_limit=1 << 20,
             )
-        for head, r in enumerate(recv):
+        for owner, r in enumerate(recv):
+            head = owner * heads_per_rank
             minimax_m3_index_merge_candidates(
                 r[1],
                 valid,
-                actual[:, head : head + 1],
+                actual[:, head : head + heads_per_rank],
                 errors,
                 init_blocks=1,
                 local_blocks=1,
@@ -1674,18 +1685,21 @@ def _assert_sharded_topk(actual, scores, num_valid, init_blocks, local_blocks):
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA candidate exchange")
 @pytest.mark.parametrize("init_blocks,local_blocks", [(0, 1), (1, 1)])
-def test_sharded_candidate_merge_deduplicates_and_forces(init_blocks, local_blocks):
+@pytest.mark.parametrize("world", [2, 4])
+def test_sharded_candidate_merge_deduplicates_and_forces(
+    init_blocks, local_blocks, world
+):
     pytest.importorskip("cutlass")
     from vllm.models.minimax_m3.nvidia.ops.index_decode_score_sharded import (
         minimax_m3_index_merge_candidates,
     )
 
     valid = [48, 48, 48, 3, 0, 1]
-    scores = torch.full((4, len(valid), 48), -1000.0)
+    scores = torch.full((world, len(valid), 48), -1000.0)
     blocks = torch.arange(48)
-    for rank in range(4):
+    for rank in range(world):
         scores[rank, 0] = (blocks * 7 + rank * 13) % 53
-    scores[2, 1] = blocks.float()
+    scores[min(2, world - 1), 1] = blocks.float()
     scores[:, 2] = 7
     scores[:, 3, :3] = torch.tensor([4, 9, 6])
     scores[:, :, 0] = -2000
@@ -1694,9 +1708,9 @@ def test_sharded_candidate_merge_deduplicates_and_forces(init_blocks, local_bloc
             scores[:, row, count - 1] = -2000
 
     # Duplicate IDs can have different scores on each rank. Padding must not win.
-    recv = torch.zeros((3, 4, 1, len(valid) + 2, 33), dtype=torch.int32)
+    recv = torch.zeros((3, world, 1, len(valid) + 2, 33), dtype=torch.int32)
     recv[1, :, :, : len(valid), 16:32] = -1
-    for rank in range(4):
+    for rank in range(world):
         for row, count in enumerate(valid):
             forced = set(range(min(init_blocks, count))) | set(
                 range(max(0, count - local_blocks), count)
@@ -2383,7 +2397,7 @@ def test_aiter_consolidated_qknorm_real_packed_shuffle(skip_index_branch, fp8_in
         assert not index_cache_t128
 
 
-@pytest.mark.parametrize("tp_shard", [1, 4])
+@pytest.mark.parametrize("tp_shard", [1, 2, 4])
 @pytest.mark.parametrize("index_dtype", ["bf16", "fp8"])
 def test_indexer_cache_squeezes_to_contiguous_3d(tp_shard, index_dtype):
     from vllm.config import VllmConfig, set_current_vllm_config

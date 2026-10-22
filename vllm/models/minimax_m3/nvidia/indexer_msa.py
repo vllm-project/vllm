@@ -73,8 +73,7 @@ _SCORE_SENTINEL = float("-inf")
 # the same buffer safely.
 MAX_K_TILES = 8192
 
-SUPPORTED_TP = 4
-ROWS = PAGE_SIZE // SUPPORTED_TP
+SUPPORTED_TP = (2, 4)
 # Receive slot sets the layers rotate over.
 NUM_SLOT_SETS = 3
 TOPK = 16
@@ -536,7 +535,7 @@ def resolve_index_k_shard(
         "MiniMax M3 index-K cache sharded over TP%d (%d of %d tokens per block "
         "per rank)",
         tp,
-        ROWS,
+        PAGE_SIZE // tp,
         PAGE_SIZE,
     )
     return tp
@@ -549,8 +548,8 @@ def _unsupported_reason(
     topk_blocks: int,
 ) -> str | None:
     tp = get_tensor_model_parallel_world_size()
-    if tp != SUPPORTED_TP:
-        return f"needs tensor_parallel_size={SUPPORTED_TP} (got {tp})"
+    if tp not in SUPPORTED_TP:
+        return f"needs tensor_parallel_size in {SUPPORTED_TP} (got {tp})"
     if not (
         current_platform.is_cuda() and current_platform.is_device_capability_family(100)
     ):

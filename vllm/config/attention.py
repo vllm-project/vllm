@@ -100,7 +100,8 @@ class AttentionConfig:
     indexer_cache_sharding: IndexerCacheSharding = "off"
     """Shard the indexer cache across TP ranks on supported backends.
     Set "on" to request sharding; defaults to "off". The cache layout is
-    selected at startup and stays fixed for the engine."""
+    selected at startup and stays fixed for the engine. MSA supports FP8
+    index K on single-node NVLink TP2 and TP4."""
 
     indexer_sparse_logits: bool = False
     """DeepSeek V4.1 two-level indexer: score only the candidate blocks with
