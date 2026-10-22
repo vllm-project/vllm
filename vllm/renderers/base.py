@@ -455,10 +455,10 @@ class BaseRenderer(ABC, Generic[_T]):
     ) -> None:
         """Raise VLLMValidationError if a token id is out of vocabulary.
 
-        Skipped when the tokenizer is not initialized.
+        Without a tokenizer, the model vocab size is the only bound.
         """
         tokenizer = self.tokenizer
-        if not token_ids or tokenizer is None:
+        if not token_ids:
             return
 
         max_input_id = max(token_ids)
@@ -474,7 +474,9 @@ class BaseRenderer(ABC, Generic[_T]):
 
         # Here we take the max of the two to determine if a token id is
         # truly out-of-vocabulary.
-        model_vocab_size = self.model_config.get_vocab_size()
+        max_token_id = self.model_config.get_vocab_size() - 1
+        if tokenizer is not None:
+            max_token_id = max(tokenizer.max_token_id, max_token_id)
         # A negative id is out of vocabulary just like an over-large one,
         # but is not caught by the upper-bound check below. Reject it here
         # so it is not used as an embedding index downstream.
@@ -482,7 +484,7 @@ class BaseRenderer(ABC, Generic[_T]):
             raise VLLMValidationError(
                 f"Token id {min_input_id} is out of vocabulary", parameter=parameter
             )
-        if max_input_id > max(tokenizer.max_token_id, model_vocab_size - 1):
+        if max_input_id > max_token_id:
             raise VLLMValidationError(
                 f"Token id {max_input_id} is out of vocabulary", parameter=parameter
             )
