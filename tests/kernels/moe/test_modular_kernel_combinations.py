@@ -1223,13 +1223,18 @@ def _aiter_padding_matrix_worker_mxfp4(
         )
         return
 
-    # ref_out's magnitude here is below atol=1e-1, so a zeroed-out mk_out
-    # would still pass check_accuracy below -- guard against that.
-    ref_scale = ref_out.abs().mean()
-    mk_scale = mk_out.abs().mean()
-    assert mk_scale > 0.5 * ref_scale, (
-        f"AiterMxfp4Experts output magnitude (mean |mk_out|={mk_scale:.6f}) "
-        f"looks degenerate/zeroed vs. reference (mean |ref_out|={ref_scale:.6f})."
+    # check_accuracy's atol=1e-1 dwarfs the ~1e-2 reference signal, and a
+    # magnitude-only guard can't catch a sign-flipped mk_out (same
+    # magnitude as correct output). Cosine similarity can: measured on
+    # gfx950 across all padding modes, correct runs score 0.79-0.99
+    # (padding adds quantization noise in hidden/both modes) vs. <=0.01 or
+    # negative for zeroed/sign-flipped/decorrelated output.
+    cos_sim = torch.nn.functional.cosine_similarity(
+        mk_out.flatten().float(), ref_out.flatten().float(), dim=0
+    )
+    assert cos_sim > 0.5, (
+        f"AiterMxfp4Experts output (cos_sim={cos_sim:.4f} vs. reference) "
+        "looks degenerate/decorrelated, not just numerically imprecise."
     )
     # Looser tolerance than the fp8/unquantized padding matrix: matches
     # rank_worker's main sweep, which uses the same atol/rtol for mxfp4.
@@ -1282,9 +1287,11 @@ def test_aiter_moe_padding_matrix_mxfp4(mode: str, quant_config: TestMoEQuantCon
         ),
     )
     assert config.is_valid()[0]
-    assert config.fe_supports_quant_scheme(), (
-        f"AiterMxfp4Experts does not support quant scheme {quant_config}."
-    )
+    if not config.fe_supports_quant_scheme():
+        pytest.skip(
+            f"AiterMxfp4Experts does not support quant scheme {quant_config} "
+            "on this GPU (gfx950-only, not gfx1250)."
+        )
 
     weights = _make_padding_matrix_weights(config)
     vllm_config, env_dict = config.make_env_data()
@@ -1508,13 +1515,20 @@ def _aiter_token_padding_worker_mxfp4(
         # rank_worker's existing carve-out for this exact combination.
         return
 
-    # ref_out's magnitude here is below atol=1e-1, so a zeroed-out mk_out
-    # would still pass check_accuracy below -- guard against that.
-    ref_scale = ref_out[real_rows].abs().mean()
-    mk_scale = mk_out[real_rows].abs().mean()
-    assert mk_scale > 0.5 * ref_scale, (
-        f"AiterMxfp4Experts output magnitude (mean |mk_out|={mk_scale:.6f}) "
-        f"looks degenerate/zeroed vs. reference (mean |ref_out|={ref_scale:.6f})."
+    # check_accuracy's atol=1e-1 dwarfs the ~1e-2 reference signal, and a
+    # magnitude-only guard can't catch a sign-flipped mk_out (same
+    # magnitude as correct output). Cosine similarity can: measured on
+    # gfx950 across all padding modes, correct runs score 0.79-0.99
+    # (padding adds quantization noise in hidden/both modes) vs. <=0.01 or
+    # negative for zeroed/sign-flipped/decorrelated output.
+    cos_sim = torch.nn.functional.cosine_similarity(
+        mk_out[real_rows].flatten().float(),
+        ref_out[real_rows].flatten().float(),
+        dim=0,
+    )
+    assert cos_sim > 0.5, (
+        f"AiterMxfp4Experts output (cos_sim={cos_sim:.4f} vs. reference) "
+        "looks degenerate/decorrelated, not just numerically imprecise."
     )
     # Looser tolerance than the fp8/unquantized token padding test: matches
     # rank_worker's main sweep, which uses the same atol/rtol for mxfp4.
@@ -1566,9 +1580,11 @@ def test_aiter_moe_token_padding_garbage_rows_mxfp4(
         world_size=1,
     )
     assert config.is_valid()[0]
-    assert config.fe_supports_quant_scheme(), (
-        f"AiterMxfp4Experts does not support quant scheme {quant_config}."
-    )
+    if not config.fe_supports_quant_scheme():
+        pytest.skip(
+            f"AiterMxfp4Experts does not support quant scheme {quant_config} "
+            "on this GPU (gfx950-only, not gfx1250)."
+        )
 
     weights = WeightTensors.make(config)
     vllm_config, env_dict = config.make_env_data()
