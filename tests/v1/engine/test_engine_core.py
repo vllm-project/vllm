@@ -898,6 +898,26 @@ def test_checkpoint_prepare_then_restore_run_in_order():
 
 
 @pytest.mark.parametrize("deferred", [False, True])
+def test_checkpoint_prepare_fails_on_drain_barrier_error(deferred: bool):
+    """A failing barrier at the end of the drain leaves the engine FAILED and
+    still rejecting, whether the drain completes at once or later."""
+    core = _pausable_engine_core_proc()
+    core.vllm_config = MagicMock()
+    core.model_executor.is_sleeping = False
+    core.model_executor.collective_rpc.side_effect = RuntimeError("device lost")
+    core.reject_new_requests = False
+    core.engines_running = deferred
+
+    assert core.checkpoint_prepare("wait") is None
+    if deferred:
+        assert core.checkpoint_state() == (CheckpointState.PREPARING, None)
+        core.engines_running = False
+        core._notify_idle_state_callbacks()
+    assert core.checkpoint_state() == (CheckpointState.FAILED, "device lost")
+    assert core.reject_new_requests
+
+
+@pytest.mark.parametrize("deferred", [False, True])
 def test_pause_synchronizes_device_before_cache_reset(deferred: bool):
     """A resolved pause promises an idle device: the barrier must run before
     caches are cleared and before the caller is unblocked."""
