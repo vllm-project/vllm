@@ -305,7 +305,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
 
         # Draft tokens propagation - for spec-dec + struct outputs.
-        self.draft_tokens_handler = DraftTokensHandler(self.device)
+        self.draft_tokens_handler = DraftTokensHandler(
+            max_num_reqs=self.max_num_reqs, device=self.device
+        )
 
         # Built before memory profiling; block tables are attached at KV init.
         self.pcp_manager = pcp.maybe_build_pcp_manager(
@@ -1153,6 +1155,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Call model_state.remove_request *before* req_states.remove_request
         # so the model_state can still look up the slot index.
         self.model_state.remove_request(req_id)
+        if self.draft_tokens_handler is not None:
+            # Drop the request's retained drafts (finished, preempted, or
+            # about to be re-added).
+            self.draft_tokens_handler.discard(req_id)
         req_idx = self.req_states.remove_request(req_id)
         if req_idx is None:
             return False
