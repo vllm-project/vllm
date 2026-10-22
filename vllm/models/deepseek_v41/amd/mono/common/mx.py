@@ -15,7 +15,7 @@ from flydsl.expr import rocdl
 from flydsl.expr.typing import T
 
 from vllm.models.deepseek_v41.amd.mono.common.arch import GFX942
-from vllm.models.deepseek_v41.amd.mono.common.ops import CM_NT
+from vllm.models.deepseek_v41.amd.mono.common.ops import CM_NT, rsrc
 
 # gfx942 quantizes to FNUZ with 224: the same bytes as OCP with 448 and a scale
 # code one higher (common/gfx942.py).
@@ -75,15 +75,29 @@ def umod(x, d, unsigned=True):
     return fx.Int32(fx.Uint32(x) % d)
 
 
-def fp4_tile_load(r_w, base, rg, k, st, at):
+# a load with ``live`` false (``oob``) reads past this many bytes of its buffer
+# (``oob_rsrc``): out of range, no memory traffic, zeros never used
+OOB_RECORDS = 0x60000000
+OOB_DWORD = 0x1C000000
+
+
+def oob(live, i):
+    return i if live is None else live.select(i, fx.Int32(OOB_DWORD))
+
+
+def oob_rsrc(addr, live):
+    return rsrc(addr) if live is None else rsrc(addr, OOB_RECORDS)
+
+
+def fp4_tile_load(r_w, base, rg, k, st, at, live=None):
     """A lane's 16 B of an FP4 weight's (16, 16)-shuffled 16-row group ``rg``
     (K = ``k``) at 128-k step ``st``: dword ``base`` + the group's 2 k + 256 a
     step + ``at`` (``lane * 4``: 32 fp4, K block lane / 16 of row lane % 16).
-    Nontemporal: a weight a step reads once."""
+    Nontemporal: a weight a step reads once. ``live``: ``oob``."""
     return fx.Vector(
         bo.buffer_load(
             r_w,
-            base + rg * (2 * k) + st * 256 + at,
+            oob(live, base + rg * (2 * k) + st * 256 + at),
             vec_width=4,
             dtype=T.i32,
             cache_modifier=CM_NT,
