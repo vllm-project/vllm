@@ -1,0 +1,114 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+use thiserror::Error;
+use vllm_engine_core_client::Error as EngineCoreError;
+use vllm_llm::Error as LlmError;
+
+pub use crate::lower::logprobs::LogprobsError;
+pub use crate::lower::sampling::SamplingParamsError;
+pub use crate::lower::token_ids::TokenIdsError;
+
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error("tokenizer error: {0}")]
+    Tokenizer(String),
+    #[error("text request `{request_id}` must contain at least one prompt token ID")]
+    EmptyPromptTokenIds { request_id: String },
+    #[error("text request `{request_id}` stop strings cannot be empty")]
+    EmptyStopString { request_id: String },
+    #[error(
+        "Parameter 'cache_salt' must be a non-empty string of at most 128 characters \
+         and must not contain '@', '/', '\\', or NUL."
+    )]
+    InvalidCacheSalt,
+    #[error(
+        "This model's maximum context length is {max_model_len} tokens. However, your \
+         prompt contains {prompt_len} input tokens, which exceeds this limit even without \
+         any output tokens. Please reduce the length of the input prompt."
+    )]
+    PromptTooLong { max_model_len: u32, prompt_len: u32 },
+    #[error(
+        "This model's maximum context length is {max_model_len} tokens. However, your \
+         prompt fills it with {max_model_len} input tokens, leaving no room for output \
+         tokens. Please reduce the length of the input prompt."
+    )]
+    PromptFillsContext { max_model_len: u32 },
+    #[error(transparent)]
+    Logprobs(#[from] LogprobsError),
+    #[error(transparent)]
+    TokenIds(#[from] TokenIdsError),
+    #[error(transparent)]
+    SamplingParams(#[from] SamplingParamsError),
+    #[error(
+        "`min_tokens` must be less than or equal to `max_tokens`, \
+         got min_tokens={min_tokens}, max_tokens={max_tokens}"
+    )]
+    MinTokensExceedsMaxTokens { min_tokens: u32, max_tokens: u32 },
+    #[error("`thinking_token_budget` must be a non-negative integer or -1 for unlimited.")]
+    InvalidThinkingTokenBudget,
+    #[error(
+        "truncate_prompt_tokens={value} cannot be greater than max_model_len = \
+         {max_model_len}. Please request a smaller truncation size."
+    )]
+    TruncatePromptTokensExceedsMaxModelLen { value: u64, max_model_len: u32 },
+    #[error("invalid truncate_prompt_tokens={value}; must be >= -1")]
+    InvalidTruncatePromptTokens { value: i64 },
+    #[error("truncate_prompt_tokens is not supported for multimodal requests")]
+    TruncateUnsupportedWithMultimodal,
+    #[error("invalid repetition detection params: {message}")]
+    InvalidRepetitionDetection { message: String },
+    #[error("text request stream `{request_id}` closed before terminal output")]
+    StreamClosedBeforeTerminalOutput { request_id: String },
+    #[error(transparent)]
+    Llm(#[from] LlmError),
+    #[error(transparent)]
+    EngineCore(#[from] EngineCoreError),
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+impl Error {
+    /// Whether this error represents invalid user request parameters.
+    pub fn is_request_validation_error(&self) -> bool {
+        match self {
+            Self::PromptTooLong { .. }
+            | Self::PromptFillsContext { .. }
+            | Self::EmptyPromptTokenIds { .. }
+            | Self::EmptyStopString { .. }
+            | Self::InvalidCacheSalt
+            | Self::Logprobs(_)
+            | Self::TokenIds(_)
+            | Self::SamplingParams(_)
+            | Self::MinTokensExceedsMaxTokens { .. }
+            | Self::InvalidThinkingTokenBudget
+            | Self::TruncatePromptTokensExceedsMaxModelLen { .. }
+            | Self::InvalidTruncatePromptTokens { .. }
+            | Self::TruncateUnsupportedWithMultimodal
+            | Self::InvalidRepetitionDetection { .. }
+            // An empty tokenized prompt detected later, at request prepare
+            // time, surfaces through the transparent Llm wrapper.
+            | Self::Llm(LlmError::EmptyPromptTokenIds { .. })
+            | Self::Llm(LlmError::EngineCoreClient(
+                EngineCoreError::InvalidDataParallelRank { .. },
+            ))
+            | Self::EngineCore(EngineCoreError::InvalidStructuredOutputsParams { .. }) => true,
+            _ => false,
+        }
+    }
+
+    /// The request parameter a validation error refers to, reported as the
+    /// `param` of the OpenAI error object.
+    pub fn param(&self) -> Option<&'static str> {
+        match self {
+            Self::PromptTooLong { .. } | Self::PromptFillsContext { .. } => Some("input_tokens"),
+            _ => None,
+        }
+    }
+}
+
+impl From<vllm_tokenizer::TokenizerError> for Error {
+    fn from(error: vllm_tokenizer::TokenizerError) -> Self {
+        Self::Tokenizer(error.0)
+    }
+}

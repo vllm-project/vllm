@@ -2,17 +2,59 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Mapping
+from types import SimpleNamespace
 
+import numpy as np
 import pytest
+import torch
 from PIL import Image as PILImage
 
+from vllm.exceptions import VLLMValidationError
+from vllm.model_executor.models.gemma4_mm import (
+    Gemma4ForConditionalGeneration,
+    Gemma4ImagePixelInputs,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.cache import MultiModalProcessorOnlyCache
+from vllm.multimodal.inputs import MultiModalFieldConfig
+from vllm.utils.mem_constants import GiB_bytes
+from vllm.v1.worker.encoder_cudagraph_defs import ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG
 
 from ....conftest import ImageTestAssets
 from ...utils import build_model_context
 
 # TODO: to be updated to "google/gemma-4-e2b-it" once the models are available
 GEMMA4_MODEL_ID = "google/gemma-4-E2B-it"
+
+
+def test_gemma4_image_schema_accepts_variable_patch_counts():
+    Gemma4ImagePixelInputs(
+        pixel_values=[
+            torch.randn(10080, 768),
+            torch.randn(2520, 768),
+        ],
+        pixel_position_ids=[
+            torch.zeros(10080, 2, dtype=torch.long),
+            torch.zeros(2520, 2, dtype=torch.long),
+        ],
+    )
+
+
+def test_gemma4_image_batching_keeps_variable_patch_counts_unstacked():
+    field = MultiModalFieldConfig.batched("image").field
+    elems = field.build_elems(
+        "image",
+        "pixel_values",
+        [torch.randn(10080, 768), torch.randn(2520, 768)],
+    )
+
+    reduced = field.reduce_data(list(elems))
+
+    assert isinstance(reduced, list)
+    assert [tensor.shape for tensor in reduced] == [
+        torch.Size([10080, 768]),
+        torch.Size([2520, 768]),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -162,6 +204,66 @@ def test_get_prompt_updates_respects_nested_max_soft_tokens(model_id: str):
 
 
 @pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
+@pytest.mark.parametrize(
+    "image_kwargs", [{"rescale_factor": 1 / 127.5}, {"max_soft_tokens": 560}]
+)
+@pytest.mark.parametrize("video_uuid", [None, "same-video"])
+def test_video_cache_is_independent_of_image_kwargs(
+    model_id: str,
+    image_kwargs: dict[str, object],
+    video_uuid: str | None,
+):
+    """Request image overrides must not change video frames or make results
+    depend on cache warmth.
+    """
+    request_kwargs = {"images_kwargs": image_kwargs}
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"image": 1, "video": 1},
+        mm_processor_cache_gb=1,
+    )
+    cache = MultiModalProcessorOnlyCache(ctx.model_config)
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    hf_processor = processor.info.get_hf_processor()
+    image = PILImage.new("RGB", (48, 48), color=(128, 128, 128))
+    frames = np.stack([np.asarray(image)] * 2)
+    metadata = {"fps": 2.0, "frames_indices": [0, 1]}
+    mm_items = processor.info.parse_mm_data(
+        {"image": image, "video": [(frames, metadata)]}
+    )
+
+    def process(mm_kwargs, cache):
+        return processor(
+            hf_processor.image_token + hf_processor.video_token,
+            mm_items,
+            mm_uuid_items={"video": [video_uuid]},
+            hf_processor_mm_kwargs=mm_kwargs,
+            cache=cache,
+        )
+
+    # Populate the video cache without image overrides, then change only
+    # images_kwargs on the next request. Since images_kwargs are excluded from
+    # the video hash, and must not affect the processed video, the cached result
+    # must match a fresh recomputation.
+    baseline = process({}, cache=cache)
+    cached = process(request_kwargs, cache=cache)
+    cache.clear_cache()
+    fresh = process(request_kwargs, cache=cache)
+
+    def pixels(result, modality, field):
+        return result["mm_kwargs"][modality][0][field].data
+
+    video_pixels = pixels(fresh, "video", "pixel_values_videos")
+    assert torch.equal(pixels(cached, "video", "pixel_values_videos"), video_pixels)
+    assert torch.equal(pixels(baseline, "video", "pixel_values_videos"), video_pixels)
+    assert baseline["mm_hashes"]["video"] == fresh["mm_hashes"]["video"]
+    assert not torch.equal(
+        pixels(baseline, "image", "pixel_values"),
+        pixels(fresh, "image", "pixel_values"),
+    )
+
+
+@pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
 def test_limit_mm_per_prompt(
     image_assets: ImageTestAssets,
     model_id: str,
@@ -185,9 +287,119 @@ def test_limit_mm_per_prompt(
     mm_data = {"image": images}
 
     # Expect ValueError when exceeding limit
-    with pytest.raises(ValueError, match="At most 1 image"):
+    with pytest.raises(VLLMValidationError, match="At most 1 image"):
         processor(
             prompt,
             mm_items=processor.info.parse_mm_data(mm_data),
             hf_processor_mm_kwargs={},
         )
+
+
+# Regression guard for PR #43169 follow-up: the batched Gemma4 vision encoder
+# admitted ``chunk ~= 53`` on a 22 GiB L4 with a 26B AWQ model loaded,
+# allocating 2.43 GiB int64 inside
+# ``F.one_hot(num_classes=position_embedding_size)`` and OOMing because only
+# 2.41 GiB was actually free.  The fix sizes ``chunk`` from currently-free GPU
+# memory and counts the ``F.one_hot`` transient as the dominant cost.
+
+_encoder_chunk = Gemma4ForConditionalGeneration._encoder_chunk
+
+# Gemma4 vision config default (HF: configuration_gemma4.py).
+_POSITION_EMBEDDING_SIZE = 10240
+# Video frame: max_soft_tokens=70, pooling_kernel_size=2 -> 70 * 4 patches.
+_VIDEO_PATCHES_PER_FRAME = 280
+
+
+def test_encoder_chunk_tight_budget_fits_in_free():
+    free = 3 * GiB_bytes  # L4 22 GiB after 26B AWQ load.
+    total = 22 * GiB_bytes
+    chunk = _encoder_chunk(
+        _VIDEO_PATCHES_PER_FRAME, free, total, _POSITION_EMBEDDING_SIZE
+    )
+    one_hot_bytes = chunk * _VIDEO_PATCHES_PER_FRAME * 2 * _POSITION_EMBEDDING_SIZE * 8
+    assert one_hot_bytes <= free // 2
+
+
+def test_encoder_chunk_roomy_gpu_keeps_batching():
+    chunk = _encoder_chunk(
+        _VIDEO_PATCHES_PER_FRAME,
+        60 * GiB_bytes,
+        80 * GiB_bytes,
+        _POSITION_EMBEDDING_SIZE,
+    )
+    assert chunk > 8
+
+
+def test_encoder_chunk_zero_patches_is_safe():
+    assert (
+        _encoder_chunk(0, 60 * GiB_bytes, 80 * GiB_bytes, _POSITION_EMBEDDING_SIZE) == 1
+    )
+
+
+def test_encoder_chunk_zero_position_embedding_size_is_safe():
+    # Degenerate config: must not raise ZeroDivisionError.
+    assert (
+        _encoder_chunk(_VIDEO_PATCHES_PER_FRAME, 60 * GiB_bytes, 80 * GiB_bytes, 0) == 1
+    )
+
+
+def test_encoder_chunk_no_free_memory_falls_back_to_one():
+    assert (
+        _encoder_chunk(
+            _VIDEO_PATCHES_PER_FRAME, 0, 22 * GiB_bytes, _POSITION_EMBEDDING_SIZE
+        )
+        == 1
+    )
+
+
+def _gemma4_for_encoder_cudagraph() -> Gemma4ForConditionalGeneration:
+    model = object.__new__(Gemma4ForConditionalGeneration)
+    vision_config = SimpleNamespace(
+        patch_size=16, pooling_kernel_size=3, default_output_length=280
+    )
+    model.vision_tower = SimpleNamespace(config=vision_config)
+    model.config = SimpleNamespace(vision_config=vision_config)
+    return model
+
+
+@pytest.mark.parametrize(
+    ("token_budget", "row_tokens"), [(4096, 70), (4096, 280), (70, 280)]
+)
+def test_encoder_cudagraph_capture_rows_fit_token_budget(
+    token_budget: int, row_tokens: int
+):
+    # Regression for #61045: rows were max_frames_per_batch (58 * 32) at
+    # 280 tokens each, so the 4096-token buffer alone was 6.69 GiB.
+    model = _gemma4_for_encoder_cudagraph()
+    inputs = model.prepare_encoder_cudagraph_capture_inputs(
+        token_budget=token_budget,
+        max_batch_size=58,
+        max_frames_per_batch=58 * 32,
+        device="meta",
+        dtype=torch.bfloat16,
+        axis_keys=(row_tokens,),
+    )
+
+    num_rows, row_patches, _ = inputs.values["pixel_values"].shape
+    assert row_patches == row_tokens * 9
+    assert num_rows == max(1, token_budget // row_tokens)
+
+
+def test_encoder_cudagraph_mixed_width_images_pack_by_padded_width():
+    model = _gemma4_for_encoder_cudagraph()
+    mm_kwargs = {
+        "pixel_values": [torch.zeros(2520, 768), torch.zeros(630, 768)],
+        "pixel_position_ids": [
+            torch.zeros(2520, 2, dtype=torch.long),
+            torch.zeros(630, 2, dtype=torch.long),
+        ],
+    }
+
+    specs = model.get_encoder_cudagraph_item_specs(mm_kwargs)
+    assert [spec.output_tokens for spec in specs] == [280, 70]
+    assert [spec.get_path_output_tokens("default") for spec in specs] == [280, 280]
+
+    selected = model.select_encoder_cudagraph_items(mm_kwargs, [1])
+    assert selected[ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG] == (70,)
+    selected = model.select_encoder_cudagraph_items(mm_kwargs, [0, 1])
+    assert selected[ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG] == (280,)

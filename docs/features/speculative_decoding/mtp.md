@@ -24,10 +24,11 @@ vllm serve google/gemma-4-E2B-it \
     --speculative-config '{"method":"mtp","model":"gg-hf-am/gemma-4-E2B-it-assistant","num_speculative_tokens":1}'
 ```
 
-The E2B, E4B, 26B-A4B, and 31B Gemma 4 IT assistant checkpoints are supported
-when their configuration uses `model_type: gemma4_assistant`. vLLM maps those
-checkpoints to `Gemma4MTPModel` internally and wires the assistant layers to
-share KV cache with the target model.
+The E2B, E4B, 12B, 26B-A4B, and 31B Gemma 4 IT assistant checkpoints are supported.
+Tower-based variants use `model_type: gemma4_assistant` and the encoder-free
+Gemma 4 Unified variant (12B) uses `model_type: gemma4_unified_assistant`.
+vLLM maps both to `Gemma4MTPModel` internally and wires the assistant layers
+to share KV cache with the target model.
 
 If an older vLLM release logs `SpeculativeConfig(method='draft_model', ...)`
 for a Gemma 4 assistant checkpoint, that release is treating the assistant as a
@@ -73,3 +74,12 @@ vllm serve XiaomiMiMo/MiMo-7B-Base \
   is a good default to start with.
 - If your model does not support MTP, use another method such as EAGLE or draft
   model speculation.
+- When the MTP head shares the target's unquantized lm_head (most MTP models),
+  `"draft_lm_head_quantization": "fp8"` or `"nvfp4"` in `--speculative-config`
+  gives the drafter a quantized copy of that head (Model Runner V2). The target
+  still verifies with its own head, so outputs are unchanged; only the
+  acceptance length can move. It helps most on bandwidth-bound GPUs with a
+  large vocabulary. The copy costs about one byte (FP8) or 0.56 bytes (NVFP4)
+  per lm_head weight, e.g. 0.6 or 0.35 GiB for a 248k x 2560 head; it is
+  counted in the model weights, so with `--kv-cache-memory-bytes` leave room
+  for it.

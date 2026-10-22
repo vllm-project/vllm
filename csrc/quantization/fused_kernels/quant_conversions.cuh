@@ -4,9 +4,9 @@
  * __device__ helper functions to deal with float -> quant datatype conversion
  */
 
-#include "libtorch_stable/quantization/vectorization.cuh"
+#include "quantization/vectorization.cuh"
 // TODO(luka/varun):refactor common.cuh to use this file instead
-#include "../w8a8/fp8/common.cuh"
+#include "quantization/w8a8/fp8/common.cuh"
 
 namespace vllm {
 
@@ -75,16 +75,5 @@ struct ScaledQuant<quant_type_t, is_scale_inverted,
     }
   }
 };
-
-template <typename scalar_t, typename quant_type_t, bool is_scale_inverted>
-__device__ void scaled_quant_conversion(quant_type_t* __restrict__ output,
-                                        scalar_t const* __restrict__ input,
-                                        float const scale, int const tid,
-                                        int const num_elements,
-                                        int const step) {
-  for (int i = tid; i < num_elements; i += step) {
-    output[i] = ScaledQuant<quant_type_t, is_scale_inverted>(input[i], scale);
-  }
-}
 
 }  // namespace vllm

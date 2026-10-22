@@ -1,14 +1,13 @@
 #include <optional>
-#include <torch/all.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
 #include <algorithm>
 #include <limits>
 
-#include "attention_dtypes.h"
-#include "attention_utils.cuh"
-#include "../quantization/w8a8/fp8/common.cuh"
+#include "../torch_utils.h"
 #include "../dispatch_utils.h"
+#include <torch/headeronly/core/ScalarType.h>
+
+#include "core/vec_dtypes/vec_dtypes.h"
+#include "quantization/w8a8/fp8/common.cuh"
 
 namespace vllm {
 
@@ -21,7 +20,10 @@ __global__ void merge_attn_states_kernel(
     const float* prefix_lse, const scalar_t* suffix_output,
     const float* suffix_lse, const uint num_tokens, const uint num_heads,
     const uint head_size, const uint prefix_head_stride,
-    const uint output_head_stride, const uint prefix_num_tokens,
+    const uint output_head_stride, const uint prefix_lse_head_stride,
+    const uint prefix_lse_token_stride, const uint suffix_lse_head_stride,
+    const uint suffix_lse_token_stride, const uint output_lse_head_stride,
+    const uint output_lse_token_stride, const uint prefix_num_tokens,
     const float* output_scale) {
   // Inputs always load 128-bit packs (pack_size elements of scalar_t).
   // Outputs store pack_size elements of output_t, which is smaller for FP8.
@@ -84,15 +86,19 @@ __global__ void merge_attn_states_kernel(
       }
     }
     if (output_lse != nullptr && pack_idx == 0) {
-      float s_lse = suffix_lse[head_idx * num_tokens + token_idx];
-      output_lse[head_idx * num_tokens + token_idx] = s_lse;
+      float s_lse = suffix_lse[head_idx * suffix_lse_head_stride +
+                               token_idx * suffix_lse_token_stride];
+      output_lse[head_idx * output_lse_head_stride +
+                 token_idx * output_lse_token_stride] = s_lse;
     }
     return;
   }
 
   // For tokens within prefix range, merge prefix and suffix
-  float p_lse = prefix_lse[head_idx * num_tokens + token_idx];
-  float s_lse = suffix_lse[head_idx * num_tokens + token_idx];
+  float p_lse = prefix_lse[head_idx * prefix_lse_head_stride +
+                           token_idx * prefix_lse_token_stride];
+  float s_lse = suffix_lse[head_idx * suffix_lse_head_stride +
+                           token_idx * suffix_lse_token_stride];
   p_lse = std::isinf(p_lse) ? -std::numeric_limits<float>::infinity() : p_lse;
   s_lse = std::isinf(s_lse) ? -std::numeric_limits<float>::infinity() : s_lse;
 
@@ -132,7 +138,8 @@ __global__ void merge_attn_states_kernel(
     }
     // We only need to write to output_lse once per head.
     if (output_lse != nullptr && pack_idx == 0) {
-      output_lse[head_idx * num_tokens + token_idx] = max_lse;
+      output_lse[head_idx * output_lse_head_stride +
+                 token_idx * output_lse_token_stride] = max_lse;
     }
     return;
   }
@@ -187,7 +194,8 @@ __global__ void merge_attn_states_kernel(
   // We only need to write to output_lse once per head.
   if (output_lse != nullptr && pack_idx == 0) {
     float out_lse = logf(out_se) + max_lse;
-    output_lse[head_idx * num_tokens + token_idx] = out_lse;
+    output_lse[head_idx * output_lse_head_stride +
+               token_idx * output_lse_token_stride] = out_lse;
   }
 }
 
@@ -196,17 +204,17 @@ __global__ void merge_attn_states_kernel(
 // The following macro is used to dispatch the conversion function based on
 // the output data type. The FN is a macro that calls a function with
 // template<typename scalar_t>.
-#define DISPATCH_BY_SCALAR_DTYPE(scalar_dtype, fn)                      \
-  {                                                                     \
-    if (scalar_dtype == at::ScalarType::Float) {                        \
-      fn(float);                                                        \
-    } else if (scalar_dtype == at::ScalarType::Half) {                  \
-      fn(uint16_t);                                                     \
-    } else if (scalar_dtype == at::ScalarType::BFloat16) {              \
-      fn(__nv_bfloat16);                                                \
-    } else {                                                            \
-      TORCH_CHECK(false, "Unsupported data type of O: ", scalar_dtype); \
-    }                                                                   \
+#define DISPATCH_BY_SCALAR_DTYPE(scalar_dtype, fn)                          \
+  {                                                                         \
+    if (scalar_dtype == torch::headeronly::ScalarType::Float) {             \
+      fn(float);                                                            \
+    } else if (scalar_dtype == torch::headeronly::ScalarType::Half) {       \
+      fn(uint16_t);                                                         \
+    } else if (scalar_dtype == torch::headeronly::ScalarType::BFloat16) {   \
+      fn(__nv_bfloat16);                                                    \
+    } else {                                                                \
+      STD_TORCH_CHECK(false, "Unsupported data type of O: ", scalar_dtype); \
+    }                                                                       \
   }
 
 #define LAUNCH_MERGE_ATTN_STATES(scalar_t, output_t, NUM_THREADS,           \
@@ -221,6 +229,9 @@ __global__ void merge_attn_states_kernel(
             reinterpret_cast<scalar_t*>(suffix_output.data_ptr()),          \
             reinterpret_cast<float*>(suffix_lse.data_ptr()), num_tokens,    \
             num_heads, head_size, prefix_head_stride, output_head_stride,   \
+            prefix_lse_head_stride, prefix_lse_token_stride,                \
+            suffix_lse_head_stride, suffix_lse_token_stride,                \
+            output_lse_head_stride, output_lse_token_stride,                \
             prefix_num_tokens, output_scale_ptr);                           \
   }
 
@@ -245,36 +256,52 @@ __global__ void merge_attn_states_kernel(
  */
 template <typename scalar_t>
 void merge_attn_states_launcher(
-    torch::Tensor& output, std::optional<torch::Tensor> output_lse,
-    const torch::Tensor& prefix_output, const torch::Tensor& prefix_lse,
-    const torch::Tensor& suffix_output, const torch::Tensor& suffix_lse,
+    torch::stable::Tensor& output,
+    std::optional<torch::stable::Tensor> output_lse,
+    const torch::stable::Tensor& prefix_output,
+    const torch::stable::Tensor& prefix_lse,
+    const torch::stable::Tensor& suffix_output,
+    const torch::stable::Tensor& suffix_lse,
     const std::optional<int64_t> prefill_tokens_with_context,
-    const std::optional<torch::Tensor>& output_scale) {
+    const std::optional<torch::stable::Tensor>& output_scale) {
   constexpr uint NUM_THREADS = 128;
   const uint num_tokens = output.size(0);
   const uint num_heads = output.size(1);
   const uint head_size = output.size(2);
   const uint prefix_head_stride = prefix_output.stride(1);
   const uint output_head_stride = output.stride(1);
+  // lse tensors are [NUM_HEADS, NUM_TOKENS] but may be non-contiguous views
+  // (e.g. a transpose of a backend's [NUM_TOKENS, NUM_HEADS] output), so index
+  // them by their actual strides rather than assuming a contiguous layout.
+  const uint prefix_lse_head_stride = prefix_lse.stride(0);
+  const uint prefix_lse_token_stride = prefix_lse.stride(1);
+  const uint suffix_lse_head_stride = suffix_lse.stride(0);
+  const uint suffix_lse_token_stride = suffix_lse.stride(1);
+  uint output_lse_head_stride = 0;
+  uint output_lse_token_stride = 0;
+  if (output_lse.has_value()) {
+    output_lse_head_stride = output_lse.value().stride(0);
+    output_lse_token_stride = output_lse.value().stride(1);
+  }
   // Thread mapping is based on input BF16 pack_size
   const uint pack_size = 16 / sizeof(scalar_t);
-  TORCH_CHECK(head_size % pack_size == 0,
-              "headsize must be multiple of pack_size:", pack_size);
+  STD_TORCH_CHECK(head_size % pack_size == 0,
+                  "headsize must be multiple of pack_size:", pack_size);
 
   const uint prefix_num_tokens =
       prefill_tokens_with_context.has_value()
           ? static_cast<uint>(prefill_tokens_with_context.value())
           : num_tokens;
-  TORCH_CHECK(prefix_num_tokens <= num_tokens,
-              "prefix_num_tokens must be <= num_tokens");
+  STD_TORCH_CHECK(prefix_num_tokens <= num_tokens,
+                  "prefix_num_tokens must be <= num_tokens");
 
   float* output_lse_ptr = nullptr;
   if (output_lse.has_value()) {
-    output_lse_ptr = output_lse.value().data_ptr<float>();
+    output_lse_ptr = output_lse.value().mutable_data_ptr<float>();
   }
   float* output_scale_ptr = nullptr;
   if (output_scale.has_value()) {
-    output_scale_ptr = output_scale.value().data_ptr<float>();
+    output_scale_ptr = output_scale.value().mutable_data_ptr<float>();
   }
   // Process one pack elements per thread. for float, the
   // pack_size is 4 for half/bf16, the pack_size is 8.
@@ -284,14 +311,15 @@ void merge_attn_states_launcher(
   dim3 block(NUM_THREADS);
   dim3 grid((total_threads + NUM_THREADS - 1) / NUM_THREADS);
 
-  const c10::cuda::OptionalCUDAGuard device_guard(prefix_output.device());
-  auto stream = at::cuda::getCurrentCUDAStream();
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      prefix_output.get_device_index());
+  auto stream = get_current_cuda_stream();
 
   if (output_scale.has_value()) {
     // FP8 output path - dispatch on output FP8 type
-    VLLM_DISPATCH_FP8_TYPES(output.scalar_type(), "merge_attn_states_fp8", [&] {
-      LAUNCH_MERGE_ATTN_STATES(scalar_t, fp8_t, NUM_THREADS, true);
-    });
+    VLLM_STABLE_DISPATCH_FP8_TYPES(
+        output.scalar_type(), "merge_attn_states_fp8",
+        [&] { LAUNCH_MERGE_ATTN_STATES(scalar_t, fp8_t, NUM_THREADS, true); });
   } else {
     // Original BF16/FP16/FP32 output path
     LAUNCH_MERGE_ATTN_STATES(scalar_t, scalar_t, NUM_THREADS, false);
@@ -305,26 +333,29 @@ void merge_attn_states_launcher(
         suffix_lse, prefill_tokens_with_context, output_scale);       \
   }
 
-void merge_attn_states(torch::Tensor& output,
-                       std::optional<torch::Tensor> output_lse,
-                       const torch::Tensor& prefix_output,
-                       const torch::Tensor& prefix_lse,
-                       const torch::Tensor& suffix_output,
-                       const torch::Tensor& suffix_lse,
-                       std::optional<int64_t> prefill_tokens_with_context,
-                       const std::optional<torch::Tensor>& output_scale) {
+void merge_attn_states(
+    torch::stable::Tensor& output,
+    std::optional<torch::stable::Tensor> output_lse,
+    const torch::stable::Tensor& prefix_output,
+    const torch::stable::Tensor& prefix_lse,
+    const torch::stable::Tensor& suffix_output,
+    const torch::stable::Tensor& suffix_lse,
+    const std::optional<int64_t> prefill_tokens_with_context,
+    const std::optional<torch::stable::Tensor>& output_scale) {
   if (output_scale.has_value()) {
-    TORCH_CHECK(output.scalar_type() == at::ScalarType::Float8_e4m3fn ||
-                    output.scalar_type() == at::ScalarType::Float8_e4m3fnuz,
-                "output must be FP8 when output_scale is provided, got: ",
-                output.scalar_type());
+    STD_TORCH_CHECK(
+        output.scalar_type() == torch::headeronly::ScalarType::Float8_e4m3fn ||
+            output.scalar_type() ==
+                torch::headeronly::ScalarType::Float8_e4m3fnuz,
+        "output must be FP8 when output_scale is provided, got: ",
+        output.scalar_type());
   } else {
-    TORCH_CHECK(output.scalar_type() == prefix_output.scalar_type(),
-                "output dtype (", output.scalar_type(),
-                ") must match prefix_output dtype (",
-                prefix_output.scalar_type(), ") when output_scale is not set");
+    STD_TORCH_CHECK(
+        output.scalar_type() == prefix_output.scalar_type(), "output dtype (",
+        output.scalar_type(), ") must match prefix_output dtype (",
+        prefix_output.scalar_type(), ") when output_scale is not set");
   }
   // Always dispatch on prefix_output (input) dtype
-  DISPATCH_BY_SCALAR_DTYPE(prefix_output.dtype(),
+  DISPATCH_BY_SCALAR_DTYPE(prefix_output.scalar_type(),
                            CALL_MERGE_ATTN_STATES_LAUNCHER);
 }

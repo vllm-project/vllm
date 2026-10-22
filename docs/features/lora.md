@@ -248,6 +248,62 @@ Now, you can specify a base_model_name alongside the name and path using JSON fo
 
 To provide the backward compatibility support, you can still use the old key-value format (name=path), but the `base_model_name` will remain unspecified in that case.
 
+## Mixing 2D and 3D MoE LoRA Adapters
+
+To serve 2D-format(based on `megatron`) and 3D-format (based on `peft`) adapters from the same engine instance, start the server with `--enable-mixed-moe-lora-format`
+and declare the layout of each adapter explicitly via the `is_3d_lora_weight` field.
+
+Server startup (static modules):
+
+```bash
+vllm serve Qwen/Qwen3.6-35B-A3B \
+    --enable-lora \
+    --enable-mixed-moe-lora-format \
+    --tensor-parallel-size 4 \
+    --enable-expert-parallel \
+    --lora-modules \
+        '{"name": "lora-2d", "path": "jeeejeee/qwen36-35ba3b-2d-weights-poken-lora", "is_3d_lora_weight": false}' \
+        '{"name": "lora-3d", "path": "jeeejeee/qwen36-35ba3b-moe-all-linear-poken-lora", "is_3d_lora_weight": true}'
+```
+
+Dynamic load via `/v1/load_lora_adapter`:
+
+```bash
+curl -X POST http://localhost:8000/v1/load_lora_adapter \
+-H "Content-Type: application/json" \
+-d '{
+    "lora_name": "lora-3d",
+    "lora_path": "/path/to/3d-format-lora",
+    "is_3d_lora_weight": true
+}'
+```
+
+!!! warning "You must know your adapter's layout"
+    Under `--enable-mixed-moe-lora-format`, vLLM trusts whatever
+    `is_3d_lora_weight` the caller declares. Loading checks reject fused 3D
+    expert weights routed to a 2D wrapper without the required flags, but
+    do not validate every layout mismatch. A wrong declaration can still
+    cause loading failures or incorrect outputs. Confirm the layout before serving:
+
+    - **2D (per-expert, megatron-style)** → set `is_3d_lora_weight: false`.
+      Adapter keys look like `...experts.{idx}.gate_proj.lora_A.weight`,
+      `...experts.{idx}.up_proj.lora_A.weight`,
+      `...experts.{idx}.down_proj.lora_A.weight` — one set per expert.
+    - **3D (fused, peft-style)** → set `is_3d_lora_weight: true`.
+      Adapter keys look like `...experts.gate_up_proj.lora_A.weight`,
+      `...experts.down_proj.lora_A.weight` — a single tensor that stacks
+      all experts on the leading dim.
+
+When `--enable-mixed-moe-lora-format` is **not** set, `is_3d_lora_weight`
+is ignored: vLLM picks the wrapper from the base model's
+`is_3d_moe_weight` and the adapter is required to match. The field is
+also ignored for non-MoE models.
+
+For a model using a 2D MoE wrapper (such as Qwen3-MoE), loading fused 3D
+expert adapter weights requires both `enable_mixed_moe_lora_format=True`
+on the engine and `is_3d_lora_weight=True` on the request. Otherwise, adapter
+loading raises a `ValueError` naming these settings before activation.
+
 ## LoRA model lineage in model card
 
 The new format of `--lora-modules` is mainly to support the display of parent model information in the model card. Here's an explanation of how your current response supports this:
@@ -370,6 +426,28 @@ vllm serve ibm-granite/granite-speech-3.3-2b \
 ```
 
 Note: Default multimodal LoRAs are currently only available for `.generate` and chat completions.
+
+## Sequence-Classification LoRA Adapters
+
+vLLM supports PEFT sequence-classification adapters that save a complete, single-layer linear classification head through `modules_to_save`. The saved module must be named `score` or `classifier`.
+
+See [classification_with_lora_offline.py](../../examples/pooling/classify/classification_with_lora_offline.py) for an offline classification example using a LoRA adapter.
+
+To batch adapters with different `num_labels`, set the maximum number of labels:
+
+```bash
+vllm serve model --enable-lora --max-lora-cls-labels 8
+```
+
+The equivalent `LLM` argument is `max_lora_cls_labels`. It defaults to the base model's `num_labels`, and each request returns its adapter's number of labels.
+
+A classification head stored as float32 is converted to the runtime head dtype when it is loaded.
+
+## Token-Classification LoRA Adapters
+
+For token-classification models that support LoRA, use `pooling_task="token_classify"` with `LLM.encode`.
+
+Classification heads support LoRA A/B weights (matching the base head's output size) or `modules_to_save=["classifier"]`. Full heads follow the [sequence-classification configuration](#sequence-classification-lora-adapters) above, including `max_lora_cls_labels` for different label counts.
 
 ## Using Tips
 

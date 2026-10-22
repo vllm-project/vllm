@@ -1,0 +1,87 @@
+#!/bin/sh
+# Entrypoint wrapper for the opt-in `vllm-openai-nonroot` image.
+#
+# The image also ships a `vllm` user (UID 2000, GID 0) with HOME /home/vllm
+# and a group-0-writable home directory. When the container is launched with
+# `--user 2000:0` (or any other UID in group 0) the passwd entry is enough on
+# its own: Docker picks up HOME=/home/vllm, getpass.getuser() resolves to
+# "vllm", and every cache dir (HF, Triton, Inductor, vLLM, Numba, Outlines)
+# that defaults to `$HOME/.cache/...` lands in a writable location.
+#
+# This wrapper exists for the *arbitrary-UID* case (e.g. OpenShift's
+# `runAsUser: 1000540000` Restricted Pod Security Standard) where the caller
+# UID is not in /etc/passwd at all. In that case:
+#   * $HOME may be unset or resolve to "/" (unwritable).
+#   * getpass.getuser() falls back to pwd.getpwuid() -> KeyError.
+#
+# The wrapper re-points $HOME to /home/vllm when writable, /tmp/vllm-home.XXXXXX
+# otherwise, and defaults $USER to "vllm" so the pwd-lookup path is never
+# taken. Everything else is forwarded to `vllm serve`.
+#
+# Non-empty caller-set env vars (HOME, USER, LOGNAME) are preserved, so
+# existing K8s manifests and `docker run -e ...` keep working unchanged.
+# Unset or empty values fall through to the wrapper's defaults, matching
+# what shell code typically expects from "unset".
+
+set -eu
+
+if [ -z "${HOME:-}" ] || [ ! -w "${HOME}" ]; then
+    if [ -w /home/vllm ]; then
+        export HOME=/home/vllm
+    else
+        if _h="$(mktemp -d /tmp/vllm-home.XXXXXX 2>/dev/null)"; then
+            export HOME="$_h"
+            chmod 0700 "$HOME" 2>/dev/null || true
+        else
+            export HOME=/tmp
+        fi
+        unset _h
+    fi
+fi
+
+# Preserve the caller's cwd whenever it's still usable. A read-only mount
+# (e.g. `docker run -w /models ... --model ./llama.gguf` where /models is
+# the user's model share) is a legitimate, usable cwd — vllm only needs to
+# *read* relative paths from there. We only fall back to $HOME when the
+# cwd itself is truly inaccessible (no search bit, deleted inode, mount
+# gone, etc.), which is when `cd .` actually fails.
+#
+# This is the accessibility check, not a writability check; the latter
+# would silently rewrite cwd for any read-only workflow and break relative
+# argv like `--model ./llama.gguf`, `--chat-template ./t.jinja`, relative
+# TLS cert paths, etc.
+if ! cd . 2>/dev/null; then
+    cd "$HOME"
+fi
+
+# getpass.getuser() prefers $USER/$LOGNAME/etc. before hitting getpwuid();
+# setting it here makes the "UID not in passwd" path a no-op for everything
+# in the process tree.
+if [ -z "${USER:-}" ]; then
+    export USER=vllm
+fi
+if [ -z "${LOGNAME:-}" ]; then
+    export LOGNAME="$USER"
+fi
+
+# Shell-level tooling (`whoami`, bash's `\u` prompt, `id -un`, `sudo`) does
+# NOT consult $USER; it calls getpwuid(geteuid()) directly. For arbitrary
+# runtime UIDs in OpenShift-style deploys this returns "I have no name!".
+# If /etc/passwd is group-0 writable (set at build time) and doesn't yet
+# have an entry for this UID, append a synthetic one so every downstream
+# consumer sees a consistent "vllm" identity.
+#
+# We parse the passwd file directly instead of calling `getent` because
+# the container's NSS is typically just files anyway, and this lets us
+# unit-test via the VLLM_PASSWD_FILE hook (undocumented; production uses
+# /etc/passwd).
+_passwd_file="${VLLM_PASSWD_FILE:-/etc/passwd}"
+_uid="$(id -u)"
+if [ -w "$_passwd_file" ] \
+    && ! awk -F: -v u="$_uid" '$3==u {found=1; exit} END {exit !found}' "$_passwd_file" 2>/dev/null; then
+    printf 'vllm:x:%s:%s:vllm:%s:/bin/bash\n' \
+        "$_uid" "$(id -g)" "$HOME" >> "$_passwd_file"
+fi
+unset _uid _passwd_file
+
+exec vllm serve "$@"

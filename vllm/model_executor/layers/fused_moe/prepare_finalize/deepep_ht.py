@@ -12,7 +12,9 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
+from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
+from vllm.utils.torch_utils import current_stream
 from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,
     dbo_enabled,
@@ -25,10 +27,25 @@ from vllm.v1.worker.ubatching import (
 )
 
 
+def _dbo_record_stream(*tensors: torch.Tensor | None) -> None:
+    """Mark tensors allocated on the other DBO stream as used by this one.
+
+    Under DBO, DeepEP allocates its outputs on the comm stream while the
+    experts read them on the compute stream, and the reverse holds for the
+    dispatch and combine inputs. Without this, the caching allocator can hand
+    a freed block to the other ubatch while kernels on this stream still read
+    it.
+    """
+    if not dbo_enabled():
+        return
+    stream = current_stream()
+    for t in tensors:
+        if t is not None:
+            t.record_stream(stream)
+
+
 class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
-    """
-    Prepare/Finalize using DeepEP High-Throughput kernels.
-    """
+    """Prepare/Finalize using DeepEP High-Throughput kernels."""
 
     @staticmethod
     def maybe_roundup_layer_hidden_size(hidden_size: int, dtype: torch.dtype) -> int:
@@ -59,6 +76,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.dp_size = dp_size
         self.rank_expert_offset = rank_expert_offset
         self.async_prepare = True
+        self.sync_dbo_comm = current_platform.is_rocm()
 
         # The dispatch function returns a handle that the combine function
         # requires. Under DBO microbatching we must track one handle per
@@ -67,6 +85,13 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
         # From https://github.com/deepseek-ai/DeepEP/blob/9fe9021f29c9083cd1808ab36b740208524d9f63/deep_ep/buffer.py#L164
         self.available_rank_configs = [2, 4, 8, 16, 24, 32, 64, 128, 144, 160]
+
+    def _sync_dbo_comm_if_needed(self) -> None:
+        if self.sync_dbo_comm and dbo_enabled():
+            # ROCm DeepEP HT dispatch/combine reuse Buffer-owned communication
+            # workspace. Do not let the next DBO ubatch reuse that workspace
+            # before this ubatch's HT kernel has completed.
+            torch.cuda.current_stream().synchronize()
 
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_
@@ -117,6 +142,9 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         # kernel will block the CPU so we want to queue up all the compute
         # for the other ubatch before the dispatch kernel starts.
         dbo_yield_and_switch_from_compute_to_comm()
+        # The ROCm host sync after dispatch already orders these reads.
+        if not self.sync_dbo_comm:
+            _dbo_record_stream(tokens, token_scales, rank_topk_ids, rank_topk_weights)
 
         (
             num_tokens_per_rank,
@@ -161,6 +189,8 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             allocate_on_comm_stream=False,
         )
 
+        self._sync_dbo_comm_if_needed()
+
         # record the handle for this ubatch
         a2a_idx = dbo_current_ubatch_id()
         self.handles[a2a_idx] = handle
@@ -200,6 +230,9 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             expert_x, expert_x_scale = token_data
         else:
             expert_x, expert_x_scale = token_data, None
+        _dbo_record_stream(
+            expert_x, expert_x_scale, expert_topk_ids, expert_topk_weights
+        )
 
         # The existing MOE kernels assume that all entries of topk_ids are
         # valid. To that effect, set the -1s in expert_topk_ids to some expert
@@ -361,6 +394,8 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             )
         previous_event = dbo_get_previous_event(self.buffer.capture)
         dbo_yield_and_switch_from_compute_to_comm()
+        if not self.sync_dbo_comm:
+            _dbo_record_stream(fused_expert_output)
         assert fused_expert_output.dtype == torch.bfloat16, (
             f"Expected fused_expert_output bfloat16, got {fused_expert_output.dtype}"
         )
@@ -375,6 +410,8 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             allocate_on_comm_stream=False,
         )
 
+        self._sync_dbo_comm_if_needed()
+
         dbo_switch_to_compute()
 
         if do_async:
@@ -383,7 +420,6 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 if event.event is not None:
                     event.current_stream_wait()
                 dbo_switch_to_comm()
-                # Respect inplace outputs.
                 output.copy_(combined_x, non_blocking=True)
 
                 # TODO(lucas): refactor the modular kernel so this will be
@@ -394,7 +430,6 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         else:
             # TODO(lucas): support this case with the refactored modular kernel
             assert not dbo_enabled()
-            # Respect inplace outputs.
             output.copy_(combined_x, non_blocking=True)
             return None
 

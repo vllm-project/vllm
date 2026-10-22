@@ -8,140 +8,166 @@
 
 from packaging import version
 
-from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
+from vllm.model_executor.layers.mamba.ops.triton_helpers import (
+    fast_exp,
+    launch_autotuned,
+)
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 TRITON_22 = version.parse(triton.__version__) >= version.parse("2.2.0")
 
 
+def _drop_racy_wgmma_configs(configs: list[triton.Config]) -> list[triton.Config]:
+    """Drop the configs that Triton miscompiles on sm90.
+
+    With whole warpgroups (num_warps % 4 == 0) and BLOCK_SIZE_M % 64 == 0,
+    `tl.dot(cb, x)` lowers to wgmma with `cb` in registers. With
+    num_stages > 1, Triton leaves that wgmma running across the loop
+    back-edge while the next iteration overwrites the registers of `cb`,
+    which writes NaN/Inf into whole output rows.
+    """
+    if not (current_platform.is_cuda() and current_platform.is_device_capability(90)):
+        return configs
+    return [
+        c
+        for c in configs
+        if c.num_stages == 1
+        or c.num_warps % 4 != 0
+        or c.kwargs["BLOCK_SIZE_M"] % 64 != 0
+    ]
+
+
 @triton.autotune(
-    configs=[
-        # =================================================================
-        # Higher warp count configs for better latency hiding
-        # More warps = more instructions in flight = better memory latency hiding
-        # =================================================================
-        triton.Config(
-            {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 32},
-            num_stages=2,
-            num_warps=8,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
-            num_stages=2,
-            num_warps=8,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 32},
-            num_stages=2,
-            num_warps=8,
-        ),
-        # Smaller tiles with more stages for software pipelining
-        triton.Config(
-            {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 32},
-            num_stages=3,
-            num_warps=4,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 64},
-            num_stages=2,
-            num_warps=4,
-        ),
-        # =================================================================
-        # Low register pressure configs (num_stages=1) for large dstate
-        # =================================================================
-        triton.Config(
-            {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 64},
-            num_stages=1,
-            num_warps=4,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
-            num_stages=1,
-            num_warps=4,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
-            num_stages=1,
-            num_warps=4,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
-            num_stages=1,
-            num_warps=4,
-        ),
-        # num_stages=2 configs - moderate register pressure
-        triton.Config(
-            {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 64},
-            num_stages=2,
-            num_warps=4,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
-            num_stages=2,
-            num_warps=4,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
-            num_stages=2,
-            num_warps=4,
-        ),
-        # Original configs for larger dstate values
-        triton.Config(
-            {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 256, "BLOCK_SIZE_K": 64},
-            num_stages=3,
-            num_warps=8,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 256, "BLOCK_SIZE_K": 32},
-            num_stages=4,
-            num_warps=4,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 32},
-            num_stages=4,
-            num_warps=4,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
-            num_stages=4,
-            num_warps=4,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 32},
-            num_stages=4,
-            num_warps=4,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 64},
-            num_stages=4,
-            num_warps=4,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 64},
-            num_stages=4,
-            num_warps=4,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 32},
-            num_stages=4,
-            num_warps=4,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 32},
-            num_stages=5,
-            num_warps=2,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
-            num_stages=5,
-            num_warps=2,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
-            num_stages=4,
-            num_warps=2,
-        ),
-    ],
+    configs=_drop_racy_wgmma_configs(
+        [
+            # =================================================================
+            # Higher warp count configs for better latency hiding
+            # More warps = more instructions in flight = better memory latency hiding
+            # =================================================================
+            triton.Config(
+                {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 32},
+                num_stages=2,
+                num_warps=8,
+            ),
+            triton.Config(
+                {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
+                num_stages=2,
+                num_warps=8,
+            ),
+            triton.Config(
+                {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 32},
+                num_stages=2,
+                num_warps=8,
+            ),
+            # Smaller tiles with more stages for software pipelining
+            triton.Config(
+                {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 32},
+                num_stages=3,
+                num_warps=4,
+            ),
+            triton.Config(
+                {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 64},
+                num_stages=2,
+                num_warps=4,
+            ),
+            # =================================================================
+            # Low register pressure configs (num_stages=1) for large dstate
+            # =================================================================
+            triton.Config(
+                {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 64},
+                num_stages=1,
+                num_warps=4,
+            ),
+            triton.Config(
+                {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
+                num_stages=1,
+                num_warps=4,
+            ),
+            triton.Config(
+                {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
+                num_stages=1,
+                num_warps=4,
+            ),
+            triton.Config(
+                {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
+                num_stages=1,
+                num_warps=4,
+            ),
+            # num_stages=2 configs - moderate register pressure
+            triton.Config(
+                {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 64},
+                num_stages=2,
+                num_warps=4,
+            ),
+            triton.Config(
+                {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
+                num_stages=2,
+                num_warps=4,
+            ),
+            triton.Config(
+                {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
+                num_stages=2,
+                num_warps=4,
+            ),
+            # Original configs for larger dstate values
+            triton.Config(
+                {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 256, "BLOCK_SIZE_K": 64},
+                num_stages=3,
+                num_warps=8,
+            ),
+            triton.Config(
+                {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 256, "BLOCK_SIZE_K": 32},
+                num_stages=4,
+                num_warps=4,
+            ),
+            triton.Config(
+                {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 32},
+                num_stages=4,
+                num_warps=4,
+            ),
+            triton.Config(
+                {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
+                num_stages=4,
+                num_warps=4,
+            ),
+            triton.Config(
+                {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 32},
+                num_stages=4,
+                num_warps=4,
+            ),
+            triton.Config(
+                {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 64},
+                num_stages=4,
+                num_warps=4,
+            ),
+            triton.Config(
+                {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 64},
+                num_stages=4,
+                num_warps=4,
+            ),
+            triton.Config(
+                {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 32},
+                num_stages=4,
+                num_warps=4,
+            ),
+            triton.Config(
+                {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 32},
+                num_stages=5,
+                num_warps=2,
+            ),
+            triton.Config(
+                {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
+                num_stages=5,
+                num_warps=2,
+            ),
+            triton.Config(
+                {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
+                num_stages=4,
+                num_warps=2,
+            ),
+        ]
+    ),
     key=["chunk_size", "hdim", "dstate", "IS_CAUSAL"],
 )
 @triton.jit
@@ -163,7 +189,6 @@ def _chunk_scan_fwd_kernel(
     chunk_size: tl.constexpr,
     hdim: tl.constexpr,
     dstate: tl.constexpr,
-    seqlen,
     nheads_ngroups_ratio: tl.constexpr,
     # Strides
     stride_cb_chunk: tl.int64,
@@ -466,7 +491,9 @@ def _chunk_scan_fwd(
         else (0, 0, 0, 0)
     )
 
-    _chunk_scan_fwd_kernel[grid](
+    launch_autotuned(
+        _chunk_scan_fwd_kernel,
+        grid,
         cb_ptr=cb,
         x_ptr=x,
         z_ptr=z,
@@ -482,7 +509,6 @@ def _chunk_scan_fwd(
         chunk_size=chunk_size,
         hdim=headdim,
         dstate=dstate,
-        seqlen=seqlen,
         nheads_ngroups_ratio=nheads // ngroups,
         stride_cb_chunk=cb.stride(0),
         stride_cb_head=cb.stride(1),

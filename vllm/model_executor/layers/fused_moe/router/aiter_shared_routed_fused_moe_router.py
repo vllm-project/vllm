@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Callable
 
 import torch
 
@@ -17,8 +16,7 @@ from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
 
 
 class AiterSharedRoutedFusedMoERouter(BaseRouter):
-    """
-    ROCm AITER router for models with fused shared experts (e.g. Qwen3-MoE).
+    """ROCm AITER router for models with fused shared experts (e.g. Qwen3-MoE).
 
     When the AITER topk_softmax kernel supports sigmoid fusion, the routing
     softmax and shared-expert sigmoid are computed in a single kernel launch.
@@ -33,19 +31,15 @@ class AiterSharedRoutedFusedMoERouter(BaseRouter):
         self,
         top_k: int,
         global_num_experts: int,
-        eplb_state: EplbLayerState,
         num_fused_shared_experts: int,
+        eplb_state: EplbLayerState | None = None,
         scoring_func: str = "softmax",
         renormalize: bool = True,
-        enable_eplb: bool = False,
-        indices_type_getter: Callable[[], torch.dtype | None] | None = None,
     ):
         super().__init__(
             top_k=top_k,
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
-            enable_eplb=enable_eplb,
-            indices_type_getter=indices_type_getter,
         )
         self.renormalize = renormalize
         self.scoring_func = scoring_func
@@ -73,7 +67,7 @@ class AiterSharedRoutedFusedMoERouter(BaseRouter):
             "Number of tokens mismatch"
         )
 
-        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
             aiter_topK_meta_data,
         )
 
@@ -90,7 +84,14 @@ class AiterSharedRoutedFusedMoERouter(BaseRouter):
             total_topk_weights_slice = total_topk_weights[:M]
             topk_ids_slice = total_topk_ids[:M, :topk]
 
-            topk_func = dispatch_topk_softmax_func(use_rocm_aiter=True)
+            topk_func = dispatch_topk_softmax_func(
+                use_rocm_aiter=True,
+                topk_weights=total_topk_weights_slice,
+                topk_indices=topk_ids_slice,
+                gating_output=router_logits,
+                num_shared_experts=num_fse,
+                shared_expert_scoring_func="sigmoid",
+            )
             topk_func(
                 total_topk_weights_slice,
                 topk_ids_slice,
@@ -116,7 +117,10 @@ class AiterSharedRoutedFusedMoERouter(BaseRouter):
         )
 
         topk_func = dispatch_topk_softmax_func(
-            use_rocm_aiter=rocm_aiter_ops.is_fused_moe_enabled()
+            use_rocm_aiter=rocm_aiter_ops.is_fused_moe_enabled(),
+            topk_weights=topk_weights,
+            topk_indices=topk_ids,
+            gating_output=routing_logits,
         )
         topk_weights, topk_ids = topk_func(
             topk_weights,
@@ -127,7 +131,7 @@ class AiterSharedRoutedFusedMoERouter(BaseRouter):
         )
 
         if aiter_topK_meta_data is not None:
-            from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+            from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
                 inject_shared_expert_weights,
             )
 

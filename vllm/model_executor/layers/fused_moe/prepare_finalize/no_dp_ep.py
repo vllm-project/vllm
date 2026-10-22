@@ -31,6 +31,7 @@ def _quantize_input(
         per_act_token_quant=quant_config.per_act_token_quant,
         block_shape=quant_config.block_shape,
         is_scale_swizzled=quant_config.is_scale_swizzled,
+        is_scale_transposed=quant_config.is_scale_transposed,
         mx_alignment=quant_config.mx_alignment,
     )
 
@@ -38,6 +39,11 @@ def _quantize_input(
 
 
 class MoEPrepareAndFinalizeNoDPEPModular(mk.FusedMoEPrepareAndFinalizeModular):
+    def supports_deferred_moe_finalize(self) -> bool:
+        # finalize() here is the top-k weight-and-reduce and nothing else,
+        # which is exactly the work a deferring consumer takes over.
+        return True
+
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
@@ -71,7 +77,6 @@ class MoEPrepareAndFinalizeNoDPEPModular(mk.FusedMoEPrepareAndFinalizeModular):
             assert topk == 1, (
                 "apply_router_weight_on_input is only implemented for topk=1"
             )
-            # Note: do not use inplace for shared experts overlap
             a1 = a1 * topk_weights.to(a1.dtype)
 
         a1q, a1q_scale = _quantize_input(a1, quant_config, defer_input_quant)
@@ -99,6 +104,9 @@ class MoEPrepareAndFinalizeNoDPEPModular(mk.FusedMoEPrepareAndFinalizeModular):
 
 
 class MoEPrepareAndFinalizeNoDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMonolithic):
+    def supports_deferred_moe_finalize(self) -> bool:
+        return True
+
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard

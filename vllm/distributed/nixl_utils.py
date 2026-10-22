@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
 import importlib
 import os
 import sys
@@ -21,7 +22,7 @@ def _maybe_set_ucx_rcache_limit() -> None:
     if "UCX_RCACHE_MAX_UNRELEASED" in os.environ:
         return
 
-    if "nixl" in sys.modules or "rixl" in sys.modules:
+    if "nixl" in sys.modules or "nixl_rocm" in sys.modules:
         logger.warning_once(
             "NIXL was already imported, we can't reset "
             "UCX_RCACHE_MAX_UNRELEASED. "
@@ -36,8 +37,12 @@ def _maybe_set_ucx_rcache_limit() -> None:
     os.environ["UCX_RCACHE_MAX_UNRELEASED"] = "1024"
 
 
+def _get_nixl_package_name() -> str:
+    return "nixl_rocm" if current_platform.is_rocm() else "nixl"
+
+
 def _get_nixl_module_name(name: str) -> str:
-    package_name = "rixl" if current_platform.is_rocm() else "nixl"
+    package_name = _get_nixl_package_name()
     if name == "nixlXferTelemetry":
         return f"{package_name}._bindings"
     return f"{package_name}._api"
@@ -79,4 +84,53 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-__all__ = ["NixlWrapper", "nixl_agent_config", "nixlXferTelemetry"]
+def is_nixl_available() -> bool:
+    """Lightweight check for the platform's NIXL package without importing it."""
+    import importlib.util
+
+    pkg = _get_nixl_package_name()
+    return pkg in sys.modules or importlib.util.find_spec(pkg) is not None
+
+
+@functools.cache
+def check_nixl_version(min_version: str) -> None:
+    """Raise if the installed NIXL package is older than ``min_version``."""
+    from importlib.metadata import packages_distributions, version
+
+    from packaging.version import Version
+
+    pkg = _get_nixl_package_name()
+    for dist in packages_distributions().get(pkg, ()):
+        installed = version(dist)
+        if Version(installed) < Version(min_version):
+            raise RuntimeError(
+                f"NIXL >= {min_version} is required, but {dist}=={installed} "
+                "is installed"
+            )
+        return
+
+
+def alias_nixl_for_ray() -> None:
+    """Let Ray's ``nixl._api`` import resolve to the ROCm implementation."""
+    if not current_platform.is_rocm() or "nixl._api" in sys.modules:
+        return
+
+    package_name = _get_nixl_package_name()
+    if not is_nixl_available():
+        raise ImportError(f"Ray's NIXL transport on ROCm requires {package_name}")
+
+    _maybe_set_ucx_rcache_limit()
+    package = importlib.import_module(package_name)
+    api = importlib.import_module(f"{package_name}._api")
+    sys.modules.setdefault("nixl", package)
+    sys.modules.setdefault("nixl._api", api)
+
+
+__all__ = [
+    "NixlWrapper",
+    "nixl_agent_config",
+    "nixlXferTelemetry",
+    "is_nixl_available",
+    "check_nixl_version",
+    "alias_nixl_for_ray",
+]

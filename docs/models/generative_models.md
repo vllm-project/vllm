@@ -127,7 +127,7 @@ If the model doesn't have a chat template or you want to specify another one,
 you can explicitly pass a chat template:
 
 ```python
-from vllm.entrypoints.chat_utils import load_chat_template
+from vllm.renderers.chat_utils import load_chat_template
 
 # You can find a list of existing chat templates under `examples/`
 custom_template = load_chat_template(chat_template="<path_to_template>")
@@ -138,7 +138,7 @@ outputs = llm.chat(conversation, chat_template=custom_template)
 
 ## Online Serving
 
-Our [OpenAI-Compatible Server](../serving/openai_compatible_server.md) provides endpoints that correspond to the offline APIs:
+Our [OpenAI-Compatible Server](../serving/online_serving/openai_compatible_server.md) provides endpoints that correspond to the offline APIs:
 
-- [Completions API](../serving/openai_compatible_server.md#completions-api) is similar to `LLM.generate` but only accepts text.
-- [Chat API](../serving/openai_compatible_server.md#chat-api)  is similar to `LLM.chat`, accepting both text and [multi-modal inputs](../features/multimodal_inputs.md) for models with a chat template.
+- [Completions API](../serving/online_serving/openai_compatible_server.md#completions-api) is similar to `LLM.generate` but only accepts text.
+- [Chat API](../serving/online_serving/openai_compatible_server.md#chat-api)  is similar to `LLM.chat`, accepting both text and [multi-modal inputs](../features/multimodal_inputs.md) for models with a chat template.

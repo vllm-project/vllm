@@ -31,10 +31,10 @@ from typing import Annotated
 import torch
 import torch.nn.functional as F
 from torch import nn
-from transformers import BatchFeature, PretrainedConfig
+from transformers import BatchFeature, PreTrainedConfig
 
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import MultiModalDataDict, PromptType, TokensPrompt
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
@@ -60,7 +60,9 @@ from vllm.multimodal.processing import (
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.transformers_utils.processor import cached_processor_from_config
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import PIN_MEMORY
 
 from .blip2 import Blip2QFormerModel
 from .interfaces import (
@@ -89,8 +91,7 @@ ISO639_1_SUPPORTED_LANGS = {
 
 ### Audio Input
 class GraniteSpeechAudioInputs(TensorSchema):
-    """
-    Audio input features for Granite Speech model.
+    """Audio input features for Granite Speech model.
 
     Dimensions:
         - b: Batch size
@@ -109,7 +110,7 @@ class GraniteSpeechAudioInputs(TensorSchema):
     """List of audio embedding sizes for each item in batch."""
 
 
-class GraniteSpeechMultiModalProcessingInfo(BaseProcessingInfo):
+class GraniteSpeechProcessingInfo(BaseProcessingInfo):
     def get_data_parser(self):
         feature_extractor = self.get_hf_processor().audio_processor
 
@@ -134,7 +135,7 @@ class GraniteSpeechMultiModalProcessingInfo(BaseProcessingInfo):
 
 ### Input Processing  & Multimodal utils
 class GraniteSpeechMultiModalProcessor(
-    BaseMultiModalProcessor[GraniteSpeechMultiModalProcessingInfo]
+    BaseMultiModalProcessor[GraniteSpeechProcessingInfo]
 ):
     def _get_mm_fields_config(
         self,
@@ -143,7 +144,7 @@ class GraniteSpeechMultiModalProcessor(
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             input_features=MultiModalFieldConfig.batched("audio"),
-            audio_embed_sizes=MultiModalFieldConfig.batched("audio"),
+            audio_embed_sizes=MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
         )
 
     def _get_prompt_updates(
@@ -157,14 +158,14 @@ class GraniteSpeechMultiModalProcessor(
         feature_extractor = processor.audio_processor
         vocab = tokenizer.get_vocab()
 
-        # Use getattr with default to be compatible with transformers<4.48
-        audio_token = getattr(processor, "audio_token", "<|audio|>")
-        audio_token_id = vocab[audio_token]
+        audio_token_id = vocab[processor.audio_token]
 
         def get_replacement(item_idx: int):
             audios = mm_items.get_items("audio", AudioProcessorItems)
             audio = audios.get(item_idx)
-            audio_length = audio.shape[-1]
+            if audio is None:
+                raise ValueError(f"Missing audio item {item_idx}")
+            audio_length = len(audio) if isinstance(audio, list) else audio.shape[-1]
             num_projector_features = feature_extractor._get_num_audio_features(
                 [audio_length]
             )[0]
@@ -178,70 +179,54 @@ class GraniteSpeechMultiModalProcessor(
             )
         ]
 
-    def _call_hf_processor(
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _postprocess_hf_mm_data(
         self,
-        prompt: str,
         mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
     ) -> BatchFeature:
-        mm_data = dict(mm_data)
-        audios = mm_data.pop("audios", [])
-
-        if audios:
-            # GraniteSpeechFeatureExtractor accepts "audio"
-            mm_data["audio"] = audios
-
-        processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
-        )
-
         if "audio" in mm_data:
             # Calculate the number of audio tokens per entry in the batch;
             # This is used to split the batch back out after padding.
             audio_token_index = self.info.get_hf_config().audio_token_index
-            processed_outputs["audio_embed_sizes"] = (
-                processed_outputs["input_ids"] == audio_token_index
+            processed_data["audio_embed_sizes"] = (
+                processed_data["input_ids"] == audio_token_index
             ).sum(-1)
 
-        return processed_outputs
+        return processed_data
 
 
 class GraniteSpeechDummyInputsBuilder(
-    BaseDummyInputsBuilder[GraniteSpeechMultiModalProcessingInfo]
+    BaseDummyInputsBuilder[GraniteSpeechProcessingInfo]
 ):
     def get_dummy_mm_data(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_audios = mm_counts.get("audio", 0)
-        audio_overrides = mm_options.get("audio")
-
         return {
             "audio": self._get_dummy_audios(
                 length=self.info.get_max_audio_len(),
-                num_audios=num_audios,
-                overrides=audio_overrides,
+                num_audios=mm_counts.get("audio", 0),
+                overrides=mm_options.get("audio"),
             )
         }
 
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_audios = mm_counts.get("audio", 0)
         hf_processor = self.info.get_hf_processor()
-        audio_token = getattr(hf_processor, "audio_token", "<|audio|>")
-        return audio_token * num_audios
+        return hf_processor.audio_token * num_audios
 
 
 ### QFormer Projector
 class GraniteSpeechEncoderProjector(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         cache_config: CacheConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -299,7 +284,7 @@ class GraniteSpeechConformerFeedForward(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
@@ -335,7 +320,7 @@ class GraniteSpeechConformerAttention(nn.Module):
     for more details.
     """
 
-    def __init__(self, config: PretrainedConfig, prefix: str = ""):
+    def __init__(self, config: PreTrainedConfig, prefix: str = ""):
         super().__init__()
 
         inner_dim = config.dim_head * config.num_heads
@@ -389,10 +374,8 @@ class GraniteSpeechConformerAttention(nn.Module):
         # shaw's relative positional embedding
         dist = attention_dists.to(hidden_states.device)
         rel_pos_emb = self.rel_pos_emb(dist)
-        rel_pos_emb_expanded = rel_pos_emb.view([1, 1, 1] + list(rel_pos_emb.shape))
         pos_attn = (
-            torch.sum(query_states.unsqueeze(-2) * rel_pos_emb_expanded, dim=-1)
-            * self.scale
+            torch.einsum("bnhid,ijd->bnhij", query_states, rel_pos_emb) * self.scale
         )
 
         if remainder > 0:
@@ -443,7 +426,7 @@ class GraniteSpeechConformerConvModule(nn.Module):
     convolutional layers.
     """
 
-    def __init__(self, config: PretrainedConfig, prefix: str = ""):
+    def __init__(self, config: PreTrainedConfig, prefix: str = ""):
         super().__init__()
         inner_dim = config.hidden_dim * config.conv_expansion_factor
 
@@ -474,7 +457,7 @@ class GraniteSpeechConformerBlock(nn.Module):
     """Conformer block, consisting largely of linear layers,
     attention, and convolutional layers."""
 
-    def __init__(self, config: PretrainedConfig, prefix: str = ""):
+    def __init__(self, config: PreTrainedConfig, prefix: str = ""):
         super().__init__()
         self.ff1 = GraniteSpeechConformerFeedForward(config, prefix=f"{prefix}.ff1")
         self.attn = GraniteSpeechConformerAttention(config, prefix=f"{prefix}.attn")
@@ -500,7 +483,7 @@ class GraniteSpeechCTCEncoder(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         prefix: str,
         quant_config: QuantizationConfig | None = None,
     ):
@@ -560,7 +543,7 @@ class GraniteSpeechCTCEncoder(nn.Module):
 
 @MULTIMODAL_REGISTRY.register_processor(
     GraniteSpeechMultiModalProcessor,
-    info=GraniteSpeechMultiModalProcessingInfo,
+    info=GraniteSpeechProcessingInfo,
     dummy_inputs=GraniteSpeechDummyInputsBuilder,
 )
 class GraniteSpeechForConditionalGeneration(
@@ -616,8 +599,7 @@ class GraniteSpeechForConditionalGeneration(
             )
 
         with self._mark_tower_model(vllm_config, "audio"):
-            # Conformer encoder
-            self.encoder = GraniteSpeechCTCEncoder(
+            self.encoder = self._build_encoder(
                 config=config.encoder_config,
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "encoder"),
@@ -635,6 +617,18 @@ class GraniteSpeechForConditionalGeneration(
             self.language_model.make_empty_intermediate_tensors
         )
 
+    def _build_encoder(
+        self,
+        config: PreTrainedConfig,
+        quant_config: QuantizationConfig | None,
+        prefix: str,
+    ) -> "GraniteSpeechCTCEncoder":
+        return GraniteSpeechCTCEncoder(
+            config=config,
+            quant_config=quant_config,
+            prefix=prefix,
+        )
+
     def _parse_and_validate_audio_input(
         self,
         **kwargs: object,
@@ -645,6 +639,9 @@ class GraniteSpeechForConditionalGeneration(
 
         if input_features is None:
             return None
+
+        if not isinstance(audio_embed_sizes, torch.Tensor):
+            raise ValueError("audio_embed_sizes must be a tensor")
 
         # If we have a batch of variable feature length audio clips, we need
         # to mask the features; usually we would get an input_features_mask
@@ -713,17 +710,20 @@ class GraniteSpeechForConditionalGeneration(
         Args:
             audio_embed_sizes: torch.Tensor
                 Tensor of num features in each seq in the batch.
+
         Returns:
             torch.Tensor: Mask of shape (bsz, num_features) to be applied to
             the audio features prior to splitting the audio embeddings.
+
         """
-        most_audio_features = torch.max(audio_embed_sizes).item()
-        mask_indices = torch.arange(
-            most_audio_features,
-            device=audio_embed_sizes.device,
-        ).view(1, -1)
+        most_audio_features = int(torch.max(audio_embed_sizes))
+        mask_indices = torch.arange(most_audio_features).view(1, -1)
         input_features_mask = mask_indices < audio_embed_sizes.view(-1, 1)
-        return input_features_mask
+        target_device = self.encoder.input_linear.weight.device
+        if target_device == input_features_mask.device:
+            return input_features_mask
+        masked = input_features_mask.pin_memory() if PIN_MEMORY else input_features_mask
+        return masked.to(target_device, non_blocking=True)
 
     def _pad_and_stack_input_features(
         self,
@@ -743,10 +743,12 @@ class GraniteSpeechForConditionalGeneration(
         Args:
             input_features: list[torch.Tensor]
                 3D Input features to be coerced into a tensor.
+
         Returns:
             torch.Tensor: Tensor of shape [bsz, num_features, 160], where
             num_features is the max number of features of any entry in the
             batch.
+
         """
         feat_lens = [feats.shape[1] for feats in input_features]
         padding = [max(feat_lens) - length for length in feat_lens]
@@ -770,15 +772,18 @@ class GraniteSpeechForConditionalGeneration(
             audio_input: GraniteSpeechAudioInputs
                 Audio inputs object containing Mel features, an input features
                 mask, and the (flattened) number of audio tokens per instance.
+
         Returns:
             tuple[torch.Tensor]: List of length bsz.
+
         """
         # TODO (Alex) - support embedding inputs
         encoder_embeds = self.encoder(audio_input["input_features"])
         # [bsz, <max feature size>, 4096]
         projected_embeds = self.projector(encoder_embeds)
-        # Apply mask on variable length audio features
-        masked_embeds = projected_embeds[audio_input["input_features_mask"]]
+        # Apply mask on variable length audio features.
+        with gpu_sync_allowed():
+            masked_embeds = projected_embeds[audio_input["input_features_mask"]]
         # Split variable length features into a tuple
         return torch.split(masked_embeds, audio_input["audio_embed_sizes"])
 
@@ -864,7 +869,11 @@ class GraniteSpeechForConditionalGeneration(
         audio_tok = cls.get_placeholder_str("audio", 0)
 
         if task_type == "translate":
-            full_lang_name_to = cls.supported_languages.get(to_language, to_language)
+            full_lang_name_to = (
+                cls.supported_languages.get(to_language, to_language)
+                if to_language is not None
+                else ""
+            )
             user_prompt = f"{audio_tok}translate the speech to {full_lang_name_to}"  # noqa: E501
         elif task_type == "transcribe":
             user_prompt = (

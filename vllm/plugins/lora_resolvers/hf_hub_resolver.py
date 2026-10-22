@@ -3,13 +3,12 @@
 import asyncio
 import os
 
-from huggingface_hub import HfApi, snapshot_download
-
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.lora.resolver import LoRAResolverRegistry
 from vllm.plugins.lora_resolvers.filesystem_resolver import FilesystemResolver
+from vllm.transformers_utils.repo_utils import hf_api
 
 logger = init_logger(__name__)
 
@@ -49,7 +48,7 @@ class HfHubResolver(FilesystemResolver):
             return None
 
         repo_path = await asyncio.to_thread(
-            snapshot_download,
+            hf_api().snapshot_download,
             repo_id=maybe_repo,
             allow_patterns=f"{maybe_subpath}/*" if maybe_subpath != "." else "*",
         )
@@ -68,6 +67,7 @@ class HfHubResolver(FilesystemResolver):
             lora_name: Path to LoRA in HF Hub, e.g., <org>/<repo>/<subpath>,
                 match on <org>/<repo> (if it contains an adapter directly) or
                 <org>/<repo>/ if it may have one in subdirs.
+
         """
         for potential_repo in self.repo_list:
             if lora_name.startswith(potential_repo) and (
@@ -87,6 +87,7 @@ class HfHubResolver(FilesystemResolver):
         Args:
             lora_name: Path to LoRA in HF Hub, e.g., <org>/<repo>/<subpath>
             maybe_repo: Path to the repo to match against if one exists.
+
         """
         if maybe_repo is None:
             return None
@@ -109,8 +110,12 @@ class HfHubResolver(FilesystemResolver):
 
         Args:
             repo_name: Name of the HF hub repo to inspect.
+
         """
-        repo_files = await asyncio.to_thread(HfApi().list_repo_files, repo_id=repo_name)
+        repo_files = await asyncio.to_thread(
+            hf_api().list_repo_files,
+            repo_id=repo_name,
+        )
         adapter_dirs = {
             os.path.dirname(name)
             for name in repo_files
@@ -122,8 +127,7 @@ class HfHubResolver(FilesystemResolver):
 
 
 def register_hf_hub_resolver():
-    """Register the Hf hub LoRA Resolver with vLLM"""
-
+    """Register the Hf hub LoRA Resolver with vLLM."""
     hf_repo_list = envs.VLLM_LORA_RESOLVER_HF_REPO_LIST
     is_enabled = (
         envs.VLLM_PLUGINS is not None and "lora_hf_hub_resolver" in envs.VLLM_PLUGINS

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Tests for MNNVL AllToAll operations.
+"""Tests for MNNVL AllToAll operations.
 
 Requires: docker run ... --cap-add=SYS_PTRACE ...
 Run: pytest tests/distributed/test_mnnvl_alltoall.py -v
@@ -9,19 +8,24 @@ Run: pytest tests/distributed/test_mnnvl_alltoall.py -v
 
 import os
 import traceback
+from contextlib import contextmanager
 
 import pytest
 import torch
 import torch.multiprocessing as mp
 
 from vllm.distributed import get_ep_group
+from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     has_flashinfer_nvlink_one_sided,
     has_flashinfer_nvlink_two_sided,
 )
+from vllm.utils.import_utils import has_deep_ep_v2
 from vllm.utils.network_utils import get_open_port
 
 from ..utils import init_test_distributed_environment
+
+DEVICE = current_platform.device_type
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -72,7 +76,10 @@ def _spawn_workers(worker_fn, world_size, *, dp_size=None):
     err_queue.close()
     err_queue.join_thread()
     if errors:
-        pytest.fail("Worker(s) failed:\n" + "\n---\n".join(errors))
+        combined = "\n---\n".join(errors)
+        if "NCCL GIN" in combined:
+            pytest.skip("NCCL GIN not available on this system")
+        pytest.fail("Worker(s) failed:\n" + combined)
 
 
 def _run_worker(rank, world_size, port, worker_fn, dp_size, dp_port, err_queue):
@@ -83,6 +90,7 @@ def _run_worker(rank, world_size, port, worker_fn, dp_size, dp_port, err_queue):
                  Otherwise use tp=world_size (default for EP-based tests).
         dp_port: Separate port for the DP master (only used when dp_size is set).
         err_queue: Queue for propagating tracebacks to the parent process.
+
     """
     try:
         os.environ.pop("CUDA_VISIBLE_DEVICES", None)
@@ -111,6 +119,7 @@ def _init_dp_environment(world_size, rank, port, dp_size, dp_port):
     Args:
         port: Port for torch.distributed init.
         dp_port: Separate port for the DP master group init.
+
     """
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.config.parallel import ParallelConfig
@@ -140,16 +149,19 @@ def _init_dp_environment(world_size, rank, port, dp_size, dp_port):
         ensure_model_parallel_initialized(1, 1)
 
 
-def _make_forward_context(rank, world_size, num_tokens_per_rank):
-    """Create a forward context with mock DP metadata for AgRs tests.
+@contextmanager
+def _make_forward_context(
+    rank, world_size, num_tokens_per_rank, num_tokens_across_dp=None
+):
+    """Keep the vLLM config and mock-DP forward context active together.
 
     Returns a context manager suitable for ``with`` statements.
     The real DPMetadata (with sp_local_sizes etc.) is created internally
     by set_forward_context from num_tokens_across_dp; the attn_metadata
     placeholder just satisfies the "attn_metadata is not None" guard.
     """
+    from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.config.parallel import ParallelConfig
-    from vllm.config.vllm import VllmConfig
     from vllm.forward_context import set_forward_context
 
     class _AttnMeta:
@@ -165,14 +177,18 @@ def _make_forward_context(rank, world_size, num_tokens_per_rank):
         is_moe_model=True,
         data_parallel_rank=rank,
     )
-    return set_forward_context(
-        _AttnMeta(),
-        vllm_config,
-        num_tokens=num_tokens_per_rank,
-        num_tokens_across_dp=torch.tensor(
-            [num_tokens_per_rank] * world_size, dtype=torch.int
+    if num_tokens_across_dp is None:
+        num_tokens_across_dp = [num_tokens_per_rank] * world_size
+    with (
+        set_current_vllm_config(vllm_config),
+        set_forward_context(
+            _AttnMeta(),
+            vllm_config,
+            num_tokens=num_tokens_per_rank,
+            num_tokens_across_dp=torch.tensor(num_tokens_across_dp, dtype=torch.int),
         ),
-    )
+    ):
+        yield
 
 
 # ---------------------------------------------------------------------------
@@ -194,11 +210,74 @@ requires_ptrace = pytest.mark.skipif(
     not _has_sys_ptrace(),
     reason="SYS_PTRACE required (docker run --cap-add=SYS_PTRACE)",
 )
+requires_deep_ep_v2 = pytest.mark.skipif(
+    not has_deep_ep_v2(),
+    reason="DeepEP v2 (ElasticBuffer) not available or NCCL < 2.30.4",
+)
 
 # NOTE: No module-level pytestmark here. The FlashInfer lifecycle tests have
 # their own @requires_two_sided / @requires_one_sided decorators, and
 # test_args_dispatch_combine uses only standard torch.distributed ops and
 # should run even when FlashInfer NVLink backends are not installed.
+
+
+@pytest.mark.parametrize("supports_output", [False, True])
+def test_one_sided_combine_into_compatibility(supports_output):
+    from vllm.distributed.device_communicators.all2all import (
+        FlashInferNVLinkOneSidedManager,
+    )
+
+    class FakeMoeAlltoAll:
+        def combine(
+            self,
+            payload,
+            runtime_max_tokens_per_rank,
+            output=None,
+            *,
+            use_low_precision=False,
+        ):
+            result = payload + runtime_max_tokens_per_rank
+            if output is None:
+                return result
+            output.copy_(result)
+            return output
+
+    manager = FlashInferNVLinkOneSidedManager.__new__(FlashInferNVLinkOneSidedManager)
+    manager.moe_alltoall = FakeMoeAlltoAll()
+    manager._combine_supports_output = supports_output
+    payload = torch.arange(4, dtype=torch.float32)
+    output = torch.empty_like(payload)
+
+    manager.combine_into(payload, runtime_max_tokens_per_rank=2, output=output)
+
+    torch.testing.assert_close(output, payload + 2)
+
+
+@pytest.mark.parametrize("low_precision_combine", [False, True])
+def test_one_sided_combine_into_low_precision(low_precision_combine):
+    """The fp8 combine setting is passed through to the kernel."""
+    from vllm.distributed.device_communicators.all2all import (
+        FlashInferNVLinkOneSidedManager,
+    )
+
+    seen_kwargs = {}
+
+    class FakeMoeAlltoAll:
+        def combine(self, payload, runtime_max_tokens_per_rank, output, **kwargs):
+            seen_kwargs.update(kwargs)
+            output.copy_(payload + runtime_max_tokens_per_rank)
+
+    manager = FlashInferNVLinkOneSidedManager.__new__(FlashInferNVLinkOneSidedManager)
+    manager.moe_alltoall = FakeMoeAlltoAll()
+    manager._combine_supports_output = True
+    manager.low_precision_combine = low_precision_combine
+    payload = torch.arange(4, dtype=torch.float32)
+    output = torch.empty_like(payload)
+
+    manager.combine_into(payload, runtime_max_tokens_per_rank=2, output=output)
+
+    assert seen_kwargs == {"use_low_precision": low_precision_combine}
+    torch.testing.assert_close(output, payload + 2)
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +383,8 @@ def _one_sided_lifecycle_worker(rank, world_size):
         top_k=2,
         num_experts=world_size * 8,
         hidden_size=4096,
+        x_bytes_per_token=4096 * 2,
+        x_sf_bytes_per_token=0,
     )
 
     # Initialize
@@ -343,6 +424,90 @@ def test_one_sided_manager_lifecycle(world_size):
 
 
 # ---------------------------------------------------------------------------
+# Test 2b: One-sided manager grows workspace across heterogeneous MoE layers
+# ---------------------------------------------------------------------------
+#
+# Models with heterogeneous MoE quantization — most notably a quantized base
+# MoE combined with an unquantized MTP head — can call initialize() multiple
+# times with different per-token dispatch payload sizes. The shared workspace
+# must grow to the union and the MoeAlltoAll must be rebuilt; otherwise a
+# later layer's combine call overruns the workspace sized for the first
+# layer's smaller payload and trips FlashInfer's combinePayloadOffset assert.
+# ---------------------------------------------------------------------------
+
+
+def _one_sided_workspace_grow_worker(rank, world_size):
+    from vllm.distributed.device_communicators.all2all import (
+        FlashInferNVLinkOneSidedManager,
+    )
+    from vllm.distributed.parallel_state import get_dp_group
+
+    cpu_group = get_dp_group().cpu_group
+    manager = FlashInferNVLinkOneSidedManager(cpu_group)
+
+    base_kwargs = dict(
+        max_num_tokens=1024,
+        top_k=2,
+        num_experts=world_size * 8,
+        hidden_size=4096,
+    )
+    nvfp4_kwargs = dict(
+        x_bytes_per_token=base_kwargs["hidden_size"] // 2,
+        x_sf_bytes_per_token=base_kwargs["hidden_size"] // 16,
+    )
+    bf16_kwargs = dict(
+        x_bytes_per_token=base_kwargs["hidden_size"] * 2,
+        x_sf_bytes_per_token=0,
+    )
+
+    # First init: NVFP4-like (hidden_bytes = hidden // 2 + hidden // 16).
+    manager.initialize(**base_kwargs, **nvfp4_kwargs)
+    assert manager.initialized
+    nvfp4_workspace_size = manager.workspace_size
+    nvfp4_moe_alltoall = manager.moe_alltoall
+
+    torch.distributed.barrier()
+
+    # Second init: bf16-like (hidden_bytes = hidden * 2). Models the case of
+    # a quantized base MoE followed by an unquantized MoE layer (e.g. an MTP
+    # head). Per-token dispatch payload is ~4x larger, so the union workspace
+    # must grow and MoeAlltoAll must be rebuilt.
+    manager.initialize(**base_kwargs, **bf16_kwargs)
+    assert manager.initialized
+    assert manager.workspace_size > nvfp4_workspace_size
+    assert manager.moe_alltoall is not nvfp4_moe_alltoall
+    bf16_workspace_size = manager.workspace_size
+    bf16_moe_alltoall = manager.moe_alltoall
+
+    torch.distributed.barrier()
+
+    # Third init: back to NVFP4-like shape. Existing workspace already covers
+    # it, so initialize() must no-op — no shrink, no rebuild.
+    manager.initialize(**base_kwargs, **nvfp4_kwargs)
+    assert manager.initialized
+    assert manager.workspace_size == bf16_workspace_size
+    assert manager.moe_alltoall is bf16_moe_alltoall
+
+    torch.distributed.barrier()
+    manager.cleanup()
+
+
+@requires_multi_gpu
+@requires_one_sided
+@requires_ptrace
+@pytest.mark.parametrize("world_size", [2])
+def test_one_sided_manager_workspace_grow(world_size):
+    """A later initialize() with a larger per-token payload must grow the
+    workspace and rebuild MoeAlltoAll; a later initialize() with a smaller
+    payload must no-op."""
+    _spawn_workers(
+        _one_sided_workspace_grow_worker,
+        world_size,
+        dp_size=world_size,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Test 3: AgRs dispatch/combine with value validation
 # ---------------------------------------------------------------------------
 #
@@ -353,12 +518,127 @@ def test_one_sided_manager_lifecycle(world_size):
 # ---------------------------------------------------------------------------
 
 
+class _FakeCombineGroup:
+    def __init__(self, combine_input):
+        self.combine_input = combine_input
+        self.allocation_calls = 0
+        self.combined_input = None
+
+    def allocate_combine_input(self, shape, dtype, device, **kwargs):
+        self.allocation_calls += 1
+        assert self.combine_input is not None
+        assert self.combine_input.shape == shape
+        assert self.combine_input.dtype == dtype
+        assert self.combine_input.device == device
+        return self.combine_input
+
+    def combine_into_output(self, hidden_states, output, **kwargs):
+        self.combined_input = hidden_states
+        output.copy_(hidden_states)
+        return output
+
+
+def test_args_cpu_workspace_allocation(monkeypatch):
+    from types import SimpleNamespace
+
+    import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+
+    kernel = object.__new__(mk.FusedMoEKernelModularImpl)
+    kernel.fused_experts = SimpleNamespace(
+        workspace_dtype=lambda dtype: dtype,
+        workspace_shapes=lambda *args: ((0,), (0,), (2, 3)),
+        finalize_weight_and_reduce_impl=lambda: None,
+    )
+    kernel.prepare_finalize = SimpleNamespace(
+        allocate_fused_expert_output=lambda *args: None,
+    )
+    monkeypatch.setattr(mk.current_platform, "is_cpu", lambda: True)
+
+    workspace13, workspace2, output, specialized = kernel._allocate_buffers(
+        torch.float32,
+        torch.device("cpu"),
+        2,
+        2,
+        3,
+        3,
+        1,
+        1,
+        1,
+        None,
+        MoEActivation.SILU,
+    )
+    assert workspace13.numel() == workspace2.numel() == 0
+    assert output.shape == (2, 3)
+    assert output.device.type == "cpu"
+    assert not specialized
+
+
+def test_args_finalize_noop_reuses_fused_expert_output(monkeypatch):
+    import vllm.model_executor.layers.fused_moe.prepare_finalize.naive_dp_ep as pf
+    from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+        TopKWeightAndReduceNoOP,
+    )
+
+    fused_expert_output = torch.arange(6, dtype=torch.float32).view(2, 3)
+    output = torch.empty_like(fused_expert_output)
+    group = _FakeCombineGroup(combine_input=None)
+    monkeypatch.setattr(pf, "get_ep_group", lambda: group)
+
+    impl = pf.MoEPrepareAndFinalizeNaiveDPEPModular()
+    impl.finalize(
+        output,
+        fused_expert_output,
+        torch.ones((2, 1)),
+        torch.zeros((2, 1), dtype=torch.long),
+        False,
+        TopKWeightAndReduceNoOP(),
+    )
+
+    assert group.allocation_calls == 0
+    assert group.combined_input is fused_expert_output
+    torch.testing.assert_close(output, fused_expert_output)
+
+
+def test_args_finalize_contiguous_writes_combine_input(monkeypatch):
+    import vllm.model_executor.layers.fused_moe.prepare_finalize.naive_dp_ep as pf
+    import vllm.model_executor.layers.fused_moe.topk_weight_and_reduce as wr
+
+    fused_expert_output = torch.arange(12, dtype=torch.float32).view(2, 2, 3)
+    original = fused_expert_output.clone()
+    topk_weights = torch.tensor([[0.25, 0.75], [0.4, 0.6]])
+    combine_input = torch.empty((2, 3), dtype=torch.float32)
+    output = torch.empty_like(combine_input)
+    group = _FakeCombineGroup(combine_input)
+    monkeypatch.setattr(pf, "get_ep_group", lambda: group)
+    monkeypatch.setattr(
+        wr.ops,
+        "moe_sum",
+        lambda hidden_states, out: out.copy_(hidden_states.sum(dim=1)),
+    )
+
+    impl = pf.MoEPrepareAndFinalizeNaiveDPEPModular()
+    impl.finalize(
+        output,
+        fused_expert_output,
+        topk_weights,
+        torch.zeros((2, 2), dtype=torch.long),
+        False,
+        wr.TopKWeightAndReduceContiguous(),
+    )
+
+    expected = (original * topk_weights.unsqueeze(-1)).sum(dim=1)
+    assert group.allocation_calls == 1
+    assert group.combined_input is combine_input
+    torch.testing.assert_close(output, expected)
+
+
 def _args_dispatch_combine_worker(rank, world_size):
     from vllm.distributed.device_communicators.all2all import AgRsAll2AllManager
     from vllm.forward_context import get_forward_context
 
     cpu_group = get_ep_group().cpu_group
-    device = torch.device(f"cuda:{rank}")
+    device = torch.device(f"{DEVICE}:{rank}")
 
     hidden_size = 64
     tokens_per_rank = 16
@@ -441,14 +721,39 @@ def _args_dispatch_combine_worker(rank, world_size):
             # -- combine (reduce-scatter) --
             # Each token i has value i in all columns; after reduce-scatter
             # each rank gets its slice, summed across ranks.
-            expert_out = (
+            expert_values = (
                 torch.arange(total_tokens, device=device, dtype=torch.float32)
                 .unsqueeze(1)
                 .expand(total_tokens, hidden_size)
                 .contiguous()
             )
+            expert_out = manager.allocate_combine_input(
+                expert_values.shape,
+                expert_values.dtype,
+                expert_values.device,
+                is_sequence_parallel=True,
+            )
+            if expert_out is None:
+                expert_out = expert_values
+            else:
+                from vllm.distributed.device_communicators.pynccl_allocator import (
+                    is_symmetric_memory_tensor,
+                )
 
-            combined = manager.combine(expert_out, is_sequence_parallel=True)
+                assert is_symmetric_memory_tensor(expert_out)
+                expert_out.copy_(expert_values)
+
+            combine_output = torch.empty(
+                (tokens_per_rank, hidden_size),
+                device=device,
+                dtype=expert_out.dtype,
+            )
+            combined = manager.combine_into_output(
+                expert_out,
+                combine_output,
+                is_sequence_parallel=True,
+            )
+            assert combined.data_ptr() == combine_output.data_ptr()
             assert combined.shape == (tokens_per_rank, hidden_size)
 
             for i in range(tokens_per_rank):
@@ -459,6 +764,61 @@ def _args_dispatch_combine_worker(rank, world_size):
                 )
 
             torch.distributed.barrier()
+
+    uneven_sizes = [tokens_per_rank + r for r in range(world_size)]
+    with _make_forward_context(
+        rank,
+        world_size,
+        uneven_sizes[rank],
+        num_tokens_across_dp=uneven_sizes,
+    ):
+        dp_metadata = get_forward_context().dp_metadata
+        assert dp_metadata is not None
+        with dp_metadata.sp_local_sizes(sequence_parallel_size=1):
+            assert (
+                manager.allocate_combine_input(
+                    (sum(uneven_sizes), hidden_size),
+                    torch.float32,
+                    device,
+                    is_sequence_parallel=True,
+                )
+                is None
+            )
+
+            total_uneven_tokens = sum(uneven_sizes)
+            uneven_input = (
+                torch.arange(
+                    total_uneven_tokens,
+                    dtype=torch.float32,
+                    device=device,
+                )
+                .unsqueeze(1)
+                .expand(total_uneven_tokens, hidden_size)
+                .contiguous()
+            )
+            uneven_input.add_(rank)
+            uneven_output = torch.empty(
+                (uneven_sizes[rank], hidden_size),
+                dtype=torch.float32,
+                device=device,
+            )
+            combined = get_ep_group().reduce_scatterv_into_output(
+                uneven_input,
+                uneven_output,
+                dim=0,
+                sizes=uneven_sizes,
+            )
+            assert combined.data_ptr() == uneven_output.data_ptr()
+
+            start = sum(uneven_sizes[:rank])
+            expected = torch.arange(
+                start,
+                start + uneven_sizes[rank],
+                dtype=torch.float32,
+                device=device,
+            ) * world_size + sum(range(world_size))
+            expected = expected.unsqueeze(1).expand_as(combined)
+            torch.testing.assert_close(combined, expected)
 
 
 @requires_multi_gpu
@@ -499,7 +859,7 @@ def _two_sided_data_worker(rank, world_size):
     # Use DP group because MnnvlMoe workspace allocation calls get_dp_group()
     # internally and requires dp_size == ep_size.
     cpu_group = get_dp_group().cpu_group
-    device = torch.device(f"cuda:{rank}")
+    device = torch.device(f"{DEVICE}:{rank}")
     num_gpus = torch.accelerator.device_count()
 
     hidden_size = 128
@@ -644,7 +1004,7 @@ def _one_sided_data_worker(rank, world_size):
     from vllm.forward_context import get_forward_context
 
     cpu_group = get_dp_group().cpu_group
-    device = torch.device(f"cuda:{rank}")
+    device = torch.device(f"{DEVICE}:{rank}")
 
     hidden_size = 256
     tokens_per_rank = 32
@@ -658,6 +1018,12 @@ def _one_sided_data_worker(rank, world_size):
         top_k=experts_per_token,
         num_experts=num_experts,
         hidden_size=hidden_size,
+        x_bytes_per_token=hidden_size // 2,
+        # Account for the fp8 block-scale payload (x_sf: hidden//16 bytes
+        # per token) that is dispatched alongside the nvfp4 hidden states.
+        # Without this the dispatch region is under-reserved and the combine
+        # payload overflows the per-rank workspace.
+        x_sf_bytes_per_token=hidden_size // 16,
     )
     assert manager.initialized
     assert manager.moe_alltoall is not None
@@ -671,17 +1037,17 @@ def _one_sided_data_worker(rank, world_size):
 
             # Create test data with raw tensors matching the nvfp4 payload
             # sizes the workspace was allocated for:
-            #   a1q: (tokens, hidden_size // 2) — nvfp4 hidden states
-            #   a1q_scale: (tokens, hidden_size // 16) — fp8 scaling factors
+            #   x: (tokens, hidden_size // 2) — nvfp4 hidden states
+            #   x_sf: (tokens, hidden_size // 16) — fp8 scaling factors
             torch.manual_seed(rank + 42)
-            a1q = torch.randint(
+            x = torch.randint(
                 0,
                 256,
                 (tokens_per_rank, hidden_size // 2),
                 device=device,
                 dtype=torch.uint8,
             )
-            a1q_scale = torch.randint(
+            x_sf = torch.randint(
                 0,
                 256,
                 (tokens_per_rank, hidden_size // 16),
@@ -703,15 +1069,16 @@ def _one_sided_data_worker(rank, world_size):
             )
 
             # --- One-sided dispatch ---
-            payloads = [a1q, a1q_scale, topk_ids, topk_weights]
+            payloads = [x, x_sf, topk_ids, topk_weights]
             recv_payloads = manager.moe_alltoall.dispatch(
                 token_selected_experts=topk_ids,
                 input_payloads=payloads,
                 runtime_max_tokens_per_rank=runtime_max_tokens,
             )
             assert len(recv_payloads) == 4
-            recv_a1q, recv_scale, recv_ids, recv_weights = recv_payloads
-            assert recv_a1q.numel() > 0
+            recv_x, recv_x_sf, recv_ids, recv_weights = recv_payloads
+            assert recv_x.numel() > 0
+            assert recv_x_sf.numel() > 0
             assert recv_ids.numel() > 0
 
             # --- Round-trip exact verification ---
@@ -772,3 +1139,179 @@ def _one_sided_data_worker(rank, world_size):
 def test_one_sided_dispatch_combine(world_size):
     """Test FlashInfer one-sided dispatch/combine with actual data flow."""
     _spawn_workers(_one_sided_data_worker, world_size, dp_size=world_size)
+
+
+def _one_sided_low_precision_worker(rank, world_size):
+    from vllm.distributed.device_communicators.all2all import (
+        FlashInferNVLinkOneSidedManager,
+    )
+    from vllm.distributed.parallel_state import get_dp_group
+
+    device = torch.device(f"cuda:{rank}")
+    hidden_size = 256
+    tokens_per_rank = 32
+    experts_per_token = 2
+    num_experts = world_size * 8
+
+    manager = FlashInferNVLinkOneSidedManager(get_dp_group().cpu_group)
+    manager.initialize(
+        max_num_tokens=tokens_per_rank,
+        top_k=experts_per_token,
+        num_experts=num_experts,
+        hidden_size=hidden_size,
+        x_bytes_per_token=hidden_size // 2,
+        x_sf_bytes_per_token=hidden_size // 16,
+    )
+    assert manager.low_precision_combine
+
+    torch.manual_seed(rank + 42)
+    x = torch.randint(
+        0, 256, (tokens_per_rank, hidden_size // 2), device=device, dtype=torch.uint8
+    )
+    x_sf = torch.randint(
+        0, 256, (tokens_per_rank, hidden_size // 16), device=device, dtype=torch.uint8
+    )
+    topk_ids = torch.randint(
+        0,
+        num_experts,
+        (tokens_per_rank, experts_per_token),
+        device=device,
+        dtype=torch.int32,
+    )
+    topk_weights = torch.rand(
+        tokens_per_rank, experts_per_token, device=device, dtype=torch.float32
+    )
+
+    manager.moe_alltoall.dispatch(
+        token_selected_experts=topk_ids,
+        input_payloads=[x, x_sf, topk_ids, topk_weights],
+        runtime_max_tokens_per_rank=tokens_per_rank,
+    )
+
+    # Go through combine_into rather than moe_alltoall.combine: the workspace
+    # was sized for fp8, so the kernel must be told to send fp8. Calling the
+    # raw kernel here would send bf16 into fp8-sized slots and corrupt it.
+    expert_output = torch.ones(
+        world_size, tokens_per_rank, hidden_size, device=device, dtype=torch.bfloat16
+    )
+    output = torch.empty(
+        tokens_per_rank, hidden_size, device=device, dtype=torch.bfloat16
+    )
+    manager.combine_into(
+        payload=expert_output,
+        runtime_max_tokens_per_rank=tokens_per_rank,
+        output=output,
+    )
+
+    # Integers 1..top_k are exact in fp8_e4m3, so the fp8 transport must match
+    # bf16 exactly: one contribution per distinct expert-owning rank.
+    experts_per_rank = num_experts // world_size
+    expert_ranks = topk_ids // experts_per_rank
+    num_distinct = torch.tensor(
+        [len(set(row.tolist())) for row in expert_ranks],
+        device=device,
+        dtype=torch.bfloat16,
+    ).unsqueeze(1)
+    torch.testing.assert_close(output, num_distinct.expand_as(output))
+
+    torch.distributed.barrier()
+    manager.cleanup()
+
+
+@requires_multi_gpu
+@requires_one_sided
+@requires_ptrace
+@pytest.mark.parametrize("world_size", [2])
+def test_one_sided_combine_low_precision(world_size, monkeypatch):
+    """Exercise the real fp8 combine transport, not a fake kernel.
+
+    A workspace/dtype mismatch corrupts the combine buffer silently rather
+    than raising, so this asserts the combined values are exactly right.
+    """
+    from flashinfer.comm.trtllm_moe_alltoall import MoeAlltoAll
+
+    from vllm.utils.func_utils import supports_kw
+
+    if not supports_kw(
+        MoeAlltoAll.combine, "use_low_precision", allow_var_kwargs=False
+    ):
+        pytest.skip("installed FlashInfer has no use_low_precision support")
+
+    monkeypatch.setenv("VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE", "1")
+    _spawn_workers(_one_sided_low_precision_worker, world_size, dp_size=world_size)
+
+
+# ---------------------------------------------------------------------------
+# Test 6: DeepEP v2 (ElasticBuffer) manager lifecycle
+# ---------------------------------------------------------------------------
+#
+# Tests DeepEPV2All2AllManager which wraps DeepEP's ElasticBuffer API using
+# the NCCL GIN backend. Requires DeepEP >= 2.0 and NCCL >= 2.30.4.
+#
+# Uses EP group because the DeepEP v2 manager is constructed with an
+# EP-scoped communicator in production. With tp=world_size the EP group
+# spans all ranks.
+# ---------------------------------------------------------------------------
+
+
+def _deepep_v2_lifecycle_worker(rank, world_size):
+    from vllm.distributed.device_communicators.all2all import (
+        DeepEPV2All2AllManager,
+    )
+
+    ep_group = get_ep_group()
+    manager = DeepEPV2All2AllManager(
+        ep_group.cpu_group,
+        device_group=ep_group.device_group,
+    )
+
+    assert manager.rank == rank
+    assert manager.world_size == world_size
+    assert manager._num_sms is None
+
+    hidden_size = 7168
+    num_experts = world_size * 32
+    num_topk = 8
+    max_tokens = 256
+
+    handle_kwargs = dict(
+        num_max_tokens_per_rank=max_tokens,
+        hidden=hidden_size,
+        num_topk=num_topk,
+        num_experts=num_experts,
+        use_fp8_dispatch=False,
+    )
+
+    handle = manager.get_handle(handle_kwargs)
+    assert handle is not None
+    assert manager._num_sms is not None
+    assert manager._num_sms > 0
+
+    torch.distributed.barrier()
+
+    # get_handle again with same args should return cached handle
+    handle2 = manager.get_handle(dict(handle_kwargs))
+    assert handle2 is handle
+
+    torch.distributed.barrier()
+
+    # Destroy clears the cache
+    manager.destroy()
+    assert len(manager.handle_cache._cache) == 0
+
+    torch.distributed.barrier()
+
+    # Re-create after destroy
+    handle3 = manager.get_handle(dict(handle_kwargs))
+    assert handle3 is not None
+
+    torch.distributed.barrier()
+    manager.destroy()
+
+
+@requires_multi_gpu
+@requires_deep_ep_v2
+@pytest.mark.parametrize("world_size", [2])
+def test_deepep_v2_manager_lifecycle(world_size):
+    """Test DeepEP v2 ElasticBuffer manager init, caching, and destroy."""
+    _spawn_workers(_deepep_v2_lifecycle_worker, world_size)

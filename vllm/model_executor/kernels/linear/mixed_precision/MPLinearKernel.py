@@ -11,6 +11,14 @@ from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.scalar_type import ScalarType
 
 
+def _shallow_copy(param: torch.Tensor) -> torch.Tensor:
+    """A new object of ``param``'s class sharing its data, with its own copy of
+    the attributes (e.g. dim tags) for a transform to retag."""
+    copy = torch.Tensor._make_subclass(type(param), param.data, param.requires_grad)
+    copy.__dict__.update(param.__dict__)
+    return copy
+
+
 @dataclass
 class MPLinearLayerConfig:
     full_weight_shape: tuple[int, int]  # [in, out]
@@ -19,7 +27,6 @@ class MPLinearLayerConfig:
     act_type: torch.dtype
     group_size: int
     zero_points: bool
-    has_g_idx: bool
     out_type: torch.dtype | None = None
 
 
@@ -40,7 +47,6 @@ class MPLinearKernel(ABC):
         w_q_param_name: str,
         w_s_param_name: str,
         w_zp_param_name: str | None = None,
-        w_gidx_param_name: str | None = None,
     ) -> None:
         assert self.can_implement(c)
         self.config = c
@@ -48,10 +54,7 @@ class MPLinearKernel(ABC):
         self.w_s_name = w_s_param_name
         if c.zero_points:
             assert w_zp_param_name is not None
-        if c.has_g_idx:
-            assert w_gidx_param_name is not None
-        self.w_zp_name = w_zp_param_name
-        self.w_gidx_name = w_gidx_param_name
+        self.w_zp_name: str | None = w_zp_param_name
 
     @abstractmethod
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -70,10 +73,8 @@ class MPLinearKernel(ABC):
         self, layer: torch.nn.Module, name: str | None, fn: Callable
     ) -> None:
         if name is not None and getattr(layer, name, None) is not None:
-            old_param = getattr(layer, name)
-            new_param = fn(old_param)
-            # replace the parameter with torch.nn.Parameter for TorchDynamo
-            # compatibility
+            # `fn` may retag its input; the kept loader param keeps its own dims.
+            new_param = fn(_shallow_copy(getattr(layer, name)))
             replace_parameter(
                 layer, name, torch.nn.Parameter(new_param.data, requires_grad=False)
             )
@@ -83,12 +84,10 @@ class MPLinearKernel(ABC):
     ) -> tuple[
         torch.Tensor,  # w_q
         torch.Tensor,  # w_s
-        torch.Tensor | None,  # w_zp,
-        torch.Tensor | None,  # w_gidx
+        torch.Tensor | None,  # w_zp
     ]:
         return (
             getattr(layer, self.w_q_name),
             getattr(layer, self.w_s_name),
             getattr(layer, self.w_zp_name or "", None),
-            getattr(layer, self.w_gidx_name or "", None),
         )

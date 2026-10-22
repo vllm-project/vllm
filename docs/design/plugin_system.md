@@ -53,6 +53,8 @@ Every plugin has three parts:
 
 - **Stat logger plugins** (with group name `vllm.stat_logger_plugins`): The primary use case for these plugins is to register custom, out-of-the-tree loggers into vLLM. The entry point should be a class that subclasses StatLoggerBase.
 
+- **Endpoint plugins** (with group name `vllm.endpoint_plugins`): The primary use case for these plugins is to register custom, out-of-the-tree HTTP routes on the OpenAI compatible API server. Unlike the other plugin groups above, endpoint plugins are loaded only in the API server front end process and are **not loaded by default**. See [Endpoint Plugins](endpoint_plugins.md) for the interface and [Security](../usage/security.md#endpoint-plugins) for the opt-in and trust model.
+
 ## Guidelines for Writing Plugins
 
 - **Being re-entrant**: The function specified in the entry point should be re-entrant, meaning it can be called multiple times without causing issues. This is necessary because the function might be called multiple times in some processes.
@@ -103,6 +105,7 @@ Every plugin has three parts:
     - `check_and_update_config`: This function is called very early in the vLLM's initialization process. It's used for plugins to update the vllm configuration. For example, the block size, graph mode config, etc., can be updated in this function. The most important thing is that the **worker_cls** should be set in this function to let vLLM know which worker class to use for the worker process.
     - `get_attn_backend_cls`: This function should return the attention backend class's fully qualified name.
     - `get_device_communicator_cls`: This function should return the device communicator class's fully qualified name.
+    - (optional) `get_routed_experts_local_rows`: If the platform's MoE preparation pads or shards the router input before expert selection, return this DP rank's routing rows for routed-expert capture. The default `None` keeps the generic DP/TP restoration.
 
 4. Implement the worker class `MyDummyWorker` in `my_dummy_worker.py`. The worker class should inherit from [WorkerBase][vllm.v1.worker.worker_base.WorkerBase]. Please follow the interface to implement the functions one by one. Basically, all interfaces in the base class should be implemented, since they are called here and there in vLLM. To make sure a model can be executed, the basic functions should be implemented are:
 

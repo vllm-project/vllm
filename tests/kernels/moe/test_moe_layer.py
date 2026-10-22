@@ -7,10 +7,13 @@ Run `pytest tests/kernels/test_moe_layer.py`.
 
 import functools
 import os
+import sys
+import tempfile
 import traceback
 import types
 from collections.abc import Callable
-from dataclasses import astuple, dataclass, fields
+from contextlib import suppress
+from dataclasses import astuple, dataclass, fields, replace
 from itertools import product
 from typing import get_args
 
@@ -26,19 +29,28 @@ from tests.kernels.moe.modular_kernel_tools.parallel_utils import (
 from tests.kernels.moe.utils import TestMLP, make_test_weights, moe_quantize_weights
 from vllm.config import (
     CompilationConfig,
+    EPLBConfig,
     ParallelConfig,
     SchedulerConfig,
     VllmConfig,
     set_current_vllm_config,
 )
-from vllm.distributed.eplb.eplb_communicator import create_eplb_communicator
-from vllm.distributed.eplb.rebalance_execute import rearrange_expert_weights_inplace
-from vllm.distributed.parallel_state import (
+from vllm.distributed import (
     get_ep_group,
     get_eplb_group,
+    tensor_model_parallel_all_gather,
 )
+from vllm.distributed.device_communicators.all_reduce_utils import (
+    gpu_p2p_access_check,
+)
+from vllm.distributed.eplb.eplb_communicator import create_eplb_communicator
+from vllm.distributed.eplb.rebalance_execute import rearrange_expert_weights_inplace
 from vllm.forward_context import set_forward_context
-from vllm.model_executor.layers.fused_moe import FusedMoE, fused_experts
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEFactory,
+    MoERunner,
+    fused_experts,
+)
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
@@ -49,6 +61,7 @@ from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptFp8Config,
     ModelOptNvFp4Config,
 )
+from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     has_flashinfer_nvlink_one_sided,
@@ -62,7 +75,16 @@ from vllm.v1.worker.workspace import (
     is_workspace_manager_initialized,
 )
 
-fp8_dtype = torch.float8_e4m3fn  # current_platform.fp8_dtype
+
+def on_gfx950() -> bool:
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx950 as rocm_on_gfx950
+
+        return rocm_on_gfx950()
+    return False
+
+
+fp8_dtype = current_platform.fp8_dtype()
 
 SHAPE_COMBOS = [
     (1, 128, 256),
@@ -75,19 +97,22 @@ NUM_EXPERTS = [8, 64]
 TOP_KS = [2, 6]
 
 # dp_size, tp_size, use_ep
-# Note: DP+TP is not yet supported in the FusedMoE layer.
+# Note: DP+TP is not yet supported in the FusedMoEFactory layer.
 PARALLEL_COMBOS = [
     [1, 2, False],
     [1, 4, False],
     [2, 1, True],
     [4, 1, True],
+    # This combination indicates sequence parallel.
+    # See ParallelConfig.use_sequence_parallel.
+    [2, 2, True],
 ]
 
 # TODO: should this even be set manually?  let oracles handle this
 BACKENDS = ["allgather_reducescatter"]
 
 if has_mori():
-    BACKENDS += ["mori"]
+    BACKENDS += ["mori_high_throughput", "mori_low_latency"]
 
 if has_flashinfer_nvlink_two_sided():
     BACKENDS += ["flashinfer_nvlink_two_sided"]
@@ -101,6 +126,17 @@ if has_deep_ep():
 if has_nixl_ep():
     BACKENDS += ["nixl_ep"]
 
+DEEPEP_BACKENDS = {"deepep_high_throughput", "deepep_low_latency"}
+
+# These tests run on one node, where NVSHMEM reaches peers over NVLink, so
+# keep it off the NICs to avoid depending on IB setup on shared CI hosts.
+DEEPEP_SINGLE_NODE_NVSHMEM_ENV = {
+    "NVSHMEM_REMOTE_TRANSPORT": "none",
+    # DeepEP forces IBGDA on, so also hide the NICs from it.
+    "NVSHMEM_HCA_LIST": "none",
+}
+MORI_BACKENDS = {"mori_high_throughput", "mori_low_latency"}
+
 QUANT_METHODS = [
     None,
     "fp8",
@@ -112,24 +148,26 @@ QUANT_METHODS = [
 # Which quantization methods each backend supports.
 # fmt: off
 BACKEND_SUPPORTED_QUANTS: dict[str, set[str | None]] = {
-    "allgather_reducescatter":     {None, "fp8", "modelopt_fp8", "modelopt_fp4"},
-    "mori":                        {None, "fp8", "modelopt_fp8"},
-    "flashinfer_nvlink_two_sided": {None,        "modelopt_fp8", "modelopt_fp4"},
-    "flashinfer_nvlink_one_sided": {None,        "modelopt_fp8", "modelopt_fp4"},
-    "deepep_low_latency":          {None, "fp8_blocked", "modelopt_fp4"},
+    "allgather_reducescatter":     {None,         "fp8", "modelopt_fp8", "modelopt_fp4"}, # noqa: E501
+    "mori_high_throughput":        {None,         "fp8", "modelopt_fp8"},
+    "mori_low_latency":            {None,         "fp8", "modelopt_fp8"},
+    "flashinfer_nvlink_two_sided": {None, "fp8_blocked",                 "modelopt_fp4"}, # noqa: E501
+    "flashinfer_nvlink_one_sided": {None, "fp8_blocked",                 "modelopt_fp4"}, # noqa: E501
+    "deepep_low_latency":          {None, "fp8_blocked",                 "modelopt_fp4"}, # noqa: E501
     "deepep_high_throughput":      {None, "fp8_blocked", "modelopt_fp8", "modelopt_fp4"}, # noqa: E501
-    "nixl_ep":                     {None, "fp8", "modelopt_fp8"},
+    "nixl_ep":                     {None, "fp8_blocked", "modelopt_fp8"},
 }
 
-# Map from backend -> (DP/EP support, DP support, TP support)
-BACKEND_EP_DP_TP_SUPPORT: dict[str, tuple[bool, bool, bool]] = {
-    "allgather_reducescatter":     (True,  True,  True),
-    "mori":                        (True, False, False),
-    "flashinfer_nvlink_two_sided": (False, True, False),
-    "flashinfer_nvlink_one_sided": (False, True, False),
-    "deepep_low_latency":          (True, False, False),
-    "deepep_high_throughput":      (True, False, False),
-    "nixl_ep":                     (True, False, False),
+# Map from backend -> (DP/EP support, DP support, TP support, SP support)
+BACKEND_EP_DP_TP_SUPPORT: dict[str, tuple[bool, bool, bool, bool]] = {
+    "allgather_reducescatter":     (True,  True,  True,  True),
+    "mori_high_throughput":        (True, False, False,  True),
+    "mori_low_latency":            (True, False, False,  True),
+    "flashinfer_nvlink_two_sided": (False, True, False, False),
+    "flashinfer_nvlink_one_sided": (False, True, False, False),
+    "deepep_low_latency":          (True, False, False,  True),
+    "deepep_high_throughput":      (True, False, False,  True),
+    "nixl_ep":                     (True, False, False,  True),
 }
 # fmt: on
 
@@ -161,6 +199,48 @@ def mock_normalize_e4m3fn_to_e4m3fnuz(
 # NOTE: Not able to use monkeypatch because of the spawned parallel workers.
 def override_normalize_e4m3fn_to_e4m3fnuz():
     vllm.model_executor.layers.quantization.utils.w8a8_utils.normalize_e4m3fn_to_e4m3fnuz = mock_normalize_e4m3fn_to_e4m3fnuz  # noqa: E501
+    vllm.model_executor.layers.quantization.fp8.normalize_e4m3fn_to_e4m3fnuz = (
+        mock_normalize_e4m3fn_to_e4m3fnuz  # noqa: E501
+    )
+
+
+def sp_wrapper(
+    fn: Callable | MoERunner, is_sequence_parallel: bool | None = None
+) -> Callable:
+    """Wrapper to handle sequence parallelism chunking and gathering.
+
+    For SP with EP:
+    - The TP group is created with the original tensor_parallel_size (e.g., 2)
+    - get_tp_group() has the correct world_size for SP operations
+    - sequence_parallel_chunk() uses get_tensor_model_parallel_world_size()
+    - tensor_model_parallel_all_gather() uses get_tp_group()
+    - Both should work correctly even when EP is enabled
+    """
+    if isinstance(fn, MoERunner):
+        assert is_sequence_parallel is None
+        is_sequence_parallel = fn.moe_config.moe_parallel_config.is_sequence_parallel
+    else:
+        assert is_sequence_parallel is not None
+
+    if is_sequence_parallel:
+
+        def wrapper(
+            hidden_states: torch.Tensor,
+            router_logits: torch.Tensor,
+        ) -> torch.Tensor:
+            # Split sequence across TP ranks
+            # Both hidden_states and router_logits have [num_tokens, ...] shape
+            hidden_states = sequence_parallel_chunk(hidden_states)
+            router_logits = sequence_parallel_chunk(router_logits)
+            # Run MoE on local chunk
+            result = fn(hidden_states, router_logits)
+            # Gather results from all TP ranks
+            result = tensor_model_parallel_all_gather(result, 0)
+            # Remove any padding added by SP.
+            return result[: hidden_states.shape[0]]
+
+        return wrapper
+    return fn
 
 
 def maybe_roundup_layer_hidden_size(
@@ -168,8 +248,7 @@ def maybe_roundup_layer_hidden_size(
     act_dtype: torch.dtype,
     backend: str | None,
 ) -> int:
-    """
-    Given layer hidden size and MoE configurations, round up hidden_size
+    """Given layer hidden size and MoE configurations, round up hidden_size
     if necessary.
 
     Args:
@@ -181,6 +260,7 @@ def maybe_roundup_layer_hidden_size(
         Rounded up hidden_size if rounding up is required based on the configs
         and all2all backend.
         Original hidden size otherwise.
+
     """
     if backend == "deepep_high_throughput":
         from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ht import (
@@ -203,11 +283,6 @@ def maybe_roundup_layer_hidden_size(
     return hidden_size
 
 
-def rank_chunk(num: int, r: int, w: int) -> int:
-    rem = num % w
-    return (num // w) + (1 if r < rem else 0)
-
-
 def chunk_by_rank(
     t: torch.Tensor,
     r: int,
@@ -220,19 +295,6 @@ def chunk_by_rank(
     if device is not None:
         t = t.to(device)
     return t
-
-
-def maybe_chunk_by_rank(
-    t: torch.Tensor | None,
-    r: int,
-    w: int,
-    dim: int = 0,
-    device: torch.device | None = None,
-) -> torch.Tensor | None:
-    if t is not None:
-        return chunk_by_rank(t, r, w, dim, device)
-    else:
-        return t
 
 
 def tp_chunk_gate_up(
@@ -272,6 +334,15 @@ class MoETestConfig:
     dp_size: int = 1
     tp_size: int = 1
 
+    @property
+    def is_sequence_parallel(self) -> bool:
+        # Sequence parallelism: EP enabled + TP dimension used for sequence splitting
+        # In test config: ep_size represents total expert parallel size
+        # tp_size represents the original TP dimension (becomes sp_size in MoERunner)
+        # dp_size represents data parallel size
+        # For SP: we need EP enabled (ep_size > 1) and sequence splitting (tp_size > 1)
+        return self.ep_size > 1 and self.tp_size > 1
+
     # TODO: add more error messages
     def id(self) -> str:
         def proc(s: str) -> str:
@@ -305,6 +376,66 @@ class MoETestConfig:
             [convert(v, f.type) for v, f in zip(str_values, fields(MoETestConfig))]
         )
         return MoETestConfig(*values)
+
+
+def _group_configs_by_buffer_requirements(
+    test_configs: list[MoETestConfig],
+) -> list[list[MoETestConfig]]:
+    """Group configs that can share one persistent all-to-all buffer."""
+    groups: dict[tuple[int, int, int], list[MoETestConfig]] = {}
+    for test_config in test_configs:
+        # max_num_tokens and the remaining buffer arguments are fixed for one
+        # outer pytest item. These are the arguments that can vary here.
+        hidden_size = (
+            test_config.k // 2
+            if test_config.use_routed_input_transform
+            else test_config.k
+        )
+        buffer_key = (
+            hidden_size,
+            test_config.ep_size,
+            test_config.num_experts,
+        )
+        groups.setdefault(buffer_key, []).append(test_config)
+    return list(groups.values())
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("backend", ["deepep_low_latency", "nixl_ep"])
+def test_group_configs_by_buffer_requirements(backend):
+    config_a = MoETestConfig(
+        1,
+        128,
+        2048,
+        8,
+        2,
+        torch.bfloat16,
+        None,
+        False,
+        False,
+        False,
+        backend=backend,
+        ep_size=2,
+        dp_size=2,
+    )
+    config_b = replace(config_a, num_experts=64)
+    config_a_later = replace(config_a, m=32)
+    config_c = replace(config_a, k=4096)
+    config_d = replace(config_a, ep_size=4, dp_size=4)
+    config_latent = replace(
+        config_a, use_shared_experts=True, use_routed_input_transform=True
+    )
+
+    assert _group_configs_by_buffer_requirements(
+        [config_a, config_b, config_a_later, config_c, config_d, config_latent]
+    ) == [
+        [config_a, config_a_later],
+        [config_b],
+        [config_c],
+        [config_d],
+        [config_latent],
+    ]
+    assert _group_configs_by_buffer_requirements([]) == []
 
 
 def generate_valid_test_configs(
@@ -361,6 +492,22 @@ def generate_valid_test_configs(
     return configs
 
 
+@functools.cache
+def visible_devices_have_peer_access(world_size: int) -> bool:
+    if not current_platform.is_cuda():
+        return True
+
+    try:
+        return all(
+            gpu_p2p_access_check(src, dst)
+            for src in range(world_size)
+            for dst in range(world_size)
+            if src != dst
+        )
+    except RuntimeError:
+        return False
+
+
 # TODO: break this up into sections
 def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
     # routed_input_transform only makes sense with shared_experts (latent MoE)
@@ -404,17 +551,12 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
             "leads to large differences.",
         )
 
-    # gate requires shared_experts (use_overlapped mode)
-    # TODO: also not sure this is true
-    if config.use_gate and not config.use_shared_experts:
-        return False, "gate requires shared_experts (use_overlapped mode)"
-
-    # Skip modelopt_fp4 if not on B100+ (compute capability 10.0+)
-    if (
-        config.quantization == "modelopt_fp4"
-        and not current_platform.has_device_capability(100)
+    # Skip modelopt_fp4 if not on B100+ (compute capability 10.0+) or gfx950.
+    if config.quantization == "modelopt_fp4" and not (
+        (current_platform.is_rocm() and on_gfx950())
+        or current_platform.has_device_capability(100)
     ):
-        return False, "modelopt_fp4 not supported on H100+ GPUs"
+        return False, "modelopt_fp4 requires native NVFP4 or emulation"
 
     # Skip flashinfer_nvlink if not on H100+ (compute capability 10.0+)
     if (
@@ -433,6 +575,28 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
                 f"{config.backend} does not support quantization={config.quantization}",
             )
 
+        if (
+            on_gfx950()
+            and config.backend == "deepep_low_latency"
+            and config.quantization == "modelopt_fp4"
+        ):
+            return (
+                False,
+                "DeepEP low latency requires a batched NVFP4 MoE backend, "
+                "which is not available on gfx950.",
+            )
+
+        if config.backend in MORI_BACKENDS:
+            if os.environ.get("VLLM_TEST_ENABLE_MORI_MOE_LAYER") != "1":
+                return False, "mori MoE layer matrix is opt-in"
+
+            from vllm._aiter_ops import rocm_aiter_ops
+
+            if not rocm_aiter_ops.is_fused_moe_enabled():
+                return False, "mori requires AITER fused MoE"
+            if rocm_aiter_ops.is_fusion_moe_shared_experts_enabled():
+                return False, "mori does not support AITER shared expert fusion"
+
         if config.backend == "deepep_low_latency":
             from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ll import (  # noqa: E501
                 DeepEPLLPrepareAndFinalize,
@@ -445,7 +609,7 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
                 )
 
         if config.backend == "nixl_ep":
-            from vllm.model_executor.layers.fused_moe.nixl_ep_prepare_finalize import (  # noqa: E501
+            from vllm.model_executor.layers.fused_moe.prepare_finalize.nixl_ep import (  # noqa: E501
                 NixlEPPrepareAndFinalize,
             )
 
@@ -456,11 +620,11 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
                 )
 
     if config.backend is not None:
-        supports_ep_dp, supports_dp, supports_tp = BACKEND_EP_DP_TP_SUPPORT[
-            config.backend
-        ]
+        supports_ep_dp, supports_dp, supports_tp, supports_sp = (
+            BACKEND_EP_DP_TP_SUPPORT[config.backend]
+        )
 
-        if config.tp_size > 1 and not supports_tp:
+        if config.tp_size > 1 and not supports_tp and not config.is_sequence_parallel:
             return False, f"{config.backend} does not support TP."
 
         if config.dp_size > 1 and config.ep_size == 1 and not supports_dp:
@@ -468,9 +632,33 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
 
         if config.dp_size > 1 and config.ep_size > 1 and not supports_ep_dp:
             return False, f"{config.backend} does not support EP/DP."
+
+        if config.is_sequence_parallel and not supports_sp:
+            return False, f"{config.backend} does not support SP."
     else:
         if config.tp_size > 1 or config.ep_size > 1 or config.dp_size > 1:
             return False, "An all2all backend is required for parallelism."
+
+    # Sequence parallelism specific validations
+    if config.is_sequence_parallel:
+        if config.ep_size == 1:
+            return False, "Sequence parallelism requires EP to be enabled (ep_size > 1)"
+
+        if config.tp_size == 1:
+            return (
+                False,
+                "Sequence parallelism requires tp_size > 1 for sequence splitting",
+            )
+
+        # SP is essentially EP + sequence splitting
+        # Verify the relationship: ep_size should equal dp_size * tp_size
+        # (when pcp_size=1).
+        expected_ep_size = config.dp_size * config.tp_size
+        if config.ep_size != expected_ep_size:
+            return False, (
+                f"For sequence parallelism: ep_size ({config.ep_size}) should equal "
+                f"dp_size * tp_size ({expected_ep_size})"
+            )
 
     if config.enable_eplb:
         if config.ep_size == 1:
@@ -485,35 +673,7 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
         if config.num_experts % config.dp_size != 0:
             return False, "EPLB requires num_experts divisible by ep_size"
 
-    # Disable fp4 tests until flashinfer is updated or the Dockerfile is
-    # modified to install cublasLt.h. See #39525.
-    if (
-        config.quantization == "modelopt_fp4"
-        and current_platform.is_device_capability_family(100)
-    ):
-        return False, "Temporarily skip until #39525 is resolved"
-
     return True, None
-
-
-def chunk_scales_by_rank(
-    t: torch.Tensor | None,
-    r: int,
-    w: int,
-    device: torch.device | None = None,
-) -> torch.Tensor | None:
-    if t is not None and t.numel() > 1:
-        # Calculate start index by summing chunk sizes for all previous ranks
-        # start = sum(rank_chunk(t.shape[0], i, w) for i in range(r))
-        # chunk = rank_chunk(t.shape[0], r, w)
-        # t = t[start:(start + chunk)]
-        chunk = rank_chunk(t.shape[0], r, w)
-        t = t[(r * chunk) : max(t.shape[0], (r + 1) * chunk)]
-
-    if t is not None and device is not None:
-        t = t.to(device)
-
-    return t
 
 
 def chunk_scales(
@@ -591,19 +751,6 @@ def _quantize_fp8_halves(
     )
 
 
-def quantization_to_quant_dtype(
-    quantization: str | None,
-) -> torch.dtype | str | None:
-    if quantization is None:
-        return None
-    elif quantization in ["fp8", "fp8_blocked", "modelopt_fp8"]:
-        return fp8_dtype
-    elif quantization in ["modelopt_fp4"]:
-        return "nvfp4"
-    else:
-        raise NotImplementedError(f"Unsupported quantization: {quantization}")
-
-
 def make_quant_config(
     quantization: str | None,
     w1: torch.Tensor,
@@ -616,11 +763,11 @@ def make_quant_config(
         return None, QuantizedWeights(w13_weight=w1, w2_weight=w2)
 
     if quantization == "fp8":
-        return Fp8Config(True), _quantize_fp8_halves(w1, w2)
+        return Fp8Config(), _quantize_fp8_halves(w1, w2)
 
     if quantization == "fp8_blocked":
         block_shape = [128, 128]
-        return Fp8Config(True, weight_block_size=block_shape), _quantize_fp8_halves(
+        return Fp8Config(weight_block_size=block_shape), _quantize_fp8_halves(
             w1, w2, block_shape
         )
 
@@ -751,7 +898,8 @@ def create_shared_experts_from_config(
     in_dtype: torch.dtype,
     tp_size: int = 1,
     tp_rank: int = 0,
-    device: torch.device | str | None = None,
+    is_sequence_parallel: bool = False,
+    device: torch.device | str | None = "cuda",
 ) -> TestMLP | None:
     """Create TestMLP for shared experts from config.
 
@@ -764,6 +912,7 @@ def create_shared_experts_from_config(
 
     Returns:
         TestMLP instance or None if config is None
+
     """
     if shared_experts_config is None:
         return None
@@ -772,7 +921,7 @@ def create_shared_experts_from_config(
     s_w2 = shared_experts_config.w2
 
     # Apply TP chunking if needed
-    if tp_size > 1:
+    if tp_size > 1 and not is_sequence_parallel:
         s_w1 = tp_chunk_gate_up(s_w1, tp_rank, tp_size, dim=1, device=device)
         s_w2 = chunk_by_rank(s_w2, tp_rank, tp_size, dim=0, device=device)
     else:
@@ -810,6 +959,7 @@ def setup_moe_test_data(
 
     Returns:
         MoETestData containing all test data and transforms
+
     """
     # For latent MoE: latent_size = k // 2
     latent_size = k // 2
@@ -920,7 +1070,8 @@ def make_fused_moe_layer(
     routed_input_transform: torch.nn.Module | None = None,
     routed_output_transform: torch.nn.Module | None = None,
     pcp_size: int | None = 1,
-) -> FusedMoE:
+    is_sequence_parallel: bool = False,
+) -> MoERunner:
     quant_config, qw = make_quant_config(quantization, w1, w2, global_num_experts)
 
     kwargs = dict()
@@ -934,7 +1085,7 @@ def make_fused_moe_layer(
         kwargs["routed_input_transform"] = routed_input_transform
         kwargs["routed_output_transform"] = routed_output_transform
 
-    layer = FusedMoE(
+    layer = FusedMoEFactory(
         num_experts=global_num_experts,
         top_k=top_k,
         hidden_size=hidden_size,
@@ -946,7 +1097,6 @@ def make_fused_moe_layer(
         topk_group=topk_group,
         quant_config=quant_config,
         tp_size=tp_size,
-        ep_size=ep_size,
         dp_size=dp_size,
         pcp_size=pcp_size,
         prefix="from_forward_context",
@@ -959,10 +1109,13 @@ def make_fused_moe_layer(
         enable_eplb=enable_eplb,
         num_redundant_experts=num_redundant_experts,
         has_bias=has_bias,
+        is_sequence_parallel=is_sequence_parallel,
         **kwargs,
     )
 
-    weight_scale_name = getattr(layer.quant_method, "weight_scale_name", "weight_scale")
+    weight_scale_name = getattr(
+        layer._quant_method, "weight_scale_name", "weight_scale"
+    )
 
     for name, value in [
         ("w13_weight", qw.w13_weight),
@@ -975,11 +1128,22 @@ def make_fused_moe_layer(
         ("w2_input_scale", qw.w2_input_scale),
     ]:
         if value is not None:
-            layer.register_parameter(
+            if quantization is None and name in ("w13_weight", "w2_weight"):
+                param = layer.routed_experts.get_parameter(name)
+                if param.shape != value.shape:
+                    # Preserve backend-required hidden-size padding for latent MoE.
+                    hidden_dim = 2 if name == "w13_weight" else 1
+                    unpadded = param.narrow(hidden_dim, 0, value.size(hidden_dim))
+                    assert unpadded.shape == value.shape
+                    with torch.no_grad():
+                        param.zero_()
+                        unpadded.copy_(value)
+                    continue
+            layer.routed_experts.register_parameter(
                 name, torch.nn.Parameter(value, requires_grad=False)
             )
 
-    layer.quant_method.process_weights_after_loading(layer)
+    layer._quant_method.process_weights_after_loading(layer.routed_experts)
 
     return layer
 
@@ -1004,10 +1168,10 @@ def make_fake_moe_layer(
     activation: str = "silu",
     indices_type: torch.dtype | None = None,
     expert_map: torch.Tensor | None = None,
-    enable_eplb: bool = False,
     expert_load_view: torch.Tensor | None = None,
     logical_to_physical_map: torch.Tensor | None = None,
     logical_replica_count: torch.Tensor | None = None,
+    num_redundant_experts: int = 0,
     gate: torch.nn.Module | None = None,
     routed_input_transform: torch.nn.Module | None = None,
     routed_output_transform: torch.nn.Module | None = None,
@@ -1015,6 +1179,7 @@ def make_fake_moe_layer(
     tp_size: int = 1,
     dp_size: int = 1,
     ep_size: int = 1,
+    is_sequence_parallel: bool = False,
 ) -> Callable:
     quant_dtype = None
     activation = MoEActivation.from_str(activation)
@@ -1022,7 +1187,6 @@ def make_fake_moe_layer(
     router = create_fused_moe_router(
         top_k=top_k,
         global_num_experts=global_num_experts,
-        # eplb_state=None, # TODO
         renormalize=renormalize,
         use_grouped_topk=use_grouped_topk,
         num_expert_group=num_expert_group,
@@ -1032,10 +1196,6 @@ def make_fake_moe_layer(
         routed_scaling_factor=routed_scaling_factor,
         e_score_correction_bias=e_score_correction_bias,
         num_fused_shared_experts=0,  # TODO
-        enable_eplb=enable_eplb,
-        # TODO(bnell): once we can construct the MK at init time, we
-        # can make this a value.
-        indices_type_getter=lambda: indices_type,
     )
 
     if quant_dtype is not None:
@@ -1046,7 +1206,8 @@ def make_fake_moe_layer(
         w2_s = None
 
     shared_experts = create_shared_experts_from_config(
-        shared_experts_config, in_dtype, 1, 0, "cuda"
+        shared_experts_config,
+        in_dtype,
     )
 
     quant_config = FusedMoEQuantConfig.make(
@@ -1075,6 +1236,7 @@ def make_fake_moe_layer(
         topk_weights, topk_ids = router.select_experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
+            topk_indices_dtype=indices_type,
         )
 
         # Shared experts use original (untransformed) hidden_states
@@ -1091,7 +1253,6 @@ def make_fake_moe_layer(
             quant_config=quant_config,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            inplace=False,
             activation=activation,
             apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
@@ -1117,7 +1278,7 @@ def make_fake_moe_layer(
 
 
 def _test_body_regular(
-    moe_layer: Callable,
+    moe_layer: MoERunner,
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     vllm_config: VllmConfig,
@@ -1134,13 +1295,13 @@ def _test_body_regular(
         num_tokens=num_tokens,
         num_tokens_across_dp=num_tokens_across_dp,
     ):
-        output = moe_layer(hidden_states, router_logits)
+        output = sp_wrapper(moe_layer)(hidden_states, router_logits)
 
     return baseline_output, output
 
 
 def _test_body_eplb(
-    moe_layer: FusedMoE,
+    moe_layer: MoERunner,
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     vllm_config: VllmConfig,
@@ -1167,6 +1328,8 @@ def _test_body_eplb(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     device = torch.accelerator.current_accelerator()
 
+    is_sequence_parallel = moe_layer.moe_config.moe_parallel_config.is_sequence_parallel
+
     """EPLB test body: compare output before and after expert weight rearrangement."""
     # Get "before" output with original weight arrangement
     with set_forward_context(
@@ -1175,9 +1338,9 @@ def _test_body_eplb(
         num_tokens=num_tokens,
         num_tokens_across_dp=num_tokens_across_dp,
     ):
-        output_before = moe_layer(hidden_states, router_logits)
+        output_before = sp_wrapper(moe_layer)(hidden_states, router_logits)
 
-    # Create a fresh FusedMoE layer with enable_eplb=True
+    # Create a fresh MoERunner layer with enable_eplb=True
     # Delete the original layer's registration so the constructor can
     # re-use the same "from_forward_context" prefix
     cc = vllm_config.compilation_config
@@ -1206,10 +1369,8 @@ def _test_body_eplb(
         gate=gate,
         routed_input_transform=routed_input_transform,
         routed_output_transform=routed_output_transform,
+        is_sequence_parallel=is_sequence_parallel,
     )
-
-    if eplb_moe_layer._expert_map is not None:
-        eplb_moe_layer._expert_map = eplb_moe_layer._expert_map.to(device)
 
     # All ranks must generate the same permutation
     initial_indices = torch.arange(num_experts, dtype=torch.long)
@@ -1217,10 +1378,15 @@ def _test_body_eplb(
 
     expert_weights = [list(eplb_moe_layer.get_expert_weights())]
 
+    expert_buffer = [torch.empty_like(w) for w in expert_weights[0]]
+    assert vllm_config.parallel_config.eplb_config.communicator is not None, (
+        "EPLB communicator backend must be set by ParallelConfig"
+    )
     communicator = create_eplb_communicator(
         group_coordinator=get_eplb_group(),
         backend=vllm_config.parallel_config.eplb_config.communicator,
-        expert_weights=expert_weights[0],
+        expert_weights=expert_weights,
+        expert_buffer=expert_buffer,
     )
 
     # Rearrange expert weights across EP ranks
@@ -1228,6 +1394,7 @@ def _test_body_eplb(
         old_global_expert_indices=initial_indices.unsqueeze(0),
         new_global_expert_indices=shuffled_indices.unsqueeze(0),
         expert_weights=expert_weights,
+        expert_buffer=expert_buffer,
         ep_group=cpu_group,
         communicator=communicator,
     )
@@ -1256,9 +1423,13 @@ def _test_body_eplb(
         ),
     )
 
-    eplb_moe_layer.eplb_state.should_record_tensor = torch.ones(
+    assert eplb_moe_layer.router.eplb_state is not None
+    eplb_moe_layer.router.eplb_state.should_record_tensor = torch.ones(
         (), dtype=torch.bool, device=device
     )
+    eplb_moe_layer.router.eplb_state.num_unpadded_tokens_tensors = [
+        torch.tensor(0, dtype=torch.int32, device=device)
+    ]
 
     # Get "after" output with rearranged weights and EPLB routing
     with set_forward_context(
@@ -1267,7 +1438,7 @@ def _test_body_eplb(
         num_tokens=num_tokens,
         num_tokens_across_dp=num_tokens_across_dp,
     ):
-        output_after = eplb_moe_layer(hidden_states, router_logits)
+        output_after = sp_wrapper(eplb_moe_layer)(hidden_states, router_logits)
 
     return output_before, output_after
 
@@ -1275,11 +1446,12 @@ def _test_body_eplb(
 # TODO: make this take a MoETestConfig
 def _run_one_config(
     vllm_config: VllmConfig,
-    ep_size: int,
-    dp_size: int,
-    tp_size: int,
-    dp_rank: int,
-    tp_rank: int,
+    ep_size: int,  # Expert parallel size (total across all ranks)
+    dp_size: int,  # Data parallel size (number of DP groups)
+    tp_size: int,  # Tensor parallel size OR sequence parallel size (when use_ep=True)
+    dp_rank: int,  # Current rank in data parallel dimension
+    tp_rank: int,  # Current rank in tensor/sequence parallel dimension
+    is_sequence_parallel: bool,  # Whether to use sequence parallelism
     m: int,
     n: int,
     k: int,
@@ -1291,178 +1463,214 @@ def _run_one_config(
     use_shared_experts: bool,
     use_gate: bool,
     use_routed_input_transform: bool,
+    input_scale: float = 1.0,
     **kwargs,
 ) -> None:
-    set_random_seed(7)
-
     """Generic test loop that sets up environment and delegates to test_body_fn.
 
-    This function is called directly by test_moe_layer and test_moe_layer_eplb
-    via parallel_launch_with_config, passing either _test_body_regular or
-    _test_body_eplb as the test_body_fn parameter.
+    Parameter Interpretation:
+    - When is_sequence_parallel=False (standard TP or EP):
+      * ep_size: Number of expert parallel ranks (or 1 if no EP)
+      * tp_size: Number of tensor parallel ranks (or 1 if no TP)
+      * Weights are chunked by ep_size (experts) and tp_size (tensors)
+
+    - When is_sequence_parallel=True (EP + sequence splitting):
+      * ep_size: Number of expert parallel ranks (equals dp_size * tp_size)
+      * tp_size: Number of ranks to split sequence across (becomes sp_size in
+        MoERunner)
+      * Weights are chunked by ep_size (experts) but NOT by tp_size
+      * Input sequences are chunked by tp_size (via sp_wrapper)
     """
-    world_size = tp_size * dp_size
-    use_ep = ep_size > 1
+    try:
+        set_random_seed(7)
 
-    assert vllm_config.parallel_config.enable_expert_parallel == use_ep
+        use_ep = ep_size > 1
 
-    in_dtype = torch.bfloat16
-    device = torch.accelerator.current_accelerator()
+        assert vllm_config.parallel_config.enable_expert_parallel == use_ep
 
-    if not is_workspace_manager_initialized():
-        init_workspace_manager(device)
+        in_dtype = torch.bfloat16
+        device = torch.accelerator.current_accelerator()
 
-    # Create test data and transforms
-    test_data = setup_moe_test_data(
-        m=m,
-        k=k,
-        n=n,
-        num_experts=num_experts,
-        in_dtype=in_dtype,
-        use_shared_experts=use_shared_experts,
-        use_gate=use_gate,
-        use_routed_input_transform=use_routed_input_transform,
-        backend=backend,
-        device=device,
-    )
+        if not is_workspace_manager_initialized():
+            init_workspace_manager(device)
 
-    # Extract data from test_data
-    hidden_states = test_data.hidden_states
-    router_logits = test_data.router_logits
-    w1 = test_data.w1
-    w2 = test_data.w2
-    shared_experts_config = test_data.shared_experts_config
-    gate = test_data.gate
-    routed_input_transform = test_data.routed_input_transform
-    routed_output_transform = test_data.routed_output_transform
-    activation = "silu"
-
-    baseline_layer = make_fake_moe_layer(
-        w1=w1,
-        w2=w2,
-        top_k=top_k,
-        global_num_experts=num_experts,
-        in_dtype=in_dtype,
-        quantization=quantization,
-        renormalize=False,
-        shared_experts_config=shared_experts_config,
-        gate=gate,
-        routed_input_transform=routed_input_transform,
-        routed_output_transform=routed_output_transform,
-        use_ep=use_ep,
-        tp_size=tp_size,
-        ep_size=ep_size,
-        dp_size=dp_size,
-        activation=activation,
-    )
-
-    baseline_output = baseline_layer(hidden_states, router_logits)
-
-    del baseline_layer
-    torch.accelerator.empty_cache()
-
-    with set_current_vllm_config(vllm_config):
-        # Chunk weights for EP/TP (after baseline is created)
-        if ep_size > 1:
-            w1 = chunk_by_rank(w1, dp_rank, dp_size, dim=0, device=device)
-            w2 = chunk_by_rank(w2, dp_rank, dp_size, dim=0, device=device)
-
-        if tp_size > 1:
-            w1 = tp_chunk_gate_up(w1, tp_rank, tp_size, dim=1, device=device)
-            w2 = chunk_by_rank(w2, tp_rank, tp_size, dim=2, device=device)
-
-        # Setup shared experts if needed
-        shared_experts = create_shared_experts_from_config(
-            shared_experts_config, in_dtype, tp_size, tp_rank, device
+        # Create test data and transforms
+        test_data = setup_moe_test_data(
+            m=m,
+            k=k,
+            n=n,
+            num_experts=num_experts,
+            in_dtype=in_dtype,
+            use_shared_experts=use_shared_experts,
+            use_gate=use_gate,
+            use_routed_input_transform=use_routed_input_transform,
+            backend=backend,
+            device=device,
         )
 
-        # Determine hidden size for MoE layer
-        # When using routed_input_transform, experts operate in latent space
-        hidden_size_for_layer = k // 2 if routed_input_transform is not None else k
+        # Extract data from test_data
+        hidden_states = test_data.hidden_states
+        if input_scale != 1.0:
+            hidden_states = hidden_states * input_scale
+        router_logits = test_data.router_logits
+        w1 = test_data.w1
+        w2 = test_data.w2
+        shared_experts_config = test_data.shared_experts_config
+        gate = test_data.gate
+        routed_input_transform = test_data.routed_input_transform
+        routed_output_transform = test_data.routed_output_transform
+        activation = "silu"
 
-        # Create initial MoE layer
-        moe_layer = make_fused_moe_layer(
-            quantization=quantization,
-            use_ep=use_ep,
-            hidden_size=hidden_size_for_layer,
-            intermediate_size=n,
-            in_dtype=in_dtype,
-            tp_size=tp_size,
-            ep_size=ep_size,
-            dp_size=dp_size,
+        # Create baseline layer with FULL weights (no EP chunking)
+        # Baseline represents the expected output using full model
+        baseline_layer = make_fake_moe_layer(
             w1=w1,
             w2=w2,
             top_k=top_k,
             global_num_experts=num_experts,
-            shared_experts=shared_experts,
+            in_dtype=in_dtype,
+            quantization=quantization,
+            renormalize=False,
+            shared_experts_config=shared_experts_config,
             gate=gate,
             routed_input_transform=routed_input_transform,
             routed_output_transform=routed_output_transform,
-            activation=activation,
-        )
-
-        if moe_layer._expert_map is not None:
-            moe_layer._expert_map = moe_layer._expert_map.to(device)
-
-        num_tokens = m
-        num_tokens_across_dp = torch.tensor(
-            [num_tokens] * world_size,
-            device=device,
-            dtype=torch.int,
-        )
-
-        # Call the test body function with all necessary context
-        expected, actual = test_body_fn(
-            moe_layer=moe_layer,
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            vllm_config=vllm_config,
-            num_tokens=num_tokens,
-            num_tokens_across_dp=num_tokens_across_dp,
-            in_dtype=in_dtype,
-            quantization=quantization,
             use_ep=use_ep,
             tp_size=tp_size,
             ep_size=ep_size,
             dp_size=dp_size,
-            w1=w1,
-            w2=w2,
-            num_experts=num_experts,
-            k=k,
-            n=n,
-            m=m,
-            top_k=top_k,
-            shared_experts=shared_experts,
-            gate=gate,
-            routed_input_transform=routed_input_transform,
-            routed_output_transform=routed_output_transform,
-            baseline_output=baseline_output,
-            **kwargs,
+            activation=activation,
+            is_sequence_parallel=is_sequence_parallel,
         )
 
-    # Common tolerance logic
-    # TODO: consider associating tolerances with quant methods.
-    if quantization is None:
-        if k >= 2048:
-            atol, rtol = 7.6e-2, 7.6e-2
-        else:
-            atol, rtol = 3.5e-2, 3.5e-2
-    elif quantization in ("fp8", "fp8_blocked", "modelopt_fp8"):
-        atol, rtol = 6e-2, 6e-2
-    elif quantization == "modelopt_fp4":
-        if k >= 2048:
-            atol = rtol = 1e-1 + (k * 1e-4)
-        else:
-            atol = rtol = 1e-1
+        with set_current_vllm_config(vllm_config):
+            # Compute baseline output with SP wrapper if needed
+            # sp_wrapper handles sequence chunking/gathering for SP
+            baseline_output = sp_wrapper(baseline_layer, is_sequence_parallel)(
+                hidden_states, router_logits
+            )
 
-        if backend == "allgather_reducescatter" and tp_size > 1:
-            atol += 2e-1
-            rtol += 2e-1
-    else:
-        atol, rtol = 6e-2, 6e-2
+        del baseline_layer
+        torch.accelerator.empty_cache()
 
-    torch.accelerator.synchronize()  # TODO: Is this needed?
-    torch.testing.assert_close(expected, actual, atol=atol, rtol=rtol)
+        with set_current_vllm_config(vllm_config):
+            # Chunk weights for EP BEFORE creating MoERunner.
+            # MoERunner uses EP-chunked weights and handles reductions internally.
+            if ep_size > 1:
+                # Split experts across ranks (dimension 0 is the expert dimension)
+                # When EP is enabled, use EP group rank and ep_size for chunking
+                ep_rank = get_ep_group().rank_in_group
+                w1 = chunk_by_rank(w1, ep_rank, ep_size, dim=0, device=device)
+                w2 = chunk_by_rank(w2, ep_rank, ep_size, dim=0, device=device)
+
+            # Chunk weights for TP (only if NOT doing sequence parallelism)
+            # Sequence parallelism splits tokens/sequences, not weight tensors
+            if tp_size > 1 and not is_sequence_parallel:
+                w1 = tp_chunk_gate_up(w1, tp_rank, tp_size, dim=1, device=device)
+                w2 = chunk_by_rank(w2, tp_rank, tp_size, dim=2, device=device)
+
+            # Setup shared experts if needed
+            # In SP mode, shared experts should NOT be TP-chunked (same as routed
+            # experts).
+            # tp_size is used for sequence splitting, not weight splitting
+            shared_experts = create_shared_experts_from_config(
+                shared_experts_config,
+                in_dtype,
+                tp_size,
+                tp_rank,
+                is_sequence_parallel,
+                device,
+            )
+
+            # Determine hidden size for MoE layer
+            # When using routed_input_transform, experts operate in latent space
+            hidden_size_for_layer = k // 2 if routed_input_transform is not None else k
+
+            # Create initial MoE layer
+            moe_layer = make_fused_moe_layer(
+                quantization=quantization,
+                use_ep=use_ep,
+                hidden_size=hidden_size_for_layer,
+                intermediate_size=n,
+                in_dtype=in_dtype,
+                tp_size=tp_size,
+                ep_size=ep_size,
+                dp_size=dp_size,
+                w1=w1,
+                w2=w2,
+                top_k=top_k,
+                global_num_experts=num_experts,
+                shared_experts=shared_experts,
+                gate=gate,
+                routed_input_transform=routed_input_transform,
+                routed_output_transform=routed_output_transform,
+                activation=activation,
+                is_sequence_parallel=is_sequence_parallel,
+            )
+
+            num_tokens = m
+            # num_tokens_across_dp should have one entry per DP group, not per
+            # total rank.
+            # When EP is enabled, dp_size represents the number of DP groups
+            num_tokens_across_dp = torch.tensor(
+                [num_tokens] * dp_size,
+                device=device,
+                dtype=torch.int,
+            )
+
+            # Call the test body function with all necessary context
+            expected, actual = test_body_fn(
+                moe_layer=moe_layer,
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                vllm_config=vllm_config,
+                num_tokens=num_tokens,
+                num_tokens_across_dp=num_tokens_across_dp,
+                in_dtype=in_dtype,
+                quantization=quantization,
+                use_ep=use_ep,
+                tp_size=tp_size,
+                ep_size=ep_size,
+                dp_size=dp_size,
+                w1=w1,
+                w2=w2,
+                num_experts=num_experts,
+                k=k,
+                n=n,
+                m=m,
+                top_k=top_k,
+                shared_experts=shared_experts,
+                gate=gate,
+                routed_input_transform=routed_input_transform,
+                routed_output_transform=routed_output_transform,
+                baseline_output=baseline_output,
+                **kwargs,
+            )
+
+        # Common tolerance logic
+        # TODO: consider associating tolerances with quant methods.
+        if quantization is None:
+            if k >= 2048:
+                atol, rtol = 7.6e-2, 7.6e-2
+            else:
+                atol, rtol = 3.5e-2, 3.5e-2
+        elif quantization in ("fp8", "fp8_blocked", "modelopt_fp8"):
+            atol, rtol = 6.5e-2, 6.5e-2
+        elif quantization == "modelopt_fp4":
+            if k >= 2048:
+                atol = rtol = 1e-1 + (k * 1e-4)
+            else:
+                atol = rtol = 1e-1
+
+            if backend == "allgather_reducescatter" and tp_size > 1:
+                atol += 2e-1
+                rtol += 2e-1
+        else:
+            atol, rtol = 6e-2, 6e-2
+
+        torch.testing.assert_close(expected, actual, atol=atol, rtol=rtol)
+    finally:
+        torch.accelerator.synchronize()
 
 
 # Test for non-parallel cases (world_size == 1) - backend doesn't matter
@@ -1486,7 +1694,6 @@ def test_moe_layer_no_parallel(
     monkeypatch,
 ):
     """Test MoE layer without parallelism (dp_size=1, tp_size=1, use_ep=False)."""
-
     if os.environ.get("VLLM_LOGGING_LEVEL") is None:
         monkeypatch.setenv("VLLM_LOGGING_LEVEL", "ERROR")
 
@@ -1532,6 +1739,7 @@ def test_moe_layer_no_parallel(
         test_config.tp_size,
         0,
         0,
+        False,
         test_config.m,
         test_config.n,
         test_config.k,
@@ -1559,14 +1767,17 @@ def _parallel_worker(
     cpu_group,
     test_configs: list[MoETestConfig],
     verbosity: int,
+    failure_report_path: str | None = None,
+    deep_ep_handle_keepalive: list[object] | None = None,
     **kwargs,
 ) -> None:
     set_random_seed(7)
+    is_logging_rank = pgi.rank == 0
 
     total = 0
     passed = 0
     failed = 0
-    fail_ids = []
+    failure_details = []
 
     dp_rank = vllm_config.parallel_config.data_parallel_rank
 
@@ -1581,9 +1792,11 @@ def _parallel_worker(
 
         tp_rank = pgi.rank % test_config.tp_size
 
-        if verbosity > 0:
+        if verbosity > 0 and is_logging_rank:
             print(f"subtest: {test_config.id()}", end="")
 
+        local_failed = False
+        local_error: str | None = None
         try:
             _run_one_config(
                 vllm_config,
@@ -1592,6 +1805,7 @@ def _parallel_worker(
                 test_config.tp_size,
                 dp_rank,
                 tp_rank,
+                test_config.is_sequence_parallel,
                 test_config.m,
                 test_config.n,
                 test_config.k,
@@ -1606,33 +1820,76 @@ def _parallel_worker(
                 use_gate=test_config.use_gate,
                 use_routed_input_transform=test_config.use_routed_input_transform,
             )
-            if verbosity > 0:
-                print(" PASSED")
-            else:
-                print(".", end="")
-            passed = passed + 1
-        except Exception as ex:
-            fail_ids.append(test_config.id())
-            failed = failed + 1
-            if verbosity > 0:
-                traceback.print_exc()
-                print(f"\n{str(ex)}\nFAILED")
-            else:
-                print("F", end="")
+        except Exception:
+            local_failed = True
+            local_error = traceback.format_exc()
         finally:
             # DeepEP managers are not reliably reusable across many subtests in
             # a single worker process. Tear them down after each DeepEP case so
-            # later subtests do not inherit stale communication state.
-            if test_config.backend in {
-                "deepep_low_latency",
-                "deepep_high_throughput",
-            }:
+            # later subtests do not inherit stale communication state. Skip this
+            # on ROCm: rocSHMEM cannot reinitialize the allocator after a DeepEP
+            # buffer is destroyed in the same process.
+            if current_platform.is_cuda() and test_config.backend in DEEPEP_BACKENDS:
                 torch.accelerator.synchronize()
-                all2all_manager = get_ep_group().device_communicator.all2all_manager
+                device_communicator = get_ep_group().device_communicator
+                assert device_communicator is not None
+                all2all_manager = device_communicator.all2all_manager
                 if all2all_manager is not None:
                     all2all_manager.destroy()
+            elif (
+                deep_ep_handle_keepalive is not None
+                and current_platform.is_rocm()
+                and test_config.backend in DEEPEP_BACKENDS
+            ):
+                # The manager cache is weak. Keep its handle alive until the
+                # launcher hard-exits this ROCm worker, otherwise each subtest
+                # implicitly destroys and recreates the DeepEP buffer.
+                device_communicator = get_ep_group().device_communicator
+                assert device_communicator is not None
+                all2all_manager = device_communicator.all2all_manager
+                if all2all_manager is not None:
+                    handle_cache = getattr(all2all_manager, "handle_cache", None)
+                    if handle_cache is not None and not deep_ep_handle_keepalive:
+                        with handle_cache._lock:
+                            cached_handles = list(handle_cache._cache.values())
+                        if cached_handles:
+                            deep_ep_handle_keepalive.extend(cached_handles)
             total = total + 1
             torch.distributed.barrier()
+
+        any_failed_tensor = torch.tensor(
+            [int(local_failed)], device=pgi.device, dtype=torch.int32
+        )
+        torch.distributed.all_reduce(
+            any_failed_tensor, op=torch.distributed.ReduceOp.MAX
+        )
+        any_failed = bool(any_failed_tensor.item())
+
+        if any_failed:
+            failed = failed + 1
+
+            gathered_errors = [None] * pgi.world_size
+            torch.distributed.all_gather_object(
+                gathered_errors, local_error, group=cpu_group
+            )
+            first_error = next(
+                (error for error in gathered_errors if error is not None),
+                "unknown distributed failure",
+            )
+            assert first_error is not None
+            failure_details.append(f"{test_config.id()}\n{first_error.rstrip()}")
+
+            if verbosity > 0 and is_logging_rank:
+                print(" FAILED")
+                print(first_error.rstrip())
+            elif is_logging_rank:
+                print("F", end="")
+        else:
+            passed = passed + 1
+            if verbosity > 0 and is_logging_rank:
+                print(" PASSED")
+            elif is_logging_rank:
+                print(".", end="")
 
     skipped = total - (passed + failed)
 
@@ -1643,20 +1900,208 @@ def _parallel_worker(
     passes = f"{sep}{passed} passed" if passed > 0 else ""
 
     report = (
-        f"============= {fails}{skips}{passes} of {total} total tests ============="
+        f"============= {fails}{skips}{passes} of {total} total subcases ============="
     )
 
-    sep = "\n" if verbosity == 0 else ""
-    print(f"{sep}{report}")
+    if is_logging_rank:
+        sep = "\n" if verbosity == 0 else ""
+        print(f"{sep}{report}")
 
     if failed > 0:
-        fail_ids_str = "\n".join(fail_ids)
-        raise RuntimeError(
-            f"\n============= Failed subtests =============\n{fail_ids_str}\n{report}"
+        failure_details_str = "\n\n".join(failure_details)
+        failure_report = (
+            f"\n============= Failed subcases =============\n"
+            f"{failure_details_str}\n{report}"
         )
+        if is_logging_rank and failure_report_path is not None:
+            with open(failure_report_path, "a", encoding="utf-8") as report_file:
+                report_file.write(failure_report)
+        if is_logging_rank:
+            raise RuntimeError(failure_report)
 
 
-# TODO: add cudagraphs/torch.compile tests
+def _parallel_worker_rocm_deepep(
+    pgi: ProcessGroupInfo,
+    vllm_config: VllmConfig,
+    cpu_group,
+    test_configs: list[MoETestConfig],
+    verbosity: int,
+    failure_report_path: str | None = None,
+    deep_ep_handle_keepalive: list[object] | None = None,
+    **kwargs,
+) -> None:
+    """Run a ROCm DeepEP batch without unsafe Python/HIP teardown."""
+    assert current_platform.is_rocm()
+    assert deep_ep_handle_keepalive is not None
+
+    exit_code = 1
+    try:
+        _parallel_worker(
+            pgi,
+            vllm_config,
+            cpu_group,
+            test_configs,
+            verbosity,
+            failure_report_path=failure_report_path,
+            deep_ep_handle_keepalive=deep_ep_handle_keepalive,
+            **kwargs,
+        )
+        exit_code = 0
+    except BaseException as ex:
+        print(ex)
+        traceback.print_exc()
+    finally:
+        try:
+            torch.accelerator.synchronize()
+            # Do not run vLLM cleanup: it explicitly destroys the DeepEP
+            # buffer. Destroy only the default group, matching the accepted
+            # ROCm workaround in tests/kernels/moe/parallel_utils.py.
+            torch.distributed.destroy_process_group()
+        except BaseException:
+            traceback.print_exc()
+            exit_code = 1
+        finally:
+            # Bypass the HIP atexit use-after-free fixed upstream by
+            # https://github.com/ROCm/rocm-systems/pull/6942.
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(exit_code)
+
+
+def _test_body_mori_graph(
+    moe_layer: MoERunner,
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    vllm_config: VllmConfig,
+    num_tokens: int,
+    num_tokens_across_dp: torch.Tensor,
+    baseline_output: torch.Tensor,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.mori import (
+        MoriPrepareAndFinalize,
+    )
+
+    kernel = moe_layer._quant_method.moe_kernel
+    assert kernel is not None
+    assert isinstance(kernel.prepare_finalize, MoriPrepareAndFinalize)
+    assert isinstance(kernel.fused_experts, AiterExperts)
+    assert not kernel.prepare_finalize.use_fp8_dispatch
+
+    def check(actual: torch.Tensor, expected: torch.Tensor) -> None:
+        torch.testing.assert_close(actual, expected, atol=3.5e-2, rtol=3.5e-2)
+        # These inputs produce small outputs; an absolute-only budget can
+        # accept all-zero output. Also bound error relative to the reference.
+        ref_norm = expected.float().norm()
+        assert ref_norm > 0
+        assert (actual.float() - expected.float()).norm() < 3.5e-2 * ref_norm
+
+    # Forward-context metadata belongs on CPU, outside graph capture.
+    with set_forward_context(
+        None,
+        vllm_config,
+        num_tokens=num_tokens,
+        num_tokens_across_dp=num_tokens_across_dp.cpu(),
+    ):
+        initial_hidden = hidden_states.clone()
+        initial_router = router_logits.clone()
+        for _ in range(2):
+            eager_output = moe_layer(hidden_states, router_logits)
+        saved_eager_output = eager_output.clone()
+        torch.accelerator.synchronize()
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured_output = moe_layer(hidden_states, router_logits)
+        graph.replay()
+        original_output = captured_output.clone()
+        check(original_output, baseline_output)
+
+        for scale, shift in [(-0.5, 1), (1.75, 3)]:
+            hidden_states.copy_(initial_hidden * scale)
+            router_logits.copy_(initial_router.roll(shift, dims=-1))
+            expected = moe_layer(hidden_states, router_logits).clone()
+            graph.replay()
+            check(captured_output, expected)
+            assert (expected.float() - original_output.float()).norm() > (
+                0.1 * original_output.float().norm()
+            )
+
+        # Later calls must not overwrite an earlier eager return tensor.
+        check(eager_output, saved_eager_output)
+        check(original_output, baseline_output)
+        return baseline_output, original_output
+
+
+def _mori_graph_worker(
+    pgi: ProcessGroupInfo,
+    vllm_config: VllmConfig,
+    cpu_group,
+    m: int,
+    n: int,
+) -> None:
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    rocm_aiter_ops.refresh_env_variables()
+    _run_one_config(
+        vllm_config=vllm_config,
+        ep_size=2,
+        dp_size=2,
+        tp_size=1,
+        dp_rank=pgi.rank,
+        tp_rank=0,
+        is_sequence_parallel=False,
+        m=m,
+        n=n,
+        k=512,
+        num_experts=8,
+        top_k=2,
+        quantization=None,
+        backend="mori_high_throughput",
+        test_body_fn=_test_body_mori_graph,
+        use_shared_experts=False,
+        use_gate=False,
+        use_routed_input_transform=False,
+        input_scale=1.0 + pgi.rank,
+    )
+
+
+@pytest.mark.parametrize("m,n", [(1, 256), (32, 512), (45, 256)])
+def test_moe_layer_mori_graph(m: int, n: int, monkeypatch):
+    """BF16 EP dispatch/combine preserves routing and outputs across replays."""
+    from vllm._aiter_ops import is_aiter_found_and_supported
+
+    if not current_platform.is_rocm() or not has_mori():
+        pytest.skip("Requires ROCm and MoRI")
+    if not is_aiter_found_and_supported():
+        pytest.skip("Requires supported AITER kernels")
+    if current_platform.device_count() < 2:
+        pytest.skip("Requires two GPUs")
+
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "0")
+    compilation_config = CompilationConfig()
+    compilation_config.pass_config.fuse_allreduce_rms = False
+    vllm_config = VllmConfig(
+        parallel_config=ParallelConfig(
+            data_parallel_size=2,
+            tensor_parallel_size=1,
+            enable_expert_parallel=True,
+            all2all_backend="mori_high_throughput",
+        ),
+        compilation_config=compilation_config,
+        scheduler_config=SchedulerConfig.default_factory(
+            max_num_batched_tokens=64, max_num_seqs=64
+        ),
+    )
+    parallel_launch_with_config(2, _mori_graph_worker, vllm_config, None, m, n)
+
+
+# TODO: add torch.compile tests and graph coverage for other backends.
 @pytest.mark.parametrize("dp_size, tp_size, use_ep", PARALLEL_COMBOS)
 @pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("enable_eplb", [False, True])
@@ -1676,7 +2121,12 @@ def test_moe_layer(
     """
     num_gpus = current_platform.device_count()
     world_size = tp_size * dp_size
-    ep_size = 1 if not use_ep else world_size  # or dp_size?
+    # When use_ep=True: FusedMoEParallelConfig flattens tp_size across dp ranks
+    # Result: ep_size = dp_size * pcp_size * tp_size
+    # Since pcp_size=1 in these tests: ep_size = dp_size * tp_size = world_size
+    # When use_ep=False: no expert parallelism, ep_size = 1
+    ep_size = 1 if not use_ep else world_size
+
     assert world_size > 1
 
     # Check if enough GPUs available
@@ -1686,18 +2136,35 @@ def test_moe_layer(
     if enable_eplb and not use_ep:
         pytest.skip("EPLB requires EP.")
 
+    if backend in DEEPEP_BACKENDS and not visible_devices_have_peer_access(world_size):
+        pytest.skip("DeepEP backends require peer access between visible GPUs.")
+
     verbosity = pytestconfig.getoption("verbose")
 
     if os.environ.get("VLLM_LOGGING_LEVEL") is None:
         monkeypatch.setenv("VLLM_LOGGING_LEVEL", "ERROR")
 
-    # TODO
-    # VLLM_FLASHINFER_MOE_BACKEND=latency
-    # VLLM_USE_FLASHINFER_MOE_FP16=1
-    # VLLM_USE_FLASHINFER_MOE_FP8
-    # VLLM_USE_FLASHINFER_MOE_FP4
-    # VLLM_USE_FLASHINFER_MOE_INT4
+    if (
+        backend in MORI_BACKENDS
+        and os.environ.get("VLLM_TEST_ENABLE_MORI_MOE_LAYER") == "1"
+    ):
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "0")
+        from vllm._aiter_ops import rocm_aiter_ops
 
+        rocm_aiter_ops.refresh_env_variables()
+
+    # TODO: cover FlashInfer MoE backends via moe_backend, e.g.
+    # moe_backend=flashinfer_trtllm / flashinfer_cutlass / flashinfer_cutedsl
+    # (BF16, FP8 and NVFP4 paths), and VLLM_USE_FLASHINFER_MOE_INT4=1.
+
+    # Repeated NIXL memory registration in this broad layer matrix fails on
+    # gfx950. NIXL EPLB is covered by dedicated tests, so use Gloo here to
+    # preserve the layer/EPLB coverage.
+    eplb_config = EPLBConfig(
+        communicator="torch_gloo" if enable_eplb and on_gfx950() else None
+    )
     parallel_config = ParallelConfig(
         pipeline_parallel_size=1,
         data_parallel_size=dp_size,
@@ -1705,6 +2172,7 @@ def test_moe_layer(
         enable_expert_parallel=use_ep,
         all2all_backend=backend,
         enable_eplb=enable_eplb,
+        eplb_config=eplb_config,
     )
 
     compilation_config = CompilationConfig()
@@ -1739,15 +2207,53 @@ def test_moe_layer(
     if len(test_configs) == 0:
         pytest.skip("No supported configs found for this testpoint.")
 
+    with tempfile.NamedTemporaryFile(
+        prefix="moe-layer-failures-", delete=False
+    ) as failure_report_file:
+        failure_report_path = failure_report_file.name
+
+    test_config_batches = [test_configs]
+    if backend == "nixl_ep" or (
+        current_platform.is_rocm() and backend == "deepep_low_latency"
+    ):
+        # NIXL retains a process-wide buffer with fixed geometry. Likewise,
+        # rocSHMEM cannot recreate a differently sized low-latency buffer.
+        # Use fresh workers for incompatible shapes, retaining every subcase.
+        test_config_batches = _group_configs_by_buffer_requirements(test_configs)
+
+    rocm_deepep = current_platform.is_rocm() and backend in DEEPEP_BACKENDS
+    parallel_worker = _parallel_worker_rocm_deepep if rocm_deepep else _parallel_worker
+    cuda_deepep = current_platform.is_cuda() and backend in DEEPEP_BACKENDS
+    env_dict = DEEPEP_SINGLE_NODE_NVSHMEM_ENV if cuda_deepep else None
+    launch_failures: list[str] = []
+
     try:
-        parallel_launch_with_config(
-            world_size,
-            _parallel_worker,
-            vllm_config,
-            None,
-            test_configs,
-            verbosity,
-        )
+        for test_config_batch in test_config_batches:
+            report_size_before = os.path.getsize(failure_report_path)
+            try:
+                parallel_launch_with_config(
+                    world_size,
+                    parallel_worker,
+                    vllm_config,
+                    env_dict,
+                    test_config_batch,
+                    verbosity,
+                    failure_report_path=failure_report_path,
+                    deep_ep_handle_keepalive=[] if rocm_deepep else None,
+                )
+            except Exception as ex:
+                # Normal subtest failures are already in the shared report.
+                # Preserve launcher/setup errors that occur before that write.
+                if os.path.getsize(failure_report_path) == report_size_before:
+                    launch_failures.append(str(ex))
+
+        if os.path.getsize(failure_report_path) > 0:
+            with open(failure_report_path, encoding="utf-8") as report_file:
+                launch_failures.insert(0, report_file.read())
+        if launch_failures:
+            pytest.fail("\n\n".join(launch_failures))
     finally:
+        with suppress(FileNotFoundError):
+            os.remove(failure_report_path)
         torch.accelerator.synchronize()  # TODO: Is this needed?
         torch.accelerator.empty_cache()

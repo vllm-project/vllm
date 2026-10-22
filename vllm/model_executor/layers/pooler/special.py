@@ -19,7 +19,7 @@ from .seqwise import (
     pooler_for_classify,
     pooler_for_embed,
 )
-from .tokwise import AllPool, pooler_for_token_classify, pooler_for_token_embed
+from .tokwise import pooler_for_token_classify, pooler_for_token_embed
 
 
 class DispatchPooler(Pooler):
@@ -46,7 +46,6 @@ class DispatchPooler(Pooler):
             {
                 "token_classify": pooler_for_token_classify(
                     pooler_config,
-                    pooling=AllPool(),
                     classifier=classifier,
                 ),
                 "classify": pooler_for_classify(
@@ -75,6 +74,20 @@ class DispatchPooler(Pooler):
     def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
         return self.poolers_by_task[task].get_pooling_updates(task)
 
+    def replace_classifier(
+        self,
+        new_classifier: ClassifierFn,
+    ) -> None:
+        """Replaces the classifier to the LoRA-wrapped version."""
+        for task, pooler in self.poolers_by_task.items():
+            if task not in {"classify"}:
+                # Now LoRA only supports classification tasks,
+                # so we only replace the classifier for "classify" task.
+                continue
+            head = getattr(pooler, "head", None)
+            if head is not None and hasattr(head, "classifier"):
+                head.classifier = new_classifier
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -102,6 +115,7 @@ class DispatchPooler(Pooler):
                 # portion of the batch. Token offset is computed from the CPU
                 # `num_scheduled_tokens_cpu` to avoid a GPU->CPU sync.
                 group_cursor = group_metadata.pooling_cursor
+                assert group_cursor is not None
                 num_group_tokens = int(group_cursor.num_scheduled_tokens_cpu.sum())
                 group_hidden_states = hidden_states[
                     token_offset : token_offset + num_group_tokens
@@ -163,6 +177,9 @@ class BOSEOSFilter(Pooler):
         self.bos_token_id = bos_token_id
         self.eos_token_id = eos_token_id
 
+    def extra_repr(self) -> str:
+        return f"bos_token_id={self.bos_token_id}, eos_token_id={self.eos_token_id}"
+
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return self.pooler.get_supported_tasks()
 
@@ -181,6 +198,11 @@ class BOSEOSFilter(Pooler):
         for i, (prompt_len, token_ids) in enumerate(
             zip(pooling_metadata.prompt_lens, prompt_token_ids)
         ):
+            # Late chunking returns one row per chunk, with special tokens
+            # already included in the means. Skip BOS/EOS row removal for these
+            # requests; ordinary token outputs still use the filtering below.
+            if pooling_metadata.pooling_params[i].late_chunking_params is not None:
+                continue
             pooled_data = pooled_outputs[i]
             assert (
                 isinstance(pooled_data, torch.Tensor)

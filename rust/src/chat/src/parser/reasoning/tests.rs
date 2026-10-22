@@ -1,0 +1,176 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+use std::sync::Arc;
+
+use vllm_tokenizer::test_utils::TestTokenizer;
+
+use super::{ReasoningParserFactory, names};
+
+#[test]
+fn factory_contains_and_lists_registered_parsers() {
+    let factory = ReasoningParserFactory::new();
+    assert!(factory.contains(names::QWEN3));
+    assert!(factory.contains(names::DEEPSEEK_V4));
+    assert!(factory.contains(names::SEED_OSS));
+    assert!(factory.contains(names::STEP3P5));
+    assert!(factory.contains(names::MINIMAX_M3));
+    assert!(factory.list().contains(&names::QWEN3.to_string()));
+    assert!(factory.list().contains(&names::DEEPSEEK_V4.to_string()));
+    assert!(factory.list().contains(&names::SEED_OSS.to_string()));
+    assert!(factory.list().contains(&names::STEP3P5.to_string()));
+    assert!(factory.list().contains(&names::MINIMAX_M3.to_string()));
+}
+
+#[test]
+fn factory_resolves_deepseek_v4() {
+    let factory = ReasoningParserFactory::new();
+    assert_eq!(
+        factory.resolve_name_for_model("deepseek-ai/DeepSeek-V4"),
+        Some(names::DEEPSEEK_V4)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("deepseek_v4"),
+        Some(names::DEEPSEEK_V4)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("deepseek-ai/DeepSeek-V4.1-Flash"),
+        Some(names::DEEPSEEK_V41)
+    );
+}
+
+#[test]
+fn factory_distinguishes_qwen_model_families() {
+    let factory = ReasoningParserFactory::new();
+    assert_eq!(
+        factory.resolve_name_for_model("Qwen/QwQ-32B"),
+        Some(names::DEEPSEEK_R1)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("Qwen/Qwen3-8B"),
+        Some(names::QWEN3)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("Qwen/Qwen2.5-0.5B-Instruct"),
+        None
+    );
+}
+
+#[test]
+fn factory_routes_step3p5_models_to_dedicated_parser() {
+    let factory = ReasoningParserFactory::new();
+    // step3p5 patterns must beat the bare `step3` substring.
+    assert_eq!(
+        factory.resolve_name_for_model("step-3p5-instruct"),
+        Some(names::STEP3P5)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("step3p5"),
+        Some(names::STEP3P5)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("step-3.5-base"),
+        Some(names::STEP3P5)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("step3-base"),
+        Some(names::STEP3)
+    );
+}
+
+#[test]
+fn factory_routes_seed_oss_models() {
+    let factory = ReasoningParserFactory::new();
+    assert_eq!(
+        factory.resolve_name_for_model("ByteDance-Seed/Seed-OSS-36B-Instruct"),
+        Some(names::SEED_OSS)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("seedoss-7b"),
+        Some(names::SEED_OSS)
+    );
+}
+
+#[test]
+fn factory_resolves_minimax_m3_before_generic_minimax() {
+    let factory = ReasoningParserFactory::new();
+    assert_eq!(
+        factory.resolve_name_for_model("MiniMaxAI/Minimax-M3-preview"),
+        Some(names::MINIMAX_M3)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("mm-m3"),
+        Some(names::MINIMAX_M3)
+    );
+}
+
+#[test]
+fn factory_rejects_unknown_parser_names() {
+    let tokenizer = Arc::new(TestTokenizer::new());
+    let factory = ReasoningParserFactory::new();
+    let error = match factory.create("missing", tokenizer) {
+        Ok(_) => panic!("expected parser lookup to fail"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("choose from"));
+}
+
+#[test]
+fn factory_distinguishes_glm_reasoning_framing() {
+    let factory = ReasoningParserFactory::new();
+    for model in ["zai-org/GLM-4.5", "zai-org/GLM-4.6"] {
+        assert_eq!(factory.resolve_name_for_model(model), Some(names::GLM45));
+    }
+    for model in ["zai-org/GLM-4.7-Flash", "zai-org/GLM-5.2-FP8"] {
+        assert_eq!(factory.resolve_name_for_model(model), Some(names::GLM47));
+    }
+}
+
+#[test]
+fn step5_preserves_reasoning_and_content_whitespace_across_chunks() {
+    use vllm_tokenizer::{DecodedText, Tokenizer as _};
+
+    let tokenizer = Arc::new(
+        TestTokenizer::new()
+            .with_regular_token("<think>", 256)
+            .with_regular_token("</think>", 257),
+    );
+    let factory = ReasoningParserFactory::new();
+    let prompt = tokenizer.encode("<|im_start|>assistant\n<think>", false).unwrap();
+    let wire = "\nreasoning\n</think>\n\nanswer\n";
+    for model in [
+        "stepfun-ai/Step-5-Preview",
+        "stepfun-ai/Step-5-Preview-BF16",
+        "step5",
+    ] {
+        for split in wire.char_indices().map(|(index, _)| index).chain(std::iter::once(wire.len()))
+        {
+            let mut parser = factory
+                .create(
+                    factory.resolve_name_for_model(model).unwrap(),
+                    tokenizer.clone(),
+                )
+                .unwrap();
+            parser.initialize(&prompt).unwrap();
+            let mut reasoning = String::new();
+            let mut content = String::new();
+            for delta in [
+                parser.push(DecodedText::unattributed(&wire[..split])).unwrap(),
+                parser.push(DecodedText::unattributed(&wire[split..])).unwrap(),
+                parser.finish().unwrap(),
+            ] {
+                if let Some(text) = delta.reasoning {
+                    reasoning.push_str(&text.text);
+                }
+                if let Some(text) = delta.content {
+                    content.push_str(&text.text);
+                }
+            }
+            assert_eq!(
+                (reasoning.as_str(), content.as_str()),
+                ("\nreasoning\n", "\n\nanswer\n"),
+                "{model} split {split}"
+            );
+        }
+    }
+}

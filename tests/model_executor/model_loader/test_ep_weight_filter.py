@@ -91,6 +91,7 @@ class TestComputeLocalExpertIds:
         ids_0 = compute_local_expert_ids(10, ep_size=3, ep_rank=0)
         ids_1 = compute_local_expert_ids(10, ep_size=3, ep_rank=1)
         ids_2 = compute_local_expert_ids(10, ep_size=3, ep_rank=2)
+        assert ids_0 is not None and ids_1 is not None and ids_2 is not None
 
         assert len(ids_0) == 4
         assert len(ids_1) == 3
@@ -107,9 +108,10 @@ class TestComputeLocalExpertIds:
             assert len(ids) == 48
 
         # All experts covered
-        all_ids = set()
+        all_ids: set[int] = set()
         for rank in range(8):
             ids = compute_local_expert_ids(384, ep_size=8, ep_rank=rank)
+            assert ids is not None
             all_ids |= ids
         assert all_ids == set(range(384))
 
@@ -183,6 +185,21 @@ class TestShouldSkipWeight:
     def test_remote_expert_skipped(self):
         assert should_skip_weight(
             "model.layers.0.mlp.experts.200.gate_proj.weight", self.local_ids
+        )
+
+    def test_local_packed_expert_not_skipped(self):
+        assert not should_skip_weight(
+            "model.layers.0.mlp.experts.10.gate_proj.weight_packed", self.local_ids
+        )
+
+    def test_remote_packed_expert_skipped(self):
+        assert should_skip_weight(
+            "model.layers.0.mlp.experts.200.gate_proj.weight_packed", self.local_ids
+        )
+
+    def test_remote_expert_scale_not_skipped(self):
+        assert not should_skip_weight(
+            "model.layers.0.mlp.experts.200.gate_proj.weight_scale", self.local_ids
         )
 
     def test_boundary_expert(self):
@@ -299,6 +316,7 @@ class TestEpFilterOnSyntheticMoeWeights:
         files, expected = synthetic_moe_files
         # EP=2, rank=0 → experts 0-3
         local_ids = compute_local_expert_ids(8, ep_size=2, ep_rank=0)
+        assert local_ids is not None
         loaded = dict(
             safetensors_weights_iterator(files, False, local_expert_ids=local_ids)
         )
@@ -322,6 +340,7 @@ class TestEpFilterOnSyntheticMoeWeights:
     def test_ep2_rank1_gets_other_half(self, synthetic_moe_files):
         files, expected = synthetic_moe_files
         local_ids = compute_local_expert_ids(8, ep_size=2, ep_rank=1)
+        assert local_ids is not None
         loaded = dict(
             safetensors_weights_iterator(files, False, local_expert_ids=local_ids)
         )

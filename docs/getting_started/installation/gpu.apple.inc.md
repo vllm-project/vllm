@@ -52,6 +52,9 @@ source ~/.venv-vllm-metal/bin/activate
 vllm serve
 ```
 
+Wait for 2-3 minutes until you see application startup complete:
+> INFO:     Application startup complete.
+
 Once the server is running, you have multiple options to interact with it:
 
 #### Option 1: Interactive chat
@@ -92,7 +95,7 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)
 ```
 
-For more details on the `vllm` CLI commands, see the [OpenAI-compatible server documentation](../../serving/openai_compatible_server.md).
+For more details on the `vllm` CLI commands, see the [OpenAI-compatible server documentation](../../serving/online_serving/openai_compatible_server.md).
 
 --8<-- [end:set-up-using-python]
 --8<-- [start:pre-built-wheels]
