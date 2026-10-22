@@ -587,6 +587,7 @@ def compute_mm_prefix_ranges(
     req_ids: list[str],
     mm_features: dict[str, list[MultiModalFeatureSpec]],
     sliding_window: int | None = None,
+    bidirectional_prompt_lens: Sequence[int] | np.ndarray | None = None,
 ) -> dict[int, list[tuple[int, int]]]:
     """Compute PrefixLM bidirectional ranges for multimodal tokens.
 
@@ -595,6 +596,10 @@ def compute_mm_prefix_ranges(
     """
     req_doc_ranges: dict[int, list[tuple[int, int]]] = {}
     for req_idx, req_id in enumerate(req_ids):
+        if bidirectional_prompt_lens is not None:
+            prompt_len = int(bidirectional_prompt_lens[req_idx])
+            req_doc_ranges[req_idx] = [(0, prompt_len - 1)] if prompt_len else []
+            continue
         image_doc_ranges = []
         for mm_feature in mm_features.get(req_id, ()):
             if mm_feature.modality not in ("image", "video"):

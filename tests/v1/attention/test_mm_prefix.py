@@ -24,6 +24,7 @@ from vllm.v1.attention.backends.utils import (
     fill_mm_prefix_query_ranges,
 )
 from vllm.v1.kv_cache_interface import KVCacheLayout
+from vllm.v1.worker.gpu.attn_utils import compute_mm_prefix_ranges
 
 
 def _fa4_available() -> bool:
@@ -77,6 +78,18 @@ SLIDING_WINDOW_LEFT = 129
 
 # Stands in for the builder's persistent (max_num_batched_tokens, 2) buffer.
 STAGING_CAPACITY = 64
+
+
+@pytest.mark.skip_global_cleanup
+def test_bidirectional_prompt_range_includes_instruction_tokens():
+    """PaliGemma's prefix includes the instruction after the image tokens."""
+    ranges = compute_mm_prefix_ranges(
+        req_ids=["paligemma"],
+        mm_features={},
+        bidirectional_prompt_lens=[260],
+    )
+
+    assert ranges == {0: [(0, 259)]}
 
 
 def _query_ranges(mm_ranges, query_lens, seq_lens):
