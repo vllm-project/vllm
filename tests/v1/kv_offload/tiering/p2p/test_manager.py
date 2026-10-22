@@ -937,6 +937,56 @@ class TestHasPendingWork:
         mgr._sessions["peer:1"] = _FakeSession(peer_id="peer:1")
         assert mgr.has_pending_work() is True
 
+    @pytest.mark.cpu_test
+    def test_B2_idle_manager_does_not_keep_engine_busy(self):
+        """A quiescent P2P tier must let pause and shutdown observe idle."""
+        from unittest.mock import MagicMock
+
+        from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
+            OffloadingConnectorScheduler,
+        )
+        from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
+            OffloadingConnector,
+        )
+        from vllm.v1.core.sched.interface import PauseState
+        from vllm.v1.core.sched.scheduler import Scheduler
+        from vllm.v1.engine.core import EngineCoreProc
+        from vllm.v1.kv_offload.tiering.manager import (
+            CPUPrimaryTierOffloadingManager,
+            TieringOffloadingManager,
+        )
+
+        p2p = _make_manager()
+        mmap_region = MagicMock()
+        view = memoryview(np.zeros((1, 16), dtype=np.int8))
+        mmap_region.create_kv_memoryview.return_value = view
+        manager = TieringOffloadingManager(
+            CPUPrimaryTierOffloadingManager(1, mmap_region),
+            [p2p],
+            tier_poll_interval_s=0,
+        )
+        connector_scheduler = object.__new__(OffloadingConnectorScheduler)
+        connector_scheduler.manager = manager
+        connector_scheduler._jobs = {}
+        connector = object.__new__(OffloadingConnector)
+        connector.connector_scheduler = connector_scheduler
+        scheduler = object.__new__(Scheduler)
+        scheduler._pause_state = PauseState.PAUSED_NEW
+        scheduler.running = []
+        scheduler.waiting = []
+        scheduler.kv_holding_waiting = []
+        scheduler.num_waiting_for_streaming_input = 0
+        scheduler.finished_req_ids = set()
+        scheduler.requests = {}
+        scheduler.connector = connector
+        scheduler.ec_connector = None
+        core = object.__new__(EngineCoreProc)
+        core.scheduler = scheduler
+        core.engines_running = False
+        core.batch_queue = None
+
+        assert core._pause_complete() is True
+
 
 # ---------------------------------------------------------------------------
 # Shutdown drain
@@ -1743,6 +1793,22 @@ class _DrainCtrl:
 
 
 class TestDrainJobs:
+    @pytest.mark.cpu_test
+    def test_B5_drain_jobs_finishes_unbound_stores(self):
+        """Drain covers stores parked before the decoder's first fetch."""
+        mgr = _make_manager()
+        mgr._control = _DrainCtrl()
+        job = _job_metadata(
+            job_id=5,
+            kv_params=_remote_decoder_kv_params(kv_request_id="B5"),
+        )
+        mgr.submit_store(job)
+
+        mgr.drain_jobs()
+
+        assert mgr._unbound_stores == {}
+        assert JobResult(job_id=5, success=False) in list(mgr.get_finished_jobs())
+
     def test_returns_immediately_when_quiescent(self):
         """No sessions and no inflight: drain_jobs returns without sleeping."""
         mgr = _make_manager()

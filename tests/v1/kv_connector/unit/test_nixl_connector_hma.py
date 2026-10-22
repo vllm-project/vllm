@@ -1414,6 +1414,35 @@ def test_map_block_ids_for_block_size_ratio_hybrid():
 
 
 @pytest.mark.cpu_test
+def test_B3_heterogeneous_blocks_transfer_only_uncached_suffix():
+    """Decoder allocation padding must not shift a prefix-hit transfer."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker._group_spec_types = (FullAttentionSpec,)
+    worker._has_mamba = False
+    _bind_worker_method(worker, "get_mapped_blocks")
+    _bind_worker_method(worker, "_map_block_ids_for_block_size_ratio")
+    _bind_worker_method(worker, "_apply_prefix_caching")
+
+    decode_ids, prefill_ids = worker._map_block_ids_for_block_size_ratio(
+        [[1, 2]], [list(range(10))], 4
+    )
+    decode_ids, prefill_ids = worker._apply_prefix_caching(
+        decode_ids,
+        prefill_ids,
+        decode_physical_per_logical=1,
+        prefill_physical_per_logical=1,
+    )
+
+    assert decode_ids == [list(range(4, 10))]
+    assert prefill_ids == [list(range(4, 10))]
+
+
+@pytest.mark.cpu_test
 @pytest.mark.parametrize(
     ("kv_cache_layout", "enable_permute_local_kv"),
     [("LBHNC", False), ("LBNHC", False), ("LBNHC", True)],
