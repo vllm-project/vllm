@@ -28,7 +28,7 @@ from vllm.v1.spec_decode.remote.transport import TransportError, check_data_fram
 # v2 requires peers to honor the per-round draft budget, including zero.
 # A v1 server would silently ignore it and still generate the maximum K.
 PROTOCOL_MAJOR = 2
-PROTOCOL_MINOR = 1
+PROTOCOL_MINOR = 2
 
 # Field-level range constraints are enforced by msgspec on decode, so a
 # peer cannot deliver negative identifiers or degenerate shapes. Checks
@@ -177,6 +177,8 @@ class PrefillChunk(msgspec.Struct):
     checksum: NonNegativeInt
     execution_timeout_ms: NonNegativeInt | None = None
     """Remaining relative execution budget when the control frame is sent."""
+    execution_group_id: NonNegativeInt | None = None
+    """Prefill pipeline identity; all chunks share its first server deadline."""
 
 
 class AdvanceAndPropose(msgspec.Struct):

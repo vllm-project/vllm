@@ -10,6 +10,7 @@ import threading
 import time
 from unittest.mock import Mock
 
+import msgspec
 import pytest
 import torch
 
@@ -21,6 +22,7 @@ from vllm.v1.spec_decode.remote.capabilities import (
     TargetFeatureKind,
 )
 from vllm.v1.spec_decode.remote.protocol import (
+    PROTOCOL_MINOR,
     CloseSequence,
     ErrorReply,
     FeatureSlot,
@@ -126,6 +128,7 @@ class ProtocolPeer:
     """Socket peer for replies a conforming draft adapter cannot produce."""
 
     hello: Hello
+    protocol_minor: int = PROTOCOL_MINOR
 
     def __init__(self, conn):
         self.conn = conn
@@ -143,8 +146,13 @@ class ProtocolPeer:
     def reply(self, envelope, message, *, frames=()):
         for frame in frames:
             self.conn.send_data(frame)
-        self.conn.send_control(
+        reply = decode_envelope(
             encode_message(message, session_id="s", request_id=envelope.request_id)
+        )
+        self.conn.send_control(
+            msgspec.msgpack.encode(
+                msgspec.structs.replace(reply, protocol_minor=self.protocol_minor)
+            )
         )
 
 
@@ -153,12 +161,13 @@ def protocol_peer():
     listener = listen("tcp://127.0.0.1:0")
     connections, threads, errors = [], [], []
 
-    def start(script):
+    def start(script, *, protocol_minor=PROTOCOL_MINOR):
         def serve():
             try:
                 conn = listener.accept(timeout=5)
                 connections.append(conn)
                 peer = ProtocolPeer(conn)
+                peer.protocol_minor = protocol_minor
                 envelope, hello, _ = peer.recv()
                 assert isinstance(hello, Hello)
                 peer.hello = hello
@@ -195,6 +204,86 @@ def protocol_peer():
         thread.join(timeout=5)
         assert not thread.is_alive()
     assert not errors
+
+
+def test_pipelined_prefills_cannot_renew_an_expired_round_budget():
+    """An expired queued prefill must not delay an existing healthy request."""
+
+    class DelayedPrefill(FakeDraftAdapter):
+        def __init__(self):
+            super().__init__(vocab_size=VOCAB)
+            self.release_first = threading.Event()
+            self.release_second = threading.Event()
+            self.second_calls = 0
+
+        def prefill(self, key, inputs):
+            if key.sequence_id == 1:
+                assert self.release_first.wait(5)
+            if key.sequence_id == 2:
+                self.second_calls += 1
+                assert self.release_second.wait(5)
+            return super().prefill(key, inputs)
+
+    adapter = DelayedPrefill()
+    server = RemoteDraftServer(adapter)
+    server.start("tcp://127.0.0.1:0")
+    session = RemoteDraftSession(server.endpoint, IDENTITY, request_timeout_ms=200)
+    try:
+        session.connect()
+        first, second, healthy = session.open_sequences((1, 2, 3))
+        session.prefill(healthy, features([4]), is_final=True)
+        session.prefill_many(
+            [(first, features([4]), False), (second, features([4]), False)]
+        )
+        assert session.sequence_state(first) is SequenceState.TARGET_ONLY
+        assert session.sequence_state(second) is SequenceState.TARGET_ONLY
+        adapter.release_first.set()
+        result = session.collect(session.dispatch(batch(0, [healthy], [7])))
+        assert result.output.valid_lengths.tolist() == [NUM_SPEC_TOKENS]
+        assert result.output.token_ids.tolist() == [expected_row(7)]
+        assert adapter.second_calls == 0
+        assert session.sequence_state(healthy) is SequenceState.READY
+    finally:
+        adapter.release_first.set()
+        adapter.release_second.set()
+        session.close()
+        server.stop()
+
+
+def test_legacy_peer_does_not_receive_more_prefills_after_round_timeout(protocol_peer):
+    """Older peers cannot anchor pipelined commands to one execution budget."""
+    from vllm.v1.spec_decode.remote.protocol import Pong
+
+    def script(peer):
+        for _ in range(3):
+            envelope, opened, _ = peer.recv()
+            assert isinstance(opened, OpenSequence)
+            peer.reply(envelope, SequenceAck(opened.key))
+        _, first, _ = peer.recv()
+        assert isinstance(first, PrefillChunk)
+        # No first ACK: the shared client deadline must expire before another
+        # prefill can be sent. The next RPC flushes logical retirements.
+        envelope, closed, _ = peer.recv()
+        assert isinstance(closed, CloseSequence)
+        for key in closed.keys:
+            peer.reply(envelope, SequenceAck(key))
+        envelope, ping, _ = peer.recv()
+        assert isinstance(ping, Ping)
+        peer.reply(envelope, Pong(nonce=ping.nonce))
+
+    endpoint = protocol_peer(script, protocol_minor=1)
+    session = RemoteDraftSession(endpoint, IDENTITY, request_timeout_ms=200)
+    try:
+        session.connect()
+        first, second, _ = session.open_sequences((1, 2, 3))
+        session.prefill_many(
+            [(first, features([4]), False), (second, features([4]), False)]
+        )
+        assert session.sequence_state(first) is SequenceState.TARGET_ONLY
+        assert session.sequence_state(second) is SequenceState.TARGET_ONLY
+        assert session.ping().healthy
+    finally:
+        session.close()
 
 
 @pytest.fixture

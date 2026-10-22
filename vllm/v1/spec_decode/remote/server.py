@@ -904,6 +904,8 @@ class _ServerSession:
         self.num_speculative_tokens = 0
         self.inbound: dict[int, DataFrame] = {}
         self.last_batch_id = -1
+        self._prefill_group_id = -1
+        self._prefill_group_deadline: float | None = None
         self.sequence_number = 0
         self.next_result_slot = 0
         self.cancelled_batches = 0
@@ -1599,7 +1601,19 @@ class _ServerSession:
         self, message: PrefillChunk | AdvanceAndPropose
     ) -> float | None:
         budget = message.execution_timeout_ms
-        return None if budget is None else time.monotonic() + budget / 1000
+        if budget is None:
+            return None
+        deadline = time.monotonic() + budget / 1000
+        if isinstance(message, PrefillChunk) and message.execution_group_id is not None:
+            group = message.execution_group_id
+            if group < self._prefill_group_id:
+                return time.monotonic()
+            if group == self._prefill_group_id:
+                assert self._prefill_group_deadline is not None
+                deadline = min(deadline, self._prefill_group_deadline)
+            self._prefill_group_id = group
+            self._prefill_group_deadline = deadline
+        return deadline
 
     def _expire_owned_sequences(
         self, deadline: float | None, keys: tuple[SequenceKey, ...]

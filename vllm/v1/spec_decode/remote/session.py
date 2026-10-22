@@ -241,6 +241,7 @@ class RemoteDraftSession:
         self._alive = False
         self._session_id = ""
         self._session_epoch = -1
+        self._peer_protocol_minor = 0
         self._capabilities: SpeculatorPlacementCapabilities | None = None
         self._feature_schema: TargetFeatureSchema | None = None
         self._limits: RemoteServerLimits | None = None
@@ -363,7 +364,7 @@ class RemoteDraftSession:
                 max_buffered_bytes=MAX_HANDSHAKE_BYTES + 5,
             )
             request_id = self._send(hello, deadline=deadline)
-            _, ack = self._await(
+            envelope, ack = self._await(
                 lambda env, msg: (
                     isinstance(msg, HelloAck) and env.request_id == request_id
                 ),
@@ -405,6 +406,7 @@ class RemoteDraftSession:
             raise RemoteDraftError(f"invalid remote result byte budget: {e}") from e
         self._session_id = ack.session_id
         self._session_epoch = ack.session_epoch
+        self._peer_protocol_minor = envelope.protocol_minor
         self._capabilities = ack.capabilities
         self._feature_schema = ack.feature_schema
         self._limits = ack.limits
@@ -466,6 +468,7 @@ class RemoteDraftSession:
         self._alive = False
         self._session_id = ""
         self._session_epoch = -1
+        self._peer_protocol_minor = 0
         self._capabilities = None
         self._feature_schema = None
         self._limits = None
@@ -1386,8 +1389,29 @@ class RemoteDraftSession:
             (SpeculatorStatusCode.TIMEOUT, "not sent before the deadline")
         ] * len(calls)
         pending: dict[int, int] = {}
+        acknowledged = 0
         if deadline is None:
             deadline = self._clock() + self._request_timeout_s
+        prefill = bool(calls) and all(
+            isinstance(message, PrefillChunk) for message, _, _ in calls
+        )
+        pipeline = not prefill or self._peer_protocol_minor >= 2
+        if prefill and pipeline:
+            group = self._next_request_id
+            for message, _, _ in calls:
+                message.execution_group_id = group
+
+        def receive_ack(wait_deadline: float):
+            return self._await(
+                lambda env, msg: (
+                    isinstance(msg, SequenceAck)
+                    and env.request_id in pending
+                    and msg.key == calls[pending[env.request_id]][1]
+                ),
+                wait_deadline,
+                request_ids=pending,
+            )
+
         lost = ""
         try:
             for index, (message, _, frames) in enumerate(calls):
@@ -1397,6 +1421,10 @@ class RemoteDraftSession:
                     deadline=deadline,
                 )
                 pending[request_id] = index
+                if not pipeline:
+                    envelope, ack = receive_ack(deadline)
+                    results[pending.pop(envelope.request_id)] = (ack.status, ack.detail)
+                    acknowledged += 1
         except TransportTimeout:
             pass
         except TransportError as e:
@@ -1405,6 +1433,11 @@ class RemoteDraftSession:
             results[index:] = [(SpeculatorStatusCode.INTERNAL_ERROR, lost)] * (
                 len(calls) - index
             )
+        except RemoteDraftError as e:
+            results[index:] = [(SpeculatorStatusCode.INTERNAL_ERROR, str(e))] * (
+                len(calls) - index
+            )
+            pending.clear()
         unanswered = (
             SpeculatorStatusCode.TIMEOUT,
             "no acknowledgement before deadline",
@@ -1417,15 +1450,7 @@ class RemoteDraftSession:
                 )
                 break
             try:
-                envelope, ack = self._await(
-                    lambda env, msg: (
-                        isinstance(msg, SequenceAck)
-                        and env.request_id in pending
-                        and msg.key == calls[pending[env.request_id]][1]
-                    ),
-                    deadline,
-                    request_ids=pending,
-                )
+                envelope, ack = receive_ack(deadline)
             except TransportTimeout:
                 break
             except TransportError as e:
@@ -1436,6 +1461,7 @@ class RemoteDraftSession:
                 unanswered = (SpeculatorStatusCode.INTERNAL_ERROR, str(e))
                 break
             results[pending.pop(envelope.request_id)] = (ack.status, ack.detail)
+            acknowledged += 1
         for index in pending.values():
             results[index] = unanswered
         if not self._alive:
