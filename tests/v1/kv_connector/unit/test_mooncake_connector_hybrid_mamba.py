@@ -804,6 +804,12 @@ def test_transfer_rule_follows_plain_head_mapping_for_hybrid_attention(monkeypat
         assert worker._transfer_rule("model.layers.3.indexer_ring") == (True, None)
         assert worker._transfer_rule("model.layers.3.compressed_key") == (True, None)
 
+        # At a TP size equal to the KV-head count, a rank holds one KV head,
+        # as many as the single-head indexer ring; the ring stays replicated.
+        worker.tp_size = worker.transfer_topo.total_num_kv_heads
+        assert worker._transfer_rule("model.layers.3.indexer_ring") == (True, None)
+        assert worker._transfer_rule("model.layers.3.compressed_key") == (True, None)
+
         worker.shutdown()
         worker.shutdown = noop_shutdown
         connector.connector_worker = None

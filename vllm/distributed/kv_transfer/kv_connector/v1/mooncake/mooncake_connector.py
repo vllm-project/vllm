@@ -3072,7 +3072,7 @@ class MooncakeConnectorWorker:
             self.kv_cache_config.has_mamba_layers
             and not self.use_mla
             and (
-                isinstance(spec, MLAAttentionSpec)
+                isinstance(spec, (MLAAttentionSpec, CircularBufferSpec))
                 or (
                     isinstance(spec, AttentionSpec)
                     and spec.num_kv_heads != max(total_num_kv_heads // self.tp_size, 1)
@@ -3081,7 +3081,9 @@ class MooncakeConnectorWorker:
         ):
             # A hybrid model's auxiliary cache that does not shard with the KV
             # heads (e.g. a single-head indexer key cache) is the same on every
-            # rank.
+            # rank. Ring buffers are per-request scratch whose head slots are
+            # not KV heads, so their head count cannot tell them apart from a
+            # one-head shard.
             return True, None
         return (
             self._producer_cache_is_replicated(),
