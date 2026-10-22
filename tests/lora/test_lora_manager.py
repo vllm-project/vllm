@@ -12,6 +12,7 @@ from torch import nn
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.lora import LoRAConfig
 from vllm.lora.layers import (
+    BaseLayerWithLoRA,
     ColumnParallelLinearWithLoRA,
     MergedColumnParallelLinearWithLoRA,
     ReplicatedLinearWithLoRA,
@@ -32,6 +33,7 @@ from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager, WorkerLoRAManager
 from vllm.model_executor.layers.fused_moe import GateLinear
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.platforms import current_platform
 
 from .utils import create_peft_lora
@@ -138,6 +140,46 @@ def test_from_lora_tensors(qwen3_lora_files, device):
             f"{lora.lora_a.shape=}, {lora.lora_b.shape=}"
         )
         assert lora.lora_a.shape[0] == 8
+
+
+@pytest.mark.parametrize("is_pooling_model", [False, True])
+@pytest.mark.parametrize(
+    "lm_prefix,module_name,text_name",
+    [
+        (
+            "language_model",
+            "language_model.model.layers.0.self_attn.o_proj",
+            "model.layers.0.self_attn.o_proj",
+        ),
+        ("language_model", "language_model.lm_head", "lm_head"),
+        (
+            "model.text_model",
+            "model.text_model.layers.0.self_attn.o_proj",
+            "model.layers.0.self_attn.o_proj",
+        ),
+    ],
+)
+def test_text_only_lora_binds_to_multimodal_language_model(
+    lm_prefix, module_name, text_name, is_pooling_model
+):
+    """An adapter trained on the text-only *ForCausalLM must apply to the
+    language model of a multimodal wrapper instead of silently doing nothing."""
+    manager = LoRAModelManager.__new__(LoRAModelManager)
+    manager.is_pooling_model = is_pooling_model
+    manager.supports_mm = True
+    manager.mm_mapping = MultiModelKeys.from_string_field(language_model=lm_prefix)
+
+    def weights(name: str) -> LoRALayerWeights:
+        return LoRALayerWeights(name, 8, 16, torch.zeros(8, 4), torch.zeros(4, 8))
+
+    text_lora = weights(text_name)
+    adapter = LoRAModel(1, 8, {text_name: text_lora})
+    assert manager._get_lora_layer_weights(adapter, module_name) is text_lora
+    assert manager._get_lora_layer_weights(adapter, "visual.blocks.0.proj") is None
+
+    exact_lora = weights(module_name)
+    adapter = LoRAModel(1, 8, {text_name: text_lora, module_name: exact_lora})
+    assert manager._get_lora_layer_weights(adapter, module_name) is exact_lora
 
 
 def create_lora(
@@ -411,8 +453,9 @@ def test_get_dummy_lora_warmup_rank_for_fully_sharded_moe():
         fully_sharded_loras=True,
     )
 
-    class DummyModule:
+    class DummyModule(BaseLayerWithLoRA):
         def __init__(self, tp_size: int, fully_sharded: bool):
+            super().__init__()
             self.tp_size = tp_size
             self.fully_sharded = fully_sharded
 
@@ -972,6 +1015,7 @@ def test_lru_cache_worker_adapter_manager(dist_init, dummy_model, device, tmp_pa
     punica_wrapper = worker_adapter_manager._adapter_manager.punica_wrapper_mapping.get(
         DEFAULT_LANGUAGE_WRAPPER_KEY
     )
+    assert punica_wrapper is not None
     assert punica_wrapper.device == device
 
 
@@ -1129,30 +1173,24 @@ def test_packed_loras(default_vllm_config, dist_init, dummy_model_gate_up, devic
     packed_lora = model_lora.get_lora("gate_up_proj")
     assert packed_lora and isinstance(packed_lora, PackedLoRALayerWeights)
 
-    torch.testing.assert_close(
-        packed_lora.lora_a[0], model_lora_clone.get_lora("gate_proj").lora_a
-    )
-    torch.testing.assert_close(
-        packed_lora.lora_b[0], model_lora_clone.get_lora("gate_proj").lora_b
-    )
-    torch.testing.assert_close(
-        packed_lora.lora_a[1], model_lora_clone.get_lora("up_proj").lora_a
-    )
-    torch.testing.assert_close(
-        packed_lora.lora_b[1], model_lora_clone.get_lora("up_proj").lora_b
-    )
+    gate_lora = model_lora_clone.get_lora("gate_proj")
+    assert gate_lora is not None
+    torch.testing.assert_close(packed_lora.lora_a[0], gate_lora.lora_a)
+    torch.testing.assert_close(packed_lora.lora_b[0], gate_lora.lora_b)
+    up_lora = model_lora_clone.get_lora("up_proj")
+    assert up_lora is not None
+    torch.testing.assert_close(packed_lora.lora_a[1], up_lora.lora_a)
+    torch.testing.assert_close(packed_lora.lora_b[1], up_lora.lora_b)
 
     packed_lora1 = model_lora1.get_lora("gate_up_proj")
     assert packed_lora1 and isinstance(packed_lora1, PackedLoRALayerWeights)
 
     assert packed_lora1.lora_a[0] is None
     assert packed_lora1.lora_b[0] is None
-    torch.testing.assert_close(
-        packed_lora1.lora_a[1], model_lora_clone1.get_lora("up_proj").lora_a
-    )
-    torch.testing.assert_close(
-        packed_lora1.lora_b[1], model_lora_clone1.get_lora("up_proj").lora_b
-    )
+    up_lora1 = model_lora_clone1.get_lora("up_proj")
+    assert up_lora1 is not None
+    torch.testing.assert_close(packed_lora1.lora_a[1], up_lora1.lora_a)
+    torch.testing.assert_close(packed_lora1.lora_b[1], up_lora1.lora_b)
 
 
 def _test_target_modules(
