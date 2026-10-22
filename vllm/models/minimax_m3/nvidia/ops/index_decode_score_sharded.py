@@ -647,6 +647,41 @@ def minimax_m3_index_pack_candidates(
     )
 
 
+def minimax_m3_index_select_publish_candidates(
+    scores: torch.Tensor,
+    num_valid_pages: torch.Tensor,
+    recv_bases: torch.Tensor,
+    slot: int,
+    rank: int,
+    t_max: int,
+    errors: torch.Tensor,
+    *,
+    world_size: int,
+    heads_per_rank: int,
+    init_blocks: int,
+    local_blocks: int,
+    spin_limit: int = 1 << 26,
+) -> None:
+    """Select local Top16 directly into each head owner's receive slot."""
+    from vllm.third_party.fmha_sm100.jit import get_sparse_topk_module
+
+    get_sparse_topk_module().sparse_topk_select_publish(
+        scores,
+        num_valid_pages,
+        recv_bases,
+        errors,
+        slot,
+        rank,
+        world_size,
+        heads_per_rank,
+        t_max,
+        init_blocks,
+        local_blocks,
+        spin_limit,
+        torch.cuda.current_stream().cuda_stream,
+    )
+
+
 def minimax_m3_index_merge_candidates(
     recv_slot: torch.Tensor,
     num_valid_pages: torch.Tensor,

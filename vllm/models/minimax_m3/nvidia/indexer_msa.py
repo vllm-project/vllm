@@ -504,7 +504,6 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
                 assert nd <= comm.max_decode_tokens
                 slot_set = comm.slot_set(self.index_k_ordinal)
                 scores = comm.scores[:nd]
-                candidates = comm.candidates[:nd]
                 sharded_score.minimax_m3_index_decode_score_sharded_cutedsl(
                     index_q[:nd],
                     kv,
@@ -515,18 +514,9 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
                     d.max_decode_query_len,
                     scores,
                 )
-                sparse_topk_select(
+                sharded_score.minimax_m3_index_select_publish_candidates(
                     scores,
-                    self.topk_blocks,
-                    num_valid_pages=num_valid_pages[:nd],
-                    force_begin_blocks=self.init_blocks,
-                    force_end_blocks=self.local_blocks,
-                    output=candidates,
-                    max_score_layout="THK",
-                )
-                sharded_score.minimax_m3_index_publish_candidates(
-                    scores,
-                    candidates,
+                    num_valid_pages[:nd],
                     comm.recv_bases,
                     slot_set,
                     comm.rank,
@@ -534,6 +524,8 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
                     comm.errors,
                     world_size=comm.world,
                     heads_per_rank=comm.hpr,
+                    init_blocks=self.init_blocks,
+                    local_blocks=self.local_blocks,
                     spin_limit=SPIN_LIMIT,
                 )
                 sharded_score.minimax_m3_index_merge_candidates(
@@ -916,11 +908,6 @@ class IndexKShardComm:
             self.scores = torch.empty(
                 (self.max_decode_tokens, total_index_heads, MAX_K_TILES),
                 dtype=torch.float32,
-                device=self.device,
-            )
-            self.candidates = torch.empty(
-                (self.max_decode_tokens, total_index_heads, TOPK),
-                dtype=torch.int32,
                 device=self.device,
             )
             self.recv_bases = torch.empty(
