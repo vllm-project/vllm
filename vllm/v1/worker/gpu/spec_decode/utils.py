@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Mapping
+
 import numpy as np
 import torch
 
@@ -135,7 +137,7 @@ class DraftTokensHandler:
 
 def check_draft_vintage(
     level: str,
-    scheduled_spec_tokens: dict[str, "list[int] | tuple[int, ...]"],
+    scheduled_spec_tokens: Mapping[str, "list[int] | tuple[int, ...]"],
     req_id_to_index: dict[str, int],
     draft_tokens: torch.Tensor,
 ) -> list[str]:
