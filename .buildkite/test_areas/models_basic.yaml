@@ -183,6 +183,18 @@ steps:
       # cuda.bindings.driver), so it is deliberately left out here.
       - pytest -v -s models/kimi_k3
 
+- label: ":nvidia: (B200) Dory FP4 MLP prefill"
+  key: dory-fp4-prefill-b200
+  timeout_in_minutes: 20
+  device: b200-k8s
+  source_file_dependencies:
+  - vllm/model_executor/models/dory.py
+  - vllm/model_executor/layers/quantization/utils/marlin_utils_fp4.py
+  - tests/models/test_dory_fp4_prefill.py
+  commands:
+    # NVFP4 x NVFP4 CUTLASS GEMM needs FP4 tensor cores; skipped elsewhere.
+    - pytest -v -s models/test_dory_fp4_prefill.py
+
 - label: ":nvidia: (4xB200) [Nightly] Kimi K3 Prefix Cache"
   key: kimi-k3-prefix-cache-4xb200
   # Nightly only: 4-GPU B200 pods wait hours behind smaller jobs on per-PR runs.

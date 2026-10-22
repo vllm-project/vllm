@@ -36,6 +36,10 @@ class DoryConfig(PreTrainedConfig):
     n_recurrent_loops: int = 1
     # "last_loop" reuses one cache, overwritten by each recurrent loop.
     recurrent_kv_cache_mode: str = "per_loop"
+    # Runtime option (hf_overrides) for W4A16 NVFP4 checkpoints on GPUs with FP4
+    # tensor cores: steps of at least this many tokens run the MLP linears as
+    # NVFP4 x NVFP4 GEMMs (activations quantized to NVFP4). 0 disables it.
+    fp4_prefill_min_tokens: int = 0
 
     def __post_init__(self, **kwargs):
         if self.layer_types is None:
@@ -89,6 +93,8 @@ class DoryConfig(PreTrainedConfig):
             )
         if self.n_recurrent_loops < 1:
             raise ValueError("n_recurrent_loops must be a positive integer")
+        if self.fp4_prefill_min_tokens < 0:
+            raise ValueError("fp4_prefill_min_tokens must be >= 0")
         if self.recurrent_kv_cache_mode not in ("per_loop", "last_loop"):
             raise ValueError("recurrent_kv_cache_mode must be per_loop or last_loop")
         if any(

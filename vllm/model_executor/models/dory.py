@@ -3,6 +3,7 @@
 """Dory: normalized latent recurrent transformer."""
 
 import math
+import weakref
 from collections.abc import Iterable
 
 import torch
@@ -12,9 +13,11 @@ from torch import nn
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    LinearBase,
     MergedColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
@@ -28,8 +31,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.sequence import IntermediateTensors
+from vllm.utils.torch_utils import direct_register_custom_op
 
 from .utils import maybe_prefix
+
+logger = init_logger(__name__)
 
 EPS = 1e-6
 
@@ -48,6 +54,93 @@ def slerp_norm(a: torch.Tensor, b: torch.Tensor, lr: torch.Tensor) -> torch.Tens
 
 def slerp_alpha(a, b, alpha, alpha_scale):
     return slerp_norm(a, b, (alpha.float() * alpha_scale).abs())
+
+
+# ------------------------------------------------------ FP4 tensor-core MLP prefill
+# Opt-in (hf_overrides {"fp4_prefill_min_tokens": N}) for W4A16 NVFP4 checkpoints on
+# GPUs with FP4 tensor cores. Marlin (W4A16) is BF16-compute bound for large steps,
+# so steps of >= N tokens run the MLP linears as NVFP4 x NVFP4 CUTLASS GEMMs with
+# activations quantized to NVFP4 on the fly; smaller steps keep Marlin unchanged.
+# The activation global scale is static: Dory MLP inputs are unit-norm (justnorm),
+# so |x_i| <= 1. An MLP reading the raw embeddings (layer 0) stays on Marlin.
+_FP4_INPUT_BOUND = 1.125  # unit-norm inputs plus headroom for BF16 rounding
+_FP4_LINEARS: "weakref.WeakValueDictionary[str, LinearBase]" = (
+    weakref.WeakValueDictionary()
+)
+
+
+def _fp4_prefill_min_tokens(config, quant_config, prefix: str) -> int:
+    n = getattr(config, "fp4_prefill_min_tokens", 0) or 0
+    if n <= 0:
+        return 0
+    if getattr(quant_config, "quant_method", None) != "W4A16_NVFP4":
+        logger.warning_once(
+            "Dory fp4_prefill_min_tokens needs a ModelOpt W4A16_NVFP4 "
+            "checkpoint; ignored."
+        )
+        return 0
+    from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+        cutlass_fp4_supported,
+    )
+
+    if not cutlass_fp4_supported():
+        logger.warning_once(
+            "Dory fp4_prefill_min_tokens needs FP4 tensor cores "
+            "(CUTLASS NVFP4 GEMM); ignored on this GPU."
+        )
+        return 0
+    if prefix.endswith(".layers.0.mixer"):
+        return 0  # reads the embeddings: no unit-norm bound
+    logger.info_once(
+        "Dory: MLP linears use FP4 tensor cores for steps of >= %d tokens.", n
+    )
+    return n
+
+
+def _fp4_prepare(layer: LinearBase) -> None:
+    """Swizzle the retained serialized block scales once, for the CUTLASS GEMM."""
+    from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+        swizzle_blockscale,
+    )
+
+    gs = layer._nvfp4_weight_global_scale_for_gather.float().reshape(1)
+    layer._dory_fp4_w_sf = swizzle_blockscale(layer._nvfp4_weight_scale_for_gather)
+    layer._dory_fp4_x_gs = torch.full_like(gs, 448.0 * 6.0 / _FP4_INPUT_BOUND)
+    layer._dory_fp4_alpha = gs * (_FP4_INPUT_BOUND / (448.0 * 6.0))
+    del layer._nvfp4_weight_scale_for_gather
+
+
+def _dory_fp4_linear(x: torch.Tensor, layer_name: str) -> torch.Tensor:
+    layer = _FP4_LINEARS[layer_name]
+    if x.shape[0] < layer._dory_fp4_min_tokens or not hasattr(
+        layer, "_nvfp4_weight_for_gather"
+    ):
+        return layer.quant_method.apply(layer, x, None)
+    from vllm import _custom_ops as ops
+
+    if not hasattr(layer, "_dory_fp4_w_sf"):
+        _fp4_prepare(layer)
+    xq, x_sf = ops.scaled_fp4_quant(x, layer._dory_fp4_x_gs)
+    return ops.cutlass_scaled_fp4_mm(
+        xq,
+        layer._nvfp4_weight_for_gather,
+        x_sf,
+        layer._dory_fp4_w_sf,
+        layer._dory_fp4_alpha,
+        x.dtype,
+    )
+
+
+def _dory_fp4_linear_fake(x: torch.Tensor, layer_name: str) -> torch.Tensor:
+    n = _FP4_LINEARS[layer_name].output_size_per_partition
+    return x.new_empty((x.shape[0], n))
+
+
+direct_register_custom_op(
+    op_name="dory_fp4_linear",
+    op_func=_dory_fp4_linear,
+    fake_impl=_dory_fp4_linear_fake,
+)
 
 
 class DoryAttention(nn.Module):
@@ -184,16 +277,27 @@ class DoryMLP(nn.Module):
         self.suv_gate = nn.Parameter(torch.empty(self.ffn))
         self.suv_up = nn.Parameter(torch.empty(self.ffn))
         self._suv_factor = config.hidden_size**0.5
+        self.fp4_min_tokens = _fp4_prefill_min_tokens(config, quant_config, prefix)
+        if self.fp4_min_tokens:
+            for layer in (self.gate_up_proj, self.down_proj):
+                # keep the serialized FP4 weights next to the Marlin layout
+                layer._retain_weight_for_gather = True
+                layer._dory_fp4_min_tokens = self.fp4_min_tokens
+                _FP4_LINEARS[layer.prefix] = layer
+
+    def _linear(self, layer, x):
+        if self.fp4_min_tokens:
+            return torch.ops.vllm.dory_fp4_linear(x, layer.prefix)
+        return layer(x)[0]
 
     def forward(self, hidden_states):
-        m, _ = self.gate_up_proj(hidden_states)
+        m = self._linear(self.gate_up_proj, hidden_states)
         g, u = m.chunk(2, dim=-1)
         g = (g.float() * (self.suv_gate.float() * self._suv_factor)).to(g.dtype)
         u = (u.float() * (self.suv_up.float() * self._suv_factor)).to(u.dtype)
         m = (F.silu(g.float()) * u.float()).to(m.dtype)
         m = justnorm(m)
-        out, _ = self.down_proj(m)
-        return out
+        return self._linear(self.down_proj, m)
 
 
 class DoryDecoderLayer(nn.Module):
