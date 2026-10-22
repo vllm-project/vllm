@@ -4558,6 +4558,101 @@ def rocm_sparse_attn_decode_bf16(
         output.copy_(out[..., : output.shape[-1]])
 
 
+# Decode tokens (requests x (1 + draft tokens)) from which the gfx942 HIP sparse
+# decode kernel beats the Triton split-K kernel, measured on MI300X with
+# DeepSeek-V4.1-Flash TP4 shapes by
+# benchmarks/kernels/benchmark_rocm_sparse_mla_decode.py.
+_HIP_SPARSE_DECODE_MIN_TOKENS = 64
+
+
+@functools.cache
+def _hip_sparse_decode_available() -> bool:
+    return _ON_GFX942 and hasattr(torch.ops._rocm_C, "sparse_mla_decode_fp8_ds_mla")
+
+
+def _use_hip_sparse_decode(q: torch.Tensor, output: torch.Tensor) -> bool:
+    return (
+        q.shape[0] >= _HIP_SPARSE_DECODE_MIN_TOKENS
+        and q.shape[1] == 16
+        and q.shape[2] == 512
+        and q.dtype == torch.bfloat16
+        and q.stride(-1) == 1
+        and output.dtype == torch.bfloat16
+        and output.shape == q.shape
+        and output.stride(-1) == 1
+        and _hip_sparse_decode_available()
+    )
+
+
+def _hip_sparse_decode_num_splits(num_tokens: int) -> int:
+    # One wavefront per (token, split), 4 per CU: fill the wave slots in a
+    # single round and keep a few tiles per split.
+    slots = 4 * _decode_cu_count()
+    if 2 * num_tokens >= slots:
+        return 1
+    if 4 * num_tokens >= slots:
+        return 2
+    return max(1, min(8, slots // num_tokens))
+
+
+def _rocm_sparse_attn_decode_hip(
+    q: torch.Tensor,
+    main_cache: torch.Tensor,
+    main_indices: torch.Tensor,
+    main_lengths: torch.Tensor | None,
+    main_ragged_indices: torch.Tensor | None,
+    main_ragged_indptr: torch.Tensor | None,
+    extra_cache: torch.Tensor | None,
+    extra_indices: torch.Tensor | None,
+    extra_lengths: torch.Tensor | None,
+    extra_ragged_indices: torch.Tensor | None,
+    extra_ragged_indptr: torch.Tensor | None,
+    attn_sink: torch.Tensor | None,
+    scale: float,
+    output: torch.Tensor,
+) -> None:
+    from vllm import _custom_ops as ops
+
+    if main_ragged_indices is None or main_ragged_indptr is None:
+        main_ragged_indices, main_ragged_indptr = build_ragged_indices_from_dense(
+            main_indices,
+            main_lengths
+            if main_lengths is not None
+            else (main_indices >= 0).sum(dim=-1, dtype=torch.int32),
+            num_rows=main_cache.shape[0] * main_cache.shape[1],
+        )
+    if extra_cache is not None and (
+        extra_ragged_indices is None or extra_ragged_indptr is None
+    ):
+        assert extra_indices is not None
+        extra_ragged_indices, extra_ragged_indptr = build_ragged_indices_from_dense(
+            extra_indices,
+            extra_lengths
+            if extra_lengths is not None
+            else (extra_indices >= 0).sum(dim=-1, dtype=torch.int32),
+            num_rows=extra_cache.shape[0] * extra_cache.shape[1],
+        )
+    has_extra = extra_cache is not None
+    sink = None
+    if attn_sink is not None:
+        sink = attn_sink[: q.shape[1]].to(torch.float32).contiguous()
+    ops.rocm_sparse_mla_decode_fp8_ds_mla(
+        output,
+        q,
+        main_cache,
+        _as_int32_contiguous_1d(main_ragged_indices),
+        _as_int32_contiguous_1d(main_ragged_indptr),
+        extra_cache,
+        _as_int32_contiguous_1d(extra_ragged_indices) if has_extra else None,
+        _as_int32_contiguous_1d(extra_ragged_indptr) if has_extra else None,
+        sink,
+        scale,
+        not current_platform.is_fp8_fnuz(),
+        True,
+        _hip_sparse_decode_num_splits(q.shape[0]),
+    )
+
+
 def rocm_sparse_attn_decode(
     q: torch.Tensor,
     kv_cache: torch.Tensor | None,
@@ -4622,6 +4717,30 @@ def rocm_sparse_attn_decode(
         extra_cache = kv_cache
         if topk_indices is not None:
             extra_indices = topk_indices.reshape(topk_indices.shape[0], -1)
+
+    if (
+        output_mxfp8 is None
+        and output is not None
+        and _use_hip_sparse_decode(q, output)
+    ):
+        _rocm_sparse_attn_decode_hip(
+            q=q,
+            main_cache=swa_k_cache,
+            main_indices=main_indices,
+            main_lengths=swa_lens,
+            main_ragged_indices=swa_ragged_indices,
+            main_ragged_indptr=swa_ragged_indptr,
+            extra_cache=extra_cache,
+            extra_indices=extra_indices,
+            extra_lengths=topk_lens,
+            extra_ragged_indices=topk_ragged_indices,
+            extra_ragged_indptr=topk_ragged_indptr,
+            attn_sink=attn_sink,
+            scale=scale,
+            output=output,
+        )
+        # Like the aiter path, the HIP kernel leaves the inverse RoPE to the caller.
+        return 0
 
     if output_mxfp8 is not None:
         assert output is None, "output and output_mxfp8 are mutually exclusive"
