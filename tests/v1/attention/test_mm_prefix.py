@@ -685,6 +685,7 @@ def test_flashinfer_mm_prefix_supports_combination(kv_dtype, sink, reason):
     if reason is None:
         assert result is None
     else:
+        assert result is not None
         assert reason in result
 
 
