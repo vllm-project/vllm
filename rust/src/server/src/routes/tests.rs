@@ -50,6 +50,7 @@ use vllm_llm::Llm;
 use vllm_metrics::METRICS;
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{Prompt, TextBackend, TextRequestProcessor};
+use vllm_tokenizer::Tokenizer as _;
 use vllm_tokenizer::test_utils::TestTokenizer;
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
@@ -132,6 +133,12 @@ fn bytes_to_token_ids(bytes: &[u8]) -> Vec<u32> {
     bytes.iter().map(|byte| u32::from(*byte)).collect()
 }
 
+/// Encode `text` with the fake chat tokenizer, so markers spelled in full are
+/// their dedicated tokens, as the model emits them.
+fn token_ids(text: &str) -> Vec<u32> {
+    fake_chat_tokenizer().encode(text, false).unwrap()
+}
+
 fn default_stream_output_specs() -> Vec<(Vec<u32>, Option<EngineCoreFinishReason>)> {
     vec![
         (vec![b'h' as u32], None),
@@ -142,7 +149,7 @@ fn default_stream_output_specs() -> Vec<(Vec<u32>, Option<EngineCoreFinishReason
 
 fn weather_tool_call_output_specs() -> Vec<(Vec<u32>, Option<EngineCoreFinishReason>)> {
     vec![
-        (bytes_to_token_ids(b"<think>Need tool.</think>"), None),
+        (token_ids("<think>Need tool.</think>"), None),
         (
             bytes_to_token_ids(b"<tool_call>\n{\"name\":\"get_weather\", "),
             None,
@@ -1649,7 +1656,8 @@ async fn render_completion_returns_generate_request_with_body_request_id() {
                         "request_id": "body-req",
                         "model": "render-model",
                         "prompt": "hello",
-                        "max_tokens": 8
+                        "max_tokens": 8,
+                        "return_token_ids": true
                     })
                     .to_string(),
                 ))
@@ -1666,6 +1674,7 @@ async fn render_completion_returns_generate_request_with_body_request_id() {
     assert_eq!(json[0]["model"], "render-model");
     assert_eq!(json[0]["stream"], false);
     assert_eq!(json[0]["sampling_params"]["max_tokens"], 8);
+    assert_eq!(json[0]["return_token_ids"], true);
     assert!(!json[0]["token_ids"].as_array().unwrap().is_empty());
     assert!(json[0].get("stream_options").is_none());
     assert!(json[0].get("prompt_token_ids").is_none());
@@ -1714,7 +1723,8 @@ async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
                         "vllm_xargs": {"custom": 1},
                         "kv_transfer_params": {"do_remote_decode": true},
                         "ec_transfer_params": {"do_remote_encode": true},
-                        "chat_template_kwargs": {"enable_thinking": false}
+                        "chat_template_kwargs": {"enable_thinking": false},
+                        "return_token_ids": true
                     })
                     .to_string(),
                 ))
@@ -1753,7 +1763,9 @@ async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
         render_json["reasoning_parser_kwargs"],
         json!({"chat_template_kwargs": {"enable_thinking": false}})
     );
+    assert_eq!(render_json["return_token_ids"], true);
 
+    let expected_prompt_token_ids = json!(token_ids);
     let (chat, engine_task) = test_models_with_engine_outputs_and_backend_inner(
         b"engine-render-generate-round-trip",
         |request_id| engine_outputs_for_request(request_id, default_stream_output_specs()),
@@ -1804,9 +1816,14 @@ async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
         .expect("call generate app");
 
     assert_eq!(generate_response.status(), StatusCode::OK);
-    let _ = to_bytes(generate_response.into_body(), usize::MAX)
+    let generate_body = to_bytes(generate_response.into_body(), usize::MAX)
         .await
         .expect("read generate response");
+    let generate_json: serde_json::Value =
+        serde_json::from_slice(&generate_body).expect("decode generate response");
+    // The request's `return_token_ids` survives render, so generate echoes
+    // the prompt as the chat route would.
+    assert_eq!(generate_json["prompt_token_ids"], expected_prompt_token_ids);
     engine_task.finish().await;
 }
 
@@ -4146,77 +4163,96 @@ async fn invalid_terminal_finish_reason_is_returned_as_openai_error_sse() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn retryable_engine_error_returns_service_unavailable() {
-    // A retryable engine error (e.g. a paused engine's rejection) is a 503 on
-    // every route when it arrives before the response starts, an SSE error after.
+async fn engine_request_errors_map_to_http_status() {
+    // A retryable engine error (e.g. a paused engine's rejection) is a 503 and
+    // a validation error (e.g. a constraint the structured-output backend
+    // cannot compile) a 400 on every route when it arrives before the response
+    // starts, an SSE error after.
     let model = "Qwen/Qwen1.5-0.5B-Chat";
     let messages = json!([{"role": "user", "content": "hello"}]);
     let raw = |stream: bool| {
         json!({"model": model, "token_ids": [11, 22], "stream": stream,
                "sampling_params": {"max_tokens": 2}})
     };
-    let unavailable = StatusCode::SERVICE_UNAVAILABLE;
-    let cases = [
+    let paused = RequestError {
+        code: "engine_paused".to_string(),
+        message: "Generation is paused.".to_string(),
+        retryable: true,
+    };
+    let invalid = RequestError {
+        code: RequestError::VALIDATION_ERROR.to_string(),
+        message: "Invalid structured outputs: Grammar error: bad".to_string(),
+        retryable: false,
+    };
+    for (error, status, error_type) in [
         (
-            "/v1/completions",
-            json!({"model": model, "prompt": "hello"}),
-            unavailable,
+            paused,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "ServiceUnavailableError",
         ),
-        (
-            "/v1/chat/completions",
-            json!({"model": model, "messages": messages}),
-            unavailable,
-        ),
-        ("/inference/v1/generate", raw(false), unavailable),
-        ("/inference/v1/generate", raw(true), StatusCode::OK),
-    ];
-    for (uri, request, status) in cases {
-        let (chat, engine_task) = test_models_with_engine_outputs_and_backend_inner(
-            b"engine-openai",
-            |request_id| {
-                RequestBatchOutputs {
-                    outputs: vec![EngineCoreOutput {
-                        request_id: request_id.to_string(),
-                        finish_reason: Some(EngineCoreFinishReason::Error),
-                        error: Some(Box::new(RequestError {
-                            code: "engine_paused".to_string(),
-                            message: "Generation is paused.".to_string(),
-                            retryable: true,
-                        })),
+        (invalid, StatusCode::BAD_REQUEST, "BadRequestError"),
+    ] {
+        let cases = [
+            (
+                "/v1/completions",
+                json!({"model": model, "prompt": "hello"}),
+                status,
+            ),
+            (
+                "/v1/chat/completions",
+                json!({"model": model, "messages": messages}),
+                status,
+            ),
+            ("/inference/v1/generate", raw(false), status),
+            ("/inference/v1/generate", raw(true), StatusCode::OK),
+        ];
+        for (uri, request, expected_status) in cases {
+            let engine_error = error.clone();
+            let (chat, engine_task) = test_models_with_engine_outputs_and_backend_inner(
+                b"engine-openai",
+                move |request_id| {
+                    RequestBatchOutputs {
+                        outputs: vec![EngineCoreOutput {
+                            request_id: request_id.to_string(),
+                            finish_reason: Some(EngineCoreFinishReason::Error),
+                            error: Some(Box::new(engine_error.clone())),
+                            ..Default::default()
+                        }],
                         ..Default::default()
-                    }],
-                    ..Default::default()
-                }
-                .into()
-            },
-            |_| {},
-            Arc::new(FakeChatBackend::new()),
-        )
-        .await;
-        let mut app = build_router_with_scale_out_endpoints(
-            Arc::new(AppState::new(vec![model.to_string()], chat)),
-            true,
-        );
-        let response = app
-            .call(
-                Request::builder()
-                    .method("POST")
-                    .uri(uri)
-                    .header("content-type", "application/json")
-                    .body(Body::from(request.to_string()))
-                    .expect("build request"),
+                    }
+                    .into()
+                },
+                |_| {},
+                Arc::new(FakeChatBackend::new()),
             )
-            .await
-            .expect("call app");
+            .await;
+            let mut app = build_router_with_scale_out_endpoints(
+                Arc::new(AppState::new(vec![model.to_string()], chat)),
+                true,
+            );
+            let response = app
+                .call(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from(request.to_string()))
+                        .expect("build request"),
+                )
+                .await
+                .expect("call app");
 
-        assert_eq!(response.status(), status, "{uri} {request}");
-        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
-        engine_task.await.expect("mock engine task");
-        let text = String::from_utf8(body.to_vec()).expect("utf8 body");
-        assert!(
-            text.contains("\"type\":\"ServiceUnavailableError\"") && text.contains("\"code\":503"),
-            "{uri} {request}: {text}"
-        );
+            assert_eq!(response.status(), expected_status, "{uri} {request}");
+            let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+            engine_task.await.expect("mock engine task");
+            let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+            assert!(
+                text.contains(&format!("\"type\":\"{error_type}\""))
+                    && text.contains(&format!("\"code\":{}", status.as_u16()))
+                    && text.contains(&error.message),
+                "{uri} {request}: {text}"
+            );
+        }
     }
 }
 
@@ -5869,9 +5905,9 @@ async fn reasoning_blocks_are_mapped_to_reasoning_sse_chunks() {
     let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
         Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
         vec![
-            (bytes_to_token_ids(b"<think>"), None),
+            (token_ids("<think>"), None),
             (bytes_to_token_ids(b"think "), None),
-            (bytes_to_token_ids(b"more</think>"), None),
+            (token_ids("more</think>"), None),
             (
                 bytes_to_token_ids(b"answer"),
                 Some(EngineCoreFinishReason::Length),
@@ -5916,7 +5952,7 @@ async fn include_reasoning_false_suppresses_reasoning_in_non_stream_chat() {
     let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
         Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
         vec![
-            (bytes_to_token_ids(b"<think>think</think>"), None),
+            (token_ids("<think>think</think>"), None),
             (
                 bytes_to_token_ids(b"answer"),
                 Some(EngineCoreFinishReason::Length),
@@ -5976,7 +6012,7 @@ async fn include_reasoning_false_suppresses_non_stream_output_metadata() {
                 let add = recv_engine_message(dealer).await;
                 let request: EngineCoreRequest =
                     rmp_serde::from_slice(&add[1]).expect("decode request");
-                let reasoning_token_ids = bytes_to_token_ids(b"<think>think</think>");
+                let reasoning_token_ids = token_ids("<think>think</think>");
                 let answer_token_ids = bytes_to_token_ids(b"answer");
 
                 send_outputs(
@@ -6201,11 +6237,11 @@ async fn tool_call_sse_chunks_can_carry_logprobs() {
                     RequestBatchOutputs {
                         outputs: vec![request_output_with_logprobs(
                             &request.request_id,
-                            bytes_to_token_ids(b"<think>Need tool.</think>"),
+                            token_ids("<think>Need tool.</think>"),
                             None,
                             None,
-                            Some(sample_logprobs_for_tokens(&bytes_to_token_ids(
-                                b"<think>Need tool.</think>",
+                            Some(sample_logprobs_for_tokens(&token_ids(
+                                "<think>Need tool.</think>",
                             ))),
                             None,
                         )],
