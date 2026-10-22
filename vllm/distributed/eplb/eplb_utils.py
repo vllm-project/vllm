@@ -74,17 +74,6 @@ class CpuGpuEvent:
         self._event.record(stream)
         self._recorded.set()
 
-    def record_if_idle(self, stream: torch.Stream | None = None) -> bool:
-        """Record only if the previous event has already been consumed.
-
-        The shutdown path has to wake the waiting thread without knowing
-        whether a record is still pending, and record() rejects that case.
-        """
-        if self._recorded.is_set():
-            return False
-        self.record(stream)
-        return True
-
 
 def override_envs_for_eplb(
     parallel_config: ParallelConfig,

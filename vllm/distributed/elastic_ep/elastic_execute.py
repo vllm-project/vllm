@@ -464,19 +464,6 @@ class ElasticEPScalingExecutor:
     def switch_and_remove(self) -> None:
         # Removing ranks skipped preparation, so wait for prior cleanup here.
         self._wait_for_group_cleanup()
-        # The EPLB worker is a daemon thread that runs collectives on the EPLB
-        # group, and the group is destroyed a few lines below. Every removed
-        # worker was observed with that thread still alive here, and one of
-        # them segfaulted with no Python frames, only __clone, which is what a
-        # daemon thread killed inside a native call looks like.
-        eplb_state = self.worker.model_runner.eplb_state
-        if eplb_state is not None and not eplb_state.stop_async_worker():
-            # Carrying on would destroy the group under the thread, which is
-            # the segfault above, so say so rather than fail silently.
-            logger.warning(
-                "[Elastic EP] EPLB async worker did not stop before the "
-                "EPLB group is destroyed"
-            )
         self._release_cuda_graphs()
         retired_groups = _replace_active_groups(
             world=None, dp=None, ep=None, eplb=None, node_count=None

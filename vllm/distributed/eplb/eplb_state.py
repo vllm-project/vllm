@@ -289,11 +289,6 @@ class EplbState:
         """
         Background thread handling async transfers.
         """
-        self.async_stop_requested: bool = False
-        """
-        Asks :func:`transfer_run_periodically` to leave its loop.  See
-        :meth:`stop_async_worker`.
-        """
         self.device_index: int | None = None
         """
         Device index for the async EPLB worker thread.
@@ -991,33 +986,10 @@ class EplbState:
         if not self.is_async:
             return
         if self.async_worker is None:
-            self.async_stop_requested = False
             self.async_worker = start_async_worker(
                 self,
                 is_profile=is_profile,
             )
-
-    def stop_async_worker(self, timeout: float = 60.0) -> bool:
-        """Ask the background transfer thread to exit, and wait for it.
-
-        The thread runs collectives on the EPLB group and keeps a reference to
-        it, so it has to be gone before that group is destroyed. It is also a
-        daemon thread, so without this it is killed wherever it happens to be,
-        including inside a collective. Returns whether the thread exited.
-        """
-        thread = self.async_worker
-        if thread is None:
-            return True
-        self.async_stop_requested = True
-        # The thread parks on rearrange_event, so only a record wakes it.
-        self.rearrange_event.record_if_idle()
-        thread.join(timeout)
-        if thread.is_alive():
-            logger.warning("Async EPLB worker did not exit within %.1f s", timeout)
-            return False
-        self.async_worker = None
-        self.async_stop_requested = False
-        return True
 
     def drain_async(self) -> None:
         """Drain in-flight async EPLB by consuming all remaining layer results.
@@ -1073,7 +1045,6 @@ class EplbState:
                         f"Draining the async EPLB worker for model {model_key} "
                         f"did not finish within {timeout:.0f} s "
                         f"(pending_result={ms.pending_result is not None}, "
-                        f"stop_requested={self.async_stop_requested}, "
                         f"async worker {worker_state}). Every EP rank has to "
                         f"produce a result for each layer before any of them "
                         f"can leave this loop, so one rank that stopped "
