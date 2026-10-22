@@ -358,9 +358,13 @@ class DraftModelSpeculator(BaseSpeculator):
         draft_seq_lens_cpu_upper_bound = torch.zeros(
             num_reqs_padded, dtype=torch.int32, device="cpu"
         )
+        seq_lens_cpu_offset = step
+        if step == 0:
+            # Standalone AR include extra query tokens in prefill
+            seq_lens_cpu_offset += self.num_extra_query_per_req
         torch.add(
             seq_lens_cpu_upper_bound[:num_reqs],
-            step,
+            seq_lens_cpu_offset,
             out=draft_seq_lens_cpu_upper_bound[:num_reqs],
         )
         draft_seq_lens_cpu_upper_bound[:num_reqs].clamp_(max=self.max_model_len)
