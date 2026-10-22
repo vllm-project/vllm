@@ -39,7 +39,7 @@ if TYPE_CHECKING:
 # fp8_ds_mla KV row: 512 B quantized NoPE + 16 B scales + 128 B RoPE.
 FP8_DS_MLA_ROW_BYTES = 656
 HiSparseTopKResult: TypeAlias = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
-# trtllm-gen sparse MLA reads ~200 rows from the start of its KV cache
+# trtllm-gen sparse MLA reads up to ~250 rows from the start of its KV cache
 # whatever the cache's size: https://github.com/flashinfer-ai/flashinfer/issues/6484
 _MIN_STAGED_PREFILL_KV_ROWS = 256
 

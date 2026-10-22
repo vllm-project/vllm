@@ -3535,7 +3535,7 @@ def test_hisparse_gather_prefill_cache_prefers_resident_rows():
 def test_hisparse_staged_prefill_cache_backs_min_attention_rows():
     """A staged cache of a few blocks still has 256 allocated rows behind it.
 
-    trtllm-gen sparse MLA reads ~200 rows from the start of its KV cache
+    trtllm-gen sparse MLA reads up to ~250 rows from the start of its KV cache
     whatever its size, faulting when a smaller cache ends at an unmapped page.
     """
     if not _has_hisparse_ops():
