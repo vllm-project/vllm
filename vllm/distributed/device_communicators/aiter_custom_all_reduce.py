@@ -54,6 +54,10 @@ class AiterCustomAllreduce:
         return self._impl.disabled
 
     def should_custom_ar(self, inp: torch.Tensor) -> bool:
+        # AITER's gate checks only size and contiguity, but its kernel raises
+        # for other dtypes (e.g. int8 FP8-embedding reductions); fall back.
+        if inp.dtype not in (torch.float32, torch.float16, torch.bfloat16):
+            return False
         return self._impl.should_custom_ar(inp)
 
     def custom_all_reduce(self, inp: torch.Tensor) -> torch.Tensor | None:

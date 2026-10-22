@@ -349,7 +349,35 @@ def pad_tp_shard_to_weight_blocks(
     config.intermediate_size_per_partition = round_up(
         config.intermediate_size_per_partition, block_n
     )
+    # Ranks hold varying amounts of checkpoint data followed by zero weights,
+    # so there is no uniform tail to mask; the zero rows contribute nothing.
+    if config.intermediate_pad is None:
+        config.intermediate_pad = 0
     return True
+
+
+def _is_aiter_fp8_moe_forced() -> bool:
+    """Whether the AITER env vars force the AITER backend in
+    `select_fp8_moe_backend`."""
+    if not (
+        envs.is_set("VLLM_ROCM_USE_AITER") or envs.is_set("VLLM_ROCM_USE_AITER_MOE")
+    ):
+        return False
+    return (
+        envs.VLLM_ROCM_USE_AITER
+        and envs.VLLM_ROCM_USE_AITER_MOE
+        and not rocm_aiter_ops.is_rdna_aiter_enabled()
+    )
+
+
+def _forced_fp8_moe_backend(config: FusedMoEConfig) -> Fp8MoeBackend | None:
+    """The backend `select_fp8_moe_backend` will use without falling back, or
+    None if it will pick by priority."""
+    if config.moe_backend != "auto":
+        return map_fp8_backend(config.moe_backend)
+    if _is_aiter_fp8_moe_forced():
+        return Fp8MoeBackend.AITER
+    return None
 
 
 def resolve_fp8_moe_weight_block_shape(
@@ -361,8 +389,9 @@ def resolve_fp8_moe_weight_block_shape(
     """Return the TP-adapted block shape and refine factor:
     refine if kernels allow, else pad to the TP shard."""
     refined_shape = refine_fp8_moe_block_shape(config, weight_block_size)
-    if is_checkpoint_fp8_serialized and config.moe_backend != "auto":
-        kernel_classes = backend_to_kernel_cls(map_fp8_backend(config.moe_backend))
+    forced_backend = _forced_fp8_moe_backend(config)
+    if is_checkpoint_fp8_serialized and forced_backend is not None:
+        kernel_classes = backend_to_kernel_cls(forced_backend)
         can_refine = refined_shape is not None and any(
             k_cls._supports_quant_scheme(
                 create_fp8_quant_key(
@@ -376,7 +405,7 @@ def resolve_fp8_moe_weight_block_shape(
             logger.info_once(
                 "FP8 %s TP loading uses complete checkpoint blocks: "
                 "local allocation %d, without weight requantization.",
-                config.moe_backend,
+                forced_backend.value,
                 config.intermediate_size_per_partition,
             )
             return weight_block_size, None
@@ -504,12 +533,7 @@ def select_fp8_moe_backend(
 
     # Handle explicit AITER FP8 configuration.
     if envs.is_set("VLLM_ROCM_USE_AITER") or envs.is_set("VLLM_ROCM_USE_AITER_MOE"):
-        skip_aiter_moe = (
-            not envs.VLLM_ROCM_USE_AITER
-            or not envs.VLLM_ROCM_USE_AITER_MOE
-            or rocm_aiter_ops.is_rdna_aiter_enabled()
-        )
-        if skip_aiter_moe:
+        if not _is_aiter_fp8_moe_forced():
             if Fp8MoeBackend.AITER in AVAILABLE_BACKENDS:
                 AVAILABLE_BACKENDS.remove(Fp8MoeBackend.AITER)
         else:

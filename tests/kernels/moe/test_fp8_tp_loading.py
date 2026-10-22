@@ -166,6 +166,26 @@ def test_fp8_tp_default_keeps_refined_layout(monkeypatch, backend, tp_size, bloc
     assert layer.quant_method.moe_block_shape == [block, block]
 
 
+@pytest.mark.parametrize("aiter_enabled,padded", [("1", True), ("0", False)])
+def test_fp8_tp_env_forced_aiter_uses_block_aligned_layout(
+    monkeypatch, aiter_enabled, padded
+):
+    # VLLM_ROCM_USE_AITER forces AITER, which only supports 128x128 blocks,
+    # even when moe_backend is left on auto.
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", aiter_enabled)
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+    layer = _make_fp8_tp_experts(monkeypatch, 4, 0, "auto")
+    assert layer.moe_config.tp_shard_with_padding is padded
+    if padded:
+        assert layer.moe_config.intermediate_size_per_partition == 256
+        assert layer.moe_config.intermediate_pad == 0
+        assert layer.quant_method.moe_block_shape == [128, 128]
+    else:
+        assert layer.moe_config.intermediate_size_per_partition == 160
+        assert layer.moe_config.intermediate_pad is None
+        assert layer.quant_method.moe_block_shape == [32, 32]
+
+
 @pytest.mark.parametrize(
     "field,value",
     [
