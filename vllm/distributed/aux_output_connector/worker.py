@@ -37,7 +37,10 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
     bind_routed_experts_capturer,
 )
-from vllm.model_executor.layers.indexer_capture import IndexerCapturer
+from vllm.model_executor.layers.indexer_capture import (
+    IndexerCapturer,
+    bind_indexer_capturer,
+)
 from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 
 if TYPE_CHECKING:
@@ -122,7 +125,7 @@ class AuxOutputWorkerConnector:
             self._indexer is None
             and vllm_config.aux_output_config.enable_return_indexer_topk
         ):
-            self._indexer = IndexerCapturer(
+            self._indexer = bind_indexer_capturer(
                 model,
                 vllm_config,
                 output_rank=get_tp_group().is_first_rank,

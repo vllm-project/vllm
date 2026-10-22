@@ -1210,6 +1210,9 @@ class DeepseekV2MLAAttention(nn.Module):
             is_sparse=self.is_v32,
             topk_indices_buffer=topk_indices_buffer,
             index_group_builder=index_group_builder,
+            enable_indexer_capture=(
+                self.is_v32 and vllm_config.aux_output_config.enable_return_indexer_topk
+            ),
         )
 
         self.mla_attn = MultiHeadLatentAttentionWrapper(
@@ -1236,18 +1239,6 @@ class DeepseekV2MLAAttention(nn.Module):
             # reused by later draft iterations through index sharing.
             allow_short_prefill_indexer_scoring_skip=not is_mtp_layer,
         )
-        if (
-            vllm_config.aux_output_config.enable_return_indexer_topk
-            and self.indexer is not None
-        ):
-            from vllm.model_executor.layers.indexer_capture import (
-                configure_indexer_capture,
-            )
-
-            configure_indexer_capture(
-                self.mla_attn, vllm_config, layer_id, config.index_topk
-            )
-            self.indexer.indexer_op.dense_mha_metadata_layer_name = ""
 
     def forward(
         self,
