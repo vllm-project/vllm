@@ -15,6 +15,10 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
+from vllm.model_executor.layers.fused_moe.router.rocm_sigmoid_single_group_topk import (  # noqa: E501
+    can_use_sigmoid_single_group_topk,
+    sigmoid_single_group_topk,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -162,6 +166,29 @@ def inject_shared_expert_weights(
     return topk_weights, topk_ids
 
 
+def _single_group_topk_is_profitable() -> bool:
+    """Only dispatch the Triton router when the step runs under a CUDA graph.
+
+    The kernel's advantage is device time: under graph replay it is 1.67x-2.15x
+    on gfx942. Eagerly it loses, because it is a Triton launch from Python
+    against AITER's single C++ dispatch, and that overhead is no longer
+    amortised -- measured end to end at -1.8% to -3.5% throughput with
+    --enforce-eager. Capture and replay take the same branch, since the mode is
+    already set while capturing.
+
+    Mirrors the forward-context check in
+    vllm/models/deepseek_v41/amd/ops/sparse_indexer.py.
+    """
+    from vllm.config import CUDAGraphMode
+    from vllm.forward_context import get_forward_context
+
+    try:
+        return get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.NONE
+    except AssertionError:
+        # No forward context (direct calls, unit tests): keep AITER.
+        return False
+
+
 def rocm_aiter_grouped_topk(
     hidden_states: torch.Tensor,
     gating_output: torch.Tensor,
@@ -204,16 +231,37 @@ def rocm_aiter_grouped_topk(
         topk_weights = torch.empty((token, topk), dtype=torch.float32, device=device)
 
     if e_score_correction_bias is not None:
-        rocm_aiter_ops.biased_grouped_topk(
+        # Degenerate grouping (num_expert_group == topk_group == 1): the group
+        # stage selects nothing, so a plain sigmoid+bias top-k in one
+        # register-resident wave replaces AITER's LDS-scan grouped kernel.
+        if _single_group_topk_is_profitable() and can_use_sigmoid_single_group_topk(
             gating_output,
             e_score_correction_bias,
             topk_weights,
             topk_ids,
             num_expert_group,
             topk_group,
-            renormalize,
-            routed_scaling_factor=routed_scaling_factor,
-        )
+            scoring_func,
+        ):
+            sigmoid_single_group_topk(
+                gating_output,
+                e_score_correction_bias,
+                topk_weights,
+                topk_ids,
+                renormalize,
+                routed_scaling_factor,
+            )
+        else:
+            rocm_aiter_ops.biased_grouped_topk(
+                gating_output,
+                e_score_correction_bias,
+                topk_weights,
+                topk_ids,
+                num_expert_group,
+                topk_group,
+                renormalize,
+                routed_scaling_factor=routed_scaling_factor,
+            )
     else:
         assert scoring_func == "softmax" or scoring_func == "sigmoid"
         rocm_aiter_ops.grouped_topk(
