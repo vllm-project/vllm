@@ -1226,12 +1226,42 @@ class VllmConfig:
                     )
 
     def _verify_kv_transfer_compat(self) -> None:
-        """Reject configurations that silently corrupt KV transfers."""
+        """Reject unsupported KV transfer combinations."""
         if (
             self.kv_transfer_config is None
             or self.kv_transfer_config.kv_connector is None
         ):
             return
+
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.use_remote_draft()
+        ):
+            pending = [self.kv_transfer_config]
+            while pending:
+                connector = pending.pop()
+                if connector.kv_connector == "MultiConnector":
+                    # Child connectors use their own roles, independently of
+                    # the wrapper's role.
+                    pending.extend(
+                        KVTransferConfig(**child)
+                        for child in connector.kv_connector_extra_config.get(
+                            "connectors", []
+                        )
+                    )
+                elif connector.is_kv_consumer or (
+                    connector.kv_connector in ("NixlConnector", "NixlPullConnector")
+                    and connector.kv_connector_extra_config.get(
+                        "bidirectional_kv_xfer", False
+                    )
+                ):
+                    raise ValueError(
+                        "remote drafting does not support KV consumers "
+                        f"({connector.kv_connector}): external KV hits skip "
+                        "the full target prefill required by the remote drafter, "
+                        "even with prefix caching disabled. Disable KV "
+                        "consumption/offloading or use local drafting."
+                    )
 
         if self.model_config is not None and self.model_config.enable_sleep_mode:
             # Lazy import to avoid circular dependencies
@@ -2197,6 +2227,7 @@ class VllmConfig:
         # Resolve kv_offloading-derived connector name into kv_transfer_config
         # before the HMA check below, which inspects the connector class.
         self._post_init_kv_transfer_config()
+        self._verify_kv_transfer_compat()
         self._verify_aux_output_compatibility()
 
         # Hybrid KV cache manager (HMA) runtime rules:
@@ -2305,7 +2336,6 @@ class VllmConfig:
             if "-quant_fp8" not in custom_ops:
                 custom_ops.append("+quant_fp8")
 
-        self._verify_kv_transfer_compat()
         if self.use_cumem_cudagraph_pool:
             # NCCL graph registration pins the offloaded pool; workers inherit this.
             value = os.environ.setdefault("NCCL_GRAPH_REGISTER", "0")

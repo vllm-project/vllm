@@ -25,8 +25,10 @@ from vllm.v1.spec_decode.remote.capabilities import (
 )
 from vllm.v1.spec_decode.remote.transport import TransportError, check_data_frame_size
 
-PROTOCOL_MAJOR = 1
-PROTOCOL_MINOR = 0
+# v2 requires peers to honor the per-round draft budget, including zero.
+# A v1 server would silently ignore it and still generate the maximum K.
+PROTOCOL_MAJOR = 2
+PROTOCOL_MINOR = 1
 
 # Field-level range constraints are enforced by msgspec on decode, so a
 # peer cannot deliver negative identifiers or degenerate shapes. Checks
@@ -173,6 +175,8 @@ class PrefillChunk(msgspec.Struct):
     is_final: bool
     feature_slot: NonNegativeInt
     checksum: NonNegativeInt
+    execution_timeout_ms: NonNegativeInt | None = None
+    """Remaining relative execution budget when the control frame is sent."""
 
 
 class AdvanceAndPropose(msgspec.Struct):
@@ -191,6 +195,14 @@ class AdvanceAndPropose(msgspec.Struct):
     round_ids_slot: NonNegativeInt | None = None
     query_lens_slot: NonNegativeInt | None = None
     """Integer frame [len(keys)] of token-level feature rows per key."""
+    num_speculative_tokens: NonNegativeInt | None = None
+    """This round's draft budget; None uses the maximum negotiated by Hello.
+
+    Zero still applies verified context but produces no usable drafts. Results
+    retain the negotiated maximum width, with valid lengths bounded by this K.
+    """
+    execution_timeout_ms: NonNegativeInt | None = None
+    """Optional relative budget; older minor peers retain their server limit."""
 
 
 class ProposalResponse(msgspec.Struct):

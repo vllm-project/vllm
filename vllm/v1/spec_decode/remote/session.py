@@ -18,6 +18,7 @@ are opened, so only requests that were running at the time lose
 speculation.
 """
 
+import contextlib
 import itertools
 import math
 import time
@@ -94,11 +95,6 @@ logger = init_logger(__name__)
 # draft tokens, per-row valid lengths, per-row status codes.
 RESULT_FRAMES = 3
 
-# Writes get at least this throughput's worth of time on top of the request
-# budget, so a large prefill chunk is not cut off mid-frame (which would
-# close the connection) merely because copying it takes longer than a
-# decode round's deadline.
-_MIN_WRITE_BYTES_PER_S = 256 << 20
 _RECONNECT_BACKOFF_S = 1.0
 _MAX_RECONNECT_BACKOFF_S = 30.0
 
@@ -262,6 +258,7 @@ class RemoteDraftSession:
         self._max_pending_bytes = 0
         self._max_result_frame_bytes = 0
         self._records: dict[int, _SequenceRecord] = {}
+        self._retiring: set[SequenceKey] = set()
         # Survives reconnects so closed requests need no per-id tombstones.
         self._next_generation = 0
         self._abandoned_batches: set[int] = set()
@@ -424,20 +421,26 @@ class RemoteDraftSession:
             len(ack.feature_schema.slots),
         )
 
-    def maybe_reconnect(self) -> bool:
+    def maybe_reconnect(self, *, deadline: float | None = None) -> bool:
         """Re-establish a lost connection, at most once per backoff period.
 
         Returns whether the session is connected. Call it between rounds;
         sequences opened on the old connection stay INVALID until they are
         closed or re-opened. Each attempt is bounded by the request timeout
-        because it runs on the runner thread.
+        because it runs on the runner thread. An explicit ``deadline`` also
+        caps the remaining connect and handshake time.
         """
         if self._alive:
             return True
         if self._inflight_batch_id is not None or self._clock() < self._reconnect_at:
             return False
+        timeout_s = self._request_timeout_s
+        if deadline is not None:
+            timeout_s = min(timeout_s, deadline - self._clock())
+        if timeout_s <= 0:
+            return False
         try:
-            self.connect(timeout_s=self._request_timeout_s)
+            self.connect(timeout_s=timeout_s)
         except RemoteDraftError as e:
             self._reconnect_at = self._clock() + self._reconnect_backoff_s
             logger.warning(
@@ -478,6 +481,7 @@ class RemoteDraftSession:
         self._max_pending_bytes = 0
         self._max_result_frame_bytes = 0
         self._abandoned_batches.clear()
+        self._retiring.clear()
 
     def _hello(self) -> Hello:
         identity = self._identity
@@ -535,57 +539,93 @@ class RemoteDraftSession:
         Re-opening a desynced or invalidated sequence bumps the generation
         so the server discards anything it still holds for the old one.
         """
-        self._require_no_inflight("open a sequence")
-        self.maybe_reconnect()
-        key = self._open(sequence_id)
-        if self.sequence_state(key) is SequenceState.INVALID and self.maybe_reconnect():
-            # The open found the connection dead (e.g. a restarted server)
-            # and reconnecting worked, so this request can use the new one.
-            key = self._open(sequence_id)
-        return key
+        return self.open_sequences((sequence_id,))[0]
 
-    def _open(self, sequence_id: int) -> SequenceKey:
-        record = self._records.get(sequence_id)
-        if record is not None and record.state not in (
-            SequenceState.DESYNCED,
-            SequenceState.INVALID,
-        ):
-            raise RemoteDraftError(
-                f"sequence {sequence_id} is already open ({record.state.value})"
+    def open_sequences(
+        self, sequence_ids: Sequence[int], *, deadline: float | None = None
+    ) -> tuple[SequenceKey, ...]:
+        """Pipeline request opens within one preparation budget, including reconnect."""
+        self._require_no_inflight("open sequences")
+        if len(set(sequence_ids)) != len(sequence_ids):
+            raise ValueError("duplicate sequence ids in open_sequences")
+        for sequence_id in sequence_ids:
+            record = self._records.get(sequence_id)
+            if record is not None and record.state not in (
+                SequenceState.DESYNCED,
+                SequenceState.INVALID,
+            ):
+                raise RemoteDraftError(
+                    f"sequence {sequence_id} is already open ({record.state.value})"
+                )
+        if not sequence_ids:
+            return ()
+        if deadline is None:
+            deadline = self.preparation_deadline()
+        try:
+            self.maybe_reconnect(deadline=deadline)
+            keys = self._open_many(sequence_ids, deadline=deadline)
+            if all(
+                self.sequence_state(key) is SequenceState.INVALID for key in keys
+            ) and self.maybe_reconnect(deadline=deadline):
+                # Reconnect succeeded after open found the old connection dead.
+                keys = self._open_many(sequence_ids, deadline=deadline)
+            return keys
+        except MemoryError:
+            # No keys were returned to the caller, even if the peer opened them.
+            self._invalidate("remote sequence registration allocation failed")
+            for sequence_id in sequence_ids:
+                record = self._records.pop(sequence_id, None)
+                if record is not None:
+                    self._retiring.discard(record.key)
+            raise
+
+    def _open_many(
+        self, sequence_ids: Sequence[int], *, deadline: float
+    ) -> tuple[SequenceKey, ...]:
+        records: list[_SequenceRecord] = []
+        for sequence_id in sequence_ids:
+            generation = self._next_generation
+            self._next_generation += 1
+            key = SequenceKey(
+                verifier_instance_id=self._identity.verifier_instance_id,
+                sequence_id=sequence_id,
+                generation=generation,
             )
-        generation = self._next_generation
-        self._next_generation += 1
-        key = SequenceKey(
-            verifier_instance_id=self._identity.verifier_instance_id,
-            sequence_id=sequence_id,
-            generation=generation,
-        )
-        record = _SequenceRecord(key, SequenceState.OPENING)
-        self._records[sequence_id] = record
+            record = _SequenceRecord(key, SequenceState.OPENING)
+            self._records[sequence_id] = record
+            records.append(record)
+        keys = tuple(record.key for record in records)
         if not self._alive:
-            record.state = SequenceState.INVALID
-            record.last_status = SpeculatorStatusCode.INTERNAL_ERROR
+            for record in records:
+                record.state = SequenceState.INVALID
+                record.last_status = SpeculatorStatusCode.INTERNAL_ERROR
             # The connection loss and each reconnect attempt already warned.
             self._raise_if_strict(
-                f"cannot open sequence {sequence_id}: session is not connected",
+                "cannot open sequences: session is not connected",
                 quiet=True,
             )
-            return key
-        ((status, detail),) = self._sequence_rpcs([(OpenSequence(key=key), key, None)])
-        if status is SpeculatorStatusCode.OK:
-            record.state = transition_sequence(record.state, SequenceState.PREFILLING)
-        else:
-            if status is SpeculatorStatusCode.QUEUE_FULL:
-                # A rejected open left no server state to retry against;
-                # latch target-only so prefill and dispatch stay quiet
-                # no-ops instead of wedging the sequence in OPENING.
-                self._latch_target_only(record, status)
+            return keys
+        replies, deadline = self._sequence_rpcs(
+            [(OpenSequence(key=key), key, None) for key in keys], deadline=deadline
+        )
+        failures: list[str] = []
+        for record, (status, detail) in zip(records, replies):
+            if status is SpeculatorStatusCode.OK:
+                record.state = transition_sequence(
+                    record.state, SequenceState.PREFILLING
+                )
             else:
-                self._apply_status(record, status)
-            self._raise_if_strict(
-                f"open_sequence({sequence_id}) failed: {status.name} {detail}"
-            )
-        return key
+                if status is SpeculatorStatusCode.QUEUE_FULL:
+                    self._latch_target_only(record, status)
+                else:
+                    self._apply_status(record, status)
+                failures.append(
+                    f"sequence {record.key.sequence_id}: {status.name} {detail}"
+                )
+        self._retire_terminal_sequences(deadline)
+        if failures:
+            self._raise_if_strict("open_sequences failed for " + "; ".join(failures))
+        return keys
 
     def prefill(
         self, key: SequenceKey, features: FeatureBatch, *, is_final: bool
@@ -594,7 +634,10 @@ class RemoteDraftSession:
         self.prefill_many([(key, features, is_final)])
 
     def prefill_many(
-        self, chunks: Sequence[tuple[SequenceKey, FeatureBatch, bool]]
+        self,
+        chunks: Sequence[tuple[SequenceKey, FeatureBatch, bool]],
+        *,
+        deadline: float | None = None,
     ) -> None:
         """Send one prompt chunk for each of several sequences.
 
@@ -605,6 +648,8 @@ class RemoteDraftSession:
         offsets. A sequence that is already latched target-only silently
         ignores prefill so the request keeps running without speculation.
         """
+        if deadline is None:
+            deadline = self.preparation_deadline()
         self._require_no_inflight("prefill a sequence")
         if len({key for key, _, _ in chunks}) != len(chunks):
             raise ValueError("at most one prefill chunk per sequence per call")
@@ -654,8 +699,9 @@ class RemoteDraftSession:
                 checksum=_checksum(frames),
             )
             prepared.append((record, chunk, frames))
-        replies = self._sequence_rpcs(
-            [(chunk, chunk.key, frames) for _, chunk, frames in prepared]
+        replies, deadline = self._sequence_rpcs(
+            [(chunk, chunk.key, frames) for _, chunk, frames in prepared],
+            deadline=deadline,
         )
         for (record, chunk, _), (status, detail) in zip(prepared, replies):
             if status is SpeculatorStatusCode.OK:
@@ -670,6 +716,7 @@ class RemoteDraftSession:
                 f"sequence {chunk.key.sequence_id} at offset {chunk.offset}: "
                 f"{status.name} {detail}"
             )
+        self._retire_terminal_sequences(deadline)
         if failures:
             self._raise_if_strict("prefill failed for " + "; ".join(failures))
 
@@ -685,10 +732,12 @@ class RemoteDraftSession:
                 continue
             if record.state is SequenceState.INVALID:
                 del self._records[key.sequence_id]
+                self._retiring.discard(key)
                 continue
             record.state = transition_sequence(record.state, SequenceState.CLOSING)
             pending.append(key)
         if pending and self._alive:
+            self._retiring.difference_update(pending)
             self._close_remote(tuple(pending))
         for key in pending:
             record = self._records.pop(key.sequence_id, None)
@@ -731,7 +780,58 @@ class RemoteDraftSession:
     # Proposal rounds
     # ------------------------------------------------------------------
 
-    def dispatch(self, batch: RemoteProposalBatch) -> RemoteProposalHandle:
+    def preparation_deadline(self) -> float:
+        """Capture the existing request budget before preparing remote features."""
+        return self._clock() + self._request_timeout_s
+
+    def fail_sequences(
+        self,
+        keys: Collection[SequenceKey],
+        *,
+        status: SpeculatorStatusCode = SpeculatorStatusCode.OUT_OF_MEMORY,
+        detail: str,
+        deadline: float | None = None,
+    ) -> None:
+        """Latch local preparation failures until the affected requests close.
+
+        Preparation can advance the verifier's bookkeeping before the peer
+        receives its context. Keeping the records terminal prevents a later
+        step from resuming with stale own-KV. An outstanding proposal uses
+        the same connection teardown as a transport failure. Idle remote state
+        is retired without waiting for ACKs, using only the preparation budget
+        captured by the caller before the failed work.
+        """
+        for key in keys:
+            record = self._records.get(key.sequence_id)
+            if record is not None and record.key == key:
+                self._latch_target_only(record, status)
+        if self._inflight_batch_id is not None:
+            self._invalidate(detail)
+        self._retire_terminal_sequences(deadline)
+        self._raise_if_strict(detail)
+
+    def _retire_terminal_sequences(self, deadline: float | None) -> None:
+        """Reclaim terminal peer state at an idle boundary within its budget."""
+        if not self._alive or not self._retiring or self._inflight_batch_id is not None:
+            return
+        remaining = 0.0 if deadline is None else deadline - self._clock()
+        if remaining > 0:
+            # A send failure already tears down connection-owned peer KV.
+            with contextlib.suppress(TransportError):
+                self._send_retirements(
+                    self._require_connection(), time.monotonic() + remaining
+                )
+        elif not any(
+            record.state
+            in (SequenceState.OPENING, SequenceState.PREFILLING, SequenceState.READY)
+            for record in self._records.values()
+        ):
+            self._invalidate("terminal cleanup exhausted the request budget")
+        # A healthy sibling flushes the bounded queue on its next RPC.
+
+    def dispatch(
+        self, batch: RemoteProposalBatch, *, deadline: float | None = None
+    ) -> RemoteProposalHandle:
         """Send one round to the server without waiting for the result.
 
         Rows whose sequence is not READY (latched target-only, desynced,
@@ -741,7 +841,14 @@ class RemoteDraftSession:
         At most one proposal may be in flight per session: collect the
         previous handle before dispatching the next round.
         """
+        if deadline is None:
+            deadline = self.preparation_deadline()
         self._require_no_inflight(f"dispatch batch {batch.batch_id}")
+        effective_k = batch.num_speculative_tokens
+        if effective_k is None:
+            effective_k = self._identity.num_speculative_tokens
+        if not 0 <= effective_k <= self._identity.num_speculative_tokens:
+            raise ValueError("round draft budget must be within the negotiated maximum")
         if batch.batch_id <= self._last_batch_id:
             raise ValueError(
                 f"batch_id {batch.batch_id} is not newer than "
@@ -775,7 +882,7 @@ class RemoteDraftSession:
             active_rows=self._admit(batch.keys, ready_rows, query_lens),
             num_speculative_tokens=self._identity.num_speculative_tokens,
             device=batch.recovery_tokens.device,
-            deadline=self._clock() + self._request_timeout_s,
+            deadline=deadline,
         )
         handle.failed_rows.update(
             dict.fromkeys(
@@ -816,6 +923,7 @@ class RemoteDraftSession:
             recovery_tokens_slot=base + 1,
             feature_slot=base + num_inputs,
             query_lens_slot=None if batch.query_lens is None else base + 2,
+            num_speculative_tokens=effective_k,
         )
         failure = None
         if self._clock() >= handle.deadline:
@@ -917,6 +1025,12 @@ class RemoteDraftSession:
         tokens: torch.Tensor | None,
         valid: torch.Tensor | None,
     ) -> RemoteProposalResult:
+        deadline = handle.deadline
+        if SpeculatorStatusCode.TIMEOUT in statuses.values():
+            # A reported timeout must not start another write even if the
+            # injectable clock has not yet observed the transport's deadline.
+            deadline = min(deadline, self._clock())
+        self._retire_terminal_sequences(deadline)
         result = self._build_result(handle, statuses, tokens, valid)
         # Only rows decided this round: rows latched earlier report their
         # old status every round and must not warn every decode step.
@@ -1101,30 +1215,32 @@ class RemoteDraftSession:
         *,
         deadline: float,
         frames: list[DataFrame] | None = None,
-        drain_incoming: bool = False,
     ) -> int:
         conn = self._require_connection()
-        request_id = self._next_request_id
-        self._next_request_id += 1
         frames = frames or []
-        num_bytes = sum(len(frame.payload) for frame in frames)
         # Translate the injectable session clock to the transport's monotonic
         # clock once, so every frame consumes the same remaining budget.
-        budget = max(deadline - self._clock(), num_bytes / _MIN_WRITE_BYTES_PER_S)
+        budget = max(0.0, deadline - self._clock())
         wire_deadline = time.monotonic() + budget
+        self._send_retirements(conn, wire_deadline)
+        # Retirement ACKs can still be pending after their write queue emptied.
+        request_id = self._next_request_id
+        self._next_request_id += 1
         sent_frames = False
         try:
             for frame in frames:
-                conn.send_data(
-                    frame, deadline=wire_deadline, drain_incoming=drain_incoming
-                )
+                conn.send_data(frame, deadline=wire_deadline, drain_incoming=True)
                 sent_frames = True
+            if isinstance(message, (PrefillChunk, AdvanceAndPropose)):
+                message.execution_timeout_ms = max(
+                    0, int((deadline - self._clock()) * 1000)
+                )
             conn.send_control(
                 encode_message(
                     message, session_id=self._session_id, request_id=request_id
                 ),
                 deadline=wire_deadline,
-                drain_incoming=drain_incoming,
+                drain_incoming=True,
             )
         except TransportTimeout:
             # Completed data frames also need their final control message;
@@ -1133,6 +1249,28 @@ class RemoteDraftSession:
                 self._invalidate("timed out while sending")
             raise
         return request_id
+
+    def _send_retirements(self, conn: FramedConnection, wire_deadline: float) -> None:
+        """Release unused peer KV before later commands, without an ACK wait."""
+        if not self._retiring:
+            return
+        keys = tuple(self._retiring)
+        request_id = self._next_request_id
+        self._next_request_id += 1
+        try:
+            conn.send_control(
+                encode_message(
+                    CloseSequence(keys=keys),
+                    session_id=self._session_id,
+                    request_id=request_id,
+                ),
+                deadline=wire_deadline,
+                drain_incoming=True,
+            )
+        except TransportError:
+            self._invalidate("terminal sequence cleanup did not finish sending")
+            raise
+        self._retiring.difference_update(keys)
 
     def _await(
         self,
@@ -1235,19 +1373,21 @@ class RemoteDraftSession:
         )
 
     def _sequence_rpcs(
-        self, calls: list[tuple[Any, SequenceKey, list[DataFrame] | None]]
-    ) -> list[tuple[SpeculatorStatusCode, str]]:
-        """Pipeline sequence commands while buffering their acknowledgements.
+        self,
+        calls: list[tuple[Any, SequenceKey, list[DataFrame] | None]],
+        *,
+        deadline: float | None = None,
+    ) -> tuple[list[tuple[SpeculatorStatusCode, str]], float]:
+        """Return sequence replies and the remaining acknowledgement deadline.
 
-        Writes share one request budget; the acknowledgements get a fresh
-        one once everything is written, so the time spent copying large
-        chunks does not count against the server.
+        Writes and acknowledgements consume the same remaining budget.
         """
         results = [
             (SpeculatorStatusCode.TIMEOUT, "not sent before the deadline")
         ] * len(calls)
         pending: dict[int, int] = {}
-        deadline = self._clock() + self._request_timeout_s
+        if deadline is None:
+            deadline = self._clock() + self._request_timeout_s
         lost = ""
         try:
             for index, (message, _, frames) in enumerate(calls):
@@ -1255,7 +1395,6 @@ class RemoteDraftSession:
                     message,
                     frames=frames,
                     deadline=deadline,
-                    drain_incoming=len(calls) > 1,
                 )
                 pending[request_id] = index
         except TransportTimeout:
@@ -1266,7 +1405,6 @@ class RemoteDraftSession:
             results[index:] = [(SpeculatorStatusCode.INTERNAL_ERROR, lost)] * (
                 len(calls) - index
             )
-        deadline = self._clock() + self._request_timeout_s
         unanswered = (
             SpeculatorStatusCode.TIMEOUT,
             "no acknowledgement before deadline",
@@ -1308,7 +1446,10 @@ class RemoteDraftSession:
                         SpeculatorStatusCode.INTERNAL_ERROR,
                         "session invalidated after acknowledgement",
                     )
-        return results
+        if any(status is SpeculatorStatusCode.TIMEOUT for status, _ in results):
+            # A timeout cannot grant a fresh retirement write budget.
+            deadline = min(deadline, self._clock())
+        return results, deadline
 
     def _apply_status(
         self, record: _SequenceRecord, status: SpeculatorStatusCode
@@ -1369,6 +1510,7 @@ class RemoteDraftSession:
         record.last_status = status
         if can_transition_sequence(record.state, SequenceState.TARGET_ONLY):
             record.state = SequenceState.TARGET_ONLY
+            self._retiring.add(record.key)
 
     def _is_ready(self, key: SequenceKey) -> bool:
         record = self._records.get(key.sequence_id)
@@ -1497,6 +1639,7 @@ class RemoteDraftSession:
         self._inbound_sizes.clear()
         self._inbound_bytes = 0
         self._drop_connection()
+        self._retiring.clear()
 
     def _drop_connection(self) -> None:
         conn, self._conn = self._conn, None

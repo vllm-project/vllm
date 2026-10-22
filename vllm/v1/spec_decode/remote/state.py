@@ -134,6 +134,8 @@ class RemoteProposalBatch:
     """[batch] CPU tensor: rows each key owns in token-level feature slots,
     which then hold ``sum(query_lens)`` rows in key order. None means one
     row per key."""
+    num_speculative_tokens: int | None = None
+    """Effective K for this round, or None for the negotiated maximum."""
 
 
 @dataclass

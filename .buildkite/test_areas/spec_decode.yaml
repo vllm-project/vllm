@@ -185,6 +185,18 @@ steps:
       - tests/v1/e2e/spec_decode/
       - vllm/platforms/rocm.py
 
+- label: ":nvidia: (H200 MIG 35GB) Remote MTP Placement"
+  key: spec-decode-remote-mtp
+  timeout_in_minutes: 30
+  device: h200_35gb
+  source_file_dependencies:
+    - vllm/config/speculative.py
+    - vllm/v1/spec_decode/remote/
+    - vllm/v1/worker/gpu/
+    - tests/v1/e2e/spec_decode/remote/
+  commands:
+    - pytest -v -s v1/e2e/spec_decode/remote/
+
 - label: ":nvidia: (H200 MIG 35GB) Spec Decode MTP DeepSeek + MiMo"
   key: spec-decode-mtp-deepseek-mimo
   timeout_in_minutes: 30

@@ -7,6 +7,7 @@ import contextlib
 import dataclasses
 import socket
 import threading
+import time
 from unittest.mock import Mock
 
 import pytest
@@ -40,6 +41,7 @@ from vllm.v1.spec_decode.remote.protocol import (
 )
 from vllm.v1.spec_decode.remote.server import (
     DEFAULT_LIMITS,
+    AdapterError,
     FakeDraftAdapter,
     RemoteDraftServer,
 )
@@ -245,6 +247,294 @@ def ready(session, sequence_id, prompt=(1, 2, 3)):
 
 def round_trip(session, batch_):
     return session.collect(session.dispatch(batch_))
+
+
+@pytest.mark.parametrize("effective_k", [-1, NUM_SPEC_TOKENS + 1])
+def test_invalid_round_budget_fails_before_sending(session, monkeypatch, effective_k):
+    key = ready(session, 1)
+    send = Mock()
+    monkeypatch.setattr(session, "_send", send)
+    with pytest.raises(ValueError, match="draft budget"):
+        session.dispatch(
+            dataclasses.replace(
+                batch(0, [key], [7]), num_speculative_tokens=effective_k
+            )
+        )
+    send.assert_not_called()
+    assert session.sequence_state(key) is SequenceState.READY
+
+
+def test_adapter_cannot_exceed_the_requested_round_budget(
+    session, adapter, monkeypatch
+):
+    key = ready(session, 1)
+    propose = adapter.advance_and_propose
+
+    def ignore_budget(batch_):
+        return propose(
+            dataclasses.replace(batch_, effective_num_speculative_tokens=None)
+        )
+
+    monkeypatch.setattr(adapter, "advance_and_propose", ignore_budget)
+    result = round_trip(
+        session, dataclasses.replace(batch(0, [key], [7]), num_speculative_tokens=0)
+    )
+    assert result.row_statuses == (SpeculatorStatusCode.INTERNAL_ERROR,)
+    assert result.output.valid_lengths.tolist() == [0]
+    assert session.sequence_state(key) is SequenceState.TARGET_ONLY
+
+
+@pytest.mark.parametrize("policy", ["target_only", "error"])
+def test_local_failure_is_terminal_before_policy(make_session, policy):
+    session = make_session(failure_policy=policy)
+    key = ready(session, 1)
+    expectation = (
+        pytest.raises(RemoteDraftError, match="feature allocation failed")
+        if policy == "error"
+        else contextlib.nullcontext()
+    )
+    with expectation:
+        session.fail_sequences(
+            (key,),
+            detail="feature allocation failed",
+            deadline=session.preparation_deadline(),
+        )
+    assert session.sequence_state(key) is SequenceState.TARGET_ONLY
+    assert session.connected
+    assert session._records[key.sequence_id].last_status is (
+        SpeculatorStatusCode.OUT_OF_MEMORY
+    )
+
+
+def test_terminal_retirement_uses_only_the_remaining_preparation_budget(
+    session, adapter, clock, monkeypatch
+):
+    key = ready(session, 1)
+    deadline = session.preparation_deadline()
+    clock.advance(0.075)
+    sent_deadlines = []
+    send = session._conn.send_control
+
+    def send_control(payload, **kwargs):
+        message = decode_payload(decode_envelope(payload))
+        assert isinstance(message, CloseSequence)
+        sent_deadlines.append(kwargs["deadline"])
+        send(payload, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(session_module.time, "monotonic", lambda: 5000.0)
+        patch.setattr(session._conn, "send_control", send_control)
+        patch.setattr(
+            session,
+            "_await",
+            lambda *a, **k: pytest.fail("retirement waited for an ACK"),
+        )
+        session.fail_sequences((key,), detail="feature OOM", deadline=deadline)
+    assert sent_deadlines == [pytest.approx(5000.025)]
+    assert session.sequence_state(key) is SequenceState.TARGET_ONLY
+    assert session.connected
+    assert not session._retiring
+
+
+@pytest.mark.parametrize("healthy_sibling", [False, True])
+def test_expired_preparation_budget_reclaims_idle_connection_or_defers_to_sibling(
+    session, adapter, server, clock, monkeypatch, healthy_sibling
+):
+    a = ready(session, 1)
+    b = ready(session, 2) if healthy_sibling else None
+    closed = threading.Event()
+    close = adapter.close_sequences
+
+    def close_sequences(keys):
+        close(keys)
+        if a in keys:
+            closed.set()
+
+    monkeypatch.setattr(adapter, "close_sequences", close_sequences)
+    deadline = session.preparation_deadline()
+    clock.advance(0.101)
+    with monkeypatch.context() as patch:
+        send = Mock(wraps=session._conn.send_control)
+        patch.setattr(session._conn, "send_control", send)
+        session.fail_sequences((a,), detail="feature OOM", deadline=deadline)
+        send.assert_not_called()
+    assert session.sequence_state(a) is SequenceState.TARGET_ONLY
+    if healthy_sibling:
+        assert session.connected and session._retiring == {a}
+        result = round_trip(session, batch(0, [b], [4]))
+        assert result.row_statuses == (OK,)
+        assert session.sequence_state(b) is SequenceState.READY
+        assert session.connected
+    else:
+        assert not session.connected
+    assert closed.wait(2), "terminal remote state was not retired"
+    assert adapter.prefix(a) is None
+    assert server.registry.get(a) is None
+    assert not session._retiring
+
+
+@pytest.mark.parametrize("send_failure", [TransportTimeout, TransportError])
+def test_unsent_terminal_retirement_drops_connection_and_releases_peer_state(
+    session, adapter, server, monkeypatch, send_failure
+):
+    a, b = ready(session, 1), ready(session, 2)
+    closed = threading.Event()
+    close = adapter.close_sequences
+
+    def close_sequences(keys):
+        close(keys)
+        if a in keys:
+            closed.set()
+
+    def fail_send(payload, **kwargs):
+        assert isinstance(decode_payload(decode_envelope(payload)), CloseSequence)
+        raise send_failure("injected retirement send failure")
+
+    monkeypatch.setattr(adapter, "close_sequences", close_sequences)
+    monkeypatch.setattr(session._conn, "send_control", fail_send)
+    session.fail_sequences(
+        (a,), detail="feature OOM", deadline=session.preparation_deadline()
+    )
+    assert not session.connected
+    assert session.sequence_state(a) is SequenceState.TARGET_ONLY
+    assert session.sequence_state(b) is SequenceState.INVALID
+    assert closed.wait(2)
+    assert server.registry.get(a) is None
+    assert not session._retiring
+
+
+@pytest.mark.parametrize("policy", ["target_only", "error"])
+@pytest.mark.parametrize("healthy_sibling", [False, True])
+@pytest.mark.parametrize("advance_clock", [False, True])
+def test_prefill_timeout_retires_idle_state_or_preserves_healthy_sibling(
+    make_session,
+    adapter,
+    server,
+    clock,
+    monkeypatch,
+    policy,
+    healthy_sibling,
+    advance_clock,
+):
+    session = make_session(failure_policy=policy)
+    a = session.open_sequence(1)
+    b = ready(session, 2) if healthy_sibling else None
+    completed, closed = threading.Event(), threading.Event()
+    prefill, close = adapter.prefill, adapter.close_sequences
+
+    def prefill_and_notify(*args, **kwargs):
+        result = prefill(*args, **kwargs)
+        completed.set()
+        return result
+
+    def close_and_notify(keys):
+        close(keys)
+        if a in keys:
+            closed.set()
+
+    def timeout(matches, deadline, **kwargs):
+        assert completed.wait(2), "peer did not accept the prefill"
+        if advance_clock:
+            clock.now = deadline
+        raise TransportTimeout("prefill acknowledgement expired")
+
+    monkeypatch.setattr(adapter, "prefill", prefill_and_notify)
+    monkeypatch.setattr(adapter, "close_sequences", close_and_notify)
+    expectation = (
+        pytest.raises(RemoteDraftError, match="prefill failed.*TIMEOUT")
+        if policy == "error"
+        else contextlib.nullcontext()
+    )
+    retire = session._send_retirements
+
+    def reject_late_retirement(*args, **kwargs):
+        if session._retiring:
+            pytest.fail("cleanup wrote after a transport timeout")
+        return retire(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(session, "_await", timeout)
+        patch.setattr(session, "_send_retirements", reject_late_retirement)
+        with expectation:
+            session.prefill(a, features([1, 2]), is_final=False)
+    assert session.sequence_state(a) is SequenceState.TARGET_ONLY
+    assert session.connected is healthy_sibling
+    if healthy_sibling:
+        assert session._retiring == {a}
+        assert round_trip(session, batch(0, [b], [4])).row_statuses == (OK,)
+        assert session.sequence_state(b) is SequenceState.READY
+    assert closed.wait(2), "terminal prefill retained peer state"
+    assert adapter.prefix(a) is None and server.registry.get(a) is None
+    assert not session._retiring
+
+
+@pytest.mark.parametrize("policy", ["target_only", "error"])
+def test_prefill_failure_retires_with_only_the_remaining_ack_budget(
+    make_session, adapter, clock, monkeypatch, policy
+):
+    session = make_session(failure_policy=policy)
+    session._request_timeout_s = 10.0
+    key = session.open_sequence(1)
+    closed = threading.Event()
+    prefill, close = adapter.prefill, adapter.close_sequences
+    read, retire = session._await, session._send_retirements
+    budgets = []
+
+    def fail_after_prefill(*args, **kwargs):
+        prefill(*args, **kwargs)
+        raise AdapterError(SpeculatorStatusCode.OUT_OF_MEMORY, "prefill allocation")
+
+    def read_ack(*args, **kwargs):
+        result = read(*args, **kwargs)
+        clock.advance(2.5)
+        return result
+
+    def retire_with_budget(conn, deadline):
+        if session._retiring:
+            budgets.append(deadline - time.monotonic())
+        return retire(conn, deadline)
+
+    def close_and_notify(keys):
+        close(keys)
+        if key in keys:
+            closed.set()
+
+    monkeypatch.setattr(adapter, "prefill", fail_after_prefill)
+    monkeypatch.setattr(adapter, "close_sequences", close_and_notify)
+    monkeypatch.setattr(session, "_await", read_ack)
+    monkeypatch.setattr(session, "_send_retirements", retire_with_budget)
+    expectation = (
+        pytest.raises(RemoteDraftError, match="prefill failed.*OUT_OF_MEMORY")
+        if policy == "error"
+        else contextlib.nullcontext()
+    )
+    with expectation:
+        session.prefill(key, features([1, 2]), is_final=False)
+    assert len(budgets) == 1 and budgets[0] <= 7.5
+    assert session.connected and not session._retiring
+    assert session.sequence_state(key) is SequenceState.TARGET_ONLY
+    assert closed.wait(2), "prefill failure retained remote state despite spare budget"
+    assert adapter.prefix(key) is None
+
+
+def test_normal_close_removes_deferred_terminal_retirement(session, clock, monkeypatch):
+    a, _ = ready(session, 1), ready(session, 2)
+    deadline = session.preparation_deadline()
+    clock.advance(0.101)
+    session.fail_sequences((a,), detail="feature OOM", deadline=deadline)
+    assert session._retiring == {a}
+    sent = []
+    send = session._conn.send_control
+
+    def send_control(payload, **kwargs):
+        sent.append(decode_payload(decode_envelope(payload)))
+        send(payload, **kwargs)
+
+    monkeypatch.setattr(session._conn, "send_control", send_control)
+    session.close_sequences((a,))
+    assert len(sent) == 1 and isinstance(sent[0], CloseSequence)
+    assert session.sequence_state(a) is None
+    assert not session._retiring
 
 
 # ----------------------------------------------------------------------
@@ -688,7 +978,7 @@ def test_queue_full_latches_target_only_without_skipping_recovery(
     assert result.row_statuses == (SpeculatorStatusCode.QUEUE_FULL,)
     assert result.output.valid_lengths.tolist() == [0]
     assert adapter.proposed_batches == [0]
-    assert adapter.prefix(a) == [1, 2, 3]
+    assert adapter.prefix(a) is None
 
 
 def test_timeout_latches_target_only_and_purges_stale_result(session, adapter, clock):
@@ -750,10 +1040,9 @@ def test_dispatch_expired_during_encoding_sends_no_proposal(
     assert round_trip(session, batch(1, [b], recovery=[5])).row_statuses == (OK,)
 
 
-def test_large_writes_get_a_size_proportional_budget(make_session, monkeypatch):
+def test_large_writes_cannot_extend_the_round_deadline(make_session, monkeypatch):
     session = make_session(dataclasses.replace(IDENTITY, max_num_batched_tokens=1000))
     a = session.open_sequence(1)
-    monkeypatch.setattr(session_module, "_MIN_WRITE_BYTES_PER_S", 1000)
     budgets = []
     sock = session._conn._sock
     settimeout = socket.socket.settimeout
@@ -764,11 +1053,32 @@ def test_large_writes_get_a_size_proportional_budget(make_session, monkeypatch):
         return settimeout(connection, timeout)
 
     monkeypatch.setattr(socket.socket, "settimeout", record_budget)
-    # 1000 int32 tokens at 1000 B/s is a 4 s write budget, far beyond the
-    # 100 ms request timeout that would otherwise cut the copy short.
     session.prefill(a, features(list(range(1000))), is_final=True)
-    assert budgets and budgets[0] > 3.0
+    assert budgets and 0 < budgets[0] <= 0.101
     assert session.sequence_state(a) is SequenceState.READY
+
+
+def test_open_prefill_and_proposal_share_one_round_budget(session, clock, monkeypatch):
+    deadline = session.preparation_deadline()
+    await_reply = session._await
+    waits = []
+    durations = iter((0.04, 0.08))
+
+    def delayed(matches, reply_deadline, **kwargs):
+        waits.append(reply_deadline)
+        clock.advance(next(durations))
+        return await_reply(matches, reply_deadline, **kwargs)
+
+    monkeypatch.setattr(session, "_await", delayed)
+    (key,) = session.open_sequences((1,), deadline=deadline)
+    session.prefill_many([(key, features([1, 2]), True)], deadline=deadline)
+    result = session.collect(session.dispatch(batch(0, [key], [7]), deadline=deadline))
+    assert waits == [deadline, deadline]
+    assert result.output.valid_lengths.tolist() == [0]
+    assert session.sequence_state(key) in (
+        SequenceState.TARGET_ONLY,
+        SequenceState.INVALID,
+    )
 
 
 def timeout_after_frames(monkeypatch, conn, completed_frames):
@@ -861,8 +1171,47 @@ def test_collect_timeout_does_not_write_after_deadline(
     result = session.collect(handle)
     assert result.row_statuses == (SpeculatorStatusCode.TIMEOUT,)
     assert result.output.valid_lengths.tolist() == [0]
-    assert session.connected
+    assert not session.connected
     adapter.release()
+
+
+@pytest.mark.parametrize("policy", ["target_only", "error"])
+@pytest.mark.parametrize("num_requests", [1, 2])
+def test_all_timed_out_requests_retire_on_disconnect_without_another_rpc(
+    make_session, adapter, server, clock, monkeypatch, policy, num_requests
+):
+    session = make_session(failure_policy=policy)
+    keys = tuple(ready(session, i) for i in range(num_requests))
+    retired = threading.Event()
+    close = adapter.close_sequences
+
+    def close_sequences(closed):
+        close(closed)
+        if set(keys).issubset(closed):
+            retired.set()
+
+    monkeypatch.setattr(adapter, "close_sequences", close_sequences)
+    adapter.hold_batches.add(0)
+    handle = session.dispatch(batch(0, keys, recovery=[4] * num_requests))
+    clock.advance(1.0)
+    monkeypatch.setattr(
+        session._conn, "send_control", Mock(side_effect=AssertionError("late write"))
+    )
+    expectation = (
+        pytest.raises(RemoteDraftError, match="TIMEOUT")
+        if policy == "error"
+        else contextlib.nullcontext()
+    )
+    with expectation:
+        session.collect(handle)
+    assert not session.connected
+    assert not session._retiring
+    assert session._inflight_batch_id is None
+    assert all(session.sequence_state(k) is SequenceState.TARGET_ONLY for k in keys)
+    adapter.release()
+    assert retired.wait(2), "idle terminal requests retained their remote state"
+    assert all(server.registry.get(k) is None for k in keys)
+    assert all(adapter.prefix(k) is None for k in keys)
 
 
 def test_latched_rows_report_their_failure_once(session, adapter, clock, monkeypatch):
@@ -963,8 +1312,12 @@ def test_rows_beyond_max_feature_tokens_degrade_instead_of_raising(clock):
 
 
 @pytest.mark.parametrize("policy", ["target_only", "error"])
-def test_prefill_beyond_server_limits_follows_failure_policy(clock, policy):
+def test_prefill_beyond_server_limits_follows_failure_policy(
+    clock, monkeypatch, policy
+):
     server, adapter = limited_server(max_feature_tokens=4, max_model_len=6)
+    prefill = Mock(wraps=adapter.prefill)
+    monkeypatch.setattr(adapter, "prefill", prefill)
     identity = dataclasses.replace(IDENTITY, max_num_batched_tokens=4, max_model_len=6)
     session = RemoteDraftSession(
         server.endpoint, identity, failure_policy=policy, clock=clock
@@ -974,6 +1327,7 @@ def test_prefill_beyond_server_limits_follows_failure_policy(clock, policy):
         too_big = session.open_sequence(1)
         too_long = session.open_sequence(2)
         session.prefill(too_long, features([1, 2, 3, 4]), is_final=False)
+        assert adapter.prefix(too_long) == [1, 2, 3, 4]
         if policy == "error":
             with pytest.raises(RemoteDraftError, match="max_feature_tokens"):
                 session.prefill(too_big, features([1] * 5), is_final=True)
@@ -984,7 +1338,11 @@ def test_prefill_beyond_server_limits_follows_failure_policy(clock, policy):
             session.prefill(too_long, features([5, 6, 7]), is_final=True)
         assert session.sequence_state(too_big) is SequenceState.TARGET_ONLY
         assert session.sequence_state(too_long) is SequenceState.TARGET_ONLY
-        assert adapter.prefix(too_long) == [1, 2, 3, 4]
+        assert session.ping().active_sequences == 0
+        prefill.assert_called_once()
+        assert adapter.prefix(too_big) is None and adapter.prefix(too_long) is None
+        assert server.registry.get(too_big) is None
+        assert server.registry.get(too_long) is None
     finally:
         session.close()
         server.stop()
@@ -1228,6 +1586,198 @@ def test_open_twice_is_an_error(session):
         session.open_sequence(1)
 
 
+def test_open_many_pipelines_generations_without_refreshing_deadline(
+    session, clock, monkeypatch
+):
+    previous = session.open_sequence(1)
+    session.close_sequences((previous,))
+    deadline = session.preparation_deadline()
+    send, wait = session._send, session._await
+    events = []
+    deadlines = []
+
+    def write(*args, **kwargs):
+        events.append("send")
+        deadlines.append(kwargs["deadline"])
+        result = send(*args, **kwargs)
+        clock.advance(0.02)
+        return result
+
+    def read(matches, ack_deadline, **kwargs):
+        events.append("wait")
+        deadlines.append(ack_deadline)
+        return wait(matches, ack_deadline, **kwargs)
+
+    monkeypatch.setattr(session, "_send", write)
+    monkeypatch.setattr(session, "_await", read)
+    keys = session.open_sequences((1, 2), deadline=deadline)
+    assert events == ["send", "send", "wait", "wait"]
+    assert deadlines == [deadline] * 4
+    assert keys[0].generation > previous.generation
+    assert keys[1].generation > keys[0].generation
+    assert session.sequence_state(previous) is None
+    assert all(session.sequence_state(key) is SequenceState.PREFILLING for key in keys)
+
+
+@pytest.mark.parametrize("policy", ["target_only", "error"])
+@pytest.mark.parametrize("failure", ["record", "ownership", "after_open"])
+def test_open_allocation_failure_reclaims_unreturned_keys(
+    make_session, server, adapter, monkeypatch, policy, failure
+):
+    session = make_session(failure_policy=policy)
+    sibling = ready(session, 99)
+    conn = session._conn
+    generation = session._next_generation
+    stale = SequenceKey(IDENTITY.verifier_instance_id, 1, generation)
+    cleaned = threading.Event()
+    close = adapter.close_sequences
+
+    def close_and_notify(keys):
+        close(keys)
+        if sibling in keys:
+            cleaned.set()
+
+    monkeypatch.setattr(adapter, "close_sequences", close_and_notify)
+    with monkeypatch.context() as patch:
+        if failure == "record":
+            make_record = session_module._SequenceRecord
+
+            def allocate(key, state):
+                if key.sequence_id == 2:
+                    raise MemoryError("injected open allocation failure")
+                return make_record(key, state)
+
+            patch.setattr(session_module, "_SequenceRecord", allocate)
+        elif failure == "ownership":
+
+            class Records(dict):
+                def __setitem__(self, sequence_id, record):
+                    if sequence_id == 2:
+                        raise MemoryError("injected open allocation failure")
+                    super().__setitem__(sequence_id, record)
+
+            # Keep the failed dictionary visible after the patch context.
+            session._records = Records(session._records)
+        else:
+            open_many = session._open_many
+
+            def fail_after_open(*args, **kwargs):
+                open_many(*args, **kwargs)
+                raise MemoryError("injected open allocation failure")
+
+            patch.setattr(session, "_open_many", fail_after_open)
+        with pytest.raises(MemoryError, match="open allocation"):
+            session.open_sequences((1, 2))
+    assert not session.connected and conn.closed
+    assert set(session._records) == {99}
+    assert session.sequence_state(sibling) is SequenceState.INVALID
+    assert not session._retiring
+    assert cleaned.wait(2), "failed open retained connection-owned peer state"
+    assert len(server.registry) == 0
+    assert adapter.prefix(sibling) is None
+
+    next_generation = session._next_generation
+    session._records = dict(session._records)
+    session.connect()
+    session.close_sequences((sibling,))
+    fresh = session.open_sequences((1, 2))
+    assert fresh[0].generation >= next_generation > generation
+    assert fresh[1].generation > fresh[0].generation
+    session.close_sequences((stale,))
+    session.prefill_many([(key, features([1]), True) for key in fresh])
+    assert round_trip(session, batch(0, fresh, [4, 5])).row_statuses == (OK, OK)
+
+
+@pytest.mark.parametrize("policy", ["target_only", "error"])
+def test_open_many_partial_ack_disconnect_keeps_every_record_invalid(
+    make_session, clock, monkeypatch, policy
+):
+    session = make_session(failure_policy=policy)
+    wait = session._await
+    acknowledged: list[SequenceAck] = []
+    deadline = session.preparation_deadline()
+
+    def disconnect(matches, ack_deadline, **kwargs):
+        if acknowledged:
+            clock.advance(0.1)
+            raise TransportError("connection lost after first open ACK")
+        reply = wait(matches, ack_deadline, **kwargs)
+        acknowledged.append(reply[1])
+        return reply
+
+    monkeypatch.setattr(session, "_await", disconnect)
+    expectation = (
+        pytest.raises(RemoteDraftError, match="INTERNAL_ERROR")
+        if policy == "error"
+        else contextlib.nullcontext()
+    )
+    with expectation:
+        session.open_sequences((1, 2), deadline=deadline)
+    assert len(acknowledged) == 1
+    assert not session.connected
+    assert len(session._records) == 2
+    assert all(
+        record.state is SequenceState.INVALID for record in session._records.values()
+    )
+
+
+def test_open_many_reconnect_uses_remaining_preparation_budget(
+    session, clock, monkeypatch
+):
+    session._invalidate("test reconnect")
+    deadline = session.preparation_deadline()
+    clock.advance(0.04)
+    connect = session.connect
+    budgets = []
+
+    def reconnect(*, timeout_s):
+        budgets.append(timeout_s)
+        connect(timeout_s=timeout_s)
+        clock.advance(0.06)
+
+    monkeypatch.setattr(session, "connect", reconnect)
+    keys = session.open_sequences((1, 2), deadline=deadline)
+    assert budgets == [pytest.approx(0.06)]
+    assert all(session.sequence_state(key) is SequenceState.TARGET_ONLY for key in keys)
+    assert all(
+        session._records[key.sequence_id].last_status is SpeculatorStatusCode.TIMEOUT
+        for key in keys
+    )
+
+
+@pytest.mark.parametrize("policy", ["target_only", "error"])
+def test_open_many_applies_every_ack_before_enforcing_failure_policy(
+    make_session, adapter, monkeypatch, policy
+):
+    session = make_session(failure_policy=policy)
+    open_sequence = adapter.open_sequence
+
+    def reject_second(key):
+        if key.sequence_id == 2:
+            raise AdapterError(SpeculatorStatusCode.QUEUE_FULL, "test admission limit")
+        return open_sequence(key)
+
+    monkeypatch.setattr(adapter, "open_sequence", reject_second)
+    expectation = (
+        pytest.raises(RemoteDraftError, match="QUEUE_FULL")
+        if policy == "error"
+        else contextlib.nullcontext()
+    )
+    with expectation:
+        session.open_sequences((1, 2, 3))
+    keys = tuple(session._records[i].key for i in (1, 2, 3))
+    assert [session.sequence_state(key) for key in keys] == [
+        SequenceState.PREFILLING,
+        SequenceState.TARGET_ONLY,
+        SequenceState.PREFILLING,
+    ]
+    session.prefill_many(
+        [(keys[0], features([1]), True), (keys[2], features([3]), True)]
+    )
+    result = round_trip(session, batch(0, keys, recovery=[4, 5, 6]))
+    assert result.output.valid_lengths.tolist() == [NUM_SPEC_TOKENS, 0, NUM_SPEC_TOKENS]
+
+
 def test_acknowledged_close_forgets_the_sequence(session, adapter):
     for sequence_id in range(50):
         previous = ready(session, sequence_id)
@@ -1447,6 +1997,60 @@ def test_prefill_many_drains_acks_under_socket_backpressure(
         assert all(session.sequence_state(key) is SequenceState.READY for key in keys)
         assert all(adapter.prefix(key) == prompt for key in keys)
         assert session.ping().active_sequences == num_requests
+    finally:
+        session.close()
+        server.stop()
+
+
+@pytest.mark.parametrize("send_buffer", [None, 8192])
+@pytest.mark.parametrize("flush_before_request", [False, True])
+@pytest.mark.timeout(20)
+def test_retirement_acks_cannot_block_a_later_inline_request(
+    tmp_path_factory, adapter, send_buffer, flush_before_request
+):
+    """Retirement writes can finish before the peer's ACK writes finish."""
+    num_tokens = 131072
+    server = RemoteDraftServer(
+        adapter,
+        limits=RemoteServerLimits(
+            max_batch_size=256,
+            max_feature_tokens=num_tokens,
+            max_sequences=256,
+            max_model_len=num_tokens + 1,
+        ),
+    )
+    server.start(f"unix://{tmp_path_factory.mktemp('ra')}/retirement.sock")
+    identity = dataclasses.replace(
+        IDENTITY,
+        max_num_seqs=256,
+        max_num_batched_tokens=num_tokens,
+        max_model_len=num_tokens + 1,
+    )
+    session = RemoteDraftSession(server.endpoint, identity, request_timeout_ms=1000)
+    try:
+        session.connect()
+        keys = [session.open_sequence(i) for i in range(256)]
+        if send_buffer is not None:
+            peer = next(iter(server._connections))
+            for conn in (session._conn, peer):
+                assert conn is not None
+                conn._sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, send_buffer)
+        retired, healthy = tuple(keys[:-1]), keys[-1]
+        deadline = session.preparation_deadline() if flush_before_request else 0.0
+        session.fail_sequences(retired, detail="feature OOM", deadline=deadline)
+        assert bool(session._retiring) is not flush_before_request
+
+        session.prefill(healthy, features([1] * num_tokens), is_final=True)
+        assert session.connected
+        assert session.sequence_state(healthy) is SequenceState.READY
+        assert all(
+            session.sequence_state(key) is SequenceState.TARGET_ONLY for key in retired
+        )
+        assert adapter.prefix(healthy) == [1] * num_tokens
+        assert session.ping().active_sequences == 1
+        result = round_trip(session, batch(0, [healthy], [4]))
+        assert result.row_statuses == (OK,)
+        assert result.output.token_ids.tolist() == [expected_row(4)]
     finally:
         session.close()
         server.stop()

@@ -3,7 +3,9 @@
 """Standalone draft server driven over the raw wire protocol: handshake
 gating, idempotent sequence commands, batch ordering, and error replies."""
 
+import contextlib
 import dataclasses
+import runpy
 import socket
 import threading
 import time
@@ -11,6 +13,7 @@ import zlib
 from unittest.mock import Mock
 
 import pytest
+import torch
 
 from vllm.v1.spec_decode.remote import server as server_module
 from vllm.v1.spec_decode.remote import transport as transport_module
@@ -40,6 +43,7 @@ from vllm.v1.spec_decode.remote.protocol import (
 from vllm.v1.spec_decode.remote.server import (
     _MAX_INPUT_FRAMES,
     DEFAULT_LIMITS,
+    AdapterError,
     FakeDraftAdapter,
     RemoteDraftServer,
     SequenceRegistry,
@@ -61,6 +65,16 @@ VERIFIER = "verifier-a"
 NUM_SPEC_TOKENS = 4
 VOCAB = 50
 OK = SpeculatorStatusCode.OK
+
+
+def test_module_entrypoint_reuses_canonical_adapter_exception_class(monkeypatch):
+    canonical_main = Mock()
+    monkeypatch.setattr(server_module, "main", canonical_main)
+    # runpy reproduces `python -m`; the warning is expected because this
+    # test already imported the module to replace its canonical entrypoint.
+    with pytest.warns(RuntimeWarning, match="found in sys.modules"):
+        runpy.run_module(server_module.__name__, run_name="__main__")
+    canonical_main.assert_called_once_with()
 
 
 def key(sequence_id: int, generation: int = 0, verifier: str = VERIFIER):
@@ -245,7 +259,15 @@ class RawClient:
         assert self.open(k).status is OK
         assert self.prefill(k, list(tokens), offset=0).status is OK
 
-    def propose(self, batch_id: int, keys, recovery, accepted=None):
+    def propose(
+        self,
+        batch_id: int,
+        keys,
+        recovery,
+        accepted=None,
+        *,
+        num_speculative_tokens=None,
+    ):
         accepted = accepted or [0] * len(keys)
         base = self.reserve(3)
         frames = [
@@ -259,6 +281,7 @@ class RawClient:
             accepted_counts_slot=base,
             recovery_tokens_slot=base + 1,
             feature_slot=base + 2,
+            num_speculative_tokens=num_speculative_tokens,
         )
         return self.call(message, frames=frames)
 
@@ -921,14 +944,15 @@ def test_prefill_and_rounds_respect_advertised_limits():
         assert client.prefill(k, [5, 6], offset=4, is_final=True).status is OK
 
         # The prefix sits at max_model_len: even accepted=0 grows it by the
-        # bonus token, so the row must come back OUT_OF_MEMORY untouched.
+        # bonus token, so the row must come back OUT_OF_MEMORY and retire.
         response = client.propose(0, [k], recovery=[9])
         assert response.status is OK
         _, valid, statuses = client.result(response)
         assert statuses == [SpeculatorStatusCode.OUT_OF_MEMORY]
         assert valid == [0]
         assert adapter.proposed_batches == []
-        assert adapter.prefix(k) == [1, 2, 3, 4, 5, 6]
+        assert adapter.prefix(k) is None
+        assert server.registry.get(k) is None
     finally:
         client.close()
         adapter.release()
@@ -959,7 +983,7 @@ def test_failed_row_is_refused_by_later_rounds(client, adapter, monkeypatch):
     _, valid, statuses = client.result(client.propose(1, [key(70)], recovery=[2]))
     assert statuses == [SpeculatorStatusCode.SEQUENCE_DESYNC]
     assert valid == [0]
-    assert adapter.prefix(key(70)) == [1, 2, 3]
+    assert adapter.prefix(key(70)) is None
 
 
 def test_cancel_is_accepted_without_reply(client):
@@ -1051,7 +1075,9 @@ def test_ping_answers_while_the_adapter_is_busy(server, adapter, client):
     assert server.queue_depth == 0
 
 
-@pytest.mark.parametrize("failure", ["queue_full", "adapter", "malformed_result"])
+@pytest.mark.parametrize(
+    "failure", ["queue_full", "adapter", "malformed_result", "draft_budget"]
+)
 def test_slow_error_reply_does_not_block_another_session_cleanup(
     server, adapter, client, monkeypatch, failure
 ):
@@ -1076,6 +1102,10 @@ def test_slow_error_reply_does_not_block_another_session_cleanup(
         def fail_proposal(batch):
             if failure == "adapter":
                 raise RuntimeError("injected adapter failure")
+            if failure == "draft_budget":
+                return propose(
+                    dataclasses.replace(batch, effective_num_speculative_tokens=None)
+                )
             result = propose(batch)
             return dataclasses.replace(result, valid_lengths=ints_to_frame(0, []))
 
@@ -1103,7 +1133,12 @@ def test_slow_error_reply_does_not_block_another_session_cleanup(
             replies.append(
                 client.open(failed_key)
                 if failure == "queue_full"
-                else client.propose(0, [failed_key], recovery=[1])
+                else client.propose(
+                    0,
+                    [failed_key],
+                    recovery=[1],
+                    num_speculative_tokens=0 if failure == "draft_budget" else None,
+                )
             )
         except Exception as error:
             errors.append(error)
@@ -1159,6 +1194,39 @@ def test_warmup_runs_before_the_endpoint_accepts():
         server.stop()
 
 
+@pytest.mark.parametrize("fatal", [False, True])
+def test_failed_warmup_preserves_error_and_only_fatal_context_blocks_retry(
+    fatal, monkeypatch
+):
+    from vllm.v1.spec_decode.remote.errors import CudaRuntimeError
+
+    error = (
+        CudaRuntimeError("opaque startup failure", cuda_error_code=226)
+        if fatal
+        else ValueError("recoverable warmup failure")
+    )
+    adapter = FakeDraftAdapter(vocab_size=VOCAB)
+    warmup = Mock(side_effect=[error, None])
+    monkeypatch.setattr(adapter, "warmup", warmup)
+    server = RemoteDraftServer(adapter)
+    with pytest.raises(type(error)) as caught:
+        server.start("tcp://127.0.0.1:0")
+    assert caught.value is error
+    assert server.endpoint is None
+    assert server.healthy is not fatal
+    if fatal:
+        with pytest.raises(RuntimeError, match="process restart"):
+            server.start("tcp://127.0.0.1:0")
+        warmup.assert_called_once_with()
+    else:
+        server.start("tcp://127.0.0.1:0")
+        try:
+            assert server.endpoint is not None
+            assert warmup.call_count == 2
+        finally:
+            server.stop()
+
+
 @pytest.mark.parametrize(
     ("endpoint", "warns"), [("tcp://127.0.0.1:0", False), ("tcp://0.0.0.0:0", True)]
 )
@@ -1184,6 +1252,170 @@ def test_ping_reports_active_sequences(client):
     assert isinstance(pong, Pong)
     assert pong.nonce == 77
     assert pong.active_sequences == 2
+
+
+@pytest.mark.parametrize("stage", ["open_sequence", "prefill", "advance_and_propose"])
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "oom",
+        "ordinary",
+        "illegal_address",
+        "assert",
+        "wrapped_assert",
+        "driver_code",
+        "hardware_stack",
+        "hardware_stack_code",
+        "tensor_memory",
+        "tensor_memory_code",
+        "contained",
+        "mps_terminated",
+        "structured_226",
+        "structured_810",
+        "structured_oom",
+        "completion_unknown",
+        "wrapped_completion_unknown",
+    ],
+)
+def test_adapter_fault_health_fences_context_fatal_errors(
+    server, adapter, client, monkeypatch, stage, fault
+):
+    from vllm.v1.spec_decode.remote.errors import (
+        CompletionUnknownError,
+        CudaRuntimeError,
+    )
+
+    client.hello()
+    failed_key, sibling = key(90), key(91)
+    client.ready(sibling)
+    if stage != "open_sequence":
+        assert client.open(failed_key).status is OK
+    if stage == "advance_and_propose":
+        assert client.prefill(failed_key, [1], offset=0).status is OK
+    errors = {
+        "oom": torch.OutOfMemoryError("CUDA out of memory"),
+        "ordinary": RuntimeError("ordinary adapter failure"),
+        "illegal_address": RuntimeError(
+            "CUDA error: an illegal memory access was encountered"
+        ),
+        "assert": RuntimeError("CUDA error: device-side assert triggered"),
+        "driver_code": RuntimeError("CUDA_ERROR_ILLEGAL_ADDRESS"),
+        "hardware_stack": RuntimeError(
+            "cudaEventQuery failed: hardware stack error (714)"
+        ),
+        "hardware_stack_code": RuntimeError("cudaErrorHardwareStackError"),
+        "tensor_memory": RuntimeError("CUDA error: tensor memory not completely freed"),
+        "tensor_memory_code": RuntimeError("CUDA_ERROR_TENSOR_MEMORY_LEAK"),
+        "contained": RuntimeError("cudaErrorContained"),
+        "mps_terminated": RuntimeError("cudaErrorMpsClientTerminated"),
+        "structured_226": CudaRuntimeError("event query failed", cuda_error_code=226),
+        "structured_810": CudaRuntimeError("event query failed", cuda_error_code=810),
+        "structured_oom": CudaRuntimeError("allocation failed", cuda_error_code=2),
+        "completion_unknown": CompletionUnknownError("upload completion unknown"),
+    }
+    wrapped = AdapterError(SpeculatorStatusCode.INTERNAL_ERROR, "executor failed")
+    wrapped.__cause__ = errors["assert"]
+    errors["wrapped_assert"] = wrapped
+    wrapped_completion = RuntimeError("executor failed")
+    wrapped_completion.__cause__ = errors["completion_unknown"]
+    errors["wrapped_completion_unknown"] = wrapped_completion
+    operation = getattr(adapter, stage)
+    calls = 0
+
+    def fail_once(*args):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise errors[fault]
+        return operation(*args)
+
+    monkeypatch.setattr(adapter, stage, fail_once)
+    if stage == "open_sequence":
+        response = client.open(failed_key)
+    elif stage == "prefill":
+        response = client.prefill(failed_key, [1], offset=0)
+    else:
+        response = client.propose(0, [failed_key], [2])
+    assert response.status is SpeculatorStatusCode.INTERNAL_ERROR
+    fatal = fault not in ("oom", "ordinary", "structured_oom")
+    assert client.call(Ping(nonce=23)).healthy is not fatal
+    assert server.wait(0) is fatal
+    if fatal:
+        assert client.open(key(92)).status is SpeculatorStatusCode.INTERNAL_ERROR
+        assert (
+            client.prefill(sibling, [4], offset=3).status
+            is SpeculatorStatusCode.INTERNAL_ERROR
+        )
+        assert (
+            client.propose(1, [sibling], [4]).status
+            is SpeculatorStatusCode.INTERNAL_ERROR
+        )
+        assert calls == 1
+    else:
+        client.ready(key(92))
+        assert client.propose(1, [key(92)], [4]).status is OK
+        assert calls >= 2
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "device-side assert triggered",
+        "hardware stack error",
+        "tensor memory not completely freed",
+    ],
+)
+def test_fatal_adapter_error_wakes_main_and_joins_workers(monkeypatch, detail):
+    adapter = FakeDraftAdapter(vocab_size=VOCAB)
+    server = RemoteDraftServer(adapter)
+    monkeypatch.setattr(server_module, "RemoteDraftServer", lambda *a, **kw: server)
+    started = threading.Event()
+    start = server.start
+
+    def start_and_notify(endpoint):
+        resolved = start(endpoint)
+        started.set()
+        return resolved
+
+    monkeypatch.setattr(server, "start", start_and_notify)
+    errors = []
+
+    def run_main():
+        try:
+            server_module.main(["--endpoint", "tcp://127.0.0.1:0"])
+        except Exception as error:
+            errors.append(error)
+
+    owner = threading.Thread(target=run_main)
+    owner.start()
+    client = None
+    try:
+        assert started.wait(5.0)
+        client = RawClient(server.endpoint)
+        client.hello()
+        client.ready(key(93))
+        close = Mock(wraps=adapter.close_sequences)
+        monkeypatch.setattr(adapter, "close_sequences", close)
+        monkeypatch.setattr(
+            adapter,
+            "open_sequence",
+            Mock(side_effect=RuntimeError(f"CUDA error: {detail}")),
+        )
+        with contextlib.suppress(ConnectionClosed):
+            client.open(key(94))
+        owner.join(timeout=5.0)
+        assert not owner.is_alive()
+        assert len(errors) == 1 and "restart required" in str(errors[0])
+        assert not server.healthy
+        assert not server._workers and not server._connections
+        assert server.registry.get(key(93)) is not None
+        assert server.registry.get(key(94)) is not None
+        close.assert_not_called()
+    finally:
+        if client is not None:
+            client.close()
+        server.stop()
+        owner.join(timeout=5.0)
 
 
 def test_disconnect_releases_sequences(server, adapter, client):
@@ -1595,6 +1827,112 @@ def test_adapter_waiter_limit_reserves_cleanup_progress(adapter):
             assert not thread.is_alive()
     assert sorted(finished) == [False, True]
     assert server.queue_depth == 0
+
+
+@pytest.mark.parametrize("operation", ["prefill", "proposal"])
+@pytest.mark.parametrize("budget_ms", [0, 20, 5000, None])
+def test_execution_budget_expires_before_queued_adapter_work(
+    adapter, server, client, monkeypatch, operation, budget_ms
+):
+    """Expired queued work retires own-KV without a new forward or context update."""
+    prefill = Mock(wraps=adapter.prefill)
+    monkeypatch.setattr(adapter, "prefill", prefill)
+    timeout_responses = []
+    send = server_module._ServerSession._send
+
+    def check_timeout_send(session, message, *args, **kwargs):
+        if getattr(message, "status", None) is SpeculatorStatusCode.TIMEOUT:
+            assert server.lock.acquire(blocking=False)
+            server.lock.release()
+            timeout_responses.append(message)
+        return send(session, message, *args, **kwargs)
+
+    monkeypatch.setattr(server_module._ServerSession, "_send", check_timeout_send)
+    assert isinstance(client.hello(), HelloAck)
+    client.ready(key(1))
+    waiting = RawClient(server.endpoint)
+    sequence = key(2, verifier="waiting")
+    try:
+        assert isinstance(waiting.hello(verifier_instance_id="waiting"), HelloAck)
+        if operation == "prefill":
+            assert waiting.open(sequence).status is OK
+        else:
+            waiting.ready(sequence)
+        entry = server.registry.get(sequence)
+        assert entry is not None
+        original_offset = entry.applied_offset
+        prefill_calls = prefill.call_count
+        adapter.hold_batches.add(0)
+        client.send(
+            AdvanceAndPropose(
+                batch_id=0,
+                keys=(key(1),),
+                accepted_counts_slot=100,
+                recovery_tokens_slot=101,
+                feature_slot=102,
+            ),
+            frames=(
+                ints_to_frame(100, [0]),
+                ints_to_frame(101, [4]),
+                ints_to_frame(102, [4]),
+            ),
+        )
+        assert wait_until(lambda: server.queue_depth == 1)
+        frame = ints_to_frame(102, [4])
+        message: PrefillChunk | AdvanceAndPropose
+        frames: tuple[DataFrame, ...]
+        if operation == "prefill":
+            message = PrefillChunk(
+                key=sequence,
+                offset=0,
+                num_tokens=1,
+                is_final=True,
+                feature_slot=102,
+                checksum=checksum(frame),
+                execution_timeout_ms=budget_ms,
+            )
+            frames = (frame,)
+        else:
+            message = AdvanceAndPropose(
+                batch_id=1,
+                keys=(sequence,),
+                accepted_counts_slot=100,
+                recovery_tokens_slot=101,
+                feature_slot=102,
+                execution_timeout_ms=budget_ms,
+            )
+            frames = (ints_to_frame(100, [0]), ints_to_frame(101, [4]), frame)
+        waiting.send(message, frames=frames)
+        assert wait_until(lambda: server.queue_depth == 2)
+        if budget_ms == 20:
+            # The handler has captured its budget before joining this queue.
+            threading.Event().wait(0.04)
+        adapter.release()
+        assert client.recv()[1].status is OK
+        reply = waiting.recv()[1]
+        expired = budget_ms in (0, 20)
+        assert reply.status is (SpeculatorStatusCode.TIMEOUT if expired else OK)
+        assert len(timeout_responses) == int(expired)
+        if expired:
+            assert server.registry.get(sequence) is None
+            assert adapter.prefix(sequence) is None
+            assert entry.applied_offset == original_offset
+            assert entry.last_batch_id == -1
+            assert prefill.call_count == prefill_calls
+            assert adapter.proposed_batches == [0]
+            # Missing context cannot silently resume under the retired key.
+            response = waiting.propose(2, (sequence,), [4])
+            assert waiting.result(response)[2] == [SpeculatorStatusCode.SEQUENCE_DESYNC]
+        else:
+            assert server.registry.get(sequence) is entry
+            assert adapter.prefix(sequence)[-1] == 4
+        assert waiting.call(Ping(nonce=1)).healthy
+        replacement = key(3, verifier="waiting")
+        waiting.ready(replacement)
+        assert waiting.propose(3, (replacement,), [4]).status is OK
+    finally:
+        adapter.release()
+        waiting.close()
 
 
 def test_shutdown_discards_queued_proposal_and_retires_both_sessions():

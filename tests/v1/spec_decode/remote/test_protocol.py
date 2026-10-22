@@ -172,6 +172,26 @@ def test_major_version_mismatch_rejected():
         decode_envelope(data)
 
 
+def test_previous_major_cannot_silently_ignore_round_budget():
+    envelope = decode_envelope(encode_message(Ping()))
+    old = msgspec.structs.replace(envelope, protocol_major=1)
+    with pytest.raises(ProtocolVersionError, match="unsupported protocol major 1"):
+        decode_envelope(msgspec.msgpack.encode(old))
+
+
+@pytest.mark.parametrize("effective_k", [None, 0, 1, 3])
+def test_round_budget_roundtrips_without_changing_legacy_default(effective_k):
+    message = AdvanceAndPropose(
+        batch_id=1,
+        keys=(KEY,),
+        accepted_counts_slot=1,
+        recovery_tokens_slot=2,
+        feature_slot=3,
+        num_speculative_tokens=effective_k,
+    )
+    assert decode_payload(decode_envelope(encode_message(message))) == message
+
+
 def test_unknown_message_type_rejected():
     envelope = MessageEnvelope(
         protocol_major=PROTOCOL_MAJOR,

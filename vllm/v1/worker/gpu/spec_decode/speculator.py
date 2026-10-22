@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import replace
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -62,6 +62,14 @@ class BaseSpeculator(ABC):
     num_query_per_req: int = 1
     # Extra query slots reserved per request outside the regular queries.
     num_extra_query_per_req: int = 0
+
+    def close_requests(self, req_ids: Collection[str]) -> None:
+        """Release per-request draft state on finish, cancellation or preemption."""
+        return None
+
+    def close(self) -> None:
+        """Release external resources when the model runner shuts down."""
+        return None
 
     @abstractmethod
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:

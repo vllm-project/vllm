@@ -110,8 +110,10 @@ class RemoteDraftConfig:
     for the affected requests; "error" surfaces the failure as an engine
     error (development / CI)."""
     request_timeout_ms: int = Field(default=100, gt=0)
-    """Deadline for collecting a proposal before the affected rows fall
-    back to target-only decoding with valid_length=0."""
+    """Soft round budget for remote preparation, open, prefill and proposal.
+    Expired rows fall back with valid_length=0. CPU/GPU preparation and CUDA
+    completion fences are not preemptible, so this is not a hard return bound.
+    """
     startup_timeout_ms: int = Field(default=30_000, gt=0)
     """Deadline for the initial connection and HELLO handshake."""
 

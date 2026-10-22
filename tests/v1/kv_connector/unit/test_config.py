@@ -5,12 +5,9 @@
 
 import pytest
 
-from vllm.config import (
-    CacheConfig,
-    KVTransferConfig,
-    ParallelConfig,
-    VllmConfig,
-)
+from vllm.config import CacheConfig, KVTransferConfig, ParallelConfig, VllmConfig
+from vllm.config.kv_transfer import KVRole
+from vllm.config.speculative import RemoteDraftConfig, SpeculativeConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 
 pytestmark = pytest.mark.cpu_test
@@ -110,6 +107,9 @@ def _build_config(
     kv_connector_extra_config: dict | None = None,
     enable_sleep_mode: bool = False,
     enable_cumem_allocator: bool = False,
+    kv_role: KVRole = "kv_both",
+    remote_draft: bool | None = None,
+    kv_offloading_backend: str | None = None,
 ) -> VllmConfig:
     """Build a VllmConfig that exercises _verify_kv_transfer_compat without
     requiring a real model (avoids HF downloads in CI)."""
@@ -118,7 +118,7 @@ def _build_config(
     kv_transfer_config = (
         KVTransferConfig(
             kv_connector=kv_connector,
-            kv_role="kv_both",
+            kv_role=kv_role,
             kv_connector_extra_config=kv_connector_extra_config or {},
         )
         if kv_connector is not None
@@ -126,10 +126,28 @@ def _build_config(
     )
     cfg = VllmConfig.__new__(VllmConfig)
     cfg.kv_transfer_config = kv_transfer_config
+    cfg.speculative_config = None
+    if remote_draft is not None:
+        # Use the real placement predicate without loading a draft checkpoint.
+        cfg.speculative_config = SpeculativeConfig.__new__(SpeculativeConfig)
+        cfg.speculative_config.remote_draft = (
+            RemoteDraftConfig(endpoint="unix:///test-draft.sock")
+            if remote_draft
+            else None
+        )
     cfg.model_config = SimpleNamespace(
         enable_sleep_mode=enable_sleep_mode,
         enable_cumem_allocator=(enable_cumem_allocator or enable_sleep_mode),
     )
+    cfg.cache_config = CacheConfig(
+        enable_prefix_caching=False,
+        **(
+            {"kv_offloading_backend": kv_offloading_backend, "kv_offloading_size": 1.0}
+            if kv_offloading_backend is not None
+            else {}
+        ),
+    )
+    cfg._post_init_kv_transfer_config()
     cfg._verify_kv_transfer_compat()
     return cfg
 
@@ -198,6 +216,96 @@ def test_no_kv_connector_ignores_expandable_segments(monkeypatch):
     configured."""
     monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     _build_config(kv_connector=None)
+
+
+@pytest.mark.parametrize("kv_role", ["kv_consumer", "kv_both"])
+def test_remote_draft_rejects_external_kv_prefixes(kv_role):
+    """External hits skip target prefill even when prefix caching is disabled."""
+    with pytest.raises(ValueError, match="remote draft.*KV.*consum"):
+        _build_config(
+            kv_connector="ExampleConnector", kv_role=kv_role, remote_draft=True
+        )
+
+
+@pytest.mark.parametrize("remote_draft", [None, False])
+@pytest.mark.parametrize("kv_role", ["kv_consumer", "kv_both", "kv_producer"])
+def test_native_draft_keeps_kv_connector_roles(remote_draft, kv_role):
+    _build_config(
+        kv_connector="ExampleConnector", kv_role=kv_role, remote_draft=remote_draft
+    )
+
+
+@pytest.mark.parametrize("kv_connector", [None, "ExampleConnector"])
+def test_remote_draft_keeps_no_connector_and_producer_only(kv_connector):
+    _build_config(kv_connector=kv_connector, kv_role="kv_producer", remote_draft=True)
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("bidirectional", [False, True])
+@pytest.mark.parametrize("remote_draft", [False, True])
+@pytest.mark.parametrize("name", ["NixlConnector", "NixlPullConnector"])
+def test_remote_draft_checks_producer_bidirectional_reads(
+    nested, bidirectional, remote_draft, name
+):
+    child = {
+        "kv_connector": name,
+        "kv_role": "kv_producer",
+        "kv_connector_extra_config": {"bidirectional_kv_xfer": bidirectional},
+    }
+    if nested:
+        child = {
+            "kv_connector": "MultiConnector",
+            "kv_role": "kv_producer",
+            "kv_connector_extra_config": {"connectors": [child]},
+        }
+    if remote_draft and bidirectional:
+        with pytest.raises(ValueError, match="external KV hits skip"):
+            _build_config(**child, remote_draft=remote_draft)
+    else:
+        _build_config(**child, remote_draft=remote_draft)
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("consumer", [False, True])
+def test_remote_draft_checks_multi_connector_child_roles(nested, consumer):
+    """MultiConnector executes children using their own independent roles."""
+    child: dict[str, object] = {
+        "kv_connector": "ExampleConnector",
+        "kv_role": "kv_consumer" if consumer else "kv_producer",
+    }
+    if nested:
+        child = {
+            "kv_connector": "MultiConnector",
+            "kv_role": "kv_producer",
+            "kv_connector_extra_config": {"connectors": [child]},
+        }
+    kwargs = dict(
+        kv_connector="MultiConnector",
+        kv_role="kv_producer",
+        kv_connector_extra_config={"connectors": [child]},
+        remote_draft=True,
+    )
+    if consumer:
+        with pytest.raises(ValueError, match="remote draft.*KV.*consum"):
+            _build_config(**kwargs)
+    else:
+        _build_config(**kwargs)
+
+
+@pytest.mark.parametrize("backend", ["native", "lmcache"])
+@pytest.mark.parametrize("remote_draft", [None, False, True])
+def test_remote_draft_checks_normalized_kv_offloading(backend, remote_draft):
+    kwargs = dict(
+        kv_connector=None,
+        kv_offloading_backend=backend,
+        remote_draft=remote_draft,
+    )
+    if remote_draft:
+        with pytest.raises(ValueError, match="remote draft.*KV.*consum"):
+            _build_config(**kwargs)
+    else:
+        cfg = _build_config(**kwargs)
+        assert cfg.kv_transfer_config.is_kv_consumer
 
 
 def test_kv_offloading_size_only_uses_native_default():

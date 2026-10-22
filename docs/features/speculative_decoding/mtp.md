@@ -83,3 +83,9 @@ vllm serve XiaomiMiMo/MiMo-7B-Base \
   per lm_head weight, e.g. 0.6 or 0.35 GiB for a 248k x 2560 head; it is
   counted in the model weights, so with `--kv-cache-memory-bytes` leave room
   for it.
+
+## Experimental standalone placement
+
+For the separate-process own-KV MTP contracts and their validation limits, see
+[Standalone own-KV MTP](remote_mtp.md). These restrictions apply to the remote
+runtime, not to the native local models listed above.

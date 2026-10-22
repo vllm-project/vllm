@@ -19,11 +19,9 @@ def init_speculator(
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
     if speculative_config.use_remote_draft():
-        raise NotImplementedError(
-            "speculative_config.remote_draft is configured but no remote "
-            "drafter runtime is implemented for this model runner yet; "
-            "remove remote_draft to use the local drafter."
-        )
+        from vllm.v1.worker.gpu.spec_decode.remote import RemoteSpeculator
+
+        return RemoteSpeculator(vllm_config, device)
     if speculative_config.method == "extract_hidden_states":
         from vllm.v1.worker.gpu.spec_decode.extract_hidden_states import (
             ExtractHiddenStatesSpeculator,
