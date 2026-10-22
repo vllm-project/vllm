@@ -10,8 +10,10 @@ backrefs==8.0
     # via mkdocs-material
 bracex==3.0.1
     # via wcmatch
-certifi==2026.7.22
-    # via requests
+certifi==2026.10.19
+    # via
+    #   -r requirements/docs.in
+    #   requests
 charset-normalizer==3.5.1
     # via requests
 click==8.5.0

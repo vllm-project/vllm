@@ -66,6 +66,15 @@ class CPUAttentionBackend(AttentionBackend):
         return [MultipleOf(32)]
 
     @classmethod
+    def supports_kv_cache_dtype(cls, kv_cache_dtype: "CacheDType | None") -> bool:
+        if kv_cache_dtype in (None, "auto", "bfloat16", "float16"):
+            return True
+        if kv_cache_dtype not in cls.supported_kv_cache_dtypes:
+            return False
+        # Mirrors the FP8 ISA requirement enforced in _get_attn_isa.
+        return torch.cpu._is_amx_tile_supported() or torch.cpu._is_avx512_supported()
+
+    @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return [32, 64, 80, 96, 112, 128, 160, 192, 224, 256, 512]
 
