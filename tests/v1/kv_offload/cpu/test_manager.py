@@ -235,12 +235,12 @@ def test_filter_reused_manager_reports_stores_skipped_counter():
     assert stats.reduce()[CPUOffloadingMetrics.STORES_SKIPPED] == 0
 
 
-def test_cpu_manager_reports_no_config_info_without_a_configuration():
-    """A caller that passes no configuration keeps the empty default.
+def test_cpu_manager_reports_no_config_info_without_info():
+    """A caller that passes no info keeps the empty default.
 
     The scheduler still sends an info payload, so the metric appears with the
     engine labels alone. Tests in tests/v1/kv_offload/test_factory.py cover the
-    published labels, because a real spec supplies the configuration.
+    published labels, because a real spec supplies the info.
     """
     manager = make_cpu_manager(num_chunks=4)
 

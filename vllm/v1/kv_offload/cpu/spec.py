@@ -129,6 +129,10 @@ class CPUOffloadingSpec(OffloadingSpec):
             # or |--- C0 (single copy) ---| *** maybe-pad *** |
             self.kv_bytes_per_chunk = aligned_kv_bytes_per_chunk
 
+        self.cpu_info = CPUOffloadingInfo.from_config(
+            config, self.num_chunks, self.kv_bytes_per_chunk
+        )
+
         # scheduler-side
         self._manager: OffloadingManager | None = None
 
@@ -160,13 +164,12 @@ class CPUOffloadingSpec(OffloadingSpec):
 
             self._manager = CPUOffloadingManager(
                 num_chunks=self.num_chunks,
-                kv_bytes_per_chunk=self.kv_bytes_per_chunk,
-                config=self.config,
                 cache_policy=self.eviction_policy,
                 cache_policy_module_path=self.cache_policy_module_path,
                 enable_events=self.kv_events_config.enable_kv_cache_events,
                 store_threshold=store_threshold,
                 max_tracker_size=max_tracker_size,
+                info=self.cpu_info,
             )
         return self._manager
 

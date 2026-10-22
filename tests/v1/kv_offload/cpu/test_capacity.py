@@ -1,19 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for the CPU offloading tier capacity estimate.
-
-The estimate answers one question: how many KV tokens does a full tier serve
-at the best request length up to max_model_len? Both functions under test take
-plain arguments, so these tests need no manager and no engine.
-"""
+"""Tests for cpu_kv_cache_size_tokens, the CPU tier capacity at max_model_len."""
 
 import pytest
 
+from tests.v1.kv_offload.conftest import make_offloading_config
 from vllm.v1.kv_offload.config import OffloadingGroupConfig
-from vllm.v1.kv_offload.cpu.manager import (
-    _capacity_tokens_at_max_len,
-    _chunks_per_request,
-)
+from vllm.v1.kv_offload.cpu.common import CPUOffloadingInfo
 
 MAX_MODEL_LEN = 36864
 
@@ -32,15 +25,6 @@ HYBRID = ((16, None), (16, 4), (16, 1))
 def make_groups(
     *shapes: tuple[int, int | None],
 ) -> tuple[OffloadingGroupConfig, ...]:
-    """Build a group tuple from (tokens_per_block, window_chunks) pairs.
-
-    Args:
-        shapes: One pair for each group of the model.
-
-    Returns:
-        The groups, each with a distinct single layer name.
-
-    """
     return tuple(
         OffloadingGroupConfig(
             tokens_per_block=tokens_per_block,
@@ -52,158 +36,62 @@ def make_groups(
     )
 
 
+def size_tokens(
+    shapes: tuple[tuple[int, int | None], ...],
+    blocks_per_chunk: int,
+    num_chunks: int,
+    max_model_len: int = MAX_MODEL_LEN,
+) -> int | None:
+    config = make_offloading_config(
+        groups=make_groups(*shapes),
+        blocks_per_chunk=blocks_per_chunk,
+        max_model_len=max_model_len,
+    )
+    info = CPUOffloadingInfo.from_config(config, num_chunks, kv_bytes_per_chunk=1)
+    return info.cpu_kv_cache_size_tokens
+
+
 @pytest.mark.parametrize(
     ("shapes", "blocks_per_chunk", "num_chunks", "expected"),
     [
-        # 4500 * 36864 // 144 = 1152000
+        # 4500 * 36864 // 144
         pytest.param(FULL_16, 16, 4500, 1152000, id="single-full-group"),
-        # 4000 * 36864 // min(144, 16) = 9216000
+        # 4000 * 36864 // min(144, 16)
         pytest.param(((16, 16),), 16, 4000, 9216000, id="uniform-swa-4096"),
-        # 4000 * 36864 // min(144, 4) = 36864000
+        # 4000 * 36864 // min(144, 4)
         pytest.param(((16, 4),), 16, 4000, 36864000, id="uniform-swa-1024"),
-        # 4000 * 36864 // (144 + 6 * 4) = 877714
+        # 4000 * 36864 // (144 + 6 * 4)
         pytest.param(GEMMA, 16, 4000, 877714, id="full-plus-6-swa-1024"),
-        # 8000 * 36432 // (69 + 9 * 1) = 3736615, at the last full chunk
-        pytest.param(GRANITE, 1, 8000, 3736615, id="full-plus-9-mamba"),
-        # 8000 * 36864 // min(70, 1) = 294912000
+        # 8000 * 36864 // (70 + 9 * 1)
+        pytest.param(GRANITE, 1, 8000, 3733063, id="full-plus-9-mamba"),
+        # 8000 * 36864 // min(70, 1)
         pytest.param(((528, 1),), 1, 8000, 294912000, id="pure-mamba"),
-        # 4500 * 36864 // (144 + 288) = 384000
+        # 4500 * 36864 // (144 + 288)
         pytest.param(FULL_PLUS_HIDDEN, 16, 4500, 384000, id="full-plus-hidden"),
-        # 4000 * 36864 // (144 + 4 + 1) = 989637
+        # 4000 * 36864 // (144 + 4 + 1)
         pytest.param(HYBRID, 16, 4000, 989637, id="full-plus-swa-plus-mamba"),
+        # A tier of no slots holds no tokens, which is a known value.
+        pytest.param(FULL_16, 16, 0, 0, id="empty-tier"),
     ],
 )
-def test_capacity_over_model_shapes(
+def test_size_tokens_over_model_shapes(
     shapes: tuple[tuple[int, int | None], ...],
     blocks_per_chunk: int,
     num_chunks: int,
     expected: int,
 ) -> None:
-    """The estimate reports the reviewed capacity of each model shape.
-
-    A window raises the capacity above the byte count of the tier, because a
-    windowed group holds a fixed chunk count however long the request grows.
-    """
-    capacity = _capacity_tokens_at_max_len(
-        make_groups(*shapes), blocks_per_chunk, num_chunks, MAX_MODEL_LEN
-    )
-
-    assert capacity == expected
-
-
-@pytest.mark.parametrize(
-    ("tokens_per_block", "blocks_per_chunk", "num_chunks"),
-    [
-        # 4500 * 36864 // 144 = 4500 * 256 = 1152000
-        pytest.param(16, 16, 4500, id="qwen3-8b-shape"),
-        # 8000 * 36432 // 69 = 8000 * 528 = 4224000, at the last full chunk
-        pytest.param(528, 1, 8000, id="chunk-size-divides-max-len-with-remainder"),
-        # 4500 * 36864 // 288 = 4500 * 128 = 576000
-        pytest.param(8, 16, 4500, id="small-block"),
-    ],
-)
-def test_single_uncapped_group_keeps_the_exact_token_count(
-    tokens_per_block: int, blocks_per_chunk: int, num_chunks: int
-) -> None:
-    """One group without a window keeps the exact count of the old metric.
-
-    The old capacity_tokens divided the byte budget by the byte cost of one
-    token. The estimate must agree with it on this shape.
-    """
-    groups = make_groups((tokens_per_block, None))
-
-    capacity = _capacity_tokens_at_max_len(
-        groups, blocks_per_chunk, num_chunks, MAX_MODEL_LEN
-    )
-
-    assert capacity == num_chunks * blocks_per_chunk * tokens_per_block
-
-
-def test_empty_tier_reports_an_exact_zero() -> None:
-    """A tier of no slots serves no tokens, which is a known value."""
-    capacity = _capacity_tokens_at_max_len(make_groups(*FULL_16), 16, 0, MAX_MODEL_LEN)
-
-    assert capacity == 0
+    """A windowed group holds a fixed chunk count, so it raises the capacity."""
+    assert size_tokens(shapes, blocks_per_chunk, num_chunks) == expected
 
 
 @pytest.mark.parametrize(
     ("shapes", "max_model_len"),
     [
-        # max_model_len 0 leaves no length to divide, so None
         pytest.param(FULL_16, 0, id="max-model-len-not-known"),
-        # no group leaves the tokens_per_chunk set empty, so None
         pytest.param((), MAX_MODEL_LEN, id="no-groups"),
-        # 16 * 0 = 0 tokens for each chunk, so None
-        pytest.param(((0, None),), MAX_MODEL_LEN, id="blocks-span-no-tokens"),
     ],
 )
-def test_capacity_is_none_when_the_token_scale_is_unknown(
+def test_size_tokens_is_none_when_unknown(
     shapes: tuple[tuple[int, int | None], ...], max_model_len: int
 ) -> None:
-    """The estimate reports None when an input leaves the token scale open."""
-    capacity = _capacity_tokens_at_max_len(
-        make_groups(*shapes), 16, 4500, max_model_len
-    )
-
-    assert capacity is None
-
-
-@pytest.mark.parametrize(
-    ("shapes", "blocks_per_chunk", "seq_len", "expected"),
-    [
-        # cdiv(36864, 16 * 16) = 144
-        pytest.param(FULL_16, 16, 36864, 144, id="one-full-group"),
-        # 144 + 6 * min(144, 4) = 168
-        pytest.param(GEMMA, 16, 36864, 168, id="full-plus-6-swa-1024"),
-        # cdiv(36432, 528) + 9 * min(69, 1) = 69 + 9 = 78
-        pytest.param(GRANITE, 1, 36432, 78, id="full-plus-9-mamba"),
-        # min(cdiv(256, 256), 4) = 1
-        pytest.param(((16, 4),), 16, 256, 1, id="request-below-the-window"),
-        # min(cdiv(36864, 256), 4) = 4
-        pytest.param(((16, 4),), 16, 36864, 4, id="window-caps-the-request"),
-    ],
-)
-def test_chunks_per_request(
-    shapes: tuple[tuple[int, int | None], ...],
-    blocks_per_chunk: int,
-    seq_len: int,
-    expected: int,
-) -> None:
-    """One request holds one chunk for each chunk-sized span, up to the cap."""
-    chunks = _chunks_per_request(make_groups(*shapes), blocks_per_chunk, seq_len)
-
-    assert chunks == expected
-
-
-@pytest.mark.parametrize(
-    ("shapes", "blocks_per_chunk"),
-    [
-        # 1000 * 4096 // (16 + 6 * 4) = 102400
-        pytest.param(GEMMA, 16, id="full-plus-6-swa-1024"),
-        # 1000 * 3840 // (15 + 10) = 153600, at the 384-token floor
-        pytest.param(((16, None), (24, None)), 16, id="chunk-sizes-do-not-nest"),
-    ],
-)
-def test_candidate_lengths_reach_the_capacity_peak(
-    shapes: tuple[tuple[int, int | None], ...], blocks_per_chunk: int
-) -> None:
-    """The estimate matches a sweep of every request length.
-
-    The estimate measures a few candidate lengths and keeps the largest
-    result. The sweep shows that the candidate set holds the peak of the
-    capacity curve. A short max_model_len keeps the sweep fast.
-    """
-    max_model_len = 4096
-    num_chunks = 1000
-    groups = make_groups(*shapes)
-
-    peak = max(
-        num_chunks * seq_len // _chunks_per_request(groups, blocks_per_chunk, seq_len)
-        for seq_len in range(1, max_model_len + 1)
-    )
-
-    capacity = _capacity_tokens_at_max_len(
-        groups, blocks_per_chunk, num_chunks, max_model_len
-    )
-
-    assert capacity == peak
+    assert size_tokens(shapes, 16, 4500, max_model_len) is None

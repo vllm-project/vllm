@@ -122,10 +122,10 @@ The gauge holds one series for each configuration that the manager reports. A ma
 | Label | Declared by | Meaning | Notes |
 | --- | --- | --- | --- |
 | `tier` | `TieringOffloadingSpec` | The tier that this series reports. | `<index>:<type>`. Index `0` is the CPU primary tier, and a secondary tier index starts at 1. `<type>` is the `type` key of the tier config, such as `1:fs`. |
-| `cpu_num_chunks` | `CPUOffloadingSpec` or `TieringOffloadingSpec` | Chunk slots in the CPU tier. | Chunks, not GPU blocks. `cpu_bytes_to_use` divided by `cpu_kv_bytes_per_chunk`. |
+| `cpu_num_chunks` | `CPUOffloadingSpec` or `TieringOffloadingSpec` | Chunk slots in the CPU tier. | Chunks, not GPU blocks. |
 | `cpu_blocks_per_chunk` | `CPUOffloadingSpec` or `TieringOffloadingSpec` | GPU blocks in one chunk. | The chunk-to-block conversion factor. Set by `blocks_per_chunk`, or derived from `block_size`. |
-| `cpu_kv_bytes_per_chunk` | `CPUOffloadingSpec` or `TieringOffloadingSpec` | Bytes of one chunk slot. | Rounded up to the host page size, so it can hold padding. With `cpu_num_chunks` it gives the exact size of the tier in bytes, the only capacity that holds for every model shape. Reads `None` when a caller builds the manager without a chunk size. |
-| `cpu_capacity_tokens_at_max_len` | `CPUOffloadingSpec` or `TieringOffloadingSpec` | Upper bound on the KV tokens the tier holds, over the request lengths up to `max_model_len`. | A group with a sliding window raises this above the byte capacity, because that group holds a fixed chunk count however long the request grows. Reads `None` when the token scale is not known, for example a `max_model_len` of 0. |
+| `cpu_kv_cache_size_bytes` | `CPUOffloadingSpec` or `TieringOffloadingSpec` | Size of the CPU tier in bytes. | `cpu_num_chunks` times the bytes of one chunk slot. Each slot is rounded up to the host page size, so this can include padding. |
+| `cpu_kv_cache_size_tokens` | `CPUOffloadingSpec` or `TieringOffloadingSpec` | KV tokens the tier holds for requests of `max_model_len` tokens. | Computed like the GPU `kv_cache_size_tokens`. A group with a sliding window keeps a fixed chunk count, so this value can be larger than the byte capacity suggests. Reads `None` when `max_model_len` is 0 or the model has no KV cache group. |
 
 `CPUOffloadingSpec` publishes the four `cpu_` labels on its one series. `TieringOffloadingSpec` publishes them on the `0:primary` series.
 

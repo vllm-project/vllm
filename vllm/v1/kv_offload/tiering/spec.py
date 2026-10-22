@@ -399,12 +399,11 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 # Create primary tier (CPU-based)
                 primary_tier = CPUPrimaryTierOffloadingManager(
                     num_chunks=self.num_chunks,
-                    kv_bytes_per_chunk=self.kv_bytes_per_chunk,
-                    config=self.config,
                     cache_policy=self.eviction_policy,
                     cache_policy_module_path=self.cache_policy_module_path,
                     enable_events=self.kv_events_config.enable_kv_cache_events,
                     mmap_region=scheduler_mmap,
+                    info=self.cpu_info,
                 )
 
                 # Create secondary tiers
