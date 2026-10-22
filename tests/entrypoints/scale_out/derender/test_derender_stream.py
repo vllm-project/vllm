@@ -356,7 +356,6 @@ def test_non_streaming_derender_initializes_parser_prefix(
     [
         ("eos", False, True),
         ("stop_token_id", False, True),
-        ("stop_string", False, False),
         ("eos", True, False),
     ],
 )
@@ -371,7 +370,6 @@ async def test_parsed_derender_leaves_out_stop_token_like_engine(
     last_id, stop_reason = {
         "eos": (eos, None),
         "stop_token_id": (bang, bang),
-        "stop_string": (bang, "!"),
     }[stop]
 
     parser = MagicMock()
@@ -1970,6 +1968,42 @@ class TestServingDerenderStreamValidation:
         )
         result = await serving.derender_chat_stream_response(request)
         assert not isinstance(result, ErrorResponse)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("parser_configured", [False, True])
+    async def test_chat_stop_strings_rejected(self, parser_configured):
+        """A stop string can complete after its start was already streamed,
+        so streaming derender rejects stop strings instead of leaking them."""
+        serving = self._make_serving(parser_configured=parser_configured)
+        request = DerenderChatStreamRequest(
+            stream=True,
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk([1, 2]),
+            chat_request=_chat_request(stop=["three"]),
+            prompt_token_ids=[1],
+        )
+        result = await serving.derender_chat_stream_response(request)
+        assert isinstance(result, ErrorResponse)
+        assert result.error.code == 400
+        assert "output_mode=text" in result.error.message
+        serving.online_derenderer.derender_chat_stream.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_completion_stop_strings_rejected(self):
+        serving = self._make_serving(parser_configured=False)
+        request = DerenderCompletionStreamRequest(
+            stream=True,
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk([1, 2]),
+            completion_request=CompletionRequest(
+                model=MODEL_NAME, prompt="hi", stop="three"
+            ),
+        )
+        result = await serving.derender_completion_stream_response(request)
+        assert isinstance(result, ErrorResponse)
+        assert result.error.code == 400
+        assert "output_mode=text" in result.error.message
+        serving.online_derenderer.derender_completion_stream.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_missing_prompt_token_ids_with_parser_rejected(self):
