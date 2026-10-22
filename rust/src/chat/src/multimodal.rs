@@ -128,6 +128,9 @@ impl MultimodalModelContext {
     }
 
     /// Resolve a static model processor spec for one loaded model.
+    ///
+    /// Local model support ([`models`]) is consulted before the
+    /// `llm-multimodal` registry.
     fn resolve_model_spec(&self) -> Option<&'static dyn ModelProcessorSpec> {
         models::lookup_spec(&self.metadata())
     }
@@ -185,6 +188,10 @@ impl ResolvedMultimodalSpec {
     }
 
     fn primary_key(&self) -> &str {
+        // Models whose forward path reads the primary tensor under a
+        // model-specific kwarg name (e.g. MuseSpark's `images` / `videos` /
+        // `input_features`) declare it in the spec; everything else keeps the
+        // per-modality convention.
         if let Some(key) = &self.encoder_input_key {
             return key;
         }
@@ -219,8 +226,8 @@ impl ResolvedMultimodalSpec {
 #[derive(Debug, Clone)]
 struct ResolvedPlaceholder {
     token: String,
-    /// The token ID emitted for `token` in the rendered prompt.
-    marker_token_id: u32,
+    /// The token IDs emitted for `token` in the rendered prompt.
+    marker_token_ids: Vec<u32>,
     /// The model-declared embed token ID marked in `is_embed` masks.
     embed_token_id: u32,
 }
@@ -233,18 +240,21 @@ impl ResolvedPlaceholder {
     ) -> Result<Self> {
         let metadata = context.metadata();
         let token = raw.placeholder_token_for(&metadata, modality)?;
-        // This is the rendered prompt marker, so resolve it from the token
-        // string itself. Do not use `ModelProcessorSpec::placeholder_token_id_for()`:
-        // for some specs that ID is the replacement vision/patch token,
-        // not necessarily the token ID of the placeholder token.
-        let marker_token_id = context.tokenizer().token_to_id(&token).ok_or_else(|| {
-            multimodal!("placeholder token `{token}` is not in the tokenizer vocabulary")
-        })?;
+        // This is the rendered prompt marker. It may be ordinary text that
+        // encodes to multiple tokens, while `placeholder_token_id_for()` is
+        // the model's replacement vision/patch token ID.
+        let marker_token_ids = context
+            .tokenizer()
+            .token_to_id(&token)
+            .map(|token_id| vec![token_id])
+            .or_else(|| context.tokenizer().encode(&token, false).ok())
+            .filter(|token_ids| !token_ids.is_empty())
+            .ok_or_else(|| multimodal!("placeholder `{token}` could not be tokenized"))?;
         let embed_token_id = raw.placeholder_token_id_for(&metadata, modality)? as u32;
 
         Ok(Self {
             token,
-            marker_token_id,
+            marker_token_ids,
             embed_token_id,
         })
     }
@@ -280,39 +290,39 @@ pub struct MultimodalConfigFiles<'a> {
     /// Video-specific preprocessor config (`video_preprocessor_config.json`).
     pub video_preprocessor_config: Option<&'a Path>,
     /// Combined processor config (`processor_config.json`), whose modality
-    /// sections are fallback preprocessor config sources.
+    /// sections take precedence over legacy standalone files.
     pub processor_config: Option<&'a Path>,
 }
 
-/// Load a modality's dedicated preprocessor config, falling back to its section
-/// in the combined processor config.
+/// Load a modality's section from the combined processor config, falling back
+/// to its legacy standalone file.
 fn load_preprocessor_config(
     dedicated_path: Option<&Path>,
     dedicated_name: &str,
     processor_config_path: Option<&Path>,
     processor_section: &str,
 ) -> Result<Option<PreProcessorConfig>> {
-    if let Some(path) = dedicated_path {
+    if let Some(path) = processor_config_path {
         let text = fs::read_to_string(path)
-            .map_err(|error| multimodal!("failed to read {dedicated_name}: {error}"))?;
-        let config = PreProcessorConfig::from_json(&text)
-            .map_err(|error| multimodal!("failed to parse {dedicated_name}: {error}"))?;
-        return Ok(Some(config));
+            .map_err(|error| multimodal!("failed to read processor_config.json: {error}"))?;
+        let value: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|error| multimodal!("failed to parse processor_config.json: {error}"))?;
+        if let Some(processor) = value.get(processor_section).filter(|value| !value.is_null()) {
+            let config = PreProcessorConfig::from_value(processor.clone()).map_err(|error| {
+                multimodal!(
+                    "failed to parse {processor_section} from processor_config.json: {error}"
+                )
+            })?;
+            return Ok(Some(config));
+        }
     }
-
-    let Some(path) = processor_config_path else {
+    let Some(path) = dedicated_path else {
         return Ok(None);
     };
     let text = fs::read_to_string(path)
-        .map_err(|error| multimodal!("failed to read processor_config.json: {error}"))?;
-    let value: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|error| multimodal!("failed to parse processor_config.json: {error}"))?;
-    let Some(processor) = value.get(processor_section) else {
-        return Ok(None);
-    };
-    let config = PreProcessorConfig::from_value(processor.clone()).map_err(|error| {
-        multimodal!("failed to parse {processor_section} from processor_config.json: {error}")
-    })?;
+        .map_err(|error| multimodal!("failed to read {dedicated_name}: {error}"))?;
+    let config = PreProcessorConfig::from_json(&text)
+        .map_err(|error| multimodal!("failed to parse {dedicated_name}: {error}"))?;
     Ok(Some(config))
 }
 
@@ -382,6 +392,14 @@ impl MultimodalModelInfo {
         )?
         .unwrap_or_else(|| preprocessor_config.clone());
 
+        let audio_preprocessor_config = load_preprocessor_config(
+            files.preprocessor_config,
+            "preprocessor_config.json",
+            files.processor_config,
+            "feature_extractor",
+        )?
+        .unwrap_or_else(|| preprocessor_config.clone());
+
         let context = MultimodalModelContext {
             model_id,
             model_type,
@@ -393,6 +411,7 @@ impl MultimodalModelInfo {
             context,
             preprocessor_config,
             video_preprocessor_config,
+            audio_preprocessor_config,
             limit_mm_per_prompt,
         )
     }
@@ -403,14 +422,12 @@ impl MultimodalModelInfo {
         context: MultimodalModelContext,
         preprocessor_config: PreProcessorConfig,
         video_preprocessor_config: PreProcessorConfig,
+        audio_preprocessor_config: PreProcessorConfig,
         limit_mm_per_prompt: MmLimitPerPrompt,
     ) -> Result<Option<Self>> {
-        let (image, video) = Self::resolve_vision_lanes(
-            &context,
-            preprocessor_config.clone(),
-            video_preprocessor_config,
-        )?;
-        let audio = Self::resolve_audio_lane(&context, &preprocessor_config)?;
+        let (image, video) =
+            Self::resolve_vision_lanes(&context, preprocessor_config, video_preprocessor_config)?;
+        let audio = Self::resolve_audio_lane(&context, &audio_preprocessor_config)?;
 
         if image.is_none() && video.is_none() && audio.is_none() {
             warn!(
@@ -488,10 +505,10 @@ impl MultimodalModelInfo {
         };
 
         let video = if let Some(placeholder) = resolve_placeholder(Modality::Video) {
-            // Placeholder expansion attributes markers to modalities by token
-            // ID, so a marker shared with the image modality is ambiguous.
-            let image_marker = image.as_ref().map(|image| image.placeholder.marker_token_id);
-            if image_marker == Some(placeholder.marker_token_id) {
+            // Placeholder expansion attributes marker sequences to modalities,
+            // so a marker shared with the image modality is ambiguous.
+            let image_marker = image.as_ref().map(|image| &image.placeholder.marker_token_ids);
+            if image_marker == Some(&placeholder.marker_token_ids) {
                 warn!(
                     model_id = context.model_id,
                     token = placeholder.token,
@@ -1021,6 +1038,7 @@ mod tests {
             context,
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
+            PreProcessorConfig::default(),
             limit_mm_per_prompt,
         )
         .unwrap()
@@ -1072,8 +1090,8 @@ mod tests {
             Some("<|video_pad|>")
         );
         assert_ne!(
-            info.image.as_ref().unwrap().placeholder.marker_token_id,
-            info.video.as_ref().unwrap().placeholder.marker_token_id,
+            info.image.as_ref().unwrap().placeholder.marker_token_ids,
+            info.video.as_ref().unwrap().placeholder.marker_token_ids,
         );
     }
 
@@ -1109,6 +1127,7 @@ mod tests {
         };
         let info = MultimodalModelInfo::from_loaded(
             context,
+            PreProcessorConfig::default(),
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
             HashMap::new(),
@@ -1179,6 +1198,181 @@ mod tests {
         assert_eq!(info.placeholder_token(Modality::Video), None);
     }
 
+    // Token IDs from the Muse-Spark-1.2 checkpoint's `tokenizer_config.json`.
+    fn muse_spark_tokenizer() -> TestTokenizer {
+        TestTokenizer::new()
+            .with_regular_token("<|audio|>", 200038)
+            .with_regular_token("<|image_start|>", 200080)
+            .with_regular_token("<|image_end|>", 200081)
+            .with_regular_token("<|vid_start|>", 200082)
+            .with_regular_token("<|vid_end|>", 200083)
+            .with_regular_token("<|vid_frame_separator|>", 200087)
+            .with_regular_token("<|image|>", 200090)
+            .with_regular_token("<|video|>", 200091)
+            .with_regular_token("<|patch|>", 200092)
+            .with_regular_token("<|soft_audio_start|>", 201463)
+            .with_regular_token("<|soft_audio_end|>", 201464)
+    }
+
+    fn muse_spark_info() -> MultimodalModelInfo {
+        let config = serde_json::json!({
+            "model_type": "muse_spark",
+            "audio_config": {"patch_sizes": [16, 6, 5, 4]},
+        });
+        test_info("muse_spark", config, muse_spark_tokenizer())
+    }
+
+    #[test]
+    fn processor_sections_take_precedence_over_legacy_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join("preprocessor_config.json");
+        let combined = dir.path().join("processor_config.json");
+        fs::write(&legacy, r#"{"sampling_rate":8000}"#).unwrap();
+        for section in ["image_processor", "video_processor", "feature_extractor"] {
+            fs::write(
+                &combined,
+                serde_json::json!({section: {"sampling_rate":24000}}).to_string(),
+            )
+            .unwrap();
+            let config = load_preprocessor_config(
+                Some(&legacy),
+                "preprocessor_config.json",
+                Some(&combined),
+                section,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(config.get_extra::<usize>("sampling_rate"), Some(24000));
+        }
+        fs::write(&combined, "{}").unwrap();
+        let config = load_preprocessor_config(
+            Some(&legacy),
+            "preprocessor_config.json",
+            Some(&combined),
+            "feature_extractor",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(config.get_extra::<usize>("sampling_rate"), Some(8000));
+    }
+
+    #[tokio::test]
+    async fn muse_spark_combined_processor_config_controls_media_features() {
+        use llm_multimodal::{
+            AudioSource, VideoSource,
+            audio::DecodedAudio,
+            types::{DecodedRgbFrame, DecodedRgbVideo},
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.json");
+        let processor = dir.path().join("processor_config.json");
+        fs::write(
+            &config,
+            r#"{"model_type":"muse_spark","audio_config":{"patch_sizes":[16,6,5,4]}}"#,
+        )
+        .unwrap();
+        fs::write(
+            &processor,
+            r#"{
+            "image_processor": {"patch_size":14,"merge_size":2},
+            "video_processor": {"patch_size":14,"merge_size":2,"temporal_patch_size":2},
+            "feature_extractor": {"sampling_rate":8000,"samples_per_token":80}
+        }"#,
+        )
+        .unwrap();
+        let info = MultimodalModelInfo::from_paths(
+            "generic-checkpoint".to_owned(),
+            Some("muse_spark".to_owned()),
+            MultimodalConfigFiles {
+                config: Some(&config),
+                processor_config: Some(&processor),
+                preprocessor_config: None,
+                video_preprocessor_config: None,
+            },
+            Arc::new(muse_spark_tokenizer()),
+            HashMap::new(),
+        )
+        .unwrap()
+        .unwrap();
+        let audio = Arc::new(AudioClip::new(
+            bytes::Bytes::new(),
+            DecodedAudio {
+                samples: vec![0.25; 160],
+                sample_rate: 16000,
+            },
+            AudioSource::InlineBytes,
+            "audio".to_owned(),
+        ));
+        let prepared = info.prepare_audios(vec![audio], vec![None]).await.unwrap();
+        assert_eq!(prepared.replacements[0].tokens, [201463, 200038, 201464]);
+
+        let frame_len = 3 * 28 * 28;
+        let video = DecodedRgbVideo::new(
+            bytes::Bytes::from(vec![128; frame_len * 2]),
+            (0..2)
+                .map(|index| DecodedRgbFrame {
+                    width: 28,
+                    height: 28,
+                    offset: index * frame_len,
+                    len: frame_len,
+                })
+                .collect(),
+        );
+        let clip = Arc::new(VideoClip::new_rgb_with_sample_fps(
+            video,
+            bytes::Bytes::new(),
+            VideoSource::InlineBytes,
+            "video".to_owned(),
+            2.0,
+        ));
+        let prepared =
+            info.prepare_videos(vec![clip], vec![None], ModelDtype::Float32).await.unwrap();
+        let token_ids =
+            prepared.replacements[0].tokens.iter().map(|&id| id as u32).collect::<Vec<_>>();
+        // Two frames uniformly sampled at 2 fps with temporal_patch_size=2
+        // form one clip whose first frame is stamped at 0/2.0 = 0.00s.
+        assert_eq!(
+            info.context.tokenizer().decode(&token_ids, false).unwrap(),
+            "<|vid_start|>Time: 0.00s<|video|><|vid_end|>"
+        );
+    }
+
+    #[test]
+    fn muse_spark_resolves_all_modalities_with_model_kwarg_names() {
+        let info = muse_spark_info();
+
+        assert_eq!(info.placeholder_token(Modality::Image), Some("<|patch|>"));
+        assert_eq!(info.placeholder_token(Modality::Video), Some("<|video|>"));
+        assert_eq!(info.placeholder_token(Modality::Audio), Some("<|audio|>"));
+        let image = info.image.as_ref().unwrap();
+        assert_eq!(image.placeholder.marker_token_ids, vec![200092]);
+        assert_eq!(image.placeholder.embed_token_id, 200092); // <|patch|>
+        let video = info.video.as_ref().unwrap();
+        assert_eq!(video.placeholder.embed_token_id, 200091); // <|video|>
+        let audio = info.audio.as_ref().unwrap();
+        assert_eq!(audio.placeholder.embed_token_id, 200038); // <|audio|>
+
+        // The MuseSpark engine reads its forward kwargs under model-specific
+        // names rather than the per-modality defaults.
+        assert_eq!(image.spec.primary_key(), "images");
+        assert_eq!(video.spec.primary_key(), "videos");
+        assert_eq!(audio.spec.primary_key(), "input_features");
+    }
+
+    #[test]
+    fn muse_spark_without_audio_encoder_disables_audio_lane_only() {
+        let config = serde_json::json!({
+            "model_type": "muse_spark",
+            "audio_config": null,
+        });
+        let info = test_info("muse_spark", config, muse_spark_tokenizer());
+
+        assert_eq!(info.placeholder_token(Modality::Image), Some("<|patch|>"));
+        assert_eq!(info.placeholder_token(Modality::Video), Some("<|video|>"));
+        assert!(info.audio.is_none());
+    }
+
     fn step5_vl_info() -> MultimodalModelInfo {
         let config = serde_json::json!({"model_type": "step5_vl"});
         test_info("step5_vl", config, step3_vl_tokenizer())
@@ -1195,7 +1389,7 @@ mod tests {
         let image = info.image.as_ref().expect("image support should resolve");
         // The marker and the embed token are the same `<im_patch>` token; the
         // structural tokens only appear inside the replacement sequence.
-        assert_eq!(image.placeholder.marker_token_id, STEP3_IM_PATCH_ID);
+        assert_eq!(image.placeholder.marker_token_ids, vec![STEP3_IM_PATCH_ID]);
         assert_eq!(image.placeholder.embed_token_id, STEP3_IM_PATCH_ID);
         assert_eq!(image.processor.model_name(), "step3_vl");
     }
@@ -1222,6 +1416,7 @@ mod tests {
 
         let info = MultimodalModelInfo::from_loaded(
             context,
+            PreProcessorConfig::default(),
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
             HashMap::new(),
@@ -1270,7 +1465,10 @@ mod tests {
         );
         assert_eq!(info.placeholder_token(Modality::Video), None);
         let image = info.image.as_ref().expect("image support");
-        assert_eq!(image.placeholder.marker_token_id, DEEPSEEK_V41_IMAGE_ID);
+        assert_eq!(
+            image.placeholder.marker_token_ids,
+            vec![DEEPSEEK_V41_IMAGE_ID]
+        );
         assert_eq!(image.placeholder.embed_token_id, DEEPSEEK_V41_IMAGE_ID);
         // The engine's forward kwargs pop `patches` (not `pixel_values`).
         assert_eq!(image.spec.primary_key(), "patches");

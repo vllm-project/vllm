@@ -5872,6 +5872,7 @@ dependencies = [
  "anyhow",
  "asynk-strim-attr",
  "bytes",
+ "chrono",
  "clap",
  "easy-ext",
  "expect-test",
@@ -6027,6 +6028,8 @@ dependencies = [
  "expect-test",
  "itertools 0.14.0",
  "prometheus-client",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

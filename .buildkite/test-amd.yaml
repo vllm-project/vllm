@@ -851,6 +851,7 @@ steps:
   - tests/models/test_vision.py
   commands:
   - pytest -v -s distributed/test_custom_all_reduce.py
+  - pytest -v -s distributed/test_minimax_m3_indexer_cp_tp.py
   - torchrun --nproc_per_node=2 distributed/test_ca_buffer_sharing.py
   - TARGET_TEST_SUITE=MI300 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   - pytest -v -s -x lora/test_mixtral.py
@@ -1587,6 +1588,24 @@ steps:
   # Four GPUs run the two tp4 cases in test_amd_latent_moe_runner.py; the tp8
   # case and the 8/16-GPU cases in test_latent_moe_tail.py still skip.
   - pytest -v -s -m "distributed" models/kimi_k3
+
+- label: ":amd: (MI355) MiniMax M3 Specialized Decode"
+  timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_4
+  num_gpus: 4
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/models/minimax_m3/amd/
+  - vllm/models/deepseek_v41/amd/mono/common/
+  - tests/models/minimax_m3/amd_specialized_decode/
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -v -s models/minimax_m3/amd_specialized_decode
+  # the long TP4 hand-off stress
+  - pytest -v -s --optional -m optional models/minimax_m3/amd_specialized_decode
 
 - label: ":amd: (MI300) Mamba Kernels" # TBD
   timeout_in_minutes: 55
@@ -4365,9 +4384,11 @@ steps:
       kernels/test_kpool_decode_update_batched.py
       kernels/test_minimax_m3_amd_ops.py
       kernels/test_minimax_m3_sparse_attn_fp8_scale.py
+      kernels/test_muse_spark_router_bf16x3.py
       kernels/test_onednn.py
       kernels/test_relu2_fp8_quant.py
       --deselect=tests/kernels/test_bf16_skinny_gemm.py::test_every_dsv3_routed_shape_is_instantiated
+  - pytest -v -s kernels/test_fused_muse_spark_qknorm_rope_kv_insert.py -k rocm
 
 - label: ":amd: (MI355) Gate Linear Router Kernels"
   timeout_in_minutes: 20
