@@ -38,6 +38,7 @@ from .model import (
     _fused_shared_expert_name,
     _mega_moe_fused_shared_experts,
     _num_fused_shared_experts,
+    _reject_mega_moe_reload,
     _routed_experts_prefix,
     _try_load_fp8_attn_proj,
     _try_load_fp8_indexer_wk,
@@ -210,6 +211,7 @@ class Glm5NextMultiTokenPredictor(nn.Module):
 class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        self.model_config = vllm_config.model_config
         self.config = vllm_config.model_config.hf_text_config
         self.quant_config = vllm_config.quant_config
         self.model = Glm5NextMultiTokenPredictor(
@@ -294,6 +296,7 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
         return name
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        _reject_mega_moe_reload(self, self.model_config)
         stacked_params_mapping = [
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
