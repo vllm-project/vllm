@@ -198,6 +198,8 @@ logger = init_logger(__name__)
 
 
 class GPUModelRunner(LoRAModelRunnerMixin):
+    screened_head_cls: type[ScreenedLMHead] = ScreenedLMHead
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -522,7 +524,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     ),
                 )
             if self.model_config.screened_lm_head:
-                self.screened_head = ScreenedLMHead.from_model(
+                self.screened_head = self.screened_head_cls.from_model(
                     self.model,
                     self.sampler,
                     self.vocab_size,
@@ -1623,6 +1625,28 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         return block_tables, slot_mappings
 
+    def _screened_logits(
+        self,
+        sample_hidden_states: torch.Tensor,
+        input_batch: InputBatch,
+        grammar_output: GrammarOutput | None,
+    ) -> torch.Tensor | None:
+        """Logits from the screened lm_head, or None when the batch needs the
+        full lm_head."""
+        # Rejection sampling reads the draft rows the screen may drop.
+        if (
+            self.screened_head is None
+            or grammar_output is not None
+            or input_batch.num_draft_tokens > 0
+        ):
+            return None
+        top_k = self.screened_head.required_top_k(
+            input_batch.idx_mapping_np, sample_hidden_states.shape[0]
+        )
+        if top_k is None:
+            return None
+        return self.screened_head(sample_hidden_states, top_k)
+
     def sample(
         self,
         hidden_states: torch.Tensor,
@@ -1646,15 +1670,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logits = logits[:, : self.vocab_size]
         else:
             sample_hidden_states = hidden_states[input_batch.logits_indices]
-            top_k = None
-            if self.screened_head is not None and grammar_output is None:
-                top_k = self.screened_head.required_top_k(
-                    input_batch.idx_mapping_np, sample_hidden_states.shape[0]
-                )
-            if top_k is not None:
-                assert self.screened_head is not None
-                logits = self.screened_head(sample_hidden_states, top_k)
-            else:
+            logits = self._screened_logits(
+                sample_hidden_states, input_batch, grammar_output
+            )
+            if logits is None:
                 logits = self.model.compute_logits(sample_hidden_states)
 
         invalid_drafts = None

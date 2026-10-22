@@ -217,6 +217,13 @@ class ScreenedLMHead:
             self.err[rows] = err * (1 + 4 * gamma)
 
     @classmethod
+    def unsupported_platform_reason(cls) -> str | None:
+        """What the current platform lacks for this screen, or None."""
+        if current_platform.is_cuda() and current_platform.has_device_capability(89):
+            return None
+        return "an FP8-capable CUDA GPU (compute capability 8.9+)"
+
+    @classmethod
     def from_model(
         cls,
         model: torch.nn.Module,
@@ -229,10 +236,8 @@ class ScreenedLMHead:
         lm_head = getattr(language_model, "lm_head", None)
         processor = getattr(language_model, "logits_processor", None)
         reason = None
-        if not (
-            current_platform.is_cuda() and current_platform.has_device_capability(89)
-        ):
-            reason = "an FP8-capable CUDA GPU (compute capability 8.9+)"
+        if (platform_reason := cls.unsupported_platform_reason()) is not None:
+            reason = platform_reason
         elif envs.VLLM_BATCH_INVARIANT:
             # Whether a request is screened depends on the rest of its batch.
             reason = "VLLM_BATCH_INVARIANT to be off"
@@ -293,7 +298,9 @@ class ScreenedLMHead:
             return None
         return top_k
 
-    def __call__(self, x: torch.Tensor, top_k: int = 1) -> torch.Tensor:
+    def __call__(self, x: torch.Tensor, top_k: int = 1) -> torch.Tensor | None:
+        """The screened logits, or None when a subclass declines the batch and
+        the caller must use the full lm_head."""
         num_tokens = x.shape[0]
         vocab_size = self.vocab_size
         assert num_tokens <= self.max_num_tokens

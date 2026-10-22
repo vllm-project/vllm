@@ -1392,6 +1392,22 @@ def test_v1_model_runner_rejects_v2_only_features():
         VllmConfig._validate_v1_model_runner(config)
 
 
+def test_v1_model_runner_rejects_screened_lm_head():
+    config = SimpleNamespace(
+        parallel_config=ParallelConfig(distributed_executor_backend="mp"),
+        scheduler_config=SchedulerConfig.default_factory(async_scheduling=False),
+        speculative_config=None,
+        model_config=SimpleNamespace(
+            screened_lm_head=True, is_diffusion=False, architecture="LlamaForCausalLM"
+        ),
+    )
+    config._dflash_needs_multi_kv_group = lambda: False
+    config._is_dflash_candidate_draft = lambda: False
+
+    unsupported = VllmConfig._get_v1_model_runner_unsupported_features(config)
+    assert unsupported == ["screened lm_head"]
+
+
 def test_batch_sharded_sampling_rejects_return_sampling_mask():
     """The batch-sharded gather drops sampling masks, so the combination must
     fail loudly instead of returning ``sampling_mask=None``."""
