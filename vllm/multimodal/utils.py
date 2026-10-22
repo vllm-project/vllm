@@ -119,20 +119,57 @@ def encode_video_url(
     return f"data:{mimetype};base64,{video_b64}"
 
 
+def resolve_mm_processor_kwarg(
+    mm_processor_kwargs: Mapping[str, Any] | None,
+    key: str,
+    *,
+    scope: str = "videos_kwargs",
+) -> Any:
+    """Read a processor kwarg that may be set flat or inside an HF scope.
+
+    HuggingFace processors accept some kwargs both in the shared flat
+    namespace and inside a modality scope such as ``videos_kwargs``. A scoped
+    value takes precedence over the flat one here. (Note: HF's own
+    ``_merge_kwargs`` instead *rejects* a key passed both flat and scoped, so
+    configuring both is not portable — set it in exactly one place.) For
+    example, ``use_audio_in_video`` may be configured as
+    ``--mm-processor-kwargs '{"use_audio_in_video": true}'`` or as
+    ``--mm-processor-kwargs '{"videos_kwargs": {"use_audio_in_video": true}}'``.
+
+    Only a single scope level is resolved; deeper nesting is not supported.
+    """
+    if not mm_processor_kwargs:
+        return None
+
+    scoped_kwargs = mm_processor_kwargs.get(scope)
+    if isinstance(scoped_kwargs, Mapping) and scoped_kwargs.get(key) is not None:
+        return scoped_kwargs[key]
+
+    return mm_processor_kwargs.get(key)
+
+
 def get_load_audio_from_video(kwargs: Mapping[str, object] | None) -> bool | None:
     """Whether each video's audio track is loaded and fused into the video, or
     `None` if the processor kwargs don't say.
 
     `load_audio_from_video` is the name Transformers uses for this processor
     setting, replacing the deprecated `use_audio_in_video`, which is still read as a
-    fallback until vLLM moves to the new name everywhere.
+    fallback until vLLM moves to the new name everywhere. Either name may be set
+    flat or inside the `videos_kwargs` scope.
     """
     if not kwargs:
         return None
     for name in ("load_audio_from_video", "use_audio_in_video"):
-        if (value := kwargs.get(name)) is not None:
+        if (value := resolve_mm_processor_kwarg(kwargs, name)) is not None:
             return bool(value)
     return None
+
+
+def get_use_audio_in_video(
+    mm_processor_kwargs: Mapping[str, Any] | None,
+) -> bool:
+    """Whether the processor interleaves audio into video for this request."""
+    return bool(get_load_audio_from_video(mm_processor_kwargs))
 
 
 def get_mm_features_in_window(
