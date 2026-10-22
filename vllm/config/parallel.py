@@ -868,7 +868,10 @@ class ParallelConfig:
 
     @staticmethod
     def sync_dp_state(
-        dp_group: ProcessGroup, has_unfinished: bool, pending_pause: bool
+        dp_group: ProcessGroup,
+        has_unfinished: bool,
+        pending_pause: bool,
+        timeout: timedelta | None = None,
     ) -> tuple[bool, bool]:
         """Combined all-reduce for DP state synchronization.
 
@@ -888,7 +891,7 @@ class ParallelConfig:
         tensor = torch.tensor(
             [int(has_unfinished), int(pending_pause)], dtype=torch.int32, device="cpu"
         )
-        cpu_all_reduce_(tensor, dp_group)
+        cpu_all_reduce_(tensor, dp_group, timeout=timeout)
         dp_size = dp_group.size()
         pause_count = tensor[1].item()
         has_unfinished_global = tensor[0].item() > 0 or pause_count % dp_size != 0

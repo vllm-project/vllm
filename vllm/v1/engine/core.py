@@ -2527,6 +2527,7 @@ class DPEngineCoreProc(EngineCoreProc):
             self.dp_group,
             has_unfinished=local_unfinished,
             pending_pause=self.pending_pause,
+            timeout=self.vllm_config.parallel_config.cpu_distributed_timeout,
         )
 
         if pause_consensus:

@@ -1377,9 +1377,11 @@ class GroupCoordinator:
         """
         torch.distributed.barrier(group=self.cpu_group)
 
-    def cpu_all_reduce_(self, tensor: torch.Tensor) -> torch.Tensor:
+    def cpu_all_reduce_(
+        self, tensor: torch.Tensor, timeout: timedelta | None = None
+    ) -> torch.Tensor:
         """In-place SUM all-reduce of a small CPU tensor over `cpu_group`."""
-        return cpu_all_reduce_(tensor, self.cpu_group)
+        return cpu_all_reduce_(tensor, self.cpu_group, timeout)
 
     def send(self, tensor: torch.Tensor, dst: int | None = None) -> None:
         """Sends a tensor to the destination rank in a blocking way."""
