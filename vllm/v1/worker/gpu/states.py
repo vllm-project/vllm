@@ -3,6 +3,7 @@
 import numpy as np
 import torch
 
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
 
 
@@ -79,6 +80,9 @@ class RequestState:
             dtype=torch.int64,
             device=device,
         )
+        # Slots of the requests added since the last apply_staged_writes().
+        # Their draft tokens are reset in a single batched op.
+        self.new_req_indices: list[int] = []
 
         self.next_prefill_tokens = torch.zeros(
             num_prefill_lookahead, self.max_num_reqs, dtype=torch.int32, device=device
@@ -115,7 +119,7 @@ class RequestState:
         self.num_computed_tokens.stage_write_elem(req_idx, num_computed_tokens)
 
         if self.num_speculative_steps > 0:
-            self.draft_tokens[req_idx].zero_()
+            self.new_req_indices.append(req_idx)
 
     def apply_staged_writes(self) -> None:
         self.prompt_len.copy_to_uva()
@@ -123,6 +127,12 @@ class RequestState:
         self.total_len.apply_write()
         self.all_token_ids.apply_write()
         self.num_computed_tokens.apply_write()
+        if self.new_req_indices:
+            indices = async_tensor_h2d(
+                self.new_req_indices, self.device, dtype=torch.int64
+            )
+            self.draft_tokens.index_fill_(0, indices, 0)
+            self.new_req_indices.clear()
 
     def remove_request(self, req_id: str) -> int | None:
         """Return the freed slot index, or None if the request was not found."""
