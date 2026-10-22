@@ -92,16 +92,23 @@ class HostStagingAllocationError(RuntimeError):
     """A host receive slot could not be allocated, page-locked or registered."""
 
 
-def _alloc_page_locked_slot(nbytes: int) -> torch.Tensor:
+def _alloc_page_locked_slot(
+    nbytes: int, *, park: Callable[[torch.Tensor, str], None]
+) -> torch.Tensor:
     """One exact-size host receive slot: a pageable ``torch.empty`` page-locked
     whole from its storage base with ``cudaHostRegister``, then NIXL-registered.
 
     Torch's pinned allocator is bypassed on purpose: it rounds every request up
     to a power of two and keeps freed blocks cached, so the pool would occupy
     more than the documented ``lanes x K x slot bytes`` and never give it back.
-    Any failure leaves nothing registered: a nonzero ``cudaHostRegister`` code
-    (the wrapper returns codes and never raises) is raised with its error text,
-    and a NIXL failure unregisters the page-locked range before re-raising.
+    A failure leaves no registration the caller has to track: a nonzero
+    ``cudaHostRegister`` code (the wrapper returns codes and never raises) is
+    raised with its error text, and a NIXL failure unregisters the page-locked
+    range before re-raising. When that rollback fails as well (a nonzero
+    ``cudaHostUnregister`` code or an exception out of the call) the range's
+    page-lock state is unknown, so the buffer goes to ``park`` (the engine's
+    ``_park_host_slot``) rather than being dropped, and the NIXL error is still
+    the one raised.
     """
     cudart = CudaRTLibrary()
     buffer = torch.empty(nbytes, dtype=torch.uint8, device="cpu")
@@ -117,7 +124,15 @@ def _alloc_page_locked_slot(nbytes: int) -> torch.Tensor:
     try:
         register_nixl_memory(buffer)
     except Exception:
-        _host_unregister(cudart, base)
+        try:
+            unregistered = _host_unregister(cudart, base)
+        except Exception:
+            logger.exception(
+                "cudaHostUnregister of a half-allocated host receive slot failed"
+            )
+            unregistered = False
+        if not unregistered:
+            park(buffer, "failed cudaHostUnregister after its NIXL registration failed")
         raise
     return buffer
 
@@ -918,7 +933,7 @@ class ShardedRDTWeightTransferEngine(
             return buffer
 
         try:
-            return _alloc_page_locked_slot(nbytes)
+            return _alloc_page_locked_slot(nbytes, park=self._park_host_slot)
         except Exception as error:
             raise HostStagingAllocationError(
                 "staging_device='host' could not "

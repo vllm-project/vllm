@@ -132,6 +132,7 @@ def cuda_runtime(monkeypatch):
         events=[],
         register_code=0,
         unregister_code=0,
+        unregister_error=None,
         load_error=None,
     )
 
@@ -147,6 +148,8 @@ def cuda_runtime(monkeypatch):
         def cudaHostUnregister(self, ptr):
             state.unregistered.append(ptr)
             state.events.append(("unregister", ptr))
+            if state.unregister_error is not None:
+                raise state.unregister_error
             return state.unregister_code
 
         def cudaGetErrorString(self, code):
@@ -596,6 +599,62 @@ def test_a_nixl_registration_failure_unregisters_the_partial_slot(nixl, cuda_run
     assert size == 48
     assert nixl.deregistered == [] and cuda_runtime.events == [("unregister", base)]
     assert torch.uint8 not in engine._dest_buffers[0]
+
+
+def test_a_failed_rollback_unregister_parks_the_half_allocated_slot(
+    nixl, cuda_runtime, engine_log
+):
+    engine = _host_pool_engine()
+    nixl.failure = RuntimeError("NIXL refused the buffer")
+    cuda_runtime.unregister_code = 1  # cudaErrorInvalidValue
+
+    with pytest.raises(HostStagingAllocationError) as excinfo:
+        engine._preregister_at_init()
+
+    # The allocation still fails loudly, with the NIXL error as its cause, and
+    # nothing enters the pool.
+    assert excinfo.value.__cause__ is nixl.failure
+    assert torch.uint8 not in engine._dest_buffers[0]
+    base, size, _flags = cuda_runtime.registered[0]
+    assert cuda_runtime.events == [("unregister", base)]
+    # The rollback could not confirm the page-lock is gone, so the slot is
+    # parked and reported like every other unsure release, never dropped.
+    assert len(engine._parked_host_slots) == 1
+    (parked,) = engine._parked_host_slots
+    assert _base(parked) == base and parked.untyped_storage().nbytes() == size == 48
+    (error,) = _errors(engine_log)
+    assert f"{base:#x}" in error and "48 bytes" in error
+    assert "cudaHostUnregister" in error and "never freed" in error
+
+
+def test_a_raising_rollback_unregister_parks_the_half_allocated_slot(
+    nixl, cuda_runtime, engine_log
+):
+    engine = _host_pool_engine()
+    nixl.failure = RuntimeError("NIXL refused the buffer")
+    cuda_runtime.unregister_error = OSError("cudart call faulted")
+
+    with pytest.raises(HostStagingAllocationError) as excinfo:
+        engine._preregister_at_init()
+
+    # A rollback that raises instead of returning a code is the same unsure
+    # release: the NIXL error is still the cause, nothing enters the pool.
+    assert excinfo.value.__cause__ is nixl.failure
+    assert torch.uint8 not in engine._dest_buffers[0]
+    base, size, _flags = cuda_runtime.registered[0]
+    assert cuda_runtime.events == [("unregister", base)]
+    assert len(engine._parked_host_slots) == 1
+    (parked,) = engine._parked_host_slots
+    assert _base(parked) == base and parked.untyped_storage().nbytes() == size == 48
+    # The rollback's exception is logged with its traceback, then the slot is
+    # reported like every other parked slot.
+    rollback, parking = _errors(engine_log)
+    assert "cudaHostUnregister" in rollback
+    with_traceback = {id(r): r for r in engine_log.records if r.exc_info}
+    (traceback_record,) = with_traceback.values()
+    assert traceback_record.exc_info[1] is cuda_runtime.unregister_error
+    assert f"{base:#x}" in parking and "48 bytes" in parking
+    assert "cudaHostUnregister" in parking and "never freed" in parking
 
 
 def test_an_unloadable_cuda_runtime_fails_loudly_in_host_mode(
