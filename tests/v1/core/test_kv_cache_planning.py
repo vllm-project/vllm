@@ -1944,6 +1944,35 @@ def test_check_enough_kv_cache_memory_reserves_null_block():
     )
 
 
+@pytest.mark.parametrize(
+    ("mm_kwargs", "expect_hint"),
+    [
+        ({}, True),
+        ({"skip_mm_profiling": True}, False),
+        ({"language_model_only": True}, False),
+    ],
+)
+def test_check_enough_kv_cache_memory_points_to_mm_profiling(mm_kwargs, expect_hint):
+    """Encoder profiling at the maximum input size can consume the whole KV
+    cache budget on small GPUs; the error must name the multimodal knobs
+    rather than only `gpu_memory_utilization`, unless the encoder was not
+    profiled.
+    """
+    model_config = ModelConfig(
+        model="Qwen/Qwen3-VL-2B-Instruct", max_model_len=512, **mm_kwargs
+    )
+    vllm_config = VllmConfig(model_config=model_config)
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    spec = new_kv_cache_spec()
+
+    for available_memory in (0, spec.page_size_bytes * 2):
+        with pytest.raises(ValueError) as exc_info:
+            check_enough_kv_cache_memory(
+                vllm_config, {"layer1": spec}, available_memory
+            )
+        assert ("limit_mm_per_prompt" in str(exc_info.value)) == expect_hint
+
+
 def _spec_decode_kv_cache_groups(worker_specs, use_eagle_block_drop=True):
     config = VllmConfig(model_config=ModelConfig(max_model_len=64))
     config.cache_config.kv_cache_layout = "BLHNC"

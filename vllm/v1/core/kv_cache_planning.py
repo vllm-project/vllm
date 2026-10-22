@@ -48,14 +48,30 @@ logger = init_logger(__name__)
 
 
 def _check_enough_kv_cache_memory(
+    vllm_config: VllmConfig,
     available_memory: int,
     get_needed_memory: Callable[[], int],
-    max_model_len: int,
     estimate_max_model_len: Callable[[int], int],
 ):
+    max_model_len = vllm_config.model_config.max_model_len
+    mm_config = vllm_config.model_config.multimodal_config
+    mm_profiling_msg = ""
+    if (
+        mm_config is not None
+        and not mm_config.skip_mm_profiling
+        and not mm_config.language_model_only
+    ):
+        mm_profiling_msg = (
+            "Memory profiling reserved activation memory for the multimodal "
+            "encoder at the maximum input size; reduce it with size hints in "
+            "`limit_mm_per_prompt`, `mm_processor_kwargs` (e.g. `max_pixels`) "
+            "or `skip_mm_profiling`. "
+        )
+
     if available_memory <= 0:
         raise ValueError(
             "No available memory for the cache blocks. "
+            f"{mm_profiling_msg}"
             "Try increasing `gpu_memory_utilization` when initializing the engine "
             "(this flag also controls CPU memory reservation on the CPU "
             "backend, despite its name). "
@@ -79,6 +95,7 @@ def _check_enough_kv_cache_memory(
             f"({max_model_len}), ({format_gib(needed_memory)} GiB KV "
             f"cache is needed, which is larger than the available KV cache "
             f"memory ({format_gib(available_memory)} GiB). {estimated_msg}"
+            f"{mm_profiling_msg}"
             f"Try increasing `gpu_memory_utilization` (which also controls "
             f"CPU memory on the CPU backend) or decreasing `max_model_len` "
             f"when initializing the engine. "
@@ -177,9 +194,9 @@ def check_enough_kv_cache_memory(
             else available_memory
         )
         _check_enough_kv_cache_memory(
+            vllm_config,
             check_memory,
             lambda: max_memory_usage_bytes(vllm_config, kv_cache_spec.values()),
-            vllm_config.model_config.max_model_len,
             lambda am: estimate_max_model_len(vllm_config, kv_cache_spec, am),
         )
 
@@ -1591,9 +1608,9 @@ def get_kv_cache_configs(
         if not groups:
             continue
         _check_enough_kv_cache_memory(
+            vllm_config,
             avail_mem,
             partial(_max_memory_usage_bytes_from_groups, builder, vllm_config, groups),
-            vllm_config.model_config.max_model_len,
             partial(_estimate_max_model_len_from_groups, builder, vllm_config, groups),
         )
 
