@@ -394,10 +394,8 @@ class NixlEplbCommunicator(EplbCommunicator):
         # Per-rank expert_id -> physical row; set by set_transfer_context.
         self._expert_to_src_row: list[dict[int, int]] | None = None
         self._layer_idx: int | None = None
-        # (layer, peer) -> local and remote address ranges, diagnostic only.
         # (layer, tensor) -> (base_ptr, bytes) as published to the peers.
         self._published_ptrs: dict[tuple[int, int], tuple[int, int]] = {}
-        # Device backed address ranges, to place a fault address. Diagnostic.
         self.set_stream(None)
 
         nixl_agent_config = nixl_utils.nixl_agent_config

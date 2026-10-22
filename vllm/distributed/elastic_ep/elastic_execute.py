@@ -579,14 +579,6 @@ class ElasticEPScalingExecutor:
         rank_mapping: dict[int, int] | None = None,
         async_op: bool = False,
     ) -> None:
-        if async_op:
-            # A reconfiguration reshuffle cannot be scheduled. The copies land
-            # on a stream the caller does not wait for, so the engine resumes
-            # serving against expert weights that are still being moved, and
-            # answers come back wrong for as long as the copies run.
-            async_op = False
-            logger.info("[Elastic EP] Expert resharding runs synchronously")
-
         if get_ep_group().rank == 0:
             logger.info("[Elastic EP] Starting expert resharding...")
 
