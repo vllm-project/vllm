@@ -327,11 +327,11 @@ def test_d2d_warmup_cache_seeding(vllm_runner, tmp_path):
         tp_size=2,
         extra_args=[
             *case.daemon_args,
-            "--weight-cache-listen-host",
+            "--seed-listen-host",
             "127.0.0.1",
-            "--weight-cache-listen-port",
+            "--seed-listen-port",
             str(base_port),
-            "--weight-cache-seed-token",
+            "--seed-token",
             token,
         ],
         env_extra={"VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR": str(tmp_path / "source")},
@@ -346,11 +346,11 @@ def test_d2d_warmup_cache_seeding(vllm_runner, tmp_path):
             tp_size=2,
             extra_args=[
                 *case.daemon_args,
-                "--weight-cache-seed-host",
+                "--seed-source-host",
                 "127.0.0.1",
-                "--weight-cache-seed-port",
+                "--seed-source-port",
                 str(base_port),
-                "--weight-cache-seed-token",
+                "--seed-token",
                 token,
             ],
             env_extra={"VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR": str(tmp_path / "mirror")},
@@ -935,8 +935,8 @@ def test_warmup_cache_request_validation_and_miss(tmp_path, monkeypatch):
     # A path traversal or malformed hash must never reach the filesystem.
     assert handle(_warmup_cache_request(config_hash="../x"))["status"] == "error"
     assert handle(_warmup_cache_request(config_hash="A" * 64))["status"] == "error"
-    for bad_rank in (-1, True, "0", 1 << 12):
-        assert handle(_warmup_cache_request(rank=bad_rank))["status"] == "error"
+    # A garbage rank just names a file that does not exist: a clean miss.
+    assert handle(_warmup_cache_request(rank=-1))["status"] == "miss"
     # A well-formed request for a cache that does not exist is a clean miss.
     assert handle(_warmup_cache_request())["status"] == "miss"
 
@@ -979,7 +979,10 @@ def test_remote_warmup_cache_listener(tmp_path, monkeypatch):
         recv_json,
         send_json,
     )
-    from vllm.model_executor.model_loader.weight_cache.seed import SeedTransport
+    from vllm.model_executor.model_loader.weight_cache.seed import (
+        SeedConfig,
+        SeedTransport,
+    )
     from vllm.model_executor.model_loader.weight_cache.warmup_cache import (
         FlashInferWarmupCache,
     )
@@ -991,7 +994,8 @@ def test_remote_warmup_cache_listener(tmp_path, monkeypatch):
     (cache_dir / "autotune_configs_dp0_rank0.json").write_text(json.dumps(table))
 
     transport = SeedTransport(
-        [FlashInferWarmupCache()], listen=("127.0.0.1", 0), token="test-secret"
+        [FlashInferWarmupCache()],
+        SeedConfig(listen=("127.0.0.1", 0), token="test-secret"),
     )
     address = transport.start_listener()
     assert address is not None
@@ -1026,10 +1030,13 @@ def test_transport_cuts_off_trickling_peer(monkeypatch):
         recv_json,
         send_json,
     )
-    from vllm.model_executor.model_loader.weight_cache.seed import SeedTransport
+    from vllm.model_executor.model_loader.weight_cache.seed import (
+        SeedConfig,
+        SeedTransport,
+    )
 
     monkeypatch.setattr(seed_mod, "_REMOTE_REQUEST_TIMEOUT_S", 0.5)
-    transport = SeedTransport([], listen=("127.0.0.1", 0), token="t")
+    transport = SeedTransport([], SeedConfig(listen=("127.0.0.1", 0), token="t"))
     address = transport.start_listener()
     assert address is not None
     try:

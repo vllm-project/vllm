@@ -144,33 +144,33 @@ class PreloadSubcommand(CLISubcommand):
             help="Host for the parent /health endpoint (default: 0.0.0.0).",
         )
         parser.add_argument(
-            "--weight-cache-listen-host",
+            "--seed-listen-host",
             type=str,
             default=None,
             help="Host to bind for authenticated daemon-to-daemon requests.",
         )
         parser.add_argument(
-            "--weight-cache-listen-port",
+            "--seed-listen-port",
             type=int,
             default=None,
             help="Base port for daemon-to-daemon requests; each daemon binds "
             "base_port + group offset + its global rank.",
         )
         parser.add_argument(
-            "--weight-cache-seed-host",
+            "--seed-source-host",
             type=str,
             default=None,
             help="Host of a source daemon replica to seed warmup caches from.",
         )
         parser.add_argument(
-            "--weight-cache-seed-port",
+            "--seed-source-port",
             type=int,
             default=None,
             help="Base port of the source daemon replica; each daemon dials "
             "base_port + group offset + its global rank.",
         )
         parser.add_argument(
-            "--weight-cache-seed-token",
+            "--seed-token",
             type=str,
             default=None,
             help="Shared secret for daemon-to-daemon requests. The JSON "
@@ -186,6 +186,7 @@ class PreloadSubcommand(CLISubcommand):
             get_draft_daemon_config,
             plan_local_ranks,
         )
+        from vllm.model_executor.model_loader.weight_cache.seed import SeedConfig
         from vllm.model_executor.model_loader.weight_cache.utils import (
             format_daemon_role,
         )
@@ -214,8 +215,8 @@ class PreloadSubcommand(CLISubcommand):
         dp_size = parallel_config.data_parallel_size
         world_size = dp_size * pp_size * tp_size
 
-        listen_args = (args.weight_cache_listen_host, args.weight_cache_listen_port)
-        source_args = (args.weight_cache_seed_host, args.weight_cache_seed_port)
+        listen_args = (args.seed_listen_host, args.seed_listen_port)
+        source_args = (args.seed_source_host, args.seed_source_port)
         if any(value is None for value in listen_args) and any(
             value is not None for value in listen_args
         ):
@@ -228,14 +229,10 @@ class PreloadSubcommand(CLISubcommand):
             raise ValueError(
                 "Weight cache seed host and port must be provided together"
             )
-        if any(value is not None for value in (*listen_args, *source_args)):
-            if not args.weight_cache_seed_token:
-                raise ValueError(
-                    "Weight cache listener/source requires --weight-cache-seed-token"
-                )
-        elif args.weight_cache_seed_token:
+        has_endpoint = any(value is not None for value in (*listen_args, *source_args))
+        if has_endpoint != bool(args.seed_token):
             raise ValueError(
-                "--weight-cache-seed-token requires a listener or a source"
+                "Preload daemons must set --seed-token to enable D2D transfer"
             )
 
         placements = plan_local_ranks(parallel_config)
@@ -307,8 +304,8 @@ class PreloadSubcommand(CLISubcommand):
             )
         }
         for base_port in (
-            args.weight_cache_listen_port,
-            args.weight_cache_seed_port,
+            args.seed_listen_port,
+            args.seed_source_port,
         ):
             if base_port is None:
                 continue
@@ -318,6 +315,14 @@ class PreloadSubcommand(CLISubcommand):
                     f"Daemon-to-daemon port range {base_port}-{max_port} exceeds 65535"
                 )
 
+        def _seed_endpoint(
+            host: str | None, base_port: int | None, offset: int
+        ) -> tuple[str, int] | None:
+            # Validated above: host and port are provided together.
+            if host is None or base_port is None:
+                return None
+            return host, base_port + offset
+
         procs = []
         for group_index, (is_draft, config, init_method) in enumerate(groups):
             # Draft daemons live past the target group's port block so both
@@ -325,21 +330,15 @@ class PreloadSubcommand(CLISubcommand):
             port_offset = group_index * world_size
             for local_rank, dp_rank, pp_rank, tp_rank in placements:
                 global_rank = dp_rank * pp_size * tp_size + pp_rank * tp_size + tp_rank
-                seed_listen = (
-                    (
-                        args.weight_cache_listen_host,
-                        args.weight_cache_listen_port + port_offset + global_rank,
-                    )
-                    if args.weight_cache_listen_host is not None
-                    else None
-                )
-                seed_source = (
-                    (
-                        args.weight_cache_seed_host,
-                        args.weight_cache_seed_port + port_offset + global_rank,
-                    )
-                    if args.weight_cache_seed_host is not None
-                    else None
+                offset = port_offset + global_rank
+                seed_config = SeedConfig(
+                    listen=_seed_endpoint(
+                        args.seed_listen_host, args.seed_listen_port, offset
+                    ),
+                    source=_seed_endpoint(
+                        args.seed_source_host, args.seed_source_port, offset
+                    ),
+                    token=args.seed_token,
                 )
                 procs.append(
                     ctx.Process(
@@ -354,9 +353,7 @@ class PreloadSubcommand(CLISubcommand):
                             is_draft,
                             dp_rank,
                             pp_rank,
-                            seed_listen,
-                            seed_source,
-                            args.weight_cache_seed_token,
+                            seed_config,
                         ),
                         name=(
                             f"vllm-weight-cache-{format_daemon_role(is_draft)}-"

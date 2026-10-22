@@ -84,16 +84,16 @@ Source replica:
 
 ```bash
 vllm preload --model /path/to/model --tensor-parallel-size 4 \
-    --weight-cache-listen-host 0.0.0.0 --weight-cache-listen-port 29600 \
-    --weight-cache-seed-token "$TOKEN"
+    --seed-listen-host 0.0.0.0 --seed-listen-port 29600 \
+    --seed-token "$TOKEN"
 ```
 
 Mirror replica (possibly on another node):
 
 ```bash
 vllm preload --model /path/to/model --tensor-parallel-size 4 \
-    --weight-cache-seed-host <source-host> --weight-cache-seed-port 29600 \
-    --weight-cache-seed-token "$TOKEN"
+    --seed-source-host <source-host> --seed-source-port 29600 \
+    --seed-token "$TOKEN"
 ```
 
 Each rank binds and dials `base_port + group offset + its global rank`, so one
@@ -262,9 +262,9 @@ processes owned by the same user:
   directory is additionally rejected if it is group/world accessible.
 - On Linux the daemon verifies the connecting peer's UID via `SO_PEERCRED`.
 
-The optional daemon-to-daemon listener (`--weight-cache-listen-*`) is a
+The optional daemon-to-daemon listener (`--seed-listen-*`) is a
 separate TCP channel: requests are JSON-only and size-capped, authenticate
-with the shared `--weight-cache-seed-token` (constant-time comparison), and
+with the shared `--seed-token` (constant-time comparison), and
 an unauthenticated peer that stops sending is cut off by a whole-message
 deadline instead of blocking the accept loop. The channel is unencrypted —
 bind it to a trusted network.
