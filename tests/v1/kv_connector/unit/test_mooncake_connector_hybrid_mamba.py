@@ -8,7 +8,9 @@ validated by this test module.
 """
 
 import asyncio
+import ctypes
 from collections import OrderedDict
+from math import prod
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -28,6 +30,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     _compute_sender_transfer_plan,
     _validate_asymmetric_region_lengths,
 )
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.kv_cache_interface import (
@@ -304,9 +307,6 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages():
     worker._prepared_transfer_regions = {}
     worker._layout_by_peer = OrderedDict()
     worker._acked_layout_peers = set()
-    worker._has_mamba = kv_cache_config.has_mamba_layers
-    worker._sd_conv_regions = set()
-    worker._sd_pair_occurrence = {}
     worker.use_mla = False
     worker.engine = SimpleNamespace(batch_register_memory=lambda *_: 0)
     worker.is_kv_consumer = True
@@ -628,7 +628,6 @@ def test_logical_to_kernel_block_ids_expands_fa_not_gdn():
     worker.shutdown = noop_shutdown
     worker._physical_blocks_per_logical_kv_block = 17
     worker.kv_cache_config = make_hybrid_gdn_kv_cache_config(block_size=544)
-    worker._has_mamba = worker.kv_cache_config.has_mamba_layers
 
     block_ids = [[2], [2]]
     kernel_block_ids = worker._logical_to_kernel_block_ids(block_ids)
@@ -1086,7 +1085,9 @@ def test_register_kv_caches_keeps_replicated_conv_state_whole(monkeypatch):
         get_conv_state_layout.cache_clear()
 
 
-def test_hetero_tp_requires_ds_conv_layout_for_sharded_mamba(monkeypatch):
+def test_hetero_tp_sd_conv_layout_requires_a_derivable_split(monkeypatch):
+    """SD conv states reshard per row and sub-projection, so heterogeneous TP
+    needs a mamba type whose sub-projections can be derived."""
     from vllm.model_executor.layers.mamba.mamba_utils import (
         get_conv_state_layout,
     )
@@ -1109,9 +1110,25 @@ def test_hetero_tp_requires_ds_conv_layout_for_sharded_mamba(monkeypatch):
         try:
             monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "SD")
             get_conv_state_layout.cache_clear()
+            # The fixture's GDN conv state (6, 3) is DS-shaped; SD is (3, 6).
+            worker._layer_specs["model.layers.1.linear_attn"] = MambaSpec(
+                block_size=vllm_config.cache_config.block_size,
+                shapes=((3, 6), (1, 2, 2)),
+                dtypes=(torch.float16, torch.float16),
+                mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+            )
+            assert worker._hetero_tp_mamba_layout_error(worker.tp_size * 2) is None
+
+            # A sharded short conv has no sub-projection split to reshard by.
+            worker._layer_specs["model.layers.2.conv"] = MambaSpec(
+                block_size=vllm_config.cache_config.block_size,
+                shapes=((3, 4),),
+                dtypes=(torch.float16,),
+                mamba_type=MambaAttentionBackendEnum.SHORT_CONV,
+            )
             err = worker._hetero_tp_mamba_layout_error(worker.tp_size * 2)
-            assert err is not None and "VLLM_SSM_CONV_STATE_LAYOUT=DS" in err
-            # Homogeneous TP copies whole states, so SD is fine.
+            assert err is not None and "model.layers.2.conv" in err
+            # Homogeneous TP copies whole states, so any SD state is fine.
             assert worker._hetero_tp_mamba_layout_error(worker.tp_size) is None
 
             monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "DS")
@@ -1242,85 +1259,217 @@ def test_gdn_conv_sub_projection_regions_align_across_het_tp(monkeypatch):
         get_conv_state_layout.cache_clear()
 
 
-# ---------------------------------------------------------------------------
-# SD-layout GDN conv row x segment resharding (Qwen3.6 default layout).
-# These tests validate sd_conv_row_segment_descriptors() against the
-# byte-exact reference formula verified on real hardware (Qwen3.6-35B,
-# all four TP shapes, 500-problem GSM8K full runs).
-# ---------------------------------------------------------------------------
+# Global conv sub-projection dims per mamba type, and the head-sharded ssm
+# state (heads, a, b). Mamba2's x:B:C is 2:1:1; GDN's Q:K:V is 1:1:2.
+_SD_RESHARD_MODELS = {
+    MambaAttentionBackendEnum.GDN_ATTN: ((8, 8, 16), (4, 4, 2)),
+    MambaAttentionBackendEnum.MAMBA2: ((16, 8, 8), (4, 4, 2)),
+}
+# conv_kernel - 1 + num_spec, with one speculative token.
+_SD_CONV_ROWS = 4
 
 
-def test_sd_conv_p2d1_exact_once():
-    """P TP2 -> D TP1: 9 descriptors per producer rank cover the D conv
-    region (3 rows x 16384 B) exactly once."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
-        sd_conv_row_segment_descriptors,
+def _sd_reshard_spec(mamba_type, tp: int, block_size: int) -> MambaSpec:
+    proj_dims, (heads, a, b) = _SD_RESHARD_MODELS[mamba_type]
+    return MambaSpec(
+        block_size=block_size,
+        shapes=((_SD_CONV_ROWS, sum(proj_dims) // tp), (heads // tp, a, b)),
+        dtypes=(torch.float16, torch.float16),
+        mamba_type=mamba_type,
     )
 
-    cov = [[0] * 16384 for _ in range(3)]
-    for r in (0, 1):
-        s, d, lens = sd_conv_row_segment_descriptors(
-            0x10000, 0x20000, 7, 7, 49152, 49152, 24576, 49152, +2, r, 0
+
+def _sd_shard_page(conv, ssm, mamba_type, tp: int, rank: int) -> torch.Tensor:
+    """One rank's page bytes: SD conv rows [proj0_r | proj1_r | ...], then
+    its heads of the ssm state."""
+    proj_dims, _ = _SD_RESHARD_MODELS[mamba_type]
+    pieces = []
+    start = 0
+    for dim in proj_dims:
+        shard = dim // tp
+        pieces.append(conv[:, start + rank * shard : start + (rank + 1) * shard])
+        start += dim
+    heads = ssm.shape[0] // tp
+    return torch.cat(
+        [
+            torch.cat(pieces, dim=1).contiguous().view(torch.int8).flatten(),
+            ssm[rank * heads : (rank + 1) * heads]
+            .contiguous()
+            .view(torch.int8)
+            .flatten(),
+        ]
+    )
+
+
+async def _plan_and_apply_sd_reshard(
+    worker: MooncakeConnectorWorker,
+    *,
+    p_tp: int,
+    p_rank: int,
+    producer_cache: torch.Tensor,
+    consumer_pages: list[torch.Tensor],
+    d_spec: MambaSpec,
+    layer_name: str,
+    requests: dict[str, tuple[int, int]],
+) -> None:
+    """Plan one producer rank's sends to its consumer ranks for all requests
+    in one batch, and apply the planned copies."""
+    d_tp = len(consumer_pages)
+    worker.tp_size, worker.tp_rank = p_tp, p_rank
+    worker.register_kv_caches({layer_name: producer_cache})
+    assert worker._hetero_tp_mamba_layout_error(d_tp) is None
+    local_regions = worker._get_transfer_regions(
+        worker.kv_caches_base_addr,
+        worker.block_len_per_layer,
+        worker.kv_block_len_per_layer,
+        worker.registered_layer_names,
+        worker.registered_layer_indices,
+        worker.registered_group_indices,
+    )
+    ratio = max(p_tp, d_tp) // min(p_tp, d_tp)
+    d_ranks = (
+        [p_rank // ratio]
+        if p_tp >= d_tp
+        else range(p_rank * ratio, (p_rank + 1) * ratio)
+    )
+    d_conv_bytes = prod(d_spec.shapes[0]) * get_dtype_size(d_spec.dtypes[0])
+    for d_rank in d_ranks:
+        consumer = consumer_pages[d_rank]
+        block_len = consumer.stride(0)
+        remote_regions = [
+            TransferRegion(
+                layer_name=layer_name,
+                layer_index=0,
+                base_addr=consumer.data_ptr() + offset,
+                block_len=block_len,
+                kv_block_len=length,
+                group_index=0,
+            )
+            for offset, length in (
+                (0, d_conv_bytes),
+                (d_conv_bytes, d_spec.page_size_bytes - d_conv_bytes),
+            )
+        ]
+        ready_reqs = [
+            (
+                req_id,
+                SendBlockMeta(
+                    p_req_id=f"p-{req_id}",
+                    transfer_id=f"xfer-{req_id}",
+                    local_block_ids=[[p_block]],
+                    ready=asyncio.Event(),
+                ),
+            )
+            for req_id, (p_block, _) in requests.items()
+        ]
+        xfer_meta = MooncakeXferMetadata(
+            remote_hostname="consumer-host",
+            remote_port=54321,
+            remote_tp_size=d_tp,
+            remote_tp_rank=d_rank,
+            req_blocks={
+                req_id: (f"xfer-{req_id}", [[d_block]])
+                for req_id, (_, d_block) in requests.items()
+            },
+            kv_caches_base_addr=[],
+            block_lens=[],
+            kv_block_lens=[],
         )
-        assert len(s) == 9
-        for src_addr, dst_addr, ln in zip(s, d, lens):
-            rel = dst_addr - 0x20000 - 7 * 49152
-            row, off = divmod(rel, 16384)
-            for x in range(off, off + ln):
-                cov[row][x] += 1
-    assert all(c == 1 for row in cov for c in row)
-
-
-def test_sd_conv_d1p2_exact_once():
-    """D TP1 -> P TP2 (reverse): each P rank page covered exactly once."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
-        sd_conv_row_segment_descriptors,
-    )
-
-    for r in (0, 1):
-        cov = [[0] * 8192 for _ in range(3)]
-        s, d, lens = sd_conv_row_segment_descriptors(
-            0x10000, 0x20000, 7, 7, 49152, 49152, 49152, 24576, -2, 0, r
+        (
+            src_ptrs,
+            dst_ptrs,
+            lengths,
+            err_reqs,
+            err_msg,
+        ) = await worker._build_transfer_params(
+            ready_reqs, xfer_meta, local_regions, remote_regions
         )
-        assert len(s) == 9
-        for src_addr, dst_addr, ln in zip(s, d, lens):
-            rel = dst_addr - 0x20000 - 7 * 49152
-            row, off = divmod(rel, 8192)
-            for x in range(off, off + ln):
-                cov[row][x] += 1
-        assert all(c == 1 for row in cov for c in row)
+        assert err_reqs == [] and err_msg is None
+        for src, dst, length in zip(src_ptrs, dst_ptrs, lengths):
+            ctypes.memmove(dst, src, length)
 
 
-def test_sd_conv_matches_reference_permute_formula():
-    """Dst layout must equal the hardware-verified permute formula:
-    D row j = [q0|q1|k0|k1|v0|v1] where P rank r sends q_r, k_r, v_r."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
-        sd_conv_row_segment_descriptors,
+@pytest.mark.cpu_test
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mamba_type", list(_SD_RESHARD_MODELS))
+@pytest.mark.parametrize("p_tp,d_tp", [(2, 1), (1, 2), (4, 2), (2, 4)])
+async def test_hetero_tp_reshards_sd_conv_state(monkeypatch, mamba_type, p_tp, d_tp):
+    """Heterogeneous TP with the SD conv layout: every consumer page equals
+    its own rank's shard of the producer state, for every request of a batch.
+    """
+    from vllm.model_executor.layers.mamba.mamba_utils import (
+        get_conv_state_layout,
     )
 
-    # P rank1 dst for row 0: q1 at 2048, k1 at 6144, v1 at 12288
-    s, d, lens = sd_conv_row_segment_descriptors(
-        0x10000, 0x20000, 0, 0, 49152, 49152, 24576, 49152, +2, 1, 0
+    monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
+    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "SD")
+    get_conv_state_layout.cache_clear()
+    # The planner does not depend on the role; a consumer worker registers
+    # without a bootstrap server.
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector",
+        kv_role="kv_consumer",
     )
-    dst_offs = [x - 0x20000 for x in d[:3]]
-    assert dst_offs == [2048, 6144, 12288]
+    block_size = vllm_config.cache_config.block_size
+    layer_name = "model.layers.0.linear_attn"
+    num_blocks = 8
+    proj_dims, ssm_shape = _SD_RESHARD_MODELS[mamba_type]
+    torch.manual_seed(0)
+    global_conv = torch.randn(num_blocks, _SD_CONV_ROWS, sum(proj_dims)).half()
+    global_ssm = torch.randn(num_blocks, *ssm_shape).half()
 
-    # P rank0 dst for row 0: q0 at 0, k0 at 4096, v0 at 8192
-    s, d, lens = sd_conv_row_segment_descriptors(
-        0x10000, 0x20000, 0, 0, 49152, 49152, 24576, 49152, +2, 0, 0
-    )
-    dst_offs = [x - 0x20000 for x in d[:3]]
-    assert dst_offs == [0, 4096, 8192]
+    def pages(tp: int, rank: int, fill: bool) -> torch.Tensor:
+        spec = _sd_reshard_spec(mamba_type, tp, block_size)
+        cache = torch.zeros(num_blocks, spec.page_size_bytes, dtype=torch.int8)
+        if fill:
+            for block in range(num_blocks):
+                page = _sd_shard_page(
+                    global_conv[block], global_ssm[block], mamba_type, tp, rank
+                )
+                cache[block, : page.numel()] = page
+        return cache
 
+    consumer_pages = [pages(d_tp, rank, fill=False) for rank in range(d_tp)]
+    # (producer block, consumer block) per request, planned in one batch.
+    requests = {"req-a": (3, 5), "req-b": (6, 2), "req-c": (1, 7)}
+    try:
+        for p_rank in range(p_tp):
+            p_spec = _sd_reshard_spec(mamba_type, p_tp, block_size)
+            kv_cache_config = KVCacheConfig(
+                num_blocks=num_blocks,
+                kv_cache_tensors=[],
+                kv_cache_groups=[KVCacheGroupSpec([layer_name], p_spec)],
+            )
+            with set_current_vllm_config(vllm_config), patch_worker_dependencies():
+                connector = MooncakeConnector(
+                    vllm_config, KVConnectorRole.WORKER, kv_cache_config
+                )
+            worker = connector.connector_worker
+            try:
+                await _plan_and_apply_sd_reshard(
+                    worker,
+                    p_tp=p_tp,
+                    p_rank=p_rank,
+                    producer_cache=pages(p_tp, p_rank, fill=True),
+                    consumer_pages=consumer_pages,
+                    d_spec=_sd_reshard_spec(mamba_type, d_tp, block_size),
+                    layer_name=layer_name,
+                    requests=requests,
+                )
+            finally:
+                worker.shutdown()
+                worker.shutdown = noop_shutdown
+                connector.connector_worker = None
 
-def test_sd_conv_non_divisible_falls_back():
-    """Rows not splitting into 1:1:2 -> empty lists (caller falls back
-    to the whole-region copy, matching #53078 behavior)."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
-        sd_conv_row_segment_descriptors,
-    )
-
-    s, d, lens = sd_conv_row_segment_descriptors(
-        0x10000, 0x20000, 0, 0, 20, 40, 10, 20, +2, 0, 0
-    )
-    assert s == [] and d == [] and lens == []
+        for d_rank, consumer in enumerate(consumer_pages):
+            for p_block, d_block in requests.values():
+                expected = _sd_shard_page(
+                    global_conv[p_block], global_ssm[p_block], mamba_type, d_tp, d_rank
+                )
+                assert torch.equal(consumer[d_block, : expected.numel()], expected)
+            untouched = sorted(
+                set(range(num_blocks)) - {d for _, d in requests.values()}
+            )
+            assert not consumer[untouched].any()
+    finally:
+        get_conv_state_layout.cache_clear()

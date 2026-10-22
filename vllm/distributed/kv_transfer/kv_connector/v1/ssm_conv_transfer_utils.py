@@ -4,7 +4,9 @@
 
 With DS conv state layout (dim, state_len), sub-projections are
 contiguous in memory.  Each D rank reads its slices via separate
-RDMA transfers — no P-side permutation needed.
+RDMA transfers — no P-side permutation needed.  With SD layout
+(state_len, dim), a sub-projection is contiguous only within one row;
+see `sd_conv_sub_spans`.
 
 Supported model types:
   - Mamba1: conv = [x], temporal = (intermediate_size, state_size)
@@ -50,7 +52,7 @@ class MambaConvSplitInfo:
 
     @property
     def proj_bytes(self) -> tuple[int, ...]:
-        """Byte sizes of the sub-projections for one rank."""
+        """Byte sizes of the sub-projections for one rank (DS layout)."""
         row_bytes = self.conv_rows * self.conv_dtype_size
         return tuple(d * row_bytes for d in self.local_proj_dims)
 
@@ -115,7 +117,8 @@ def derive_mamba_conv_split(
 
     Args:
         mamba_spec: MambaSpec whose shapes are:
-            shapes[0] = conv state: (conv_dim_local, conv_rows) in DS layout.
+            shapes[0] = conv state: (conv_dim_local, conv_rows) in DS layout,
+                        (conv_rows, conv_dim_local) in SD layout.
             shapes[1] = temporal state (model-specific shape).
         local_tp: this engine's tensor-parallel size.
 
@@ -138,11 +141,10 @@ def derive_mamba_conv_split(
     conv_shape = mamba_spec.shapes[0]
     assert len(conv_shape) == 2, f"Expected 2D conv state shape, got {conv_shape}"
 
-    # NOTE (ZhanqiuHu): 3-read requires DS layout, which is already asserted
-    # in nixl worker __init__.  Use it directly instead of heuristic detection.
-    assert is_conv_state_dim_first(), "3-read requires DS conv state layout"
-    local_conv_dim = conv_shape[0]  # DS: (conv_dim_local, conv_rows)
-    conv_rows = conv_shape[1]
+    if is_conv_state_dim_first():
+        local_conv_dim, conv_rows = conv_shape
+    else:
+        conv_rows, local_conv_dim = conv_shape
 
     conv_dtype_size = torch.tensor(
         [],
@@ -235,82 +237,50 @@ def compute_physical_blocks_per_logical(
     return math.ceil((ssm_sizes[0] + ssm_sizes[1]) / block_len)
 
 
-def sd_conv_row_segment_descriptors(
-    src_base: int,
-    dst_base: int,
-    local_block_id: int,
-    remote_block_id: int,
-    local_block_len: int,
-    remote_block_len: int,
-    local_kv_bl: int,
-    remote_kv_bl: int,
-    tp_ratio: int,
-    local_tp_rank: int,
-    remote_tp_rank: int,
-) -> tuple[list[int], list[int], list[int]]:
-    """Expand one whole-conv-region copy into per-row per-segment
-    descriptors.
+def sd_conv_sub_spans(
+    split: MambaConvSplitInfo, tp_ratio: int
+) -> list[tuple[int, int, int, int]]:
+    """Split an SD-layout conv state into its per-row sub-projection spans.
 
-    Args mirror the sender loop in MooncakeConnector:
-      tp_ratio > 0: local (producer) is the SMALL side; shard_idx selects
-        this producer rank slice inside each consumer-side segment.
-      tp_ratio < 0: local (producer) is the LARGE side; shard_idx selects
-        the remote consumer rank slice.
+    In the SD layout (conv_rows, conv_dim), each row concatenates the
+    sub-projections, so a sub-projection is contiguous only within one row.
+    Heterogeneous TP must reshard each (row, sub-projection) span on its own;
+    splitting the whole state by the TP ratio cuts across rows and
+    projections.
 
-    Returns (srcs, dsts, lens); empty lists if the 1:1:2 row split is not
-    exactly representable (caller falls back to the whole-region copy).
+    Args:
+        split: this engine's conv split (SD layout).
+        tp_ratio: signed TP ratio from `_get_tp_ratio(local_tp, remote_tp)`;
+            positive when the remote engine has the larger per-rank state.
+
+    Returns:
+        (local_offset, remote_offset, local_len, remote_len) in bytes, one per
+        (row, sub-projection), with offsets from the start of the conv state.
+
     """
-    assert tp_ratio != 1, "SD expansion only applies to heterogeneous TP"
+    assert tp_ratio != 1
     abs_ratio = abs(tp_ratio)
-    if local_kv_bl < remote_kv_bl:
-        row_small = local_kv_bl // 3
-        row_large = remote_kv_bl // 3
+    local_dims = split.local_proj_dims
+    if tp_ratio > 0:
+        remote_dims = tuple(dim * abs_ratio for dim in local_dims)
     else:
-        row_small = remote_kv_bl // 3
-        row_large = local_kv_bl // 3
-    if row_small % 4 != 0 or row_large % 4 != 0:
-        return [], [], []
-    seg_small = (row_small // 4, row_small // 4, row_small // 2)
-    seg_large_start = (0, row_large // 4, row_large // 2)
+        assert all(dim % abs_ratio == 0 for dim in local_dims), (
+            f"Conv sub-projection dims {local_dims} do not divide by the TP "
+            f"ratio {abs_ratio}."
+        )
+        remote_dims = tuple(dim // abs_ratio for dim in local_dims)
+    elem = split.conv_dtype_size
+    local_row = sum(local_dims) * elem
+    remote_row = sum(remote_dims) * elem
 
-    shard_idx = local_tp_rank % tp_ratio if tp_ratio > 0 else remote_tp_rank % abs_ratio
-
-    srcs = []
-    dsts = []
-    lens = []
-    for row in range(3):
-        seg_acc = 0
-        for seg in range(3):
-            cell = seg_small[seg]
-            large_off = seg_large_start[seg] + shard_idx * cell
-            if tp_ratio > 0:
-                src = (
-                    src_base
-                    + local_block_id * local_block_len
-                    + row * row_small
-                    + seg_acc
-                )
-                dst = (
-                    dst_base
-                    + remote_block_id * remote_block_len
-                    + row * row_large
-                    + large_off
-                )
-            else:
-                src = (
-                    src_base
-                    + local_block_id * local_block_len
-                    + row * row_large
-                    + large_off
-                )
-                dst = (
-                    dst_base
-                    + remote_block_id * remote_block_len
-                    + row * row_small
-                    + seg_acc
-                )
-            srcs.append(src)
-            dsts.append(dst)
-            lens.append(cell)
-            seg_acc += cell
-    return srcs, dsts, lens
+    spans: list[tuple[int, int, int, int]] = []
+    for row in range(split.conv_rows):
+        local_offset = row * local_row
+        remote_offset = row * remote_row
+        for local_dim, remote_dim in zip(local_dims, remote_dims):
+            spans.append(
+                (local_offset, remote_offset, local_dim * elem, remote_dim * elem)
+            )
+            local_offset += local_dim * elem
+            remote_offset += remote_dim * elem
+    return spans

@@ -47,8 +47,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.stats import (
     MooncakeKVConnectorStats,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
+    MambaConvSplitInfo,
     derive_mamba_conv_split,
-    sd_conv_row_segment_descriptors,
+    sd_conv_sub_spans,
 )
 from vllm.distributed.parallel_state import (
     get_pp_group,
@@ -1266,7 +1267,6 @@ class MooncakeConnectorWorker:
             self.rpc_port,
         )
 
-        self._has_mamba = kv_cache_config.has_mamba_layers
         self._remote_agents: dict[EngineId, dict[int, dict[int, str]]] = {}
         self._pending_bootstrap_queries: dict[str, asyncio.Event] = {}
         self.side_channel_port: int = 0  # we will bind it in register_kv_caches()
@@ -1376,6 +1376,10 @@ class MooncakeConnectorWorker:
 
         self._tp_size: dict[EngineId, int] = {self.engine_id: self.tp_size}
         self._layer_specs: dict[str, KVCacheSpec] = {}
+        # Registered SD-layout conv state regions (base address -> layer) and
+        # their sub-projection splits, derived on first heterogeneous-TP use.
+        self._sd_conv_layer_by_base: dict[int, str] = {}
+        self._sd_conv_splits: dict[str, MambaConvSplitInfo] = {}
         for group in kv_cache_config.transfer_groups:
             group_spec = group.kv_cache_spec
             specs_by_layer = getattr(group_spec, "kv_cache_specs", {})
@@ -1842,7 +1846,6 @@ class MooncakeConnectorWorker:
         err_reqs: list[ReqId] = []
         err_msg: str | None = None
         remote_session = f"{agent_meta.remote_hostname}:{agent_meta.remote_port}"
-        self._sd_pair_occurrence: dict[tuple[int, str], int] = {}
 
         for d_req_id, send_meta in ready_reqs:
             _, remote_block_ids_per_group = agent_meta.req_blocks[d_req_id]
@@ -1951,19 +1954,10 @@ class MooncakeConnectorWorker:
                 group_local_block_ids, group_remote_block_ids = (
                     group_concurrent_contiguous(local_block_ids, remote_block_ids)
                 )
-                (
-                    should_transfer,
-                    src_region_offset,
-                    dst_region_offset,
-                    transfer_len,
-                ) = self._get_sender_transfer_plan(
-                    local_kv_block_len=local_region.kv_block_len,
-                    remote_kv_block_len=remote_region.kv_block_len,
-                    remote_tp_rank=agent_meta.remote_tp_rank,
-                    remote_tp_size=agent_meta.remote_tp_size,
-                    layer_name=local_region.layer_name,
+                copies = self._sender_block_copies(
+                    local_region, remote_region, agent_meta
                 )
-                if not should_transfer:
+                if not copies:
                     # Replicated KV cache: only one producer rank in the TP group
                     # needs to send the actual bytes for this paired decoder rank.
                     # TODO: Account for replicated producer KV in
@@ -1971,67 +1965,20 @@ class MooncakeConnectorWorker:
                     # unnecessary ZMQ requests and remove this branch.
                     continue
 
-                assert src_region_offset + transfer_len <= local_region.kv_block_len, (
-                    "Computed source transfer region exceeds local KV block size."
-                )
-                assert dst_region_offset + transfer_len <= remote_region.kv_block_len, (
-                    "Destination transfer region exceeds remote KV block size."
-                )
                 # Collapse one contiguous block group into a single larger
                 # transfer descriptor when the per-block copy is identical.
-                can_coalesce = _can_coalesce_block_transfers(
+                can_coalesce = len(copies) == 1 and _can_coalesce_block_transfers(
                     local_region_block_len=local_region.block_len,
                     remote_region_block_len=remote_region.block_len,
-                    src_region_offset=src_region_offset,
-                    dst_region_offset=dst_region_offset,
-                    transfer_len=transfer_len,
-                )
-
-                tp_ratio_for_loop = _get_tp_ratio(
-                    self.tp_size, agent_meta.remote_tp_size
-                )
-                sd_occurrence = self._sd_pair_occurrence.get(
-                    (id(local_regions), local_region.layer_name), 0
-                )
-                self._sd_pair_occurrence[
-                    (id(local_regions), local_region.layer_name)
-                ] = sd_occurrence + 1
-                is_sd_conv = (
-                    self._has_mamba
-                    and tp_ratio_for_loop != 1
-                    and (local_region.layer_name, sd_occurrence)
-                    in self._sd_conv_regions
-                    and min(local_region.kv_block_len, remote_region.kv_block_len)
-                    <= 65536
-                    and min(local_region.kv_block_len, remote_region.kv_block_len)
-                    * abs(tp_ratio_for_loop)
-                    == max(local_region.kv_block_len, remote_region.kv_block_len)
+                    src_region_offset=copies[0][0],
+                    dst_region_offset=copies[0][1],
+                    transfer_len=copies[0][2],
                 )
                 for group_local_block_id, group_remote_block_id in zip(
                     group_local_block_ids, group_remote_block_ids
                 ):
-                    if is_sd_conv:
-                        for lb, rb in zip(group_local_block_id, group_remote_block_id):
-                            seg_srcs, seg_dsts, seg_lens = (
-                                sd_conv_row_segment_descriptors(
-                                    local_region.base_addr,
-                                    remote_region.base_addr,
-                                    lb,
-                                    rb,
-                                    local_region.block_len,
-                                    remote_region.block_len,
-                                    local_region.kv_block_len,
-                                    remote_region.kv_block_len,
-                                    tp_ratio_for_loop,
-                                    self.tp_rank,
-                                    agent_meta.remote_tp_rank,
-                                )
-                            )
-                            src_ptrs.extend(seg_srcs)
-                            dst_ptrs.extend(seg_dsts)
-                            lengths.extend(seg_lens)
-                        continue
                     if can_coalesce:
+                        src_region_offset, dst_region_offset, transfer_len = copies[0]
                         src_ptrs.append(
                             local_region.base_addr
                             + group_local_block_id[0] * local_region.block_len
@@ -2043,20 +1990,21 @@ class MooncakeConnectorWorker:
                             + dst_region_offset
                         )
                         lengths.append(transfer_len * len(group_local_block_id))
-                    else:
-                        for local_block_id, remote_block_id in zip(
-                            group_local_block_id, group_remote_block_id
-                        ):
-                            src_ptrs.append(
-                                local_region.base_addr
-                                + local_block_id * local_region.block_len
-                                + src_region_offset
-                            )
-                            dst_ptrs.append(
-                                remote_region.base_addr
-                                + remote_block_id * remote_region.block_len
-                                + dst_region_offset
-                            )
+                        continue
+                    for local_block_id, remote_block_id in zip(
+                        group_local_block_id, group_remote_block_id
+                    ):
+                        local_block_addr = (
+                            local_region.base_addr
+                            + local_block_id * local_region.block_len
+                        )
+                        remote_block_addr = (
+                            remote_region.base_addr
+                            + remote_block_id * remote_region.block_len
+                        )
+                        for src_offset, dst_offset, transfer_len in copies:
+                            src_ptrs.append(local_block_addr + src_offset)
+                            dst_ptrs.append(remote_block_addr + dst_offset)
                             lengths.append(transfer_len)
 
             logger.debug(
@@ -2115,8 +2063,7 @@ class MooncakeConnectorWorker:
         seen_storage_ptrs: set[int] = set()
         self.block_len_per_layer = []
         self.kv_block_len_per_layer = []
-        self._sd_conv_regions: set[tuple[str, int]] = set()
-        self._sd_occurrence_counter: dict[str, int] = {}
+        self._sd_conv_layer_by_base = {}
         self.registered_layer_names = []
         self.registered_layer_indices = []
         self.registered_group_indices = []
@@ -2167,7 +2114,9 @@ class MooncakeConnectorWorker:
                 conv_bytes = prod(layer_spec.shapes[0]) * get_dtype_size(
                     layer_spec.dtypes[0]
                 )
-                if is_conv_state_dim_first() and not layer_spec.tp_replicated:
+                if layer_spec.tp_replicated:
+                    region_entries = [(0, conv_bytes)]
+                elif is_conv_state_dim_first():
                     # The conv state concatenates sub-projections (GDN: Q, K,
                     # V) along the dim axis, and each sub-projection shards
                     # across TP independently. Register one region per
@@ -2180,18 +2129,11 @@ class MooncakeConnectorWorker:
                         (offset, size) for offset, size in split.local_conv_offsets
                     ]
                 else:
-                    # SD layout (state_len, conv_dim): sub-projections
-                    # interleave across rows, so the region cannot be split
-                    # by projection. Record this (layer_name, occurrence)
-                    # as an SD conv region; the sender loop expands its
-                    # descriptors row-by-row/segment-by-segment instead.
+                    # SD (state_len, dim) interleaves the sub-projections
+                    # across rows, so the state stays one region and the
+                    # sender reshards it per row (_sender_block_copies).
                     region_entries = [(0, conv_bytes)]
-                    self._sd_conv_regions.add(
-                        (layer_name, self._sd_occurrence_counter.get(layer_name, 0))
-                    )
-                self._sd_occurrence_counter[layer_name] = (
-                    self._sd_occurrence_counter.get(layer_name, 0) + 1
-                )
+                    self._sd_conv_layer_by_base[base_addr] = layer_name
                 state_offset = conv_bytes
                 shape: tuple[int, ...]
                 dtype: torch.dtype
@@ -3094,21 +3036,21 @@ class MooncakeConnectorWorker:
         )
 
     def _hetero_tp_mamba_layout_error(self, remote_tp_size: int) -> str | None:
-        """Reject heterogeneous TP for sharded Mamba/GDN state without the DS
-        conv layout, which is the only one that keeps each conv
-        sub-projection contiguous (the NIXL connector requires it too)."""
-        if (
-            self.tp_size != remote_tp_size
-            and not is_conv_state_dim_first()
-            and any(
-                isinstance(spec, MambaSpec) and not spec.tp_replicated
-                for spec in self._layer_specs.values()
-            )
-        ):
-            return (
-                "Mooncake heterogeneous-TP transfer of Mamba/GDN state requires "
-                "DS conv state layout. Set VLLM_SSM_CONV_STATE_LAYOUT=DS"
-            )
+        """Reject heterogeneous TP for a sharded SD-layout Mamba/GDN conv
+        state whose sub-projections cannot be derived (unsupported mamba
+        type), since it can only be resharded per row and sub-projection."""
+        if self.tp_size == remote_tp_size or is_conv_state_dim_first():
+            return None
+        for layer_name, spec in self._layer_specs.items():
+            if not isinstance(spec, MambaSpec) or spec.tp_replicated:
+                continue
+            try:
+                self._sd_conv_split(layer_name)
+            except (AssertionError, NotImplementedError) as e:
+                return (
+                    "Mooncake heterogeneous-TP transfer cannot reshard the SD "
+                    f"conv state of {layer_name}: {e}"
+                )
         return None
 
     def _transfer_rule(self, layer_name: str) -> tuple[bool, int | None]:
@@ -3166,6 +3108,62 @@ class MooncakeConnectorWorker:
             producer_cache_replicated=producer_cache_replicated,
             total_num_kv_heads=total_num_kv_heads,
         )
+
+    def _sender_block_copies(
+        self,
+        local_region: TransferRegion,
+        remote_region: TransferRegion,
+        agent_meta: MooncakeXferMetadata,
+    ) -> list[tuple[int, int, int]]:
+        """(src_offset, dst_offset, length) copies for one block of a region
+        pair; empty when this producer rank does not send the region."""
+        spans = [(0, 0, local_region.kv_block_len, remote_region.kv_block_len)]
+        sd_conv_layer = self._sd_conv_layer_by_base.get(local_region.base_addr)
+        if sd_conv_layer is not None and agent_meta.remote_tp_size != self.tp_size:
+            # Each SD conv row interleaves the sub-projections, so reshard
+            # every (row, sub-projection) span on its own.
+            spans = sd_conv_sub_spans(
+                self._sd_conv_split(sd_conv_layer),
+                _get_tp_ratio(self.tp_size, agent_meta.remote_tp_size),
+            )
+            assert spans[-1][0] + spans[-1][2] == local_region.kv_block_len
+            assert spans[-1][1] + spans[-1][3] == remote_region.kv_block_len
+
+        copies: list[tuple[int, int, int]] = []
+        for local_offset, remote_offset, local_len, remote_len in spans:
+            (
+                should_transfer,
+                src_offset,
+                dst_offset,
+                transfer_len,
+            ) = self._get_sender_transfer_plan(
+                local_kv_block_len=local_len,
+                remote_kv_block_len=remote_len,
+                remote_tp_rank=agent_meta.remote_tp_rank,
+                remote_tp_size=agent_meta.remote_tp_size,
+                layer_name=local_region.layer_name,
+            )
+            if not should_transfer:
+                return []
+            assert src_offset + transfer_len <= local_len, (
+                "Computed source transfer region exceeds local KV block size."
+            )
+            assert dst_offset + transfer_len <= remote_len, (
+                "Destination transfer region exceeds remote KV block size."
+            )
+            copies.append(
+                (local_offset + src_offset, remote_offset + dst_offset, transfer_len)
+            )
+        return copies
+
+    def _sd_conv_split(self, layer_name: str) -> MambaConvSplitInfo:
+        split = self._sd_conv_splits.get(layer_name)
+        if split is None:
+            spec = self._layer_specs[layer_name]
+            assert isinstance(spec, MambaSpec)
+            split = derive_mamba_conv_split(spec, self.tp_size)
+            self._sd_conv_splits[layer_name] = split
+        return split
 
     def _log_debug_cache_registration(
         self, layer_name: str, cache: torch.Tensor
