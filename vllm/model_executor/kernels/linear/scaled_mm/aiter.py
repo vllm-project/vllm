@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-
 import torch
 
 from vllm import _custom_ops as ops
@@ -464,6 +463,48 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             Bs = Bs.to(torch.float32)
 
         out_dtype = self.config.out_dtype
+
+        # Opted-in DSV4 projections only. A/B/As/Bs are exactly the already-
+        # prepared tensors received by the passing native AITER backend;
+        # no extra quantization, weight shuffle, or fallback layout change.
+        skinny_n = getattr(self, "_gfx1151_skinny_blockscale_n", None)
+        skinny_cu = getattr(self, "_gfx1151_skinny_cu_count", None)
+        skinny_k = A.shape[1] if A.ndim == 2 else None
+        if (
+            self.use_triton
+            and tuple(self.weight_group_shape) == (128, 128)
+            and out_dtype == torch.bfloat16
+            and skinny_cu is not None
+            and isinstance(skinny_cu, int)
+            and skinny_cu > 0
+            and isinstance(skinny_n, int)
+            and skinny_n > 0
+            and skinny_n % 128 == 0
+            and A.ndim == 2
+            and 1 <= A.shape[0] <= 6
+            and skinny_k is not None
+            and skinny_k % 128 == 0
+            and skinny_k == 4096
+            and B.shape == (skinny_n, skinny_k)
+            and As.shape == (A.shape[0], skinny_k // 128)
+            and Bs.shape == (skinny_n // 128, skinny_k // 128)
+            and A.dtype == torch.float8_e4m3fn
+            and B.dtype == A.dtype
+            and As.dtype == Bs.dtype == torch.float32
+            and A.is_contiguous()
+            # Native ROCm FP8 padding creates a row-major logical weight
+            # view with physical padding. Share it with
+            # AITER directly: no .contiguous() copy or second representation.
+            and B.stride(1) == 1
+            and B.stride(0) >= skinny_k
+            and B.stride(0) % 16 == 0
+            and As.is_contiguous()
+            and Bs.is_contiguous()
+        ):
+            import vllm._custom_ops as ops
+
+            return ops.wvSplitKQBlockScale(B, A, As, Bs, skinny_cu)
+
         if self.use_triton:
             gemm_a8w8_blockscale_op = rocm_aiter_ops.triton_gemm_a8w8_blockscale
         else:

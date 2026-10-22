@@ -896,6 +896,36 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
     def prepare_attn_preshuffle(self) -> None:
         from vllm._aiter_ops import rocm_aiter_ops
 
+        # RDNA's known-good AITER blockscale backend uses its own native,
+        # unshuffled weight preparation. Opt in only these two projection
+        # instances; never mutate their weights or change their fallback.
+        from vllm.platforms.rocm import on_gfx1151
+
+        if on_gfx1151() and rocm_aiter_ops.is_rdna_linear_enabled():
+            from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
+                AiterFp8BlockScaledMMKernel,
+            )
+
+            for linear, output_size in (
+                (self.fused_wqa_wkv, 1536),
+                (self.wo_b, 4096),
+            ):
+                method = getattr(linear, "quant_method", None)
+                kernel = getattr(method, "fp8_linear", None)
+                if kernel is None:
+                    kernel = getattr(
+                        getattr(linear, "scheme", None), "fp8_linear", None
+                    )
+                if type(kernel) is not AiterFp8BlockScaledMMKernel:
+                    continue
+                if not kernel.use_triton:
+                    continue
+                kernel._gfx1151_skinny_blockscale_n = output_size
+                kernel._gfx1151_skinny_cu_count = torch.cuda.get_device_properties(
+                    linear.weight.device
+                ).multi_processor_count
+            return
+
         if not rocm_aiter_ops.is_enabled():
             return
         from vllm.model_executor.layers.quantization.utils.fp8_utils import (
