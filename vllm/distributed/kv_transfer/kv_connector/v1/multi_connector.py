@@ -277,6 +277,16 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         for c in self._connectors:
             c.bind_gpu_block_pool(gpu_block_pool)
 
+    @property
+    def ends_loads_on_reusable_boundary(self) -> bool:  # type: ignore[override]
+        return any(c.ends_loads_on_reusable_boundary for c in self._connectors)
+
+    def get_reusable_load_rule(self) -> tuple[int, int] | None:
+        # Every child is bound to the same cache manager.
+        if not self._connectors:
+            return None
+        return self._connectors[0].get_reusable_load_rule()
+
     # We must override the base class method here because we need to bind
     # the metadata to each connector in the order of the connectors in the
     # MultiKVConnectorMetadata.

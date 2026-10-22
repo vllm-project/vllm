@@ -185,6 +185,11 @@ class KVConnectorBase_V1(ABC):
     # HOST/DISK/P2P or override get_external_cache_hit_sources().
     _cache_hit_source = CacheHitSource.EXTERNAL_UNSPECIFIED
 
+    # Set by a connector that, when vLLM's hit is below the reusable end of
+    # its match (get_reusable_load_rule), loads only up to that end. The
+    # scheduler then retains the state each of its loads ends on.
+    ends_loads_on_reusable_boundary: bool = False
+
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
         """Whether external hits can complete divergent local hybrid hits.
@@ -501,6 +506,24 @@ class KVConnectorBase_V1(ABC):
 
         """
         return
+
+    def get_reusable_load_rule(self) -> tuple[int, int] | None:
+        """Where a load must end so that the state it loads stays hittable.
+
+        A load ends on an align-mode Mamba state. Under the EAGLE block drop
+        a later request matching ``n`` tokens resumes one block lower, so a
+        load ending at the match end leaves a state nothing hits.
+
+        Returns:
+            ``(granularity_tokens, drop_tokens)``: for a match of ``n`` tokens
+            the load should end at ``max(n // granularity_tokens *
+            granularity_tokens - drop_tokens, 0)``. None when every load end
+            is reusable or no cache manager is bound.
+
+        """
+        if self._kv_cache_manager is None:
+            return None
+        return self._kv_cache_manager.get_reusable_load_rule()
 
     def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
         """KV cache groups restored by this connector's load for ``request``.

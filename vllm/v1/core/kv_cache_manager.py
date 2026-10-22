@@ -779,6 +779,12 @@ class KVCacheManager:
 
         return cached_tokens or 0
 
+    def get_reusable_load_rule(self) -> tuple[int, int] | None:
+        """See ``KVCacheCoordinator.get_reusable_load_rule``."""
+        if not self.enable_caching:
+            return None
+        return self.coordinator.get_reusable_load_rule()
+
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
         """Cache the blocks for the request, if enabled.
 
