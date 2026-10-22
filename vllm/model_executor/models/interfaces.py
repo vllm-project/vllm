@@ -1799,6 +1799,15 @@ class SupportsMRoPE(Protocol):
         MRO of your model class.
     """
 
+    supports_linear_text_mrope: ClassVar[bool] = False
+    """
+    A flag that indicates `get_mrope_input_positions` returns the sequential
+    positions `arange(len(input_tokens))` in every channel, with a delta of
+    0, whenever `mm_features` is empty. The model runner then computes the
+    positions of text-only requests on the GPU instead of staging them from
+    the host.
+    """
+
     def get_mrope_input_positions(
         self,
         input_tokens: list[int],
