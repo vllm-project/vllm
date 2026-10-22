@@ -4314,19 +4314,22 @@ def test_kv_events_reconstruct_lookahead_block_hashes():
         kv_cache_utils.maybe_convert_block_hash(block_hash)
         for block_hash in request.block_hashes
     ]
+    assert events[0].token_ids == [0, 1, 2, 3]
+    assert events[0].lookahead_token_ids == [[2], [4]]
     reconstructed_hashes = []
     parent_hash = events[0].parent_block_hash
     assert events[0].extra_keys is not None
-    for block_start, extra_keys in zip(
+    for block_start, extra_keys, lookahead_token_ids in zip(
         range(0, len(events[0].token_ids), block_size),
         events[0].extra_keys,
+        events[0].lookahead_token_ids,
         strict=True,
     ):
         parent_hash = kv_cache_utils.hash_block_tokens(
             sha256,
             parent_hash,
             events[0].token_ids[block_start : block_start + block_size],
-            extra_keys,
+            (extra_keys, *lookahead_token_ids),
         )
         reconstructed_hashes.append(parent_hash)
     assert reconstructed_hashes == request.block_hashes

@@ -1075,12 +1075,33 @@ def test_request_block_hasher_incremental_append_with_multiple_mm_features(
     )
 
     mm_keys = (("mm", "A", 0), ("mm", "B", 2))
-    extra_keys = (mm_keys, 8, None) if lookahead else mm_keys
+    extra_keys = (mm_keys, 8) if lookahead else mm_keys
     expected_second_hash = hash_fn(
         (incremental.block_hashes[0], (4, 5, 6, 7), extra_keys)
     )
     assert incremental.block_hashes[1] == expected_second_hash
     assert incremental.block_hashes == fresh.block_hashes
+
+
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
+def test_lookahead_block_hash_keeps_mm_input_ending_at_lookahead(hash_fn):
+    """An MM input whose last token is a block's lookahead token still keys the
+    next block."""
+    request = make_request(
+        request_id="0",
+        prompt_token_ids=list(range(9)),
+        block_size=4,
+        hash_fn=hash_fn,
+        mm_positions=[PlaceholderRange(offset=3, length=2)],
+        mm_hashes=["A"],
+        use_lookahead_block_hashes=True,
+    )
+
+    first_hash = hash_fn(
+        (kv_cache_utils.NONE_HASH, (0, 1, 2, 3), ((("mm", "A", 3),), 4))
+    )
+    second_hash = hash_fn((first_hash, (4, 5, 6, 7), ((("mm", "A", -1),), 8)))
+    assert request.block_hashes == [first_hash, second_hash]
 
 
 @pytest.mark.parametrize(

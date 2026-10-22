@@ -661,33 +661,13 @@ def to_event_extra_keys(
     """
     if not extra_keys:
         return None
-    event_keys = [_untag_extra_keys(keys) for keys in extra_keys]
-    return event_keys or None
-
-
-def to_request_event_extra_keys(
-    extra_keys: Iterable[tuple[Any, ...] | None] | None,
-    use_lookahead_block_hashes: bool,
-) -> list[tuple[Any, ...] | None] | None:
-    """`to_event_extra_keys` for keys from
-    `generate_request_block_hash_extra_keys`. Lookahead keys keep the lookahead
-    token and untag the block and lookahead extra keys."""
-    if not use_lookahead_block_hashes:
-        return to_event_extra_keys(extra_keys)
-    if not extra_keys:
-        return None
-    return [
+    event_keys = [
         None
         if keys is None
-        else (_untag_extra_keys(keys[0]), keys[1], _untag_extra_keys(keys[2]))
+        else tuple(key[1:] if key[0] == "mm" else key[1] for key in keys)
         for keys in extra_keys
-    ] or None
-
-
-def _untag_extra_keys(keys: tuple[Any, ...] | None) -> tuple[Any, ...] | None:
-    if keys is None:
-        return None
-    return tuple(key[1:] if key[0] == "mm" else key[1] for key in keys)
+    ]
+    return event_keys or None
 
 
 def hash_block_tokens(
@@ -971,7 +951,9 @@ def get_request_block_hasher(
 
     With ``use_lookahead_block_hashes``, each hash also covers the token right
     after its block, which the EAGLE draft KV at the block's last position
-    depends on, so it is emitted only once that token exists.
+    depends on, so it is emitted only once that token exists. The block tokens
+    stay the hashed tokens; the extra keys become ``(E, token)``, where ``E``
+    covers the block and that token.
     """
 
     def request_block_hasher(request: Request) -> list[BlockHash]:
@@ -1004,13 +986,15 @@ def get_request_block_hasher(
                 break
 
             # MM and LoRA requests need extra keys for block-hash computation.
-            extra_keys, curr_mm_idx = generate_request_block_hash_extra_keys(
-                request,
-                start_token_idx,
-                end_token_idx,
-                curr_mm_idx,
-                use_lookahead_block_hashes,
-            )
+            if use_lookahead_block_hashes:
+                extra_keys, curr_mm_idx = generate_lookahead_block_hash_extra_keys(
+                    request, start_token_idx, end_token_idx, curr_mm_idx
+                )
+                extra_keys = (extra_keys, request.all_token_ids[end_token_idx])
+            else:
+                extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
+                    request, start_token_idx, end_token_idx, curr_mm_idx
+                )
 
             # Compute the hash of the current block
             block_tokens = request.all_token_ids[start_token_idx:end_token_idx]
@@ -1032,49 +1016,20 @@ def generate_lookahead_block_hash_extra_keys(
     start_token_idx: int,
     end_token_idx: int,
     start_mm_idx: int,
-) -> tuple[tuple[Any, ...], int]:
-    block_extra_keys, next_block_mm_idx = generate_block_hash_extra_keys(
-        request,
-        start_token_idx,
-        end_token_idx,
-        start_mm_idx,
-    )
-    lookahead_extra_keys, _ = generate_block_hash_extra_keys(
-        request,
-        end_token_idx,
-        end_token_idx + 1,
-        next_block_mm_idx,
-    )
-    return (
-        (
-            block_extra_keys,
-            request.all_token_ids[end_token_idx],
-            lookahead_extra_keys,
-        ),
-        next_block_mm_idx,
-    )
-
-
-def generate_request_block_hash_extra_keys(
-    request: Request,
-    start_token_idx: int,
-    end_token_idx: int,
-    start_mm_idx: int,
-    use_lookahead_block_hashes: bool,
 ) -> tuple[tuple[Any, ...] | None, int]:
-    if use_lookahead_block_hashes:
-        return generate_lookahead_block_hash_extra_keys(
-            request,
-            start_token_idx,
-            end_token_idx,
-            start_mm_idx,
-        )
-    return generate_block_hash_extra_keys(
-        request,
-        start_token_idx,
-        end_token_idx,
-        start_mm_idx,
+    """`generate_block_hash_extra_keys` over the block and the token after it.
+
+    The returned MM index stays on an MM input covering ``end_token_idx``,
+    since the next block starts there.
+    """
+    extra_keys, mm_idx = generate_block_hash_extra_keys(
+        request, start_token_idx, end_token_idx + 1, start_mm_idx
     )
+    if mm_idx > 0:
+        mm_position = request.mm_features[mm_idx - 1].mm_position
+        if mm_position.offset + mm_position.length > end_token_idx:
+            mm_idx -= 1
+    return extra_keys, mm_idx
 
 
 def get_max_concurrency_for_kv_cache_config(

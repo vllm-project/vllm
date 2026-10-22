@@ -92,6 +92,14 @@ class BlockStored(KVCacheEvent):
     ownership of the underlying block, which may be shared across sessions.
     """
     session_id: str | None = None
+    """Tokens after each block that its hash also depends on, one entry per
+    block in block_hashes; None for the legacy hashes.
+
+    Set with EAGLE-family lookahead block hashes. These tokens are not cached in
+    the block, and extra_keys also covers them, so blocks with the same tokens
+    at the same position can have different hashes.
+    """
+    lookahead_token_ids: list[list[int]] | None = None
 
     def __hash__(self) -> int:
         return hash(
@@ -109,6 +117,9 @@ class BlockStored(KVCacheEvent):
                 self.locality,
                 self.ownership,
                 self.session_id,
+                tuple(map(tuple, self.lookahead_token_ids))
+                if self.lookahead_token_ids is not None
+                else None,
             )
         )
 
