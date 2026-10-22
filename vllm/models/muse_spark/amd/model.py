@@ -1033,18 +1033,19 @@ class MuseSpark1xModel(LlamaModel):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
 
+        num_tokens = hidden_states.shape[0]
         x: MuseSpark1xResidualStream | torch.Tensor = hidden_states.to(
             self.residual_dtype
         )
         shard = None
         if (
             self.token_shard_min_tokens
-            and x.shape[0] >= self.token_shard_min_tokens
-            and x.shape[0] % self.token_shard_divisor == 0
+            and num_tokens >= self.token_shard_min_tokens
+            and num_tokens % self.token_shard_divisor == 0
             and not self.aux_hidden_state_layers
             and not torch.cuda.is_current_stream_capturing()
         ):
-            shard = TokenShard(x.shape[0])
+            shard = TokenShard(num_tokens)
             x = shard.local(x)
         remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
         aux_hidden_states: list[torch.Tensor] = []
