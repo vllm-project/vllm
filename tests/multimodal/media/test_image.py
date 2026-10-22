@@ -304,6 +304,23 @@ def test_image_decompression_bomb_rejected(monkeypatch):
     assert isinstance(exc_info.value.__cause__, Image.DecompressionBombError)
 
 
+def test_image_broken_png_rejected():
+    """A PNG with a corrupted chunk structure surfaces as a client-side
+    ValueError (Pillow raises SyntaxError, which is not an OSError)."""
+    # Real-world request bytes: stray bytes between the IDAT CRC and the
+    # IEND chunk shift the stream, so Pillow reads a bogus chunk header.
+    data = bytes.fromhex(
+        "89504e470d0a1a0a0000000d4948445200000004000000040806000000a9f19e"
+        "7e000000144944415478da63fccfc0c0c0c0c0c0c0c0c0c000000e0001ff02ab"
+        "ce36890000000049454e44ae426082"
+    )
+
+    image_io = ImageMediaIO()
+    with pytest.raises(ValueError, match="Failed to load image") as exc_info:
+        image_io.load_bytes(data)
+    assert isinstance(exc_info.value.__cause__, SyntaxError)
+
+
 def test_image_pixel_limit_disabled(monkeypatch):
     """Setting VLLM_MAX_IMAGE_PIXELS=0 disables the pixel limit."""
     import vllm.envs as envs
