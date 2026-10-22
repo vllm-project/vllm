@@ -125,8 +125,9 @@ def test_rdna3_mxfp4_experts_match_dequant_reference(M, activation, with_bias):
     w2, w2_s = rand_mxfp4(K, N)
     w13_ref = torch.stack([_dequant_ref(w13[e], w13_s[e]) for e in range(E)])
     w2_ref = torch.stack([_dequant_ref(w2[e], w2_s[e]) for e in range(E)])
-    b13 = torch.randn(E, 2 * N, device=dev) if with_bias else None
-    b2 = torch.randn(E, K, device=dev) if with_bias else None
+    bias_init = torch.randn if with_bias else torch.zeros
+    b13 = bias_init(E, 2 * N, device=dev)
+    b2 = bias_init(E, K, device=dev)
 
     x = torch.randn(M, K, device=dev, dtype=dtype)
     topk_weights, topk_ids = torch.randn(M, E, device=dev).softmax(-1).topk(top_k)
@@ -136,16 +137,12 @@ def test_rdna3_mxfp4_experts_match_dequant_reference(M, activation, with_bias):
     for m in range(M):
         for j in range(top_k):
             e = topk_ids[m, j]
-            h = x[m].float() @ w13_ref[e].t()
-            if with_bias:
-                h = h + b13[e]
+            h = x[m].float() @ w13_ref[e].t() + b13[e]
             if activation == MoEActivation.SWIGLUOAI:
                 a = _swigluoai_interleaved(h)
             else:
                 a = F.silu(h[:N]) * h[N:]
-            y = a.to(dtype).float() @ w2_ref[e].t()
-            if with_bias:
-                y = y + b2[e]
+            y = a.to(dtype).float() @ w2_ref[e].t() + b2[e]
             ref[m] += topk_weights[m, j] * y
 
     deinterleave = activation == MoEActivation.SWIGLUOAI
@@ -156,8 +153,8 @@ def test_rdna3_mxfp4_experts_match_dequant_reference(M, activation, with_bias):
     quant_config = mxfp4_w4a16_moe_quant_config(
         w1_scale=b_s13,
         w2_scale=b_s2,
-        w1_bias=None if b13 is None else b13.to(dtype),
-        w2_bias=None if b2 is None else b2.to(dtype),
+        w1_bias=b13.to(dtype) if with_bias else None,
+        w2_bias=b2.to(dtype) if with_bias else None,
     )
     moe_config = make_dummy_moe_config(
         num_experts=E,
