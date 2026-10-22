@@ -8,6 +8,25 @@ from dataclasses import dataclass, field
 import torch
 
 
+def remap_lora_ids(
+    token_lora_ids: torch.Tensor, slot_lora_ids: torch.Tensor
+) -> torch.Tensor:
+    """Translate dispatched adapter identities into this worker's GPU slots."""
+    matches = (token_lora_ids[:, None] == slot_lora_ids[None, :]) & (
+        token_lora_ids[:, None] > 0
+    )
+    slots = torch.arange(
+        slot_lora_ids.numel(), device=slot_lora_ids.device, dtype=torch.int32
+    )
+    mapping = torch.where(matches, slots[None, :], -1).amax(dim=1)
+    torch._assert_async(
+        ((token_lora_ids <= 0) | (mapping >= 0)).all(),
+        "Dispatched MoE LoRA adapter is not resident on this worker. "
+        "Preload it on every participating worker before submitting requests.",
+    )
+    return mapping
+
+
 @dataclass
 class LoRAKernelMeta:
     token_lora_mapping: torch.Tensor

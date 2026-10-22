@@ -6,6 +6,9 @@ import random
 import tempfile
 from unittest.mock import patch
 
+import pytest
+
+from vllm import SamplingParams
 from vllm.config import (
     CacheConfig,
     DeviceConfig,
@@ -30,6 +33,50 @@ MODEL_PATH = "Qwen/Qwen3-0.6B"
 NUM_LORAS = 16
 
 DEVICE_TYPE = current_platform.device_type
+
+
+@pytest.mark.parametrize("use_v2", [False, True])
+@pytest.mark.parametrize("lora_id", [1, 7])
+@pytest.mark.parametrize("pin", [False, True])
+def test_idle_step_preserves_loaded_lora(
+    vllm_runner, qwen3_lora_files, monkeypatch, use_v2, lora_id, pin
+):
+    """Idle forwards must not replace real adapters with warmup weights."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(use_v2)))
+    with vllm_runner(
+        MODEL_PATH,
+        enable_lora=True,
+        max_loras=1,
+        max_lora_rank=8,
+        max_model_len=128,
+        max_num_batched_tokens=128,
+        max_num_seqs=4,
+        enforce_eager=True,
+        enable_chunked_prefill=True,
+        enable_prefix_caching=False,
+    ) as model:
+        llm = model.llm
+        assert not llm.llm_engine.list_loras()
+        request = LoRARequest("resident", lora_id, qwen3_lora_files)
+        assert llm.llm_engine.add_lora(request)
+        if pin:
+            assert llm.llm_engine.pin_lora(lora_id)
+
+        # Exercise the first idle step before any request uses the adapter.
+        for _ in range(2):
+            llm.collective_rpc("execute_dummy_batch", timeout=60)
+            assert set(llm.llm_engine.list_loras()) == {lora_id}, (
+                "Idle step evicted a resident adapter"
+            )
+
+        params = SamplingParams(temperature=0, max_tokens=4, prompt_logprobs=0)
+        prompt = "Hi, tell me about you"
+        before = llm.generate(prompt, params, lora_request=request)[0]
+        llm.collective_rpc("execute_dummy_batch", timeout=60)
+        assert set(llm.llm_engine.list_loras()) == {lora_id}
+        after = llm.generate(prompt, params, lora_request=request)[0]
+        assert before.prompt_logprobs == after.prompt_logprobs
+        assert before.outputs[0].token_ids == after.outputs[0].token_ids
 
 
 @patch.dict(os.environ, {"RANK": "0"})

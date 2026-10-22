@@ -263,6 +263,7 @@ class LoRAModelRunnerMixin:
         remove_lora: bool = True,
         num_active_loras: int = 0,
         mapping_type: LoRAMappingType = LoRAMappingType.LANGUAGE,
+        is_dp_dummy: bool = False,
     ):
         """Context manager for dummy runs with LoRA.
 
@@ -274,8 +275,21 @@ class LoRAModelRunnerMixin:
             num_active_loras: Number of distinct active LoRAs to use.
                 LoRA is activated when num_active_loras > 0.
             mapping_type: Which LoRA mapping to build (language or encoder).
+            is_dp_dummy: Clear local token mappings without creating or removing
+                adapters during an idle data-parallel step.
 
         """
+        if is_dp_dummy:
+            with self.maybe_select_dummy_loras(
+                lora_config,
+                num_scheduled_tokens,
+                mapping_type,
+                num_sampled_tokens,
+                num_active_loras=0,
+            ):
+                yield
+            return
+
         with (
             self.maybe_setup_dummy_loras(lora_config, remove_lora),
             self.maybe_select_dummy_loras(
