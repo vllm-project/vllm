@@ -118,14 +118,7 @@ class ColPaliModel(
 
         head_dtype = vllm_config.model_config.head_dtype
 
-        hidden_size = getattr(config, "hidden_size", None)
-        if hidden_size is None and hasattr(config, "text_config"):
-            hidden_size = config.text_config.hidden_size
-        if hidden_size is None:
-            raise ValueError(
-                "Unable to determine text hidden size from config. "
-                "Expected 'hidden_size' or 'text_config.hidden_size'."
-            )
+        hidden_size = config.vlm_config.text_config.hidden_size
         self._proj_hidden_size = hidden_size
 
         # ColPali uses embedding_dim=128, but also check other naming variants
