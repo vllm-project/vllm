@@ -57,8 +57,8 @@ from vllm.models.kimi_k3.nvidia.ops.recoverssm import (
 )
 from vllm.models.kimi_k3.nvidia.recoverssm.kernels import (
     CuteRecoverSSMVerify,
+    can_use_cute_recoverssm,
     compile_state_commit,
-    cute_recoverssm_unsupported_reason,
 )
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
@@ -747,7 +747,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 vllm_config.model_config.dtype,
                 self.conv1d.weight.device,
             )
-            reason = cute_recoverssm_unsupported_reason(
+            supported, reason = can_use_cute_recoverssm(
                 head_dim=self.head_dim,
                 window=self.spec_query_len,
                 conv_width=self.conv_size,
@@ -758,7 +758,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 conv_weight_dtype=self.conv1d.weight.dtype,
                 lower_bound=self.gate_lower_bound,
             )
-            self.recoverssm_backend = "triton" if reason is not None else "cute"
+            self.recoverssm_backend = "cute" if supported else "triton"
             if self.recoverssm_backend == "triton":
                 logger.info_once(
                     "Using the Triton KDA RecoverSSM verify and commit: the CuTe "

@@ -34,7 +34,7 @@ CONV_WIDTH = 4
 MAX_WINDOW = 8
 
 
-def cute_recoverssm_unsupported_reason(
+def can_use_cute_recoverssm(
     *,
     head_dim: int,
     window: int,
@@ -45,25 +45,26 @@ def cute_recoverssm_unsupported_reason(
     state_dtype: torch.dtype,
     conv_weight_dtype: torch.dtype,
     lower_bound: float | None,
-) -> str | None:
-    """Why the CuTe verify cannot serve a KDA layer (None: it can)."""
+) -> tuple[bool, str | None]:
+    """Whether the CuTe verify and commit can serve a KDA layer, and if not,
+    why."""
     if not (
         current_platform.is_cuda() and current_platform.is_device_capability_family(100)
     ):
-        return "it needs SM10x tensor cores (tcgen05)"
+        return False, "it needs SM10x tensor cores (tcgen05)"
     if head_dim != K or conv_width != CONV_WIDTH:
-        return f"it needs head_dim {K} and a width-{CONV_WIDTH} convolution"
+        return False, f"it needs head_dim {K} and a width-{CONV_WIDTH} convolution"
     if has_conv_bias:
-        return "it does not apply a convolution bias"
+        return False, "it does not apply a convolution bias"
     if not 1 <= window <= MAX_WINDOW:
-        return f"it verifies 1 to {MAX_WINDOW} tokens per step"
+        return False, f"it verifies 1 to {MAX_WINDOW} tokens per step"
     if lower_bound is None:
-        return "it needs a bounded KDA gate (gate_lower_bound)"
+        return False, "it needs a bounded KDA gate (gate_lower_bound)"
     if (activation_dtype, conv_state_dtype, state_dtype) != (torch.bfloat16,) * 3:
-        return "it needs bfloat16 activations, conv state and SSM state"
+        return False, "it needs bfloat16 activations, conv state and SSM state"
     if conv_weight_dtype not in (torch.bfloat16, torch.float32):
-        return "it needs a bfloat16 or float32 convolution weight"
-    return None
+        return False, "it needs a bfloat16 or float32 convolution weight"
+    return True, None
 
 
 def _architecture(device: torch.device) -> str:
