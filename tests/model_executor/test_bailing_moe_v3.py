@@ -50,9 +50,9 @@ def test_bailing_v3_returns_requested_aux_hidden_states(monkeypatch):
     model.model = inner_model
     model.set_aux_hidden_state_layers((1, 3))
 
-    hidden_states, aux_hidden_states = model.forward(
-        input_ids=torch.tensor([0]), positions=torch.tensor([0])
-    )
+    output = model.forward(input_ids=torch.tensor([0]), positions=torch.tensor([0]))
+    assert isinstance(output, tuple)
+    hidden_states, aux_hidden_states = output
 
     torch.testing.assert_close(hidden_states, torch.full((1, 2), 3.0))
     assert len(aux_hidden_states) == 2
