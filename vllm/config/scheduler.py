@@ -89,6 +89,20 @@ class SchedulerConfig:
     queued and running requests. Only applies when
     long_prefill_token_threshold is nonzero."""
 
+    max_num_batched_context_tokens: int | None = Field(default=None, ge=1)
+    """Bound on the context a step's prefill chunks attend over, summed over
+    the step. Each chunk counts the tokens already computed for its request
+    plus the tokens it prefills, so a chunk deep into a long prompt counts
+    far more than its token count. Prefill step time on long contexts follows
+    this sum rather than ``max_num_batched_tokens``; under data parallelism,
+    where every rank waits for the slowest one, this also bounds the
+    straggler rank.
+
+    A prefill chunk that does not fit is shortened or left for a later step.
+    The first prefill chunk of a step is always scheduled, and decode tokens
+    do not count. Requires chunked prefill. ``None`` (default) disables the
+    bound."""
+
     max_num_queued_reqs: int | None = Field(default=None, ge=0)
     """Maximum number of requests that can be in-flight (waiting or running)
     at the same time, or None for no limit. When the limit is reached, new
@@ -298,6 +312,7 @@ class SchedulerConfig:
             self.disable_chunked_mm_input = True
             self.enable_chunked_prefill = False
             self.long_prefill_token_threshold = 0
+            self.max_num_batched_context_tokens = None
             logger.info(
                 "Encoder-decoder models do not support chunked prefill nor"
                 " prefix caching; disabling both."
@@ -350,6 +365,15 @@ class SchedulerConfig:
                 "* max_model_len (%d). This may lead to unexpected behavior.",
                 self.max_num_batched_tokens,
                 self.max_num_seqs * max_model_len,
+            )
+
+        if (
+            self.max_num_batched_context_tokens is not None
+            and not self.enable_chunked_prefill
+        ):
+            raise ValueError(
+                "max_num_batched_context_tokens requires chunked prefill, since "
+                "it shortens prefill chunks."
             )
 
         if self.long_prefill_token_threshold > max_model_len:

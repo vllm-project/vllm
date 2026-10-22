@@ -618,6 +618,19 @@ class Scheduler(SchedulerInterface):
             num_new_tokens -= self.num_prefill_lookahead - remaining
         return max(num_new_tokens, 0)
 
+    def _fit_prefill_context(
+        self, num_computed_tokens: int, num_new_tokens: int, prefill_context: int
+    ) -> int:
+        """Shorten a prefill chunk so the context this step's prefill chunks
+        attend over (`prefill_context` so far, plus this chunk's computed and
+        new tokens) stays within max_num_batched_context_tokens. The step's
+        first prefill chunk is not shortened. Returns 0 if nothing fits."""
+        budget = self.scheduler_config.max_num_batched_context_tokens
+        if budget is None or prefill_context == 0:
+            return num_new_tokens
+        fit = budget - prefill_context - num_computed_tokens
+        return max(0, min(num_new_tokens, fit))
+
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
@@ -653,6 +666,9 @@ class Scheduler(SchedulerInterface):
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
         # Whether the running batch contains any prefill requests.
         prefill_scheduled = False
+        # Context the scheduled prefill chunks attend over (computed + new
+        # tokens per chunk), for max_num_batched_context_tokens.
+        prefill_context = 0
         # Whether a waiting request was admitted with prompt left to compute.
         # Separate from `prefill_scheduled`, which covers only the running loop.
         prefill_admitted = False
@@ -774,6 +790,14 @@ class Scheduler(SchedulerInterface):
                 - request.num_computed_tokens
                 - self.num_sampled_tokens_per_step,
             )
+
+            if request.is_prefill_chunk:
+                num_new_tokens = self._fit_prefill_context(
+                    request.num_computed_tokens, num_new_tokens, prefill_context
+                )
+                if num_new_tokens == 0:
+                    req_index += 1
+                    continue
 
             # Apply Mamba alignment before encoder caps.
             if self.need_mamba_block_aligned_split:
@@ -905,6 +929,8 @@ class Scheduler(SchedulerInterface):
             # Schedule the request.
             scheduled_running_reqs.append(request)
             prefill_scheduled |= request.is_prefill_chunk
+            if request.is_prefill_chunk:
+                prefill_context += request.num_computed_tokens + num_new_tokens
             request_id = request.request_id
             req_to_new_blocks[request_id] = new_blocks
             num_scheduled_tokens[request_id] = num_new_tokens
@@ -1230,6 +1256,13 @@ class Scheduler(SchedulerInterface):
                     num_new_tokens = min(num_new_tokens, request_token_budget)
                     assert num_new_tokens > 0
 
+                    if not pad_spec_decode:
+                        num_new_tokens = self._fit_prefill_context(
+                            num_computed_tokens, num_new_tokens, prefill_context
+                        )
+                        if num_new_tokens == 0:
+                            break
+
                     # Apply Mamba alignment before encoder caps.
                     if self.need_mamba_block_aligned_split:
                         num_new_tokens = self._mamba_block_aligned_split(
@@ -1434,6 +1467,8 @@ class Scheduler(SchedulerInterface):
                 num_scheduled_tokens[request_id] = num_new_tokens
                 token_budget -= num_new_tokens
                 input_budget -= num_new_tokens + draft_slots
+                if not pad_spec_decode:
+                    prefill_context += num_computed_tokens + num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
                 self._set_kv_fetch_stage(request, None)
