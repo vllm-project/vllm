@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use vllm_tokenizer::{DecodedText, DynTokenizer};
 use xgrammar_structural_tag::format::Format;
 
 use super::{JsonToolCallConfig, JsonToolCallParser, JsonToolCallWhitespace};
@@ -91,7 +92,7 @@ impl Ernie45ToolParser {
 }
 
 impl ToolParser for Ernie45ToolParser {
-    fn create(tools: &[Tool]) -> Result<Box<dyn ToolParser>>
+    fn create(tools: &[Tool], _tokenizer: DynTokenizer) -> Result<Box<dyn ToolParser>>
     where
         Self: Sized + 'static,
     {
@@ -113,7 +114,7 @@ impl ToolParser for Ernie45ToolParser {
         Ok(format.map(with_template_framing))
     }
 
-    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
+    fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
         // Filter the newly committed events on their own: the caller's output
         // may merge new text into an event it already holds.
         let mut committed = ToolParserOutput::default();
@@ -164,6 +165,7 @@ fn with_template_framing(format: Format) -> Format {
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
+    use vllm_tokenizer::DecodedText;
 
     use xgrammar_structural_tag::ToolChoice;
     use xgrammar_structural_tag::format::Format;
@@ -183,13 +185,15 @@ mod tests {
         let mut output = ToolParserOutput::default();
         parser
             .parse_into(
-                "<tool_call>\n{\"name\": \"add\", \"arguments\": {}}\n</tool_call>",
+                DecodedText::unattributed(
+                    "<tool_call>\n{\"name\": \"add\", \"arguments\": {}}\n</tool_call>",
+                ),
                 &mut output,
             )
             .unwrap();
         output.push_text("committed");
 
-        parser.parse_into("\nDone.", &mut output).unwrap();
+        parser.parse_into(DecodedText::unattributed("\nDone."), &mut output).unwrap();
         output.append(parser.finish().unwrap());
 
         let output = output.coalesce();

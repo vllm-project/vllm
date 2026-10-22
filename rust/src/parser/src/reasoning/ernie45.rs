@@ -239,6 +239,7 @@ fn held_suffix_len(text: &str) -> usize {
 mod tests {
     use std::sync::Arc;
 
+    use vllm_tokenizer::test_utils::decode_chunks;
     use vllm_tokenizer::{DecodedText, TokenAnchor, TokenAttribution};
 
     use super::Ernie45ReasoningParser;
@@ -301,8 +302,8 @@ mod tests {
     fn collect(parser: &mut Ernie45ReasoningParser, chunks: &[&str]) -> (String, String) {
         let mut reasoning = String::new();
         let mut content = String::new();
-        for chunk in chunks {
-            let delta = push_str(parser, chunk);
+        for chunk in decode_chunks(&fake_tokenizer(), chunks) {
+            let delta = parser.push(chunk).unwrap();
             reasoning.push_str(reasoning_str(&delta).unwrap_or_default());
             content.push_str(content_str(&delta).unwrap_or_default());
         }
