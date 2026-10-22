@@ -108,21 +108,48 @@ def test_strided_hidden_input():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_dispatch_dispatch() -> None:
-    """Sanity check on the high-level dispatcher."""
-    n, H, r = 32, 1024, 8
+def test_dispatch_accept_v4_flash_shape() -> None:
+    """Dispatcher must accept the DeepSeek-V4-Flash signature shape.
+
+    (n_embed=7168, markov_rank=32) is the only shape with validated
+    end-to-end benefit on datacenter GPUs, so the gate accepts it
+    (given batch >= 32) and rejects others.
+    """
+    n, H, r = 64, 7168, 32
     hidden, markov, weight = _make_inputs(n, H, r)
     out = dspark_confidence_fused(hidden, markov, weight, temp=1.0)
+    assert out is not None, "expected dispatcher to accept V4-Flash shape"
     assert out.shape == (n,)
     assert out.dtype == torch.float32
     assert torch.all((out >= 0.0) & (out <= 1.0))
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_fallback_when_fp32_hidden():
-    """If the caller passes fp32 hidden, dispatcher must decline (return None).
-    The model caller is responsible for falling back to PyTorch."""
-    n, H, r = 32, 1024, 8
+def test_dispatch_rejects_small_model_shape() -> None:
+    """4B-class DSpark variants (e.g. Qwen3-4B-DSpark: H=2560, r=256) show
+    parity e2e on consumer GPUs and a regression on H200; gate declines."""
+    n, H, r = 64, 2560, 256
+    hidden, markov, weight = _make_inputs(n, H, r)
+    out = dspark_confidence_fused(hidden, markov, weight)
+    assert out is None, "fused dispatch should decline non-V4-Flash shape"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_dispatch_rejects_tiny_batch() -> None:
+    """TileLang per-call dispatch overhead (~93us on Hopper) dominates at
+    small batch. Dispatcher must decline when n < min_fused_batch, even
+    at the validated V4-Flash shape."""
+    n, H, r = 8, 7168, 32
+    hidden, markov, weight = _make_inputs(n, H, r)
+    out = dspark_confidence_fused(hidden, markov, weight)
+    assert out is None, "fused dispatch should decline batch < 32"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_dispatch_rejects_fp32_hidden():
+    """If the caller passes fp32 hidden, dispatcher must decline (return
+    None). The model caller falls back to PyTorch."""
+    n, H, r = 64, 7168, 32
     hidden, markov, weight = _make_inputs(n, H, r)
     hidden = hidden.float()  # force dispatch decline
     out = dspark_confidence_fused(hidden, markov, weight)
@@ -130,9 +157,9 @@ def test_fallback_when_fp32_hidden():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_fallback_when_huge_batch():
+def test_dispatch_rejects_huge_batch():
     """Over max_fused_batch, dispatcher must decline."""
-    n, H, r = 4096, 1024, 8
+    n, H, r = 4096, 7168, 32
     hidden, markov, weight = _make_inputs(n, H, r)
     out = dspark_confidence_fused(hidden, markov, weight, max_fused_batch=1024)
     assert out is None, "fused dispatch should decline when n > max_fused_batch"
