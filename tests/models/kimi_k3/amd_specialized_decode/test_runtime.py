@@ -154,6 +154,8 @@ def supported_vllm_config(tmp_path, monkeypatch, on_mi355x):
     from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    # CUDA must not auto-enable a process-wide setting in this ROCm fixture.
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
     KimiLinearConfig(
         architectures=["KimiLinearForCausalLM"],
         hidden_size=7168,
