@@ -8,13 +8,14 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from vllm.distributed.weight_transfer.m2n_common import (
     DESTINATION_SHARD_AXIS,
     M2N_WIRE_SCHEMA_VERSION,
     REPLICATE,
     M2NDestinationMode,
+    M2NLayout,
     M2NMesh,
     M2NParamMeta,
     M2NSourceTopology,
@@ -31,7 +32,7 @@ if TYPE_CHECKING:
 
 
 def _check_destination_placements(placements: Placements, context: str) -> None:
-    """Validate the session-wide replica/shard destination convention."""
+    """Validate the per-parameter replica/shard destination convention."""
     if len(placements) != 2:
         raise ValueError(f"{context} must have 2 entries")
     if any(not isinstance(code, int) or isinstance(code, bool) for code in placements):
@@ -49,6 +50,7 @@ class M2NWireDestination:
     name: str
     mode: str
     dtype_name: str
+    mesh_dims: tuple[int, int]
     placements: Placements | None
     local_shape: tuple[int, ...]
     semantic_id: str | None
@@ -67,6 +69,9 @@ class M2NWireDestination:
         if not isinstance(self.mode, str):
             raise TypeError("destination mode must be a string")
         M2NDestinationMode(self.mode)
+        mesh_dims = tuple(self.mesh_dims)
+        M2NMesh(cast(tuple[int, int], mesh_dims), 0)
+        object.__setattr__(self, "mesh_dims", mesh_dims)
         if self.placements is not None:
             object.__setattr__(self, "placements", tuple(self.placements))
             _check_destination_placements(
@@ -137,8 +142,13 @@ class M2NWireDestination:
                 or self.num_shards != 1
             ):
                 raise ValueError("a replicated destination has shard metadata")
-        elif self.shard_dim is None:
-            raise ValueError("a sharded destination needs shard_dim")
+        else:
+            if self.shard_dim is None:
+                raise ValueError("a sharded destination needs shard_dim")
+            if self.num_shards != self.mesh_dims[DESTINATION_SHARD_AXIS]:
+                raise ValueError(
+                    "destination num_shards must match its mesh shard axis"
+                )
         if (
             self.mode == M2NDestinationMode.FULL_FALLBACK.value
             and self.placements is not None
@@ -151,6 +161,7 @@ class M2NWireDestination:
             "name",
             "mode",
             "dtype_name",
+            "mesh_dims",
             "placements",
             "local_shape",
             "semantic_id",
@@ -177,6 +188,7 @@ class M2NWireDestination:
             "name": self.name,
             "mode": self.mode,
             "dtype_name": self.dtype_name,
+            "mesh_dims": list(self.mesh_dims),
             "placements": (None if self.placements is None else list(self.placements)),
             "local_shape": list(self.local_shape),
             "semantic_id": self.semantic_id,
@@ -194,8 +206,7 @@ class M2NWireDestination:
         destination: M2NDestination,
         *,
         dtype_name: str,
-        destination_shard_index: int,
-        shard_axis_size: int,
+        local_worker_rank: int,
     ) -> M2NWireDestination:
         """Strip live state from one worker-local destination plan."""
         placements = destination.placements
@@ -205,8 +216,8 @@ class M2NWireDestination:
         semantic_id = None
         if placements is not None:
             shard_dim = placements[DESTINATION_SHARD_AXIS]
-            shard_index = destination_shard_index
-            num_shards = shard_axis_size
+            num_shards = destination.mesh_dims[DESTINATION_SHARD_AXIS]
+            shard_index = local_worker_rank % num_shards
         if destination.mode is M2NDestinationMode.SHARDED_STAGING:
             assert destination.sharded_spec is not None
             spec = destination.sharded_spec
@@ -218,6 +229,7 @@ class M2NWireDestination:
             name=destination.name,
             mode=destination.mode.value,
             dtype_name=dtype_name,
+            mesh_dims=destination.mesh_dims,
             placements=placements,
             local_shape=destination.local_shape,
             semantic_id=semantic_id,
@@ -273,16 +285,29 @@ def _parse_worker_plan(
 def _validate_geometry(
     destination: M2NWireDestination,
     param: M2NWireParam,
-    dst_mesh: M2NMesh,
+    destination_interval: M2NMesh,
     worker_rank: int,
 ) -> None:
-    if not dst_mesh.start_rank <= worker_rank < dst_mesh.start_rank + dst_mesh.size:
+    if not (
+        destination_interval.start_rank
+        <= worker_rank
+        < destination_interval.start_rank + destination_interval.size
+    ):
         raise ValueError(f"rank {worker_rank} is outside the destination mesh")
-    local_worker_rank = worker_rank - dst_mesh.start_rank
-    expected_shard_index = local_worker_rank % dst_mesh.dims[DESTINATION_SHARD_AXIS]
+    num_workers = destination_interval.size
+    if destination.mesh_dims[0] * destination.mesh_dims[1] != num_workers:
+        raise ValueError(
+            f"worker rank {worker_rank} destination mesh {destination.mesh_dims} "
+            f"does not cover {num_workers} workers for {param.name!r}"
+        )
+    local_worker_rank = worker_rank - destination_interval.start_rank
+    expected_shard_index = (
+        local_worker_rank % destination.mesh_dims[DESTINATION_SHARD_AXIS]
+    )
     if destination.placements is None:
         if (
-            destination.local_shape != param.shape
+            destination.mesh_dims != (num_workers, 1)
+            or destination.local_shape != param.shape
             or destination.shard_dim is not None
             or destination.num_shards != 1
             or destination.shard_index != 0
@@ -300,7 +325,7 @@ def _validate_geometry(
             f"for {param.name!r}: {placements}"
         )
     shard_dim = placements[DESTINATION_SHARD_AXIS]
-    num_shards = dst_mesh.dims[DESTINATION_SHARD_AXIS]
+    num_shards = destination.mesh_dims[DESTINATION_SHARD_AXIS]
     if (
         destination.shard_dim != shard_dim
         or destination.num_shards != num_shards
@@ -377,10 +402,13 @@ def _validate_staging_groups(
 def _validate_plan_set(
     plans: Sequence[tuple[int, list[M2NWireDestination]]],
     params: Sequence[M2NWireParam],
-    dst_mesh: M2NMesh,
+    destination_interval: M2NMesh,
 ) -> None:
     expected_ranks = list(
-        range(dst_mesh.start_rank, dst_mesh.start_rank + dst_mesh.size)
+        range(
+            destination_interval.start_rank,
+            destination_interval.start_rank + destination_interval.size,
+        )
     )
     actual_ranks = [rank for rank, _ in plans]
     if actual_ranks != expected_ranks:
@@ -391,8 +419,11 @@ def _validate_plan_set(
     reference = plans[0][1]
     invariant_fields = (
         "mode",
+        "mesh_dims",
         "placements",
         "semantic_id",
+        "shard_dim",
+        "num_shards",
         "staging_group",
         "staging_slot",
         "staging_group_size",
@@ -400,7 +431,7 @@ def _validate_plan_set(
     for worker_rank, plan in plans:
         _validate_staging_groups(plan, worker_rank)
         for index, (destination, param) in enumerate(zip(plan, params)):
-            _validate_geometry(destination, param, dst_mesh, worker_rank)
+            _validate_geometry(destination, param, destination_interval, worker_rank)
             expected = reference[index]
             differing = [
                 field
@@ -422,6 +453,7 @@ def agree_destination_plan(
     source_topology: M2NSourceTopology | None = None,
     metas: Sequence[M2NParamMeta],
     dst_mesh: M2NMesh,
+    dst_mesh_constraint: tuple[int, int] | None,
     local_plan: Sequence[M2NWireDestination] | None,
     local_error: str | None,
 ) -> tuple[list[M2NWireDestination], str]:
@@ -440,6 +472,13 @@ def agree_destination_plan(
                 raise ValueError(
                     "destination mesh does not cover the tail of the group"
                 )
+            if dst_mesh_constraint is not None:
+                constraint_mesh = M2NMesh(dst_mesh_constraint, dst_mesh.start_rank)
+                if constraint_mesh != dst_mesh:
+                    raise ValueError(
+                        "fixed destination mesh constraint does not match the "
+                        "destination rank interval"
+                    )
             if local_plan is not None:
                 serialized_plan = [item.to_dict() for item in local_plan]
         except Exception as exc:
@@ -449,12 +488,14 @@ def agree_destination_plan(
         "error": prepared_error,
         "plan": serialized_plan,
         "source_digest": source_digest,
-        "dst_mesh_dims": list(dst_mesh.dims),
+        "dst_mesh_dims": (
+            None if dst_mesh_constraint is None else list(dst_mesh_constraint)
+        ),
         "dst_mesh_start_rank": dst_mesh.start_rank,
     }
     gathered = group.all_gather_obj(envelope)
     errors: list[str] = []
-    declarations: list[tuple[int, str, M2NMesh]] = []
+    declarations: list[tuple[int, str, int, tuple[int, int] | None]] = []
     expected_fields = {
         "ok",
         "error",
@@ -491,10 +532,25 @@ def agree_destination_plan(
             declared_digest = item["source_digest"]
             if not isinstance(declared_digest, str) or not declared_digest:
                 raise ValueError("source_digest must be a non-empty string")
-            declared_mesh = M2NMesh(
-                tuple(item["dst_mesh_dims"]), item["dst_mesh_start_rank"]
+            start_rank = item["dst_mesh_start_rank"]
+            if (
+                not isinstance(start_rank, int)
+                or isinstance(start_rank, bool)
+                or not 0 < start_rank < group.world_size
+            ):
+                raise ValueError("destination mesh start rank is invalid")
+            raw_constraint = item["dst_mesh_dims"]
+            declared_constraint = None
+            if raw_constraint is not None:
+                constraint_mesh = M2NMesh(tuple(raw_constraint), start_rank)
+                if constraint_mesh.size != group.world_size - start_rank:
+                    raise ValueError(
+                        "fixed destination mesh does not cover the group tail"
+                    )
+                declared_constraint = constraint_mesh.dims
+            declarations.append(
+                (rank, declared_digest, start_rank, declared_constraint)
             )
-            declarations.append((rank, declared_digest, declared_mesh))
         except Exception as exc:
             errors.append(f"rank {rank}: {type(exc).__name__}: {exc}")
     if errors:
@@ -503,16 +559,21 @@ def agree_destination_plan(
             + "; ".join(errors)
         )
 
-    _, canonical_digest, canonical_mesh = declarations[0]
-    for rank, declared_digest, declared_mesh in declarations[1:]:
+    _, canonical_digest, canonical_start_rank, canonical_constraint = declarations[0]
+    for rank, declared_digest, declared_start_rank, declared_constraint in declarations[
+        1:
+    ]:
         if declared_digest != canonical_digest:
             errors.append(f"rank {rank}: source_digest disagrees with rank 0")
-        if declared_mesh != canonical_mesh:
-            errors.append(f"rank {rank}: destination mesh disagrees with rank 0")
-    if group.world_size != canonical_mesh.start_rank + canonical_mesh.size:
-        errors.append("agreed destination mesh does not cover the group tail")
-    if not 0 < canonical_mesh.start_rank < group.world_size:
-        errors.append("agreed destination mesh must leave trainers and workers")
+        if declared_start_rank != canonical_start_rank:
+            errors.append(f"rank {rank}: destination mesh start disagrees with rank 0")
+        if declared_constraint != canonical_constraint:
+            errors.append(
+                f"rank {rank}: destination mesh constraint disagrees with rank 0"
+            )
+    canonical_mesh = M2NMesh(
+        (group.world_size - canonical_start_rank, 1), canonical_start_rank
+    )
     if errors:
         raise RuntimeError(
             "nccl_m2n destination preflight rejected before NCCL init: "
@@ -541,30 +602,52 @@ def agree_destination_plan(
     commit_error: str | None = None
     try:
         _validate_plan_set(worker_plans, params, canonical_mesh)
+        if canonical_constraint is not None:
+            for destination in canonical_plan:
+                if (
+                    destination.placements is not None
+                    and destination.mesh_dims != canonical_constraint
+                ):
+                    raise ValueError(
+                        f"sharded destination for {destination.name!r} uses mesh "
+                        f"{destination.mesh_dims}, expected fixed destination "
+                        f"mesh {canonical_constraint}"
+                    )
         if len(metas) != len(params) or any(
             meta.name != param.name for meta, param in zip(metas, params)
         ):
             raise ValueError("source metadata does not match the wire plan")
-        validate_transfer_plan(
-            metas,
-            canonical_mesh,
-            [destination.placements for destination in canonical_plan],
-        )
         resolved_topology = source_topology or M2NSourceTopology.single_group(
             canonical_mesh.start_rank,
             len(params),
         )
+        resolved_topology.validate(
+            num_trainer_ranks=canonical_mesh.start_rank,
+            num_params=len(params),
+        )
+        source_group_size = len(resolved_topology.groups[0])
+        destination_layouts = [
+            M2NLayout(
+                M2NMesh(destination.mesh_dims, source_group_size),
+                destination.placements,
+            )
+            for destination in canonical_plan
+        ]
+        validate_transfer_plan(metas, destination_layouts)
+        route_mesh_dims = canonical_constraint or canonical_mesh.dims
         transfer_routes = build_m2n_transfer_routes(
             resolved_topology,
             num_trainer_ranks=canonical_mesh.start_rank,
             world_size=group.world_size,
-            dst_mesh_dims=canonical_mesh.dims,
+            dst_mesh_dims=route_mesh_dims,
         )
         payload = {
             "schema_version": M2N_WIRE_SCHEMA_VERSION,
             "source_digest": canonical_digest,
             "source_topology": resolved_topology.to_dict(),
-            "dst_mesh_dims": list(canonical_mesh.dims),
+            "dst_mesh_constraint": (
+                None if canonical_constraint is None else list(canonical_constraint)
+            ),
             "dst_mesh_start_rank": canonical_mesh.start_rank,
             "transfer_routes": [
                 {

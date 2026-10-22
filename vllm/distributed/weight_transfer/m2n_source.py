@@ -206,9 +206,9 @@ def mesh_from_tensor(tensor: torch.Tensor, num_trainer_ranks: int) -> M2NMesh:
 def placements_from_tensor(tensor: torch.Tensor) -> Placements | None:
     """How a parameter is placed over its mesh, or `REPLICATED`.
 
-    `REPLICATED` is returned rather than a `(REPLICATE, REPLICATE)` pair: m2n
-    cannot express that, and the size-1-axis encoding it needs instead is
-    applied later by `resolve_layout`, which owns that workaround.
+    `REPLICATED` is returned rather than a `(REPLICATE, REPLICATE)` pair so
+    vLLM has one canonical fully replicated representation. `resolve_layout`
+    later converts it to the equivalent size-1-axis encoding.
     """
     placements = getattr(tensor, "placements", None)
     if placements is None:

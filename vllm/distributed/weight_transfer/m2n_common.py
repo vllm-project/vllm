@@ -51,7 +51,7 @@ MAX_DEST_SHARDS = 64
 
 # Increment when the JSON init payload changes incompatibly. M2N peers must
 # agree on this before any rank constructs a NCCL communicator.
-M2N_WIRE_SCHEMA_VERSION = 5
+M2N_WIRE_SCHEMA_VERSION = 6
 
 _MULTI_COMM_LAUNCH_ENV = "NCCL_LAUNCH_ORDER_IMPLICIT"
 
@@ -288,7 +288,7 @@ class M2NLayout:
 
 
 def check_placements(placements: Placements, context: str = "placements") -> None:
-    """Reject placement pairs nccl_m2n cannot express."""
+    """Validate vLLM's canonical M2N placement representation."""
     if len(placements) != MESH_NDIMS:
         raise ValueError(f"{context} must have {MESH_NDIMS} entries")
     if any(not isinstance(code, int) or isinstance(code, bool) for code in placements):
@@ -303,7 +303,7 @@ def check_placements(placements: Placements, context: str = "placements") -> Non
     if num_sharded == 0:
         raise ValueError(
             f"{context}: a fully replicated tensor is carried as REPLICATED, "
-            "not as two REPLICATE axes"
+            "not as the equivalent two-REPLICATE-axis encoding"
         )
     if num_sharded == MESH_NDIMS:
         raise ValueError(
@@ -319,13 +319,11 @@ def resolve_layout(
 ) -> tuple[M2NMesh, Placements]:
     """Pair one tensor's placement with the mesh m2n should see for it.
 
-    A replicated tensor needs a size-1 mesh axis to carry a no-op shard, since
-    m2n has no `{REPLICATE, REPLICATE}`. It is therefore described over the
-    *same rank interval* re-factored as `(size, 1)`. That re-factoring is sound
-    precisely because replication is order-independent — every rank holds the
-    whole tensor, so it does not matter that `(a, b)` and `(size, 1)` walk the
-    interval in a different order. A sharded tensor keeps its side's own
-    factorization, where rank order decides who owns which shard.
+    vLLM canonically describes a replicated tensor over a `(size, 1)` mesh with
+    a no-op shard on the size-1 axis. NCCL M2N also accepts two replicated axes,
+    but keeping one representation makes plan agreement unambiguous. A sharded
+    tensor keeps its side's own factorization, where rank order decides who
+    owns which shard.
     """
     if placements is None:
         return M2NMesh((mesh.size, 1), mesh.start_rank), (REPLICATE, 0)
@@ -448,16 +446,17 @@ def check_plan_limits(
 
 def validate_transfer_plan(
     metas: Sequence["M2NParamMeta"],
-    dst_mesh: M2NMesh,
-    dst_placements: Sequence[Placements | None],
+    destination_layouts: Sequence[M2NLayout],
 ) -> None:
     """Validate the complete ordered source-to-destination transfer plan."""
-    if len(dst_placements) != len(metas):
+    if len(destination_layouts) != len(metas):
         raise ValueError(
-            f"destination plan has {len(dst_placements)} parameters, expected "
+            f"destination plan has {len(destination_layouts)} parameters, expected "
             f"{len(metas)}"
         )
-    for meta, placement in zip(metas, dst_placements):
+    for meta, destination_layout in zip(metas, destination_layouts):
+        if not isinstance(destination_layout, M2NLayout):
+            raise TypeError("destination plan must contain M2NLayout values")
         check_transferable(meta.name, meta.dtype, meta.shape)
         src = resolve_layout(
             meta.source_layout.mesh,
@@ -466,8 +465,8 @@ def validate_transfer_plan(
         )
         validate_layout(*src, meta.shape, f"parameter '{meta.name}' source layout")
         dst = resolve_layout(
-            dst_mesh,
-            placement,
+            destination_layout.mesh,
+            destination_layout.placements,
             f"parameter '{meta.name}' destination placements",
         )
         validate_layout(*dst, meta.shape, f"parameter '{meta.name}' destination layout")
@@ -580,8 +579,9 @@ class M2NSourceTopology:
 
     An empty topology represents an empty manifest and is also used as a
     lifecycle sentinel. A usable non-empty plan must pass :meth:`validate`.
-    Source groups are non-empty and pairwise disjoint, so a trainer rank belongs
-    to at most one group. Each parameter selects exactly one canonical group.
+    Source groups are non-empty, pairwise disjoint, and equal-sized, so a
+    trainer rank belongs to at most one group. Each parameter selects exactly
+    one canonical group.
     """
 
     groups: tuple[tuple[int, ...], ...]
@@ -709,6 +709,9 @@ class M2NSourceTopology:
             return
         if not self.groups:
             raise ValueError("a non-empty source manifest needs a source group")
+        group_size = len(self.groups[0])
+        if any(len(ranks) != group_size for ranks in self.groups):
+            raise ValueError("all source groups must have the same size")
         for group_index, ranks in enumerate(self.groups):
             invalid = [rank for rank in ranks if rank >= num_trainer_ranks]
             if invalid:
@@ -724,7 +727,11 @@ class M2NSourceTopology:
 
 @dataclass(frozen=True)
 class M2NTransferRoute:
-    """One source and destination group in route-local communicator order."""
+    """One source and destination group in route-local communicator order.
+
+    ``dst_mesh`` describes the destination rank interval. Each parameter's
+    resolved destination layout is carried by its destination record.
+    """
 
     source_group_index: int
     members: tuple[int, ...]

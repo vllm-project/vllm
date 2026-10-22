@@ -38,6 +38,7 @@ from vllm.distributed.weight_transfer.m2n_common import (
     REPLICATE,
     REPLICATED,
     M2NDestinationMode,
+    M2NMesh,
     Placements,
 )
 from vllm.logger import init_logger
@@ -74,6 +75,7 @@ class M2NDestination:
 
     name: str
     mode: M2NDestinationMode
+    mesh_dims: tuple[int, int]
     placements: Placements | None
     local_shape: tuple[int, ...]
     tensor: torch.Tensor | None = field(compare=False, repr=False)
@@ -83,6 +85,13 @@ class M2NDestination:
     staging_slot: int | None = None
     staging_group_size: int | None = None
 
+    def __post_init__(self) -> None:
+        dims = tuple(self.mesh_dims)
+        M2NMesh(cast(tuple[int, int], dims), 0)
+        object.__setattr__(self, "mesh_dims", dims)
+        if self.placements is not None:
+            object.__setattr__(self, "placements", tuple(self.placements))
+
     @property
     def direct(self) -> bool:
         return self.mode is M2NDestinationMode.IN_PLACE
@@ -90,9 +99,8 @@ class M2NDestination:
 
 def _base_loader_shard_dim(
     param: torch.nn.Parameter,
-    shard_axis_size: int,
-) -> int | None:
-    """Return a known-safe loader's declared shard dim, or reject it.
+) -> tuple[int, int, int] | None:
+    """Return a known-safe loader's shard dim, count, and rank, or reject it.
 
     Loader identity is deliberately fail-closed. A missing loader is not
     treated as ``default_weight_loader`` because a model-level ``load_weights``
@@ -141,16 +149,29 @@ def _base_loader_shard_dim(
         return None
 
     if loader_fn in replicated_loaders:
-        return REPLICATE
+        return REPLICATE, 1, 0
     if loader_fn not in column_loaders | row_loaders:
         return None
 
-    if owner is None or getattr(owner, "tp_size", None) != shard_axis_size:
+    if owner is None:
+        return None
+    tp_size = getattr(owner, "tp_size", None)
+    tp_rank = getattr(owner, "tp_rank", None)
+    if (
+        not isinstance(tp_size, int)
+        or isinstance(tp_size, bool)
+        or tp_size <= 0
+        or not isinstance(tp_rank, int)
+        or isinstance(tp_rank, bool)
+        or not 0 <= tp_rank < tp_size
+    ):
         return None
 
     attr = "output_dim" if loader_fn in column_loaders else "input_dim"
     dim = getattr(param, attr, None)
-    return dim if isinstance(dim, int) and dim >= 0 else None
+    if not isinstance(dim, int) or isinstance(dim, bool) or dim < 0:
+        return None
+    return dim, tp_size, tp_rank
 
 
 def _validated_shard_dim(
@@ -178,21 +199,30 @@ def _validate_semantic_target(
     request: ShardedWeightRequest,
     target: ShardedWeightTarget,
     *,
-    shard_axis_size: int,
-    destination_shard_index: int,
-) -> None:
+    num_workers: int,
+    local_worker_rank: int,
+    dst_mesh_dims: tuple[int, int] | None,
+) -> tuple[int, int]:
     spec = target.spec
-    if spec.num_shards != shard_axis_size:
+    num_shards = spec.num_shards
+    if num_shards <= 0 or num_workers % num_shards:
         raise ValueError(
             f"semantic target for '{request.name}' uses {spec.num_shards} "
-            f"shards, but the destination mesh shard axis has {shard_axis_size}"
+            f"shards, which does not divide {num_workers} workers"
         )
-    if spec.shard_index != destination_shard_index:
+    if dst_mesh_dims is not None and num_shards != dst_mesh_dims[1]:
+        raise ValueError(
+            f"semantic target for '{request.name}' uses {num_shards} shards, "
+            f"but the fixed destination mesh shard axis has {dst_mesh_dims[1]}"
+        )
+    expected_shard_index = local_worker_rank % num_shards
+    if spec.shard_index != expected_shard_index:
         raise ValueError(
             f"semantic target for '{request.name}' reports shard index "
             f"{spec.shard_index}, but this M2N rank maps to "
-            f"{destination_shard_index}"
+            f"{expected_shard_index}"
         )
+    return dst_mesh_dims or (num_workers // num_shards, num_shards)
 
 
 def resolve_parameter_destinations(
@@ -202,9 +232,9 @@ def resolve_parameter_destinations(
     shapes: Sequence[Sequence[int]],
     *,
     num_workers: int,
-    shard_axis_size: int,
+    local_worker_rank: int,
+    dst_mesh_dims: tuple[int, int] | None,
     allow_direct: bool,
-    destination_shard_index: int,
     allow_full_fallback: Sequence[bool],
 ) -> list[M2NDestination]:
     """Resolve semantic targets, then conservative exact-name destinations."""
@@ -215,16 +245,25 @@ def resolve_parameter_destinations(
         not isinstance(value, bool) for value in fallback_allowed
     ):
         raise ValueError("allow_full_fallback must contain one bool per destination")
-    if shard_axis_size <= 0 or num_workers % shard_axis_size:
+    if (
+        not isinstance(num_workers, int)
+        or isinstance(num_workers, bool)
+        or num_workers <= 0
+    ):
+        raise ValueError("num_workers must be a positive integer")
+    if not 0 <= local_worker_rank < num_workers:
         raise ValueError(
-            f"destination shard axis {shard_axis_size} must divide "
-            f"{num_workers} workers"
+            f"local worker rank {local_worker_rank} must be in [0, {num_workers})"
         )
-    if not 0 <= destination_shard_index < shard_axis_size:
-        raise ValueError(
-            f"destination shard index {destination_shard_index} must be in "
-            f"[0, {shard_axis_size})"
-        )
+    fixed_mesh_dims = None
+    if dst_mesh_dims is not None:
+        fixed_mesh = M2NMesh(cast(tuple[int, int], tuple(dst_mesh_dims)), 0)
+        if fixed_mesh.size != num_workers:
+            raise ValueError(
+                f"destination mesh {fixed_mesh.dims} must cover {num_workers} workers"
+            )
+        fixed_mesh_dims = fixed_mesh.dims
+    flat_mesh_dims = (num_workers, 1)
 
     params = dict(model.named_parameters()) if allow_direct else {}
     blocked_param_ids = {
@@ -265,11 +304,12 @@ def resolve_parameter_destinations(
         if not allow_direct:
             target = None
         if target is not None:
-            _validate_semantic_target(
+            mesh_dims = _validate_semantic_target(
                 request,
                 target,
-                shard_axis_size=shard_axis_size,
-                destination_shard_index=destination_shard_index,
+                num_workers=num_workers,
+                local_worker_rank=local_worker_rank,
+                dst_mesh_dims=fixed_mesh_dims,
             )
             retention_key = target.retention_key
             if retention_key != active_retention_key:
@@ -293,6 +333,7 @@ def resolve_parameter_destinations(
                 M2NDestination(
                     name=name,
                     mode=M2NDestinationMode.SHARDED_STAGING,
+                    mesh_dims=mesh_dims,
                     placements=_destination_placements(target.spec.shard_dim),
                     local_shape=target.spec.local_shape,
                     tensor=None,
@@ -307,17 +348,42 @@ def resolve_parameter_destinations(
         close_staging_group()
         param = params.get(name)
         dim = None
+        mesh_dims = flat_mesh_dims
         if (
             param is not None
             and id(param) not in blocked_param_ids
             and param.dtype == dtype
             and param.data.is_contiguous()
-            and num_workers % shard_axis_size == 0
         ):
-            declared_dim = _base_loader_shard_dim(param, shard_axis_size)
+            declared_dim: int | None
+            shard_info = _base_loader_shard_dim(param)
+            if shard_info is not None:
+                declared_dim, shard_count, shard_index = shard_info
+                expected_shards = (
+                    fixed_mesh_dims[1] if fixed_mesh_dims is not None else shard_count
+                )
+                valid_coordinate = declared_dim == REPLICATE or (
+                    shard_count == expected_shards
+                    and num_workers % shard_count == 0
+                    and shard_index == local_worker_rank % shard_count
+                )
+                if valid_coordinate:
+                    mesh_dims = (
+                        flat_mesh_dims
+                        if declared_dim == REPLICATE
+                        else fixed_mesh_dims
+                        or (num_workers // shard_count, shard_count)
+                    )
+                else:
+                    declared_dim = None
+            else:
+                declared_dim = None
             if declared_dim is not None:
                 dim = _validated_shard_dim(
-                    shape, param.shape, declared_dim, shard_axis_size
+                    shape,
+                    param.shape,
+                    declared_dim,
+                    1 if declared_dim == REPLICATE else shard_count,
                 )
 
         if dim is None:
@@ -330,6 +396,7 @@ def resolve_parameter_destinations(
                 M2NDestination(
                     name=name,
                     mode=M2NDestinationMode.FULL_FALLBACK,
+                    mesh_dims=flat_mesh_dims,
                     placements=REPLICATED,
                     local_shape=shape,
                     tensor=None,
@@ -342,6 +409,7 @@ def resolve_parameter_destinations(
             M2NDestination(
                 name=name,
                 mode=M2NDestinationMode.IN_PLACE,
+                mesh_dims=mesh_dims,
                 placements=(
                     REPLICATED if dim == REPLICATE else _destination_placements(dim)
                 ),
@@ -370,6 +438,7 @@ def resolve_parameter_destinations(
             destinations[index] = M2NDestination(
                 name=destination.name,
                 mode=M2NDestinationMode.FULL_FALLBACK,
+                mesh_dims=flat_mesh_dims,
                 placements=REPLICATED,
                 local_shape=tuple(shapes[index]),
                 tensor=None,
