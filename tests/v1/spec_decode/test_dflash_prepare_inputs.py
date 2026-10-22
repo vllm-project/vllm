@@ -26,10 +26,10 @@ def _run_prepare(
     cp_size: int = 1,
     cp_interleave: int = 1,
     draft_dcp_size: int | None = None,
+    max_num_reqs: int = 4,
+    max_num_tokens: int = 16,
 ):
     device = torch.device("cuda")
-    max_num_reqs = 4
-    max_num_tokens = 16
     num_speculative_steps = 3
 
     input_buffers = SimpleNamespace(
@@ -149,6 +149,74 @@ def _run_prepare(
         sample_idx_mapping=sample_idx_mapping.cpu(),
         temperature=temperature.cpu(),
         seeds=seeds.cpu(),
+    )
+
+
+def test_prepare_dflash_inputs_pads_the_unused_buffer_tail():
+    """The padding path is exercised through the real `propose()` path.
+
+    `_prepare_dflash_inputs_kernel` fills the tail of each draft input buffer
+    so a CUDA-graph replay at a larger captured size reads padding rather than
+    stale values. Asserting that through `_run_prepare` -- rather than against
+    a local copy of the loop arithmetic -- is the point: `pad_span` and
+    `PAD_BLOCK_SIZE` are production code, and a test that re-derives them
+    passes no matter how they regress.
+
+    THE SHAPE IS CHOSEN TO MAKE THE PAD LOOP ITERATE. Here num_reqs=1,
+    num_query_per_req=num_speculative_steps=3, max_num_reqs=4 and
+    max_num_tokens=4096, so last_query_end=3 and pad_span=4093. PAD_BLOCK_SIZE
+    caps at 1024, so the query-tail loop runs FOUR times.
+
+    At the 16-token shape this test first used, pad_span was 13 and
+    PAD_BLOCK_SIZE was next_power_of_2(13)=16 -- a single iteration, where the
+    loop's stride is never exercised. A regression that advanced `i` wrongly
+    would leave everything past the first block stale, and in production
+    (max_num_tokens=16384, sixteen iterations) that is
+    query_slot_mapping[1024:] holding real slot IDs from the target's previous
+    step, which is exactly what this padding exists to prevent.
+
+    PAD_BLOCK_SIZE is deliberately NOT the main kernel's BLOCK_SIZE. That one
+    is min(256, next_pow2(max_tokens_per_req)) -- k+1 at decode, so 8 at spec
+    7 -- and walking a 16384-token span 8 elements at a time is 2048 serial
+    iterations in one program, which is where the original ~38 us/step went.
+
+    `_run_prepare` pre-fills every buffer with a sentinel (-1 / -2), so an
+    unwritten tail shows up as the sentinel rather than as a plausible zero.
+    """
+    max_num_tokens = 4096
+    out = _run_prepare(
+        target_positions=[10, 11, 12, 13],
+        block_table_values=[0, 0, 7, 8, 9, 10, 11, 12],
+        max_num_tokens=max_num_tokens,
+    )
+    last_query_end = 3
+
+    # Per-request buffers are padded to max_num_reqs for CUDA-graph safety:
+    # query_start_loc holds the final offset, seq_lens holds 0.
+    assert out.input_buffers.query_start_loc.cpu().tolist()[1:] == [last_query_end] * 4
+    assert out.input_buffers.seq_lens.cpu().tolist()[1:] == [0, 0, 0]
+
+    # Padded sample slots point at query index 0 -- a valid row -- so replay
+    # never reads out of bounds; their idx mapping is -1 so sampling discards
+    # them instead of writing stale draft logits.
+    assert out.sample_indices.tolist()[3:] == [0] * 9
+    assert out.sample_pos.tolist()[3:] == [0] * 9
+    assert out.sample_idx_mapping.tolist()[3:] == [-1] * 9
+
+    # Slots past the real query tokens must be PAD so a larger replay writes
+    # no K/V.
+    num_pad = max_num_tokens - last_query_end
+    assert out.query_slot_mapping.tolist()[last_query_end:] == [PAD_SLOT_ID] * num_pad
+
+    # The same tail of the per-token buffers is zeroed and flagged as
+    # padding, so a replay at a captured size larger than the batch reads
+    # inert rows rather than the previous step's tokens and positions. The
+    # sentinels distinguish "written as 0" from "never written": input_ids
+    # and positions arrive pre-filled with -1, and is_padding all-False.
+    assert out.input_buffers.input_ids.cpu().tolist()[last_query_end:] == [0] * num_pad
+    assert out.input_buffers.positions.cpu().tolist()[last_query_end:] == [0] * num_pad
+    assert (
+        out.input_buffers.is_padding.cpu().tolist()[last_query_end:] == [True] * num_pad
     )
 
 
