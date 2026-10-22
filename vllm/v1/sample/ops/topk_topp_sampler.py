@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from subprocess import CalledProcessError
+
 import torch
 import torch.nn as nn
 
@@ -384,12 +386,14 @@ class TopKTopPSampler(nn.Module):
             return False
         try:
             import aiter.ops.sampling  # noqa: F401
-        except ImportError:
+        except Exception as err:
+            # The import may JIT-build and fail with OSError/CalledProcessError.
             self._aiter_ops_import_failed = True
             self.forward = self.forward_native
             logger.warning_once(
-                "aiter.ops.sampling is not available on ROCm. "
-                "Falling back to PyTorch-native implementation."
+                "aiter.ops.sampling is not available on ROCm (%s). "
+                "Falling back to PyTorch-native implementation.",
+                err,
             )
             return False
         self.aiter_ops = torch.ops.aiter
@@ -426,7 +430,18 @@ class TopKTopPSampler(nn.Module):
         )
         if self.aiter_ops is None and not self._init_aiter_ops():
             return self.forward_native(logits, generators, k, p)
-        return self.aiter_sample(logits, k, p, generators), None
+        try:
+            return self.aiter_sample(logits, k, p, generators), None
+        except (ImportError, OSError, RuntimeError, CalledProcessError) as err:
+            # Some AITER wheels expose the op before its JIT extension exists.
+            self._aiter_ops_import_failed = True
+            self.forward = self.forward_native
+            logger.warning_once(
+                "AITER sampling kernel is unavailable on this ROCm system "
+                "(%s). Falling back to PyTorch-native sampling.",
+                err,
+            )
+            return self.forward_native(logits, generators, k, p)
 
     def aiter_sample(
         self,
@@ -484,13 +499,23 @@ class TopKTopPSampler(nn.Module):
 
 
 def apply_top_k_top_p(
-    logits: torch.Tensor, k: torch.Tensor | None, p: torch.Tensor | None
+    logits: torch.Tensor,
+    k: torch.Tensor | None,
+    p: torch.Tensor | None,
+    has_topp_only_rows: bool = True,
 ) -> torch.Tensor:
+    """Apply top-k and/or top-p masking to logits.
+
+    has_topp_only_rows must be True if any row has p < 1 and
+    k >= logits.shape[-1] (no active top-k).
+    """
     if p is None and k is None:
         return logits
 
     if HAS_TRITON:
-        return apply_top_k_top_p_triton(logits, k, p)
+        return apply_top_k_top_p_triton(
+            logits, k, p, has_topp_only_rows=has_topp_only_rows
+        )
 
     is_cpu = current_platform.is_cpu()
     return apply_top_k_top_p_pytorch(logits, k, p, allow_cpu_sync=is_cpu)

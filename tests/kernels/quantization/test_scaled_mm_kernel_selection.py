@@ -287,6 +287,43 @@ def test_cpu_kernel_accepts_all_configs():
         )
 
 
+@pytest.mark.skipif(
+    not hasattr(torch.ops._C, "int8_scaled_mm_with_quant"),
+    reason="int8_scaled_mm_with_quant is not built",
+)
+def test_cpu_sgl_int8_linear_accepts_3d_input():
+    """The SGL int8 path must accept B x T x D activations (Whisper encoder)."""
+    N, K = 64, 128
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(
+        torch.randint(-127, 128, (N, K), dtype=torch.int8), requires_grad=False
+    )
+    layer.weight_scale = torch.nn.Parameter(
+        torch.rand(N, 1) * 0.01 + 1e-3, requires_grad=False
+    )
+    layer.bias = torch.nn.Parameter(
+        torch.randn(N, dtype=torch.bfloat16), requires_grad=False
+    )
+    config = Int8ScaledMMLinearLayerConfig(
+        is_channelwise=True,
+        is_static_input_scheme=False,
+        input_symmetric=True,
+    )
+    kernel = CPUInt8ScaledMMLinearKernel(
+        config,
+        ("weight", "weight_scale", "input_scale", "input_zero_point", "azp_adj"),
+    )
+    kernel.process_weights_for_sgl(layer)
+    kernel.linear_method = kernel._apply_weights_sgl
+
+    x = torch.randn(2, 3, K, dtype=torch.bfloat16)
+    out = kernel.apply_weights(layer, x, layer.bias)
+    ref = kernel.apply_weights(layer, x.reshape(-1, K), layer.bias)
+
+    assert out.shape == (2, 3, N)
+    torch.testing.assert_close(out, ref.reshape(2, 3, N), rtol=0, atol=0)
+
+
 class OOTInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
     @classmethod
     def is_supported(
