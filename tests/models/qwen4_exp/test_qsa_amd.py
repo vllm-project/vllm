@@ -493,3 +493,29 @@ def test_qsa_sparse_paged_attention_matches_reference(
     )
 
     torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+
+
+@requires_qsa_kernels
+@pytest.mark.parametrize("kv_cache_dtype", ["fp8", "fp8_e4m3"])
+def test_qsa_impl_constructs_with_fp8_kv(kv_cache_dtype: str) -> None:
+    """The impl constructor must accept an FP8 KV cache dtype.
+
+    The QSA Triton kernel dequantizes fp8 itself and never runs flash-attn
+    over the cache, so the parent constructor's flash-attn quantized-KV
+    probe (which raises on ROCm) must not reject it: the impl hands the
+    parent "auto" for that probe and restores the real dtype afterwards,
+    mirroring the NVIDIA implementation. Guards both the construction
+    succeeding and the dtype surviving the parent round-trip.
+    """
+    from vllm.models.qwen4_exp.amd.qsa import Qwen4ExpQSAFlashAttentionImpl
+
+    impl = Qwen4ExpQSAFlashAttentionImpl(
+        num_heads=24,
+        head_size=128,
+        scale=0.088,
+        num_kv_heads=2,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype=kv_cache_dtype,
+    )
+    assert impl.kv_cache_dtype == kv_cache_dtype

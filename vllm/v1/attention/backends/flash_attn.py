@@ -1052,10 +1052,6 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
 class FlashAttentionImpl(AttentionImpl):
     can_return_lse_for_decode: bool = True
     supports_dcp: bool = True
-    # Impls that read their KV cache through something other than the
-    # FlashAttention library (e.g. a custom Triton kernel) set this so the
-    # constructor's flash-attn kv-cache support probe does not apply.
-    kv_reads_bypass_flash_attn: bool = False
 
     def __init__(
         self,
@@ -1125,18 +1121,16 @@ class FlashAttentionImpl(AttentionImpl):
         # Cache the batch invariant result for use in forward passes
         self.batch_invariant_enabled = envs.VLLM_BATCH_INVARIANT
 
-        if (
-            is_quantized_kv_cache(self.kv_cache_dtype)
-            and not self.kv_reads_bypass_flash_attn
-            and not flash_attn_supports_kv_cache_dtype(
-                self.kv_cache_dtype,
-                requires_alibi=alibi_slopes is not None,
-                head_size=head_size,
-                head_size_v=head_size,
-                has_sinks=sinks is not None,
-                requires_softcap=bool(self.logits_soft_cap),
-                supports_fa4_hd256=True,
-            )
+        if is_quantized_kv_cache(
+            self.kv_cache_dtype
+        ) and not flash_attn_supports_kv_cache_dtype(
+            self.kv_cache_dtype,
+            requires_alibi=alibi_slopes is not None,
+            head_size=head_size,
+            head_size_v=head_size,
+            has_sinks=sinks is not None,
+            requires_softcap=bool(self.logits_soft_cap),
+            supports_fa4_hd256=True,
         ):
             raise NotImplementedError(
                 f"FlashAttention does not support {self.kv_cache_dtype}"
