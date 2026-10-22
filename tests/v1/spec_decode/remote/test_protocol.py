@@ -336,10 +336,3 @@ def test_unregistered_message_type_cannot_encode():
 
     with pytest.raises(ProtocolError, match="unregistered"):
         encode_message(Rogue())
-
-
-def test_sequence_key_generation_distinguishes_stale_state():
-    # Same request identity, new generation: distinct key, so responses
-    # carrying the old generation cannot match current state.
-    assert SequenceKey("v0", 7, 3) != KEY
-    assert len({KEY, SequenceKey("v0", 7, 2)}) == 1

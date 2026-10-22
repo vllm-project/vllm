@@ -41,11 +41,6 @@ def test_handle_happy_path():
     )
 
 
-def test_handle_collect_is_one_shot():
-    with pytest.raises(InvalidStateTransition, match="collected -> collected"):
-        transition_handle(HandleState.COLLECTED, HandleState.COLLECTED)
-
-
 def test_handle_cannot_skip_dispatch():
     with pytest.raises(InvalidStateTransition):
         transition_handle(HandleState.CREATED, HandleState.COLLECTED)

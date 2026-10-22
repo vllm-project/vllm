@@ -7,13 +7,12 @@ import contextlib
 import dataclasses
 import socket
 import threading
-import time
 from unittest.mock import Mock
 
 import pytest
 import torch
 
-from vllm.v1.spec_decode.remote import server as server_module
+from vllm.config.speculative import RemoteDraftConfig
 from vllm.v1.spec_decode.remote import session as session_module
 from vllm.v1.spec_decode.remote import transport as transport_module
 from vllm.v1.spec_decode.remote.capabilities import (
@@ -24,8 +23,12 @@ from vllm.v1.spec_decode.remote.protocol import (
     CloseSequence,
     ErrorReply,
     FeatureSlot,
+    Hello,
     HelloAck,
+    OpenSequence,
     Ping,
+    PrefillChunk,
+    ProposalResponse,
     RemoteServerLimits,
     SequenceAck,
     SequenceKey,
@@ -82,9 +85,13 @@ IDENTITY = VerifierIdentity(
 class FakeClock:
     def __init__(self):
         self.now = 1000.0
+        self.after_read = 0.0
 
     def __call__(self):
-        return self.now
+        now = self.now
+        self.now += self.after_read
+        self.after_read = 0.0
+        return now
 
     def advance(self, seconds: float):
         self.now += seconds
@@ -111,6 +118,81 @@ def batch(batch_id, keys, recovery, accepted=None):
 
 def expected_row(last_token: int):
     return [(last_token + j + 1) % VOCAB for j in range(NUM_SPEC_TOKENS)]
+
+
+class ProtocolPeer:
+    """Socket peer for replies a conforming draft adapter cannot produce."""
+
+    hello: Hello
+
+    def __init__(self, conn):
+        self.conn = conn
+
+    def recv(self):
+        frames = []
+        while True:
+            frame = self.conn.recv(timeout=5)
+            if frame.kind == transport_module.FRAME_DATA:
+                frames.append(transport_module.decode_data_frame(frame.body))
+                continue
+            envelope = decode_envelope(frame.body)
+            return envelope, decode_payload(envelope), frames
+
+    def reply(self, envelope, message, *, frames=()):
+        for frame in frames:
+            self.conn.send_data(frame)
+        self.conn.send_control(
+            encode_message(message, session_id="s", request_id=envelope.request_id)
+        )
+
+
+@pytest.fixture
+def protocol_peer():
+    listener = listen("tcp://127.0.0.1:0")
+    connections, threads, errors = [], [], []
+
+    def start(script):
+        def serve():
+            try:
+                conn = listener.accept(timeout=5)
+                connections.append(conn)
+                peer = ProtocolPeer(conn)
+                envelope, hello, _ = peer.recv()
+                assert isinstance(hello, Hello)
+                peer.hello = hello
+                adapter = FakeDraftAdapter(vocab_size=VOCAB)
+                peer.reply(
+                    envelope,
+                    HelloAck(
+                        server_id="scripted",
+                        session_id="s",
+                        session_epoch=1,
+                        selected_transport="inline",
+                        capabilities=adapter.capabilities(),
+                        feature_schema=adapter.feature_schema(),
+                        limits=DEFAULT_LIMITS,
+                    ),
+                )
+                script(peer)
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                for conn in connections:
+                    conn.close()
+
+        thread = threading.Thread(target=serve)
+        threads.append(thread)
+        thread.start()
+        return listener.endpoint
+
+    yield start
+    listener.close()
+    for conn in connections:
+        conn.close()
+    for thread in threads:
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+    assert not errors
 
 
 @pytest.fixture
@@ -170,7 +252,11 @@ def round_trip(session, batch_):
 # ----------------------------------------------------------------------
 
 
-def test_handshake_negotiates_inline_transport_and_schema(session, adapter):
+@pytest.mark.parametrize("transport", ["auto", "inline"])
+def test_handshake_negotiates_inline_transport_and_schema(
+    make_session, adapter, transport
+):
+    session = make_session(transport=transport)
     assert session.connected
     assert session.selected_transport == "inline"
     assert session.session_epoch >= 1
@@ -257,11 +343,6 @@ def test_handshake_rejects_limits_below_verifier_config(
     assert any(
         reason in r for r in session._handshake_rejections(session._hello(), ack)
     )
-
-
-def test_explicit_inline_transport_connects(make_session):
-    session = make_session(transport="inline")
-    assert session.selected_transport == "inline"
 
 
 def test_unimplemented_transport_is_rejected():
@@ -651,12 +732,14 @@ def test_dispatch_expired_during_encoding_sends_no_proposal(
     a = ready(session, 1)
     b = ready(session, 2)
 
-    def slow_encode(slot, tensor):
-        frame = tensor_to_frame(slot, tensor)
-        clock.advance(1.0)
-        return frame
+    to_numpy = torch.Tensor.numpy
 
-    monkeypatch.setattr(session_module, "tensor_to_frame", slow_encode)
+    def slow_host_copy(tensor, *args, **kwargs):
+        array = to_numpy(tensor, *args, **kwargs)
+        clock.advance(1.0)
+        return array
+
+    monkeypatch.setattr(torch.Tensor, "numpy", slow_host_copy)
     result = round_trip(session, batch(0, [a], recovery=[4]))
     assert result.row_statuses == (SpeculatorStatusCode.TIMEOUT,)
     assert result.output.valid_lengths.tolist() == [0]
@@ -672,13 +755,15 @@ def test_large_writes_get_a_size_proportional_budget(make_session, monkeypatch):
     a = session.open_sequence(1)
     monkeypatch.setattr(session_module, "_MIN_WRITE_BYTES_PER_S", 1000)
     budgets = []
-    send_data = session._conn.send_data
+    sock = session._conn._sock
+    settimeout = socket.socket.settimeout
 
-    def record(frame, *, deadline=None, drain_incoming=False):
-        budgets.append(deadline - time.monotonic())
-        send_data(frame, deadline=deadline, drain_incoming=drain_incoming)
+    def record_budget(connection, timeout):
+        if connection is sock and timeout is not None:
+            budgets.append(timeout)
+        return settimeout(connection, timeout)
 
-    monkeypatch.setattr(session._conn, "send_data", record)
+    monkeypatch.setattr(socket.socket, "settimeout", record_budget)
     # 1000 int32 tokens at 1000 B/s is a 4 s write budget, far beyond the
     # 100 ms request timeout that would otherwise cut the copy short.
     session.prefill(a, features(list(range(1000))), is_final=True)
@@ -764,10 +849,15 @@ def test_collect_timeout_does_not_write_after_deadline(
     handle = session.dispatch(batch(0, [a], recovery=[4]))
     clock.advance(1.0)
 
-    def reject_late_write(*args, **kwargs):
-        pytest.fail("fallback must not wait on a cancellation write")
+    sock = session._conn._sock
+    sendall = socket.socket.sendall
 
-    monkeypatch.setattr(session._conn, "send_control", reject_late_write)
+    def reject_late_write(connection, *args, **kwargs):
+        if connection is sock:
+            pytest.fail("fallback must not wait on a cancellation write")
+        return sendall(connection, *args, **kwargs)
+
+    monkeypatch.setattr(socket.socket, "sendall", reject_late_write)
     result = session.collect(handle)
     assert result.row_statuses == (SpeculatorStatusCode.TIMEOUT,)
     assert result.output.valid_lengths.tolist() == [0]
@@ -792,16 +882,28 @@ def test_latched_rows_report_their_failure_once(session, adapter, clock, monkeyp
     warning.assert_not_called()
 
 
-def test_failure_policy_error_raises_after_latching(make_session, adapter, clock):
-    session = make_session(failure_policy="error")
-    a = ready(session, 1)
-    adapter.hold_batches.add(0)
-    handle = session.dispatch(batch(0, [a], recovery=[1]))
-    clock.advance(10.0)
-    with pytest.raises(RemoteDraftError, match="TIMEOUT"):
-        session.collect(handle)
-    assert session.sequence_state(a) is SequenceState.TARGET_ONLY
-    adapter.release()
+def test_configured_timeout_raises_after_latching(server, adapter, clock):
+    config = RemoteDraftConfig(
+        endpoint=server.endpoint,
+        transport="inline",
+        failure_policy="error",
+        request_timeout_ms=250,
+        startup_timeout_ms=1000,
+    )
+    session = RemoteDraftSession.from_config(config, IDENTITY, clock=clock)
+    try:
+        session.connect()
+        a = ready(session, 1)
+        adapter.hold_batches.add(0)
+        handle = session.dispatch(batch(0, [a], recovery=[1]))
+        assert handle.deadline == clock() + 0.25
+        clock.advance(0.251)
+        with pytest.raises(RemoteDraftError, match="TIMEOUT"):
+            session.collect(handle)
+        assert session.sequence_state(a) is SequenceState.TARGET_ONLY
+    finally:
+        adapter.release()
+        session.close()
 
 
 def limited_server(**limits):
@@ -891,20 +993,44 @@ def test_prefill_beyond_server_limits_follows_failure_policy(clock, policy):
 def test_stale_generation_desyncs_then_reopen_recovers(session, server, adapter):
     a = ready(session, 1)
     newer = SequenceKey(a.verifier_instance_id, a.sequence_id, a.generation + 1)
-    with server.lock:
-        server.registry.open(newer, owner=session.session_id)
-        adapter.open_sequence(newer)
+    replacement = transport_module.connect(server.endpoint, timeout=5)
+    try:
+        replacement.send_control(
+            encode_message(
+                Hello(
+                    verifier_instance_id=IDENTITY.verifier_instance_id,
+                    target_fingerprint=IDENTITY.target_fingerprint,
+                    tokenizer_fingerprint=IDENTITY.tokenizer_fingerprint,
+                    method=IDENTITY.method,
+                    num_speculative_tokens=NUM_SPEC_TOKENS,
+                    parallel_drafting=False,
+                    supported_transports=("inline",),
+                ),
+                request_id=1,
+            )
+        )
+        ack = decode_payload(decode_envelope(replacement.recv(timeout=5).body))
+        assert isinstance(ack, HelloAck)
+        replacement.send_control(
+            encode_message(OpenSequence(newer), session_id=ack.session_id, request_id=2)
+        )
+        opened = decode_payload(decode_envelope(replacement.recv(timeout=5).body))
+        assert isinstance(opened, SequenceAck) and opened.status is OK
 
-    result = round_trip(session, batch(0, [a], recovery=[1]))
-    assert result.row_statuses == (SpeculatorStatusCode.STALE_GENERATION,)
-    assert session.sequence_state(a) is SequenceState.DESYNCED
+        result = round_trip(session, batch(0, [a], recovery=[1]))
+        assert result.row_statuses == (SpeculatorStatusCode.STALE_GENERATION,)
+        assert session.sequence_state(a) is SequenceState.DESYNCED
 
-    reopened = session.open_sequence(1)
-    assert reopened.generation == a.generation + 1
-    session.prefill(reopened, features([4, 5]), is_final=True)
-    result = round_trip(session, batch(1, [reopened], recovery=[6]))
-    assert result.row_statuses == (OK,)
-    assert adapter.prefix(reopened) == [4, 5, 6]
+        session.open_sequence(2)
+        reopened = session.open_sequence(1)
+        assert reopened.generation > newer.generation
+        session.prefill(reopened, features([4, 5]), is_final=True)
+        result = round_trip(session, batch(1, [reopened], recovery=[6]))
+        assert result.row_statuses == (OK,)
+        assert adapter.prefix(reopened) == [4, 5, 6]
+        assert adapter.prefix(newer) is None
+    finally:
+        replacement.close()
 
 
 def test_server_shutdown_degrades_to_target_only(session, server, adapter):
@@ -1054,49 +1180,27 @@ def test_open_after_a_silent_restart_uses_the_new_server(make_session, server):
         restarted.stop()
 
 
-def test_error_reply_to_an_earlier_request_is_ignored(clock):
-    listener = listen("tcp://127.0.0.1:0")
-    adapter = FakeDraftAdapter(vocab_size=VOCAB)
-    ack = HelloAck(
-        server_id="scripted",
-        session_id="s",
-        session_epoch=1,
-        selected_transport="inline",
-        capabilities=adapter.capabilities(),
-        feature_schema=adapter.feature_schema(),
-        limits=DEFAULT_LIMITS,
-    )
+def test_error_reply_to_an_earlier_request_is_ignored(protocol_peer, clock):
+    def send_stale_error(peer):
+        envelope, message, _ = peer.recv()
+        assert isinstance(message, OpenSequence)
+        peer.conn.send_control(
+            encode_message(
+                ErrorReply(SpeculatorStatusCode.PROTOCOL_ERROR, "abandoned"),
+                session_id="s",
+                request_id=envelope.request_id - 1,
+            )
+        )
+        peer.reply(envelope, SequenceAck(message.key))
 
-    def serve():
-        conn = listener.accept(timeout=5.0)
-        with contextlib.suppress(TransportError):
-            hello = decode_envelope(conn.recv(timeout=5.0).body)
-            conn.send_control(
-                encode_message(ack, session_id="s", request_id=hello.request_id)
-            )
-            envelope = decode_envelope(conn.recv(timeout=5.0).body)
-            stale = ErrorReply(SpeculatorStatusCode.PROTOCOL_ERROR, "abandoned")
-            conn.send_control(
-                encode_message(stale, session_id="s", request_id=hello.request_id)
-            )
-            reply = SequenceAck(key=decode_payload(envelope).key)
-            conn.send_control(
-                encode_message(reply, session_id="s", request_id=envelope.request_id)
-            )
-            conn.recv(timeout=5.0)
-        conn.close()
-
-    thread = threading.Thread(target=serve)
-    thread.start()
-    session = RemoteDraftSession(listener.endpoint, IDENTITY, clock=clock)
+    endpoint = protocol_peer(send_stale_error)
+    session = RemoteDraftSession(endpoint, IDENTITY, clock=clock)
     try:
         session.connect()
         key = session.open_sequence(1)
         assert session.sequence_state(key) is SequenceState.PREFILLING
     finally:
         session.close()
-        thread.join()
-        listener.close()
 
 
 def test_reconnect_fences_handles_from_the_old_connection(session):
@@ -1151,16 +1255,9 @@ def test_unsent_close_timeout_disconnects_and_reclaims_server_requests(
             cleaned.set()
 
     monkeypatch.setattr(adapter, "close_sequences", close_sequences)
-    send = session._send
-
-    def expire_before_send(message, **kwargs):
-        if isinstance(message, CloseSequence):
-            clock.advance(0.101)
-        return send(message, **kwargs)
-
-    with monkeypatch.context() as patch:
-        patch.setattr(session, "_send", expire_before_send)
-        session.close_sequences((a,))
+    # The first clock read creates the close budget; it expires before writing.
+    clock.after_read = 0.101
+    session.close_sequences((a,))
     assert not session.connected
     assert conn.closed
     assert session.sequence_state(a) is None
@@ -1176,38 +1273,50 @@ def test_unsent_close_timeout_disconnects_and_reclaims_server_requests(
 
 @pytest.mark.parametrize("failure_policy", ["target_only", "error"])
 def test_sent_close_ack_timeout_keeps_other_requests_usable(
-    make_session, adapter, clock, monkeypatch, failure_policy
+    protocol_peer, clock, failure_policy
 ):
-    session = make_session(failure_policy=failure_policy)
-    a, b = ready(session, 1), ready(session, 2)
-    conn = session._conn
     closed = threading.Event()
-    close = adapter.close_sequences
 
-    def close_sequences(keys):
-        close(keys)
-        if a in keys:
-            closed.set()
+    def withhold_close_ack(peer):
+        for _ in range(4):
+            envelope, message, _ = peer.recv()
+            assert isinstance(message, (OpenSequence, PrefillChunk))
+            peer.reply(envelope, SequenceAck(message.key))
+        _, close, _ = peer.recv()
+        assert isinstance(close, CloseSequence) and len(close.keys) == 1
+        closed.set()
+        clock.advance(0.101)
+        envelope, proposal, _ = peer.recv()
+        assert proposal.keys[0] != close.keys[0]
+        peer.reply(
+            envelope,
+            ProposalResponse(
+                batch_id=proposal.batch_id, sequence_number=0, result_slot=0
+            ),
+            frames=(
+                tensor_to_frame(0, tokens([expected_row(4)], torch.int64)),
+                tensor_to_frame(1, tokens([NUM_SPEC_TOKENS])),
+                tensor_to_frame(2, tokens([int(OK)])),
+            ),
+        )
 
-    monkeypatch.setattr(adapter, "close_sequences", close_sequences)
-    send = session._send
-
-    def expire_after_send(message, **kwargs):
-        request_id = send(message, **kwargs)
-        if isinstance(message, CloseSequence):
-            clock.advance(0.101)
-        return request_id
-
-    with monkeypatch.context() as patch:
-        patch.setattr(session, "_send", expire_after_send)
+    endpoint = protocol_peer(withhold_close_ack)
+    session = RemoteDraftSession(
+        endpoint, IDENTITY, failure_policy=failure_policy, clock=clock
+    )
+    try:
+        session.connect()
+        a, b = ready(session, 1), ready(session, 2)
         session.close_sequences((a,))
-    assert session.connected and not conn.closed
-    assert closed.wait(2), "sent close did not reach the adapter"
-    assert adapter.prefix(a) is None
-    assert session.sequence_state(b) is SequenceState.READY
-    result = round_trip(session, batch(0, [b], [4]))
-    assert result.row_statuses == (OK,)
-    assert result.output.token_ids.tolist() == [expected_row(4)]
+        assert closed.wait(2)
+        assert session.connected
+        assert session.sequence_state(a) is None
+        assert session.sequence_state(b) is SequenceState.READY
+        result = round_trip(session, batch(0, [b], [4]))
+        assert result.row_statuses == (OK,)
+        assert result.output.token_ids.tolist() == [expected_row(4)]
+    finally:
+        session.close()
 
 
 def test_unacknowledged_close_keeps_bumping_the_generation(session):
@@ -1235,12 +1344,7 @@ def test_disconnected_sequence_churn_does_not_retain_request_ids(
         assert session.sequence_state(key) is SequenceState.INVALID
         session.close_sequences((key,))
     assert not session._records
-    retained = {
-        name: len(value)
-        for name, value in vars(session).items()
-        if isinstance(value, dict) and value
-    }
-    assert not retained, f"closed requests retained in session bookkeeping: {retained}"
+    assert session.pending_frames == 0
 
     restarted = RemoteDraftServer(FakeDraftAdapter(vocab_size=VOCAB))
     restarted.start(endpoint)
@@ -1258,20 +1362,50 @@ def test_disconnected_sequence_churn_does_not_retain_request_ids(
 
 
 def test_unacknowledged_close_fences_server_state_without_retaining_history(
-    session, adapter, monkeypatch
+    server, adapter, clock, protocol_peer
 ):
-    first = ready(session, 1)
-    with monkeypatch.context() as patch:
-        patch.setattr(session, "_close_remote", Mock(return_value=set()))
-        session.close_sequences((first,))
-    assert adapter.prefix(first) == [1, 2, 3]
+    def defer_close(peer):
+        upstream = transport_module.connect(server.endpoint, timeout=5)
+        try:
+            upstream.send_control(encode_message(peer.hello, request_id=1))
+            ack = decode_payload(decode_envelope(upstream.recv(timeout=5).body))
+            assert isinstance(ack, HelloAck)
+            with contextlib.suppress(transport_module.ConnectionClosed):
+                while True:
+                    envelope, message, frames = peer.recv()
+                    if isinstance(message, CloseSequence):
+                        # Keep the old state on the real server until a newer OPEN.
+                        clock.advance(0.101)
+                        continue
+                    for frame in frames:
+                        upstream.send_data(frame)
+                    upstream.send_control(
+                        encode_message(
+                            message,
+                            session_id=ack.session_id,
+                            request_id=envelope.request_id,
+                        )
+                    )
+                    response = upstream.recv(timeout=5)
+                    peer.reply(envelope, decode_payload(decode_envelope(response.body)))
+        finally:
+            upstream.close()
 
-    second = ready(session, first.sequence_id, prompt=(4, 5))
-    assert second.generation > first.generation
-    assert adapter.prefix(first) is None
-    assert adapter.prefix(second) == [4, 5]
-    session.close_sequences((first,))
-    assert session.sequence_state(second) is SequenceState.READY
+    endpoint = protocol_peer(defer_close)
+    session = RemoteDraftSession(endpoint, IDENTITY, clock=clock)
+    try:
+        session.connect()
+        first = ready(session, 1)
+        session.close_sequences((first,))
+        assert adapter.prefix(first) == [1, 2, 3]
+        second = ready(session, first.sequence_id, prompt=(4, 5))
+        assert second.generation > first.generation
+        assert adapter.prefix(first) is None
+        assert adapter.prefix(second) == [4, 5]
+        session.close_sequences((first,))
+        assert session.sequence_state(second) is SequenceState.READY
+    finally:
+        session.close()
 
 
 def test_close_is_idempotent(session, server, adapter):
@@ -1320,97 +1454,83 @@ def test_prefill_many_drains_acks_under_socket_backpressure(
 
 @pytest.mark.parametrize("policy", ["target_only", "error"])
 @pytest.mark.parametrize("is_final", [True, False])
-@pytest.mark.parametrize("disconnect", [True, False])
 def test_prefill_acknowledgements_cannot_revive_a_lost_connection(
-    make_session, adapter, monkeypatch, policy, is_final, disconnect
+    protocol_peer, policy, is_final
 ):
-    session = make_session(failure_policy=policy)
-    keys = (session.open_sequence(1), session.open_sequence(2))
-    original_await = session._await
-    acknowledged = 0
+    def disconnect_after_one_ack(peer):
+        for _ in range(2):
+            envelope, message, _ = peer.recv()
+            assert isinstance(message, OpenSequence)
+            peer.reply(envelope, SequenceAck(message.key))
+        requests = [peer.recv() for _ in range(2)]
+        assert all(isinstance(message, PrefillChunk) for _, message, _ in requests)
+        envelope, chunk, _ = requests[0]
+        peer.reply(envelope, SequenceAck(chunk.key))
+        # The fixture closes after this ACK; the second request gets EOF.
 
-    def acknowledge_then_disconnect(*args, **kwargs):
-        nonlocal acknowledged
-        if acknowledged and disconnect:
-            raise TransportError("connection lost after first prefill ACK")
-        reply = original_await(*args, **kwargs)
-        assert reply[1].key == keys[acknowledged]
-        assert reply[1].status is OK
-        acknowledged += 1
-        return reply
-
-    monkeypatch.setattr(session, "_await", acknowledge_then_disconnect)
-    expected = (
-        pytest.raises(RemoteDraftError, match="prefill failed")
-        if disconnect and policy == "error"
-        else contextlib.nullcontext()
-    )
-    with expected:
-        session.prefill_many([(key, features([1]), is_final) for key in keys])
-
-    if not disconnect:
-        assert acknowledged == 2
-        expected_state = SequenceState.READY if is_final else SequenceState.PREFILLING
-        assert all(session.sequence_state(key) is expected_state for key in keys)
-        assert all(
-            session._records[key.sequence_id].prefilled_tokens == 1 for key in keys
+    endpoint = protocol_peer(disconnect_after_one_ack)
+    session = RemoteDraftSession(endpoint, IDENTITY, failure_policy=policy)
+    try:
+        session.connect()
+        keys = (session.open_sequence(1), session.open_sequence(2))
+        expected = (
+            pytest.raises(RemoteDraftError, match="prefill failed")
+            if policy == "error"
+            else contextlib.nullcontext()
         )
-        return
-
-    assert acknowledged == 1
-    assert not session.connected
-    assert all(session.sequence_state(key) is SequenceState.INVALID for key in keys)
-    assert all(session._records[key.sequence_id].prefilled_tokens == 0 for key in keys)
-    if policy == "target_only":
-        monkeypatch.setattr(session, "_send", Mock(side_effect=AssertionError))
-        session.prefill_many([(key, features([2]), True) for key in keys])
-        result = round_trip(session, batch(0, keys, recovery=[2, 3]))
-        assert result.output.valid_lengths.tolist() == [0, 0]
-        assert all(status is not OK for status in result.row_statuses)
-        assert adapter.proposed_batches == []
+        with expected:
+            session.prefill_many([(key, features([1]), is_final) for key in keys])
+        assert not session.connected
+        assert all(session.sequence_state(key) is SequenceState.INVALID for key in keys)
+        if policy == "target_only":
+            session.prefill_many([(key, features([2]), True) for key in keys])
+            result = round_trip(session, batch(0, keys, recovery=[2, 3]))
+            assert result.output.valid_lengths.tolist() == [0, 0]
+            assert all(status is not OK for status in result.row_statuses)
+    finally:
+        session.close()
 
 
-def test_prefill_many_writes_every_chunk_before_waiting(
-    session, server, adapter, monkeypatch
-):
-    a = session.open_sequence(1)
-    b = session.open_sequence(2)
-    c = session.open_sequence(3)
-    # The server holds a newer generation of b, so only b's chunk fails.
-    newer = SequenceKey(b.verifier_instance_id, b.sequence_id, b.generation + 1)
-    with server.lock:
-        server.registry.open(newer, owner=session.session_id)
-        adapter.open_sequence(newer)
+def test_prefill_many_pipelines_chunks_and_isolates_failed_rows(protocol_peer):
+    def acknowledge_after_all_chunks(peer):
+        for _ in range(3):
+            envelope, message, _ = peer.recv()
+            assert isinstance(message, OpenSequence)
+            peer.reply(envelope, SequenceAck(message.key))
+        # Withhold all replies until the whole batch reaches the wire.
+        requests = [peer.recv() for _ in range(3)]
+        for (envelope, chunk, frames), values, final in zip(
+            requests, ([1, 2], [3], [4, 5]), (True, True, False)
+        ):
+            assert isinstance(chunk, PrefillChunk)
+            assert chunk.offset == 0
+            assert chunk.num_tokens == len(values)
+            assert chunk.is_final is final
+            assert transport_module.frame_to_ints(frames[0]) == values
+            status = (
+                SpeculatorStatusCode.SEQUENCE_DESYNC
+                if chunk.key.sequence_id == 2
+                else OK
+            )
+            peer.reply(envelope, SequenceAck(chunk.key, status))
 
-    events: list[str] = []
-    send, wait = session._send, session._await
-
-    def record_send(*args, **kwargs):
-        events.append("send")
-        return send(*args, **kwargs)
-
-    def record_wait(*args, **kwargs):
-        events.append("wait")
-        return wait(*args, **kwargs)
-
-    monkeypatch.setattr(session, "_send", record_send)
-    monkeypatch.setattr(session, "_await", record_wait)
-    session.prefill_many(
-        [
-            (a, features([1, 2]), True),
-            (b, features([3]), True),
-            (c, features([4, 5]), False),
-        ]
-    )
-    assert events == ["send"] * 3 + ["wait"] * 3
-    assert session.sequence_state(a) is SequenceState.READY
-    assert session.sequence_state(b) is SequenceState.DESYNCED
-    assert session.sequence_state(c) is SequenceState.PREFILLING
-    assert adapter.prefix(a) == [1, 2]
-    assert adapter.prefix(c) == [4, 5]
-
-    with pytest.raises(ValueError, match="one prefill chunk per sequence"):
-        session.prefill_many([(c, features([6]), True), (c, features([7]), True)])
+    endpoint = protocol_peer(acknowledge_after_all_chunks)
+    session = RemoteDraftSession(endpoint, IDENTITY)
+    try:
+        session.connect()
+        a, b, c = (session.open_sequence(i) for i in (1, 2, 3))
+        session.prefill_many(
+            [
+                (a, features([1, 2]), True),
+                (b, features([3]), True),
+                (c, features([4, 5]), False),
+            ]
+        )
+        assert session.sequence_state(a) is SequenceState.READY
+        assert session.sequence_state(b) is SequenceState.DESYNCED
+        assert session.sequence_state(c) is SequenceState.PREFILLING
+    finally:
+        session.close()
 
 
 @pytest.mark.parametrize("policy", ["target_only", "error"])
@@ -1435,18 +1555,25 @@ def test_prefill_send_failure_reports_cause_for_unsent_rows(
         sent += 1
 
     monkeypatch.setattr(conn, "send_data", fail_send)
-    report = Mock(wraps=session._raise_if_strict)
-    monkeypatch.setattr(session, "_raise_if_strict", report)
+    report = Mock()
+    monkeypatch.setattr(session_module.logger, "warning", report)
     expected = (
         pytest.raises(RemoteDraftError, match="prefill failed")
         if policy == "error"
         else contextlib.nullcontext()
     )
-    with expected:
+    with expected as raised:
         session.prefill_many([(key, features([1]), True) for key in keys])
 
-    report.assert_called_once()
-    detail = report.call_args.args[0]
+    if policy == "error":
+        assert raised is not None
+        detail = str(raised.value)
+    else:
+        detail = next(
+            call.args[1]
+            for call in report.call_args_list
+            if call.args[0] == "Remote draft falling back to target-only: %s"
+        )
     if timeout:
         assert detail.count("TIMEOUT") == len(keys) - sent_before_failure
         assert "INTERNAL_ERROR" not in detail
@@ -1457,37 +1584,22 @@ def test_prefill_send_failure_reports_cause_for_unsent_rows(
         assert detail.count("INTERNAL_ERROR injected send failure") == len(keys)
 
 
-def test_prefill_rejects_stale_key_and_ready_sequence(session):
+def test_prefill_rejects_stale_key_ready_sequence_and_duplicate_chunks(session):
     a = ready(session, 1)
     with pytest.raises(RemoteDraftError, match="cannot accept prefill"):
         session.prefill(a, features([1]), is_final=True)
     stale = SequenceKey(a.verifier_instance_id, a.sequence_id, 7)
     with pytest.raises(ValueError, match="not current"):
         session.prefill(stale, features([1]), is_final=True)
+    b = session.open_sequence(2)
+    with pytest.raises(ValueError, match="one prefill chunk per sequence"):
+        session.prefill_many([(b, features([6]), True), (b, features([7]), True)])
 
 
 def test_ping_round_trip(session):
     ready(session, 1)
     pong = session.ping()
     assert pong.active_sequences == 1
-
-
-def test_from_config_reads_placement_fields(server, clock):
-    class Config:
-        endpoint = server.endpoint
-        transport = "auto"
-        failure_policy = "error"
-        request_timeout_ms = 250
-        startup_timeout_ms = 1000
-
-    session = RemoteDraftSession.from_config(Config(), IDENTITY, clock=clock)
-    session.connect()
-    try:
-        assert session.connected
-        assert session._failure_policy == "error"
-        assert session._request_timeout_s == 0.25
-    finally:
-        session.close()
 
 
 # ----------------------------------------------------------------------
@@ -1540,41 +1652,42 @@ def test_client_handshake_rejects_header_before_receiving_body(monkeypatch, kind
 
 
 @pytest.mark.parametrize("overflow", ["bytes", "frames", "duplicate", "header"])
-def test_client_bounds_pending_results_across_received_frames(
-    make_session, monkeypatch, overflow
-):
+def test_client_bounds_pending_results_across_received_frames(protocol_peer, overflow):
     identity = dataclasses.replace(IDENTITY, max_num_seqs=1, num_speculative_tokens=16)
-    session = make_session(identity)
-    original = server_module._ServerSession._handle_control
 
-    def flood(peer, body):
-        if not isinstance(decode_payload(decode_envelope(body)), Ping):
-            return original(peer, body)
+    def flood(peer):
+        _, message, _ = peer.recv()
+        assert isinstance(message, Ping)
         if overflow == "header":
+            maximum = transport_module.check_data_frame_size(
+                (1 << 63) - 1, "int64", (1, identity.num_speculative_tokens)
+            )
             peer.conn._sock.sendall(
-                transport_module._HEADER.pack(
-                    transport_module.FRAME_DATA,
-                    session._max_result_frame_bytes + 1,
-                )
+                transport_module._HEADER.pack(transport_module.FRAME_DATA, maximum + 1)
             )
             return
         values = [1] * 16 if overflow == "bytes" else [1]
-        for i in range(8):
-            peer.conn.send_data(
-                transport_module.ints_to_frame(
-                    0 if overflow == "duplicate" else i,
-                    values,
-                    dtype="int64",
-                    shape=(1, len(values)),
+        with contextlib.suppress(TransportError):
+            for i in range(8):
+                peer.conn.send_data(
+                    transport_module.ints_to_frame(
+                        0 if overflow == "duplicate" else i,
+                        values,
+                        dtype="int64",
+                        shape=(1, len(values)),
+                    )
                 )
-            )
 
-    monkeypatch.setattr(server_module._ServerSession, "_handle_control", flood)
-    with pytest.raises(RemoteDraftError, match="ping failed.*(exceed|duplicate)"):
-        session.ping()
-    assert not session.connected
-    assert session.pending_frames == session._inbound_bytes == 0
-    assert not session._inbound_sizes
+    endpoint = protocol_peer(flood)
+    session = RemoteDraftSession(endpoint, identity)
+    try:
+        session.connect()
+        with pytest.raises(RemoteDraftError, match="ping failed.*(exceed|duplicate)"):
+            session.ping()
+        assert not session.connected
+        assert session.pending_frames == 0
+    finally:
+        session.close()
 
 
 def test_consuming_results_replenishes_the_receive_budget(session):

@@ -306,27 +306,46 @@ def test_send_deadline_closes_connection_when_peer_does_not_read(drain_incoming)
 
 def test_send_frames_share_absolute_deadline(monkeypatch):
     now = [10.0]
-    clock = Mock()
-    clock.monotonic.side_effect = lambda: now[0]
-    monkeypatch.setattr(transport, "time", clock)
-    sock = Mock(spec=socket.socket)
+    monkeypatch.setattr(transport, "time", Mock(monotonic=lambda: now[0]))
+    sock, peer_sock = socket.socketpair()
+    sock.settimeout(1)
+    peer = FramedConnection(peer_sock)
 
-    def sendall(data):
-        now[0] += 2.0
+    class MeteredSocket:
+        """Charge virtual time per byte, independent of send coalescing."""
 
-    sock.sendall.side_effect = sendall
-    connection = FramedConnection(sock)
-    connection.send_control(b"first", deadline=15.0)
-    with pytest.raises(TransportTimeout):
-        connection.send_data(ints_to_frame(0, [1]), deadline=15.0)
-    assert sock.settimeout.call_args_list == [
-        call(None),
-        call(5.0),
-        call(3.0),
-        call(1.0),
-    ]
-    assert sock.sendall.call_count == 3
-    assert connection.closed
+        def settimeout(self, timeout):
+            self.remaining = timeout
+
+        def sendall(self, data):
+            available = len(data) if self.remaining is None else self.remaining
+            sent = min(len(data), int(available))
+            if sent:
+                sock.sendall(data[:sent])
+            now[0] += min(len(data), available)
+            if sent != len(data):
+                raise TimeoutError
+
+        def shutdown(self, how):
+            sock.shutdown(how)
+
+        def close(self):
+            sock.close()
+
+    connection = FramedConnection(MeteredSocket())
+    try:
+        deadline = 25.0
+        connection.send_control(b"first", deadline=deadline)
+        with pytest.raises(TransportTimeout):
+            connection.send_data(ints_to_frame(0, [1]), deadline=deadline)
+        assert now[0] == deadline
+        assert connection.closed
+        assert peer.recv(timeout=1).body == b"first"
+        with pytest.raises(ConnectionClosed):
+            peer.recv(timeout=1)
+    finally:
+        connection.close()
+        peer.close()
 
 
 @pytest.mark.parametrize("drain_incoming", [False, True])
@@ -420,8 +439,9 @@ def test_receive_allocation_failure_fences_consumed_frame(monkeypatch, duplex):
     sock = Mock(spec=socket.socket)
     sock.recv.return_value = struct.pack("!BI", FRAME_CONTROL, 2)
     sock.send.side_effect = len
-    connection = FramedConnection(sock)
-    connection._buffer = FailedBuffer()
+    with monkeypatch.context() as patch:
+        patch.setattr("builtins.bytearray", FailedBuffer)
+        connection = FramedConnection(sock)
     if duplex:
         selector = Mock()
         selector.select.side_effect = [

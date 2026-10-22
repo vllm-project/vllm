@@ -71,115 +71,88 @@ def key(sequence_id: int, generation: int = 0, verifier: str = VERIFIER):
     )
 
 
-def test_cleanup_failure_retains_ownership_and_releases_connection(monkeypatch):
-    adapter = FakeDraftAdapter(vocab_size=VOCAB)
-    server = RemoteDraftServer(adapter)
-    conn = Mock()
-    server._connections.add(conn)
-    owned, other = key(1), key(2)
-    close_sequences = adapter.close_sequences
-
-    def close_with_failure(keys):
-        close_sequences(keys)
-        raise RuntimeError("injected adapter cleanup failure")
-
-    close_adapter = Mock(side_effect=close_with_failure)
-    monkeypatch.setattr(adapter, "close_sequences", close_adapter)
-    report_error = Mock()
-    monkeypatch.setattr(server_module.logger, "exception", report_error)
-
-    def run(session):
-        session.session_id = "closing-session"
-        for sequence, owner in ((owned, session.session_id), (other, "other-session")):
-            assert server.registry.open(sequence, owner=owner).status == OK
-            adapter.open_sequence(sequence)
-
-    monkeypatch.setattr(server_module._ServerSession, "run", run)
-    server._serve_connection(conn)
-
-    close_adapter.assert_called_once_with((owned,))
-    assert server.registry.get(owned) is not None
-    assert adapter.prefix(owned) is None
-    assert server.registry.get(other) is not None
-    assert adapter.prefix(other) == []
-    conn.close.assert_called_once_with()
-    assert conn not in server._connections
-    report_error.assert_called_once()
-    assert server._cleanup_failed
-
-
-@pytest.mark.parametrize("operation", ["close", "discard", "cleanup", "replace"])
-@pytest.mark.parametrize("partial", [False, True])
+@pytest.mark.parametrize(
+    ("operation", "retired_count"),
+    [
+        ("close", 0),
+        ("close", 1),
+        ("discard", 0),
+        ("discard", 1),
+        ("cleanup", 0),
+        ("cleanup", 1),
+        ("cleanup", 2),
+        ("replace", 0),
+        ("replace", 1),
+    ],
+)
 def test_retirement_failure_preserves_owners_and_fences_adapter(
-    monkeypatch, operation, partial
+    operation, retired_count
 ):
-    """Neither a failed batch nor a new generation can orphan adapter state."""
-    adapter = FakeDraftAdapter(vocab_size=VOCAB)
+    """Failed device retirement retains owners, closes the peer, and fences work."""
+    retirements = []
+
+    class FailingRetirementAdapter(FakeDraftAdapter):
+        def close_sequences(self, keys):
+            retirements.append(keys)
+            assert all(server.registry.get(sequence) is not None for sequence in keys)
+            super().close_sequences(keys[:retired_count])
+            raise MemoryError("injected block return failure")
+
+        def advance_and_propose(self, batch):
+            raise RuntimeError("injected adapter failure")
+
+    adapter = FailingRetirementAdapter(vocab_size=VOCAB)
     server = RemoteDraftServer(adapter)
-    conn = Mock()
-    session = server_module._ServerSession(server, conn)
-    session.session_id = "closing-session"
-    session.verifier_instance_id = VERIFIER
+    endpoint = server.start("tcp://127.0.0.1:0")
+    first, second = RawClient(endpoint), RawClient(endpoint)
     owned, sibling, other = key(1), key(2), key(3)
-    for sequence, owner in (
-        (owned, session.session_id),
-        (sibling, session.session_id),
-        (other, "other-session"),
-    ):
-        assert server.registry.open(sequence, owner=owner).created
-        adapter.open_sequence(sequence)
-    close_sequences = adapter.close_sequences
     expected = (owned,) if operation == "replace" else (owned, sibling)
+    try:
+        assert isinstance(first.hello(), HelloAck)
+        first.ready(owned)
+        first.ready(sibling)
+        assert isinstance(second.hello(), HelloAck)
+        second.ready(other)
 
-    def fail_retirement(keys):
-        # Ownership must survive even if some rows were already retired.
-        assert keys == expected
-        assert all(server.registry.get(sequence) is not None for sequence in keys)
-        if partial:
-            close_sequences(keys[:1])
-        raise MemoryError("injected block return failure")
+        with pytest.raises(ConnectionClosed):
+            if operation == "close":
+                first.send(CloseSequence((owned, sibling, other)))
+                first.recv()
+            elif operation == "discard":
+                first.propose(0, [owned, sibling, other], recovery=[4, 5, 6])
+            elif operation == "cleanup":
+                first.conn._sock.shutdown(socket.SHUT_WR)
+                first.recv()
+            else:
+                first.open(key(1, generation=1))
+        assert server.wait(timeout=2)
+        assert retirements == [expected]
+        for sequence, owner in (
+            (owned, first.session_id),
+            (sibling, first.session_id),
+            (other, second.session_id),
+        ):
+            entry = server.registry.get(sequence)
+            assert entry is not None and entry.owner == owner
+            assert adapter.prefix(sequence) == (
+                None if sequence in expected[:retired_count] else [1, 2, 3]
+            )
+        assert server.registry.get(key(1, generation=1)) is None
+        assert adapter.prefix(key(1, generation=1)) is None
 
-    close = Mock(side_effect=fail_retirement)
-    monkeypatch.setattr(adapter, "close_sequences", close)
-    with pytest.raises(MemoryError, match="block return"):
-        if operation == "close":
-            session._close(CloseSequence((owned, sibling)), 1)
-        elif operation == "discard":
-            with server.adapter_turn():
-                session._discard_owned_sequences((owned, sibling, other))
-        elif operation == "cleanup":
-            session.cleanup()
-        else:
-            session._open(OpenSequence(key(1, generation=1)), 1)
-
-    for sequence, owner in (
-        (owned, session.session_id),
-        (sibling, session.session_id),
-        (other, "other-session"),
-    ):
-        entry = server.registry.get(sequence)
-        assert entry is not None and entry.owner == owner
-    assert server.registry.get(key(1, generation=1)) is None
-    assert adapter.prefix(owned) == (None if partial else [])
-    assert adapter.prefix(sibling) == []
-    assert adapter.prefix(other) == []
-    assert adapter.prefix(key(1, generation=1)) is None
-    conn.send_control.assert_not_called()
-    assert server._stopping.is_set()
-    assert server.queue_depth == 0
-
-    # A second cleanup, including another session's, must not retry device work.
-    for owner in (session.session_id, "other-session"):
-        session.session_id = owner
+        # Another live session cannot retry retirement or enter the failed adapter.
+        with pytest.raises(ConnectionClosed):
+            second.open(key(4))
+        server.stop()
         with pytest.raises(server_module.SequenceCleanupFailed, match="restart"):
-            session.cleanup()
-    with pytest.raises(server_module.SequenceCleanupFailed, match="restart"):
-        session._open(OpenSequence(key(4)), 2)
-    server.stop()
-    with pytest.raises(server_module.SequenceCleanupFailed, match="restart"):
-        server.start("tcp://127.0.0.1:0")
-    close.assert_called_once_with(expected)
-    assert len(server.registry) == 3
+            server.start("tcp://127.0.0.1:0")
+        assert retirements == [expected]
+        assert len(server.registry) == 3
+        assert server.queue_depth == 0
+    finally:
+        first.close()
+        second.close()
+        server.stop()
 
 
 def checksum(*frames) -> int:
@@ -1113,16 +1086,17 @@ def test_slow_error_reply_does_not_block_another_session_cleanup(
     cleaned = threading.Event()
     replies = []
     errors = []
-    send = server_module._ServerSession._send
+    sendall = socket.socket.sendall
+    client_address = client.conn._sock.getsockname()
 
-    def slow_error_reply(session, message, request_id, **kwargs):
-        if session.session_id == client.session_id and message.status is not OK:
+    def slow_error_reply(sock, data, *args, **kwargs):
+        if sock.getpeername() == client_address:
             sending.set()
             if not release.wait(timeout=5.0):
                 raise TimeoutError("error reply was not released")
-        return send(session, message, request_id, **kwargs)
+        return sendall(sock, data, *args, **kwargs)
 
-    monkeypatch.setattr(server_module._ServerSession, "_send", slow_error_reply)
+    monkeypatch.setattr(socket.socket, "sendall", slow_error_reply)
 
     def reject():
         try:
@@ -1279,9 +1253,7 @@ def test_live_sessions_cannot_mutate_each_others_sequences(server, adapter):
 
 
 @pytest.mark.timeout(10)
-def test_server_closes_connection_when_verifier_stops_reading(
-    server, client, monkeypatch
-):
+def test_server_closes_connection_when_verifier_stops_reading(server, client):
     client.hello(num_speculative_tokens=1 << 18)
     k = key(1)
     client.ready(k)
@@ -1289,14 +1261,6 @@ def test_server_closes_connection_when_verifier_stops_reading(
     conn = next(iter(server._connections))
     conn._sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
     server.send_timeout_s = 0.05
-    closed = threading.Event()
-    original_close = conn.close
-
-    def close_and_notify():
-        original_close()
-        closed.set()
-
-    monkeypatch.setattr(conn, "close", close_and_notify)
     base = client.reserve(3)
     client.send(
         AdvanceAndPropose(
@@ -1312,8 +1276,7 @@ def test_server_closes_connection_when_verifier_stops_reading(
             ints_to_frame(base + 2, [4]),
         ],
     )
-    assert closed.wait(5.0)
-    assert conn.closed
+    assert wait_until(lambda: conn.closed)
 
 
 def test_stop_disconnects_clients(server, client):
@@ -1631,30 +1594,6 @@ def test_adapter_waiter_limit_reserves_cleanup_progress(adapter):
             thread.join(timeout=2)
             assert not thread.is_alive()
     assert sorted(finished) == [False, True]
-    assert server.queue_depth == 0
-
-
-@pytest.mark.parametrize("stop_on_acquire", [False, True])
-def test_stopping_fences_foreground_but_preserves_cleanup(adapter, stop_on_acquire):
-    server = RemoteDraftServer(adapter)
-    server.lock = Mock()
-    if stop_on_acquire:
-
-        def acquire(**_):
-            server._draining = True
-            return True
-
-        server.lock.acquire.side_effect = acquire
-    else:
-        server._draining = True
-
-    with pytest.raises(ConnectionClosed, match="stopping"), server.adapter_turn():
-        pytest.fail("foreground work entered the stopping adapter")
-    assert server.lock.acquire.call_count == int(stop_on_acquire)
-    assert server.lock.release.call_count == int(stop_on_acquire)
-    assert server.queue_depth == 0
-    with server.adapter_turn(cleanup=True):
-        assert server.queue_depth == 1
     assert server.queue_depth == 0
 
 
