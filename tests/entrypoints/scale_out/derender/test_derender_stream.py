@@ -35,6 +35,7 @@ from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
+    FunctionCall,
     PerRequestMetrics,
     SpeculativeDecodingMetrics,
 )
@@ -55,6 +56,7 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     GenerateTokensResponse,
     GenerateTokensStreamChoice,
     GenerateTokensStreamResponse,
+    ParseContext,
 )
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.parser import Parser
@@ -425,6 +427,56 @@ async def test_parsed_derender_leaves_out_stop_token_like_engine(
 
     assert batch == expected
     assert stream.choices[0].delta.content == expected
+
+
+_WEATHER_TOOLS = [
+    {
+        "type": "function",
+        "function": {"name": "get_weather", "parameters": {"type": "object"}},
+    }
+]
+
+
+@pytest.mark.parametrize(
+    "tool_choice",
+    ["auto", "required", {"type": "function", "function": {"name": "get_weather"}}],
+)
+def test_derender_text_choices_builds_request_from_parse_context(
+    derenderer, monkeypatch, tool_choice
+):
+    """Every tool_choice survives the synthetic request validators, the
+    history count is seeded and parallel_tool_calls=false keeps one call."""
+    parser = MagicMock()
+    parser.parse.return_value = (
+        None,
+        None,
+        [
+            FunctionCall(name="get_weather", arguments="{}"),
+            FunctionCall(name="get_weather", arguments="{}"),
+        ],
+    )
+    monkeypatch.setattr(derenderer, "parser", MagicMock(return_value=parser))
+    parse_context = ParseContext.model_validate(
+        {
+            "tools": _WEATHER_TOOLS,
+            "tool_choice": tool_choice,
+            "parallel_tool_calls": False,
+            "history_tool_call_cnt": 3,
+        }
+    )
+    output = MagicMock(text="raw", token_ids=[1, 2], finish_reason="stop")
+
+    ((message, finish_reason),) = derenderer._derender_text_choices(
+        [output], parse_context.to_chat_request(), 3, [11]
+    )
+
+    chat_request = parser.parse.call_args.args[1]
+    assert chat_request.tool_choice == parse_context.tool_choice
+    parser.set_prompt_token_ids.assert_called_once_with([11])
+    parser.set_history_tool_call_count.assert_called_once_with(3)
+    assert len(message.tool_calls) == 1
+    # A forced named tool reports "stop", like coupled chat.
+    assert finish_reason == ("stop" if isinstance(tool_choice, dict) else "tool_calls")
 
 
 class TestDetokenizeDelta:
@@ -2442,7 +2494,7 @@ async def test_stream_parsed_matches_batch_tool_call(parser_client, parser_token
     )
     assert batch_resp.status_code == 200, batch_resp.text
     batch_choice = batch_resp.json()["choices"][0]
-    if not batch_choice["message"]["tool_calls"]:
+    if not batch_choice["message"].get("tool_calls"):
         pytest.skip("Model did not emit a tool call")
 
     for chunk_sizes in ([len(output_ids)], [1] * len(output_ids)):
