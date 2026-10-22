@@ -3587,6 +3587,30 @@ def test_draft_sample_method_probabilistic_is_accepted():
     assert speculative_config.draft_sample_method == "probabilistic"
 
 
+@pytest.mark.skip_global_cleanup
+def test_ngram_gpu_rejects_dynamic_speculative_decoding():
+    with pytest.raises(
+        ValueError,
+        match="Dynamic speculative decoding is not supported with method='ngram_gpu'",
+    ):
+        SpeculativeConfig(
+            method="ngram_gpu",
+            num_speculative_tokens=4,
+            num_speculative_tokens_per_batch_size=[(1, 16, 4), (17, 256, 0)],
+        )
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("method", ["ngram", "ngram_gpu"])
+def test_ngram_methods_accept_static_speculative_decoding(method):
+    speculative_config = SpeculativeConfig(
+        method=method,
+        num_speculative_tokens=4,
+    )
+
+    assert speculative_config.num_speculative_tokens_per_batch_size is None
+
+
 @pytest.mark.parametrize("disable_eagle_block_drop", [False, True])
 def test_eagle_block_drop_can_be_disabled_without_disabling_eagle(
     disable_eagle_block_drop: bool,

@@ -1867,6 +1867,16 @@ class SpeculativeConfig:
                 f"than zero ({self.num_speculative_tokens})."
             )
 
+        if (
+            self.method == "ngram_gpu"
+            and self.num_speculative_tokens_per_batch_size is not None
+        ):
+            raise ValueError(
+                "Dynamic speculative decoding is not supported with "
+                "method='ngram_gpu'. Remove "
+                "num_speculative_tokens_per_batch_size or use method='ngram'."
+            )
+
         if self.rejection_sample_method == "synthetic":
             # Consolidate to per-position rates
             self.synthetic_acceptance_rates = self._resolve_synthetic_acceptance_rates(
