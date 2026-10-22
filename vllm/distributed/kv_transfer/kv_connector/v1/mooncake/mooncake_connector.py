@@ -1899,6 +1899,8 @@ class MooncakeConnectorWorker:
             if not any(local_block_ids_by_group):
                 continue
 
+            # Normalize before kernel expansion so group_concurrent_contiguous
+            # can coalesce the resulting ascending kernel runs.
             for group_index, (local_group, remote_group) in enumerate(
                 zip(local_block_ids_by_group, remote_block_ids_by_group)
             ):
