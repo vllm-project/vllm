@@ -310,6 +310,77 @@ async def test_audio_with_timestamp(mary_had_lamb, whisper_client):
 
 
 @pytest.mark.asyncio
+async def test_audio_with_timestamp_and_vad(mary_had_lamb, whisper_client):
+    """VAD drops silence before sending speech to the model, but segment
+    timestamps must still refer to positions in the original audio."""
+    mary_had_lamb.seek(0)
+    audio, sr = load_audio(mary_had_lamb)
+    clip_s = len(audio) / sr
+    lead_silence_s, gap_silence_s = 10.0, 20.0
+    # silence + speech + silence + speech; each speech span is a VAD chunk.
+    padded_audio = np.concatenate(
+        [
+            np.zeros(int(lead_silence_s * sr), dtype=audio.dtype),
+            audio,
+            np.zeros(int(gap_silence_s * sr), dtype=audio.dtype),
+            audio,
+        ]
+    )
+    buffer = io.BytesIO()
+    sf.write(buffer, padded_audio, sr, format="WAV")
+    buffer.seek(0)
+
+    mary_had_lamb.seek(0)
+    reference = await whisper_client.audio.transcriptions.create(
+        model=MODEL_NAME,
+        file=mary_had_lamb,
+        language="en",
+        response_format="verbose_json",
+        temperature=0.0,
+    )
+    transcription = await whisper_client.audio.transcriptions.create(
+        model=MODEL_NAME,
+        file=buffer,
+        language="en",
+        response_format="verbose_json",
+        temperature=0.0,
+        extra_body={"vad_config.enabled": True},
+    )
+
+    assert reference.segments and transcription.segments
+    first_copy_start_s = lead_silence_s
+    second_copy_start_s = lead_silence_s + clip_s + gap_silence_s
+    first_copy = [
+        seg for seg in transcription.segments if seg.start < second_copy_start_s - 1
+    ]
+    second_copy = [
+        seg for seg in transcription.segments if seg.start >= second_copy_start_s - 1
+    ]
+    assert first_copy and second_copy, [
+        (seg.start, seg.end) for seg in transcription.segments
+    ]
+
+    # VAD pads speech by a few tens of ms and Whisper timestamps are 20 ms
+    # tokens, so allow some slack around the reference timings.
+    tolerance_s = 1.0
+    ref_start_s = reference.segments[0].start
+    ref_end_s = reference.segments[-1].end
+    assert first_copy[0].start == pytest.approx(
+        first_copy_start_s + ref_start_s, abs=tolerance_s
+    )
+    assert first_copy[-1].end == pytest.approx(
+        first_copy_start_s + ref_end_s, abs=tolerance_s
+    )
+    assert second_copy[0].start == pytest.approx(
+        second_copy_start_s + ref_start_s, abs=tolerance_s
+    )
+    assert second_copy[-1].end == pytest.approx(
+        second_copy_start_s + ref_end_s, abs=tolerance_s
+    )
+    assert transcription.segments[-1].end <= len(padded_audio) / sr + tolerance_s
+
+
+@pytest.mark.asyncio
 async def test_audio_with_max_tokens(whisper_client, mary_had_lamb):
     transcription = await whisper_client.audio.transcriptions.create(
         model=MODEL_NAME,

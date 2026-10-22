@@ -33,6 +33,7 @@ from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.model_executor.models import SupportsTranscription
 from vllm.multimodal.audio import (
     ThreadLocalVADProvider,
+    TimedAudioChunk,
     get_audio_duration,
     split_audio_with_vad,
 )
@@ -216,7 +217,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         sr: int,
         duration: float,
         request: SpeechToTextRequest,
-    ) -> list[np.ndarray]:
+    ) -> list[TimedAudioChunk]:
         vad_config = request.build_vad_config()
 
         vad = self._vad_provider.get() if vad_config.enabled else None
@@ -234,7 +235,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         self,
         audio_data: bytes,
         request: SpeechToTextRequest,
-    ) -> tuple[list[np.ndarray], float]:
+    ) -> tuple[list[TimedAudioChunk], float]:
         y, sr, duration = self._decode_audio(audio_data)
         chunks = self._chunk_speech(y, sr, duration, request)
         return chunks, duration
@@ -308,22 +309,20 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         # Run cpu intensive preprocess step in a separate thread pool executor.
         if self._vad_executor is not None and request.build_vad_config().enabled:
             y, sr, duration = await self._decode_audio_async(audio_data)
-            chunks = await self._chunk_speech_async(y, sr, duration, request)
+            timed_chunks = await self._chunk_speech_async(y, sr, duration, request)
         else:
-            chunks, duration = await self._decode_and_chunk_speech_async(
+            timed_chunks, duration = await self._decode_and_chunk_speech_async(
                 audio_data, request
             )
 
-        if not chunks:
+        if not timed_chunks:
             # VAD detected no speech.
             return [], duration, []
 
-        chunk_start_offsets: list[float] = [0.0]
-
-        for chunk in chunks[:-1]:
-            chunk_start_offsets.append(
-                chunk_start_offsets[-1] + chunk.shape[-1] / self.asr_config.sample_rate
-            )
+        chunks = [chunk.audio for chunk in timed_chunks]
+        # Start times come from the chunker rather than summing chunk lengths,
+        # since VAD drops non-speech audio between chunks.
+        chunk_start_offsets = [chunk.start_s for chunk in timed_chunks]
 
         if request.language is None and getattr(
             self.model_cls, "supports_explicit_language_detection", False

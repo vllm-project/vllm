@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # test_audio.py
 import math
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -971,4 +971,103 @@ def test_split_audio_without_vad_keeps_silent_audio(max_audio_clip_s):
     )
 
     assert len(chunks) == 1
-    np.testing.assert_array_equal(chunks[0], silence)
+    np.testing.assert_array_equal(chunks[0].audio, silence)
+    assert chunks[0].start_s == 0.0
+
+
+def _fake_vad(speech_spans_s: list[tuple[float, float]], sample_rate: int):
+    vad = MagicMock(spec=VAD)
+    vad.get_speech_timestamps.return_value = [
+        {"start": int(start * sample_rate), "end": int(end * sample_rate)}
+        for start, end in speech_spans_s
+    ]
+    return vad
+
+
+def _assert_chunks_aligned(chunks, audio: np.ndarray, sample_rate: int) -> None:
+    """Each chunk must be the slice of the original audio at its start time."""
+    for chunk in chunks:
+        start = round(chunk.start_s * sample_rate)
+        np.testing.assert_array_equal(
+            chunk.audio, audio[start : start + chunk.audio.shape[-1]]
+        )
+
+
+def test_split_audio_with_vad_start_times_follow_original_audio():
+    """VAD drops non-speech between chunks, so chunk start times must come
+    from the VAD spans rather than from summing chunk lengths."""
+    sample_rate = 16000
+    audio = np.random.default_rng(0).standard_normal(100 * sample_rate)
+    audio = audio.astype(np.float32)
+    # The second span is longer than max_audio_clip_s, so it is RMS-split.
+    speech_spans_s = [(10.0, 20.0), (45.0, 85.0)]
+
+    chunks = split_audio_with_vad(
+        duration=100.0,
+        asr_config=SpeechToTextConfig(max_audio_clip_s=30),
+        vad=_fake_vad(speech_spans_s, sample_rate),
+        vad_config=VADConfig(enabled=True),
+        audio_data=audio,
+        sample_rate=sample_rate,
+    )
+
+    assert len(chunks) == 3
+    assert chunks[0].start_s == 10.0
+    assert chunks[1].start_s == 45.0
+    assert chunks[2].start_s == pytest.approx(
+        45.0 + chunks[1].audio.shape[-1] / sample_rate
+    )
+    _assert_chunks_aligned(chunks, audio, sample_rate)
+    # The RMS-split sub-chunks cover the whole second span.
+    assert chunks[2].start_s + chunks[2].audio.shape[-1] / sample_rate == 85.0
+
+
+def test_split_audio_without_vad_start_times_are_cumulative():
+    sample_rate = 16000
+    audio = np.random.default_rng(0).standard_normal(65 * sample_rate)
+    audio = audio.astype(np.float32)
+
+    chunks = split_audio_with_vad(
+        duration=65.0,
+        asr_config=SpeechToTextConfig(max_audio_clip_s=30),
+        vad=None,
+        vad_config=VADConfig(enabled=False),
+        audio_data=audio,
+        sample_rate=sample_rate,
+    )
+
+    assert len(chunks) == 3
+    assert chunks[0].start_s == 0.0
+    for prev, cur in zip(chunks, chunks[1:]):
+        assert cur.start_s == pytest.approx(
+            prev.start_s + prev.audio.shape[-1] / sample_rate
+        )
+    _assert_chunks_aligned(chunks, audio, sample_rate)
+
+
+def test_split_audio_with_vad_only_starts_at_first_speech():
+    sample_rate = 16000
+    audio = np.random.default_rng(0).standard_normal(30 * sample_rate)
+    audio = audio.astype(np.float32)
+    speech_spans_s = [(5.0, 10.0), (20.0, 25.0)]
+
+    chunks = split_audio_with_vad(
+        duration=30.0,
+        asr_config=SpeechToTextConfig(max_audio_clip_s=None),
+        vad=_fake_vad(speech_spans_s, sample_rate),
+        vad_config=VADConfig(enabled=True),
+        audio_data=audio,
+        sample_rate=sample_rate,
+    )
+
+    assert len(chunks) == 1
+    assert chunks[0].start_s == 5.0
+    np.testing.assert_array_equal(
+        chunks[0].audio,
+        np.concatenate(
+            [
+                audio[5 * sample_rate : 10 * sample_rate],
+                audio[20 * sample_rate : 25 * sample_rate],
+            ]
+        ),
+    )
