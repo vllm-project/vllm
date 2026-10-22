@@ -610,7 +610,7 @@ steps:
   - vllm/device_allocator/
   - vllm/connections.py
   - vllm/engine/arg_utils.py
-  - vllm/entrypoints/chat_utils.py
+  - vllm/renderers/chat_utils/
   - vllm/entrypoints/mcp/
   - vllm/entrypoints/openai/chat_completion/protocol.py
   - vllm/entrypoints/openai/completion/protocol.py
@@ -624,6 +624,7 @@ steps:
   - vllm/logprobs.py
   - vllm/model_executor/layers/quantization/quark/
   - vllm/model_executor/model_loader/tensorizer.py
+  - vllm/models/muse_spark/
   - vllm/multimodal/
   - vllm/outputs.py
   - vllm/parser/

@@ -408,7 +408,6 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
                 RoutingMethodType.SigmoidRenorm,
                 RoutingMethodType.Sigmoid,
                 RoutingMethodType.MiniMax2,
-                RoutingMethodType.Simulated,
             ]
         elif (weight_key, activation_key) == (kFp8StaticTensorSym, kFp8StaticTensorSym):
             # NOTE(dbari): as above, potentially allow others here.
@@ -420,7 +419,6 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
                 RoutingMethodType.SigmoidRenorm,
                 RoutingMethodType.Sigmoid,
                 RoutingMethodType.MiniMax2,
-                RoutingMethodType.Simulated,
             ]
         else:
             raise ValueError("Unsupported quantization scheme.")

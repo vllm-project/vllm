@@ -189,7 +189,7 @@ steps:
       - vllm/model_executor/models/qwen3.py
       - vllm/model_executor/models/qwen3_next.py
       - vllm/model_executor/models/qwen3_next_mtp.py
-      - vllm/model_executor/layers/fla/ops/
+      - vllm/third_party/flash_linear_attention/ops/
       - vllm/_aiter_ops.py
       - vllm/v1/attention/backends/triton_attn.py
       - vllm/v1/attention/backends/rocm_attn.py
