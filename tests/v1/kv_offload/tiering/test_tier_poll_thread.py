@@ -350,6 +350,91 @@ def test_parent_lookup_while_serving_keeps_the_round_contained():
         manager.shutdown()
 
 
+class _HitTier(_FakeTier):
+    """Second tier whose lookup HITs, so the parent queues a promotion."""
+
+    tolerates_off_thread_polling: ClassVar[bool] = False
+
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
+        return LookupResult.HIT
+
+
+class _PromotingTier(_FakeTier):
+    """Opted-in tier that serves a peer lookup through its parent.
+
+    The parent lookup excludes this tier and lands on _HitTier, so the
+    tiering manager queues a promotion in _pending_load_submissions, which
+    only on_schedule_end() flushes.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.on_serve = self._promote
+        self.promoted = threading.Event()
+
+    def _promote(self, parent: ParentManager) -> None:
+        parent.lookup(OffloadKey(b"\x07" * 8), ReqContext(req_id="peer"))
+        self.promoted.set()
+
+
+def test_off_thread_promotion_keeps_the_engine_stepping_until_the_step_flushes_it():
+    """A promotion queued by the control thread must not be stranded.
+
+    poll_tiers() deliberately does not flush promotions; only the next
+    on_schedule_end() does. So has_pending_work() must stay True after the
+    round, or an idle engine would never take the step that submits the load
+    and the pinned primary chunk would be leaked.
+    """
+    num_chunks = 8
+    primary = CPUPrimaryTierOffloadingManager(
+        num_chunks=num_chunks,
+        mmap_region=_mock_mmap_region(num_chunks),
+    )
+    common = {
+        "offloading_spec": MagicMock(),
+        "primary_kv_view": primary.get_kv_memoryview(),
+    }
+    tier = _PromotingTier(tier_type="promoting", **common)
+    hit = _HitTier(tier_type="hit", **common)
+    manager = TieringOffloadingManager(
+        primary_tier=primary, secondary_tiers=[tier, hit]
+    )
+    try:
+        assert tier.promoted.wait(_SETTLE_S), "control thread never served"
+
+        with manager.lock:
+            assert manager._pending_load_submissions
+            assert manager.has_pending_work() is True
+
+            manager.on_schedule_end(_EMPTY_SCHEDULE_END)
+            assert not manager._pending_load_submissions
+    finally:
+        manager.shutdown()
+
+
+def test_dead_poll_thread_makes_the_manager_keep_the_engine_stepping(
+    manager_and_tier,
+):
+    """The tier-poll loop gives up after repeated failures and leaves a dead
+    thread object behind. Once no live thread services an opted-in tier, the
+    engine tick is the only driver again, so the manager must keep it stepping.
+    """
+    manager, tier = manager_and_tier
+    assert tier.served.wait(_SETTLE_S)
+    assert manager.has_pending_work() is False
+
+    manager._stop_tier_poll_thread()
+    # _stop_tier_poll_thread() clears the field only when the join succeeds.
+    # Reproduce the give-up path, which leaves the finished thread in place.
+    dead = threading.Thread(target=lambda: None)
+    dead.start()
+    dead.join()
+    manager._tier_poll_thread = dead
+
+    assert not dead.is_alive()
+    assert manager.has_pending_work() is True
+
+
 def test_shutdown_joins_the_control_thread_before_tier_teardown(manager_and_tier):
     """The thread drives tier transports, so it must be stopped first.
 

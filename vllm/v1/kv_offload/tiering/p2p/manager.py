@@ -222,8 +222,15 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     not driven by the engine, so this tier sets ``tolerates_off_thread_polling``
     to be serviced from that thread too; without it a peer's lookup or fetch
     waits for a step boundary, which on a saturated rank can be seconds.
-    ``has_pending_work()`` keeps the engine ticking so the control transport
-    and existing sessions are polled even when no requests are scheduled.
+
+    ``has_pending_work()`` reports peer-originated work that still needs a
+    step: results waiting to be handed off, sessions with transfers in
+    flight or a registration pending, parked unbound stores and lookups
+    owing a ``parent.on_request_finished``. Idle peer polling is not included
+    -- the tier-poll thread drives it -- so an otherwise quiescent engine can
+    report itself idle and finish a pause or a graceful shutdown. When that
+    thread is disabled (``tier_poll_interval_s <= 0``) the tiering manager
+    keeps the engine ticking on this tier's behalf instead.
     """
 
     cache_hit_source: ClassVar[CacheHitSource] = CacheHitSource.P2P
@@ -646,11 +653,18 @@ class P2PSecondaryTierManager(SecondaryTierManager):
 
     @override
     def has_pending_work(self) -> bool:
-        # The engine tick is the only driver of _control.poll() and
-        # session.poll(); without it we miss new peer connects and
-        # inbound fetch messages on existing sessions. Keep the engine
-        # ticking for the lifetime of this manager.
-        return True
+        # Real, peer-originated work only. Idle peer polling is deliberately
+        # excluded: the tier-poll thread drives _control.poll()/session.poll()
+        # between steps, and reporting it here would keep EngineCore.has_work()
+        # permanently True, so pause and graceful shutdown could never finish.
+        # When that thread is disabled the tiering manager adds the keep-alive
+        # itself, since only it knows whether the thread exists.
+        return bool(
+            self._finished_jobs
+            or self._failed_serve_ctxs
+            or self._unbound_stores
+            or any(s.has_pending_work for s in self._sessions.values())
+        )
 
     @override
     def drain_jobs(self) -> None:

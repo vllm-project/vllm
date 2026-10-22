@@ -49,7 +49,7 @@ None was rejected, but review changed two claims:
 | ID | Title | Component | Location | Reported | Reviewed | Upstream | Found by |
 |----|-------|-----------|----------|----------|----------|----------|----------|
 | B1 | Second connector reset with no step in between trips an assert | OffloadingConnector scheduler | `vllm/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py:2199` | high | **medium** | Covered by #59099 (open) | Opus |
-| B2 | P2P tier keeps `has_work()` True forever; pause/sleep/shutdown never complete | P2P secondary tier | `vllm/v1/kv_offload/tiering/p2p/manager.py:648` | high | **high** | None found | Opus |
+| B2 | P2P tier keeps `has_work()` True forever; pause/sleep/shutdown never complete | P2P secondary tier | `vllm/v1/kv_offload/tiering/p2p/manager.py:648` | high | **high** | None found · **fixed on this branch** | Opus |
 | B3 | Heterogeneous block sizes misalign transfers after a prefix hit | NIXL worker | `vllm/distributed/kv_transfer/kv_connector/v1/nixl/base_worker.py:3601` | high | **high** | Covered by #59746 (open) | Codex |
 | B4 | Prefix lookup defers forever when the prefix exceeds CPU staging capacity | OffloadingConnector scheduler + tiering | `vllm/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py:779` | high | **medium** | Same root cause as #62931; likely fixed by #62932 (open, not verified) | Codex |
 | B5 | P2P `drain_jobs` skips parked stores; reset then asserts | P2P secondary tier | `vllm/v1/kv_offload/tiering/p2p/manager.py:670` | medium | **medium** | None found | Codex |
@@ -172,7 +172,16 @@ is non-empty, so the engine steps and delivers the flush. Make
 
 ## B2: P2P secondary tier keeps `has_work()` permanently True, so engine shutdown, pause and sleep never complete gracefully
 
-**Status:** Confirmed · **Severity:** high
+**Status:** Confirmed · **Severity:** high · **Fixed on this branch**
+
+Fixed in `vllm/v1/kv_offload/tiering/p2p/manager.py` (a real predicate over
+`_finished_jobs`, `_failed_serve_ctxs`, `_unbound_stores` and
+`session.has_pending_work`) plus
+`vllm/v1/kv_offload/tiering/manager.py` (adds `_pending_load_submissions`, and
+keeps the engine stepping for an opted-in tier only while no live tier-poll
+thread services it). Tests: `tests/v1/kv_offload/tiering/p2p/test_manager.py`
+and `tests/v1/kv_offload/tiering/test_tier_poll_thread.py`; the docs note the
+`tier_poll_interval_s=0` behaviour.
 
 ### What's wrong
 

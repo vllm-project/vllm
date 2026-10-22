@@ -137,6 +137,38 @@ def _make_manager() -> P2PSecondaryTierManager:
     return mgr
 
 
+def _attach_fake_transports(mgr: P2PSecondaryTierManager) -> None:
+    """Give a stubbed manager inert control/data transports.
+
+    The shipped configuration runs the tier-poll thread, which drives
+    _poll_once() -> _control.poll()/session.poll() and shutdown()'s
+    _control.close()/_data.close(). A stub built with __new__ has none.
+    """
+
+    class _Control:
+        def poll(self):
+            return []
+
+        def close(self) -> None:
+            pass
+
+    class _Data:
+        def remove_remote_peer(self, pid):
+            pass
+
+        def cancel(self, ids, mode="immediate"):
+            return []
+
+        def poll(self, peer_id=None):
+            return SimpleNamespace(done=[], failed=[])
+
+        def close(self) -> None:
+            pass
+
+    mgr._control = _Control()
+    mgr._data = _Data()
+
+
 def _init_offloading_spec() -> SimpleNamespace:
     """Minimal offloading_spec for driving the real __init__."""
     return SimpleNamespace(
@@ -918,28 +950,67 @@ class TestGetFinished:
 
 
 class TestHasPendingWork:
-    """has_pending_work() must always return True so the engine keeps
-    ticking the offload pipeline — that's the only thread driving
-    _control.poll() (incoming peer connects) and session.poll()
-    (incoming fetch messages on existing sessions)."""
+    """has_pending_work() reports peer-originated work that still needs a step.
 
-    def test_returns_true_unconditionally_to_keep_engine_ticking(self):
-        """Even with no sessions and no jobs, has_pending_work() returns
-        True so the engine keeps calling get_finished_jobs(), which is
-        what drives _control.poll() for inbound peer connects."""
+    Idle peer polling is left to the tier-poll thread, so a quiescent tier must
+    report False and let pause and graceful shutdown observe an idle engine.
+    The tiering manager adds the keep-alive itself when no thread services the
+    tier.
+    """
+
+    def test_idle_manager_reports_no_pending_work(self):
+        """With no sessions and no jobs, the tier is idle."""
         mgr = _make_manager()
+        assert mgr.has_pending_work() is False
+
+    def test_connected_idle_session_is_not_pending_work(self):
+        """An idle connected session is not work: polling it is the
+        tier-poll thread's job, not a reason to keep the engine stepping."""
+        mgr = _make_manager()
+        mgr._sessions["peer:1"] = _FakeSession(peer_id="peer:1", connected=True)
+        assert mgr.has_pending_work() is False
+
+    def test_session_with_outstanding_transfer_is_pending_work(self):
+        """A session with an in-flight load keeps the engine stepping until
+        the transfer is drained."""
+        mgr = _make_manager()
+        session = _FakeSession(peer_id="peer:1", connected=True)
+        session._client._inbound[1] = object()
+        mgr._sessions["peer:1"] = session
         assert mgr.has_pending_work() is True
 
-    def test_returns_true_even_when_sessions_present(self):
-        """The result is the same regardless of session state — there is
-        no 'idle' branch."""
+    def test_finished_jobs_awaiting_handoff_is_pending_work(self):
+        """Results not yet returned by get_finished_jobs() need a step."""
         mgr = _make_manager()
-        mgr._sessions["peer:1"] = _FakeSession(peer_id="peer:1")
+        mgr._finished_jobs.append(JobResult(job_id=1, success=True))
+        assert mgr.has_pending_work() is True
+
+    def test_parked_unbound_store_is_pending_work(self):
+        """A parked store still pins primary slots until it is fetched or
+        reaped, so it keeps the engine stepping."""
+        from vllm.v1.kv_offload.tiering.p2p.manager import _UnboundStoreBatch
+
+        mgr = _make_manager()
+        mgr._unbound_stores["req-1"] = [
+            _UnboundStoreBatch(job_id=1, keys=[OffloadKey(b"k")], block_ids=[0])
+        ]
+        assert mgr.has_pending_work() is True
+
+    def test_failed_serve_ctx_awaiting_release_is_pending_work(self):
+        """A synthetic lookup ctx still owing parent.on_request_finished must
+        be flushed on the next serve_external_requests()."""
+        mgr = _make_manager()
+        mgr._failed_serve_ctxs.append(_req_context(kv_params=None))
         assert mgr.has_pending_work() is True
 
     @pytest.mark.cpu_test
     def test_B2_idle_manager_does_not_keep_engine_busy(self):
-        """A quiescent P2P tier must let pause and shutdown observe idle."""
+        """A quiescent P2P tier must let pause and shutdown observe idle.
+
+        The shipped configuration runs the tier-poll thread, which services
+        idle peers between steps; the tier must not keep EngineCore.has_work()
+        True just for that.
+        """
         from unittest.mock import MagicMock
 
         from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
@@ -957,6 +1028,61 @@ class TestHasPendingWork:
         )
 
         p2p = _make_manager()
+        _attach_fake_transports(p2p)
+        mmap_region = MagicMock()
+        view = memoryview(np.zeros((1, 16), dtype=np.int8))
+        mmap_region.create_kv_memoryview.return_value = view
+        manager = TieringOffloadingManager(
+            CPUPrimaryTierOffloadingManager(1, mmap_region),
+            [p2p],
+        )
+        try:
+            connector_scheduler = object.__new__(OffloadingConnectorScheduler)
+            connector_scheduler.manager = manager
+            connector_scheduler._jobs = {}
+            connector = object.__new__(OffloadingConnector)
+            connector.connector_scheduler = connector_scheduler
+            scheduler = object.__new__(Scheduler)
+            scheduler._pause_state = PauseState.PAUSED_NEW
+            scheduler.running = []
+            scheduler.waiting = []
+            scheduler.kv_holding_waiting = []
+            scheduler.num_waiting_for_streaming_input = 0
+            scheduler.finished_req_ids = set()
+            scheduler.requests = {}
+            scheduler.connector = connector
+            scheduler.ec_connector = None
+            core = object.__new__(EngineCoreProc)
+            core.scheduler = scheduler
+            core.engines_running = False
+            core.batch_queue = None
+
+            assert core._pause_complete() is True
+        finally:
+            manager.shutdown()
+
+    @pytest.mark.cpu_test
+    def test_B2_no_poll_thread_keeps_engine_busy(self):
+        """With the tier-poll thread disabled the engine tick is the only
+        driver, so the tiering manager must keep the engine stepping."""
+        from unittest.mock import MagicMock
+
+        from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
+            OffloadingConnectorScheduler,
+        )
+        from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
+            OffloadingConnector,
+        )
+        from vllm.v1.core.sched.interface import PauseState
+        from vllm.v1.core.sched.scheduler import Scheduler
+        from vllm.v1.engine.core import EngineCoreProc
+        from vllm.v1.kv_offload.tiering.manager import (
+            CPUPrimaryTierOffloadingManager,
+            TieringOffloadingManager,
+        )
+
+        p2p = _make_manager()
+        _attach_fake_transports(p2p)
         mmap_region = MagicMock()
         view = memoryview(np.zeros((1, 16), dtype=np.int8))
         mmap_region.create_kv_memoryview.return_value = view
@@ -965,27 +1091,31 @@ class TestHasPendingWork:
             [p2p],
             tier_poll_interval_s=0,
         )
-        connector_scheduler = object.__new__(OffloadingConnectorScheduler)
-        connector_scheduler.manager = manager
-        connector_scheduler._jobs = {}
-        connector = object.__new__(OffloadingConnector)
-        connector.connector_scheduler = connector_scheduler
-        scheduler = object.__new__(Scheduler)
-        scheduler._pause_state = PauseState.PAUSED_NEW
-        scheduler.running = []
-        scheduler.waiting = []
-        scheduler.kv_holding_waiting = []
-        scheduler.num_waiting_for_streaming_input = 0
-        scheduler.finished_req_ids = set()
-        scheduler.requests = {}
-        scheduler.connector = connector
-        scheduler.ec_connector = None
-        core = object.__new__(EngineCoreProc)
-        core.scheduler = scheduler
-        core.engines_running = False
-        core.batch_queue = None
+        try:
+            assert manager._tier_poll_thread is None
+            connector_scheduler = object.__new__(OffloadingConnectorScheduler)
+            connector_scheduler.manager = manager
+            connector_scheduler._jobs = {}
+            connector = object.__new__(OffloadingConnector)
+            connector.connector_scheduler = connector_scheduler
+            scheduler = object.__new__(Scheduler)
+            scheduler._pause_state = PauseState.PAUSED_NEW
+            scheduler.running = []
+            scheduler.waiting = []
+            scheduler.kv_holding_waiting = []
+            scheduler.num_waiting_for_streaming_input = 0
+            scheduler.finished_req_ids = set()
+            scheduler.requests = {}
+            scheduler.connector = connector
+            scheduler.ec_connector = None
+            core = object.__new__(EngineCoreProc)
+            core.scheduler = scheduler
+            core.engines_running = False
+            core.batch_queue = None
 
-        assert core._pause_complete() is True
+            assert core._pause_complete() is False
+        finally:
+            manager.shutdown()
 
 
 # ---------------------------------------------------------------------------

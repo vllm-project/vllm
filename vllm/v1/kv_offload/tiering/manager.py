@@ -1110,11 +1110,22 @@ class TieringOffloadingManager(OffloadingManager):
         # In-flight primary<->secondary transfers (pending promotions are
         # translated to transfer jobs in on_schedule_end), plus any work the
         # secondary tiers themselves still have outstanding.
-        return (
-            bool(self._jobs)
+        if (
+            self._jobs
+            or self._pending_load_submissions
             or any(state.pending_cascade_keys for state in self._req_state.values())
             or any(tier.has_pending_work() for tier in self.secondary_tiers)
-        )
+        ):
+            return True
+        # A tier that opts into off-thread polling reports only its own work and
+        # leaves idle peer polling to the tier-poll thread. When no live thread
+        # services it -- disabled by a non-positive interval, or stopped for
+        # good after consecutive failures -- the engine tick is the only driver,
+        # so keep the engine stepping for its lifetime.
+        if not self._polled_tiers:
+            return False
+        thread = self._tier_poll_thread
+        return thread is None or not thread.is_alive()
 
     @override
     def take_events(self) -> Iterable[OffloadingEvent]:

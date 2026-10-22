@@ -179,7 +179,7 @@ Two consequences worth knowing:
 - Any tier can be reached from that thread indirectly, because serving a peer looks keys up through the tiering manager, which fans out to the other tiers. Tier state must therefore not assume a particular thread, only that the manager lock is held.
 - Work the thread deliberately leaves alone is batched per step: a promotion it initiates is submitted at the next `on_schedule_end()`, not immediately.
 
-Setting `tier_poll_interval_s` to `0` disables the thread; opted-in tiers then get serviced once per engine step, as they were before it existed.
+Setting `tier_poll_interval_s` to `0` disables the thread; opted-in tiers then get serviced once per engine step, as they were before it existed. With the thread disabled the engine keeps stepping for such a tier's lifetime, so an idle engine does not report itself idle and pause and graceful shutdown do not complete on their own.
 
 ### Filesystem (FS)
 
