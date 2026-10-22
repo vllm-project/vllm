@@ -97,6 +97,8 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
         "KimiLinearForCausalLM",
         "MiniMaxM3SparseForCausalLM",
         "MiniMaxM3SparseForConditionalGeneration",
+        "MuseSpark1xForCausalLM",
+        "MuseSparkForConditionalGeneration",
         "Qwen4ExpForCausalLM",
         "Qwen4ExpForConditionalGeneration",
         "Qwen4ExpMTP",
@@ -3055,6 +3057,8 @@ class VllmConfig:
         if self.speculative_config:
             if self.speculative_config.method == "dspark":
                 unsupported.append("dspark speculative decoding")
+            elif self.speculative_config.is_xpress():
+                unsupported.append("xpress speculative decoding")
             if self.speculative_config.enable_adaptive_verification:
                 unsupported.append("adaptive draft verification")
             if self.speculative_config.draft_lm_head_quantization is not None:
