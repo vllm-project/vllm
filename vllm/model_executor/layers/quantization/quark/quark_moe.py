@@ -2082,10 +2082,6 @@ class QuarkW8A8Mxfp8MoEMethod(QuarkMoEMethod):
         layer.w2_input_scale = None
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
-        if getattr(layer, "_already_called_process_weights_after_loading", False):
-            return
-        layer._already_called_process_weights_after_loading = True
-
         layer.weight_block_size = self.weight_block_size
         w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
             fp8_backend=self.mxfp8_backend,
