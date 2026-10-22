@@ -47,7 +47,11 @@ class AsyncScheduler(Scheduler):
             )
             # Add placeholders for the new draft/spec tokens.
             # We will update the actual spec token ids in the worker process.
-            request.spec_token_ids = self._spec_token_placeholders
+            num_spec_tokens = self._num_spec_tokens_for(request)
+            if num_spec_tokens < len(self._spec_token_placeholders):
+                request.spec_token_ids = self._spec_token_placeholders[:num_spec_tokens]
+            else:
+                request.spec_token_ids = self._spec_token_placeholders
 
             if self.use_v2_model_runner:
                 # Set the next step index in which this request is eligible to be

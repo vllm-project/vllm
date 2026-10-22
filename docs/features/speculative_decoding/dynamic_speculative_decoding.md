@@ -74,3 +74,25 @@ VLLM_USE_V2_MODEL_RUNNER=0 vllm serve meta-llama/Llama-3.1-8B-Instruct \
 * Tested with Eagle, Eagle-3, and DFlash. Other SD methods may or may not work out of the box
 * Full Cudagraph only works with Model Runner V2. MRv1 only supports piece-wise cuda graph with this feature
 * Not compatible with data parallelism (`--data-parallel-size > 1`). Each DP rank schedules independently, so ranks can pick different K values, causing DP collective divergence and deadlocks. When DP is enabled, vLLM automatically disables `num_speculative_tokens_per_batch_size` and falls back to the static `num_speculative_tokens` value.
+
+## Per-request cap
+
+How many drafts pay off also depends on the request: requests that copy from
+their prompt (rewriting, extraction, code edits) accept more drafts than
+free-form chat. A request can lower its own K with `max_speculative_tokens`:
+each step it verifies at most `min(max_speculative_tokens, K)` drafts, where K
+is the server's `num_speculative_tokens` or the schedule's value for the
+current batch size. `0` turns speculation off for that request. Larger values
+have no effect.
+
+```python
+SamplingParams(max_tokens=256, max_speculative_tokens=1)
+```
+
+```bash
+curl http://localhost:8000/v1/completions -H "Content-Type: application/json" \
+  -d '{"model": "...", "prompt": "...", "max_speculative_tokens": 0}'
+```
+
+A batch whose requests verify different numbers of drafts is not a uniform
+decode batch, so that step runs piecewise instead of full CUDA graphs.

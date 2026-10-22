@@ -268,6 +268,16 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
     thinking_token_budget: ThinkingTokenBudget = None
+    max_speculative_tokens: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Maximum number of draft tokens verified per step for this request "
+            "when the server runs speculative decoding. 0 disables speculation "
+            "for this request. Values above the server's setting have no "
+            "effect."
+        ),
+    )
     include_reasoning: bool = True
     parallel_tool_calls: bool | None = True
 
@@ -802,6 +812,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             logit_bias=self.logit_bias,
             bad_words=self.bad_words,
             thinking_token_budget=self.thinking_token_budget,
+            max_speculative_tokens=self.max_speculative_tokens,
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
             skip_clone=True,  # Created fresh per request, safe to skip clone
