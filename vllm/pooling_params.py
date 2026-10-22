@@ -35,9 +35,6 @@ class LateInteractionParams(
     query_key: str
     query_uses: int | None = None
 
-    def __post_init__(self) -> None:
-        self.verify()
-
     def verify(self) -> None:
         if self.mode not in ("cache_query", "score_doc"):
             raise VLLMValidationError(
@@ -145,6 +142,11 @@ class PoolingParams(
         return deepcopy(self)
 
     def verify(self, model_config: ModelConfig) -> None:
+        # Late-interaction fields are filled during input processing (the
+        # scoring path assigns them per query/doc), so they are validated here
+        # and not at construction time.
+        if self.late_interaction_params is not None:
+            self.late_interaction_params.verify()
         if self.late_chunking_params is not None:
             self.late_chunking_params.verify()
             if self.task != "token_embed":

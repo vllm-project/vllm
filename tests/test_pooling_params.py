@@ -230,23 +230,39 @@ def test_late_chunk_size_maximum_survives_wire_round_trip():
     )
 
 
+def _late_interaction_pooling_params(late_params):
+    return PoolingParams(task="token_embed", late_interaction_params=late_params)
+
+
 @pytest.mark.parametrize("mode", ["", "cache_query ", "score-doc", "score_docs"])
 def test_late_interaction_rejects_unknown_mode(mode):
+    late_params = LateInteractionParams(mode=mode, query_key="k", query_uses=1)
+    # Construction accepts a work-in-progress: input processing fills fields
+    # before the request is verified.
+    assert late_params.mode == mode
     with pytest.raises(VLLMValidationError, match="cache_query.*score_doc"):
-        LateInteractionParams(mode=mode, query_key="k", query_uses=1)
+        _late_interaction_pooling_params(late_params).verify(
+            _late_chunking_model_config()
+        )
 
 
 @pytest.mark.parametrize("query_uses", [None, 0, -1, True, 1.5, "2"])
 def test_late_interaction_cache_query_rejects_bad_use_count(query_uses):
+    late_params = LateInteractionParams(
+        mode="cache_query", query_key="k", query_uses=query_uses
+    )
     with pytest.raises(VLLMValidationError, match="positive integer"):
-        LateInteractionParams(mode="cache_query", query_key="k", query_uses=query_uses)
+        _late_interaction_pooling_params(late_params).verify(
+            _late_chunking_model_config()
+        )
 
 
-def test_late_interaction_valid_shapes_survive_wire_round_trip():
+def test_late_interaction_valid_shapes_survive_verify_and_wire_round_trip():
     for params in (
         LateInteractionParams(mode="cache_query", query_key="k", query_uses=3),
         LateInteractionParams(mode="score_doc", query_key="k"),
     ):
+        _late_interaction_pooling_params(params).verify(_late_chunking_model_config())
         assert (
             msgspec.msgpack.decode(
                 msgspec.msgpack.encode(params), type=LateInteractionParams
