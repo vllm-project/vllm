@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import time
 from collections import deque
 from contextlib import AsyncExitStack, asynccontextmanager
 from types import SimpleNamespace
@@ -221,6 +222,29 @@ def test_safety_identifier_is_echoed() -> None:
 
 def test_safety_identifier_defaults_to_none() -> None:
     assert _echoed_response()["safety_identifier"] is None
+
+
+@pytest.mark.parametrize(
+    "status", ["completed", "queued", "in_progress", "incomplete", "failed"]
+)
+def test_completed_at_only_set_when_completed(status: str) -> None:
+    request = ResponsesRequest(model="test-model", input="hi")
+    before = int(time.time())
+    response = ResponsesResponse.from_request(
+        request=request,
+        sampling_params=request.to_sampling_params(default_max_tokens=16),
+        model_name="test-model",
+        created_time=before,
+        output=[],
+        status=status,
+    ).model_dump(mode="json")
+    after = int(time.time())
+
+    assert "completed_at" in response
+    if status == "completed":
+        assert before <= response["completed_at"] <= after
+    else:
+        assert response["completed_at"] is None
 
 
 @pytest.mark.parametrize(
@@ -1699,6 +1723,35 @@ async def test_responses_streaming_metrics_only_on_completed_event():
     assert events[-1].response.metrics.time_to_first_token_ms == pytest.approx(500.0)
 
 
+@pytest.mark.asyncio
+async def test_responses_completed_at_set_on_completed_response():
+    response = await _make_full_metrics_response(False)
+    assert response.status == "completed"
+    assert response.completed_at is not None
+    assert response.completed_at >= response.created_at
+
+    serving = _make_serving_instance()
+    request = ResponsesRequest(input="hi", tools=[], stream=True, store=False)
+    context = _make_simple_context_with_output("hello", [10, 20])
+    events = [
+        event
+        async for event in serving.responses_stream_generator(
+            request=request,
+            sampling_params=SamplingParams(max_tokens=16),
+            result_generator=_empty_context_generator(),
+            context=context,
+            model_name="test-model",
+            tokenizer=MagicMock(),
+            request_metadata=RequestResponseMetadata(request_id="req"),
+        )
+    ]
+
+    assert events[0].response.completed_at is None
+    assert isinstance(events[-1], ResponseCompletedEvent)
+    assert events[-1].response.completed_at is not None
+    assert events[-1].response.completed_at >= events[-1].response.created_at
+
+
 async def _stream_truncated_by_length(serving: OpenAIServingResponses):
     request = ResponsesRequest(input="hi", tools=[], stream=True, store=False)
     context = _make_simple_context_with_output(
@@ -1737,6 +1790,7 @@ async def test_responses_stream_truncated_by_length_reports_incomplete():
     assert final.response.incomplete_details is not None
     assert final.response.incomplete_details.reason == "max_output_tokens"
     assert [item.status for item in final.response.output] == ["incomplete"]
+    assert final.response.completed_at is None
 
 
 @pytest.mark.asyncio

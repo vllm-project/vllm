@@ -63,6 +63,8 @@ async def test_chat_with_input_type(client: openai.AsyncOpenAI):
     )
     print(response)
     assert response.status == "completed"
+    assert response.completed_at is not None
+    assert response.completed_at >= response.created_at
 
 
 @pytest.mark.asyncio
@@ -91,3 +93,5 @@ async def test_streaming(client: openai.AsyncOpenAI):
         for event in events
     )
     assert isinstance(events[-1], openai_responses_types.ResponseCompletedEvent)
+    assert events[0].response.completed_at is None
+    assert events[-1].response.completed_at is not None

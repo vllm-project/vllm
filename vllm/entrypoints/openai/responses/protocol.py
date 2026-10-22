@@ -862,6 +862,7 @@ class ResponsesRequest(OpenAIBaseModel):
 class ResponsesResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"resp_{random_uuid()}")
     created_at: int = Field(default_factory=lambda: int(time.time()))
+    completed_at: int | None = None
     # error: Optional[ResponseError] = None
     incomplete_details: IncompleteDetails | None = None
     instructions: str | None = None
@@ -980,6 +981,7 @@ class ResponsesResponse(OpenAIBaseModel):
         return cls(
             id=request.request_id,
             created_at=created_time,
+            completed_at=int(time.time()) if status == "completed" else None,
             incomplete_details=incomplete_details,
             instructions=request.instructions,
             metadata=request.metadata,
