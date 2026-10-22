@@ -216,11 +216,18 @@ def _check_indexer_forwards(config, device, rank, comm):
                 f"Indexer validation failed on a TP rank: {error}"
             ) from error
 
+    exchanges = []
+    all_to_all = torch.distributed.all_to_all_single
+
+    def exchange(received, send, **kwargs):
+        exchanges.append(tuple(send.shape))
+        return all_to_all(received, send, **kwargs)
+
     batches = [
         BatchSpec(seq_lens=[129, 2305], query_lens=[1, 1]),
         BatchSpec(seq_lens=[128, 2306], query_lens=[4, 4]),
         BatchSpec(seq_lens=[128, 2307], query_lens=[8, 8]),
-        BatchSpec(seq_lens=[2305, 2561, 2624, 2720], query_lens=[1, 1, 64, 96]),
+        BatchSpec(seq_lens=[2305, 2561, 2691, 2720], query_lens=[1, 1, 259, 127]),
         BatchSpec(seq_lens=[2691], query_lens=[259]),
         BatchSpec(seq_lens=[129, 2305], query_lens=[1, 1]),
     ]
@@ -266,6 +273,7 @@ def _check_indexer_forwards(config, device, rank, comm):
             query[:, :, :7] = (1 << bits) * (
                 1 - 2 * (((head_codes ^ (layer * 7)) >> bits) & 1)
             )
+            query[256:] *= -1
             queries.append(query.to(torch.float8_e4m3fn))
         metadata = [builder.build(0, common) for builder in builders]
 
@@ -292,8 +300,14 @@ def _check_indexer_forwards(config, device, rank, comm):
             metadata[1] = builders[1].build(0, common)
             assert metadata[1].prefill_msa.local_scores.shape[0] <= 256
             # Reuse scratch across layers and steps, then return to gather.
-            for _ in range(3):
-                run(True, metadata, queries)
+            exchanges.clear()
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr(torch.distributed, "all_to_all_single", exchange)
+                for _ in range(3):
+                    run(True, metadata, queries)
+            assert exchanges == [
+                (world, local_heads, metadata[1].num_prefill_tokens, 33)
+            ] * (3 * len(layers[1]))
             check(metadata, queries, num_tokens)
             builders[1].prefill_local_score = False
             pages = torch.tensor([num_pages - 1, 0, 7, 0], device=device)
