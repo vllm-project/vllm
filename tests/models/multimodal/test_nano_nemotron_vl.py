@@ -22,11 +22,16 @@ from vllm.multimodal.parse import (
     MultiModalDataParser,
     VideoProcessorItems,
 )
+from vllm.platforms import current_platform
 from vllm.transformers_utils.processors.nano_nemotron_vl import (
     DynamicResolutionImageTiler,
     NanoNemotronVLProcessor,
     _bicubic_resize_and_normalize,
 )
+
+# FusedMMInputNorm runs a Triton kernel on GPU platforms, so its inputs must
+# live on the platform's device.
+_DEVICE = torch.device(current_platform.device_type)
 
 
 @pytest.mark.parametrize("do_cpu_normalize", [True, False])
@@ -58,9 +63,9 @@ def test_nemotron_resized_normalization_matches_reference(
         nn.Module.__init__(model)
         model.input_norm = FusedMMInputNorm(
             mean.flatten().tolist(), std.flatten().tolist(), 1.0 / 255.0
-        )
+        ).to(_DEVICE)
         model.llm_dtype = dtype
-        output = model._normalize_pixel_values(output)
+        output = model._normalize_pixel_values(output.to(_DEVICE)).cpu()
 
     resized = torch.nn.functional.interpolate(
         pixels.permute(0, 3, 1, 2).float(),
@@ -85,10 +90,10 @@ def test_nemotron_dynamic_device_normalization_matches_cpu_reference(
 
     model = object.__new__(NemotronH_Nano_VL_V2)
     nn.Module.__init__(model)
-    model.input_norm = FusedMMInputNorm(image_mean, image_std, 1.0 / 255.0)
+    model.input_norm = FusedMMInputNorm(image_mean, image_std, 1.0 / 255.0).to(_DEVICE)
     model.llm_dtype = torch.bfloat16
 
-    output = model._normalize_pixel_values(pixels)
+    output = model._normalize_pixel_values(pixels.to(_DEVICE)).cpu()
     batch, patches, _ = pixels.shape
     expected = pixels.to(torch.float32).view(batch, patches, 3, -1)
     expected = (
@@ -324,6 +329,7 @@ def _vision_norm_model(use_layernorm=True):
     model.language_model = _LanguageModel()
     model.vision_model = _VisionModel()
     model.sound_encoder = None
+    model.input_norm = None
     model.mlp1 = torch.nn.Identity()
     model.vision_final_layernorm = (
         torch.nn.LayerNorm(4, eps=1e-6, dtype=torch.bfloat16) if use_layernorm else None
