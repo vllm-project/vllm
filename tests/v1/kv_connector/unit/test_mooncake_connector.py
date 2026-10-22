@@ -1597,6 +1597,152 @@ def test_pull_completion_requires_local_blocks(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", ["error", "exception", "finish"])
+async def test_peer_failure_only_settles_its_pending_requests(terminal):
+    """Partial and duplicate replies must not release another peer's targets."""
+    with mooncake_register_worker(_make_test_kv_cache_config()) as (worker, _):
+        metas = {
+            f"d-req-{i}": PullReqMeta(
+                d_req_id=f"d-req-{i}",
+                transfer_id=f"xfer-{i}",
+                local_block_ids=[[i]],
+                remote_engine_id="p-engine",
+                remote_bootstrap_addr="http://bootstrap:33333",
+                pull_tasks_count=2,
+            )
+            for i in range(1, 4)
+        }
+        requests = list(metas.values())
+        partial = MooncakeXferResponse(
+            status=MooncakeXferResponseStatus.CONTINUE,
+            ok_reqs=["d-req-1"],
+            err_reqs=["d-req-2"],
+            err_msg="one request failed",
+        )
+        end = (
+            RuntimeError("connection lost")
+            if terminal == "exception"
+            else worker._encoder.encode(
+                MooncakeXferResponse(
+                    status=(
+                        MooncakeXferResponseStatus.FINISH
+                        if terminal == "finish"
+                        else MooncakeXferResponseStatus.ERROR
+                    ),
+                    err_msg="peer finished",
+                )
+            )
+        )
+        sock = mooncake_connector.make_zmq_socket.return_value.__enter__.return_value
+        sock.recv.side_effect = [worker._encoder.encode(partial)] * 2 + [end]
+        await worker.receive_kv_from_single_worker("tcp://producer:1234", metas)
+        assert [meta.pull_tasks_count for meta in requests] == [1, 1, 1]
+        assert [meta.failed for meta in requests] == [False, True, True]
+        assert worker.finished_recving_reqs == set()
+        assert worker.get_block_ids_with_load_errors() == {2, 3}
+        worker.process_pulling_result(
+            MooncakeXferResponse(
+                status=MooncakeXferResponseStatus.FINISH, ok_reqs=list(metas)
+            ),
+            metas,
+        )
+        assert worker.finished_recving_reqs == {meta.d_req_id for meta in requests}
+        assert all(meta.pull_tasks_count == 0 for meta in requests)
+        worker.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_peer_succeeds", [True, False])
+async def test_expired_peer_finish_settles_pending_receive(first_peer_succeeds):
+    """An expired peer's omitted result must not strand the decoder's blocks."""
+    config = _make_test_kv_cache_config()
+    with mooncake_register_worker(config, kv_role="kv_producer") as (producer, _):
+        try:
+            producer.kv_caches_base_addr = [0x1000]
+            producer.block_len_per_layer = [256]
+            producer.kv_block_len_per_layer = [256]
+            producer.registered_layer_names = ["model.layers.0.self_attn"]
+            producer.registered_layer_indices = [0]
+            send_meta = SendBlockMeta(
+                p_req_id="p-req-1",
+                transfer_id="xfer-req-1",
+                local_block_ids=[[1]],
+                ready=asyncio.Event(),
+                expire_time=time.perf_counter() - 1,
+            )
+            send_meta.ready.set()
+            producer.reqs_need_send[send_meta.transfer_id] = send_meta
+
+            async def expire_before_send():
+                assert await producer.fetch_finished_sending_reqs() == {"p-req-1"}
+
+            metadata = _xfer_meta(
+                [
+                    _region(
+                        0x2000,
+                        row_offset=-1,
+                        layer_name=producer.registered_layer_names[0],
+                    )
+                ],
+                {"d-req-1": (send_meta.transfer_id, [[100]])},
+            )
+            sock = AsyncMock(spec=zmq.asyncio.Socket, send_multipart=AsyncMock())
+            with (
+                patch.object(send_meta.ready, "wait", side_effect=expire_before_send),
+                patch.object(producer, "_send_blocks") as send,
+            ):
+                await producer.send_kv_to_decode(b"consumer", sock, metadata)
+                send.assert_not_called()
+            assert send_meta.transfer_id not in producer.reqs_need_send
+            sock.send_multipart.assert_awaited_once()
+            _, payload = sock.send_multipart.call_args.args[0]
+            response = producer._xfer_resp_decoder.decode(payload)
+            assert response.status == MooncakeXferResponseStatus.FINISH
+            assert not response.ok_reqs
+            assert not response.err_reqs
+        finally:
+            producer.shutdown()
+            producer.is_kv_consumer = True
+
+    with mooncake_register_worker(config) as (worker, _):
+        try:
+            meta = PullReqMeta(
+                d_req_id="d-req-1",
+                transfer_id="xfer-req-1",
+                local_block_ids=[[100]],
+                remote_engine_id="p-engine",
+                remote_bootstrap_addr="http://bootstrap:33333",
+                pull_tasks_count=2,
+            )
+            worker.process_pulling_result(
+                MooncakeXferResponse(
+                    status=MooncakeXferResponseStatus.FINISH,
+                    ok_reqs=[meta.d_req_id] if first_peer_succeeds else None,
+                    err_reqs=None if first_peer_succeeds else [meta.d_req_id],
+                ),
+                {meta.d_req_id: meta},
+            )
+            assert meta.pull_tasks_count == 1
+            assert worker.finished_recving_reqs == set()
+            sock = (
+                mooncake_connector.make_zmq_socket.return_value.__enter__.return_value
+            )
+            sock.recv.return_value = payload
+            await worker.receive_kv_from_single_worker(
+                "tcp://producer:1234", {meta.d_req_id: meta}
+            )
+            assert meta.pull_tasks_count == 0
+            assert meta.failed
+            assert worker.finished_recving_reqs == {meta.d_req_id}
+            assert worker.get_block_ids_with_load_errors() == {100}
+            stats = worker.get_kv_connector_stats()
+            assert stats is not None
+            assert stats.reduce()["Num failed recvs"] == 1
+        finally:
+            worker.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_kv_consumuer(monkeypatch):
     """Simulates a Consumer Worker (Decoder) initiating a pull from a Producer.
 

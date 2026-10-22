@@ -511,6 +511,13 @@ class ModelConfig:
             factors["video_pruning"] = (
                 self.multimodal_config.is_multimodal_pruning_enabled()
             )
+            # Adding modality into the hashing method to take multimodal
+            # cache into consideration.
+            factors["mm_limit_per_prompt"] = {
+                modality: (opts if isinstance(opts, int) else opts.count)
+                for modality, opts in self.multimodal_config.limit_per_prompt.items()
+            }
+            factors["mm_enable_mm_embeds"] = self.multimodal_config.enable_mm_embeds
         return hash_factors(factors)
 
     def _update_nested(
@@ -1875,6 +1882,7 @@ class ModelConfig:
             "top_p",
             "min_p",
             "max_new_tokens",
+            "skip_special_tokens",
         ]
         if any(p in config for p in available_params):
             diff_sampling_param = {
@@ -2016,6 +2024,10 @@ class ModelConfig:
         return self._model_info.supports_pp
 
     @property
+    def is_lora_supported(self) -> bool:
+        return self._model_info.supports_lora
+
+    @property
     def is_attention_free(self) -> bool:
         return self._model_info.is_attention_free
 
@@ -2033,6 +2045,10 @@ class ModelConfig:
     @property
     def has_noops(self) -> bool:
         return self._model_info.has_noops
+
+    @property
+    def supports_kv_cache_grouping(self) -> bool:
+        return self._model_info.supports_kv_cache_grouping
 
     @property
     def has_inner_state(self):
@@ -2274,7 +2290,7 @@ class ModelConfig:
 
     @property
     def is_quantized(self) -> bool:
-        return getattr(self.hf_config, "quantization_config", None) is not None
+        return self.model_arch_config.quantization_config is not None
 
     def is_nvfp4_quantized(self) -> bool:
         quant_config = self.model_arch_config.quantization_config

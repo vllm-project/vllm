@@ -673,8 +673,8 @@ class PullReqMeta:
     expire_time: float = float("inf")
     # Designed for one D pairing to multiple P
     pull_tasks_count: int = 0
-    # Set once any worker reports a failure, so a success from another worker
-    # for the same request is not counted afterwards.
+    # A failure is sticky; still settle later peer results before releasing
+    # destination blocks to prevent write-after-free from delayed peer writes.
     failed: bool = False
 
 
@@ -2465,6 +2465,8 @@ class MooncakeConnectorWorker:
         worker_addr: str,
         pull_metas: dict[ReqId, PullReqMeta],
     ):
+        # Each peer settles its own requests, sharing the per-request counters.
+        pull_metas = pull_metas.copy()
         req_ids = set(pull_metas)
         include_layout = (
             not self._kv_layout_id or worker_addr not in self._acked_layout_peers
@@ -2525,6 +2527,12 @@ class MooncakeConnectorWorker:
                             self._acked_layout_peers.add(worker_addr)
                         self.process_pulling_result(response, pull_metas)
                         if status == MooncakeXferResponseStatus.FINISH:
+                            # P may omit expired requests from its final response.
+                            self._handle_failed_recv(
+                                pull_metas,
+                                list(pull_metas),
+                                "peer finished without reporting a transfer result",
+                            )
                             return
             except zmq.ContextTerminated:
                 logger.debug(
@@ -2544,8 +2552,11 @@ class MooncakeConnectorWorker:
         """Report a failed remote KV load so the scheduler can fail or recompute it."""
         failed: list[ReqId] = []
         for req_id in req_ids:
-            pull_meta = pull_metas.get(req_id)
-            if pull_meta is None or pull_meta.failed:
+            pull_meta = pull_metas.pop(req_id, None)
+            if pull_meta is None:
+                continue
+            if pull_meta.failed:
+                self._complete_pull_task(pull_meta)
                 continue
             pull_meta.failed = True
             failed.append(req_id)
@@ -2559,15 +2570,23 @@ class MooncakeConnectorWorker:
                 # abort_immediately request just to run request_finished). No D
                 # request is waiting on a load, and reporting one here would trip
                 # the scheduler's `assert req_id in self.requests`.
+                self._complete_pull_task(pull_meta)
                 continue
             if self._is_hma_required:
                 self._failed_recv_reqs.put(pull_meta.d_req_id)
             else:
                 self._invalid_block_ids.put(invalid)
-            self.finished_recving_reqs.add(pull_meta.d_req_id)
+            self._complete_pull_task(pull_meta)
 
         if failed:
             logger.error("pulling kv_caches for %s failed: %s", failed, reason)
+
+    def _complete_pull_task(self, pull_meta: PullReqMeta) -> None:
+        # Bootstrap failures have no peer tasks to settle.
+        if pull_meta.pull_tasks_count > 0:
+            pull_meta.pull_tasks_count -= 1
+        if pull_meta.pull_tasks_count == 0 and any(pull_meta.local_block_ids):
+            self.finished_recving_reqs.add(pull_meta.d_req_id)
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Drain the blocks whose remote KV load failed since the last call."""
@@ -2584,26 +2603,19 @@ class MooncakeConnectorWorker:
         response: MooncakeXferResponse,
         pull_metas: dict[ReqId, PullReqMeta],
     ):
-        ok_reqs: list[ReqId] = response.ok_reqs or []
-
-        for req_id in ok_reqs:
-            pull_meta = pull_metas[req_id]
-            if pull_meta.failed:
-                continue
-            # No race because we are in async loop.
-            pull_meta.pull_tasks_count -= 1
-            # Empty pulls only release the producer's blocks; the consumer
-            # did not enter WAITING_FOR_REMOTE_KVS.
-            if pull_meta.pull_tasks_count == 0 and any(pull_meta.local_block_ids):
-                self.finished_recving_reqs.add(pull_meta.d_req_id)
-
-        if ok_reqs:
-            logger.debug("pulling kv_caches for %s finished", ok_reqs)
-
         if response.err_reqs:
             self._handle_failed_recv(
                 pull_metas, response.err_reqs, response.err_msg or "unknown error"
             )
+        ok_reqs: list[ReqId] = response.ok_reqs or []
+
+        for req_id in ok_reqs:
+            pull_meta = pull_metas.pop(req_id, None)
+            if pull_meta is not None:
+                self._complete_pull_task(pull_meta)
+
+        if ok_reqs:
+            logger.debug("pulling kv_caches for %s finished", ok_reqs)
 
     async def _connect_to_prefiller_bootstrap(self, remote_bootstrap_addr: str):
         url = remote_bootstrap_addr + "/query"
