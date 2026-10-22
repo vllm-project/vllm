@@ -203,6 +203,8 @@ class Config:
         }
 
         if self.use_mxfp4_w4a4_dsv4:
+            # model_type must pass FusedMoEConfig.__post_init__'s validation
+            # gate for this env var.
             vllm_config.model_config.hf_config = SimpleNamespace(
                 model_type="deepseek_v41"
             )

@@ -750,19 +750,16 @@ def test_aiter_moe_dispatch_policy_forwarded_through_apply(dispatch_policy: int)
 
 # --- 3b: AITER_MOE_SORT_BACKEND (MXFP4 adaptive-vs-Opus aux sort) ------------
 #
-# AITER_MOE_SORT_BACKEND is read once at aiter import time, same as the
-# CK/FlyDSL flags above, but only matters when aiter's internal `output_aux`
-# flag is set. The only path that sets it is MXFP4 DeepSeek-V4.1 (DSV4) a4w4,
-# opted into via VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4=1 (see
-# FusedMoEConfig.__post_init__ / rocm_aiter_fused_experts()'s
-# use_mxfp4_w4a4_dsv4 branch) -- this is why PR #58393 deferred it. Despite
-# the "a4w4" name, this is vLLM's W4A16 scheme at the modular-kernel layer
-# (activations aren't pre-quantized): AITER's DSV4 kernel quantizes them to
-# 4-bit internally, which is also why aiter's env var and the issue's own
-# table call it "a4w4"/"W4A4".
+# Only matters when aiter's internal `output_aux` flag is set, which aiter
+# sets only for the MXFP4 DeepSeek-V4.1 (DSV4) a4w4 path, opted into via
+# VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4=1 (FusedMoEConfig.__post_init__;
+# rocm_aiter_fused_experts()'s use_mxfp4_w4a4_dsv4 branch) -- why #58393
+# deferred this. Despite the "a4w4" name, DSV4 is reached through vLLM's
+# W4A16 modular-kernel quant pair: activations aren't pre-quantized here,
+# AITER quantizes them to 4-bit internally, hence the "a4w4"/"W4A4" name.
 #
-# Shape (E=384, K=5120, N=640, topk=6, M=16) is a real DeepSeek-V4.1-tuned
-# shape (dsv41_fp4_tuned_fmoe.csv) that selects block_m=16, the only block_m
+# Shape (E=384, K=5120, N=640, topk=6, M=16) is DeepSeek-V4.1-tuned
+# (dsv41_fp4_tuned_fmoe.csv) and selects block_m=16 -- the only block_m
 # where aiter's _aux_uses_opus() crossover ever prefers adaptive over Opus.
 
 MXFP4_SORT_BACKEND_ENV_CASES = ["opus", "ck", "adaptive", "auto"]
@@ -779,6 +776,8 @@ def _aiter_mxfp4_sort_backend_worker(
 ):
     import aiter.fused_moe as aiter_fused_moe
 
+    # Captured before patching: a patched attribute's signature would be the
+    # mock's (*args, **kwargs), not the real one.
     original_moe_sorting_impl = aiter_fused_moe._moe_sorting_impl
     original_adaptive_sort = aiter_fused_moe._adaptive_moe_sort
 
@@ -816,10 +815,8 @@ def _aiter_mxfp4_sort_backend_worker(
     block_size = bound.arguments["block_size"]
     num_experts = bound.arguments["num_experts"]
     routed_rows = bound.arguments["topk_ids"].numel()
-    # The same predicate aiter itself uses to choose between the fused
-    # (adaptive) sort and Opus, so the expectation tracks aiter's real
-    # dispatch logic even if the installed build picks a different block_m
-    # for this shape than the one observed when this test was written.
+    # Mirrors aiter's own predicate, so the expectation holds even if a
+    # different installed build picks a different block_m for this shape.
     aux_uses_opus = aiter_fused_moe._aux_uses_opus(
         output_aux, block_size, routed_rows, num_experts
     )
@@ -849,13 +846,9 @@ def _aiter_mxfp4_sort_backend_worker(
 @require_aiter_moe
 @pytest.mark.parametrize("backend", MXFP4_SORT_BACKEND_ENV_CASES)
 def test_aiter_moe_sort_backend_dispatch_env_matrix_mxfp4(backend: str):
-    """See https://github.com/vllm-project/vllm/issues/54966 ("Test AITER
-    backend and dispatch settings"): the MXFP4 DSV4 follow-up to
-    test_aiter_moe_sorting_backend_dispatch_env_matrix, covering
-    AITER_MOE_SORT_BACKEND (left uncovered by PR #58393 since it only fires
-    on the MXFP4 DSV4 path, which could not yet be driven through this
-    harness).
-    """
+    """3b follow-up to test_aiter_moe_sorting_backend_dispatch_env_matrix: covers
+    AITER_MOE_SORT_BACKEND (#54966), left uncovered by #58393 since it only fires
+    on the MXFP4 DSV4 path."""
     if not _aiter_sort_backend_hooks_available():
         pytest.skip(
             "Installed aiter build predates the sort-backend hooks "
@@ -900,9 +893,8 @@ def test_aiter_moe_sort_backend_dispatch_env_matrix_mxfp4(backend: str):
     )
     valid, reason = config.is_valid()
     if not valid:
-        # Also where AiterMxfp4Experts's gfx950-only check lives (is_valid()
-        # checks fe_supports_quant_scheme()) -- a skip, not a failure, since
-        # e.g. the MI300 CI lane running this file isn't gfx950.
+        # is_valid() also covers AiterMxfp4Experts's gfx950-only check; skip
+        # (not fail) since e.g. the MI300 CI lane running this file isn't gfx950.
         pytest.skip(reason)
 
     weights = WeightTensors.make(config)
