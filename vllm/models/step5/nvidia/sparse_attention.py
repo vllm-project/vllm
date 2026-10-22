@@ -3,13 +3,13 @@
 """Hopper and B300 sparse attention using FlashInfer and Triton."""
 
 import functools
-import os
 from dataclasses import replace
 from typing import Any, ClassVar, NamedTuple, cast
 
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm.config import get_current_vllm_config_or_none
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
@@ -109,7 +109,7 @@ class Step5SplitKVFlashAttentionImpl(FlashAttentionImpl):
         requests = attn_metadata.seq_lens.shape[0]
         query_len = attn_metadata.max_query_len
         if (
-            os.getenv("STEP5_FA4_HD192") == "1"
+            envs.STEP5_FA4_HD192
             and current_platform.is_device_capability_family(100)
             and self.head_size == 192
             and query_len > 4

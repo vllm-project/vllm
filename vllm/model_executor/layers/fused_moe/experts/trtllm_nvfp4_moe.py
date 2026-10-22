@@ -2,10 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-import os
-
 import torch
 
+import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -43,7 +42,7 @@ logger = init_logger(__name__)
 
 def _trtllm_activation_to_int(activation: MoEActivation) -> int:
     if activation == MoEActivation.SWIGLUSTEP:
-        if os.getenv("STEP5_TRTLLM_APPROXIMATE_SWIGLU") != "1":
+        if not envs.STEP5_TRTLLM_APPROXIMATE_SWIGLU:
             raise ValueError("Step5 TRT-LLM activation approximation requires opt-in")
         activation = MoEActivation.SILU
     return activation_to_flashinfer_int(activation)
@@ -97,7 +96,7 @@ class TrtLlmNvFp4ExpertsBase:
         if clamp is None:
             clamp = getattr(moe_config, "swiglu_limit", None)
         if moe_config.activation == MoEActivation.SWIGLUSTEP:
-            if os.getenv("STEP5_TRTLLM_APPROXIMATE_SWIGLU") != "1":
+            if not envs.STEP5_TRTLLM_APPROXIMATE_SWIGLU:
                 raise ValueError(
                     "Step5 TRT-LLM activation approximation requires opt-in"
                 )
@@ -252,7 +251,7 @@ class TrtLlmNvFp4ExpertsBase:
     def _supports_activation(activation: MoEActivation) -> bool:
         """Supports SITU only when the installed FlashInfer exposes it."""
         if activation == MoEActivation.SWIGLUSTEP:
-            return os.getenv("STEP5_TRTLLM_APPROXIMATE_SWIGLU") == "1"
+            return envs.STEP5_TRTLLM_APPROXIMATE_SWIGLU
         if activation == MoEActivation.SITU:
             return has_flashinfer_situ_activation()
         return activation in [

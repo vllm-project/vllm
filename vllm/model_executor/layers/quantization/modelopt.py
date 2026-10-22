@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
@@ -234,7 +233,7 @@ class ModelOptQuantConfigBase(QuantizationConfig):
         # handle exclusion
         if self.is_layer_excluded(prefix):
             if (
-                os.getenv("STEP5_FP8_TAIL") == "trtllm"
+                envs.STEP5_FP8_TAIL == "trtllm"
                 and isinstance(layer, RoutedExperts)
                 and any(
                     fnmatch(prefix, f"*layers.{idx}.moe.experts*")

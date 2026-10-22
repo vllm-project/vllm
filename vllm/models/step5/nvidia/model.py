@@ -3,7 +3,6 @@
 """Inference-only Step5 model."""
 
 import copy
-import os
 import typing
 from collections.abc import Iterable
 from typing import Any
@@ -1797,7 +1796,7 @@ class Step5MoE(nn.Module):
             e_score_correction_bias=self.router_bias,
             routed_scaling_factor=config.moe_router_scaling_factor,
         )
-        if os.getenv("STEP5_FP8_TAIL") == "trtllm" and self.layer_idx in (88, 89, 90):
+        if envs.STEP5_FP8_TAIL == "trtllm" and self.layer_idx in (88, 89, 90):
             expert_kwargs["activation"] = "silu"
             expert_kwargs["swiglu_limit"] = 7.0
 
