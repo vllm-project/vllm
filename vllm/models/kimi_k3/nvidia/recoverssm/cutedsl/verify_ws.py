@@ -63,6 +63,9 @@ from .verify import (
 CONSUMERS = 128  # 4 compute warps: thread c owns channel c / state row c
 PRODUCER = 4  # the producer warp
 THREADS = CONSUMERS + 32
+# Compute threads that load and activate the betas: past the Q * Q + 2 Q (at
+# most 80) threads that reduce the couplings and norms.
+BETA_TID = 96
 CTAS_PER_SM = 3  # shared memory bound (~60 KB per CTA)
 CONV_W = 4  # conv taps
 
@@ -468,9 +471,9 @@ class KdaTcVerify2:
                 wv = cute.make_rmem_tensor((Q,), Float32)  # e^{-L_t} k_t
                 beta_raw = Float32(0)
                 if live:
-                    if tid >= 64 and tid < 64 + Q:  # noqa: SIM102 (traced: `and` does not combine traced values)
-                        if tid - 64 < qlen:
-                            beta_raw = raw_beta[bos + tid - 64, head].to(Float32)
+                    if tid >= BETA_TID and tid < BETA_TID + Q:  # noqa: SIM102 (traced: `and` does not combine traced values)
+                        if tid - BETA_TID < qlen:
+                            beta_raw = raw_beta[bos + tid - BETA_TID, head].to(Float32)
                     first = meta[mi, 4]
                     a = meta_f[mi, 0]
                     bias = bias_s[c]
@@ -657,11 +660,11 @@ class KdaTcVerify2:
                             if tid >= NC + Q:
                                 scale = scale * Float32(K**-0.5)
                             scales[tid - NC] = scale
-                    elif tid >= 64 and tid < 64 + Q:
+                    elif tid >= BETA_TID and tid < BETA_TID + Q:
                         beta = Float32(0)
-                        if tid - 64 < qlen:
+                        if tid - BETA_TID < qlen:
                             beta = sigmoid(beta_raw, True)
-                        betas[tid - 64] = beta
+                        betas[tid - BETA_TID] = beta
                 consumer_sync()
                 if live:
                     wait_bar(mma_done, mma_phase)

@@ -92,9 +92,12 @@ def _clone_pages(pages):
     )
 
 
-def _inputs(batch: int, heads: int, window: int, varlen: bool, row_pad: int):
+def _inputs(
+    batch: int, heads: int, window: int, varlen: bool, row_pad: int, row_offset: int
+):
     """Raw projections laid out as the KDA in-projection output: q/k/v, then the
-    output gate, f_a, beta and the alignment padding in one row."""
+    output gate, f_a, beta and the alignment padding in one row; the spec-decode
+    tokens start ``row_offset`` rows in (after a batch's non-spec tokens)."""
     lens = torch.full((batch,), window, dtype=torch.int32)
     if varlen and batch > 2:
         lens[0] = window - 2
@@ -103,32 +106,45 @@ def _inputs(batch: int, heads: int, window: int, varlen: bool, row_pad: int):
     query_start[1:] = torch.cumsum(lens, 0)
     tokens = int(query_start[-1])
     width = 4 * heads * D + D + heads + row_pad
-    projected = torch.randn(tokens, width, device=DEVICE, dtype=torch.bfloat16)
+    projected = torch.randn(
+        row_offset + tokens, width, device=DEVICE, dtype=torch.bfloat16
+    )[row_offset:]
     mixed_qkv = projected[:, : 3 * heads * D]
     raw_beta = projected[:, 4 * heads * D + D : 4 * heads * D + D + heads]
     raw_gate = torch.randn(tokens, heads * D, device=DEVICE, dtype=torch.bfloat16)
     return lens, query_start.to(DEVICE), mixed_qkv, raw_gate, raw_beta
 
 
-@pytest.mark.parametrize("heads", [96, 12])
-@pytest.mark.parametrize("dim_first", [True, False])
-@pytest.mark.parametrize("conv_weight_dtype", [torch.float32, torch.bfloat16])
-@pytest.mark.parametrize("batch,varlen", [(1, False), (8, False), (13, True)])
-@pytest.mark.parametrize("row_pad", [0, 3])
-@pytest.mark.parametrize("recoverssm_accepted", [True, False])
-@torch.inference_mode()
-def test_cute_verify_matches_triton(
-    heads, dim_first, conv_weight_dtype, batch, varlen, row_pad, recoverssm_accepted
+def _compiled_verify(heads, window, dim_first, conv_weight_dtype):
+    verify = CuteRecoverSSMVerify(
+        num_heads=heads,
+        window=window,
+        conv_dim_first=dim_first,
+        conv_weight_dtype=conv_weight_dtype,
+        device=DEVICE,
+    )
+    verify.compile()
+    return verify
+
+
+def _check_verify(
+    heads=96,
+    dim_first=True,
+    conv_weight_dtype=torch.float32,
+    batch=8,
+    varlen=False,
+    row_pad=0,
+    recoverssm_accepted=True,
+    window=5,
+    row_offset=0,
+    dead_slot=0,
 ):
-    """``row_pad`` 3 misaligns the projection rows, so the dim-first layout falls
-    back from the warp-specialized verify to the plain tcgen05 one.
-    ``recoverssm_accepted`` feeds RecoverSSM's accepted counts (always 1: the
-    commit compacts the conv state); otherwise the stock spec-decode counts."""
-    torch.manual_seed(batch * 7 + heads + row_pad)
-    window = 5
+    """Run the CuTe verify and the Triton reference on the same pages; returns
+    whether the CuTe verify launched (it declines unaligned inputs)."""
+    torch.manual_seed(batch * 7 + heads + row_pad + window)
     slots = 3 * batch + 1
     lens, query_start, mixed_qkv, raw_gate, raw_beta = _inputs(
-        batch, heads, window, varlen, row_pad
+        batch, heads, window, varlen, row_pad, row_offset
     )
     tokens = mixed_qkv.shape[0]
     A_log = torch.randn(heads, device=DEVICE) * 0.5
@@ -144,7 +160,7 @@ def test_cute_verify_matches_triton(
     state_indices = torch.randperm(slots - 1, device=DEVICE)[:batch].to(torch.int32) + 1
     if varlen and batch > 4:
         # Padded requests: CUDA graph batches pad with the null block.
-        state_indices[3:5] = 0
+        state_indices[3:5] = dead_slot
 
     pages = _pages(slots, heads, window, dim_first)
     ref = _clone_pages(pages)
@@ -152,7 +168,9 @@ def test_cute_verify_matches_triton(
     _, conv, state, correction, key_gate = pages
     _, ref_conv, ref_state, ref_correction, ref_key_gate = ref
 
-    # Reference: the stock convolution, then the Triton verify.
+    # Reference: the stock convolution, then the Triton verify. (The stock
+    # convolution writes out of bounds for slot -1, so it gets the null block.)
+    ref_indices = state_indices.clamp(min=0)
     ref_out = torch.full(
         (1, tokens, heads, D), 7.0, device=DEVICE, dtype=torch.bfloat16
     )
@@ -163,7 +181,7 @@ def test_cute_verify_matches_triton(
         conv_weight,
         None,
         activation="silu",
-        conv_state_indices=state_indices,
+        conv_state_indices=ref_indices,
         num_accepted_tokens=accepted,
         query_start_loc=query_start,
         max_query_len=window,
@@ -186,21 +204,14 @@ def test_cute_verify_matches_triton(
         correction_cache=ref_correction,
         kg_cache=ref_key_gate,
         query_start_loc=query_start,
-        state_indices=state_indices,
+        state_indices=ref_indices,
         spec_query_len=window,
         out=ref_out,
     )
 
-    verify = CuteRecoverSSMVerify(
-        num_heads=heads,
-        window=window,
-        conv_dim_first=dim_first,
-        conv_weight_dtype=conv_weight_dtype,
-        device=DEVICE,
-    )
-    verify.compile()
+    verify = _compiled_verify(heads, window, dim_first, conv_weight_dtype)
     out = torch.full((tokens, heads * D), 7.0, device=DEVICE, dtype=torch.bfloat16)
-    verify(
+    launched = verify(
         mixed_qkv=mixed_qkv,
         raw_gate=raw_gate,
         raw_beta=raw_beta,
@@ -218,6 +229,11 @@ def test_cute_verify_matches_triton(
         out=out,
     )
     torch.accelerator.synchronize()
+    if not launched:
+        assert (out == 7.0).all()
+        for page, before in zip(pages[1:], initial[1:]):
+            assert torch.equal(page, before)
+        return False
     assert int(verify.counter) == 0  # left zeroed for the next launch
 
     live = [b for b in range(batch) if int(state_indices[b]) > 0 and int(lens[b]) > 0]
@@ -253,6 +269,94 @@ def test_cute_verify_matches_triton(
     untouched = sorted(set(range(slots)) - {int(state_indices[b]) for b in live})
     for page, before in zip(pages[1:], initial[1:]):
         assert torch.equal(page[untouched], before[untouched])
+    return True
+
+
+@pytest.mark.parametrize("heads", [96, 12])
+@pytest.mark.parametrize("dim_first", [True, False])
+@pytest.mark.parametrize("conv_weight_dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("batch,varlen", [(1, False), (8, False), (13, True)])
+@pytest.mark.parametrize("row_pad", [0, 3])
+@pytest.mark.parametrize("recoverssm_accepted", [True, False])
+@torch.inference_mode()
+def test_cute_verify_matches_triton(
+    heads, dim_first, conv_weight_dtype, batch, varlen, row_pad, recoverssm_accepted
+):
+    """``row_pad`` 3 misaligns the projection rows, so the dim-first layout falls
+    back from the warp-specialized verify to the plain tcgen05 one.
+    ``recoverssm_accepted`` feeds RecoverSSM's accepted counts (always 1: the
+    commit compacts the conv state); otherwise the stock spec-decode counts."""
+    assert _check_verify(
+        heads, dim_first, conv_weight_dtype, batch, varlen, row_pad, recoverssm_accepted
+    )
+
+
+@pytest.mark.parametrize("window", [2, 8])
+@pytest.mark.parametrize("dim_first", [True, False])
+@torch.inference_mode()
+def test_cute_verify_window_sizes(window, dim_first):
+    """1 and 7 speculative tokens (the 1-8 token windows the kernels support)."""
+    assert _check_verify(window=window, dim_first=dim_first, batch=13, varlen=True)
+
+
+@pytest.mark.parametrize("row_pad,launches", [(0, True), (3, False)])
+@torch.inference_mode()
+def test_cute_verify_token_offset(row_pad, launches):
+    """Spec-decode tokens after a mixed batch's other tokens start one row into
+    the projection: with 16-byte aligned rows the CuTe verify runs, otherwise it
+    declines (writing nothing) and the caller runs the Triton verify."""
+    assert _check_verify(row_pad=row_pad, row_offset=1) == launches
+
+
+@torch.inference_mode()
+def test_cute_verify_pad_slot_id():
+    """Requests padded with PAD_SLOT_ID (-1) are dead like null-block ones."""
+    assert _check_verify(batch=13, varlen=True, dead_slot=-1)
+
+
+@torch.inference_mode()
+def test_cute_verify_rejects_mismatched_tensors():
+    """A compiled CuTe kernel would reinterpret a wrong dtype or layout: the
+    host side rejects them (and declines a misaligned page)."""
+    heads, window, batch = 16, 5, 2
+    _, query_start, mixed_qkv, raw_gate, raw_beta = _inputs(
+        batch, heads, window, False, 0, 0
+    )
+    tokens = mixed_qkv.shape[0]
+    _, conv, state, correction, key_gate = _pages(4, heads, window, True)
+    verify = _compiled_verify(heads, window, True, torch.float32)
+    args = dict(
+        mixed_qkv=mixed_qkv,
+        raw_gate=raw_gate,
+        raw_beta=raw_beta,
+        A_log=torch.zeros(heads, device=DEVICE),
+        dt_bias=torch.zeros(heads * D, device=DEVICE),
+        lower_bound=LOWER_BOUND,
+        state=state,
+        correction=correction,
+        key_gate=key_gate,
+        query_start_loc=query_start,
+        state_indices=torch.arange(1, batch + 1, dtype=torch.int32, device=DEVICE),
+        num_accepted_tokens=torch.ones(batch, dtype=torch.int32, device=DEVICE),
+        conv_state=conv,
+        conv_weight=torch.zeros(3 * heads * D, 4, device=DEVICE),
+        out=torch.empty(tokens, heads * D, device=DEVICE, dtype=torch.bfloat16),
+    )
+    with pytest.raises(ValueError, match="conv_weight"):
+        verify(**{**args, "conv_weight": args["conv_weight"].bfloat16()})
+    with pytest.raises(ValueError, match="state"):
+        verify(**{**args, "state": state.float()})
+    # Padded value rows: the state TMA reads K-element rows back to back.
+    padded = torch.zeros(*state.shape[:-1], D + 8, device=DEVICE, dtype=torch.bfloat16)[
+        ..., :D
+    ]
+    with pytest.raises(ValueError, match="state strides"):
+        verify(**{**args, "state": padded})
+    # A state 8 bytes off a 16-byte boundary.
+    shifted = torch.zeros(state.numel() + 8, device=DEVICE, dtype=torch.bfloat16)
+    assert not verify(
+        **{**args, "state": shifted[4 : 4 + state.numel()].view(state.shape)}
+    )
 
 
 def _layer(pages, heads: int) -> SimpleNamespace:
@@ -275,7 +379,10 @@ def _layer(pages, heads: int) -> SimpleNamespace:
 def test_cute_state_commit_matches_triton(heads, batch, monkeypatch):
     """The CuTe fold of every layer's accepted tokens equals the Triton fold,
     with varlen windows, rejected-everything (0 accepted) and dead requests."""
-    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "DS")
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.mamba.mamba_utils.get_conv_state_layout",
+        lambda: "DS",
+    )
     torch.manual_seed(heads + batch)
     window, num_layers = 5, 3
     slots = 2 * batch + 1
@@ -321,3 +428,103 @@ def test_cute_state_commit_matches_triton(heads, batch, monkeypatch):
                 assert torch.equal(cute_state[slot], before[slot])
         unused = sorted(set(range(slots)) - set(state_indices.tolist()))
         assert torch.equal(cute_state[unused], before[unused])
+
+
+@pytest.mark.parametrize("heads", [96, 16])
+@torch.inference_mode()
+def test_recoverssm_steps_match_stock_spec_decode(heads, monkeypatch):
+    """Several verify -> sample -> commit steps of RecoverSSM (CuTe verify and
+    commit, one state slot per request) produce the outputs of stock
+    speculative decoding (``causal_conv1d_update`` + ``fused_recurrent_kda``
+    over 1 + k state slots per request)."""
+    from vllm.models.kimi_k3.nvidia.ops.third_party.kda import fused_recurrent_kda
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.mamba.mamba_utils.get_conv_state_layout",
+        lambda: "DS",
+    )
+    torch.manual_seed(heads)
+    window, batch, steps = 5, 6, 4
+    tokens = batch * window
+    query_start = torch.arange(0, tokens + 1, window, dtype=torch.int32, device=DEVICE)
+    conv_weight = torch.randn(3 * heads * D, 4, device=DEVICE) * 0.5
+
+    # RecoverSSM: one slot per request.
+    layer = _layer(_pages(batch + 1, heads, window, dim_first=True), heads)
+    rss_slots = torch.arange(1, batch + 1, dtype=torch.int32, device=DEVICE)
+    # Stock: 1 + k slots per request; the request's state starts in column 0.
+    _, ref_conv, ref_state, _, _ = _pages(batch * window + 1, heads, window, True)
+    ref_slots = torch.arange(
+        1, batch * window + 1, dtype=torch.int32, device=DEVICE
+    ).view(batch, window)
+    ref_conv[ref_slots[:, 0]] = layer.kv_cache[0][rss_slots]
+    ref_state[ref_slots[:, 0]] = layer.kv_cache[1][rss_slots]
+
+    verify = _compiled_verify(heads, window, True, torch.float32)
+    compile_state_commit(heads, window, DEVICE)
+    context = KDARecoverSSMCommitContext.create(
+        [layer], spec_query_len=window, max_num_reqs=batch, cute_state_commit=True
+    )
+    assert context.state_commit is not None
+    ones = torch.ones(batch, dtype=torch.int32, device=DEVICE)
+    accepted = ones.clone()  # the stock path's counts from the previous step
+    for _ in range(steps):
+        _, _, mixed_qkv, raw_gate, raw_beta = _inputs(batch, heads, window, False, 0, 0)
+        out = torch.empty(tokens, heads * D, device=DEVICE, dtype=torch.bfloat16)
+        assert verify(
+            mixed_qkv=mixed_qkv,
+            raw_gate=raw_gate,
+            raw_beta=raw_beta,
+            A_log=layer.A_log,
+            dt_bias=layer.dt_bias,
+            lower_bound=LOWER_BOUND,
+            state=layer.kv_cache[1],
+            correction=layer.kv_cache[2],
+            key_gate=layer.kv_cache[3],
+            query_start_loc=query_start,
+            state_indices=rss_slots,
+            num_accepted_tokens=ones,
+            conv_state=layer.kv_cache[0],
+            conv_weight=conv_weight,
+            out=out,
+        )
+        conv_out = torch.empty_like(mixed_qkv)
+        causal_conv1d_update(
+            mixed_qkv,
+            ref_conv,
+            conv_weight,
+            None,
+            activation="silu",
+            conv_state_indices=ref_slots[:, 0],
+            num_accepted_tokens=accepted,
+            query_start_loc=query_start,
+            max_query_len=window,
+            validate_data=False,
+            out=conv_out,
+        )
+        q, k, v = (
+            x.unflatten(-1, (heads, D)).unsqueeze(0)
+            for x in conv_out.split(heads * D, -1)
+        )
+        ref_out, _ = fused_recurrent_kda(
+            q=q,
+            k=k,
+            v=v,
+            raw_g=raw_gate.view(1, tokens, heads, D),
+            raw_beta=raw_beta.unsqueeze(0),
+            A_log=layer.A_log,
+            dt_bias=layer.dt_bias,
+            lower_bound=LOWER_BOUND,
+            initial_state=ref_state,
+            cu_seqlens=query_start,
+            ssm_state_indices=ref_slots,
+            num_accepted_tokens=accepted,
+        )
+        torch.testing.assert_close(
+            out.float(), ref_out.view(tokens, -1).float(), atol=3e-2, rtol=3e-2
+        )
+        # Sample: accept 1..k+1 tokens per request, then commit them.
+        accepted = torch.randint(
+            1, window + 1, (batch,), dtype=torch.int32, device=DEVICE
+        )
+        context.commit(accepted, rss_slots, query_start)

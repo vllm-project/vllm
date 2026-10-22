@@ -16,10 +16,12 @@ import torch
 
 from vllm.config import CacheConfig
 from vllm.config.model import ModelDType
+from vllm.distributed import divide
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
+from vllm.utils.torch_utils import get_kv_cache_torch_dtype
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.interfaces import MambaStateShapes
@@ -48,11 +50,10 @@ def kda_state_dtypes(
         cache_config.mamba_cache_dtype,
         cache_config.mamba_ssm_cache_dtype,
     )
-    if recoverssm_records_in_page(cache_config):
-        dtypes = MambaStateDtypeCalculator.append_kda_recoverssm_record(
-            dtypes, model_dtype
-        )
-    return dtypes
+    if not recoverssm_records_in_page(cache_config):
+        return dtypes
+    # Corrections (FP32), then keys and raw gates (activation dtype).
+    return (*dtypes, torch.float32, get_kv_cache_torch_dtype("auto", model_dtype))
 
 
 def kda_state_shapes(
@@ -73,10 +74,10 @@ def kda_state_shapes(
     )
     if not recoverssm_records_in_page(cache_config):
         return shapes
-    return MambaStateShapeCalculator.append_kda_recoverssm_record(
-        shapes,
-        num_heads,
-        head_dim,
-        tp_world_size=tp_size,
-        spec_query_len=1 + num_spec,
+    local_num_heads = divide(num_heads, tp_size)
+    window = 1 + num_spec
+    return (
+        *shapes,
+        (local_num_heads, window, head_dim),
+        (local_num_heads, window, 2 * head_dim),
     )

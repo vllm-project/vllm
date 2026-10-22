@@ -125,6 +125,33 @@ def _share_storage_and_block_stride(caches: list[torch.Tensor]) -> bool:
     return len(block_strides) == len(storage_ptrs) == 1
 
 
+def check_mamba_state_sizes(
+    local_sizes: tuple[int, ...],
+    local_tp_size: int,
+    remote_sizes: tuple[int, ...],
+    remote_tp_size: int,
+) -> None:
+    """Reject a peer whose conv or SSM state per TP shard differs from ours.
+
+    The Mamba page stride may differ between P and D (e.g. KDA RecoverSSM's
+    verify records extend only the decode pages), but the remote conv
+    descriptors use the local conv decomposition, which shards every conv
+    sub-projection and the SSM state over TP. A different state (e.g. another
+    number of speculative tokens, which sets the conv length) would be read
+    at the wrong offsets.
+    """
+    if any(
+        local * local_tp_size != remote * remote_tp_size
+        for local, remote in zip(local_sizes, remote_sizes, strict=True)
+    ):
+        raise RuntimeError(
+            "Mamba conv / SSM state sizes differ between P and D "
+            f"(local {tuple(local_sizes)} at TP {local_tp_size}, remote "
+            f"{tuple(remote_sizes)} at TP {remote_tp_size}); use the same Mamba "
+            "state dtypes and number of speculative tokens on both."
+        )
+
+
 class NixlBaseConnectorWorker:
     """Base implementation of Worker side methods shared by pull and push."""
 
@@ -2886,25 +2913,12 @@ class NixlBaseConnectorWorker:
             len(self.block_len_per_layer)
         )
         if self._has_mamba:
-            # The Mamba page stride may differ between P and D (e.g. KDA
-            # RecoverSSM's verify records extend only the decode pages), but the
-            # remote conv descriptors use the local conv decomposition, so the
-            # conv and SSM states themselves must match per TP shard (e.g. the
-            # same number of speculative tokens, which sets the conv length).
-            local_tp_size = self.transfer_topo.tp_size
-            if any(
-                local * local_tp_size != remote * remote_tp_size
-                for local, remote in zip(
-                    self._mamba_ssm_size, nixl_agent_meta.ssm_sizes, strict=True
-                )
-            ):
-                raise RuntimeError(
-                    "Mamba conv / SSM state sizes differ between P and D "
-                    f"(local {self._mamba_ssm_size} at TP {local_tp_size}, remote "
-                    f"{tuple(nixl_agent_meta.ssm_sizes)} at TP {remote_tp_size}); "
-                    "use the same Mamba state dtypes and number of speculative "
-                    "tokens on both."
-                )
+            check_mamba_state_sizes(
+                self._mamba_ssm_size,
+                self.transfer_topo.tp_size,
+                tuple(nixl_agent_meta.ssm_sizes),
+                remote_tp_size,
+            )
         if self._has_mamba and self.use_mla:
             # Hybrid MLA+SSM (e.g. KimiLinear's KDA+MLA): regions are
             # kernel-granularity views of the mamba-unified page. The MLA

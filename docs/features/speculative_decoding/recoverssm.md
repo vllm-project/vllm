@@ -35,7 +35,7 @@ Otherwise, and on other GPUs, Triton kernels run instead. To force the Triton ke
 
 ## P/D disaggregation
 
-RecoverSSM works with KV connectors. A request's state between steps is its conv and SSM state, in the same layout as without RecoverSSM, so P/D connectors transfer it as usual.
+RecoverSSM runs with KV connectors. A request's state between steps is its conv and SSM state, in the same layout as without RecoverSSM. It has been tested with the NixlConnector for P/D transfers, together with the MooncakeStoreConnector for prefix caching between prefill instances.
 
 The verify records extend each KDA Mamba page and thereby the attention block size (for Kimi-K3, 896 to 1024 tokens). A P/D prefill instance never verifies, so it can drop the records with `--kda-recoverssm-prefill-only`. This flag:
 
@@ -43,4 +43,4 @@ The verify records extend each KDA Mamba page and thereby the attention block si
 - requires the NixlConnector, alone or in a MultiConnector. NIXL pairs the prefill and decode pages of different sizes;
 - rejects requests whose `max_tokens` is not 1 (P/D proxies send prefill requests with `max_tokens=1`).
 
-Run both instances with the same `--use-replayssm` and speculative configuration; NIXL rejects peers whose conv or SSM state sizes differ.
+Run both instances with the same `--use-replayssm` and speculative configuration; NIXL rejects peers whose conv or SSM state sizes differ. With RecoverSSM, the MooncakeStoreConnector keys its objects by the instance's page layout, so prefill-only and decode instances sharing a store never load each other's pages.

@@ -1125,6 +1125,20 @@ class EngineCore:
                 request.mm_features
             )
 
+        sampling_params = request.sampling_params
+        if (
+            self.vllm_config.cache_config.kda_recoverssm_prefill_only
+            and sampling_params is not None
+            and sampling_params.max_tokens != 1
+        ):
+            # Repeats the input processor's check for direct engine-core
+            # clients: the Mamba pages here have no room for verify records.
+            raise VLLMValidationError(
+                "This instance only prefills for P/D decode instances "
+                "(--kda-recoverssm-prefill-only): requests must set "
+                f"max_tokens=1, got {sampling_params.max_tokens}.",
+                parameter="max_tokens",
+            )
         req = Request.from_engine_core_request(request, self.request_block_hasher)
         if req.use_structured_output:
             # Note on thread safety: no race condition.

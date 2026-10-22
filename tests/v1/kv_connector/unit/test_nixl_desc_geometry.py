@@ -576,10 +576,15 @@ def test_registration_ignores_a_sub_block_padding_tail(page_covers_view):
 
 
 def _make_mla_hybrid_worker(
-    local_block_size, kernel_block_size, num_logical_blocks, worker_cls=None
+    local_block_size,
+    kernel_block_size,
+    num_logical_blocks,
+    worker_cls=None,
+    kda_records=False,
 ):
     """Build a real worker (pull by default) with a hybrid MLA + 2xKDA HMA
-    layout."""
+    layout. ``kda_records`` appends KDA RecoverSSM-style verify records (32 +
+    32 bytes) after the conv (48 bytes) and SSM (64 bytes) state in each page."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
         base_worker as bw,
     )
@@ -602,10 +607,12 @@ def _make_mla_hybrid_worker(
         dtype=torch.float16,
     )
     unified_page = mla_spec.page_size_bytes
+    record_shapes = ((1, 2, 4), (1, 2, 8)) if kda_records else ()
+    record_dtypes = (torch.float32, torch.float16) if kda_records else ()
     kda_spec = MambaSpec(
         block_size=local_block_size,
-        shapes=((8, 3), (1, 4, 4)),
-        dtypes=(torch.float16, torch.float32),
+        shapes=((8, 3), (1, 4, 4), *record_shapes),
+        dtypes=(torch.float16, torch.float32, *record_dtypes),
         page_size_padded=unified_page,
         mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
     )
@@ -901,7 +908,13 @@ def _resolve(
 
 
 def _run_hetero_case(
-    local_block, kernel, remote_block, num_tokens, tp_size=2, remote_kernel=None
+    local_block,
+    kernel,
+    remote_block,
+    num_tokens,
+    tp_size=2,
+    remote_kernel=None,
+    kda_records=False,
 ):
     """Full pull-path run for one geometry; returns pairing records.
 
@@ -924,6 +937,7 @@ def _run_hetero_case(
         local_block_size=local_block,
         kernel_block_size=kernel,
         num_logical_blocks=max(2 * n_local + 4, 8),
+        kda_records=kda_records,
     )
     # Local KDA state pages are (48, 64) bytes; the remote holds 1/tp_size
     # shards of each.
@@ -980,6 +994,8 @@ def _run_hetero_case(
     # The local page is split into sub-descs of one transfer unit each.
     desc_page = worker.block_len_per_layer[0] * unit // kernel
     meta_r_num_blocks_bytes = (meta_r.num_blocks // remote_ppl) * remote_unified
+    local_region = len(worker._test_tensors[0])
+    remote_region = meta_r_num_blocks_bytes
     covered_tokens = set()
     for op, lh, lids, rh, rids in nixl.xfers:
         larr, rarr = nixl.dlists[lh], nixl.dlists[rh]
@@ -1020,6 +1036,17 @@ def _run_hetero_case(
                     f"remote_block={remote_block}, N={num_tokens})"
                 )
                 covered_tokens.add(ltok)
+            else:
+                # Mamba descriptors cover the conv and SSM state only (never
+                # trailing records), at each side's own page stride.
+                for arr, idx, bases, size, page, state_bytes in (
+                    (larr, li, local_bases, local_region, local_unified, 48 + 64),
+                    (rarr, ri, remote_bases, remote_region, remote_unified, 0),
+                ):
+                    addr, length, _ = (int(x) for x in arr[int(idx)])
+                    base = next(b for b in bases if 0 <= addr - b < size)
+                    limit = state_bytes or (48 + 64) // tp_size
+                    assert (addr - base) % page + length <= limit
 
     # Invariant 3: full coverage of the matched tokens, at the finest
     # transfer granularity.
@@ -1208,7 +1235,8 @@ def test_recoverssm_prefill_only_block_sizes(num_tokens):
     """Kimi-K3 KDA RecoverSSM: the decode Mamba page also holds the verify
     records, so its attention block (1024 tokens) is larger than that of a
     --kda-recoverssm-prefill-only instance (896) with the same conv and SSM
-    state (TP8 prefill -> TP1 decode); they pair in gcd-sized (128) units."""
+    state (TP8 prefill -> TP1 decode); they pair in gcd-sized (128) units, and
+    the Mamba descriptors skip the decode page's records."""
     _run_hetero_case(
         local_block=1024,
         kernel=1024,
@@ -1216,6 +1244,7 @@ def test_recoverssm_prefill_only_block_sizes(num_tokens):
         remote_kernel=896,
         num_tokens=num_tokens,
         tp_size=8,
+        kda_records=True,
     )
 
 
@@ -1706,3 +1735,55 @@ def test_ring_scratch_without_mamba_registers_and_addresses_its_own_regions():
     )
     # Paged block 1 in both regions; ring block 0 only in its scratch region.
     assert sorted(desc_ids.tolist()) == sorted([0 * 2 + 1, 1 * 2 + 1, 1 * 2 + 0])
+
+
+def _mamba_spec(mamba_type: str, tp: int, conv_rows: int = 3):
+    """Mamba2 (x | B | C) or GDN (Q | K | V) state shapes sharded over ``tp``."""
+    from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+    from vllm.v1.kv_cache_interface import MambaSpec
+
+    if mamba_type == "mamba2":
+        heads, head_dim, d_state, groups = 16, 8, 4, 8
+        conv_dim = heads * head_dim + 2 * groups * d_state
+        temporal = (heads // tp, head_dim, d_state)
+        backend = MambaAttentionBackendEnum.MAMBA2
+    else:
+        heads, head_dim = 16, 8
+        conv_dim = 3 * heads * head_dim
+        temporal = (heads // tp, head_dim, head_dim)
+        backend = MambaAttentionBackendEnum.GDN_ATTN
+    return MambaSpec(
+        block_size=16,
+        shapes=((conv_dim // tp, conv_rows), temporal),
+        dtypes=(torch.bfloat16, torch.float32),
+        mamba_type=backend,
+    )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("mamba_type", ["mamba2", "gdn"])
+@pytest.mark.parametrize("local_tp,remote_tp", [(1, 1), (1, 8), (8, 1), (2, 4)])
+def test_mamba_state_size_check_hetero_tp(mamba_type, local_tp, remote_tp):
+    """Mamba2 and GDN state sharded over different TP sizes passes the
+    handshake's size check; another conv length (number of speculative
+    tokens) at either TP fails it."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
+        check_mamba_state_sizes,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (  # noqa: E501
+        derive_mamba_conv_split,
+    )
+
+    def sizes(tp, conv_rows=3):
+        with patch(
+            "vllm.model_executor.layers.mamba.mamba_utils.get_conv_state_layout",
+            return_value="DS",
+        ):
+            spec = _mamba_spec(mamba_type, tp, conv_rows)
+            return derive_mamba_conv_split(spec, tp).ssm_sizes
+
+    check_mamba_state_sizes(sizes(local_tp), local_tp, sizes(remote_tp), remote_tp)
+    with pytest.raises(RuntimeError, match="state sizes differ"):
+        check_mamba_state_sizes(
+            sizes(local_tp), local_tp, sizes(remote_tp, conv_rows=7), remote_tp
+        )

@@ -3460,6 +3460,9 @@ class VllmConfig:
                 raise ValueError(
                     "RecoverSSM currently requires pipeline_parallel_size=1"
                 )
+            if self.parallel_config.enable_dbo:
+                # Micro-batches would run a layer's verifies concurrently.
+                raise ValueError("RecoverSSM does not support --enable-dbo")
             if self.mamba_config.backend != MambaBackendEnum.TRITON:
                 raise ValueError("RecoverSSM requires --mamba-backend triton")
         elif use_mamba_replayssm_spec:
@@ -3533,22 +3536,33 @@ def _validate_kda_recoverssm_prefill_only(config: VllmConfig) -> None:
             "--kda-recoverssm-prefill-only marks a P/D prefill instance and "
             f"requires kv_role 'kv_producer' or 'kv_both'; got {role}"
         )
-    connectors = [kv_transfer_config.kv_connector]
+    from vllm.distributed.kv_transfer.kv_connector.factory import (
+        KVConnectorFactory,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.connector import (
+        NixlBaseConnector,
+    )
+
+    configs = [kv_transfer_config]
     if kv_transfer_config.kv_connector == "MultiConnector":
-        connectors = [
-            connector.get("kv_connector")
-            for connector in kv_transfer_config.kv_connector_extra_config.get(
+        configs = [
+            KVTransferConfig(**{"engine_id": kv_transfer_config.engine_id, **child})
+            for child in kv_transfer_config.kv_connector_extra_config.get(
                 "connectors", []
             )
         ]
-    if "NixlConnector" not in connectors:
+    if not any(
+        issubclass(KVConnectorFactory.get_connector_class(c), NixlBaseConnector)
+        for c in configs
+    ):
         # A prefill-only Mamba page is smaller than the decode instance's.
         # NIXL describes the conv and SSM state as separate regions with
         # each side's page stride; other connectors copy whole pages.
         raise ValueError(
-            "--kda-recoverssm-prefill-only requires the NixlConnector (alone "
-            "or in a MultiConnector) to transfer Mamba state to decode "
-            f"instances, whose pages are larger; got {connectors}"
+            "--kda-recoverssm-prefill-only requires a NIXL connector (alone or "
+            "in a MultiConnector) to transfer Mamba state to decode instances, "
+            "whose pages are larger; got "
+            f"{[c.kv_connector for c in configs]}"
         )
 
 

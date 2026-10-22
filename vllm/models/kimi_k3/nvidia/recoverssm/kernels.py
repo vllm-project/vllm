@@ -19,13 +19,16 @@ graph capture; nothing compiles under capture.
 
 from collections.abc import Sequence
 from functools import cache
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+
+if TYPE_CHECKING:
+    from vllm.models.kimi_k3.nvidia.ops.recoverssm import KDARecoverSSMCommitContext
 
 logger = init_logger(__name__)
 
@@ -142,15 +145,17 @@ def _compile_verify(
         *fakes,
         cutlass.Float32(0),
         cutlass.Int32(0),
-        make_fake_stream(),
-        options=f"--gpu-arch={arch}",
+        make_fake_stream(use_tvm_ffi_env_stream=True),
+        options=f"--gpu-arch={arch} --enable-tvm-ffi",
     )
 
 
-def _check(name: str, tensor: torch.Tensor, dtype: torch.dtype, ndim: int) -> None:
-    if tensor.dtype != dtype or tensor.ndim != ndim or tensor.stride(-1) != 1:
+def _check(
+    name: str, tensor: torch.Tensor, dtype: torch.dtype, shape: tuple[int, ...]
+) -> None:
+    if tensor.dtype != dtype or tuple(tensor.shape) != shape or tensor.stride(-1) != 1:
         raise ValueError(
-            f"KDA RecoverSSM CuTe kernel: {name} must be a {ndim}-D {dtype} tensor "
+            f"KDA RecoverSSM CuTe kernel: {name} must be a {shape} {dtype} tensor "
             f"with a unit last stride; got {tensor.dtype} shape "
             f"{tuple(tensor.shape)} strides {tensor.stride()}"
         )
@@ -178,9 +183,12 @@ class CuteRecoverSSMVerify:
         self.conv_weight_dtype = conv_weight_dtype
         self.device = device
         # Each launch takes one ticket per work item and leaves the counter
-        # zeroed. One per layer, so verifies on different streams never share it.
+        # zeroed for the next one. A layer's verifies run one after another on
+        # one stream (dual-batch overlap is not supported with RecoverSSM).
         self.counter = torch.zeros(1, dtype=torch.int32, device=device)
         self._compiled: dict[bool, Any] = {}
+        # Page and parameter layouts already checked (fixed per KV cache).
+        self._checked: set[tuple] = set()
 
     def compile(self) -> None:
         """Compile the variants this layer launches (outside graph capture)."""
@@ -218,81 +226,51 @@ class CuteRecoverSSMVerify:
         conv_state: torch.Tensor,
         conv_weight: torch.Tensor,
         out: torch.Tensor,
-    ) -> None:
+    ) -> bool:
         """Verify ``state_indices.shape[0]`` requests. ``mixed_qkv`` [T, 3HK] is
         the raw projection (before the convolution), ``raw_gate`` [T, HK],
         ``raw_beta`` [T, H], ``out`` [T, HV]; ``conv_state`` is the stored
-        [slots, 3HK, Q + 2] (dim first) or [slots, Q + 2, 3HK] page view."""
-        import cutlass
+        [slots, 3HK, Q + 2] (dim first) or [slots, Q + 2, 3HK] page view.
 
-        from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.common.host import (
-            dynamic_view,
-            stream,
-        )
+        Returns False without launching when a tensor does not start on a
+        16-byte boundary (the kernels assume it, e.g. for an odd token offset
+        into the projection rows): the caller then runs the Triton verify.
+        Raises on any other mismatch with the compiled signature."""
+        static = (A_log, dt_bias, state, correction, key_gate, conv_state, conv_weight)
+        key = tuple((t.data_ptr(), tuple(t.shape), t.stride(), t.dtype) for t in static)
+        if key not in self._checked:
+            self._check_static(*static)
+            if not _aligned(*static):
+                return False
+            self._checked.add(key)
 
         H, Q = self.num_heads, self.window
         tokens = mixed_qkv.shape[0]
         batch = state_indices.shape[0]
-        slots = state.shape[0]
-        for name, tensor, dtype, ndim in (
-            ("mixed_qkv", mixed_qkv, torch.bfloat16, 2),
-            ("raw_gate", raw_gate, torch.bfloat16, 2),
-            ("raw_beta", raw_beta, torch.bfloat16, 2),
-            ("A_log", A_log, torch.float32, 1),
-            ("dt_bias", dt_bias, torch.float32, 1),
-            ("state", state, torch.bfloat16, 4),
-            ("correction", correction, torch.float32, 4),
-            ("key_gate", key_gate, torch.bfloat16, 4),
-            ("out", out, torch.bfloat16, 2),
-            ("query_start_loc", query_start_loc, torch.int32, 1),
-            ("state_indices", state_indices, torch.int32, 1),
-            ("num_accepted_tokens", num_accepted_tokens, torch.int32, 1),
-            ("conv_state", conv_state, torch.bfloat16, 3),
-            ("conv_weight", conv_weight, self.conv_weight_dtype, 2),
-        ):
-            _check(name, tensor, dtype, ndim)
-        conv_len = Q + CONV_WIDTH - 2
-        conv_shape = (slots, 3 * H * K, conv_len)
-        if not self.conv_dim_first:
-            conv_shape = (slots, conv_len, 3 * H * K)
-        expected = (
-            ("mixed_qkv", mixed_qkv, (tokens, 3 * H * K)),
-            ("raw_gate", raw_gate, (tokens, H * K)),
-            ("raw_beta", raw_beta, (tokens, H)),
-            ("A_log", A_log, (H,)),
-            ("dt_bias", dt_bias, (H * K,)),
-            ("state", state, (slots, H, K, K)),
-            ("correction", correction, (slots, H, Q, K)),
-            ("key_gate", key_gate, (slots, H, Q, 2 * K)),
-            ("out", out, (tokens, H * K)),
-            ("query_start_loc", query_start_loc, (batch + 1,)),
-            ("conv_state", conv_state, conv_shape),
-            ("conv_weight", conv_weight, (3 * H * K, CONV_WIDTH)),
+        dynamic = (
+            ("mixed_qkv", mixed_qkv, torch.bfloat16, (tokens, 3 * H * K)),
+            ("raw_gate", raw_gate, torch.bfloat16, (tokens, H * K)),
+            ("raw_beta", raw_beta, torch.bfloat16, (tokens, H)),
+            ("out", out, torch.bfloat16, (tokens, H * K)),
+            ("query_start_loc", query_start_loc, torch.int32, (batch + 1,)),
+            ("state_indices", state_indices, torch.int32, (batch,)),
         )
-        for name, tensor, shape in expected:
-            if tuple(tensor.shape) != shape:
-                raise ValueError(
-                    f"KDA RecoverSSM CuTe verify: {name} has shape "
-                    f"{tuple(tensor.shape)}, expected {shape}"
-                )
-        if num_accepted_tokens.shape[0] < batch:
-            raise ValueError("KDA RecoverSSM CuTe verify: too few accepted counts")
+        for name, tensor, dtype, shape in dynamic:
+            _check(name, tensor, dtype, shape)
+        _check(
+            "num_accepted_tokens",
+            num_accepted_tokens[:batch],
+            torch.int32,
+            (batch,),
+        )
         if tokens > batch * Q:
             raise ValueError("KDA RecoverSSM CuTe verify: more tokens than slots")
-        # The state streams in by TMA: K-element rows, 16-byte aligned slots.
-        if (
-            state.stride()[1:] != (K * K, K, 1)
-            or state.stride(0) * 2 % 16
-            or not _aligned(state)
-        ):
-            raise ValueError(
-                f"KDA RecoverSSM CuTe verify: state strides {state.stride()} need "
-                "contiguous heads and 16-byte aligned slots"
-            )
+        if not _aligned(*(t for _, t, _, _ in dynamic), num_accepted_tokens):
+            return False
         if batch == 0 or tokens == 0:
-            return
+            return True
         warp_specialized = self.conv_dim_first and self._bulk_copy_aligned(
-            mixed_qkv, raw_gate, dt_bias, conv_state, conv_weight
+            mixed_qkv, raw_gate, conv_state, conv_weight
         )
         compiled = self._compiled.get(warp_specialized)
         if compiled is None:
@@ -300,47 +278,75 @@ class CuteRecoverSSMVerify:
                 "KDA RecoverSSM CuTe verify launched before compile() (it must "
                 "not compile under CUDA graph capture)"
             )
+        # TVM-FFI launch on the current stream, straight from the torch tensors.
         compiled(
-            *map(
-                dynamic_view,
-                (
-                    mixed_qkv,
-                    raw_gate,
-                    raw_beta,
-                    A_log,
-                    dt_bias,
-                    state,
-                    correction,
-                    key_gate,
-                    out,
-                    query_start_loc,
-                    state_indices,
-                    conv_state,
-                    conv_weight,
-                    num_accepted_tokens,
-                    self.counter,
-                ),
-            ),
-            cutlass.Float32(lower_bound),
-            cutlass.Int32(NULL_BLOCK_ID),
-            stream(self.device),
+            mixed_qkv,
+            raw_gate,
+            raw_beta,
+            A_log,
+            dt_bias,
+            state,
+            correction,
+            key_gate,
+            out,
+            query_start_loc,
+            state_indices,
+            conv_state,
+            conv_weight,
+            num_accepted_tokens,
+            self.counter,
+            lower_bound,
+            NULL_BLOCK_ID,
         )
+        return True
+
+    def _check_static(
+        self,
+        A_log: torch.Tensor,
+        dt_bias: torch.Tensor,
+        state: torch.Tensor,
+        correction: torch.Tensor,
+        key_gate: torch.Tensor,
+        conv_state: torch.Tensor,
+        conv_weight: torch.Tensor,
+    ) -> None:
+        H, Q = self.num_heads, self.window
+        slots = state.shape[0]
+        conv_len = Q + CONV_WIDTH - 2
+        conv_shape = (slots, 3 * H * K, conv_len)
+        if not self.conv_dim_first:
+            conv_shape = (slots, conv_len, 3 * H * K)
+        for name, tensor, dtype, shape in (
+            ("A_log", A_log, torch.float32, (H,)),
+            ("dt_bias", dt_bias, torch.float32, (H * K,)),
+            ("state", state, torch.bfloat16, (slots, H, K, K)),
+            ("correction", correction, torch.float32, (slots, H, Q, K)),
+            ("key_gate", key_gate, torch.bfloat16, (slots, H, Q, 2 * K)),
+            ("conv_state", conv_state, torch.bfloat16, conv_shape),
+            ("conv_weight", conv_weight, self.conv_weight_dtype, (3 * H * K, 4)),
+        ):
+            _check(name, tensor, dtype, shape)
+        # The state streams in by TMA: K-element rows of contiguous heads, slots
+        # a multiple of 16 bytes apart.
+        if state.stride()[1:] != (K * K, K, 1) or state.stride(0) * 2 % 16:
+            raise ValueError(
+                f"KDA RecoverSSM CuTe verify: state strides {state.stride()} need "
+                "contiguous heads and 16-byte aligned slots"
+            )
 
     def _bulk_copy_aligned(
         self,
         mixed_qkv: torch.Tensor,
         raw_gate: torch.Tensor,
-        dt_bias: torch.Tensor,
         conv_state: torch.Tensor,
         conv_weight: torch.Tensor,
     ) -> bool:
-        """The warp-specialized verify bulk-copies 16-byte aligned q / k / v and
-        gate rows, conv state channel blocks (contiguous per slot), conv taps and
-        dt_bias; otherwise the plain tcgen05 verify runs."""
+        """The warp-specialized verify bulk-copies q / k / v and gate rows (16-byte
+        aligned rows), conv state channel blocks (contiguous per slot) and conv
+        taps; otherwise the plain tcgen05 verify runs."""
         conv_len = self.window + CONV_WIDTH - 2
         return (
-            _aligned(mixed_qkv, raw_gate, dt_bias, conv_state, conv_weight)
-            and mixed_qkv.stride(0) % 8 == 0
+            mixed_qkv.stride(0) % 8 == 0
             and raw_gate.stride(0) % 8 == 0
             and conv_weight.stride() == (CONV_WIDTH, 1)
             and conv_state.stride()[1:] == (conv_len, 1)
@@ -379,8 +385,8 @@ def _compile_commit(heads: int, window: int, arch: str, param_dtype: torch.dtype
         *fakes,
         cutlass.Float32(0),
         cutlass.Int32(0),
-        make_fake_stream(),
-        options=f"--gpu-arch={arch}",
+        make_fake_stream(use_tvm_ffi_env_stream=True),
+        options=f"--gpu-arch={arch} --enable-tvm-ffi",
     )
 
 
@@ -391,38 +397,17 @@ def compile_state_commit(num_heads: int, window: int, device: torch.device) -> N
 
 
 class CuteRecoverSSMStateCommit:
-    """The CuTe state fold for a ``KDARecoverSSMCommitContext``'s layers.
+    """The CuTe state fold for a ``KDARecoverSSMCommitContext``'s layers. A
+    commit runs after sampling, outside CUDA graphs: its launch (TVM-FFI, on
+    the current stream) takes the context's tensors as they are."""
 
-    Every argument but the source slots is fixed per context and batch size, so
-    their CuTe views are built once: a commit runs after sampling, outside CUDA
-    graphs, and its host time is on every decode step."""
-
-    def __init__(self, context: Any) -> None:
-        from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.common.host import (
-            dynamic_view,
-        )
-
+    def __init__(self, context: "KDARecoverSSMCommitContext") -> None:
         state = context.checkpoints[0]
         _, heads, _, _ = state.shape
         self.compiled = _compile_commit(
             heads, context.spec_query_len, _architecture(state.device), torch.float32
         )
         self.context = context
-        self.device = state.device
-        self.constants = tuple(
-            dynamic_view(tensor)
-            for tensor in (
-                context.state_base_addrs,
-                context.correction_cache_base_addrs,
-                context.kg_cache_base_addrs,
-                context.state_block_strides,
-                context.correction_cache_block_strides,
-                context.kg_cache_block_strides,
-                context.A_log,
-                context.dt_bias,
-            )
-        )
-        self._plans: dict[int, tuple[Any, Any]] = {}
 
     @staticmethod
     def unsupported_reason(
@@ -462,26 +447,20 @@ class CuteRecoverSSMStateCommit:
         return None
 
     def __call__(self, state_indices: torch.Tensor, batch: int) -> None:
-        import cutlass
-
-        from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.common.host import (
-            dynamic_view,
-            stream,
-        )
-
         context = self.context
-        plan = self._plans.get(batch)
-        if plan is None:
-            plan = (
-                dynamic_view(context.commit_lens[:batch]),
-                dynamic_view(context.final_state_indices[:batch]),
-            )
-            self._plans[batch] = plan
+        assert context.lower_bound is not None
         self.compiled(
-            *self.constants,
-            dynamic_view(state_indices[:batch]),
-            *plan,
-            cutlass.Float32(context.lower_bound),
-            cutlass.Int32(NULL_BLOCK_ID),
-            stream(self.device),
+            context.state_base_addrs,
+            context.correction_cache_base_addrs,
+            context.kg_cache_base_addrs,
+            context.state_block_strides,
+            context.correction_cache_block_strides,
+            context.kg_cache_block_strides,
+            context.A_log,
+            context.dt_bias,
+            state_indices[:batch],
+            context.commit_lens[:batch],
+            context.final_state_indices[:batch],
+            context.lower_bound,
+            NULL_BLOCK_ID,
         )

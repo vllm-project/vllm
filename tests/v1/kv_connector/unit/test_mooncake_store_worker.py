@@ -315,7 +315,10 @@ def _make_vllm_config(
     disable_hybrid_kv_cache_manager: bool = True,
 ) -> SimpleNamespace:
     cache_config = SimpleNamespace(
-        block_size=16, num_gpu_blocks=10, prefix_match_unit=None
+        block_size=16,
+        num_gpu_blocks=10,
+        prefix_match_unit=None,
+        use_kda_recoverssm=False,
     )
     cache_config.get_resolved_kv_cache_layout = lambda: kv_cache_layout
     return SimpleNamespace(
@@ -5192,3 +5195,41 @@ def test_blob_block_hashes_empty():
     view = BlobBlockHashes(memoryview(b""), 0)
     assert len(view) == 0
     assert list(view) == []
+
+
+def _page_layout_config(*page_layouts: tuple[int, int]) -> SimpleNamespace:
+    return SimpleNamespace(
+        kv_cache_groups=[
+            SimpleNamespace(
+                kv_cache_spec=SimpleNamespace(
+                    block_size=block_size, page_size_bytes=page_size_bytes
+                )
+            )
+            for block_size, page_size_bytes in page_layouts
+        ]
+    )
+
+
+def test_kda_recoverssm_pages_get_layout_namespace():
+    """A Kimi-K3 KDA RecoverSSM prefill-only instance stores smaller Mamba pages
+    (no verify records, smaller blocks) than a decode instance: their Store
+    objects must not share keys, while instances with one layout share them."""
+
+    def key(use_kda_recoverssm: bool, *page_layouts: tuple[int, int]) -> str:
+        vllm_config = SimpleNamespace(
+            cache_config=SimpleNamespace(use_kda_recoverssm=use_kda_recoverssm)
+        )
+        namespace = worker.page_layout_namespace(
+            vllm_config, _page_layout_config(*page_layouts)
+        )
+        metadata = KeyMetadata("test-model", 0, 0, 0, 0, store_namespace=namespace)
+        return PoolKey(metadata, "deadbeef").to_string()
+
+    prefill_only = ((896, 1 << 20), (896, 1 << 20))
+    decode = ((1024, 9 << 17), (1024, 9 << 17))
+    assert key(True, *prefill_only) != key(True, *decode)
+    assert key(True, *prefill_only) == key(True, *prefill_only)
+    # Without RecoverSSM the keys stay byte-identical to the historical format.
+    assert key(False, *decode) == (
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@deadbeef"
+    )

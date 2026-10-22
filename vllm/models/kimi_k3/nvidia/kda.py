@@ -3,7 +3,6 @@
 
 from collections.abc import Callable
 from dataclasses import replace
-from typing import Any
 
 import torch
 from einops import rearrange
@@ -305,14 +304,38 @@ def resolve_kda_spec_decode_backend(
     return "native"
 
 
-def resolve_kda_recoverssm_backend(backend: str, **layer: Any) -> str:
+def resolve_kda_recoverssm_backend(
+    backend: str,
+    *,
+    num_heads: int,
+    head_dim: int,
+    window: int,
+    conv_width: int,
+    has_conv_bias: bool,
+    activation_dtype: torch.dtype,
+    conv_state_dtype: torch.dtype,
+    state_dtype: torch.dtype,
+    conv_weight_dtype: torch.dtype,
+    lower_bound: float | None,
+) -> str:
     """The KDA RecoverSSM verify and commit kernels: "cute" (SM10x tensor
     cores, with the short convolution fused into the verify) or "triton"."""
     if backend not in ("auto", "cute", "triton"):
         raise ValueError(f"Unsupported KDA RecoverSSM backend: {backend}")
     if backend == "triton":
         return "triton"
-    reason = cute_recoverssm_unsupported_reason(**layer)
+    reason = cute_recoverssm_unsupported_reason(
+        num_heads=num_heads,
+        head_dim=head_dim,
+        window=window,
+        conv_width=conv_width,
+        has_conv_bias=has_conv_bias,
+        activation_dtype=activation_dtype,
+        conv_state_dtype=conv_state_dtype,
+        state_dtype=state_dtype,
+        conv_weight_dtype=conv_weight_dtype,
+        lower_bound=lower_bound,
+    )
     if reason is None:
         logger.info_once("Using the CuTe KDA RecoverSSM verify and commit.")
         return "cute"
@@ -1000,9 +1023,10 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             # dummy runs still get here: leave the conv and SSM state untouched.
             return out.zero_()
         conv_state, state = self.kv_cache[:2]
-        if self.recoverssm_verify is not None:
+        verify = self.recoverssm_verify
+        if verify is not None:
             assert self.gate_lower_bound is not None
-            self.recoverssm_verify(
+            if verify(
                 mixed_qkv=mixed_qkv,
                 raw_gate=raw_g[0].flatten(-2),
                 raw_beta=raw_beta[0],
@@ -1018,8 +1042,8 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 conv_state=conv_state,
                 conv_weight=conv_weight,
                 out=out[0].flatten(-2),
-            )
-            return out
+            ):
+                return out
 
         from vllm.models.kimi_k3.nvidia.ops.recoverssm import kda_recoverssm_verify
 

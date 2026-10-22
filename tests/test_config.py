@@ -47,6 +47,9 @@ from vllm.config.mamba import MambaBackendEnum
 from vllm.config.speculative import _validate_qwen3_omni_dspark
 from vllm.config.utils import get_field
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.connector import (
+    NixlPullConnector,
+)
 from vllm.platforms import current_platform
 from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.config import (
@@ -258,7 +261,7 @@ def test_kda_recoverssm_derivation_is_revalidated():
             backend=MambaBackendEnum.TRITON,
             enable_stochastic_rounding=False,
         ),
-        parallel_config=SimpleNamespace(pipeline_parallel_size=1),
+        parallel_config=SimpleNamespace(pipeline_parallel_size=1, enable_dbo=False),
         kv_transfer_config=None,
         use_v2_model_runner=True,
     )
@@ -283,6 +286,10 @@ def test_kda_recoverssm_derivation_is_revalidated():
     assert not config.cache_config.use_kda_recoverssm
 
     config.model_config.architecture = "KimiLinearForCausalLM"
+    config.parallel_config.enable_dbo = True
+    with pytest.raises(ValueError, match="enable-dbo"):
+        VllmConfig.validate_mamba_cached_kernel(config)
+    config.parallel_config.enable_dbo = False
     config.parallel_config.pipeline_parallel_size = 2
     with pytest.raises(ValueError, match="pipeline_parallel_size=1"):
         VllmConfig.validate_mamba_cached_kernel(config)
@@ -311,10 +318,14 @@ def _replayssm_config(
             backend=MambaBackendEnum.TRITON if is_kda else MambaBackendEnum.FLASHINFER,
             enable_stochastic_rounding=False,
         ),
-        parallel_config=SimpleNamespace(pipeline_parallel_size=1),
+        parallel_config=SimpleNamespace(pipeline_parallel_size=1, enable_dbo=False),
         kv_transfer_config=kv_transfer_config,
         use_v2_model_runner=True,
     )
+
+
+class _TestNixlConnector(NixlPullConnector):
+    pass
 
 
 def _nixl(kv_role: str) -> KVTransferConfig:
@@ -356,7 +367,13 @@ def test_mamba2_replayssm_rejects_kv_connectors(kv_role):
     [
         _nixl("kv_producer"),
         _nixl("kv_both"),
-        _multi("kv_both", "NixlConnector", "MooncakeStoreConnector"),
+        _multi("kv_both", "NixlConnector", "ExampleConnector"),
+        # A NIXL subclass loaded from a module path.
+        KVTransferConfig(
+            kv_connector="_TestNixlConnector",
+            kv_connector_module_path=__name__,
+            kv_role="kv_producer",
+        ),
     ],
 )
 def test_kda_recoverssm_prefill_only_accepted(kv_transfer_config):
@@ -373,12 +390,12 @@ def test_kda_recoverssm_prefill_only_accepted(kv_transfer_config):
         (None, "got no KV connector"),
         (_nixl("kv_consumer"), "got kv_role 'kv_consumer'"),
         (
-            KVTransferConfig(kv_connector="MooncakeConnector", kv_role="kv_producer"),
-            r"requires the NixlConnector .*got \['MooncakeConnector'\]",
+            KVTransferConfig(kv_connector="ExampleConnector", kv_role="kv_producer"),
+            r"requires a NIXL connector .*got \['ExampleConnector'\]",
         ),
         (
-            _multi("kv_both", "LMCacheConnectorV1", "MooncakeStoreConnector"),
-            "requires the NixlConnector",
+            _multi("kv_both", "ExampleConnector", "ExampleConnector"),
+            "requires a NIXL connector",
         ),
     ],
 )
@@ -1234,7 +1251,7 @@ def test_adaptive_verification_requires_full_cudagraphs(graph_mode, should_raise
         speculative_config=SimpleNamespace(enable_adaptive_verification=True),
         lora_config=None,
         compilation_config=CompilationConfig(cudagraph_mode=graph_mode),
-        parallel_config=SimpleNamespace(pipeline_parallel_size=1),
+        parallel_config=SimpleNamespace(pipeline_parallel_size=1, enable_dbo=False),
     )
 
     if should_raise:

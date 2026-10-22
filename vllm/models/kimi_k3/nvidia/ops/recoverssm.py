@@ -4,7 +4,7 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -12,6 +12,11 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+
+if TYPE_CHECKING:
+    from vllm.models.kimi_k3.nvidia.recoverssm.kernels import (
+        CuteRecoverSSMStateCommit,
+    )
 
 logger = init_logger(__name__)
 
@@ -757,9 +762,9 @@ class KDARecoverSSMCommitContext:
     dt_bias: torch.Tensor
     lower_bound: float | None
     spec_query_len: int
-    # The CuTe state fold (``CuteRecoverSSMStateCommit``) replacing the Triton
-    # one outside align mode; None keeps the Triton fold.
-    state_commit: Any = None
+    # The CuTe state fold replacing the Triton one outside align mode; None
+    # keeps the Triton fold.
+    state_commit: "CuteRecoverSSMStateCommit | None" = None
 
     @classmethod
     def create(
@@ -929,7 +934,7 @@ class KDARecoverSSMCommitContext:
             if reason is None:
                 context.state_commit = CuteRecoverSSMStateCommit(context)
             else:
-                logger.warning_once(
+                logger.info_once(
                     "KDA RecoverSSM keeps the Triton state commit: %s", reason
                 )
         return context
