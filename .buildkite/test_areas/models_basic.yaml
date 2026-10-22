@@ -259,6 +259,7 @@ steps:
   - vllm/models/qwen4_exp/
   - vllm/config/compilation.py
   - vllm/v1/attention/backends/short_conv_attn.py
+  - vllm/model_executor/layers/mamba/checkpoint.py
   - tests/models/qwen4_exp/
   commands:
   - pytest -v -s models/qwen4_exp/test_qsa_amd.py models/qwen4_exp/test_qsa_prepare_amd.py

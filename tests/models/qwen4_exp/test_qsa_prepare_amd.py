@@ -80,32 +80,16 @@ def assert_fp8_within_one_ulp(actual: torch.Tensor, expected: torch.Tensor) -> N
 def _make_main_inputs(num_tokens: int, main_fp8: bool = False) -> dict:
     """Random main-attention arguments with a paged cache in vLLM's layout."""
     num_blocks = num_tokens // MAIN_PAGE + 2
-    if main_fp8:
-        # ROCm fp8 KV-cache layout: uint8 storage holding e4m3 codes in
-        # the platform's native fp8 flavor, as the production typed views
-        # do (FNUZ on MI300/MI325, OCP elsewhere).
-        fp8_dtype = current_platform.fp8_dtype()
-        cache = (
-            torch.zeros(
-                num_blocks,
-                MAIN_HK,
-                MAIN_PAGE,
-                2 * MAIN_D,
-                dtype=torch.uint8,
-                device="cuda",
-            )
-            .view(fp8_dtype)
-            .transpose(1, 2)
-        )
-    else:
-        cache = torch.zeros(
-            num_blocks,
-            MAIN_HK,
-            MAIN_PAGE,
-            2 * MAIN_D,
-            dtype=torch.bfloat16,
-            device="cuda",
-        ).transpose(1, 2)
+    # FP8 configs store e4m3 codes in the platform's native flavor
+    # (FNUZ on MI300/MI325, OCP elsewhere), matching the production views.
+    cache = torch.zeros(
+        num_blocks,
+        MAIN_HK,
+        MAIN_PAGE,
+        2 * MAIN_D,
+        dtype=current_platform.fp8_dtype() if main_fp8 else torch.bfloat16,
+        device="cuda",
+    ).transpose(1, 2)
     slots = torch.randperm(num_blocks * MAIN_PAGE, device="cuda")[:num_tokens]
     slots[-1] = -1
     norm_weights = torch.randn(2, MAIN_D, dtype=torch.bfloat16, device="cuda") * 0.2
@@ -148,9 +132,11 @@ def _check_main_outputs(main: dict, q_out, gate_out, rope, positions) -> None:
     q, k = rope(positions, q, k)
     kv_cache = main["main_kv_cache"]
     if kv_cache.dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn):
-        # The FP8 cache stores value / scale as e4m3fnuz codes. Compare
-        # against a torch-side conversion: the C++ cache-update reference
-        # encodes fnuz destinations incorrectly on gfx950, so it cannot referee.
+        # The FP8 cache holds (value / scale) as e4m3 codes. Build the
+        # expected codes with a torch-side cast: the C++ cache-update
+        # reference writes wrong codes when the destination flavor is not
+        # the one the GPU natively produces (FNUZ destinations on gfx950),
+        # so it cannot referee this comparison.
         slot = main["main_slot_mapping"]
         valid = slot >= 0
         blocks = (slot[valid] // MAIN_PAGE).long()
@@ -167,12 +153,20 @@ def _check_main_outputs(main: dict, q_out, gate_out, rope, positions) -> None:
         torch.testing.assert_close(q_out.flatten(1), q, rtol=RTOL, atol=ATOL)
         assert torch.equal(gate_out, gate)
 
-        # The unfused reference and the kernel differ within the BF16
-        # comparison's RTOL/ATOL (rope and norm rounding), which FP8
-        # denormal quantization amplifies into a few code steps at small
-        # magnitudes. Accept the BF16-equivalent tolerance, or 2 codes for
-        # cast-boundary flips; an incorrect scale still fails at the large
-        # magnitudes the batch always covers.
+        # Compare in code space (the uint8 codes), not fp8 values with a
+        # plain rtol/atol: one code step's float meaning varies ~100x
+        # across e4m3's range, so no fixed tolerance can say "2 steps".
+        #
+        # The fused kernel and the unfused reference round in a slightly
+        # different order, so their answers differ by tiny amounts. That
+        # nudges a value sitting on a step boundary to the next step, and
+        # on very small numbers (where fp8 steps are coarse) it can jump
+        # many steps at once. Allowing 2 codes covers the boundary flips;
+        # the float check below covers the small-value jumps, which are
+        # tiny in absolute terms but can span many codes. A real bug —
+        # like a scale that was never applied — moves normal-sized
+        # numbers by many codes AND large amounts, so it still fails
+        # loudly.
         def _assert_codes_match(actual, expected):
             code_diff = (
                 actual.view(torch.uint8).int() - expected.view(torch.uint8).int()

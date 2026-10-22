@@ -26,6 +26,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
 from vllm.model_executor.models.qwen3_vl import mrope_positions_factor
 from vllm.platforms import current_platform
+from vllm.platforms.interface import DeviceCapability
 from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
@@ -53,7 +54,7 @@ from vllm.v1.kv_cache_interface import (
     get_kv_quant_mode,
 )
 
-from ..common.qsa_cache import QSAForwardMetadata
+from ..common.qsa_cache import QSAForwardMetadata, qsa_kv_cache_dtype
 from . import model
 from .indexer_qsa import QSAIndexer
 
@@ -73,7 +74,33 @@ class Qwen4ExpQSAFlashAttentionBackend(FlashAttentionBackend):
     """FullAttentionSpec backend used by the merged QSA owner."""
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
+    # fp8/fp8_e4m3: e4m3 bytes in a uint8 cache, written by qsa_prepare with
+    # the layer's per-tensor scales and dequantized on load inside the QSA
+    # Triton kernel. flash-attn never runs over this cache, so its fp8 probe
+    # does not apply (see supports_combination below).
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = list(_QSA_KV_CACHE_DTYPES)
+
+    @classmethod
+    def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
+        return kv_cache_dtype is None or kv_cache_dtype in cls.supported_kv_cache_dtypes
+
+    @classmethod
+    def supports_combination(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: CacheDType | None,
+        block_size: int | None,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        use_mm_prefix: bool,
+        device_capability: DeviceCapability,
+    ) -> str | None:
+        # The QSA Triton kernel dequantizes the fp8 KV itself; flash-attn
+        # never runs over the quantized cache, so every combination the
+        # parent would reject on kv-cache-dtype grounds is accepted here.
+        return None
 
     @staticmethod
     def get_name() -> str:
@@ -103,11 +130,6 @@ class Qwen4ExpQSAFlashAttentionBackend(FlashAttentionBackend):
 
 class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
     """Run paged sparse GQA with the QSA Triton kernel."""
-
-    # The QSA reads its KV cache through the Triton kernel below, never
-    # through the FlashAttention library, so the base class's flash-attn
-    # kv-cache-dtype support check does not apply.
-    kv_reads_bypass_flash_attn = True
 
     supports_dcp: bool = False
     supports_pcp: bool = False
@@ -164,18 +186,8 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             fp8_dtype = current_platform.fp8_dtype()
             key_cache = key_cache.view(fp8_dtype)
             value_cache = value_cache.view(fp8_dtype)
-        if (
-            key_cache.dtype
-            not in (
-                torch.bfloat16,
-                torch.float8_e4m3fn,
-                torch.float8_e4m3fnuz,
-            )
-            or query.dtype != torch.bfloat16
-        ):
-            raise NotImplementedError(
-                "Qwen4Exp QSA requires BF16 Q and BF16 or FP8-e4m3 K/V"
-            )
+        if query.dtype != torch.bfloat16:
+            raise NotImplementedError("Qwen4Exp QSA requires BF16 queries")
         if key_cache.dtype != torch.bfloat16 and (
             layer._k_scale_float != 1.0 or layer._v_scale_float != 1.0
         ):
@@ -221,20 +233,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             raise ValueError("Qwen4Exp QSA requires a paged KV cache")
         if model_config.dtype != torch.bfloat16:
             raise NotImplementedError("Qwen4Exp QSA currently requires BF16")
-        cache_dtype = cache_config.cache_dtype
-        if cache_config.kv_cache_dtype_skip_layers and cache_dtype not in (
-            "auto",
-            "bfloat16",
-        ):
-            from vllm.model_executor.models.utils import extract_layer_index
-
-            layer_idx = extract_layer_index(prefix)
-            if str(layer_idx) in cache_config.kv_cache_dtype_skip_layers:
-                cache_dtype = "auto"
-                logger.info_once(
-                    "QSA layer %s uses auto KV cache dtype (skip-layers)",
-                    prefix,
-                )
+        cache_dtype = qsa_kv_cache_dtype(cache_config, prefix)
         if cache_dtype not in _QSA_KV_CACHE_DTYPES:
             raise NotImplementedError(
                 "Qwen4Exp QSA requires a BF16 or FP8-e4m3 main KV cache"
@@ -320,9 +319,8 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
             self.kv_cache_dtype, model_config
         )
-        if self.kv_cache_torch_dtype != torch.bfloat16 and self.kv_cache_dtype not in (
-            "fp8",
-            "fp8_e4m3",
+        if self.kv_cache_torch_dtype != torch.bfloat16 and (
+            self.kv_cache_dtype not in _QSA_KV_CACHE_DTYPES
         ):
             raise NotImplementedError(
                 "Qwen4Exp QSA requires a BF16 or FP8-e4m3 main KV cache"
