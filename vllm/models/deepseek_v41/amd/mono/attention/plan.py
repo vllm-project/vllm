@@ -47,6 +47,10 @@ PAIR = 8  # a mailbox (value, tag) pair
 # polls copy b % COPIES: 256 CTAs spinning on one region's lines serialize.
 COPIES = 8
 QRDY_STRIDE = 64  # pairs a QRDY copy: >= the tokens a launch
+# Tuned, from this many rows at widths ending in a partial token tile: wo_a's
+# ready flags a (task, token tile), wo_b taking a tile once every task
+# published it (18 / 24 rows measured a loss).
+ARDY_MIN_S = 30
 
 
 def flag_stride(n: int) -> int:
@@ -62,6 +66,12 @@ def flag_copy(c, bid, stride):
 def on_copy(copy, i):
     """Flag ``i`` of the copy at pair ``copy`` (``flag_copy``)."""
     return i if isinstance(copy, int) and copy == 0 else copy + i
+
+
+def ardy_tiles(s: int, tuned: bool = False) -> int:
+    """Token tiles wo_a publishes ready flags for (1: one flag a task)."""
+    nt = len(token_tiles(s))
+    return nt if tuned and nt > 1 and s >= ARDY_MIN_S and s % TILE != 0 else 1
 
 
 def cdiv(a, b):
@@ -183,7 +193,7 @@ def back_scratch(s: int, d: Dims, start: int = 0, tuned: bool = False) -> dict:
     )  # back.chunk_keys
     nchunk = cdiv(KEYS, ck)
     crdy = s * d.heads // 8
-    ardy = (COPIES if tuned else 1) * d.woa_tasks
+    ardy = (COPIES * ardy_tiles(s, True) if tuned else 1) * d.woa_tasks
     return byte_layout(
         [
             ("part", s * nchunk * d.heads * HEAD_DIM * 2),  # bf16 partials
