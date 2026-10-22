@@ -767,21 +767,18 @@ _PADDING_HIDDEN_PAD_EXPECTED = 128
 _PADDING_INTERMEDIATE_PAD_EXPECTED = 256
 
 # AITER's W4A16 CK-Tile MXFP4 stage2 kernel misindexes scales and raises
-# NotImplementedError whenever the physical (possibly-padded) intermediate
-# width isn't a multiple of 256 -- unlike the 128-aligned
-# _PADDING_N_UNPADDED/_PADDING_N_PADDED above, which are only 128-aligned and
-# trip that check. MXFP4 needs its own 256-aligned N pair.
+# NotImplementedError unless the physical intermediate width is a multiple
+# of 256 -- the 128-aligned _PADDING_N_UNPADDED/_PADDING_N_PADDED above
+# aren't enough, so MXFP4 needs its own 256-aligned N pair.
 _PADDING_N_UNPADDED_MXFP4 = 512  # 2 * 256
 _PADDING_N_PADDED_MXFP4 = 768  # +256
 _PADDING_INTERMEDIATE_PAD_EXPECTED_MXFP4_W4A16 = 512
 
 # Separately, AITER's W4A4 MXFP4 stage1 (gate/up) GEMM silently produces
-# NaN/Inf -- instead of raising -- whenever the physical (possibly-padded)
-# hidden width isn't a multiple of 256 (confirmed empirically on gfx950:
-# K=896/1152 -> NaN, K=768/1024 -> finite). W4A16 isn't affected (it doesn't
-# quantize activations, so its stage1 GEMM takes a different, unrestricted
-# path), but there's no harm in using the same 256-aligned K pair for both
-# MXFP4 schemes here rather than branching the test on scheme.
+# NaN/Inf -- not a raise -- unless the physical hidden width is a multiple
+# of 256 (confirmed on gfx950: K=896/1152 -> NaN, K=768/1024 -> finite).
+# W4A16's stage1 path is unrestricted (unquantized activations), but reuses
+# the same 256-aligned K pair rather than branching the test on scheme.
 _PADDING_K_UNPADDED_MXFP4 = 1024  # 4 * 256
 _PADDING_K_PADDED_MXFP4 = 1280  # +256
 # hidden_pad = (K_padded_mxfp4 - hidden_dim_unpadded) // 128 * 128.
@@ -893,9 +890,8 @@ def _make_padding_matrix_weights(config: Config) -> WeightTensors:
         n=config.N,
         k=config.K,
         in_dtype=config.dtype,
-        # config.weight_dtype, not config.quant_dtype: the latter is None for
-        # MXFP4 W4A16 (unquantized activation), even though the weight itself
-        # is still mxfp4.
+        # weight_dtype, not quant_dtype: quant_dtype is None for MXFP4 W4A16
+        # (unquantized activation) even though the weight itself is mxfp4.
         quant_dtype=config.weight_dtype,
         block_shape=config.quant_block_shape,
         per_out_ch_quant=config.is_per_out_ch_quant,
@@ -1092,12 +1088,10 @@ _PADDING_MXFP4_QUANT_IDS = [
 ]
 
 # intermediate_pad = (N_padded_mxfp4 - intermediate_size_per_partition_unpadded)
-#   // 64 * 64 * (2 if tp_size == 1 else 1) (rocm_aiter_moe.py's
-#   aiter_moe_pads()); tp_size==1 here. Unlike every other scheme in this
-# file, W4A4's SiLU path doubles the intermediate pad inside AITER itself,
-# so aiter_moe_pads() passes it through *undoubled* to avoid masking live
-# rows twice. W4A16 isn't exempted (its weight is mxfp4 but its activation
-# isn't), so it keeps the same doubled value as the fp8/unquantized cases.
+#   // 64 * 64 * (2 if tp_size==1 else 1), undoubled for W4A4 only: its SiLU
+#   path already doubles the intermediate pad inside AITER, so
+#   aiter_moe_pads() must pass it through undoubled to avoid double-masking
+#   live rows. W4A16 (unquantized activation) keeps the doubled value.
 _PADDING_INTERMEDIATE_PAD_EXPECTED_MXFP4_W4A4 = 256
 
 
@@ -1208,11 +1202,10 @@ def _aiter_padding_matrix_worker_mxfp4(
 
     if padded_config.is_w4a16_mxfp4:
         # AITER_MXFP4_BF16 silently computes the wrong thing for bias-free
-        # SwiGLU-OAI (~55% sign agreement, ~5x-small magnitude on hardware),
-        # instead of raising. Only smoke-test (shape + finite, already
-        # checked above) until the fix in
+        # SwiGLU-OAI (~55% sign agreement, ~5x-small magnitude on hardware)
+        # instead of raising. Smoke-test only (already checked above) until
         # https://github.com/vllm-project/vllm/pull/59766 lands -- mirrors
-        # rank_worker's existing carve-out for this exact combination.
+        # rank_worker's existing carve-out.
         assert mk_out.shape == ref_out.shape, (
             f"AiterMxfp4Experts output shape {mk_out.shape} != reference "
             f"shape {ref_out.shape}."
@@ -1221,10 +1214,9 @@ def _aiter_padding_matrix_worker_mxfp4(
 
     # check_accuracy's atol=1e-1 dwarfs the ~1e-2 reference signal, and a
     # magnitude-only guard can't catch a sign-flipped mk_out (same
-    # magnitude as correct output). Cosine similarity can: measured on
-    # gfx950 across all padding modes, correct runs score 0.79-0.99
-    # (padding adds quantization noise in hidden/both modes) vs. <=0.01 or
-    # negative for zeroed/sign-flipped/decorrelated output.
+    # magnitude as correct). Cosine similarity can: gfx950 measurements show
+    # 0.79-0.99 for correct runs (padding adds noise) vs. <=0.01/negative
+    # for corrupted output.
     cos_sim = torch.nn.functional.cosine_similarity(
         mk_out.flatten().float(), ref_out.flatten().float(), dim=0
     )
@@ -1245,15 +1237,12 @@ def _aiter_padding_matrix_worker_mxfp4(
 def test_aiter_moe_padding_matrix_mxfp4(mode: str, quant_config: TestMoEQuantConfig):
     """See https://github.com/vllm-project/vllm/issues/54966 ("Test padding").
 
-    MXFP4 counterpart to test_aiter_moe_padding_matrix, covering
-    AiterMxfp4Experts's two schemes: W4A16 (mxfp4 weight, unquantized
-    activation) and W4A4 (both mxfp4). W4A16 is forced to SWIGLUOAI
-    activation -- AITER's heuristic-dispatch kernel only has that
-    specialization (https://github.com/ROCm/aiter/issues/2419) -- and is
-    only smoke-tested (shape + finite), not compared against a reference,
-    since AITER_MXFP4_BF16 silently computes the wrong thing for SwiGLU-OAI
-    pending #59766. W4A4 keeps the default SILU activation and gets the
-    full unpadded-reference comparison.
+    MXFP4 counterpart to test_aiter_moe_padding_matrix: W4A16 (mxfp4 weight,
+    unquantized activation) and W4A4 (both mxfp4). W4A16 is forced to
+    SWIGLUOAI -- AITER's heuristic-dispatch kernel only supports that
+    (ROCm/aiter#2419) -- and only smoke-tested (shape + finite), since
+    AITER_MXFP4_BF16 silently miscomputes SwiGLU-OAI pending #59766. W4A4
+    uses SILU and gets the full reference comparison.
     """
     from vllm.model_executor.layers.fused_moe.prepare_finalize import (
         MoEPrepareAndFinalizeNoDPEPModular,
@@ -1382,20 +1371,18 @@ def _aiter_token_padding_worker(
 
     if config.is_w4a16_mxfp4:
         # AITER_MXFP4_BF16 silently computes the wrong thing for bias-free
-        # SwiGLU-OAI (~55% sign agreement, ~5x-small magnitude on hardware),
-        # instead of raising. Only smoke-test (finite real rows, already
-        # checked above) until the fix in
-        # https://github.com/vllm-project/vllm/pull/59766 lands -- mirrors
-        # rank_worker's existing carve-out for this exact combination.
+        # SwiGLU-OAI (~55% sign agreement, ~5x-small magnitude on hardware)
+        # instead of raising. Smoke-test only (finite real rows, already
+        # checked above) until https://github.com/vllm-project/vllm/pull/59766
+        # lands -- mirrors rank_worker's existing carve-out.
         return
 
     if config.weight_dtype == "mxfp4":
         # check_accuracy's atol=1e-1 dwarfs the ~1e-2 reference signal, and a
         # magnitude-only guard can't catch a sign-flipped mk_out (same
-        # magnitude as correct output). Cosine similarity can: measured on
-        # gfx950 across all padding modes, correct runs score 0.79-0.99
-        # (padding adds quantization noise in hidden/both modes) vs. <=0.01 or
-        # negative for zeroed/sign-flipped/decorrelated output.
+        # magnitude as correct). Cosine similarity can: gfx950 measurements
+        # show 0.79-0.99 for correct runs (padding adds noise) vs.
+        # <=0.01/negative for corrupted output.
         cos_sim = torch.nn.functional.cosine_similarity(
             mk_out[real_rows].flatten().float(),
             ref_out[real_rows].flatten().float(),
@@ -1516,12 +1503,10 @@ def test_aiter_moe_token_padding_garbage_rows_mxfp4(
     """See https://github.com/vllm-project/vllm/issues/54966 ("Test padding").
 
     MXFP4 counterpart to test_aiter_moe_token_padding_garbage_rows. W4A16 is
-    forced to SWIGLUOAI activation (AITER's heuristic-dispatch kernel only
-    has that specialization, https://github.com/ROCm/aiter/issues/2419) and
-    only smoke-tested (real rows stay finite, no accuracy comparison),
-    since AITER_MXFP4_BF16 silently computes the wrong thing for SwiGLU-OAI
-    pending #59766. W4A4 keeps the default SILU activation and gets the
-    full accuracy comparison.
+    forced to SWIGLUOAI -- AITER's heuristic-dispatch kernel only supports
+    that (ROCm/aiter#2419) -- and only smoke-tested (finite real rows, no
+    accuracy comparison), since AITER_MXFP4_BF16 silently miscomputes
+    SwiGLU-OAI pending #59766. W4A4 uses SILU and gets the full comparison.
     """
     from vllm.model_executor.layers.fused_moe.prepare_finalize import (
         MoEPrepareAndFinalizeNoDPEPModular,
@@ -1530,10 +1515,9 @@ def test_aiter_moe_token_padding_garbage_rows_mxfp4(
     garbage_rows = _TOKEN_PADDING_GARBAGE_MODES[garbage_mode]
     is_w4a16 = quant_config.quant_dtype is None
 
-    # Reuses the same 256-aligned K/N as test_aiter_moe_padding_matrix_mxfp4
-    # (required by AITER's MXFP4 kernels -- see the constants' definitions).
-    # Token-padding safety doesn't depend on hidden_pad/intermediate_pad, so
-    # there's no need for a separate shape here.
+    # Reuses test_aiter_moe_padding_matrix_mxfp4's 256-aligned K/N (required
+    # by AITER's MXFP4 kernels). Token-padding safety doesn't depend on
+    # hidden_pad/intermediate_pad, so no separate shape is needed here.
     config = Config(
         Ms=_PADDING_M,
         K=_PADDING_K_PADDED_MXFP4,
