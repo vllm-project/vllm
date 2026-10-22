@@ -260,6 +260,34 @@ def get_fse_test_model_config(
         # AliceAI requires the AttnRes grouping metadata.
         config.block_attn_res_block_size = 1
         return config, AliceAIModel
+    if model_type == "qwen4_exp":
+        from transformers import Qwen4ExpTextConfig
+
+        config = Qwen4ExpTextConfig(
+            vocab_size=256,
+            hidden_size=128,
+            num_hidden_layers=2,
+            num_attention_heads=1,
+            num_key_value_heads=1,
+            head_dim=128,
+            linear_key_head_dim=64,
+            linear_value_head_dim=64,
+            linear_num_key_heads=1,
+            linear_num_value_heads=1,
+            moe_intermediate_size=32,
+            shared_expert_intermediate_size=32,
+            num_experts_per_tok=1,
+            num_experts=2,
+            layer_types=["full_attention", "full_attention"],
+            eos_token_id=1,
+            hc_count=2,
+            hc_lowrank=4,
+            ple_layer_ids=[],
+            quantization_config=quantization_config,
+        )
+        from vllm.models.qwen4_exp.amd.model import Qwen4ExpModel
+
+        return config, Qwen4ExpModel
     if model_type == "AXK1":
         from transformers import AXK1Config
 
@@ -1069,6 +1097,25 @@ def _assert_mtp_fused_shared_expert_redirect(
     )
 
 
+def _assert_mtp_shared_expert_not_fused(
+    mtp: nn.Module, ckpt_prefix: str, moe: nn.Module, n_routed_experts: int
+) -> None:
+    """Load an unfused MTP shared expert and verify no fused slot is appended.
+
+    Without AITER the shared expert stays a separate MLP, so the routed tensor must
+    keep exactly ``n_routed_experts`` rows.
+    """
+    packed_down = torch.full((128, 16), 3, dtype=torch.uint8)
+    down_scale = torch.full((128, 1), 127, dtype=torch.uint8)
+    mtp.load_weights(
+        [
+            (f"{ckpt_prefix}.down_proj.weight", packed_down),
+            (f"{ckpt_prefix}.down_proj.weight_scale", down_scale),
+        ]
+    )
+    assert moe.experts.routed_experts.w2_weight.shape[0] == n_routed_experts
+
+
 def _make_deepseek_v4_shared_expert_checkpoint(
     layer: nn.Module, idx: int, fused: bool, exclude: bool
 ) -> tuple[list[tuple[str, torch.Tensor]], list[tuple[torch.Tensor, torch.Tensor]]]:
@@ -1283,6 +1330,7 @@ def single_rank_parallel_state(monkeypatch: pytest.MonkeyPatch):
         "glm4_moe_lite",
         "deepseek_v32",
         "glm5_next",
+        "qwen4_exp",
     ],
 )
 @pytest.mark.parametrize("shared_expert_precision", ["all_mxfp4", "mixed"])
@@ -1293,10 +1341,6 @@ def single_rank_parallel_state(monkeypatch: pytest.MonkeyPatch):
         (True, []),
         (True, [r"re:.*\.shared_experts?\..*"]),
     ],
-)
-@pytest.mark.skipif(
-    not current_platform.is_rocm(),
-    reason="AITER fused shared experts only exist on ROCm",
 )
 def test_models_fse_init(
     model_type: str,
@@ -1443,6 +1487,13 @@ def test_models_fse_init(
         # wiring is under test here.
         monkeypatch.setattr(
             deepseek_v32_model, "DeepseekV32MLAAttention", _StubGlm5NextAttention
+        )
+    if model_type == "qwen4_exp":
+        from vllm.models.qwen4_exp.amd import model as qwen4_exp_model
+
+        # Only the MoE/shared-expert wiring is under test here.
+        monkeypatch.setattr(
+            qwen4_exp_model, "Qwen3NextAttention", _StubGlm5NextAttention
         )
 
     import vllm.envs as envs
@@ -1620,9 +1671,14 @@ def test_models_fse_init(
                     if mtp_model is not None
                 ]
                 for mtp_model, ckpt_prefix, moe, n_routed in mtp_cases:
-                    _assert_mtp_fused_shared_expert_redirect(
-                        mtp_model, ckpt_prefix, moe, n_routed
-                    )
+                    if fse_enabled and not exclude:
+                        _assert_mtp_fused_shared_expert_redirect(
+                            mtp_model, ckpt_prefix, moe, n_routed
+                        )
+                    else:
+                        _assert_mtp_shared_expert_not_fused(
+                            mtp_model, ckpt_prefix, moe, n_routed
+                        )
             for idx in range(2):
                 prefix = f"layers.{idx}.{moe_attr}"
                 expected_name = (
@@ -1658,11 +1714,15 @@ def test_models_fse_init(
             assert not mtp.model.layers[
                 str(config.num_hidden_layers)
             ].mtp_block.ffn.is_fused_shared_expert_enabled
-            warning.assert_called_once()
-            assert (
-                "DeepSeek-V4 shared experts at <shared_expert>"
-                in (warning.call_args.args[1])
-            )
+            if aiter_fse_enabled:
+                warning.assert_called_once()
+                assert (
+                    "DeepSeek-V4 shared experts at <shared_expert>"
+                    in (warning.call_args.args[1])
+                )
+            else:
+                # Without AITER nothing fuses, so no skip reason is reported.
+                warning.assert_not_called()
         if aiter_fse_enabled and shared_expert_precision == "mixed" and not exclude:
             warning.assert_called_once()
             if model_type == "deepseek_v4":
