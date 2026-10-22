@@ -126,6 +126,7 @@ enable_error_code = ["method-assign"]
 [tool.pytest.ini_options]
 markers = [
     "slow_test",
+    "nixl_ep: NIXL EP component tests run by the dedicated NVIDIA step",
     "skip_global_cleanup",
     "core_model: enable this model test in each PR instead of only nightly",
     "hybrid_model: models that contain mamba layers (including pure SSM and hybrid architectures)",
