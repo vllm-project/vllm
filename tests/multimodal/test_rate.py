@@ -5,6 +5,7 @@ import pytest
 import torch
 
 from vllm.multimodal.image_prune.rate import (
+    _get_diversity_scores,
     _get_random_projections,
     compute_retained_tokens_count,
     compute_retention_mask_rate,
@@ -64,26 +65,58 @@ def test_identical_features_degenerate_case() -> None:
 
 
 def test_deterministic_given_same_projections() -> None:
+    """Selection must not depend on global RNG state (restart-stable)."""
     embeds = _fake_image_embeds(200)
-    torch.manual_seed(42)
-    first = compute_retention_mask_rate(embeds, q=0.5)
+    torch.manual_seed(1)
     _get_random_projections.cache_clear()
-    torch.manual_seed(42)
+    first = compute_retention_mask_rate(embeds, q=0.5)
+    torch.manual_seed(999)
+    _get_random_projections.cache_clear()
     second = compute_retention_mask_rate(embeds, q=0.5)
     assert torch.equal(first, second)
 
 
-def test_central_tokens_evicted_first() -> None:
-    """Tokens near the feature centroid are evicted before diverse ones."""
-    torch.manual_seed(0)
-    hidden = 64
-    diverse = torch.randn(60, hidden)
-    center = torch.nn.functional.normalize(diverse.mean(0, keepdim=True), dim=-1)
-    central = center.expand(40, hidden) + 0.001 * torch.randn(40, hidden)
-    embeds = torch.cat([diverse, central], dim=0)
-    mask = compute_retention_mask_rate(embeds, q=0.4)
-    assert int((~mask[60:]).sum().item()) == 40
-    assert int(mask[:60].sum().item()) == 60
+@pytest.mark.parametrize("q", [0.25, 0.5, 0.75])
+@pytest.mark.parametrize("num_tokens", [200, 784])
+def test_retained_selection_is_not_positional(q: float, num_tokens: int) -> None:
+    """On generic inputs RATE must score tokens, not retain a prefix.
+
+    Guards against regressions where the pivot-selection path silently
+    degenerates (e.g. all-zero scores), which turns the stable argsort
+    into positional prefix retention.
+    """
+    embeds = _fake_image_embeds(num_tokens)
+    mask = compute_retention_mask_rate(embeds, q=q)
+    retained = int(mask.sum().item())
+    assert retained == compute_retained_tokens_count(num_tokens=num_tokens, q=q)
+    assert not mask[:retained].all(), "RATE retained a positional prefix"
+
+
+def test_pivot_scores_have_spread() -> None:
+    """The pivot path yields non-constant diversity scores for real inputs."""
+    embeds = _fake_image_embeds(784)
+    scores = _get_diversity_scores(
+        embeds,
+        pivot_block_size=32,
+        skip_num=max(1, int(0.01 * 784)),
+        num_proj=8,
+    )
+    assert scores.numel() == 784
+    assert float(scores.std().item()) > 0.0
+
+
+def test_retained_tokens_are_lowest_scored() -> None:
+    """The mask must select exactly the lowest-scoring tokens."""
+    embeds = _fake_image_embeds(784)
+    q = 0.5
+    skip_num = max(1, int(0.01 * 784))
+    scores = _get_diversity_scores(
+        embeds, pivot_block_size=32, skip_num=skip_num, num_proj=8
+    )
+    retain = compute_retained_tokens_count(num_tokens=784, q=q)
+    expected = torch.zeros(784, dtype=torch.bool)
+    expected[torch.argsort(scores, stable=True)[:retain]] = True
+    assert torch.equal(compute_retention_mask_rate(embeds, q=q), expected)
 
 
 def test_empty_input_safe() -> None:

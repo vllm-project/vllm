@@ -70,10 +70,15 @@ def compute_retention_mask_rate(
 def _get_random_projections(
     num_proj: int, embed_dim: int, dtype: torch.dtype, device: torch.device
 ) -> torch.Tensor:
-    """Unit-norm random projection matrix of shape `(num_proj, embed_dim)`."""
+    """Seeded unit-norm projection matrix `(num_proj, embed_dim)`, so that
+    token selection is reproducible across restarts."""
+    gen = torch.Generator(device="cpu")
+    gen.manual_seed(0x9E3779B9 + embed_dim * 0x517CC1B7 + num_proj)
     return F.normalize(
-        torch.randn(num_proj, embed_dim, dtype=dtype, device=device), p=2, dim=-1
-    )
+        torch.randn(num_proj, embed_dim, dtype=torch.float32, generator=gen),
+        p=2,
+        dim=-1,
+    ).to(device=device, dtype=dtype)
 
 
 def _get_diversity_scores(
@@ -103,7 +108,7 @@ def _get_diversity_scores(
     sorted_values, sorted_idx = init_scores.sort(dim=-1, stable=True)
 
     denom = sorted_values[skip_num] - sorted_values[-skip_num]
-    if denom <= 0:
+    if denom == 0:
         return torch.zeros(num_tokens, dtype=embeds.dtype, device=embeds.device)
 
     # Quantize the projection scores so roughly `num_tokens /

@@ -2450,6 +2450,13 @@ class Qwen3VLForConditionalGeneration(
             grid_thw_list = grid_thw.tolist()
             image_embeds_out = []
             for emb, size in zip(image_embeds_split, grid_thw_list):
+                retention_mask = None
+                if self.image_pruning_rate is not None and self.image_pruning_rate > 0:
+                    # Prune image embeddings via RATE; retained embeddings
+                    # keep their original (unpruned-grid) mrope positions.
+                    retention_mask = compute_retention_mask_rate(
+                        emb, q=self.image_pruning_rate
+                    )
                 positions = async_tensor_h2d(
                     compute_mrope_for_media(size, merge_size), emb.device
                 )
@@ -2463,12 +2470,7 @@ class Qwen3VLForConditionalGeneration(
                     dim=1,
                 )
                 emb = torch.cat([emb, positions], dim=1)
-                if self.image_pruning_rate is not None and self.image_pruning_rate > 0:
-                    # Prune image embeddings via RATE; retained embeddings
-                    # keep their original (unpruned-grid) mrope positions.
-                    retention_mask = compute_retention_mask_rate(
-                        emb, q=self.image_pruning_rate
-                    )
+                if retention_mask is not None:
                     with gpu_sync_allowed():
                         emb = emb[retention_mask]
                 image_embeds_out.append(emb)
