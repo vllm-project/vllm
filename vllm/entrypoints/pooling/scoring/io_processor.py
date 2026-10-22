@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
 from collections.abc import Sequence
+from functools import cached_property
 from typing import Any, TypeAlias, cast
 
 import torch.nn.functional as F
@@ -39,6 +40,7 @@ from ..typing import (
     RequestGenerator,
     ScoringRenderParams,
 )
+from ..utils import reserve_tokens
 from .protocol import RerankRequest, ScoreRequest, ScoringRequest
 from .typing import ScoreData, ScoreInput, ScoringData
 from .utils import (
@@ -619,6 +621,14 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
     #######################################
     # helpers
 
+    @cached_property
+    def num_post_process_tokens(self) -> int:
+        if self.model is None:
+            return 0
+        probe = TokensPrompt(prompt_token_ids=[])
+        self.model.post_process_tokens(probe)
+        return len(probe["prompt_token_ids"])
+
     def render(
         self,
         render_params: EncodeCMPLRenderParams
@@ -637,6 +647,11 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         params = render_params["params"]
         prompt_extras = render_params["prompt_extras"]
 
+        # Leave room for the tokens that post_process_tokens appends after
+        # truncation (e.g. the JinaVL score token), so the limits count them.
+        if self.num_post_process_tokens:
+            tok_params = reserve_tokens(tok_params, self.num_post_process_tokens)
+
         _, engine_prompt = self.get_score_prompt(
             data_1=render_params["data_1"],
             data_2=render_params["data_2"],
@@ -650,6 +665,9 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         )
 
         tok_params.apply_post_tokenization(self.tokenizer, engine_prompt)
+
+        if self.model is not None:
+            self.model.post_process_tokens(engine_prompt)
 
         if token_type_ids := engine_prompt.pop("token_type_ids", None):
             params = params.clone()
@@ -806,9 +824,6 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
 
         if (token_type_ids := prompt_inputs.get("token_type_ids")) is not None:
             engine_prompt["token_type_ids"] = token_type_ids
-
-        if self.model is not None:
-            self.model.post_process_tokens(engine_prompt)
 
         if mm_data is not None:
             engine_prompt["multi_modal_data"] = mm_data

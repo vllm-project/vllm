@@ -5,7 +5,7 @@ import importlib.util
 import json
 import math
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache, partial
 from typing import Any, Literal, cast
 
@@ -17,6 +17,7 @@ from vllm.config import ModelConfig
 from vllm.entrypoints.serve.engine.protocol import UsageInfo
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
+from vllm.renderers import TokenizeParams
 from vllm.tasks import SupportedTask
 from vllm.utils.serial_utils import (
     EMBED_DTYPES,
@@ -248,3 +249,17 @@ def enable_scoring_api(
         return True
 
     return False
+
+
+def reserve_tokens(tok_params: TokenizeParams, num_tokens: int) -> TokenizeParams:
+    """Shrink every length limit by `num_tokens` that are appended afterwards."""
+
+    def shrink(length: int | None) -> int | None:
+        return length if length is None or length < 0 else max(length - num_tokens, 0)
+
+    return replace(
+        tok_params,
+        max_total_tokens=shrink(tok_params.max_total_tokens),
+        truncate_prompt_tokens=shrink(tok_params.truncate_prompt_tokens),
+        pad_prompt_tokens=shrink(tok_params.pad_prompt_tokens),
+    )
