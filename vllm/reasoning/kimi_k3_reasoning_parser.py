@@ -359,7 +359,16 @@ class KimiK3ReasoningParser(ReasoningParser):
                     break
         return text[:-overlap] if overlap else text
 
-    def _content_ready_to_emit(self, text: str) -> str:
+    def finish_reasoning_streaming(self, text: str) -> str:
+        """Release an unfinished marker as literal text at end of stream."""
+        if self._think_close_re.search(text):
+            return ""
+        safe = self._reasoning_text_ready_to_emit(text)
+        opened = self._think_open_re.search(text)
+        body = text[opened.end() :] if opened is not None else text
+        return body[len(safe) :]
+
+    def _content_ready_to_emit(self, text: str, *, finished: bool = False) -> str:
         """Return the content prefix that is safe to stream now.
 
         Mirrors ``_reasoning_text_ready_to_emit`` but for the post-reasoning
@@ -375,6 +384,9 @@ class KimiK3ReasoningParser(ReasoningParser):
         # Remove complete close/message markers
         text = self._response_close_re.sub("", text)
         text = self._message_close_re.sub("", text)
+
+        if finished:
+            return text
 
         # Hold back partial markers at the end
         overlap = 0
@@ -394,6 +406,8 @@ class KimiK3ReasoningParser(ReasoningParser):
         self,
         previous_text: str,
         current_text: str,
+        *,
+        finished: bool = False,
     ) -> DeltaMessage | None:
         """Strip XTML content wrappers from streaming deltas after reasoning.
 
@@ -404,7 +418,7 @@ class KimiK3ReasoningParser(ReasoningParser):
         Works from accumulated text (``previous_text`` / ``current_text``
         already contain only post-reasoning content).
         """
-        current_safe = self._content_ready_to_emit(current_text)
+        current_safe = self._content_ready_to_emit(current_text, finished=finished)
         previous_safe = self._content_ready_to_emit(previous_text)
         if current_safe.startswith(previous_safe):
             delta = current_safe[len(previous_safe) :]
