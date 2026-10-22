@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from collections.abc import Set
+from collections.abc import Callable, Set
 from typing import TypeAlias
 
 import torch
@@ -34,8 +34,10 @@ class TokenPoolingMethod(nn.Module, ABC):
 
 
 class AllPool(TokenPoolingMethod):
-    def __init__(self):
+    def __init__(self, output_sizes_fn: Callable[[], list[int]] | None = None):
         super().__init__()
+        # Logical output widths in the current request order.
+        self.output_sizes_fn = output_sizes_fn
 
         vllm_config = get_current_vllm_config()
         scheduler_config = vllm_config.scheduler_config
@@ -63,6 +65,13 @@ class AllPool(TokenPoolingMethod):
         hidden_states_lst = list(
             torch.split(hidden_states, pooling_cursor.num_scheduled_tokens_cpu.tolist())
         )
+        if self.output_sizes_fn is not None:
+            hidden_states_lst = [
+                hs[:, :size]
+                for hs, size in zip(
+                    hidden_states_lst, self.output_sizes_fn(), strict=True
+                )
+            ]
 
         if not self.enable_chunked_prefill:
             if self.clone_finished:
