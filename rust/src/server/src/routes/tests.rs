@@ -6348,6 +6348,33 @@ async fn tool_call_sse_chunks_can_carry_logprobs() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn chat_rejects_empty_tools_array() {
+    let (mut app, engine_task) = test_app_with_engine_handle().await;
+    let cases = [json!({}), json!({"tool_choice": "none"})];
+    for extra in cases {
+        let mut body = json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": [],
+        });
+        body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        let (status, error) = post_json(&mut app, "/v1/chat/completions", body.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {error}");
+        expect_test::expect![[r#"
+            {
+              "error": {
+                "message": "`tools` must not be an empty array. Either provide at least one tool or omit the field entirely.",
+                "type": "BadRequestError",
+                "param": "tools",
+                "code": 400
+              }
+            }"#]].assert_eq(&serde_json::to_string_pretty(&error).unwrap());
+    }
+    engine_task.abort_and_join().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn streaming_chat_prompt_logprobs_are_rejected() {
     let (app, engine_task) = test_app_with_engine_handle().await;
     let response = app
