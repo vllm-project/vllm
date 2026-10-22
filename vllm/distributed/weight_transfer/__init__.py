@@ -7,10 +7,16 @@ to inference workers.
 from vllm.distributed.weight_transfer.base import (
     ModuleSource,
     ParamMeta,
+    Replicate,
+    Shard,
     TrainerWeightTransferEngine,
     VLLMWeightSyncClient,
     WeightSource,
     WeightTransferEngine,
+    local_shape,
+    mesh_coords,
+    owned_names,
+    owner_groups,
 )
 from vllm.distributed.weight_transfer.clients import (
     HTTPVLLMWeightSyncClient,
@@ -30,6 +36,12 @@ __all__ = [
     "HTTPVLLMWeightSyncClient",
     "RayVLLMWeightSyncClient",
     "ParamMeta",
+    "Replicate",
+    "Shard",
+    "owned_names",
+    "owner_groups",
+    "local_shape",
+    "mesh_coords",
     "WeightSource",
     "ModuleSource",
 ]

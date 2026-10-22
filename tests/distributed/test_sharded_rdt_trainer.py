@@ -42,8 +42,9 @@ class _ListSource(WeightSource):
     def metadata(self):
         return [ParamMeta(n, t.dtype, tuple(t.shape)) for n, t in self._pairs]
 
-    def __iter__(self):
-        return iter(self._pairs)
+    def iter_full(self):
+        for pair in self._pairs:
+            yield [pair]
 
 
 class _FakeProducerServer:
@@ -117,7 +118,7 @@ class _FakeProducerServer:
 
 
 def _rdt_engine_with_fake_server(
-    source, *, is_sender, client, server, monkeypatch, fleet_owned=None
+    source, *, is_sender, client, server, monkeypatch, fleet_owned=None, world=1
 ):
     """Build a ShardedRDTTrainerWeightTransferEngine wired to an in-process fake
     server (no Ray, no CUDA IPC): bypass trainer_init's spawn, set the
@@ -141,7 +142,7 @@ def _rdt_engine_with_fake_server(
     # ownership rank can be tested without a real process group; the fleet must
     # cover every name or the transpose rejects it (nothing would serve the rest).
     if fleet_owned is None:
-        engine._resolve_ownership(1, 0)
+        engine._resolve_ownership(world, init_info.rank)
     else:
         # Stands in for the (metadata digest, held-name bitmask) all-gather:
         # each rank's group list becomes the mask its held names would set.
@@ -250,10 +251,10 @@ def test_sharded_rdt_send_weights_drives_client_in_order(monkeypatch):
 def test_sharded_rdt_send_weights_group_order_mismatch_raises(monkeypatch):
     # Source whose iteration order disagrees with its metadata order.
     class _BadSource(_ListSource):
-        def __iter__(self):
+        def iter_full(self):
             reordered = list(self._pairs)
             reordered[0], reordered[1] = reordered[1], reordered[0]
-            return iter(reordered)
+            return ([pair] for pair in reordered)
 
     server = _FakeProducerServer()
     engine = _rdt_engine_with_fake_server(
@@ -263,7 +264,7 @@ def test_sharded_rdt_send_weights_group_order_mismatch_raises(monkeypatch):
         server=server,
         monkeypatch=monkeypatch,
     )
-    with pytest.raises(RuntimeError, match="iteration order must match"):
+    with pytest.raises(ValueError, match="where rank 0 owns 'embed.weight'"):
         engine.send_weights()
     assert "error" in server.order  # gather error propagated to the server
 
@@ -320,8 +321,9 @@ def test_sharded_rdt_send_weights_surfaces_update_error(monkeypatch):
 
 
 class _OwnedSource(_ListSource):
-    """A source holding only some groups' names, like a pipeline-parallel rank.
-    Takes group indices for convenience and declares the names inside them."""
+    """A legacy source holding only some groups' names, like a pipeline-parallel
+    rank, declared through `held_names()` rather than owners. Takes group
+    indices for convenience and declares the names inside them."""
 
     def __init__(self, pairs, owned_group_idx):
         super().__init__(pairs)
@@ -360,6 +362,99 @@ def test_sharded_rdt_publishes_only_the_groups_it_holds(monkeypatch):
     # numbered by first appearance in metadata order.
     assert engine._owner_sets == [[1], [0]]
     assert engine._name_owner_class == [0, 1, 1, 0]
+
+
+class _DeclaredSource(_ListSource):
+    """A source that declares owners per name and yields everything this rank
+    owns as ONE batch, so the engine must re-chunk it into layer groups."""
+
+    def __init__(self, pairs, owners, rank):
+        super().__init__(pairs)
+        self._owners = owners
+        self._rank = rank
+
+    def metadata(self):
+        return [
+            ParamMeta(n, t.dtype, tuple(t.shape), owners=self._owners.get(n))
+            for n, t in self._pairs
+        ]
+
+    def iter_full(self):
+        yield [
+            (n, t)
+            for n, t in self._pairs
+            if n not in self._owners or self._rank in self._owners[n]
+        ]
+
+
+# embed and layer 0 on stage 0, layer 1 on stage 1, norm everywhere.
+_PP_OWNERS = {
+    "embed.weight": (0,),
+    "model.layers.0.w": (0,),
+    "model.layers.1.w": (1,),
+}
+
+
+def test_sharded_rdt_plans_ownership_from_metadata(monkeypatch):
+    """Owners come from metadata alone: no exchange, and the same table on
+    every rank."""
+    held = [
+        {"embed.weight", "model.layers.0.w", "norm.weight"},
+        {"model.layers.1.w", "norm.weight"},
+    ]
+    monkeypatch.setattr(
+        ShardedRDTTrainerWeightTransferEngine,
+        "_all_gather_owned",
+        lambda *a: pytest.fail("declared owners need no all-gather"),
+    )
+    tables = []
+    for rank in (0, 1):
+        engine = _rdt_engine_with_fake_server(
+            _DeclaredSource(_rdt_source_two_layers()._pairs, _PP_OWNERS, rank),
+            is_sender=rank == 0,
+            client=RecordingClient(),
+            server=_FakeProducerServer(),
+            monkeypatch=monkeypatch,
+            world=2,
+        )
+        tables.append((engine._owner_sets, engine._name_owner_class))
+        assert engine._held_names == held[rank]
+    assert tables[0] == tables[1] == ([[0], [1], [0, 1]], [0, 0, 1, 2])
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="the gather loop's CUDA-IPC export needs a device",
+)
+def test_sharded_rdt_rechunks_a_declared_stream_into_owned_groups(monkeypatch):
+    """The source yields one batch; the engine still publishes per layer group,
+    and only the groups this rank owns part of."""
+    server = _FakeProducerServer(auto_free=True)
+    engine = _rdt_engine_with_fake_server(
+        _DeclaredSource(_rdt_source_two_layers()._pairs, _PP_OWNERS, 1),
+        is_sender=False,
+        client=RecordingClient(),
+        server=server,
+        monkeypatch=monkeypatch,
+        world=2,
+    )
+    engine.send_weights()
+    assert server.published == [2, 3]
+    assert server.order == ["begin", "publish", "publish", "end"]
+
+
+def test_sharded_rdt_rejects_owners_outside_the_trainer(monkeypatch):
+    with pytest.raises(ValueError, match="only 2 trainer ranks"):
+        _rdt_engine_with_fake_server(
+            _DeclaredSource(
+                _rdt_source_two_layers()._pairs, {"embed.weight": (0, 2)}, 0
+            ),
+            is_sender=True,
+            client=RecordingClient(),
+            server=_FakeProducerServer(),
+            monkeypatch=monkeypatch,
+            world=2,
+        )
 
 
 def test_sharded_rdt_owned_group_order_mismatch_raises(monkeypatch):

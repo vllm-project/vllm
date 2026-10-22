@@ -29,6 +29,8 @@ from vllm.distributed.weight_transfer import (
     ModuleSource,
     ParamMeta,
     RayVLLMWeightSyncClient,
+    Replicate,
+    Shard,
     TrainerWeightTransferEngine,
     VLLMWeightSyncClient,
     WeightSource,
@@ -40,7 +42,14 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferEngine,
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
+    iter_owned,
     layerwise_groups,
+    local_shape,
+    mesh_coords,
+    owned_names,
+    owner_groups,
+    supports_iter_full,
+    supports_iter_local,
 )
 from vllm.distributed.weight_transfer.ipc_engine import (
     IPCTrainerInitInfo,
@@ -1363,7 +1372,7 @@ class TestTrainerClients:
 
 
 class TestModuleSource:
-    """`ModuleSource` metadata vs. materialized iteration (dense, no GPU)."""
+    """`ModuleSource` metadata vs. its iteration modes (dense, no GPU)."""
 
     def test_metadata_reads_shape_and_dtype(self):
         source = ModuleSource(
@@ -1373,29 +1382,268 @@ class TestModuleSource:
         assert [m.name for m in meta] == ["w", "b"]
         assert [m.shape for m in meta] == [(2, 3), (3,)]
         assert all(m.dtype == torch.float32 for m in meta)
+        assert all(m.owners is None for m in meta)
 
-    def test_iteration_yields_materialized_tensors(self):
+    def test_iter_full_yields_materialized_tensors(self):
         w = torch.arange(6, dtype=torch.float32).reshape(2, 3)
         source = ModuleSource(_module_with(("w", w)))
-        pairs = list(source)
+        pairs = [pair for batch in source.iter_full() for pair in batch]
         assert [name for name, _ in pairs] == ["w"]
         assert torch.equal(pairs[0][1], w)
 
     def test_source_is_reiterable(self):
         source = ModuleSource(_module_with(("w", torch.zeros(2))))
-        assert [n for n, _ in source] == [n for n, _ in source] == ["w"]
+        assert [b[0][0] for b in source.iter_full()] == ["w"]
+        assert [b[0][0] for b in source.iter_full()] == ["w"]
 
-    def test_metadata_agrees_with_iteration(self):
-        """The two channels must line up element-for-element: engines declare
-        the round from `metadata()` and then send what iteration yields."""
+    def test_metadata_agrees_with_both_modes(self):
+        """Engines declare the round from `metadata()` and send what a mode
+        yields, so both modes must pass the same check."""
         source = ModuleSource(
             _module_with(("w", torch.zeros(2, 3)), ("b", torch.zeros(3)))
         )
         meta = source.metadata()
-        pairs = list(source)
-        assert [m.name for m in meta] == [name for name, _ in pairs]
-        assert [m.dtype for m in meta] == [t.dtype for _, t in pairs]
-        assert [m.shape for m in meta] == [tuple(t.shape) for _, t in pairs]
+        for local in (False, True):
+            batches = list(iter_owned(source, meta, 0, local=local))
+            assert [i for batch in batches for i, _ in batch] == [0, 1]
+
+
+@pytest.fixture
+def fake_world():
+    """A 4-rank process group, as rank 1, without other processes: enough to
+    build DTensors and read their layouts."""
+    from torch.testing._internal.distributed.fake_pg import FakeStore
+
+    torch.distributed.init_process_group(
+        "fake", store=FakeStore(), rank=1, world_size=4
+    )
+    try:
+        yield
+    finally:
+        torch.distributed.destroy_process_group()
+
+
+class TestModuleSourceDTensor:
+    """`ModuleSource` declares a DTensor's mesh ranks as its owners."""
+
+    @staticmethod
+    def _dtensor_module(placements_of):
+        from torch.distributed.device_mesh import init_device_mesh
+        from torch.distributed.tensor import distribute_tensor
+
+        mesh = init_device_mesh("cpu", (2, 2))
+        module = torch.nn.Module()
+        for name, placements in placements_of.items():
+            module.register_parameter(
+                name,
+                torch.nn.Parameter(
+                    distribute_tensor(torch.zeros(6, 4), mesh, placements),
+                    requires_grad=False,
+                ),
+            )
+        return module
+
+    def test_metadata_declares_mesh_and_placements(self, fake_world):
+        from torch.distributed.tensor import Replicate as TR
+        from torch.distributed.tensor import Shard as TS
+
+        source = ModuleSource(
+            self._dtensor_module({"w": [TS(0), TS(1)], "r": [TR(), TR()]})
+        )
+        w, r = source.metadata()
+        assert w.owners == (0, 1, 2, 3)
+        assert w.mesh_shape == (2, 2)
+        assert w.placements == (Shard(0), Shard(1))
+        assert r.owners == (0, 1, 2, 3)
+        assert r.placements is None
+
+    def test_iter_local_yields_the_declared_local_shape(self, fake_world):
+        from torch.distributed.tensor import Shard as TS
+
+        source = ModuleSource(self._dtensor_module({"w": [TS(0), TS(1)]}))
+        meta = source.metadata()
+        ((index, local),) = next(iter_owned(source, meta, 1, local=True))
+        assert index == 0
+        assert tuple(local.shape) == local_shape(meta[0], 1) == (3, 2)
+
+    def test_partial_placement_is_declared_replicated(self, fake_world):
+        """`Partial` has no `Shard`/`Replicate` spelling, so the source declares
+        the parameter replicated and `iter_local` must gather it."""
+        from torch.distributed.tensor import Partial
+
+        source = ModuleSource(self._dtensor_module({"p": [Partial(), Partial()]}))
+        (meta,) = source.metadata()
+        assert meta.owners == (0, 1, 2, 3)
+        assert meta.placements is None
+
+
+class TestParamMetaOwnership:
+    """Ownership and layout fields on `ParamMeta`, and the helpers derived
+    from them. Every engine plans from these, so they must agree with DTensor
+    on who holds what."""
+
+    def test_owners_default_to_a_flat_mesh(self):
+        meta = ParamMeta("w", torch.float32, (4,), owners=[2, 3])
+        assert meta.owners == (2, 3)
+        assert meta.mesh_shape == (2,)
+        assert meta.placements is None
+
+    def test_all_replicate_placements_normalize_to_none(self):
+        meta = ParamMeta(
+            "w", torch.float32, (4,), owners=(0, 1), placements=(Replicate(),)
+        )
+        assert meta.placements is None
+
+    @pytest.mark.parametrize(
+        ("kwargs", "match"),
+        [
+            ({"placements": (Shard(0),)}, "without owners"),
+            ({"owners": (0, 0)}, "distinct"),
+            ({"owners": (0, 1, 2), "mesh_shape": (2, 2)}, "does not cover"),
+            ({"owners": (0, 1), "placements": (Shard(0), Shard(0))}, "1-D mesh"),
+            ({"owners": (0, 1), "placements": (Shard(1),)}, "shards dim 1"),
+        ],
+    )
+    def test_inconsistent_layouts_are_rejected(self, kwargs, match):
+        with pytest.raises(ValueError, match=match):
+            ParamMeta("w", torch.float32, (4,), **kwargs)
+
+    def test_mesh_coords_are_row_major_over_owners(self):
+        meta = ParamMeta(
+            "w", torch.float32, (4,), owners=(4, 5, 6, 7), mesh_shape=(2, 2)
+        )
+        assert [mesh_coords(meta, r) for r in (4, 5, 6, 7)] == [
+            (0, 0),
+            (0, 1),
+            (1, 0),
+            (1, 1),
+        ]
+
+    def test_local_shape_follows_torch_chunk_outer_axis_first(self):
+        """Two axes sharding one uneven dim: 10 -> (5, 5) -> (3, 2), as DTensor
+        computes it."""
+        meta = ParamMeta(
+            "w",
+            torch.float32,
+            (10, 6),
+            owners=(0, 1, 2, 3),
+            mesh_shape=(2, 2),
+            placements=(Shard(0), Shard(0)),
+        )
+        assert [local_shape(meta, r) for r in range(4)] == [
+            (3, 6),
+            (2, 6),
+            (3, 6),
+            (2, 6),
+        ]
+
+    def test_owned_names_and_owner_groups(self):
+        """A PP=2 x TP=2 layout: each stage owns its own layers."""
+        metas = [
+            ParamMeta("embed", torch.float32, (4,), owners=(0, 1)),
+            ParamMeta("layers.0.w", torch.float32, (4,), owners=(0, 1)),
+            ParamMeta("layers.1.w", torch.float32, (4,), owners=(2, 3)),
+            ParamMeta("norm", torch.float32, (4,)),
+        ]
+        assert owned_names(metas, 0) == ["embed", "layers.0.w", "norm"]
+        assert owned_names(metas, 3) == ["layers.1.w", "norm"]
+        assert owner_groups(metas, 4) == [(0, 1), (2, 3), (0, 1, 2, 3)]
+        with pytest.raises(ValueError, match="num_ranks"):
+            owner_groups(metas)
+
+
+class _BatchSource(WeightSource):
+    """Yields scripted batches from whichever modes it is given."""
+
+    def __init__(self, meta, full=None, local=None):
+        self._meta = meta
+        self._full = full
+        self._local = local
+
+    def metadata(self):
+        return list(self._meta)
+
+    def iter_full(self):
+        return iter(self._full)
+
+    def iter_local(self):
+        return iter(self._local)
+
+
+class TestIterOwned:
+    """`iter_owned` is the one check between a source's stream and its
+    metadata that every engine relies on."""
+
+    META = [
+        ParamMeta("a", torch.float32, (4,), owners=(0, 1), placements=(Shard(0),)),
+        ParamMeta("b", torch.float32, (2,), owners=(1,)),
+        ParamMeta("c", torch.float32, (3,)),
+    ]
+
+    def test_drops_none_and_keeps_the_sources_batches(self):
+        source = _BatchSource(
+            self.META,
+            full=[
+                [("a", torch.zeros(4)), ("b", None)],
+                [("c", torch.zeros(3))],
+            ],
+        )
+        batches = list(iter_owned(source, self.META, 0, local=False))
+        assert [[i for i, _ in b] for b in batches] == [[0], [2]]
+
+    def test_local_mode_checks_the_local_shape(self):
+        ok = _BatchSource(
+            self.META, local=[[("a", torch.zeros(2))], [("c", torch.zeros(3))]]
+        )
+        assert len(list(iter_owned(ok, self.META, 0, local=True))) == 2
+        bad = _BatchSource(self.META, local=[[("a", torch.zeros(4))]])
+        with pytest.raises(ValueError, match=r"implies torch.float32 \(2,\)"):
+            list(iter_owned(bad, self.META, 0, local=True))
+
+    def test_a_name_this_rank_does_not_own_is_rejected(self):
+        source = _BatchSource(self.META, full=[[("b", torch.zeros(2))]])
+        with pytest.raises(ValueError, match="yielded 'b' where rank 0 owns 'a'"):
+            list(iter_owned(source, self.META, 0, local=False))
+
+    def test_a_truncated_stream_names_the_first_missing(self):
+        source = _BatchSource(self.META, full=[[("a", torch.zeros(4))]])
+        with pytest.raises(ValueError, match="first missing is 'c'"):
+            list(iter_owned(source, self.META, 0, local=False))
+
+    def test_modes_are_detected_from_overrides(self):
+        class _FullOnly(WeightSource):
+            def metadata(self):
+                return []
+
+            def iter_full(self):
+                return iter(())
+
+        class _LocalOnly(WeightSource):
+            def metadata(self):
+                return []
+
+            def iter_local(self):
+                return iter(())
+
+        assert supports_iter_full(_FullOnly()) and not supports_iter_local(_FullOnly())
+        assert supports_iter_local(_LocalOnly())
+        assert not supports_iter_full(_LocalOnly())
+
+    def test_a_legacy_iterable_source_is_iterated_as_full(self):
+        """One deprecation cycle: a source with only `__iter__` still works."""
+
+        class _Legacy(WeightSource):
+            def metadata(self):
+                return [ParamMeta("w", torch.float32, (2,))]
+
+            def __iter__(self):
+                yield "w", torch.ones(2)
+
+        source = _Legacy()
+        assert supports_iter_full(source)
+        assert not supports_iter_local(source)
+        ((pair,),) = list(iter_owned(source, source.metadata(), 0, local=False))
+        assert pair[0] == 0
 
 
 class TestWeightSourceGroupContract:
@@ -1614,7 +1862,7 @@ class TestTrainerEngineBase:
             source=ModuleSource(_module_with(("w", torch.zeros(2)))),
         )
         assert engine.is_sender is True
-        assert [name for name, _ in engine.source] == ["w"]
+        assert [b[0][0] for b in engine.source.iter_full()] == ["w"]
 
     def test_shutdown_default_is_noop(self):
         engine = _DummyTrainerEngine(
@@ -1865,8 +2113,8 @@ def test_nccl_worker_reuses_metadata_per_model(monkeypatch):
 
 
 class _ScriptedSource(WeightSource):
-    """Declares `meta` but yields whatever `pairs` says — used to drive the
-    metadata/iteration agreement checks."""
+    """Declares `meta` but yields whatever `pairs` says, one per batch — used to
+    drive the metadata/iteration agreement checks."""
 
     def __init__(self, meta, pairs):
         self._meta = meta
@@ -1875,8 +2123,9 @@ class _ScriptedSource(WeightSource):
     def metadata(self):
         return list(self._meta)
 
-    def __iter__(self):
-        yield from self._pairs
+    def iter_full(self):
+        for pair in self._pairs:
+            yield [pair]
 
 
 def _mock_group_engine(source, monkeypatch, **kwargs):
@@ -1910,7 +2159,7 @@ def test_nccl_trainer_send_weights_rejects_reordered_source(monkeypatch):
     reordered = [("b", torch.zeros(2)), ("w", torch.zeros(4))]
     engine = _mock_group_engine(_ScriptedSource(meta, reordered), monkeypatch)
 
-    with pytest.raises(ValueError, match="disagrees with iteration at index 0"):
+    with pytest.raises(ValueError, match="yielded 'b' where rank 0 owns 'w'"):
         engine.send_weights()
 
 
@@ -1923,7 +2172,7 @@ def test_nccl_trainer_send_weights_rejects_dtype_disagreement(monkeypatch):
         monkeypatch,
     )
 
-    with pytest.raises(ValueError, match="disagrees with iteration"):
+    with pytest.raises(ValueError, match="metadata implies torch.float32"):
         engine.send_weights()
 
 
@@ -1937,8 +2186,47 @@ def test_nccl_trainer_send_weights_rejects_truncated_source(monkeypatch):
         _ScriptedSource(meta, [("w", torch.zeros(4))]), monkeypatch
     )
 
-    with pytest.raises(ValueError, match="yielded 1 parameters"):
+    with pytest.raises(ValueError, match="yielded 1 of the 2 names"):
         engine.send_weights()
+
+
+def test_nccl_trainer_rejects_a_second_sender(monkeypatch):
+    """Each parameter is sent by its first owner and broadcast has one sender,
+    so a pipeline stage that does not start at rank 0 cannot be sent; every
+    rank sees the same metadata and raises alike."""
+    meta = [
+        ParamMeta("w", torch.float32, (4,), owners=(0, 1)),
+        ParamMeta("b", torch.float32, (2,), owners=(2, 3)),
+    ]
+    source = _ScriptedSource(meta, [])
+    for is_sender, rank in ((True, 0), (False, 2)):
+        engine = _mock_group_engine(source, monkeypatch, is_sender=is_sender, rank=rank)
+        with pytest.raises(ValueError, match="'b' is sent by its first owner, rank 2"):
+            engine.send_weights()
+
+
+def test_nccl_trainer_non_sender_owner_drives_its_gathers(monkeypatch):
+    """A non-sender owner (an FSDP peer) still iterates what it owns, since
+    the sender's gathers need it; it never touches the client or the group."""
+    meta = [ParamMeta("w", torch.float32, (4,), owners=(0, 1))]
+    yielded: list[str] = []
+
+    class _Recording(_ScriptedSource):
+        def iter_full(self):
+            for batch in super().iter_full():
+                yielded.extend(name for name, _ in batch)
+                yield batch
+
+    engine = _mock_group_engine(
+        _Recording(meta, [("w", torch.zeros(4))]),
+        monkeypatch,
+        is_sender=False,
+        rank=1,
+    )
+    engine.send_weights()
+    assert yielded == ["w"]
+    assert engine.client.order == []
+    engine.model_update_group.broadcast.assert_not_called()
 
 
 def test_nccl_trainer_send_weights_broadcasts_contiguous(monkeypatch):
@@ -1976,7 +2264,7 @@ def test_nccl_trainer_send_weights_raises_instead_of_hanging(monkeypatch):
         def metadata(self):
             return [ParamMeta("w", torch.float32, (4,))]
 
-        def __iter__(self):
+        def iter_full(self):
             # Fail only once the RPC is provably in flight.
             rpc_entered.wait(timeout=60)
             raise RuntimeError("broadcast blew up")

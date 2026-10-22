@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
-from vllm.distributed.weight_transfer.base import ParamMeta
+from vllm.distributed.weight_transfer.base import ParamMeta, Replicate, Shard
 from vllm.utils.nccl import unpinned_nccl_env
 
 if TYPE_CHECKING:
@@ -388,11 +388,11 @@ def validate_transfer_plan(
 
 @dataclass(frozen=True)
 class M2NParamMeta(ParamMeta):
-    """`ParamMeta` extended with how the trainer places this tensor.
+    """`ParamMeta` with the m2n source layout spelled out.
 
-    The base class carries only name / dtype / full shape, which is not enough
-    to plan a reshard. `source_layout` carries both the per-parameter mesh and
-    its placement on that mesh.
+    Deprecated as a source's metadata: declare `ParamMeta.owners`,
+    `mesh_shape` and `placements` instead. The trainer engine still converts
+    every parameter to this form to plan its reshards.
     """
 
     source_layout: M2NLayout
@@ -400,6 +400,62 @@ class M2NParamMeta(ParamMeta):
     def __post_init__(self) -> None:
         if not isinstance(self.source_layout, M2NLayout):
             raise TypeError("source_layout must be an M2NLayout")
+
+
+def m2n_param_meta(meta: ParamMeta, num_trainer_ranks: int) -> M2NParamMeta:
+    """The m2n source layout of `meta`, which must be owned by every trainer
+    rank in rank order (or by default).
+
+    A 1-D mesh gains a size-1 second axis; a replicated parameter keeps
+    `REPLICATED`. Placements m2n cannot express (both axes sharded, more than
+    two axes) are left for `validate_transfer_plan` to reject.
+    """
+    if isinstance(meta, M2NParamMeta):
+        return meta
+    everyone = tuple(range(num_trainer_ranks))
+    if meta.owners is not None and meta.owners != everyone:
+        raise ValueError(
+            f"parameter '{meta.name}' is owned by trainer ranks {meta.owners}, "
+            f"but nccl_m2n needs every parameter owned by ranks {everyone}, in "
+            "order"
+        )
+    mesh_shape = meta.mesh_shape or (num_trainer_ranks,)
+    if len(mesh_shape) > MESH_NDIMS:
+        raise ValueError(
+            f"parameter '{meta.name}' has a {len(mesh_shape)}-D source mesh; "
+            f"nccl_m2n supports at most {MESH_NDIMS} axes"
+        )
+    dims = (mesh_shape[0], mesh_shape[1] if len(mesh_shape) == 2 else 1)
+    placements: Placements | None = REPLICATED
+    if meta.placements is not None:
+        codes = [p.dim if isinstance(p, Shard) else REPLICATE for p in meta.placements]
+        codes += [REPLICATE] * (MESH_NDIMS - len(codes))
+        placements = cast(Placements, tuple(codes))
+    return M2NParamMeta(
+        meta.name,
+        meta.dtype,
+        meta.shape,
+        M2NLayout(M2NMesh(dims, 0), placements),
+    )
+
+
+def owned_param_meta(meta: M2NParamMeta) -> ParamMeta:
+    """The base `ParamMeta` of a validated m2n layout: owners, mesh and
+    placements, for checking what `iter_local` yields."""
+    mesh = meta.source_layout.mesh
+    codes = meta.source_layout.placements
+    return ParamMeta(
+        meta.name,
+        meta.dtype,
+        meta.shape,
+        owners=tuple(range(mesh.start_rank, mesh.start_rank + mesh.size)),
+        mesh_shape=mesh.dims,
+        placements=(
+            None
+            if codes is None
+            else tuple(Replicate() if c == REPLICATE else Shard(c) for c in codes)
+        ),
+    )
 
 
 @dataclass(frozen=True)

@@ -33,8 +33,9 @@ class CheckpointNameSource(WeightSource):
     internal layout to checkpoint names is the normal producer job.
 
     Every rank publishes the whole model: fused params are all-gathered and then
-    sliced per expert. Ownership stays uniform (no ``held_names``) -- serving
-    only the experts a rank holds is a real trainer's concern, not an example's.
+    sliced per expert. Ownership stays uniform (no ``ParamMeta.owners``) --
+    serving only the experts a rank holds is a real trainer's concern, not an
+    example's.
     """
 
     def __init__(self, module: torch.nn.Module) -> None:
@@ -71,22 +72,29 @@ class CheckpointNameSource(WeightSource):
             for entry_name, shape in self._expand(name, param)
         ]
 
-    def __iter__(self):
+    def iter_full(self):
         for name, param in self._module.named_parameters():
             m = _FUSED_EXPERT_RE.match(name)
             if m is None:
-                yield name, materialize_full_tensor(param)
+                yield [(name, materialize_full_tensor(param))]
                 continue
-            # One gather per FUSED param, not per expert: the views below are
-            # into that one tensor, and every expert of a layer rides in the
-            # same gather group, so it stays resident exactly as long as needed.
+            # One gather and one batch per FUSED param: the per-expert views
+            # below are into that one tensor, which stays resident while the
+            # engine consumes the batch.
             prefix, kind = m.group(1), m.group(2)
             full = materialize_full_tensor(param)
             if kind == "down_proj":
-                for e in range(full.shape[0]):
-                    yield f"{prefix}.{e}.down_proj.weight", full[e]
+                yield [
+                    (f"{prefix}.{e}.down_proj.weight", full[e])
+                    for e in range(full.shape[0])
+                ]
             else:
                 half = full.shape[1] // 2
-                for e in range(full.shape[0]):
-                    yield f"{prefix}.{e}.gate_proj.weight", full[e, :half, :]
-                    yield f"{prefix}.{e}.up_proj.weight", full[e, half:, :]
+                yield [
+                    pair
+                    for e in range(full.shape[0])
+                    for pair in (
+                        (f"{prefix}.{e}.gate_proj.weight", full[e, :half, :]),
+                        (f"{prefix}.{e}.up_proj.weight", full[e, half:, :]),
+                    )
+                ]

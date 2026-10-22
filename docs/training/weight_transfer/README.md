@@ -126,9 +126,11 @@ on. This is the main rule to internalize:
 For sharded trainers (FSDP, TP/PP/EP), **every trainer rank builds an engine and
 calls `send_weights()`**. Rank 0 is the sender: only it holds a communicator,
 talks to the client, and puts bytes on the wire. Non-sender ranks still iterate
-the `WeightSource`, because materializing a parameter is usually itself a
-collective (an FSDP `full_tensor()` all-gather, a Megatron export) that would
-deadlock if some ranks skipped it.
+the `WeightSource` over the parameters they own, because materializing a
+parameter is usually itself a collective among its owners (an FSDP
+`full_tensor()` all-gather, a Megatron export) that would deadlock if some of
+them skipped it. Which ranks own which parameter is declared in
+[`ParamMeta.owners`](base.md#parammeta-ownership-and-layout).
 
 Pass each process's own `rank` on the init info. It is explicit rather than read
 from a global process group, which is ambiguous once several groups (FSDP / TP /

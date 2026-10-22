@@ -1,13 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Trainer-side weight sources for the NCCL M2N backend.
+"""Deprecated trainer-side weight sources for the NCCL M2N backend.
 
-m2n plans a transfer from both sides' layouts, so the trainer has to say how it
-holds each parameter — which the base `WeightSource` / `ParamMeta` pair does not
-express. This module supplies the m2n flavor of both, and the DTensor-backed
-implementation that covers the common trainer. Each parameter owns its source
-mesh and placements because dense and expert weights can use different
-factorizations over the same trainer ranks.
+The base `ParamMeta` now carries each parameter's owners, mesh and placements,
+and `WeightSource.iter_local()` yields local shards, so any `WeightSource` that
+implements `iter_local()` (such as `ModuleSource`) feeds m2n directly. The
+classes here remain for one deprecation cycle.
 """
 
 from collections.abc import Callable, Iterator, Sequence
@@ -16,7 +14,11 @@ from typing import Any
 
 import torch
 
-from vllm.distributed.weight_transfer.base import WeightSource
+from vllm.distributed.weight_transfer.base import (
+    ModuleSource,
+    WeightBatch,
+    WeightSource,
+)
 from vllm.distributed.weight_transfer.m2n_common import (
     REPLICATE,
     REPLICATED,
@@ -37,11 +39,17 @@ __all__ = [
 
 
 class M2NWeightSource(WeightSource):
-    """A `WeightSource` that also describes how the trainer holds its weights.
+    """Deprecated: implement `WeightSource.iter_local()` and declare layouts
+    on the base `ParamMeta` instead.
 
-    Unlike `ModuleSource`, iteration yields each rank's **local shard**, not a
-    materialized full tensor: gathering is exactly the cost m2n removes.
+    Metadata is `M2NParamMeta`, and `__iter__` yields each rank's local shard,
+    one parameter at a time; `iter_local()` adapts that.
     """
+
+    def iter_local(self) -> Iterator[WeightBatch]:
+        """Adapt `__iter__` to one-parameter batches."""
+        for name, buffer in self:
+            yield [(name, buffer)]
 
     def metadata(self) -> list[M2NParamMeta]:  # type: ignore[override]
         """Name, dtype, full shape, and source layout for each parameter."""
@@ -171,37 +179,9 @@ def placements_from_tensor(tensor: torch.Tensor) -> Placements | None:
     return (codes[0], codes[1])
 
 
-class DTensorModuleSource(M2NWeightSource):
-    """`M2NWeightSource` over `module.named_parameters()`.
-
-    Covers both the FSDP/DTensor trainer (placement read off each parameter,
-    local shard yielded via `to_local()`) and the plain replicated trainer, with
-    no special casing. Trainers with a custom producer (a Megatron export, MoE
-    re-fusing) subclass `M2NWeightSource` instead.
-    """
+class DTensorModuleSource(ModuleSource):
+    """Deprecated alias of `ModuleSource`, which now declares DTensor layouts
+    itself; `num_trainer_ranks` is ignored."""
 
     def __init__(self, module: torch.nn.Module, num_trainer_ranks: int) -> None:
-        """Wrap `module`; `num_trainer_ranks` sizes the mesh for plain tensors."""
-        self._module = module
-        self._num_trainer_ranks = num_trainer_ranks
-
-    def metadata(self) -> list[M2NParamMeta]:  # type: ignore[override]
-        """Read each global shape and source layout without gathering shards."""
-        return [
-            M2NParamMeta(
-                name,
-                p.dtype,
-                tuple(p.shape),
-                M2NLayout(
-                    mesh_from_tensor(p, self._num_trainer_ranks),
-                    placements_from_tensor(p),
-                ),
-            )
-            for name, p in self._module.named_parameters()
-        ]
-
-    def __iter__(self) -> Iterator[tuple[str, torch.Tensor]]:
-        """Yield each parameter's local shard (`to_local()`), or the tensor itself."""
-        for name, param in self._module.named_parameters():
-            to_local = getattr(param, "to_local", None)
-            yield name, (to_local() if callable(to_local) else param)
+        super().__init__(module)

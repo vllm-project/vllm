@@ -22,10 +22,13 @@ from typing import TYPE_CHECKING, Any, ClassVar, Self, cast
 import torch
 
 from vllm.distributed.weight_transfer.base import (
+    ParamMeta,
     TrainerInitInfo,
     TrainerWeightTransferEngine,
     VLLMWeightSyncClient,
     WeightSource,
+    iter_owned,
+    supports_iter_local,
 )
 from vllm.distributed.weight_transfer.m2n_common import (
     M2N_WIRE_SCHEMA_VERSION,
@@ -41,6 +44,8 @@ from vllm.distributed.weight_transfer.m2n_common import (
     create_m2n_communicator,
     expected_local_shape,
     import_m2n,
+    m2n_param_meta,
+    owned_param_meta,
     prepare_m2n_local_runtime,
     publish_destination_placements,
     resolve_layout,
@@ -50,7 +55,6 @@ from vllm.distributed.weight_transfer.m2n_common import (
     validate_local_buffer,
     validate_transfer_plan,
 )
-from vllm.distributed.weight_transfer.m2n_source import M2NWeightSource
 from vllm.distributed.weight_transfer.nccl_common import (
     decode_nccl_unique_id,
     stateless_init_metadata_group,
@@ -159,7 +163,9 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
     """Trainer-side engine: sends every rank's local shard, once per parameter.
 
     Called on every trainer rank. All ranks join the communicator and run every
-    reshard; only rank 0 touches the control plane.
+    reshard; only rank 0 touches the control plane. The source's `iter_local()`
+    supplies the shards and its metadata the layouts; every parameter must be
+    owned by all trainer ranks, in rank order.
     """
 
     init_info_cls = M2NTrainerInitInfo
@@ -168,15 +174,17 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         self,
         *,
         client: VLLMWeightSyncClient,
-        source: M2NWeightSource,
+        source: WeightSource,
         is_sender: bool,
+        rank: int = 0,
     ) -> None:
         """Hold the client and source; `trainer_init` fills in the group."""
-        super().__init__(client=client, source=source, is_sender=is_sender)
+        super().__init__(client=client, source=source, is_sender=is_sender, rank=rank)
         self.group: Any = None
         self._m2n: Any = None
         self._handle: Any = None
         self._metas: list[M2NParamMeta] = []
+        self._owned_metas: list[ParamMeta] = []
         self._wire_params: list[M2NWireParam] = []
         self._source_digest = ""
         self._dst_mesh: M2NMesh | None = None
@@ -203,10 +211,15 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         waiting, join the metadata rendezvous, and require unanimous source,
         data-plane, and runtime readiness before constructing NCCL.
         """
+        if source is None:
+            raise ValueError(
+                "nccl_m2n trainer weight transfer requires a WeightSource."
+            )
         engine = cls(
             client=client,
-            source=cast(M2NWeightSource, source),
+            source=source,
             is_sender=init_info.is_sender,
+            rank=init_info.rank,
         )
         engine._initialize(init_info, source)
         return engine
@@ -220,10 +233,10 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         self._num_trainer_ranks = init_info.num_trainer_ranks
         local_source_error: str | None = None
         try:
-            if not isinstance(source, M2NWeightSource):
+            if source is None or not supports_iter_local(source):
                 raise TypeError(
-                    "nccl_m2n needs per-parameter layouts, so its source must "
-                    f"be an M2NWeightSource; got {type(source).__name__}"
+                    "nccl_m2n sends each rank's local shard, but "
+                    f"{type(source).__name__} does not implement iter_local()"
                 )
             self._m2n = import_m2n()
             self._prepare_source_plan(source, init_info.num_trainer_ranks)
@@ -391,17 +404,14 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         return {key: value for key, value in payload.items() if value is not None}
 
     def _prepare_source_plan(
-        self, source: M2NWeightSource, num_trainer_ranks: int
+        self, source: WeightSource, num_trainer_ranks: int
     ) -> None:
         """Build and validate this rank's immutable source plan."""
-        self._metas = source.metadata()
+        self._metas = [
+            m2n_param_meta(meta, num_trainer_ranks) for meta in source.metadata()
+        ]
         names: set[str] = set()
         for meta in self._metas:
-            if not isinstance(meta, M2NParamMeta):
-                raise TypeError(
-                    "nccl_m2n source metadata must contain M2NParamMeta "
-                    f"entries, got {type(meta).__name__}"
-                )
             if meta.name in names:
                 raise ValueError(
                     "nccl_m2n source metadata contains duplicate parameter "
@@ -422,6 +432,7 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
                     f"{num_trainer_ranks} trainer ranks"
                 )
             expected_local_shape(meta)
+        self._owned_metas = [owned_param_meta(meta) for meta in self._metas]
         self._wire_params = [
             M2NWireParam(
                 name=meta.name,
@@ -537,20 +548,15 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         # visible before a provider materializes current-stream local shards.
         torch.accelerator.synchronize(device_index)
         inflight_buffers: list[Any] = []
-        sent = 0
-        for index, (name, buffer) in enumerate(self.source):
-            if index >= len(self._metas):
-                raise RuntimeError(
-                    "weight source yielded more parameters than metadata() "
-                    f"declared (first extra parameter: '{name}')"
-                )
+        shards = (
+            pair
+            for batch in iter_owned(
+                self.source, self._owned_metas, self.rank, local=True
+            )
+            for pair in batch
+        )
+        for index, buffer in shards:
             meta = self._metas[index]
-            if name != meta.name:
-                raise RuntimeError(
-                    f"weight source yielded '{name}' at position {index}, but "
-                    f"its metadata declared '{meta.name}'; the source must "
-                    "iterate in a stable order"
-                )
             validate_local_buffer(m2n, meta, buffer)
             src_mesh, src_placements = resolve_layout(
                 meta.source_layout.mesh, meta.source_layout.placements
@@ -584,14 +590,6 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
                 record_stream(stream)
             elif not isinstance(buffer, int):
                 inflight_buffers.append(buffer)
-            sent += 1
-
-        if sent != len(self._metas):
-            missing = self._metas[sent].name
-            raise RuntimeError(
-                f"weight source yielded {sent} parameters, but metadata() "
-                f"declared {len(self._metas)} (first missing: '{missing}')"
-            )
 
         # As in the other weight-transfer backends, wait before returning
         # rather than relying on same-stream ordering. The caller may then

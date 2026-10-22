@@ -20,6 +20,11 @@ import torch
 
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer import (
+    ModuleSource,
+    ParamMeta,
+    Replicate,
+    Shard,
+    WeightSource,
     WeightTransferEngineFactory,
     WeightTransferTrainerFactory,
 )
@@ -38,6 +43,7 @@ from vllm.distributed.weight_transfer.m2n_common import (
     check_source_plan_agreement,
     create_m2n_communicator,
     expected_local_shape,
+    m2n_param_meta,
     resolve_layout,
     source_plan_digest,
 )
@@ -241,6 +247,40 @@ class TestLayout:
 
 
 class TestSourceLayout:
+    def test_declared_layout_converts_to_an_m2n_layout(self):
+        """A base `ParamMeta` layout gains m2n's size-1 second axis; an
+        unowned parameter is replicated over every trainer rank."""
+        meta = ParamMeta(
+            "w", torch.float32, (4, 4), owners=(0, 1), placements=(Shard(1),)
+        )
+        assert m2n_param_meta(meta, 2).source_layout == M2NLayout(
+            M2NMesh((2, 1), 0), (1, REPLICATE)
+        )
+        plain = ParamMeta("b", torch.float32, (4,))
+        assert m2n_param_meta(plain, 2).source_layout == M2NLayout(
+            M2NMesh((2, 1), 0), REPLICATED
+        )
+
+    def test_partitioned_owners_are_rejected(self):
+        """One communicator spans every trainer rank, so a parameter owned by
+        only some of them (a pipeline stage) has no source group yet."""
+        meta = ParamMeta("w", torch.float32, (4,), owners=(1,))
+        with pytest.raises(ValueError, match=r"owned by trainer ranks \(1,\)"):
+            m2n_param_meta(meta, 2)
+
+    def test_module_source_feeds_the_trainer_plan(self):
+        """`ModuleSource` is an m2n source: its plain parameters are replicated
+        over the trainer, with no m2n-specific metadata."""
+        module = torch.nn.Module()
+        module.register_parameter("w", torch.nn.Parameter(torch.zeros(4, 4)))
+        source = ModuleSource(module)
+        engine = M2NTrainerWeightTransferEngine(
+            client=Mock(), source=source, is_sender=False
+        )
+        engine._prepare_source_plan(source, num_trainer_ranks=2)
+        (param,) = engine._wire_params
+        assert (param.src_mesh_dims, param.src_placements) == ((2, 1), REPLICATED)
+
     def test_plain_tensor_is_replicated_across_trainer_ranks(self):
         """A tensor with no DTensor metadata is the same on every trainer rank,
         so the source describes it as replicated over all of them."""
@@ -944,7 +984,7 @@ class TestTrainerSourceContract:
         )
         engine._m2n = _fake_m2n()
         engine._handle = object()
-        engine._metas = source.metadata()
+        engine._prepare_source_plan(source, num_trainer_ranks=1)
         engine._dst_mesh = M2NMesh((1, 1), 1)
         engine._dst_placements = [REPLICATED] * len(engine._metas)
         engine.group = Mock(comm=1)
@@ -1084,9 +1124,9 @@ class TestTrainerSourceContract:
     @pytest.mark.parametrize(
         ("case", "match"),
         [
-            ("missing", "first missing: 'weight'"),
-            ("extra", "first extra"),
-            ("reordered", "yielded 'other'.*declared 'weight'"),
+            ("missing", "first missing is 'weight'"),
+            ("extra", "'extra' after every name rank 0 owns"),
+            ("reordered", "yielded 'other' where rank 0 owns 'weight'"),
         ],
     )
     def test_source_cardinality_and_order(self, monkeypatch, case, match):
@@ -1102,7 +1142,7 @@ class TestTrainerSourceContract:
         monkeypatch.setattr(torch.accelerator, "synchronize", Mock())
         monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
 
-        with pytest.raises(RuntimeError, match=match):
+        with pytest.raises(ValueError, match=match):
             engine._send()
 
     @pytest.mark.parametrize(
@@ -1231,7 +1271,6 @@ def _m2n_trainer_send(
     device = _assigned_device()
 
     from vllm.distributed.weight_transfer import WeightTransferTrainerFactory
-    from vllm.distributed.weight_transfer.m2n_source import DTensorModuleSource
     from vllm.distributed.weight_transfer.m2n_trainer import M2NTrainerInitInfo
 
     class NoopClient:
@@ -1262,27 +1301,37 @@ def _m2n_trainer_send(
         column_full = row_full + 100
         row_local = row_full.chunk(2, dim=0)[trainer_rank].contiguous()
         column_local = column_full.chunk(2, dim=1)[trainer_rank].contiguous()
-        source = ManifestM2NWeightSource(
-            [
-                M2NManifestEntry(
-                    "row_sharded",
-                    torch.float32,
-                    (4, 4),
-                    M2NLayout(M2NMesh((1, 2), 0), (REPLICATE, 0)),
-                    lambda: row_local,
-                ),
-                M2NManifestEntry(
-                    "column_sharded",
-                    torch.float32,
-                    (4, 4),
-                    M2NLayout(M2NMesh((2, 1), 0), (1, REPLICATE)),
-                    lambda: column_local,
-                ),
-            ]
-        )
+
+        class MixedLayoutSource(WeightSource):
+            """Declares each layout on the base `ParamMeta`; both shards come
+            in one `iter_local` batch."""
+
+            def metadata(self):
+                return [
+                    ParamMeta(
+                        "row_sharded",
+                        torch.float32,
+                        (4, 4),
+                        owners=(0, 1),
+                        mesh_shape=(1, 2),
+                        placements=(Replicate(), Shard(0)),
+                    ),
+                    ParamMeta(
+                        "column_sharded",
+                        torch.float32,
+                        (4, 4),
+                        owners=(0, 1),
+                        placements=(Shard(1),),
+                    ),
+                ]
+
+            def iter_local(self):
+                yield [("row_sharded", row_local), ("column_sharded", column_local)]
+
+        source = MixedLayoutSource()
         dst_mesh_dims = (2, 1)
     else:
-        source = DTensorModuleSource(Tiny(), num_trainer_ranks=1)
+        source = ModuleSource(Tiny())
         dst_mesh_dims = (1, world_size - 1)
 
     engine = WeightTransferTrainerFactory.trainer_init(

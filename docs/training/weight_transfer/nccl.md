@@ -106,16 +106,14 @@ decodes with exactly the values the trainer encoded with. They are not per-round
     `packed_buffer_size_bytes * packed_num_buffers` on each side (2 GiB at the
     defaults). Lower `packed_buffer_size_bytes` if that is too much headroom.
 
-### The two `WeightSource` channels must agree
+### Metadata and `iter_full()` must agree
 
-Dense NCCL is the backend that reads *both*
-[`WeightSource`](base.md#weightsource) channels, so it is the one where a
-disagreement between them is fatal. The engine builds the per-round update info
-from `metadata()` and ships it ahead of the bytes; the worker sizes its receive
-buffers from that info, and in packed mode cuts its chunk boundaries from it. The
-bytes themselves come from iterating the source.
+Dense NCCL builds the per-round update info from
+[`metadata()`](base.md#weightsource) and ships it ahead of the bytes; the worker
+sizes its receive buffers from that info, and in packed mode cuts its chunk
+boundaries from it. The bytes themselves come from the source's `iter_full()`.
 
-If iteration disagrees with what `metadata()` declared — a reordered, omitted, or
+If `iter_full()` disagrees with what `metadata()` declared — a reordered, omitted, or
 re-dtyped parameter — the two sides split the same byte stream differently. The
 transfer then either hangs in NCCL waiting for a length that never arrives, or
 loads garbage into the model.
@@ -126,9 +124,13 @@ rather than letting it reach the wire. `ModuleSource` satisfies this by
 construction. If you write a custom source — a Megatron export, an MoE re-fusing
 pass — this is the invariant to test first.
 
-!!! note
-    IPC does not read `metadata()` at all: it derives the update info from
-    iteration as it goes, so it cannot observe a divergence.
+### One sender
+
+Each parameter is sent by its first owner, and this backend has a single
+sender, trainer rank 0. Every parameter's `owners` must therefore start at rank
+0 or be unset; a source whose pipeline stages own different parameters is
+rejected at the first `send_weights`. Other owners (FSDP peers of rank 0) only
+drive `iter_full()` to take part in the gathers.
 
 ### Metadata is sent once, then reused
 

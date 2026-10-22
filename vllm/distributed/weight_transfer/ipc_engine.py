@@ -3,6 +3,7 @@
 """IPC-based weight transfer engine using CUDA IPC for communication."""
 
 import pickle
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Self
 
@@ -20,6 +21,9 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferEngine,
     WeightTransferInitInfo,
     WeightTransferUpdateInfo,
+    iter_owned,
+    owns,
+    supports_iter_full,
 )
 
 if TYPE_CHECKING:
@@ -252,11 +256,12 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
     """Trainer-side CUDA IPC weight transfer engine.
 
     Called on every trainer rank. For multi-rank (e.g. FSDP) trainers all ranks
-    iterate the source (materializing each tensor) and contribute to the
-    IPC-handle all-gather; only the sender (rank 0) ships the merged handles to
-    the inference side. IPC transfer is straight-line (no concurrent broadcast
-    like NCCL): `update_weights` *is* the transfer, and it rides the client, so
-    it no-ops on non-senders.
+    drive the source's `iter_full()` (materializing each tensor) and contribute
+    to the IPC-handle all-gather, so every rank must own every parameter; only
+    the sender (rank 0) ships the merged handles to the inference side. IPC
+    transfer is straight-line (no concurrent broadcast like NCCL):
+    `update_weights` *is* the transfer, and it rides the client, so it no-ops
+    on non-senders.
 
     `packed` / `packed_buffer_size_bytes` come from `IPCTrainerInitInfo`; the
     sender propagates `packed` to the worker at `trainer_init`.
@@ -270,10 +275,11 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
         client: VLLMWeightSyncClient,
         source: WeightSource,
         is_sender: bool = True,
+        rank: int = 0,
         packed: bool = False,
         packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     ) -> None:
-        super().__init__(client=client, source=source, is_sender=is_sender)
+        super().__init__(client=client, source=source, is_sender=is_sender, rank=rank)
         self.packed = packed
         self.packed_buffer_size_bytes = packed_buffer_size_bytes
         self.device_index = torch.accelerator.current_device_index()
@@ -289,10 +295,16 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
     ) -> Self:
         if source is None:
             raise ValueError("IPC trainer weight transfer requires a WeightSource.")
+        if not supports_iter_full(source):
+            raise TypeError(
+                f"IPC sends full tensors, but {type(source).__name__} does not "
+                "implement iter_full()."
+            )
         engine = cls(
             client=client,
             source=source,
             is_sender=init_info.is_sender,
+            rank=init_info.rank,
             packed=init_info.packed,
             packed_buffer_size_bytes=init_info.packed_buffer_size_bytes,
         )
@@ -322,6 +334,21 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
             self._send_packed(source)
             return None
         return self._send_unpacked(source)
+
+    def _owned_pairs(self, source: WeightSource) -> Iterator[tuple[str, torch.Tensor]]:
+        """Every parameter's full tensor. Each rank serves its own colocated
+        worker, so a partitioned source, where some rank lacks a parameter,
+        cannot be sent."""
+        meta = source.metadata()
+        for m in meta:
+            if not owns(m, self.rank):
+                raise ValueError(
+                    f"rank {self.rank} does not own parameter {m.name!r}, but "
+                    "IPC needs every trainer rank to own every parameter."
+                )
+        for batch in iter_owned(source, meta, self.rank, local=False):
+            for i, tensor in batch:
+                yield meta[i].name, tensor
 
     def _all_gather_and_merge_handles(
         self,
@@ -387,7 +414,7 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
         ipc_handles: list[dict[str, tuple]] = []
         weight_refs: list[torch.Tensor] = []
 
-        for name, tensor in source:
+        for name, tensor in self._owned_pairs(source):
             # FSDP shards were gathered by the source; ensure contiguity here.
             names.append(name)
             dtype_names.append(str(tensor.dtype).split(".")[-1])
@@ -410,7 +437,7 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
     def _send_packed(self, source: WeightSource) -> None:
         """Send weights in bounded-memory chunks (packed mode)."""
         for chunk in packed_ipc_producer(
-            iterator=iter(source),
+            iterator=self._owned_pairs(source),
             gpu_uuid=self.gpu_uuid,
             post_iter_func=lambda item: item[1],
             buffer_size_bytes=self.packed_buffer_size_bytes,

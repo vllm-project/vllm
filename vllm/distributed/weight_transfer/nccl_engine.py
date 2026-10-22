@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """NCCL-based (dense) weight transfer engine."""
 
-from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, ClassVar, Self
@@ -22,6 +21,8 @@ from vllm.distributed.weight_transfer.base import (
     WeightSource,
     WeightTransferEngine,
     WeightTransferUpdateInfo,
+    iter_owned,
+    supports_iter_full,
 )
 from vllm.distributed.weight_transfer.nccl_common import (
     NCCLWeightTransferInitInfo,
@@ -251,9 +252,13 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
     update round trip: it runs the inference-side `update_weights` concurrently
     with the trainer-side broadcast (both rendezvous inside the same NCCL
     calls), then finishes the update. Non-sender trainer ranks hold no
-    communicator; they only iterate the source to stay in the trainer-side
-    collective (e.g. FSDP `full_tensor()`) and skip the client RPCs and the
-    broadcast (all guarded on `is_sender`).
+    communicator; they only drive `iter_full()` over the names they own, to stay
+    in the trainer-side gathers (e.g. FSDP `full_tensor()`), and skip the client
+    RPCs and the broadcast (all guarded on `is_sender`).
+
+    Each parameter is sent by its first owner, so every parameter's owners must
+    start at rank 0 (or be unset): a partitioned source with several senders
+    (pipeline stages) is rejected.
 
     `packed` / buffer sizes come from `NCCLTrainerInitInfo`; the sender
     propagates them to the worker at `trainer_init` (on the worker-side init
@@ -268,11 +273,12 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         client: VLLMWeightSyncClient,
         source: WeightSource,
         is_sender: bool = True,
+        rank: int = 0,
         packed: bool = True,
         packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
         packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS,
     ) -> None:
-        super().__init__(client=client, source=source, is_sender=is_sender)
+        super().__init__(client=client, source=source, is_sender=is_sender, rank=rank)
         self.packed = packed
         self.packed_buffer_size_bytes = packed_buffer_size_bytes
         self.packed_num_buffers = packed_num_buffers
@@ -290,10 +296,16 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
     ) -> Self:
         if source is None:
             raise ValueError("NCCL trainer weight transfer requires a WeightSource.")
+        if not supports_iter_full(source):
+            raise TypeError(
+                f"NCCL broadcast sends full tensors, but {type(source).__name__} "
+                "does not implement iter_full()."
+            )
         engine = cls(
             client=client,
             source=source,
             is_sender=init_info.is_sender,
+            rank=init_info.rank,
             packed=init_info.packed,
             packed_buffer_size_bytes=init_info.packed_buffer_size_bytes,
             packed_num_buffers=init_info.packed_num_buffers,
@@ -335,6 +347,14 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         # Metadata is declared without gathering. For Megatron it is itself a
         # collective, so every rank runs it; only the sender ships it.
         meta = source.metadata()
+        # Identical on every rank, so every rank raises alike.
+        for m in meta:
+            if m.owners is not None and m.owners[0] != 0:
+                raise ValueError(
+                    f"parameter {m.name!r} is sent by its first owner, rank "
+                    f"{m.owners[0]}, but NCCL broadcast has a single sender, "
+                    "rank 0. Every parameter's owners must start at rank 0."
+                )
 
         if not self.is_sender:
             # Non-sender ranks only join the trainer-side gather collective.
@@ -378,18 +398,25 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         self._post_send_sync()
 
     def _broadcast(self, source: WeightSource, meta: list[ParamMeta]) -> None:
-        """Iterate the source (materializing each tensor — a collective on all
-        ranks) and, on the sender, broadcast from rank 0, packed or one-by-one.
-        Non-sender ranks only replay the iteration to stay in the collective."""
+        """Drive `iter_full()` (gathering among each parameter's owners) and, on
+        the sender, broadcast from rank 0, packed or one-by-one. Other owners only
+        join the gathers.
+
+        The worker sizes its receive buffers, and in packed mode cuts its chunk
+        boundaries, from the update info built from `metadata()`, so
+        `iter_owned` checks every yielded tensor against it: a disagreement
+        becomes an error naming the parameter instead of a hang or garbage.
+        """
+        batches = iter_owned(source, meta, self.rank, local=False)
         if not self.is_sender:
-            for _ in source:
+            for _ in batches:
                 pass
             return
 
         assert self.model_update_group is not None, (
             "trainer_init() must be called before _broadcast()."
         )
-        pairs = self._checked_iter(source, meta)
+        pairs = ((meta[i].name, tensor) for batch in batches for i, tensor in batch)
         if self.packed:
             packed_nccl_broadcast_producer(
                 iterator=pairs,
@@ -408,49 +435,6 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
                 # enqueued. (The packed path linearizes in `pack_tensors`.)
                 send = tensor if tensor.is_contiguous() else tensor.contiguous()
                 self.model_update_group.broadcast(send, src=0, stream=stream)
-
-    @staticmethod
-    def _checked_iter(
-        source: WeightSource, meta: list[ParamMeta]
-    ) -> Iterator[tuple[str, torch.Tensor]]:
-        """Yield the source's pairs, checking each against what the worker was
-        told to expect.
-
-        The worker sizes its receive buffers — and in packed mode cuts its chunk
-        boundaries — from the update info, which is built from `metadata()`. If
-        iteration disagrees with it, the two sides split the stream differently
-        and the transfer hangs in NCCL or loads garbage. Checking here costs one
-        comparison per parameter and turns that into an error naming the first
-        divergent parameter. Sender-only: under pipeline parallelism a
-        non-sender's yielded tensor is not meaningful.
-        """
-        sent = 0
-        for name, tensor in source:
-            if sent >= len(meta):
-                raise ValueError(
-                    f"WeightSource yielded more parameters than metadata() "
-                    f"declared ({len(meta)}); first extra is {name!r}."
-                )
-            expected = meta[sent]
-            if (
-                name != expected.name
-                or tensor.dtype != expected.dtype
-                or tuple(tensor.shape) != expected.shape
-            ):
-                raise ValueError(
-                    "WeightSource metadata() disagrees with iteration at index "
-                    f"{sent}: declared {expected.name!r} "
-                    f"{expected.dtype} {tuple(expected.shape)}, got {name!r} "
-                    f"{tensor.dtype} {tuple(tensor.shape)}. Both channels must "
-                    "enumerate the same parameters in the same order."
-                )
-            sent += 1
-            yield name, tensor
-        if sent != len(meta):
-            raise ValueError(
-                f"WeightSource yielded {sent} parameters but metadata() "
-                f"declared {len(meta)}; the worker is waiting for the rest."
-            )
 
     def _post_send_sync(self) -> None:
         """Wait for this rank's transfer work to land before returning.
