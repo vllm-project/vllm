@@ -135,10 +135,13 @@ def _norm_residual_norm_kernel(
     NEXT_WEIGHT: tl.constexpr,
     SCALED: tl.constexpr,
     BLOCK: tl.constexpr,
+    PDL: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
     col = tl.arange(0, BLOCK)
     dtype = X.dtype.element_ty
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     x = tl.load(X + row * X_STRIDE + col, col < N, other=0).to(tl.float32)
     r = tl.load(R + row * R_STRIDE + col, col < N, other=0).to(dtype).to(tl.float32)
     h, y = _boundary_math(
@@ -172,6 +175,8 @@ def beam_norm_residual_norm(
     next_weight: torch.Tensor | None,
     next_eps: float | None,
     scales: tuple[float, float] | None,
+    *,
+    launch_pdl: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Fuse post-norm, scaled residual add and next pre-norm, keeping each cast."""
     assert x.ndim == residual.ndim == 2 and x.shape == residual.shape
@@ -199,7 +204,9 @@ def beam_norm_residual_norm(
             next_weight is not None,
             scales is not None,
             triton.next_power_of_2(n),
-            num_warps=4 if n <= 1024 else 8,
+            launch_pdl,
+            num_warps=4 if launch_pdl or n <= 1024 else 8,
             enable_fp_fusion=False,
+            **({"launch_pdl": True} if launch_pdl else {}),
         )
     return hidden, normalized

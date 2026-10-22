@@ -127,7 +127,7 @@ def beam_allreduce_norm_residual_norm(
     assert x.shape[1] == workspace.hidden_size
     assert x.shape[0] <= workspace.max_tokens
     if x.shape[0] >= workspace.separate_norm_min_tokens:
-        from .layernorm import beam_norm_residual_norm
+        from ..common.layernorm import beam_norm_residual_norm
 
         reduced = torch.empty_like(x)
         torch.ops._C.beam_allreduce(

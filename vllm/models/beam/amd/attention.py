@@ -21,8 +21,8 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.transformers_utils.configs.beam import BeamConfig
 from vllm.v1.attention.backend import AttentionType
 
+from ..common.layernorm import RMSNorm
 from .attention_ops import beam_output_gate, beam_qk_norm_rope
-from .layernorm import RMSNorm
 
 
 def use_merged_qkv_gate(config: BeamConfig, tp_size: int) -> bool:

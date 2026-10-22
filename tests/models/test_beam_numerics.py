@@ -441,7 +441,11 @@ def test_fused_kernels_reuse_specializations_across_token_counts(
 
     def unexpected_compile(**kwargs):
         if kwargs["fn"].module.startswith(
-            ("vllm.models.beam.amd", "vllm.models.beam.nvidia")
+            (
+                "vllm.models.beam.amd",
+                "vllm.models.beam.common",
+                "vllm.models.beam.nvidia",
+            )
         ):
             pytest.fail(f"Unexpected shape specialization: {kwargs['fn'].name}")
 

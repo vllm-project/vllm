@@ -6,14 +6,13 @@ from typing import TYPE_CHECKING
 
 from vllm.platforms import current_platform
 
+from .common import dflash2_conv_ops, dflash2_ops, layernorm
+
 if TYPE_CHECKING:
     from .nvidia import (
         activation,
         attention,
         attention_ops,
-        dflash2_conv_ops,
-        dflash2_ops,
-        layernorm,
         model,
     )
     from .nvidia.dflash2 import DFlash2BeamForCausalLM
@@ -23,9 +22,6 @@ elif current_platform.is_rocm():
         activation,
         attention,
         attention_ops,
-        dflash2_conv_ops,
-        dflash2_ops,
-        layernorm,
         model,
     )
     from .amd.dflash2 import DFlash2BeamForCausalLM
@@ -35,9 +31,6 @@ else:
         activation,
         attention,
         attention_ops,
-        dflash2_conv_ops,
-        dflash2_ops,
-        layernorm,
         model,
     )
     from .nvidia.dflash2 import DFlash2BeamForCausalLM
