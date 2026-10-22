@@ -461,7 +461,7 @@ def test_load_weights_pairs_split_fp8_qkv_proj_and_skips_absent_layers(monkeypat
     )
 
     assert loaded == {f"{present}.weight", f"{present}.weight_scale_inv"}
-    assert model._pending_fp8_qkv_proj == {}
+    assert not model.__dict__.get("_pending_weight_parts")
     expected = _owned_rows(
         truth, num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp, 0, 1
     )

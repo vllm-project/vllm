@@ -694,6 +694,8 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant)
             "embed_tokens.weight" not in autoloaded_weights
             and is_mtp_completeness_check_enabled()
         ):
+            # Re-register last so reloads write the checkpoint's own name.
+            del self.embed_tokens
             self.embed_tokens = self.language_model.model.embed_tokens
             autoloaded_weights.add("embed_tokens.weight")
         return autoloaded_weights
