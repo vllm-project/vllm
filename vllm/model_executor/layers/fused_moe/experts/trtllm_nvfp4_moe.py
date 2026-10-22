@@ -256,6 +256,53 @@ class TrtLlmNvFp4ExpertsBase:
     def expects_unquantized_inputs(self) -> bool:
         return self.per_token_activation
 
+    def _routed_moe_kwargs(
+        self,
+        hidden_states: torch.Tensor,
+        a1q_scale: torch.Tensor | None,
+        activation: MoEActivation,
+    ) -> dict:
+        assert self.quant_config.w1_scale is not None
+        assert self.quant_config.w2_scale is not None
+
+        if self.expects_unquantized_inputs:
+            hidden_states, block_scale, per_token_scale = (
+                quantize_nvfp4_per_token_input(hidden_states)
+            )
+        else:
+            assert a1q_scale is not None
+            block_scale, per_token_scale = a1q_scale, None
+        return dict(
+            routing_bias=None,
+            hidden_states=hidden_states,
+            hidden_states_scale=block_scale.view(torch.float8_e4m3fn).reshape(
+                *hidden_states.shape[:-1], -1
+            ),
+            gemm1_weights_scale=self.quant_config.w1_scale.view(torch.float8_e4m3fn),
+            gemm1_bias=None,
+            gemm1_alpha=self.gemm1_alpha,
+            gemm1_beta=self.gemm1_beta,
+            gemm1_clamp_limit=self.gemm1_clamp_limit,
+            gemm2_weights_scale=self.quant_config.w2_scale.view(torch.float8_e4m3fn),
+            gemm2_bias=None,
+            output1_scale_scalar=self.g1_scale_c,
+            output1_scale_gate_scalar=self.quant_config.g1_alphas,
+            output2_scale_scalar=self.quant_config.g2_alphas,
+            top_k=self.topk,
+            n_group=0,
+            topk_group=0,
+            intermediate_size=self.intermediate_size_per_partition,
+            local_expert_offset=self.ep_rank * self.local_num_experts,
+            local_num_experts=self.local_num_experts,
+            routed_scaling_factor=None,
+            routing_method_type=1,
+            activation_type=activation_to_flashinfer_int(activation),
+            per_token_scale=per_token_scale,
+            tune_max_num_tokens=min(
+                fi_moe_largest_bucket(self.moe_config), self._get_chunk_size()
+            ),
+        )
+
     def _get_chunk_size(self) -> int:
         MAX_GRID_Y = 65535
         MAX_TILE_TOKENS_DIM = 128
@@ -336,55 +383,14 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         """Finalize into ``output``, or stop after GEMM2 when it is None."""
         import flashinfer
 
-        assert self.quant_config.w1_scale is not None
-        assert self.quant_config.w2_scale is not None
-
-        # Per-token: input is unquantized, quantize it here. Otherwise it was
-        # already quantized in prepare() with the static global scale.
-        if self.expects_unquantized_inputs:
-            hidden_states, block_scale, per_token_scale = (
-                quantize_nvfp4_per_token_input(hidden_states)
-            )
-        else:
-            block_scale, per_token_scale = a1q_scale, None
-        output1_scale_gate_scalar = self.quant_config.g1_alphas
-
-        # Invoke kernel.
         flashinfer_output = flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe(
             topk_ids=(topk_ids, topk_weights),
-            routing_bias=None,
-            hidden_states=hidden_states,
-            hidden_states_scale=block_scale.view(torch.float8_e4m3fn).reshape(
-                *hidden_states.shape[:-1], -1
-            ),
             gemm1_weights=w1,
-            gemm1_weights_scale=self.quant_config.w1_scale.view(torch.float8_e4m3fn),
-            gemm1_bias=None,
-            gemm1_alpha=self.gemm1_alpha,
-            gemm1_beta=self.gemm1_beta,
-            gemm1_clamp_limit=self.gemm1_clamp_limit,
             gemm2_weights=w2,
-            gemm2_weights_scale=self.quant_config.w2_scale.view(torch.float8_e4m3fn),
-            gemm2_bias=None,
-            output1_scale_scalar=self.g1_scale_c,
-            output1_scale_gate_scalar=output1_scale_gate_scalar,
-            output2_scale_scalar=self.quant_config.g2_alphas,
             num_experts=global_num_experts,
-            top_k=self.topk,
-            n_group=0,
-            topk_group=0,
-            intermediate_size=self.intermediate_size_per_partition,
-            local_expert_offset=self.ep_rank * self.local_num_experts,
-            local_num_experts=self.local_num_experts,
-            routed_scaling_factor=None,
-            routing_method_type=1,  # not used
             do_finalize=output is not None,
-            activation_type=activation_to_flashinfer_int(activation),
-            per_token_scale=per_token_scale,
             output=output,
-            tune_max_num_tokens=min(
-                fi_moe_largest_bucket(self.moe_config), self._get_chunk_size()
-            ),
+            **self._routed_moe_kwargs(hidden_states, a1q_scale, activation),
         )
         if output is not None:
             return None
