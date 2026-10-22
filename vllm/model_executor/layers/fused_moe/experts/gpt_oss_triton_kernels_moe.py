@@ -478,6 +478,9 @@ def _patch_legacy_routing_for_nonpow2_topk() -> None:
 
 triton_kernels_version = get_triton_kernels_version()
 
+# tk 3.8: combine via w2 scatter + topk sum instead of index_add (RDNA only).
+_TK38_SCATTER_COMBINE = False
+
 if triton_kernels_version is not None:
     try:
         import triton_kernels.swiglu
@@ -489,7 +492,9 @@ if triton_kernels_version is not None:
             )
             from triton_kernels.tensor import make_ragged_tensor_metadata
 
-            from vllm.platforms.rocm import on_gfx950
+            from vllm.platforms.rocm import on_gfx950, on_rdna
+
+            _TK38_SCATTER_COMBINE = current_platform.is_rocm() and on_rdna()
 
             if on_gfx950():
                 # block_n=64/block_k=256 fit gfx950's 160KB LDS + the CDNA4
@@ -539,16 +544,26 @@ if triton_kernels_version is not None:
 
 
 if triton_kernels_version == "3.8":
-    # 3.8's matmul dropped matmul_ogs's in-kernel scatter+topk-reduce, so the
-    # forward combines externally via index_add; this is the ragged routing
-    # bundle the (inlined) 3.8 paths pass around, in place of matmul_ogs's.
+    # 3.8's matmul dropped matmul_ogs's in-kernel topk-reduce, so the forward
+    # combines externally; this is the ragged routing bundle the (inlined) 3.8
+    # paths pass around, in place of matmul_ogs's.
     class RoutingData:  # type: ignore[no-redef]
-        __slots__ = ("ragged", "gate_scal", "gather_tok", "n_expts_act", "n_valid")
+        __slots__ = (
+            "ragged",
+            "gate_scal",
+            "gather_tok",
+            "scatter_indx",
+            "n_expts_act",
+            "n_valid",
+        )
 
-        def __init__(self, ragged, gate_scal, gather_tok, n_expts_act, n_valid):
+        def __init__(
+            self, ragged, gate_scal, gather_tok, scatter_indx, n_expts_act, n_valid
+        ):
             self.ragged = ragged
             self.gate_scal = gate_scal
             self.gather_tok = gather_tok
+            self.scatter_indx = scatter_indx
             self.n_expts_act = n_expts_act
             self.n_valid = n_valid
 
@@ -725,8 +740,8 @@ def triton_kernel_fused_experts(
     )
 
     if triton_kernels_version == "3.8":
-        # 3.8 has no in-kernel scatter+topk-reduce, so the two matmuls are
-        # followed by an external index_add combine.
+        # 3.8 has no in-kernel topk-reduce, so the two matmuls are followed by
+        # an external combine.
         assert quant_config is not None
         M, K = hidden_states.shape[-2:]
         a_ragged = routing_data.ragged
@@ -760,13 +775,16 @@ def triton_kernel_fused_experts(
             a_ragged,
             None,
             None,
-            None,
+            routing_data.scatter_indx,
             quant_config.w2_precision,
             gammas=None if apply_router_weight_on_input else gammas,
         )
+        out = output_tensor.view(M, K)
+        if _TK38_SCATTER_COMBINE:
+            masked_moe_sum(y.view(M, topk, K), None, out)
+            return out
         acc = torch.zeros((M, K), dtype=torch.float32, device=hidden_states.device)
         acc.index_add_(0, gather_tok.to(torch.int64), y.to(torch.float32))
-        out = output_tensor.view(M, K)
         out.copy_(acc.to(out.dtype))
         return out
     assert quant_config is not None
@@ -857,7 +875,8 @@ def _tk38_routing_data(
     nrows = order.shape[0]
     ragged = make_ragged_tensor_metadata(col_sum, nrows)
     gather_tok = (order // topk).to(torch.int32)
-    routing = RoutingData(ragged, flat_w[order], gather_tok, topk, nrows)
+    scatter_indx = order.to(torch.int32) if _TK38_SCATTER_COMBINE else None
+    routing = RoutingData(ragged, flat_w[order], gather_tok, scatter_indx, topk, nrows)
     return routing, gather_tok, gather_tok
 
 
@@ -986,6 +1005,7 @@ def _masked_topk_sum_kernel(
     K,
     topk: tl.constexpr,
     BLOCK_K: tl.constexpr,
+    HAS_TOPK_IDS: tl.constexpr,
 ):
     pid_m = tl.program_id(0).to(tl.int64)
     k = tl.program_id(1) * BLOCK_K + tl.arange(0, BLOCK_K)
@@ -993,7 +1013,7 @@ def _masked_topk_sum_kernel(
     base = pid_m * topk
     acc = tl.zeros((BLOCK_K,), dtype=tl.float32)
     for j in tl.static_range(topk):
-        eid = tl.load(topk_ids_ptr + base + j)
+        eid = tl.load(topk_ids_ptr + base + j) if HAS_TOPK_IDS else 0
         # NOTE: This is NaN-safe because the invalid slots are skipped.
         if eid >= 0:
             x = tl.load(inp_ptr + (base + j) * K + k, mask=k_mask)
@@ -1003,14 +1023,20 @@ def _masked_topk_sum_kernel(
 
 def masked_moe_sum(
     intermediate: torch.Tensor,  # (M, topk, K)
-    topk_ids: torch.Tensor,  # (M, topk) int, -1 = invalid / non-local slot
+    topk_ids: torch.Tensor | None,  # (M, topk) int, -1 = invalid; None = sum all
     output: torch.Tensor,  # (M, K)
 ) -> None:
     M, topk, K = intermediate.shape
     BLOCK_K = 1024
     grid = (M, triton.cdiv(K, BLOCK_K))
     _masked_topk_sum_kernel[grid](
-        intermediate, topk_ids, output, K, topk=topk, BLOCK_K=BLOCK_K
+        intermediate,
+        topk_ids,
+        output,
+        K,
+        topk=topk,
+        BLOCK_K=BLOCK_K,
+        HAS_TOPK_IDS=topk_ids is not None,
     )
 
 
