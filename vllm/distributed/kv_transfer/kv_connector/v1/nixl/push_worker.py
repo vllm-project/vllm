@@ -693,7 +693,14 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 )
             )
 
-        notif_id = self._completion_notif(request_id, remote_request_id)
+        # The notif D receives when the WRITE completes, with the request's KV
+        # checksums if the scheduler sent any.
+        if (checksums := self._push_kv_checksums.get(request_id)) is not None:
+            notif_id = KV_CHECKSUM_NOTIF_PREFIX + msgspec.msgpack.encode(
+                (remote_request_id, self.world_size, checksums)
+            )
+        else:
+            notif_id = f"{remote_request_id}:{self.world_size}".encode()
 
         if len(local_block_ids) == 0:
             logger.warning("No blocks to push for request %s", request_id)
@@ -776,15 +783,6 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             if not self._handle_failed_transfer(request_id, handle):
                 return handle
             return None
-
-    def _completion_notif(self, request_id: str, remote_request_id: str) -> bytes:
-        """The notif D receives when a WRITE of the request completes, with
-        the request's KV checksums if the scheduler sent any."""
-        if (checksums := self._push_kv_checksums.get(request_id)) is not None:
-            return KV_CHECKSUM_NOTIF_PREFIX + msgspec.msgpack.encode(
-                (remote_request_id, self.world_size, checksums)
-            )
-        return f"{remote_request_id}:{self.world_size}".encode()
 
     # --- Notification handling on engine main thread ------------------ #
 

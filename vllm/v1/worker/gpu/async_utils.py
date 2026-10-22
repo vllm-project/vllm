@@ -282,7 +282,7 @@ class KVChecksumCopy:
             self.record = pending.enqueue_async_cpu_copy()
             self.copy_event.record(copy_stream)
 
-    def add_to(self, output: ModelRunnerOutput) -> None:
+    def add_to_output(self, output: ModelRunnerOutput) -> None:
         """Wait for the copy and add the checksums to ``output``, which must
         not be the shared empty output."""
         if output.kv_connector_output is None:
@@ -309,7 +309,7 @@ class AsyncKVChecksumOutput(AsyncModelRunnerOutput):
         else:
             # A copy, as this may be the shared empty output.
             output = copy(self.output)
-        self.kv_checksums.add_to(output)
+        self.kv_checksums.add_to_output(output)
         return output
 
 

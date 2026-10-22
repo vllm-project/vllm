@@ -1746,10 +1746,8 @@ class Scheduler(SchedulerInterface):
             if not request.is_prefill_chunk:
                 self._inflight_prefills.discard(request)
 
-        if self.kv_checksum is not None:
-            scheduler_output.kv_checksum_scheduled = (
-                self.kv_checksum.build_checksum_meta()
-            )
+        if kv_checksum is not None:
+            scheduler_output.kv_checksum_scheduled = kv_checksum.build_checksum_meta()
 
         # Clear the finished and preempted request IDs.
         # NOTE: We shouldn't just clear() here because it will also affect

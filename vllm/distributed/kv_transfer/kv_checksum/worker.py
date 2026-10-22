@@ -77,10 +77,10 @@ class _LayerView:
     """
 
     pieces: torch.Tensor
+    # ``layer * H + head`` of this rank's first head.
     first_slice: int
-    """``layer * H + head`` of this rank's first head."""
+    # The replicas and replica index of this rank's heads.
     replica_key: ReplicaKey
-    """The replicas and replica index of this rank's heads."""
 
 
 class _FusedLayers:
@@ -478,11 +478,11 @@ def _build_layer_views(
 class _GroupBatch:
     """The rows of one KV cache group to checksum in one pass."""
 
+    # ``(req_id, start_position, num_rows)`` per request, in row order.
     segments: list[tuple[str, int, int]] = field(default_factory=list)
-    """``(req_id, start_position, num_rows)`` per request, in row order."""
     block_ids: list[int] = field(default_factory=list)
+    # The request's number of tokens, per segment.
     num_tokens: list[int] = field(default_factory=list)
-    """The request's number of tokens, per segment."""
 
     def rows(self, block_size: int) -> np.ndarray:
         """The ``[block_ids, first_tokens, valid_tokens]`` of the rows."""

@@ -70,17 +70,13 @@ ReplicaKey = tuple[int, int]
 
 @dataclass
 class KVChecksumBlocks:
-    """The blocks of one request to checksum.
+    """The blocks of one request to checksum."""
 
-    Attributes:
-        num_tokens: Tokens whose KV the blocks hold; slots of the last block at
-            or past this count are not checksummed.
-        groups: Per KV cache group id, the position of the first block and the
-            ids of the blocks at consecutive positions from there.
-
-    """
-
+    # Tokens whose KV the blocks hold; slots of the last block at or past this
+    # count are not checksummed.
     num_tokens: int
+    # Per KV cache group id, the position of the first block and the ids of the
+    # blocks at consecutive positions from there.
     groups: dict[int, tuple[int, list[int]]]
 
 
@@ -88,55 +84,41 @@ class KVChecksumBlocks:
 class KVChecksumScheduled:
     """The requests to checksum, by request id, set by the scheduler each step."""
 
+    # Scheduled to be checksummed after this step's forward, when their KV is final.
     reqs_to_send: dict[str, KVChecksumBlocks] = field(default_factory=dict)
-    """Scheduled to be checksummed after this step's forward, when their KV is final."""
-
+    # Scheduled to be checksummed once the KV load started this step finishes.
     reqs_to_recv: dict[str, KVChecksumBlocks] = field(default_factory=dict)
-    """Scheduled to be checksummed once the KV load started this step finishes."""
 
 
 @dataclass
 class KVChecksumGroup:
-    """One worker's partial checksums of one request's blocks in one group.
+    """One worker's partial checksums of one request's blocks in one group."""
 
-    Attributes:
-        start: Position of the first row.
-        replica_keys: The replica key of each column.
-        values: ``(num_positions, len(replica_keys))`` uint64 partial checksums.
-
-    """
-
+    # Position of the first row.
     start: int
+    # The replica key of each column.
     replica_keys: list[ReplicaKey]
+    # ``(num_positions, len(replica_keys))`` uint64 partial checksums.
     values: np.ndarray
 
 
 @dataclass
 class KVChecksumRecord:
-    """One worker's checksums for one step.
-
-    Attributes:
-        checksums: Partial checksums per request and group. Every request the
-            worker processed this step has an entry, empty if none of its
-            groups has layers here, so the scheduler can tell which workers
-            reported it.
-        skipped_groups: Groups with layers on this worker that it cannot
-            checksum.
-        fingerprints: Per transfer group, the sum of a hash of each of this
-            worker's layers in it (name, type and dtype). Summed over PP stages it
-            identifies the group's layers.
-
-    """
+    """One worker's checksums for one step."""
 
     pp_rank: int
     tp_rank: int
+    # Partial checksums per request and group. Every request the worker
+    # processed this step has an entry, empty if none of its groups is here.
     checksums: dict[str, dict[int, KVChecksumGroup]]
+    # Groups with layers on this worker that it cannot checksum.
     skipped_groups: frozenset[int]
+    # Per transfer group, the sum of a hash (name, type, dtype) of each of this
+    # worker's layers in it. Summed over PP stages it identifies the group's layers.
     fingerprints: dict[int, int]
+    # Producer checksums of loads received in connectors' own messages, per
+    # request; reported by the first worker only, as every worker receives them.
     received: dict[str, bytes] = field(default_factory=dict)
-    """Producer checksums of loads, per request, received by connectors that
-    carry them in their own messages; reported by the first worker only (PP
-    and TP rank 0), as every worker receives them."""
 
 
 def num_valid_tokens(position: int, block_size: int, num_tokens: int) -> int:

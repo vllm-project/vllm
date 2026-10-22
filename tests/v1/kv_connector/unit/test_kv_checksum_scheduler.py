@@ -283,16 +283,16 @@ def _block_ids(output: SchedulerOutput, req_id: str, send: bool) -> tuple[int, l
 class _Transfer:
     """What a prefilled request hands its consumer."""
 
+    # The consumer request's kv_transfer_params.
     params: dict[str, Any]
-    """The consumer request's kv_transfer_params."""
+    # Checksums the producer's connector sends itself, if it does.
     sent: bytes | None
-    """Checksums the producer's connector sends itself, if it does."""
+    # The producer's blocks, by position.
     block_ids: list[int]
-    """The producer's blocks, by position."""
+    # The producer's Mamba state block, if any.
     state_block: int | None = None
-    """The producer's Mamba state block, if any."""
+    # The global states of a ``_split_mamba_spec`` layer, if any.
     split_state: tuple[torch.Tensor, torch.Tensor] | None = None
-    """The global states of a ``_split_mamba_spec`` layer, if any."""
 
 
 def _state_block(

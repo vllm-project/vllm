@@ -1079,14 +1079,14 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
 class MambaStateSplit:
     """How TP shards one Mamba state.
 
-    Along local dimension ``axis``, the state is a run of segments, each
-    ``(local_size, replicas)``: a segment of global size ``G`` is cut into
-    ``G * replicas / tp_size``-sized shards, the same shard on ``replicas``
-    consecutive ranks, and rank ``r`` holds shard ``r // replicas`` of every
-    segment.
+    A segment of global size ``G`` is cut into ``G * replicas / tp_size``-sized
+    shards, the same shard on ``replicas`` consecutive ranks, and rank ``r`` holds
+    shard ``r // replicas`` of every segment.
     """
 
+    # The local dimension the state is split along.
     axis: int
+    # The run of segments along ``axis``, each ``(local_size, replicas)``.
     segments: tuple[tuple[int, int], ...]
 
 

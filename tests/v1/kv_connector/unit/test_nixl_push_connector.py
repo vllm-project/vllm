@@ -969,10 +969,16 @@ class TestPushWriterNotifs:
     def test_completion_notif_delivers_kv_checksums(self, with_checksums):
         """P's WRITE completion notif carries the request's KV checksums when
         the scheduler sent any; D reports them with the finished load."""
-        producer = _StubWriterWorker.fresh()
+        producer, _ = TestPushPrefixCaching._worker_driving_xfer()
         if with_checksums:
             producer._push_kv_checksums["p-req"] = b"checksums"
-        notif = producer._completion_notif("p-req", "d:req")
+        NixlPushConnectorWorker._do_start_push_kv(
+            producer,
+            "p-req",
+            ([10],),
+            _registration_data("d:req", local_block_ids=([500],)),
+        )
+        notif = producer.nixl_wrapper.make_prepped_xfer.call_args.kwargs["notif_msg"]
 
         consumer = _StubWriterWorker.fresh()
         consumer._recving_metadata["d:req"] = MagicMock(pp_size=1)

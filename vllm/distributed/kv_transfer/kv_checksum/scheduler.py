@@ -60,19 +60,14 @@ _SENT_FINISH_REASONS = (FinishReason.STOP, FinishReason.LENGTH)
 
 @dataclass
 class KVChecksumPayload:
-    """A producer's checksums of one request, as sent to its consumer.
+    """A producer's checksums of one request, as sent to its consumer."""
 
-    Attributes:
-        tp_size: The producer's TP size.
-        num_tokens: Tokens whose KV the checksummed blocks hold.
-        groups: Per KV cache group id, the group's fingerprint (see
-            ``KVChecksumRecord.fingerprints``), its block size, the position
-            of the first block, and one uint64 checksum per block position.
-
-    """
-
+    # The producer's TP size.
     tp_size: int
+    # Tokens whose KV the checksummed blocks hold.
     num_tokens: int
+    # Per KV cache group id: its fingerprint (``KVChecksumRecord.fingerprints``),
+    # block size, first block position, and one uint64 checksum per position.
     groups: dict[int, tuple[int, int, int, np.ndarray]]
 
     def to_bytes(self) -> bytes:
@@ -143,16 +138,14 @@ class _Pending:
     """A request whose checksums are being collected from the workers."""
 
     blocks: KVChecksumBlocks
+    # The producer's checksums; only for a load.
     expected: KVChecksumPayload | None = None
-    """The producer's checksums; only for a load."""
+    # Why ``expected`` is None.
     missing_reason: str = "the producer sent no checksums"
-    """Why ``expected`` is None."""
-
+    # Per (pp_rank, tp_rank): its checksums of the request per group, and its record.
     reports: dict[
         tuple[int, int], tuple[dict[int, KVChecksumGroup], KVChecksumRecord]
     ] = field(default_factory=dict)
-    """Per (pp_rank, tp_rank): its checksums of the request per group, and
-    its record."""
 
     def set_expected(self, req_id: str, data: bytes) -> None:
         try:
@@ -641,9 +634,7 @@ def _non_null_run(
         offset = nulls.index(False)
     except ValueError:
         return None
-    if any(nulls[offset:]):
-        return None
-    return first + offset, block_ids[offset:]
+    return None if any(nulls[offset:]) else (first + offset, block_ids[offset:])
 
 
 def _chunk_sums(
