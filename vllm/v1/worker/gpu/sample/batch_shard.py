@@ -324,14 +324,9 @@ def _shard_grammar_output(
     bitmask = grammar_output.grammar_bitmask
     blocks = bitmask.reshape(len(grammar_req_ids), -1, bitmask.shape[-1])
     local_bitmask = blocks[keep].reshape(-1, bitmask.shape[-1])
-    # num_acceptable_drafts is ordered with structured_output_request_ids.
-    num_acceptable = grammar_output.num_acceptable_drafts
-    if num_acceptable is not None:
-        num_acceptable = [num_acceptable[i] for i in keep]
     return GrammarOutput(
         structured_output_request_ids=local_ids,
         grammar_bitmask=local_bitmask,
-        num_acceptable_drafts=num_acceptable,
     )
 
 

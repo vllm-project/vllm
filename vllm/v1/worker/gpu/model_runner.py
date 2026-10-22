@@ -175,10 +175,7 @@ from vllm.v1.worker.gpu.spec_decode.utils import (
     get_drafter_hidden_states,
 )
 from vllm.v1.worker.gpu.states import RequestState
-from vllm.v1.worker.gpu.structured_outputs import (
-    StructuredOutputsWorker,
-    grammar_invalid_drafts,
-)
+from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
 from vllm.v1.worker.gpu.ubatch_utils import (
     UBatchRunner,
     UBatchState,
@@ -1637,7 +1634,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             sample_hidden_states = hidden_states[input_batch.logits_indices]
             logits = self.model.compute_logits(sample_hidden_states)
 
-        invalid_drafts = None
         # A diffusion prefill has no logit rows even when a bitmask row
         # arrived for it.
         if grammar_output is not None and logits.shape[0] > 0:
@@ -1648,11 +1644,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch,
                 grammar_output.structured_output_request_ids,
                 grammar_output.grammar_bitmask,
-            )
-            invalid_drafts = grammar_invalid_drafts(
-                input_batch,
-                grammar_output.structured_output_request_ids,
-                grammar_output.num_acceptable_drafts,
             )
 
         sampler_output: SamplerOutput | None
@@ -1672,7 +1663,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch,
                 # Draft logits are needed for probabilistic rejection sampling.
                 self.speculator.draft_logits,
-                invalid_drafts,
             )
 
         if shard_metadata is not None:
