@@ -1028,7 +1028,7 @@ class Step5Attention(nn.Module):
                 Step5DSAAttentionBackend.supports_compute_capability(capability)
             ):
                 raise NotImplementedError(
-                    f"Step5 DSA requires SM90 or SM103; got {capability}."
+                    f"Step5 DSA requires SM90, SM100 or SM103; got {capability}."
                 )
             if self.head_dim not in (128, 192):
                 raise ValueError(
