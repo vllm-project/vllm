@@ -51,16 +51,10 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.v1.attention.backends.flashinfer import (
-    FlashInferImpl,
-    FlashInferMetadata,
-    FlashInferTrtllmAPIDecode,
-)
 
 from .configs import FlintConfig
 from .gguf_nvfp4 import find_gguf_file, gguf_nvfp4_weights_iterator
 from .ops import linear as flint_linear
-from .ops.decode_attention import flint_decode_attention
 from .ops.moe import (
     BF16_DECODE_MAX_TOKENS,
     LL_MOE_MAX_TOKENS,
@@ -312,9 +306,18 @@ class FlintAttention(nn.Module):
             sinks=self.softmax_offset,
         )
         # The fused kernel writes the KV cache itself (in the FlashInfer layout)
-        # and then calls the attention backend directly.
+        # and then calls the attention backend directly. Imported here so the
+        # module imports on platforms without FlashInfer.
+        from vllm.v1.attention.backends.flashinfer import (
+            FlashInferImpl,
+            FlashInferMetadata,
+            FlashInferTrtllmAPIDecode,
+        )
+
         impl = self.attn.impl
         assert isinstance(impl, FlashInferImpl), "Flint requires FlashInfer attention"
+        self._metadata_cls = FlashInferMetadata
+        self._decode_cls = FlashInferTrtllmAPIDecode
         assert get_current_vllm_config().model_config.dtype == torch.bfloat16
         assert self.attn.kv_cache_dtype in ("auto", "bfloat16")
         assert impl.kv_sharing_target_layer_name is None
@@ -326,6 +329,9 @@ class FlintAttention(nn.Module):
         self.max_decode_batch = 64 if is_sliding else 8
         if self.flint_decode:
             assert not config.attention_bias
+            from .ops.decode_attention import flint_decode_attention
+
+            self._decode_attention = flint_decode_attention
 
     def forward(
         self, positions: torch.Tensor, hidden_states: torch.Tensor
@@ -395,14 +401,14 @@ class FlintAttention(nn.Module):
             else forward_metadata
         )
         if (
-            not isinstance(attn_metadata, FlashInferMetadata)  # profiling run
+            not isinstance(attn_metadata, self._metadata_cls)  # profiling run
             or attn_metadata.num_prefills != 0
             or not 0 < attn_metadata.num_decodes <= self.max_decode_batch
             or attn_metadata.num_decode_tokens != attn_metadata.num_decodes
         ):
             return None
         decode = attn_metadata.decode
-        assert isinstance(decode, FlashInferTrtllmAPIDecode)
+        assert isinstance(decode, self._decode_cls)
         assert decode.q_len_per_req == 1 and decode.dcp_query_start_loc is None
         left = self.impl.window_left
         window = left + 1 if left >= 0 else None
@@ -412,7 +418,7 @@ class FlintAttention(nn.Module):
         self, q: torch.Tensor, out: torch.Tensor, decode, n: int, window: int | None
     ) -> None:
         shape = (-1, self.num_heads, self.head_dim)
-        flint_decode_attention(
+        self._decode_attention(
             q.view(shape)[:n],
             self.attn.kv_cache,
             decode.block_tables,
