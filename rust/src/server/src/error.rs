@@ -113,10 +113,13 @@ pub fn chat_submit_error(context: &'static str, error: vllm_chat::Error) -> ApiE
     server_error!("{}: {}", context, error.to_report_string())
 }
 
-/// Classify an engine-reported request failure: a retryable error (e.g. a
-/// paused engine's rejection) maps to HTTP 503, anything else to a 500.
+/// Classify an engine-reported request failure: a validation error (e.g. a
+/// constraint the structured-output backend cannot compile) maps to HTTP 400,
+/// a retryable error (e.g. a paused engine's rejection) to 503, anything else
+/// to a 500.
 pub fn engine_error(error: Option<&RequestError>) -> ApiError {
     match error {
+        Some(error) if error.is_validation_error() => invalid_request!("{}", error.message),
         Some(error) if error.retryable => ApiError::ServiceUnavailable {
             message: error.message.clone(),
         },
