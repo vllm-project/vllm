@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import gc
 import importlib.util
 import sys
 import threading
 import time
+import weakref
 from concurrent.futures import Future
 from dataclasses import replace
 from types import SimpleNamespace
@@ -709,7 +711,10 @@ def test_embedded_scheduler_clear_removes_published_objects():
     scheduler.close()
 
 
-def test_mori_worker_reports_published_key_eviction(tmp_path):
+def test_mori_publication_does_not_retain_historical_keys(tmp_path):
+    class _Key(str):
+        pass
+
     class _Client:
         def flush(self):
             return True
@@ -728,14 +733,19 @@ def test_mori_worker_reports_published_key_eviction(tmp_path):
         1,
         1,
     )
-    plan = BlockTransferPlan("evicted-key", 0)
-    job = TransferJobState((plan,))
-    job.start()
-    job.complete()
-    handle.publish(job)
+    references = []
+    for index in range(1000):
+        key = _Key(f"evicted-{index}")
+        references.append(weakref.ref(key))
+        job = TransferJobState((BlockTransferPlan(key, 0),))
+        job.start()
+        job.complete()
+        handle.publish(job)
+    del key, job
+    gc.collect()
 
-    assert handle.batch_exists(["evicted-key"]) == [False]
-    assert handle.take_evicted_keys() == ("evicted-key",)
+    assert all(reference() is None for reference in references)
+    assert handle.batch_exists(["evicted-0"]) == [False]
     assert handle.take_evicted_keys() == ()
     handle.close()
 
