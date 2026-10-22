@@ -2372,6 +2372,27 @@ class DPEngineCoreProc(EngineCoreProc):
                     (-1, EngineCoreOutputs(start_wave=self.current_wave))
                 )
 
+    def profile(
+        self,
+        is_start: bool = True,
+        profile_prefix: str | None = None,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
+    ):
+        super().profile(is_start, profile_prefix, delay_iterations, max_iterations)
+        if (
+            envs.VLLM_ENABLE_MULTINODE_PROFILING
+            and self.has_coordinator
+            and not self.engines_running
+            and not self.ignore_start_dp_wave
+        ):
+            # A profiler command needs one coordinated dummy step even when
+            # there are no requests left to keep the DP wave running.
+            self.engines_running = True
+            self.output_queue.put_nowait(
+                (-1, EngineCoreOutputs(start_wave=self.current_wave))
+            )
+
     def resume_scheduler(self):
         if self.pending_pause or (self.engines_running and self.ignore_start_dp_wave):
             raise RuntimeError(
