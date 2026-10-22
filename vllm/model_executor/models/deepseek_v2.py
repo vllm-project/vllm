@@ -133,11 +133,6 @@ from .utils import (
     maybe_prefix,
 )
 
-if typing.TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
-        MegaMoEWeightFormat,
-    )
-
 logger = init_logger(__name__)
 
 
@@ -440,12 +435,8 @@ class DeepseekV2MoE(nn.Module):
         quant_config: QuantizationConfig | None,
         prefix: str,
     ) -> None:
-        """DeepGEMM MegaMoE for the routed experts: one kernel dispatches
-        across the EP group, runs the expert GEMMs and combines.
-
-        Block-FP8 experts are requantized to MXFP8 (FP8xFP8); ModelOpt NVFP4
-        experts load straight into the NVFP4 kernel layout and unquantized
-        experts (e.g. a BF16 MTP layer) run the BF16 kernel.
+        """DeepGEMM FP8xFP8 MegaMoE for the routed experts: one kernel
+        dispatches across the EP group, runs the expert GEMMs and combines.
 
         Routing (``scoring_func`` + ``e_score_correction_bias``, renormalized,
         times ``routed_scaling_factor``) runs before the kernel; the shared
@@ -453,7 +444,6 @@ class DeepseekV2MoE(nn.Module):
         parallelism: every EP rank calls the kernel once per layer per step.
         """
         from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
-            DeepGemmMegaMoEExperts,
             MegaMoEActivation,
         )
         from vllm.models.glm5next.nvidia.mega_moe import Glm5NextMegaMoEExperts
@@ -477,12 +467,11 @@ class DeepseekV2MoE(nn.Module):
             getattr(config, "topk_group", 1) or 1
         ) > 1:
             raise NotImplementedError("DeepGEMM MegaMoE requires one expert group.")
-        weight_format = self._mega_moe_weight_format(quant_config, prefix)
         weight_block_size = getattr(quant_config, "weight_block_size", None)
-        if weight_format is None and weight_block_size is None:
+        if weight_block_size is None:
             raise NotImplementedError(
-                "DeepGEMM MegaMoE requires block-FP8, ModelOpt NVFP4 or "
-                f"unquantized routed experts; {prefix}.experts is none of these."
+                "DeepGEMM MegaMoE requires a block-FP8 checkpoint "
+                "(quantization_config.weight_block_size)."
             )
         if self.gate.e_score_correction_bias is None:
             raise NotImplementedError(
@@ -497,23 +486,6 @@ class DeepseekV2MoE(nn.Module):
         self.mega_renormalize = config.norm_topk_prob
         self.mega_scoring_func = getattr(config, "scoring_func", "softmax")
         ep_rank = get_ep_group().rank_in_group
-        if weight_format is not None:
-            self.experts = DeepGemmMegaMoEExperts(
-                vllm_config,
-                num_experts=self.n_physical_experts,
-                num_local_experts=self.n_local_physical_experts,
-                experts_start_idx=ep_rank * self.n_local_physical_experts,
-                num_logical_experts=self.n_logical_experts,
-                top_k=self.mega_top_k,
-                hidden_size=config.hidden_size,
-                intermediate_size=config.moe_intermediate_size,
-                activation=MegaMoEActivation("swiglu"),
-                weight_format=weight_format,
-                shared_experts=None,
-                prefix=f"{prefix}.experts",
-            )
-            return
-        assert weight_block_size is not None
         self.experts = Glm5NextMegaMoEExperts(
             vllm_config,
             num_experts=self.n_physical_experts,
@@ -529,33 +501,8 @@ class DeepseekV2MoE(nn.Module):
             prefix=f"{prefix}.experts",
         )
 
-    @staticmethod
-    def _mega_moe_weight_format(
-        quant_config: QuantizationConfig | None, prefix: str
-    ) -> "MegaMoEWeightFormat | None":
-        """MegaMoE format loaded as is, or None for block-FP8 experts, which
-        are requantized after loading."""
-        from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
-            MEGA_MOE_BF16,
-            MEGA_MOE_NVFP4,
-        )
-
-        if quant_config is None:
-            return MEGA_MOE_BF16
-        name = quant_config.get_name()
-        if name == "modelopt_fp4":
-            return MEGA_MOE_NVFP4
-        resolve_quant_algo = getattr(quant_config, "_resolve_quant_algo", None)
-        if name == "modelopt_mixed" and resolve_quant_algo is not None:
-            algo = resolve_quant_algo(f"{prefix}.experts")
-            if algo == "NVFP4":
-                return MEGA_MOE_NVFP4
-            if algo is None:
-                return MEGA_MOE_BF16
-        return None
-
     def finalize_mega_moe_weights(self) -> None:
-        if self.use_mega_moe and hasattr(self.experts, "requantize_block_fp8"):
+        if self.use_mega_moe:
             self.experts.requantize_block_fp8()
 
     def _forward_mega_moe(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -1943,12 +1890,6 @@ class DeepseekV2Model(nn.Module):
                         name_mapped = chunk_name.replace(weight_name, param_name)
 
                         if is_pp_missing_parameter(name_mapped, self):
-                            continue
-                        if name_mapped not in params_dict and name_mapped.endswith(
-                            "w13_input_scale"
-                        ):
-                            # MegaMoE NVFP4 quantizes the dispatch per token
-                            # and keeps no w1/w3 input scale.
                             continue
 
                         param = params_dict[name_mapped]

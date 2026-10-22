@@ -388,7 +388,6 @@ steps:
   - tests/model_executor/layers/test_activation.py
   - tests/models/test_language_model_cache_is_weak.py
   - tests/models/deepseek_v32/test_sequence_parallel.py
-  - tests/models/deepseek_v32/test_mega_moe_wiring.py
   - tests/models/test_deepseek_v4_fi_moe_ep.py
   - tests/models/test_dspark_mla.py
   - tests/models/transformers/test_layer_registry.py
@@ -406,7 +405,6 @@ steps:
       model_executor/layers/test_activation.py
       models/test_language_model_cache_is_weak.py
       models/deepseek_v32/test_sequence_parallel.py
-      models/deepseek_v32/test_mega_moe_wiring.py
       models/test_deepseek_v4_fi_moe_ep.py
       models/test_dspark_mla.py
       models/transformers/test_layer_registry.py
