@@ -152,13 +152,15 @@ def test_streaming_parses_once_per_completed_invoke(monkeypatch):
         "</atem:invoke>\n</atem:function_calls>"
     )
 
-    real = MuseToolParser._parse_tool_calls.__func__
+    # Bound before patching, so `real` keeps the original implementation and
+    # already carries `cls`; the wrapper drops the one it is handed.
+    real = MuseToolParser._parse_tool_calls
     parses = 0
 
     def counting(cls, *args, **kwargs):
         nonlocal parses
         parses += 1
-        return real(cls, *args, **kwargs)
+        return real(*args, **kwargs)
 
     monkeypatch.setattr(MuseToolParser, "_parse_tool_calls", classmethod(counting))
 
