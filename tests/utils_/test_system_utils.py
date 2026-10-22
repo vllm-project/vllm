@@ -12,9 +12,11 @@ from pathlib import Path
 
 import psutil
 
+import vllm.envs as envs
 from vllm.utils import system_utils
 from vllm.utils.system_utils import (
     _maybe_force_spawn,
+    claim_triton_cache_dir,
     suppress_stdout,
     unique_filepath,
 )
@@ -78,6 +80,30 @@ def test_kill_process_tree_skips_child_that_exits_mid_walk(monkeypatch):
         for p in procs:
             p.kill()
             p.wait()
+
+
+def test_claim_triton_cache_dir_defaults_under_vllm_cache_root(monkeypatch, tmp_path):
+    monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path))
+    # setenv "" rather than delenv: the function writes os.environ directly,
+    # and delenv records nothing to restore for an absent variable.
+    monkeypatch.setenv("TRITON_CACHE_DIR", "")
+    envs.disable_envs_cache()
+
+    claim_triton_cache_dir()
+
+    expected = tmp_path / "triton_cache"
+    assert os.environ["TRITON_CACHE_DIR"] == str(expected)
+    assert expected.is_dir()
+
+
+def test_claim_triton_cache_dir_honours_caller(monkeypatch, tmp_path):
+    monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path))
+    monkeypatch.setenv("TRITON_CACHE_DIR", str(tmp_path / "mine"))
+    envs.disable_envs_cache()
+
+    claim_triton_cache_dir()
+
+    assert os.environ["TRITON_CACHE_DIR"] == str(tmp_path / "mine")
 
 
 def test_forked_child_can_use_openmp_after_parent_did():

@@ -419,12 +419,13 @@ vLLM assumes that its cache directories are **private and trusted**. Cache conte
 
 ### Cache Directory Configuration
 
-Most cache paths default to subdirectories under a single root. Changing `VLLM_CACHE_ROOT` changes the default location for all features that inherit from it. When `torch.compile` caching is enabled (the default), vLLM also redirects `TRITON_CACHE_DIR` into this tree. If compile caching is disabled, Triton falls back to its own default location (`~/.triton/cache`).
+Most cache paths default to subdirectories under a single root. Changing `VLLM_CACHE_ROOT` changes the default location for all features that inherit from it. vLLM also points `TRITON_CACHE_DIR` into this tree unless it is already set.
 
 | Environment Variable | Default | Description |
 | --- | --- | --- |
 | `VLLM_CACHE_ROOT` | `~/.cache/vllm` | Base directory for vLLM-owned caches. Respects `XDG_CACHE_HOME` if set. |
 | *(torch.compile)* | `$VLLM_CACHE_ROOT/torch_compile_cache/` | Compilation cache for AOT-compiled models, Inductor graphs, and Triton kernels. Controlled by `VLLM_DISABLE_COMPILE_CACHE` (set to `1` to disable). |
+| `TRITON_CACHE_DIR` | `$VLLM_CACHE_ROOT/triton_cache/` | Triton's JIT kernel cache. Set by vLLM when unset; an explicit value is preserved. |
 | `VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR` | Managed: `~/.cache/flashinfer/autotune/`; legacy: `$VLLM_CACHE_ROOT/flashinfer_autotune_cache/<flashinfer-version>/<arch>/<cache-hash>/` | Overrides cache placement for both FlashInfer autotune cache APIs. |
 | `VLLM_ASSETS_CACHE` | `$VLLM_CACHE_ROOT/assets/` | Downloaded assets (e.g., tokenizer files). |
 | `VLLM_XLA_CACHE_PATH` | `$VLLM_CACHE_ROOT/xla_cache/` | XLA/TPU compilation cache. |

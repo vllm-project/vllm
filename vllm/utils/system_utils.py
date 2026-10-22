@@ -41,6 +41,25 @@ def update_environment_variables(envs_dict: dict[str, str]):
         os.environ[k] = v
 
 
+def claim_triton_cache_dir() -> None:
+    """Point Triton at a vLLM-owned cache directory for this process.
+
+    Triton is steerable only through ``TRITON_CACHE_DIR``. torch exports it as a
+    side effect of constructing an Inductor autotuner, which an AOT compile
+    cache hit skips, so vLLM's own ``@triton.jit`` kernels rebuild into
+    ``~/.triton`` on every start. Claiming it before anything compiles also
+    means a value present here is one the caller chose.
+    """
+    if os.environ.get("TRITON_CACHE_DIR"):
+        return
+    # Outside the per-model compile cache: these kernels are not
+    # model-specific, and the AOT artifact already carries Inductor's.
+    triton_cache = os.path.join(envs.VLLM_CACHE_ROOT, "triton_cache")
+    os.makedirs(triton_cache, exist_ok=True)
+    os.environ["TRITON_CACHE_DIR"] = triton_cache
+    logger.debug("Using Triton cache directory: %s", triton_cache)
+
+
 @contextlib.contextmanager
 def set_env_var(key: str, value: str) -> Iterator[None]:
     """Temporarily set an environment variable."""
