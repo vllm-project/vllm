@@ -78,3 +78,25 @@ steps:
   commands:
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
   - pytest -v -s distributed/test_elastic_ep.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) Elastic EP Scaling"
+      dind: false
+      device: mi355_4
+      timeout_in_minutes: 60
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/distributed/
+      - "!vllm/distributed/kv_transfer/"
+      - vllm/engine/
+      - vllm/v1/executor/
+      - vllm/compilation/
+      - tests/distributed/
+      - vllm/platforms/rocm.py
+      - requirements/kv_connectors_rocm.txt
+      commands:
+      - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+      # Thread timeout so a hung scale cycle prints a Python stack rather than
+      # being killed by the agent with nothing in the log.
+      - pytest -v -s --timeout=1800 --timeout-method=thread distributed/test_elastic_ep.py
