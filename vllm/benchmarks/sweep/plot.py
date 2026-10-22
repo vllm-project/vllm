@@ -10,6 +10,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import TYPE_CHECKING, ClassVar, Self
 
+import regex as re
 from typing_extensions import override
 
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -29,18 +30,15 @@ class PlotFilterBase(ABC):
 
     @classmethod
     def parse_str(cls, s: str):
-        for op_key in PLOT_FILTERS:
-            if op_key in s:
-                key, value = s.split(op_key)
-                return PLOT_FILTERS[op_key](
-                    key,
-                    value.removeprefix(op_key).strip("'").strip('"'),
-                )
-        else:
-            raise ValueError(
-                f"Invalid operator for plot filter '{s}'. "
-                f"Valid operators are: {sorted(PLOT_FILTERS)}",
-            )
+        parts = re.split(r"(==|!=|<=|>=|<|>)", s, maxsplit=1)
+        if len(parts) == 3:
+            key, op_key, value = parts
+            return PLOT_FILTERS[op_key](key, value.strip("'").strip('"'))
+
+        raise ValueError(
+            f"Invalid operator for plot filter '{s}'. "
+            f"Valid operators are: {sorted(PLOT_FILTERS)}",
+        )
 
     @abstractmethod
     def apply(self, df: "pd.DataFrame") -> "pd.DataFrame":
