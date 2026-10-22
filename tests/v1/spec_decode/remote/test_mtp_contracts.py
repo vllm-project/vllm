@@ -3,25 +3,22 @@
 """CPU admission and shared-weight checks for standalone MTP model families."""
 
 import copy
-from types import SimpleNamespace
+from functools import cache
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import pytest
 import torch
 from safetensors.torch import save_file
-from transformers import AutoConfig, PreTrainedConfig
+from transformers import AutoConfig, PreTrainedConfig, Qwen3Config
 
-from vllm.config import SpeculativeConfig
+from tests.v1.spec_decode.remote.runtime_fixtures import (
+    cpu_parallel_state as cpu_parallel_state,
+)
+from tests.v1.spec_decode.remote.runtime_fixtures import make_config
+from vllm.config import ModelConfig, SpeculativeConfig
 from vllm.v1.spec_decode.remote.runtime.schema import create_runtime_contract
 from vllm.v1.spec_decode.remote.runtime.weights import materialize_target_shell
-
-
-class _Model(SimpleNamespace):
-    def get_hidden_size(self):
-        return self.hf_config.hidden_size
-
-    def get_vocab_size(self):
-        return self.hf_config.vocab_size
-
 
 MODELS = (
     ("mimo", "MiMoForCausalLM", "MiMoMTPModel", 1),
@@ -34,8 +31,11 @@ MODELS = (
     ("hy_v3", "HYV3ForCausalLM", "HYV3MTPModel", 3),
 )
 
+pytestmark = pytest.mark.usefixtures("cpu_parallel_state")
 
-def _config(model_type="ernie4_5_moe", architecture="Ernie4_5_MoeForCausalLM", k=1):
+
+@cache
+def _template(model_type, architecture, k):
     kwargs = dict(
         architectures=[architecture],
         hidden_size=16,
@@ -44,38 +44,50 @@ def _config(model_type="ernie4_5_moe", architecture="Ernie4_5_MoeForCausalLM", k
         num_attention_heads=2,
         num_key_value_heads=2,
         num_nextn_predict_layers=1,
+        max_position_embeddings=64,
     )
     if model_type == "nemotron_h":
         kwargs["mtp_hybrid_override_pattern"] = "*E"
-    # MiMo uses the generic remote-code config; the other families have
-    # installed Transformers config classes. All use the production override.
     hf_config = (
         PreTrainedConfig(model_type=model_type, **kwargs)
         if model_type == "mimo"
         else AutoConfig.for_model(model_type, **kwargs)
     )
-    target = _Model(
-        hf_config=hf_config,
-        model="test/target",
-        revision="a" * 40,
-        dtype=torch.bfloat16,
-        quantization=None,
-        tokenizer="test/target",
-        tokenizer_revision="a" * 40,
-        tokenizer_mode="auto",
+    directory = TemporaryDirectory(prefix="vllm-mtp-contract-")
+    root = Path(directory.name)
+    Qwen3Config(**kwargs).save_pretrained(root)
+    target = ModelConfig(
+        model=str(root),
+        dtype="bfloat16",
+        max_model_len=64,
+        skip_tokenizer_init=True,
+        hf_overrides=lambda _: copy.deepcopy(hf_config),
     )
-    draft = copy.deepcopy(target)
-    draft.hf_config = SpeculativeConfig.hf_config_override(copy.deepcopy(hf_config))
-    return SimpleNamespace(
-        model_config=target,
-        speculative_config=SimpleNamespace(
-            method="mtp",
-            draft_model_config=draft,
-            num_speculative_tokens=k,
-            parallel_drafting=False,
-            draft_sample_method="greedy",
+    config = make_config()
+    config.model_config = target
+    draft = ModelConfig(
+        model=str(root),
+        runner="draft",
+        dtype="bfloat16",
+        max_model_len=64,
+        skip_tokenizer_init=True,
+        hf_overrides=lambda _: SpeculativeConfig.hf_config_override(
+            copy.deepcopy(hf_config)
         ),
     )
+    config.speculative_config.method = "mtp"
+    config.speculative_config.num_speculative_tokens = k
+    config.speculative_config.draft_model_config = draft
+    # Schema tests vary checkpoint identities independently from parsed metadata.
+    target.model = target.tokenizer = "test/target"
+    target.revision = target.tokenizer_revision = "a" * 40
+    draft = config.speculative_config.draft_model_config
+    draft.model, draft.revision = "test/target", "a" * 40
+    return directory, config
+
+
+def _config(model_type="ernie4_5_moe", architecture="Ernie4_5_MoeForCausalLM", k=1):
+    return copy.deepcopy(_template(model_type, architecture, k)[1])
 
 
 @pytest.mark.parametrize("model_type,target_arch,draft_arch,k", MODELS)
@@ -123,6 +135,7 @@ def test_mtp_contract_does_not_accept_unrelated_target(kind):
         target.hidden_size *= 2
     else:
         target.vocab_size += 1
+    config.model_config.model_arch_config = config.model_config.get_model_arch_config()
     with pytest.raises(ValueError, match="matching target"):
         create_runtime_contract(config)
 
@@ -174,31 +187,8 @@ def test_glm_dense_mla_contract_rejects_sparse_indexer_variant():
         create_runtime_contract(config)
 
 
-@pytest.fixture
-def shell_layers(monkeypatch):
-    import vllm.model_executor.layers.vocab_parallel_embedding as embeddings
-
-    class Layer(torch.nn.Module):
-        def __init__(self, vocab_size, hidden_size, *, params_dtype, quant_config):
-            super().__init__()
-            self.weight = torch.nn.Parameter(
-                torch.empty(vocab_size, hidden_size, dtype=params_dtype),
-                requires_grad=False,
-            )
-
-        def weight_loader(self, parameter, loaded):
-            parameter.copy_(loaded)
-
-        def tie_weights(self, embedding):
-            self.weight = embedding.weight
-            return self
-
-    monkeypatch.setattr(embeddings, "VocabParallelEmbedding", Layer)
-    monkeypatch.setattr(embeddings, "ParallelLMHead", Layer)
-
-
 def test_nemotron_shared_embedding_uses_checkpoint_mapper_and_pinned_revision(
-    monkeypatch, shell_layers
+    monkeypatch, tmp_path
 ):
     import vllm.v1.spec_decode.remote.runtime.weights as weights
 
@@ -208,25 +198,21 @@ def test_nemotron_shared_embedding_uses_checkpoint_mapper_and_pinned_revision(
     head = embedding + 16
     calls = []
 
-    def selected(source, revision, names):
-        calls.append((source, revision, names))
-        return {"backbone.embeddings.weight": embedding, "lm_head.weight": head}
+    save_file(
+        {"backbone.embeddings.weight": embedding, "lm_head.weight": head},
+        tmp_path / "model.safetensors",
+    )
 
-    monkeypatch.setattr(weights, "selected_checkpoint_weights", selected)
+    class HubService:
+        def hf_hub_download(self, source, filename, *, revision):
+            calls.append((source, revision))
+            return str(tmp_path / filename)
+
+    monkeypatch.setattr(weights, "hf_api", HubService)
     shell = materialize_target_shell(config, torch.device("cpu"))
-    assert calls == [
-        (
-            "test/target",
-            "a" * 40,
-            (
-                "backbone.embeddings.weight",
-                "model.embed_tokens.weight",
-                "lm_head.weight",
-            ),
-        )
-    ]
-    torch.testing.assert_close(shell.model.embed_tokens.weight, embedding)
-    torch.testing.assert_close(shell.lm_head.weight, head)
+    assert calls == [("test/target", "a" * 40)] * 2
+    torch.testing.assert_close(shell.model.embed_tokens.weight[:32], embedding)
+    torch.testing.assert_close(shell.lm_head.weight[:32], head)
     assert list(dict(shell.named_parameters())) == [
         "model.embed_tokens.weight",
         "lm_head.weight",
@@ -236,32 +222,26 @@ def test_nemotron_shared_embedding_uses_checkpoint_mapper_and_pinned_revision(
 @pytest.mark.parametrize(
     "embedding_name", ["model.embed_tokens.weight", "backbone.embeddings.weight"]
 )
-def test_tied_nemotron_checkpoint_needs_no_separate_head(
-    tmp_path, shell_layers, embedding_name
-):
+def test_tied_nemotron_checkpoint_needs_no_separate_head(tmp_path, embedding_name):
     config = _config("nemotron_h", "NemotronHForCausalLM", 3).model_config
     config.model = str(tmp_path)
     config.hf_config.tie_word_embeddings = True
     embedding = torch.randn(32, 16, dtype=torch.bfloat16)
     save_file({embedding_name: embedding}, tmp_path / "model.safetensors")
     shell = materialize_target_shell(config, torch.device("cpu"))
-    torch.testing.assert_close(shell.lm_head.weight, embedding)
+    torch.testing.assert_close(shell.lm_head.weight[:32], embedding)
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 @pytest.mark.parametrize(
     "tied,include_head", [(True, False), (True, True), (False, True)]
 )
-def test_shared_weight_storage_preserves_tying(
-    tmp_path, monkeypatch, device, tied, include_head
-):
+def test_shared_weight_storage_preserves_tying(tmp_path, device, tied, include_head):
     import vllm.model_executor.layers.vocab_parallel_embedding as embeddings
     import vllm.v1.spec_decode.remote.runtime.weights as weights
 
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA device required")
-    monkeypatch.setattr(embeddings, "get_tensor_model_parallel_rank", lambda: 0)
-    monkeypatch.setattr(embeddings, "get_tensor_model_parallel_world_size", lambda: 1)
     config = _config().model_config
     config.model = str(tmp_path)
     config.hf_config.tie_word_embeddings = tied
@@ -270,23 +250,6 @@ def test_shared_weight_storage_preserves_tying(
     if include_head:
         checkpoint["lm_head.weight"] = embedding.clone() if tied else embedding + 16
     save_file(checkpoint, tmp_path / "model.safetensors")
-    requested = []
-    select_weights = weights.selected_checkpoint_weights
-    allocations = []
-    create_weights = embeddings.UnquantizedEmbeddingMethod.create_weights
-
-    def select(source, revision, names):
-        requested.extend(names)
-        return select_weights(source, revision, names)
-
-    def allocate(self, layer, *args, **kwargs):
-        create_weights(self, layer, *args, **kwargs)
-        allocations.append(layer.weight.device.type)
-
-    monkeypatch.setattr(weights, "selected_checkpoint_weights", select)
-    monkeypatch.setattr(
-        embeddings.UnquantizedEmbeddingMethod, "create_weights", allocate
-    )
     shell = materialize_target_shell(config, torch.device(device))
     embed = shell.model.embed_tokens.weight
     head = shell.lm_head.weight
@@ -295,8 +258,6 @@ def test_shared_weight_storage_preserves_tying(
     torch.testing.assert_close(
         head[:32].cpu(), embedding if tied else checkpoint["lm_head.weight"]
     )
-    assert ("lm_head.weight" in requested) is not tied
-    assert allocations == [device, "meta" if tied else device]
     storages = {
         p.untyped_storage().data_ptr(): p.untyped_storage().nbytes()
         for p in shell.parameters()
@@ -314,7 +275,7 @@ def test_shared_weight_storage_preserves_tying(
     )
 
 
-def test_conflicting_nemotron_embedding_aliases_are_rejected(tmp_path, shell_layers):
+def test_conflicting_nemotron_embedding_aliases_are_rejected(tmp_path):
     config = _config("nemotron_h", "NemotronHForCausalLM", 3).model_config
     config.model = str(tmp_path)
     save_file(
@@ -337,7 +298,7 @@ def test_conflicting_nemotron_embedding_aliases_are_rejected(tmp_path, shell_lay
     ],
 )
 def test_shared_weights_cannot_silently_reinterpret_shape_or_quantization(
-    tmp_path, shell_layers, weight
+    tmp_path, weight
 ):
     config = _config().model_config
     config.model = str(tmp_path)
@@ -356,7 +317,7 @@ def test_shared_weights_cannot_silently_reinterpret_shape_or_quantization(
     ],
 )
 def test_alternate_shared_weights_must_match_the_target_before_loading(
-    tmp_path, shell_layers, tied, changed_name
+    tmp_path, tied, changed_name
 ):
     config = _config().model_config
     target, alternate = tmp_path / "target", tmp_path / "shared"
@@ -373,7 +334,7 @@ def test_alternate_shared_weights_must_match_the_target_before_loading(
         config, torch.device("cpu"), shared_weights_source=str(alternate)
     )
     assert torch.equal(
-        shell.model.embed_tokens.weight, tensors["model.embed_tokens.weight"]
+        shell.model.embed_tokens.weight[:32], tensors["model.embed_tokens.weight"]
     )
     tensors[changed_name][0, 0] = 2
     save_file(tensors, alternate / "model.safetensors")

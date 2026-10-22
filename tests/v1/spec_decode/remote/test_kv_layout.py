@@ -27,7 +27,12 @@ from vllm.v1.worker.utils import allocate_kv_cache
 
 
 def _spec(kind):
-    kwargs = dict(block_size=4, num_kv_heads=2, head_size=3, dtype=torch.bfloat16)
+    kwargs = dict(
+        block_size=4,
+        num_kv_heads=2,
+        head_size=3,
+        dtype=torch.float32 if kind == "full" else torch.bfloat16,
+    )
     if kind == "mla":
         return MLAAttentionSpec(**(kwargs | {"num_kv_heads": 1, "head_size": 5}))
     if kind == "swa":
@@ -69,13 +74,14 @@ def test_dense_own_kv_layers_and_blocks_never_alias(kind, layout_name):
 @pytest.mark.parametrize("kind", ["full", "mla", "swa"])
 def test_each_layer_budget_reserves_a_null_block(kind):
     spec = _spec(kind)
-    page_group_bytes = 2 * spec.page_size_bytes
+    names = ["a"] if kind == "full" else ["a", "b"]
+    page_group_bytes = len(names) * spec.page_size_bytes
     with pytest.raises(ValueError, match="null block plus one block"):
         make_standalone_kv_config(
-            spec, ["a", "b"], 2 * page_group_bytes - 1, KVCacheLayout.LBNHC
+            spec, names, 2 * page_group_bytes - 1, KVCacheLayout.LBNHC
         )
     config = make_standalone_kv_config(
-        spec, ["a", "b"], 2 * page_group_bytes, KVCacheLayout.LBNHC
+        spec, names, 2 * page_group_bytes, KVCacheLayout.LBNHC
     )
     pool = DraftBlockPool(config.num_blocks, spec.block_size)
     assert pool.ensure(0, spec.block_size) == [1]
@@ -194,9 +200,9 @@ def test_nonempty_unique_layer_names_and_hardware_alignment_are_required():
         )
 
 
-@pytest.mark.parametrize("kind", ["mla", "swa"])
+@pytest.mark.parametrize("kind", ["full", "mla", "swa"])
 @pytest.mark.parametrize("layout_name", ["BLHNC", "BLNHC", "BHLNC"])
-def test_new_cache_types_still_require_layer_compact_layout(kind, layout_name):
+def test_all_cache_types_require_layer_compact_layout(kind, layout_name):
     with pytest.raises(ValueError, match="layer-compact"):
         make_standalone_kv_config(
             _spec(kind), ["draft"], 4096, KVCacheLayout[layout_name]

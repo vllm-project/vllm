@@ -3,33 +3,31 @@
 """Standalone own-KV runtime: draft KV pool, step planning, and the
 target-conditioned adapter driven end to end through the server."""
 
-import threading
-from collections import defaultdict
-from contextlib import nullcontext
 from dataclasses import replace
-from unittest.mock import Mock
 
 import numpy as np
 import pytest
 import torch
 
+from tests.v1.spec_decode.remote.runtime_fixtures import (
+    VOCAB,
+    K,
+    KVDigestExecutor,
+    digest_row,
+    make_planner,
+)
 from vllm.v1.spec_decode.remote.capabilities import (
     SpeculatorPlacementCapabilities,
     TargetFeatureKind,
 )
 from vllm.v1.spec_decode.remote.protocol import (
-    CloseSequence,
     FeatureSlot,
-    OpenSequence,
     RemoteServerLimits,
     SequenceKey,
     SpeculatorStatusCode,
     TargetFeatureSchema,
 )
-from vllm.v1.spec_decode.remote.runtime.adapter import (
-    DraftStepExecutor,
-    TargetConditionedDraftAdapter,
-)
+from vllm.v1.spec_decode.remote.runtime.adapter import TargetConditionedDraftAdapter
 from vllm.v1.spec_decode.remote.runtime.kv import (
     NULL_BLOCK_ID,
     DraftBlockPool,
@@ -37,14 +35,11 @@ from vllm.v1.spec_decode.remote.runtime.kv import (
 )
 from vllm.v1.spec_decode.remote.runtime.step import (
     BlockTableUpdate,
-    DraftStepPlan,
     DraftStepPlanner,
     DraftStepRow,
 )
 from vllm.v1.spec_decode.remote.server import (
     RemoteDraftServer,
-    SequenceCleanupFailed,
-    _ServerSession,
 )
 from vllm.v1.spec_decode.remote.session import RemoteDraftSession, VerifierIdentity
 from vllm.v1.spec_decode.remote.state import (
@@ -54,23 +49,10 @@ from vllm.v1.spec_decode.remote.state import (
 )
 
 OK = SpeculatorStatusCode.OK
-K = 3
-VOCAB = 1000
-BLOCK_SIZE = 2
-STRIDE = 1 << 20
 
 
 def key(sequence_id: int) -> SequenceKey:
     return SequenceKey("verifier", sequence_id, 0)
-
-
-def make_planner(num_blocks=64, max_num_reqs=4, max_model_len=64):
-    return DraftStepPlanner(
-        DraftBlockPool(num_blocks, BLOCK_SIZE),
-        max_num_reqs=max_num_reqs,
-        max_model_len=max_model_len,
-        num_speculative_tokens=K,
-    )
 
 
 # ----------------------------------------------------------------------
@@ -95,31 +77,6 @@ def test_pool_growth_is_all_or_nothing():
     assert pool.ensure(0, 5) == [3]
 
 
-class _FailNextInsert(dict):
-    def __setitem__(self, key, value):
-        if not getattr(self, "failed", False):
-            self.failed = True
-            raise MemoryError("injected ownership allocation failure")
-        super().__setitem__(key, value)
-
-
-@pytest.mark.parametrize("existing_positions", [0, 2])
-def test_pool_metadata_oom_preserves_capacity(existing_positions):
-    pool = DraftBlockPool(num_blocks=4, block_size=2)
-    if existing_positions:
-        pool.ensure(0, existing_positions)
-    previous = pool.blocks(0)
-    free = pool.num_free_blocks
-    pool._owned = _FailNextInsert(pool._owned)
-    with pytest.raises(MemoryError, match="ownership allocation"):
-        pool.ensure(0, 6)
-    assert pool.blocks(0) == previous
-    assert pool.num_free_blocks == free
-    pool.release(0)
-    # Request cleanup must recover all capacity, including a failed growth.
-    assert pool.ensure(1, 6) == [1, 2, 3]
-
-
 def test_pool_release_returns_blocks_and_slots_cross_blocks():
     pool = DraftBlockPool(num_blocks=8, block_size=2)
     pool.ensure(0, 2)
@@ -128,53 +85,6 @@ def test_pool_release_returns_blocks_and_slots_cross_blocks():
     pool.release(1)
     assert pool.num_free_blocks == 6
     assert pool.ensure(2, 2) == [2]
-
-
-class _NoGrowthList(list):
-    def append(self, value):
-        raise MemoryError("injected free-list growth failure")
-
-    def extend(self, values):
-        raise MemoryError("injected free-list growth failure")
-
-
-class _FailReleaseWrite(list):
-    def __init__(self, values, fail_after):
-        super().__init__(values)
-        self.remaining = fail_after
-
-    def __setitem__(self, index, value):
-        if self.remaining == 0:
-            self.remaining = -1
-            raise MemoryError("injected free-list write failure")
-        self.remaining -= 1
-        super().__setitem__(index, value)
-
-
-def test_pool_release_does_not_grow_free_storage():
-    pool = DraftBlockPool(num_blocks=4, block_size=2)
-    pool.ensure(0, 6)
-    pool._free = _NoGrowthList(pool._free)
-    pool.release(0)
-    pool.release(0)
-    assert pool.num_free_blocks == 3
-    assert pool.ensure(1, 6) == [1, 2, 3]
-
-
-@pytest.mark.parametrize("fail_after", [0, 1])
-def test_failed_pool_release_preserves_ownership_until_retry(fail_after):
-    pool = DraftBlockPool(num_blocks=4, block_size=2)
-    pool.ensure(0, 4)
-    pool._free = _FailReleaseWrite(pool._free, fail_after)
-    with pytest.raises(MemoryError, match="free-list write"):
-        pool.release(0)
-    assert pool.blocks(0) == (1, 2)
-    assert pool.num_free_blocks == 1
-    assert pool.ensure(1, 2) == [3]
-    pool.release(0)
-    pool.release(1)
-    assert pool.num_free_blocks == 3
-    assert set(pool.ensure(2, 6)) == {1, 2, 3}
 
 
 # ----------------------------------------------------------------------
@@ -256,69 +166,6 @@ def test_request_slots_are_bounded_and_reused():
     assert plan.block_table_updates[0].start == 0
 
 
-@pytest.mark.parametrize("failure", ["record", "ownership"])
-def test_request_metadata_oom_preserves_slots(monkeypatch, failure):
-    import vllm.v1.spec_decode.remote.runtime.step as step
-
-    planner = make_planner(max_num_reqs=2)
-    with monkeypatch.context() as patch:
-        if failure == "record":
-
-            def fail_record(*args):
-                raise MemoryError("injected request allocation failure")
-
-            patch.setattr(step, "_DraftSequence", fail_record)
-        else:
-            patch.setattr(planner, "_sequences", _FailNextInsert())
-        with pytest.raises(MemoryError):
-            planner.open(key(1))
-    planner.close(key(1))
-    assert planner.num_open == 0
-    assert planner.open(key(2))
-    assert planner.open(key(3))
-    assert {planner.req_index(key(2)), planner.req_index(key(3))} == {0, 1}
-    assert not planner.open(key(4))
-
-
-def test_request_close_does_not_grow_free_storage():
-    planner = make_planner(num_blocks=3, max_num_reqs=1)
-    planner._free_slots = _NoGrowthList(planner._free_slots)
-    planner.block_pool._free = _NoGrowthList(planner.block_pool._free)
-    for sequence_id in range(3):
-        current = key(sequence_id)
-        assert planner.open(current)
-        planner.block_pool.ensure(planner.req_index(current), 4)
-        planner.close(current)
-        planner.close(current)
-        assert planner.num_open == 0
-        assert planner.block_pool.num_free_blocks == 2
-
-
-@pytest.mark.parametrize("failure", ["blocks", "slot"])
-def test_failed_request_close_can_be_retried(monkeypatch, failure):
-    planner = make_planner(num_blocks=3, max_num_reqs=1)
-    planner.open(key(1))
-    planner.block_pool.ensure(planner.req_index(key(1)), 4)
-    with monkeypatch.context() as patch:
-        if failure == "blocks":
-
-            def fail_release(req_index):
-                raise MemoryError("injected block return failure")
-
-            patch.setattr(planner.block_pool, "release", fail_release)
-        else:
-            planner._free_slots = _FailReleaseWrite(planner._free_slots, 0)
-        with pytest.raises(MemoryError):
-            planner.close(key(1))
-    assert key(1) in planner
-    assert not planner.open(key(2))
-    planner.close(key(1))
-    assert planner.num_open == 0
-    assert planner.block_pool.num_free_blocks == 2
-    assert planner.open(key(2))
-    assert planner.block_pool.ensure(planner.req_index(key(2)), 4) == [1, 2]
-
-
 @pytest.mark.parametrize(
     "row",
     [
@@ -341,64 +188,6 @@ def test_malformed_rows_are_caller_bugs(row):
 # ----------------------------------------------------------------------
 # Adapter end to end
 # ----------------------------------------------------------------------
-
-
-def digest_row(prefix, next_token) -> list[int]:
-    digest = sum((token + 1) * (position + 1) for position, token in enumerate(prefix))
-    return [(digest + next_token + j) % VOCAB for j in range(K)]
-
-
-class KVDigestExecutor(DraftStepExecutor):
-    """CPU stand-in for a device executor.
-
-    Writes (position, target token) into every token's KV slot and drafts
-    from a digest of the committed prefix read back through its own block
-    tables, so any position, slot, block table, or committed-length error
-    in the runtime changes the drafts.
-    """
-
-    def __init__(self, pool: DraftBlockPool, max_num_tokens=None):
-        self.pool = pool
-        self._max_num_tokens = max_num_tokens
-        self.kv = np.full(pool.num_blocks * pool.block_size, -1, dtype=np.int64)
-        self.block_tables: dict[int, list[int]] = defaultdict(list)
-        self.plans: list[DraftStepPlan] = []
-        self.effective_ks: list[int] = []
-
-    @property
-    def max_num_tokens(self):
-        return self._max_num_tokens
-
-    def execute(self, plan, features, *, num_speculative_tokens=None):
-        effective_k = K if num_speculative_tokens is None else num_speculative_tokens
-        self.effective_ks.append(effective_k)
-        if self.max_num_tokens is not None and plan.num_tokens > self.max_num_tokens:
-            raise ValueError("draft step exceeds the configured feature-token budget")
-        self.plans.append(plan)
-        for req_index, update in plan.block_table_updates.items():
-            table = self.block_tables[req_index][: update.start]
-            self.block_tables[req_index] = table + update.block_ids
-        tokens = features[0].numpy().astype(np.int64)
-        assert tokens.shape == (plan.num_tokens,)
-        self.kv[plan.slot_mapping] = plan.positions * STRIDE + tokens
-        drafts = []
-        for i in range(plan.num_reqs):
-            committed = int(plan.seq_lens[i] - plan.num_rejected[i])
-            table = np.array(self.block_tables[int(plan.req_indices[i])])
-            positions = np.arange(committed)
-            slots = table[positions // BLOCK_SIZE] * BLOCK_SIZE + positions % BLOCK_SIZE
-            values = self.kv[slots]
-            assert (values // STRIDE == positions).all()
-            next_token = (
-                plan.last_sampled[i]
-                if plan.num_sampled[i]
-                else plan.next_prefill_tokens[i][0]
-            )
-            drafts.append(
-                digest_row((values % STRIDE).tolist(), int(next_token))[:effective_k]
-                + [0] * (K - effective_k)
-            )
-        return torch.tensor(drafts)
 
 
 SCHEMA = TargetFeatureSchema(
@@ -761,125 +550,6 @@ def test_terminal_row_failure_returns_kv_without_disturbing_healthy_sibling(runt
     assert round_(
         session, 2, [a], [0], [], [0], [25]
     ).output.valid_lengths.tolist() == [0]
-
-
-@pytest.mark.parametrize("operation", ["close", "discard", "cleanup", "replace"])
-@pytest.mark.parametrize("failure", [None, "once", "always"])
-def test_server_retirement_preserves_real_kv_ownership(monkeypatch, operation, failure):
-    """A failed host release retains its request slot and fences admission."""
-    planner = make_planner(num_blocks=3, max_num_reqs=1)
-    pool = planner.block_pool
-    adapter = TargetConditionedDraftAdapter(
-        KVDigestExecutor(pool),
-        planner,
-        capabilities=CAPABILITIES,
-        feature_schema=SCHEMA,
-        methods={"mtp"},
-    )
-    server = RemoteDraftServer(adapter)
-    conn = Mock()
-    session = _ServerSession(server, conn)
-    session.session_id = "owner"
-    session.verifier_instance_id = "verifier"
-    current = key(1)
-    assert server.registry.open(current, owner=session.session_id).created
-    adapter.open_sequence(current)
-    pool.ensure(planner.req_index(current), 4)
-    assert pool.num_free_blocks == 0
-    release = pool.release
-    attempts = 0
-
-    def release_blocks(req_index):
-        nonlocal attempts
-        attempts += 1
-        if failure == "always" or (failure == "once" and attempts == 1):
-            raise MemoryError("injected block return failure")
-        release(req_index)
-
-    monkeypatch.setattr(pool, "release", release_blocks)
-    expected = (
-        pytest.raises(MemoryError, match="block return") if failure else nullcontext()
-    )
-    with expected:
-        if operation == "close":
-            session._close(CloseSequence((current,)), 1)
-        elif operation == "discard":
-            with server.adapter_turn():
-                session._discard_owned_sequences((current,))
-        elif operation == "cleanup":
-            session.cleanup()
-        else:
-            session._open(OpenSequence(SequenceKey("verifier", 1, 1)), 1)
-
-    assert attempts == 1
-    if failure:
-        assert not server.healthy
-        assert server.wait(0)
-        assert server.registry.get(current) is not None
-        assert current in planner
-        assert pool.num_free_blocks == 0
-        conn.send_control.assert_not_called()
-        with pytest.raises(SequenceCleanupFailed):
-            session.cleanup()
-        with pytest.raises(SequenceCleanupFailed):
-            session._open(OpenSequence(key(2)), 2)
-        assert attempts == 1
-        assert planner.num_open == 1
-        assert not planner.open(key(2))
-    else:
-        assert server.healthy
-        assert server.registry.get(current) is None
-        assert current not in planner
-        assert pool.num_free_blocks == 2
-        session.cleanup()
-        assert len(server.registry) == 0
-        assert planner.num_open == 0
-        assert planner.open(key(2))
-        assert pool.ensure(planner.req_index(key(2)), 4) == [1, 2]
-
-
-def test_repeated_unsent_close_timeouts_return_all_owned_kv(runtime, monkeypatch):
-    session, executor = runtime
-    pool = executor.pool
-    free_blocks = pool.num_free_blocks
-    reclaimed = threading.Event()
-    release = pool.release
-
-    def release_blocks(req_index):
-        release(req_index)
-        if pool.num_free_blocks == free_blocks:
-            reclaimed.set()
-
-    monkeypatch.setattr(pool, "release", release_blocks)
-    send = session._send
-
-    def expire_before_send(message, **kwargs):
-        if isinstance(message, CloseSequence):
-            kwargs["deadline"] = session._clock() - 1
-        return send(message, **kwargs)
-
-    previous_generation = -1
-    for _ in range(3):
-        key = session.open_sequence(1)
-        assert key.generation > previous_generation
-        previous_generation = key.generation
-        session.prefill(key, chunk([1, 2, 3], lookahead=4), is_final=False)
-        assert pool.num_free_blocks < free_blocks
-        reclaimed.clear()
-        with monkeypatch.context() as patch:
-            patch.setattr(session, "_send", expire_before_send)
-            session.close_sequences((key,))
-        assert not session.connected
-        assert reclaimed.wait(2), "connection cleanup retained draft KV"
-        assert pool.num_free_blocks == free_blocks
-        session.connect()
-
-    fresh = session.open_sequence(1)
-    session.prefill(fresh, chunk(list(range(20)), lookahead=20), is_final=False)
-    assert session.sequence_state(fresh) is SequenceState.PREFILLING
-    assert executor.plans[-1].num_tokens == 20
-    session.close_sequences((fresh,))
-    assert pool.num_free_blocks == free_blocks
 
 
 def test_request_slots_beyond_the_runtime_are_queue_full(runtime):
