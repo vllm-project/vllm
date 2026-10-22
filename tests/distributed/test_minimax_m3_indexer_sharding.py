@@ -35,6 +35,7 @@ def _indexer_sharding(monkeypatch, tp_size, pp_size, rank, distributed_init_port
 
     with monkeypatch.context() as m:
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        m.setattr(msa, "PREFILL_FMHA_CHUNK_SIZE", msa.PREFILL_CHUNK_SIZE)
         device = torch.device(f"cuda:{rank}")
         torch.accelerator.set_device_index(device)
         config = create_vllm_config(
@@ -315,6 +316,9 @@ def _check_indexer_forwards(config, device, rank, comm):
             scratch = metadata[1].prefill_msa.local_scores
             assert scratch.shape[0] <= msa.PREFILL_CHUNK_SIZE
             assert scratch.numel() * scratch.element_size() <= msa.PREFILL_SCORE_BYTES
+            chunks = metadata[1].prefill_msa.local_chunks
+            assert len(chunks) > 1
+            assert all((chunk.plan is not None) == (world == 2) for chunk in chunks)
             # Reuse scratch across layers and steps.
             exchanges.clear()
             with pytest.MonkeyPatch.context() as patch:
