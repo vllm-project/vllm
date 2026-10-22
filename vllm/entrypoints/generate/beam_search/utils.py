@@ -139,30 +139,26 @@ class BeamSearchInstance:
 
 
 def get_beam_search_score(
-    tokens: list[int],
+    num_generated_tokens: int,
     cumulative_logprob: float,
-    eos_token_ids: set[int],
     length_penalty: float = 1.0,
 ) -> float:
     """Calculate the beam search score with length penalty.
 
-    Adapted from
+    Like Transformers, the length counts the generated tokens, including a
+    terminating EOS token. Adapted from
 
-    https://github.com/huggingface/transformers/blob/ccb92be23def445f2afdea94c31286f84b89eb5b/src/transformers/generation/beam_search.py#L938
+    https://github.com/huggingface/transformers/blob/09a71e5b32a747dbc7805599457e67c956ef212f/src/transformers/generation/utils.py#L3531
     """
-    seq_len = len(tokens)
-    if tokens[-1] in eos_token_ids:
-        seq_len -= 1
-
-    # An aborted beam may contain only an EOS prompt token.
-    return cumulative_logprob / (max(seq_len, 1) ** length_penalty)
+    # An aborted beam may not have generated any tokens.
+    return cumulative_logprob / (max(num_generated_tokens, 1) ** length_penalty)
 
 
-def create_sort_beams_key_function(eos_token_ids: set[int], length_penalty: float):
+def create_sort_beams_key_function(length_penalty: float):
     def sort_beams_key(x: BeamSearchSequence) -> float:
-        return get_beam_search_score(
-            x.tokens, x.cum_logprob, eos_token_ids, length_penalty
-        )
+        # `logprobs` has one entry per generated token, including an EOS token
+        # that `tokens` omits unless include_stop_str_in_output is set.
+        return get_beam_search_score(len(x.logprobs), x.cum_logprob, length_penalty)
 
     return sort_beams_key
 
