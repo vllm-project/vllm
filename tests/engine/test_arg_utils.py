@@ -806,6 +806,35 @@ def test_ir_op_priority():
 
 
 @pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        ([], None),
+        (["--specialized-decode"], True),
+        (["--no-specialized-decode"], False),
+    ],
+)
+def test_specialized_decode_cli(argv, expected):
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = EngineArgs.from_cli_args(parser.parse_args(argv))
+    assert args.specialized_decode is expected
+
+
+@pytest.mark.parametrize(
+    ("flag", "expected"), [(None, True), (True, True), (False, False)]
+)
+def test_specialized_decode_overrides_the_kernel_config(flag, expected):
+    """``--no-specialized-decode`` turns off a specialized decode that a config
+    file or the Python API asked for, and an absent flag leaves it alone."""
+    from vllm.config.kernel import KernelConfig
+
+    config = EngineArgs(
+        specialized_decode=flag,
+        kernel_config=KernelConfig(specialized_decode=True),
+    ).create_engine_config()
+    assert config.kernel_config.specialized_decode is expected
+
+
+@pytest.mark.parametrize(
     ("input_json", "expected_json"),
     [
         # Decimal suffixes (lowercase)
