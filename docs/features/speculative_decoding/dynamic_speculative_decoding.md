@@ -94,5 +94,7 @@ curl http://localhost:8000/v1/completions -H "Content-Type: application/json" \
   -d '{"model": "...", "prompt": "...", "max_speculative_tokens": 0}'
 ```
 
-A batch whose requests verify different numbers of drafts is not a uniform
-decode batch, so that step runs piecewise instead of full CUDA graphs.
+The drafter still proposes K tokens for every request; the cap only limits
+how many are verified. A batch whose requests verify different numbers of
+drafts is not a uniform decode batch, so that step runs piecewise instead of
+full CUDA graphs.
