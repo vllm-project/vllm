@@ -1198,6 +1198,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # DeepseekV4SWACache.
         if not self.is_kv_source:
             return None
+        return self.get_compressed_kv_cache_spec(vllm_config)
+
+    def get_compressed_kv_cache_spec(self, vllm_config: VllmConfig) -> MLAAttentionSpec:
         # fp8_ds_mla is a UE8M0 block-scaled uint8 layout whose page rounds up
         # to the decode kernel's TMA stride; plain bf16 / per-tensor fp8 rows
         # use natural element-size pages.
