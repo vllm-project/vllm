@@ -41,19 +41,9 @@ def defer_comm_warmup_on_rocm():
     communicators still have collectives in flight; instead the warm-up is
     deferred to when the engine is quiet (during commit).
     """
-    import os
-
     from vllm.platforms import current_platform
 
-    # Measurements on MI355 show the export headroom is full during prepare and
-    # nearly gone at commit, which is where this deferral puts the first
-    # collective. Turning the deferral off moves that collective back into the
-    # window that still has room, so a pass with this set says whether the
-    # headroom is what the failure is about. Diagnostic only.
-    if (
-        not current_platform.is_rocm()
-        or os.getenv("VLLM_EEP_DEBUG_NO_DEFER_WARMUP") == "1"
-    ):
+    if not current_platform.is_rocm():
         yield
         return
     prev = _warmup_deferred()

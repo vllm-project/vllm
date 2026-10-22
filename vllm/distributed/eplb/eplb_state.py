@@ -1050,12 +1050,7 @@ class EplbState:
                     "Draining async EPLB worker for model %s",
                     model_key,
                 )
-            # The periodic report is diagnostic only. The rank that dropped out
-            # is the one whose pending_result stays false while the others have
-            # theirs, and nothing else in the log names it.
             started = time.perf_counter()
-            report_every = float(os.getenv("VLLM_EEP_DEBUG_WATCHDOG") or 0)
-            next_report = report_every
             while ms.rebalanced:
                 if self._all_ranks_result_ready(ms):
                     result = ms.pending_result
@@ -1071,17 +1066,6 @@ class EplbState:
                 worker_state = (
                     "alive" if worker is not None and worker.is_alive() else "gone"
                 )
-                if report_every > 0 and elapsed > next_report:
-                    next_report += report_every
-                    logger.warning(
-                        "[EEP-DEBUG] still draining %s after %.0f s: "
-                        "pending_result=%s, stop_requested=%s, worker=%s",
-                        model_key,
-                        elapsed,
-                        ms.pending_result is not None,
-                        self.async_stop_requested,
-                        worker_state,
-                    )
                 if timeout > 0 and elapsed > timeout:
                     raise RuntimeError(
                         f"Draining the async EPLB worker for model {model_key} "
