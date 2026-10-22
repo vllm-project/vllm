@@ -978,23 +978,29 @@ class UMBPStoreConnectorScheduler:
             return [], True
 
         try:
-            hits = list(self.runtime.lookup([key for _, key, _, _ in candidates]))
+            keys = [
+                rank_key
+                for _, _, group_id, block_hash in candidates
+                for rank_key in _rank_keys(
+                    self.codec, self.topology, block_hash, group_id
+                )
+            ]
+            hits = list(self.runtime.lookup(keys))
         except Exception as exc:
             logger.warning("UMBP lazy residency lookup failed: %s", exc)
             return [], False
-        if len(hits) != len(candidates):
+        if len(hits) != len(keys):
             logger.warning(
                 "UMBP lazy lookup returned %d results for %d candidates",
                 len(hits),
-                len(candidates),
+                len(keys),
             )
             return [], False
 
         plans: list[BlockTransferPlan] = []
-        for (block, key, group_id, block_hash), exists in zip(
-            candidates, hits, strict=True
-        ):
-            if exists:
+        rank_count = self.topology.rank_count
+        for index, (block, key, group_id, block_hash) in enumerate(candidates):
+            if all(hits[index * rank_count : (index + 1) * rank_count]):
                 continue
             plans.append(
                 BlockTransferPlan(
