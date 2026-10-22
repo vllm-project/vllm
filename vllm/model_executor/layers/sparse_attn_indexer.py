@@ -498,11 +498,14 @@ def sparse_attn_indexer(
             profile_specs.extend(gather_spec * 2)
         current_workspace_manager().get_simultaneous(*profile_specs)
 
-        # Dummy allocation to simulate for peak logits tensor memory during inference.
-        # FP8 elements so elements == bytes
-        max_logits_elems = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+        # Dummy allocation to simulate the peak prefill logits memory. The chunk
+        # splitter caps FP32 logits at the budget; on SM100 the BF16 kernel
+        # output coexists with its FP32 copy.
+        max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+        if mqa_logits_use_mx_scales():
+            max_logits_bytes += max_logits_bytes // 2
         _ = torch.empty(
-            max_logits_elems, dtype=torch.uint8, device=hidden_states.device
+            max_logits_bytes, dtype=torch.uint8, device=hidden_states.device
         )
 
         # The dummy run returns before exchange_topk executes, so reserve its
@@ -783,6 +786,8 @@ def sparse_attn_indexer(
                     cp_kv_cache_interleave_size,
                     row_starts=row_starts,
                 )
+            # Free this chunk's logits before the next chunk allocates its own.
+            del logits
 
         if row_shard is not None:
             # Rows are already fully ranked, so this is a layout gather.

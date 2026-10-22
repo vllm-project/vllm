@@ -546,7 +546,8 @@ def _check_table(
 def _check_dummy_hash_model_forward(
     vllm_config, engram, head_sizes, weight, scales, dp_shared_memory
 ):
-    """A metadata-less replica joins DP sharding but skips a shared lookup."""
+    """A metadata-less replica looks up dead rows, so it joins DP sharding and
+    the memory profile sees the Engram activations."""
     from vllm.models.deepseek_v41.common.engram import NgramHashState
     from vllm.models.deepseek_v41.nvidia import model as model_ops
 
@@ -569,17 +570,11 @@ def _check_dummy_hash_model_forward(
         # **kwargs absorbs the decoder's keyword-only flags.
         def __call__(self, hidden, positions, input_ids, *args, **kwargs):
             hashes, keep = args[-2:]
-            if dp_shared_memory and dp_rank == 1:
-                assert hashes is None and keep is None
-                output = hidden.new_zeros(
-                    tokens, len(head_sizes), DIM, dtype=torch.bfloat16
-                )
-            else:
-                assert hashes is not None and keep is not None
-                assert bool(keep.all()) == (dp_rank != 1)
-                if dp_rank == 1:
-                    assert torch.all(hashes == engram_ops.DEAD_ID)
-                output = engram.embed(hashes[:, 0])
+            assert hashes is not None and keep is not None
+            assert bool(keep.all()) == (dp_rank != 1)
+            if dp_rank == 1:
+                assert torch.all(hashes == engram_ops.DEAD_ID)
+            output = engram.embed(hashes[:, 0])
             # Trailing None is previous_aux; this stub captures no aux states.
             return output, hidden, hidden, hidden, hidden, None
 
