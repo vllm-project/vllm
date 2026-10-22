@@ -298,9 +298,9 @@ fn collect_generate(
     }: ResponseOptions,
     mm_placeholders: Option<MultiModalPlaceholders>,
 ) -> Result<GenerateResponse, ApiError> {
-    if let FinishReason::Error(Some(error)) = &collected.finish_reason
-        && error.retryable
-    {
+    // Like Python, which raises every engine-typed error, a typed error fails
+    // the request; an untyped one is reported as finish reason `error`.
+    if let FinishReason::Error(Some(error)) = &collected.finish_reason {
         return Err(engine_error(Some(error)));
     }
     let logprobs = if include_logprobs {

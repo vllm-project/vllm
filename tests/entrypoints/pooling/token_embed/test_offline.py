@@ -9,6 +9,7 @@ from tests.models.utils import check_embeddings_close
 from vllm import LLM, PoolingParams, PoolingRequestOutput
 from vllm.config import PoolerConfig
 from vllm.exceptions import VLLMValidationError
+from vllm.outputs import PoolingOutput
 from vllm.pooling_params import LateChunkingParams
 from vllm.tasks import PoolingTask
 
@@ -39,16 +40,20 @@ def llm(vllm_runner):
 
 
 @pytest.mark.skip_global_cleanup
-def test_str_prompts(llm: LLM):
-    outputs = llm.encode(prompt, pooling_task="token_embed", use_tqdm=False)
+@pytest.mark.parametrize("method", ["encode", "embed"])
+def test_str_prompts(llm: LLM, method: str):
+    kwargs = {"pooling_task": "token_embed"} if method == "encode" else {}
+    outputs = getattr(llm, method)(prompt, use_tqdm=False, **kwargs)
     assert len(outputs) == 1
     assert isinstance(outputs[0], PoolingRequestOutput)
     assert outputs[0].outputs.data.shape == (11, 384)
 
 
 @pytest.mark.skip_global_cleanup
-def test_token_ids_prompts(llm: LLM):
-    outputs = llm.encode([prompt_token_ids], pooling_task="token_embed", use_tqdm=False)
+@pytest.mark.parametrize("method", ["encode", "embed"])
+def test_token_ids_prompts(llm: LLM, method: str):
+    kwargs = {"pooling_task": "token_embed"} if method == "encode" else {}
+    outputs = getattr(llm, method)([prompt_token_ids], use_tqdm=False, **kwargs)
     assert len(outputs) == 1
     assert isinstance(outputs[0], PoolingRequestOutput)
     assert outputs[0].outputs.data.shape == (11, 384)
@@ -193,10 +198,10 @@ def test_e5_late_chunking_mixed_requests(llm: LLM, normalize: bool):
         )
         for size in sizes
     ]
-    actual = llm.encode(
-        texts, pooling_task="token_embed", pooling_params=params, use_tqdm=False
-    )
-    for original, result, size in zip(raw, actual, sizes):
+    actual = llm.embed(texts, pooling_params=params, use_tqdm=False)
+    for index, (original, size) in enumerate(zip(raw, sizes)):
+        result = actual[index]
+        assert isinstance(result.outputs, PoolingOutput)
         expected = original.outputs.data
         if size is not None:
             expected = torch.stack(
