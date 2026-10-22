@@ -65,6 +65,19 @@ def _more_kv_cache_memory_hint(
 ) -> str:
     """How the user can make room for the KV cache, for error messages.
     after_warmup: the KV cache was sized after CUDA graph capture and warmup."""
+    mm_config = vllm_config.model_config.multimodal_config
+    mm_profiling_msg = ""
+    if (
+        mm_config is not None
+        and not mm_config.skip_mm_profiling
+        and not mm_config.language_model_only
+    ):
+        mm_profiling_msg = (
+            "Memory profiling reserved activation memory for the multimodal "
+            "encoder at the maximum input size; reduce it with size hints in "
+            "`limit_mm_per_prompt`, `mm_processor_kwargs` (e.g. `max_pixels`) "
+            "or `skip_mm_profiling`. "
+        )
     cache_config = vllm_config.cache_config
     if cache_config.enable_extensible_kv_cache:
         used_by = "the model and its activations"
@@ -77,18 +90,18 @@ def _more_kv_cache_memory_hint(
             )
         utilization = cache_config.resolved_gpu_memory_utilization
         if utilization < 1.0:
-            return (
+            return mm_profiling_msg + (
                 f"The KV cache gets what is left after {used_by} within "
                 f"`gpu_memory_utilization`={utilization}; increase it (with the "
                 "extensible KV cache it defaults to 1.0) or decrease "
                 f"`max_model_len` or `max_num_seqs`.{graphs_hint}"
             )
-        return (
+        return mm_profiling_msg + (
             "The extensible KV cache already takes all device memory left after "
             f"{used_by}; decrease `max_model_len` or `max_num_seqs`, or the "
             f"model needs a device with more memory.{graphs_hint}"
         )
-    return (
+    return mm_profiling_msg + (
         "Try increasing `gpu_memory_utilization` when initializing the engine "
         "(this flag also controls CPU memory reservation on the CPU backend, "
         "despite its name)."
