@@ -57,9 +57,9 @@ from vllm.v1.core.kv_cache_planning import get_kv_cache_configs
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     generate_scheduler_kv_cache_config,
+    get_num_hash_lookahead_tokens,
     get_request_block_hasher,
     init_none_hash,
-    is_lookahead_block_hashing_enabled,
     resolve_cache_hit_alignment_tokens,
     resolve_kv_cache_block_sizes,
     update_kv_cache_capacity,
@@ -224,7 +224,7 @@ class EngineCore:
             self.request_block_hasher = get_request_block_hasher(
                 hash_block_size,
                 caching_hash_fn,
-                is_lookahead_block_hashing_enabled(vllm_config),
+                get_num_hash_lookahead_tokens(vllm_config),
             )
 
         self.step_fn = (

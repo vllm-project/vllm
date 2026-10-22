@@ -92,7 +92,7 @@ def make_request(
     prompt_logprobs: int | None = None,
     cache_salt: str | None = None,
     lora_request: LoRARequest | None = None,
-    use_lookahead_hashes: bool = False,
+    num_hash_lookahead_tokens: int = 0,
     session_id: str | None = None,
 ):
     mm_features = []
@@ -119,7 +119,7 @@ def make_request(
         lora_request=lora_request,
         cache_salt=cache_salt,
         block_hasher=get_request_block_hasher(
-            block_size, hash_fn, use_lookahead_hashes
+            block_size, hash_fn, num_hash_lookahead_tokens
         ),
         session_id=session_id,
     )
@@ -4217,13 +4217,13 @@ def test_eagle_identical_prompt_hit(
         max_model_len=8192,
         enable_caching=True,
         use_eagle=not lookahead,
-        use_lookahead_block_hashes=lookahead,
+        num_hash_lookahead_tokens=lookahead,
         hash_block_size=block_size,
     )
     token_ids = [0] * num_prompt_tokens
 
     req = make_request(
-        "prime", token_ids, block_size, sha256, use_lookahead_hashes=lookahead
+        "prime", token_ids, block_size, sha256, num_hash_lookahead_tokens=lookahead
     )
     computed_blocks, _, _ = manager.get_computed_blocks(req)
     manager.allocate_slots(
@@ -4235,7 +4235,7 @@ def test_eagle_identical_prompt_hit(
     manager.free(req)
 
     req_eagle = make_request(
-        "eagle", token_ids, block_size, sha256, use_lookahead_hashes=lookahead
+        "eagle", token_ids, block_size, sha256, num_hash_lookahead_tokens=lookahead
     )
     computed_blocks, num_tokens, _ = manager.get_computed_blocks(req_eagle)
     assert len(computed_blocks.blocks[0]) == expected_blocks
@@ -4249,7 +4249,7 @@ def test_lookahead_token_controls_last_block_hit():
         max_model_len=8192,
         enable_caching=True,
         use_eagle=False,
-        use_lookahead_block_hashes=True,
+        num_hash_lookahead_tokens=1,
         hash_block_size=block_size,
     )
 
@@ -4258,7 +4258,7 @@ def test_lookahead_token_controls_last_block_hit():
         [0, 1, 2, 3, 4, 5],
         block_size,
         sha256,
-        use_lookahead_hashes=True,
+        num_hash_lookahead_tokens=1,
     )
     computed_blocks, _, _ = manager.get_computed_blocks(first)
     manager.allocate_slots(first, first.num_tokens, 0, computed_blocks)
@@ -4269,7 +4269,7 @@ def test_lookahead_token_controls_last_block_hit():
         [0, 1, 2, 3, 4, 6],
         block_size,
         sha256,
-        use_lookahead_hashes=True,
+        num_hash_lookahead_tokens=1,
     )
     _, num_tokens, _ = manager.get_computed_blocks(same_lookahead)
     assert num_tokens == 2 * block_size
@@ -4279,7 +4279,7 @@ def test_lookahead_token_controls_last_block_hit():
         [0, 1, 2, 3, 7, 6],
         block_size,
         sha256,
-        use_lookahead_hashes=True,
+        num_hash_lookahead_tokens=1,
     )
     _, num_tokens, _ = manager.get_computed_blocks(different_lookahead)
     assert num_tokens == block_size
@@ -4292,7 +4292,7 @@ def test_kv_events_reconstruct_lookahead_block_hashes():
         max_model_len=8192,
         enable_caching=True,
         use_eagle=False,
-        use_lookahead_block_hashes=True,
+        num_hash_lookahead_tokens=1,
         hash_block_size=block_size,
         enable_kv_cache_events=True,
     )
@@ -4301,7 +4301,7 @@ def test_kv_events_reconstruct_lookahead_block_hashes():
         [0, 1, 2, 3, 4],
         block_size,
         sha256,
-        use_lookahead_hashes=True,
+        num_hash_lookahead_tokens=1,
     )
     computed_blocks, _, _ = manager.get_computed_blocks(request)
     manager.allocate_slots(request, request.num_tokens, 0, computed_blocks)
@@ -4368,7 +4368,7 @@ def test_eagle_hybrid_mamba_hits_partial_prompt_boundary():
         max_model_len=8192,
         enable_caching=True,
         use_eagle=False,
-        use_lookahead_block_hashes=True,
+        num_hash_lookahead_tokens=1,
         hash_block_size=hash_block_size,
     )
 
@@ -4377,7 +4377,7 @@ def test_eagle_hybrid_mamba_hits_partial_prompt_boundary():
         token_ids,
         hash_block_size,
         sha256,
-        use_lookahead_hashes=True,
+        num_hash_lookahead_tokens=1,
     )
     computed_blocks, num_computed, _ = manager.get_computed_blocks(first)
     manager.allocate_slots(first, 1248, num_computed, computed_blocks)
@@ -4393,7 +4393,7 @@ def test_eagle_hybrid_mamba_hits_partial_prompt_boundary():
         token_ids,
         hash_block_size,
         sha256,
-        use_lookahead_hashes=True,
+        num_hash_lookahead_tokens=1,
     )
     _, num_computed, _ = manager.get_computed_blocks(second)
 
@@ -4433,19 +4433,19 @@ def test_lookahead_per_group_hits_stay_within_max_length():
         max_model_len=8192,
         enable_caching=True,
         use_eagle=False,
-        use_lookahead_block_hashes=True,
+        num_hash_lookahead_tokens=1,
         hash_block_size=block_size,
     )
     token_ids = list(range(5 * block_size + 1))
     first = make_request(
-        "first", token_ids, block_size, sha256, use_lookahead_hashes=True
+        "first", token_ids, block_size, sha256, num_hash_lookahead_tokens=1
     )
     computed_blocks, num_computed, _ = manager.get_computed_blocks(first)
     manager.allocate_slots(first, len(token_ids), num_computed, computed_blocks)
     manager.free(first)
 
     probe = make_request(
-        "probe", token_ids, block_size, sha256, use_lookahead_hashes=True
+        "probe", token_ids, block_size, sha256, num_hash_lookahead_tokens=1
     )
     _, per_group_hits = manager.coordinator.find_longest_cache_hit_per_group(
         probe.block_hashes, 2 * block_size
@@ -5416,12 +5416,12 @@ def test_hybrid_mamba_retention_lookahead_keeps_last_prompt_boundary():
         hash_block_size=block_size,
         retention_interval=0,
         use_eagle=False,
-        use_lookahead_block_hashes=True,
+        num_hash_lookahead_tokens=1,
     )
 
     # 129 tokens: the last boundary below the logits token is 128.
     token_ids = [i for i in range(4) for _ in range(block_size)] + [4]
-    req0 = make_request("0", token_ids, block_size, sha256, use_lookahead_hashes=True)
+    req0 = make_request("0", token_ids, block_size, sha256, num_hash_lookahead_tokens=1)
     for chunk_end in (32, 64, 96, 128, 129):
         blocks = manager.allocate_slots(
             req0,
@@ -5440,7 +5440,7 @@ def test_hybrid_mamba_retention_lookahead_keeps_last_prompt_boundary():
             assert cached is None, f"mamba hash {i} should not be cached"
     manager.free(req0)
 
-    req1 = make_request("1", token_ids, block_size, sha256, use_lookahead_hashes=True)
+    req1 = make_request("1", token_ids, block_size, sha256, num_hash_lookahead_tokens=1)
     computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
     assert num_computed_tokens == 4 * block_size
     assert [len(blocks) for blocks in computed_blocks.blocks] == [4, 4]

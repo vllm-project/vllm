@@ -388,7 +388,7 @@ def test_spec_internal_checkpoint_metadata_targets_replay_boundary(
     """Lookahead hashes need no back-off from the replay boundary."""
     monkeypatch.setattr(
         mamba_checkpoint,
-        "is_lookahead_block_hashing_enabled",
+        "get_num_hash_lookahead_tokens",
         lambda *_: lookahead_hashing,
     )
     device = torch.device("cuda")

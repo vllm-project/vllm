@@ -53,7 +53,7 @@ def _manager(
         enable_caching=True,
         hash_block_size=hash_block_size,
         use_eagle=not lookahead,
-        use_lookahead_block_hashes=lookahead,
+        num_hash_lookahead_tokens=lookahead,
         num_prefill_lookahead=num_prefill_lookahead,
         enable_mamba_shared_prefix_checkpoint=shared_prefix_checkpoint,
     )
@@ -77,9 +77,9 @@ def _stub(manager, block_size, hash_block_size, *, block_drop=True):
         # they exist only to compensate for the drop, which lookahead hashes
         # make unnecessary.
         use_eagle_block_drop=(
-            block_drop and not manager.block_pool.use_lookahead_block_hashes
+            block_drop and not manager.block_pool.num_hash_lookahead_tokens
         ),
-        use_lookahead_block_hashes=manager.block_pool.use_lookahead_block_hashes,
+        num_hash_lookahead_tokens=manager.block_pool.num_hash_lookahead_tokens,
         hash_block_size=hash_block_size,
         mamba_has_prefill_checkpoint_blocks=False,  # forced False under eagle
         mamba_partial_cache_hit=partial_hit,
@@ -136,7 +136,7 @@ def _request(request_id, tokens, stub):
         tokens,
         stub.hash_block_size,
         sha256,
-        use_lookahead_hashes=stub.use_lookahead_block_hashes,
+        num_hash_lookahead_tokens=stub.num_hash_lookahead_tokens,
     )
 
 

@@ -85,8 +85,8 @@ pytestmark = pytest.mark.cpu_test
 
 
 def _enable_lookahead_block_hashes(scheduler: Scheduler) -> None:
-    scheduler.use_lookahead_block_hashes = True
-    scheduler.kv_cache_manager.block_pool.use_lookahead_block_hashes = True
+    scheduler.num_hash_lookahead_tokens = 1
+    scheduler.kv_cache_manager.block_pool.num_hash_lookahead_tokens = 1
 
 
 def test_make_scheduled_encoder_input_stats_output_embeddings():
@@ -4759,7 +4759,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.return_sampling_mask = False
     scheduler.recompute_kv_load_failures = False
     scheduler.defer_block_free = False
-    scheduler.use_lookahead_block_hashes = False
+    scheduler.num_hash_lookahead_tokens = 0
     scheduler.make_stats = Mock(return_value=None)
     scheduler.max_model_len = 128
 

@@ -441,7 +441,7 @@ class TestStreamingScheduler(unittest.TestCase):
         discarded sampled token invalidates the hash of the block before it."""
         init_none_hash(sha256)
         scheduler = create_scheduler()
-        scheduler.use_lookahead_block_hashes = True
+        scheduler.num_hash_lookahead_tokens = 1
         hash_block_size = scheduler.hash_block_size
 
         def make_session(token_ids: list[int]) -> Request:

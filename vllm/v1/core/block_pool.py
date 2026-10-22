@@ -162,7 +162,7 @@ class BlockPool:
         hash_block_size: int,
         enable_kv_cache_events: bool = False,
         metrics_collector: KVCacheMetricsCollector | None = None,
-        use_lookahead_block_hashes: bool = False,
+        num_hash_lookahead_tokens: int = 0,
         medium: str = MEDIUM_GPU,
     ):
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
@@ -170,7 +170,7 @@ class BlockPool:
         self.medium = medium
         self.enable_caching = enable_caching
         self.hash_block_size = hash_block_size
-        self.use_lookahead_block_hashes = use_lookahead_block_hashes
+        self.num_hash_lookahead_tokens = num_hash_lookahead_tokens
         # All kv-cache blocks.
         self.blocks: list[KVCacheBlock] = [
             KVCacheBlock(idx, pool=self) for idx in range(num_gpu_blocks)
@@ -321,7 +321,7 @@ class BlockPool:
             # Skip null/masked-out blocks to match the length of new_hashes.
             extra_keys_list: list[tuple[Any, ...] | None] = []
             lookahead_token_ids: list[list[int]] | None = (
-                [] if self.use_lookahead_block_hashes else None
+                [] if self.num_hash_lookahead_tokens else None
             )
             curr_mm_idx = 0
             for i in range(num_cached_blocks, num_full_blocks):
@@ -336,7 +336,9 @@ class BlockPool:
                 )
                 extra_keys_list.append(extra_keys)
                 if lookahead_token_ids is not None:
-                    lookahead_token_ids.append([request.all_token_ids[block_end]])
+                    lookahead_token_ids.append(
+                        self._lookahead_token_ids(request, block_end)
+                    )
 
             self.kv_event_queue.append(
                 self._build_block_stored_event(
@@ -356,11 +358,16 @@ class BlockPool:
         self, request: Request, start: int, end: int, start_mm_idx: int
     ) -> tuple[tuple[Any, ...] | None, int]:
         # Event extra keys cover the same window as the block hash.
-        if self.use_lookahead_block_hashes:
+        if self.num_hash_lookahead_tokens:
             return generate_lookahead_block_hash_extra_keys(
-                request, start, end, start_mm_idx
+                request, start, end, end + self.num_hash_lookahead_tokens, start_mm_idx
             )
         return generate_block_hash_extra_keys(request, start, end, start_mm_idx)
+
+    def _lookahead_token_ids(self, request: Request, block_end: int) -> list[int]:
+        return request.all_token_ids[
+            block_end : block_end + self.num_hash_lookahead_tokens
+        ]
 
     def _build_block_stored_event(
         self,
@@ -425,7 +432,7 @@ class BlockPool:
         cached_hashes: list[ExternalBlockHash] = []
         extra_keys_list: list[tuple[Any, ...] | None] = []
         lookahead_token_ids: list[list[int]] | None = (
-            [] if self.use_lookahead_block_hashes else None
+            [] if self.num_hash_lookahead_tokens else None
         )
         curr_mm_idx = 0
         for i in range(num_cached_blocks):
@@ -437,7 +444,9 @@ class BlockPool:
             )
             extra_keys_list.append(extra_keys)
             if lookahead_token_ids is not None:
-                lookahead_token_ids.append([request.all_token_ids[block_end]])
+                lookahead_token_ids.append(
+                    self._lookahead_token_ids(request, block_end)
+                )
 
         if not cached_hashes:
             return
@@ -585,8 +594,8 @@ class BlockPool:
                     extra_keys=to_event_extra_keys([extra_keys]),
                     group_idx=kv_cache_group_id,
                     session_id=request.session_id,
-                    lookahead_token_ids=[[request.all_token_ids[block_end]]]
-                    if self.use_lookahead_block_hashes
+                    lookahead_token_ids=[self._lookahead_token_ids(request, block_end)]
+                    if self.num_hash_lookahead_tokens
                     else None,
                 )
             )

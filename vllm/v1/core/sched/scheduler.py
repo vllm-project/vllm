@@ -40,7 +40,7 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     KVCacheBlock,
-    is_lookahead_block_hashing_enabled,
+    get_num_hash_lookahead_tokens,
 )
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
@@ -325,10 +325,8 @@ class Scheduler(SchedulerInterface):
                     "acceptance rates."
                 )
 
-        self.use_lookahead_block_hashes = is_lookahead_block_hashing_enabled(
-            vllm_config
-        )
-        if self.use_lookahead_block_hashes:
+        self.num_hash_lookahead_tokens = get_num_hash_lookahead_tokens(vllm_config)
+        if self.num_hash_lookahead_tokens:
             # Lookahead hashes prove the boundary token, so EAGLE needs no drop.
             self.use_eagle_block_drop = False
 
@@ -342,7 +340,7 @@ class Scheduler(SchedulerInterface):
             max_in_flight_tokens=vllm_config.max_in_flight_tokens,
             enable_caching=self.cache_config.enable_prefix_caching,
             use_eagle=self.use_eagle_block_drop,
-            use_lookahead_block_hashes=self.use_lookahead_block_hashes,
+            num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
             num_prefill_lookahead=self.num_prefill_lookahead,
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
@@ -1759,8 +1757,8 @@ class Scheduler(SchedulerInterface):
             session.num_prompt_tokens : keep_end
         ]
         del session._all_token_ids[keep_end:]
-        # A lookahead hash also covers the token after its block.
-        num_hashed_tokens = keep_end - int(self.use_lookahead_block_hashes)
+        # A lookahead hash also covers the tokens after its block.
+        num_hashed_tokens = keep_end - self.num_hash_lookahead_tokens
         del session.block_hashes[max(num_hashed_tokens, 0) // self.hash_block_size :]
         session._output_token_ids.clear()
         assert session.prompt_token_ids is not None
@@ -2290,13 +2288,13 @@ class Scheduler(SchedulerInterface):
                 stopped = True
 
             if (
-                self.use_lookahead_block_hashes
+                self.num_hash_lookahead_tokens
                 and stopped
                 and status_before_stop == RequestStatus.RUNNING
                 and not output_is_stale
             ):
-                # The last sampled token is the lookahead token of the block
-                # before it, which no later allocation will publish.
+                # The last sampled token completes the lookahead of an earlier
+                # block, which no later allocation will publish.
                 self.kv_cache_manager.cache_blocks(
                     request,
                     request.num_computed_tokens - request.num_in_flight_tokens,

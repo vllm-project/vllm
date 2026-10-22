@@ -950,30 +950,30 @@ def resolve_cache_hit_alignment_tokens(
     return scheduler_block_size
 
 
-def is_lookahead_block_hashing_enabled(vllm_config: VllmConfig) -> bool:
+def get_num_hash_lookahead_tokens(vllm_config: VllmConfig) -> int:
+    """Tokens after each block that its hash covers; 0 keeps the legacy hashes."""
     speculative_config = vllm_config.speculative_config
     if (
         speculative_config is None
         or not speculative_config.use_eagle_block_drop()
         or speculative_config.disable_lookahead_block_hashes
+        or not vllm_config.cache_config.enable_prefix_caching
     ):
-        return False
-    # The hash covers only the next token; multi-module MTP reads further ahead.
-    if vllm_config.num_prefill_lookahead_tokens > 1:
-        return False
+        return 0
     # HiSparse is not validated with lookahead hashes.
     if vllm_config.attention_config.hisparse_config is not None:
-        return False
+        return 0
     # KV connectors keep the legacy hashes.
     if vllm_config.kv_transfer_config is not None:
-        return False
-    return vllm_config.cache_config.enable_prefix_caching
+        return 0
+    # The drafter's KV at a block's last position reads this far ahead.
+    return vllm_config.num_prefill_lookahead_tokens
 
 
 def get_request_block_hasher(
     hash_block_size: int,
     caching_hash_fn: Callable[[Any], bytes],
-    use_lookahead_block_hashes: bool = False,
+    num_hash_lookahead_tokens: int = 0,
 ) -> Callable[[Request], list[BlockHash]]:
     """Returns a function which computes the list of un-computed block hashes
     of a request.
@@ -983,16 +983,16 @@ def get_request_block_hasher(
     boundary. Coarser group block sizes and partial-cache boundaries reuse
     these hashes directly (see ``BlockHashListWithBlockSize``).
 
-    With ``use_lookahead_block_hashes``, each hash also covers the token right
-    after its block, which the EAGLE draft KV at the block's last position
-    depends on, so it is emitted only once that token exists. The block tokens
-    stay the hashed tokens; the extra keys become ``(E, token)``, where ``E``
-    covers the block and that token.
+    With ``num_hash_lookahead_tokens`` (L) > 0, each hash also covers the L
+    tokens after its block, which the drafter's KV at the block's last position
+    depends on, so it is emitted only once those tokens exist. The block tokens
+    stay the hashed tokens; the extra keys become ``(E, *tokens)``, where ``E``
+    covers the block and those tokens.
     """
 
     def request_block_hasher(request: Request) -> list[BlockHash]:
         start_token_idx = len(request.block_hashes) * hash_block_size
-        num_tokens = request.num_tokens - int(use_lookahead_block_hashes)
+        num_tokens = request.num_tokens - num_hash_lookahead_tokens
 
         if start_token_idx + hash_block_size > num_tokens:
             # Early stop when there no new full blocks created.
@@ -1020,11 +1020,23 @@ def get_request_block_hasher(
                 break
 
             # MM and LoRA requests need extra keys for block-hash computation.
-            if use_lookahead_block_hashes:
+            if num_hash_lookahead_tokens:
+                hash_end_token_idx = end_token_idx + num_hash_lookahead_tokens
                 extra_keys, curr_mm_idx = generate_lookahead_block_hash_extra_keys(
-                    request, start_token_idx, end_token_idx, curr_mm_idx
+                    request,
+                    start_token_idx,
+                    end_token_idx,
+                    hash_end_token_idx,
+                    curr_mm_idx,
                 )
-                extra_keys = (extra_keys, request.all_token_ids[end_token_idx])
+                if num_hash_lookahead_tokens == 1:
+                    # Same tuple as the slice below, built faster.
+                    extra_keys = (extra_keys, request.all_token_ids[end_token_idx])
+                else:
+                    extra_keys = (
+                        extra_keys,
+                        *request.all_token_ids[end_token_idx:hash_end_token_idx],
+                    )
             else:
                 extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
                     request, start_token_idx, end_token_idx, curr_mm_idx
@@ -1049,20 +1061,23 @@ def generate_lookahead_block_hash_extra_keys(
     request: Request,
     start_token_idx: int,
     end_token_idx: int,
+    hash_end_token_idx: int,
     start_mm_idx: int,
 ) -> tuple[tuple[Any, ...] | None, int]:
-    """`generate_block_hash_extra_keys` over the block and the token after it.
+    """`generate_block_hash_extra_keys` over the block and its lookahead tokens
+    up to ``hash_end_token_idx``.
 
-    The returned MM index stays on an MM input covering ``end_token_idx``,
-    since the next block starts there.
+    The returned MM index steps back to the first MM input the next block,
+    which starts at ``end_token_idx``, still overlaps.
     """
     extra_keys, mm_idx = generate_block_hash_extra_keys(
-        request, start_token_idx, end_token_idx + 1, start_mm_idx
+        request, start_token_idx, hash_end_token_idx, start_mm_idx
     )
-    if mm_idx > 0:
+    while mm_idx > 0:
         mm_position = request.mm_features[mm_idx - 1].mm_position
-        if mm_position.offset + mm_position.length > end_token_idx:
-            mm_idx -= 1
+        if mm_position.offset + mm_position.length <= end_token_idx:
+            break
+        mm_idx -= 1
     return extra_keys, mm_idx
 
 
