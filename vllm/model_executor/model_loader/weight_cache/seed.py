@@ -8,8 +8,7 @@ RDMA) later. The flow is shared — the target names what it wants by kind and
 kind-specific key fields, the source resolves the key to a payload, and the
 target validates and installs it:
 
-    request:  {"cmd": "get_seed", "kind": "flashinfer_autotune",
-               <kind-specific key fields>..., "token": "..."}
+    request:  {"kind": "flashinfer_autotune", <key fields>..., "token": "..."}
     response: {"status": "ok", "payload": <kind-specific>}
               {"status": "miss"} | {"status": "error", "message": "..."}
 
@@ -40,9 +39,7 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
 
 logger = init_logger(__name__)
 
-GET_SEED_CMD = "get_seed"
-
-# Requests carry a command and small key fields; payloads flow in responses.
+# Requests carry a kind and small key fields; payloads flow in responses.
 MAX_REMOTE_REQUEST_SIZE = 64 << 10
 _REQUEST_TIMEOUT_S = 30.0
 # An unauthenticated peer gets a whole-message deadline, not a per-read
@@ -62,16 +59,12 @@ class Seedable(Protocol):
         """Target side: the key fields identifying what this rank needs."""
         ...
 
-    def validate_request(self, request: Any) -> dict[str, Any]:
-        """Source side: validate the wire key, return it normalized.
+    def resolve(self, request: dict[str, Any]) -> Any | None:
+        """Source side: produce the payload named by ``request``.
 
-        Raise ValueError on any malformed field; the request must be rejected
-        before touching local state.
+        Validate the wire key first — raise ValueError on any malformed field,
+        before touching local state. Return None on a miss.
         """
-        ...
-
-    def resolve(self, params: dict[str, Any]) -> Any | None:
-        """Source side: produce the payload named by ``params``, None on miss."""
         ...
 
     def validate_payload(self, payload: Any) -> Any:
@@ -108,27 +101,17 @@ class SeedTransport:
         degrades to the local path with a log line.
         """
         response = self.request(
-            {
-                "cmd": GET_SEED_CMD,
-                "kind": seedable.kind,
-                **seedable.request_params(ctx),
-            },
-            label=f"{seedable.kind} seed",
+            {"kind": seedable.kind, **seedable.request_params(ctx)},
         )
         if response is None:
             return
         status = response.get("status")
-        if status == "miss":
-            logger.info(
-                "Source has no %s seed for this rank; using the local path",
-                seedable.kind,
-            )
-            return
         if status != "ok":
-            logger.warning(
-                "Source refused the %s seed request: %r; using the local path",
+            log = logger.info if status == "miss" else logger.warning
+            log(
+                "No remote %s seed adopted (status %s); using the local path",
                 seedable.kind,
-                response,
+                status,
             )
             return
         try:
@@ -143,22 +126,20 @@ class SeedTransport:
         logger.info("Adopted remote %s seed", seedable.kind)
 
     def handle_request(self, request: Any) -> dict[str, Any]:
-        """Source side: answer one authenticated ``get_seed`` request."""
-        if not isinstance(request, dict) or request.get("cmd") != GET_SEED_CMD:
-            return {"status": "error", "message": "unsupported seed command"}
-        kind_name = request.get("kind")
+        """Source side: answer one authenticated seed request."""
+        kind_name = request.get("kind") if isinstance(request, dict) else None
         seedable = next((s for s in self._seedables if s.kind == kind_name), None)
         if seedable is None:
             return {"status": "error", "message": "unsupported seed kind"}
         try:
-            payload = seedable.resolve(seedable.validate_request(request))
+            payload = seedable.resolve(request)
         except (OSError, ValueError) as e:
             return {"status": "error", "message": str(e)}
         if payload is None:
             return {"status": "miss"}
         return {"status": "ok", "payload": payload}
 
-    def request(self, payload: dict[str, Any], *, label: str) -> dict[str, Any] | None:
+    def request(self, payload: dict[str, Any]) -> dict[str, Any] | None:
         """Send one authenticated request to the source daemon.
 
         Returns the response, or None with a log line on any transport
@@ -166,6 +147,7 @@ class SeedTransport:
         """
         if self._source is None:
             return None
+        label = payload.get("kind", "payload")
         try:
             with socket.create_connection(
                 self._source, timeout=_REQUEST_TIMEOUT_S
