@@ -272,6 +272,16 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
     def update_connector_output(self, connector_output: Any) -> None:
         assert self.connector_scheduler is not None
+        events = connector_output.kv_cache_events
+        if isinstance(events, UMBPStoreKVEvents):
+            worker_events = events.get_all_events()
+            invalidate = getattr(self.connector_scheduler, "invalidate_kv_events", None)
+            if invalidate is not None:
+                invalidate(worker_events)
+            if self._kv_cache_events is None:
+                self._kv_cache_events = events
+            else:
+                self._kv_cache_events.append_events(worker_events)
         self.connector_scheduler.update_connector_output(connector_output)
         scheduler_events = self.connector_scheduler.take_events()
         if scheduler_events:
@@ -279,13 +289,6 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 self._kv_cache_events = UMBPStoreKVEvents(scheduler_events)
             else:
                 self._kv_cache_events.append_events(scheduler_events)
-        events = connector_output.kv_cache_events
-        if not isinstance(events, UMBPStoreKVEvents):
-            return
-        if self._kv_cache_events is None:
-            self._kv_cache_events = events
-        else:
-            self._kv_cache_events.append_events(events.get_all_events())
 
     def take_events(self) -> Iterable[KVCacheEvent]:
         if self._kv_cache_events is None:

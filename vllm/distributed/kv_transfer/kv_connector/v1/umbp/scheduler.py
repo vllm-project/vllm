@@ -5,14 +5,16 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
+from itertools import islice
 from typing import Any, cast
 
 from vllm.config import VllmConfig
-from vllm.distributed.kv_events import BlockStored, KVCacheEvent
+from vllm.distributed.kv_events import BlockRemoved, BlockStored, KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
@@ -116,6 +118,19 @@ class _LookupContext:
 @dataclass(frozen=True)
 class _PendingLookup:
     context: _LookupContext
+    future: Future[Sequence[bool]]
+
+
+@dataclass
+class _EventObject:
+    serial: int
+    plan: BlockTransferPlan | None
+    published: bool = False
+
+
+@dataclass(frozen=True)
+class _EventLookup:
+    objects: tuple[tuple[tuple[int, bytes], int], ...]
     future: Future[Sequence[bool]]
 
 
@@ -316,6 +331,16 @@ class UMBPStoreConnectorScheduler:
         self._gpu_block_pool: BlockPool | None = None
         self._store_events: dict[int, _StoreEvent] = {}
         self._kv_events: list[KVCacheEvent] = []
+        self._event_objects: dict[tuple[int, bytes], _EventObject] = {}
+        self._pending_event_objects: dict[tuple[int, bytes], int] = {}
+        self._event_lookup: _EventLookup | None = None
+        self._event_serial = 0
+        self._next_event_reconcile = 0.0
+        self._event_max_objects = extra.get("kv_event_max_objects", 65536)
+        if type(self._event_max_objects) is not int or self._event_max_objects <= 0:
+            raise ValueError("kv_event_max_objects must be a positive integer")
+        self._event_check_batch_size = 256
+        self._event_publications_suppressed = 0
         self._num_workers = getattr(vllm_config.parallel_config, "world_size", 1)
         self._store_event_counter = 0
 
@@ -1212,15 +1237,107 @@ class UMBPStoreConnectorScheduler:
             if event.result.completed_workers < self._num_workers:
                 continue
             del self._store_events[event_id]
+            if pool is not None:
+                block_ids = dict.fromkeys(event.block_ids())
+                pool.free_blocks(
+                    pool.blocks[block_id] for block_id in reversed(block_ids)
+                )
             if self.enable_kv_cache_events:
-                seen: set[tuple[int, bytes]] = set()
-                for plan in event.iter_plans():
-                    if plan.group_id is None or plan.block_hash is None:
-                        continue
-                    identity = (plan.group_id, plan.block_hash)
-                    if identity in seen or identity in event.result.failed_objects:
-                        continue
-                    seen.add(identity)
+                self._queue_event_objects(event)
+        self._reconcile_kv_events()
+
+    def _queue_event_objects(self, event: _StoreEvent) -> None:
+        seen: set[tuple[int, bytes]] = set()
+        for plan in event.iter_plans():
+            if plan.group_id is None or plan.block_hash is None:
+                continue
+            identity = (plan.group_id, plan.block_hash)
+            if identity in seen or identity in event.result.failed_objects:
+                continue
+            seen.add(identity)
+            previous = self._event_objects.get(identity)
+            if previous is None and len(self._event_objects) >= self._event_max_objects:
+                self._event_publications_suppressed += 1
+                logger.warning_once(
+                    "UMBP KV event tracking limit reached; suppressing new "
+                    "BlockStored events until tracked objects are evicted"
+                )
+                continue
+            self._event_serial += 1
+            self._event_objects[identity] = _EventObject(
+                self._event_serial, plan, previous.published if previous else False
+            )
+            self._pending_event_objects[identity] = self._event_serial
+
+    def invalidate_kv_events(self, events: Sequence[KVCacheEvent]) -> None:
+        removed = {
+            (event.group_idx, block_hash)
+            for event in events
+            if isinstance(event, BlockRemoved)
+            for block_hash in event.block_hashes
+        }
+        if not removed:
+            return
+        for identity in list(self._event_objects):
+            group_id, block_hash = identity
+            if (
+                group_id,
+                maybe_convert_block_hash(cast(BlockHash, block_hash)),
+            ) in removed:
+                del self._event_objects[identity]
+                self._pending_event_objects.pop(identity, None)
+
+    def _reconcile_kv_events(self) -> None:
+        if (
+            not self.enable_kv_cache_events
+            or self.runtime is None
+            or self.codec is None
+        ):
+            return
+        pending = self._event_lookup
+        if pending is not None:
+            if not pending.future.done():
+                return
+            self._event_lookup = None
+            try:
+                hits = list(pending.future.result())
+                if len(hits) != len(pending.objects) * self.topology.rank_count:
+                    raise ValueError("invalid UMBP event residency result length")
+            except Exception as exc:
+                logger.debug("UMBP event residency check failed: %s", exc)
+                hits = None
+            for index, (identity, serial) in enumerate(pending.objects):
+                record = self._event_objects.get(identity)
+                if record is None or record.serial != serial:
+                    continue
+                # Rotate completed checks so a bounded batch visits every object.
+                del self._event_objects[identity]
+                self._pending_event_objects.pop(identity, None)
+                if hits is None:
+                    if record.published:
+                        self._event_objects[identity] = record
+                    continue
+                ranks = self.topology.rank_count
+                resident = all(hits[index * ranks : (index + 1) * ranks])
+                if not resident:
+                    if record.published:
+                        group_id, block_hash = identity
+                        self._kv_events.append(
+                            BlockRemoved(
+                                block_hashes=[
+                                    maybe_convert_block_hash(
+                                        cast(BlockHash, block_hash)
+                                    )
+                                ],
+                                medium="CPU",
+                                group_idx=group_id,
+                                locality="LOCAL",
+                            )
+                        )
+                    continue
+                if not record.published:
+                    plan = record.plan
+                    assert plan is not None and plan.block_hash is not None
                     self._kv_events.append(
                         BlockStored(
                             block_hashes=[
@@ -1244,19 +1361,61 @@ class UMBPStoreConnectorScheduler:
                             locality="LOCAL",
                         )
                     )
-            if pool is not None:
-                block_ids = dict.fromkeys(event.block_ids())
-                pool.free_blocks(
-                    pool.blocks[block_id] for block_id in reversed(block_ids)
+                record.published = True
+                record.plan = None
+                self._event_objects[identity] = record
+        if not self._event_objects:
+            return
+        now = time.monotonic()
+        candidates = []
+        if now >= self._next_event_reconcile:
+            candidates = list(
+                islice(
+                    (
+                        (identity, record.serial)
+                        for identity, record in self._event_objects.items()
+                        if record.published
+                    ),
+                    max(1, self._event_check_batch_size // 2),
                 )
+            )
+            self._next_event_reconcile = now + 1.0
+        selected = {identity for identity, _ in candidates}
+        candidates.extend(
+            islice(
+                (
+                    (identity, serial)
+                    for identity, serial in self._pending_event_objects.items()
+                    if identity not in selected
+                ),
+                self._event_check_batch_size - len(candidates),
+            )
+        )
+        if not candidates:
+            return
+        keys = [
+            key
+            for (group_id, block_hash), _ in candidates
+            for key in _rank_keys(self.codec, self.topology, block_hash, group_id)
+        ]
+        self._event_lookup = _EventLookup(
+            tuple(candidates),
+            self._lookup_executor.submit(self.runtime.lookup, keys),
+        )
 
     def take_events(self) -> list[KVCacheEvent]:
+        self._reconcile_kv_events()
         events = self._kv_events
         self._kv_events = []
         return events
 
     def has_pending_push_work(self) -> bool:
-        return bool(self._pending_finished_stores) or bool(self._store_events)
+        return (
+            bool(self._pending_finished_stores)
+            or bool(self._store_events)
+            or self._event_lookup is not None
+            or bool(self._pending_event_objects)
+        )
 
     def reset_store(self) -> bool:
         if self._store_events or self._pending_finished_stores:
@@ -1266,7 +1425,14 @@ class UMBPStoreConnectorScheduler:
         self._pending_lookups.clear()
         self._load_specs.clear()
         self._pending_loads.clear()
-        return True if self.runtime is None else self.runtime.clear()
+        cleared = True if self.runtime is None else self.runtime.clear()
+        if cleared:
+            self._event_objects.clear()
+            self._pending_event_objects.clear()
+            if self._event_lookup is not None:
+                self._event_lookup.future.cancel()
+                self._event_lookup = None
+        return cleared
 
     def close(self) -> None:
         self._lookup_executor.shutdown(wait=True, cancel_futures=True)
