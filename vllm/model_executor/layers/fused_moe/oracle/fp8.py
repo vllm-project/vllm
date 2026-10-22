@@ -862,6 +862,14 @@ def make_fp8_moe_kernel(
         routing_tables=routing_tables,
         allow_new_interface=True,
         use_monolithic=issubclass(experts_cls, mk.FusedMoEExpertsMonolithic),
+        # CUTLASS block-FP8 experts quantize inside the kernel, so all-to-all
+        # carries BF16/FP16 activations rather than FP8 values and scales.
+        input_dtype=(
+            moe_config.in_dtype
+            if fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS
+            and moe_quant_config.is_block_quantized
+            else None
+        ),
     )
     assert prepare_finalize is not None
 
