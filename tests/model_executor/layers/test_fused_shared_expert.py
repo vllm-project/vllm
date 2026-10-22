@@ -1463,8 +1463,6 @@ def test_models_fse_init(
         mp.setattr(rocm_aiter_moe, "aiter_topK_meta_data", None)
         rocm_aiter_moe.init_aiter_topK_meta_data.cache_clear()
         aiter_fse_enabled = bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())
-        # These AMD-specific models currently use the raw environment flag.
-        # and do not rely on `rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()`.
         fse_enabled = use_fse and aiter_fse_enabled
 
         with (
