@@ -938,54 +938,86 @@ def _aiter_padding_matrix_worker(
             pgi, vllm_config, padded_config, weights, rank_tensors
         )
 
+    fe_name = padded_config.fused_experts_type.__name__
     assert fused_moe_mock.call_count > 0, (
-        "Expected AiterExperts.apply() to call rocm_aiter_ops.fused_moe."
+        f"Expected {fe_name}.apply() to call rocm_aiter_ops.fused_moe."
     )
     for call in fused_moe_mock.call_args_list:
         assert call.kwargs["hidden_pad"] == hidden_pad_expected, (
-            f"AiterExperts.apply() forwarded hidden_pad="
+            f"{fe_name}.apply() forwarded hidden_pad="
             f"{call.kwargs['hidden_pad']}, expected {hidden_pad_expected}."
         )
         assert call.kwargs["intermediate_pad"] == intermediate_pad_expected, (
-            f"AiterExperts.apply() forwarded intermediate_pad="
+            f"{fe_name}.apply() forwarded intermediate_pad="
             f"{call.kwargs['intermediate_pad']}, expected "
             f"{intermediate_pad_expected}."
         )
 
+    k_unpadded = padded_config.hidden_dim_unpadded or padded_config.K
+    n_unpadded = (
+        padded_config.intermediate_size_per_partition_unpadded or padded_config.N
+    )
+
     # AiterExperts.apply() never slices its own output -- the buffer stays
     # raw (padded) width; only the caller-sliced unpadded prefix is checked.
     assert mk_out.shape[-1] == padded_config.K, (
-        f"AiterExperts output width {mk_out.shape[-1]} != raw hidden_dim "
+        f"{fe_name} output width {mk_out.shape[-1]} != raw hidden_dim "
         f"{padded_config.K}."
     )
-    mk_out = mk_out[..., :_PADDING_K_UNPADDED]
+    mk_out = mk_out[..., :k_unpadded]
     # Only the real slice is checked: beyond it is unspecified/reused memory.
     assert torch.isfinite(mk_out).all(), (
-        "AiterExperts output must not contain NaN/Inf in the real "
+        f"{fe_name} output must not contain NaN/Inf in the real "
         "hidden_dim_unpadded-wide output slice."
     )
 
-    unpadded_weights = _slice_unpadded_weights(
-        weights,
-        padded_config.quant_config,
-        _PADDING_K_UNPADDED,
-        _PADDING_N_UNPADDED,
-    )
-    unpadded_rank_tensors = _slice_unpadded_rank_tensors(
-        rank_tensors, _PADDING_K_UNPADDED
-    )
+    is_mxfp4 = padded_config.weight_dtype == "mxfp4"
+    if is_mxfp4:
+        unpadded_weights = _slice_unpadded_mxfp4_weights(
+            weights, k_unpadded, n_unpadded
+        )
+    else:
+        unpadded_weights = _slice_unpadded_weights(
+            weights, padded_config.quant_config, k_unpadded, n_unpadded
+        )
+    unpadded_rank_tensors = _slice_unpadded_rank_tensors(rank_tensors, k_unpadded)
 
     with set_current_vllm_config(vllm_config):
         ref_out = reference_moe_impl(
             padded_config, unpadded_weights, unpadded_rank_tensors
         )
 
+    if padded_config.is_w4a16_mxfp4:
+        # AITER_MXFP4_BF16 silently miscomputes bias-free SwiGLU-OAI (~55%
+        # sign agreement, ~5x-small magnitude) instead of raising -- smoke
+        # test only until https://github.com/vllm-project/vllm/pull/59766.
+        assert mk_out.shape == ref_out.shape, (
+            f"{fe_name} output shape {mk_out.shape} != reference shape {ref_out.shape}."
+        )
+        return
+
+    if is_mxfp4:
+        # atol=1e-1 dwarfs the ~1e-2 reference signal, so a magnitude-only
+        # guard can't catch a sign-flipped (same-magnitude) mk_out. Cosine
+        # similarity can: gfx950 measures 0.79-0.99 correct vs. <=0.01 corrupted.
+        cos_sim = torch.nn.functional.cosine_similarity(
+            mk_out.flatten().float(), ref_out.flatten().float(), dim=0
+        )
+        assert cos_sim > 0.5, (
+            f"{fe_name} output (cos_sim={cos_sim:.4f} vs. reference) looks "
+            "degenerate/decorrelated, not just numerically imprecise."
+        )
+        # Looser tolerance than the fp8/unquantized case below: matches
+        # rank_worker's main mxfp4 sweep's atol/rtol.
+        check_accuracy(ref_out, mk_out, atol=1e-1, rtol=1e-1, percent=0.9)
+        return
+
     # ref_out's magnitude here (~1e-3-1e-2) is below atol=3e-2, so a zeroed-out
     # mk_out would still pass check_accuracy below -- guard against that.
     ref_scale = ref_out.abs().mean()
     mk_scale = mk_out.abs().mean()
     assert mk_scale > 0.5 * ref_scale, (
-        f"AiterExperts output magnitude (mean |mk_out|={mk_scale:.6f}) looks "
+        f"{fe_name} output magnitude (mean |mk_out|={mk_scale:.6f}) looks "
         f"degenerate/zeroed vs. reference (mean |ref_out|={ref_scale:.6f})."
     )
 
@@ -1086,11 +1118,10 @@ _PADDING_MXFP4_QUANT_IDS = [
     for c in _PADDING_MXFP4_QUANT_CONFIGS
 ]
 
-# intermediate_pad = (N_padded_mxfp4 - intermediate_size_per_partition_unpadded)
-#   // 64 * 64 * (2 if tp_size==1 else 1), undoubled for W4A4 only: its SiLU
-#   path already doubles the intermediate pad inside AITER, so
-#   aiter_moe_pads() must pass it through undoubled to avoid double-masking
-#   live rows. W4A16 (unquantized activation) keeps the doubled value.
+# Same formula as _PADDING_INTERMEDIATE_PAD_EXPECTED_MXFP4_W4A16, undoubled:
+# W4A4's SiLU path already doubles the intermediate pad inside AITER, so
+# aiter_moe_pads() must pass it through undoubled to avoid double-masking
+# live rows.
 _PADDING_INTERMEDIATE_PAD_EXPECTED_MXFP4_W4A4 = 256
 
 
@@ -1098,16 +1129,15 @@ def _slice_unpadded_mxfp4_weights(
     weights: WeightTensors, k_unpadded: int, n_unpadded: int
 ) -> WeightTensors:
     """MXFP4 counterpart to _slice_unpadded_weights: slices the packed
-    uint8/block-scale WeightTensors directly (no dequant needed), so the
-    result can feed reference_moe_impl the same way the fp8 path does.
+    uint8/block-scale WeightTensors directly, so the result can feed
+    reference_moe_impl the same way the fp8 path does.
 
     downcast_to_mxfp() packs 2 elements/byte along the quantized axis (K for
-    w1, N for w2); its scale blocks are 32-wide (MXFP_BLOCK_SIZE). This
-    file's MXFP4 padding constants are multiples of both (lcm=64), so the
-    packed-axis slice always lands on a byte/scale-block boundary. The
-    unpacked axis (N for w1, K for w2) slices the same way
-    _slice_unpadded_weights does. W1's gate/up interleave is left to
-    reference_moe_impl, which expects pre-interleave [gate; up] row order.
+    w1, N for w2) with 32-wide scale blocks (MXFP_BLOCK_SIZE); this file's
+    MXFP4 padding constants are multiples of both (lcm=64), so each slice
+    lands on a byte/scale-block boundary. The unpacked axis slices like
+    _slice_unpadded_weights. Gate/up interleave is left to
+    reference_moe_impl, which expects pre-interleave row order.
     """
     assert weights.w1_scale is not None and weights.w2_scale is not None, (
         "mxfp4 weights must carry block scales"
@@ -1122,97 +1152,6 @@ def _slice_unpadded_mxfp4_weights(
     w2_scale = weights.w2_scale[:, :k_unpadded, : n_unpadded // 32]
 
     return WeightTensors(w1=w1, w2=w2, w1_scale=w1_scale, w2_scale=w2_scale)
-
-
-def _aiter_padding_matrix_worker_mxfp4(
-    pgi: ProcessGroupInfo,
-    vllm_config: VllmConfig,
-    cpu_group,
-    padded_config: Config,
-    padded_weights: WeightTensors,
-    verbose: bool,
-    hidden_pad_expected: int,
-    intermediate_pad_expected: int,
-):
-    device = torch.device(f"cuda:{pgi.local_rank}")
-    init_workspace_manager(device)
-    set_random_seed(pgi.rank)
-
-    weights = copy.deepcopy(padded_weights)
-    weights.to_current_device()
-
-    rank_tensors = RankTensors.make(padded_config, pgi)
-
-    with mock.patch.object(
-        rocm_aiter_ops, "fused_moe", wraps=rocm_aiter_ops.fused_moe
-    ) as fused_moe_mock:
-        mk_out = run_modular_kernel(
-            pgi, vllm_config, padded_config, weights, rank_tensors
-        )
-
-    assert fused_moe_mock.call_count > 0, (
-        "Expected AiterMxfp4Experts.apply() to call rocm_aiter_ops.fused_moe."
-    )
-    for call in fused_moe_mock.call_args_list:
-        assert call.kwargs["hidden_pad"] == hidden_pad_expected, (
-            f"AiterMxfp4Experts.apply() forwarded hidden_pad="
-            f"{call.kwargs['hidden_pad']}, expected {hidden_pad_expected}."
-        )
-        assert call.kwargs["intermediate_pad"] == intermediate_pad_expected, (
-            f"AiterMxfp4Experts.apply() forwarded intermediate_pad="
-            f"{call.kwargs['intermediate_pad']}, expected "
-            f"{intermediate_pad_expected}."
-        )
-
-    assert mk_out.shape[-1] == padded_config.K, (
-        f"AiterMxfp4Experts output width {mk_out.shape[-1]} != raw hidden_dim "
-        f"{padded_config.K}."
-    )
-    mk_out = mk_out[..., :_PADDING_K_UNPADDED_MXFP4]
-    assert torch.isfinite(mk_out).all(), (
-        "AiterMxfp4Experts output must not contain NaN/Inf in the real "
-        "hidden_dim_unpadded-wide output slice."
-    )
-
-    unpadded_weights = _slice_unpadded_mxfp4_weights(
-        weights, _PADDING_K_UNPADDED_MXFP4, _PADDING_N_UNPADDED_MXFP4
-    )
-    unpadded_rank_tensors = _slice_unpadded_rank_tensors(
-        rank_tensors, _PADDING_K_UNPADDED_MXFP4
-    )
-
-    with set_current_vllm_config(vllm_config):
-        ref_out = reference_moe_impl(
-            padded_config, unpadded_weights, unpadded_rank_tensors
-        )
-
-    if padded_config.is_w4a16_mxfp4:
-        # AITER_MXFP4_BF16 silently computes the wrong thing for bias-free
-        # SwiGLU-OAI (~55% sign agreement, ~5x-small magnitude on hardware)
-        # instead of raising. Smoke-test only (already checked above) until
-        # https://github.com/vllm-project/vllm/pull/59766 lands -- mirrors
-        # rank_worker's existing carve-out.
-        assert mk_out.shape == ref_out.shape, (
-            f"AiterMxfp4Experts output shape {mk_out.shape} != reference "
-            f"shape {ref_out.shape}."
-        )
-        return
-
-    # check_accuracy's atol=1e-1 dwarfs the ~1e-2 reference signal, and a
-    # magnitude-only guard can't catch a sign-flipped mk_out (same
-    # magnitude as correct). Cosine similarity can: gfx950 measurements show
-    # 0.79-0.99 for correct runs (padding adds noise) vs. <=0.01/negative
-    # for corrupted output.
-    cos_sim = torch.nn.functional.cosine_similarity(
-        mk_out.flatten().float(), ref_out.flatten().float(), dim=0
-    )
-    assert cos_sim > 0.5, (
-        f"AiterMxfp4Experts output (cos_sim={cos_sim:.4f} vs. reference) "
-        "looks degenerate/decorrelated, not just numerically imprecise."
-    )
-    # Looser tolerance than the fp8/unquantized padding matrix: matches
-    # rank_worker's main sweep, which uses the same atol/rtol for mxfp4.
-    check_accuracy(ref_out, mk_out, atol=1e-1, rtol=1e-1, percent=0.9)
 
 
 @require_aiter_moe
@@ -1277,7 +1216,7 @@ def test_aiter_moe_padding_matrix_mxfp4(mode: str, quant_config: TestMoEQuantCon
 
     parallel_launch_with_config(
         config.world_size,
-        _aiter_padding_matrix_worker_mxfp4,
+        _aiter_padding_matrix_worker,
         vllm_config,
         env_dict,
         config,
@@ -1356,19 +1295,15 @@ def _aiter_token_padding_worker(
     )
 
     if config.is_w4a16_mxfp4:
-        # AITER_MXFP4_BF16 silently computes the wrong thing for bias-free
-        # SwiGLU-OAI (~55% sign agreement, ~5x-small magnitude on hardware)
-        # instead of raising. Smoke-test only (finite real rows, already
-        # checked above) until https://github.com/vllm-project/vllm/pull/59766
-        # lands -- mirrors rank_worker's existing carve-out.
+        # AITER_MXFP4_BF16 silently miscomputes bias-free SwiGLU-OAI (~55%
+        # sign agreement, ~5x-small magnitude) instead of raising -- smoke
+        # test only (finite real rows, already checked) until #59766 lands.
         return
 
     if config.weight_dtype == "mxfp4":
-        # check_accuracy's atol=1e-1 dwarfs the ~1e-2 reference signal, and a
-        # magnitude-only guard can't catch a sign-flipped mk_out (same
-        # magnitude as correct). Cosine similarity can: gfx950 measurements
-        # show 0.79-0.99 for correct runs (padding adds noise) vs.
-        # <=0.01/negative for corrupted output.
+        # atol=1e-1 dwarfs the ~1e-2 reference signal, so a magnitude-only
+        # guard can't catch a sign-flipped (same-magnitude) mk_out. Cosine
+        # similarity can: gfx950 measures 0.79-0.99 correct vs. <=0.01 corrupted.
         cos_sim = torch.nn.functional.cosine_similarity(
             mk_out[real_rows].flatten().float(),
             ref_out[real_rows].flatten().float(),
@@ -1379,7 +1314,7 @@ def _aiter_token_padding_worker(
             "degenerate/decorrelated, not just numerically imprecise."
         )
         # Looser tolerance than the fp8/unquantized case below: matches
-        # rank_worker's main sweep, which uses the same atol/rtol for mxfp4.
+        # rank_worker's main mxfp4 sweep's atol/rtol.
         check_accuracy(
             ref_out[real_rows], mk_out[real_rows], atol=1e-1, rtol=1e-1, percent=0.9
         )
