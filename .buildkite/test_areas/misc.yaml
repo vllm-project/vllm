@@ -624,6 +624,7 @@ steps:
   - vllm/logprobs.py
   - vllm/model_executor/layers/quantization/quark/
   - vllm/model_executor/model_loader/tensorizer.py
+  - vllm/models/muse_spark/
   - vllm/multimodal/
   - vllm/outputs.py
   - vllm/parser/
