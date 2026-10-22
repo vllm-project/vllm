@@ -5,16 +5,11 @@ steps:
 - label: ":intel: (BMG) Model Executor"
   key: model-executor-intel
   timeout_in_minutes: 45
-  device: intel_gpu
-  agent_tags:
-    label: production
-    gpu: 1+
-    mem: 16+
-  no_plugin: true
-  working_dir: "."
+  device: intel_gpu_k8s
+  num_devices: 1
+  resource_claim_template: b70-1
+  working_dir: "/workspace/vllm/"
   env:
-    REGISTRY: "public.ecr.aws/q9t5s3a7"
-    REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
   - vllm/engine/arg_utils.py
@@ -22,27 +17,22 @@ steps:
   - vllm/model_executor
   - tests/model_executor
   commands:
-    - >-
-      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'apt-get update && apt-get install -y curl libsodium23 &&
-      export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
-      export PYTHONFAULTHANDLER=1 &&
-      cd tests &&
-      pytest -v -s model_executor -m "not slow_test" --ignore="model_executor/layers/test_rocm_unquantized_gemm.py" --ignore="model_executor/model_loader/tensorizer_loader/test_tensorizer.py" --ignore="model_executor/model_loader/test_reload.py" --ignore="model_executor/model_loader/test_weight_cache.py" --deselect="tests/model_executor/test_enabled_custom_ops.py::test_topk_gating_enabled_by_cdna"'
+    - apt-get update
+    - apt-get install -y curl libsodium23
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - export PYTHONFAULTHANDLER=1
+    - cd tests
+    - pytest -v -s model_executor -m "not slow_test" --ignore="model_executor/layers/test_rocm_unquantized_gemm.py" --ignore="model_executor/model_loader/tensorizer_loader/test_tensorizer.py" --ignore="model_executor/model_loader/test_reload.py" --ignore="model_executor/model_loader/test_weight_cache.py" --deselect="tests/model_executor/test_enabled_custom_ops.py::test_topk_gating_enabled_by_cdna"
+
 
 - label: ":intel: (BMG) Tensorizer Model Loader Tests (XPU)"
   key: tensorizer-model-loader-tests-xpu
   timeout_in_minutes: 45
-  device: intel_gpu
-  agent_tags:
-    label: production
-    gpu: 1+
-    mem: 24+
-  no_plugin: true
-  working_dir: "."
+  device: intel_gpu_k8s
+  num_devices: 1
+  resource_claim_template: b70-1
+  working_dir: "/workspace/vllm/"
   env:
-    REGISTRY: "public.ecr.aws/q9t5s3a7"
-    REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
   - vllm/engine/arg_utils.py
@@ -50,10 +40,9 @@ steps:
   - vllm/model_executor
   - tests/model_executor
   commands:
-    - >-
-      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'apt-get update && apt-get install -y curl libsodium23 &&
-      export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
-      export PYTHONFAULTHANDLER=1 &&
-      cd tests &&
-      pytest -v -s model_executor/model_loader/tensorizer_loader/test_tensorizer.py -m "not slow_test"'
+    - apt-get update
+    - apt-get install -y curl libsodium23
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - export PYTHONFAULTHANDLER=1
+    - cd tests
+    - pytest -v -s model_executor/model_loader/tensorizer_loader/test_tensorizer.py -m "not slow_test"

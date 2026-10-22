@@ -5,16 +5,11 @@ steps:
 - label: ":intel: (BMG) Engine"
   key: engine
   timeout_in_minutes: 40
-  device: intel_gpu
-  agent_tags:
-    label: production
-    gpu: 1+
-    mem: 16+
-  no_plugin: true
-  working_dir: "."
+  device: intel_gpu_k8s
+  num_devices: 1
+  resource_claim_template: b70-1
+  working_dir: "/workspace/vllm/"
   env:
-    REGISTRY: "public.ecr.aws/q9t5s3a7"
-    REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
   - vllm/compilation/
@@ -35,49 +30,37 @@ steps:
   - tests/test_vllm_port
   - tests/jit_monitor/test_hooks.py
   commands:
-    - >-
-      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'cd tests &&
-      pytest -v -s engine/test_arg_utils.py test_sequence.py test_logger.py test_vllm_port.py jit_monitor/test_hooks.py'
+    - cd tests
+    - pytest -v -s engine/test_arg_utils.py test_sequence.py test_logger.py test_vllm_port.py jit_monitor/test_hooks.py
+
 
 - label: ":intel: (BMG) Engine (1 GPU)"
   key: engine-1-gpu
   timeout_in_minutes: 30
-  device: intel_gpu
-  agent_tags:
-    label: production
-    gpu: 1+
-    mem: 16+
-  no_plugin: true
-  working_dir: "."
+  device: intel_gpu_k8s
+  num_devices: 1
+  resource_claim_template: b70-1
+  working_dir: "/workspace/vllm/"
   env:
-    REGISTRY: "public.ecr.aws/q9t5s3a7"
-    REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
     - vllm/v1/engine/
     - tests/v1/engine/
     - tests/test_config.py
   commands:
-    - >-
-      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'cd tests &&
-      pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py --ignore v1/engine/test_core_engine_actor_manager.py &&
-      pytest -v -s test_config.py'
+    - cd tests
+    - pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py --ignore v1/engine/test_core_engine_actor_manager.py
+    - pytest -v -s test_config.py
+
 
 - label: ":intel: (BMG) V1 e2e (2 GPUs)"
   key: v1-e2e-2-gpus
   timeout_in_minutes: 30
-  device: intel_gpu
-  agent_tags:
-    label: production
-    gpu: 2+
-    mem: 16+
-  no_plugin: true
-  working_dir: "."
+  device: intel_gpu_k8s
+  num_devices: 2
+  resource_claim_template: b70-2
+  working_dir: "/workspace/vllm/"
   env:
-    REGISTRY: "public.ecr.aws/q9t5s3a7"
-    REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
     - vllm/compilation/
@@ -99,9 +82,5 @@ steps:
     - vllm/v1/
     - tests/v1/e2e/spec_decode/
   commands:
-  - >-
-      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'cd tests &&
-      pytest -v -s
-      v1/e2e/spec_decode/draft_model/test_draft_model.py::test_draft_model_tensor_parallelism
-      v1/e2e/spec_decode/draft_model/test_draft_model.py::test_draft_model_engine_args_tensor_parallelism'
+    - cd tests
+    - pytest -v -s v1/e2e/spec_decode/draft_model/test_draft_model.py::test_draft_model_tensor_parallelism v1/e2e/spec_decode/draft_model/test_draft_model.py::test_draft_model_engine_args_tensor_parallelism
