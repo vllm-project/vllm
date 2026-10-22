@@ -279,6 +279,12 @@ def _allocate_scheduled(
     return blocks
 
 
+def _resident_block_ids(manager: KVCacheManager, request_id: str) -> list[int]:
+    """The GPU block HiSparse reads each resident page from; 0 if host-only."""
+    resident = get_hisparse_coordinator(manager).resident_managers[0]
+    return [block.block_id for block in resident.get_residency_row(request_id)]
+
+
 def test_hisparse_does_not_write_back_reprefillable_tokens():
     """Multi-module MTP re-prefills the last tokens, so they are not final."""
     manager = make_hisparse_kv_cache_manager(32, 16, num_prefill_lookahead=3)
@@ -319,7 +325,7 @@ def test_hisparse_builds_dma_row_mirrors_across_pages():
 def test_hisparse_async_speculation_mirrors_uncertain_position_range():
     """Unresolved drafts must not leave gaps in the eager host mirror."""
     coordinator = MagicMock(host_group_id=0)
-    coordinator.take_block_table_updates.return_value = {}
+    coordinator.take_residency_updates.return_value = {}
     coordinator.build_offload_command.return_value = None
     coordinator.build_row_mirrors.return_value = ()
     scheduler = HiSparseConnectorScheduler(
@@ -332,7 +338,6 @@ def test_hisparse_async_speculation_mirrors_uncertain_position_range():
     connector.connector_scheduler = scheduler
     connector.update_state_after_alloc(request, None, 0)
     scheduler_output = SimpleNamespace(
-        block_table_updates=None,
         kv_cache_block_copies=None,
         scheduled_new_reqs=[],
         scheduled_cached_reqs=SimpleNamespace(
@@ -370,11 +375,66 @@ def test_hisparse_reports_when_context_is_fully_resident():
         hot_manager.require_hot(request.request_id)
     assert _allocate_scheduled(manager, request, num_new_tokens=len(tokens)) is not None
     _publish_hisparse_pages(manager)
+    coordinator.take_residency_updates([request.request_id])
+    core_row = manager.get_block_ids(request.request_id)[2]
     pool = manager.block_pool
     pool.get_new_blocks(pool.get_num_free_blocks())
 
     assert not coordinator.all_context_pages_resident(scheduled)
-    assert coordinator.take_block_table_updates().keys() == {request.request_id}
+    # The block-table row stays append-only; the worker learns of the lost
+    # pages from the residency update instead.
+    assert manager.get_block_ids(request.request_id)[2] == core_row
+    resident_ids = _resident_block_ids(manager, request.request_id)
+    lost = [page for page, block_id in enumerate(resident_ids) if block_id == 0]
+    assert lost
+    update = coordinator.take_residency_updates([request.request_id])
+    assert update[request.request_id].pages == lost
+    assert update[request.request_id].block_ids[0] == [0] * len(lost)
+
+
+def test_hisparse_residency_update_sends_only_changed_pages():
+    """Losing one early page must not resend the pages after it: per-step
+    residency updates would otherwise grow with the context length."""
+    manager = make_hisparse_kv_cache_manager(32, 16)
+    tokens = list(range(6 * HISPARSE_BLOCK_SIZE))
+    request = make_request("request", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    assert _allocate_scheduled(manager, request, num_new_tokens=len(tokens))
+    coordinator = get_hisparse_coordinator(manager)
+    for hot_manager in coordinator.hot_managers:
+        hot_manager.require_hot(request.request_id)
+    assert _allocate_scheduled(manager, request, num_new_tokens=len(tokens))
+    coordinator.take_residency_updates([request.request_id])
+    pool = manager.block_pool
+    num_never_used = pool.get_num_free_blocks()
+    # Pages unpin as their host copies complete, so page 0 is reused first.
+    _publish_hisparse_pages(manager)
+    pool.get_new_blocks(num_never_used + 1)
+
+    update = coordinator.take_residency_updates([request.request_id])
+
+    assert update[request.request_id].pages == [0]
+    assert update[request.request_id].block_ids == ([0],)
+
+
+def test_hisparse_readmitted_request_resends_its_full_residency():
+    """A preempted request may resume in a worker state row holding another
+    request's residency, so its first update must cover every page again."""
+    manager = make_hisparse_kv_cache_manager(32, 16)
+    coordinator = get_hisparse_coordinator(manager)
+    tokens = list(range(2 * HISPARSE_BLOCK_SIZE))
+    request = make_request("request", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    assert _allocate_scheduled(manager, request, len(tokens)) is not None
+    assert request.request_id in coordinator.take_residency_updates(
+        [request.request_id]
+    )
+    manager.free(request)
+
+    assert _allocate_scheduled(manager, request, len(tokens)) is not None
+    update = coordinator.take_residency_updates([request.request_id])
+    assert update[request.request_id].pages == [0, 1]
+    assert update[request.request_id].block_ids[0] == _resident_block_ids(
+        manager, request.request_id
+    )
 
 
 def test_hisparse_host_prefix_can_be_completed_by_indexer_offload():
@@ -416,9 +476,7 @@ def test_hisparse_host_prefix_can_be_completed_by_indexer_offload():
     source, indexer, resident, hot = manager.get_blocks(resumed.request_id).blocks
     assert len(source) == len(indexer) == len(resident) == 4
     assert len(hot) == 2
-    assert not any(block.is_null for block in resident[:2])
-    assert not resident[2].is_null
-    assert not resident[3].is_null
+    assert 0 not in _resident_block_ids(manager, resumed.request_id)
     coordinator = get_hisparse_coordinator(manager)
     assert not coordinator.build_offload_command().page_transfers
     coordinator.finish_host_import(resumed.request_id, failed=False)
@@ -594,8 +652,12 @@ def test_nixl_hisparse_full_block_import_keeps_a_writable_tail(num_tokens):
         failed_recving_kv_req_ids=set(),
         finished_recving_kv_req_ids={request.request_id},
         prefix_replay_tokens=0,
+        prefix_replay_group_ids=(),
     )
     scheduler._mark_prefix_replay = MethodType(Scheduler._mark_prefix_replay, scheduler)
+    scheduler._load_restores_replay_window = MethodType(
+        Scheduler._load_restores_replay_window, scheduler
+    )
     Scheduler._update_waiting_for_remote_kv(scheduler, request)
     assert request.num_tokens - request.num_computed_tokens == 1
     assert _allocate_scheduled(manager, request, num_new_tokens=1) is not None
@@ -662,9 +724,10 @@ def test_hisparse_keeps_resident_pages_until_hot_buffer_is_allocated(enable_cach
     pool.free_blocks(held)
     assert _allocate_scheduled(manager, first, num_new_tokens=1) is not None
     assert all(m.has_hot("first") for m in coordinator.hot_managers)
+    coordinator.take_residency_updates(["first"])
     pool.get_new_blocks(pool.get_num_free_blocks())
     assert not coordinator.all_context_pages_resident(scheduled)
-    assert "first" in coordinator.take_block_table_updates()
+    assert "first" in coordinator.take_residency_updates(["first"])
 
 
 def test_hisparse_full_pool_keeps_pages_pinned_until_preemption():
@@ -1200,11 +1263,7 @@ def test_hisparse_prefix_hit_adopts_gpu_shadow_pages():
         num_new_computed_tokens=num_computed,
         new_computed_blocks=computed,
     )
-    resident_blocks = manager.get_blocks("resumed").blocks[2]
-    assert [block.block_id for block in resident_blocks[:3]] == (
-        original_resident_ids[:3]
-    )
-    assert not any(block.is_null for block in resident_blocks[:3])
+    assert _resident_block_ids(manager, "resumed")[:3] == original_resident_ids[:3]
     assert get_hisparse_coordinator(manager).all_context_pages_resident(
         ((resumed.request_id, num_computed, len(tokens) - num_computed),)
     )
@@ -1245,17 +1304,13 @@ def test_hisparse_prefix_hit_under_pressure_adopts_surviving_copies(
         new_computed_blocks=computed,
     )
 
-    resumed_blocks = manager.get_blocks("resumed").blocks
-    assert [block.block_id for block in resumed_blocks[2][:3]] == [
+    resident_ids = _resident_block_ids(manager, "resumed")
+    assert resident_ids[:3] == [
         copy_ids[page] if page in adopted_pages else pool.null_block.block_id
         for page in range(3)
     ]
-    gpu_ids = [
-        block.block_id
-        for group in resumed_blocks[1:]
-        for block in group
-        if not block.is_null
-    ]
+    _, indexer, _, hot = manager.get_block_ids("resumed")
+    gpu_ids = [block_id for block_id in indexer + resident_ids + hot if block_id]
     assert len(gpu_ids) == len(set(gpu_ids))
 
 
@@ -1484,8 +1539,7 @@ def test_hisparse_reused_copy_is_not_adopted():
         num_new_computed_tokens=num_computed,
         new_computed_blocks=computed,
     )
-    resident_blocks = manager.get_blocks("resumed").blocks[2]
-    assert all(block.is_null for block in resident_blocks[:3])
+    assert _resident_block_ids(manager, "resumed")[:3] == [0, 0, 0]
 
 
 def test_hisparse_external_import_uses_hard_gpu_footprint():
@@ -1563,6 +1617,7 @@ def make_kv_cache_config_hybrid_model(
             block_size=block_size,
             shapes=((1, 1),),
             dtypes=(torch.float32,),
+            mamba_cache_mode="align",
         )
 
     return KVCacheConfig(
@@ -1598,6 +1653,7 @@ def make_kv_cache_config_three_types(
             block_size=block_size,
             shapes=((1, 1),),
             dtypes=(torch.float32,),
+            mamba_cache_mode="align",
         )
     elif third_spec_type == "sliding_window":
         third_spec = SlidingWindowSpec(
@@ -1678,6 +1734,7 @@ def test_prefix_cache_hit_uses_per_group_dcp_geometry(draft_sharded):
                     block_size=block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
                 ),
             ),
         ],
@@ -1703,10 +1760,13 @@ def test_prefix_cache_hit_uses_per_group_dcp_geometry(draft_sharded):
     req0 = make_request("0", common_token_ids + [99] * 7, block_size, hash_fn)
     computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req0)
     assert num_computed_tokens == 0
-    blocks = manager.allocate_slots(
-        req0, len(req0.prompt_token_ids), 0, computed_blocks
-    )
-    assert blocks is not None
+    # Align-mode Mamba keeps a state only where a chunk ends, so end the first
+    # chunk on the shared prefix.
+    for num_new_tokens in (len(common_token_ids), 7):
+        blocks = manager.allocate_slots(req0, num_new_tokens, 0, computed_blocks)
+        assert blocks is not None
+        req0.num_computed_tokens += num_new_tokens
+        computed_blocks = None
 
     req1 = make_request("1", common_token_ids + [100] * 5, block_size, hash_fn)
     computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
@@ -2231,7 +2291,7 @@ def _make_hybrid_kv_cache_config(
             - "full": FullAttentionSpec
             - "sliding_window": SlidingWindowSpec with window=2*block_size
             - "sliding_window_large": SlidingWindowSpec with window=4*block_size
-            - "mamba": MambaSpec
+            - "mamba": MambaSpec in prefix-caching ("align") mode
 
     """
     spec_map = {
@@ -2256,11 +2316,6 @@ def _make_hybrid_kv_cache_config(
             sliding_window=4 * block_size,
         ),
         "mamba": lambda: MambaSpec(
-            block_size=block_size,
-            shapes=((1, 1),),
-            dtypes=(torch.float32,),
-        ),
-        "mamba_align": lambda: MambaSpec(
             block_size=block_size,
             shapes=((1, 1),),
             dtypes=(torch.float32,),
@@ -2373,14 +2428,16 @@ def test_prefill_hybrid_model_combinations(spec_types: list[str]):
     assert not computed_blocks.blocks[0]  # No cache hit initially
     assert num_computed_tokens == 0
 
-    blocks = manager.allocate_slots(
-        req0, 55, len(computed_blocks.blocks[0]) * block_size, computed_blocks
-    )
-    assert blocks is not None
-    # Should have blocks for all groups
-    assert len(blocks.get_block_ids()) == num_groups
-
-    manager.new_step_starts()
+    # Align-mode Mamba keeps a state only where a chunk ends, so end the first
+    # chunk on the common prefix.
+    for num_new_tokens in (len(common_token_ids), len(unique_token_ids)):
+        blocks = manager.allocate_slots(req0, num_new_tokens, 0, computed_blocks)
+        assert blocks is not None
+        # Should have blocks for all groups
+        assert len(blocks.get_block_ids()) == num_groups
+        req0.num_computed_tokens += num_new_tokens
+        computed_blocks = None
+        manager.new_step_starts()
 
     # Second request: should hit cached blocks for common prefix
     req1 = make_request("1", common_token_ids + [4] * 5, block_size, hash_fn)
@@ -2495,7 +2552,7 @@ def test_prefill_hybrid_model_mamba_align():
     num_blocks = 30
 
     kv_cache_config = _make_hybrid_kv_cache_config(
-        block_size, num_blocks, ["full", "mamba_align"]
+        block_size, num_blocks, ["full", "mamba"]
     )
     manager = make_kv_cache_manager(
         kv_cache_config,
@@ -2531,7 +2588,7 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
     """
     block_size = 16
     manager = make_kv_cache_manager(
-        _make_hybrid_kv_cache_config(block_size, 30, ["full", "mamba_align"]),
+        _make_hybrid_kv_cache_config(block_size, 30, ["full", "mamba"]),
         max_model_len=8192,
         enable_caching=True,
         hash_block_size=block_size,
@@ -2606,7 +2663,7 @@ def test_hybrid_model_mamba_align_with_dynamic_draft_tokens():
     num_blocks = 30
 
     kv_cache_config = _make_hybrid_kv_cache_config(
-        block_size, num_blocks, ["full", "mamba_align"]
+        block_size, num_blocks, ["full", "mamba"]
     )
     manager = KVCacheManager(
         kv_cache_config,
@@ -5043,19 +5100,10 @@ def test_hybrid_local_kv_retention_mtp_reuses_latest_boundary():
 
 
 def test_hybrid_mamba_retention_mtp_resend_of_aligned_prompt():
-    """An identical resend and a longer sibling resume at DIFFERENT positions.
+    """EAGLE resend and extension reuse the same retained checkpoint.
 
-    How far a lookup matches depends on who is asking. A resend of the same
-    prompt caps its lookup at ``num_tokens - 1`` (the last token is recomputed
-    for logits), while a sibling whose prompt merely starts with this one caps
-    above the prompt. The two coincide unless the prompt length is an exact
-    multiple of the alignment -- there they differ by one alignment unit, and
-    under the EAGLE drop BOTH are reachable.
-
-    Retaining only the higher one leaves the resend with every retained state
-    above every candidate its lookup can produce, and the reconciled hit
-    collapses to 0 -- the same zero-hit failure sparse retention already fixes
-    at unaligned prompt lengths.
+    Attention may inspect the prompt's final block before dropping it, so an
+    aligned resend must not lose another block to the P - 1 lookup limit.
     """
     block_size = 32
     num_spec = 3
@@ -5093,16 +5141,12 @@ def test_hybrid_mamba_retention_mtp_resend_of_aligned_prompt():
         use_eagle=True,
     )
 
-    # 128 tokens, an exact multiple of the 32-token alignment. A longer sibling
-    # matches 128 and drops to 96; this prompt's own resend caps at 127, matches
-    # 96 and drops to 64. Both states must survive retention.
+    # Both requests prove 128 attention tokens, drop one block, and reuse 96.
     token_ids = [i for i in range(4) for _ in range(block_size)]
     req0 = make_request("0", token_ids, block_size, sha256)
     computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req0)
     assert num_computed_tokens == 0
-    # Prefill in block-aligned chunks the way the align-mode scheduler does: a
-    # state only materializes as a chunk's running-state block, so a
-    # single-shot prefill could not retain the lower one.
+    # Materialize the checkpoint through normal block-aligned prefill chunks.
     for chunk_end in (32, 64, 96, 128):
         blocks = manager.allocate_slots(
             req0,
@@ -5114,8 +5158,7 @@ def test_hybrid_mamba_retention_mtp_resend_of_aligned_prompt():
         assert blocks is not None
         req0.num_computed_tokens = chunk_end
 
-    # Block ``i`` ends at token ``(i + 1) * 32``, so positions 64 and 96 are
-    # mamba blocks 1 and 2.
+    # Both materialized replay checkpoints survive; resend and extension use 96.
     pool = manager.block_pool
     expected_mamba_cached = {1, 2}
     for i in range(4):
@@ -5126,15 +5169,13 @@ def test_hybrid_mamba_retention_mtp_resend_of_aligned_prompt():
             assert cached is None, f"mamba hash {i} should not be cached"
     manager.free(req0)
 
-    # The identical resend: full attention matches blocks 0-2 (96 tokens, capped
-    # by num_tokens - 1) and the EAGLE drop caps the candidate at 64. Without
-    # the lower state retained the reconciled hit would be 0.
+    # The identical resend must reuse the retained checkpoint, not miss to zero.
     req1 = make_request("1", token_ids, block_size, sha256)
     computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
-    assert num_computed_tokens == 2 * block_size
-    assert [len(blocks) for blocks in computed_blocks.blocks] == [2, 2]
+    assert num_computed_tokens == 3 * block_size
+    assert [len(blocks) for blocks in computed_blocks.blocks] == [3, 3]
 
-    # The longer sibling resumes one alignment unit higher, off the same prompt.
+    # The longer sibling reuses that same checkpoint.
     longer = make_request("2", token_ids + [9] * block_size, block_size, sha256)
     computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(longer)
     assert num_computed_tokens == 3 * block_size
@@ -5858,49 +5899,6 @@ def test_mamba_reachable_block_mask_pins_shared_prefix():
     assert retained(0, None) == {14}
 
 
-def test_mamba_shared_prefix_survives_zero_retention():
-    """Manager-level check of the full wiring: a pinned shared-prefix boundary
-    (``Request.shared_prefix_boundary``, set by the scheduler on Marconi-style
-    detection) keeps its Mamba state block cached under
-    ``prefix_cache_retention_interval=0``, which otherwise retains only the
-    end-of-prompt replay boundary. Without this, a shared prefix (junction
-    before ``num_prompt``) would be recomputed by every sharing request."""
-    block_size = 16
-
-    # 16-block (256-token) prompt; replay boundary is block 240 // 16 - 1 = 14.
-    token_ids = [i for i in range(16) for _ in range(block_size)]
-
-    def cached_mamba_blocks(shared_prefix_boundary):
-        # Fresh manager per scenario so cached blocks don't leak between runs.
-        manager = make_kv_cache_manager(
-            _make_hybrid_kv_cache_config(block_size, 100, ["full", "mamba"]),
-            max_model_len=8192,
-            enable_caching=True,
-            hash_block_size=block_size,
-            retention_interval=0,
-        )
-        req = make_request("r", token_ids, block_size, sha256)
-        req.shared_prefix_boundary = shared_prefix_boundary
-        computed_blocks, num_computed, _ = manager.get_computed_blocks(req)
-        blocks = manager.allocate_slots(
-            req, len(token_ids), num_computed, computed_blocks
-        )
-        assert blocks is not None
-        pool = manager.block_pool
-        return {
-            i
-            for i in range(16)
-            if pool.get_cached_block(req.block_hashes[i], kv_cache_group_ids=[1])
-            is not None
-        }
-
-    # Without a pinned boundary, retention=0 keeps only the replay boundary (14).
-    assert cached_mamba_blocks(0) == {14}
-    # Pinning the shared prefix at token 96 (state block 5) retains it too, so a
-    # later request sharing that prefix can hit the Mamba state.
-    assert cached_mamba_blocks(96) == {5, 14}
-
-
 def test_mamba_shared_prefix_reuse_under_zero_retention():
     """Full cross-request Marconi flow: a partial shared prefix cached by the
     detecting request must stay reusable by a later request under
@@ -5911,7 +5909,7 @@ def test_mamba_shared_prefix_reuse_under_zero_retention():
 
     def last_req_hit(retention, pin):
         manager = make_kv_cache_manager(
-            _make_hybrid_kv_cache_config(block_size, 200, ["full", "mamba_align"]),
+            _make_hybrid_kv_cache_config(block_size, 200, ["full", "mamba"]),
             max_model_len=8192,
             enable_caching=True,
             hash_block_size=block_size,
@@ -6186,25 +6184,34 @@ def test_mamba_reachable_block_mask_large_dcp_stays_sparse():
     assert mask_no_dcp == mask_large_dcp, "DCP must not change Mamba retention"
 
 
-def test_swa_shared_prefix_reuse_under_zero_retention():
+@pytest.mark.parametrize("use_eagle", [False, True])
+def test_swa_shared_prefix_reuse_under_zero_retention(use_eagle):
     """SWA cross-request analog: a partial shared prefix's sliding-window tail
     must stay reusable under ``prefix_cache_retention_interval=0``. Without
     the pin the junction window is masked out and a later request misses; with
-    it (and under dense) reuse is preserved."""
+    it (and under dense) reuse is preserved. With only the SWA group drafting
+    under EAGLE, the full group reports the junction at the shared prefix, but
+    the SWA hit lands one block below it: the block past the junction is not
+    shared and cannot serve as the EAGLE peek."""
     block_size = 16
 
     def last_req_hit(retention, pin):
+        config = _make_hybrid_kv_cache_config(
+            block_size, 200, ["full", "sliding_window"]
+        )
+        config.kv_cache_groups[1].is_eagle_group = use_eagle
         manager = make_kv_cache_manager(
-            _make_hybrid_kv_cache_config(block_size, 200, ["full", "sliding_window"]),
+            config,
             max_model_len=8192,
             enable_caching=True,
+            use_eagle=use_eagle,
             hash_block_size=block_size,
             retention_interval=retention,
         )
         shared = [7 for _ in range(4 * block_size)]  # 4-block shared prefix
 
         def distinct(v):
-            return [v for _ in range(2 * block_size)]
+            return [v for _ in range(4 * block_size)]
 
         # req0 primes the (dense) full-attention cache; SWA under RET=0 keeps
         # only its own replay window, not the shared-prefix boundary.
@@ -6227,12 +6234,13 @@ def test_swa_shared_prefix_reuse_under_zero_retention():
         _, nc2, _ = manager.get_computed_blocks(req2)
         return nc2
 
+    expected = (3 if use_eagle else 4) * block_size
     # Dense keeps every SWA tail -> reuse works (ceiling).
-    assert last_req_hit(retention=None, pin=False) == 4 * block_size
+    assert last_req_hit(retention=None, pin=False) == expected
     # retention=0 without the pin drops the junction window -> reuse lost (bug).
     assert last_req_hit(retention=0, pin=False) == 0
     # retention=0 with the pin keeps the junction window -> reuse restored.
-    assert last_req_hit(retention=0, pin=True) == 4 * block_size
+    assert last_req_hit(retention=0, pin=True) == expected
 
 
 def test_device_eviction_keeps_host_prefix():

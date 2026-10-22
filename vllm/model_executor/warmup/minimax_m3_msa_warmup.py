@@ -4,6 +4,9 @@
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
+from vllm.model_executor.warmup.attention_warmup import (
+    mixed_batch_attention_warmup,
+)
 from vllm.models.minimax_m3.nvidia.model import MiniMaxM3SparseAttention
 from vllm.platforms import current_platform
 from vllm.tracing import instrument
@@ -34,10 +37,4 @@ def minimax_m3_msa_warmup(worker: "Worker") -> None:
     logger.info("Warming up MiniMax M3 MSA kernels.")
 
     # Cover sparse prefill through the normal model path.
-    worker.model_runner._dummy_run(
-        num_tokens=16,
-        skip_eplb=True,
-        is_profile=True,
-        force_attention=True,
-        create_mixed_batch=True,
-    )
+    mixed_batch_attention_warmup(worker)

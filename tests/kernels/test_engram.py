@@ -7,6 +7,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    dequant_mxfp8_to_bf16,
+)
 from vllm.models.deepseek_v41.common import engram as engram_ops
 from vllm.models.deepseek_v41.common.engram import (
     Engram,
@@ -181,6 +184,7 @@ def test_engram_cache_follows_kv_cache_binding(num_blocks):
     state.swa_cache_module.kv_cache = torch.empty(4, 64, 1)
     assert state.ensure_cache()
     profiling_cache = state._cache
+    assert profiling_cache is not None
     profiling_cache.fill_(7)
     assert state.ensure_cache()
     assert state._cache is profiling_cache
@@ -189,6 +193,7 @@ def test_engram_cache_follows_kv_cache_binding(num_blocks):
     state.swa_cache_module.kv_cache = torch.empty(num_blocks, 64, 1)
     assert state.ensure_cache()
     assert state._cache is not profiling_cache
+    assert state._cache is not None
     assert state._cache.shape == (num_blocks * 64,)
     assert torch.count_nonzero(state._cache) == 0
 
@@ -499,11 +504,12 @@ def test_lookback_window_reproduces_single_instance(runner, capture):
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
-def test_v2_model_state_gathers_lookback_window():
+@pytest.mark.parametrize("pcp", [False, True])
+def test_v2_model_state_gathers_lookback_window(pcp):
     """The window is gathered on device from the runner's token history."""
     from vllm.models.deepseek_v41.nvidia.model_state import DeepseekV41ModelState
 
-    depth, max_num_reqs, max_model_len = 3, 4, 16
+    depth, max_num_reqs, max_model_len = 3, 6, 16
     state = DeepseekV41ModelState.__new__(DeepseekV41ModelState)
     state.rope_state = None
     state.supports_mm_inputs = False
@@ -524,15 +530,24 @@ def test_v2_model_state_gathers_lookback_window():
     # Batch rows -> request state rows: a request two decode steps in, a fresh
     # request, and one at the end of a 5-token prompt.
     input_batch = SimpleNamespace(
-        idx_mapping=torch.tensor([2, 0, 3], dtype=torch.int64, device="cuda")
+        idx_mapping=torch.tensor(
+            [2, 0, 3, 2] if pcp else [2, 0, 3], dtype=torch.int64, device="cuda"
+        ),
+        query_start_loc=torch.arange(5 if pcp else 4, dtype=torch.int32, device="cuda"),
+        positions=torch.tensor([8, 0, 6, 5] if pcp else [8, 0, 6], device="cuda"),
     )
     window = state.prepare_inputs(input_batch, req_states)["lookback_token_ids"]
-    assert window.cpu().tolist() == [
+    assert window is not None
+    expected = [
         [22, 21, 16],
         [-1, -1, -1],
         [0, 0, 0],
-        [-1, -1, -1],
     ]
+    if pcp:
+        # The second PCP chunk of request 2 starts at 5, not at its global 8.
+        expected.append([15, 14, 13])
+    expected.extend([[-1] * depth] * (max_num_reqs - len(expected)))
+    assert window.cpu().tolist() == expected
     # Graph capture runs on the dummy inputs and replays read the same buffer.
     dummy = state.prepare_dummy_inputs(num_reqs=3, num_tokens=3)["lookback_token_ids"]
     assert dummy is window and torch.all(dummy == -1)
@@ -714,8 +729,9 @@ def test_engram_lookup_reuses_jit_across_token_shapes():
 )
 @pytest.mark.parametrize("cpu_offload", [False, True])
 @pytest.mark.parametrize("background", [False, True])
+@pytest.mark.parametrize("packed", [False, True])
 @pytest.mark.parametrize("num_tokens", [1, 7, 256])
-def test_engram_lookup_matches_torch(cpu_offload, background, num_tokens):
+def test_engram_lookup_matches_torch(cpu_offload, background, packed, num_tokens):
     """The fused gather must be bit-exact with the torch dequant path it
     replaces, from HBM and from pinned host memory alike, and must contribute
     zeros for rows another TP rank owns."""
@@ -729,8 +745,13 @@ def test_engram_lookup_matches_torch(cpu_offload, background, num_tokens):
         layer.vocab_start_idx,
         layer.vocab_end_idx,
     )
-    out = torch.empty(num_tokens, cols, layer.dim, dtype=torch.bfloat16, device="cuda")
+    width = layer.dim + layer.dim // 32 if packed else layer.dim
+    dtype = torch.uint8 if packed else torch.bfloat16
+    out = torch.empty(num_tokens, cols, width, dtype=dtype, device="cuda")
     layer.lookup(ids, out, background=background)
+    if packed:
+        values = out[..., : layer.dim].view(torch.float8_e4m3fn)
+        out = dequant_mxfp8_to_bf16(values, out[..., layer.dim :])
     assert torch.equal(out, expected)
 
 
@@ -788,6 +809,7 @@ def test_engram_shared_prefetch_stream_waits_per_layer():
     modules[1].prepare_embeddings(hashes[:, 1])
     rows = modules[0].embed(hashes[:, 0])
     torch.cuda.current_stream().synchronize()
+    assert modules[1]._prefetch_done is not None
     assert not modules[1]._prefetch_done.query(), "waited for the second lookup"
     layer = modules[0].embed_tokens
     expected = _reference_lookup(
@@ -847,7 +869,7 @@ def test_engram_constructor_honors_offload(monkeypatch, cpu_offload):
         streams.append(torch.cuda.current_stream())
         lookup(ids, out, background=background)
 
-    layer.lookup = track_lookup
+    monkeypatch.setattr(layer, "lookup", track_lookup)
     main = torch.cuda.current_stream()
     ids = torch.randint(
         layer.vocab_start_idx,
