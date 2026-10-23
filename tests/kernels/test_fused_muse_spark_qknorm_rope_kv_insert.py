@@ -491,6 +491,7 @@ def test_query_fusion_respects_attention_metadata(
     )
     assert (q_fp8 is not None) == expected_fp8
     if expected_fp8:
+        assert q_fp8 is not None
         expected_q, _ = ops.scaled_fp8_quant(ref[:, : 16 * HEAD_DIM], layer._q_scale)
         torch.testing.assert_close(q_fp8.float(), expected_q.float(), rtol=0, atol=0)
     else:

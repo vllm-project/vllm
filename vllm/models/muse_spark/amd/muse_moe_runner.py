@@ -3,7 +3,7 @@
 """ROCm MoE implementation for MuseSpark1x checkpoints."""
 
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 
 import torch
 
@@ -402,7 +402,11 @@ class MuseSparkUnquantizedFusedMoE(UnquantizedFusedMoEMethod):
         if post_expert_norm_fn is None:
             raise RuntimeError("MuseSpark1x post-expert norm is not configured.")
         return MuseSparkUnquantizedMoEQuantConfig(
-            **vars(base_config),
+            **{
+                f.name: getattr(base_config, f.name)
+                for f in fields(FusedMoEQuantConfig)
+                if f.init
+            },
             post_expert_norm_fn=post_expert_norm_fn,
         )
 
@@ -573,7 +577,11 @@ class MuseSparkQuarkW8A8Fp8FusedMoE(QuarkW8A8Fp8MoEMethod):
         if post_expert_norm_fn is None:
             raise RuntimeError("MuseSpark1x post-expert norm is not configured.")
         return MuseSparkQuarkFp8MoEQuantConfig(
-            **vars(base_config),
+            **{
+                f.name: getattr(base_config, f.name)
+                for f in fields(FusedMoEQuantConfig)
+                if f.init
+            },
             post_expert_norm_fn=post_expert_norm_fn,
         )
 
@@ -621,7 +629,11 @@ class MuseSparkQuarkOCPMXFusedMoE(QuarkOCP_MX_MoEMethod):
         if post_expert_norm_fn is None:
             raise RuntimeError("MuseSpark1x post-expert norm is not configured.")
         return MuseSparkQuarkOCPMXMoEQuantConfig(
-            **vars(base_config),
+            **{
+                f.name: getattr(base_config, f.name)
+                for f in fields(FusedMoEQuantConfig)
+                if f.init
+            },
             post_expert_norm_fn=post_expert_norm_fn,
         )
 

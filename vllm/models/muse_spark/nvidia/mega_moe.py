@@ -49,7 +49,7 @@ def _get_deep_gemm():
         not in inspect.signature(module.bf16_mega_moe).parameters
     ):
         raise RuntimeError(
-            "Muse Spark MegaMoE requires the pinned Inferact DeepGEMM build "
+            "Muse Spark MegaMoE requires the pinned DeepGEMM build "
             "with BF16 post-expert normalization. "
             "Install it with tools/install_deepgemm.sh or rebuild the vLLM wheel."
         )

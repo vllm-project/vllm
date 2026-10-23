@@ -58,9 +58,9 @@ from vllm.models.muse_spark.common.ops.fused_rmsnorm import (
     fused_norm_residual_norm_fwd,
     supports_norm_residual_norm,
 )
-from vllm.platforms.rocm import on_gfx950
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.third_party.flash_linear_attention.ops.fused_norm_gate import (
+from vllm.third_party.flash_linear_attention.ops.kda import (
     rms_norm_gated,
 )
 from vllm.transformers_utils.configs.muse_spark import (
@@ -85,6 +85,16 @@ logger = init_logger(__name__)
 
 # Below this the fp32 Triton router GEMM is at least as fast in serving.
 _ROUTER_BF16X3_MIN_TOKENS = 16
+
+
+def _supports_router_bf16x3_device() -> bool:
+    if not current_platform.is_rocm():
+        return False
+
+    # Importing a foreign platform can reload torch extension libraries.
+    from vllm.platforms.rocm import on_gfx950
+
+    return on_gfx950()
 
 
 def norm_residual_then_norm(
@@ -186,6 +196,8 @@ class MuseSpark1xMoE(nn.Module):
         self.route_scale = config.routed_scaling_factor
 
         self.router_output_multiplier = config.output_multiplier
+        self._router_multiplier_folded = False
+        self.router.weight.weight_loader = self._load_router_weight
 
         self.moe_router = MuseSpark1xRouter(
             top_k=config.num_experts_per_tok,
@@ -265,21 +277,34 @@ class MuseSpark1xMoE(nn.Module):
             moe_config_cls=MuseSparkMoEConfig,
         )
 
+    def _load_router_weight(
+        self, param: nn.Parameter, loaded_weight: torch.Tensor
+    ) -> None:
+        self.router.weight_loader(param, loaded_weight)
+        self._router_multiplier_folded = False
+
     def fold_router_output_multiplier(self) -> None:
         """Fold the router output multiplier and split the bf16x3 planes."""
-        if self.router_output_multiplier is not None:
+        if (
+            not self._router_multiplier_folded
+            and self.router_output_multiplier is not None
+        ):
             with torch.no_grad():
                 self.router.weight.mul_(self.router_output_multiplier)
-            self.router_output_multiplier = None
+            self._router_multiplier_folded = True
             self.moe_router.router_output_multiplier = None
         weight = self.router.weight.data
         # Configs are tuned and validated on gfx950 only.
         if (
-            on_gfx950()
+            _supports_router_bf16x3_device()
             and weight.dtype == torch.float32
             and supports_router_bf16x3(*weight.shape)
         ):
-            self._router_planes = split_fp32_to_bf16x3(weight)
+            planes = split_fp32_to_bf16x3(weight)
+            if getattr(self, "_router_planes", None) is None:
+                self._router_planes = planes
+            else:
+                self._router_planes.copy_(planes)
 
     def _router_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         planes = getattr(self, "_router_planes", None)
@@ -541,6 +566,7 @@ class MuseSpark1xAttention(nn.Module):
             and self.default_dtype in (torch.bfloat16, torch.float16)
             and supports_fused_kv_insert(self.attn)
         )
+        self.attn.kv_cache_update_bypass = self.fused_qk_norm_rope_kv_insert
 
     @staticmethod
     def compute_attn_temperature_scale(
@@ -1089,6 +1115,14 @@ class MuseSpark1xForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
         logits = self.logits_processor(self.lm_head, hidden_states)
         if logits is None:
             return None
+        return self._apply_output_transform(logits)
+
+    def compute_logits_local(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        hidden_states = hidden_states.to(self.lm_head.weight.dtype)
+        logits = self.logits_processor(self.lm_head, hidden_states, skip_gather=True)
+        return self._apply_output_transform(logits)
+
+    def _apply_output_transform(self, logits: torch.Tensor) -> torch.Tensor:
         if logits.dtype != torch.float32:
             logits = logits.to(torch.float32)
         if self.mul_tanh_soft_cap is not None:

@@ -234,3 +234,84 @@ def test_unquantized_loader_routes_per_expert_names_to_expert_mapping(
     list(MuseSparkRoutedExperts.load_weights(experts, individual))
     assert consolidated_calls == [["w13_weight", "w2_weight"]]
     assert per_expert_calls == [[name for name, _ in individual]]
+
+
+def test_router_weight_reload_refolds_and_preserves_planes(monkeypatch) -> None:
+    from vllm.model_executor.layers.linear import ReplicatedLinear
+    from vllm.models.muse_spark.amd.model import MuseSpark1xMoE
+
+    moe = MuseSpark1xMoE.__new__(MuseSpark1xMoE)
+    torch.nn.Module.__init__(moe)
+    moe.router = torch.nn.Linear(4, 2, bias=False)
+    moe.router.weight_loader = ReplicatedLinear.weight_loader.__get__(moe.router)
+    moe.router.weight.weight_loader = moe._load_router_weight
+    moe.router_output_multiplier = 0.25
+    moe._router_multiplier_folded = False
+    moe.moe_router = SimpleNamespace(router_output_multiplier=0.25)
+    monkeypatch.setattr(amd_model, "_supports_router_bf16x3_device", lambda: True)
+    monkeypatch.setattr(amd_model, "supports_router_bf16x3", lambda *args: True)
+
+    weight_ptr = moe.router.weight.data_ptr()
+    planes_ptr = None
+    for value in (1.0, 3.0):
+        raw = torch.full_like(moe.router.weight, value)
+        moe.router.weight.weight_loader(moe.router.weight, raw)
+        moe.fold_router_output_multiplier()
+        expected = raw * 0.25
+        torch.testing.assert_close(moe.router.weight, expected)
+        torch.testing.assert_close(moe._router_planes.float().sum(0), expected)
+        assert moe.router.weight.data_ptr() == weight_ptr
+        if planes_ptr is None:
+            planes_ptr = moe._router_planes.data_ptr()
+        assert moe._router_planes.data_ptr() == planes_ptr
+        assert moe.moe_router.router_output_multiplier is None
+
+        # Repeated materialization without loading must not rescale the weights.
+        moe.fold_router_output_multiplier()
+        torch.testing.assert_close(moe.router.weight, expected)
+        assert moe._router_planes.data_ptr() == planes_ptr
+
+
+@pytest.mark.parametrize(
+    "sharing, bypass", [(False, False), (True, False), (False, True)]
+)
+def test_aiter_kv_workspace_only_for_cache_readers(
+    monkeypatch, default_vllm_config, sharing, bypass
+) -> None:
+    from vllm.model_executor.layers.attention import Attention
+    from vllm.v1.attention.backends.rocm_aiter_fa import (
+        AiterFlashAttentionImpl,
+        AiterFlashAttentionMetadataBuilder,
+    )
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+    layer = Attention.__new__(Attention)
+    torch.nn.Module.__init__(layer)
+    layer.impl = AiterFlashAttentionImpl.__new__(AiterFlashAttentionImpl)
+    layer.impl.sliding_window = None
+    layer.impl.num_kv_heads = 1
+    layer.impl.head_size = 64
+    layer.kv_sharing_target_layer_name = "source" if sharing else None
+    layer.kv_cache_update_bypass = bypass
+    monkeypatch.setattr(
+        default_vllm_config.compilation_config,
+        "static_forward_context",
+        {"attn": layer},
+    )
+    monkeypatch.setattr(
+        default_vllm_config,
+        "model_config",
+        SimpleNamespace(
+            dtype=torch.bfloat16,
+            get_num_attention_heads=lambda _: 1,
+            get_num_kv_heads=lambda _: 1,
+            get_head_size=lambda: 64,
+        ),
+    )
+    spec = FullAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=64, dtype=torch.bfloat16
+    )
+    builder = AiterFlashAttentionMetadataBuilder(
+        spec, ["attn"], default_vllm_config, torch.device("cpu")
+    )
+    assert (builder.kv_sharing_workspace is not None) == (sharing or bypass)

@@ -678,7 +678,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
         return TokenizeParams(
             max_total_tokens=model_config.max_model_len,
-            max_output_tokens=max_output_tokens or 0,
+            max_output_tokens=max_output_tokens,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             truncation_side=self.truncation_side,
             add_special_tokens=self.add_special_tokens,
@@ -708,6 +708,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 "temperature", self._DEFAULT_SAMPLING_PARAMS["temperature"]
             )
 
+        if (skip_special_tokens := self.skip_special_tokens) is None:
+            skip_special_tokens = default_sampling_params.get(
+                "skip_special_tokens", True
+            )
+
         return BeamSearchParams(
             beam_width=n,
             allowed_token_ids=self.allowed_token_ids,
@@ -717,9 +722,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             watermarking=self.watermarking,
             length_penalty=self.length_penalty,
             include_stop_str_in_output=self.include_stop_str_in_output,
-            skip_special_tokens=(
-                True if self.skip_special_tokens is None else self.skip_special_tokens
-            ),
+            skip_special_tokens=skip_special_tokens,
         )
 
     def extract_structured_outputs(self) -> StructuredOutputsParams | None:

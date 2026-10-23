@@ -120,17 +120,15 @@ class LazyConfigDict(dict):
 
 
 _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
+    alpamayo2_super="Alpamayo2SuperConfig",
     bagel="BagelConfig",
     bailing_moe_v3_vl="BailingMoeV3VLConfig",
     beam="BeamConfig",
     chatglm="ChatGLMConfig",
-    modernvbert="ColModernVBertConfig",
     ultravbert="ColUltraVBertConfig",
-    colpali="ColPaliConfig",
     colqwen3="ColQwen3Config",
     ops_colqwen3="OpsColQwen3Config",
     qwen3_vl_nemotron_embed="Qwen3VLNemotronEmbedConfig",
-    cosmos3_edge="Cosmos3EdgeConfig",
     deepseek_vl_v2="DeepseekVLV2Config",
     deepseek_v32="DeepseekV3Config",
     dots3_note="Dots3NoteConfig",
@@ -143,10 +141,6 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     kimi_linear="KimiLinearConfig",
     kimi_vl="KimiVLConfig",
     kimi_k25="Kimi_K25Config",  # Upstream class, hub remote code uses old schema
-    muse_glimmer="MuseGlimmerConfig",
-    muse_glimmer_text="MuseGlimmerTextConfig",
-    muse_glimmer_vision="MuseGlimmerVisionConfig",
-    muse_glimmer_assistant="MuseGlimmerAssistantConfig",
     muse_spark_dspark="MuseSparkDSparkConfig",
     musespark1x_text="MuseSpark1xTextConfig",
     muse_spark_text="MuseSparkTextConfig",
@@ -168,12 +162,14 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     ultravox="UltravoxConfig",
     step3_vl="Step3VLConfig",
     step3_text="Step3TextConfig",
-    step3p5="Step3p5Config",
-    qianfan_ocr="QianfanOCRConfig",
+    step3p5="Step3p7TextConfig",  # Upstream class, hub remote code fails validation
+    step5="Step5Config",
+    step5_vl="Step5VLConfig",
     qwen3_asr="Qwen3ASRConfig",
     **{"unlimited-ocr": "UnlimitedOCRConfig"},
     unlimited_ocr="UnlimitedOCRConfig",
     **{"deepseek_v41": "DeepseekV41Config"},
+    flint="FlintConfig",
     inkling_mm_model="InklingMMConfig",
     inkling_model="InklingModelConfig",
 )
@@ -826,6 +822,10 @@ def maybe_override_with_speculators(
         Tuple of (resolved_model, resolved_tokenizer, speculative_config)
 
     """
+    # A single local file (e.g. a .gguf checkpoint) has no speculators config.
+    if os.path.isfile(model):
+        return model, tokenizer, vllm_speculative_config
+
     kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
     config_dict, _ = PreTrainedConfig.get_config_dict(
         model,

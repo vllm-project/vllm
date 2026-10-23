@@ -491,11 +491,10 @@ impl MuseSparkVisionProcessor {
             params.max_num_tokens_per_frame
         } else if params.use_per_video_token_budget {
             let num_temporal_groups = aligned / params.patch_temporal;
-            if num_temporal_groups > 0 {
-                params.max_num_video_tokens / num_temporal_groups
-            } else {
-                params.max_num_video_tokens
-            }
+            params
+                .max_num_video_tokens
+                .checked_div(num_temporal_groups)
+                .unwrap_or(params.max_num_video_tokens)
         } else {
             params.max_num_video_tokens
         };

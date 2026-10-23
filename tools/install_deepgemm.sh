@@ -9,8 +9,8 @@ set -e
 # Inferact fork of the vLLM fork's dev branch: sm120 and sm90 paged-MQA ports,
 # SwiGLU alpha/beta and SiTU Mega MoE activations, the CUDA 12.x layout header
 # fix, plus Muse Spark BF16/NVFP4 MegaMoE with fused post-expert normalization.
-DEEPGEMM_GIT_REPO="https://github.com/Inferact/DeepGEMM.git"
-DEEPGEMM_GIT_REF="1704143a9f75375d31ba644691645fdf316d4866"
+DEEPGEMM_GIT_REPO="https://github.com/vllm-project/DeepGEMM.git"
+DEEPGEMM_GIT_REF="c8aaf3bc7053db6f7d7bf762f63f3b91edd5c7bb"
 PYTHON_EXECUTABLE="${VIRTUAL_ENV:-.venv}/bin/python"
 WHEEL_DIR=""
 
