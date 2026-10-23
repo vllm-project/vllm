@@ -14,6 +14,7 @@ import torch
 from vllm.config.kv_events import KVEventsConfig
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.outputs import RequestError
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.v1.hidden_state_capture import (
@@ -108,6 +109,9 @@ class EngineCoreReadyResponse:
     supports_draft_weight_updates: bool = False
     # Full-attention block size in tokens after initialization, or unavailable.
     effective_attention_block_size: int | None = None
+    coord_store_port: int = 0
+    coordinator_input_address: str | None = None
+    coordinator_output_address: str | None = None
 
 
 class EngineCoreRequest(
@@ -246,6 +250,9 @@ class EngineCoreOutput(
     prompt_token_id_logprobs: torch.Tensor | None = None
     hidden_state_capture: HiddenStateCaptureResult | None = None
     hidden_capture_skip_reason: str | None = None
+
+    # Sent with FinishReason.ERROR, e.g. when a paused engine rejects a request.
+    error: RequestError | None = None
 
     @property
     def finished(self) -> bool:
