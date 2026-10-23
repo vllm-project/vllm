@@ -48,6 +48,7 @@ from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
     get_draft_quant_config,
+    map_draft_quant_config,
     maybe_prefix,
     process_eagle_weight,
 )
@@ -56,64 +57,6 @@ logger = init_logger(__name__)
 
 
 _SLIDING_ATTENTION = "sliding_attention"
-_DRAFT_LAYER_PATTERN = re.compile(r"(?<![A-Za-z0-9_.])layers\.(\d+)")
-
-
-def _add_global_draft_layer_exclusions(
-    quant_config: QuantizationConfig | None,
-    start_layer_id: int,
-    num_hidden_layers: int,
-) -> None:
-    """Add runtime layer aliases for checkpoint-local quant exclusions."""
-    if quant_config is None or start_layer_id == 0:
-        return
-    exclusions = getattr(quant_config, "exclude_modules", None)
-    if not isinstance(exclusions, list):
-        return
-
-    def offset_local_layer(match: re.Match[str]) -> str:
-        layer_idx = int(match.group(1))
-        if layer_idx >= num_hidden_layers:
-            return match.group(0)
-        return f"layers.{layer_idx + start_layer_id}"
-
-    for exclusion in tuple(exclusions):
-        global_exclusion = _DRAFT_LAYER_PATTERN.sub(offset_local_layer, exclusion)
-        if global_exclusion != exclusion and global_exclusion not in exclusions:
-            exclusions.append(global_exclusion)
-
-
-def _map_draft_quant_config(
-    quant_config: QuantizationConfig | None,
-    weight_mapper: WeightsMapper,
-    prefix: str,
-    start_layer_id: int,
-    num_hidden_layers: int,
-) -> None:
-    """Use runtime module names for ModelOpt draft quantization settings."""
-    if quant_config is None:
-        return
-    from vllm.model_executor.layers.quantization.modelopt import ModelOptQuantConfigBase
-
-    if not isinstance(quant_config, ModelOptQuantConfigBase):
-        _add_global_draft_layer_exclusions(
-            quant_config, start_layer_id, num_hidden_layers
-        )
-        return
-    quant_config.apply_vllm_mapper(weight_mapper.get_rename_mapper())
-    root = rf"(?:{re.escape(prefix)}\.)?" if prefix else ""
-    runtime_names = {
-        re.compile(rf"^({root}\*?)layers\.{index}(?=\.|\*|$)"): (
-            rf"\g<1>layers.{start_layer_id + index}"
-        )
-        for index in reversed(range(num_hidden_layers))
-        if start_layer_id
-    }
-    if prefix:
-        runtime_names[re.compile(rf"^(?!\*|{re.escape(prefix)}(?:\.|\*|$))")] = (
-            f"{prefix}."
-        )
-    quant_config.apply_vllm_mapper(WeightsMapper(orig_to_new_regex=runtime_names))
 
 
 def _dflash_layer_causal(config: Qwen3Config, layer_idx: int) -> bool:
@@ -446,6 +389,8 @@ class DFlashQwen3Model(nn.Module):
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_regex={
+            # Match a complete module name, including bare names and trailing
+            # wildcards in quantization configs, but not e.g. midlayer_extra.
             re.compile(r"(?<![A-Za-z0-9_])midlayer(?=\.|\*|$)"): "layers.0",
             # Muse-Glimmer-30B-assistant names the aux-hidden-state encoder
             # `encoder.fc` / `encoder.output_norm_enc`; this head calls them
@@ -477,7 +422,7 @@ class DFlashQwen3Model(nn.Module):
         self.config = speculative_config.draft_model_config.hf_config
         self.vocab_size = self.config.vocab_size
         self.quant_config = get_draft_quant_config(vllm_config)
-        _map_draft_quant_config(
+        map_draft_quant_config(
             self.quant_config,
             self.hf_to_vllm_mapper,
             prefix,

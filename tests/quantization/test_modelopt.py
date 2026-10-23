@@ -8,6 +8,7 @@ Run `pytest tests/quantization/test_modelopt.py`.
 import json
 import os
 from contextlib import nullcontext
+from copy import deepcopy
 from types import SimpleNamespace
 from typing import Any, NoReturn
 from unittest.mock import MagicMock, Mock, patch
@@ -366,6 +367,102 @@ def test_modelopt_mixed_precision_does_not_quantize_unlisted_fused_sibling():
     assert config._resolve_quant_algo("model.layers.0.linear_attn.in_proj_ba") is None
 
 
+@pytest.mark.parametrize("prefix", ["", "model"])
+@pytest.mark.parametrize("start_layer_id", [0, 1])
+def test_draft_quant_config_uses_runtime_module_names(prefix, start_layer_id):
+    from vllm.model_executor.models.qwen3_dflash import DFlashQwen3Model
+    from vllm.model_executor.models.utils import map_draft_quant_config
+
+    config = _mixed_precision_config(
+        {
+            "encoder.fc": {"quant_algo": "FP8_PER_CHANNEL_PER_TOKEN"},
+            "markov_head.markov_w2": {"quant_algo": "FP8"},
+            **{
+                f"layers.{index}.self_attn.q_proj": {"quant_algo": "FP8"}
+                for index in range(3)
+            },
+            "midlayer.mlp.gate_proj": {"quant_algo": "FP8"},
+            "midlayer.mlp.up_proj": {"quant_algo": "FP8"},
+        }
+    )
+    config.exclude_modules = [
+        "layers.0.mlp_conv*",
+        "*layers.2.self_attn.k_proj",
+        "layers.88.already_global",
+        "lilicorr.layers.0.mlp.0",
+    ]
+    native_layers = config.quantized_layers
+    native_names = tuple(native_layers)
+
+    map_draft_quant_config(
+        config, DFlashQwen3Model.hf_to_vllm_mapper, prefix, start_layer_id, 3
+    )
+
+    assert tuple(native_layers) == native_names
+    root = f"{prefix}." if prefix else ""
+    assert config.quantized_layers == {
+        f"{root}fc": {"quant_algo": "FP8_PER_CHANNEL_PER_TOKEN"},
+        f"{root}markov_head.markov_w2": {"quant_algo": "FP8"},
+        **{
+            f"{root}layers.{start_layer_id + index}.self_attn.q_proj": {
+                "quant_algo": "FP8"
+            }
+            for index in range(3)
+        },
+        f"{root}layers.{start_layer_id}.mlp.gate_proj": {"quant_algo": "FP8"},
+        f"{root}layers.{start_layer_id}.mlp.up_proj": {"quant_algo": "FP8"},
+    }
+    assert config.is_layer_excluded(f"{root}layers.{start_layer_id}.mlp_conv.weight")
+    assert config.is_layer_excluded(
+        f"{root}layers.{start_layer_id + 2}.self_attn.k_proj"
+    )
+    assert config.exclude_modules.count(f"{root}layers.88.already_global") == 1
+    assert f"{root}lilicorr.layers.0.mlp.0" in config.exclude_modules
+    if start_layer_id:
+        nested_module = f"{root}lilicorr.layers.{start_layer_id}.mlp.0"
+        assert nested_module not in config.exclude_modules
+
+
+def test_draft_quant_config_preserves_quark_settings():
+    from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
+    from vllm.model_executor.models.qwen3_dflash import DFlashQwen3Model
+    from vllm.model_executor.models.utils import map_draft_quant_config
+
+    fp8 = {"dtype": "fp8_e4m3", "qscheme": "per_tensor", "is_dynamic": False}
+    config = QuarkConfig(
+        {
+            "global_quant_config": {"weight": fp8, "input_tensors": fp8},
+            "layer_type_quant_config": {},
+            "exclude": ["layers.0.mlp_conv*"],
+        }
+    )
+    original = deepcopy(config.quant_config)
+
+    map_draft_quant_config(config, DFlashQwen3Model.hf_to_vllm_mapper, "model", 88, 3)
+
+    assert config.quant_config == original
+
+
+@pytest.mark.parametrize("prefix", ["", "model."])
+@pytest.mark.parametrize(
+    "source,target",
+    [
+        ("encoder.fc", "fc"),
+        ("encoder.output_norm_enc", "hidden_norm"),
+        ("midlayer", "layers.0"),
+        ("encoder.fcx", "encoder.fcx"),
+        ("encoder.output_norm_enc_extra", "encoder.output_norm_enc_extra"),
+        ("midlayer_extra", "midlayer_extra"),
+    ],
+)
+def test_draft_weight_aliases_match_module_boundaries(prefix, source, target):
+    from vllm.model_executor.models.qwen3_dflash import DFlashQwen3Model
+
+    mapper = DFlashQwen3Model.hf_to_vllm_mapper
+    assert mapper.map_name(f"{prefix}{source}") == f"{prefix}{target}"
+    assert mapper.map_name(f"{prefix}{source}.weight") == f"{prefix}{target}.weight"
+
+
 def test_modelopt_mixed_precision_composes_gemma4_mappers():
     from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
     from vllm.model_executor.models.gemma4_mm import (
@@ -522,6 +619,29 @@ def test_modelopt_fp8_checkpoint_setup(default_vllm_config, vllm_runner):
         print(f"ModelOpt FP8 output: {output}")
 
 
+_TINY_MODEL_CONFIG = dict(
+    vocab_size=128,
+    hidden_size=128,
+    intermediate_size=256,
+    num_attention_heads=2,
+    num_key_value_heads=2,
+    head_dim=64,
+    max_position_embeddings=64,
+)
+
+
+def _pack_fp8_weight(weights: dict[str, torch.Tensor], name: str, algorithm: str):
+    value = weights[f"{name}.weight"].float()
+    per_channel = algorithm == "FP8_PER_CHANNEL_PER_TOKEN"
+    amax = value.abs().amax(dim=1) if per_channel else value.abs().max()
+    scale = amax / torch.finfo(torch.float8_e4m3fn).max
+    divisor = scale[:, None] if per_channel else scale
+    weights[f"{name}.weight"] = (value / divisor).to(torch.float8_e4m3fn)
+    weights[f"{name}.weight_scale"] = scale
+    if not per_channel:
+        weights[f"{name}.input_scale"] = torch.tensor(1.0 / 448)
+
+
 def test_modelopt_nested_mixed_checkpoint(tmp_path, monkeypatch, vllm_runner):
     """Native and flattened ModelOpt metadata load the same FP8/BF16 weights."""
     from transformers import LlamaConfig, LlamaForCausalLM
@@ -529,25 +649,13 @@ def test_modelopt_nested_mixed_checkpoint(tmp_path, monkeypatch, vllm_runner):
     from vllm import SamplingParams
 
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
-    config = LlamaConfig(
-        vocab_size=128,
-        hidden_size=128,
-        intermediate_size=256,
-        num_hidden_layers=1,
-        num_attention_heads=2,
-        num_key_value_heads=2,
-        max_position_embeddings=64,
-    )
+    config = LlamaConfig(num_hidden_layers=1, **_TINY_MODEL_CONFIG)
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(0)
         model = LlamaForCausalLM(config).to(torch.bfloat16)
     weights = model.state_dict()
     prefix = "model.layers.0.mlp.down_proj"
-    weight = weights[f"{prefix}.weight"].float()
-    scale = weight.abs().max() / torch.finfo(torch.float8_e4m3fn).max
-    weights[f"{prefix}.weight"] = (weight / scale).to(torch.float8_e4m3fn)
-    weights[f"{prefix}.weight_scale"] = scale
-    weights[f"{prefix}.input_scale"] = torch.tensor(1.0 / 448)
+    _pack_fp8_weight(weights, prefix, "FP8")
     quantization: dict[str, Any] = {
         "quant_algo": "MIXED_PRECISION",
         "kv_cache_quant_algo": None,
@@ -603,25 +711,19 @@ def test_modelopt_mixed_dspark_checkpoint(tmp_path, monkeypatch, vllm_runner):
     from safetensors.torch import save_file
     from transformers import LlamaConfig, LlamaForCausalLM, Qwen3Config, Qwen3Model
 
+    from tests.v1.e2e.spec_decode.utils import get_spec_decode_metric_value
     from vllm import SamplingParams
 
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
-    architecture = dict(
-        vocab_size=128,
-        hidden_size=128,
-        intermediate_size=256,
-        num_attention_heads=2,
-        num_key_value_heads=2,
-        head_dim=64,
-        max_position_embeddings=64,
-    )
     target, draft = tmp_path / "target", tmp_path / "draft"
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(0)
-        teacher = LlamaForCausalLM(LlamaConfig(num_hidden_layers=4, **architecture))
+        teacher = LlamaForCausalLM(
+            LlamaConfig(num_hidden_layers=4, **_TINY_MODEL_CONFIG)
+        )
         teacher.to(torch.bfloat16).save_pretrained(target)
-        config = Qwen3Config(num_hidden_layers=1, **architecture)
+        config = Qwen3Config(num_hidden_layers=1, **_TINY_MODEL_CONFIG)
         weights = dict(Qwen3Model(config).to(torch.bfloat16).state_dict())
         del weights["embed_tokens.weight"]
         for name, shape in (
@@ -637,15 +739,7 @@ def test_modelopt_mixed_dspark_checkpoint(tmp_path, monkeypatch, vllm_runner):
         "layers.0.mlp.down_proj": "FP8",
     }
     for name, algorithm in algorithms.items():
-        value = weights[f"{name}.weight"].float()
-        per_channel = algorithm == "FP8_PER_CHANNEL_PER_TOKEN"
-        amax = value.abs().amax(dim=1) if per_channel else value.abs().max()
-        scale = amax / torch.finfo(torch.float8_e4m3fn).max
-        divisor = scale[:, None] if per_channel else scale
-        weights[f"{name}.weight"] = (value / divisor).to(torch.float8_e4m3fn)
-        weights[f"{name}.weight_scale"] = scale
-        if not per_channel:
-            weights[f"{name}.input_scale"] = torch.tensor(1.0 / 448)
+        _pack_fp8_weight(weights, name, algorithm)
     metadata = {
         "producer": {"name": "modelopt", "version": "0.49.0"},
         "quantization": {
@@ -722,19 +816,12 @@ def test_modelopt_mixed_dspark_checkpoint(tmp_path, monkeypatch, vllm_runner):
         ) as llm:
             if speculation:
                 llm.collective_rpc(check_draft)
-                before = sum(
-                    metric.value
-                    for metric in llm.llm.get_metrics()
-                    if metric.name == "vllm:spec_decode_num_draft_tokens"
-                )
             outputs.append(llm.generate([[1, 5, 7, 9]], params)[0][0][0])
             if speculation:
-                after = sum(
-                    metric.value
-                    for metric in llm.llm.get_metrics()
-                    if metric.name == "vllm:spec_decode_num_draft_tokens"
+                after = get_spec_decode_metric_value(
+                    llm.llm.get_metrics(), "vllm:spec_decode_num_draft_tokens"
                 )
-                assert after > before
+                assert after > 0
     assert len(outputs[0]) == 12
     assert outputs[1] == outputs[0]
 

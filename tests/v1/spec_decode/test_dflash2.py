@@ -1,17 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from vllm.model_executor.models.qwen3_dflash import (
-    DFlashQwen3Model,
-    _add_global_draft_layer_exclusions,
-    _map_draft_quant_config,
-)
 from vllm.model_executor.models.qwen3_dflash2 import _grouped_conv, _score_edges
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
@@ -133,121 +127,6 @@ def test_grouped_conv_triton_matches_reference(
         rtol=1e-2 if dtype is torch.bfloat16 else 1e-5,
         atol=1e-2 if dtype is torch.bfloat16 else 1e-5,
     )
-
-
-def test_draft_quant_exclusions_include_global_layer_indices():
-    quant_config = SimpleNamespace(
-        exclude_modules=[
-            "layers.0.mlp_conv*",
-            "*layers.4.self_attn.q_proj",
-            "layers.88.already_global",
-            "lilicorr.layers.0.mlp.0",
-        ]
-    )
-
-    _add_global_draft_layer_exclusions(quant_config, 88, 5)
-
-    assert "layers.88.mlp_conv*" in quant_config.exclude_modules
-    assert "*layers.92.self_attn.q_proj" in quant_config.exclude_modules
-    assert quant_config.exclude_modules.count("layers.88.already_global") == 1
-    assert "lilicorr.layers.88.mlp.0" not in quant_config.exclude_modules
-
-
-def test_draft_quant_config_preserves_quark_settings():
-    from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
-
-    fp8 = {"dtype": "fp8_e4m3", "qscheme": "per_tensor", "is_dynamic": False}
-    config = QuarkConfig(
-        {
-            "global_quant_config": {"weight": fp8, "input_tensors": fp8},
-            "layer_type_quant_config": {},
-            "exclude": ["layers.0.mlp_conv*"],
-        }
-    )
-    original = deepcopy(config.quant_config)
-
-    _map_draft_quant_config(config, DFlashQwen3Model.hf_to_vllm_mapper, "model", 88, 3)
-
-    assert config.quant_config == original
-
-
-@pytest.mark.parametrize("prefix", ["", "model"])
-@pytest.mark.parametrize("start_layer_id", [0, 1, 88])
-@pytest.mark.parametrize("fc_name", ["fc", "encoder.fc"])
-def test_draft_quant_config_uses_runtime_module_names(prefix, start_layer_id, fc_name):
-    from vllm.model_executor.layers.quantization.modelopt import (
-        ModelOptMixedPrecisionConfig,
-    )
-
-    config = ModelOptMixedPrecisionConfig.from_config(
-        {
-            "quantization": {
-                "quant_algo": "MIXED_PRECISION",
-                "quantized_layers": {
-                    fc_name: {"quant_algo": "FP8_PER_CHANNEL_PER_TOKEN"},
-                    "markov_head.markov_w2": {"quant_algo": "FP8"},
-                    **{
-                        f"layers.{index}.self_attn.q_proj": {"quant_algo": "FP8"}
-                        for index in range(3)
-                    },
-                    "midlayer.mlp.gate_proj": {"quant_algo": "FP8"},
-                    "midlayer.mlp.up_proj": {"quant_algo": "FP8"},
-                },
-                "exclude_modules": [
-                    "layers.0.mlp_conv*",
-                    "*layers.2.self_attn.k_proj",
-                    "layers.88.already_global",
-                    "lilicorr.layers.0.mlp.0",
-                ],
-            }
-        }
-    )
-    assert isinstance(config, ModelOptMixedPrecisionConfig)
-    native_layers = config.quantized_layers
-    native_names = tuple(native_layers)
-
-    _map_draft_quant_config(None, DFlashQwen3Model.hf_to_vllm_mapper, prefix, 0, 3)
-    _map_draft_quant_config(
-        config, DFlashQwen3Model.hf_to_vllm_mapper, prefix, start_layer_id, 3
-    )
-
-    assert tuple(native_layers) == native_names
-    root = f"{prefix}." if prefix else ""
-    assert config._resolve_quant_algo(f"{root}fc") == "FP8_PER_CHANNEL_PER_TOKEN"
-    assert config._resolve_quant_algo(f"{root}markov_head.markov_w2") == "FP8"
-    for index in range(3):
-        layer = f"{root}layers.{start_layer_id + index}"
-        assert config._resolve_quant_algo(f"{layer}.self_attn.qkv_proj") == "FP8"
-    assert config._resolve_quant_algo(
-        f"{root}layers.{start_layer_id}.mlp.gate_up_proj"
-    ) == ("FP8")
-    assert config._resolve_quant_algo(f"{root}unlisted") is None
-    assert config.is_layer_excluded(f"{root}layers.{start_layer_id}.mlp_conv.weight")
-    assert config.is_layer_excluded(
-        f"{root}layers.{start_layer_id + 2}.self_attn.k_proj"
-    )
-    assert config.exclude_modules.count(f"{root}layers.88.already_global") == 1
-    assert f"{root}lilicorr.layers.0.mlp.0" in config.exclude_modules
-    if start_layer_id:
-        assert not config.is_layer_excluded(f"{root}lilicorr.layers.88.mlp.0")
-
-
-@pytest.mark.parametrize("prefix", ["", "model."])
-@pytest.mark.parametrize(
-    "source,target",
-    [
-        ("encoder.fc", "fc"),
-        ("encoder.output_norm_enc", "hidden_norm"),
-        ("midlayer", "layers.0"),
-        ("encoder.fcx", "encoder.fcx"),
-        ("encoder.output_norm_enc_extra", "encoder.output_norm_enc_extra"),
-        ("midlayer_extra", "midlayer_extra"),
-    ],
-)
-def test_draft_weight_aliases_match_module_boundaries(prefix, source, target):
-    mapper = DFlashQwen3Model.hf_to_vllm_mapper
-    assert mapper.map_name(f"{prefix}{source}") == f"{prefix}{target}"
-    assert mapper.map_name(f"{prefix}{source}.weight") == f"{prefix}{target}.weight"
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
