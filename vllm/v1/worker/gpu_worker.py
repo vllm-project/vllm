@@ -30,6 +30,7 @@ from vllm.distributed import (
     init_distributed_environment,
     set_custom_all_reduce,
 )
+from vllm.distributed.aux_output_connector.worker import get_aux_output_connector
 from vllm.distributed.ec_transfer import (
     ensure_ec_transfer_initialized,
     ensure_ec_transfer_shutdown,
@@ -600,10 +601,17 @@ class Worker(WorkerBase):
         ):
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
 
-        if self.use_v2_model_runner:
-            # R3 buffers must survive weight discard and be counted by profiling.
+        if self.use_v2_model_runner and self.vllm_config.aux_output_config.enabled:
+            # Capture must exist before KV-cache profiling and outside the
+            # weights pool, so weight discard/reload cannot invalidate it.
             model_runner = cast("GPUModelRunnerV2", self.model_runner)
-            model_runner.initialize_routed_experts_capturer()
+            connector = get_aux_output_connector(self.vllm_config)
+            try:
+                connector.initialize_routed_experts_capturer(model_runner.get_model())
+            except BaseException:
+                connector.close()
+                raise
+            model_runner.aux_output_connector = connector
 
         if has_ec_transfer():
             get_ec_transfer().start_worker_services()
