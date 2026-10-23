@@ -297,6 +297,7 @@ def test_flashinfer_cutedsl_fp4_moe(
             expert_map=None,
             apply_router_weight_on_input=False,
         )
+        assert isinstance(cutedsl_output, torch.Tensor)
         cutedsl_output = cutedsl_output[:, :k]
 
         a_global_scale = torch.ones(1, device="cuda", dtype=torch.float32)
