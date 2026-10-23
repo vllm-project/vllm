@@ -52,7 +52,13 @@ async def test_bge_m3_api_server_embedding(server, pooling_task):
     client = server.get_async_client()
 
     if pooling_task != "embed":
-        with pytest.raises(openai.InternalServerError):
+        # The OpenAI client sends base64 by default; token_embed accepts only float.
+        expected_error = (
+            openai.BadRequestError
+            if pooling_task == "token_embed"
+            else openai.InternalServerError
+        )
+        with pytest.raises(expected_error):
             await run_client_embeddings(
                 client,
                 MODEL_NAME,

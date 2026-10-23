@@ -3,7 +3,7 @@
 import functools
 import time
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import NamedTuple
 
@@ -196,10 +196,14 @@ def _canonical_block_sizes(
 
 # Bound registration size to avoid driver limits on large host allocations.
 MAX_HOST_REGISTER_CHUNK_BYTES = 64 * 1024**3
+# Amortize per-call overhead with the bytes not registered in each row.
+MIN_HOST_REGISTER_SAVED_BYTES = 3 * 1024**2
 
 
-def pin_mmap_region(region: SharedOffloadRegion) -> None:
-    """Register row-aligned chunks, rolling back on failure."""
+def pin_mmap_region(
+    region: SharedOffloadRegion, worker_slot_only: bool = False
+) -> None:
+    """Register row-aligned chunks or this worker's slots, rolling back on failure."""
     rank = region.rank
     base_ptr = region._base.data_ptr()
     total_size = region.total_size_bytes
@@ -208,15 +212,40 @@ def pin_mmap_region(region: SharedOffloadRegion) -> None:
     # registrations.
     rows_per_chunk = max(MAX_HOST_REGISTER_CHUNK_BYTES // region._row_stride, 1)
     chunk_size = rows_per_chunk * region._row_stride
+    ranges: Iterator[tuple[int, int]] = (
+        (offset, min(chunk_size, total_size - offset))
+        for offset in range(0, total_size, chunk_size)
+    )
+    stride, slot, page = region._row_stride, region.cpu_page_size, region.page_size
+    min_savings = max(page, MIN_HOST_REGISTER_SAVED_BYTES)
+    if worker_slot_only and region.rank is not None and stride - slot >= min_savings:
+        # Round each slot out to pages; the worker's next slot is a page away.
+        ranges = region.iter_worker_slot_ranges()
+    else:
+        reason = (
+            "whole-region layout requested"
+            if not worker_slot_only
+            else "no worker rank"
+            if region.rank is None
+            else f"less than {min_savings} bytes saved per row"
+        )
+        logger.info(
+            "Registering full CPU offload region rank=%s (row=%d, slot=%d bytes): %s",
+            rank,
+            stride,
+            slot,
+            reason,
+        )
 
     # Register, drain and roll back through the same helper, so a failed
     # chunk leaves neither a pending error nor a partly pinned region.
     addresses: list[int] = []
-    for offset in range(0, total_size, chunk_size):
+    registered_bytes = 0
+    for offset, size in ranges:
         address = base_ptr + offset
-        size = min(chunk_size, total_size - offset)
         if host_register(address, size):
             addresses.append(address)
+            registered_bytes += size
             continue
         logger.warning(
             "host_register failed for rank=%d at %.2f of %.2f GB; "
@@ -234,7 +263,7 @@ def pin_mmap_region(region: SharedOffloadRegion) -> None:
     logger.debug(
         "Host-registered mmap region rank=%d %.2f GB in %d chunk(s)",
         rank,
-        total_size / 1e9,
+        registered_bytes / 1e9,
         len(addresses),
     )
 
@@ -785,7 +814,7 @@ class CPUOffloadingWorker(OffloadingWorker):
         pin_memory = PIN_MEMORY
         logger.info("Allocating %d CPU tensors...", len(kv_caches.tensors))
         if mmap_region is not None and pin_memory:
-            pin_mmap_region(mmap_region)
+            pin_mmap_region(mmap_region, worker_slot_only=not canonical_layout)
         host_memory_is_pinned = pin_memory and (
             mmap_region is None or mmap_region.is_pinned
         )

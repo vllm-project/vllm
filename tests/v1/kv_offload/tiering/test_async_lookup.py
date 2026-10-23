@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for AsyncLookupManager."""
 
+import queue
 import threading
 from collections.abc import Iterable
 
@@ -19,6 +20,16 @@ def _ctx(req_id: str = "r1") -> ReqContext:
     return ReqContext(req_id=req_id)
 
 
+class _SignalingQueue(queue.SimpleQueue):
+    """Sets ``ready`` once a posted batch is visible to drain_results()."""
+
+    ready: threading.Event
+
+    def put(self, item, block=True, timeout=None):
+        super().put(item, block, timeout)
+        self.ready.set()
+
+
 class InMemoryLookupManager(AsyncLookupManager):
     """Test subclass backed by an in-memory set."""
 
@@ -26,15 +37,15 @@ class InMemoryLookupManager(AsyncLookupManager):
         super().__init__(tier_type="test")
         self._existing = existing_keys or set()
         self._results_ready = threading.Event()
+        self._pending_results = _SignalingQueue()
+        self._pending_results.ready = self._results_ready
         self.batch_lookup_calls = 0
 
     def batch_lookup(
         self, keys: list[OffloadKey], req_context: ReqContext
     ) -> Iterable[bool]:
         self.batch_lookup_calls += 1
-        results = [k in self._existing for k in keys]
-        self._results_ready.set()
-        return results
+        return [k in self._existing for k in keys]
 
 
 class TestAsyncLookupManager:
@@ -298,6 +309,42 @@ class TestAsyncLookupManager:
         assert _key(2) not in mgr._lookup_state
         assert "reqA" not in mgr._req_keys
         mgr.shutdown()
+
+    @pytest.mark.parametrize("flushed", [True, False], ids=["in_flight", "pending"])
+    def test_mark_miss_skips_newer_unresolved_probe(self, flushed: bool):
+        """A failed load reported for an older generation of a key must not
+        touch a newer probe of that key. Sequence: request A resolves K and
+        promotes it, A finishes (cleanup deletes the RESOLVED entry), request B
+        re-probes K, then A's load fails and the tier calls mark_miss([K]).
+        Forcing B's PENDING / IN_FLIGHT entry to RESOLVED made flush() or
+        drain_results() assert on the scheduler thread."""
+        mgr = InMemoryLookupManager(existing_keys={_key(1)})
+        try:
+            assert mgr.lookup(_key(1), _ctx("A")) is None
+            mgr.flush()
+            mgr._results_ready.wait()
+            mgr._results_ready.clear()
+            assert mgr.lookup(_key(1), _ctx("A")) is True
+            mgr.cleanup("A")
+            assert _key(1) not in mgr._lookup_state
+
+            assert mgr.lookup(_key(1), _ctx("B")) is None
+            if flushed:
+                mgr.flush()
+                mgr._results_ready.wait()
+                mgr._results_ready.clear()
+            expected = LookupPhase.IN_FLIGHT if flushed else LookupPhase.PENDING
+            assert mgr._lookup_state[_key(1)].phase is expected
+
+            mgr.mark_miss([_key(1)])
+            if not flushed:
+                mgr.flush()
+                mgr._results_ready.wait()
+                mgr._results_ready.clear()
+            # B's own probe result is delivered.
+            assert mgr.lookup(_key(1), _ctx("B")) is True
+        finally:
+            mgr.shutdown()
 
     def test_enqueue_once_invariant_enforced(self):
         """A key is enqueued for probing exactly once, so drain_results() may

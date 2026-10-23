@@ -31,6 +31,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
+    remap_topk_to_local,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -412,10 +413,9 @@ class CutlassExpertsFp8(CutlassExpertsFp8Base):
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        # CutlassExpertsFp8 does not support expert map, which is
-        # needed for STANDARD activation format kernels in DP/EP mode.
-        # Note that the BATCHED activation format does not use
-        # the expert map for identifying experts.
+        # EP is supported only with allgather_reducescatter (expert_map remapping).
+        # DeepEP HT and FlashInfer NVLink prepare/finalize use incompatible
+        # post-dispatch layouts for Standard-format grouped GEMM.
         return not (
             moe_parallel_config.use_fi_nvl_two_sided_kernels
             or moe_parallel_config.use_deepep_ht_kernels
@@ -491,6 +491,15 @@ FLOAT4_E2M1_MAX = scalar_types.float4_e2m1f.max()
 FLOAT8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
 
 
+def _prepare_topk_ids_for_cutlass_fp4_moe(
+    topk_ids: torch.Tensor,
+    expert_map: torch.Tensor | None,
+) -> torch.Tensor:
+    if expert_map is None:
+        return topk_ids
+    return remap_topk_to_local(topk_ids, expert_map, out_dtype=torch.int32)
+
+
 def run_cutlass_moe_fp4(
     output: torch.Tensor,
     a: torch.Tensor,
@@ -513,6 +522,7 @@ def run_cutlass_moe_fp4(
     e: int,
     device: torch.device,
     apply_router_weight_on_input: bool = False,
+    expert_map: torch.Tensor | None = None,
     *,
     activation_config: ApplyMoEActivationConfig | None = None,
 ) -> None:
@@ -543,6 +553,8 @@ def run_cutlass_moe_fp4(
 
     assumes that topk < k < n to satisfy - up/down projection expectations.
     """
+    topk_ids = _prepare_topk_ids_for_cutlass_fp4_moe(topk_ids, expert_map)
+
     is_gated = activation.is_gated
     # For gated activations (e.g. SiLU), w1 output is 2*n (gate + up).
     # For non-gated activations (e.g. SiLU_NO_MUL), w1 output is n (up only).
@@ -729,9 +741,14 @@ class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        # CutlassExpertsFp4 does not support expert map, which is
-        # needed for STANDARD activation format kernels in EP mode.
-        return moe_parallel_config.ep_size == 1
+        # EP is supported only with allgather_reducescatter (expert_map remapping).
+        # DeepEP HT and FlashInfer NVLink prepare/finalize use incompatible
+        # post-dispatch layouts for Standard-format grouped GEMM.
+        return not (
+            moe_parallel_config.use_fi_nvl_two_sided_kernels
+            or moe_parallel_config.use_deepep_ht_kernels
+            or moe_parallel_config.use_fi_nvl_one_sided_kernels
+        )
 
     @staticmethod
     def _supports_batch_invariance() -> bool:
@@ -806,6 +823,7 @@ class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
             e=e,
             device=hidden_states.device,
             apply_router_weight_on_input=apply_router_weight_on_input,
+            expert_map=expert_map,
             activation_config=self.activation_config,
         )
 
@@ -828,10 +846,13 @@ def run_cutlass_moe_mxfp4(
     e: int,
     device: torch.device,
     apply_router_weight_on_input: bool = False,
+    expert_map: torch.Tensor | None = None,
     *,
     activation_config: ApplyMoEActivationConfig | None = None,
 ) -> None:
     """MXFP4 x MXFP4 MoE implementation using CUTLASS grouped GEMM."""
+    topk_ids = _prepare_topk_ids_for_cutlass_fp4_moe(topk_ids, expert_map)
+
     is_gated = activation.is_gated
     w1_n = n * 2 if is_gated else n
 
@@ -1036,7 +1057,14 @@ class CutlassExpertsMxfp4(mk.FusedMoEExpertsModular):
     def _supports_parallel_config(
         moe_parallel_config: FusedMoEParallelConfig,
     ) -> bool:
-        return moe_parallel_config.ep_size == 1
+        # EP is supported only with allgather_reducescatter (expert_map remapping).
+        # DeepEP HT and FlashInfer NVLink prepare/finalize use incompatible
+        # post-dispatch layouts for Standard-format grouped GEMM.
+        return not (
+            moe_parallel_config.use_fi_nvl_two_sided_kernels
+            or moe_parallel_config.use_deepep_ht_kernels
+            or moe_parallel_config.use_fi_nvl_one_sided_kernels
+        )
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -1103,6 +1131,7 @@ class CutlassExpertsMxfp4(mk.FusedMoEExpertsModular):
             e=e,
             device=hidden_states.device,
             apply_router_weight_on_input=apply_router_weight_on_input,
+            expert_map=expert_map,
             activation_config=self.activation_config,
         )
 

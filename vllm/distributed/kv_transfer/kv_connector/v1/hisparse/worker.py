@@ -28,6 +28,7 @@ from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.layout import HISPARSE_HOT_SUFFIX
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
+    drop_hisparse_host_pool,
     release_pinned_state,
     update_hisparse_residency,
 )
@@ -254,6 +255,7 @@ class HiSparseConnectorWorker:
                 pinned_host_pools,
                 shared_host_region,
             )
+            drop_hisparse_host_pool(self.vllm_config)
             raise
 
     def initialize(
@@ -416,6 +418,10 @@ class HiSparseConnectorWorker:
         self.host_write_event = self.host_write_events[self._next_host_write_event]
         self._next_host_write_event ^= 1
         current_stream().wait_event(previous_host_write_event)
+        if self.shared_host_region is not None and not num_tokens:
+            # Without a forward, no TP collective keeps rank 0 from recording
+            # a shared event again before every rank has issued its wait.
+            get_tp_group().barrier()
         self._release_completed_dma_descriptors()
         self._dma_submitted = False
         mirrors = _flatten_row_mirrors(metadata.row_mirrors, request_ids)
@@ -968,4 +974,5 @@ class HiSparseConnectorWorker:
             self.pinned_host_pools,
             self.shared_host_region,
         )
+        drop_hisparse_host_pool(self.vllm_config)
         self._initialized = False
