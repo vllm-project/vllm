@@ -133,7 +133,12 @@ def _lay_out_hisparse_groups(
 
     config = ResolvedHiSparseConfig.from_vllm_config(
         vllm_config,
-        vllm_config.model_config.hf_config.index_topk,
+        max(
+            spec.topk_buffer_width
+            if spec.topk_buffer_width is not None
+            else vllm_config.model_config.hf_config.index_topk
+            for spec in host_specs.values()
+        ),
         gpu_block_size,
     )
     assert config is not None
