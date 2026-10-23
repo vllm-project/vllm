@@ -162,7 +162,7 @@ variants:
     precision: mxfp4
     label: "MXFP4 (AMD)"
     vram_minimum_gb: 219
-    description: "AMD Quark MXFP4 checkpoint for MI355X; the GDN projections are quantized to MXFP4 online at load"
+    description: "AMD Quark MXFP4 checkpoint with MXFP4 routed experts, for MI355X"
     supported_hardware: [mi355x]
     tp:
       mi355x: 2
@@ -171,8 +171,6 @@ variants:
         extra_args:
           - "--gdn-prefill-backend"
           - "aiter_flydsl"
-          - "--quantization-config.targets"
-          - '{"*linear_attn.in_proj_qkv": "mxfp4", "*linear_attn.in_proj_z": "mxfp4", "*linear_attn.out_proj": "mxfp4"}'
         extra_env:
           VLLM_ROCM_USE_AITER: "1"
           VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
@@ -353,9 +351,6 @@ guide: |
     (`VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1`) and FlyDSL MoE sorting
     (`AITER_USE_FLYDSL_MOE_SORTING=1`).
   - The FlyDSL GDN prefill kernel (`--gdn-prefill-backend aiter_flydsl`).
-  - Online MXFP4 for the Gated DeltaNet projections, which the checkpoint
-    keeps in BF16 (`--quantization-config.targets`). The preshuffled AITER
-    GEMM configs for these shapes ship in the image.
 
   TP2 is the default the command builder renders:
 
@@ -370,7 +365,6 @@ guide: |
     --gpu-memory-utilization 0.90 \
     --enable-prefix-caching \
     --gdn-prefill-backend aiter_flydsl \
-    --quantization-config.targets '{"*linear_attn.in_proj_qkv": "mxfp4", "*linear_attn.in_proj_z": "mxfp4", "*linear_attn.out_proj": "mxfp4"}' \
     --enable-auto-tool-choice \
     --tool-call-parser qwen3_coder \
     --reasoning-parser qwen3
@@ -379,9 +373,6 @@ guide: |
   The checkpoint also fits on a single MI355X (288 GB HBM3E): use
   `--tensor-parallel-size 1` with the same flags to serve one replica per GPU.
   TP2 leaves more memory for KV cache and gives lower per-token latency.
-
-  Speculative decoding is off by default on MI355X. MTP does not load from the
-  published MXFP4 checkpoint yet; see Troubleshooting.
 
   ### FP8 configuration on a 4x MI355X GPU
   ```bash
@@ -475,14 +466,6 @@ guide: |
   - **DEP startup failure:** DEP requires PLE CPU offload (on by default); DEP
     without it is not supported.
   - **MTP memory pressure:** reduce `num_speculative_tokens` below 3.
-  - **MTP with the MXFP4 checkpoint:** startup fails with `The size of tensor a
-    (1280) must match the size of tensor b (2560)`. The checkpoint's
-    `quantization_config.exclude` misses the BF16 MTP layers, so vLLM builds the
-    draft as MXFP4. Until the
-    [checkpoint fix](https://huggingface.co/amd/Qwen3.8-Flash-Next-Quark-MXFP4/discussions/1)
-    is merged, download the checkpoint, add `"re:mtp\\..*"` to
-    `quantization_config.exclude` in its `config.json`, and serve the local
-    directory.
   - **PLE:** a network layer that injects N-gram Embeddings into the main model. 
 
   ## KV cache offloading
