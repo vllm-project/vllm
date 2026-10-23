@@ -10,6 +10,7 @@ import functools
 import importlib
 import importlib.metadata
 import importlib.util
+import inspect
 import os
 import shutil
 from collections.abc import Callable
@@ -517,6 +518,44 @@ def has_flashinfer_bf16_fp4() -> bool:
     return mod is not None and all(
         hasattr(mod, name) for name in ("mm_bf16_fp4", "prepare_bf16_fp4_weights")
     )
+
+
+@functools.cache
+def has_flashinfer_gdn_prefill_sm8x() -> bool:
+    """Return whether FlashInfer's GDN prefill dispatches SM8x.
+
+    Which architectures the chunked gated-delta-rule prefill covers differs
+    between builds, and the version does not say. Ask the module for the SM8x
+    entry point, the way the other gates here ask for what they need.
+    """
+    if not has_flashinfer():
+        return False
+    mod = _get_submodule("flashinfer.gdn_prefill")
+    return mod is not None and callable(
+        getattr(mod, "chunk_gated_delta_rule_sm80", None)
+    )
+
+
+@functools.cache
+def flashinfer_gdn_prefill_takes(parameter: str) -> bool:
+    """Return whether the GDN prefill accepts this keyword.
+
+    ``max_seqlen`` and ``cu_seqlens_cpu`` arrived after 0.7.0, separately. The
+    signature is what says which build this is -- the SM8x gate above cannot,
+    because a build may carry one and not the other. Passing an argument to a
+    build without it raises TypeError on every architecture, including the
+    ones that already worked.
+    """
+    if not has_flashinfer():
+        return False
+    mod = _get_submodule("flashinfer.gdn_prefill")
+    fn = getattr(mod, "chunk_gated_delta_rule", None) if mod is not None else None
+    if fn is None:
+        return False
+    try:
+        return parameter in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
 
 
 @functools.cache
