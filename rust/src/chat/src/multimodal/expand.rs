@@ -10,15 +10,16 @@ use vllm_engine_core_client::protocol::multimodal::PlaceholderRange;
 use vllm_engine_core_client::protocol::tensor::WireTensor;
 
 use super::PreparedMedia;
+use super::timing::MM_STAGE_TARGET;
 use crate::error::{Error, Result, bail_multimodal};
 
 /// One modality's queue of pending placeholder replacements for prompt
 /// expansion.
 struct ExpansionLane<'a> {
     modality: Modality,
-    marker_token_id: u32,
+    marker_token_ids: &'a [u32],
     embed_token_id: u32,
-    placeholder_token: String,
+    placeholder_token: &'a str,
     replacements: VecDeque<&'a PromptReplacement>,
 }
 
@@ -30,9 +31,9 @@ impl<'a> ExpansionLane<'a> {
 
         Some(Self {
             modality: media.modality,
-            marker_token_id: media.placeholder.marker_token_id,
+            marker_token_ids: &media.placeholder.marker_token_ids,
             embed_token_id: media.placeholder.embed_token_id,
-            placeholder_token: media.placeholder.token.clone(),
+            placeholder_token: &media.placeholder.token,
             replacements: media.replacements.iter().collect(),
         })
     }
@@ -55,6 +56,12 @@ impl<'a> ExpansionLane<'a> {
 ///
 /// The returned ranges point into the already-expanded prompt, grouped per
 /// modality in item order.
+#[tracing::instrument(
+    name = "mm_stage",
+    target = MM_STAGE_TARGET,
+    skip_all,
+    fields(stage = "prompt_expansion")
+)]
 pub(super) fn expand_prompt_token_ids(
     prompt_token_ids: &mut Vec<u32>,
     prepared: &[PreparedMedia],
@@ -64,28 +71,33 @@ pub(super) fn expand_prompt_token_ids(
         return Ok(HashMap::new());
     }
 
-    let replacement_growth = lanes.iter().flat_map(|lane| lane.replacements.iter()).fold(
-        0usize,
-        |total, replacement| {
+    let replacement_growth = lanes.iter().fold(0usize, |total, lane| {
+        lane.replacements.iter().fold(total, |total, replacement| {
             // Alignment pads are position-dependent; reserve the worst case.
             let max_pads = replacement.alignment_pad.map_or(0, |pad| pad.period - 1);
-            total.saturating_add(max_pads + replacement.tokens.len().saturating_sub(1))
-        },
-    );
+            total.saturating_add(
+                max_pads + replacement.tokens.len().saturating_sub(lane.marker_token_ids.len()),
+            )
+        })
+    });
     let expanded_len = prompt_token_ids.len().saturating_add(replacement_growth);
 
     let mut expanded = Vec::with_capacity(expanded_len);
     let mut ranges = HashMap::<Modality, Vec<PlaceholderRange>>::new();
 
-    for &token in prompt_token_ids.iter() {
-        let lane = lanes
-            .iter_mut()
-            .find(|lane| lane.marker_token_id == token && !lane.replacements.is_empty());
+    let mut prompt_index = 0;
+    while prompt_index < prompt_token_ids.len() {
+        let lane = lanes.iter_mut().find(|lane| {
+            !lane.replacements.is_empty()
+                && prompt_token_ids[prompt_index..].starts_with(lane.marker_token_ids)
+        });
         let Some(lane) = lane else {
-            expanded.push(token);
+            expanded.push(prompt_token_ids[prompt_index]);
+            prompt_index += 1;
             continue;
         };
 
+        prompt_index += lane.marker_token_ids.len();
         let replacement = lane.replacements.pop_front().expect("lane queue is non-empty");
         debug_assert_eq!(replacement.modality, lane.modality);
         if replacement.tokens.is_empty() {
@@ -161,7 +173,8 @@ mod tests {
     use super::super::tests::{
         LLAMA4_IMAGE_END_ID, LLAMA4_IMAGE_ID, LLAMA4_IMAGE_START_ID, LLAMA4_PATCH_ID,
         LLAMA4_TILE_X_SEPARATOR_ID, LLAMA4_TILE_Y_SEPARATOR_ID, QWEN3_IMAGE_PAD_ID,
-        QWEN3_VIDEO_PAD_ID,
+        QWEN3_VIDEO_PAD_ID, STEP3_IM_END_ID, STEP3_IM_PATCH_ID, STEP3_IM_START_ID,
+        STEP3_PATCH_END_ID, STEP3_PATCH_NEWLINE_ID, STEP3_PATCH_START_ID, step3_vl_tokenizer,
     };
     use super::super::{PreparedMedia, ResolvedPlaceholder};
     use super::*;
@@ -178,12 +191,43 @@ mod tests {
             modality,
             placeholder: ResolvedPlaceholder {
                 token: placeholder_token.to_string(),
-                marker_token_id,
+                marker_token_ids: vec![marker_token_id],
                 embed_token_id,
             },
             replacements,
             items: Vec::new(),
         }
+    }
+
+    #[test]
+    fn expand_prompt_tokens_matches_multi_token_placeholder() {
+        let marker_token_ids = vec![40, 41, 42];
+        let replacement = PromptReplacement::repeated(
+            Modality::Image,
+            "<image-placeholder>",
+            QWEN3_IMAGE_PAD_ID as TokenId,
+            2,
+        );
+        let prepared = vec![PreparedMedia {
+            modality: Modality::Image,
+            placeholder: ResolvedPlaceholder {
+                token: "<image-placeholder>".to_string(),
+                marker_token_ids: marker_token_ids.clone(),
+                embed_token_id: QWEN3_IMAGE_PAD_ID,
+            },
+            replacements: vec![replacement],
+            items: Vec::new(),
+        }];
+        let mut prompt_token_ids = vec![1, 40, 41, 42, 2];
+
+        let ranges = expand_prompt_token_ids(&mut prompt_token_ids, &prepared).unwrap();
+
+        assert_eq!(
+            prompt_token_ids,
+            vec![1, QWEN3_IMAGE_PAD_ID, QWEN3_IMAGE_PAD_ID, 2]
+        );
+        assert_eq!(ranges[&Modality::Image][0].offset, 1);
+        assert_eq!(ranges[&Modality::Image][0].length, 2);
     }
 
     /// Llama4 image prepared media: the `<|image|>` marker expands to
@@ -290,6 +334,35 @@ mod tests {
             &ranges[0],
             &[false, true, false, true, false, false, true, false],
         );
+    }
+
+    #[test]
+    fn expand_prompt_tokens_prepends_alignment_pad_at_splice_offset() {
+        const PAD_ID: u32 = 7;
+
+        let mut prompt_token_ids = vec![1, QWEN3_IMAGE_PAD_ID, 2];
+        let prepared = vec![qwen3_image_prepared(vec![
+            PromptReplacement::repeated(
+                Modality::Image,
+                "<|image_pad|>",
+                QWEN3_IMAGE_PAD_ID as TokenId,
+                2,
+            )
+            .with_alignment_pad(PAD_ID as TokenId, 4),
+        ])];
+
+        let ranges = expand_prompt_token_ids(&mut prompt_token_ids, &prepared).unwrap();
+        let ranges = &ranges[&Modality::Image];
+
+        // The marker lands at offset 1, so the period-4 pad contributes
+        // `4 - 1 - 1 % 4 = 2` tokens ahead of the replacement.
+        assert_eq!(
+            prompt_token_ids,
+            vec![1, PAD_ID, PAD_ID, QWEN3_IMAGE_PAD_ID, QWEN3_IMAGE_PAD_ID, 2]
+        );
+        assert_eq!(ranges[0].offset, 1);
+        assert_eq!(ranges[0].length, 4);
+        assert_bool_mask(&ranges[0], &[false, false, true, true]);
     }
 
     #[test]
@@ -563,6 +636,67 @@ mod tests {
                 if message.contains("<|video_pad|>") && message.contains("`video`")
         ));
         assert_eq!(prompt_token_ids, original_prompt_token_ids);
+    }
+
+    /// Step3-VL/Step5-VL image prepared media: `<im_patch>` is both the prompt
+    /// marker and the embed token; the other five special tokens are
+    /// structural.
+    fn step3_vl_prepared(replacements: Vec<PromptReplacement>) -> PreparedMedia {
+        prepared_media(
+            Modality::Image,
+            "<im_patch>",
+            STEP3_IM_PATCH_ID,
+            STEP3_IM_PATCH_ID,
+            replacements,
+        )
+    }
+
+    /// The replacement layout `Step3VLVisionSpec` builds for one image with
+    /// two patches (newline flag on the first) plus the global-view span.
+    fn step3_vl_expanded_tokens() -> Vec<u32> {
+        let mut tokens = vec![STEP3_PATCH_START_ID];
+        tokens.extend(std::iter::repeat_n(STEP3_IM_PATCH_ID, 81));
+        tokens.push(STEP3_PATCH_END_ID);
+        tokens.push(STEP3_PATCH_NEWLINE_ID);
+        tokens.push(STEP3_PATCH_START_ID);
+        tokens.extend(std::iter::repeat_n(STEP3_IM_PATCH_ID, 81));
+        tokens.push(STEP3_PATCH_END_ID);
+        tokens.push(STEP3_IM_START_ID);
+        tokens.extend(std::iter::repeat_n(STEP3_IM_PATCH_ID, 169));
+        tokens.push(STEP3_IM_END_ID);
+        tokens
+    }
+
+    #[test]
+    fn expand_prompt_tokens_marks_only_step3_vl_im_patch_tokens_as_embed() {
+        use vllm_text::tokenizer::Tokenizer as _;
+
+        let tokenizer = step3_vl_tokenizer();
+        let mut prompt_token_ids = tokenizer.encode("a <im_patch> b", false).unwrap();
+        let replacement = step3_vl_expanded_tokens();
+        let prepared = vec![step3_vl_prepared(vec![PromptReplacement::sequence(
+            Modality::Image,
+            "<im_patch>",
+            replacement.iter().map(|&token| token as TokenId).collect(),
+        )])];
+
+        let ranges = expand_prompt_token_ids(&mut prompt_token_ids, &prepared).unwrap();
+        let ranges = &ranges[&Modality::Image];
+
+        let mut expected = vec![u32::from(b'a'), u32::from(b' ')];
+        expected.extend(&replacement);
+        expected.extend([u32::from(b' '), u32::from(b'b')]);
+        assert_eq!(prompt_token_ids, expected);
+
+        // Two text bytes precede the marker; the span covers both patch spans
+        // and the global-view span.
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].offset, 2);
+        assert_eq!(ranges[0].length, replacement.len());
+
+        let expected_mask =
+            replacement.iter().map(|&token| token == STEP3_IM_PATCH_ID).collect::<Vec<_>>();
+        assert_bool_mask(&ranges[0], &expected_mask);
     }
 
     // DeepSeek-V4.1 image spans: every span position carries the image token

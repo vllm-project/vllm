@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
-from torch.nn.parameter import Parameter
 
 from vllm._custom_ops import fusedQuantizeNv
 from vllm.model_executor.kernels.linear import (
@@ -21,6 +20,7 @@ from vllm.model_executor.layers.quantization.qutlass_utils import to_blocked
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     slice_nvfp4_output,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.utils.flashinfer import (
     flashinfer_scaled_fp4_mm,
 )
@@ -76,8 +76,7 @@ class QutlassNvFP4LinearMethod(CompressedTensorsLinearTransformMethod):
 
     @staticmethod
     def _get_flashinfer_gemm_backend(kernel: NvFp4LinearKernel) -> str:
-        """
-        Given a kernel, find the string that is needed to be passed into
+        """Given a kernel, find the string that is needed to be passed into
         `flashinfer_scaled_fp4_mm`, using
         vllm.model_executor.kernels.linear._LINEAR_BACKEND_KERNEL_MAP as source of truth
         """
@@ -103,17 +102,16 @@ class QutlassNvFP4LinearMethod(CompressedTensorsLinearTransformMethod):
         # while CT weights use sf = absmax * SFScaleVal / 6.0. The GEMM
         # computes alpha * sum(fp4_a * sf_a * fp4_w * sf_w), so alpha must
         # compensate: alpha = weight_global_scale / 6.0
-        layer.fused_alpha = Parameter(
-            layer.weight_global_scale / NVFP4_MAX, requires_grad=False
-        )
+        replace_parameter(layer, "fused_alpha", layer.weight_global_scale / NVFP4_MAX)
 
-        layer.fused_global_scale = Parameter(
+        replace_parameter(
+            layer,
+            "fused_global_scale",
             torch.tensor(
                 [NVFP4_MAX],
                 dtype=torch.float32,
                 device=layer.weight_global_scale.device,
             ),
-            requires_grad=False,
         )
 
         layer.flashinfer_gemm_backend = self._get_flashinfer_gemm_backend(

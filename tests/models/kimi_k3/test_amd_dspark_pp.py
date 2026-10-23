@@ -7,15 +7,14 @@ from unittest.mock import Mock
 import pytest
 import torch
 
-from vllm.models.kimi_k3.amd import linear as kimi_linear
-from vllm.models.kimi_k3.amd.linear import KimiLinearModel
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-pytestmark = pytest.mark.skipif(
-    not current_platform.is_rocm(),
-    reason="AMD Kimi-K3 requires ROCm",
-)
+if not current_platform.is_rocm():
+    pytest.skip("AMD Kimi-K3 requires ROCm", allow_module_level=True)
+
+from vllm.models.kimi_k3.amd import linear as kimi_linear  # noqa: E402
+from vllm.models.kimi_k3.amd.linear import KimiLinearModel  # noqa: E402
 
 
 def _model(
@@ -136,3 +135,35 @@ def test_last_stage_prepends_remote_aux_hidden_states(monkeypatch):
     assert len(aux_hidden_states) == 2
     torch.testing.assert_close(aux_hidden_states[0], remote)
     torch.testing.assert_close(aux_hidden_states[1], local)
+
+
+def test_attn_res_stage_forwards_prefix_delta_and_aux_states(monkeypatch):
+    incoming = torch.tensor([[1.0, 2.0]])
+    local = torch.tensor([[3.0, 4.0]])
+    delta = torch.tensor([[5.0, 6.0]])
+    model = _model(
+        start_layer=0,
+        end_layer=1,
+        layer_output=(local, None),
+        aux_layers=(1,),
+    )
+    model.config.attn_res_block_size = 1
+    model.layers[0] = Mock(
+        side_effect=lambda positions, hidden, residual, prefix: (local, residual, delta)
+    )
+    monkeypatch.setattr(
+        kimi_linear,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=False),
+    )
+
+    output = model.forward(
+        input_ids=None,
+        positions=torch.tensor([0]),
+        intermediate_tensors=None,
+        inputs_embeds=incoming,
+    )
+
+    assert isinstance(output, IntermediateTensors)
+    torch.testing.assert_close(output["hidden_states"], local + delta)
+    torch.testing.assert_close(output["aux_hidden_states_0"], local + delta)

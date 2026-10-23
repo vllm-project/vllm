@@ -4,21 +4,22 @@ import contextlib
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, assert_never, cast
 
 import huggingface_hub
-from typing_extensions import TypeVar, assert_never
+from typing_extensions import TypeVar
 
-import vllm.envs as envs
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import _maybe_register_hf_config, get_config
 from vllm.transformers_utils.repo_utils import (
     any_pattern_in_repo_files,
+    get_non_weight_snapshot_path,
     is_mistral_model_repo,
 )
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
-from .hf import CachedHfTokenizer
+from .hf import CachedHfTokenizer, HfTokenizer
 from .protocol import TokenizerLike
 
 if TYPE_CHECKING:
@@ -36,10 +37,14 @@ _MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS: set[str] = {
     "internlm2",
     "step3_vl",
     "step3p7",
+    "step5",
+    "step5_vl",
     "unlimited-ocr",
+    "unlimited_ocr",
 }
 
 _VLLM_TOKENIZERS = {
+    "alpamayo2_super": ("alpamayo2_super", "Alpamayo2SuperTokenizer"),
     # ``cohere`` mode uses the standard cached HF tokenizer; only the
     # renderer (template stage) is replaced with a melody-based one.
     "cohere": ("hf", "CachedHfTokenizer"),
@@ -73,8 +78,6 @@ class _TokenizerRegistry:
             )
 
         self.tokenizers[tokenizer_mode] = (module, class_name)
-
-        return None
 
     def load_tokenizer_cls(self, tokenizer_mode: str) -> type[TokenizerLike]:
         if tokenizer_mode not in self.tokenizers:
@@ -139,23 +142,19 @@ def resolve_tokenizer_args(
         else:
             assert_never(runner_type)
 
-    if tokenizer_mode == "slow":
-        if kwargs.get("use_fast", False):
-            raise ValueError("Cannot use the fast tokenizer in slow tokenizer mode.")
-
-        tokenizer_mode = "hf"
-        kwargs["use_fast"] = False
-
     # Try to use official Mistral tokenizer if possible
     if (
         tokenizer_mode == "auto"
         and is_mistral_model_repo(
-            model_name_or_path=str(tokenizer_name), revision=revision
+            model_name_or_path=str(tokenizer_name),
+            revision=revision,
+            token=kwargs.get("token"),
         )
         and any_pattern_in_repo_files(
             model_name_or_path=str(tokenizer_name),
             allow_patterns=["tekken.json", "tokenizer.model.v*"],
             revision=revision,
+            token=kwargs.get("token"),
         )
     ):
         tokenizer_mode = "mistral"
@@ -164,6 +163,24 @@ def resolve_tokenizer_args(
     if tokenizer_mode == "auto":
         tokenizer_mode = "hf"
 
+    if tokenizer_mode == "hf":
+        if kwargs.pop("mistral_format", False):
+            raise ValueError(
+                "mistral_format=True is not supported with tokenizer_mode='hf'"
+            )
+        kwargs["mistral_format"] = False
+        if kwargs.get("code_revision") in (None, revision):
+            tokenizer_name = get_non_weight_snapshot_path(
+                str(tokenizer_name),
+                revision=revision,
+                cache_dir=download_dir,
+                token=kwargs.get("token"),
+            )
+
+    if tokenizer_mode == "mistral":
+        # MistralCommonBackend rejects HF-only keyword arguments, even None.
+        kwargs.pop("code_revision", None)
+
     return tokenizer_mode, tokenizer_name, args, kwargs
 
 
@@ -171,6 +188,10 @@ cached_resolve_tokenizer_args = lru_cache(resolve_tokenizer_args)
 
 
 def tokenizer_args_from_config(config: "ModelConfig", **kwargs):
+    if config.tokenizer == config.model:
+        code_revision = getattr(config, "code_revision", None)
+        if code_revision is not None:
+            kwargs.setdefault("code_revision", code_revision)
     return cached_resolve_tokenizer_args(
         config.tokenizer,
         runner_type=config.runner_type,
@@ -201,6 +222,7 @@ def get_tokenizer(
 
         apply_fastokens_patch()
 
+    requested_name = str(tokenizer_name)
     tokenizer_mode, tokenizer_name, args, kwargs = cached_resolve_tokenizer_args(
         tokenizer_name,
         *args,
@@ -230,7 +252,9 @@ def get_tokenizer(
             tokenizer_name,
             trust_remote_code=trust_remote_code,
             revision=revision,
+            code_revision=kwargs.get("code_revision"),
             config_format=config_format,
+            token=kwargs.get("token"),
         )
 
     # Some models have an incorrect tokenizer_class on the hub.
@@ -252,6 +276,9 @@ def get_tokenizer(
         kwargs.setdefault("config", config)
 
     tokenizer = tokenizer_cls_.from_pretrained(tokenizer_name, *args, **kwargs)
+    # Report the Hub ID rather than the local snapshot it was loaded from
+    if tokenizer_mode == "hf" and not envs.VLLM_USE_MODELSCOPE:
+        cast(HfTokenizer, tokenizer).name_or_path = requested_name
     if model_type in _MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS:
         from vllm.tokenizers.hf import get_cached_tokenizer
 
@@ -273,6 +300,10 @@ def cached_tokenizer_from_config(model_config: "ModelConfig", **kwargs):
         return None
 
     _maybe_register_hf_config(getattr(model_config, "hf_config", None))
+    if model_config.tokenizer == model_config.model:
+        code_revision = getattr(model_config, "code_revision", None)
+        if code_revision is not None:
+            kwargs.setdefault("code_revision", code_revision)
 
     return cached_get_tokenizer(
         model_config.tokenizer,

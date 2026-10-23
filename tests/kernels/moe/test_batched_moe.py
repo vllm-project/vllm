@@ -119,6 +119,8 @@ class BatchedMMTensors:
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("block_shape", [None, [128, 128]])
 @pytest.mark.parametrize("per_act_token_quant", [False, True])
+# Tuned configs can pick a BLOCK_SIZE_K wider than the quantization block.
+@pytest.mark.parametrize("fp8_block_k", [32, 256])
 def test_batched_mm(
     num_experts: int,
     max_tokens_per_expert: int,
@@ -127,6 +129,7 @@ def test_batched_mm(
     dtype: torch.dtype,
     block_shape: list[int] | None,
     per_act_token_quant: bool,
+    fp8_block_k: int,
 ):
     """Note: float8_e4m3fn is not supported on CUDA architecture < 89,
     and those tests will be skipped on unsupported hardware."""
@@ -148,6 +151,9 @@ def test_batched_mm(
 
     if per_act_token_quant and block_shape is not None:
         pytest.skip("Skip illegal quantization test.")
+
+    if fp8_block_k != 32 and not use_fp8_w8a8:
+        pytest.skip("BLOCK_SIZE_K is only varied for fp8.")
 
     if dtype.itemsize == 1:
         act_dtype = torch.bfloat16
@@ -214,7 +220,7 @@ def test_batched_mm(
         config={
             "BLOCK_SIZE_M": 16,
             "BLOCK_SIZE_N": 16,
-            "BLOCK_SIZE_K": 16 if dtype.itemsize > 1 else 32,
+            "BLOCK_SIZE_K": 16 if dtype.itemsize > 1 else fp8_block_k,
         },
         per_act_token_quant=per_act_token_quant,
         block_shape=block_shape,
@@ -246,6 +252,65 @@ def test_batched_mm(
 
     torch.testing.assert_close(ref_output, q_ref_output, atol=atol, rtol=rtol)
     torch.testing.assert_close(test_output, q_ref_output, atol=atol, rtol=rtol)
+
+
+@pytest.mark.parametrize("scale_shape", ["[E]", "[E,1,1]"])
+def test_batched_mm_per_tensor_weight_per_token_act(scale_shape: str):
+    """Per-tensor weight scales must broadcast along N when activations are
+    quantized per token, instead of indexing into other experts' scales."""
+    if torch.float8_e4m3fn not in DTYPES or (
+        current_platform.is_cuda_alike()
+        and not current_platform.has_device_capability(89)
+    ):
+        pytest.skip("float8_e4m3fn is not supported on this device")
+    set_random_seed(7)
+
+    E, M, K, N = 8, 64, 256, 256
+    num_expert_tokens = torch.randint(
+        1, M + 1, size=(E,), device=DEVICE, dtype=torch.int32
+    )
+    _, A_q, A_scale = make_quantized_test_activations(
+        E,
+        M,
+        K,
+        in_dtype=torch.bfloat16,
+        quant_dtype=torch.float8_e4m3fn,
+        per_act_token_quant=True,
+    )
+    (_, B_q, B_scale, _), _ = make_test_weights(
+        E, N // 2, K, in_dtype=torch.bfloat16, quant_dtype=torch.float8_e4m3fn
+    )
+    assert B_scale is not None and B_scale.numel() == E
+    B_scale = B_scale.view(-1) if scale_shape == "[E]" else B_scale.view(-1, 1, 1)
+
+    test_output = torch.zeros((E, M, N), dtype=torch.bfloat16, device=DEVICE)
+    invoke_moe_batched_triton_kernel(
+        A_q,
+        B_q,
+        test_output,
+        num_expert_tokens,
+        tl.bfloat16,
+        A_scale,
+        B_scale,
+        None,
+        True,
+        False,
+        False,
+        config={"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 16, "BLOCK_SIZE_K": 32},
+        per_act_token_quant=True,
+    )
+
+    ref_output = native_batched_masked_quant_matmul(
+        A_q,
+        B_q,
+        torch.zeros_like(test_output),
+        num_expert_tokens,
+        A_scale,
+        B_scale.view(-1, 1, 1),
+        None,
+        True,
+    )
+    torch.testing.assert_close(test_output, ref_output, atol=6e-2, rtol=6e-2)
 
 
 @pytest.mark.parametrize(("m", "n", "k"), MNK_FACTORS)
