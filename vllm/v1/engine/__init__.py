@@ -248,11 +248,13 @@ class EngineCoreOutput(
 
     # [num_scored_rows, num_token_ids]; appended last for array_like compatibility.
     prompt_token_id_logprobs: torch.Tensor | None = None
-    hidden_state_capture: HiddenStateCaptureResult | None = None
-    hidden_capture_skip_reason: str | None = None
 
     # Sent with FinishReason.ERROR, e.g. when a paused engine rejects a request.
     error: RequestError | None = None
+
+    # Append capture fields after existing fields for array_like compatibility.
+    hidden_state_capture: HiddenStateCaptureResult | None = None
+    hidden_capture_skip_reason: str | None = None
 
     @property
     def finished(self) -> bool:

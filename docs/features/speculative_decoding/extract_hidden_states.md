@@ -139,3 +139,9 @@ single completion without stop strings. Encoder-decoder and diffusion models
 unsupported because their hidden rows need a different position mapping.
 Unsupported requests return HTTP 400 with the validation reason; they do not
 produce a partial capture. Use `--no-async-scheduling` when starting the server.
+
+Auxiliary outputs use increasing layer order in both the native and Transformers
+backends, even if the speculative configuration lists layers in a different
+order. Request auxiliary capture with `aux_layer_ids` in that increasing order;
+each auxiliary column block corresponds to the matching response `layer_ids`
+entry.

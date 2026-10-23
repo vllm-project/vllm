@@ -840,7 +840,8 @@ class Base(
             self.model._can_record_outputs = {}
 
         target_class = self._target_class
-        for layer in layers:
+        # Match EagleModelMixin's output order and the runner's layer metadata.
+        for layer in sorted(set(layers)):
             # layer - 1 because we want the input to the layer
             layer_name = self._layer_names[layer - 1]
             layer_key = f"aux_hidden_state_{layer}"
