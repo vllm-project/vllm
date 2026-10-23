@@ -94,6 +94,7 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
             get_kv_cache_spec=lambda _, spec=specs[name]: spec,
             get_attn_backend=lambda backend=backend: backend,
             is_draft_layer=False,
+            kv_sharing_target_layer_name=None,
         )
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: layers)
     monkeypatch.setattr(
@@ -127,6 +128,7 @@ def test_get_kv_cache_spec_tags_draft_layers(monkeypatch):
             get_kv_cache_spec=lambda _: spec,
             get_attn_backend=lambda: backend,
             is_draft_layer=name == "draft",
+            kv_sharing_target_layer_name=None,
         )
         for name in ("target", "draft")
     }
