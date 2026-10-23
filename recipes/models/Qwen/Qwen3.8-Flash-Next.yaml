@@ -175,6 +175,7 @@ variants:
           VLLM_ROCM_USE_AITER: "1"
           VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
           AITER_USE_FLYDSL_MOE_SORTING: "1"
+          VLLM_ENGINE_READY_TIMEOUT_S: "1800"
 
 # TP+EP is the default deployment; it benchmarks consistently faster than
 # plain TP for this model, which stays offered as an alternative.
@@ -352,12 +353,16 @@ guide: |
     (`AITER_USE_FLYDSL_MOE_SORTING=1`).
   - The FlyDSL GDN prefill kernel (`--gdn-prefill-backend aiter_flydsl`).
 
+  A cold TP2 start takes over ten minutes, most of it loading weights, so the
+  engine startup timeout is raised from its 600 s default.
+
   TP2 is the default the command builder renders:
 
   ```bash
   export VLLM_ROCM_USE_AITER=1
   export VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1
   export AITER_USE_FLYDSL_MOE_SORTING=1
+  export VLLM_ENGINE_READY_TIMEOUT_S=1800
 
   vllm serve amd/Qwen3.8-Flash-Next-Quark-MXFP4 \
     --tensor-parallel-size 2 \
@@ -372,7 +377,7 @@ guide: |
 
   The checkpoint also fits on a single MI355X (288 GB HBM3E): use
   `--tensor-parallel-size 1` with the same flags to serve one replica per GPU.
-  TP2 leaves more memory for KV cache and gives lower per-token latency.
+  TP2 leaves more memory for KV cache.
 
   ### FP8 configuration on a 4x MI355X GPU
   ```bash
