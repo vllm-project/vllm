@@ -21,6 +21,42 @@ transposes, fp8 packing, MXFP4 scales); the LLVM intrinsics here (``expect``,
 from __future__ import annotations
 
 import flydsl.expr as fx
+
+# The W41 image's FlyDSL predates fx.memory_fence / fx.AtomicOrdering. The mono
+# kernels only need an LLVM fence, which that image already emits.
+if not hasattr(fx, "AtomicOrdering"):
+    from enum import Enum
+
+    class _AtomicOrdering(Enum):
+        NotAtomic = "not_atomic"
+        Unordered = "unordered"
+        Monotonic = "monotonic"
+        Acquire = "acquire"
+        Release = "release"
+        AcqRel = "acq_rel"
+        SeqCst = "seq_cst"
+
+    fx.AtomicOrdering = _AtomicOrdering
+
+if not hasattr(fx, "memory_fence"):
+    from flydsl._mlir.dialects import llvm as _llvm
+
+    _FENCE_ORDER = {
+        "not_atomic": _llvm.AtomicOrdering.not_atomic,
+        "unordered": _llvm.AtomicOrdering.unordered,
+        "monotonic": _llvm.AtomicOrdering.monotonic,
+        "acquire": _llvm.AtomicOrdering.acquire,
+        "release": _llvm.AtomicOrdering.release,
+        "acq_rel": _llvm.AtomicOrdering.acq_rel,
+        "seq_cst": _llvm.AtomicOrdering.seq_cst,
+    }
+
+    def _memory_fence(*, syncscope=None, ordering=fx.AtomicOrdering.SeqCst):
+        key = ordering.value if hasattr(ordering, "value") else ordering
+        _llvm.fence(_FENCE_ORDER[key], syncscope=syncscope or None)
+
+    fx.memory_fence = _memory_fence
+
 from aiter.ops.flydsl.kernels import buffer_ops as bo
 from aiter.ops.flydsl.kernels.dpp_utils import update_dpp_i32
 from aiter.ops.flydsl.kernels.kernels_common import kernel_signature
