@@ -7,12 +7,14 @@ MXFP4 GEMMs and combines in one kernel, so it is paired with a pass-through
 prepare/finalize.
 """
 
+import os
 from typing import Any
 
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -29,6 +31,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2, prev_power_of_2
+
+logger = init_logger(__name__)
 
 MAX_EP_SIZE = 8
 MAX_TOPK = 16
@@ -150,6 +154,29 @@ def aiter_mega_moe_unsupported_reasons(moe_config: FusedMoEConfig) -> list[str]:
     return reasons
 
 
+_mori_shmem_initialized = False
+
+
+def _init_mori_shmem(default_heap_size: str) -> None:
+    """Set up the MoRI symmetric heap that MegaMoEV2 places its dispatch and
+    combine workspaces on.
+
+    This must run after the worker's memory snapshot (i.e. at weight loading,
+    not in the all2all manager) so the profiler charges the heap against
+    gpu_memory_utilization.
+    """
+    global _mori_shmem_initialized
+    if _mori_shmem_initialized:
+        return
+    from vllm.distributed import get_ep_group
+    from vllm.distributed.device_communicators.all2all import init_mori_shmem
+
+    heap_size = os.environ.setdefault("MORI_SHMEM_HEAP_SIZE", default_heap_size)
+    logger.info_once("AITER MegaMoE: MORI_SHMEM_HEAP_SIZE=%s", heap_size)
+    init_mori_shmem(get_ep_group().cpu_group)
+    _mori_shmem_initialized = True
+
+
 def _num_fused_shared_experts(moe_config: FusedMoEConfig) -> int:
     # Every rank holds its own copy of a fused shared expert after its routed
     # experts, and routes each of its tokens to that local copy.
@@ -256,6 +283,9 @@ class AiterMegaMoEExperts(mk.FusedMoEExpertsModular):
             raise NotImplementedError(
                 "AITER MegaMoE does not support apply_router_weight_on_input"
             )
+        # MoRI's default 2G heap is too small: MegaMoEV2 needs > 4G, or > 8G
+        # with a fused shared expert.
+        _init_mori_shmem("16G" if self.num_fused_shared_experts else "8G")
         max_num_tokens = next_power_of_2(self.moe_config.max_num_tokens)
         # MegaMoEV2 takes fixed-slot dispatch up to FIXED_SLOT_MAX_MTPR (255 by
         # default, raised via AITER_MEGA_FIXED_SLOT_MAX_MTPR); max_tok_per_rank

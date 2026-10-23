@@ -53,28 +53,8 @@ class PassThroughAll2AllManager(All2AllManagerBase):
     """Placeholder for ``all2all_backend="passthrough"``.
 
     The MoE backend dispatches and combines itself, so there is no all2all to
-    manage. Backends that communicate over MoRI shmem still need it set up.
+    manage.
     """
-
-    def __init__(self, cpu_group, tcp_store_group=None):
-        super().__init__(cpu_group, tcp_store_group)
-        vllm_config = get_current_vllm_config()
-        if vllm_config.kernel_config.moe_backend == "aiter_mega_moe":
-            # MegaMoEV2 places its dispatch/combine workspaces on the MoRI
-            # symmetric heap, which defaults to 2 GB. MegaMoEV2 requires > 4GB
-            # (> 8GB with a fused shared expert, which needs an mxfp4 target).
-            online_targets = getattr(
-                vllm_config.model_config.quantization_config, "targets", None
-            )
-            may_fuse_shared_expert = (
-                envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
-                and "mxfp4" in (online_targets or {}).values()
-            )
-            heap_size = os.environ.setdefault(
-                "MORI_SHMEM_HEAP_SIZE", "16G" if may_fuse_shared_expert else "8G"
-            )
-            logger.info_once("AITER MegaMoE: MORI_SHMEM_HEAP_SIZE=%s", heap_size)
-            init_mori_shmem(cpu_group)
 
     def get_handle(self, kwargs):
         raise RuntimeError(

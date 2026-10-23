@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 import sys
 from dataclasses import replace
 from types import ModuleType, SimpleNamespace
@@ -19,6 +20,7 @@ from vllm.config.kernel import (
     bind_passthrough_all2all_backend,
 )
 from vllm.config.quantization import QuantizationConfigArgs
+from vllm.distributed.device_communicators import all2all
 from vllm.model_executor.layers.fused_moe import modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.experts import (
     aiter_mega_moe as mega_moe_module,
@@ -243,6 +245,11 @@ def test_layers_share_one_runtime_and_bind_their_own_weights(monkeypatch):
         lambda: SimpleNamespace(rank_in_group=3, world_size=8, cpu_group="ep"),
     )
     monkeypatch.setattr(AiterMegaMoEExperts, "_runtime_cache", {})
+    shmem_groups: list = []
+    monkeypatch.setattr(all2all, "init_mori_shmem", shmem_groups.append)
+    monkeypatch.setattr(mega_moe_module, "_mori_shmem_initialized", False)
+    env = {k: v for k, v in os.environ.items() if k != "MORI_SHMEM_HEAP_SIZE"}
+    monkeypatch.setattr(os, "environ", env)
 
     hidden, inter = 128, 64
     moe = _ep_moe_config(hidden=hidden, inter=inter)
@@ -267,6 +274,9 @@ def test_layers_share_one_runtime_and_bind_their_own_weights(monkeypatch):
         layers.append(layer)
         experts.append(layer_experts)
 
+    # The heap is set up once, at weight loading, so it is memory profiled.
+    assert shmem_groups == ["ep"]
+    assert os.environ["MORI_SHMEM_HEAP_SIZE"] == "8G"
     # One fixed-slot runtime for small steps and one for the full batch.
     assert [b["max_tok_per_rank"] for b in built] == [128, 4096]
     weight_args = ("w1", "w1_scale", "w2", "w2_scale", "max_tok_per_rank")
