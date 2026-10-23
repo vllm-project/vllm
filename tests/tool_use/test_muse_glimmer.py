@@ -464,7 +464,7 @@ def _stream_tool_parser_only(chunks: list[str]) -> list[str]:
     out: list[str] = []
     prev = ""
     for cur in chunks:
-        delta = cur[len(prev):]
+        delta = cur[len(prev) :]
         dm = MuseGlimmerToolParser.extract_tool_calls_streaming(
             T, prev, cur, delta, [], [], [], _fake_req()
         )
