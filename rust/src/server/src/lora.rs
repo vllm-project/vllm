@@ -248,7 +248,6 @@ impl LoraManager {
             lora_int_id,
             lora_path,
             base_model_name,
-            tensorizer_config_dict: None,
             load_inplace,
             is_3d_lora_weight,
         };
