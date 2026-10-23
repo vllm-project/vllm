@@ -9,9 +9,8 @@
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 import math
-from collections.abc import Iterable
 from dataclasses import dataclass
-from itertools import accumulate, repeat
+from itertools import accumulate
 from typing import TypeAlias
 
 import torch
@@ -33,23 +32,6 @@ from vllm.model_executor.models.intern_vit import (
 )
 
 input_dim_t: TypeAlias = int | tuple[int, int]
-norm_t: TypeAlias = tuple[float, float, float] | torch.Tensor
-
-
-def _ntuple(n):
-    def parse(x):
-        if isinstance(x, Iterable) and not isinstance(x, str):
-            return tuple(x)
-        return tuple(repeat(x, n))
-
-    return parse
-
-
-to_1tuple = _ntuple(1)
-to_2tuple = _ntuple(2)
-to_3tuple = _ntuple(3)
-to_4tuple = _ntuple(4)
-to_ntuple = _ntuple
 
 
 def calc_seq_len(size: tuple[int, int], patch_size: int) -> int:
