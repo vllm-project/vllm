@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # mypy: ignore-errors
-# ruff: noqa: B008, E501, F841, SIM102
+# ruff: noqa: B008, E501, SIM102
 
 # Vendored from AMD's Muse Spark FlyDSL monokernel kernels (mk/k5.py):
 # SPDX-License-Identifier: MIT
@@ -24,30 +24,31 @@
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
-"""K5 (milestone 5): the decode layer at S = 32 / 64 / 128 rows as two persistent launches
-around the library MoE (muse_moe_flydsl), rung "hybrid" of the ladder.
+"""HA and HB: one Muse Spark decoder layer for S = 32 / 64 / 96 / 128 rows as two persistent
+launches around HM (k5m.py, the local experts); one rank of a TP = EP = 8 group.
 
-    K1 (library attention) -> HA -> library MoE (align, gate_up, down, finalize) -> HB
+    [attention] -> HA -> HM -> HB
 
-HA  o-norm x gate (distributed) -> o_proj (rows 32b.., K = this rank's 2048) -> the bf16
-    partial tile goes to the rank that owns those hidden columns (reduce-scatter) ->
-    attention boundary on this rank's hidden quarter (post_attn_norm, gated residual,
-    pre-FFN norm; per-token sums of squares reduced over the 256 CTAs and the 4 ranks)
-    -> ffn_in quarter all-gathered (plain bf16 + flags) -> router (fp32, 64 experts a rank)
-    and pre_expert_proj (1024 rows a rank), K quarters over 4-CTA groups -> logits and
-    h_raw all-gathered -> top-8 (CTA t routes token t) -> h = pre_expert_norm(h_raw)
-    (CTA t: token t) -> h, topk ids / weights for the library MoE.
-HB  EP all-reduce of the library's partial (one-shot push + distributed sum) ->
-    post_expert_proj (2048 rows = this rank's hidden quarter, K halves) -> post-FFN norm,
-    gated residual, next input norm on the quarter -> xn quarter all-gathered -> qkv+gate
-    (K eighths, 9 tiles a CTA) -> head finishers (qk-norm, x qk_scale, RoPE, fp8 KV write).
+HA  optional: this layer's verify attention (attn_frag.py) at the head; o-norm x gate
+    (distributed) -> o_proj (rows 32 b .., K = this rank's 1024) -> the bf16 partials go to
+    the owner rank -> attention boundary (post_attn_norm, gated residual, pre-FFN norm) ->
+    ffn_in -> router (fp32, 32 experts a rank) and pre_expert_proj (512 rows a rank), K in 8
+    parts over 8-CTA groups -> logits and h_raw all-gathered -> top-8 (CTA t routes token t)
+    -> h = pre_expert_norm(h_raw) (CTA t: token t) -> h, top-k ids / weights for HM.
+HB  EP all-reduce of HM's partial (reduce-scatter to the column-block owner + all-gather) ->
+    post_expert_proj (this rank's 1024 rows, K in 4 parts) -> post-FFN norm, gated residual,
+    next input norm -> xn -> qkv + gate (K eighths) -> head finishers (qk-norm, RoPE,
+    q out, bf16 K / V into vLLM's LBHNC KV cache).
 
-Token-sharded boundaries: rank r owns tokens [r S/4, (r+1) S/4). The o_proj partials and the
-post_expert_proj outputs go to the owner rank of each token; one CTA a token then does the
-whole row (all-reduce sum, both norms, gated residual) with no cross-CTA reduction, and the
-ffn_in / xn rows are all-gathered. The residual stream lives token-sharded (rank r: its S/4
-rows, fp32, full 8192 columns); HA reads it as rows (s_row_off, stride 8192) so the first layer
-can read a full replicated stream; HB writes it the same way and (``gather``) all-gathers it.
+The boundaries (Build.bnd). S > 32, token owners: rank r owns tokens t = r (mod 8); the o_proj
+partials and the post_expert_proj outputs go to the owner rank of each token, one CTA a token
+does the whole row (all-reduce sum, both norms, gated residual) and the ffn_in / xn rows are
+all-gathered. The residual stream lives token-sharded (rank r: its S / 8 rows, fp32, all 8192
+columns); HA reads it as rows so the first layer can read a full replicated stream (s_full);
+HB writes it the same way and (``gather``) all-gathers it. S = 32, column blocks: the o_proj
+partials go to the owner of the column block, which reduces and all-gathers them; both
+boundaries run on all 256 CTAs (token groups x column groups, one-hop token norms) and the
+stream is replicated.
 
 Every row tile is 16 tokens (MFMA N); dense stages keep their weights in VGPRs and loop over
 the S / 16 row tiles with the activations read straight from L2 / peer memory in MFMA
@@ -79,7 +80,6 @@ from .dev import (
     bf_lo,
     bpermute,
     butterfly,
-    fp8x2,
     fresh,
     hw_exp2,
     hw_rsq,
@@ -97,34 +97,37 @@ from .dev import (
     readlane,
     rsrc,
     st_if,
-    stamp,
-    stamp_dep,
     traced,
     uniform,
     wave_sum,
     xred,
-    xshfl,
 )
 
+W = 8  # ranks in the TP = EP group
 HID = 8192
-QH = HID // 4  # hidden columns a rank owns (W = 4; builds use geom5(W))
+QH = HID // W  # hidden columns a rank owns (= stage-A K part = post-proj rows)
 DM = 4096
 E = 256
-EL = E // 4
+EL = E // W  # local experts = router experts a rank = stage-A groups
+KQ = BLOCKS // EL  # stage-A K parts
+OWN = 16 // KQ  # pre-proj rows a CTA owns after the K-part exchange
+NRP = OWN // 2  # their row pairs
+NTILES = QH // 16  # post-proj 16-row tiles a rank
+KSP = BLOCKS // NTILES  # post-proj K split
 TOPK = 8
-WMAX = 8
-MULT = 0.17677669529663687
 ROUTE_EPS = 1e-15
 PRE_EPS = 1e-5
 POST_EPS = 1e-8
 LOG2E = 1.0 / math.log(2.0)
 KCH = 128
-HQ, HKV, HD = 32, 4, 64
+HQ, HKV, HD = 128 // W, 16 // W, 64  # q / kv heads a rank
 QROWS, KROWS = HQ * HD, HKV * HD
 QKV_ROWS = QROWS + 2 * KROWS
 QKVG_ROWS = QKV_ROWS + QROWS
-OK_K = 2048
-QK_SCALE = 5.4730064863875
+OK_K = HID // W  # o_proj K a rank
+NQTILES = QKVG_ROWS // 16  # qkvg 16-row tiles a rank
+# qkvg tiles a CTA group (32 groups x 8 K eighths; 144 of 160 real)
+NQT = -(-NQTILES // 32)
 TL_POINTS = 32
 # loads of peer-written data (after its system-scope flag): device scope = past the per-XCD L2,
 # served by the memory-side cache, which every write to this memory passes
@@ -147,7 +150,7 @@ REGION_IDS = {
     "qx": 17,
     "qkv": 18,
     "sgf": 19,
-    # bnd builds (K3-style boundaries at W = 8, S = 32)
+    # the column-block boundaries (bnd)
     "opb": 20,
     "orb": 21,
     "yb": 22,
@@ -161,84 +164,20 @@ REGION_IDS = {
 
 
 @dataclass(frozen=True)
-class Geom5:
-    """World-size dependent constants of HA / HB (TP = EP = W, token owner t % W)."""
-
-    W: int
-    TS: int  # tokens a rank owns (S / W)
-    QH: int  # hidden columns a rank owns (= stage-A K part = post-proj rows)
-    EL: int  # local experts = router experts a rank = stage-A groups
-    KQ: int  # stage-A K parts (BLOCKS / EL): 4 / 8
-    OWN: int  # pre-proj rows a CTA owns after the K-part exchange (16 / KQ): 4 / 2
-    NRP: int  # their row pairs: 2 / 1
-    NTILES: int  # post-proj 16-row tiles a rank (QH / 16): 128 / 64
-    KSP: int  # post-proj K split (BLOCKS / NTILES): 2 / 4
-    HQ: int
-    HKV: int
-    QROWS: int
-    QKV_ROWS: int
-    QKVG_ROWS: int
-    OK_K: int
-    NQT: int  # qkvg tiles a CTA group (32 groups x 8 K eighths): 9 / 5 (TP8: 144 of 160 real)
-    NQTILES: int
-
-
-def geom5(W, S=None):
-    assert W in (4, 8) and W <= WMAX, W
-    el = E // W
-    kq = BLOCKS // el
-    own = 16 // kq
-    qh = HID // W
-    hq, hkv = 128 // W, 16 // W
-    qr = hq * HD
-    qkv = qr + 2 * hkv * HD
-    nqtiles = (qkv + qr) // 16
-    return Geom5(
-        W=W,
-        TS=(S // W if S else 0),
-        QH=qh,
-        EL=el,
-        KQ=kq,
-        OWN=own,
-        NRP=own // 2,
-        NTILES=qh // 16,
-        KSP=BLOCKS // (qh // 16),
-        HQ=hq,
-        HKV=hkv,
-        QROWS=qr,
-        QKV_ROWS=qkv,
-        QKVG_ROWS=qkv + qr,
-        OK_K=8192 // W,
-        NQT=-(-nqtiles // 32),
-        NQTILES=nqtiles,
-    )
-
-
-@dataclass(frozen=True)
 class Build:
-    S: int = 32
-    W: int = 4
-    next_rope: bool = True
-    qkv_pf: int = 9  # qkvg tiles issued before stage G (of 9)
-    timeline: bool = False
-    stop: int = (
-        99  # debug: HA stops after stage `stop` (1 ng, 2 o, 3 ab, 4 a, 5 route/h)
+    S: int = 32  # rows (32 / 64 / 96 / 128)
+    next_rope: bool = True  # the next layer has RoPE (SWA) or not (full, NoPE)
+    attn: str = (
+        ""  # this layer's verify attention fused at the HA head ("swa" / "full")
     )
-    hm: bool = False  # the MoE is HM (k5m), which pushes the EP partial itself: HB skips its push
-    # TEP8 c = 4 boundaries (W = 8, S = 32 only): 1 = #11 the K3-style attention boundary (O5 reduce-scatter to the
-    # column-block owner + all-gather of the reduced o, the boundary on all 256 CTAs, local ffn_in for A5; the
-    # stream input is replicated); 2 = #11 + #1 the replicated FFN boundary (post5's y to every rank, G on all 256
-    # CTAs, the full stream out, local xn for QKV5, no gather5). 0 = the token-owner boundaries (shipped).
-    bnd: int = (
-        0  # 3 = 2 with the column-group boundary mapping (#20: one-hop token norms)
-    )
-    qr1: bool = False  # W = 8, S = 32: QKV5 reduces both 16-token row tiles in one LDS round (R2 #4; bit-identical)
-    attn: str = ""  # S4 (MK_FUSED_ATTN=1): this layer's verify attention fused at the HA head ("swa" / "full")
-    attn_olate: bool = False  # S4 #10 A/B: issue the o_proj weights after the fused attention instead of before
-    # vLLM build flags (as k3.Build; defaults = the SGLang kernels, same binaries as before the flags)
-    mult1: bool = False  # HA router MULT = 1 (vLLM folds output_multiplier into the router weight)
-    vqk: bool = False  # HB q / k finish as vLLM's fused qk-norm + RoPE: no qk_scale, fp32, one bf16 rounding
-    kvl: str = ""  # HB KV store: "" = fp8 [slot][H][64] K / V (SGLang); "lbhnc" = bf16 vLLM LBHNC (see k3.Build.kvl)
+
+    @property
+    def bnd(self):
+        """The boundaries: 3 at S = 32 (o reduce-scattered to the column-block owner and
+        all-gathered, both boundaries on all 256 CTAs with one-hop token norms over column
+        groups, the stream replicated); 0 (S > 32): the token-owner boundaries (one CTA a
+        token, the stream token-sharded and all-gathered by HB)."""
+        return 3 if self.S == 32 else 0
 
 
 def _lay(items):
@@ -250,9 +189,9 @@ def _lay(items):
     return out, (off + 4095) // 4096 * 4096
 
 
-def scratch_layout(S, W=4, bnd=0):
-    G = geom5(W, S)
-    TS = G.TS
+def scratch_layout(S, world=W, bnd=0):
+    assert world == W, world
+    TS = S // W
     extra = (
         []
         if not bnd
@@ -266,36 +205,36 @@ def scratch_layout(S, W=4, bnd=0):
             ("xnb", S * HID * 2),
             ("xnbf", BLOCKS * 8),  # the next layer's input [t][col] bf16 + a flag a CTA
             ("ssa4", (4 * S * BLOCKS + 2 * S) * 8),
-            ("ssg4", (4 * S * BLOCKS + 2 * S) * 8),  # ONEPASS partials, rstd
+            ("ssg4", (4 * S * BLOCKS + 2 * S) * 8),  # partials, rstd
             ("gpa", BLOCKS * 16 * 8),
             (
                 "gpg",
                 BLOCKS * 16 * 8,
-            ),  # bnd 3: [CTA][4 tokens][4] partials of the AB / G
+            ),  # [CTA][4 tokens][4] partials of the AB / G
         ]
     )
     return _lay(
         [
-            ("y", S * G.OK_K * 2),
+            ("y", S * OK_K * 2),
             ("yf", BLOCKS * 8),
             ("smid", TS * HID * 4),
-            ("px", G.EL * G.KQ * 16 * S * 8),
+            ("px", EL * KQ * 16 * S * 8),
             ("m", S * DM * 2),
             ("mmf", BLOCKS * 8),
             (
                 "py",
-                max(128, (G.KSP - 1) * G.NTILES) * 16 * S * 8,
+                max(128, (KSP - 1) * NTILES) * 16 * S * 8,
             ),  # [K part - 1][tile][row][t]
-            ("qx", 32 * 8 * G.NQT * 16 * S * 8),
-            ("qkv", S * (G.QKV_ROWS // 2) * 8),
+            ("qx", 32 * 8 * NQT * 16 * S * 8),
+            ("qkv", S * (QKV_ROWS // 2) * 8),
         ]
         + extra
     )
 
 
-def peer_layout(S, W=4, bnd=0):
-    G = geom5(W, S)
-    TS = G.TS
+def peer_layout(S, world=W, bnd=0):
+    assert world == W, world
+    TS = S // W
     extra = (
         []
         if not bnd
@@ -311,7 +250,7 @@ def peer_layout(S, W=4, bnd=0):
             (
                 "yb",
                 2 * S * (HID // 2) * 8,
-            ),  # post5's y, all-gathered [par][t][pair] tagged (bnd 2)
+            ),  # stage F's y, all-gathered [par][t][pair] tagged
         ]
     )
     # the bnd regions go last: HM (k5m) addresses moep / mf with the layout of the plain build
@@ -321,7 +260,7 @@ def peer_layout(S, W=4, bnd=0):
             ("opf", 2 * W * BLOCKS * 8),
             ("xin", 2 * S * (HID // 2) * 4),
             ("xf", 2 * S * 8),
-            ("logit", 2 * G.KQ * S * E * 8),
+            ("logit", 2 * KQ * S * E * 8),
             ("hraw", 2 * S * (DM // 2) * 4),
             ("hf", 2 * W * BLOCKS * 8),
             ("moep", 2 * W * S * (DM // 2) * 4),
@@ -329,7 +268,7 @@ def peer_layout(S, W=4, bnd=0):
             ("moem", 2 * S * (DM // 2) * 4),
             ("mmf", 2 * BLOCKS * 8),
             ("yt", 2 * TS * (HID // 2) * 4),
-            ("ytf", 2 * W * G.NTILES * 8),
+            ("ytf", 2 * W * NTILES * 8),
             ("xn", 2 * S * (HID // 2) * 4),
             ("xnf", 2 * S * 8),
             ("sg", 2 * S * HID * 4),
@@ -347,44 +286,22 @@ def build(key: Build):
         return _BUILDS[key]
     _KEYSTR = repr(key)  # FlyDSL disk-cache key (see k3.build)
     S = key.S
-    W = key.W
-    assert S in (32, 64, 96, 128) and S % W == 0, (W, S)
-    G = geom5(W, S)
+    assert S in (32, 64, 96, 128), S
     NT = S // 16
-    TS = G.TS  # tokens a rank owns in the boundaries
-    QH, EL, KQ, OWN, NRP, NTILES, KSP = G.QH, G.EL, G.KQ, G.OWN, G.NRP, G.NTILES, G.KSP
-    HQ, HKV, QROWS, QKV_ROWS, OK_K, NQT = (
-        G.HQ,
-        G.HKV,
-        G.QROWS,
-        G.QKV_ROWS,
-        G.OK_K,
-        G.NQT,
-    )
-    CO = OK_K // KCH // WAVES  # o_proj chunks a wave: 2 / 1
-    CA = QH // KCH // WAVES  # stage-A pre-proj chunks a wave: 2 / 1
-    CP = (DM // KSP) // KCH // WAVES  # post-proj chunks a wave: 2 / 1
-    KPT = QH // THREADS  # router K a thread: 4 / 2
-    NFQ = W * BLOCKS // THREADS  # producer flags a thread (opf / hf polls): 2 / 4
-    QPF = min(key.qkv_pf, NQT)
-    CPR = (
-        BLOCKS // W
-    )  # CTAs (16-column blocks) a rank owns in the EP reduce-scatter: 64 / 32
+    TS = S // W  # tokens a rank owns in the token-owner boundaries
+    CO = OK_K // KCH // WAVES  # o_proj chunks a wave
+    CA = QH // KCH // WAVES  # stage-A pre-proj chunks a wave
+    CP = (DM // KSP) // KCH // WAVES  # post-proj chunks a wave
+    KPT = QH // THREADS  # router K a thread
+    NFQ = W * BLOCKS // THREADS  # producer flags a thread (opf / hf polls)
+    QPF = 3  # qkvg tiles issued before stage G (of NQT)
+    CPR = BLOCKS // W  # CTAs (16-column blocks) a rank owns in the EP reduce-scatter
     assert TS * W == S and NFQ * THREADS == W * BLOCKS and W * NTILES * 8 >= 512
-    BND = key.bnd
-    assert BND in (0, 1, 2, 3) and (BND == 0 or (W == 8 and S == 32)), (
-        "bnd: TEP8 32-row builds only",
-        W,
-        S,
-        BND,
-    )
-    BG = BND >= 2  # the replicated FFN boundary (#1)
-    QR1 = key.qr1
-    assert not QR1 or (W == 8 and S == 32), "qr1: TEP8 32-row builds only"
-    lay, _ = scratch_layout(S, W, BND)
-    play, _ = peer_layout(S, W, BND)
-    TL = key.timeline
-    tag_par = lambda tag: tag & 1  # noqa: E731
+    BND = key.bnd != 0  # the column-block boundaries (S = 32)
+    QR1 = S == 32  # QKV5 reduces both 16-token row tiles in one LDS round
+    lay, _ = scratch_layout(S, W, key.bnd)
+    play, _ = peer_layout(S, W, key.bnd)
+    tag_par = lambda tag: tag & 1
 
     @fx.struct
     class RouteLds:
@@ -396,7 +313,7 @@ def build(key: Build):
     class HaO:
         red: fx.Array[fx.Float32, NT * WAVES * 2 * 64 * 4, 16]
 
-    XAROW = QH + 8  # LDS row of the x quarter tile (bf16)
+    XAROW = QH + 8  # LDS row of the x slice tile (bf16)
 
     @fx.struct
     class HaA:
@@ -406,12 +323,11 @@ def build(key: Build):
         own: fx.Array[fx.Float32, NT * OWN * 16, 16]
 
     FA = None
-    if key.attn:  # S4: the fused attention fragment (mk/attn_frag.py), TP8 only
+    if key.attn:  # the fused attention fragment (attn_frag.py)
         from . import attn_frag
 
-        assert W == 8 and key.attn in ("swa", "full"), key
-        # kvl = lbhnc: the vLLM build (bf16 LBHNC cache)
-        FA = attn_frag.make(S // 8, key.attn == "swa", kvl=key.kvl)
+        assert key.attn in ("swa", "full"), key
+        FA = attn_frag.make(S // 8, key.attn == "swa", kvl="lbhnc")
         FaLds = FA.Lds
         _KEYSTR = (
             _KEYSTR + FA.key
@@ -440,49 +356,17 @@ def build(key: Build):
 
     @fx.struct
     class Misc:
-        tls: fx.Array[fx.Int64, TL_POINTS, 16]
+        pad: fx.Array[fx.Int64, TL_POINTS, 16]  # unused: keeps the tuned LDS offsets
         rs: fx.Array[
             fx.Float32, 2 * S + (32 if BND else 8), 16
         ]  # bnd: tok_rstd2 uses rs[2S .. 2S + 32)
         pr: fx.Array[
-            fx.Float32, 512 + 64 if BND == 3 else 8, 16
-        ]  # bnd 3: the polled group partials + wave sums
+            fx.Float32, 512 + 64 if BND else 8, 16
+        ]  # bnd: the polled group partials + wave sums
         red4: fx.Array[fx.Float32, 32, 16]
 
-    WN = "" if W == 4 else f"_w{W}"  # the TP4 kernel names are unchanged
-    BN = (f"_bnd{BND}" if BND else "") + ("_qr1" if QR1 else "")
-    name_a = (
-        f"muse_k5a_s{S}_t{int(TL)}_x{key.stop}_c{XCM}_y{YCM}_a{ACM}_i0{WN}"
-        + BN
-        + (f"_fa{key.attn}{int(key.attn_olate)}" if key.attn else "")
-        + ("_m1" if key.mult1 else "")
-        + (f"_kv{key.kvl}" if key.attn and key.kvl else "")
-    )
-    name_b = (
-        f"muse_k5b_r{int(key.next_rope)}q{key.qkv_pf}_s{S}_t{int(TL)}_c{XCM}_m{int(key.hm)}{WN}"
-        + BN
-        + ("_vqk" if key.vqk else "")
-        + (f"_kv{key.kvl}" if key.kvl else "")
-    )
-    RMULT = 1.0 if key.mult1 else MULT  # the router sigmoid's logit multiplier
-    VQK = key.vqk
-    VKV = key.kvl == "lbhnc"
-    assert key.kvl in ("", "lbhnc"), key.kvl
-    # fused attention: SGLang (fp8 KV, q x qk_scale) or vLLM (bf16 LBHNC KV, q without qk_scale)
-    assert not key.attn or VQK == VKV, key
-
-    @traced
-    def flush_range(tls, tl, tid, bid, lo, hi):
-        if const_expr(TL):  # noqa: SIM102
-            if (tid >= lo) & (tid < hi):
-                v = fx.ptr_load(tls + tid)
-                bo.buffer_store(
-                    fx.Vector.from_elements(
-                        [fx.Int32(v & 0xFFFFFFFF), fx.Int32(v >> 32)], fx.Int32
-                    ),
-                    rsrc(tl),
-                    (bid * TL_POINTS + tid) * 2,
-                )
+    name_a = f"muse_k5a_s{S}" + (f"_fa{key.attn}" if key.attn else "")
+    name_b = f"muse_k5b_s{S}_r{int(key.next_rope)}"
 
     def sel_peer(pl, d):
         p = pl[0]
@@ -541,7 +425,7 @@ def build(key: Build):
         return fx.Uint32(neg.select(~b, b ^ fx.Int32(-2147483648)))
 
     @traced
-    def route_token(tkns, bias_v, lgss, tid, lane, rt, tls=None):
+    def route_token(tkns, bias_v, lgss, tid, lane, rt):
         """Tokens ``tkns`` (this wave's, all valid), interleaved for ILP: sigmoid +
         bias, radix top-8, rank, renorm -> rid / rw."""
         T_ = len(tkns)
@@ -551,12 +435,12 @@ def build(key: Build):
             for i in range_constexpr(4):
                 lg = lgss[x_][i].bitcast(fx.Float32)
                 sg = fx.Float32(1.0) / (
-                    fx.Float32(1.0) + hw_exp2(lg * fx.Float32(-RMULT * LOG2E))
+                    fx.Float32(1.0) + hw_exp2(lg * fx.Float32(-LOG2E))
                 )
                 sc = sg + bias_v[i]
-                live = sc == sc  # noqa: PLR0124  (NaN ranks last)
+                live = sc == sc  # NaN ranks last
                 kx.append(okey(live.select(sc, fx.Float32(-3.0e38))))
-                sx.append((sg == sg).select(sg, fx.Float32(0.0)))  # noqa: PLR0124
+                sx.append((sg == sg).select(sg, fx.Float32(0.0)))
             keys.append(kx)
             sigs.append(sx)
         th = [fx.Uint32(0) for _ in range(T_)]
@@ -567,8 +451,6 @@ def build(key: Build):
                 for i in range_constexpr(4):
                     n = n + popcount(ballot(keys[x_][i] >= cand))
                 th[x_] = (n >= TOPK).select(cand, th[x_])
-        if const_expr(tls is not None):
-            stamp_dep(TL, tls, tid, 12, fx.Int32(th[0]))
         for x_ in range_constexpr(T_):
             tkn = tkns[x_]
             n_gt = fx.Int32(0)
@@ -611,8 +493,6 @@ def build(key: Build):
             mes.append(me)
             mss.append(ms)
             ranks.append(rank_)
-        if const_expr(tls is not None):
-            stamp_dep(TL, tls, tid, 13, ranks[0])
         # serial sum of the 8 sigmoids in rank order (+ eps), IEEE division
         for x_ in range_constexpr(T_):
             if lane < TOPK:
@@ -653,7 +533,7 @@ def build(key: Build):
             )  # padded rows (t >= nrows) repeat the last real row
             if const_expr(ao is None):
                 xv = ld_vec(attn_o, (tl_ * OK_K + kk) // 2, 4)
-            else:  # S4 fused attention (aot=1): the merged rows as tagged pairs
+            else:  # the fused attention: the merged rows as tagged pairs
                 got = mb_poll(
                     tag,
                     ao[1],
@@ -693,9 +573,9 @@ def build(key: Build):
             mb_put(tag, scratch + fx.Int64(lay["yf"][0]), bid, fx.Int32(1))
 
     @traced
-    def stage_o(o_ops, scratch, pl, tag, health, tid, bid, lane, wave, rank, red, tls):
-        """o_proj rows 32b .. (this rank's K slice) for all S tokens; the bf16 partial
-        goes to the owner rank of those hidden columns (bid / 64)."""
+    def stage_o(o_ops, scratch, pl, tag, health, tid, bid, lane, wave, rank, red):
+        """o_proj rows 32b .. (this rank's K slice) for all S tokens; the bf16 partial goes to
+        the owner rank of the column block (bnd: b // CPR) or of each token (t % W)."""
         tid = fresh(tid)
         lane = fresh(lane)
         par = tag_par(tag)
@@ -754,13 +634,11 @@ def build(key: Build):
                     fx.ptr_store(
                         accs[i], red + (((rt * WAVES + wave) * 2 + i) * 64 + lane) * 4
                     )
-            if const_expr(gi == 0):
-                stamp_dep(TL, tls, tid, 24, accs[0][0].bitcast(fx.Int32))
             gpu.barrier()
             if const_expr(gi + 1 < NG):
                 nxt = ob_loads(2 * gi + 2) + ob_loads(2 * gi + 3)
             if const_expr(BND):
-                # #11: the CTA's whole [32 columns x tokens] tile to the owner of block b (b // 32), tagged pairs
+                # the CTA's whole [32 columns x tokens] tile to the owner of block b (b // 32), tagged pairs
                 e = tid
                 pp = e % 16
                 tt32 = e // 16
@@ -786,18 +664,11 @@ def build(key: Build):
                 )
             else:
                 e = tid
-                if const_expr(W == 4):
-                    # owner of token t is rank t % 4: wave w pushes the 4 tokens of owner w % 4 of tile w / 4
-                    rt_ = 2 * gi + e // 256
-                    pp = e % 16
-                    dw = uniform(wave % 4)
-                    tt = dw + 4 * ((e // 16) % 4)
-                else:
-                    # owner t % 8: wave w pushes owner w's 2 tokens of both tiles of the group
-                    rt_ = 2 * gi + (e // 32) % 2
-                    pp = e % 16
-                    dw = uniform(wave)
-                    tt = dw + W * ((e // 16) % 2)
+                # owner t % 8: wave w pushes owner w's 2 tokens of both tiles of the group
+                rt_ = 2 * gi + (e // 32) % 2
+                pp = e % 16
+                dw = uniform(wave)
+                tt = dw + W * ((e // 16) % 2)
                 v = []
                 for h2 in range_constexpr(2):
                     rr = 2 * pp + h2
@@ -809,7 +680,7 @@ def build(key: Build):
                     v.append(s_)
                 t_ = 16 * rt_ + tt
                 # one destination a wave (SGPR peer select): no branch around the store (a branch makes
-                # the waitcnt pass drain everything), and the 4 links carry every group in parallel
+                # the waitcnt pass drain everything), and the links carry every group in parallel
                 idx = (((par * W + rank) * BLOCKS + bid) * TS + t_ // W) * 16 + pp
                 w2 = bf16_pair(v[0], v[1])
                 bo.buffer_store(
@@ -818,7 +689,6 @@ def build(key: Build):
                     idx,
                     cache_modifier=CM_SYS,
                 )
-        stamp(TL, tls, tid, 25)
         if const_expr(not BND):  # bnd: tagged pairs, no flags
             rocdl.s_waitcnt(0)
             gpu.barrier()
@@ -850,9 +720,8 @@ def build(key: Build):
         wave,
         rank,
         red4,
-        tls,
     ):
-        """CTA j < S/4: token t = rank S/4 + j, all 8192 columns (16 a thread): the 4 o_proj
+        """CTA j < S / W: token t = W j + rank, all 8192 columns (16 a thread): the W o_proj
         partials (rank order) -> o, post_attn_norm (weightless, 1e-8), gated residual (mid stream,
         local), pre_feedforward_layernorm -> the ffn_in row pushed to every rank + flag."""
         tid = fresh(tid)
@@ -880,7 +749,6 @@ def build(key: Build):
         ]
         mb_poll(tag, health, specs, REGION_IDS["opf"], cm=CM_SYS)
         gpu.barrier()
-        stamp(TL, tls, tid, 15)
         a = [fx.Float32(0.0) for _ in range(16)]
         for src in range_constexpr(W):
             for h in range_constexpr(2):
@@ -929,7 +797,6 @@ def build(key: Build):
             block_sum(ss2, lane, wave, red4, 1) * fx.Float32(1.0 / HID)
             + fx.Float32(PRE_EPS)
         )
-        stamp(TL, tls, tid, 16)
         for h in range_constexpr(2):
             cq = 8 * (tid + THREADS * h)
             wf = wfs[h]
@@ -956,7 +823,7 @@ def build(key: Build):
 
     def a_loads(w_r, w_pre, bid, tid, lane, wave):
         """CTA b = (group rb = b / KQ, K part kq = b % KQ): router expert rb of this rank (fp32,
-        KPT = 4 / 2 K a thread) and pre_expert_proj rows 16 rb .. (CA = 2 / 1 chunk tiles a wave)."""
+        KPT K a thread) and pre_expert_proj rows 16 rb .. (CA chunk tiles a wave)."""
         kq = bid % KQ
         rb = bid // KQ
         wr = ld_vec(w_r, rb * HID + kq * QH + KPT * tid, KPT)
@@ -983,7 +850,6 @@ def build(key: Build):
         red,
         tok,
         own,
-        tls,
         xl,
     ):
         tid = fresh(tid)
@@ -995,12 +861,9 @@ def build(key: Build):
         rb = bid // KQ
         if const_expr(
             BND
-        ):  # #11: ffn_in is local; the 32 CTAs of this K part wrote its columns
+        ):  # ffn_in is local; the 32 CTAs of this K part wrote its columns
             if tid < 32:
-                if const_expr(BND == 3):
-                    fa = (tid // 4) * 32 + 4 * kq + tid % 4
-                else:
-                    fa = kq * 32 + tid
+                fa = (tid // 4) * 32 + 4 * kq + tid % 4
                 mb_poll(
                     tag,
                     health,
@@ -1017,7 +880,6 @@ def build(key: Build):
                     cm=CM_SYS,
                 )
         gpu.barrier()
-        stamp(TL, tls, tid, 13)
         if const_expr(BND):
             xb = scratch + fx.Int64(lay["xinb"][0])
             xpar = 0
@@ -1029,8 +891,8 @@ def build(key: Build):
             [bf_mma_operand(wp[ci], qq, lane).bitcast(fx.BFloat16) for qq in range(4)]
             for ci in range(CA)
         ]
-        QV = QH // 8  # 16-B vectors a token row of the x tile: 256 / 128
-        NXQ = 16 * QV // THREADS  # of them a thread: 8 / 4
+        QV = QH // 8  # 16-B vectors a token row of the x tile
+        NXQ = 16 * QV // THREADS  # of them a thread
 
         def ax_loads(rt):
             return [
@@ -1046,7 +908,7 @@ def build(key: Build):
 
         xnext = ax_loads(0)
         for rt in range_constexpr(NT):
-            # the tile's x quarter (16 tokens x 2048) -> LDS, 8 x 16 B a thread
+            # the tile's x slice (16 tokens x QH) -> LDS, NXQ x 16 B a thread
             xs = xnext
             for q in range_constexpr(NXQ):
                 e = tid + THREADS * q
@@ -1054,26 +916,9 @@ def build(key: Build):
             gpu.barrier()
             if const_expr(rt + 1 < NT):
                 xnext = ax_loads(rt + 1)
-            if const_expr(rt == 0):
-                stamp(TL, tls, tid, 18)
-            if const_expr(rt == 1):
-                stamp(TL, tls, tid, 26)
             # router: thread's 4 K of every token of the tile; all LDS reads first, then the
             # 16 wave reductions interleaved (ILP)
-            if const_expr(KPT == 4):
-                xws = [
-                    fx.Vector(
-                        fx.ptr_load(
-                            xl + (t16 * XAROW + 4 * tid) // 2,
-                            result_type=fx.Vector.make_type(2, fx.Int32),
-                        )
-                    )
-                    for t16 in range(16)
-                ]
-            else:
-                xws = [
-                    fx.ptr_load(xl + (t16 * XAROW + 2 * tid) // 2) for t16 in range(16)
-                ]
+            xws = [fx.ptr_load(xl + (t16 * XAROW + 2 * tid) // 2) for t16 in range(16)]
             bvs = []
             for ci in range_constexpr(CA):
                 c = wave + WAVES * ci
@@ -1087,16 +932,7 @@ def build(key: Build):
                             )
                         ).bitcast(fx.BFloat16)
                     )
-            if const_expr(KPT == 4):
-                prs = [
-                    bf_lo(xw[0]) * wf[0]
-                    + bf_hi(xw[0]) * wf[1]
-                    + bf_lo(xw[1]) * wf[2]
-                    + bf_hi(xw[1]) * wf[3]
-                    for xw in xws
-                ]
-            else:
-                prs = [bf_lo(xw) * wf[0] + bf_hi(xw) * wf[1] for xw in xws]
+            prs = [bf_lo(xw) * wf[0] + bf_hi(xw) * wf[1] for xw in xws]
             for off in (32, 16, 8, 4, 2, 1):
                 prs = [xred(v, off, _add) for v in prs]
             if lane < 16:
@@ -1104,18 +940,12 @@ def build(key: Build):
                 for t16 in range_constexpr(1, 16):
                     v_ = (lane == t16).select(prs[t16], v_)
                 fx.ptr_store(v_, tok + (wave * 16 + lane))
-            if const_expr(rt == 0):
-                stamp_dep(TL, tls, tid, 22, prs[0].bitcast(fx.Int32))
             acc = fx.Vector.filled(4, 0.0, fx.Float32)
             for ci in range_constexpr(CA):
                 for qq in range_constexpr(4):
                     acc = mfma_bf16(wa[ci][qq], bvs[ci * 4 + qq], acc)
             fx.ptr_store(acc, red + (wave * 64 + lane) * 4)
             gpu.barrier()
-            if const_expr(rt == 0):
-                stamp(TL, tls, tid, 19)
-            if const_expr(rt == 1):
-                stamp(TL, tls, tid, 27)
             # branch-free stores (dropped out-of-range offsets): no waitcnt drain at a join
             t16 = tid % 16
             v = fx.Float32(0.0)
@@ -1142,10 +972,7 @@ def build(key: Build):
                     ((rb * KQ + kq) * 16 + rr) * S + 16 * rt + tt,
                     s_,
                 )
-            if const_expr(rt == 1):
-                stamp_dep(TL, tls, tid, 28, s_.bitcast(fx.Int32))
         gpu.barrier()
-        stamp(TL, tls, tid, 20)
         if tid < S:
             lv = fx.ptr_load(tok + (WAVES * 16 + 8 + tid))
             for pb in pl:
@@ -1195,7 +1022,6 @@ def build(key: Build):
                         hidx,
                         cache_modifier=CM_SYS,
                     )
-        stamp(TL, tls, tid, 21)
         rocdl.s_waitcnt(0)
         gpu.barrier()
         if tid == 0:
@@ -1273,19 +1099,14 @@ def build(key: Build):
         hb0 = (
             (((par * W + hsrc) * EL + hloc // 16) * KQ + (hloc % 16) // OWN) * S + t
         ) * NRP
-        if const_expr(W == 4):
-            h0 = ld_vec(own_peer + fx.Int64(play["hraw"][0]), hb0, 2, XCM)
-            h1 = ld_vec(own_peer + fx.Int64(play["hraw"][0]), hb0 + 2 * S, 2, XCM)
-            hv = fx.Vector.from_elements([h0[0], h0[1], h1[0], h1[1]], fx.Int32)
-        else:
-            # 8 columns = 4 owner CTAs (K parts) of 2 rows each: one pair a part
-            hv = fx.Vector.from_elements(
-                [
-                    ld_i32(own_peer + fx.Int64(play["hraw"][0]), hb0 + o * S, XCM)
-                    for o in range(4)
-                ],
-                fx.Int32,
-            )
+        # 8 columns = 4 owner CTAs (K parts) of 2 rows each: one pair a part
+        hv = fx.Vector.from_elements(
+            [
+                ld_i32(own_peer + fx.Int64(play["hraw"][0]), hb0 + o * S, XCM)
+                for o in range(4)
+            ],
+            fx.Int32,
+        )
         wv = ld_vec(w_pren, kk // 2, 4)
         ss = fx.Float32(0.0)
         for d in range_constexpr(4):
@@ -1309,308 +1130,7 @@ def build(key: Build):
             fx.Vector.from_elements(outw, fx.Int32), rsrc(h_out), (t * DM + kk) // 2
         )
 
-    # ============================================================ bnd (W = 8, S = 32): K3-style boundaries
-    def put4_b(tag, scratch, region, tt, bid, q1, q2, q3, q4):
-        """The 4 ONEPASS partials of token tt, CTA bid -> scratch region [t][CTA][4] (tagged), as K3 put4."""
-        base = scratch + fx.Int64(lay[region][0])
-        i0 = (tt * BLOCKS + bid) * 4
-        bo.buffer_store(
-            fx.Vector.from_elements(
-                [q1.bitcast(fx.Int32), tag, q2.bitcast(fx.Int32), tag], fx.Int32
-            ),
-            rsrc(base),
-            i0 * 2,
-            cache_modifier=CM_DEV,
-        )
-        bo.buffer_store(
-            fx.Vector.from_elements(
-                [q3.bitcast(fx.Int32), tag, q4.bitcast(fx.Int32), tag], fx.Int32
-            ),
-            rsrc(base),
-            (i0 + 2) * 2,
-            cache_modifier=CM_DEV,
-        )
-
-    @traced
-    def tok_rstd2_b(
-        scratch, region, tag, health, tid, lane, rs_out, eps1, eps2, bid, red, tls=None
-    ):
-        """K3 tok_rstd2: one round for two norms of a token. Reducer CTA 255 - t sums the 256 CTAs' 4 partials in a
-        fixed order: r1 = rsqrt(P1 / HID + eps1), r2 = rsqrt((P2 + 2 r1 P3 + r1^2 P4) / HID + eps2).
-        rs_out[t] = r1, rs_out[S + t] = r2 on every CTA (red: WAVES x 4 floats of LDS)."""
-        rbase = scratch + fx.Int64(lay[region][0])
-        tred = bid >= BLOCKS - S
-        if tred:
-            t = BLOCKS - 1 - bid
-            va = fx.Float32(0.0)
-            vb = fx.Float32(0.0)
-            if tid < 2 * BLOCKS:
-                got = mb_poll(
-                    tag,
-                    health,
-                    [(rbase, (t * BLOCKS + tid // 2) * 4 + 2 * (tid % 2), 2)],
-                    REGION_IDS[region],
-                )
-                va = got[0][0].bitcast(fx.Float32)
-                vb = got[0][1].bitcast(fx.Float32)
-            va = butterfly(va, (32, 16, 8, 4, 2))  # lanes of one parity: 32 CTAs
-            vb = butterfly(vb, (32, 16, 8, 4, 2))
-            if lane < 2:
-                fx.ptr_store(va, red + (tid // 64) * 4 + 2 * lane)
-                fx.ptr_store(vb, red + (tid // 64) * 4 + 2 * lane + 1)
-            gpu.barrier()
-            if const_expr(tls is not None):
-                stamp_dep(
-                    TL, tls, tid, 30, va.bitcast(fx.Int32)
-                )  # the reducer has all 256 partials
-            if tid == 0:
-                p = [fx.Float32(0.0) for _ in range(4)]
-                for w in range_constexpr(WAVES):
-                    for j in range_constexpr(4):
-                        p[j] = p[j] + fx.ptr_load(red + w * 4 + j)
-                r1 = hw_rsq(p[0] * fx.Float32(1.0 / HID) + fx.Float32(eps1))
-                q = p[1] + fx.Float32(2.0) * r1 * p[2] + r1 * r1 * p[3]
-                r2 = hw_rsq(q * fx.Float32(1.0 / HID) + fx.Float32(eps2))
-                mb_put(tag, rbase, 4 * S * BLOCKS + 2 * t, r1)
-                mb_put(tag, rbase, 4 * S * BLOCKS + 2 * t + 1, r2)
-            if const_expr(tls is not None):
-                stamp(TL, tls, tid, 31)  # published
-        if tid < S:
-            got2 = mb_poll(
-                tag, health, [(rbase, 4 * S * BLOCKS + 2 * tid, 2)], REGION_IDS[region]
-            )
-            fx.ptr_store(got2[0][0].bitcast(fx.Float32), rs_out + tid)
-            fx.ptr_store(got2[0][1].bitcast(fx.Float32), rs_out + (S + tid))
-        gpu.barrier()
-
-    @traced
-    def stage_ab_b(
-        own_peer,
-        pl,
-        scratch,
-        stream_in,
-        nrows,
-        alpha_a,
-        beta_a,
-        w_pffn,
-        tag,
-        health,
-        tid,
-        bid,
-        lane,
-        rank,
-        rsl,
-        tls,
-    ):
-        """#11, CTA b = hidden columns 32b .. on every rank, thread = (token tid / 16, column pair tid % 16):
-        the block owner (b / 32 == rank) sums the 8 o_proj partials in rank order (fp32 -> bf16, the all-reduce
-        output) and all-gathers it; every CTA: post_attn_norm (weightless, 1e-8), gated residual on the
-        replicated fp32 stream, pre_feedforward_layernorm, one ONEPASS token-norm round over the 256 CTAs
-        -> the mid stream and ffn_in (local, + a flag a CTA)."""
-        tid = fresh(tid)
-        par = tag_par(tag)
-        pp = tid % 16
-        tt = tid // 16
-        c = bid * 32 + 2 * pp
-        st = ld_vec(
-            stream_in, fx.min(tt, nrows - 1) * HID + c, 2
-        )  # padded rows repeat the last real row
-        al = ld_vec(alpha_a, c, 2)
-        be = ld_vec(beta_a, c, 2)
-        wf = ld_i32(w_pffn, c // 2)
-        if (
-            bid // CPR
-        ) == rank:  # the block owner: 8 partials in rank order -> bf16 -> every rank
-            specs = [
-                (
-                    own_peer + fx.Int64(play["opb"][0]),
-                    ((par * W + src) * S + tt) * (CPR * 16) + (bid % CPR) * 16 + pp,
-                    1,
-                )
-                for src in range(W)
-            ]
-            got = mb_poll(tag, health, specs, REGION_IDS["opb"], cm=CM_SYS)
-            a0 = bf_lo(got[0][0])
-            a1 = bf_hi(got[0][0])
-            for src in range_constexpr(1, W):
-                a0 = a0 + bf_lo(got[src][0])
-                a1 = a1 + bf_hi(got[src][0])
-            wr = bf16_pair(a0, a1)
-            for pb in pl:
-                mb_put_sys(
-                    tag,
-                    pb + fx.Int64(play["orb"][0]),
-                    (par * S + tt) * (HID // 2) + bid * 16 + pp,
-                    wr,
-                )
-        stamp(TL, tls, tid, 15)
-        got = mb_poll(
-            tag,
-            health,
-            [
-                (
-                    own_peer + fx.Int64(play["orb"][0]),
-                    (par * S + tt) * (HID // 2) + bid * 16 + pp,
-                    1,
-                )
-            ],
-            REGION_IDS["orb"],
-            cm=CM_SYS,
-        )
-        o0 = bf_lo(got[0][0])
-        o1 = bf_hi(got[0][0])
-        stamp_dep(TL, tls, tid, 29, got[0][0])  # orr arrived
-        a0 = al[0].bitcast(fx.Float32) * st[0].bitcast(fx.Float32)
-        a1 = al[1].bitcast(fx.Float32) * st[1].bitcast(fx.Float32)
-        b0 = be[0].bitcast(fx.Float32) * o0
-        b1 = be[1].bitcast(fx.Float32) * o1
-        q1 = butterfly(o0 * o0 + o1 * o1, (1, 2, 4, 8))
-        q2 = butterfly(a0 * a0 + a1 * a1, (1, 2, 4, 8))
-        q3 = butterfly(a0 * b0 + a1 * b1, (1, 2, 4, 8))
-        q4 = butterfly(b0 * b0 + b1 * b1, (1, 2, 4, 8))
-        if pp == 0:
-            put4_b(tag, scratch, "ssa4", tt, bid, q1, q2, q3, q4)
-        tok_rstd2_b(
-            scratch,
-            "ssa4",
-            tag,
-            health,
-            tid,
-            lane,
-            rsl,
-            POST_EPS,
-            PRE_EPS,
-            bid,
-            rsl + 2 * S,
-            tls,
-        )
-        stamp(TL, tls, tid, 16)
-        r1 = fx.ptr_load(rsl + tt)
-        n0 = bf16_round(o0 * r1)
-        n1 = bf16_round(o1 * r1)
-        s0 = a0 + be[0].bitcast(fx.Float32) * n0
-        s1 = a1 + be[1].bitcast(fx.Float32) * n1
-        bo.buffer_store(
-            fx.Vector.from_elements(
-                [s0.bitcast(fx.Int32), s1.bitcast(fx.Int32)], fx.Int32
-            ),
-            rsrc(scratch + fx.Int64(lay["smidb"][0])),
-            tt * HID + c,
-            cache_modifier=CM_DEV,
-        )
-        r2 = fx.ptr_load(rsl + (S + tt))
-        bo.buffer_store(
-            bf16_pair((s0 * r2) * bf_lo(wf), (s1 * r2) * bf_hi(wf)),
-            rsrc(scratch + fx.Int64(lay["xinb"][0])),
-            (tt * HID + c) // 2,
-            cache_modifier=CM_DEV,
-        )
-        rocdl.s_waitcnt(0)
-        gpu.barrier()
-        if tid == 0:
-            mb_put(tag, scratch + fx.Int64(lay["xinbf"][0]), bid, fx.Int32(1))
-
-    @traced
-    def stage_g_b(
-        own_peer,
-        scratch,
-        w_pff,
-        alpha,
-        beta,
-        w_in,
-        stream_out,
-        so_stride,
-        so_row,
-        sfull_out,
-        gather,
-        tag,
-        health,
-        tid,
-        bid,
-        lane,
-        rsl,
-        tls,
-    ):
-        """#1, CTA b = hidden columns 32b .. on every rank, thread = (token, column pair): post5's y of these
-        columns (all-gathered by rank b / 32), post_feedforward_layernorm (input-scaled, 1e-8), gated residual on
-        the replicated mid stream, next input_layernorm, one ONEPASS round -> the full stream (stream_out; also
-        sfull_out when gather), xn (local, + a flag a CTA)."""
-        tid = fresh(tid)
-        par = tag_par(tag)
-        pp = tid % 16
-        tt = tid // 16
-        c = bid * 32 + 2 * pp
-        st = ld_vec(scratch + fx.Int64(lay["smidb"][0]), tt * HID + c, 2, CM_DEV)
-        wpf = ld_i32(w_pff, c // 2)
-        al = ld_vec(alpha, c, 2)
-        be = ld_vec(beta, c, 2)
-        wi = ld_i32(w_in, c // 2)
-        got = mb_poll(
-            tag,
-            health,
-            [
-                (
-                    own_peer + fx.Int64(play["yb"][0]),
-                    (par * S + tt) * (HID // 2) + bid * 16 + pp,
-                    1,
-                )
-            ],
-            REGION_IDS["yb"],
-            cm=CM_SYS,
-        )
-        stamp(TL, tls, tid, 17)
-        yw = got[0][0]
-        z0 = bf16_round(bf_lo(wpf) * bf_lo(yw))
-        z1 = bf16_round(bf_hi(wpf) * bf_hi(yw))
-        a0 = al[0].bitcast(fx.Float32) * st[0].bitcast(fx.Float32)
-        a1 = al[1].bitcast(fx.Float32) * st[1].bitcast(fx.Float32)
-        b0 = be[0].bitcast(fx.Float32) * z0
-        b1 = be[1].bitcast(fx.Float32) * z1
-        q1 = butterfly(z0 * z0 + z1 * z1, (1, 2, 4, 8))
-        q2 = butterfly(a0 * a0 + a1 * a1, (1, 2, 4, 8))
-        q3 = butterfly(a0 * b0 + a1 * b1, (1, 2, 4, 8))
-        q4 = butterfly(b0 * b0 + b1 * b1, (1, 2, 4, 8))
-        if pp == 0:
-            put4_b(tag, scratch, "ssg4", tt, bid, q1, q2, q3, q4)
-        tok_rstd2_b(
-            scratch,
-            "ssg4",
-            tag,
-            health,
-            tid,
-            lane,
-            rsl,
-            POST_EPS,
-            PRE_EPS,
-            bid,
-            rsl + 2 * S,
-        )
-        stamp(TL, tls, tid, 23)
-        r1 = fx.ptr_load(rsl + tt)
-        m0 = bf16_round(z0 * r1)
-        m1 = bf16_round(z1 * r1)
-        s0 = a0 + be[0].bitcast(fx.Float32) * m0
-        s1 = a1 + be[1].bitcast(fx.Float32) * m1
-        sw = fx.Vector.from_elements(
-            [s0.bitcast(fx.Int32), s1.bitcast(fx.Int32)], fx.Int32
-        )
-        bo.buffer_store(sw, rsrc(stream_out), tt * so_stride + so_row + c)
-        if gather != 0:
-            bo.buffer_store(sw, rsrc(sfull_out), tt * HID + c)
-        r2 = fx.ptr_load(rsl + (S + tt))
-        xw = bf16_pair((s0 * r2) * bf_lo(wi), (s1 * r2) * bf_hi(wi))
-        bo.buffer_store(
-            xw,
-            rsrc(scratch + fx.Int64(lay["xnb"][0])),
-            (tt * HID + c) // 2,
-            cache_modifier=CM_DEV,
-        )
-        rocdl.s_waitcnt(0)
-        gpu.barrier()
-        if tid == 0:
-            mb_put(tag, scratch + fx.Int64(lay["xnbf"][0]), bid, fx.Int32(1))
-
-    # ------------------------------------------------------------ bnd 3: column-group boundaries (#20)
+    # ------------------------------------------------------------ bnd: column-group boundaries
     # CTA b = token group tg = b / 32 (tokens 4 tg .. 4 tg + 4) x column group cb = b % 32 (columns 256 cb .. + 256);
     # thread = (token tq = tid / 128, column pair pp = tid % 128). The token norms reduce in the CTA (2 waves a
     # token), then over the 32 CTAs of the token group in ONE hop: every CTA of the group reads the group's 32 x 4 x 4
@@ -1632,13 +1152,9 @@ def build(key: Build):
         eps1,
         eps2,
         pr,
-        tls=None,
-        sa=None,
-        sb=None,
     ):
-        """-> (r1, r2) of this thread's token from the 4 ONEPASS partials of every CTA of the token group."""
+        """-> (r1, r2) of this thread's token from the 4 norm partials of every CTA of the token group."""
         tg = bid // 32
-        cb = bid % 32
         base = scratch + fx.Int64(lay[region][0])
         qs = [wave_sum(q) for q in (q1, q2, q3, q4)]
         if lane == 0:
@@ -1652,8 +1168,6 @@ def build(key: Build):
                 pr + (512 + (2 * (tid // 4) + 1) * 4 + tid % 4)
             )
             mb_put(tag, base, bid * 16 + tid, v)
-        if const_expr(sa is not None):
-            stamp(TL, sa[0], tid, sa[1])
         src = tid // 16  # (column group, token, partial) of the group, one a thread
         got = mb_poll(
             tag,
@@ -1663,8 +1177,6 @@ def build(key: Build):
         )
         fx.ptr_store(got[0][0].bitcast(fx.Float32), pr + tid)
         gpu.barrier()
-        if const_expr(sb is not None):
-            stamp(TL, sb[0], tid, sb[1])
         if tid < 4:  # token tid: the 32 groups in order, then the two norms
             p = []
             for k in range_constexpr(4):
@@ -1699,15 +1211,15 @@ def build(key: Build):
         wave,
         rank,
         pr,
-        tls,
     ):
-        """#11 with the column-group mapping: the block owners (b / 32 == rank, block b = 32 columns, all tokens)
-        reduce + all-gather as in bnd 2; CTA (tg, cb) then does the boundary of tokens 4 tg .. x columns 256 cb .."""
+        """The attention boundary with the column-group mapping: the block owners (b / 32 == rank, block
+        b = 32 columns, all tokens) reduce the o_proj partials and all-gather the result; CTA (tg, cb) then
+        does the boundary of tokens 4 tg .. x columns 256 cb .."""
         tid = fresh(tid)
         par = tag_par(tag)
         if (
-            (bid // CPR) == rank
-        ):  # the block owner: 8 partials in rank order -> bf16 -> every rank (as bnd 2)
+            bid // CPR
+        ) == rank:  # the block owner: 8 partials in rank order -> bf16 -> every rank
             pp_ = tid % 16
             tt_ = tid // 16
             specs = [
@@ -1731,7 +1243,6 @@ def build(key: Build):
                     (par * S + tt_) * (HID // 2) + bid * 16 + pp_,
                     bf16_pair(a0, a1),
                 )
-        stamp(TL, tls, tid, 15)
         tg = bid // 32
         cb = bid % 32
         tt = 4 * tg + tid // 128
@@ -1756,7 +1267,6 @@ def build(key: Build):
         )
         o0 = bf_lo(got[0][0])
         o1 = bf_hi(got[0][0])
-        stamp_dep(TL, tls, tid, 29, got[0][0])  # orr arrived
         a0 = al[0].bitcast(fx.Float32) * st[0].bitcast(fx.Float32)
         a1 = al[1].bitcast(fx.Float32) * st[1].bitcast(fx.Float32)
         b0 = be[0].bitcast(fx.Float32) * o0
@@ -1777,11 +1287,7 @@ def build(key: Build):
             POST_EPS,
             PRE_EPS,
             pr,
-            tls,
-            (tls, 30),
-            (tls, 31),
         )
-        stamp(TL, tls, tid, 16)
         n0 = bf16_round(o0 * r1)
         n1 = bf16_round(o1 * r1)
         s0 = a0 + be[0].bitcast(fx.Float32) * n0
@@ -1825,9 +1331,9 @@ def build(key: Build):
         lane,
         wave,
         pr,
-        tls,
     ):
-        """#1 with the column-group mapping (CTA (tg, cb): tokens 4 tg .. x columns 256 cb ..)."""
+        """The FFN boundary with the column-group mapping (CTA (tg, cb): tokens 4 tg .. x columns
+        256 cb ..)."""
         tid = fresh(tid)
         par = tag_par(tag)
         tg = bid // 32
@@ -1853,7 +1359,6 @@ def build(key: Build):
             REGION_IDS["yb"],
             cm=CM_SYS,
         )
-        stamp(TL, tls, tid, 17)
         yw = got[0][0]
         z0 = bf16_round(bf_lo(wpf) * bf_lo(yw))
         z1 = bf16_round(bf_hi(wpf) * bf_hi(yw))
@@ -1878,7 +1383,6 @@ def build(key: Build):
             PRE_EPS,
             pr,
         )
-        stamp(TL, tls, tid, 23)
         m0 = bf16_round(z0 * r1)
         m1 = bf16_round(z1 * r1)
         s0 = a0 + be[0].bitcast(fx.Float32) * m0
@@ -1937,44 +1441,46 @@ def build(key: Build):
         rl = alloc.allocate(RouteLds).peek()
         sl = alloc.allocate(HaLds)
         so, sa = sl.o_.peek(), sl.a_.peek()
-        tls = misc.tls.ptr
         rt = {"rid": rl.rid.ptr, "rw": rl.rw.ptr, "sel": rl.sel.ptr}
         pl = list(peers)
         own_peer = sel_peer(pl, rank)
-        stamp(TL, tls, tid, 0)
         ep = uniform(ld_i32(epoch, 0, CM_DEV))
         tag = (ep & 0x1FFFFFF) * 64 + layer + 1
-        if const_expr(FA is None or not key.attn_olate):
-            o_ops = o_loads(
-                w_o, bid, lane, wave
-            )  # S4 #10: with FA, the o_proj weights land during the attention
-        if const_expr(
-            FA is not None
-        ):  # S4 #8: attn_o is the fragment's descriptor; the real pointer comes back
-            attn_o = FA.run(
+        ao = None
+        if const_expr(FA is None):
+            o_ops = o_loads(w_o, bid, lane, wave)
+        else:
+            # attn_o is the fragment's descriptor; ng polls the merged rows (tagged pairs)
+            attn_o, ao_t = FA.run(
                 attn_o, tag, health, tid, bid, lane, wave, sl.fa_.peek(), True, layer
             )
-            if const_expr(FA.AOT):  # ng polls the tagged rows (no all-rows wait)
-                attn_o, ao_t = attn_o
-        if const_expr(FA is not None and key.attn_olate):
+            ao = (ao_t, health)
             o_ops = o_loads(w_o, bid, lane, wave)
-        stage_ng(
-            attn_o,
-            attn_g,
-            g_stride,
+        stage_ng(attn_o, attn_g, g_stride, scratch, tag, tid, bid, nrows, ao)
+        stage_o(
+            o_ops,
             scratch,
+            pl,
             tag,
+            health,
             tid,
             bid,
-            nrows,
-            (ao_t, health) if (FA is not None and FA.AOT) else None,
+            lane,
+            wave,
+            rank,
+            so.red.ptr,
         )
-        stamp(TL, tls, tid, 1)
-        if const_expr(key.stop >= 2):
-            stage_o(
-                o_ops,
-                scratch,
+        wr, wp = a_loads(w_r, w_pre, bid, tid, lane, wave)
+        if const_expr(BND):  # all 256 CTAs, column groups
+            stage_ab_c(
+                own_peer,
                 pl,
+                scratch,
+                stream_in,
+                nrows,
+                alpha_a,
+                beta_a,
+                w_pffn,
                 tag,
                 health,
                 tid,
@@ -1982,18 +1488,16 @@ def build(key: Build):
                 lane,
                 wave,
                 rank,
-                so.red.ptr,
-                tls,
+                misc.pr.ptr,
             )
-        stamp(TL, tls, tid, 2)
-        if const_expr(key.stop >= 3):
-            wr, wp = a_loads(w_r, w_pre, bid, tid, lane, wave)
-            if const_expr(BND == 3):  # #11 + #20: all 256 CTAs, column groups
-                stage_ab_c(
+        else:
+            if bid < TS:
+                stage_ab(
                     own_peer,
                     pl,
                     scratch,
                     stream_in,
+                    s_full,
                     nrows,
                     alpha_a,
                     beta_a,
@@ -2005,102 +1509,47 @@ def build(key: Build):
                     lane,
                     wave,
                     rank,
-                    misc.pr.ptr,
-                    tls,
+                    misc.red4.ptr,
                 )
-            elif const_expr(BND):  # #11: all 256 CTAs
-                stage_ab_b(
-                    own_peer,
-                    pl,
-                    scratch,
-                    stream_in,
-                    nrows,
-                    alpha_a,
-                    beta_a,
-                    w_pffn,
-                    tag,
-                    health,
-                    tid,
-                    bid,
-                    lane,
-                    rank,
-                    misc.rs.ptr,
-                    tls,
-                )
-            else:
-                if bid < TS:
-                    stage_ab(
-                        own_peer,
-                        pl,
-                        scratch,
-                        stream_in,
-                        s_full,
-                        nrows,
-                        alpha_a,
-                        beta_a,
-                        w_pffn,
-                        tag,
-                        health,
-                        tid,
-                        bid,
-                        lane,
-                        wave,
-                        rank,
-                        misc.red4.ptr,
-                        tls,
-                    )
-            stamp(TL, tls, tid, 3)
-            if const_expr(key.stop >= 4):
-                stage_a(
-                    wr,
-                    wp,
-                    own_peer,
-                    pl,
-                    scratch,
-                    tag,
-                    health,
-                    tid,
-                    bid,
-                    lane,
-                    wave,
-                    rank,
-                    sa.red.ptr,
-                    sa.tok.ptr,
-                    sa.own.ptr,
-                    tls,
-                    sa.x.ptr,
-                )
-        stamp(TL, tls, tid, 4)
-        if const_expr(key.stop >= 5):
-            if bid < S:
-                stage_route_h(
-                    own_peer,
-                    bias,
-                    w_pren,
-                    h_out,
-                    ids_out,
-                    sc_out,
-                    tag,
-                    health,
-                    tid,
-                    bid,
-                    lane,
-                    wave,
-                    rt,
-                    sa.tok.ptr,
-                )
-        stamp(TL, tls, tid, 5)
-        flush_range(tls, tl, tid, bid, 0, 6)
-        flush_range(tls, tl, tid, bid, 13, 14)
-        flush_range(tls, tl, tid, bid, 15, 17)
-        flush_range(tls, tl, tid, bid, 18, 23)
-        flush_range(tls, tl, tid, bid, 24, 29)
-        if const_expr(BND):
-            flush_range(tls, tl, tid, bid, 29, 32)  # bnd AB round stamps
+        stage_a(
+            wr,
+            wp,
+            own_peer,
+            pl,
+            scratch,
+            tag,
+            health,
+            tid,
+            bid,
+            lane,
+            wave,
+            rank,
+            sa.red.ptr,
+            sa.tok.ptr,
+            sa.own.ptr,
+            sa.x.ptr,
+        )
+        if bid < S:
+            stage_route_h(
+                own_peer,
+                bias,
+                w_pren,
+                h_out,
+                ids_out,
+                sc_out,
+                tag,
+                health,
+                tid,
+                bid,
+                lane,
+                wave,
+                rt,
+                sa.tok.ptr,
+            )
 
     # ============================================================ HB
     def pp_loads(w_pp, bid, lane, wave):
-        """post_expert_proj tile b / KSP (16 of this rank's QH rows), K part b % KSP (2 / 4 parts)."""
+        """post_expert_proj tile b / KSP (16 of this rank's QH rows), K part b % KSP."""
         kh = bid % KSP
         ops = []
         for ci in range_constexpr(CP):
@@ -2113,39 +1562,8 @@ def build(key: Build):
         return ops
 
     @traced
-    def stage_push(part, pl, tag, tid, bid, rank):
-        """CTA b: columns 16b .. of the library's EP partial -> the MOEP of the rank owning that
-        column quarter (b / 64; reduce-scatter, plain) + flag."""
-        tid = fresh(tid)
-        par = tag_par(tag)
-        pd = sel_peer(pl, uniform(bid // CPR))
-        for it_ in range_constexpr((8 * S + THREADS - 1) // THREADS):
-            e0 = tid + THREADS * it_
-            ok = e0 < 8 * S
-            e = fx.min(e0, 8 * S - 1)
-            t = e // 8
-            p = e % 8
-            w_ = ld_i32(part, (t * DM + bid * 16 + 2 * p) // 2)
-            st_if(
-                ok,
-                w_,
-                pd + fx.Int64(play["moep"][0]),
-                (((par * W + rank) * BLOCKS + bid) * S + t) * 8 + p,
-                CM_SYS,
-            )
-        rocdl.s_waitcnt(0)
-        gpu.barrier()
-        if tid == 0:
-            mb_put_sys(
-                tag,
-                pd + fx.Int64(play["mf"][0]),
-                (par * W + rank) * BLOCKS + bid,
-                fx.Int32(1),
-            )
-
-    @traced
     def stage_ar(own_peer, pl, tag, health, tid, bid, rank):
-        """CTA b of the column-quarter owner (b / 64 == rank): the 4 ranks' partials of columns
+        """CTA b of the column-block owner (b / CPR == rank): the W ranks' partials of columns
         16b .., rank order (fp32) -> bf16 m -> every rank's MOEM (all-gather, plain) + flag."""
         tid = fresh(tid)
         par = tag_par(tag)
@@ -2203,8 +1621,8 @@ def build(key: Build):
 
     @traced
     def stage_post(ppo, pl, scratch, tag, health, tid, bid, lane, wave, rank, red):
-        """post_expert_proj tile b / 2 over K half b % 2 for all S tokens; the K halves are
-        summed by the kh = 0 CTA -> y (this rank's hidden quarter, local) + flag."""
+        """post_expert_proj tile b / KSP over K part b % KSP for all S tokens; the K parts are
+        summed by the kh = 0 CTA -> y (this rank's QH hidden columns) + flag."""
         tid = fresh(tid)
         lane = fresh(lane)
         par = tag_par(tag)
@@ -2274,8 +1692,8 @@ def build(key: Build):
                     acc = mfma_bf16(pa[ci][qq], cur[ci * 4 + qq], acc)
             fx.ptr_store(acc, red + ((rt * WAVES + wave) * 64 + lane) * 4)
         gpu.barrier()
-        if const_expr(BG):
-            # #1: y of the tile (16 columns of this rank x every token) to every rank, tagged pairs at the global
+        if const_expr(BND):
+            # bnd: y of the tile (16 columns of this rank x every token) to every rank, tagged pairs at the global
             # column rank * QH + 16 tile + 2 rp; thread = (row tile rt_, token tt, row pair rp)
             e0 = tid
             if e0 < NT * 128:
@@ -2333,20 +1751,12 @@ def build(key: Build):
         else:
             for it_ in range_constexpr((NT + 3) // 4):
                 e = tid
-                if const_expr(W == 4):
-                    # 4 tiles a round; wave w: owner w % 4, tiles 4 it + 2 (w / 4) + k, 4 tokens of that owner
-                    dw = uniform(wave % 4)
-                    k_ = (e // 32) % 2
-                    rt_ = 4 * it_ + 2 * (wave // 4) + k_
-                    rp = e % 8
-                    tt = dw + 4 * ((e // 8) % 4)
-                else:
-                    # 4 tiles a round; wave w: owner w, tiles 4 it + k (k < 4), the owner's 2 tokens of each
-                    dw = uniform(wave)
-                    k_ = (e // 16) % 4
-                    rt_ = 4 * it_ + k_
-                    rp = e % 8
-                    tt = dw + W * ((e // 8) % 2)
+                # 4 tiles a round; wave w: owner w, tiles 4 it + k (k < 4), the owner's 2 tokens of each
+                dw = uniform(wave)
+                k_ = (e // 16) % 4
+                rt_ = 4 * it_ + k_
+                rp = e % 8
+                tt = dw + W * ((e // 8) % 2)
                 if rt_ < NT:
                     v = []
                     for h2 in range_constexpr(2):
@@ -2355,88 +1765,50 @@ def build(key: Build):
                         for w in range_constexpr(WAVES):
                             s_ = s_ + fx.ptr_load(red_at(red, rt_ * WAVES + w, rr, tt))
                         v.append(s_)
-                    if const_expr(KSP == 2):
-                        if kh == 1:
-                            for h2 in range_constexpr(2):
-                                mb_put(
-                                    tag,
-                                    scratch + fx.Int64(lay["py"][0]),
-                                    (tile * 16 + 2 * rp + h2) * S + 16 * rt_ + tt,
-                                    v[h2],
-                                )
-                        else:
-                            got = mb_poll(
+                    # K parts 1 .. KSP-1 put their partial (slot kh - 1); part 0 sums the parts in order
+                    if kh != 0:
+                        for h2 in range_constexpr(2):
+                            mb_put(
                                 tag,
-                                health,
-                                [
-                                    (
-                                        scratch + fx.Int64(lay["py"][0]),
-                                        (tile * 16 + 2 * rp + h2) * S + 16 * rt_ + tt,
-                                        1,
-                                    )
-                                    for h2 in range(2)
-                                ],
-                                REGION_IDS["py"],
-                            )
-                            y0 = v[0] + got[0][0].bitcast(fx.Float32)
-                            y1 = v[1] + got[1][0].bitcast(fx.Float32)
-                            t_ = 16 * rt_ + tt
-                            idx = (
-                                ((par * W + rank) * NTILES + tile) * TS + t_ // W
-                            ) * 8 + rp
-                            w2 = bf16_pair(y0, y1)
-                            bo.buffer_store(
-                                w2,
-                                rsrc(sel_peer(pl, dw) + fx.Int64(play["yt"][0])),
-                                idx,
-                                cache_modifier=CM_SYS,
+                                scratch + fx.Int64(lay["py"][0]),
+                                (((kh - 1) * NTILES + tile) * 16 + 2 * rp + h2) * S
+                                + 16 * rt_
+                                + tt,
+                                v[h2],
                             )
                     else:
-                        # K parts 1 .. KSP-1 put their partial (slot kh - 1); part 0 sums the parts in order
-                        if kh != 0:
-                            for h2 in range_constexpr(2):
-                                mb_put(
-                                    tag,
+                        got = mb_poll(
+                            tag,
+                            health,
+                            [
+                                (
                                     scratch + fx.Int64(lay["py"][0]),
-                                    (((kh - 1) * NTILES + tile) * 16 + 2 * rp + h2) * S
+                                    (((q - 1) * NTILES + tile) * 16 + 2 * rp + h2) * S
                                     + 16 * rt_
                                     + tt,
-                                    v[h2],
+                                    1,
                                 )
-                        else:
-                            got = mb_poll(
-                                tag,
-                                health,
-                                [
-                                    (
-                                        scratch + fx.Int64(lay["py"][0]),
-                                        (((q - 1) * NTILES + tile) * 16 + 2 * rp + h2)
-                                        * S
-                                        + 16 * rt_
-                                        + tt,
-                                        1,
-                                    )
-                                    for q in range(1, KSP)
-                                    for h2 in range(2)
-                                ],
-                                REGION_IDS["py"],
-                            )
-                            y0 = v[0]
-                            y1 = v[1]
-                            for q in range_constexpr(KSP - 1):
-                                y0 = y0 + got[2 * q][0].bitcast(fx.Float32)
-                                y1 = y1 + got[2 * q + 1][0].bitcast(fx.Float32)
-                            t_ = 16 * rt_ + tt
-                            idx = (
-                                ((par * W + rank) * NTILES + tile) * TS + t_ // W
-                            ) * 8 + rp
-                            w2 = bf16_pair(y0, y1)
-                            bo.buffer_store(
-                                w2,
-                                rsrc(sel_peer(pl, dw) + fx.Int64(play["yt"][0])),
-                                idx,
-                                cache_modifier=CM_SYS,
-                            )
+                                for q in range(1, KSP)
+                                for h2 in range(2)
+                            ],
+                            REGION_IDS["py"],
+                        )
+                        y0 = v[0]
+                        y1 = v[1]
+                        for q in range_constexpr(KSP - 1):
+                            y0 = y0 + got[2 * q][0].bitcast(fx.Float32)
+                            y1 = y1 + got[2 * q + 1][0].bitcast(fx.Float32)
+                        t_ = 16 * rt_ + tt
+                        idx = (
+                            ((par * W + rank) * NTILES + tile) * TS + t_ // W
+                        ) * 8 + rp
+                        w2 = bf16_pair(y0, y1)
+                        bo.buffer_store(
+                            w2,
+                            rsrc(sel_peer(pl, dw) + fx.Int64(play["yt"][0])),
+                            idx,
+                            cache_modifier=CM_SYS,
+                        )
             rocdl.s_waitcnt(0)
             gpu.barrier()
             if (tid == 0) & (kh == 0):
@@ -2469,9 +1841,8 @@ def build(key: Build):
         wave,
         rank,
         red4,
-        tls,
     ):
-        """CTA j < S/4: token t = rank S/4 + j, all 8192 columns: post_feedforward_layernorm
+        """CTA j < S / W: token t = W j + rank, all 8192 columns: post_feedforward_layernorm
         (input-scaled, eps 1e-8), gated residual on the mid stream, next input_layernorm ->
         stream row (token-sharded; ``gather``: to every rank too), xn row to every rank + flag."""
         tid = fresh(tid)
@@ -2484,22 +1855,12 @@ def build(key: Build):
             wps.append(ld_vec(w_pff, cq // 2, 4))
             wis.append(ld_vec(w_in, cq // 2, 4))
             for h2 in range_constexpr(2):
-                if const_expr(
-                    BND
-                ):  # bnd 1: the mid stream is replicated (smidb [t][col])
-                    v4 = ld_vec(
-                        scratch + fx.Int64(lay["smidb"][0]),
-                        t * HID + cq + 4 * h2,
-                        4,
-                        CM_DEV,
-                    )
-                else:
-                    v4 = ld_vec(
-                        scratch + fx.Int64(lay["smid"][0]),
-                        j * HID + cq + 4 * h2,
-                        4,
-                        CM_DEV,
-                    )
+                v4 = ld_vec(
+                    scratch + fx.Int64(lay["smid"][0]),
+                    j * HID + cq + 4 * h2,
+                    4,
+                    CM_DEV,
+                )
                 a4 = ld_vec(alpha, cq + 4 * h2, 4)
                 b4 = ld_vec(beta, cq + 4 * h2, 4)
                 for d in range_constexpr(4):
@@ -2514,7 +1875,6 @@ def build(key: Build):
             cm=CM_SYS,
         )
         gpu.barrier()
-        stamp(TL, tls, tid, 17)
         z = []
         for h in range_constexpr(2):
             q = tid + THREADS * h
@@ -2538,7 +1898,6 @@ def build(key: Build):
             + fx.Float32(POST_EPS)
         )
         sv = [al[k] * st[k] + be[k] * bf16_round(z[k] * r1) for k in range(16)]
-        stamp_dep(TL, tls, tid, 23, sv[0].bitcast(fx.Int32))
         for h in range_constexpr(2):
             cq = 8 * (tid + THREADS * h)
             for h2 in range_constexpr(2):
@@ -2595,17 +1954,10 @@ def build(key: Build):
     def q_loads(w_qkvg, bid, lane, wave, n0, n1):
         k8 = bid % 8
         gq = bid // 8
-        if const_expr(NQT * 32 == G.NQTILES):
-            return [
-                bf_tile_load(
-                    w_qkvg, (NQT * gq + n) * 16, HID, k8 * (HID // 8) + wave * KCH, lane
-                )
-                for n in range(n0, n1)
-            ]
         return [
             bf_tile_load(
                 w_qkvg,
-                fx.min(NQT * gq + n, G.NQTILES - 1) * 16,
+                fx.min(NQT * gq + n, NQTILES - 1) * 16,
                 HID,
                 k8 * (HID // 8) + wave * KCH,
                 lane,
@@ -2627,7 +1979,6 @@ def build(key: Build):
         wave,
         red,
         own,
-        tls,
     ):
         tid = fresh(tid)
         lane = fresh(lane)
@@ -2637,13 +1988,10 @@ def build(key: Build):
         k8 = bid % 8
         gq = bid // 8
         if const_expr(
-            BG
-        ):  # #1 / #3: xn is local; the 32 CTAs of this K eighth wrote its columns
+            BND
+        ):  # xn is local; the 32 CTAs of this K eighth wrote its columns
             if tid < 32:
-                if const_expr(BND == 3):
-                    fq = (tid // 4) * 32 + 4 * k8 + tid % 4
-                else:
-                    fq = k8 * 32 + tid
+                fq = (tid // 4) * 32 + 4 * k8 + tid % 4
                 mb_poll(
                     tag,
                     health,
@@ -2660,8 +2008,7 @@ def build(key: Build):
                     cm=CM_SYS,
                 )
         gpu.barrier()
-        stamp(TL, tls, tid, 14)
-        if const_expr(BG):
+        if const_expr(BND):
             xb = scratch + fx.Int64(lay["xnb"][0])
             xpar = 0
         else:
@@ -2685,7 +2032,7 @@ def build(key: Build):
             ]
 
         if const_expr(QR1):
-            # R2 #4: the MFMAs of both row tiles first (red holds both), then one reduction round
+            # the MFMAs of both row tiles first (red holds both), then one reduction round
             bnext = qb_loads(0)
             for rt in range_constexpr(NT):
                 bs = bnext
@@ -2809,19 +2156,12 @@ def build(key: Build):
                         w2,
                     )
                 else:
-                    if const_expr(NQT * 32 == G.NQTILES):
-                        bo.buffer_store(
-                            w2,
-                            rsrc(g_out),
-                            ((16 * rt_ + tt) * QROWS + row - QKV_ROWS) // 2,
-                        )
-                    else:
-                        st_if(
-                            row < G.QKVG_ROWS,
-                            w2,
-                            g_out,
-                            ((16 * rt_ + tt) * QROWS + row - QKV_ROWS) // 2,
-                        )
+                    st_if(
+                        row < QKVG_ROWS,
+                        w2,
+                        g_out,
+                        ((16 * rt_ + tt) * QROWS + row - QKV_ROWS) // 2,
+                    )
 
     @traced
     def finish_vllm(
@@ -2840,12 +2180,13 @@ def build(key: Build):
         tt,
         nrows,
     ):
-        """head_finish of head hh (uniform), token tt (lanes 0-31 / 32-63 of a wave: two tokens) with the vLLM flags.
-        VQK: as vLLM's fused_muse_spark_qknorm_rope_kv_insert (weightless qk-norm, GPT-J RoPE with fp32 cos / sin,
-        all fp32, one RNE bf16 rounding; no qk_scale). VKV: one bf16 dword a lane into the LBHNC cache, element
-        (slot >> 4) * bstride + (kv * 16 + (slot & 15)) * 128 + 64 isv + 2p, bstride = v_cache (a value); each half
-        wave stores with its own wave-uniform 64-bit block base (readlane of its slot); slot < 0 and tt >= nrows
-        skipped. Rows tt >= nrows are not real rows (their q is written like the stock finish, their KV is not)."""
+        """The finish of head hh (uniform), token tt (lanes 0-31 / 32-63 of a wave: two tokens): q / k as
+        vLLM's fused_muse_spark_qknorm_rope_kv_insert (weightless qk-norm, GPT-J RoPE with fp32 cos / sin,
+        all fp32, one RNE bf16 rounding; no qk_scale); K / V as one bf16 dword a lane into the LBHNC cache,
+        element (slot >> 4) * bstride + (kv * 16 + (slot & 15)) * 128 + 64 isv + 2p, bstride = v_cache (a
+        value); each half wave stores with its own wave-uniform 64-bit block base (readlane of its slot);
+        slot < 0 and tt >= nrows skipped. Rows tt >= nrows are not real rows (their q is written, their KV
+        is not)."""
         row0 = (hh * HD) // 2 + p
         got = mb_poll(
             tag,
@@ -2859,30 +2200,16 @@ def build(key: Build):
         rs = hw_rsq(ss * fx.Float32(1.0 / HD) + fx.Float32(PRE_EPS))
         isv = hh >= HQ + HKV
         isq = hh < HQ
-        if const_expr(VQK):
-            n0 = x0 * rs
-            n1 = x1 * rs
-            if const_expr(key.next_rope):
-                ps = ld_i32(pos, fx.min(tt, nrows - 1) * 2)
-                c = ld_f32(cos_sin, ps * HD + p)
-                sn = ld_f32(cos_sin, ps * HD + HD // 2 + p)
-                r0 = n0 * c - n1 * sn
-                r1 = n0 * sn + n1 * c
-                n0 = r0
-                n1 = r1
-        else:
-            n0 = bf16_round(x0 * rs)
-            n1 = bf16_round(x1 * rs)
-            n0 = isq.select(bf16_round(n0 * fx.Float32(QK_SCALE)), n0)
-            n1 = isq.select(bf16_round(n1 * fx.Float32(QK_SCALE)), n1)
-            if const_expr(key.next_rope):
-                ps = ld_i32(pos, fx.min(tt, nrows - 1) * 2)
-                c = bf16_round(ld_f32(cos_sin, ps * HD + p))
-                sn = bf16_round(ld_f32(cos_sin, ps * HD + HD // 2 + p))
-                r0 = bf16_round(bf16_round(n0 * c) - bf16_round(n1 * sn))
-                r1 = bf16_round(bf16_round(n1 * c) + bf16_round(n0 * sn))
-                n0 = r0
-                n1 = r1
+        n0 = x0 * rs
+        n1 = x1 * rs
+        if const_expr(key.next_rope):
+            ps = ld_i32(pos, fx.min(tt, nrows - 1) * 2)
+            c = ld_f32(cos_sin, ps * HD + p)
+            sn = ld_f32(cos_sin, ps * HD + HD // 2 + p)
+            r0 = n0 * c - n1 * sn
+            r1 = n0 * sn + n1 * c
+            n0 = r0
+            n1 = r1
         o0 = isv.select(x0, n0)
         o1 = isv.select(x1, n1)
         if isq:
@@ -2890,34 +2217,20 @@ def build(key: Build):
         else:
             kv = hh - HQ - isv.select(fx.Int32(HKV), fx.Int32(0))
             slot = ld_i32(slots, fx.min(tt, nrows - 1) * 2)
-            if const_expr(VKV):
-                for half in range_constexpr(2):
-                    sl = readlane(slot, 32 * half)
-                    tl_ = readlane(tt, 32 * half)
-                    mine = ((tid % 64) >= 32) if half == 1 else ((tid % 64) < 32)
-                    if (sl >= 0) & (tl_ < nrows):
-                        base = k_cache + (
-                            fx.Int64(sl >> 4) * v_cache
-                            + fx.Int64(
-                                (kv * 16 + (sl & 15)) * 128
-                                + isv.select(fx.Int32(HD), fx.Int32(0))
-                            )
-                        ) * fx.Int64(2)
-                        if mine:
-                            bo.buffer_store(bf16_pair(o0, o1), rsrc(base), p)
-            else:
-                if const_expr(VQK):  # vLLM: the fp8 of the bf16-rounded value
-                    o0 = bf16_round(o0)
-                    o1 = bf16_round(o1)
-                w8 = fp8x2(o0, o1)
-                w8n = xshfl(w8, 1)
-                if ((p % 2) == 0) & (tt < nrows):
-                    off = (slot * (HKV * HD) + kv * HD + 2 * p) // 4
-                    dw = w8 | (w8n << 16)
-                    if isv:
-                        bo.buffer_store(dw, rsrc(v_cache), off)
-                    else:
-                        bo.buffer_store(dw, rsrc(k_cache), off)
+            for half in range_constexpr(2):
+                sl = readlane(slot, 32 * half)
+                tl_ = readlane(tt, 32 * half)
+                mine = ((tid % 64) >= 32) if half == 1 else ((tid % 64) < 32)
+                if (sl >= 0) & (tl_ < nrows):
+                    base = k_cache + (
+                        fx.Int64(sl >> 4) * v_cache
+                        + fx.Int64(
+                            (kv * 16 + (sl & 15)) * 128
+                            + isv.select(fx.Int32(HD), fx.Int32(0))
+                        )
+                    ) * fx.Int64(2)
+                    if mine:
+                        bo.buffer_store(bf16_pair(o0, o1), rsrc(base), p)
 
     @traced
     def head_finish(
@@ -2934,82 +2247,29 @@ def build(key: Build):
         bid,
         nrows,
     ):
-        """CTA hh < 40 finishes head hh (32 q, 4 k, 4 v) of the next layer for all S tokens."""
+        """CTA hh < HQ + 2 HKV finishes head hh (q heads, then k, then v) of the next layer for all
+        S tokens."""
         tid = fresh(tid)
         hh = bid
         p = tid % 32
-        if const_expr(VQK or VKV):
-            for tg in range_constexpr(NT):
-                if bid < HQ + 2 * HKV:
-                    finish_vllm(
-                        scratch,
-                        q_out,
-                        k_cache,
-                        v_cache,
-                        slots,
-                        cos_sin,
-                        pos,
-                        tag,
-                        health,
-                        tid,
-                        hh,
-                        p,
-                        16 * tg + tid // 32,
-                        nrows,
-                    )
-        else:
-            for tg in range_constexpr(NT):
-                tt = 16 * tg + tid // 32
-                if bid < HQ + 2 * HKV:
-                    row0 = (hh * HD) // 2 + p
-                    got = mb_poll(
-                        tag,
-                        health,
-                        [
-                            (
-                                scratch + fx.Int64(lay["qkv"][0]),
-                                tt * (QKV_ROWS // 2) + row0,
-                                1,
-                            )
-                        ],
-                        REGION_IDS["qkv"],
-                    )
-                    x0 = bf_lo(got[0][0])
-                    x1 = bf_hi(got[0][0])
-                    ss = butterfly(x0 * x0 + x1 * x1, (1, 2, 4, 8, 16))
-                    rs = hw_rsq(ss * fx.Float32(1.0 / HD) + fx.Float32(PRE_EPS))
-                    isv = hh >= HQ + HKV
-                    isq = hh < HQ
-                    n0 = bf16_round(x0 * rs)
-                    n1 = bf16_round(x1 * rs)
-                    n0 = isq.select(bf16_round(n0 * fx.Float32(QK_SCALE)), n0)
-                    n1 = isq.select(bf16_round(n1 * fx.Float32(QK_SCALE)), n1)
-                    if const_expr(key.next_rope):
-                        ps = ld_i32(pos, fx.min(tt, nrows - 1) * 2)
-                        c = bf16_round(ld_f32(cos_sin, ps * HD + p))
-                        sn = bf16_round(ld_f32(cos_sin, ps * HD + HD // 2 + p))
-                        r0 = bf16_round(bf16_round(n0 * c) - bf16_round(n1 * sn))
-                        r1 = bf16_round(bf16_round(n1 * c) + bf16_round(n0 * sn))
-                        n0 = r0
-                        n1 = r1
-                    o0 = isv.select(x0, n0)
-                    o1 = isv.select(x1, n1)
-                    if isq:
-                        bo.buffer_store(
-                            bf16_pair(o0, o1), rsrc(q_out), (tt * QROWS) // 2 + row0
-                        )
-                    else:
-                        w8 = fp8x2(o0, o1)
-                        w8n = xshfl(w8, 1)
-                        kv = hh - HQ - isv.select(fx.Int32(HKV), fx.Int32(0))
-                        slot = ld_i32(slots, fx.min(tt, nrows - 1) * 2)
-                        if ((p % 2) == 0) & (tt < nrows):
-                            off = (slot * (HKV * HD) + kv * HD + 2 * p) // 4
-                            dw = w8 | (w8n << 16)
-                            if isv:
-                                bo.buffer_store(dw, rsrc(v_cache), off)
-                            else:
-                                bo.buffer_store(dw, rsrc(k_cache), off)
+        for tg in range_constexpr(NT):
+            if bid < HQ + 2 * HKV:
+                finish_vllm(
+                    scratch,
+                    q_out,
+                    k_cache,
+                    v_cache,
+                    slots,
+                    cos_sin,
+                    pos,
+                    tag,
+                    health,
+                    tid,
+                    hh,
+                    p,
+                    16 * tg + tid // 32,
+                    nrows,
+                )
 
     @traced
     def stage_gather(own_peer, sfull_out, tag, health, tid, bid):
@@ -3073,25 +2333,18 @@ def build(key: Build):
         misc = alloc.allocate(Misc).peek()
         sl = alloc.allocate(HbLds)
         sf, sq = sl.f_.peek(), sl.q_.peek()
-        tls = misc.tls.ptr
         pl = list(peers)
         own_peer = sel_peer(pl, rank)
-        stamp(TL, tls, tid, 0)
         ep = uniform(ld_i32(epoch, 0, CM_DEV))
         tag = (ep & 0x1FFFFFF) * 64 + layer + 1
         ppo = pp_loads(w_pp, bid, lane, wave)
-        if const_expr(not key.hm):  # the library-MoE push (not in the HM build)
-            stage_push(part, pl, tag, tid, bid, rank)
-        stamp(TL, tls, tid, 6)
         if bid // CPR == rank:
             stage_ar(own_peer, pl, tag, health, tid, bid, rank)
-        stamp(TL, tls, tid, 7)
         stage_post(
             ppo, pl, scratch, tag, health, tid, bid, lane, wave, rank, sf.red.ptr
         )
-        stamp(TL, tls, tid, 8)
         qo = q_loads(w_qkvg, bid, lane, wave, 0, QPF)
-        if const_expr(BND == 3):  # #1 + #20: all 256 CTAs, column groups
+        if const_expr(BND):  # all 256 CTAs, column groups
             stage_g_c(
                 own_peer,
                 scratch,
@@ -3111,28 +2364,6 @@ def build(key: Build):
                 lane,
                 wave,
                 misc.pr.ptr,
-                tls,
-            )
-        elif const_expr(BND == 2):  # #1: all 256 CTAs
-            stage_g_b(
-                own_peer,
-                scratch,
-                w_pff,
-                alpha,
-                beta,
-                w_in,
-                stream_out,
-                so_stride,
-                so_off,
-                sfull_out,
-                gather,
-                tag,
-                health,
-                tid,
-                bid,
-                lane,
-                misc.rs.ptr,
-                tls,
             )
         else:
             if bid < TS:
@@ -3156,9 +2387,7 @@ def build(key: Build):
                     wave,
                     rank,
                     misc.red4.ptr,
-                    tls,
                 )
-        stamp(TL, tls, tid, 9)
         qo = qo + q_loads(w_qkvg, bid, lane, wave, QPF, NQT)
         stage_qkv(
             qo,
@@ -3173,9 +2402,7 @@ def build(key: Build):
             wave,
             sq.red.ptr,
             sq.own.ptr,
-            tls,
         )
-        stamp(TL, tls, tid, 10)
         head_finish(
             scratch,
             q_out,
@@ -3190,481 +2417,67 @@ def build(key: Build):
             bid,
             nrows,
         )
-        stamp(TL, tls, tid, 11)
-        if const_expr(not BG):  # bnd 2 / 3: G wrote sfull_out itself
+        if const_expr(not BND):  # the column-block G wrote sfull_out itself
             if (gather != 0) & (bid < nrows):
                 stage_gather(own_peer, sfull_out, tag, health, tid, bid)
-        stamp(TL, tls, tid, 12)
-        flush_range(tls, tl, tid, bid, 6, 13)
-        flush_range(tls, tl, tid, bid, 14, 15)
-        flush_range(tls, tl, tid, bid, 17, 18)
-        flush_range(tls, tl, tid, bid, 23, 24)
 
-    # kernels and launchers: peer0 .. peer3 at W = 4 (the TP4 signature), peer0 .. peer7 at W = 8
-    if W == 4:
+    # The kernels and their launchers. tl (a timeline buffer) is part of the launch signature the
+    # decoder passes; these builds do not read it.
 
-        @flyc.kernel(name=name_a, known_block_size=[THREADS, 1, 1])
-        def ha(
-            attn_o: Int64,
-            attn_g: Int64,
-            stream_in: Int64,
-            w_o: Int64,
-            alpha_a: Int64,
-            beta_a: Int64,
-            w_pffn: Int64,
-            w_r: Int64,
-            bias: Int64,
-            w_pre: Int64,
-            w_pren: Int64,
-            h_out: Int64,
-            ids_out: Int64,
-            sc_out: Int64,
-            scratch: Int64,
-            epoch: Int64,
-            health: Int64,
-            tl: Int64,
-            peer0: Int64,
-            peer1: Int64,
-            peer2: Int64,
-            peer3: Int64,
-            layer: Int32,
-            rank: Int32,
-            g_stride: Int32,
-            s_full: Int32,
-            nrows: Int32,
-        ):
-            ha_body(
-                attn_o,
-                attn_g,
-                stream_in,
-                w_o,
-                alpha_a,
-                beta_a,
-                w_pffn,
-                w_r,
-                bias,
-                w_pre,
-                w_pren,
-                h_out,
-                ids_out,
-                sc_out,
-                scratch,
-                epoch,
-                health,
-                tl,
-                (
-                    peer0,
-                    peer1,
-                    peer2,
-                    peer3,
-                ),
-                layer,
-                rank,
-                g_stride,
-                s_full,
-                nrows,
-            )
-
-        @flyc.kernel(name=name_b, known_block_size=[THREADS, 1, 1])
-        def hb(
-            part: Int64,
-            w_pp: Int64,
-            w_pff: Int64,
-            alpha: Int64,
-            beta: Int64,
-            w_in: Int64,
-            w_qkvg: Int64,
-            stream_out: Int64,
-            sfull_out: Int64,
-            q_out: Int64,
-            g_out: Int64,
-            k_cache: Int64,
-            v_cache: Int64,
-            slots: Int64,
-            cos_sin: Int64,
-            pos: Int64,
-            scratch: Int64,
-            epoch: Int64,
-            health: Int64,
-            tl: Int64,
-            peer0: Int64,
-            peer1: Int64,
-            peer2: Int64,
-            peer3: Int64,
-            layer: Int32,
-            rank: Int32,
-            so_stride: Int32,
-            so_off: Int32,
-            gather: Int32,
-            nrows: Int32,
-        ):
-            hb_body(
-                part,
-                w_pp,
-                w_pff,
-                alpha,
-                beta,
-                w_in,
-                w_qkvg,
-                stream_out,
-                sfull_out,
-                q_out,
-                g_out,
-                k_cache,
-                v_cache,
-                slots,
-                cos_sin,
-                pos,
-                scratch,
-                epoch,
-                health,
-                tl,
-                (
-                    peer0,
-                    peer1,
-                    peer2,
-                    peer3,
-                ),
-                layer,
-                rank,
-                so_stride,
-                so_off,
-                gather,
-                nrows,
-            )
-
-        @flyc.jit
-        def launch_a(
-            attn_o: Int64,
-            attn_g: Int64,
-            stream_in: Int64,
-            w_o: Int64,
-            alpha_a: Int64,
-            beta_a: Int64,
-            w_pffn: Int64,
-            w_r: Int64,
-            bias: Int64,
-            w_pre: Int64,
-            w_pren: Int64,
-            h_out: Int64,
-            ids_out: Int64,
-            sc_out: Int64,
-            scratch: Int64,
-            epoch: Int64,
-            health: Int64,
-            tl: Int64,
-            peer0: Int64,
-            peer1: Int64,
-            peer2: Int64,
-            peer3: Int64,
-            layer: Int32,
-            rank: Int32,
-            g_stride: Int32,
-            s_full: Int32,
-            nrows: Int32,
-            stream: fx.Stream = fx.Stream(None),
-        ):
-            _ = _KEYSTR
-            ha(
-                attn_o,
-                attn_g,
-                stream_in,
-                w_o,
-                alpha_a,
-                beta_a,
-                w_pffn,
-                w_r,
-                bias,
-                w_pre,
-                w_pren,
-                h_out,
-                ids_out,
-                sc_out,
-                scratch,
-                epoch,
-                health,
-                tl,
-                peer0,
-                peer1,
-                peer2,
-                peer3,
-                layer,
-                rank,
-                g_stride,
-                s_full,
-                nrows,
-            ).launch(grid=(BLOCKS,), block=(THREADS,), stream=stream)
-
-        @flyc.jit
-        def launch_b(
-            part: Int64,
-            w_pp: Int64,
-            w_pff: Int64,
-            alpha: Int64,
-            beta: Int64,
-            w_in: Int64,
-            w_qkvg: Int64,
-            stream_out: Int64,
-            sfull_out: Int64,
-            q_out: Int64,
-            g_out: Int64,
-            k_cache: Int64,
-            v_cache: Int64,
-            slots: Int64,
-            cos_sin: Int64,
-            pos: Int64,
-            scratch: Int64,
-            epoch: Int64,
-            health: Int64,
-            tl: Int64,
-            peer0: Int64,
-            peer1: Int64,
-            peer2: Int64,
-            peer3: Int64,
-            layer: Int32,
-            rank: Int32,
-            so_stride: Int32,
-            so_off: Int32,
-            gather: Int32,
-            nrows: Int32,
-            stream: fx.Stream = fx.Stream(None),
-        ):
-            _ = _KEYSTR
-            hb(
-                part,
-                w_pp,
-                w_pff,
-                alpha,
-                beta,
-                w_in,
-                w_qkvg,
-                stream_out,
-                sfull_out,
-                q_out,
-                g_out,
-                k_cache,
-                v_cache,
-                slots,
-                cos_sin,
-                pos,
-                scratch,
-                epoch,
-                health,
-                tl,
-                peer0,
-                peer1,
-                peer2,
-                peer3,
-                layer,
-                rank,
-                so_stride,
-                so_off,
-                gather,
-                nrows,
-            ).launch(grid=(BLOCKS,), block=(THREADS,), stream=stream)
-    else:
-
-        @flyc.kernel(name=name_a, known_block_size=[THREADS, 1, 1])
-        def ha(
-            attn_o: Int64,
-            attn_g: Int64,
-            stream_in: Int64,
-            w_o: Int64,
-            alpha_a: Int64,
-            beta_a: Int64,
-            w_pffn: Int64,
-            w_r: Int64,
-            bias: Int64,
-            w_pre: Int64,
-            w_pren: Int64,
-            h_out: Int64,
-            ids_out: Int64,
-            sc_out: Int64,
-            scratch: Int64,
-            epoch: Int64,
-            health: Int64,
-            tl: Int64,
-            peer0: Int64,
-            peer1: Int64,
-            peer2: Int64,
-            peer3: Int64,
-            peer4: Int64,
-            peer5: Int64,
-            peer6: Int64,
-            peer7: Int64,
-            layer: Int32,
-            rank: Int32,
-            g_stride: Int32,
-            s_full: Int32,
-            nrows: Int32,
-        ):
-            ha_body(
-                attn_o,
-                attn_g,
-                stream_in,
-                w_o,
-                alpha_a,
-                beta_a,
-                w_pffn,
-                w_r,
-                bias,
-                w_pre,
-                w_pren,
-                h_out,
-                ids_out,
-                sc_out,
-                scratch,
-                epoch,
-                health,
-                tl,
-                (
-                    peer0,
-                    peer1,
-                    peer2,
-                    peer3,
-                    peer4,
-                    peer5,
-                    peer6,
-                    peer7,
-                ),
-                layer,
-                rank,
-                g_stride,
-                s_full,
-                nrows,
-            )
-
-        @flyc.kernel(name=name_b, known_block_size=[THREADS, 1, 1])
-        def hb(
-            part: Int64,
-            w_pp: Int64,
-            w_pff: Int64,
-            alpha: Int64,
-            beta: Int64,
-            w_in: Int64,
-            w_qkvg: Int64,
-            stream_out: Int64,
-            sfull_out: Int64,
-            q_out: Int64,
-            g_out: Int64,
-            k_cache: Int64,
-            v_cache: Int64,
-            slots: Int64,
-            cos_sin: Int64,
-            pos: Int64,
-            scratch: Int64,
-            epoch: Int64,
-            health: Int64,
-            tl: Int64,
-            peer0: Int64,
-            peer1: Int64,
-            peer2: Int64,
-            peer3: Int64,
-            peer4: Int64,
-            peer5: Int64,
-            peer6: Int64,
-            peer7: Int64,
-            layer: Int32,
-            rank: Int32,
-            so_stride: Int32,
-            so_off: Int32,
-            gather: Int32,
-            nrows: Int32,
-        ):
-            hb_body(
-                part,
-                w_pp,
-                w_pff,
-                alpha,
-                beta,
-                w_in,
-                w_qkvg,
-                stream_out,
-                sfull_out,
-                q_out,
-                g_out,
-                k_cache,
-                v_cache,
-                slots,
-                cos_sin,
-                pos,
-                scratch,
-                epoch,
-                health,
-                tl,
-                (
-                    peer0,
-                    peer1,
-                    peer2,
-                    peer3,
-                    peer4,
-                    peer5,
-                    peer6,
-                    peer7,
-                ),
-                layer,
-                rank,
-                so_stride,
-                so_off,
-                gather,
-                nrows,
-            )
-
-        @flyc.jit
-        def launch_a(
-            attn_o: Int64,
-            attn_g: Int64,
-            stream_in: Int64,
-            w_o: Int64,
-            alpha_a: Int64,
-            beta_a: Int64,
-            w_pffn: Int64,
-            w_r: Int64,
-            bias: Int64,
-            w_pre: Int64,
-            w_pren: Int64,
-            h_out: Int64,
-            ids_out: Int64,
-            sc_out: Int64,
-            scratch: Int64,
-            epoch: Int64,
-            health: Int64,
-            tl: Int64,
-            peer0: Int64,
-            peer1: Int64,
-            peer2: Int64,
-            peer3: Int64,
-            peer4: Int64,
-            peer5: Int64,
-            peer6: Int64,
-            peer7: Int64,
-            layer: Int32,
-            rank: Int32,
-            g_stride: Int32,
-            s_full: Int32,
-            nrows: Int32,
-            stream: fx.Stream = fx.Stream(None),
-        ):
-            _ = _KEYSTR
-            ha(
-                attn_o,
-                attn_g,
-                stream_in,
-                w_o,
-                alpha_a,
-                beta_a,
-                w_pffn,
-                w_r,
-                bias,
-                w_pre,
-                w_pren,
-                h_out,
-                ids_out,
-                sc_out,
-                scratch,
-                epoch,
-                health,
-                tl,
+    @flyc.kernel(name=name_a, known_block_size=[THREADS, 1, 1])
+    def ha(
+        attn_o: Int64,
+        attn_g: Int64,
+        stream_in: Int64,
+        w_o: Int64,
+        alpha_a: Int64,
+        beta_a: Int64,
+        w_pffn: Int64,
+        w_r: Int64,
+        bias: Int64,
+        w_pre: Int64,
+        w_pren: Int64,
+        h_out: Int64,
+        ids_out: Int64,
+        sc_out: Int64,
+        scratch: Int64,
+        epoch: Int64,
+        health: Int64,
+        tl: Int64,
+        peer0: Int64,
+        peer1: Int64,
+        peer2: Int64,
+        peer3: Int64,
+        peer4: Int64,
+        peer5: Int64,
+        peer6: Int64,
+        peer7: Int64,
+        layer: Int32,
+        rank: Int32,
+        g_stride: Int32,
+        s_full: Int32,
+        nrows: Int32,
+    ):
+        ha_body(
+            attn_o,
+            attn_g,
+            stream_in,
+            w_o,
+            alpha_a,
+            beta_a,
+            w_pffn,
+            w_r,
+            bias,
+            w_pre,
+            w_pren,
+            h_out,
+            ids_out,
+            sc_out,
+            scratch,
+            epoch,
+            health,
+            tl,
+            (
                 peer0,
                 peer1,
                 peer2,
@@ -3673,73 +2486,73 @@ def build(key: Build):
                 peer5,
                 peer6,
                 peer7,
-                layer,
-                rank,
-                g_stride,
-                s_full,
-                nrows,
-            ).launch(grid=(BLOCKS,), block=(THREADS,), stream=stream)
+            ),
+            layer,
+            rank,
+            g_stride,
+            s_full,
+            nrows,
+        )
 
-        @flyc.jit
-        def launch_b(
-            part: Int64,
-            w_pp: Int64,
-            w_pff: Int64,
-            alpha: Int64,
-            beta: Int64,
-            w_in: Int64,
-            w_qkvg: Int64,
-            stream_out: Int64,
-            sfull_out: Int64,
-            q_out: Int64,
-            g_out: Int64,
-            k_cache: Int64,
-            v_cache: Int64,
-            slots: Int64,
-            cos_sin: Int64,
-            pos: Int64,
-            scratch: Int64,
-            epoch: Int64,
-            health: Int64,
-            tl: Int64,
-            peer0: Int64,
-            peer1: Int64,
-            peer2: Int64,
-            peer3: Int64,
-            peer4: Int64,
-            peer5: Int64,
-            peer6: Int64,
-            peer7: Int64,
-            layer: Int32,
-            rank: Int32,
-            so_stride: Int32,
-            so_off: Int32,
-            gather: Int32,
-            nrows: Int32,
-            stream: fx.Stream = fx.Stream(None),
-        ):
-            _ = _KEYSTR
-            hb(
-                part,
-                w_pp,
-                w_pff,
-                alpha,
-                beta,
-                w_in,
-                w_qkvg,
-                stream_out,
-                sfull_out,
-                q_out,
-                g_out,
-                k_cache,
-                v_cache,
-                slots,
-                cos_sin,
-                pos,
-                scratch,
-                epoch,
-                health,
-                tl,
+    @flyc.kernel(name=name_b, known_block_size=[THREADS, 1, 1])
+    def hb(
+        part: Int64,
+        w_pp: Int64,
+        w_pff: Int64,
+        alpha: Int64,
+        beta: Int64,
+        w_in: Int64,
+        w_qkvg: Int64,
+        stream_out: Int64,
+        sfull_out: Int64,
+        q_out: Int64,
+        g_out: Int64,
+        k_cache: Int64,
+        v_cache: Int64,
+        slots: Int64,
+        cos_sin: Int64,
+        pos: Int64,
+        scratch: Int64,
+        epoch: Int64,
+        health: Int64,
+        tl: Int64,
+        peer0: Int64,
+        peer1: Int64,
+        peer2: Int64,
+        peer3: Int64,
+        peer4: Int64,
+        peer5: Int64,
+        peer6: Int64,
+        peer7: Int64,
+        layer: Int32,
+        rank: Int32,
+        so_stride: Int32,
+        so_off: Int32,
+        gather: Int32,
+        nrows: Int32,
+    ):
+        hb_body(
+            part,
+            w_pp,
+            w_pff,
+            alpha,
+            beta,
+            w_in,
+            w_qkvg,
+            stream_out,
+            sfull_out,
+            q_out,
+            g_out,
+            k_cache,
+            v_cache,
+            slots,
+            cos_sin,
+            pos,
+            scratch,
+            epoch,
+            health,
+            tl,
+            (
                 peer0,
                 peer1,
                 peer2,
@@ -3748,41 +2561,168 @@ def build(key: Build):
                 peer5,
                 peer6,
                 peer7,
-                layer,
-                rank,
-                so_stride,
-                so_off,
-                gather,
-                nrows,
-            ).launch(grid=(BLOCKS,), block=(THREADS,), stream=stream)
+            ),
+            layer,
+            rank,
+            so_stride,
+            so_off,
+            gather,
+            nrows,
+        )
+
+    @flyc.jit
+    def launch_a(
+        attn_o: Int64,
+        attn_g: Int64,
+        stream_in: Int64,
+        w_o: Int64,
+        alpha_a: Int64,
+        beta_a: Int64,
+        w_pffn: Int64,
+        w_r: Int64,
+        bias: Int64,
+        w_pre: Int64,
+        w_pren: Int64,
+        h_out: Int64,
+        ids_out: Int64,
+        sc_out: Int64,
+        scratch: Int64,
+        epoch: Int64,
+        health: Int64,
+        tl: Int64,
+        peer0: Int64,
+        peer1: Int64,
+        peer2: Int64,
+        peer3: Int64,
+        peer4: Int64,
+        peer5: Int64,
+        peer6: Int64,
+        peer7: Int64,
+        layer: Int32,
+        rank: Int32,
+        g_stride: Int32,
+        s_full: Int32,
+        nrows: Int32,
+        stream: fx.Stream = fx.Stream(None),
+    ):
+        _ = _KEYSTR
+        ha(
+            attn_o,
+            attn_g,
+            stream_in,
+            w_o,
+            alpha_a,
+            beta_a,
+            w_pffn,
+            w_r,
+            bias,
+            w_pre,
+            w_pren,
+            h_out,
+            ids_out,
+            sc_out,
+            scratch,
+            epoch,
+            health,
+            tl,
+            peer0,
+            peer1,
+            peer2,
+            peer3,
+            peer4,
+            peer5,
+            peer6,
+            peer7,
+            layer,
+            rank,
+            g_stride,
+            s_full,
+            nrows,
+        ).launch(grid=(BLOCKS,), block=(THREADS,), stream=stream)
+
+    @flyc.jit
+    def launch_b(
+        part: Int64,
+        w_pp: Int64,
+        w_pff: Int64,
+        alpha: Int64,
+        beta: Int64,
+        w_in: Int64,
+        w_qkvg: Int64,
+        stream_out: Int64,
+        sfull_out: Int64,
+        q_out: Int64,
+        g_out: Int64,
+        k_cache: Int64,
+        v_cache: Int64,
+        slots: Int64,
+        cos_sin: Int64,
+        pos: Int64,
+        scratch: Int64,
+        epoch: Int64,
+        health: Int64,
+        tl: Int64,
+        peer0: Int64,
+        peer1: Int64,
+        peer2: Int64,
+        peer3: Int64,
+        peer4: Int64,
+        peer5: Int64,
+        peer6: Int64,
+        peer7: Int64,
+        layer: Int32,
+        rank: Int32,
+        so_stride: Int32,
+        so_off: Int32,
+        gather: Int32,
+        nrows: Int32,
+        stream: fx.Stream = fx.Stream(None),
+    ):
+        _ = _KEYSTR
+        hb(
+            part,
+            w_pp,
+            w_pff,
+            alpha,
+            beta,
+            w_in,
+            w_qkvg,
+            stream_out,
+            sfull_out,
+            q_out,
+            g_out,
+            k_cache,
+            v_cache,
+            slots,
+            cos_sin,
+            pos,
+            scratch,
+            epoch,
+            health,
+            tl,
+            peer0,
+            peer1,
+            peer2,
+            peer3,
+            peer4,
+            peer5,
+            peer6,
+            peer7,
+            layer,
+            rank,
+            so_stride,
+            so_off,
+            gather,
+            nrows,
+        ).launch(grid=(BLOCKS,), block=(THREADS,), stream=stream)
 
     _BUILDS[key] = (launch_a, launch_b)
     return _BUILDS[key]
 
 
-def build_vllm(S=32, W=8, next_rope=True, **over):
-    """HA / HB for vLLM main (TEP8, S = 32 / 64 / 96 / 128). No env reads: the shipped TEP8 knobs (qkv_pf 3, hm, at
-    S = 32 bnd 3 + qr1, else the token-owner boundaries; no fused attention) plus the vLLM flags (mult1, vqk,
-    kvl = "lbhnc")."""
+def build_vllm(S=32, W=8, next_rope=True, attn=""):
+    """The HA / HB build vLLM launches for S rows (32 / 64 / 96 / 128) of a TP = EP = 8 group;
+    next_rope: the next layer has RoPE (HB); attn = "swa" / "full": this layer's verify attention
+    fused at the HA head."""
     assert W == 8 and S in (32, 64, 96, 128), (S, W)
-    kw = dict(
-        S=S,
-        W=W,
-        next_rope=bool(next_rope),
-        qkv_pf=3,
-        timeline=False,
-        stop=99,
-        hm=True,
-        bnd=3 if S == 32 else 0,
-        qr1=S == 32,
-        attn="",
-        attn_olate=False,
-        mult1=True,
-        vqk=True,
-        kvl="lbhnc",
-    )
-    if over.get("attn"):
-        # the fused verify attention (vLLM's bf16 cache): o_proj weights after it, as SGLang ships
-        kw["attn_olate"] = True
-    kw.update(over)
-    return Build(**kw)
+    return Build(S=S, next_rope=bool(next_rope), attn=attn)
