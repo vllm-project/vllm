@@ -19,8 +19,8 @@ import socket
 import stat
 import struct
 import tempfile
-from dataclasses import dataclass, fields
-from typing import Any, NamedTuple
+from dataclasses import asdict, dataclass, fields
+from typing import Any, NamedTuple, TypeVar
 
 import torch
 from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
@@ -46,6 +46,10 @@ _LEN_STRUCT = struct.Struct("!Q")
 # Sanity bound for a single message. IPC handles are tiny; only small
 # non-CUDA tensors are ever shipped by value.
 MAX_MSG_SIZE = 1 << 34
+MAX_ARTIFACT_SIZE = 64 << 20
+MAX_JSON_MSG_SIZE = 1 << 26
+
+_DataclassT = TypeVar("_DataclassT")
 
 
 def _current_uid() -> int:
@@ -67,6 +71,15 @@ class UnsupportedQuantForIPCError(Exception):
 
 class UnsupportedPlatformForIPCError(Exception):
     """Raised when the current platform cannot share CUDA IPC handles."""
+
+
+@dataclass(frozen=True)
+class ArtifactCacheKey:
+    """Exact identity of a host-side artifact."""
+
+    kind: str
+    content_hash: str
+    vllm_version: str = vllm.version.__version__
 
 
 def check_ipc_platform_support() -> None:
@@ -393,6 +406,38 @@ class WeightCacheKey:
             for f in fields(self)
             if getattr(self, f.name) != getattr(other, f.name)
         ]
+
+
+def json_to_dataclass(cls: type[_DataclassT], payload: Any) -> _DataclassT:
+    if not isinstance(payload, dict):
+        raise ValueError(f"Expected a JSON object for {cls.__name__}")
+    names = {field.name for field in fields(cls)}  # type: ignore[arg-type]
+    unknown = set(payload) - names
+    if unknown:
+        raise ValueError(f"Unknown {cls.__name__} fields: {sorted(unknown)}")
+    return cls(**payload)
+
+
+def dataclass_to_json(instance: Any) -> dict[str, Any]:
+    return asdict(instance)
+
+
+def send_json(sock: socket.socket, obj: Any) -> None:
+    payload = json.dumps(obj).encode()
+    if len(payload) > MAX_JSON_MSG_SIZE:
+        raise ValueError("JSON message exceeds configured limit")
+    sock.sendall(_LEN_STRUCT.pack(len(payload)))
+    sock.sendall(payload)
+
+
+def recv_json(
+    sock: socket.socket,
+    max_size: int = MAX_JSON_MSG_SIZE,
+) -> Any:
+    (length,) = _LEN_STRUCT.unpack(_recv_exact(sock, _LEN_STRUCT.size))
+    if length > max_size:
+        raise ValueError(f"Message size {length} exceeds limit {max_size}")
+    return json.loads(_recv_exact(sock, length))
 
 
 @dataclass

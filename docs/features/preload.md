@@ -70,6 +70,30 @@ loading and before binding its socket, then writes the cache:
 vllm preload --model /path/to/model --tensor-parallel-size 4
 ```
 
+### Reusing autotune results across nodes
+
+Enable a source daemon's artifact listener to share its per-rank FlashInfer autotune tables with a new replica:
+
+```bash
+# Source node
+vllm preload --model /path/to/model --tensor-parallel-size 4 \
+    --weight-cache-listen-host 0.0.0.0 \
+    --weight-cache-listen-port 30000 \
+    --weight-cache-seed-token "$SEED_TOKEN"
+
+# Target node (use the source node's reachable hostname)
+vllm preload --model /path/to/model --tensor-parallel-size 4 \
+    --weight-cache-seed-host source-host \
+    --weight-cache-seed-port 30000 \
+    --weight-cache-seed-token "$SEED_TOKEN"
+```
+
+Wait for the source daemon to become ready before starting the target. Each rank uses the base port plus its global rank; draft daemon ports follow the target daemon group's block. For a replica spanning several nodes, configure each target node with the source node holding its corresponding ranks.
+
+It fetches autotune tables through an authenticated, bounded JSON connection, matches the computation configuration, FlashInfer build, vLLM version and rank, and atomically installs matching tables into its on-disk cache before warmup. A missing or incompatible table falls back to local autotuning, with the existing collective cache checks retained.
+
+The connection uses a shared token without encryption and is intended for a trusted network.
+
 ## How it works
 
 1. `vllm preload` spawns one daemon process per GPU. Each daemon loads its

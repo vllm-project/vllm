@@ -143,6 +143,39 @@ class PreloadSubcommand(CLISubcommand):
             default="0.0.0.0",
             help="Host for the parent /health endpoint (default: 0.0.0.0).",
         )
+        parser.add_argument(
+            "--weight-cache-listen-host",
+            type=str,
+            default=None,
+            help="Host for authenticated remote autotune-artifact requests.",
+        )
+        parser.add_argument(
+            "--weight-cache-listen-port",
+            type=int,
+            default=None,
+            help="Base port for remote autotune-artifact requests; each daemon "
+            "uses base_port + its global rank.",
+        )
+        parser.add_argument(
+            "--weight-cache-seed-host",
+            type=str,
+            default=None,
+            help="Host of a source daemon replica for autotune artifacts.",
+        )
+        parser.add_argument(
+            "--weight-cache-seed-port",
+            type=int,
+            default=None,
+            help="Base port of a source daemon replica; fetch rank-matched "
+            "autotune artifacts before serving.",
+        )
+        parser.add_argument(
+            "--weight-cache-seed-token",
+            type=str,
+            default=None,
+            help="Shared secret for remote autotune-artifact requests. "
+            "The JSON connection is unencrypted; use a trusted network.",
+        )
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
@@ -179,6 +212,55 @@ class PreloadSubcommand(CLISubcommand):
         tp_size = parallel_config.tensor_parallel_size
         pp_size = parallel_config.pipeline_parallel_size
         dp_size = parallel_config.data_parallel_size
+
+        listen_args = (
+            args.weight_cache_listen_host,
+            args.weight_cache_listen_port,
+        )
+        source_args = (
+            args.weight_cache_seed_host,
+            args.weight_cache_seed_port,
+        )
+        if any(value is not None for value in (*listen_args, *source_args)) and (
+            not args.weight_cache_seed_token
+        ):
+            raise ValueError(
+                "Weight cache listener/source requires --weight-cache-seed-token"
+            )
+        if any(value is None for value in listen_args) and any(
+            value is not None for value in listen_args
+        ):
+            raise ValueError(
+                "Weight cache listener host and port must be provided together"
+            )
+        if any(value is None for value in source_args) and any(
+            value is not None for value in source_args
+        ):
+            raise ValueError("Artifact source host and port must be provided together")
+        seed_listen = (
+            (
+                args.weight_cache_listen_host,
+                args.weight_cache_listen_port,
+            )
+            if args.weight_cache_listen_host is not None
+            else None
+        )
+        seed_source = (
+            (
+                args.weight_cache_seed_host,
+                args.weight_cache_seed_port,
+            )
+            if args.weight_cache_seed_host is not None
+            else None
+        )
+        for port in (
+            args.weight_cache_listen_port,
+            args.weight_cache_seed_port,
+        ):
+            if port is not None and not 1 <= port <= 65535:
+                raise ValueError(
+                    f"Artifact port must be between 1 and 65535, got {port}"
+                )
 
         placements = plan_local_ranks(parallel_config)
         local_world_size = len(placements)
@@ -236,6 +318,14 @@ class PreloadSubcommand(CLISubcommand):
                 )
             )
 
+        world_size = dp_size * pp_size * tp_size
+        for address in (seed_listen, seed_source):
+            if (
+                address is not None
+                and address[1] + len(groups) * world_size - 1 > 65535
+            ):
+                raise ValueError("Artifact port range exceeds 65535")
+
         ctx = multiprocessing.get_context("spawn")
         ready_queue: multiprocessing.Queue[tuple[str, int]] = ctx.Queue()
         # Local index == device index; global rank enumerates DP, PP, then TP.
@@ -262,6 +352,35 @@ class PreloadSubcommand(CLISubcommand):
                     dp_rank,
                     pp_rank,
                 ),
+                # Artifact endpoints are rank aligned: source and target
+                # daemons exchange the table for the same TP/PP/DP rank.
+                kwargs={
+                    "seed_source": (
+                        (
+                            seed_source[0],
+                            seed_source[1]
+                            + (world_size if is_draft else 0)
+                            + dp_rank * pp_size * tp_size
+                            + pp_rank * tp_size
+                            + tp_rank,
+                        )
+                        if seed_source is not None
+                        else None
+                    ),
+                    "seed_listen": (
+                        (
+                            seed_listen[0],
+                            seed_listen[1]
+                            + (world_size if is_draft else 0)
+                            + dp_rank * pp_size * tp_size
+                            + pp_rank * tp_size
+                            + tp_rank,
+                        )
+                        if seed_listen is not None
+                        else None
+                    ),
+                    "seed_token": args.weight_cache_seed_token,
+                },
                 name=(
                     f"vllm-weight-cache-{format_daemon_role(is_draft)}-"
                     f"{(dp_rank * pp_size * tp_size + pp_rank * tp_size + tp_rank)}"

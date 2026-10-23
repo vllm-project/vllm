@@ -455,6 +455,7 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
         autotune_kwargs["skip_ops"] = skip_ops
 
     use_autotune_v2 = use_flashinfer_autotune_v2(runner)
+    cache_hit = False
     if use_autotune_v2:
         from flashinfer import autotune_v2, autotune_v2_reload
 
@@ -483,6 +484,7 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
             )
 
         if _all_ranks_have_matching_cache(cache_path, tune_group):
+            cache_hit = True
             loaded = tuner.load_configs(str(cache_path))
             if tune_group.world_size > 1:
                 loaded_by_rank: list[bool | None] = [None] * tune_group.world_size
@@ -491,6 +493,7 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
                 )
                 loaded = all(loaded_by_rank)
             if not loaded:
+                cache_hit = False
                 tuner.clear_cache()
         autotune_context = fi_utils.autotune(tune_mode=True, **autotune_kwargs)
 
@@ -506,7 +509,8 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
                 # HiSparse hot-buffer attention is bounded by decode batch
                 # size, not the prefill-sized batch used for the full model.
                 autotune_hisparse_flashinfer_attention(runner)
-            _run_flashinfer_autotune_dummy_runs(runner, skip_attn=skip_attn)
+            if not cache_hit:
+                _run_flashinfer_autotune_dummy_runs(runner, skip_attn=skip_attn)
             replayssm_autotune_warmup(runner)
             _autotune_kimi_k3_kda_qkvg(runner.get_model())
     finally:

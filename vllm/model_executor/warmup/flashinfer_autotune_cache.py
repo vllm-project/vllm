@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 import vllm.envs as envs
 from vllm.config import CacheConfig, VllmConfig, replace
 from vllm.logger import init_logger
+from vllm.model_executor.model_loader.weight_cache.protocol import ArtifactCacheKey
 
 if TYPE_CHECKING:
     from vllm.distributed.parallel_state import GroupCoordinator
@@ -36,6 +37,44 @@ def flashinfer_autotune_cache_hash(runner: "GPUModelRunner") -> str:
         vllm_config = replace(vllm_config, cache_config=cache_config)
     config_hash = vllm_config.compute_hash(include_version=False)
     return hashlib.sha256(config_hash.encode()).hexdigest()
+
+
+def flashinfer_autotune_artifact_key(
+    runner: "GPUModelRunner", *, skip_attn: bool
+) -> ArtifactCacheKey:
+    """Identify the computation, FlashInfer build and rank of a table."""
+    import flashinfer
+    from flashinfer.jit import env as flashinfer_jit_env
+
+    from vllm.distributed.parallel_state import get_world_group
+    from vllm.model_executor.warmup.kernel_warmup import (
+        _flashinfer_autotune_skip_ops,
+    )
+
+    workspace = flashinfer_jit_env.FLASHINFER_WORKSPACE_DIR
+    skip_ops = _flashinfer_autotune_skip_ops(runner)
+    parts = [
+        flashinfer_autotune_cache_hash(runner),
+        f"{workspace.parent.name}/{workspace.name}@{flashinfer.__version__}",
+        ",".join(sorted(skip_ops or ())),
+        str(skip_attn),
+        str(runner.vllm_config.parallel_config.data_parallel_rank),
+        str(get_world_group().rank_in_group),
+    ]
+    return ArtifactCacheKey(
+        kind="flashinfer_autotune",
+        content_hash=hashlib.sha256("\x00".join(parts).encode()).hexdigest(),
+    )
+
+
+def resolve_rank_flashinfer_autotune_file(runner: "GPUModelRunner") -> Path:
+    """Resolve the per-rank filename used by the engine autotune reader."""
+    from vllm.distributed.parallel_state import get_world_group
+
+    path = resolve_flashinfer_autotune_file(runner)
+    dp_rank = runner.vllm_config.parallel_config.data_parallel_rank
+    rank = get_world_group().rank_in_group
+    return path.with_name(f"{path.stem}_dp{dp_rank}_rank{rank}{path.suffix}")
 
 
 def resolve_flashinfer_autotune_file(runner: "GPUModelRunner") -> Path:

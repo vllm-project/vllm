@@ -656,6 +656,89 @@ def test_ipc_loader_copy_mode_reports_no_external_weight_memory():
     assert loader.get_external_weight_memory(None) == 0
 
 
+def test_artifact_store_round_trip_is_exact_keyed_and_bounded():
+    """D2D artifact exchange preserves bytes and never crosses cache keys."""
+    from vllm.model_executor.model_loader.weight_cache.artifact_cache import (
+        ArtifactStore,
+    )
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        ArtifactCacheKey,
+    )
+
+    store = ArtifactStore(max_entries=1)
+    first = ArtifactCacheKey("flashinfer_autotune", "first")
+    second = ArtifactCacheKey("flashinfer_autotune", "second")
+    store.put(first, b'{"tactic": 1}')
+    assert store.get(first) == b'{"tactic": 1}'
+    assert store.get(second) is None
+    assert store.merge_json(store.to_json()) == 1
+    store.put(second, b'{"tactic": 2}')
+    assert store.get(first) is None
+    assert store.get(second) == b'{"tactic": 2}'
+
+
+def test_artifact_store_ignores_malformed_tables():
+    from vllm.model_executor.model_loader.weight_cache.artifact_cache import (
+        ArtifactStore,
+    )
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        ArtifactCacheKey,
+    )
+
+    store = ArtifactStore()
+    key = ArtifactCacheKey("flashinfer_autotune", "key")
+    store.put(key, b"invalid JSON")
+    target = ArtifactStore()
+    assert target.merge_json(store.to_json()) == 0
+    assert target.get(key) is None
+    assert store.to_json(max_bytes=0) == []
+
+
+def test_remote_artifact_listener_authenticates_and_serves_only_artifacts():
+    """Remote peers cannot invoke local weight-cache commands."""
+    import socket
+
+    from vllm.model_executor.model_loader.weight_cache.artifact_cache import (
+        ArtifactStore,
+    )
+    from vllm.model_executor.model_loader.weight_cache.daemon import (
+        WeightCacheDaemon as Daemon,
+    )
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        ArtifactCacheKey,
+        recv_json,
+        send_json,
+    )
+
+    daemon = Daemon.__new__(Daemon)
+    daemon.seed_token = "test-secret"
+    daemon.artifacts = ArtifactStore()
+    key = ArtifactCacheKey("flashinfer_autotune", "key")
+    daemon.artifacts.put(key, b'{"tactic": 1}')
+    with socket.create_server(("127.0.0.1", 0)) as server:
+        address = server.getsockname()
+        thread = threading.Thread(
+            target=daemon._serve_artifact_remote, args=(server,), daemon=True
+        )
+        thread.start()
+        for request, expected in [
+            ({"cmd": "fetch_artifacts", "token": "wrong"}, "error"),
+            ({"cmd": "release", "token": "test-secret"}, "error"),
+            ({"cmd": "fetch_artifacts", "token": "test-secret"}, "ok"),
+        ]:
+            with socket.create_connection(address, timeout=2.0) as peer:
+                send_json(peer, request)
+                response = recv_json(peer)
+            assert response["status"] == expected
+            if expected == "ok":
+                target = ArtifactStore()
+                assert target.merge_json(response["artifacts"]) == 1
+                assert target.get(key) == b'{"tactic": 1}'
+        server.shutdown(socket.SHUT_RDWR)
+        thread.join(timeout=2.0)
+        assert not thread.is_alive()
+
+
 @pytest.mark.parametrize(
     "cache_dtype,skip_layers,mismatched_fields",
     [
