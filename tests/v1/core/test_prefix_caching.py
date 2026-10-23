@@ -3,6 +3,8 @@
 """Compare the with and without prefix caching."""
 
 import copy
+import gc
+import weakref
 from collections.abc import Callable
 from dataclasses import replace
 from math import lcm
@@ -6288,3 +6290,463 @@ def test_get_unhashed_block_ids_all_groups():
     )
 
     assert blocks.get_unhashed_block_ids_all_groups() == [[1, 4], []]
+
+
+def _lookup_after_failed_admission(manager, request):
+    blocks, hit, boundary = manager.get_computed_blocks(request)
+    assert (
+        manager.allocate_slots(
+            request,
+            1,
+            num_new_computed_tokens=hit,
+            new_computed_blocks=blocks,
+            reserved_blocks=manager.block_pool.get_num_free_blocks() + 1,
+        )
+        is None
+    )
+    return blocks, hit, boundary
+
+
+PREFIX_MEMO_THRESHOLD = kv_cache_manager.MIN_PREFIX_HIT_BLOCKS_FOR_MEMO
+
+
+def test_waiting_prefix_memo_revalidates_and_extends():
+    """A waiting hit must grow with new cached tokens and shrink on eviction."""
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(16, 3 * PREFIX_MEMO_THRESHOLD),
+        max_model_len=32 * PREFIX_MEMO_THRESHOLD,
+        hash_block_size=16,
+    )
+    prompt_tokens = 32 * PREFIX_MEMO_THRESHOLD
+    initial_hit_tokens = 16 * PREFIX_MEMO_THRESHOLD
+    holder = make_request("holder", list(range(prompt_tokens)), 16, sha256)
+    waiter = make_request("waiter", list(range(prompt_tokens)), 16, sha256)
+    assert manager.allocate_slots(holder, initial_hit_tokens) is not None
+    waiter.num_preemptions = 1
+    waiter.status = RequestStatus.PREEMPTED
+    assert _lookup_after_failed_admission(manager, waiter)[1] == initial_hit_tokens
+    assert _lookup_after_failed_admission(manager, waiter)[1] == initial_hit_tokens
+    holder.num_computed_tokens = initial_hit_tokens
+    assert manager.allocate_slots(holder, 16 * PREFIX_MEMO_THRESHOLD) is not None
+    # The final block is partial from the request's perspective (lookup stops
+    # at num_tokens - 1), so only the preceding full blocks should hit.
+    extended_hit_tokens = 32 * PREFIX_MEMO_THRESHOLD - 16
+    assert _lookup_after_failed_admission(manager, waiter)[1] == extended_hit_tokens
+    manager.free(holder)
+    block = _lookup_after_failed_admission(manager, waiter)[0].blocks[0][2]
+    manager.block_pool._maybe_evict_cached_block(block)
+    assert _lookup_after_failed_admission(manager, waiter)[1] == 32
+    assert manager.reset_prefix_cache()
+    assert _lookup_after_failed_admission(manager, waiter)[1] == 0
+
+
+def test_waiting_prefix_memo_does_not_pin_blocks():
+    """A remembered hit must not keep blocks alive when the pool reuses them."""
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(16, 32), max_model_len=512, hash_block_size=16
+    )
+    prompt_tokens = 32 * PREFIX_MEMO_THRESHOLD
+    hit_tokens = 16 * PREFIX_MEMO_THRESHOLD
+    holder = make_request("holder", list(range(prompt_tokens)), 16, sha256)
+    waiter = make_request("waiter", list(range(prompt_tokens)), 16, sha256)
+    assert manager.allocate_slots(holder, hit_tokens) is not None
+    waiter.num_preemptions = 1
+    waiter.status = RequestStatus.PREEMPTED
+    manager.free(holder)
+    assert _lookup_after_failed_admission(manager, waiter)[1] == hit_tokens
+    free_blocks = manager.block_pool.get_num_free_blocks()
+    assert free_blocks > 0
+    occupied = manager.block_pool.get_new_blocks(free_blocks)
+    assert _lookup_after_failed_admission(manager, waiter)[1] == 0
+    manager.block_pool.free_blocks(occupied)
+
+
+def test_waiting_prefix_memo_cleared_on_admission_and_free():
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(16, 32), max_model_len=512, hash_block_size=16
+    )
+    prompt_tokens = 32 * PREFIX_MEMO_THRESHOLD
+    hit_tokens = 16 * PREFIX_MEMO_THRESHOLD
+    holder = make_request("holder", list(range(prompt_tokens)), 16, sha256)
+    waiter = make_request("waiter", list(range(prompt_tokens)), 16, sha256)
+    assert manager.allocate_slots(holder, hit_tokens) is not None
+    blocks, hit, _ = _lookup_after_failed_admission(manager, waiter)
+    assert waiter in manager._prefix_hits
+    assert (
+        manager.allocate_slots(
+            waiter, 16, num_new_computed_tokens=hit, new_computed_blocks=blocks
+        )
+        is not None
+    )
+    assert waiter not in manager._prefix_hits
+    manager.free(waiter)
+    _lookup_after_failed_admission(manager, waiter)
+    assert waiter in manager._prefix_hits
+    manager.free(waiter)
+    assert waiter not in manager._prefix_hits
+
+
+@pytest.mark.parametrize("use_eagle", [False, True])
+def test_waiting_prefix_memo_matches_full_lookup(use_eagle):
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(16, 32),
+        max_model_len=512,
+        hash_block_size=16,
+        use_eagle=use_eagle,
+    )
+    prompt_tokens = 32 * PREFIX_MEMO_THRESHOLD
+    hit_tokens = 16 * PREFIX_MEMO_THRESHOLD
+    holder = make_request("holder", list(range(prompt_tokens)), 16, sha256)
+    waiter = make_request("waiter", list(range(prompt_tokens)), 16, sha256)
+    assert manager.allocate_slots(holder, hit_tokens) is not None
+    waiter.num_preemptions = 1
+    waiter.status = RequestStatus.PREEMPTED
+    for _ in range(2):
+        blocks, hit, _ = _lookup_after_failed_admission(manager, waiter)
+        expected, length, _ = manager.coordinator.find_longest_cache_hit(
+            waiter.block_hashes, waiter.num_tokens - 1
+        )
+        assert hit == length
+        assert list(blocks.blocks[0]) == expected[0]
+    if manager.coordinator.eagle_group_ids:
+        assert not manager._prefix_hits
+
+
+def test_waiting_prefix_memo_alias_uses_fresh_lookup():
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(16, 32), max_model_len=512, hash_block_size=16
+    )
+    holder = make_request("holder", list(range(128)), 16, sha256)
+    waiter = make_request("waiter", [42] * 128, 16, sha256)
+    allocated = manager.allocate_slots(holder, 64)
+    assert allocated is not None
+    block = allocated.blocks[0][0]
+    manager.block_pool._insert_block_hash(
+        make_block_hash_with_group_id(waiter.block_hashes[0], 0),
+        block,
+        num_tokens=16,
+    )
+    assert _lookup_after_failed_admission(manager, waiter)[1] == 16
+    assert waiter not in manager._prefix_hits
+    manager.block_pool._remove_cached_block_hashes(block)
+    assert _lookup_after_failed_admission(manager, waiter)[1] == 0
+
+
+@pytest.mark.parametrize("parallelism", [{"dcp_world_size": 2}, {"pcp_world_size": 2}])
+def test_waiting_prefix_memo_disabled_for_context_parallel(parallelism):
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(16, 32),
+        max_model_len=512,
+        scheduler_block_size=16 * parallelism.get("dcp_world_size", 1),
+        hash_block_size=16 * parallelism.get("dcp_world_size", 1),
+        **parallelism,
+    )
+    assert not manager._memoize_prefix_hits
+
+
+def test_waiting_prefix_memo_survives_failed_reset():
+    """A failed reset must leave the memo usable with the still-live cache."""
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(16, 32), max_model_len=512, hash_block_size=16
+    )
+    prompt_tokens = 32 * PREFIX_MEMO_THRESHOLD
+    hit_tokens = 16 * PREFIX_MEMO_THRESHOLD
+    holder = make_request("holder", list(range(prompt_tokens)), 16, sha256)
+    waiter = make_request("waiter", list(range(prompt_tokens)), 16, sha256)
+    assert manager.allocate_slots(holder, hit_tokens) is not None
+    expected_blocks, expected_hit, _ = _lookup_after_failed_admission(manager, waiter)
+    assert expected_hit == hit_tokens
+    assert waiter in manager._prefix_hits
+
+    assert not manager.reset_prefix_cache()
+    blocks, hit, _ = _lookup_after_failed_admission(manager, waiter)
+    assert hit == expected_hit
+    assert list(blocks.blocks[0]) == list(expected_blocks.blocks[0])
+
+
+def test_waiting_prefix_memo_survives_unrelated_block_eviction():
+    prompt_tokens = 2 * PREFIX_MEMO_THRESHOLD * 16
+    hit_tokens = PREFIX_MEMO_THRESHOLD * 16
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(16, 2 * PREFIX_MEMO_THRESHOLD + 4),
+        max_model_len=max(512, prompt_tokens),
+        hash_block_size=16,
+    )
+    holder = make_request("a-holder", list(range(prompt_tokens)), 16, sha256)
+    waiter = make_request("a-waiter", list(range(prompt_tokens)), 16, sha256)
+    assert manager.allocate_slots(holder, hit_tokens) is not None
+
+    lookup_calls = 0
+    original_lookup = manager.coordinator.find_longest_cache_hit
+
+    def count_lookup(*args, **kwargs):
+        nonlocal lookup_calls
+        lookup_calls += 1
+        return original_lookup(*args, **kwargs)
+
+    manager.coordinator.find_longest_cache_hit = count_lookup
+    blocks, hit, _ = _lookup_after_failed_admission(manager, waiter)
+    assert hit == hit_tokens
+    memoized_block_ids = [block.block_id for block in blocks.blocks[0]]
+    assert lookup_calls == 1
+
+    unrelated = make_request("b-request", [999] * 16, 16, sha256)
+    unrelated_blocks = manager.allocate_slots(unrelated, 16)
+    assert unrelated_blocks is not None
+    manager.free(unrelated)
+    unrelated_block = unrelated_blocks.blocks[0][0]
+    assert manager.block_pool._maybe_evict_cached_block(unrelated_block)
+
+    blocks, hit, _ = _lookup_after_failed_admission(manager, waiter)
+    assert hit == hit_tokens
+    assert [block.block_id for block in blocks.blocks[0]] == memoized_block_ids
+    assert waiter in manager._prefix_hits
+    assert lookup_calls == 1
+
+
+def test_waiting_prefix_memo_hash_move_and_duplicate_physical_block():
+    """Hash moves and duplicate hashes must preserve the full lookup choice."""
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(16, 32), max_model_len=512, hash_block_size=16
+    )
+    prompt_tokens = 32 * PREFIX_MEMO_THRESHOLD
+    hit_tokens = 16 * PREFIX_MEMO_THRESHOLD
+    holder = make_request("holder", list(range(prompt_tokens)), 16, sha256)
+    waiter = make_request("waiter", list(range(prompt_tokens)), 16, sha256)
+    allocated = manager.allocate_slots(holder, hit_tokens)
+    assert allocated is not None
+    manager.free(holder)
+
+    blocks, hit, _ = _lookup_after_failed_admission(manager, waiter)
+    assert hit == hit_tokens
+    original = list(blocks.blocks[0])
+    moved_to = next(
+        block
+        for block in manager.block_pool.blocks
+        if not block.is_null and block.ref_cnt == 0 and block.block_hash is None
+    )
+    manager.block_pool.move_block_hashes(original[0], moved_to)
+    blocks, hit, _ = _lookup_after_failed_admission(manager, waiter)
+    expected, expected_hit, _ = manager.coordinator.find_longest_cache_hit(
+        waiter.block_hashes, waiter.num_tokens - 1
+    )
+    assert hit == expected_hit == hit_tokens
+    assert list(blocks.blocks[0]) == expected[0]
+    assert blocks.blocks[0][0] is moved_to
+
+    first = blocks.blocks[0][0]
+    duplicate = next(
+        block
+        for block in manager.block_pool.blocks
+        if not block.is_null and block.ref_cnt == 0 and block.block_hash is None
+    )
+    manager.block_pool._insert_block_hash(
+        make_block_hash_with_group_id(waiter.block_hashes[0], 0),
+        duplicate,
+        num_tokens=16,
+    )
+    assert (
+        manager.block_pool.cached_block_hash_to_block.get_one_block(
+            make_block_hash_with_group_id(waiter.block_hashes[0], 0)
+        )
+        is first
+    )
+
+    manager.block_pool._maybe_evict_cached_block(first)
+    blocks, hit, _ = _lookup_after_failed_admission(manager, waiter)
+    expected, expected_hit, _ = manager.coordinator.find_longest_cache_hit(
+        waiter.block_hashes, waiter.num_tokens - 1
+    )
+    assert hit == expected_hit == hit_tokens
+    assert list(blocks.blocks[0]) == expected[0]
+    assert blocks.blocks[0][0] is duplicate
+
+
+def test_waiting_prefix_memo_duplicate_uses_selected_block_for_references():
+    """Admission and release must operate on the duplicate chosen by lookup."""
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(16, 32), max_model_len=512, hash_block_size=16
+    )
+    prompt_tokens = 32 * PREFIX_MEMO_THRESHOLD
+    hit_tokens = 16 * PREFIX_MEMO_THRESHOLD
+    holder = make_request("holder", list(range(prompt_tokens)), 16, sha256)
+    waiter = make_request("waiter", list(range(prompt_tokens)), 16, sha256)
+    assert manager.allocate_slots(holder, hit_tokens) is not None
+    manager.free(holder)
+
+    blocks, hit, _ = _lookup_after_failed_admission(manager, waiter)
+    assert hit == hit_tokens
+    original = blocks.blocks[0][0]
+    assert waiter in manager._prefix_hits
+
+    duplicate = next(
+        block
+        for block in manager.block_pool.blocks
+        if not block.is_null and block.ref_cnt == 0 and block.block_hash is None
+    )
+    key = make_block_hash_with_group_id(waiter.block_hashes[0], 0)
+    manager.block_pool._insert_block_hash(key, duplicate, num_tokens=16)
+    manager.block_pool._maybe_evict_cached_block(original)
+
+    selected, selected_hit, _ = manager.get_computed_blocks(waiter)
+    assert selected_hit == hit_tokens
+    assert selected.blocks[0][0] is duplicate
+    assert duplicate.ref_cnt == 0
+    assert (
+        manager.allocate_slots(
+            waiter,
+            16,
+            num_new_computed_tokens=selected_hit,
+            new_computed_blocks=selected,
+        )
+        is not None
+    )
+    assert duplicate.ref_cnt == 1
+
+    manager.free(waiter)
+    assert duplicate.ref_cnt == 0
+    manager.block_pool._maybe_evict_cached_block(duplicate)
+    assert duplicate.block_hash is None
+
+
+def test_waiting_prefix_memo_weak_key_collection_and_request_id_reuse():
+    """Memo entries follow Request identity and disappear after collection."""
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(16, 32), max_model_len=512, hash_block_size=16
+    )
+    prompt_tokens = 32 * PREFIX_MEMO_THRESHOLD
+    hit_tokens = 16 * PREFIX_MEMO_THRESHOLD
+    holder = make_request("holder", list(range(prompt_tokens)), 16, sha256)
+    old_request = make_request("reused-id", list(range(prompt_tokens)), 16, sha256)
+    assert manager.allocate_slots(holder, hit_tokens) is not None
+    assert _lookup_after_failed_admission(manager, old_request)[1] == hit_tokens
+    old_ref = weakref.ref(old_request)
+    assert old_request in manager._prefix_hits
+
+    del old_request
+    gc.collect()
+    assert old_ref() is None
+    assert len(manager._prefix_hits) == 0
+
+    new_request = make_request("reused-id", [999] * prompt_tokens, 16, sha256)
+    assert manager.get_computed_blocks(new_request)[1] == 0
+    assert manager._prefix_hits.get(new_request, []) == []
+
+
+def test_waiting_prefix_memo_duplicate_hash_aba():
+    """Removing and reinserting A must preserve the oracle's new choice B."""
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(16, 32), max_model_len=512, hash_block_size=16
+    )
+    prompt_tokens = 32 * PREFIX_MEMO_THRESHOLD
+    hit_tokens = 16 * PREFIX_MEMO_THRESHOLD
+    holder = make_request("holder", list(range(prompt_tokens)), 16, sha256)
+    waiter = make_request("waiter", list(range(prompt_tokens)), 16, sha256)
+    assert manager.allocate_slots(holder, hit_tokens) is not None
+    manager.free(holder)
+    blocks, hit, _ = manager.get_computed_blocks(waiter)
+    assert waiter not in manager._prefix_hits
+    _lookup_after_failed_admission(manager, waiter)
+    assert waiter in manager._prefix_hits
+    first = blocks.blocks[0][0]
+    first_lifecycle_version = first._hash_lifecycle_version
+    duplicate = next(
+        block
+        for block in manager.block_pool.blocks
+        if not block.is_null and block.ref_cnt == 0 and block.block_hash is None
+    )
+    key = make_block_hash_with_group_id(waiter.block_hashes[0], 0)
+    manager.block_pool._insert_block_hash(key, duplicate, num_tokens=16)
+    manager.block_pool._maybe_evict_cached_block(first)
+    manager.block_pool._insert_block_hash(key, first, num_tokens=16)
+    assert first.block_hash == key
+    assert first._hash_lifecycle_version > first_lifecycle_version
+    actual, actual_hit, _ = manager.get_computed_blocks(waiter)
+    expected, expected_hit, _ = manager.coordinator.find_longest_cache_hit(
+        waiter.block_hashes, waiter.num_tokens - 1
+    )
+    assert actual_hit == expected_hit == hit_tokens
+    assert list(actual.blocks[0]) == expected[0]
+    assert actual.blocks[0][0] is duplicate
+    # The stale physical copy was discarded and the current equivalent copy
+    # was revalidated and memoized.
+    assert waiter in manager._prefix_hits
+
+
+def test_waiting_prefix_memo_first_admission_does_not_create_memo():
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(16, 32), max_model_len=512, hash_block_size=16
+    )
+    holder = make_request("holder", list(range(128)), 16, sha256)
+    waiter = make_request("waiter", list(range(128)), 16, sha256)
+    assert manager.allocate_slots(holder, 64) is not None
+    blocks, hit, _ = manager.get_computed_blocks(waiter)
+    assert waiter not in manager._prefix_hits
+    assert (
+        manager.allocate_slots(
+            waiter, 16, num_new_computed_tokens=hit, new_computed_blocks=blocks
+        )
+        is not None
+    )
+    assert waiter not in manager._prefix_hits
+
+
+@pytest.mark.parametrize("full_sequence_must_fit", [False, True])
+def test_waiting_prefix_memo_created_at_capacity_failure(full_sequence_must_fit):
+    """Both capacity gates must seed a memo without acquiring cached blocks."""
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(16, 2 * PREFIX_MEMO_THRESHOLD),
+        max_model_len=32 * PREFIX_MEMO_THRESHOLD,
+        hash_block_size=16,
+    )
+    prompt_tokens = 32 * PREFIX_MEMO_THRESHOLD
+    hit_tokens = 16 * PREFIX_MEMO_THRESHOLD
+    holder = make_request("holder", list(range(prompt_tokens)), 16, sha256)
+    waiter = make_request("waiter", list(range(prompt_tokens)), 16, sha256)
+    assert manager.allocate_slots(holder, hit_tokens) is not None
+    blocks, hit, _ = manager.get_computed_blocks(waiter)
+    assert hit == hit_tokens
+    assert waiter not in manager._prefix_hits
+    refs = [block.ref_cnt for block in manager.block_pool.blocks]
+    assert (
+        manager.allocate_slots(
+            waiter,
+            hit_tokens,
+            num_new_computed_tokens=hit,
+            new_computed_blocks=blocks,
+            full_sequence_must_fit=full_sequence_must_fit,
+        )
+        is None
+    )
+    assert waiter in manager._prefix_hits
+    assert [block.ref_cnt for block in manager.block_pool.blocks] == refs
+    actual, actual_hit, _ = manager.get_computed_blocks(waiter)
+    assert actual_hit == hit
+    assert list(actual.blocks[0]) == list(blocks.blocks[0])
+
+
+@pytest.mark.parametrize(
+    ("num_cached_blocks", "expect_memo"),
+    [(PREFIX_MEMO_THRESHOLD - 1, False), (PREFIX_MEMO_THRESHOLD, True)],
+)
+def test_waiting_prefix_memo_requires_minimum_hit_length(
+    num_cached_blocks, expect_memo
+):
+    """Only memoize a failed admission when enough full blocks actually hit."""
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(16, 32), max_model_len=512, hash_block_size=16
+    )
+    prompt_tokens = 2 * PREFIX_MEMO_THRESHOLD * 16
+    holder = make_request("holder", list(range(prompt_tokens)), 16, sha256)
+    waiter = make_request("waiter", list(range(prompt_tokens)), 16, sha256)
+    assert manager.allocate_slots(holder, num_cached_blocks * 16) is not None
+
+    blocks, hit, _ = _lookup_after_failed_admission(manager, waiter)
+    assert hit == num_cached_blocks * 16
+    assert (waiter in manager._prefix_hits) is expect_memo
+
+    # Whether or not the hit is memoized, the next lookup must return the same
+    # cached physical blocks and token count.
+    actual, actual_hit, _ = manager.get_computed_blocks(waiter)
+    assert actual_hit == hit
+    assert list(actual.blocks[0]) == list(blocks.blocks[0])
