@@ -1591,6 +1591,50 @@ def test_cooperative_topk_512_tie_workspace_is_per_row() -> None:
     )
 
 
+@pytest.mark.skipif(not _has_device_capability(90), reason="This test requires SM90+")
+@pytest.mark.parametrize("top_k", [512, 1024, 2048])
+@pytest.mark.parametrize("num_rows", [1, 4, 8])
+@pytest.mark.parametrize("data_type", ["random", "bf16_ties"])
+@torch.inference_mode()
+def test_cooperative_topk_long_stride(
+    top_k: int, num_rows: int, data_type: str
+) -> None:
+    """max_model_len=1M rows with ragged lengths.
+
+    Covers the long-stride dispatch (CS=24 with 3 stages and CS=16 with 4
+    stages where the device supports them, the two-pass path elsewhere), the
+    histogram-4096 and trivial paths, and the DSMEM tie refinement:
+    bf16-rounded logits produce many exact ties in the threshold bin.
+    """
+    set_random_seed(0)
+    stride = 1 << 20
+    seq_lens = [stride, 786432, 524292, 300004, 131072, 65540, 40000, 1500]
+    seq_lens = seq_lens[:num_rows]
+    logits = torch.randn(num_rows, stride, dtype=torch.float32, device="cuda")
+    if data_type == "bf16_ties":
+        logits = logits.bfloat16().float()
+    lengths = torch.tensor(seq_lens, dtype=torch.int32, device="cuda")
+    indices = torch.full((num_rows, top_k), -2, dtype=torch.int32, device="cuda")
+    workspace = torch.empty(RADIX_TOPK_WORKSPACE_SIZE, dtype=torch.uint8, device="cuda")
+    torch.ops._C.cooperative_topk(logits, lengths, indices, workspace, top_k, stride)
+    torch.accelerator.synchronize()
+
+    for row, seq_len in enumerate(seq_lens):
+        selected = indices[row]
+        if seq_len <= top_k:
+            expected = torch.arange(top_k, dtype=torch.int32, device="cuda")
+            expected[seq_len:] = -1
+            assert torch.equal(selected, expected), f"row {row}: trivial path"
+            continue
+        assert bool(((selected >= 0) & (selected < seq_len)).all()), (
+            f"row {row}: index outside [0, {seq_len})"
+        )
+        assert torch.unique(selected).numel() == top_k, f"row {row}: duplicates"
+        got = logits[row, selected.long()].sort(descending=True).values
+        want = logits[row, :seq_len].topk(top_k).values.sort(descending=True).values
+        assert torch.equal(got, want), f"row {row}: values differ from torch.topk"
+
+
 def _assert_cooperative_topk_exact(
     logits: torch.Tensor, indices: torch.Tensor, seq_len: int, top_k: int
 ) -> None:
