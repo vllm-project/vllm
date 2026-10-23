@@ -173,14 +173,6 @@ source that knows its layout declares it instead: each pipeline stage's names
 with `owners` set to that stage's ranks, each rank iterating only its own stage.
 Which engines can then send from several stages is listed on each engine's page.
 
-!!! note "Deprecated: `__iter__`, `held_names()`, `groups()`, `iter_groups()`"
-    For one deprecation cycle, a source that implements only `__iter__` is
-    iterated as `iter_full()`, one pair per batch. A source that overrides
-    `held_names()` without declaring any `owners` keeps sharded RDT's previous
-    path, which all-gathers the held names at `trainer_init`. `M2NWeightSource`,
-    `M2NParamMeta` and `DTensorModuleSource` are likewise superseded by the base
-    `ParamMeta` fields and `ModuleSource`.
-
 #### Gather groups
 
 Some backends transfer a layer at a time rather than a model at a time, so they

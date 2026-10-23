@@ -81,14 +81,9 @@ engine.send_weights()
 
 Trainers with a custom producer (a Megatron export, MoE re-fusing) subclass
 `WeightSource`, declare each layout on `ParamMeta` and implement `iter_local()`.
-A 1-D mesh is described over m2n's 2-D mesh with a size-1 second axis. vLLM
-keeps each yielded tensor alive through stream completion, and checks its dtype
-and local shape against the declared layout.
-
-The deprecated `M2NWeightSource` (with `M2NParamMeta` layouts) still works for
-one cycle; it may also yield a CUDA Array Interface object or a raw device
-pointer, whose lifetime, dtype and local shape are then the source's
-responsibility.
+A 1-D mesh is described over m2n's 2-D mesh with a size-1 second axis. Each
+yielded tensor must match its declared dtype and local shape, and is kept alive
+in stream order until its reshard completes.
 
 See [`examples/rl/rlhf_m2n.py`](../../../examples/rl/rlhf_m2n.py) for a runnable FSDP → TP example.
 

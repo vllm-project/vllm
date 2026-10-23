@@ -45,7 +45,6 @@ from vllm.distributed.weight_transfer.base import (
     layerwise_groups,
     owned_names,
     supports_iter_full,
-    uses_held_names,
 )
 from vllm.distributed.weight_transfer.sharded_rdt_common import (
     ALLOWED_OPS,
@@ -814,9 +813,7 @@ class ShardedRDTTrainerWeightTransferEngine(
     only gather and publish.
 
     Ownership comes from `ParamMeta.owners`, which every rank shares, so no
-    exchange is needed to plan who serves what. A legacy source that overrides
-    `held_names()` without declaring owners is resolved by all-gathering the
-    held names instead.
+    exchange is needed to plan who serves what.
     """
 
     init_info_cls = ShardedRDTTrainerInitInfo
@@ -843,8 +840,7 @@ class ShardedRDTTrainerWeightTransferEngine(
         self._owner_sets: list[list[int]] = []
         self._name_owner_class: list[int] = []
         self._owned_idx: list[int] = []
-        self._held_names: set[str] | None = None
-        self._legacy_held = False
+        self._owned_names: set[str] = set()
         # Strong refs to gathered tensors we've shared into the server, keyed by
         # group index. CUDA-IPC exports must outlive the importer, so we hold
         # them until the server reports the group freed. See send_weights.
@@ -1015,7 +1011,7 @@ class ShardedRDTTrainerWeightTransferEngine(
 
         world, rank = engine._world_and_rank()
         engine._resolve_ownership(world, rank)
-        engine._spawn_server(sorted(engine._held_names or []))
+        engine._spawn_server(sorted(engine._owned_names))
 
         # Every rank's server must exist before the sender's init RPC (the worker
         # init calls reserve_serve_buffer back on ALL producer servers). The
@@ -1072,11 +1068,6 @@ class ShardedRDTTrainerWeightTransferEngine(
         sets and a per-name index into them. Both come straight from metadata,
         where `owners=None` means every rank.
         """
-        assert self.source is not None  # guaranteed by trainer_init
-        self._legacy_held = uses_held_names(self.source, self._meta)
-        if self._legacy_held:
-            self._resolve_legacy_ownership(world, rank)
-            return
         everyone = tuple(range(world))
         owner_sets: list[list[int]] = []
         class_of_owners: dict[tuple[int, ...], int] = {}
@@ -1094,113 +1085,13 @@ class ShardedRDTTrainerWeightTransferEngine(
                 class_of_owners[owners] = ci
                 owner_sets.append(list(owners))
             name_owner_class.append(ci)
-        held_set = set(owned_names(self._meta, rank))
+        owned = set(owned_names(self._meta, rank))
         self._owner_sets = owner_sets
         self._name_owner_class = name_owner_class
         self._owned_idx = [
-            gi for gi, g in enumerate(self._groups) if any(n in held_set for n in g)
+            gi for gi, g in enumerate(self._groups) if any(n in owned for n in g)
         ]
-        self._held_names = held_set
-
-    def _resolve_legacy_ownership(self, world: int, rank: int) -> None:
-        """Ownership for a source that overrides `held_names()` without
-        declaring owners: each rank's held names are all-gathered as a bitmask
-        over metadata order, and the metadata digest rides along so a rank
-        whose names disagree cannot transpose into the wrong owners.
-        """
-        assert self.source is not None
-        num_groups = len(self._groups)
-        names = [m.name for m in self._meta]
-        held = self.source.held_names()
-        if held is None:
-            held_set = set(names)
-        else:
-            held_set = {str(n) for n in held}
-            unknown = sorted(held_set - set(names))
-            if unknown:
-                raise ValueError(
-                    f"WeightSource.held_names() lists {len(unknown)} name(s) not "
-                    f"in metadata(), e.g. {unknown[:3]}."
-                )
-            if not held_set:
-                raise ValueError(
-                    "WeightSource.held_names() is empty; a rank with nothing to "
-                    "serve cannot take part in the gather"
-                )
-
-        # One collective carries this rank's holdings as a bitmask over metadata
-        # order, plus the digest of the metadata it indexes into. The digest is
-        # what makes partial ownership safe: only the sender's metadata reaches
-        # the consumers, so a rank describing just its own share would silently
-        # serve the wrong weights.
-        digest = self._meta_digest()
-        mask = bytearray((len(names) + 7) // 8)
-        for i, n in enumerate(names):
-            if n in held_set:
-                mask[i >> 3] |= 1 << (i & 7)
-        per_rank = self._all_gather_owned(world, (digest, bytes(mask)))
-        mismatched = [r for r, (d, *_rest) in enumerate(per_rank) if d != digest]
-        if mismatched:
-            raise ValueError(
-                f"WeightSource.metadata() disagrees across trainer ranks "
-                f"(rank {rank} digest {digest}, differing ranks {mismatched[:4]}). "
-                "Every rank must describe the WHOLE model, even when it holds "
-                "only some of it."
-            )
-        masks = [m for _d, m in per_rank]
-
-        # Transpose to per-name owners, then dedup into classes. Numbering by
-        # FIRST APPEARANCE in metadata order keeps it a pure function of
-        # rank-identical inputs, which is what lets a rejoining consumer rebuild
-        # the identical table from get_worker_init_payload.
-        owner_sets: list[list[int]] = []
-        class_of_owners: dict[tuple[int, ...], int] = {}
-        name_owner_class: list[int] = []
-        for i, n in enumerate(names):
-            owners = tuple(r for r, m in enumerate(masks) if m[i >> 3] & (1 << (i & 7)))
-            if not owners:
-                raise ValueError(
-                    f"no trainer rank holds {n!r}; every name in metadata() must "
-                    "be held by at least one rank or it can never be served."
-                )
-            ci = class_of_owners.get(owners)
-            if ci is None:
-                ci = len(owner_sets)
-                class_of_owners[owners] = ci
-                owner_sets.append(list(owners))
-            name_owner_class.append(ci)
-
-        self._owner_sets = owner_sets
-        self._name_owner_class = name_owner_class
-        # Groups holding anything here: exactly what iteration must cover.
-        self._owned_idx = [
-            gi
-            for gi in range(num_groups)
-            if any(n in held_set for n in self._groups[gi])
-        ]
-        self._held_names = held_set
-
-    def _validate_held_yields(self, gi: int, names, tensors) -> None:
-        """Check ``held_names()`` against what the source actually yields — the
-        one place both sit side by side.
-
-        Without it, a source that claims a name but yields ``None`` for it dies
-        by stall watchdog 300s later: consumers route pulls here, the pull
-        passes the served-names guard, and the cache wait never completes. With
-        it, that is an immediate error naming the weight. One set lookup per
-        name per sync."""
-        if self._held_names is None:
-            return
-        for name, tensor in zip(names, tensors):
-            if (tensor is None) == (name in self._held_names):
-                claim = "does not hold" if tensor is not None else "holds"
-                have = "a real tensor" if tensor is not None else "None"
-                raise RuntimeError(
-                    f"held_names() disagrees with the yielded tensors: group {gi} "
-                    f"name {name!r} yielded {have} but this rank {claim} it. A "
-                    "WeightSource must yield a real tensor for every held name "
-                    "and None for the rest (see WeightSource.held_names)."
-                )
+        self._owned_names = owned
 
     def _meta_digest(self) -> str:
         """Stable digest of this rank's metadata: names, order and owners."""
@@ -1211,16 +1102,6 @@ class ShardedRDTTrainerWeightTransferEngine(
         for m in self._meta:
             h.update(f"{m.name}\t{m.owners}\n".encode())
         return h.hexdigest()[:16]
-
-    def _all_gather_owned(self, world: int, mine: tuple) -> list[tuple]:
-        """All-gather each rank's (metadata digest, held-name bitmask)."""
-        if world <= 1 or not (
-            torch.distributed.is_available() and torch.distributed.is_initialized()
-        ):
-            return [mine]
-        gathered: list[Any] = [None] * world
-        torch.distributed.all_gather_object(gathered, mine)
-        return gathered
 
     def _all_gather_server_names(self, world: int, rank: int) -> list[str]:
         """All-gather the producer server names, indexed by rank.
@@ -1458,17 +1339,12 @@ class ShardedRDTTrainerWeightTransferEngine(
                     self._drop_inflight(self._rpc("wait_freed"))
                 names, tensors = next(groups)
                 # Share each unique STORAGE once and describe every name as an
-                # as_strided view onto it. ``None`` means a name this rank does not
-                # hold (a foreign expert); the source keeps it in the list so the
-                # order check stays rank-uniform, and it is dropped here, before
-                # the IPC export, matching the sidecar's served_names.
+                # as_strided view onto it.
                 storages: dict[int, tuple] = {}
                 views: dict[str, tuple] = {}
                 refs: dict[str, torch.Tensor] = {}
                 small: list = []
                 for name, tensor in zip(names, tensors):
-                    if tensor is None:
-                        continue
                     tensor = tensor.detach()
                     if not tensor.is_cuda:
                         tensor = tensor.cuda()
@@ -1558,26 +1434,13 @@ class ShardedRDTTrainerWeightTransferEngine(
 
     def _iter_owned_groups(
         self,
-    ) -> Iterator[tuple[list[str], list[torch.Tensor | None]]]:
+    ) -> Iterator[tuple[list[str], list[torch.Tensor]]]:
         """This rank's groups, in `_owned_idx` order, as `(names, tensors)`.
 
         The source's own batches need not match the layer groups: its stream is
         re-chunked here, so how the source batches never changes the transfer.
         """
         assert self.source is not None
-        if self._legacy_held:
-            for gi, (names, tensors) in zip(self._owned_idx, self.source.iter_groups()):
-                group = self._groups[gi]
-                if list(names) != list(group):
-                    raise RuntimeError(
-                        f"WeightSource group yielded {len(names)} names starting "
-                        f"{names[:2]!r} but expected {len(group)} starting "
-                        f"{group[:2]!r}; iteration order must match metadata."
-                    )
-                self._validate_held_yields(gi, names, tensors)
-                yield names, tensors
-            return
-        assert self._held_names is not None
         pairs = (
             pair
             for batch in iter_owned(
@@ -1586,7 +1449,7 @@ class ShardedRDTTrainerWeightTransferEngine(
             for pair in batch
         )
         for gi in self._owned_idx:
-            names = [n for n in self._groups[gi] if n in self._held_names]
+            names = [n for n in self._groups[gi] if n in self._owned_names]
             yield names, [t for _, t in itertools.islice(pairs, len(names))]
         for _ in pairs:
             pass

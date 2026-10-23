@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
-from vllm.distributed.weight_transfer.base import ParamMeta, Replicate, Shard
+from vllm.distributed.weight_transfer.base import ParamMeta, Shard
 from vllm.utils.nccl import unpinned_nccl_env
 
 if TYPE_CHECKING:
@@ -388,11 +388,8 @@ def validate_transfer_plan(
 
 @dataclass(frozen=True)
 class M2NParamMeta(ParamMeta):
-    """`ParamMeta` with the m2n source layout spelled out.
-
-    Deprecated as a source's metadata: declare `ParamMeta.owners`,
-    `mesh_shape` and `placements` instead. The trainer engine still converts
-    every parameter to this form to plan its reshards.
+    """`ParamMeta` with its m2n source layout spelled out, as the engines plan
+    reshards from it. Built from a source's `ParamMeta` by `m2n_param_meta`.
     """
 
     source_layout: M2NLayout
@@ -410,8 +407,6 @@ def m2n_param_meta(meta: ParamMeta, num_trainer_ranks: int) -> M2NParamMeta:
     `REPLICATED`. Placements m2n cannot express (both axes sharded, more than
     two axes) are left for `validate_transfer_plan` to reject.
     """
-    if isinstance(meta, M2NParamMeta):
-        return meta
     everyone = tuple(range(num_trainer_ranks))
     if meta.owners is not None and meta.owners != everyone:
         raise ValueError(
@@ -436,25 +431,6 @@ def m2n_param_meta(meta: ParamMeta, num_trainer_ranks: int) -> M2NParamMeta:
         meta.dtype,
         meta.shape,
         M2NLayout(M2NMesh(dims, 0), placements),
-    )
-
-
-def owned_param_meta(meta: M2NParamMeta) -> ParamMeta:
-    """The base `ParamMeta` of a validated m2n layout: owners, mesh and
-    placements, for checking what `iter_local` yields."""
-    mesh = meta.source_layout.mesh
-    codes = meta.source_layout.placements
-    return ParamMeta(
-        meta.name,
-        meta.dtype,
-        meta.shape,
-        owners=tuple(range(mesh.start_rank, mesh.start_rank + mesh.size)),
-        mesh_shape=mesh.dims,
-        placements=(
-            None
-            if codes is None
-            else tuple(Replicate() if c == REPLICATE else Shard(c) for c in codes)
-        ),
     )
 
 
@@ -821,43 +797,6 @@ def check_data_plane_agreement(
         raise RuntimeError(
             "nccl_m2n data-plane preflight rejected before NCCL init: "
             + "; ".join(errors)
-        )
-
-
-def validate_local_buffer(m2n: Any, meta: M2NParamMeta, buffer: Any) -> None:
-    """Check source dtype/shape while delegating buffer validity to M2N."""
-    # A raw pointer carries no inspectable metadata. The source owns its
-    # correctness; _send supplies the declared dtype and local shape to M2N.
-    if isinstance(buffer, int):
-        return
-
-    mesh, placements = resolve_layout(
-        meta.source_layout.mesh, meta.source_layout.placements
-    )
-    actual = m2n.DistTensor(
-        buffer,
-        mesh=to_mesh(m2n, mesh),
-        placements=to_placements(m2n, placements),
-    )
-    declared = m2n.DistTensor(
-        None,
-        local_shape=actual.local_shape,
-        dtype=meta.dtype,
-        mesh=to_mesh(m2n, mesh),
-        placements=to_placements(m2n, placements),
-    )
-    if actual.dtype != declared.dtype:
-        raise ValueError(
-            f"parameter '{meta.name}' source returned dtype {actual.dtype}, "
-            f"but its metadata declared {declared.dtype}"
-        )
-
-    expected = expected_local_shape(meta)
-    if actual.local_shape != expected:
-        raise ValueError(
-            f"parameter '{meta.name}' source returned local shape "
-            f"{actual.local_shape}, but layout {meta.source_layout} implies "
-            f"{expected} from global shape {meta.shape}"
         )
 
 

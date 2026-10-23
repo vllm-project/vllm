@@ -45,14 +45,12 @@ from vllm.distributed.weight_transfer.m2n_common import (
     expected_local_shape,
     import_m2n,
     m2n_param_meta,
-    owned_param_meta,
     prepare_m2n_local_runtime,
     publish_destination_placements,
     resolve_layout,
     source_plan_digest,
     to_mesh,
     to_placements,
-    validate_local_buffer,
     validate_transfer_plan,
 )
 from vllm.distributed.weight_transfer.nccl_common import (
@@ -184,7 +182,7 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         self._m2n: Any = None
         self._handle: Any = None
         self._metas: list[M2NParamMeta] = []
-        self._owned_metas: list[ParamMeta] = []
+        self._source_metas: list[ParamMeta] = []
         self._wire_params: list[M2NWireParam] = []
         self._source_digest = ""
         self._dst_mesh: M2NMesh | None = None
@@ -407,8 +405,9 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         self, source: WeightSource, num_trainer_ranks: int
     ) -> None:
         """Build and validate this rank's immutable source plan."""
+        self._source_metas = source.metadata()
         self._metas = [
-            m2n_param_meta(meta, num_trainer_ranks) for meta in source.metadata()
+            m2n_param_meta(meta, num_trainer_ranks) for meta in self._source_metas
         ]
         names: set[str] = set()
         for meta in self._metas:
@@ -419,20 +418,7 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
                 )
             names.add(meta.name)
             check_transferable(meta.name, meta.dtype, meta.shape)
-            layout = meta.source_layout
-            if layout.mesh.start_rank != 0:
-                raise ValueError(
-                    f"parameter '{meta.name}' source mesh must start at rank 0, "
-                    f"got {layout.mesh.start_rank}"
-                )
-            if layout.mesh.size != num_trainer_ranks:
-                raise ValueError(
-                    f"parameter '{meta.name}' source mesh covers "
-                    f"{layout.mesh.size} ranks, but there are "
-                    f"{num_trainer_ranks} trainer ranks"
-                )
             expected_local_shape(meta)
-        self._owned_metas = [owned_param_meta(meta) for meta in self._metas]
         self._wire_params = [
             M2NWireParam(
                 name=meta.name,
@@ -547,31 +533,23 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         # Optimizer work may have used another CUDA stream. Make prior writes
         # visible before a provider materializes current-stream local shards.
         torch.accelerator.synchronize(device_index)
-        inflight_buffers: list[Any] = []
         shards = (
             pair
             for batch in iter_owned(
-                self.source, self._owned_metas, self.rank, local=True
+                self.source, self._source_metas, self.rank, local=True
             )
             for pair in batch
         )
-        for index, buffer in shards:
+        for index, shard in shards:
             meta = self._metas[index]
-            validate_local_buffer(m2n, meta, buffer)
             src_mesh, src_placements = resolve_layout(
                 meta.source_layout.mesh, meta.source_layout.placements
             )
             dst_mesh, dst_placements = resolve_layout(
                 self._dst_mesh, self._dst_placements[index]
             )
-            raw_pointer_args = {}
-            if isinstance(buffer, int):
-                raw_pointer_args = {
-                    "src_local_shape": expected_local_shape(meta),
-                    "src_dtype": meta.dtype,
-                }
             m2n.reshard(
-                buffer,
+                shard,
                 None,
                 self.group,
                 stream,
@@ -580,16 +558,9 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
                 dst_mesh=to_mesh(m2n, dst_mesh),
                 dst_placements=to_placements(m2n, dst_placements),
                 handle=self._handle,
-                **raw_pointer_args,
             )
-            # Let allocator-aware buffers recycle storage in stream order.
-            # Other object owners must stay alive until the final synchronize;
-            # raw-pointer lifetime remains the source's responsibility.
-            record_stream = getattr(buffer, "record_stream", None)
-            if callable(record_stream):
-                record_stream(stream)
-            elif not isinstance(buffer, int):
-                inflight_buffers.append(buffer)
+            # Let the allocator recycle the shard's storage in stream order.
+            shard.record_stream(stream)
 
         # As in the other weight-transfer backends, wait before returning
         # rather than relying on same-stream ordering. The caller may then

@@ -4,7 +4,7 @@
 
 import math
 from abc import ABC, abstractmethod
-from collections.abc import Collection, Iterator, Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import (
     TYPE_CHECKING,
@@ -24,9 +24,6 @@ if TYPE_CHECKING:
 
 from vllm.config.parallel import ParallelConfig
 from vllm.config.weight_transfer import WeightTransferConfig
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
 
 TInitInfo = TypeVar("TInitInfo", bound="WeightTransferInitInfo")
 TUpdateInfo = TypeVar("TUpdateInfo", bound="WeightTransferUpdateInfo")
@@ -321,22 +318,7 @@ class WeightSource(ABC):
         raise NotImplementedError
 
     def iter_full(self) -> Iterator[WeightBatch]:
-        """Yield batches of full tensors for the names this rank owns.
-
-        A legacy source that only implements `__iter__` is iterated through it,
-        one pair per batch.
-        """
-        if _is_legacy_iterable(self):
-            logger.warning_once(
-                "%s implements only __iter__; implement iter_full() instead. "
-                "Iterating a WeightSource is deprecated.",
-                type(self).__name__,
-            )
-            if _overrides(self, "iter_groups"):
-                return (
-                    list(zip(names, tensors)) for names, tensors in self.iter_groups()
-                )
-            return ([pair] for pair in self)  # type: ignore[attr-defined]
+        """Yield batches of full tensors for the names this rank owns."""
         raise NotImplementedError(f"{type(self).__name__} does not implement iter_full")
 
     def iter_local(self) -> Iterator[WeightBatch]:
@@ -345,76 +327,19 @@ class WeightSource(ABC):
             f"{type(self).__name__} does not implement iter_local"
         )
 
-    def held_names(self) -> "Collection[str] | None":
-        """Deprecated: declare `ParamMeta.owners` instead.
-
-        The parameters this rank holds, or None for all of them. Honored only by
-        sharded RDT, and only for sources that declare no owners: the ranks then
-        all-gather their held names at init, and iteration (through
-        `iter_groups`) covers exactly `groups()` in metadata order, yielding a
-        real tensor for each held name and `None` for the rest.
-        """
-        return None
-
-    def groups(self) -> list[list[str]]:
-        """Deprecated with `held_names`: this rank's gather groups, in metadata
-        order: `layerwise_groups` over `metadata()`, restricted to the groups
-        holding at least one held name.
-        """
-        groups = layerwise_groups([m.name for m in self.metadata()])
-        held = self.held_names()
-        if held is None:
-            return groups
-        held = set(held)
-        return [g for g in groups if any(n in held for n in g)]
-
-    def iter_groups(self) -> Iterator[tuple[list[str], list[torch.Tensor]]]:
-        """Deprecated with `held_names`: one `(names, tensors)` batch per group
-        from `groups()`, driven from `__iter__` and checked against metadata
-        order.
-        """
-        it = iter(self)  # type: ignore[call-overload]
-        for group in self.groups():
-            names: list[str] = []
-            tensors: list[torch.Tensor] = []
-            for expected in group:
-                name, tensor = next(it)
-                if name != expected:
-                    raise RuntimeError(
-                        f"WeightSource yielded {name!r} but expected "
-                        f"{expected!r}; iteration order must match metadata()."
-                    )
-                names.append(name)
-                tensors.append(tensor)
-            yield names, tensors
-
 
 def _overrides(source: WeightSource, method: str) -> bool:
     return getattr(type(source), method, None) is not getattr(WeightSource, method)
 
 
-def _is_legacy_iterable(source: WeightSource) -> bool:
-    return (
-        callable(getattr(source, "__iter__", None))
-        and not _overrides(source, "iter_full")
-        and not _overrides(source, "iter_local")
-    )
-
-
 def supports_iter_full(source: WeightSource) -> bool:
-    """Whether `source` implements `iter_full` (directly or via `__iter__`)."""
-    return _overrides(source, "iter_full") or _is_legacy_iterable(source)
+    """Whether `source` implements `iter_full`."""
+    return _overrides(source, "iter_full")
 
 
 def supports_iter_local(source: WeightSource) -> bool:
     """Whether `source` implements `iter_local`."""
     return _overrides(source, "iter_local")
-
-
-def uses_held_names(source: WeightSource, metas: Sequence[ParamMeta]) -> bool:
-    """Whether `source` declares ownership the deprecated way: overriding
-    `held_names()` without naming any parameter's owners."""
-    return _overrides(source, "held_names") and all(m.owners is None for m in metas)
 
 
 def iter_owned(
@@ -423,14 +348,13 @@ def iter_owned(
     rank: int,
     *,
     local: bool,
-) -> Iterator[list[tuple[int, Any]]]:
+) -> Iterator[list[tuple[int, torch.Tensor]]]:
     """Drive one of `source`'s modes, checked against `metas`.
 
     Yields the source's batches as `(metadata index, tensor)` pairs, with
     `None` tensors dropped. Raises at the first name that is not the next one
     `rank` owns, and at the first tensor whose dtype or shape disagrees with
-    its metadata (`local_shape` for `local`). Non-tensor buffers are passed
-    through unchecked.
+    its metadata (`local_shape` for `local`).
 
     Args:
         source: The weight source.
@@ -444,7 +368,7 @@ def iter_owned(
     batches = source.iter_local() if local else source.iter_full()
     pos = 0
     for batch in batches:
-        out: list[tuple[int, Any]] = []
+        out: list[tuple[int, torch.Tensor]] = []
         for name, tensor in batch:
             if tensor is None:
                 continue
@@ -461,14 +385,18 @@ def iter_owned(
                     f"owns {meta.name!r} next; it must yield exactly "
                     "owned_names(metadata(), rank), in metadata order."
                 )
-            if isinstance(tensor, torch.Tensor):
-                shape = local_shape(meta, rank) if local else meta.shape
-                if tensor.dtype != meta.dtype or tuple(tensor.shape) != shape:
-                    raise ValueError(
-                        f"WeightSource.{mode}() yielded {name!r} as "
-                        f"{tensor.dtype} {tuple(tensor.shape)}, but its metadata "
-                        f"implies {meta.dtype} {shape}."
-                    )
+            if not isinstance(tensor, torch.Tensor):
+                raise TypeError(
+                    f"WeightSource.{mode}() yielded {name!r} as "
+                    f"{type(tensor).__name__}; it must yield torch.Tensor."
+                )
+            shape = local_shape(meta, rank) if local else meta.shape
+            if tensor.dtype != meta.dtype or tuple(tensor.shape) != shape:
+                raise ValueError(
+                    f"WeightSource.{mode}() yielded {name!r} as "
+                    f"{tensor.dtype} {tuple(tensor.shape)}, but its metadata "
+                    f"implies {meta.dtype} {shape}."
+                )
             out.append((index, tensor))
             pos += 1
         if out:
