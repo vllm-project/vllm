@@ -1,20 +1,27 @@
 # MiniMax M3 specialized decode
 
-`--monokernel` on MI355X/gfx950 runs each sparse layer (3-59) as vLLM's input
-norm and attention followed by one persistent FlyDSL launch for the rest of the
-layer (`mono/ffn.py`): the attention TP all-reduce and residual add, the Gemma
-post-attention norm, the FP32 router and top-4, the shared and routed experts,
-and the MoE TP all-reduce.
+`--monokernel` on MI355X/gfx950 runs each sparse layer (3-59) as one persistent
+FlyDSL launch (`mono/layer/`), adapted from ATOM: input norm, FP8 QKV projection,
+head norms and RoPE, KV/index cache updates, index scoring and selection,
+sparse attention, FP8 output projection, both TP all-reduces, post-attention
+norm, routing and the shared/routed experts. The kernels and runtime live in
+vLLM, with no ATOM runtime dependency. See the rendered
+[deployment documentation](../../../../../docs/design/attention_backends.md#minimax-m3-specialized-decode-on-mi355x)
+for the FP8 projection configuration, draft quantization and evaluated recipe.
 
-Milestone one is deliberately narrow:
+Supported deployments are deliberately narrow:
 
 - TP4 on dedicated, unpartitioned GPUs (256 CUs, one CTA per CU);
 - plain decode of 1-16 rows, eager or replayed from a FULL CUDA graph (graph
   padding rows are inert); PIECEWISE steps, larger and mixed steps run the
   stock layers;
-- BF16 expert activations against the `AITER_MXFP4_MXFP4` post-load weights
-  (AITER `(16, 16)` weight shuffle, `e8m0_shuffle` scales), matching what
-  native AITER computes at decode.
+- group-of-32 MXFP8 expert activations against `AITER_MXFP4_MXFP4` post-load
+  weights, BF16 router weights/logits and rotary tables;
+- dynamic per-token FP8 attention projections with per-channel weight scales.
+
+`--kernel-config '{"monokernel_mode":"ffn"}'` selects the legacy kernel
+(`mono/ffn.py`), which leaves input norm and attention on native modules and
+uses BF16 expert activations and an FP32 router.
 
 `runtime/` owns refusals, planning, health and shutdown; `mono/` owns the
 kernel and its host launcher. Unsupported static deployments are refused with

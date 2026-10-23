@@ -21,7 +21,7 @@ from .routing import decide_step
 from .spec import DecodeConfig
 from .weights import MonoLayerWeights
 
-FAULT_MESSAGE = "MiniMax-M3 FFN launch error word set; the step is discarded"
+FAULT_MESSAGE = "MiniMax-M3 launch error word set; the step is discarded"
 
 LayerKernel = Callable[
     [torch.Tensor, torch.Tensor, torch.Tensor | None],
@@ -109,10 +109,16 @@ class SpecializedDecode:
     def build(cls, model, config: DecodeConfig) -> SpecializedDecode:
         from .executor import FfnExecutor
 
+        executor: Callable[..., KernelExecutor] = FfnExecutor
+        if config.mode == "layer":
+            from .layer_executor import LayerExecutor
+
+            executor = LayerExecutor
+
         return cls(
             model,
             config,
-            lambda decode: FfnExecutor(
+            lambda decode: executor(
                 decode.layers, decode.weights, config.widths, config.tp_size
             ),
         )

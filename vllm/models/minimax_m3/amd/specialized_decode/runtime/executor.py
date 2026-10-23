@@ -9,8 +9,19 @@ from dataclasses import dataclass
 
 import torch
 
+from vllm import envs
 from vllm.distributed import get_tp_group
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    get_input_quant_key,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8DynamicTokenSym,
+)
+from vllm.models.minimax_m3.amd.ops.gemma_rmsnorm import (
+    gemma_fused_add_rmsnorm_fp8,
+)
 from vllm.platforms import current_platform
 
 from ..mono.ffn import ERROR_BYTES, ERROR_WORDS, peer_bytes
@@ -39,6 +50,20 @@ def tp_agree(ok: bool) -> bool:
     from vllm.models.deepseek_v41.amd.mono.common.peer_memory import tp_agree
 
     return tp_agree(ok, get_tp_group().cpu_group)
+
+
+def mark_peers_failed(peer, rank: int) -> None:
+    """Set every rank's sticky error word so no failed step returns a token."""
+    try:
+        words = torch.tensor(
+            [1, rank, -1, 0], dtype=torch.int32, device=peer.bytes.device
+        )
+        for base in peer.addresses.tolist():
+            view = _device_words(base, ERROR_BYTES // 4, peer.bytes.device)
+            view[:ERROR_WORDS].copy_(words)
+        torch.accelerator.synchronize()
+    except Exception:
+        logger.exception("MiniMax-M3 launch: marking peers failed")
 
 
 class FfnExecutor:
@@ -106,9 +131,26 @@ class FfnExecutor:
         launches = self.launches
 
         final = layer_id == max(self._layers)
+        fuse_input_quant = (
+            not envs.VLLM_BATCH_INVARIANT
+            and get_input_quant_key(layer.self_attn.qkv_proj) == kFp8DynamicTokenSym
+        )
 
         def run(positions, hidden_states, residual):
-            hidden_states, residual = layer.input_layernorm(hidden_states, residual)
+            if fuse_input_quant:
+                norm = layer.input_layernorm
+                quantized, scales, residual = gemma_fused_add_rmsnorm_fp8(
+                    hidden_states, residual, norm.weight, norm.variance_epsilon
+                )
+                hidden_states = QuantizedActivation(
+                    quantized,
+                    scales,
+                    hidden_states.dtype,
+                    hidden_states.shape,
+                    kFp8DynamicTokenSym,
+                )
+            else:
+                hidden_states, residual = layer.input_layernorm(hidden_states, residual)
             part = layer.self_attn(positions=positions, hidden_states=hidden_states)
             launches[layer_id] += 1
             assert self._slots is not None
@@ -133,16 +175,7 @@ class FfnExecutor:
 
     def abort(self) -> None:
         """Mark this rank failed on every rank, so peers' waits end."""
-        try:
-            words = torch.tensor(
-                [1, self.rank, -1, 0], dtype=torch.int32, device=self.peer.bytes.device
-            )
-            for base in self.peer.addresses.tolist():
-                view = _device_words(base, ERROR_BYTES // 4, self.peer.bytes.device)
-                view[:ERROR_WORDS].copy_(words)
-            torch.accelerator.synchronize()
-        except Exception:
-            logger.exception("MiniMax-M3 FFN launch: marking peers failed")
+        mark_peers_failed(self.peer, self.rank)
 
     def after_step(self) -> None:
         self.steps += 1

@@ -22,6 +22,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.model_executor.model_loader import register_model_loader
+from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -120,6 +122,11 @@ def model_dir(tmp_path_factory):
 
 @torch.no_grad()
 def _randomize(worker):
+    _randomize_model(worker.model_runner.get_model())
+
+
+@torch.no_grad()
+def _randomize_model(model, *, stable_prefill=False):
     """Weights at unit-activation scales; TP shards seeded per rank, replicated
     tensors (norms, router, bias) alike on every rank."""
     from vllm.distributed import get_tensor_model_parallel_rank
@@ -130,7 +137,6 @@ def _randomize(worker):
     from vllm.model_executor.layers.fused_moe.router import bf16x3_router_gemm_rocm
 
     rank = get_tensor_model_parallel_rank()
-    model = worker.model_runner.get_model()
 
     def generator(name, sharded=True):
         key = f"{SEED}/{name}/{rank if sharded else 0}"
@@ -138,6 +144,9 @@ def _randomize(worker):
 
     for name, p in model.named_parameters():
         if ".experts." in name:
+            continue
+        if name.endswith("weight_scale"):
+            p.fill_(1.0)
             continue
         replicated = p.ndim == 1 or ".gate." in name
         if p.ndim == 1:
@@ -158,6 +167,8 @@ def _randomize(worker):
         # would amplify; the FFN under test needs no attention content
         layer.self_attn.q_norm.weight.fill_(-1.0)
         if layer.layer_id not in SPARSE:
+            if stable_prefill:
+                layer.mlp.down_proj.weight.zero_()
             continue
         moe = layer.block_sparse_moe
         if moe.gate._bf16x3_weight is not None:
@@ -178,6 +189,12 @@ def _randomize(worker):
                 ),
                 requires_grad=False,
             )
+        if stable_prefill:
+            # Native prefill sums BF16 down-projection tiles atomically. One
+            # nonzero shared-expert tile gives graph replay a stable cache
+            # reference; the independent op tests cover all routed experts.
+            new["w2_weight"][:128].zero_()
+            new["w2_weight"][128, :, 16:].zero_()
         converted = convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             mxfp4_backend=Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
             layer=torch.nn.Module(),
@@ -186,6 +203,18 @@ def _randomize(worker):
         for key, src in zip(new, converted):
             getattr(experts, key).view(torch.uint8).copy_(src.view(torch.uint8))
     torch.accelerator.synchronize()
+
+
+@register_model_loader("minimax_m3_seeded_dummy")
+class SeededDummyModelLoader(DummyModelLoader):
+    def load_model(self, vllm_config, model_config, prefix=""):
+        model = super().load_model(vllm_config, model_config, prefix)
+        _randomize_model(model, stable_prefill=True)
+        return model
+
+
+class SeededWeightsWorkerExtension:
+    """Import the seeded loader in each worker before device initialization."""
 
 
 def _requests():
@@ -320,24 +349,43 @@ def _replay(worker):
     return results, failed
 
 
-def _engine(vllm_runner, model_dir, mono, graphs=False, **extra):
+def _engine(
+    vllm_runner,
+    model_dir,
+    mono,
+    graphs=False,
+    mono_mode="ffn",
+    max_num_seqs=None,
+    load_format="dummy",
+    enforce_eager=None,
+    ir_op_priority=None,
+    cudagraph_capture_sizes=None,
+    **extra,
+):
+    compilation_config = {"cudagraph_mode": "FULL_DECODE_ONLY" if graphs else "NONE"}
+    if cudagraph_capture_sizes is not None:
+        compilation_config["cudagraph_capture_sizes"] = cudagraph_capture_sizes
+    kernel_config = {
+        "ir_op_priority": ir_op_priority or {},
+        "enable_jit_warmup": False,
+        "moe_backend": "aiter",
+        "monokernel": mono,
+    }
+    if mono_mode is not None:
+        kernel_config["monokernel_mode"] = mono_mode
     return vllm_runner(
         model_dir,
-        load_format="dummy",
+        load_format=load_format,
         skip_tokenizer_init=True,
         tensor_parallel_size=4,
-        max_num_seqs=max(BATCHES),
+        max_num_seqs=max(BATCHES) if max_num_seqs is None else max_num_seqs,
         kv_cache_dtype="fp8",
         block_size=128,
         attention_backend="TRITON_ATTN",
         attention_config={"indexer_kv_dtype": "fp8"},
-        kernel_config={
-            "enable_jit_warmup": False,
-            "moe_backend": "aiter",
-            "monokernel": mono,
-        },
-        enforce_eager=not graphs,
-        compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY" if graphs else "NONE"},
+        kernel_config=kernel_config,
+        enforce_eager=not graphs if enforce_eager is None else enforce_eager,
+        compilation_config=compilation_config,
         enable_prefix_caching=False,
         enable_trace_replay=True,
         max_logprobs=-1,
@@ -418,6 +466,111 @@ def test_model_matches_native(vllm_runner, model_dir, native, graphs):
     if graphs:
         resets = {n - b for (n, _), b in zip(after, before)}
         assert len(resets) == 1 and resets.pop() >= len(BATCHES) * STEPS // 3 - 1
+
+
+def _projection_dtypes(worker):
+    return [
+        (layer.self_attn.qkv_proj.weight.dtype, layer.self_attn.o_proj.weight.dtype)
+        for layer in _backbone(worker).layers
+    ]
+
+
+def test_online_fp8_projections_match_native(vllm_runner, model_dir):
+    """FP8 attention projections still run natively around the fused FFN;
+    mono must accept their post-load layout and preserve decode logprobs."""
+    quantization = {
+        "targets": {
+            "*self_attn*qkv_proj": "fp8_per_channel",
+            "*self_attn*o_proj": "fp8_per_channel",
+        }
+    }
+    rows = []
+    for mono in (False, True):
+        with _engine(
+            vllm_runner,
+            model_dir,
+            mono=mono,
+            quantization_config=quantization,
+        ) as runner:
+            runner.llm.collective_rpc(_randomize)
+            for dtypes in runner.llm.collective_rpc(_projection_dtypes):
+                assert dtypes == [(torch.float8_e4m3fn,) * 2] * LAYERS
+            rows.append(_decode(runner.llm))
+    cos, errors = _logit_errors(rows[1], rows[0])
+    assert cos > 0.99 and (errors < 3e-2).float().mean().item() > 0.8
+
+
+def _full_layer_state(worker):
+    from vllm.models.minimax_m3.amd.specialized_decode.runtime.layer_executor import (
+        LayerExecutor,
+    )
+    from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadataBuilder
+
+    executor = _executor(worker)
+    splits = {
+        builder.num_par_softmax_segments
+        for groups in worker.model_runner.attn_groups
+        for group in groups
+        for builder in group.metadata_builders
+        if isinstance(builder, TritonAttentionMetadataBuilder)
+    }
+    return (
+        isinstance(executor, LayerExecutor),
+        executor.outputs,
+        executor.health().failed,
+        sorted(splits),
+    )
+
+
+def test_default_monokernel_graph_replay_matches_uncaptured_forward(
+    vllm_runner, model_dir, monkeypatch
+):
+    """Default --monokernel selects full-layer MXFP8 math under FULL replay.
+
+    The FFN-only tests above retain their BF16 reference. Layer mode's expert
+    arithmetic is checked independently in test_layer_post_matches_mxfp8_reference.
+    Keep native providers and physical batch shapes identical; seed before
+    weight packing and graph capture. Padding is checked by the layer op tests.
+    """
+    # Admit every request before stepping so both engines see the same batches.
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    outputs = []
+    for graphs in (False, True):
+        with _engine(
+            vllm_runner,
+            model_dir,
+            mono=True,
+            mono_mode=None,
+            graphs=graphs,
+            max_num_seqs=8,
+            enforce_eager=False,
+            async_scheduling=False,
+            disable_custom_all_reduce=True,
+            cudagraph_capture_sizes=list(range(1, 9)) if graphs else None,
+            ir_op_priority={
+                "rms_norm": ["aiter"],
+                "fused_add_rms_norm": ["aiter"],
+            },
+            load_format="minimax_m3_seeded_dummy",
+            worker_extension_cls=(
+                "tests.models.minimax_m3.amd_specialized_decode.test_model."
+                "SeededWeightsWorkerExtension"
+            ),
+            quantization_config={
+                "targets": {
+                    "*self_attn*qkv_proj": "fp8_per_channel",
+                    "*self_attn*o_proj": "fp8_per_channel",
+                }
+            },
+        ) as runner:
+            outputs.append(_decode(runner.llm))
+            for full_layer, count, failed, splits in runner.llm.collective_rpc(
+                _full_layer_state
+            ):
+                assert full_layer and count > 0 and not failed
+                assert splits == [256]
+    cos, errors = _logit_errors(outputs[1], outputs[0])
+    assert cos > 0.99 and (errors < 3e-2).float().mean().item() > 0.8
 
 
 def _arm_late_fault(worker, rank, ticks):

@@ -118,6 +118,8 @@ steps:
   depends_on:
   - image-build-amd
   source_file_dependencies:
+  - vllm/config/kernel.py
+  - vllm/v1/attention/backends/triton_attn.py
   - vllm/models/minimax_m3/amd/
   - tests/models/minimax_m3/amd_specialized_decode/
   commands:
