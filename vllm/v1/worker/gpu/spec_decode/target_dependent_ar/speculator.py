@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
-import copy
-import ctypes
 import os
 from typing import Any
 
@@ -11,11 +9,10 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
-from vllm.distributed.device_communicators.pynccl_wrapper import ncclComm_t
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
@@ -46,96 +43,6 @@ def capture_while_body(pred: torch.Tensor):
     graph.set_conditional_handle_for_current_node(pred)
     graph.end_capture_to_conditional_node()
     torch.cuda.set_stream(torch.cuda.current_stream())
-
-
-class _NcclConfig(ctypes.Structure):
-    """ncclConfig_t as declared by the nccl.h of NCCL 2.30.7."""
-
-    _fields_ = [
-        ("size", ctypes.c_size_t),
-        ("magic", ctypes.c_uint),
-        ("version", ctypes.c_uint),
-        ("blocking", ctypes.c_int),
-        ("cgaClusterSize", ctypes.c_int),
-        ("minCTAs", ctypes.c_int),
-        ("maxCTAs", ctypes.c_int),
-        ("netName", ctypes.c_char_p),
-        ("splitShare", ctypes.c_int),
-        ("trafficClass", ctypes.c_int),
-        ("commName", ctypes.c_char_p),
-        ("collnetEnable", ctypes.c_int),
-        ("CTAPolicy", ctypes.c_int),
-        ("shrinkShare", ctypes.c_int),
-        ("nvlsCTAs", ctypes.c_int),
-        ("nChannelsPerNetPeer", ctypes.c_int),
-        ("nvlinkCentricSched", ctypes.c_int),
-        ("graphUsageMode", ctypes.c_int),
-        ("numRmaCtx", ctypes.c_int),
-        ("maxP2pPeers", ctypes.c_int),
-        ("graphStreamOrdering", ctypes.c_int),
-    ]
-
-
-def split_pynccl_without_graph_mixing(
-    pynccl: PyNcclCommunicator,
-) -> PyNcclCommunicator:
-    """Returns a copy of `pynccl` on a new communicator over the same ranks whose
-    CUDA graph captures contain only kernel nodes.
-
-    With its default graphUsageMode=2, NCCL adds event wait and record nodes to the
-    graph it is captured into, and CUDA does not allow those in the body of a
-    conditional node. graphUsageMode=1 leaves the ordering to the caller: the new
-    communicator must not be used eagerly while a graph that uses it is in flight,
-    and graphs that use it must not run concurrently on different streams. It
-    shares no resources with `pynccl`.
-    """
-    if pynccl.nccl_version < 23000:
-        raise RuntimeError(
-            f"NCCL {pynccl.nccl.ncclGetVersion()} predates the 2.30 ncclConfig_t"
-        )
-    config = _NcclConfig()
-    for name, field_type in _NcclConfig._fields_:
-        if field_type is ctypes.c_int:
-            setattr(config, name, -(2**31))  # NCCL_CONFIG_UNDEF_INT
-    config.size = ctypes.sizeof(_NcclConfig)
-    config.magic = 0xCAFEBEEF  # NCCL_API_MAGIC
-    config.version = 23007  # NCCL_VERSION_CODE of that nccl.h
-    config.splitShare = 0
-    config.graphUsageMode = 1
-    split = pynccl.nccl.lib.ncclCommSplit
-    split.restype = ctypes.c_int
-    split.argtypes = [
-        ncclComm_t,
-        ctypes.c_int,
-        ctypes.c_int,
-        ctypes.POINTER(ncclComm_t),
-        ctypes.POINTER(_NcclConfig),
-    ]
-    comm = ncclComm_t()
-    with torch.accelerator.device_index(pynccl.device.index):
-        pynccl.nccl.NCCL_CHECK(
-            split(
-                pynccl.comm, 0, pynccl.rank, ctypes.byref(comm), ctypes.byref(config)
-            )
-        )
-    split_pynccl = copy.copy(pynccl)
-    split_pynccl.comm = comm
-    return split_pynccl
-
-
-@contextlib.contextmanager
-def use_tp_pynccl(pynccl: PyNcclCommunicator | None):
-    """Routes the TP group's pynccl collectives to `pynccl`; None changes nothing."""
-    if pynccl is None:
-        yield
-        return
-    device_communicator = get_tp_group().device_communicator
-    tp_pynccl = device_communicator.pynccl_comm
-    device_communicator.pynccl_comm = pynccl
-    try:
-        yield
-    finally:
-        device_communicator.pynccl_comm = tp_pynccl
 
 
 class TargetDependentARSpeculator(DraftModelSpeculator):
@@ -192,9 +99,6 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         self.dyn_draft_positions = torch.arange(
             self.num_speculative_steps, device=device
         )
-        # The TP collectives of the captured decode graphs run on this
-        # communicator (see split_pynccl_without_graph_mixing).
-        self.dyn_draft_pynccl: PyNcclCommunicator | None = None
 
     def load_model(self, target_model: nn.Module) -> None:
         super().load_model(target_model)
@@ -295,24 +199,14 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             if self.supports_decode_metadata_update
             else self._generate_draft
         )
-        if self.dyn_draft_mode is not None:
-            if not (
-                self.supports_decode_metadata_update
-                and self.decode_cudagraph_manager.needs_capture()
-            ):
-                raise ValueError(
-                    "VLLM_DYN_DRAFT needs FULL CUDA graphs of the fused draft decode"
-                )
-            tp_pynccl = getattr(get_tp_group().device_communicator, "pynccl_comm", None)
-            if (
-                self.dyn_draft_pynccl is None
-                and tp_pynccl is not None
-                and not tp_pynccl.disabled
-            ):
-                self.dyn_draft_pynccl = split_pynccl_without_graph_mixing(tp_pynccl)
-        # Capture also runs every graph once eagerly beforehand, so NCCL sets up
-        # the new communicator's connections outside of graph capture.
-        with use_tp_pynccl(self.dyn_draft_pynccl):
+        if self.dyn_draft_mode is not None and not (
+            self.supports_decode_metadata_update
+            and self.decode_cudagraph_manager.needs_capture()
+        ):
+            raise ValueError(
+                "VLLM_DYN_DRAFT needs FULL CUDA graphs of the fused draft decode"
+            )
+        with self._decode_capture_collectives():
             self.decode_cudagraph_manager.capture(
                 decode_fn,
                 self.model_state,
@@ -325,6 +219,28 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
                 and self.speculative_config.uses_dynamic_speculative_decoding(),
             )
         self.on_multi_step_decode_end(self.max_num_reqs)
+
+    def _decode_capture_collectives(self) -> contextlib.AbstractContextManager:
+        """With VLLM_DYN_DRAFT, the decode graphs gather the draft logits through
+        symmetric memory: a conditional node's body may hold no NCCL launch, since
+        NCCL's default graph mixing adds event nodes."""
+        tp_group = get_tp_group()
+        if self.dyn_draft_mode is None or tp_group.world_size == 1:
+            return contextlib.nullcontext()
+        # The largest decode batch's logits span the LM head's padded vocabulary,
+        # in the head_dtype of the config the drafter is built under.
+        vocab_size = max(
+            (
+                module.num_embeddings_padded
+                for module in self.model.modules()
+                if isinstance(module, ParallelLMHead)
+            ),
+            default=self.vocab_size,
+        )
+        logits_bytes = self.vllm_config.model_config.head_dtype.itemsize
+        return tp_group.device_communicator.symm_mem_all_gather(
+            self.max_num_reqs * vocab_size * logits_bytes
+        )
 
     @torch.inference_mode()
     def propose(

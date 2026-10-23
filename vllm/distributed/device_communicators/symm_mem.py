@@ -154,3 +154,60 @@ class SymmMemCommunicator:
             )
         out.copy_(self.buffer[: inp.numel()].view(out.shape))
         return out
+
+
+class SymmMemAllGather:
+    """All-gather through a symmetric memory buffer with PyTorch's multimem kernel.
+
+    The collective is a single kernel that synchronizes the ranks on the buffer's
+    signal pads, so it can be captured where NCCL cannot: NCCL's default graph
+    mixing adds event record and wait nodes, which the body of a CUDA graph
+    conditional node may not hold. Creating one is collective over `group` and
+    needs multicast support.
+    """
+
+    def __init__(self, group: ProcessGroup, device: torch.device, max_bytes: int):
+        if not symm_mem_available:
+            raise RuntimeError("SymmMemAllGather needs PyTorch symmetric memory.")
+        self.group_name = group.group_name
+        self.world_size = dist.get_world_size(group)
+        self.max_bytes = max_bytes
+        self.buffer = torch_symm_mem.empty(max_bytes, dtype=torch.uint8, device=device)
+        handle = torch_symm_mem.rendezvous(self.buffer, self.group_name)
+        if handle.multicast_ptr == 0:
+            raise RuntimeError(
+                "SymmMemAllGather needs symmetric memory multicast, which this "
+                "platform does not support."
+            )
+
+    def all_gather(self, inp: torch.Tensor, dim: int = -1) -> torch.Tensor:
+        """Every rank's `inp`, concatenated along `dim` in rank order."""
+        if dim < 0:
+            dim += inp.dim()
+        inp = inp.contiguous()
+        # The kernel's vector width (up to 16 bytes) follows the output's
+        # alignment, not the input's.
+        if inp.data_ptr() % 16 or inp.nbytes % 16:
+            raise RuntimeError(
+                "SymmMemAllGather: the input's address and size must be multiples "
+                "of 16 bytes."
+            )
+        nbytes = inp.nbytes * self.world_size
+        if nbytes > self.max_bytes:
+            raise RuntimeError(
+                f"SymmMemAllGather: gathering {nbytes} bytes exceeds its "
+                f"{self.max_bytes}-byte buffer."
+            )
+        gathered = (
+            self.buffer[:nbytes]
+            .view(inp.dtype)
+            .view(self.world_size * inp.shape[0], *inp.shape[1:])
+        )
+        torch.ops.symm_mem.multimem_all_gather_out(inp, self.group_name, gathered)
+        # Copy out of the buffer, which the next all-gather overwrites.
+        by_rank = gathered.view(self.world_size, *inp.shape).movedim(0, dim)
+        out = torch.empty(by_rank.shape, dtype=inp.dtype, device=inp.device)
+        out.copy_(by_rank)
+        return out.view(
+            *inp.shape[:dim], self.world_size * inp.shape[dim], *inp.shape[dim + 1 :]
+        )
