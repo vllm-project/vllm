@@ -25,6 +25,8 @@ pub enum TokenIdsError {
     EmptyBadWordTokenization,
     #[error("Too many bad words: {count}. The max number is {max}.")]
     TooManyBadWords { count: usize, max: usize },
+    #[error("Too many bad words after tokenization: {count}. The max number is {max}.")]
+    TooManyTokenizedBadWords { count: usize, max: usize },
     #[error("Too many total bad word tokens: {count}. The max is {max}.")]
     TooManyBadWordTokens { count: usize, max: usize },
     #[error(
@@ -62,11 +64,16 @@ fn env_limit(name: &str, default: usize) -> usize {
     std::env::var(name).ok().and_then(|value| value.parse().ok()).unwrap_or(default)
 }
 
+/// The per-request cap on bad-word sequences.
+pub(super) fn max_num_bad_words() -> usize {
+    env_limit(MAX_NUM_BAD_WORDS_ENV, DEFAULT_MAX_NUM_BAD_WORDS)
+}
+
 /// Mirrors Model Runner V2's per-request bad-words buffer limits:
 /// <https://github.com/vllm-project/vllm/blob/a956a8126e6bd184cb0a6b8f7318fe4717675c2f/vllm/v1/worker/gpu/sample/bad_words.py#L40-L66>
 fn validate_bad_words_limits(bad_words_token_ids: &[Vec<u32>]) -> Result<(), TokenIdsError> {
     let count = bad_words_token_ids.len();
-    let max = env_limit(MAX_NUM_BAD_WORDS_ENV, DEFAULT_MAX_NUM_BAD_WORDS);
+    let max = max_num_bad_words();
     if count > max {
         return Err(TokenIdsError::TooManyBadWords { count, max });
     }

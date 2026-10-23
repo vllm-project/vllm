@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::cmp::Ordering;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 pub(crate) mod logprobs;
 pub(crate) mod sampling;
@@ -10,7 +10,9 @@ pub(crate) mod token_ids;
 
 use logprobs::{lower_prompt_logprob_token_ids, validate_logprobs};
 use sampling::{SamplingParamsError, validate_resolved_sampling_params};
-use token_ids::{TokenIdsError, validate_prompt_token_ids, validate_vocab_range};
+use token_ids::{
+    TokenIdsError, max_num_bad_words, validate_prompt_token_ids, validate_vocab_range,
+};
 use vllm_engine_core_client::protocol::sampling::{
     EngineCoreSamplingParams, RepetitionDetectionParams,
 };
@@ -308,9 +310,12 @@ fn tokenize_bad_words(
     if bad_words.iter().any(String::is_empty) {
         return Err(TokenIdsError::EmptyBadWord.into());
     }
+    let max_num_bad_words = max_num_bad_words();
+    let mut seen = HashSet::new();
     let mut all_token_ids = Vec::new();
 
-    for bad_word in bad_words {
+    // Like Python, duplicate words are dropped before tokenization.
+    for bad_word in bad_words.iter().filter(|word| seen.insert(word.as_str())) {
         // Like Python, both encodings drop the word's leading whitespace.
         let bad_word = bad_word.trim_start();
 
@@ -329,9 +334,17 @@ fn tokenize_bad_words(
         let keep_with_space = !with_space.is_empty()
             && with_space[0] != first
             && with_space.len() == without_space.len();
-        all_token_ids.push(without_space);
-        if keep_with_space {
-            all_token_ids.push(with_space);
+        for token_ids in std::iter::once(without_space).chain(keep_with_space.then_some(with_space))
+        {
+            all_token_ids.push(token_ids);
+            // Like Python, stop tokenizing as soon as the cap is exceeded.
+            if all_token_ids.len() > max_num_bad_words {
+                return Err(TokenIdsError::TooManyTokenizedBadWords {
+                    count: all_token_ids.len(),
+                    max: max_num_bad_words,
+                }
+                .into());
+            }
         }
     }
 
@@ -1477,6 +1490,10 @@ mod tests {
 
         let words =
             |words: &[&str]| -> Vec<String> { words.iter().map(|word| word.to_string()).collect() };
+        // The trailing whitespace-only word would fail tokenization, so the
+        // cap error shows that tokenizing stopped at the 129th word.
+        let distinct_words: Vec<String> =
+            (0..129).map(|i| format!("w{i}")).chain(["  ".to_string()]).collect();
 
         let cases = [
             // Leading whitespace is dropped before both encodings.
@@ -1488,6 +1505,15 @@ mod tests {
             (
                 words(&["blocked", "  "]),
                 Err("bad_words entries must tokenize to at least one token."),
+            ),
+            // Duplicates count once against the cap.
+            (
+                words(&["blocked"; 200]),
+                Ok(Some(vec![vec![300], vec![301]])),
+            ),
+            (
+                distinct_words,
+                Err("Too many bad words after tokenization: 129. The max number is 128."),
             ),
         ];
         for (i, (bad_words, expected)) in cases.into_iter().enumerate() {
