@@ -713,6 +713,7 @@ def prefill_local_score(
         comm.errors,
         init_blocks=init_blocks,
         local_blocks=local_blocks,
+        prefill=True,
     )
 
 

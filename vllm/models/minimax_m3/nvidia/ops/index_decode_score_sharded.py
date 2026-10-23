@@ -580,7 +580,10 @@ def _index_k_merge_candidates_kernel(
     recv_stride_h,
     recv_stride_t,
     expected_generations,
+    tokens,
     TAGGED: tl.constexpr,
+    PREFILL: tl.constexpr,
+    ROWS: tl.constexpr,
     W: tl.constexpr,
     INIT: tl.constexpr,
     LOCAL: tl.constexpr,
@@ -588,12 +591,20 @@ def _index_k_merge_candidates_kernel(
     SPIN: tl.constexpr,
     launch_pdl: tl.constexpr,
 ):
-    t = tl.program_id(0)
+    if ROWS > 1:
+        t = tl.program_id(0) * ROWS + tl.arange(0, ROWS)[:, None]
+        k = tl.arange(0, W * 16)[None, :]
+    else:
+        t = tl.program_id(0)
+        k = tl.arange(0, W * 16)
     h = tl.program_id(1)
     row = recv_ptr + h * recv_stride_h + t * recv_stride_t
-    k = tl.arange(0, W * 16)
     source = row + k // 16 * recv_stride_src + k % 16
-    if TAGGED:
+    if PREFILL:
+        ids = tl.load(source + 16, mask=t < tokens, other=-1)
+        scores = tl.load(source, mask=t < tokens, other=0).to(tl.float32, bitcast=True)
+        pending = 0
+    elif TAGGED:
         counter = expected_generations + h * (recv_stride_h // recv_stride_t) + t
         generation = tl.load(counter).to(tl.uint32) + 1
         generation = tl.where(generation == 0, 1, generation).to(tl.uint32)
@@ -626,7 +637,13 @@ def _index_k_merge_candidates_kernel(
         tl.inline_asm_elementwise(
             "trap; mov.u32 $0, 0;", "=r", [], dtype=tl.int32, is_pure=False, pack=1
         )
-    nvalid = tl.minimum(tl.load(valid_ptr + t * valid_stride), MAX_TILES)
+    if ROWS > 1:
+        nvalid = tl.minimum(
+            tl.load(valid_ptr + t * valid_stride, mask=t < tokens, other=0),
+            MAX_TILES,
+        )
+    else:
+        nvalid = tl.minimum(tl.load(valid_ptr + t * valid_stride), MAX_TILES)
     valid = (ids >= 0) & (ids < nvalid)
     scores = tl.where(scores == scores, scores, -float("inf"))
     if W != 2:
@@ -665,20 +682,26 @@ def _index_k_merge_candidates_kernel(
     )
     keys = tl.where(unique, keys, 0)
     keys = tl.sort(keys, descending=True)
-    positions = tl.arange(0, 16)
-    selected_keys = tl.gather(keys, positions, 0)
+    if ROWS > 1:
+        positions = tl.broadcast_to(tl.arange(0, 16)[None, :], (ROWS, 16))
+        selected_keys = tl.gather(keys, positions, 1)
+    else:
+        positions = tl.arange(0, 16)
+        selected_keys = tl.gather(keys, positions, 0)
     selected = (0xFFFFFFFF - selected_keys.to(tl.uint32)).to(tl.int32)
     selected = tl.where(selected_keys != 0, selected, 0x7FFFFFFF)
     selected = tl.sort(selected, descending=False)
     tl.store(
         out_ptr + t * out_stride_t + h * out_stride_h + positions,
         tl.where(selected == 0x7FFFFFFF, -1, selected),
+        mask=t < tokens if PREFILL else True,
     )
-    tl.debug_barrier()
-    if TAGGED:
-        tl.store(counter, generation)
-    else:
-        tl.atomic_xchg(ready, 0, sem="release", scope="sys")
+    if not PREFILL:
+        tl.debug_barrier()
+        if TAGGED:
+            tl.store(counter, generation)
+        else:
+            tl.atomic_xchg(ready, 0, sem="release", scope="sys")
     if launch_pdl:
         # Do not let the next layer reuse scratch before this publisher exits.
         tl.extra.cuda.gdc_wait()
@@ -802,12 +825,14 @@ def minimax_m3_index_merge_candidates(
     spin_limit: int = 1 << 26,
     use_pdl: bool = False,
     expected_generations: torch.Tensor | None = None,
+    prefill: bool = False,
 ) -> None:
     """Merge duplicate blocks by max, force init/local blocks, and sort Top16 IDs."""
     world, heads, capacity, row_size = recv_slot.shape
     tokens, out_heads, topk = output.shape
     assert world in SUPPORTED_TP and out_heads == heads
     tagged = expected_generations is not None
+    assert not prefill or (not tagged and not use_pdl)
     assert topk == TOPK and tokens <= capacity
     assert row_size == (2 * TOPK if tagged else CANDIDATE_ROW_SIZE)
     assert recv_slot.dtype == (torch.int64 if tagged else torch.int32)
@@ -817,7 +842,8 @@ def minimax_m3_index_merge_candidates(
         assert expected_generations.is_contiguous()
     assert recv_slot.stride(-1) == output.stride(-1) == 1
     assert num_valid_pages.shape == (tokens,)
-    _index_k_merge_candidates_kernel[(tokens, heads)](
+    rows = 8 if prefill and world == 2 else 1
+    _index_k_merge_candidates_kernel[(triton.cdiv(tokens, rows), heads)](
         recv_slot,
         num_valid_pages,
         output,
@@ -829,12 +855,15 @@ def minimax_m3_index_merge_candidates(
         recv_slot.stride(1),
         recv_slot.stride(2),
         expected_generations,
+        tokens,
         TAGGED=tagged,
+        PREFILL=prefill,
+        ROWS=rows,
         W=world,
         INIT=init_blocks,
         LOCAL=local_blocks,
         MAX_TILES=MAX_K_TILES,
         SPIN=spin_limit,
         launch_pdl=use_pdl,
-        num_warps=1 if world == 2 else 4,
+        num_warps=rows if world == 2 else 4,
     )
