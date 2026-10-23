@@ -1,7 +1,13 @@
 # Guide de Déploiement - Service vLLM Medium (Qwen3-32B-AWQ)
 
-**Dernière mise à jour** : 2025-10-22  
-**Version** : 1.0
+> ⚠️ **DOCUMENT HISTORIQUE (2025-10)** — décrit le déploiement **Qwen3-32B-AWQ**, retiré de production depuis ~novembre 2025 (lignée : GLM-4.7-Flash → Qwen3.5 → Qwen3.6 → Swift-1.5-Qwen3.8-27B, en prod depuis 2026-09-25). Conservé pour ses procédures génériques (pré-validation, monitoring, troubleshooting).
+>
+> **Pour déployer le service courant** : profile `myia_vllm/configs/docker/profiles/medium-swift15-27b.yml` (image `vllm/vllm-openai:v0.32.0` épinglée, port **5002**, conteneur `myia_vllm-medium-swift15-27b`) — commandes dans `CLAUDE.md` §Common Commands.
+>
+> **Ne pas suivre tel quel** : `--enable-chunked-prefill` est aujourd'hui **interdit** (force le fallback V0), le prefix caching est **activé** (et accordé `--prefix-match-unit 16`), l'image n'est plus `latest` mais épinglée, et plusieurs chemins cités (`profiles/medium.yml`, `scripts/deploy_medium_monitored.ps1`) **n'existent plus**.
+
+**Dernière mise à jour** : 2025-10-22 (marqué historique le 2026-10-23, passe fossiles siège po-2025)  
+**Version** : 1.1-historique
 
 ## 📋 Table des Matières
 1. [Prérequis Système](#1-prérequis-système)
