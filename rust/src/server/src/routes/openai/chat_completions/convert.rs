@@ -400,7 +400,14 @@ fn convert_assistant_tool_calls(
             Ok(AssistantContentBlock::ToolCall(AssistantToolCall {
                 id: tool_call.id,
                 name: tool_call.function.name,
-                arguments: tool_call.function.arguments.unwrap_or_else(|| "{}".to_string()),
+                // Like Python, an empty `arguments` string means no arguments,
+                // the same as an absent one: clients send it for calls to tools
+                // without parameters.
+                arguments: tool_call
+                    .function
+                    .arguments
+                    .filter(|arguments| !arguments.is_empty())
+                    .unwrap_or_else(|| "{}".to_string()),
             }))
         })
         .collect()
@@ -1518,6 +1525,46 @@ mod tests {
             }]
         );
         assert_eq!(prepared.chat_request.tool_choice(), &ChatToolChoice::None);
+    }
+
+    #[test]
+    fn prepare_chat_request_lowers_empty_tool_call_arguments_as_absent() {
+        let tool_call_arguments = |arguments: serde_json::Value| {
+            let request: ChatCompletionRequest = serde_json::from_value(json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "messages": [{
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "get_current_time", "arguments": arguments},
+                    }],
+                }],
+            }))
+            .expect("parse request");
+            let prepared = prepare_chat_request(
+                request,
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+            )
+            .expect("request is valid");
+            let [VllmChatMessage::Assistant { content }] =
+                prepared.chat_request.messages.as_slice()
+            else {
+                panic!("expected one assistant message");
+            };
+            let [AssistantContentBlock::ToolCall(call)] = content.as_slice() else {
+                panic!("expected one tool call");
+            };
+            call.arguments.clone()
+        };
+
+        assert_eq!(tool_call_arguments(json!("")), "{}");
+        assert_eq!(tool_call_arguments(json!(null)), "{}");
+        assert_eq!(
+            tool_call_arguments(json!(r#"{"tz":"UTC"}"#)),
+            r#"{"tz":"UTC"}"#
+        );
     }
 
     #[test]
