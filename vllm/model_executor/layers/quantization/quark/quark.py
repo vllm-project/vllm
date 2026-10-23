@@ -1084,6 +1084,9 @@ class QuarkLinearMethod(LinearMethodBase):
 
         return scheme.apply_weights(layer, x, bias=bias)
 
+    def fuse_input_hadamard(self, layer: torch.nn.Module, size: int) -> bool:
+        return layer.scheme.fuse_input_hadamard(layer, size)
+
 
 class QuarkKVCacheMethod(BaseKVCacheMethod):
     """Supports loading kv-cache scaling factors from quark checkpoints."""

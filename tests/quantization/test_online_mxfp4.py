@@ -10,6 +10,7 @@ against the pure-torch reference in `reference_mxfp4.py`.
 import pytest
 import torch
 
+from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.config.kernel import MoEBackend
 from vllm.config.model import ModelConfig
 from vllm.model_executor.kernels.linear import _POSSIBLE_MXFP4_KERNELS
@@ -627,3 +628,23 @@ def test_quark_ocp_mx_dense_rejects_unaligned_input_partition():
             params_dtype=torch.bfloat16,
             weight_loader=lambda *_: None,
         )
+
+
+@pytest.mark.skipif(
+    not is_aiter_found_and_supported(),
+    reason="gemm_with_dynamic_quant is registered only with AITER.",
+)
+def test_gemm_with_dynamic_quant_fake_dtype():
+    """torch.compile sizes the op's output from its fake; a fake that reports
+    another dtype than the real op makes the compiled graph read past it."""
+    from torch._subclasses.fake_tensor import FakeTensorMode
+
+    with FakeTensorMode(), torch.device(current_platform.device_type):
+        x = torch.empty(16, 64, dtype=torch.bfloat16)
+        weight = torch.empty(32, 32, dtype=torch.uint8)
+        weight_scale = torch.empty(32, 2, dtype=torch.uint8)
+        y = torch.ops.vllm.gemm_with_dynamic_quant(
+            x, weight, weight_scale, True, torch.bfloat16, hadamard_rotate=True
+        )
+    assert y.dtype == torch.bfloat16
+    assert y.shape == (16, 32)
