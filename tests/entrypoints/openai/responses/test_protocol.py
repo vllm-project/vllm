@@ -134,3 +134,23 @@ def test_responses_input_assistant_string_content_without_type_still_valid() -> 
     body = {"model": "m", "input": [{"role": "assistant", "content": "hi"}]}
     request = ResponsesRequest.model_validate(body)
     assert len(request.input) == 1
+
+
+def test_responses_input_assistant_explicit_null_type_still_rejected() -> None:
+    """The fix is scoped to items that *omit* the ``type`` key. An assistant
+    item with an explicit ``"type": null`` keeps the base behavior (rejected),
+    so we do not silently change how an explicit null is handled.
+    """
+    body = {
+        "model": "m",
+        "input": [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "type": None,
+                "content": [{"type": "output_text", "text": "x"}],
+            },
+        ],
+    }
+    with pytest.raises(ValidationError):
+        ResponsesRequest.model_validate(body)
