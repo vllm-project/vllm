@@ -1240,6 +1240,7 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
             sampled_token_ids=sampled_token_ids,
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
             prompt_token_id_logprobs_dict=prompt_token_id_logprobs_dict,
+            lora_load_event=self.take_lora_load_event(),
         )
         if sampler_output.logprobs_tensors is not None:
             model_runner_output.logprobs = sampler_output.logprobs_tensors.tolists()
@@ -1312,6 +1313,7 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
             ],
             kv_connector_output=kv_connector_output,
             ec_connector_output=ec_connector_output,
+            lora_load_event=self.take_lora_load_event(),
         )
         self.postprocess_num_computed_tokens(input_batch)
         return model_runner_output

@@ -4011,6 +4011,28 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
                 weight_version: Some(
                     "v7",
                 ),
+                lora_load_event: Some(
+                    LoraLoadEvent {
+                        gpu_adapters: [
+                            "alpha",
+                        ],
+                        cpu_adapters: [
+                            "alpha",
+                            "beta",
+                        ],
+                        pinned_adapters: [],
+                        ranks: {
+                            "alpha": 64,
+                        },
+                        loads: [
+                            LoraLoadTiming {
+                                adapter_name: "alpha",
+                                transition: "load",
+                                seconds: 0.25,
+                            },
+                        ],
+                    },
+                ),
             },
         )
     "#]]
@@ -4219,6 +4241,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     assert!(legacy_ready.effective_attention_block_size.is_none());
     assert!(ready_response.supports_lora);
     assert_eq!(ready_response.max_loras, 8);
+    assert_eq!(ready_response.max_cpu_loras, 16);
     assert_eq!(
         ready_response.weight_transfer_backend.as_deref(),
         Some("nccl")

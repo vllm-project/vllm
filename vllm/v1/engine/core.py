@@ -37,6 +37,7 @@ from vllm.envs import enable_envs_cache
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import configure_logging, init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
+from vllm.lora.load_event import LoRALoadEvent
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.cache import (
     MultiModalCacheMissError,
@@ -263,6 +264,13 @@ class EngineCore:
         self.aborts_queue = queue.Queue[list[str]]()
 
         self._idle_state_callbacks: list[Callable] = []
+
+        # In-process frontend only; EngineCoreProc sends to its clients instead.
+        self._pending_lora_load_event: LoRALoadEvent | None = None
+        # The last LoRA snapshot sent, and how many of the queued batches took
+        # their snapshot before a later adapter RPC took that one.
+        self._lora_load_event: LoRALoadEvent | None = None
+        self._num_stale_lora_snapshots = 0
 
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
@@ -709,6 +717,43 @@ class EngineCore:
         for eco in outputs.values():
             eco.weight_version = self._weight_version
 
+    def _publish_step_lora_load_event(self, event: LoRALoadEvent | None) -> None:
+        """Publish the snapshot from a step's output. A step that was queued
+        during an adapter RPC took its snapshot before the RPC took its own, so
+        only the step's timings are sent, with the RPC's adapters."""
+        if self._num_stale_lora_snapshots > 0:
+            self._num_stale_lora_snapshots -= 1
+            if event is None or not event.loads or self._lora_load_event is None:
+                return
+            event = msgspec.structs.replace(self._lora_load_event, loads=event.loads)
+        self._publish_lora_load_event(event)
+
+    def _publish_lora_rpc_load_event(self) -> None:
+        """Publish the snapshot from the last add/remove/pin_lora reply."""
+        event = self.model_executor.take_lora_load_event()
+        if event is not None and self.batch_queue:
+            self._num_stale_lora_snapshots = len(self.batch_queue)
+        self._publish_lora_load_event(event)
+
+    def _publish_lora_load_event(self, event: LoRALoadEvent | None) -> None:
+        if event is None:
+            return
+        self._lora_load_event = event
+        self._send_lora_load_event(event)
+
+    def _send_lora_load_event(self, event: LoRALoadEvent) -> None:
+        """Hold the event for the in-process frontend's next output. Snapshots
+        replace each other; their timings accumulate."""
+        if self._pending_lora_load_event is not None:
+            event = msgspec.structs.replace(
+                event, loads=self._pending_lora_load_event.loads + event.loads
+            )
+        self._pending_lora_load_event = event
+
+    def take_pending_lora_load_event(self) -> LoRALoadEvent | None:
+        event, self._pending_lora_load_event = self._pending_lora_load_event, None
+        return event
+
     def _should_throttle_prefills(self) -> bool:
         """Whether to defer prefills this step, to run them every Nth step.
         Overridden by the DP engine core to align across ranks."""
@@ -746,6 +791,7 @@ class EngineCore:
         )
         self._attach_iteration_details(engine_core_outputs, iteration_details)
         self._attach_weight_version(engine_core_outputs)
+        self._publish_step_lora_load_event(model_output.lora_load_event)
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
@@ -854,6 +900,7 @@ class EngineCore:
         )
         self._attach_iteration_details(engine_core_outputs, iteration_details)
         self._attach_weight_version(engine_core_outputs)
+        self._publish_step_lora_load_event(model_output.lora_load_event)
 
         # NOTE(nick): We can either handle the deferred tasks here or save
         # in a field and do it immediately once step_with_batch_queue is
@@ -1227,16 +1274,22 @@ class EngineCore:
         return self.collective_rpc("compute_weight_checksums")
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
-        return self.model_executor.add_lora(lora_request)
+        added = self.model_executor.add_lora(lora_request)
+        self._publish_lora_rpc_load_event()
+        return added
 
     def remove_lora(self, lora_id: int) -> bool:
-        return self.model_executor.remove_lora(lora_id)
+        removed = self.model_executor.remove_lora(lora_id)
+        self._publish_lora_rpc_load_event()
+        return removed
 
     def list_loras(self) -> set[int]:
         return self.model_executor.list_loras()
 
     def pin_lora(self, lora_id: int) -> bool:
-        return self.model_executor.pin_lora(lora_id)
+        pinned = self.model_executor.pin_lora(lora_id)
+        self._publish_lora_rpc_load_event()
+        return pinned
 
     def save_sharded_state(
         self,
@@ -2082,6 +2135,16 @@ class EngineCoreProc(EngineCore):
             for v, p in zip(args, arg_types)
         )
 
+    def _send_lora_load_event(self, event: LoRALoadEvent) -> None:
+        """Send the adapters to every frontend and the timings to client 0
+        only, as with scheduler stats."""
+        self.output_queue.put_nowait((0, EngineCoreOutputs(lora_load_event=event)))
+        adapters_only = msgspec.structs.replace(event, loads=[])
+        for client_index in range(1, len(self.addresses.outputs)):
+            self.output_queue.put_nowait(
+                (client_index, EngineCoreOutputs(lora_load_event=adapters_only))
+            )
+
     def _send_engine_dead(self):
         """Send EngineDead status to the EngineCoreClient."""
         # Put ENGINE_CORE_DEAD in the queue.
@@ -2134,6 +2197,11 @@ class EngineCoreProc(EngineCore):
             supports_lora=self.vllm_config.lora_config is not None,
             max_loras=(
                 self.vllm_config.lora_config.max_loras
+                if self.vllm_config.lora_config is not None
+                else 0
+            ),
+            max_cpu_loras=(
+                self.vllm_config.lora_config.max_cpu_loras or 0
                 if self.vllm_config.lora_config is not None
                 else 0
             ),
