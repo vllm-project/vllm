@@ -180,6 +180,7 @@ def test_replay_on_off_preserves_rejection_sampling_and_rng(monkeypatch):
         ),
         use_fp64_gumbel=False,
         apply_sampling_params=lambda logits, *_: logits,
+        trace_replay_state=None,
     )
     rejection_sampler = _make_rejection_sampler(sampler, num_speculative_steps)
     pos = torch.arange(12, dtype=torch.int32, device=device)
