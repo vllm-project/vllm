@@ -232,6 +232,7 @@ class AdaptiveVerificationManager:
         num_bonus_tokens: int,
         max_total_logits: int,
         copy_admitted_drafts_to_host: bool = False,
+        adaptive_verification_floor: int = 0,
     ):
         self.req_states = req_states
         self.num_speculative_steps = req_states.num_speculative_steps
@@ -239,6 +240,7 @@ class AdaptiveVerificationManager:
         self._copy_stream = torch.cuda.Stream(device)
 
         self.num_bonus_tokens = num_bonus_tokens
+        self.adaptive_verification_floor = adaptive_verification_floor
         # Rejection sampling verifies logits in one contiguous chunk; the
         # chunked path indexes by scheduled (untrimmed) offsets and cannot
         # address the compacted layout, so the budget must fit one chunk.
@@ -423,6 +425,22 @@ class AdaptiveVerificationManager:
             dtype=np.int32,
             count=num_reqs,
         )
+        if self.adaptive_verification_floor > 0:
+            num_decode_requests = np.count_nonzero(
+                self.req_states.num_computed_prefill_tokens[slots]
+                >= self.req_states.prefill_len.np[slots]
+            )
+            if num_decode_requests <= self.adaptive_verification_floor:
+                draft_budget = min(
+                    int(scheduled_drafts.sum()),
+                    max(0, self._max_total_logits - num_reqs * self.num_bonus_tokens),
+                )
+                self._batch_budget = (
+                    dict(zip(req_ids, map(int, scheduled_drafts), strict=True)),
+                    dict(zip(req_ids, map(int, num_non_draft_tokens), strict=True)),
+                    draft_budget,
+                )
+                return int(num_non_draft_tokens.sum()) + draft_budget
         stale_confidences = self._stale_confidences[self._stale_idx].np[slots]
         survival_probability = np.cumprod(stale_confidences.astype(np.float64), axis=1)
         steps = np.arange(self.num_speculative_steps)
@@ -593,6 +611,7 @@ def maybe_create_adaptive_verification_manager(
     vllm_config: "VllmConfig",
     target_layer_names: set[str] | None = None,
     additional_attn_cg_support: tuple[AttentionCGSupport, str | None] | None = None,
+    adaptive_verification_floor: int = 0,
     copy_admitted_drafts_to_host: bool = False,
 ) -> AdaptiveVerificationManager | None:
     if not enable_adaptive_verification:
@@ -642,5 +661,6 @@ def maybe_create_adaptive_verification_manager(
         query_start_loc,
         num_bonus_tokens,
         max_total_logits=max_total_logits,
+        adaptive_verification_floor=adaptive_verification_floor,
         copy_admitted_drafts_to_host=copy_admitted_drafts_to_host,
     )

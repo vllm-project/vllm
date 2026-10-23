@@ -50,6 +50,19 @@ vllm serve MiMo-V2.5-Pro-FP4-DFlash \
 
 Set `enable_adaptive_verification: false` to verify the full block for every request.
 
+To keep low-concurrency verification independent of confidence and cost-profile
+variance, set `adaptive_verification_floor` in the speculative config alongside
+`enable_adaptive_verification: true`. For example,
+`"adaptive_verification_floor": 8` verifies all scheduled draft tokens when there
+are **8 or fewer scheduled decode requests**. Above 8, the usual adaptive budget
+applies. Prefill requests, including the final prefill chunk, do not count toward
+the floor; decode requests without drafts do count. The default is `0`, which
+disables the floor, and negative values are rejected.
+
+The floor does not override the rejection sampler's logits-memory limit or
+increase the number of drafts scheduled. It can increase verification work when
+draft acceptance is low. It has no effect when adaptive verification is disabled.
+
 ## Requirements and limitations
 
 - The attention backend must tolerate device-decided query lengths, since the CPU lengths only bound them from above. Backends that plan off the CPU lengths are excluded by the attention selector, and rejected at startup for models that hard-wire their backend.

@@ -716,6 +716,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             vllm_config=self.vllm_config,
             target_layer_names=target_attn_layer_names,
             additional_attn_cg_support=additional_attn_cg_support,
+            adaptive_verification_floor=(
+                self.speculative_config.adaptive_verification_floor
+                if self.speculative_config is not None
+                else 0
+            ),
             copy_admitted_drafts_to_host=self.batch_sharder is not None,
         )
 

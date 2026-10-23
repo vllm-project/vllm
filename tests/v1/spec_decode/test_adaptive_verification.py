@@ -18,6 +18,7 @@ from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     maybe_create_adaptive_verification_manager,
     resolve_adaptive_cudagraph_mode,
 )
+from vllm.v1.worker.gpu.states import RequestState
 
 
 def make_manager(
@@ -36,6 +37,7 @@ def make_manager(
     manager.cost_tables = (np.zeros(num_reqs + 1), verify_cost_ms)
     manager._max_total_logits = 1 << 30
     manager.num_bonus_tokens = 1
+    manager.adaptive_verification_floor = 0
     return manager
 
 
@@ -308,6 +310,49 @@ def test_zero_budget_rebuilds_cpu_cu_num_logits():
     assert cu_num_logits_np.dtype == scheduled_cu_num_logits.dtype
     # The prefill keeps its scheduled tokens; only drafts are dropped.
     assert np.array_equal(compacted, np.array([1, 1, 40], dtype=np.int32))
+
+
+@pytest.mark.parametrize(
+    "floor,draftless_decode,max_logits,expected_drafts",
+    [
+        (0, False, 16, 0),
+        (1, False, 16, 0),
+        (2, False, 16, 4),
+        (3, False, 16, 4),
+        (2, True, 16, 0),
+        (2, False, 4, 1),
+    ],
+)
+def test_floor_counts_decodes_and_preserves_logits_limit(
+    dist_init, floor, draftless_decode, max_logits, expected_drafts
+):
+    """Prefill completion must not disable the floor; draftless decodes must."""
+    device = torch.device("cuda:0")
+    states = RequestState(3, 32, 16, 2, 32, device)
+    for req_id, computed in [("a", 4), ("b", 4), ("c", 4 if draftless_decode else 3)]:
+        states.add_request(req_id, 4, [1, 2, 3, 4], computed, 8)
+    manager = AdaptiveVerificationManager(
+        states,
+        torch.zeros(4, dtype=torch.int32, device=device),
+        num_bonus_tokens=1,
+        max_total_logits=max_logits,
+        adaptive_verification_floor=floor,
+    )
+    for slot in states.req_id_to_index.values():
+        manager.add_request(slot)
+    manager.set_cost_curves([(1, 1.0), (3, 1.0)], [(1, 1.0), (3, 1.0), (4, 100.0)])
+    scheduled = {"a": 3, "b": 3, "c": 1}
+    drafts = {"a": [5, 6], "b": [5, 6]}
+    assert manager.get_num_tokens(scheduled, drafts) == 3 + expected_drafts
+    cu_logits, offsets, budget, _ = manager.reallocate_drafts(
+        list(scheduled),
+        torch.tensor(list(states.req_id_to_index.values()), device=device),
+    )
+    assert budget == expected_drafts
+    assert offsets[-1].item() == 3 + expected_drafts
+    assert cu_logits[-1].item() == 3 + expected_drafts
+    if expected_drafts == 4:
+        assert offsets.tolist() == [0, 3, 6, 7]
 
 
 def global_topk_budget(

@@ -3663,6 +3663,18 @@ def test_draft_sample_method_probabilistic_is_accepted():
     assert speculative_config.draft_sample_method == "probabilistic"
 
 
+@pytest.mark.parametrize("floor", [0, 8, -1])
+def test_adaptive_verification_floor_validation(floor):
+    kwargs = dict(
+        method="ngram", num_speculative_tokens=2, adaptive_verification_floor=floor
+    )
+    if floor < 0:
+        with pytest.raises(ValidationError, match="adaptive_verification_floor"):
+            SpeculativeConfig(**kwargs)
+    else:
+        assert SpeculativeConfig(**kwargs).adaptive_verification_floor == floor
+
+
 @pytest.mark.parametrize(
     ("method", "drops_block"),
     [("eagle3", True), ("mtp", True), ("dflash", False), ("dspark", False)],
