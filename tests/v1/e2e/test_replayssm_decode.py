@@ -270,13 +270,14 @@ def test_replayssm_flashinfer_mtp(vllm_runner, monkeypatch, use_v2_model_runner)
     )
 
 
-# Prefix spans several mamba blocks; prefix caching only reuses full blocks.
+# Prefix exceeds the FP32 FlashInfer ReplaySSM block at TP1.
+# Prefix caching only reuses full blocks.
 _PC_SENTENCE = (
     "In a detailed survey of state space models, the authors compared many "
     "architectures across a wide range of long-context language tasks and "
     "measured their throughput, memory use, and accuracy in careful detail. "
 )
-_PC_PREFIX = _PC_SENTENCE * 120
+_PC_PREFIX = _PC_SENTENCE * 160
 PREFIX_CACHING_PROMPTS = [
     _PC_PREFIX + "The most important conclusion was that",
     _PC_PREFIX + "Surprisingly, the experiments showed that",
