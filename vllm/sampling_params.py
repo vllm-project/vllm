@@ -1509,6 +1509,9 @@ class BeamSearchParams(
     ignore_eos: bool = False
     temperature: float = 0.0
     length_penalty: float = 1.0
+    """Exponent on the number of generated tokens (including a final EOS) that
+    normalizes a beam's cumulative log-probability when ranking beams, as in
+    Transformers. Values above 0 favor longer beams, below 0 shorter ones."""
     include_stop_str_in_output: bool = False
     structured_outputs: StructuredOutputsParams | None = None
     skip_special_tokens: bool = True

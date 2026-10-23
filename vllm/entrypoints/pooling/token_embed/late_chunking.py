@@ -10,7 +10,7 @@ from vllm.exceptions import VLLMValidationError
 from vllm.outputs import LateChunk, LateChunkingMetadata, PoolingRequestOutput
 from vllm.renderers import TokenizeParams
 
-from .typing import AnyRenderParam, EncodeCMPLRenderParams
+from ..typing import AnyRenderParam, EncodeCMPLRenderParams
 
 
 def prepare_late_chunking_input(
