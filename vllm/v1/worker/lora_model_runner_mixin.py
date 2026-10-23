@@ -14,6 +14,8 @@ from vllm.config.lora import LoRAConfig
 from vllm.device_allocator import get_mem_allocator_instance
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping, LoRAMappingType
+from vllm.lora.load_event import LoRALoadEvent
+from vllm.lora.model_manager import LoRALoadedState
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.models import supports_lora
@@ -27,6 +29,7 @@ logger = init_logger(__name__)
 class LoRAModelRunnerMixin:
     lora_config: LoRAConfig | None
     get_model: Callable[[], nn.Module]
+    _last_lora_loaded_state: LoRALoadedState | None = None
 
     def reset_lora_state(self) -> None:
         """Invalidate LoRA state after base weights are replaced."""
@@ -39,6 +42,28 @@ class LoRAModelRunnerMixin:
         for module in self.get_model().modules():
             if isinstance(module, LogitsProcessorWithLoRA):
                 module.reset_sharded_to_full_mapping()
+
+    def take_lora_load_event(self) -> LoRALoadEvent | None:
+        """Snapshot the adapter caches if they changed since the last take or
+        a transition was timed. Unchanged costs three small set copies and a
+        compare."""
+        if not self.lora_config:
+            return None
+        state = self.lora_manager.get_loaded_state()
+        loads = self.lora_manager.drain_load_timings()
+        if state == self._last_lora_loaded_state and not loads:
+            return None
+        self._last_lora_loaded_state = state
+        gpu_adapters, cpu_adapters, pinned_adapters = (
+            self.lora_manager.get_loaded_names(state)
+        )
+        return LoRALoadEvent(
+            gpu_adapters=gpu_adapters,
+            cpu_adapters=cpu_adapters,
+            pinned_adapters=pinned_adapters,
+            ranks=self.lora_manager.get_loaded_ranks(state),
+            loads=loads,
+        )
 
     def load_lora_model(
         self,
@@ -146,6 +171,7 @@ class LoRAModelRunnerMixin:
                 yield
 
             # __exit__ code
+            self.lora_manager.drain_load_timings()
             if remove_lora:
                 self.lora_manager.remove_all_adapters()
 
