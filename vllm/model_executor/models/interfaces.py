@@ -1608,6 +1608,8 @@ class LocalArgmaxMixin:
 class EagleModelMixin:
     start_layer: int
     aux_hidden_state_layers: tuple[int, ...] = ()
+
+    # Set by models that forward auxiliary hidden states between PP stages.
     supports_aux_hidden_states_over_pp: ClassVar[bool] = False
     AUX_HIDDEN_STATE_KEY: ClassVar[str] = "aux_hidden_states_"
     _aux_slot_base_cached: int = 0
@@ -1649,9 +1651,26 @@ class EagleModelMixin:
             aux_hidden_states.append(value)
         return aux_hidden_states
 
+    @staticmethod
+    def local_aux_layer_ids(
+        start_layer: int,
+        end_layer: int,
+        aux_ids: tuple[int, ...],
+        is_first_rank: bool,
+    ) -> tuple[int, ...]:
+        """Auxiliary layer outputs produced by this stage."""
+        out: list[int] = []
+        if is_first_rank and start_layer in aux_ids:
+            out.append(start_layer)
+        for layer_idx in range(start_layer, end_layer):
+            if (layer_idx + 1) in aux_ids:
+                out.append(layer_idx + 1)
+        return tuple(out)
+
     def pack_local_aux_hidden_states(
         self, aux_hidden_states: list[torch.Tensor]
     ) -> dict[str, torch.Tensor]:
+        """Add this stage's auxiliary hidden states to the PP handoff."""
         if not aux_hidden_states:
             return {}
         base = self._aux_slot_base_cached
@@ -1663,6 +1682,7 @@ class EagleModelMixin:
     def collect_remote_aux_hidden_states(
         self, intermediate_tensors: "IntermediateTensors | None"
     ) -> list[torch.Tensor]:
+        """Read earlier stages' auxiliary hidden states in layer order."""
         total = self._aux_upstream_total_cached
         if total == 0:
             return []
