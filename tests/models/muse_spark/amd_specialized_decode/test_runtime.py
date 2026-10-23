@@ -491,6 +491,27 @@ def test_refuse_model_accepts_the_checkpoint_layout():
         assert refuse_model(bb, layers) == []
 
 
+def test_expert_resources_end_at_the_accepted_weights():
+    """``stages/experts.py`` sizes the w13 / w13s / w2 / w2s buffer resources
+    exactly (a dead slot loads expert EXPERTS, one past the end, as no memory
+    request): each must be the bytes of the weight ``refuse_model`` accepts,
+    or the last expert's tail would read zeros (zero scale codes)."""
+    pytest.importorskip("flydsl")
+    from vllm.models.muse_spark.amd.specialized_decode.mono.stages import experts
+
+    bb = _backbone()
+    assert refuse_model(bb, kernel_layers(bb)) == []
+    X = bb.layers[2].feed_forward.experts.routed_experts
+    E, INTER, MH = spec.EXPERTS, spec.INTER, spec.MOE_HIDDEN
+    for n, got, t, want in (
+        ("w13", experts.W13_BYTES, X.w13_weight, E * 2 * INTER * MH // 2),
+        ("w13s", experts.W13S_BYTES, X.w13_weight_scale, E * 2 * INTER * MH // 32),
+        ("w2", experts.W2_BYTES, X.w2_weight, E * MH * INTER // 2),
+        ("w2s", experts.W2S_BYTES, X.w2_weight_scale, E * MH * INTER // 32),
+    ):
+        assert got == t.nbytes == want, (n, got, t.nbytes, want)
+
+
 def _break(bb, what):
     L = bb.layers[2]
     F, A = L.feed_forward, L.self_attn

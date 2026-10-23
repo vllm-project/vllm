@@ -9,7 +9,8 @@ Each stage is checked tightly on its own inputs as the kernel saw them
 cannot hide behind upstream noise; the chain (``moe``, ``branch_out``) against
 vLLM's stock decode. Every case has an eps-scaled row (the attention output,
 the pooled rows, one route's expert rows) and one case all-zero norm weights
-(gain ``w + 1``); the base case at every width 1 .. 8. Then: the ranks agree
+(gain ``w + 1``) with the last expert (the end of the experts' buffer
+resources) always picked; the base case at every width 1 .. 8. Then: the ranks agree
 bit for bit; one CUDA graph of two steps at two widths replayed 300 times on
 two input sets written in place in turn, every replay bit for bit the eager
 step on its own set; pad rows (NaN inputs)
@@ -57,6 +58,9 @@ EPS_EXPERT = 17  # the "eps" case's forced expert, its w2 scaled by 2^-EPS_W2_SH
 # unscaled, a route's R at these weights has mean square ~370 (CPU reference,
 # 8 ranks): 2^-17 puts mean((R (w + 1))^2) at ~2e-8, i.e. at POST_EXP_EPS
 EPS_W2_SHIFT = 17
+# the "zero_w" case's forced expert: the last one, whose w13 / w13s / w2 / w2s
+# end exactly at their buffer resources' num_records (stages/experts.py)
+LAST_EXPERT = E - 1
 
 
 def _on_gfx950() -> bool:
@@ -218,7 +222,7 @@ def _weights(rank: int, device, case: str = "base") -> dict:
     PRE_EXP_EPS, expert EPS_EXPERT always picked and its w2 scaled by
     2^-EPS_W2_SHIFT (that route's mean square ~ POST_EXP_EPS), the residual
     gate -2.5 (beta ~ 2.4e-4, see ``_inputs``). ``zero_w``:
-    every norm weight zero."""
+    every norm weight zero, expert LAST_EXPERT always picked."""
     from aiter.ops.shuffle import shuffle_weight
     from aiter.utility.fp4_utils import e8m0_shuffle
 
@@ -270,6 +274,7 @@ def _weights(rank: int, device, case: str = "base") -> dict:
     if case == "zero_w":
         for n in ("w_preffn", "w_preexp", "w_postexp"):
             w[n] = torch.zeros_like(w[n])
+        w["bias"][LAST_EXPERT] = 10.0
 
     def shuf_scale(c):
         # e8m0_shuffle on the [E N, K / 32] view of the uint8 codes, the dtype
@@ -611,6 +616,8 @@ def _check_step(runner, w, core, stream, pad, stream_out, branch_out, case) -> d
         assert torch.equal(rb["tw"], tw_s.cpu().float()), case
         if case == "eps":
             assert (rb["ids"][live] == EPS_EXPERT).any(-1).all()
+        if case == "zero_w":
+            assert (rb["ids"][live] == LAST_EXPERT).any(-1).all()
         # ---- pooler on the kernel's own ffn_in
         pooled = _linear(xrow, w["w_pool"]).cpu()
         ref.check_gemv(
