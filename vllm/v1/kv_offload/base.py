@@ -666,6 +666,13 @@ class OffloadingWorker(ABC):
     ) -> bool:
         """Async offloaded medium -> GPU."""
 
+    def submit_sync_load(
+        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: GPULoadStoreSpec
+    ) -> bool:
+        """Like submit_load, for a load waited on within the step. Workers can
+        keep it from queueing behind async loads."""
+        return self.submit_load(job_id, src_spec, dst_spec)
+
     @abstractmethod
     def get_finished(self) -> list[TransferResult]: ...
 

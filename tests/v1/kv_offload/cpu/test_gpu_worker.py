@@ -78,10 +78,16 @@ def test_worker_shutdown_releases_region_and_runs_both_handlers() -> None:
         calls.append("load")
         return True
 
+    def record_sync_load_shutdown() -> bool:
+        calls.append("sync_load")
+        return True
+
     store_handler = MagicMock()
     load_handler = MagicMock()
+    sync_load_handler = MagicMock()
     store_handler.shutdown.side_effect = record_store_shutdown
     load_handler.shutdown.side_effect = record_load_shutdown
+    sync_load_handler.shutdown.side_effect = record_sync_load_shutdown
 
     def record_region_cleanup(**_: bool) -> bool:
         calls.append("region")
@@ -91,11 +97,12 @@ def test_worker_shutdown_releases_region_and_runs_both_handlers() -> None:
     mmap_region.cleanup.side_effect = record_region_cleanup
     worker._store_handler = store_handler
     worker._load_handler = load_handler
+    worker._sync_load_handler = sync_load_handler
     worker._mmap_region = mmap_region
 
     worker.shutdown()
 
-    assert calls == ["store", "load", "region"]
+    assert calls == ["store", "load", "sync_load", "region"]
     store_handler.shutdown.assert_called_once_with()
     load_handler.shutdown.assert_called_once_with()
     mmap_region.cleanup.assert_called_once_with()
@@ -146,6 +153,7 @@ def test_worker_logs_handler_error_and_cleans_region(
     mmap_region.cleanup.side_effect = record_region_cleanup
     worker._store_handler = store_handler
     worker._load_handler = load_handler
+    worker._sync_load_handler = MagicMock()
     worker._mmap_region = mmap_region
 
     with caplog_vllm.at_level(
@@ -223,6 +231,7 @@ def test_worker_syncs_before_cleanup_after_handler_failure(
     mmap_region.cleanup.side_effect = record_region_cleanup
     worker._store_handler = store_handler
     worker._load_handler = load_handler
+    worker._sync_load_handler = MagicMock()
     worker._mmap_region = mmap_region
 
     with caplog_vllm.at_level(
@@ -699,5 +708,55 @@ def test_load_waits_for_pending_compute_stream_writes(default_vllm_config) -> No
             torch.accelerator.synchronize()
             for block_id in loaded_blocks:
                 torch.testing.assert_close(gpu_tensor[block_id].cpu(), expected)
+    finally:
+        worker.shutdown()
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="stream ordering test requires a CUDA-like platform",
+)
+@torch.inference_mode()
+def test_sync_load_does_not_queue_behind_async_load(default_vllm_config) -> None:
+    """Sync loads use their own stream, so waiting for one does not wait for
+    an earlier async load."""
+    device = DEVICES[0]
+    page_size_bytes = 1024
+    gpu_tensor = torch.zeros((8, page_size_bytes), dtype=torch.int8, device=device)
+    worker = CPUOffloadingWorker(
+        kv_caches=CanonicalKVCaches(
+            tensors=[
+                CanonicalKVCacheTensor(
+                    tensor=gpu_tensor, page_size_bytes=page_size_bytes
+                )
+            ],
+            group_data_refs=[
+                [CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=page_size_bytes)]
+            ],
+        ),
+        blocks_per_chunk=1,
+        num_cpu_chunks=8,
+    )
+    busy_stream = torch.cuda.Stream()
+
+    try:
+        # The async load waits on the stream it is submitted from.
+        with torch.cuda.stream(busy_stream):
+            torch.cuda._sleep(50_000_000)
+            assert worker.submit_load(
+                1,
+                CPULoadStoreSpec([0]),
+                GPULoadStoreSpec([0], group_sizes=(1,), block_indices=(0,)),
+            )
+        assert worker.submit_sync_load(
+            2,
+            CPULoadStoreSpec([1]),
+            GPULoadStoreSpec([1], group_sizes=(1,), block_indices=(0,)),
+        )
+
+        worker.wait({2})
+        assert not worker._load_handler._transfer_events[1].query()
+        torch.accelerator.synchronize()
+        assert {result.job_id for result in worker.get_finished()} == {1, 2}
     finally:
         worker.shutdown()

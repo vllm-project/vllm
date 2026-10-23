@@ -18,6 +18,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     ReqId,
     TransferJob,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
+    _group_kv_bytes_per_block,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
     OffloadingEventGroupSpec,
     OffloadingEventsTracker,
@@ -187,7 +190,9 @@ class SchedulerOffloadConfig(NamedTuple):
     alignment_tokens: int | None = None
     retention_interval: int | None = None
     dcp_world_size: int = 1
-    sync_load_max_tokens: int = 0
+    sync_load_budget_bytes: int = 0
+    # KV bytes per token on one worker, summed over the offloaded groups.
+    kv_bytes_per_token: int = 0
 
     @classmethod
     def from_spec(
@@ -345,8 +350,15 @@ class SchedulerOffloadConfig(NamedTuple):
             alignment_tokens=alignment_tokens,
             retention_interval=retention_interval,
             dcp_world_size=vllm_config.parallel_config.decode_context_parallel_size,
-            # Hits up to this many tokens load within the step (0 disables).
-            sync_load_max_tokens=int(spec.extra_config.get("sync_load_max_tokens", 0)),
+            # Per-step KV bytes (per worker) loaded within the step (0 disables).
+            sync_load_budget_bytes=int(
+                spec.extra_config.get("sync_load_budget_bytes", 0)
+            ),
+            kv_bytes_per_token=sum(
+                _group_kv_bytes_per_block(kv_cache_config.kv_cache_groups[g.group_id])
+                // g.tokens_per_block
+                for g in spec.config.groups
+            ),
         )
 
 
@@ -383,7 +395,6 @@ class RequestOffloadState:
     # time.monotonic() of this request's first deferred offload lookup;
     # None once consumed (observed) or while no lookup is pending.
     deferred_lookup_start_time: float | None = None
-    sync_load: bool = False
     # Fine-grained token boundary selected beyond the last complete offload
     # chunk. It is consumed when the corresponding load is scheduled.
     partial_tail_boundary: int | None = None
@@ -650,6 +661,9 @@ class OffloadingConnectorScheduler:
 
         self._req_status: dict[ReqId, RequestOffloadState] = {}
         self._current_batch_load_jobs: dict[int, TransferJob] = {}
+        # Requests loading synchronously in the current engine step
+        self._current_batch_sync_loads: set[ReqId] = set()
+        self._current_batch_sync_load_bytes = 0
         self._current_batch_jobs_to_flush: set[int] = set()
         # GPU block IDs allocated in the current engine step
         self._current_batch_allocated_block_ids: set[int] = set()
@@ -1282,13 +1296,35 @@ class OffloadingConnectorScheduler:
                 self._maybe_observe_lookup_async_delay(req_status)
         req_status.update_num_hit_chunks(num_computed_tokens + (num_hit_tokens or 0))
 
-        # Keep at least one token to compute, or the request can't be scheduled.
-        req_status.sync_load = (
-            num_hit_tokens is not None
-            and 0 < num_hit_tokens <= self.config.sync_load_max_tokens
-            and num_computed_tokens + num_hit_tokens < request.num_tokens
+        sync_load = self._reserve_sync_load(
+            req_status, num_computed_tokens, num_hit_tokens
         )
-        return num_hit_tokens, bool(num_hit_tokens) and not req_status.sync_load
+        return num_hit_tokens, bool(num_hit_tokens) and not sync_load
+
+    def _reserve_sync_load(
+        self,
+        req_status: RequestOffloadState,
+        num_computed_tokens: int,
+        num_hit_tokens: int | None,
+    ) -> bool:
+        """Reserve the step's sync-load budget for a hit, if it fits."""
+        req_id = req_status.req.request_id
+        self._current_batch_sync_loads.discard(req_id)
+        # Keep at least one token to compute, or the request can't be scheduled.
+        if (
+            not self.config.sync_load_budget_bytes
+            or not num_hit_tokens
+            or num_computed_tokens + num_hit_tokens >= req_status.req.num_tokens
+        ):
+            return False
+        # Overestimates sliding-window and recurrent groups, which load less.
+        num_bytes = num_hit_tokens * self.config.kv_bytes_per_token
+        budget = self.config.sync_load_budget_bytes
+        if self._current_batch_sync_load_bytes + num_bytes > budget:
+            return False
+        self._current_batch_sync_load_bytes += num_bytes
+        self._current_batch_sync_loads.add(req_id)
+        return True
 
     def get_external_cache_hit_sources(
         self,
@@ -1349,9 +1385,6 @@ class OffloadingConnectorScheduler:
             )
 
         if num_external_tokens == 0:
-            # The scheduler may drop the hit after the lookup.
-            if req_status := self._req_status.get(request.request_id):
-                req_status.sync_load = False
             return
 
         # prepare_load() below pins keys that get_num_new_matched_tokens()
@@ -1360,6 +1393,7 @@ class OffloadingConnectorScheduler:
 
         req_status = self._req_status[request.request_id]
         req_status.loaded_from_offload = True
+        sync_load = request.request_id in self._current_batch_sync_loads
 
         num_locally_computed_tokens = req_status.num_locally_computed_tokens
         num_cached_tokens = num_locally_computed_tokens + num_external_tokens
@@ -1396,9 +1430,7 @@ class OffloadingConnectorScheduler:
             for i in range(first_fresh_gpu_block_idx, num_gpu_blocks):
                 block = group_blocks[i]
                 # Sync-load blocks are hashed at allocation: match by position.
-                if not block.is_null and (
-                    req_status.sync_load or block.block_hash is None
-                ):
+                if not block.is_null and (sync_load or block.block_hash is None):
                     load_start_gpu_block_idx = i
                     break
 
@@ -1474,7 +1506,7 @@ class OffloadingConnectorScheduler:
             req_id=request.request_id,
             src_spec=src_spec,
             dst_spec=dst_spec,
-            sync=req_status.sync_load,
+            sync=sync_load,
         )
         # a load can only be issued when no other jobs are pending.
         assert not req_status.transfer_jobs
@@ -1484,10 +1516,11 @@ class OffloadingConnectorScheduler:
             pending_count=self.config.num_workers,
             keys=set(keys_to_load),
             is_store=False,
-            is_sync_load=req_status.sync_load,
+            is_sync_load=sync_load,
         )
 
-        if self._chunks_being_loaded is not None:
+        # A sync load completes before this step's forward pass.
+        if self._chunks_being_loaded is not None and not sync_load:
             self._chunks_being_loaded.update(keys_to_load)
         req_status.partial_tail_boundary = None
 
@@ -2145,6 +2178,8 @@ class OffloadingConnectorScheduler:
             if not req_status.transfer_jobs:
                 del self._req_status[req_id]
         self._current_batch_load_jobs = {}
+        self._current_batch_sync_loads = set()
+        self._current_batch_sync_load_bytes = 0
         self._current_batch_jobs_to_flush = set()
         self._current_batch_allocated_block_ids = set()
 
@@ -2349,6 +2384,7 @@ class OffloadingConnectorScheduler:
         """Reset the offloading manager cache, evicting all stored chunks."""
         # reset_cache cannot be called in the middle of a schedule step
         assert not self._current_batch_load_jobs
+        assert not self._current_batch_sync_loads
         assert not self._current_batch_jobs_to_flush
         assert not self._current_batch_allocated_block_ids
 

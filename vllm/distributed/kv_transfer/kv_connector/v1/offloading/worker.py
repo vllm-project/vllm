@@ -252,14 +252,16 @@ class OffloadingConnectorWorker:
 
         sync_job_ids: set[int] = set()
         for job_id, entry in metadata.load_jobs.items():
+            assert isinstance(entry.dst_spec, GPULoadStoreSpec)
             if entry.sync:
                 # Its request already runs this step: no finished_recving.
                 sync_job_ids.add(job_id)
                 self._load_jobs[job_id] = None
+                submit = self.worker.submit_sync_load
             else:
                 self._load_jobs[job_id] = entry.req_id
-            assert isinstance(entry.dst_spec, GPULoadStoreSpec)
-            success = self.worker.submit_load(job_id, entry.src_spec, entry.dst_spec)
+                submit = self.worker.submit_load
+            success = submit(job_id, entry.src_spec, entry.dst_spec)
             assert success
         if sync_job_ids:
             self.worker.wait(sync_job_ids)
