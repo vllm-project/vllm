@@ -93,7 +93,7 @@ impl SamplingLimits {
     pub const DEFAULT_MAX_LOGPROBS: i32 = 20;
     /// Original Python definition:
     /// <https://github.com/vllm-project/vllm/blob/b5adb027ad03c29b46181752ba3b1cb84eff1dd4/vllm/sampling_params.py#L30-L32>
-    pub const MAX_LOGPROB_TOKEN_IDS: usize = 128;
+    pub const MAX_LOGPROB_TOKEN_IDS: usize = 256;
 
     /// Return the union bound used to validate token-ID prompts.
     pub fn prompt_token_vocab_size(&self) -> usize {
