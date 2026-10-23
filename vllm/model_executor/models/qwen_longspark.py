@@ -23,7 +23,7 @@
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
-"""LongSpark DraftFreeKV model.
+"""Qwen LongSpark DraftFreeKV model.
 
 The module implements the inference-only portion of the MIT-licensed
 LongSpark/SpecForge DraftFreeKV checkpoint format. Target K/V ownership and
