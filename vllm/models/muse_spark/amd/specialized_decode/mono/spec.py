@@ -469,7 +469,6 @@ SCRATCH_REGIONS = (
     "route",
     "inter",
     "isc",
-    "pss",
     "upart",
 )
 PEER_REGIONS = ("ar", "rlog", "pool", "rsx", "sqx", "moe", "branch")
@@ -486,11 +485,12 @@ SCRATCH_PAIRS = (
     ("route", _MT * 16),  # t*16 + k: id; t*16 + 8 + k: fp32 weight
     ("inter", _MP * 64),  # pick*64 + 4g + w: a2 fp4 words
     ("isc", _MP * UG_GROUPS),  # pick*16 + g: a2 e8m0 code
-    ("pss", RED_TASKS * _MP),  # j*MP + pick: fp32 sum x^2 of 16 owner columns
+    (None, RED_TASKS * _MP),  # reserved (the retired rank-local ``pss``)
     ("upart", U_GROUPS * (U_PARTS - 1) * _MT * ROWS),  # ((g*3 + q-1)*MT + t)*16 + r
 )
 # Reserved bytes before ``xrow`` (a retired debug region): kept so that every
-# later offset, compiled into the kernels as an immediate, stays.
+# later offset, compiled into the kernels as an immediate, stays (as the
+# reserved pairs of the retired ``pss`` above).
 RESERVED_A = _MT * (XQ_WORDS + XSC_WORDS) * PAIR_BYTES
 XROW_BYTES = _MT * HIDDEN * 2
 
@@ -529,7 +529,7 @@ PEER_PAIRS = (
     ("rlog", TP * _MT * EXPERTS_RANK),  # (src*MT + t)*32 + i: fp32 logits
     ("pool", _MT * MOE_HIDDEN // 2),  # (t*4096 + col)/2: bf16 pooled
     ("rsx", TP * _MP * OWN_COLS // 2),  # ((src*MP + pick)*512 + cc)/2: bf16 rows
-    ("sqx", TP * _MP),  # src*MP + pick: fp32 owner sum of squares
+    ("sqx", TP * _MP * RED_TASKS),  # (src*MP + pick)*32 + j: fp32 sum x^2, 16 cols
     ("moe", _MT * MOE_HIDDEN // 2),  # (t*4096 + col)/2: bf16 MoE output
     ("branch", _MT * HIDDEN // 2),  # (t*8192 + col)/2: bf16 unpooler output
 )
@@ -537,11 +537,13 @@ PEER_PAIRS = (
 
 def pair_layout(items, align: int = PAIR_BYTES, start: int = 0) -> dict:
     """``items`` (name, pairs) laid out in order: name -> (byte offset, bytes),
-    each region from an ``align``-byte boundary at or past ``start``."""
+    each region from an ``align``-byte boundary at or past ``start``; a None
+    name reserves its pairs."""
     out, off = {}, start
     for name, pairs in items:
         off = (off + align - 1) // align * align
-        out[name] = (off, pairs * PAIR_BYTES)
+        if name is not None:
+            out[name] = (off, pairs * PAIR_BYTES)
         off += pairs * PAIR_BYTES
     return out
 
@@ -613,8 +615,10 @@ def rsx_pair(src, pick, cc):
     return ((src * _MP + pick) * OWN_COLS + cc) // 2
 
 
-def sqx_pair(src, pick):
-    return src * _MP + pick
+def sqx_pair(src, j, pick):
+    """Owner CTA j of rank src's 16-column sum of squares of ``pick``: a
+    rank's 32 slices of a pick adjacent (a lane loads 4 as two 2-pair specs)."""
+    return (src * _MP + pick) * RED_TASKS + j
 
 
 def moe_pair(t, col):
@@ -644,10 +648,6 @@ def route_id_pair(t, k):
 
 def route_weight_pair(t, k):
     return t * 16 + 8 + k
-
-
-def pss_pair(j, pick):
-    return j * _MP + pick
 
 
 def upart_pair(g, q, t, r):

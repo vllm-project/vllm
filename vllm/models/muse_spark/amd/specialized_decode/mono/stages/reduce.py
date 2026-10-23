@@ -16,11 +16,11 @@ CTAs (j, columns 16 j .. of the 512) take every pick's 16 columns:
            to the column owner only), summed in fp32 in rank order, never
            rounded (README, Numerics: the deviation)
     x      R (w_postexp + GAIN): the weight first, as stock
-    pss    the pick's sum of x^2 over the CTA's 16 columns -> every owner CTA of
-           this rank; each sums the 32 in a fixed order (rank-local, scratch)
-    sqx    owner CTA 0's sum over the rank's 512 columns -> every rank; each
-           owner sums the 8 ranks' in rank order: the pick's sum of squares
-           over all 4096 columns, the same bits on every rank
+    sqx    the pick's sum of x^2 over the CTA's 16 columns -> every rank (one
+           cross-rank hop, no rank-local one); each owner sums, for each rank
+           in rank order, that rank's 32 in a fixed order (4 a lane, then the
+           8 lanes): the pick's sum of squares over all 4096 columns, the same
+           bits on every rank
     xs     x rsqrt(ss / 4096 + POST_EXP_EPS) tw, 0 on a pad row and on a pick
            of route weight 0 (``select``: NaN in a dead pick's rows cannot
            leak)
@@ -60,7 +60,6 @@ from vllm.models.muse_spark.amd.specialized_decode.mono.spec import (
     ROWS,
     TOPK,
     TP,
-    pss_pair,
     rsx_pair,
     sqx_pair,
 )
@@ -68,6 +67,7 @@ from vllm.models.muse_spark.amd.specialized_decode.mono.spec import (
 PICK_LANES = ROWS // 2  # threads a pick: 2 of its 16 columns each
 PSS_PER_LANE = RED_TASKS // PICK_LANES  # 4 of the 32 owner slices a lane sums
 assert PSS_PER_LANE * PICK_LANES == RED_TASKS
+assert PSS_PER_LANE == 4  # a lane's slices of a rank: two 2-pair loads
 assert TOPK * PICK_LANES == 64  # a row's picks fill one wave: S rows, S waves
 
 
@@ -121,7 +121,7 @@ def _f32(w):
 def stage_owner(c, j):
     """Owner CTA j of this rank (columns 16 j .. of its 512): a thread a pick's
     two columns (pick = t 8 + k, ``rsx`` -> R -> x -> the pick's sum of squares
-    via ``pss`` and ``sqx`` -> xs in LDS), then a thread a row's two columns
+    via ``sqx`` -> xs in LDS), then a thread a row's two columns
     (the top-k sum -> every rank's ``moe``). Ends with a barrier (``xs`` is in
     the stage union)."""
     s, tid, wave = c["S"], c["tid"], c["wave"]
@@ -149,27 +149,34 @@ def stage_owner(c, j):
         x0 = r0 * w0
         x1 = r1 * w1
         # the pick's sum of squares: 16 columns (lanes rp ^ 4, 2, 1 of the pick)
+        # -> every rank's slice j of this rank
         ps = butterfly(x0 * x0 + x1 * x1, (4, 2, 1))
         if rp == 0:
-            c["put"](c["scr"]["pss"], pss_pair(j, pick), ps)
-        # ... the rank's 512: lane rp sums slices 4 rp .. 4 rp + 3, then the
-        # 8 lanes
+            for p in range_constexpr(TP):
+                c["put"](c["peer"]["sqx"][p], sqx_pair(rank, j, pick), ps)
+        # ... all 4096, one batch: rank src's 512 as lane rp's slices
+        # 4 rp .. 4 rp + 3 summed in order, then the 8 lanes; then the ranks
+        # in rank order
         # (polls after a predicated put go through ``uniform_addr``: no
         # readfirstlane waterfall around the poll loads)
-        sl = pss_lane_slices(rp)
-        pss = uniform_addr(c["scr"]["pss"])
-        pv = c["poll"]([(pss, pss_pair(q, pick), 1) for q in sl])
-        own = ((_f32(pv[0][0]) + _f32(pv[1][0])) + _f32(pv[2][0])) + _f32(pv[3][0])
-        own = butterfly(own, (4, 2, 1))
-        if (rp == 0) & (fx.Int32(j) == 0):
-            for p in range_constexpr(TP):
-                c["put"](c["peer"]["sqx"][p], sqx_pair(rank, pick), own)
-        # ... all 4096: the 8 owners' in rank order
+        sl = pss_lane_slices(rp)[0]
         sqx = uniform_addr(c["peer"]["sqx_own"])
-        sq = c["poll"]([(sqx, sqx_pair(src, pick), 1) for src in range(TP)])
-        ss = _f32(sq[0][0])
+        sq = c["poll"](
+            [
+                (sqx, sqx_pair(src, sl + 2 * h, pick), 2)
+                for src in range(TP)
+                for h in range(2)
+            ],
+            batch=2 * TP,
+        )
+        owns = []
+        for src in range_constexpr(TP):
+            lo, hi = sq[2 * src], sq[2 * src + 1]
+            own = ((_f32(lo[0]) + _f32(lo[1])) + _f32(hi[0])) + _f32(hi[1])
+            owns.append(butterfly(own, (4, 2, 1)))
+        ss = owns[0]
         for src in range_constexpr(1, TP):
-            ss = ss + _f32(sq[src][0])
+            ss = ss + owns[src]
         scale = (
             hw_rsq(ss * fx.Float32(1.0 / MOE_HIDDEN) + fx.Float32(POST_EXP_EPS)) * tw
         )

@@ -97,14 +97,26 @@ def _tag(runner) -> int:
     return spec.step_tag(int(runner.epoch.item()), SLOT)
 
 
+def _owner_sum(part: torch.Tensor) -> torch.Tensor:
+    """A rank's 32 owner slices [..., 32] summed in ``stage_owner``'s fp32
+    order: lane rp the 4 slices 4 rp .. in order, then the butterfly over the
+    8 lanes (xor 4, 2, 1), which every lane ends with (lane 0's order)."""
+    lane = part[..., 0::4] + part[..., 1::4]
+    lane = (lane + part[..., 2::4]) + part[..., 3::4]  # [..., 8]: lane rp
+    for off in (4, 2, 1):
+        lane = lane + lane[..., [rp ^ off for rp in range(8)]]
+    return lane[..., 0]
+
+
 def readback(runner, S: int) -> dict:
     """Every mailbox region of the last launch (rows < S), decoded, and the
     tags each pair carried: ``ar`` bf16 [TP, S, H] (src's partial), ``ass`` /
     ``bss`` fp32 [NA, S], ``rlog`` fp32 [S, E] (expert 32 src + i), ``route``
     (ids int32 [S, 8], weights fp32), ``pool`` bf16 [S, HM], ``rsx`` bf16 [TP,
-    S, 8, OWN_COLS] (src's down rows of this rank's columns), ``pss`` fp32
-    [RED_TASKS, S, 8], ``sqx`` fp32 [TP, S, 8], ``moe`` bf16 [S, HM],
-    ``branch`` bf16 [S, H]; plain ``xrow`` bf16 [S, H]."""
+    S, 8, OWN_COLS] (src's down rows of this rank's columns), ``sqx_part``
+    fp32 [TP, RED_TASKS, S, 8] (src's owner CTA j's 16 columns), ``sqx`` fp32
+    [TP, S, 8] (src's 512 columns, summed as the kernel does), ``moe`` bf16 [S,
+    HM], ``branch`` bf16 [S, H]; plain ``xrow`` bf16 [S, H]."""
     out, tags = {}, {}
 
     def rows(name, n_rows, row_pairs):
@@ -133,12 +145,11 @@ def readback(runner, S: int) -> dict:
     v = rows("rsx", TP * MP, spec.OWN_COLS // 2).view(TP, MP, -1)[:, : S * TOPK]
     tags["rsx"] = tags["rsx"].view(TP, MP, -1)[:, : S * TOPK]
     out["rsx"] = v.contiguous().view(bf).view(TP, S, TOPK, spec.OWN_COLS)
-    v = rows("pss", spec.RED_TASKS, MP)[:, : S * TOPK]
-    tags["pss"] = tags["pss"][:, : S * TOPK]
-    out["pss"] = v.contiguous().view(f32).view(spec.RED_TASKS, S, TOPK)
-    v = rows("sqx", TP, MP)[:, : S * TOPK]
-    tags["sqx"] = tags["sqx"][:, : S * TOPK]
-    out["sqx"] = v.contiguous().view(f32).view(TP, S, TOPK)
+    v = rows("sqx", TP * MP, spec.RED_TASKS).view(TP, MP, -1)[:, : S * TOPK]
+    tags["sqx"] = tags["sqx"].view(TP, MP, -1)[:, : S * TOPK]
+    part = v.contiguous().view(f32).view(TP, S, TOPK, spec.RED_TASKS)
+    out["sqx_part"] = part.permute(0, 3, 1, 2).contiguous()
+    out["sqx"] = _owner_sum(part)
     lay = spec.scratch_layout()
     o = lay[spec.XROW][0]
     xrow = runner.scratch[o : o + spec.XROW_BYTES].cpu().view(bf).view(MT, H)
@@ -623,12 +634,18 @@ def _check_step(runner, w, core, stream, pad, stream_out, branch_out, case) -> d
         torch.testing.assert_close(
             rb["sqx"].double().sum(0)[live], sq.double()[live], rtol=1e-5, atol=1e-30
         )
-        torch.testing.assert_close(
-            rb["pss"].double().sum(0)[live],
-            rb["sqx"][rank].double()[live],
-            rtol=1e-5,
-            atol=1e-30,
-        )
+        # this rank's 32 owner slices (16 columns each), as every rank got them
+        for jj in range(spec.RED_TASKS):
+            c0 = rank * spec.OWN_COLS + jj * spec.ROWS
+            torch.testing.assert_close(
+                rb["sqx_part"][rank][jj][live],
+                ref.owner_sumsq(
+                    R[..., c0 : c0 + spec.ROWS].cpu(),
+                    w["w_postexp"][c0 : c0 + spec.ROWS].cpu(),
+                ),
+                rtol=1e-5,
+                atol=1e-30,
+            )
         moe_ref = torch.empty(S, HM, dtype=bf, device=dev)
         fused_post_expert_finalize(
             R,
