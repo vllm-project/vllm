@@ -62,7 +62,6 @@ class SpeculatorConfig:
     draft_has_own_vocab: ClassVar[bool] = False
 
     supports_watermarking: ClassVar[bool] = False
-    supports_parallel_drafting: ClassVar[bool] = False
     supports_draft_lm_head_quantization: ClassVar[bool] = False
     # Prefill context parallelism.
     supports_pcp: ClassVar[bool] = False

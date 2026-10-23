@@ -20,7 +20,6 @@ class DFlashSpeculatorConfig(CheckpointSpeculatorConfig):
     uses_target_hidden_states = True
     target_embed_sharing: ClassVar[TargetEmbedSharing] = "always"
     supports_watermarking = True
-    supports_parallel_drafting = True
 
     @classmethod
     def matches(cls, spec: "SpeculativeConfig") -> bool:
