@@ -7,7 +7,6 @@ from http import HTTPStatus
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-from PIL import Image
 
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
@@ -16,7 +15,7 @@ from vllm.entrypoints.serve import create_error_response
 from vllm.multimodal.media import MediaConnector
 from vllm.multimodal.parse import parse_mm_uuids
 from vllm.multimodal.processing.processor import MultiModalProcessorCacheMissError
-from vllm.renderers.base import BaseRenderer
+from vllm.renderers.chat_utils import can_conversation_defer_media
 from vllm.renderers.hf import HfRenderer
 from vllm.renderers.params import ChatParams
 from vllm.tokenizers.registry import cached_tokenizer_from_config
@@ -28,34 +27,15 @@ baby_reading_video = (
     baby_reading_video_asset.np_ndarrays,
     baby_reading_video_asset.metadata,
 )
-kimi_vision_chunk_image = {
-    "type": "image",
-    "image": cherry_pil_image,
-    "uuid": "test-image-uuid",
-}
-kimi_vision_chunk_video = {
-    "type": "video_chunk",
-    "video_chunk": [
-        Image.fromarray(frame) for frame in baby_reading_video_asset.np_ndarrays[:4]
-    ],
-    "uuid": "test-video-uuid",
-    "video_idx": 0,
-    "prompt": ("<|media_begin|>video<|media_content|><|media_pad|><|media_end|>"),
-}
 
 
 def _build_renderer(
-    *,
-    model: str = "Qwen/Qwen2.5-VL-3B-Instruct",
-    mm_cache_gb: float = 4.0,
-    enable_prefix_caching: bool = True,
-    trust_remote_code: bool = False,
+    *, mm_cache_gb: float = 4.0, enable_prefix_caching: bool = True
 ) -> HfRenderer:
     model_config = ModelConfig(
-        model=model,
+        model="Qwen/Qwen2.5-VL-3B-Instruct",
         max_model_len=128,
         mm_processor_cache_gb=mm_cache_gb,
-        trust_remote_code=trust_remote_code,
     )
 
     vllm_config = VllmConfig(
@@ -149,23 +129,8 @@ def test_cached_uuid_skips_url_loading(
     use_async: bool,
 ):
     renderer = _build_renderer()
-    media_url = f"https://example.com/test.{modality}"
-    media_uuid = f"test-{modality}-uuid"
     fetch_media = _mock_media(monkeypatch, modality, media, use_async)
-
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": f"Describe this {modality}."},
-                {
-                    "type": f"{modality}_url",
-                    f"{modality}_url": {"url": media_url},
-                    "uuid": media_uuid,
-                },
-            ],
-        }
-    ]
+    messages = _media_messages("Describe", (modality, f"test-{modality}-uuid"))
 
     params = ChatParams(skip_early_mm_lookup=skip_early_mm_lookup)
     _, first_prompts = _render_chat(renderer, [messages], params, use_async)
@@ -192,26 +157,8 @@ def test_uuid_cache_eviction_falls_back_to_url(
     media: object,
 ):
     renderer = _build_renderer()
-    mm_processor_cache = renderer.mm_processor_cache
-    assert mm_processor_cache is not None
-
-    fetch_media = Mock(return_value=media)
-    monkeypatch.setattr(MediaConnector, f"fetch_{modality}", fetch_media)
-
-    media_url = f"https://example.com/test.{modality}"
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": f"Describe this {modality}."},
-                {
-                    "type": f"{modality}_url",
-                    f"{modality}_url": {"url": media_url},
-                    "uuid": f"test-{modality}-uuid",
-                },
-            ],
-        }
-    ]
+    fetch_media = _mock_media(monkeypatch, modality, media, use_async=False)
+    messages = _media_messages("Describe", (modality, f"test-{modality}-uuid"))
 
     renderer.render_chat([messages], ChatParams())
     renderer.clear_mm_cache()
@@ -249,8 +196,7 @@ def test_partial_uuid_hit_retries_only_affected_conversation(monkeypatch, use_as
 
     assert [
         call.args[0][0]["content"][0]["text"] for call in render_messages.call_args_list
-    ].count("Cached conversation") == 1
-    assert render_messages.call_count == 3
+    ] == ["Partial conversation"]
     fetch_image.assert_called_once_with("https://example.com/partial-image.image")
     assert fetch_video.call_count == 1
     assert prompts[0]["prompt_token_ids"] == warm_prompts[0]["prompt_token_ids"]
@@ -258,173 +204,151 @@ def test_partial_uuid_hit_retries_only_affected_conversation(monkeypatch, use_as
     assert set(prompts[1]["mm_hashes"]) == {"image", "video"}
     assert conversations == original
 
-    fetch_image.reset_mock()
-    fetch_video.reset_mock()
-    _, cached_prompts = _render_chat(renderer, conversations, params, use_async)
-    fetch_image.assert_not_called()
-    fetch_video.assert_not_called()
-    assert [p["prompt_token_ids"] for p in cached_prompts] == [
-        p["prompt_token_ids"] for p in prompts
-    ]
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        pytest.param(
+            [{"type": "image_url", "image_url": {"url": "url"}, "uuid": "image"}],
+            True,
+            id="image-url",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "input_audio",
+                    "input_audio": {"data": "AAAA", "format": "wav"},
+                    "uuid": "audio",
+                }
+            ],
+            True,
+            id="input-audio",
+        ),
+        pytest.param(
+            [{"type": "image_url", "image_url": None, "uuid": "image"}],
+            False,
+            id="uuid-without-data",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "input_audio",
+                    "input_audio": {"data": "", "format": "wav"},
+                    "uuid": "audio",
+                }
+            ],
+            False,
+            id="input-audio-without-data",
+        ),
+        pytest.param(
+            [
+                {"type": "image_url", "image_url": {"url": "url"}, "uuid": "image"},
+                {"type": "video_url", "video_url": {"url": "url"}},
+            ],
+            False,
+            id="missing-uuid",
+        ),
+        pytest.param("Describe", False, id="text-only"),
+    ],
+)
+def test_can_conversation_defer_media(content, expected):
+    """Media loading is deferred only if all media has UUIDs and some has data."""
+    messages = [{"role": "user", "content": content}]
+
+    assert can_conversation_defer_media(messages) is expected
 
 
-def test_async_uuid_render_preserves_cache_update_order(monkeypatch):
-    """Sender cache updates must follow the order of returned conversations."""
-    renderer = _build_renderer()
-    conversations = [
-        _media_messages("first", ("image", "shared")),
-        _media_messages("second", ("image", "shared")),
-    ]
-    completed = []
+def test_can_conversation_defer_media_does_not_consume_iterators():
+    part = {"type": "image_url", "image_url": {"url": "url"}, "uuid": "image"}
+    content = iter([part])
 
-    async def render(_self, batch, **kwargs):
-        name = batch[0][0]["content"][0]["text"]
-        if name == "first":
-            await asyncio.sleep(0)
-        completed.append(name)
-        return [[]], [{"prompt": name}]
-
-    monkeypatch.setattr(BaseRenderer, "render_chat_async", render)
-    _, prompts = _render_chat(renderer, conversations, ChatParams(), True)
-
-    assert completed == [prompt["prompt"] for prompt in prompts] == ["first", "second"]
+    assert not can_conversation_defer_media([{"role": "user", "content": content}])
+    assert next(content) == part
 
 
-@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
-def test_missing_uuid_loads_all_media(monkeypatch, use_async):
-    renderer = _build_renderer()
-    fetch_image = _mock_media(monkeypatch, "image", cherry_pil_image, use_async)
-    messages = _media_messages("Describe", ("image", "cached-image"))
-    _render_chat(renderer, [messages], ChatParams(), use_async)
-    messages[0]["content"].append(
-        {
-            "type": "image_url",
-            "image_url": {"url": "https://example.com/no-uuid.image"},
-        }
-    )
-    fetch_image.reset_mock()
-
-    _render_chat(renderer, [messages], ChatParams(), use_async)
-
-    assert fetch_image.call_count == 2
-
-
-@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
-def test_uuid_without_url_still_requires_cache_hit(monkeypatch, use_async):
-    renderer = _build_renderer()
-    fetch_image = _mock_media(monkeypatch, "image", cherry_pil_image, use_async)
-    messages = _media_messages("Describe", ("image", "missing-image"))
-    messages[0]["content"][1]["image_url"]["url"] = None
-
-    with pytest.raises(MultiModalProcessorCacheMissError, match="data is not provided"):
-        _render_chat(renderer, [messages], ChatParams(), use_async)
-
-    fetch_image.assert_not_called()
+def _wrap_process_for_engine(monkeypatch, renderer, use_async):
+    method = "process_for_engine_async" if use_async else "process_for_engine"
+    mock_type = AsyncMock if use_async else Mock
+    process = mock_type(wraps=getattr(renderer, method))
+    monkeypatch.setattr(renderer, method, process)
+    return process
 
 
 @pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
 @pytest.mark.parametrize(
-    "case", ["skip-cache", "no-cache", "audio-in-video", "other-media"]
+    "case", ["skip-cache", "no-cache", "audio-in-video", "missing-uuid"]
 )
-def test_ineligible_conversation_renders_original_messages(
-    monkeypatch, use_async, case
-):
+def test_ineligible_conversation_loads_media_upfront(monkeypatch, use_async, case):
+    """Conversations that cannot defer media are processed once, not retried."""
     renderer = _build_renderer(mm_cache_gb=0 if case == "no-cache" else 4)
+    fetch_image = _mock_media(monkeypatch, "image", cherry_pil_image, use_async)
     messages = _media_messages("Describe", ("image", "image"))
+    if case == "missing-uuid":
+        del messages[0]["content"][1]["uuid"]
     params = ChatParams()
     if case == "audio-in-video":
         params = ChatParams(mm_processor_kwargs={"use_audio_in_video": True})
-    elif case == "other-media":
-        messages[0]["content"].append(
-            {
-                "type": "audio_url",
-                "audio_url": {"url": "https://example.com/audio.wav"},
-                "uuid": "audio",
-            }
-        )
-    mock_type = AsyncMock if use_async else Mock
-    render = mock_type(return_value=([[]], [{}]))
-    method = "render_chat_async" if use_async else "render_chat"
-    monkeypatch.setattr(BaseRenderer, method, render)
+    process = _wrap_process_for_engine(monkeypatch, renderer, use_async)
 
     _render_chat(
-        renderer, [messages], params, use_async, skip_mm_cache=case == "skip-cache"
+        renderer,
+        [messages],
+        params,
+        use_async,
+        skip_mm_cache=case == "skip-cache",
     )
 
-    assert render.call_count == 1
-    assert render.call_args.args[0][0] is messages
+    assert process.call_count == 1
+    assert fetch_image.call_count == 1
 
 
 @pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
-@pytest.mark.parametrize(
-    "error", [ValueError("invalid media"), MultiModalProcessorCacheMissError("missing")]
-)
-def test_uuid_render_retry_is_bounded_and_only_handles_cache_misses(
-    monkeypatch, use_async, error
-):
+def test_uuid_only_cache_miss_is_not_retried(monkeypatch, use_async):
+    """Without a URL to fall back to, a cache miss fails without a retry."""
     renderer = _build_renderer()
     messages = _media_messages("Describe", ("image", "image"))
-    mock_type = AsyncMock if use_async else Mock
-    render = mock_type(side_effect=error)
-    method = "render_chat_async" if use_async else "render_chat"
-    monkeypatch.setattr(BaseRenderer, method, render)
+    messages[0]["content"][1]["image_url"] = None
+    process = _wrap_process_for_engine(monkeypatch, renderer, use_async)
 
-    with pytest.raises(type(error), match=str(error)):
+    with pytest.raises(MultiModalProcessorCacheMissError):
         _render_chat(renderer, [messages], ChatParams(), use_async)
 
-    assert render.call_count == (
-        2 if isinstance(error, MultiModalProcessorCacheMissError) else 1
-    )
+    assert process.call_count == 1
 
 
-@pytest.mark.parametrize(
-    ("modality", "media"),
-    [
-        pytest.param("image", kimi_vision_chunk_image, id="image"),
-        pytest.param("video", kimi_vision_chunk_video, id="video"),
-    ],
-)
-def test_early_uuid_lookup_is_disabled_for_unified_vision_chunks(
-    monkeypatch: pytest.MonkeyPatch,
-    modality: str,
-    media: object,
-):
-    renderer = _build_renderer(
-        model="moonshotai/Kimi-K2.5",
-        trust_remote_code=True,
-    )
-    mm_processor_cache = renderer.mm_processor_cache
-    assert mm_processor_cache is not None
+def test_batch_cache_misses_reload_media_concurrently(monkeypatch):
+    """Retried conversations load media concurrently and keep the batch order."""
+    renderer = _build_renderer()
+    active_fetches = max_active_fetches = 0
 
-    is_cached_item = Mock(return_value=True)
-    monkeypatch.setattr(mm_processor_cache, "is_cached_item", is_cached_item)
-    fetch_media = Mock(return_value=media)
-    monkeypatch.setattr(MediaConnector, f"fetch_{modality}", fetch_media)
+    async def fetch_image(*args, **kwargs):
+        nonlocal active_fetches, max_active_fetches
+        active_fetches += 1
+        max_active_fetches = max(max_active_fetches, active_fetches)
+        try:
+            await asyncio.sleep(0.01)
+            return cherry_pil_image
+        finally:
+            active_fetches -= 1
 
-    media_url = f"https://example.com/test.{modality}"
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": f"Describe this {modality}."},
-                {
-                    "type": f"{modality}_url",
-                    f"{modality}_url": {"url": media_url},
-                    "uuid": f"test-{modality}-uuid",
-                },
-            ],
-        }
+    monkeypatch.setattr(MediaConnector, "fetch_image_async", fetch_image)
+    conversations = [
+        _media_messages(f"Conversation {i}", ("image", f"image-{i}")) for i in range(2)
     ]
 
-    monkeypatch.setattr(
-        renderer, "process_for_engine", lambda prompt, *args, **kwargs: prompt
+    out_conversations, prompts = _render_chat(
+        renderer, conversations, ChatParams(), use_async=True
     )
-    conversations, prompts = renderer.render_chat([messages], ChatParams())
+    _, cached_prompts = _render_chat(
+        renderer, conversations, ChatParams(), use_async=True
+    )
 
-    assert len(conversations[0]) == 1
-    assert prompts[0]["multi_modal_data"] == {"vision_chunk": [media]}
-    assert fetch_media.call_count == 1
-    is_cached_item.assert_not_called()
+    assert max_active_fetches == 2
+    assert all(
+        f"Conversation {i}" in str(conversation)
+        for i, conversation in enumerate(out_conversations)
+    )
+    assert [p["mm_hashes"] for p in prompts] == [p["mm_hashes"] for p in cached_prompts]
 
 
 def test_multi_modal_uuids_length_mismatch_raises():

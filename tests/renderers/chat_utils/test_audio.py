@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
+from unittest.mock import AsyncMock, Mock
+
 import pytest
 
 from vllm.config import ModelConfig
+from vllm.multimodal.media import MediaConnector
 from vllm.renderers.chat_utils import parse_chat_messages, parse_chat_messages_async
 from vllm.utils.serial_utils import tensor2base64
 
@@ -222,3 +226,43 @@ async def test_parse_chat_messages_audio_embeds_async(
     assert mm_uuids is not None
     assert "audio" in mm_uuids
     assert_mm_uuids(mm_uuids, 1, modality="audio", expected_uuids=[None])
+
+
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize(
+    "part",
+    [
+        {"type": "audio_url", "audio_url": {"url": "https://example.com/a.wav"}},
+        {"type": "input_audio", "input_audio": {"data": "AAAA", "format": "wav"}},
+    ],
+    ids=["audio_url", "input_audio"],
+)
+def test_parse_chat_messages_defers_audio_with_uuid(
+    qwen2_audio_model_config, monkeypatch, use_async, part
+):
+    """Audio with a UUID is not loaded when deferring to a cache lookup."""
+    fetch_audio = AsyncMock() if use_async else Mock()
+    method = "fetch_audio_async" if use_async else "fetch_audio"
+    monkeypatch.setattr(MediaConnector, method, fetch_audio)
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {**part, "uuid": "abcd"},
+                {"type": "text", "text": "What does the audio say?"},
+            ],
+        }
+    ]
+
+    parse = parse_chat_messages_async if use_async else parse_chat_messages
+    result = parse(
+        messages,
+        qwen2_audio_model_config,
+        content_format="string",
+        defer_uuid_media=True,
+    )
+    _, mm_data, mm_uuids = asyncio.run(result) if use_async else result
+
+    fetch_audio.assert_not_called()
+    assert mm_data == {"audio": [None]}
+    assert mm_uuids == {"audio": ["abcd"]}

@@ -9,7 +9,7 @@ import itertools
 import weakref
 from collections import defaultdict, deque
 from collections.abc import Sequence
-from functools import lru_cache, partial
+from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Final, Literal, cast, overload
 
 import jinja2
@@ -35,7 +35,6 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
 )
 from vllm.multimodal.processing.processor import (
-    MultiModalProcessorCacheMissError,
     PromptReplacement,
     apply_token_matches,
     find_mm_placeholders,
@@ -73,7 +72,7 @@ if TYPE_CHECKING:
     )
 
     from .inputs import DictPrompt
-    from .params import ChatParams, TokenizeParams
+    from .params import ChatParams
 
 logger = init_logger(__name__)
 
@@ -1013,179 +1012,31 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         # Only fast tokenizers expose offset_mapping.
         return self.tokenizer is not None and self.tokenizer.is_fast
 
-    def _get_uuid_only_messages(
-        self,
-        messages: list[ChatCompletionMessageParam],
-        params: ChatParams,
-    ) -> list[ChatCompletionMessageParam] | None:
-        """Omit URLs only when every media item can be looked up by UUID."""
-        if (
-            params.skip_early_mm_lookup
-            or self.mm_processor_cache is None
-            or self.use_unified_vision_chunk
-        ):
-            return None
-
-        mm_config = self.model_config.get_multimodal_config()
-        processor_kwargs = mm_config.merge_mm_processor_kwargs(
-            params.mm_processor_kwargs or {}
-        )
-        if processor_kwargs.get("use_audio_in_video", False):
-            return None
-
-        uuid_only_messages = []
-        has_url = False
-        for message in messages:
-            content = message.get("content")
-            if content is None or isinstance(content, str):
-                uuid_only_messages.append(message)
-                continue
-            if not isinstance(content, list):
-                return None
-
-            uuid_only_content: list[Any] = []
-            for part in content:
-                if isinstance(part, str) or part.get("type") in (
-                    "text",
-                    "input_text",
-                    "output_text",
-                    "refusal",
-                    "thinking",
-                    "tool_reference",
-                ):
-                    uuid_only_content.append(part)
-                    continue
-                if part.get("type") not in (
-                    None,
-                    "image_url",
-                    "input_image",
-                    "video_url",
-                ):
-                    return None
-                url_key = next(
-                    (key for key in ("image_url", "video_url") if key in part), None
-                )
-                if url_key is None or part.get("uuid") is None:
-                    return None
-
-                media = cast(dict[str, Any], part)[url_key]
-                url = media.get("url") if isinstance(media, dict) else media
-                has_url |= url is not None
-                uuid_only_content.append(
-                    {
-                        **part,
-                        url_key: {**media, "url": None}
-                        if isinstance(media, dict)
-                        else None,
-                    }
-                )
-
-            uuid_only_messages.append(
-                cast(
-                    "ChatCompletionMessageParam",
-                    {**message, "content": uuid_only_content},
-                )
-            )
-
-        return uuid_only_messages if has_url else None
-
     @override
-    def render_chat(
-        self,
-        conversations: Sequence[list[ChatCompletionMessageParam]],
-        chat_params: ChatParams,
-        tok_params: TokenizeParams | None = None,
-        *,
-        prompt_extras: dict[str, Any] | None = None,
-        skip_mm_cache: bool = False,
-    ):
-        render = partial(
-            super().render_chat,
-            chat_params=chat_params,
-            tok_params=tok_params,
-            prompt_extras=prompt_extras,
-            skip_mm_cache=skip_mm_cache,
-        )
-
-        uuid_only_conversations = [
-            None
-            if skip_mm_cache
-            else self._get_uuid_only_messages(messages, chat_params)
-            for messages in conversations
-        ]
-        if all(messages is None for messages in uuid_only_conversations):
-            return render(conversations)
-
-        def render_one(
-            messages: list[ChatCompletionMessageParam],
-            uuid_only: list[ChatCompletionMessageParam] | None,
-        ):
-            if uuid_only is not None:
-                try:
-                    return render([uuid_only])
-                except MultiModalProcessorCacheMissError:
-                    pass
-            return render([messages])
-
-        rendered = [
-            render_one(messages, uuid_only)
-            for messages, uuid_only in zip(conversations, uuid_only_conversations)
-        ]
-        return [result[0][0] for result in rendered], [
-            result[1][0] for result in rendered
-        ]
-
-    @override
-    async def render_chat_async(
-        self,
-        conversations: Sequence[list[ChatCompletionMessageParam]],
-        chat_params: ChatParams,
-        tok_params: TokenizeParams | None = None,
-        *,
-        prompt_extras: dict[str, Any] | None = None,
-        skip_mm_cache: bool = False,
-    ):
-        render = partial(
-            super().render_chat_async,
-            chat_params=chat_params,
-            tok_params=tok_params,
-            prompt_extras=prompt_extras,
-            skip_mm_cache=skip_mm_cache,
-        )
-
-        uuid_only_conversations = [
-            None
-            if skip_mm_cache
-            else self._get_uuid_only_messages(messages, chat_params)
-            for messages in conversations
-        ]
-        if all(messages is None for messages in uuid_only_conversations):
-            return await render(conversations)
-
-        async def render_one(
-            messages: list[ChatCompletionMessageParam],
-            uuid_only: list[ChatCompletionMessageParam] | None,
-        ):
-            if uuid_only is not None:
-                try:
-                    return await render([uuid_only])
-                except MultiModalProcessorCacheMissError:
-                    pass
-            return await render([messages])
-
-        # Sender-cache updates must follow the order of returned conversations.
-        rendered = [
-            await render_one(messages, uuid_only)
-            for messages, uuid_only in zip(conversations, uuid_only_conversations)
-        ]
-        return [result[0][0] for result in rendered], [
-            result[1][0] for result in rendered
-        ]
+    def _can_defer_uuid_media(self) -> bool:
+        return not self.use_unified_vision_chunk
 
     def render_messages(
         self,
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
+    ) -> tuple[list[ConversationMessage], DictPrompt]:
+        return self._render_messages(messages, params, defer_uuid_media=False)
+
+    @override
+    def _render_messages_deferring_media(
+        self,
+        messages: list[ChatCompletionMessageParam],
+        params: ChatParams,
+    ) -> tuple[list[ConversationMessage], DictPrompt]:
+        return self._render_messages(messages, params, defer_uuid_media=True)
+
+    def _render_messages(
+        self,
+        messages: list[ChatCompletionMessageParam],
+        params: ChatParams,
+        *,
+        defer_uuid_media: bool,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         model_config = self.model_config
         tokenizer = self.get_tokenizer()
@@ -1208,6 +1059,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             ),
             media_io_kwargs=params.media_io_kwargs,
             mm_processor_kwargs=params.mm_processor_kwargs,
+            defer_uuid_media=defer_uuid_media,
         )
 
         # prompt_embeds tensors are carried by the tracker through mm_data,
@@ -1294,6 +1146,27 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
+        return await self._render_messages_async(
+            messages, params, defer_uuid_media=False
+        )
+
+    @override
+    async def _render_messages_deferring_media_async(
+        self,
+        messages: list[ChatCompletionMessageParam],
+        params: ChatParams,
+    ) -> tuple[list[ConversationMessage], DictPrompt]:
+        return await self._render_messages_async(
+            messages, params, defer_uuid_media=True
+        )
+
+    async def _render_messages_async(
+        self,
+        messages: list[ChatCompletionMessageParam],
+        params: ChatParams,
+        *,
+        defer_uuid_media: bool,
+    ) -> tuple[list[ConversationMessage], DictPrompt]:
         model_config = self.model_config
         tokenizer = self.get_tokenizer()
 
@@ -1315,6 +1188,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             ),
             media_io_kwargs=params.media_io_kwargs,
             mm_processor_kwargs=params.mm_processor_kwargs,
+            defer_uuid_media=defer_uuid_media,
         )
 
         prompt_embeds_tensors: list[torch.Tensor] | None = None

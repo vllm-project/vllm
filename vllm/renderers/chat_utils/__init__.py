@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from .chat_message import (
+    can_conversation_defer_media,
     has_non_text_content,
     parse_chat_message_content,
     parse_chat_message_content_parts,
@@ -13,7 +14,7 @@ from .chat_template import (
     load_chat_template,
     validate_chat_template,
 )
-from .content_parser import PROMPT_EMBEDS_PLACEHOLDER_TOKEN
+from .content_parser import PROMPT_EMBEDS_PLACEHOLDER_TOKEN, uses_audio_in_video
 from .item_tracker import (
     AsyncMultiModalItemTracker,
     BaseMultiModalItemTracker,
@@ -33,10 +34,12 @@ __all__ = [
     "BaseMultiModalItemTracker",
     "MultiModalItemTracker",
     "AsyncMultiModalItemTracker",
+    "can_conversation_defer_media",
     "has_non_text_content",
     "parse_chat_message_content",
     "parse_chat_message_content_parts",
     "parse_chat_messages",
     "parse_chat_messages_async",
     "PROMPT_EMBEDS_PLACEHOLDER_TOKEN",
+    "uses_audio_in_video",
 ]
