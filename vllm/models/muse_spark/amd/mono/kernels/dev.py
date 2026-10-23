@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # mypy: ignore-errors
-# ruff: noqa: E501, F841
+# ruff: noqa: E501
 
 # Vendored from AMD's Muse Spark FlyDSL monokernel kernels (mk/dev.py):
 # SPDX-License-Identifier: MIT
@@ -24,11 +24,9 @@
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
-"""Device-side primitives for the Muse FlyDSL monokernel (FlyDSL 0.3.2).
+"""Device-side primitives of the Muse Spark monokernel.
 
-Most of this is adapted from ATOM's ``atom/mono/device`` (ops.py, sync.py,
-stamps.py; MIT, AMD), trimmed to what the MoE block needs and changed where the
-installed FlyDSL 0.3.2 / aiter differ (no ``kernel_signature``). Differences
+Adapted from ATOM's ``atom/mono/device`` (ops.py, sync.py; MIT, AMD). Differences
 from ATOM that matter:
 
 * Mailbox tags are epoch based (``tag = epoch * 64 + slot + 1`` with the epoch a
@@ -36,7 +34,7 @@ from ATOM that matter:
   zero-at-step-start discipline: nothing is ever zeroed.
 * Every spin is bounded by a wall-clock timeout (s_memrealtime, 100 MHz) that
   writes a diagnostic record and sets a sticky FAILED word, so a bug turns into
-  a report instead of a hang (brief rule).
+  a report instead of a hang.
 """
 
 from __future__ import annotations
@@ -46,7 +44,7 @@ from aiter.ops.flydsl.kernels import buffer_ops as bo
 from aiter.ops.flydsl.kernels.dpp_utils import update_dpp_i32
 from flydsl._mlir.dialects import llvm
 from flydsl.compiler.ast_rewriter import ASTRewriter
-from flydsl.expr import const_expr, range_constexpr, rocdl
+from flydsl.expr import range_constexpr, rocdl
 from flydsl.expr.typing import T, as_ir_value
 
 BLOCKS = 256
@@ -101,10 +99,6 @@ def _hw_f32(name, x):
 
 def hw_rsq(x):
     return _hw_f32("llvm.amdgcn.rsq.f32", x)
-
-
-def hw_rcp(x):
-    return _hw_f32("llvm.amdgcn.rcp.f32", x)
 
 
 def hw_exp2(x):
@@ -297,10 +291,6 @@ def ld_i32_if(ok, ptr, i, nbytes, cm=0):
     )
 
 
-def st_i32(v, ptr, i, cm=0):
-    bo.buffer_store(fx.Int32(v), rsrc(ptr), i, cache_modifier=cm)
-
-
 # ------------------------------------------------------------------ mailbox
 DIAG_WORDS = 8
 TIMEOUT_TICKS = 2 * 100_000_000  # 2 s at 100 MHz
@@ -336,7 +326,7 @@ def _spin_bounded(load_all, pending, health, region_id, index, tag):
     return v
 
 
-# Mailbox helpers are plain functions, not methods: FlyDSL 0.3.2's region
+# Mailbox helpers are plain functions, not methods: FlyDSL's region
 # analyzer carries every local whose method is called inside an ``if`` / ``while``
 # as scf state, which an object of Python callables cannot be.
 #
@@ -376,62 +366,6 @@ def mb_put2(tag, base, i, w0, w1):
     )
 
 
-@traced
-def _spin_bounded_from(v, load_all, pending, health, region_id, index, tag):
-    """``_spin_bounded`` whose first round (``v``) was issued by the caller."""
-    t0 = memrealtime()
-    late = fx.Int32(0)
-    failed = ld_i32(health, 0, CM_DEV)
-    while pending(v) & (late == 0) & (failed == 0):
-        rocdl.s_sleep(1)
-        v = load_all()
-        late = (memrealtime() - t0 > TIMEOUT_TICKS).select(fx.Int32(1), fx.Int32(0))
-    if late != 0:
-        bo.buffer_store(fx.Int32(1), rsrc(health), 0, cache_modifier=CM_DEV)
-    return v
-
-
-def mb_poll_split(tag, health, specs, region_id=0):
-    """A poll whose first round is issued now and checked later:
-    ``first, finish = mb_poll_split(...)``; other loads may be issued between,
-    then ``finish(first)`` -> words as ``mb_poll``. One batch (len(specs) <= 32)."""
-
-    def load_all():
-        words = []
-        for b, i, n in specs:
-            w = fx.Vector(
-                bo.buffer_load(
-                    rsrc(b),
-                    fx.Int32(i) * 2,
-                    vec_width=2 * n,
-                    dtype=T.i32,
-                    cache_modifier=CM_DEV,
-                )
-            )
-            words += [w[e] for e in range(2 * n)]
-        return fx.Vector.from_elements(words, fx.Int32)
-
-    nw = sum(2 * n for _, _, n in specs)
-
-    def pending(v):
-        bad = v[1] != tag
-        for e in range(3, nw, 2):
-            bad = bad | (v[e] != tag)
-        return bad
-
-    def finish(v):
-        v = _spin_bounded_from(
-            v, load_all, pending, health, region_id, specs[0][1], tag
-        )
-        outs, e = [], 0
-        for _, _, n in specs:
-            outs.append([v[e + 2 * q] for q in range(n)])
-            e += 2 * n
-        return outs
-
-    return load_all(), finish
-
-
 def mb_poll(tag, health, specs, region_id=0, batch=16, oks=None, cm=CM_DEV):
     """[(base, pair index, npairs in {1, 2})] -> value words, all re-loaded
     together until every tag matches (one round trip after the last lands).
@@ -465,8 +399,6 @@ def mb_poll(tag, health, specs, region_id=0, batch=16, oks=None, cm=CM_DEV):
             words += [w[e] for e in range(2 * n)]
         return fx.Vector.from_elements(words, fx.Int32)
 
-    nw = sum(2 * n for _, _, n in specs)
-
     def pending(v):
         bad = None
         e = 0
@@ -487,67 +419,6 @@ def mb_poll(tag, health, specs, region_id=0, batch=16, oks=None, cm=CM_DEV):
     return outs
 
 
-# ------------------------------------------------------------------ timeline
-@traced
-def stamp(on, tls, tid, k):
-    if const_expr(on):  # noqa: SIM102
-        if tid == 0:
-            fx.ptr_store(memrealtime(), tls + k)
-
-
-def memrealtime_after(dep):
-    """s_memrealtime ordered after ``dep`` (an i32 the asm takes as an input) and
-    waited for: an in-kernel timestamp that the scheduler cannot hoist."""
-    return fx.Int64(
-        llvm.inline_asm(
-            T.i64,
-            [fx.Int32(dep).ir_value()],
-            "s_memrealtime $0\ns_waitcnt lgkmcnt(0)",
-            "=s,v",
-            has_side_effects=True,
-        )
-    )
-
-
-@traced
-def stamp_dep(on, tls, tid, k, dep):
-    """A stamp at point k ordered after ``dep`` (low 32 bits of the clock)."""
-    if const_expr(on):  # noqa: SIM102
-        if tid == 0:
-            fx.ptr_store(memrealtime_after(dep), tls + k)
-
-
-@traced
-def stamp_flush(on, tls, tl, tid, bid, points):
-    if const_expr(on):  # noqa: SIM102
-        if tid < points:
-            v = fx.ptr_load(tls + tid)
-            lo = fx.Int32(v & 0xFFFFFFFF)
-            hi = fx.Int32(v >> 32)
-            bo.buffer_store(
-                fx.Vector.from_elements([lo, hi], fx.Int32),
-                rsrc(tl),
-                (bid * points + tid) * 2,
-            )
-
-
-def fp8x2(a, b):
-    """Two f32 -> two E4M3 bytes in the low 16 bits (v_cvt_pk_fp8_f32, RNE)."""
-    return fx.Int32(rocdl.cvt_pk_fp8_f32(T.i32, a, b, fx.Int32(0), False)) & 0xFFFF
-
-
-def cache_inv(system=False):
-    """Acquire-side invalidate (gfx94x/95x memory model): buffer_inv sc1 (device scope) or
-    sc0 sc1 (system scope), so the normal (cached) loads that follow see data other CUs or
-    other GPUs released before their flag. Side-effecting: no memory op moves across it."""
-    asm = "buffer_inv sc0 sc1" if system else "buffer_inv sc1"
-    return fx.Int32(
-        llvm.inline_asm(
-            T.i32, [], asm + "\n\tv_mov_b32 $0, 0", "=v", has_side_effects=True
-        )
-    )
-
-
 def st_if(ok, v, base, i, cm=0):
     """buffer_store of v (i32 or i32 vector) at dword i, dropped (out-of-range offset, no
     branch) when not ``ok``: keeps the waitcnt pass from draining at a join."""
@@ -563,11 +434,3 @@ def mb_put_if(ok, tag, base, i, v, cm=CM_DEV):
     """Pair i := (v, tag) when ``ok`` (branch-free, see st_if)."""
     bits = v.bitcast(fx.Int32) if isinstance(v, fx.Float32) else fx.Int32(v)
     st_if(ok, fx.Vector.from_elements([bits, tag], fx.Int32), base, fx.Int32(i) * 2, cm)
-
-
-def min_tree(vs):
-    """Pairwise minimum of a power-of-two list of traced ints (plain Python: not AST-rewritten)."""
-    vs = list(vs)
-    while len(vs) > 1:
-        vs = [fx.min(vs[2 * j], vs[2 * j + 1]) for j in range(len(vs) // 2)]
-    return vs[0]
