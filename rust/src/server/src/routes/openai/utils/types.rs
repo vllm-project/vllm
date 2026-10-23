@@ -261,6 +261,20 @@ pub struct StreamOptions {
     pub continuous_usage_stats: Option<bool>,
 }
 
+impl StreamOptions {
+    /// Whether no option is set, as in `"stream_options": {}`.
+    ///
+    /// Python rejects `stream_options` without `stream=true` only when the
+    /// object is non-empty, so an empty object must pass that check.
+    pub fn is_empty(&self) -> bool {
+        let Self {
+            include_usage,
+            continuous_usage_stats,
+        } = self;
+        include_usage.is_none() && continuous_usage_stats.is_none()
+    }
+}
+
 // ============================================================================
 // Tools and Function Calling
 // ============================================================================
@@ -741,13 +755,16 @@ pub struct ErrorResponse {
     pub error: ErrorDetail,
 }
 
+/// Mirrors the Python vLLM `ErrorInfo` class.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ErrorDetail {
     pub message: String,
+    /// The error class, such as `BadRequestError`.
     #[serde(rename = "type")]
     pub error_type: String,
     pub param: Option<String>,
-    pub code: Option<String>,
+    /// The HTTP status code.
+    pub code: u16,
 }
 
 // ============================================================================

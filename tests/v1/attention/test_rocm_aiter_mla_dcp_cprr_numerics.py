@@ -37,6 +37,7 @@ if not current_platform.is_rocm():
     pytest.skip("ROCm AITER MLA tests", allow_module_level=True)
 
 from vllm._aiter_ops import is_aiter_found  # noqa: E402
+from vllm.distributed.parallel_state import GroupCoordinator  # noqa: E402
 from vllm.v1.attention.backends.mla import rocm_aiter_mla  # noqa: E402
 
 KV_LORA_RANK = 512
@@ -130,7 +131,9 @@ def _merge_partials(os_, lses):
 # --------------------------------------------------------------------------
 
 
-class _FakeGroup:
+class _FakeGroup(GroupCoordinator):
+    """Rank-simulating stub; ``GroupCoordinator.__init__`` is never run."""
+
     def __init__(self, world_size: int, rank: int):
         self.world_size = world_size
         self.rank_in_group = rank
@@ -198,7 +201,7 @@ class _PrefillBackendStub:
         return self
 
 
-def _make_ctx_layer(vllm_config):
+def _make_ctx_layer(vllm_config, monkeypatch: pytest.MonkeyPatch):
     """Stand-in for the registered attention layer in static_forward_context.
 
     ``MLACommonMetadataBuilder.__init__`` reads the MLA dims, ``dcp_manager``
@@ -210,7 +213,7 @@ def _make_ctx_layer(vllm_config):
     from vllm.v1.attention.ops.dcp import MLADCPManager
 
     mgr = object.__new__(MLADCPManager)
-    mgr.init_kv_gather = lambda *a, **k: None
+    monkeypatch.setattr(mgr, "init_kv_gather", lambda *a, **k: None)
 
     return SimpleNamespace(
         non_causal_multi_token_decode=False,
@@ -375,7 +378,9 @@ def _run_shard(
     return md, o, lse, local_len
 
 
-def _numerics(heads_per_rank: int, sabotage: bool = False):
+def _numerics(
+    monkeypatch: pytest.MonkeyPatch, heads_per_rank: int, sabotage: bool = False
+):
     """Run every DCP shard and return (per-shard max rel err, merged rel err)."""
     import aiter
 
@@ -394,7 +399,7 @@ def _numerics(heads_per_rank: int, sabotage: bool = False):
 
         layer_name = "model.layers.0.self_attn.attn"
         vllm_config.compilation_config.static_forward_context[layer_name] = (
-            _make_ctx_layer(vllm_config)
+            _make_ctx_layer(vllm_config, monkeypatch)
         )
         # block_size 1: one page per token, so page ids are positions and the
         # residue-class page table is expressible directly.
@@ -489,7 +494,9 @@ def _numerics(heads_per_rank: int, sabotage: bool = False):
     ids=["native-128", "padded-96-to-128"],
 )
 @torch.inference_mode()
-def test_cprr_shards_match_reference_and_merge_to_full_context(heads_per_rank):
+def test_cprr_shards_match_reference_and_merge_to_full_context(
+    monkeypatch, heads_per_rank
+):
     """Every DCP shard must be right, and their LSE merge must reproduce
     full-context attention.
 
@@ -498,14 +505,14 @@ def test_cprr_shards_match_reference_and_merge_to_full_context(heads_per_rank):
     reference on the tokens whose causal window is truncated. Checking the merge
     alone would hide that, so both are asserted.
     """
-    shard_rel, merge_rel = _numerics(heads_per_rank)
+    shard_rel, merge_rel = _numerics(monkeypatch, heads_per_rank)
     assert shard_rel < SHARD_RTOL, f"per-shard rel err {shard_rel:.3e}"
     assert merge_rel < MERGE_RTOL, f"merged rel err {merge_rel:.3e}"
 
 
 @requires_cprr
 @torch.inference_mode()
-def test_wrong_cp_rank_breaks_the_result():
+def test_wrong_cp_rank_breaks_the_result(monkeypatch):
     """Positive control: without it, a passing run above proves nothing.
 
     Feeding shard r's pages to the kernel while telling it that it is rank r+1
@@ -513,7 +520,7 @@ def test_wrong_cp_rank_breaks_the_result():
     and the round-robin reconstruction are wrong. If the error does NOT blow up,
     the kernel is not using cp_rank and the test above has no power.
     """
-    shard_rel, merge_rel = _numerics(16, sabotage=True)
+    shard_rel, merge_rel = _numerics(monkeypatch, 16, sabotage=True)
     assert shard_rel > SHARD_RTOL or merge_rel > MERGE_RTOL, (
         f"sabotaged run still passed (shard {shard_rel:.3e}, merge "
         f"{merge_rel:.3e}) -- cp_rank is not reaching the kernel"

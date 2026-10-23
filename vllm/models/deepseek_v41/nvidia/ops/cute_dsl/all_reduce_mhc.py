@@ -12,11 +12,17 @@ reduces it and normalizes. The consumer's residual add and copy are replaced by
 the mHC post-mix of the hc residual streams and their pre-mix collapse, which
 the RMSNorm then normalizes. The finalize variant also reads FP32 routing
 weights.
+
+Optionally the consumer also writes the normalized output as MXFP8 with UE8M0
+scales in the swizzled 128x4 layout FlashInfer's MXFP8 GEMMs read. It quantizes
+the BF16-rounded output with FlashInfer's own quantize helpers, so the result is
+bit-identical to ``mxfp8_quantize`` of the BF16 output, without its launch.
 """
 
 from __future__ import annotations
 
 import math
+from typing import Any
 
 import cuda.bindings.driver as cuda
 import cutlass
@@ -24,10 +30,11 @@ import cutlass.cute as cute
 import torch
 import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
-from cutlass import BFloat16, Float32, Int32, Int64, Uint32
+from cutlass import BFloat16, Float32, Int32, Int64, Uint8, Uint32
 from cutlass.cute.runtime import make_fake_compact_tensor
 
 from vllm.distributed import get_tp_group
+from vllm.models.deepseek_v41.common.ops.query_quant import mxfp8_scale_bytes
 
 from .primitives import (
     NEGATIVE_ZERO_BF16_BITS,
@@ -64,6 +71,12 @@ from .primitives import (
 LAMPORT_GENERATIONS = 3
 NEXT_STAGE = 0
 ACTIVE_STAGE = 1
+# One UE8M0 scale per 32 values: four adjacent threads' BF16 fragments.
+MXFP8_BLOCK = 32
+FRAGMENTS_PER_MXFP8_BLOCK = MXFP8_BLOCK // VEC_BF16
+# The swizzled scale layout tiles 128 rows by 4 scale columns.
+SCALE_TILE_ROWS = 128
+SCALE_TILE_COLS = 4
 
 
 @cute.jit
@@ -523,7 +536,11 @@ class _LamportMHCDeviceKernel:
 
     The residual add and residual copy become the mHC post-mix of the hc
     streams, stored as the residual output, and their pre-mix collapse, which
-    the unchanged RMSNorm normalizes.
+    the unchanged RMSNorm normalizes. With ``quantize``, the normalized output
+    is also written as MXFP8 with swizzled 128x4 UE8M0 scales, including the
+    zero scales of the padding rows up to a multiple of 128. With
+    ``residual_only``, only the residual output is written; the pre-mix, gamma
+    and normalized output are unused.
     """
 
     def __init__(
@@ -537,6 +554,8 @@ class _LamportMHCDeviceKernel:
         rank_lanes: int,
         threads: int,
         enable_pdl: bool,
+        quantize: bool = False,
+        residual_only: bool = False,
     ) -> None:
         if rank_lanes not in (1, 2, 4, 8):
             raise ValueError("rank_lanes must be 1, 2, 4, or 8")
@@ -546,6 +565,24 @@ class _LamportMHCDeviceKernel:
             raise ValueError("threads must be a positive warp and rank-lane multiple")
         if hidden <= 0 or hidden % VEC_BF16:
             raise ValueError("hidden must be a positive multiple of 8")
+        # A scale block's four fragments must sit in four adjacent lanes.
+        if quantize and (rank_lanes != 1 or hidden % (MXFP8_BLOCK * SCALE_TILE_COLS)):
+            raise ValueError("MXFP8 output needs rank_lanes == 1 and hidden % 128 == 0")
+        if quantize and residual_only:
+            raise ValueError("a residual-only consumer has no layer input to quantize")
+        self.quantize = quantize
+        # FlashInfer's MXFP8 quantize helpers are FlashInfer internals: only the
+        # quantized variant, which the specialized decode builds, imports them.
+        # Untyped modules.
+        self.fp4_ops: Any = None
+        self.mxfp8_ops: Any = None
+        if quantize:
+            from flashinfer.cute_dsl import fp4_common
+            from flashinfer.quantization import quantization_cute_dsl_utils
+
+            self.fp4_ops = fp4_common
+            self.mxfp8_ops = quantization_cute_dsl_utils
+        self.write_layer_input = not residual_only
         self.hidden = hidden
         self.hc = hc
         self.tp = tp
@@ -555,6 +592,7 @@ class _LamportMHCDeviceKernel:
         self.threads = threads
         self.enable_pdl = enable_pdl
         self.fragments = hidden // VEC_BF16
+        self.scale_cols = hidden // MXFP8_BLOCK
         self.groups_per_cta = threads // rank_lanes
         self.fragment_stride = cluster_size * self.groups_per_cta
         self.trips = math.ceil(self.fragments / self.fragment_stride)
@@ -575,6 +613,8 @@ class _LamportMHCDeviceKernel:
         gamma: cute.Tensor,
         residual_output: cute.Tensor,
         norm_output: cute.Tensor,
+        quant_output: cute.Tensor,
+        quant_scales: cute.Tensor,
         stage_state: cute.Tensor,
         eps: Float32,
         m: Int32,
@@ -589,6 +629,8 @@ class _LamportMHCDeviceKernel:
             gamma,
             residual_output,
             norm_output,
+            quant_output,
+            quant_scales,
             stage_state,
             eps,
         ).launch(
@@ -611,6 +653,8 @@ class _LamportMHCDeviceKernel:
         gamma: cute.Tensor,
         residual_output: cute.Tensor,
         norm_output: cute.Tensor,
+        quant_output: cute.Tensor,
+        quant_scales: cute.Tensor,
         stage_state: cute.Tensor,
         eps: Float32,
     ) -> None:
@@ -651,15 +695,16 @@ class _LamportMHCDeviceKernel:
             fragment = base_fragment + trip * self.fragment_stride
             if fragment < self.fragments and rank_lane == 0:
                 gamma_element = Int64(fragment) * VEC_BF16
-                gamma_pointer = cute.make_ptr(
-                    BFloat16,
-                    (gamma.iterator + gamma_element).llvm_ptr,
-                    cute.AddressSpace.gmem,
-                    assumed_align=16,
-                )
-                gamma_fragments[trip, None].store(
-                    packed_u32x4_to_bf16x8(load_global_u32x4(gamma_pointer))
-                )
+                if cutlass.const_expr(self.write_layer_input):
+                    gamma_pointer = cute.make_ptr(
+                        BFloat16,
+                        (gamma.iterator + gamma_element).llvm_ptr,
+                        cute.AddressSpace.gmem,
+                        assumed_align=16,
+                    )
+                    gamma_fragments[trip, None].store(
+                        packed_u32x4_to_bf16x8(load_global_u32x4(gamma_pointer))
+                    )
                 for source in cutlass.range_constexpr(hc):
                     residual_element = (
                         Int64(token) * hc + source
@@ -683,9 +728,10 @@ class _LamportMHCDeviceKernel:
             post_mix[target] = cute.arch.load(
                 (post.iterator + mix_index).llvm_ptr, Float32
             )
-            pre_mix[target] = cute.arch.load(
-                (pre.iterator + mix_index).llvm_ptr, Float32
-            )
+            if cutlass.const_expr(self.write_layer_input):
+                pre_mix[target] = cute.arch.load(
+                    (pre.iterator + mix_index).llvm_ptr, Float32
+                )
             for source in cutlass.range_constexpr(hc):
                 comb_index = (Int64(token) * hc + source) * hc + target
                 comb_mix[source, target] = cute.arch.load(
@@ -771,10 +817,12 @@ class _LamportMHCDeviceKernel:
                         Int64((residual_output.iterator + output_element).toint()),
                         bf16x8_to_packed_u32x4(mixed_bf16),
                     )
-                    collapse.store(
-                        collapse.load() + mixed_bf16.to(Float32) * pre_mix[target]
-                    )
-                prenorm_fragments[trip, None].store(collapse.load().to(BFloat16))
+                    if cutlass.const_expr(self.write_layer_input):
+                        collapse.store(
+                            collapse.load() + mixed_bf16.to(Float32) * pre_mix[target]
+                        )
+                if cutlass.const_expr(self.write_layer_input):
+                    prenorm_fragments[trip, None].store(collapse.load().to(BFloat16))
 
         if token == 0 and cluster_rank == 0 and tidx == 0:
             store_global_u32(
@@ -798,56 +846,120 @@ class _LamportMHCDeviceKernel:
                         Int64((contribution_mailbox.iterator + source_element).toint())
                     )
 
-        thread_sum = Float32(0.0)
-        for trip in cutlass.range_constexpr(self.trips):
-            fragment = base_fragment + trip * self.fragment_stride
-            if fragment < self.fragments and rank_lane == 0:
-                values = prenorm_fragments[trip, None].load().to(Float32)
-                thread_sum = thread_sum + (values * values).reduce(
-                    cute.ReductionOp.ADD,
-                    init_val=Float32(0.0),
-                    reduction_profile=0,
-                )
+        if cutlass.const_expr(self.write_layer_input):
+            thread_sum = Float32(0.0)
+            for trip in cutlass.range_constexpr(self.trips):
+                fragment = base_fragment + trip * self.fragment_stride
+                if fragment < self.fragments and rank_lane == 0:
+                    values = prenorm_fragments[trip, None].load().to(Float32)
+                    thread_sum = thread_sum + (values * values).reduce(
+                        cute.ReductionOp.ADD,
+                        init_val=Float32(0.0),
+                        reduction_profile=0,
+                    )
 
-        smem = cutlass.utils.SmemAllocator()
-        warp_sums = smem.allocate_array(Float32, self.warps)
-        cluster_sums = smem.allocate_array(Float32, self.cluster_size)
-        cta_sum = _group_leader_block_sum(
-            thread_sum,
-            warp_sums,
-            self.warps,
-            self.rank_lanes,
-        )
-        if tidx < self.cluster_size:
-            local_slot = cluster_sums + cluster_rank
-            remote_slot = map_shared_to_peer(local_slot, Int32(tidx))
-            store_shared_cluster_f32(remote_slot, cta_sum)
-        cute.arch.cluster_arrive()
-        cute.arch.cluster_wait()
-        full_sum = Float32(0.0)
-        for peer in cutlass.range_constexpr(self.cluster_size):
-            full_sum = full_sum + cute.arch.load(
-                (cluster_sums + peer).llvm_ptr,
-                Float32,
+            smem = cutlass.utils.SmemAllocator()
+            warp_sums = smem.allocate_array(Float32, self.warps)
+            cluster_sums = smem.allocate_array(Float32, self.cluster_size)
+            cta_sum = _group_leader_block_sum(
+                thread_sum,
+                warp_sums,
+                self.warps,
+                self.rank_lanes,
             )
-        inv_rms = cute.math.rsqrt(
-            full_sum / Float32(self.hidden) + eps,
-            fastmath=True,
-        )
-        for trip in cutlass.range_constexpr(self.trips):
-            fragment = base_fragment + trip * self.fragment_stride
-            if fragment < self.fragments and rank_lane == 0:
-                gamma_values = gamma_fragments[trip, None].load().to(Float32)
-                result = (
-                    prenorm_fragments[trip, None].load().to(Float32)
-                    * inv_rms
-                    * gamma_values
-                ).to(BFloat16)
-                output_element = Int64(token) * self.hidden + Int64(fragment) * VEC_BF16
-                store_global_u32x4(
-                    Int64((norm_output.iterator + output_element).toint()),
-                    bf16x8_to_packed_u32x4(result),
+            if tidx < self.cluster_size:
+                local_slot = cluster_sums + cluster_rank
+                remote_slot = map_shared_to_peer(local_slot, Int32(tidx))
+                store_shared_cluster_f32(remote_slot, cta_sum)
+            cute.arch.cluster_arrive()
+            cute.arch.cluster_wait()
+            full_sum = Float32(0.0)
+            for peer in cutlass.range_constexpr(self.cluster_size):
+                full_sum = full_sum + cute.arch.load(
+                    (cluster_sums + peer).llvm_ptr,
+                    Float32,
                 )
+            inv_rms = cute.math.rsqrt(
+                full_sum / Float32(self.hidden) + eps,
+                fastmath=True,
+            )
+            for trip in cutlass.range_constexpr(self.trips):
+                fragment = base_fragment + trip * self.fragment_stride
+                if cutlass.const_expr(self.quantize):
+                    normalized = cute.make_rmem_tensor(
+                        cute.make_layout((VEC_BF16,)), BFloat16
+                    )
+                    normalized.fill(BFloat16(0.0))
+                if fragment < self.fragments and rank_lane == 0:
+                    gamma_values = gamma_fragments[trip, None].load().to(Float32)
+                    result = (
+                        prenorm_fragments[trip, None].load().to(Float32)
+                        * inv_rms
+                        * gamma_values
+                    ).to(BFloat16)
+                    output_element = (
+                        Int64(token) * self.hidden + Int64(fragment) * VEC_BF16
+                    )
+                    store_global_u32x4(
+                        Int64((norm_output.iterator + output_element).toint()),
+                        bf16x8_to_packed_u32x4(result),
+                    )
+                    if cutlass.const_expr(self.quantize):
+                        normalized.store(result)
+                if cutlass.const_expr(self.quantize):
+                    # FlashInfer's 4-threads-per-scale MXFP8 quantize of the BF16
+                    # output. Every lane joins the shuffles; fragments are a
+                    # multiple of 4, so a scale block is wholly in or out of range.
+                    words = bf16x8_to_packed_u32x4(normalized.load())
+                    block_max = self.mxfp8_ops.reduce_max_4threads(
+                        self.mxfp8_ops.bfloat2_hmax_reduce_to_f32(
+                            self.mxfp8_ops.bfloat2_max_abs_4(
+                                words[0], words[1], words[2], words[3]
+                            )
+                        )
+                    )
+                    scale = self.mxfp8_ops.float_to_ue8m0_fast(
+                        block_max * Float32(self.mxfp8_ops.INV_FLOAT8_E4M3_MAX)
+                    )
+                    inv_scale = self.mxfp8_ops.ue8m0_to_inv_scale_fast(scale)
+                    if fragment < self.fragments:
+                        self.fp4_ops.st_global_u64(
+                            self.fp4_ops.get_ptr_as_int64(
+                                quant_output,
+                                Int64(token) * self.hidden + Int64(fragment) * VEC_BF16,
+                            ),
+                            self.mxfp8_ops.bfloat2x4_to_fp8x8_packed(
+                                words[0], words[1], words[2], words[3], inv_scale
+                            ),
+                        )
+                        if fragment % FRAGMENTS_PER_MXFP8_BLOCK == 0:
+                            quant_scales[
+                                self.mxfp8_ops.compute_sf_index_swizzled_128x4_gpu(
+                                    token,
+                                    fragment // FRAGMENTS_PER_MXFP8_BLOCK,
+                                    Int32(self.scale_cols),
+                                )
+                            ] = scale.to(Uint8)
+
+            if cutlass.const_expr(self.quantize):
+                # Zero the scales of the padding rows, as FlashInfer's quantize
+                # does, one 4-column word per store, spread over the whole grid.
+                m, _, _ = cute.arch.grid_dim()
+                words_per_row = self.scale_cols // SCALE_TILE_COLS
+                padded_m = (
+                    (m + SCALE_TILE_ROWS - 1) // SCALE_TILE_ROWS * SCALE_TILE_ROWS
+                )
+                pad_words = (padded_m - m) * words_per_row
+                word = (token * self.cluster_size + cluster_rank) * self.threads + tidx
+                while word < pad_words:
+                    row = m + word // words_per_row
+                    offset = self.mxfp8_ops.compute_sf_index_swizzled_128x4_gpu(
+                        row,
+                        word % words_per_row * SCALE_TILE_COLS,
+                        Int32(self.scale_cols),
+                    )
+                    store_global_u32(quant_scales.iterator + offset, Uint32(0))
+                    word = word + m * self.cluster_size * self.threads
 
 
 class AllReduceMHC:
@@ -858,7 +970,11 @@ class AllReduceMHC:
     caller. ``finalize`` does the same for an unfinalized MoE output, folding
     the top-k reduction and the shared-expert add into the publish. Each
     instance owns a Lamport mailbox; construction is collective over the TP
-    group.
+    group. With ``quantize_layer_input``, both also accept ``mxfp8_out``
+    buffers that receive the normalized collapse as MXFP8. With
+    ``residual_only``, both also accept ``pre`` and ``norm_weight`` of None and
+    then write only the post-mixed streams, for a consumer that collapses them
+    itself.
     """
 
     def __init__(
@@ -869,12 +985,16 @@ class AllReduceMHC:
         max_num_tokens: int,
         top_k: int,
         device: torch.device,
+        quantize_layer_input: bool = False,
+        residual_only: bool = False,
     ) -> None:
         group = get_tp_group().device_group
         self.hidden_size = hidden = hidden_size
         self.hc_mult = hc = hc_mult
         self.capacity = capacity = max_num_tokens
         self.top_k = top_k
+        self.quantize_layer_input = quantize_layer_input
+        self.residual_only = residual_only
         tp = dist.get_world_size(group)
         rank = dist.get_rank(group)
         device = torch.device(device)
@@ -936,42 +1056,86 @@ class AllReduceMHC:
                 Int32(capacity),
                 current_cu_stream(),
             )
-            self._collective = cute.compile(
-                _LamportMHCDeviceKernel(
-                    hidden=hidden,
-                    hc=hc,
-                    tp=tp,
-                    capacity_m=capacity,
-                    cluster_size=5,
-                    rank_lanes=1,
-                    threads=128,
-                    enable_pdl=True,
-                ),
-                make_fake_compact_tensor(
-                    BFloat16,
-                    (LAMPORT_GENERATIONS * tp * capacity * hidden,),
-                    assumed_align=16,
-                ),
-                make_fake_dynamic_compact_tensor(
-                    BFloat16, alignment=16, divisibility=hc * hidden
-                ),
-                make_fake_dynamic_compact_tensor(Float32, alignment=4, divisibility=hc),
-                make_fake_dynamic_compact_tensor(
-                    Float32, alignment=4, divisibility=hc * hc
-                ),
-                make_fake_dynamic_compact_tensor(Float32, alignment=4, divisibility=hc),
-                make_fake_compact_tensor(BFloat16, (hidden,), assumed_align=16),
-                make_fake_dynamic_compact_tensor(
-                    BFloat16, alignment=16, divisibility=hc * hidden
-                ),
-                make_fake_dynamic_compact_tensor(
-                    BFloat16, alignment=16, divisibility=hidden
-                ),
-                make_fake_compact_tensor(Int32, (2,), assumed_align=4),
-                Float32(0.0),
-                Int32(capacity),
-                current_cu_stream(),
+            # Stand-ins for the MXFP8 outputs of the unquantized variants,
+            # which never touch them.
+            self._no_quant_output = torch.empty(16, dtype=torch.uint8, device=device)
+            no_quant_cute = to_cute(self._no_quant_output, 16)
+            self._no_quant_args = (no_quant_cute, no_quant_cute)
+
+            def compile_collective(quantize: bool, residual_only: bool):
+                if quantize:
+                    quant_fakes = (
+                        make_fake_dynamic_compact_tensor(
+                            Uint8, alignment=16, divisibility=hidden
+                        ),
+                        make_fake_dynamic_compact_tensor(
+                            Uint8, alignment=16, divisibility=16
+                        ),
+                    )
+                else:
+                    quant_fakes = (
+                        make_fake_compact_tensor(Uint8, (16,), assumed_align=16),
+                    ) * 2
+                return cute.compile(
+                    _LamportMHCDeviceKernel(
+                        hidden=hidden,
+                        hc=hc,
+                        tp=tp,
+                        capacity_m=capacity,
+                        cluster_size=5,
+                        rank_lanes=1,
+                        threads=128,
+                        enable_pdl=True,
+                        quantize=quantize,
+                        residual_only=residual_only,
+                    ),
+                    make_fake_compact_tensor(
+                        BFloat16,
+                        (LAMPORT_GENERATIONS * tp * capacity * hidden,),
+                        assumed_align=16,
+                    ),
+                    make_fake_dynamic_compact_tensor(
+                        BFloat16, alignment=16, divisibility=hc * hidden
+                    ),
+                    make_fake_dynamic_compact_tensor(
+                        Float32, alignment=4, divisibility=hc
+                    ),
+                    make_fake_dynamic_compact_tensor(
+                        Float32, alignment=4, divisibility=hc * hc
+                    ),
+                    make_fake_dynamic_compact_tensor(
+                        Float32, alignment=4, divisibility=hc
+                    ),
+                    make_fake_compact_tensor(BFloat16, (hidden,), assumed_align=16),
+                    make_fake_dynamic_compact_tensor(
+                        BFloat16, alignment=16, divisibility=hc * hidden
+                    ),
+                    make_fake_dynamic_compact_tensor(
+                        BFloat16, alignment=16, divisibility=hidden
+                    ),
+                    *quant_fakes,
+                    make_fake_compact_tensor(Int32, (2,), assumed_align=4),
+                    Float32(0.0),
+                    Int32(capacity),
+                    current_cu_stream(),
+                )
+
+            self._collective = compile_collective(quantize=False, residual_only=False)
+            self._collective_quant = (
+                compile_collective(quantize=True, residual_only=False)
+                if quantize_layer_input
+                else None
             )
+            self._collective_residual = (
+                compile_collective(quantize=False, residual_only=True)
+                if residual_only
+                else None
+            )
+            if residual_only:
+                # Stand-in for the norm weight the variant never reads.
+                self._no_norm_weight = torch.empty(
+                    hidden, dtype=torch.bfloat16, device=device
+                )
 
             self._mailbox = symm_mem.empty(
                 (LAMPORT_GENERATIONS, tp, capacity, hidden),
@@ -995,10 +1159,11 @@ class AllReduceMHC:
         residual: torch.Tensor,
         post: torch.Tensor,
         comb: torch.Tensor,
-        pre: torch.Tensor,
-        norm_weight: torch.Tensor,
+        pre: torch.Tensor | None,
+        norm_weight: torch.Tensor | None,
         norm_eps: float,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        mxfp8_out: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Return (post-mixed residual streams, normalized layer input).
 
         Args:
@@ -1006,9 +1171,14 @@ class AllReduceMHC:
             residual: [M, hc, hidden] BF16 residual streams.
             post: [M, hc(, 1)] FP32 post-mix.
             comb: [M, hc, hc] FP32 residual mix, indexed [source, target].
-            pre: [M, hc] FP32 carried pre-mix for the collapse.
+            pre: [M, hc] FP32 carried pre-mix for the collapse. None (with
+                ``norm_weight``, built with ``residual_only``): write only the
+                residual streams and return no layer input.
             norm_weight: [hidden] BF16 RMSNorm weight.
             norm_eps: RMSNorm epsilon.
+            mxfp8_out: optional [M, hidden] FP8 E4M3 values and swizzled
+                128x4 UE8M0 scales (``mxfp8_scale_bytes(M, hidden)`` bytes)
+                that also receive the layer input as MXFP8.
 
         """
         m = x.shape[0]
@@ -1022,7 +1192,9 @@ class AllReduceMHC:
             Int32(m),
             current_cu_stream(),
         )
-        return self._collect(residual, post, comb, pre, norm_weight, norm_eps, m)
+        return self._collect(
+            residual, post, comb, pre, norm_weight, norm_eps, m, mxfp8_out
+        )
 
     def finalize(
         self,
@@ -1033,10 +1205,11 @@ class AllReduceMHC:
         residual: torch.Tensor,
         post: torch.Tensor,
         comb: torch.Tensor,
-        pre: torch.Tensor,
-        norm_weight: torch.Tensor,
+        pre: torch.Tensor | None,
+        norm_weight: torch.Tensor | None,
         norm_eps: float,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        mxfp8_out: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """``__call__`` for a MoE output left unfinalized.
 
         Args:
@@ -1049,9 +1222,11 @@ class AllReduceMHC:
             residual: [M, hc, hidden] BF16 residual streams.
             post: [M, hc(, 1)] FP32 post-mix.
             comb: [M, hc, hc] FP32 residual mix, indexed [source, target].
-            pre: [M, hc] FP32 carried pre-mix for the collapse.
-            norm_weight: [hidden] BF16 RMSNorm weight.
+            pre: [M, hc] FP32 carried pre-mix for the collapse (None: residual
+                only, as in ``__call__``).
+            norm_weight: [hidden] BF16 RMSNorm weight (None with ``pre``).
             norm_eps: RMSNorm epsilon.
+            mxfp8_out: as in ``__call__``.
 
         """
         m = shared_output.shape[0]
@@ -1080,7 +1255,9 @@ class AllReduceMHC:
             Int32(m),
             current_cu_stream(),
         )
-        return self._collect(residual, post, comb, pre, norm_weight, norm_eps, m)
+        return self._collect(
+            residual, post, comb, pre, norm_weight, norm_eps, m, mxfp8_out
+        )
 
     def _check(
         self,
@@ -1088,7 +1265,7 @@ class AllReduceMHC:
         residual: torch.Tensor,
         post: torch.Tensor,
         comb: torch.Tensor,
-        pre: torch.Tensor,
+        pre: torch.Tensor | None,
     ) -> None:
         hc = self.hc_mult
         if not 1 <= m <= self.capacity:
@@ -1097,7 +1274,7 @@ class AllReduceMHC:
             raise ValueError("unexpected residual shape")
         if (
             post.numel() != m * hc
-            or pre.numel() != m * hc
+            or (pre is not None and pre.numel() != m * hc)
             or comb.numel() != m * hc * hc
         ):
             raise ValueError("unexpected mix shapes")
@@ -1107,17 +1284,48 @@ class AllReduceMHC:
         residual: torch.Tensor,
         post: torch.Tensor,
         comb: torch.Tensor,
-        pre: torch.Tensor,
-        norm_weight: torch.Tensor,
+        pre: torch.Tensor | None,
+        norm_weight: torch.Tensor | None,
         norm_eps: float,
         m: int,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        mxfp8_out: tuple[torch.Tensor, torch.Tensor] | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         hidden, hc = self.hidden_size, self.hc_mult
         residual_output = torch.empty_like(residual)
-        layer_input = torch.empty(
-            (m, hidden), dtype=torch.bfloat16, device=residual.device
-        )
-        self._collective(
+        if (pre is None) != (norm_weight is None):
+            raise ValueError("pre and norm_weight are both given or both None")
+        layer_input: torch.Tensor | None = None
+        if pre is None or norm_weight is None:
+            if self._collective_residual is None:
+                raise ValueError("built without residual_only")
+            if mxfp8_out is not None:
+                raise ValueError("a residual-only boundary has no layer input")
+            # The variant reads neither the pre-mix nor the norm weight and
+            # writes no layer input: stand-ins fill their arguments.
+            collective, quant_args = self._collective_residual, self._no_quant_args
+            pre, norm_weight, norm_output = post, self._no_norm_weight, residual_output
+        else:
+            layer_input = norm_output = torch.empty(
+                (m, hidden), dtype=torch.bfloat16, device=residual.device
+            )
+            if mxfp8_out is None:
+                collective, quant_args = self._collective, self._no_quant_args
+            else:
+                if self._collective_quant is None:
+                    raise ValueError("built without quantize_layer_input")
+                values, scales = mxfp8_out
+                if values.shape != (m, hidden) or scales.numel() != (
+                    mxfp8_scale_bytes(m, hidden)
+                ):
+                    raise ValueError("mxfp8_out does not match the layer input")
+                collective = self._collective_quant
+                quant_args = (
+                    to_cute_dynamic(
+                        values.view(torch.uint8).flatten(), 16, divisibility=hidden
+                    ),
+                    to_cute_dynamic(scales.flatten(), 16, divisibility=16),
+                )
+        collective(
             to_cute(self._mailbox.flatten(), 16),
             to_cute_dynamic(residual.flatten(), 16, divisibility=hc * hidden),
             to_cute_dynamic(post.flatten(), 4, divisibility=hc),
@@ -1125,7 +1333,8 @@ class AllReduceMHC:
             to_cute_dynamic(pre.flatten(), 4, divisibility=hc),
             to_cute(norm_weight, 16),
             to_cute_dynamic(residual_output.flatten(), 16, divisibility=hc * hidden),
-            to_cute_dynamic(layer_input.flatten(), 16, divisibility=hidden),
+            to_cute_dynamic(norm_output.flatten(), 16, divisibility=hidden),
+            *quant_args,
             to_cute(self._stage_state, 4),
             Float32(norm_eps),
             Int32(m),

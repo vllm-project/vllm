@@ -16,7 +16,6 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     PIN_MEMORY,
     canonicalize_singleton_dim_strides,
-    is_quantized_kv_cache,
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -78,6 +77,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     KVQuantMode,
     SlidingWindowSpec,
+    is_quantized_kv_cache,
 )
 from vllm.v1.worker.cp_utils import (
     run_split_fa2_dcp_context_attention,
@@ -425,6 +425,9 @@ class FlashAttentionBackend(AttentionBackend):
             return False
         if head_size <= 256:
             return True
+        if current_platform.is_xpu():
+            # The XPU SYCL kernels support head sizes up to 512.
+            return head_size <= 512
         if is_fa_version_supported(4):
             return head_size <= 512
         return False
@@ -613,7 +616,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
     #  https://github.com/vllm-project/vllm/issues/22945
     _cudagraph_support = (
         AttentionCGSupport.ALWAYS
-        if get_flash_attn_version() in (3, 4)
+        if get_flash_attn_version() in (3, 4) or current_platform.is_xpu()
         else AttentionCGSupport.UNIFORM_BATCH
     )
     supports_update_block_table: bool = True

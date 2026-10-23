@@ -1304,6 +1304,22 @@ def test_full_attention_merge_preserves_replicated_cache_geometry(use_mla):
 
 
 @pytest.mark.parametrize(
+    "target",
+    [
+        new_kv_cache_spec(),
+        new_mla_spec(),
+        SinkFullAttentionSpec(
+            block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float32, sink_len=4
+        ),
+    ],
+)
+def test_draft_layer_tag_is_not_part_of_the_cache_format(target):
+    draft = replace(target, is_draft=True)
+    assert draft == target and hash(draft) == hash(target)
+    assert type(target).merge([target, draft]) == target
+
+
+@pytest.mark.parametrize(
     "layer_type,dcp_size,expected_width",
     [
         ("mla", 1, 64),

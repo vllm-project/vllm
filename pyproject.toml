@@ -199,9 +199,11 @@ extend-exclude = ["tests/models/fixtures/*", "tests/prompts/*", "tests/tokenizer
     "tests/entrypoints/speech_to_text/transcription/test_transcription_validation.py",
     "docs/governance/process.md", "docs/community/reviewers.md", "docs/assets/contributing/vllm_bench_serve_timeline.html", 
     "tests/v1/engine/test_fast_incdec_prefix_err.py", ".git/*", "csrc/cpu/sgl-kernels/*",
+    "tests/entrypoints/scale_out/token_in_token_out/test_protocol.py",
     "rust/src/chat/src/renderer/deepseek_v32/fixtures/*", "rust/src/parser/**",
     "rust/src/text/src/output/decoded.rs",
-    "rust/src/tokenizer/src/incremental.rs"]
+    "rust/src/tokenizer/src/incremental.rs",
+    "recipes/models/*"]
 ignore-hidden = false
 
 [tool.typos.default]
@@ -226,6 +228,7 @@ view_seperator = "view_seperator"
 inverse_std_variences = "inverse_std_variences"
 
 [tool.typos.default.extend-words]
+certifi = "certifi"
 MoNE = "MoNE"
 mone = "mone"
 Hel = "Hel"

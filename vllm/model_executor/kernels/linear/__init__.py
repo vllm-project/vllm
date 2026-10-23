@@ -88,6 +88,9 @@ from vllm.model_executor.kernels.linear.mxfp4.humming import (
 from vllm.model_executor.kernels.linear.mxfp4.marlin import (
     MarlinMxFp4LinearKernel,
 )
+from vllm.model_executor.kernels.linear.mxfp4.pytorch import (
+    TorchMxFp4LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp4.xpu import (
     XPUMxFp4LinearKernel,
 )
@@ -187,6 +190,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.b12x import (
 )
 from vllm.model_executor.kernels.linear.scaled_mm.cpu import (
     CPUFp8BlockScaledMMKernel,
+    CPUFp8ChannelWiseScaledMMLinearKernel,
     CPUFp8PerTensorScaledMMLinearKernel,
     CPUFp8W8A8BlockScaledMMKernel,
     CPUFP8W8A8ScaledMMLinearKernel,
@@ -341,6 +345,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
         ChannelWiseTorchFP8ScaledMMLinearKernel,
         RowWiseTorchFP8ScaledMMLinearKernel,
         BlockWiseTorchFP8ScaledMMLinearKernel,
+        TorchMxFp4LinearKernel,
         TorchMxFp8LinearKernel,
         TorchNvFp4LinearKernel,
     },
@@ -466,6 +471,7 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
     PlatformEnum.CPU: [
         CPUFP8W8A8ScaledMMLinearKernel,
         CPUFp8PerTensorScaledMMLinearKernel,
+        CPUFp8ChannelWiseScaledMMLinearKernel,
         PerTensorTorchFP8ScaledMMLinearKernel,
         ChannelWiseTorchFP8ScaledMMLinearKernel,
     ],
@@ -624,6 +630,7 @@ _POSSIBLE_MXFP4_KERNELS: dict[PlatformEnum, list[type[MxFp4LinearKernel]]] = {
     ],
     PlatformEnum.XPU: [
         XPUMxFp4LinearKernel,
+        TorchMxFp4LinearKernel,
     ],
 }
 
@@ -836,11 +843,13 @@ def init_int8_linear_kernel(
     is_static_input_scheme: bool,
     input_symmetric: bool,
     module_name: str,
+    is_fused_module: bool = False,
 ) -> Int8ScaledMMLinearKernel:
     config = Int8ScaledMMLinearLayerConfig(
         is_channelwise=is_channelwise,
         is_static_input_scheme=is_static_input_scheme,
         input_symmetric=input_symmetric,
+        is_fused_module=is_fused_module,
     )
 
     kernel_type = choose_scaled_mm_linear_kernel(

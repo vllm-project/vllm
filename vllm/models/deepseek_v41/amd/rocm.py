@@ -2,13 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, cast
 
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
@@ -21,6 +20,7 @@ from vllm.model_executor.layers.rocm_paged_mxfp4_indexer import (
     RocmSparseAttnIndexer,
     RocmSparseMQAIndexer,
 )
+from vllm.models.deepseek_v41.amd.ops.sparse_indexer import Gfx942SparseAttnIndexer
 from vllm.models.deepseek_v41.attention import (
     DeepseekV4Attention,
     DeepseekV4Indexer,
@@ -61,7 +61,8 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_sparse_attn_prefill,
 )
 from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
-    rocm_paged_mxfp4_cache_layout,
+    rocm_mxfp4_indexer_k_store,
+    rocm_mxfp4_indexer_q_quant,
 )
 from vllm.v1.kv_cache_interface import KVCacheSpec
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -210,6 +211,36 @@ def compute_global_topk_ragged_indices_and_indptr(
     block_size: int,
     is_valid_token: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    # On gfx942 with --monokernel, a decode batch of up to 16
+    # rows is packed with one launch instead of 4 (topk_pack.py). Other
+    # batches return None there and take the function below.
+    from vllm.models.deepseek_v41.amd.ops import topk_pack
+
+    fused = topk_pack.pack(
+        topk_indices,
+        token_to_req_indices,
+        block_table,
+        block_size,
+        is_valid_token,
+    )
+    if fused is not None:
+        return fused
+    return _compute_global_topk_ragged_indices_and_indptr_old(
+        topk_indices,
+        token_to_req_indices,
+        block_table,
+        block_size,
+        is_valid_token,
+    )
+
+
+def _compute_global_topk_ragged_indices_and_indptr_old(
+    topk_indices: torch.Tensor,
+    token_to_req_indices: torch.Tensor,
+    block_table: torch.Tensor,
+    block_size: int,
+    is_valid_token: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     topk_indices = topk_indices.reshape(topk_indices.shape[0], -1).contiguous()
     num_tokens = topk_indices.shape[0]
     topk = topk_indices.shape[1]
@@ -349,6 +380,22 @@ class DeepseekV41ROCMAiterSparseSWAMetadataBuilder(DeepseekV41SparseSWAMetadataB
         fast_build: bool = False,
         replay_start: torch.Tensor | None = None,
     ) -> DeepseekV41ROCMAiterSparseSWAMetadata:
+        # On gfx942 with --monokernel, a decode batch gets this
+        # metadata from one launch instead of 8 launches per SWA group
+        # (swa_decode_meta.py). Other batches return None there and take
+        # the build below.
+        from vllm.models.deepseek_v41.amd.ops import swa_decode_meta
+
+        fused = swa_decode_meta.build(
+            self,
+            common_prefix_len,
+            common_attn_metadata,
+            fast_build,
+            replay_start,
+            DeepseekV41ROCMAiterSparseSWAMetadata,
+        )
+        if fused is not None:
+            return fused
         base = super().build(
             common_prefix_len=common_prefix_len,
             common_attn_metadata=common_attn_metadata,
@@ -401,76 +448,6 @@ class DeepseekV41ROCMAiterSparseSWAMetadataBuilder(DeepseekV41SparseSWAMetadataB
             prefill_swa_ragged_indices=prefill_ragged_indices,
             prefill_swa_ragged_indptr=prefill_ragged_indptr,
         )
-
-
-@functools.cache
-def _aiter_indexer_cache_ops() -> tuple[Callable[..., None], Callable[..., tuple]]:
-    """The aiter indexer key writer and query quantizer."""
-    from aiter.ops.triton.fusions.k_norm_rope_mxfp4_cache import (
-        k_norm_rope_mxfp4_cache,
-    )
-    from aiter.ops.triton.rope.q_rope_mxfp4_quant import q_rope_mxfp4_quant
-
-    return k_norm_rope_mxfp4_cache, q_rope_mxfp4_quant
-
-
-def rocm_mxfp4_indexer_k_store(
-    k_pre: torch.Tensor,
-    positions: torch.Tensor,
-    cos_sin_cache: torch.Tensor,
-    rms_norm_weight: torch.Tensor,
-    rms_norm_eps: float,
-    k_cache: torch.Tensor,
-    kv_slot_mapping: torch.Tensor,
-    compress_ratio: int,
-    use_fp4_cache: bool,
-    *,
-    num_heads: int,
-) -> None:
-    """`indexer_k_norm_rope_store` for the ROCm MXFP4 cache: aiter's cache op
-    writes the key in the order its MQA-logits kernel reads with ``num_heads``
-    query heads."""
-    assert use_fp4_cache, "the ROCm indexer cache op writes MXFP4 only"
-    layout = rocm_paged_mxfp4_cache_layout(num_heads, k_pre.shape[1], k_cache.shape[1])
-    k_norm_rope_mxfp4_cache, _ = _aiter_indexer_cache_ops()
-    k_norm_rope_mxfp4_cache(
-        k_pre,
-        positions,
-        cos_sin_cache,
-        rms_norm_weight,
-        rms_norm_eps,
-        k_cache,
-        kv_slot_mapping,
-        compress_ratio,
-        shuffle=layout,
-    )
-
-
-def rocm_mxfp4_indexer_q_quant(
-    positions: torch.Tensor,
-    index_q: torch.Tensor,
-    index_q_cos_sin_cache: torch.Tensor,
-    index_weights: torch.Tensor,
-    index_weights_softmax_scale: float,
-    index_weights_head_scale: float,
-    use_fp4: bool = True,
-    weights_out_dtype: torch.dtype = torch.float32,
-) -> tuple[tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
-    """`fused_indexer_q_rope_quant` for the ROCm MXFP4 indexer, on aiter's op:
-    ((packed [T, H, D // 2], e8m0 as one int32 per head [T, H]), fp32
-    weights)."""
-    assert use_fp4 and weights_out_dtype == torch.float32, (
-        "the ROCm indexer quantizes Q to MXFP4 and scores with fp32 weights"
-    )
-    _, q_rope_mxfp4_quant = _aiter_indexer_cache_ops()
-    q_packed, q_scale, weights_out = q_rope_mxfp4_quant(
-        index_q,
-        positions,
-        index_q_cos_sin_cache,
-        index_weights,
-        index_weights_softmax_scale * index_weights_head_scale,
-    )
-    return (q_packed, q_scale.view(torch.int32).squeeze(-1)), weights_out
 
 
 class DeepseekV41RocmMxfp4Indexer(DeepseekV4Indexer):
@@ -529,6 +506,23 @@ class DeepseekV41RocmMxfp4Indexer(DeepseekV4Indexer):
         return q, q_scale, weights
 
 
+class DeepseekV41Gfx942Indexer(DeepseekV4Indexer):
+    """vLLM's FP8 indexer, whose layers run the gfx942 top-512 launches of
+    ops/topk.py on decode steps (ops/sparse_indexer.py). The attention below
+    takes it only with --monokernel on gfx942."""
+
+    attn_cls = Gfx942SparseAttnIndexer
+
+
+def _gfx942_monokernel() -> bool:
+    """True with --monokernel on a gfx942 GPU, read from the config of the
+    model that is being built. ops.enabled() cannot answer here, because the
+    mono decode layers record the flag only after their attention is built."""
+    from vllm.platforms.rocm import on_gfx942
+
+    return bool(get_current_vllm_config().kernel_config.monokernel) and on_gfx942()
+
+
 class DeepseekV41ROCMAiterMLASparseBackend(DeepseekV4SparseMLABackend):
     @staticmethod
     def get_name() -> str:
@@ -561,6 +555,8 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
     ) -> type[DeepseekV4Indexer]:
         if k_cache is not None and k_cache.rocm_mxfp4:
             return DeepseekV41RocmMxfp4Indexer
+        if _gfx942_monokernel():
+            return DeepseekV41Gfx942Indexer
         return super()._indexer_cls(k_cache)
 
     def __init__(self, *args, **kwargs):

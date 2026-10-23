@@ -33,7 +33,6 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.torch_utils import (
     PIN_MEMORY,
-    is_quantized_kv_cache,
     np_to_pinned_tensor,
 )
 from vllm.v1.attention.backend import AttentionLayer, AttentionMetadataBuilder
@@ -55,6 +54,7 @@ from vllm.v1.hisparse.runtime import (
     HiSparsePrefillStagingPlan,
     build_hisparse_prefill_staging_plan,
 )
+from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig

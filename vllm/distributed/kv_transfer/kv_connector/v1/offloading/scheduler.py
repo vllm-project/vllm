@@ -236,10 +236,9 @@ class SchedulerOffloadConfig(NamedTuple):
         )
         if use_eagle_block_drop and not eagle_groups:
             # No group is annotated as holding drafter layers. This happens
-            # for shared-group MTP models (e.g. Qwen3.5-style), whose drafter
-            # is a regular decoder layer merged into the target's
-            # full-attention group, and for separate-draft models that miss
-            # annotation. Treating every group as a drafter group here makes
+            # when the drafter owns no KV cache (e.g. KV-sharing drafters) or
+            # the model runner does not tag draft layers' KV cache specs.
+            # Treating every group as a drafter group here makes
             # the volatile-tail pop apply to ALL groups, which can zero the
             # whole request's offload hit whenever any group's servable
             # window is a single chunk (issue #52735). Drafter KV served one
@@ -639,7 +638,13 @@ class OffloadingConnectorScheduler:
         # be freed before a request finishes).
         self._block_id_to_pending_jobs: dict[int, set[int]] = {}
 
-        self._events_tracker = OffloadingEventsTracker(spec.kv_events_config)
+        self._events_tracker = OffloadingEventsTracker(
+            spec.kv_events_config,
+            {
+                group.group_idx: group.kv_event_group_spec
+                for group in self.config.kv_group_configs
+            },
+        )
 
     # Holds the manager lock for the current schedule(), or None between steps.
     # Read and written only by the scheduler thread, so it needs no
@@ -756,7 +761,7 @@ class OffloadingConnectorScheduler:
         for local_idx, key in enumerate(keys):
             result = self.manager.lookup(key, req_context)
             match result:
-                case LookupResult.HIT:
+                case LookupResult.HIT | LookupResult.HIT_PENDING:
                     self._events_tracker.record_lookup(
                         req,
                         group_config,
@@ -764,9 +769,7 @@ class OffloadingConnectorScheduler:
                         key,
                     )
                     hit_count += 1
-                case LookupResult.HIT_PENDING:
-                    defer_lookup = True
-                    hit_count += 1
+                    defer_lookup |= result is LookupResult.HIT_PENDING
                 case LookupResult.RETRY:
                     # Don't break: keep scanning to let manager kick off
                     # async lookups (until a miss is detected).

@@ -347,7 +347,7 @@ class DiffusionGemmaForConditionalGeneration(
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality == "image":
-            return "<image_soft_token>"
+            return "<|image|>"
         if modality == "video":
             return "<|video|>"
         raise ValueError(f"Unsupported modality: {modality}")
@@ -1404,14 +1404,17 @@ class DiffusionSampler:
         # unaffected; only the canvas exploration is constrained. Applied
         # before canvas padding so phantom positions stay uniform.
         if num_decode > 0:
-            top_k, top_p = self.sampling_states.get_top_k_top_p(
+            top_k, top_p, has_topp_only_rows = self.sampling_states.get_top_k_top_p(
                 decode_slots.repeat_interleave(
                     valid_canvas_len, output_size=int(valid_canvas_len_np.sum())
                 ),
                 decode_slots_np,
+                logits.shape[-1],
             )
             if top_k is not None or top_p is not None:
-                logits = apply_top_k_top_p(logits.float(), top_k, top_p)
+                logits = apply_top_k_top_p(
+                    logits.float(), top_k, top_p, has_topp_only_rows=has_topp_only_rows
+                )
 
         # Where each decode request's rows start in the flat logits. Tiles
         # below gather and pad a request to the tile's width.

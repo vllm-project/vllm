@@ -15,7 +15,7 @@ from vllm import SamplingParams
 from vllm.logprobs import Logprob
 from vllm.platforms import current_platform
 from vllm.sampling_params import StructuredOutputsParams
-from vllm.v1.metrics.reader import Metric
+from vllm.v1.metrics.reader import Counter, Metric
 
 from ....conftest import VllmRunner
 from ....models.utils import check_outputs_equal
@@ -445,6 +445,8 @@ def _get_acceptance_rate(before: list[Metric], after: list[Metric]) -> float:
 
 
 def _get_count(before: list[Metric], after: list[Metric], name: str) -> int:
-    before_val = next(m.value for m in before if m.name == name)
-    after_val = next(m.value for m in after if m.name == name)
-    return after_val - before_val
+    before_metric = next(m for m in before if m.name == name)
+    after_metric = next(m for m in after if m.name == name)
+    assert isinstance(before_metric, Counter)
+    assert isinstance(after_metric, Counter)
+    return after_metric.value - before_metric.value

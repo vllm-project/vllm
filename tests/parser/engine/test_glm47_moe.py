@@ -185,12 +185,14 @@ class TestStreamedToolArguments:
         def streaming_conversions(lines: int) -> int:
             calls = 0
             base = glm47_moe_config()
+            base_converter = base.arg_converter
+            assert base_converter is not None
 
             def counting_converter(raw_args: str, partial: bool) -> str:
                 nonlocal calls
                 if partial:
                     calls += 1
-                return base.arg_converter(raw_args, partial)
+                return base_converter(raw_args, partial)
 
             parser = Glm47MoeParser(
                 make_mock_tokenizer(VOCAB),
@@ -210,6 +212,7 @@ class TestStreamedToolArguments:
 
     def test_value_extender_stops_at_split_value_end(self):
         extend = _glm47_arg_value_extender("<arg_key>k</arg_key><arg_value>x")
+        assert extend is not None
         assert [extend(d) for d in ['a"\n', "</arg_", "value>"]] == [
             'a\\"\\n',
             "</arg_",

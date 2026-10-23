@@ -28,7 +28,7 @@ steps:
       export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
       export PYTHONFAULTHANDLER=1 &&
       cd tests &&
-      pytest -v -s model_executor -m "not slow_test" --ignore="model_executor/layers/test_rocm_unquantized_gemm.py" --ignore="model_executor/model_loader/tensorizer_loader/test_tensorizer.py" --ignore="model_executor/model_loader/test_reload.py"'
+      pytest -v -s model_executor -m "not slow_test" --ignore="model_executor/layers/test_rocm_unquantized_gemm.py" --ignore="model_executor/model_loader/tensorizer_loader/test_tensorizer.py" --ignore="model_executor/model_loader/test_reload.py" --ignore="model_executor/model_loader/test_weight_cache.py" --deselect="tests/model_executor/test_enabled_custom_ops.py::test_topk_gating_enabled_by_cdna"'
 
 - label: ":intel: (BMG) Tensorizer Model Loader Tests (XPU)"
   key: tensorizer-model-loader-tests-xpu

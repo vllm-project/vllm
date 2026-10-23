@@ -187,7 +187,7 @@ def test_msa_cutlass_decode_static_dispatch_nvfp4_has_no_fallback(
     assert should_prepare_decode_metadata(
         1,
         DEFAULT_QUERY_LEN,
-        decode_backend=decode_backend,  # type: ignore[arg-type]
+        decode_backend=decode_backend,
         num_q_heads=16,
         num_kv_heads=1,
         kv_cache_dtype="nvfp4",

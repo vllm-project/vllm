@@ -114,7 +114,8 @@ class BlockObjectStore:
             raise ValueError("auxiliary output store must fit at least one object")
         self.object_nbytes = object_nbytes
         self.num_slots = max_bytes // object_nbytes
-        self._lru: OrderedDict[str, int] = OrderedDict()
+        self._slots: dict[str, int] = {}
+        self._lru: OrderedDict[str, None] = OrderedDict()
         self._references: dict[str, int] = {}
         self._free_slots: list[int] = []
         self._next_slot = 0
@@ -123,12 +124,12 @@ class BlockObjectStore:
         )
 
     def _evict_to_fit(self, protected: set[str]) -> None:
-        excess = len(self._lru) - self.num_slots
+        excess = len(self._slots) - self.num_slots
         if excess <= 0:
             return
         victims = []
         for key in self._lru:
-            if key not in self._references and key not in protected:
+            if key not in protected:
                 victims.append(key)
                 if len(victims) == excess:
                     break
@@ -138,7 +139,8 @@ class BlockObjectStore:
                 f"limit={self.num_slots} objects"
             )
         for victim in victims:
-            slot = self._lru.pop(victim)
+            del self._lru[victim]
+            slot = self._slots.pop(victim)
             if slot != self._UNALLOCATED_SLOT:
                 self._free_slots.append(slot)
 
@@ -163,8 +165,10 @@ class BlockObjectStore:
         self._retain(retain_keys)
         terminal_order = self._release(release_keys)
         for key in unique:
-            self._lru.setdefault(key, self._UNALLOCATED_SLOT)
-            self._lru.move_to_end(key)
+            self._slots.setdefault(key, self._UNALLOCATED_SLOT)
+            if key not in self._references:
+                self._lru[key] = None
+                self._lru.move_to_end(key)
         for key in terminal_order:
             if key in self._lru:
                 self._lru.move_to_end(key)
@@ -172,23 +176,23 @@ class BlockObjectStore:
             self._evict_to_fit(set(unique) - set(terminal_order))
         except BlockObjectStoreError:
             for key in unique:
-                if self._lru.get(key) == self._UNALLOCATED_SLOT:
-                    del self._lru[key]
+                if self._slots.get(key) == self._UNALLOCATED_SLOT:
+                    del self._slots[key]
+                    self._lru.pop(key, None)
             raise
         for object_id, obj in unique.items():
-            slot = self._lru.get(object_id)
-            if slot is None:
-                continue
-            if slot != self._UNALLOCATED_SLOT:
+            if self._slots.get(object_id) != self._UNALLOCATED_SLOT:
                 continue
             slot = self._allocate_slot()
             offset = slot * self.object_nbytes
             arena[offset : offset + self.object_nbytes] = obj.payload
-            self._lru[object_id] = slot
+            self._slots[object_id] = slot
 
     def _retain(self, keys: Iterable[str]) -> None:
         for key in keys:
             references = self._references.get(key, 0)
+            if not references:
+                self._lru.pop(key, None)
             self._references[key] = references + 1
 
     def _release(self, keys: Iterable[str]) -> list[str]:
@@ -199,6 +203,8 @@ class BlockObjectStore:
                 self._references[key] = references
                 continue
             del self._references[key]
+            if key in self._slots:
+                self._lru[key] = None
             terminal_order.append(key)
         return terminal_order
 
@@ -207,11 +213,11 @@ class BlockObjectStore:
         if arena_obj is None:
             raise RuntimeError("auxiliary output store is closed")
         try:
-            entries = [self._lru[key] for key in keys]
+            entries = [self._slots[key] for key in keys]
         except KeyError as error:
             raise BlockObjectStoreError(
                 "auxiliary output object does not exist; the object may have been "
-                f"evicted (used={len(self._lru)}, "
+                f"evicted (used={len(self._slots)}, "
                 f"limit={self.num_slots} objects). Increase "
                 "aux_output_config.max_bytes when a KV cache hit requires it."
             ) from error
@@ -224,7 +230,8 @@ class BlockObjectStore:
         finally:
             arena.release()
         for key in keys:
-            self._lru.move_to_end(key)
+            if key in self._lru:
+                self._lru.move_to_end(key)
         return payload
 
     def close(self) -> None:

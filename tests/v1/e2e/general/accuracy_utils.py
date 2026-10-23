@@ -174,7 +174,13 @@ def check_logprobs(
         assert {scores[t].rank for t in top_ids} == set(range(1, requested + 1)), (
             context
         )
-        ordered = sorted(top_ids, key=lambda t: scores[t].rank)
+
+        def rank_of(token_id: int) -> int:
+            rank = scores[token_id].rank
+            assert rank is not None
+            return rank
+
+        ordered = sorted(top_ids, key=rank_of)
         assert all(
             scores[a].logprob >= scores[b].logprob for a, b in zip(ordered, ordered[1:])
         ), f"{context}: top-k scores disagree with their reported ranks"

@@ -17,15 +17,18 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import torch
 
-from .attention.plan import HEAD_DIM, HIDDEN, KEYS, Q_RANK, Dims
+from .attention.front import FRONT_POINTS
+from .attention.plan import HEAD_DIM, HIDDEN, KEYS, Q_RANK, WINDOW, Dims
+from .common.arch import GFX942
 from .common.plan import BLOCKS
 from .layer import (
     EPOCH_WORDS,
+    K2_POINTS,
     MAX_TOKENS,
     MonoBuild,
     build_mono_ffn,
@@ -35,7 +38,7 @@ from .layer import (
     scratch_bytes,
 )
 from .stages.dims import Dims as MoeDims
-from .stages.moe_shape import EXPERTS
+from .stages.moe_shape import EXPERTS, TOPK
 
 __all__ = ["BLOCKS", "MAX_TOKENS", "AttnWeights", "DSV41MonoLayer", "MonoLayerWeights"]
 
@@ -86,14 +89,17 @@ class AttnWeights:
 
     def check(self, d: Dims) -> None:
         h, g = d.heads, d.groups
+        # gfx942 reads its own copies (weights942.linear_copy): FNUZ bytes in
+        # the same shapes, as every attention K is a multiple of 128.
+        fp8 = torch.uint8 if GFX942 else torch.float8_e4m3fn
         want = {
-            "wqkv": ((1792, HIDDEN), torch.float8_e4m3fn),
+            "wqkv": ((1792, HIDDEN), fp8),
             "wqkv_scale": ((56, HIDDEN // 32), torch.uint8),
-            "wq_b": ((h * HEAD_DIM, 1280), torch.float8_e4m3fn),
+            "wq_b": ((h * HEAD_DIM, 1280), fp8),
             "wq_b_scale": ((h * HEAD_DIM // 32, 40), torch.uint8),
-            "wo_a": ((g * 1024, d.group_k), torch.float8_e4m3fn),
+            "wo_a": ((g * 1024, d.group_k), fp8),
             "wo_a_scale": ((g * 32, d.group_k // 32), torch.uint8),
-            "wo_b": ((HIDDEN, g * 1024), torch.float8_e4m3fn),
+            "wo_b": ((HIDDEN, g * 1024), fp8),
             "wo_b_scale": ((HIDDEN // 32, g * 32), torch.uint8),
         }
         _check_tensors(self, f"layer {self.layer_id}", want)
@@ -125,10 +131,10 @@ class MonoLayerWeights:
     sw2: torch.Tensor  # shared down [5120, inter] e4m3
     sw2_s: torch.Tensor
 
-    def check(self, tp: int) -> None:
-        """The MoE's tensors: 384 experts, TP-sharded intermediates (the routed
-        one padded as the loader pads it), AITER's A8W4 layout, 32 x 32 E8M0
-        blocks for the shared expert."""
+    def check(self, tp: int, experts: int = EXPERTS) -> None:
+        """The MoE's tensors: ``experts`` routed experts (384; the DSpark draft's
+        128), TP-sharded intermediates (the routed one padded as the loader pads
+        it), AITER's A8W4 layout, 32 x 32 E8M0 blocks for the shared expert."""
         d, fp4, e4m3, u8 = (
             MoeDims(tp),
             torch.float4_e2m1fn_x2,
@@ -136,16 +142,39 @@ class MonoLayerWeights:
             torch.uint8,
         )
         want = {
-            "gate_w": ((EXPERTS, HIDDEN), torch.bfloat16),
-            "bias": ((EXPERTS,), torch.float32),
-            "w13": ((EXPERTS, 2 * d.inter, HIDDEN // 2), fp4),
-            "w13_s": ((EXPERTS * 2 * d.inter, HIDDEN // 32), u8),
-            "w2": ((EXPERTS, HIDDEN, d.inter // 2), fp4),
-            "w2_s": ((EXPERTS * HIDDEN, d.down_scale_cols), u8),
+            "gate_w": ((experts, HIDDEN), torch.bfloat16),
+            "bias": ((experts,), torch.float32),
+            "w13": ((experts, 2 * d.inter, HIDDEN // 2), fp4),
+            "w13_s": ((experts * 2 * d.inter, HIDDEN // 32), u8),
+            "w2": ((experts, HIDDEN, d.inter // 2), fp4),
+            "w2_s": ((experts * HIDDEN, d.down_scale_cols), u8),
             "sgu": ((2 * d.sh_inter, HIDDEN), e4m3),
             "sgu_s": ((2 * d.sh_inter // 32, HIDDEN // 32), u8),
             "sw2": ((HIDDEN, d.sh_inter), e4m3),
             "sw2_s": ((HIDDEN // 32, d.sh_inter // 32), u8),
+        }
+        _check_tensors(self, "MoE", want)
+
+    def check_942(self, experts: int) -> None:
+        """The MoE's tensors on gfx942, TP4, which are the copies that
+        ``weights942`` makes. The routed experts have their real intermediate
+        width without the loader's padding, as FP4 bytes in ``fp4_tile_major``
+        order and E8M0 codes a row each. The shared expert is FNUZ bytes from
+        ``linear_copy``, with K padded to a multiple of 128. ``experts`` is 384
+        for the target layers and 128 for the DSpark draft layers."""
+        d, u8 = MoeDims(4), torch.uint8
+        inter, kp = d.inter_real, -(-d.sh_inter // 128) * 128
+        want = {
+            "gate_w": ((experts, HIDDEN), torch.bfloat16),
+            "bias": ((experts,), torch.float32),
+            "w13": ((experts, 2 * inter, HIDDEN // 2), u8),
+            "w13_s": ((experts, 2 * inter, HIDDEN // 32), u8),
+            "w2": ((experts, HIDDEN, inter // 2), u8),
+            "w2_s": ((experts, HIDDEN, inter // 32), u8),
+            "sgu": ((2 * d.sh_inter, HIDDEN), u8),
+            "sgu_s": ((2 * d.sh_inter // 32, HIDDEN // 32), u8),
+            "sw2": ((HIDDEN, kp), u8),
+            "sw2_s": ((HIDDEN // 32, kp // 32), u8),
         }
         _check_tensors(self, "MoE", want)
 
@@ -154,11 +183,36 @@ class DSV41MonoLayer:
     """The mono decode runner of one TP rank (``group``: its TP group, for the
     peer-memory handle exchange; a gloo / CPU group)."""
 
-    def __init__(self, tp: int, rank: int, group, device: torch.device | str = "cuda"):
+    def __init__(
+        self,
+        tp: int,
+        rank: int,
+        group,
+        device: torch.device | str = "cuda",
+        timeline: bool = False,
+        experts: int = EXPERTS,
+        topk: int = TOPK,
+        ug_groups: int = 2,
+        swa_width: int = WINDOW,
+    ):
         _ensure_writable_flydsl_cache()
         from .common.peer_memory import PeerBuffer
 
         self.tp, self.rank = tp, rank
+        # A timeline runner builds K1 and K2 with clock stamps. Each CTA
+        # writes its stamps into its own record of these buffers (100 MHz
+        # ticks, except the two shader clock points of moe.TL_UG_POINTS), and
+        # a profiling script reads them after a step.
+        self.timeline = timeline
+        self.tl1 = torch.zeros(BLOCKS, FRONT_POINTS, dtype=torch.int64, device=device)
+        self.tl2 = torch.zeros(BLOCKS, K2_POINTS, dtype=torch.int64, device=device)
+        # The FFN launch uses K2's record layout from the seam point on, plus
+        # its own start at point 0.
+        self.tl3 = torch.zeros(BLOCKS, K2_POINTS, dtype=torch.int64, device=device)
+        # the layers it runs: the target's (384 experts, top-6, 128-wide causal SWA
+        # rows) or the DSpark draft's, which has a runner of its own
+        self.experts, self.topk, self.ug_groups = experts, topk, ug_groups
+        self.swa_width = swa_width
         self.d = Dims(tp)
         dev = self.device = torch.device(device)
         self._scratch: dict[int, torch.Tensor] = {}
@@ -205,7 +259,9 @@ class DSV41MonoLayer:
                     "a CUDA graph capture"
                 )
             buf = torch.zeros(
-                scratch_bytes(tokens, self.tp), dtype=torch.uint8, device=self.device
+                scratch_bytes(tokens, self.tp, self.experts, self.topk, self.ug_groups),
+                dtype=torch.uint8,
+                device=self.device,
             )
             self._scratch[tokens] = buf
         return buf
@@ -220,14 +276,38 @@ class DSV41MonoLayer:
     def kernels(self, tokens: int, ratio: int, fold: bool = True, index: bool = False):
         key = (tokens, ratio, fold, index)
         if key not in self._kernels:
-            b = MonoBuild(tokens, self.tp, ratio, fold=fold, index=index)
-            self._kernels[key] = (build_mono_k1(b), build_mono_k2(b))
+            b = MonoBuild(
+                tokens,
+                self.tp,
+                ratio,
+                timeline=self.timeline,
+                fold=fold,
+                index=index,
+                experts=self.experts,
+                topk=self.topk,
+                ug_groups=self.ug_groups,
+                swa_width=self.swa_width,
+            )
+            # On gfx942, keylist.launch writes an index source's keys between
+            # vLLM's indexer and K2 (forward), so its K2 is the one without
+            # the key-table build.
+            k2 = replace(b, index=False) if GFX942 else b
+            self._kernels[key] = (build_mono_k1(b), build_mono_k2(k2))
         return self._kernels[key]
 
-    def ffn_kernel(self, tokens: int):
-        key = (tokens, "ffn")
+    def ffn_kernel(self, tokens: int, experts: int, topk: int):
+        key = (tokens, "ffn", experts, topk)
         if key not in self._kernels:
-            self._kernels[key] = build_mono_ffn(MonoBuild(tokens, self.tp, 0))
+            self._kernels[key] = build_mono_ffn(
+                MonoBuild(
+                    tokens,
+                    self.tp,
+                    0,
+                    timeline=self.timeline,
+                    experts=experts,
+                    topk=topk,
+                )
+            )
         return self._kernels[key]
 
     @staticmethod
@@ -282,7 +362,9 @@ class DSV41MonoLayer:
             assert t_.is_contiguous()
         assert positions.dtype == slot_mapping.dtype == torch.int64
         assert swa_indices.dtype == swa_lens.dtype == token_to_req.dtype == torch.int32
-        assert swa_indices.stride(0) == 128 and swa_cache.dtype == torch.uint8
+        assert (
+            swa_indices.stride(0) == self.swa_width and swa_cache.dtype == torch.uint8
+        )
         assert swa_cache.shape[-1] == 584 and swa_cache.stride(1) == 584
         swa_block = swa_cache.shape[1]
         if ratio:
@@ -344,11 +426,30 @@ class DSV41MonoLayer:
             self.qr.data_ptr(),
             self.scratch(M).data_ptr(),
             self.epoch.data_ptr(),
-            0,
+            self.tl1.data_ptr() if self.timeline else 0,
             stream=st,
         )
         if select is not None:
             select(self.normed[:M], self.qr[:M])
+            if GFX942:
+                # K1 of an index source writes no keys. The gfx942 K2 has no
+                # key-table build, so the keys of the top-k that select just
+                # wrote are listed here, as K1's stage_kt lists them.
+                from .keylist import launch as keylist_launch
+
+                keylist_launch(
+                    self.kt,
+                    self.klen,
+                    slot_mapping,
+                    positions,
+                    swa_indices,
+                    swa_lens,
+                    token_to_req,
+                    ratio,
+                    topk=topk,
+                    comp_block_table=bt,
+                    comp_block=comp_block,
+                )
         k2(
             self.q.data_ptr(),
             swa_cache.data_ptr(),
@@ -403,7 +504,7 @@ class DSV41MonoLayer:
             self.peer.addresses.data_ptr(),
             self.rank,
             self.epoch.data_ptr(),
-            0,
+            self.tl2.data_ptr() if self.timeline else 0,
             stream=st,
         )
         return outs
@@ -417,10 +518,13 @@ class DSV41MonoLayer:
         res_mix: torch.Tensor,  # [M, 4, 4] f32
         pre_mix: torch.Tensor,  # [M, 4] f32
         outs: tuple | None = None,
+        topk: int = 6,
     ):
         """-> (out, residual, post_mix, res_mix, pre_mix) of a layer whose
         attention vLLM ran: the attention's TP reduce, the FFN seam, the MoE and
-        its all-reduce in one launch."""
+        its all-reduce in one launch. The routed expert count is the gate
+        weight's row count, and ``topk`` is the layer's picks a token: 384 / 6
+        for the target, 128 / 3 for a DSpark draft layer."""
         M = part.shape[0]
         assert self.supports(M), M
         for t_ in (part, residual, post_mix, res_mix, pre_mix):
@@ -429,7 +533,7 @@ class DSV41MonoLayer:
         if outs is None:
             outs = self._outs(M, residual)
         out, res_out, post_out, comb_out, pre_out = outs
-        self.ffn_kernel(M)(
+        self.ffn_kernel(M, w.gate_w.shape[0], topk)(
             part.data_ptr(),
             residual.data_ptr(),
             post_mix.data_ptr(),
@@ -459,6 +563,7 @@ class DSV41MonoLayer:
             self.peer.addresses.data_ptr(),
             self.rank,
             self.epoch.data_ptr(),
+            self.tl3.data_ptr() if self.timeline else 0,
             stream=torch.cuda.current_stream(),
         )
         return outs

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
@@ -352,6 +353,12 @@ class Gemma4Config(VerifyAndUpdateConfig):
                         "for all layers to avoid mixed FA3/FA4 penalty.",
                         head_dims,
                     )
+        elif current_platform.is_xpu():
+            logger.info(
+                "Gemma4 model has heterogeneous head dimensions %s. Leaving the "
+                "attention backend choice to the XPU platform.",
+                head_dims,
+            )
         elif vllm_config.attention_config.backend is None:
             vllm_config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
             logger.info(
@@ -778,6 +785,28 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                 )
             if cache_config.mamba_block_size is None:
                 cache_config.mamba_block_size = model_config.max_model_len
+
+
+class MiniMaxM3SparseForConditionalGenerationConfig(VerifyAndUpdateConfig):
+    INDEX_CACHE_KEYS = ("use_index_cache", "index_topk_freq", "index_skip_topk_offset")
+
+    @classmethod
+    def verify_and_update_model_config(cls, model_config: "ModelConfig") -> None:
+        """Reject IndexCache overrides set on the outer VL config, where the
+        ROCm text model never reads them."""
+        from vllm.platforms import current_platform
+
+        overrides = model_config.hf_overrides
+        if not current_platform.is_rocm() or not isinstance(overrides, dict):
+            return
+        misplaced = [key for key in cls.INDEX_CACHE_KEYS if key in overrides]
+        if misplaced:
+            suggested = {"text_config": {key: overrides[key] for key in misplaced}}
+            raise ValueError(
+                "MiniMax-M3 reads IndexCache settings from text_config, so "
+                f"top-level {', '.join(misplaced)} would be ignored. Pass them as "
+                f"--hf-overrides '{json.dumps(suggested)}'."
+            )
 
 
 class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
@@ -1216,6 +1245,9 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "LlamaNemotronVLModel": LlamaNemotronVLConfig,
     "Mamba2ForCausalLM": MambaModelConfig,
     "MambaForCausalLM": MambaModelConfig,
+    "MiniMaxM3SparseForConditionalGeneration": (
+        MiniMaxM3SparseForConditionalGenerationConfig
+    ),
     "NemotronHForCausalLM": NemotronHForCausalLMConfig,
     "NemotronHPuzzleForCausalLM": NemotronHForCausalLMConfig,
     "NemotronH_Nano_VL_V2": NemotronHNanoVLV2Config,

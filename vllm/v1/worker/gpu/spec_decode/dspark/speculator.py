@@ -157,6 +157,14 @@ class DSparkSpeculator(DFlashSpeculator):
         if self._draft_topk is not None:
             self._sample_sequential_topk(num_reqs, head_hidden)
             return
+        # A draft model can run the Markov steps below with its own kernels.
+        # It returns False, having done nothing, for a step that the loop
+        # below must run.
+        sample_sequential = getattr(self.model, "sample_sequential", None)
+        if sample_sequential is not None and sample_sequential(
+            self, num_reqs, head_hidden
+        ):
+            return
 
         # Sequential Markov sampling over the backbone's output hidden states.
         n_spec = self.num_speculative_steps
@@ -183,6 +191,8 @@ class DSparkSpeculator(DFlashSpeculator):
                 confidence_markov_embeds.append(markov_embed)
             bias = self.model.markov_bias(markov_embed)
             logits_i = base_logits[:, i] + bias
+            if hasattr(self.model, "apply_output_logit_transform"):
+                logits_i = self.model.apply_output_logit_transform(logits_i)
             draft_sampled_i = self._sample_logits(
                 logits_i, idx_map[:, i], sample_pos[:, i], i
             )

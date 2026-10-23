@@ -54,6 +54,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import all_close_1d
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import get_triton_kernels_version
 from vllm.utils.math_utils import round_up
@@ -535,6 +536,30 @@ def _make_log_unsupported(backend: Mxfp4MoeBackend, reason: str | None) -> str:
     return f"{base} since {reason}." if reason else f"{base}."
 
 
+def _requested_kernel_cls(
+    backend: Mxfp4MoeBackend,
+    config: FusedMoEConfig,
+) -> list[type[mk.FusedMoEExperts]]:
+    """Kernel classes for an explicitly requested backend. The LoRA-aware
+    TRT-LLM experts are opt-in: "auto" keeps its current LoRA selection."""
+    candidates = backend_to_kernel_cls(backend)
+    if not config.is_lora_enabled or backend not in TRTLLM_BACKENDS:
+        return candidates
+    if backend == Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8:
+        raise ValueError(
+            _make_log_unsupported(
+                backend,
+                "expert LoRA is not supported with MXFP8 activations; use "
+                "moe_backend='flashinfer_trtllm'",
+            )
+        )
+    from vllm.model_executor.layers.fused_moe.experts.trtllm_lora_moe import (
+        TrtLlmMxfp4LoRAExperts,
+    )
+
+    return [TrtLlmMxfp4LoRAExperts, *candidates]
+
+
 def _return_or_raise(
     backend: Mxfp4MoeBackend,
     config: FusedMoEConfig,
@@ -544,7 +569,7 @@ def _return_or_raise(
     scope: Literal["process", "global", "local"] = "local",
 ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts]]:
     reason: str | None = None
-    for k_cls in backend_to_kernel_cls(backend):
+    for k_cls in _requested_kernel_cls(backend, config):
         supported, reason = k_cls.is_supported_config(
             k_cls, config, weight_key, activation_key, activation_format
         )
@@ -588,39 +613,6 @@ def _get_requested_backends(
         if requested_activation_key is None:
             return backends
     return _filter_by_activation(backends, requested_activation_key)
-
-
-def _requires_qwen38_tep8_emulation(
-    config: FusedMoEConfig,
-    activation_key: QuantKey | None,
-) -> bool:
-    """Avoid the inaccurate native gfx950 kernel for Qwen3.8 TEP8.
-
-    Qwen3.8 Flash Next's routed experts use the distinctive
-    ``E=512, H=2560, N=640`` W4A4 shape. With eight-way expert parallelism,
-    AITER operates on 64 local experts and pads ``N`` to 768. That native path
-    is not numerically reliable on gfx950, while OCP MX emulation preserves
-    model accuracy. Keep this guard exact so other MXFP4 shapes and smaller EP
-    configurations retain the native backend.
-    """
-    parallel = config.moe_parallel_config
-    if not (
-        activation_key == kMxfp4Dynamic
-        and parallel.use_ep
-        and parallel.ep_size == 8
-        and config.num_experts == 512
-        and config.num_local_experts == 64
-        and config.hidden_dim == 2560
-        and config.intermediate_size == 640
-    ):
-        return False
-
-    if not current_platform.is_rocm():
-        return False
-
-    from vllm.platforms.rocm import on_gfx950
-
-    return on_gfx950()
 
 
 def select_mxfp4_moe_backend(
@@ -684,21 +676,6 @@ def select_mxfp4_moe_backend(
                 return selected
         assert last_error is not None
         raise last_error
-
-    if _requires_qwen38_tep8_emulation(config, requested_activation_key):
-        backend = Mxfp4MoeBackend.EMULATION
-        logger.warning_once(
-            "Using OCP MX emulation for the Qwen3.8 Flash Next TEP8 routed "
-            "experts on gfx950 because the native AITER W4A4 kernel is not "
-            "numerically reliable for this shape. Performance will be lower."
-        )
-        return _return_or_raise(
-            backend,
-            config,
-            kMxfp4Static,
-            requested_activation_key,
-            activation_format,
-        )
 
     # Select kernels in order of backend.
     AVAILABLE_BACKENDS = _filter_by_activation(
@@ -1519,12 +1496,12 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
                 "emulation. Using the maximum across experts for each layer."
             )
         if w13_input_scale is not None:
-            layer.w13_input_scale = torch.nn.Parameter(
-                w13_input_scale.max().to(torch.float32), requires_grad=False
+            replace_parameter(
+                layer, "w13_input_scale", w13_input_scale.max().to(torch.float32)
             )
         if w2_input_scale is not None:
-            layer.w2_input_scale = torch.nn.Parameter(
-                w2_input_scale.max().to(torch.float32), requires_grad=False
+            replace_parameter(
+                layer, "w2_input_scale", w2_input_scale.max().to(torch.float32)
             )
         return (
             w13_weight,

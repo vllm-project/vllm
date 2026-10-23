@@ -152,25 +152,32 @@ def test_deep_sleep_lora(gpu_memory_cleared):
     assert output[0].outputs[0].text == output3[0].outputs[0].text
 
 
-def _lora_logits_mapping_present(model) -> bool:
+def _lora_logits_mapping_correct(model) -> bool:
     from vllm.lora.layers.logits_processor import LogitsProcessorWithLoRA
 
-    return any(
-        isinstance(m, LogitsProcessorWithLoRA)
-        and m.sharded_to_full_mapping_gpu is not None
-        for m in model.modules()
+    processors = [m for m in model.modules() if isinstance(m, LogitsProcessorWithLoRA)]
+    return bool(processors) and all(
+        m.sharded_to_full_mapping_gpu is not None
+        and torch.equal(
+            m.sharded_to_full_mapping_gpu,
+            m.sharded_to_full_mapping_gpu.new_tensor(m.sharded_to_full_mapping),
+        )
+        for m in processors
     )
 
 
 @multi_gpu_test(num_gpus=2)
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="LoRA state is kept in the runtime pool only on CUDA/ROCm",
+)
 def test_deep_sleep_lora_tp2(monkeypatch):
     """Level-2 sleep/wake/reload with enable_lora=True and TP=2.
 
     With TP > 1 the LoRA logits processor carries
     ``sharded_to_full_mapping_gpu``, a permanent index mapping used to
-    reorder gathered logits. Like the LoRA stacked tensors it is a plain
-    attribute allocated in the sleep-mode pool, so level-2 sleep destroys
-    its contents — it must be restored after reload.
+    reorder gathered logits. Level-2 sleep must preserve it, like the rest
+    of the LoRA state.
     """
     # Needed for apply_model to reach the multiproc TP workers below.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
@@ -187,7 +194,7 @@ def test_deep_sleep_lora_tp2(monkeypatch):
 
     # Guard against this test silently not exercising the TP>1 reindex
     # path (e.g. if lm_head wrapping conditions change).
-    assert all(llm.apply_model(_lora_logits_mapping_present))
+    assert all(llm.apply_model(_lora_logits_mapping_correct))
 
     prompt = "How are you?"
     sampling_params = SamplingParams(temperature=0, max_tokens=10)
@@ -195,6 +202,8 @@ def test_deep_sleep_lora_tp2(monkeypatch):
 
     llm.sleep(level=2)
     llm.wake_up(tags=["weights"])
+    # Check before reload_weights, which also resets the mapping.
+    assert all(llm.apply_model(_lora_logits_mapping_correct))
     llm.collective_rpc("reload_weights")
     llm.wake_up(tags=["kv_cache"])
     output2 = llm.generate(prompt, sampling_params)

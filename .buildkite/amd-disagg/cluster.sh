@@ -110,8 +110,13 @@ export HSA_NO_SCRATCH_RECLAIM="${HSA_NO_SCRATCH_RECLAIM:-1}"
 #
 #export HOME=/tmp
 export HF_HOME="${HF_HOME:-/tmp/hf_home}"
+# Remote-code modules are rewritten by every rank on every node at import; keep
+# those writes off the shared NFS cache.
+export HF_MODULES_CACHE="${HF_MODULES_CACHE:-/tmp/hf_modules}"
 export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/tmp/.cache}"
-export VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-3600}"
+# Engine startup gets the same budget as the P/D health gate.
+export VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-${HEALTH_TIMEOUT_S:-5400}}"
+export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="${VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS:-3600}"
 
 # ----------------------------------------------------------------- scale
 # DP/EP group formation timeout across nodes (seconds).
@@ -146,6 +151,10 @@ export MORI_SHMEM_HEAP_SIZE="${MORI_SHMEM_HEAP_SIZE:-16G}"
 
 # Pin to gfx950 to avoid jit compilation failures with other archs on this cluster.
 export MORI_GPU_ARCHS="gfx950"
+
+# Required on this cluster's NIC setup; without the host proxy the EP dispatch
+# path fails to come up.
+export MORI_ENABLE_HOST_PROXY="${MORI_ENABLE_HOST_PROXY:-1}"
 
 # ----------------------------------------------------------------- benchmark
 export BENCHMARK_COMBINATIONS="${BENCHMARK_COMBINATIONS:-1024/128 2048/128}"

@@ -133,15 +133,21 @@ def _make_runner(
     )
 
 
-def _gather(runner: EncoderRunner, *, num_scheduled: int, draft_lookahead: int):
-    # Single prefilling request, num_computed_tokens=0, prefill_len large.
+def _gather(
+    runner: EncoderRunner,
+    *,
+    num_scheduled: int,
+    draft_lookahead: int,
+    num_computed: int = 0,
+):
+    # Single prefilling request, prefill_len large.
     return runner.gather_mm_embeddings(
         req_ids=["req0"],
         total_num_scheduled_tokens=num_scheduled,
         num_scheduled_tokens=np.array([num_scheduled]),
         query_start_loc=np.array([0]),
         prefill_lens=np.array([1000]),
-        num_computed_tokens=np.array([0]),
+        num_computed_tokens=np.array([num_computed]),
         draft_lookahead=draft_lookahead,
     )
 
@@ -179,6 +185,31 @@ def test_draft_lookahead_tolerates_missing_boundary_feature():
     assert [e.modality for e in mm_embeds] == ["image"]
     assert not bool(is_mm_embed[7])
     assert int(is_mm_embed.sum()) == 7
+
+
+@pytest.mark.parametrize("draft_lookahead", [1, 3])
+@pytest.mark.parametrize("num_computed", [8, 9])
+def test_draft_lookahead_ignores_freed_feature(draft_lookahead, num_computed):
+    """A consumed feature may be freed without removing its request metadata."""
+    freed = _feature("freed", offset=0, length=8)
+    current = _feature("current", offset=8, length=8)
+    runner = _make_runner([freed, current], cached=[freed, current])
+    runner.encoder_cache.free_encoder_cache(freed.identifier)
+
+    mm_embeds, is_mm_embed = _gather(
+        runner,
+        num_scheduled=4,
+        draft_lookahead=draft_lookahead,
+        num_computed=num_computed,
+    )
+
+    start = num_computed + draft_lookahead - current.mm_position.offset
+    expected = runner.encoder_cache.encoder_outputs[current.identifier][
+        start : start + 4
+    ]
+    assert len(mm_embeds) == 1
+    torch.testing.assert_close(mm_embeds[0], expected)
+    assert is_mm_embed.tolist() == [True] * 4
 
 
 def test_draft_lookahead_raises_on_interior_miss():

@@ -8,6 +8,7 @@ import pytest
 from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
+from vllm.inputs import tokens_input
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
 
@@ -46,6 +47,7 @@ def _serving() -> OpenAIServingCompletion:
     serving = OpenAIServingCompletion.__new__(OpenAIServingCompletion)
     serving.enable_prompt_tokens_details = False
     serving.enable_force_include_usage = False
+    serving.enable_log_outputs = False
     serving.enable_per_request_metrics = False
     serving.system_fingerprint = None
     serving.return_tokens_as_token_ids = False
@@ -68,7 +70,7 @@ async def test_stream_text_offset_matches_non_stream_with_stop_holdback():
     stream_offsets = []
     async for line in serving.completion_stream_generator(
         _request(stream=True),
-        [{"prompt": "Hi"}],
+        [tokens_input([9], prompt="Hi")],
         results(),
         "r",
         0,

@@ -18,6 +18,7 @@ The MiniMax-M3-preview config selects a single set of branches:
 """
 
 from collections.abc import Iterable
+from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
@@ -107,6 +108,9 @@ from vllm.models.minimax_m3.amd.sparse_attention_msa import (
     MiniMaxM3SparseAiterPAImpl,
     MiniMaxM3SparseAiterPAPrefillMetadata,
 )
+from vllm.models.minimax_m3.amd.specialized_decode.runtime import (
+    specialized_decode_config,
+)
 from vllm.models.minimax_m3.common.encoder_cudagraph import (
     MiniMaxM3EncoderCudaGraphMixin,
 )
@@ -134,6 +138,9 @@ from vllm.v1.kv_cache_interface import (
     get_kv_quant_mode,
     is_quantized_kv_cache,
 )
+
+if TYPE_CHECKING:
+    from .specialized_decode.runtime.decode import SpecializedDecode
 
 logger = init_logger(__name__)
 
@@ -163,10 +170,11 @@ def _should_skip_index_topk(config: PreTrainedConfig, layer_id: int) -> bool:
     Only 1 of every ``index_topk_freq`` sparse-attention layers recomputes the
     lightning-indexer top-k block selection; the rest reuse the selection the
     preceding compute layer wrote into the shared ``topk_indices_buffer`` this
-    same forward pass. This cuts the indexer score + top-k cost ~``freq``x with
-    negligible accuracy impact (adjacent sparse layers pick nearly the same
-    blocks; ATOM validated GSM8K with freq=4). Gated by ``use_index_cache``;
-    enable via ``--hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}'``.
+    same forward pass. This cuts the indexer score + top-k cost ~``freq``x but
+    approximates the per-layer selection, so validate accuracy on long-context
+    inputs. Gated by ``use_index_cache`` in the text config; enable via
+    ``--hf-overrides '{"text_config": {"use_index_cache": true,
+    "index_topk_freq": 4}}'``.
     """
     if not getattr(config, "use_index_cache", False):
         return False
@@ -1369,6 +1377,8 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         self.config = config
+        self.specialized_decode_config = specialized_decode_config(vllm_config)
+        self.specialized_decode: SpecializedDecode | None = None
 
         self.vocab_size = config.vocab_size
 
@@ -1466,6 +1476,14 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
+    def build_specialized_decode(self) -> None:
+        from .specialized_decode.runtime.decode import SpecializedDecode
+
+        assert self.specialized_decode_config is not None
+        self.specialized_decode = SpecializedDecode.build(
+            self, self.specialized_decode_config
+        )
+
     def forward(
         self,
         input_ids: torch.Tensor | None,
@@ -1484,13 +1502,31 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
+        decode = self.specialized_decode
         # EAGLE3 is not yet compatible with pipeline parallel
         aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
-        for idx, layer in enumerate(self.layers[self.start_layer : self.end_layer]):
-            hidden_states, residual = layer(positions, hidden_states, residual)
-            self._maybe_add_hidden_state(
-                aux_hidden_states, idx + 1, hidden_states, residual
-            )
+        if decode is None:
+            for idx, layer in enumerate(self.layers[self.start_layer : self.end_layer]):
+                hidden_states, residual = layer(positions, hidden_states, residual)
+                self._maybe_add_hidden_state(
+                    aux_hidden_states, idx + 1, hidden_states, residual
+                )
+        else:
+            step = decode.plan(positions, intermediate_tensors)
+            failure: Exception | None = None
+            try:
+                layers = self.layers[self.start_layer : self.end_layer]
+                for idx, layer in enumerate(layers):
+                    kernel = step.layer(layer.layer_id) if step else None
+                    hidden_states, residual = (kernel or layer)(
+                        positions, hidden_states, residual
+                    )
+                    self._maybe_add_hidden_state(
+                        aux_hidden_states, idx + 1, hidden_states, residual
+                    )
+            except Exception as err:
+                failure = err
+            decode.after_step(step, failure)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -1660,6 +1696,12 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
+
+    @staticmethod
+    def get_model_state_cls():
+        from .model_state import MiniMaxM3ModelState
+
+        return MiniMaxM3ModelState
 
     def forward(
         self,
@@ -1884,6 +1926,9 @@ class MiniMaxM3SparseForConditionalGeneration(
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
+
+    def get_model_state_cls(self):
+        return self.language_model.get_model_state_cls()
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.language_model.get_expert_mapping()

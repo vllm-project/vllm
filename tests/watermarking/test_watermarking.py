@@ -368,11 +368,50 @@ def test_gpu_sampler_respects_mixed_request_watermarking(
         None,
         None,
         False,
+        False,
     )
 
     assert torch.equal(sampled, torch.tensor([3, 7]))
     assert torch.equal(output_logits[0], logits[0])
     assert torch.equal(output_logits[1], torch.full((8,), 10.0))
+
+
+@pytest.mark.parametrize(
+    "temperatures,expected",
+    [((0.0, 1.0), [5, 7]), ((1.0, 1.0), [7, 7])],
+)
+def test_gpu_sampler_uses_argmax_only_for_greedy_rows(
+    monkeypatch, make_gpu_watermark_sampler, temperatures, expected
+):
+    sampler = make_gpu_watermark_sampler(StubWatermarker(), deduplicate_contexts="none")
+    for req_idx, temperature in enumerate(temperatures):
+        sampler.add_request(
+            req_idx, SamplingParams(temperature=temperature, watermarking=True)
+        )
+    sampler.apply_staged_writes()
+    sampler._get_contexts = lambda expanded_idx_mapping: torch.zeros(
+        2, 1, dtype=torch.int64
+    )
+    monkeypatch.setattr(
+        "vllm.v1.watermarking.watermarker.gumbel_sample",
+        lambda *args, **kwargs: torch.tensor([3, 4]),
+    )
+    logits = torch.zeros(2, 8)
+    logits[:, 5] = 1.0
+
+    sampled, _ = sampler._sample_random(
+        logits,
+        torch.tensor([0, 1]),
+        np.array([0, 1]),
+        torch.zeros(2, dtype=torch.int64),
+        None,
+        None,
+        False,
+        False,
+    )
+
+    # Greedy rows take the argmax; watermarked rows keep the watermarked token.
+    assert torch.equal(sampled, torch.tensor(expected))
 
 
 def test_gpu_sampler_filters_top_k_top_p_before_watermarking(
@@ -383,7 +422,7 @@ def test_gpu_sampler_filters_top_k_top_p_before_watermarking(
     # reference path; the assertion is about the call order, not the kernel.
     monkeypatch.setattr(
         "vllm.v1.watermarking.gpu_sampler.apply_top_k_top_p",
-        lambda logits, k, p: apply_top_k_top_p_pytorch(
+        lambda logits, k, p, **kwargs: apply_top_k_top_p_pytorch(
             logits, k, p, allow_cpu_sync=True
         ),
     )
@@ -414,6 +453,7 @@ def test_gpu_sampler_filters_top_k_top_p_before_watermarking(
         torch.zeros(1, dtype=torch.int64),
         torch.tensor([2]),
         torch.tensor([0.8]),
+        False,
         False,
     )
 
@@ -460,6 +500,7 @@ def test_gpu_sampler_skips_watermarking_for_repeated_contexts(monkeypatch):
     sampler.sampling_states = SimpleNamespace(
         temperature=SimpleNamespace(np=np.ones(2), gpu=torch.ones(2)),
         seeds=SimpleNamespace(gpu=torch.zeros(2, dtype=torch.int64)),
+        any_greedy=lambda idx_mapping_np: False,
     )
     sampler.use_fp64_gumbel = False
     sampler._get_contexts = lambda expanded_idx_mapping: torch.zeros(
@@ -482,6 +523,7 @@ def test_gpu_sampler_skips_watermarking_for_repeated_contexts(monkeypatch):
         None,
         None,
         False,
+        False,
     )
 
     assert torch.equal(sampled, torch.tensor([3, 7]))
@@ -499,6 +541,7 @@ def test_gpu_sampler_can_disable_context_deduplication(monkeypatch):
     sampler.sampling_states = SimpleNamespace(
         temperature=SimpleNamespace(np=np.ones(2), gpu=torch.ones(2)),
         seeds=SimpleNamespace(gpu=torch.zeros(2, dtype=torch.int64)),
+        any_greedy=lambda idx_mapping_np: False,
     )
     sampler.use_fp64_gumbel = False
     sampler._get_contexts = lambda expanded_idx_mapping: torch.zeros(
@@ -516,6 +559,7 @@ def test_gpu_sampler_can_disable_context_deduplication(monkeypatch):
         torch.zeros(2, dtype=torch.int64),
         None,
         None,
+        False,
         False,
     )
 
@@ -923,6 +967,7 @@ def test_gpu_sampler_uses_fused_gumbel_for_repeated_contexts():
     sampler.sampling_states = SimpleNamespace(
         temperature=SimpleNamespace(np=np.ones(2), gpu=temperatures),
         seeds=SimpleNamespace(gpu=seeds),
+        any_greedy=lambda idx_mapping_np: False,
     )
     sampler.req_states = SimpleNamespace(
         all_token_ids=SimpleNamespace(gpu=all_token_ids),
@@ -955,6 +1000,7 @@ def test_gpu_sampler_uses_fused_gumbel_for_repeated_contexts():
         positions,
         None,
         None,
+        False,
         False,
     )
 
@@ -991,6 +1037,7 @@ def test_gpu_sampler_skips_watermarking_for_greedy_batch(monkeypatch):
         torch.zeros(2, dtype=torch.int64),
         None,
         None,
+        False,
         False,
     )
 

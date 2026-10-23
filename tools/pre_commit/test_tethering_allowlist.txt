@@ -20,7 +20,6 @@
 # custom runner rather than a directory-level pytest invocation.
 tests/distributed/aux_output_connector/test_store.py  # added by #45635 (2026-09-21), no job collects this path
 tests/distributed/test_dcp_a2a.py  # multi-GPU DCP all-to-all; no dir-level pytest job
-tests/distributed/test_dcp_direct_a2a_lse_reduce.py  # multi-GPU DCP all-to-all; no dir-level pytest job
 tests/distributed/test_eplb_events.py  # multi-GPU EPLB; no dir-level pytest job
 tests/distributed/test_eplb_fused_moe_layer.py  # multi-GPU EPLB; no dir-level pytest job
 tests/distributed/test_eplb_fused_moe_layer_dep_nvfp4.py  # multi-GPU EPLB nvfp4; no dir-level pytest job

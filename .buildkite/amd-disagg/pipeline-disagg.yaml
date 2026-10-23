@@ -4,6 +4,10 @@
 # defaults to `vllm-router`
 #
 
+env:
+  # Spur reservation for the CI nodes; ignored while it is not active.
+  SBATCH_RESERVATION: "vllm-ci"
+
 steps:
 
 #--------------------------------------  mi350 · disagg 1P1D (TP8, 2 nodes) · SLURM  --------------------------------------#
@@ -11,7 +15,7 @@ steps:
 - label: "DeepSeek-V3-PD-1P1D-TP8-MoRIIO-proxy"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -20,7 +24,7 @@ steps:
 - label: "DeepSeek-V3-PD-1P1D-TP8-MoRIIO-vllm-router"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -29,7 +33,7 @@ steps:
 - label: "DeepSeek-R1-MXFP4-PD-1P1D-TP8-MoRIIO-proxy"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -38,7 +42,7 @@ steps:
 - label: "DeepSeek-R1-MXFP4-PD-1P1D-TP8-MoRIIO-vllm-router"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -47,7 +51,7 @@ steps:
 - label: "Kimi-K2.5-MXFP4-PD-1P1D-TP8-MoRIIO-proxy"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -56,7 +60,7 @@ steps:
 - label: "Kimi-K2.5-MXFP4-PD-1P1D-TP8-MoRIIO-vllm-router"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -65,7 +69,7 @@ steps:
 - label: "Kimi-K2.6-MXFP4-PD-1P1D-TP8-MoRIIO-proxy"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -74,7 +78,7 @@ steps:
 - label: "Kimi-K2.6-MXFP4-PD-1P1D-TP8-MoRIIO-vllm-router"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -83,7 +87,7 @@ steps:
 - label: "MiniMax-M3-MXFP8-PD-1P1D-TP8-MoRIIO-proxy"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -92,7 +96,7 @@ steps:
 - label: "MiniMax-M3-MXFP8-PD-1P1D-TP8-MoRIIO-vllm-router"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -101,7 +105,7 @@ steps:
 - label: "GLM-5.2-FP8-PD-1P1D-TP8-MoRIIO-proxy"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -110,19 +114,22 @@ steps:
 - label: "GLM-5.2-FP8-PD-1P1D-TP8-MoRIIO-vllm-router"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
   - MODEL_NAME=GLM-5.2-FP8 NODES=2 GPUS_PER_NODE=8 WIDE_EP_MODE=0 MORIIO_READ_MODE=0 RUN_AFTER_HEALTH=accuracy ROUTER_TYPE=vllm-router WAIT=1 bash .buildkite/amd-disagg/run-slurm-disagg-test.sh
+
+- wait: ~
+  continue_on_failure: true
 
 #--------------------------------------  mi350 · disagg 2P2D (TP8, 4 nodes) · SLURM  --------------------------------------#
 
 - label: "DeepSeek-V3-PD-2P2D-TP8-MoRIIO-proxy"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
-  concurrency: 2
+  timeout_in_minutes: 270
+  concurrency: 1
   concurrency_group: "amd-disagg/mi350/4node"
   commands:
   - MODEL_NAME=DeepSeek-V3 xP=2 yD=2 NODES=4 GPUS_PER_NODE=8 WIDE_EP_MODE=0 MORIIO_READ_MODE=0 RUN_AFTER_HEALTH=accuracy ROUTER_TYPE=proxy WAIT=1 bash .buildkite/amd-disagg/run-slurm-disagg-test.sh
@@ -130,8 +137,8 @@ steps:
 - label: "DeepSeek-V3-PD-2P2D-TP8-MoRIIO-vllm-router"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
-  concurrency: 2
+  timeout_in_minutes: 270
+  concurrency: 1
   concurrency_group: "amd-disagg/mi350/4node"
   commands:
   - MODEL_NAME=DeepSeek-V3 xP=2 yD=2 NODES=4 GPUS_PER_NODE=8 WIDE_EP_MODE=0 MORIIO_READ_MODE=0 RUN_AFTER_HEALTH=accuracy ROUTER_TYPE=vllm-router WAIT=1 bash .buildkite/amd-disagg/run-slurm-disagg-test.sh
@@ -139,8 +146,8 @@ steps:
 - label: "DeepSeek-R1-MXFP4-PD-2P2D-TP8-MoRIIO-proxy"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
-  concurrency: 2
+  timeout_in_minutes: 270
+  concurrency: 1
   concurrency_group: "amd-disagg/mi350/4node"
   commands:
   - MODEL_NAME=DeepSeek-R1-MXFP4 xP=2 yD=2 NODES=4 GPUS_PER_NODE=8 WIDE_EP_MODE=0 MORIIO_READ_MODE=0 RUN_AFTER_HEALTH=accuracy ROUTER_TYPE=proxy WAIT=1 bash .buildkite/amd-disagg/run-slurm-disagg-test.sh
@@ -148,8 +155,8 @@ steps:
 - label: "DeepSeek-R1-MXFP4-PD-2P2D-TP8-MoRIIO-vllm-router"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
-  concurrency: 2
+  timeout_in_minutes: 270
+  concurrency: 1
   concurrency_group: "amd-disagg/mi350/4node"
   commands:
   - MODEL_NAME=DeepSeek-R1-MXFP4 xP=2 yD=2 NODES=4 GPUS_PER_NODE=8 WIDE_EP_MODE=0 MORIIO_READ_MODE=0 RUN_AFTER_HEALTH=accuracy ROUTER_TYPE=vllm-router WAIT=1 bash .buildkite/amd-disagg/run-slurm-disagg-test.sh
@@ -157,8 +164,8 @@ steps:
 - label: "Kimi-K2.5-MXFP4-PD-2P2D-TP8-MoRIIO-proxy"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
-  concurrency: 2
+  timeout_in_minutes: 270
+  concurrency: 1
   concurrency_group: "amd-disagg/mi350/4node"
   commands:
   - MODEL_NAME=Kimi-K2.5-MXFP4 xP=2 yD=2 NODES=4 GPUS_PER_NODE=8 WIDE_EP_MODE=0 MORIIO_READ_MODE=0 RUN_AFTER_HEALTH=accuracy ROUTER_TYPE=proxy WAIT=1 bash .buildkite/amd-disagg/run-slurm-disagg-test.sh
@@ -166,8 +173,8 @@ steps:
 - label: "Kimi-K2.5-MXFP4-PD-2P2D-TP8-MoRIIO-vllm-router"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
-  concurrency: 2
+  timeout_in_minutes: 270
+  concurrency: 1
   concurrency_group: "amd-disagg/mi350/4node"
   commands:
   - MODEL_NAME=Kimi-K2.5-MXFP4 xP=2 yD=2 NODES=4 GPUS_PER_NODE=8 WIDE_EP_MODE=0 MORIIO_READ_MODE=0 RUN_AFTER_HEALTH=accuracy ROUTER_TYPE=vllm-router WAIT=1 bash .buildkite/amd-disagg/run-slurm-disagg-test.sh
@@ -175,8 +182,8 @@ steps:
 - label: "Kimi-K2.6-MXFP4-PD-2P2D-TP8-MoRIIO-proxy"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
-  concurrency: 2
+  timeout_in_minutes: 270
+  concurrency: 1
   concurrency_group: "amd-disagg/mi350/4node"
   commands:
   - MODEL_NAME=Kimi-K2.6-MXFP4 xP=2 yD=2 NODES=4 GPUS_PER_NODE=8 WIDE_EP_MODE=0 MORIIO_READ_MODE=0 RUN_AFTER_HEALTH=accuracy ROUTER_TYPE=proxy WAIT=1 bash .buildkite/amd-disagg/run-slurm-disagg-test.sh
@@ -184,8 +191,8 @@ steps:
 - label: "Kimi-K2.6-MXFP4-PD-2P2D-TP8-MoRIIO-vllm-router"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
-  concurrency: 2
+  timeout_in_minutes: 270
+  concurrency: 1
   concurrency_group: "amd-disagg/mi350/4node"
   commands:
   - MODEL_NAME=Kimi-K2.6-MXFP4 xP=2 yD=2 NODES=4 GPUS_PER_NODE=8 WIDE_EP_MODE=0 MORIIO_READ_MODE=0 RUN_AFTER_HEALTH=accuracy ROUTER_TYPE=vllm-router WAIT=1 bash .buildkite/amd-disagg/run-slurm-disagg-test.sh
@@ -193,8 +200,8 @@ steps:
 - label: "MiniMax-M3-MXFP8-PD-2P2D-TP8-MoRIIO-proxy"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
-  concurrency: 2
+  timeout_in_minutes: 270
+  concurrency: 1
   concurrency_group: "amd-disagg/mi350/4node"
   commands:
   - MODEL_NAME=MiniMax-M3-MXFP8 xP=2 yD=2 NODES=4 GPUS_PER_NODE=8 WIDE_EP_MODE=0 MORIIO_READ_MODE=0 RUN_AFTER_HEALTH=accuracy ROUTER_TYPE=proxy WAIT=1 bash .buildkite/amd-disagg/run-slurm-disagg-test.sh
@@ -202,18 +209,21 @@ steps:
 - label: "MiniMax-M3-MXFP8-PD-2P2D-TP8-MoRIIO-vllm-router"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
-  concurrency: 2
+  timeout_in_minutes: 270
+  concurrency: 1
   concurrency_group: "amd-disagg/mi350/4node"
   commands:
   - MODEL_NAME=MiniMax-M3-MXFP8 xP=2 yD=2 NODES=4 GPUS_PER_NODE=8 WIDE_EP_MODE=0 MORIIO_READ_MODE=0 RUN_AFTER_HEALTH=accuracy ROUTER_TYPE=vllm-router WAIT=1 bash .buildkite/amd-disagg/run-slurm-disagg-test.sh
+
+- wait: ~
+  continue_on_failure: true
 
 #--------------------------------------  mi350 · disagg wide-EP intranode (EP8/DP8, 2 nodes) · SLURM  --------------------------------------#
 
 - label: "DeepSeek-V3-PD-1P1D-EP8/DP8-WideEP-MoRIIO-proxy"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -222,7 +232,7 @@ steps:
 - label: "DeepSeek-V3-PD-1P1D-EP8/DP8-WideEP-MoRIIO-vllm-router"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -231,7 +241,7 @@ steps:
 - label: "DeepSeek-R1-MXFP4-PD-1P1D-EP8/DP8-WideEP-MoRIIO-proxy"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -240,7 +250,7 @@ steps:
 - label: "DeepSeek-R1-MXFP4-PD-1P1D-EP8/DP8-WideEP-MoRIIO-vllm-router"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -249,7 +259,7 @@ steps:
 - label: "Kimi-K2.5-MXFP4-PD-1P1D-EP8/DP8-WideEP-MoRIIO-proxy"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -258,7 +268,7 @@ steps:
 - label: "Kimi-K2.5-MXFP4-PD-1P1D-EP8/DP8-WideEP-MoRIIO-vllm-router"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -267,7 +277,7 @@ steps:
 - label: "Kimi-K2.6-MXFP4-PD-1P1D-EP8/DP8-WideEP-MoRIIO-proxy"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -276,7 +286,7 @@ steps:
 - label: "Kimi-K2.6-MXFP4-PD-1P1D-EP8/DP8-WideEP-MoRIIO-vllm-router"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -285,7 +295,7 @@ steps:
 - label: "MiniMax-M3-MXFP8-PD-1P1D-EP8/DP8-WideEP-MoRIIO-proxy"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -294,7 +304,7 @@ steps:
 - label: "MiniMax-M3-MXFP8-PD-1P1D-EP8/DP8-WideEP-MoRIIO-vllm-router"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -303,7 +313,7 @@ steps:
 - label: "GLM-5.2-FP8-PD-1P1D-EP8/DP8-WideEP-MoRIIO-proxy"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -312,8 +322,68 @@ steps:
 - label: "GLM-5.2-FP8-PD-1P1D-EP8/DP8-WideEP-MoRIIO-vllm-router"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
   - MODEL_NAME=GLM-5.2-FP8 NODES=2 GPUS_PER_NODE=8 WIDE_EP_MODE=1 MORIIO_READ_MODE=0 RUN_AFTER_HEALTH=accuracy ROUTER_TYPE=vllm-router WAIT=1 bash .buildkite/amd-disagg/run-slurm-disagg-test.sh
+
+- wait: ~
+  continue_on_failure: true
+
+#--------------------------------------  mi350 · disagg wide-EP internode (EP16/DP16, 4 nodes) · SLURM  --------------------------------------#
+
+- label: "DeepSeek-V3-PD-2P2D-EP16/DP16-WideEP-MoRIIO-vllm-router"
+  agents:
+    queue: amd_mi350_ainic
+  timeout_in_minutes: 270
+  concurrency: 1
+  concurrency_group: "amd-disagg/mi350/4node"
+  commands:
+  - MODEL_NAME=DeepSeek-V3 xP=2 yD=2 NODES=4 GPUS_PER_NODE=8 WIDE_EP_MODE=1 MORIIO_READ_MODE=0 RUN_AFTER_HEALTH=accuracy ROUTER_TYPE=vllm-router WAIT=1 bash .buildkite/amd-disagg/run-slurm-disagg-test.sh
+
+- label: "DeepSeek-R1-MXFP4-PD-2P2D-EP16/DP16-WideEP-MoRIIO-vllm-router"
+  agents:
+    queue: amd_mi350_ainic
+  timeout_in_minutes: 270
+  concurrency: 1
+  concurrency_group: "amd-disagg/mi350/4node"
+  commands:
+  - MODEL_NAME=DeepSeek-R1-MXFP4 xP=2 yD=2 NODES=4 GPUS_PER_NODE=8 WIDE_EP_MODE=1 MORIIO_READ_MODE=0 RUN_AFTER_HEALTH=accuracy ROUTER_TYPE=vllm-router WAIT=1 bash .buildkite/amd-disagg/run-slurm-disagg-test.sh
+
+- label: "Kimi-K2.5-MXFP4-PD-2P2D-EP16/DP16-WideEP-MoRIIO-vllm-router"
+  agents:
+    queue: amd_mi350_ainic
+  timeout_in_minutes: 270
+  concurrency: 1
+  concurrency_group: "amd-disagg/mi350/4node"
+  commands:
+  - MODEL_NAME=Kimi-K2.5-MXFP4 xP=2 yD=2 NODES=4 GPUS_PER_NODE=8 WIDE_EP_MODE=1 MORIIO_READ_MODE=0 RUN_AFTER_HEALTH=accuracy ROUTER_TYPE=vllm-router WAIT=1 bash .buildkite/amd-disagg/run-slurm-disagg-test.sh
+
+- label: "Kimi-K2.6-MXFP4-PD-2P2D-EP16/DP16-WideEP-MoRIIO-vllm-router"
+  agents:
+    queue: amd_mi350_ainic
+  timeout_in_minutes: 270
+  concurrency: 1
+  concurrency_group: "amd-disagg/mi350/4node"
+  commands:
+  - MODEL_NAME=Kimi-K2.6-MXFP4 xP=2 yD=2 NODES=4 GPUS_PER_NODE=8 WIDE_EP_MODE=1 MORIIO_READ_MODE=0 RUN_AFTER_HEALTH=accuracy ROUTER_TYPE=vllm-router WAIT=1 bash .buildkite/amd-disagg/run-slurm-disagg-test.sh
+
+- label: "MiniMax-M3-MXFP8-PD-2P2D-EP16/DP16-WideEP-MoRIIO-vllm-router"
+  agents:
+    queue: amd_mi350_ainic
+  timeout_in_minutes: 330
+  concurrency: 1
+  concurrency_group: "amd-disagg/mi350/4node"
+  commands:
+  - MODEL_NAME=MiniMax-M3-MXFP8 xP=2 yD=2 NODES=4 GPUS_PER_NODE=8 WIDE_EP_MODE=1 MORIIO_READ_MODE=0 RUN_AFTER_HEALTH=accuracy WORKLOAD_TIMEOUT_S=10800 ROUTER_TYPE=vllm-router WAIT=1 bash .buildkite/amd-disagg/run-slurm-disagg-test.sh
+
+- label: "GLM-5.2-FP8-PD-2P2D-EP16/DP16-WideEP-MoRIIO-vllm-router"
+  agents:
+    queue: amd_mi350_ainic
+  timeout_in_minutes: 270
+  concurrency: 1
+  concurrency_group: "amd-disagg/mi350/4node"
+  commands:
+  - MODEL_NAME=GLM-5.2-FP8 xP=2 yD=2 NODES=4 GPUS_PER_NODE=8 WIDE_EP_MODE=1 MORIIO_READ_MODE=0 RUN_AFTER_HEALTH=accuracy ROUTER_TYPE=vllm-router WAIT=1 bash .buildkite/amd-disagg/run-slurm-disagg-test.sh
+

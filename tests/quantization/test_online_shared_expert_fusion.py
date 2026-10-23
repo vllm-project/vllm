@@ -259,6 +259,13 @@ def _write_minimal_moe_config(model_path: Path, architecture: str) -> None:
     (model_path / "config.json").write_text(json.dumps(config))
 
 
+def _unpadded_block(padded: torch.Tensor, expected: torch.Tensor) -> torch.Tensor:
+    # Backends may pad hidden/intermediate sizes (e.g. AITER W4A4 pads 64 to
+    # 256/128), so loaded shards occupy only the leading block of their slot.
+    rows, cols = expected.shape
+    return padded[:rows, :cols]
+
+
 @pytest.mark.parametrize(
     "load_path", ["load_weights", "fused_gate_up", "weight_loader"]
 )
@@ -342,14 +349,16 @@ def test_online_shared_expert_loads_bf16_weights_into_mxfp4_slot(
     expected_gate, expected_gate_scale = mxfp4_quantize(shared_gate)
     expected_up, expected_up_scale = mxfp4_quantize(shared_up)
     expected_down, expected_down_scale = mxfp4_quantize(shared_down)
-    assert torch.equal(layer.w13_weight[2, :intermediate_size], expected_gate)
-    assert torch.equal(layer.w13_weight[2, intermediate_size:], expected_up)
-    assert torch.equal(layer.w2_weight[2], expected_down)
-    assert torch.equal(
-        layer.w13_weight_scale[2, :intermediate_size], expected_gate_scale
-    )
-    assert torch.equal(layer.w13_weight_scale[2, intermediate_size:], expected_up_scale)
-    assert torch.equal(layer.w2_weight_scale[2], expected_down_scale)
+    gate_up_rows = layer.w13_weight.shape[1] // 2
+    for actual, expected in (
+        (layer.w13_weight[2, :gate_up_rows], expected_gate),
+        (layer.w13_weight[2, gate_up_rows:], expected_up),
+        (layer.w2_weight[2], expected_down),
+        (layer.w13_weight_scale[2, :gate_up_rows], expected_gate_scale),
+        (layer.w13_weight_scale[2, gate_up_rows:], expected_up_scale),
+        (layer.w2_weight_scale[2], expected_down_scale),
+    ):
+        assert torch.equal(_unpadded_block(actual, expected), expected)
 
 
 def test_online_shared_expert_reload_compatibility(
@@ -405,9 +414,9 @@ def test_online_shared_expert_reload_compatibility(
             ]
 
         list(layer.load_weights(checkpoint_weights(shared_gate)))
-        old_weight = layer.w13_weight[2, :64].clone()
         reloaded_gate = shared_gate + 1
         expected_weight, expected_scale = mxfp4_quantize(reloaded_gate)
+        old_weight = _unpadded_block(layer.w13_weight[2], expected_weight).clone()
         assert not torch.equal(old_weight, expected_weight)
 
         record_metadata_for_reloading(layer)
@@ -417,8 +426,12 @@ def test_online_shared_expert_reload_compatibility(
         list(layer.load_weights(checkpoint_weights(reloaded_gate)))
         finalize_layerwise_reload(layer, default_vllm_config.model_config)
         assert not layer.w13_weight.is_meta
-        assert torch.equal(layer.w13_weight[2, :64], expected_weight)
-        assert torch.equal(layer.w13_weight_scale[2, :64], expected_scale)
+        assert torch.equal(
+            _unpadded_block(layer.w13_weight[2], expected_weight), expected_weight
+        )
+        assert torch.equal(
+            _unpadded_block(layer.w13_weight_scale[2], expected_scale), expected_scale
+        )
 
 
 # TODO: Add DeepseekV4ForConditionalGeneration once it uses

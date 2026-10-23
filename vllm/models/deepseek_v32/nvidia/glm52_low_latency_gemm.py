@@ -1,6 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""GLM-5.2 decode GEMM selection for unquantized BF16 on SM103."""
+"""GLM-5.2 decode GEMM selection for unquantized BF16 on SM103/SM107.
+
+Dispatch is by local ``(N, K)`` weight shape and token count ``M``.
+:data:`GLM52_PROJECTIONS` was measured on B300 (SM103) and
+:data:`GLM52_PROJECTIONS_SM107` on VRNVL72 (SM107). The SM107 table also covers
+the TP4 projections (q_b, o_proj, shared expert) and the replicated indexer
+projections, which run as BF16 GEMMs at decode batch sizes.
+"""
 
 from __future__ import annotations
 
@@ -64,7 +71,7 @@ GLM52_Q_B_PROJECTION = GLM52ProjectionSpec(
 )
 
 # The MTP eh_proj is a plain nn.Linear, so it gets its plan through
-# build_glm52_plan rather than a quant_method swap. cuBLAS wins from M=4.
+# build_glm52_plan rather than a quant_method swap. cuBLAS wins from M=4 on SM103.
 GLM52_EH_PROJECTION = GLM52ProjectionSpec(
     n=6144,
     k=12288,
@@ -84,9 +91,130 @@ GLM52_PROJECTIONS = {
     )
 }
 
+# SM107 (VRNVL72) table: each M is listed only where it beat cuBLAS; other M use
+# cuBLAS. Times are table backend / cuBLAS at M=4 unless noted.
+# q_a + kv_a, replicated: 5.84 / 6.91 us.
+_SM107_QKV_A_PROJECTION = GLM52ProjectionSpec(
+    n=2624,
+    k=6144,
+    cute_configs=(
+        (1, SkinnyGemmConfig(1, 256, 4, k_unroll=2)),
+        (2, SkinnyGemmConfig(2, 128, 2, k_unroll=2)),
+        (3, SkinnyGemmConfig(3, 128, 2, k_unroll=2)),
+        (4, SkinnyGemmConfig(4, 128, 2, k_unroll=2)),
+        (5, SkinnyGemmConfig(5, 128, 2)),
+    ),
+    dsv3_tokens=frozenset(range(6, 9)),
+)
 
-def _is_sm103() -> bool:
-    return current_platform.is_device_capability((10, 3))
+# MTP eh_proj (draft M = number of requests): 12.90 / 16.96 us at M=1.
+_SM107_EH_PROJECTION = GLM52ProjectionSpec(
+    n=6144,
+    k=12288,
+    cute_configs=(
+        (1, SkinnyGemmConfig(1, 256, 2, vector_width=4, static_k=12288)),
+        (2, SkinnyGemmConfig(2, 64, 4, k_unroll=4)),
+        (3, SkinnyGemmConfig(3, 64, 2, k_unroll=2)),
+        (4, SkinnyGemmConfig(4, 128, 4)),
+    ),
+)
+
+# q_b_proj at TP4 and the indexer wq_b (replicated): 4.31 / 5.71 us.
+_SM107_Q_B_TP4_PROJECTION = GLM52ProjectionSpec(
+    n=4096,
+    k=2048,
+    cute_configs=(
+        (1, SkinnyGemmConfig(1, 128, 4, k_unroll=2)),
+        (2, SkinnyGemmConfig(2, 128, 4, k_unroll=2)),
+        (3, SkinnyGemmConfig(3, 128, 4, k_unroll=2)),
+        (4, SkinnyGemmConfig(4, 64, 4, k_unroll=4)),
+        (5, SkinnyGemmConfig(5, 64, 2, k_unroll=2)),
+        (6, SkinnyGemmConfig(6, 64, 2, k_unroll=2)),
+    ),
+)
+
+# o_proj at TP4: CuTe wins only for M<=3 (draft passes): 5.90 / 7.77 us at M=1.
+_SM107_O_PROJ_TP4_PROJECTION = GLM52ProjectionSpec(
+    n=6144,
+    k=4096,
+    cute_configs=(
+        (1, SkinnyGemmConfig(1, 128, 3, k_unroll=4)),
+        (2, SkinnyGemmConfig(2, 64, 4, k_unroll=4)),
+        (3, SkinnyGemmConfig(3, 128, 4)),
+    ),
+)
+
+# indexer wk + weights_proj, replicated: 2.83 / 5.43 us.
+_SM107_WK_WEIGHTS_PROJECTION = GLM52ProjectionSpec(
+    n=160,
+    k=6144,
+    cute_configs=(
+        (1, SkinnyGemmConfig(1, 256, 1, k_unroll=2, static_k=6144)),
+        (2, SkinnyGemmConfig(2, 256, 1, k_unroll=2, static_k=6144)),
+        (3, SkinnyGemmConfig(3, 256, 1, k_unroll=2)),
+        (4, SkinnyGemmConfig(4, 256, 1, k_unroll=2)),
+        (5, SkinnyGemmConfig(5, 128, 2, k_unroll=2)),
+        (6, SkinnyGemmConfig(6, 256, 1, k_unroll=2)),
+        (8, SkinnyGemmConfig(8, 256, 1, k_unroll=2)),
+        (12, SkinnyGemmConfig(12, 256, 1, k_unroll=2)),
+        (16, SkinnyGemmConfig(16, 256, 1, k_unroll=2)),
+    ),
+)
+
+# shared expert gate_up at TP4: 3.96 / 5.40 us.
+_SM107_SHARED_GATE_UP_TP4_PROJECTION = GLM52ProjectionSpec(
+    n=1024,
+    k=6144,
+    cute_configs=(
+        (1, SkinnyGemmConfig(1, 256, 2, k_unroll=2)),
+        (2, SkinnyGemmConfig(2, 256, 2, k_unroll=2)),
+        (3, SkinnyGemmConfig(3, 256, 2, k_unroll=2)),
+        (4, SkinnyGemmConfig(4, 128, 1, k_unroll=2)),
+        (5, SkinnyGemmConfig(5, 128, 2, k_unroll=2)),
+        (6, SkinnyGemmConfig(6, 128, 1, k_unroll=2)),
+        (8, SkinnyGemmConfig(8, 128, 2, k_unroll=2)),
+    ),
+)
+
+# shared expert down at TP4: 3.19 / 4.28 us.
+_SM107_SHARED_DOWN_TP4_PROJECTION = GLM52ProjectionSpec(
+    n=6144,
+    k=512,
+    cute_configs=(
+        (1, SkinnyGemmConfig(1, 64, 6, k_unroll=4)),
+        (2, SkinnyGemmConfig(2, 64, 4, k_unroll=4)),
+        (3, SkinnyGemmConfig(3, 64, 4)),
+        (4, SkinnyGemmConfig(4, 32, 4, k_unroll=2)),
+        (6, SkinnyGemmConfig(6, 32, 4, k_unroll=2)),
+    ),
+)
+
+# q_b_proj at TP8: the SM103 entry, re-measured on VRNVL72 and kept (CuTe at M=1-2
+# 3.3 / 5.0 us; dsv3_fused_a_gemm at M=3-16 4.0-4.2 / 4.9-5.1 us).
+_SM107_Q_B_TP8_PROJECTION = GLM52_Q_B_PROJECTION
+
+GLM52_PROJECTIONS_SM107 = {
+    (spec.n, spec.k): spec
+    for spec in (
+        _SM107_QKV_A_PROJECTION,
+        _SM107_Q_B_TP8_PROJECTION,
+        _SM107_EH_PROJECTION,
+        _SM107_Q_B_TP4_PROJECTION,
+        _SM107_O_PROJ_TP4_PROJECTION,
+        _SM107_WK_WEIGHTS_PROJECTION,
+        _SM107_SHARED_GATE_UP_TP4_PROJECTION,
+        _SM107_SHARED_DOWN_TP4_PROJECTION,
+    )
+}
+
+
+def _low_latency_table() -> dict[tuple[int, int], GLM52ProjectionSpec] | None:
+    """Measured dispatch table for the current device, or None if unsupported."""
+    if current_platform.is_device_capability((10, 7)):
+        return GLM52_PROJECTIONS_SM107
+    if current_platform.is_device_capability((10, 3)):
+        return GLM52_PROJECTIONS
+    return None
 
 
 def _is_supported_row_major(tensor: torch.Tensor) -> bool:
@@ -144,11 +272,14 @@ def build_glm52_plan(
     weight: torch.Tensor | None, dtype: torch.dtype
 ) -> dict[int, ResolvedCall] | None:
     """Plan for a weight the walk below cannot reach (a plain ``nn.Linear``)."""
-    if dtype != torch.bfloat16 or not _is_sm103():
+    if dtype != torch.bfloat16:
+        return None
+    table = _low_latency_table()
+    if table is None:
         return None
     if weight is None or weight.dim() != 2 or weight.dtype != torch.bfloat16:
         return None
-    spec = GLM52_PROJECTIONS.get(tuple(weight.shape))
+    spec = table.get(tuple(weight.shape))
     if spec is None:
         return None
     _request_warmup(dtype, {config for _, config in spec.cute_configs})
@@ -177,7 +308,10 @@ def enable_glm52_low_latency_gemm(
     module: nn.Module,
     dtype: torch.dtype,
 ) -> None:
-    if dtype != torch.bfloat16 or not _is_sm103():
+    if dtype != torch.bfloat16:
+        return
+    table = _low_latency_table()
+    if table is None:
         return
 
     warmup_configs: set[SkinnyGemmConfig] = set()
@@ -190,7 +324,7 @@ def enable_glm52_low_latency_gemm(
         weight = getattr(child, "weight", None)
         if weight is None or weight.dim() != 2 or weight.dtype != torch.bfloat16:
             continue
-        spec = GLM52_PROJECTIONS.get(tuple(weight.shape))
+        spec = table.get(tuple(weight.shape))
         if spec is None:
             continue
         child.quant_method = GLM52LowLatencyLinearMethod(spec.build_plan())

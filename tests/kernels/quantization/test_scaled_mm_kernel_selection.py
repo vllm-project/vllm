@@ -22,6 +22,7 @@ from vllm.model_executor.kernels.linear import (
     Int8ScaledMMLinearKernel,
     Int8ScaledMMLinearLayerConfig,
     ScaledMMLinearKernel,
+    TritonInt8ScaledMMLinearKernel,
     _get_linear_backend,
     _resolve_backend_kernels,
     init_fp8_linear_kernel,
@@ -144,6 +145,126 @@ def test_aiter_kernel_implements_is_supported():
     # This validates the method works correctly even on non-ROCm platforms
 
 
+@pytest.mark.parametrize(
+    ("is_static_input_scheme", "is_channelwise", "is_fused_module", "expected"),
+    [
+        # per-tensor activations x per-tensor weights
+        (True, False, False, False),
+        # per-tensor activations x per-channel weights
+        (True, False, True, False),
+        (True, True, False, False),
+        (True, True, True, False),
+        # per-token activations x per-tensor weights
+        (False, False, False, False),
+        # per-token activations x per-channel weights
+        (False, False, True, True),
+        (False, True, False, True),
+        (False, True, True, True),
+    ],
+)
+def test_aiter_int8_kernel_can_implement_scale_layouts(
+    is_static_input_scheme, is_channelwise, is_fused_module, expected
+):
+    config = Int8ScaledMMLinearLayerConfig(
+        is_static_input_scheme=is_static_input_scheme,
+        is_channelwise=is_channelwise,
+        input_symmetric=True,
+        is_fused_module=is_fused_module,
+    )
+    can_impl, _ = AiterInt8ScaledMMLinearKernel.can_implement(config)
+    assert can_impl is expected
+
+
+def _make_compressed_tensors_per_tensor_int8_scheme():
+    from compressed_tensors.quantization import QuantizationStrategy
+
+    from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
+        CompressedTensorsW8A8Int8,
+    )
+
+    return CompressedTensorsW8A8Int8(
+        strategy=QuantizationStrategy.TENSOR,
+        is_static_input_scheme=False,
+        input_symmetric=True,
+    )
+
+
+def _make_quark_per_tensor_int8_scheme():
+    from vllm.model_executor.layers.quantization.quark.schemes.quark_w8a8_int8 import (
+        QuarkW8A8Int8,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kInt8DynamicTokenSym,
+        kInt8StaticTensorSym,
+    )
+
+    return QuarkW8A8Int8(kInt8StaticTensorSym, kInt8DynamicTokenSym)
+
+
+@pytest.mark.parametrize(
+    "make_scheme",
+    [
+        _make_compressed_tensors_per_tensor_int8_scheme,
+        _make_quark_per_tensor_int8_scheme,
+    ],
+    ids=["compressed_tensors", "quark"],
+)
+@pytest.mark.parametrize("output_partition_sizes", [[16, 32], [48]], ids=str)
+@patch.object(TritonInt8ScaledMMLinearKernel, "is_supported", return_value=(True, None))
+@patch.object(AiterInt8ScaledMMLinearKernel, "is_supported", return_value=(True, None))
+@patch(
+    "vllm.model_executor.parameter.get_tensor_model_parallel_world_size", return_value=1
+)
+@patch("vllm.model_executor.parameter.get_tensor_model_parallel_rank", return_value=0)
+@patch("vllm.model_executor.kernels.linear.current_platform")
+def test_aiter_int8_per_tensor_weight_selection_and_loading(
+    platform_mock,
+    _tp_rank,
+    _tp_size,
+    _aiter_supported,
+    _triton_supported,
+    output_partition_sizes,
+    make_scheme,
+):
+    """Per-tensor weights x per-token activations through the scheme's own
+    create_weights/process_weights_after_loading: AITER is selected only for
+    fused modules, whose shard scales must become per-channel after loading."""
+    platform_mock._enum = PlatformEnum.ROCM
+    platform_mock.get_device_capability.return_value = None
+    scheme = make_scheme()
+    layer = torch.nn.Module()
+    scheme.create_weights(
+        layer,
+        output_partition_sizes=output_partition_sizes,
+        input_size_per_partition=32,
+        params_dtype=torch.bfloat16,
+        weight_loader=lambda *args, **kwargs: None,
+    )
+
+    is_fused = len(output_partition_sizes) > 1
+    expected_kernel = (
+        AiterInt8ScaledMMLinearKernel if is_fused else TritonInt8ScaledMMLinearKernel
+    )
+    assert type(scheme.kernel) is expected_kernel
+    if not is_fused:
+        return
+
+    n = sum(output_partition_sizes)
+    shard_scales = torch.tensor([0.5, 2.0])
+    layer.weight.data.copy_(torch.ones(n, 32, dtype=torch.int8))
+    layer.weight_scale.data.copy_(shard_scales)
+    scheme.process_weights_after_loading(layer)
+
+    # AiterInt8ScaledMMLinearKernel.apply_weights expects [K, N] weights and
+    # one scale per output channel.
+    assert layer.weight.shape == (32, n)
+    assert layer.weight_scale.numel() == layer.weight.shape[1]
+    expected = torch.repeat_interleave(
+        shard_scales, torch.tensor(output_partition_sizes)
+    )
+    assert torch.equal(layer.weight_scale.flatten(), expected)
+
+
 def test_cpu_kernel_accepts_all_configs():
     """Test that CPUInt8ScaledMMLinearKernel accepts all config combinations."""
     configs = [
@@ -164,6 +285,43 @@ def test_cpu_kernel_accepts_all_configs():
         assert can_impl, (
             f"CPUInt8ScaledMMLinearKernel should accept config {config}: {reason}"
         )
+
+
+@pytest.mark.skipif(
+    not hasattr(torch.ops._C, "int8_scaled_mm_with_quant"),
+    reason="int8_scaled_mm_with_quant is not built",
+)
+def test_cpu_sgl_int8_linear_accepts_3d_input():
+    """The SGL int8 path must accept B x T x D activations (Whisper encoder)."""
+    N, K = 64, 128
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(
+        torch.randint(-127, 128, (N, K), dtype=torch.int8), requires_grad=False
+    )
+    layer.weight_scale = torch.nn.Parameter(
+        torch.rand(N, 1) * 0.01 + 1e-3, requires_grad=False
+    )
+    layer.bias = torch.nn.Parameter(
+        torch.randn(N, dtype=torch.bfloat16), requires_grad=False
+    )
+    config = Int8ScaledMMLinearLayerConfig(
+        is_channelwise=True,
+        is_static_input_scheme=False,
+        input_symmetric=True,
+    )
+    kernel = CPUInt8ScaledMMLinearKernel(
+        config,
+        ("weight", "weight_scale", "input_scale", "input_zero_point", "azp_adj"),
+    )
+    kernel.process_weights_for_sgl(layer)
+    kernel.linear_method = kernel._apply_weights_sgl
+
+    x = torch.randn(2, 3, K, dtype=torch.bfloat16)
+    out = kernel.apply_weights(layer, x, layer.bias)
+    ref = kernel.apply_weights(layer, x.reshape(-1, K), layer.bias)
+
+    assert out.shape == (2, 3, N)
+    torch.testing.assert_close(out, ref.reshape(2, 3, N), rtol=0, atol=0)
 
 
 class OOTInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):

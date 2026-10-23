@@ -202,6 +202,7 @@ def torch_experts(
     )
 
     if quant_input_only:
+        assert a_scale is not None
         a = (a.float() * a_scale.view(-1, 1)).to(w1.dtype)
 
     num_experts = w1.shape[0]
@@ -231,6 +232,7 @@ def torch_experts(
                 tmp2, tmp2_scale = moe_kernel_quantize_input(
                     tmp2, None, quant_dtype, per_act_token_quant
                 )
+                assert tmp2_scale is not None
                 tmp2 = (tmp2.float() * tmp2_scale.view(-1, 1)).to(w2.dtype)
                 out[mask] = tmp2 @ w2[i].transpose(0, 1)
             elif block_shape is not None:

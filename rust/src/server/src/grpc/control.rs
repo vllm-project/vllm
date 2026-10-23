@@ -339,7 +339,7 @@ impl pb::control_server::Control for ControlServiceImpl {
         let clear_cache = request.clear_cache.unwrap_or(true);
         let _guard = self.rl_lock.lock().await;
         self.client()
-            .pause_scheduler(mode, clear_cache)
+            .pause_generation(mode, clear_cache)
             .await
             .map_err(|error| utility_status("pause_generation", error))?;
         Ok(Response::new(pb::PauseGenerationResponse {}))
