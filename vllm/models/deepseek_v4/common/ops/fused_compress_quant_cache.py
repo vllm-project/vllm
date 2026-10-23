@@ -1217,11 +1217,18 @@ class FusedKVCompressNormRopeInsertIndexerTritonKernel(
         from vllm.v1.attention.backends.mla.indexer import (
             dsa_indexer_uses_fp4,
         )
+        from vllm.v1.attention.backends.mla.rocm_flydsl_mxfp4_indexer import (
+            rocm_flydsl_mxfp4_indexer_enabled,
+        )
 
         use_fp4_cache = dsa_indexer_uses_fp4(vllm_config)
-        # The MXFP4 variant packs FP4 with CUDA PTX; ROCm writes the MXFP4
-        # indexer cache with aiter's op instead.
-        if use_fp4_cache and current_platform.is_rocm():
+        # On ROCm only the FlyDSL indexer writes MXFP4 K with this kernel;
+        # aiter's Triton paged indexer writes it with aiter's own op.
+        if (
+            use_fp4_cache
+            and current_platform.is_rocm()
+            and not rocm_flydsl_mxfp4_indexer_enabled(vllm_config)
+        ):
             return []
         head_dim = int(getattr(hf_config, "index_head_dim", 0) or 0)
         rope_head_dim = int(getattr(hf_config, "qk_rope_head_dim", 0) or 0)

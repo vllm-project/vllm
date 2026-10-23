@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import inspect
 from dataclasses import dataclass
-from functools import lru_cache
 from typing import Any
 
 import numpy as np
@@ -59,63 +57,6 @@ logger = init_logger(__name__)
 DSA_INDEXER_KV_DTYPES = ("fp8", "mxfp4")
 
 
-@lru_cache(maxsize=1)
-def aiter_mxfp4_available() -> bool:
-    """Whether installed AITER exposes stride-capable FlyDSL FP4 kernels."""
-    try:
-        from aiter.ops.flydsl.kernels.mqa_logits import (
-            pa_mqa_logits_fp4 as decode,
-        )
-        from aiter.ops.flydsl.kernels.mqa_logits import (
-            pa_mqa_logits_fp4_common as common,
-        )
-        from aiter.ops.flydsl.kernels.mqa_logits import (
-            pa_mqa_logits_fp4_prefill as prefill,
-        )
-
-        if "byte_offset" not in inspect.signature(common._i32_buffer).parameters:
-            return False
-        required = {"kv_page_stride", "kv_scale_page_stride", "block_table_stride"}
-        for module, name in (
-            (decode, "pa_mqa_logits_fp4"),
-            (prefill, "pa_mqa_logits_fp4_prefill"),
-        ):
-            for prefix in ("build_", "compile_"):
-                suffix = "_module" if prefix == "build_" else ""
-                function = getattr(module, prefix + name + suffix)
-                if not required.issubset(inspect.signature(function).parameters):
-                    return False
-        for function, parameters in (
-            (decode.default_varctx_parallel_unit_num, {"batch_size", "max_seq_len"}),
-            (decode.flydsl_pa_mqa_logits_fp4, {"cta_info", "total_ctas"}),
-            (prefill.flydsl_pa_mqa_logits_fp4_prefill, {"cta_info", "n_ctas"}),
-            (
-                decode.compute_varctx_schedule,
-                {
-                    "block_k",
-                    "parallel_unit_num",
-                    "max_seq_len",
-                    "next_n",
-                    "cta_info_out",
-                },
-            ),
-            (
-                prefill.compute_prefill_schedule,
-                {"block_k", "parallel_unit_num", "max_seq_len"},
-            ),
-        ):
-            if not parameters.issubset(inspect.signature(function).parameters):
-                return False
-        return True
-    except (ImportError, AttributeError, TypeError, ValueError):
-        return False
-
-
-def _model_type(vllm_config: VllmConfig) -> str | None:
-    model_config = getattr(vllm_config, "model_config", None)
-    return None if model_config is None else model_config.hf_config.model_type
-
-
 def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
     """Whether the DeepSeek sparse indexer should use the MXFP4 K cache."""
     kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype("fp8")
@@ -126,44 +67,29 @@ def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
         )
     use_fp4 = kv_dtype == "mxfp4"
     if use_fp4 and current_platform.is_rocm():
-        model_type = _model_type(vllm_config)
-        if model_type == "deepseek_v41":
-            from vllm._aiter_ops import rocm_aiter_ops
-            from vllm.platforms.rocm import get_cdna_version
+        from vllm._aiter_ops import rocm_aiter_ops
+        from vllm.platforms.rocm import get_cdna_version
 
-            if get_cdna_version() != 4:
-                raise ValueError(
-                    "indexer_kv_dtype='mxfp4' on ROCm requires CDNA4 (MI350X/MI355X)."
-                )
-            if not rocm_aiter_ops.is_enabled():
-                raise ValueError(
-                    "indexer_kv_dtype='mxfp4' on ROCm runs on aiter's kernels; enable "
-                    "aiter with VLLM_ROCM_USE_AITER=1."
-                )
-            return True
-        if model_type != "deepseek_v4":
+        # Only DeepSeek-V4 and V4.1 are wired to the ROCm MXFP4 cache; other
+        # DSA models would silently keep their FP8 one.
+        model_config = vllm_config.model_config
+        if model_config is None or model_config.hf_config.model_type not in (
+            "deepseek_v4",
+            "deepseek_v41",
+        ):
             raise ValueError(
                 "indexer_kv_dtype='mxfp4' on ROCm is only supported for "
-                f"DeepSeek-V4 and DeepSeek-V4.1, not model_type={model_type!r}."
+                "DeepSeek-V4 and DeepSeek-V4.1."
             )
-        # DeepSeek-V4 uses AITER's FlyDSL paged MXFP4 scorers.
-        from vllm.platforms.rocm import on_gfx950
-
-        if not on_gfx950():
-            raise ValueError("ROCm indexer_kv_dtype='mxfp4' requires gfx950")
-        parallel = vllm_config.parallel_config
-        if (
-            parallel.decode_context_parallel_size != 1
-            or parallel.prefill_context_parallel_size != 1
-        ):
-            raise ValueError("ROCm MXFP4 indexer requires DCP=PCP=1")
-        if not aiter_mxfp4_available():
-            logger.warning(
-                "indexer_kv_dtype='mxfp4' was requested, but the installed "
-                "AITER build lacks the required stride/rebase or decode/prefill "
-                "schedule ABI; falling back to the fp8 indexer."
+        if get_cdna_version() != 4:
+            raise ValueError(
+                "indexer_kv_dtype='mxfp4' on ROCm requires CDNA4 (MI350X/MI355X)."
             )
-            return False
+        if not rocm_aiter_ops.is_enabled():
+            raise ValueError(
+                "indexer_kv_dtype='mxfp4' on ROCm runs on aiter's kernels; enable "
+                "aiter with VLLM_ROCM_USE_AITER=1."
+            )
         return True
     if use_fp4 and not current_platform.is_device_capability_family(100):
         raise ValueError(
@@ -172,19 +98,6 @@ def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
             "earlier architectures are not supported."
         )
     return use_fp4
-
-
-def rocm_flydsl_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
-    """Whether the indexer runs DeepSeek-V4's ROCm MXFP4 path on AITER FlyDSL.
-
-    Only DeepSeek-V4 is wired to it. DeepSeek-V4.1 has its own ROCm MXFP4
-    indexer (rocm_paged_mxfp4_indexer) with a different cache layout, so the
-    FlyDSL buffers, schedules and checks must not apply to it."""
-    return (
-        current_platform.is_rocm()
-        and _model_type(vllm_config) == "deepseek_v4"
-        and dsa_indexer_uses_fp4(vllm_config)
-    )
 
 
 class PrepareUniformDecodeKernel(
@@ -561,74 +474,6 @@ class DeepseekV32IndexerPrefillChunkMetadata:
     max_local_total_seq_lens: int = 0
 
     pcp_deinterleave_idx: torch.Tensor | None = None
-    logits_width: int = 0
-    fp4_windows: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
-    fp4_cta_info: torch.Tensor | None = None
-    fp4_total_ctas: int | None = None
-
-
-@triton.jit(do_not_specialize=["ROWS", "REQUESTS", "QUERY_OFFSET", "SEARCH_STEPS"])
-def _build_rocm_fp4_prefill_windows_kernel(
-    query_starts,
-    row_starts,
-    row_ends,
-    row_to_batch,
-    local_starts,
-    local_ends,
-    ROWS,
-    REQUESTS,
-    QUERY_OFFSET,
-    SEARCH_STEPS,
-    BLOCK: tl.constexpr,
-):
-    row = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-    valid = row < ROWS
-    query = row + QUERY_OFFSET
-    lo = tl.full((BLOCK,), 0, tl.int32)
-    hi = tl.full((BLOCK,), 0, tl.int32) + REQUESTS
-    for _ in range(SEARCH_STEPS):
-        mid = (lo + hi) // 2
-        end = tl.load(query_starts + tl.minimum(mid + 1, REQUESTS))
-        right = (mid < REQUESTS) & (end <= query)
-        lo = tl.where(right, mid + 1, lo)
-        hi = tl.where(right, hi, mid)
-    real_end = tl.load(query_starts + REQUESTS)
-    start = tl.load(row_starts + row, mask=valid, other=0)
-    end = tl.load(row_ends + row, mask=valid, other=0)
-    tl.store(row_to_batch + row, tl.minimum(lo, REQUESTS - 1), mask=valid)
-    tl.store(local_starts + row, 0, mask=valid)
-    tl.store(
-        local_ends + row,
-        tl.where(query < real_end, tl.maximum(end - start, 0), 0),
-        mask=valid,
-    )
-
-
-def _build_rocm_fp4_prefill_windows(
-    query_start_loc: torch.Tensor,
-    row_starts: torch.Tensor,
-    row_ends: torch.Tensor,
-    rows: int,
-    num_reqs: int,
-    query_offset: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    windows = torch.empty((3, rows), dtype=torch.int32, device=query_start_loc.device)
-    row_to_batch, starts, ends = windows.unbind(0)
-    if rows:
-        _build_rocm_fp4_prefill_windows_kernel[(triton.cdiv(rows, 256),)](
-            query_start_loc,
-            row_starts,
-            row_ends,
-            row_to_batch,
-            starts,
-            ends,
-            rows,
-            num_reqs,
-            query_offset,
-            (num_reqs + 1).bit_length(),
-            BLOCK=256,
-        )
-    return row_to_batch, starts, ends
 
 
 class BuildPrefillChunkMetadataKernel(
@@ -865,7 +710,6 @@ class BuildPrefillChunkMetadataKernel(
 class DeepseekV32IndexerPrefillMetadata:
     chunks: list[DeepseekV32IndexerPrefillChunkMetadata]
     max_prefill_seq_len: int = -1
-    fp4_logits: torch.Tensor | None = None
     # Per-TP-rank contiguous row counts, or None for the replicated path.
     row_shard_sizes: list[int] | None = None
 
@@ -886,9 +730,6 @@ class DeepSeekV32IndexerDecodeMetadata:
     decode_is_uniform: bool = True
     write_max_decode_len: int = 0
     indices: torch.Tensor | None = None
-    # Views into builder-owned storage, refreshed before each graph replay.
-    fp4_cta_info: torch.Tensor | None = None
-    fp4_total_ctas: int | None = None
 
 
 @dataclass
@@ -1129,9 +970,6 @@ def _supports_native_decode(next_n: int) -> bool:
 
 
 def _use_flattening(vllm_config: VllmConfig) -> bool:
-    if current_platform.is_rocm() and dsa_indexer_uses_fp4(vllm_config):
-        # Expand uncompressed causal bounds before dividing each by C4.
-        return True
     speculative_config = vllm_config.speculative_config
     next_n = 1 + vllm_config.num_speculative_tokens
     return not _supports_native_decode(next_n) or (
@@ -1188,12 +1026,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             else 0
         )
         self.indexer_uses_fp4 = dsa_indexer_uses_fp4(self.vllm_config)
-        self.use_rocm_fp4 = self.indexer_uses_fp4 and rocm_flydsl_indexer_uses_fp4(
-            self.vllm_config
-        )
-        self.fp4_topk_tokens = int(
-            getattr(self.vllm_config.model_config.hf_config, "index_topk", 0)
-        )
 
         next_n = self.num_speculative_tokens + 1
         self.decode_threshold = next_n
@@ -1294,38 +1126,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             if self.dcp_world_size > 1 and self.compress_ratio > 1
             else self.cp_kv_cache_interleave_size
         )
-
-        if self.use_rocm_fp4 and (
-            self.compress_ratio != 4 or self.kv_cache_spec.num_states != 64
-        ):
-            raise ValueError("ROCm MXFP4 indexer requires C4 and 64-token pages")
-
-        self.fp4_cta_info_buffer: torch.Tensor | None = None
-        self.fp4_prefill_logits_buffer: torch.Tensor | None = None
-        if self.use_rocm_fp4:
-            from aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4 import (
-                default_varctx_parallel_unit_num,
-            )
-
-            compilation_config = self.vllm_config.compilation_config
-            max_decode_tokens = max(
-                scheduler_config.max_num_seqs * next_n,
-                compilation_config.max_cudagraph_capture_size or 0,
-                max(compilation_config.cudagraph_capture_sizes or (), default=0),
-            )
-            self.fp4_max_seq_len = (
-                self.vllm_config.model_config.max_model_len // self.compress_ratio
-            )
-            max_parallel_unit_num = default_varctx_parallel_unit_num(
-                max_decode_tokens, self.fp4_max_seq_len
-            )
-            # Stable storage shared by every indexer layer in this attention group.
-            # build() refreshes its contents before eager execution or graph replay.
-            self.fp4_cta_info_buffer = torch.empty(
-                (max_parallel_unit_num, 4),
-                dtype=torch.int32,
-                device=self.device,
-            )
 
         # Pre-allocate buffers for CUDA graph compatibility when
         if self.compress_ratio > 1:
@@ -1612,46 +1412,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
         return chunks
 
-    @staticmethod
-    def _split_fp4_indexer_prefill_chunks(
-        compressed_seq_lens_cpu: torch.Tensor,
-        prefill_query_lens_cpu: torch.Tensor,
-        max_logits_bytes: int,
-        request_offset: int = 0,
-    ) -> list[tuple[slice, slice]]:
-        """Plan direct-paged FP4 chunks by rows times maximum request width."""
-        chunks: list[tuple[slice, slice]] = []
-        max_logits_elems = max_logits_bytes // 4
-        end = 0
-
-        while end < len(compressed_seq_lens_cpu):
-            start, chunk_m, chunk_width = end, 0, 0
-            while end < len(compressed_seq_lens_cpu):
-                q = int(prefill_query_lens_cpu[end].item())
-                width = int(compressed_seq_lens_cpu[end].item())
-                new_m = chunk_m + q
-                new_width = max(chunk_width, width)
-                if new_m * new_width > max_logits_elems:
-                    break
-                chunk_m, chunk_width = new_m, new_width
-                end += 1
-
-            if end == start:
-                chunk_m = int(prefill_query_lens_cpu[end].item())
-                chunk_width = int(compressed_seq_lens_cpu[end].item())
-                end += 1
-
-            req_slice = slice(start + request_offset, end + request_offset)
-            max_q = (
-                max(1, max_logits_elems // chunk_width)
-                if chunk_width > 0
-                else max(1, chunk_m)
-            )
-            for q_off in range(0, chunk_m, max_q):
-                chunks.append((req_slice, slice(q_off, min(q_off + max_q, chunk_m))))
-
-        return chunks
-
     def build(
         self,
         common_prefix_len: int,
@@ -1750,14 +1510,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
             req_idx = None
             shard_rows = None
-            if self.use_rocm_fp4:
-                chunk_specs = self._split_fp4_indexer_prefill_chunks(
-                    compressed_seq_lens_cpu[num_decodes:],
-                    prefill_query_lens_cpu,
-                    max_logits_bytes,
-                    request_offset=num_decodes,
-                )
-            elif self.use_pcp and self.dcp_world_size > 1:
+            if self.use_pcp and self.dcp_world_size > 1:
                 # The gathered KV must be packed identically on every PCP rank:
                 # chunk by request from its DCP shard rows, which every rank
                 # holds. A dummy batch bypasses the PCP manager and has one
@@ -1818,36 +1571,10 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     dcp_world_size=self.dcp_world_size,
                     cp_kv_cache_interleave_size=self.compressed_cp_interleave_size,
                     pcp_plan=pcp_plan,
-                    logits_width=(
-                        int(compressed_seq_lens_cpu[req_slice].max().item())
-                        if self.use_rocm_fp4
-                        else 0
-                    ),
-                    build_fp4_schedule=self.use_rocm_fp4,
-                    fp4_topk_tokens=self.fp4_topk_tokens,
                 )
                 # Skip when total_seq_lens is 0 (i.e., no compressed token).
                 if metadata is not None:
                     chunks.append(metadata)
-            fp4_logits = None
-            scored_fp4_chunks = [
-                chunk for chunk in chunks if chunk.fp4_cta_info is not None
-            ]
-            if self.use_rocm_fp4 and scored_fp4_chunks:
-                required_logits_elems = max(
-                    (chunk.token_end - chunk.token_start) * chunk.logits_width
-                    for chunk in scored_fp4_chunks
-                )
-                if (
-                    self.fp4_prefill_logits_buffer is None
-                    or self.fp4_prefill_logits_buffer.numel() < required_logits_elems
-                ):
-                    self.fp4_prefill_logits_buffer = torch.empty(
-                        required_logits_elems,
-                        dtype=torch.float32,
-                        device=self.device,
-                    )
-                fp4_logits = self.fp4_prefill_logits_buffer
             row_shard_sizes = None
             if tp_prefill_row_sharding_supported(
                 self.vllm_config, self.dcp_world_size, self.use_pcp, self.tp_size
@@ -1866,7 +1593,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     if num_prefills > 0
                     else 0
                 ),
-                fp4_logits=fp4_logits,
                 row_shard_sizes=row_shard_sizes,
             )
 
@@ -2027,30 +1753,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 schedule_metadata = self.scheduler_metadata_buffer[: metadata.shape[0]]
                 schedule_metadata[:] = metadata
 
-            fp4_cta_info = None
-            fp4_total_ctas = None
-            if self.fp4_cta_info_buffer is not None and num_decode_tokens > 0:
-                from aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4 import (
-                    compute_varctx_schedule,
-                    default_varctx_parallel_unit_num,
-                )
-
-                # FP4 flattens speculative rows before C4 length conversion, so
-                # AITER sees next_n=1 and one exact context bound per output row.
-                assert seq_lens.shape == (num_decode_tokens, 1)
-                parallel_unit_num = default_varctx_parallel_unit_num(
-                    num_decode_tokens, self.fp4_max_seq_len
-                )
-                assert parallel_unit_num <= self.fp4_cta_info_buffer.shape[0]
-                _, fp4_cta_info, fp4_total_ctas = compute_varctx_schedule(
-                    seq_lens[:, 0],
-                    block_k=256,
-                    parallel_unit_num=parallel_unit_num,
-                    max_seq_len=self.fp4_max_seq_len,
-                    next_n=1,
-                    cta_info_out=self.fp4_cta_info_buffer[:parallel_unit_num],
-                )
-
             decode_metadata = DeepSeekV32IndexerDecodeMetadata(
                 block_table=block_table,
                 seq_lens=seq_lens,
@@ -2062,8 +1764,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 per_req_decode_lens=self.per_req_decode_lens_buffer[:num_decodes],
                 decode_is_uniform=write_is_uniform,
                 write_max_decode_len=max_decode_len,
-                fp4_cta_info=fp4_cta_info,
-                fp4_total_ctas=fp4_total_ctas,
             )
 
         attn_metadata = DeepseekV32IndexerMetadata(
@@ -2152,9 +1852,6 @@ def build_prefill_chunk_metadata(
     dcp_world_size: int = 1,
     cp_kv_cache_interleave_size: int = 1,
     pcp_plan: PCPGlobalChunkPlan | None = None,
-    logits_width: int = 0,
-    build_fp4_schedule: bool = False,
-    fp4_topk_tokens: int = 0,
 ) -> DeepseekV32IndexerPrefillChunkMetadata | None:
     if pcp_plan is not None:
         total_seq_lens = pcp_plan.total
@@ -2254,36 +1951,6 @@ def build_prefill_chunk_metadata(
         skip_kv_gather = skip_kv_gather or qs_start > 0
     else:
         token_end = query_start_loc_cpu[end_idx].item()
-    fp4_windows = None
-    fp4_cta_info = None
-    fp4_total_ctas = None
-    if build_fp4_schedule and output_query_len:
-        assert logits_width > 0
-        fp4_windows = _build_rocm_fp4_prefill_windows(
-            query_start_loc,
-            cu_seq_len_ks,
-            cu_seq_len_ke,
-            output_query_len,
-            num_reqs,
-            qs_start,
-        )
-        if logits_width > fp4_topk_tokens:
-            from aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4 import (
-                default_varctx_parallel_unit_num,
-            )
-            from aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4_prefill import (
-                compute_prefill_schedule,
-            )
-
-            parallel_unit_num = default_varctx_parallel_unit_num(
-                output_query_len, logits_width
-            )
-            _, fp4_cta_info, fp4_total_ctas = compute_prefill_schedule(
-                *fp4_windows,
-                block_k=256,
-                parallel_unit_num=parallel_unit_num,
-                max_seq_len=logits_width,
-            )
 
     return DeepseekV32IndexerPrefillChunkMetadata(
         pcp_deinterleave_idx=pcp_deinterleave_idx,
@@ -2301,10 +1968,6 @@ def build_prefill_chunk_metadata(
         local_cu_seq_lens=local_cu_seq_lens,
         local_total_seq_lens=local_total_seq_lens,
         max_local_total_seq_lens=max_local_total_seq_lens,
-        logits_width=logits_width,
-        fp4_windows=fp4_windows,
-        fp4_cta_info=fp4_cta_info,
-        fp4_total_ctas=fp4_total_ctas,
     )
 
 

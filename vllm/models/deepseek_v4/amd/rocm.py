@@ -22,12 +22,18 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
     triton_kernel_dispatcher_with_warmup,
 )
+from vllm.models.deepseek_v4.amd.ops.sparse_attn_indexer import (
+    RocmFlyDslSparseAttnIndexer,
+)
 from vllm.models.deepseek_v4.attention import (
     DeepseekV4Attention,
     DeepseekV4Indexer,
     DeepseekV4IndexerCache,
 )
 from vllm.models.deepseek_v4.common.ops import dequantize_and_gather_k_cache
+from vllm.models.deepseek_v4.common.ops.fused_indexer_q import (
+    fused_indexer_q_rope_quant,
+)
 from vllm.models.deepseek_v4.compressor import CompressorMetadata, DeepseekCompressor
 from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4FlashMLAMetadata,
@@ -44,6 +50,10 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.mla.indexer import dsa_indexer_uses_fp4
+from vllm.v1.attention.backends.mla.rocm_flydsl_mxfp4_indexer import (
+    DeepseekV4RocmFlyDslIndexerBackend,
+    rocm_flydsl_mxfp4_indexer_enabled,
+)
 from vllm.v1.attention.backends.mla.rocm_paged_mxfp4_indexer import (
     DeepseekV4RocmMxfp4IndexerBackend,
 )
@@ -830,6 +840,8 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
     _use_aiter_sparse_mla = False
 
     def _get_indexer_cls(self, vllm_config: VllmConfig) -> type[DeepseekV4Indexer]:
+        if rocm_flydsl_mxfp4_indexer_enabled(vllm_config):
+            return DeepseekV4RocmFlyDslIndexer
         if dsa_indexer_uses_fp4(vllm_config):
             # aiter's paged MXFP4 kernels write and score the index K cache.
             return DeepseekV4RocmMxfp4Indexer
@@ -1932,4 +1944,40 @@ class DeepseekV4RocmMxfp4Indexer(DeepseekV4Indexer):
             indexer_weights,
             self.softmax_scale,
             self.n_head**-0.5,
+        )
+
+
+class DeepseekV4RocmFlyDslIndexerCache(DeepseekV4IndexerCache):
+    def get_attn_backend(self) -> type[AttentionBackend]:
+        return DeepseekV4RocmFlyDslIndexerBackend
+
+
+class DeepseekV4RocmFlyDslIndexer(DeepseekV4Indexer):
+    """`DeepseekV4Indexer` on aiter's FlyDSL paged MXFP4 scorers. The shared
+    compressor's fused kernel pools, normalizes, ropes, quantizes and writes K
+    straight into their page layout, with no intermediate K buffer."""
+
+    def _get_cache_cls(self) -> type[DeepseekV4IndexerCache]:
+        return DeepseekV4RocmFlyDslIndexerCache
+
+    def _get_attn_cls(self) -> type[SparseAttnIndexer]:
+        return RocmFlyDslSparseAttnIndexer
+
+    def _q_rope_quant(
+        self,
+        positions: torch.Tensor,
+        q: torch.Tensor,
+        rotary_emb: torch.nn.Module,
+        indexer_weights: torch.Tensor,
+    ) -> tuple[tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
+        # The FlyDSL scorers take bf16 weights with both scales folded.
+        return fused_indexer_q_rope_quant(
+            positions,
+            q,
+            rotary_emb.cos_sin_cache,
+            indexer_weights,
+            self.softmax_scale,
+            self.n_head**-0.5,
+            use_fp4=True,
+            weights_out_dtype=torch.bfloat16,
         )
