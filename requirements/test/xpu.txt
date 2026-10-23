@@ -89,8 +89,10 @@ cachetools==7.1.7
     # via -r requirements/test/../common.txt
 cbor2==6.1.4
     # via -r requirements/test/../common.txt
-certifi==2026.7.22
+certifi==2026.10.19
     # via
+    #   -c requirements/common.txt
+    #   -r requirements/test/../common.txt
     #   httpcore
     #   httpx
     #   requests

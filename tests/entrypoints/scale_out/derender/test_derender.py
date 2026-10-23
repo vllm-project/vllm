@@ -1413,6 +1413,55 @@ async def test_e2e_harmony_plain_roundtrip(harmony_client, harmony_tokenizer):
     assert "Four" in content
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_choice", ["auto", "none"])
+async def test_e2e_harmony_tool_choice_none_drops_tool_calls(
+    harmony_client, harmony_tokenizer, tool_choice
+):
+    """HarmonyParser extracts tool calls whatever the tool_choice, so
+    /derender must drop them for "none", like coupled chat. "auto" checks
+    the tokens really parse as a tool call."""
+    messages = [{"role": "user", "content": "Weather in Paris?"}]
+    gen_req = await _e2e_render_chat(harmony_client, HARMONY_MODEL, messages)
+
+    assistant_msg = {
+        "role": "assistant",
+        "tool_calls": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "arguments": '{"city": "Paris"}',
+                },
+            }
+        ],
+    }
+    output_ids = _harmony_extract_assistant_ids(harmony_tokenizer, assistant_msg)
+    if "get_weather" not in harmony_tokenizer.decode(output_ids):
+        pytest.skip("Harmony template did not render the tool call")
+
+    resp = await harmony_client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": HARMONY_MODEL,
+            "generate_response": _e2e_generate_response(output_ids),
+            "prompt_tokens": len(gen_req["token_ids"]),
+            "chat_request": {
+                "model": HARMONY_MODEL,
+                "messages": messages,
+                "tools": _E2E_TOOLS,
+                "tool_choice": tool_choice,
+            },
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    choice = resp.json()["choices"][0]
+    assert bool(choice["message"].get("tool_calls")) == (tool_choice == "auto")
+    assert choice["finish_reason"] == (
+        "tool_calls" if tool_choice == "auto" else "stop"
+    )
+
+
 @pytest.fixture(scope="module")
 def harmony_default_server():
     """gpt-oss render server with NO parser flags.
@@ -1525,7 +1574,7 @@ _HERMES_TOOL_CALL_TEXT = (
 
 def _derender_hermes_chat(
     text: str,
-    tool_choice: str = "auto",
+    tool_choice: str | None = "auto",
     engine_finish_reason: str = "stop",
     parser_cls: type | None = None,
 ):
@@ -1596,6 +1645,8 @@ def test_derender_chat_keeps_parser_tool_call_id():
     multi-turn history."""
 
     class _KimiIdParser:
+        tool_parser_cls = object
+
         def __init__(self, *args, **kwargs):
             pass
 
@@ -1611,6 +1662,31 @@ def test_derender_chat_keeps_parser_tool_call_id():
 
     (tool_call,) = choice.message.tool_calls
     assert tool_call.id == "functions.get_weather:1"
+
+
+@pytest.mark.parametrize("use_stub_parser", [False, True])
+def test_derender_chat_drops_tool_calls_without_tool_choice(use_stub_parser):
+    """/derender drops parsed tool calls for ``tool_choice=None`` and for a
+    parser that ignores ``tool_choice="none"`` (Harmony), like coupled chat."""
+
+    class _IgnoresToolChoiceParser:
+        tool_parser_cls = object
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def parse(self, model_output, request, **kwargs):
+            call = FunctionCall(name="get_weather", arguments='{"city": "Paris"}')
+            return None, None, [call]
+
+    choice = _derender_hermes_chat(
+        _HERMES_TOOL_CALL_TEXT,
+        tool_choice="none" if use_stub_parser else None,
+        parser_cls=_IgnoresToolChoiceParser if use_stub_parser else None,
+    )
+
+    assert not choice.message.tool_calls
+    assert choice.finish_reason == "stop"
 
 
 def _make_derenderer(tokenizer, generation_config: dict | None = None):
