@@ -3587,8 +3587,14 @@ def test_draft_sample_method_probabilistic_is_accepted():
     assert speculative_config.draft_sample_method == "probabilistic"
 
 
+@pytest.mark.parametrize(
+    ("method", "drops_block"),
+    [("eagle3", True), ("mtp", True), ("dflash", False), ("dspark", False)],
+)
 @pytest.mark.parametrize("disable_eagle_block_drop", [False, True])
 def test_eagle_block_drop_can_be_disabled_without_disabling_eagle(
+    method: str,
+    drops_block: bool,
     disable_eagle_block_drop: bool,
 ):
     # Start from an ngram config to avoid loading model metadata: these predicates
@@ -3598,10 +3604,12 @@ def test_eagle_block_drop_can_be_disabled_without_disabling_eagle(
         num_speculative_tokens=3,
         disable_eagle_block_drop=disable_eagle_block_drop,
     )
-    speculative_config.method = "eagle3"
+    speculative_config.method = method
 
     assert speculative_config.use_eagle()
-    assert speculative_config.use_eagle_block_drop() is not disable_eagle_block_drop
+    assert speculative_config.use_eagle_block_drop() is (
+        drops_block and not disable_eagle_block_drop
+    )
 
 
 def test_draft_sample_method_gumbel_is_rejected():
