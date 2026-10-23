@@ -19,13 +19,14 @@ from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import T, as_ir_value
 
-from ..common.arch import GFX942
+from ..common.arch import GFX942, tiling
 from ..common.gfx942 import bf16_hi_pair, fp8x2_f32, mfma_bf16_k32
 
-# The execution model: one CTA a CU of an MI355X, all resident.
-BLOCKS = 256
-THREADS = 512
-WAVES = THREADS // 64
+# The execution model: one CTA a compute unit, all resident, so the grid width
+# is the GPU's compute-unit count (256 on MI355X / MI350X / gfx942, 128 on
+# MI350P). The runner sets MONO_BLOCKS_ENV before FlyDSL traces this module, so
+# the device and host plans build the same grid.
+BLOCKS, THREADS, WAVES = tiling()
 
 # gfx95x cache policy bits (LLVM CPol): SC0 = 1, SC1 = 16, NT = 2. SC1 alone is
 # device scope (past the per-XCD L2s); NT streams data read once.
