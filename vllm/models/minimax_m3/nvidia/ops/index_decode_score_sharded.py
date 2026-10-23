@@ -56,7 +56,7 @@ class IndexDecodeScoreShardedKernel:
         gQ: cute.Tensor,  # [bs * runtime_decode_query_len, num_heads, head_dim]
         gK_cache: cute.Tensor,  # [num_pages, BLOCK // world_size, head_dim]
         block_table: cute.Tensor,  # [bs, max_pages]
-        scores: cute.Tensor,  # [total_tokens, num_heads, MAX_K_TILES]
+        scores: cute.Tensor,  # [total_tokens, num_heads, score_columns]
         seq_lens: cute.Tensor,  # [bs]
         rank: Int32,  # this rank's token offset inside every block
         stream: CUstream,
@@ -420,6 +420,7 @@ class IndexDecodeScoreShardedKernel:
         world_size: int = 4,
         use_pdl: bool = False,
         prefetch_history: bool = False,
+        score_columns: int = MAX_K_TILES,
     ):
         bs = cute.sym_int()
         total_tokens = cute.sym_int()
@@ -433,7 +434,7 @@ class IndexDecodeScoreShardedKernel:
         )
         block_table = make_fake_tensor(Int32, (bs, cute.sym_int()), divisibility=1)
         scores = make_fake_tensor(
-            Float32, (total_tokens, num_heads, MAX_K_TILES), divisibility=4
+            Float32, (total_tokens, num_heads, score_columns), divisibility=4
         )
         seq_lens = make_fake_tensor(Int32, (bs,), divisibility=1)
         kernel = IndexDecodeScoreShardedKernel(
@@ -487,7 +488,10 @@ def minimax_m3_index_decode_score_sharded_cutedsl(
     assert 1 <= decode_query_len <= max_decode_query_len
     assert num_heads * max_decode_query_len <= 32
     assert 0 <= rank < world_size and num_heads % world_size == 0
-    assert score_out.shape == (total_tokens, num_heads, MAX_K_TILES)
+    assert score_out.ndim == 3 and score_out.shape[:2] == (total_tokens, num_heads)
+    score_columns = score_out.shape[-1]
+    assert 0 < score_columns <= MAX_K_TILES
+    assert score_columns % IndexDecodeScoreShardedKernel.PAGES == 0
     assert score_out.dtype == torch.float32 and score_out.is_contiguous()
     kernel = IndexDecodeScoreShardedKernel.compile(
         num_heads,
@@ -497,6 +501,7 @@ def minimax_m3_index_decode_score_sharded_cutedsl(
         world_size,
         use_pdl,
         prefetch_history,
+        score_columns,
     )
     kernel(idx_q, index_kv_shard, block_table, score_out, seq_lens, rank)
 
@@ -737,7 +742,8 @@ def minimax_m3_index_publish_candidates(
     tokens, heads, topk = local_indices.shape
     assert topk == TOPK and tokens <= t_max
     assert heads == world_size * heads_per_rank
-    assert scores.shape == (tokens, heads, MAX_K_TILES)
+    assert scores.ndim == 3 and scores.shape[:2] == (tokens, heads)
+    assert 0 < scores.shape[-1] <= MAX_K_TILES
     assert scores.stride(-1) == local_indices.stride(-1) == 1
     _index_k_publish_candidates_kernel[(tokens, heads)](
         scores,
@@ -753,7 +759,7 @@ def minimax_m3_index_publish_candidates(
         local_indices.stride(1),
         W=world_size,
         HPR=heads_per_rank,
-        MAX_TILES=MAX_K_TILES,
+        MAX_TILES=scores.shape[-1],
         SPIN=spin_limit,
         num_warps=4,
     )

@@ -2165,24 +2165,30 @@ def test_decode_index_score_cutedsl_correctness(
     reason="Sharded index decode score requires Blackwell.",
 )
 @pytest.mark.parametrize(
-    "world,decode_query_len,max_decode_query_len,split_k",
+    "world,decode_query_len,max_decode_query_len,split_k,score_columns",
     [
-        (world, q, max_q, 128)
+        (world, q, max_q, 128, 8192)
         for world in (2, 4)
         for q, max_q in ((1, 1), (1, 8), (3, 8), (8, 8))
     ]
-    + [(2, q, 8, 1) for q in (1, 3, 8)],
+    + [(2, q, 8, 1, 8192) for q in (1, 3, 8)]
+    + [(world, 4, 4, 128, cols) for world in (2, 4) for cols in (36, 40)],
 )
 @pytest.mark.parametrize("fused_publish", [False, True])
 @pytest.mark.parametrize("pdl_mode", ["off", "wait", "prefetch"])
 def test_sharded_decode_index_score_matches_reference(
-    world, decode_query_len, max_decode_query_len, split_k, fused_publish, pdl_mode
+    world,
+    decode_query_len,
+    max_decode_query_len,
+    split_k,
+    score_columns,
+    fused_publish,
+    pdl_mode,
 ):
     pytest.importorskip("cutlass")
     from vllm.third_party.fmha_sm100.api import sparse_topk_select
 
     from vllm.models.minimax_m3.nvidia.ops.index_decode_score_sharded import (
-        MAX_K_TILES,
         minimax_m3_index_decode_score_sharded_cutedsl,
         minimax_m3_index_merge_candidates,
         minimax_m3_index_publish_candidates,
@@ -2209,7 +2215,7 @@ def test_sharded_decode_index_score_matches_reference(
     ]
     bases = torch.tensor([r.data_ptr() for r in recv], device="cuda", dtype=torch.int64)
     errors = torch.zeros(1, device="cuda", dtype=torch.int32)
-    scores = torch.full((total_q, heads, MAX_K_TILES), -float("inf"), device="cuda")
+    scores = torch.full((total_q, heads, score_columns), -float("inf"), device="cuda")
     all_scores = torch.empty_like(scores)
     local_ids = torch.empty((total_q, heads, 16), dtype=torch.int32, device="cuda")
     actual = torch.empty_like(local_ids)
@@ -2227,7 +2233,7 @@ def test_sharded_decode_index_score_matches_reference(
         block_table[:3],
         seq_lens[:3],
         decode_query_len,
-        MAX_K_TILES,
+        score_columns,
     )
     # Consecutive calls reuse the same slot, including the single-layer case.
     for _ in range(2):

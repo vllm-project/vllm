@@ -64,6 +64,7 @@ def _indexer_sharding(monkeypatch, tp_size, pp_size, rank, distributed_init_port
             assert msa.resolve_index_k_shard(config, 4, "fp8", 16) == tp_size
             comm = msa.get_comm()
             assert comm is not None
+            assert comm.scores.shape == (comm.max_decode_tokens, 4, 32)
             _check_indexer_forwards(config, device, rank, comm)
             _check_sharding_policy(config, comm)
         get_tp_group().barrier()
