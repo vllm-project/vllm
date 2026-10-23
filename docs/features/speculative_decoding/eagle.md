@@ -56,6 +56,28 @@ for output in outputs:
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
 
+## Capping the Drafter's Attention Window
+
+A drafter trained on short sequences can lose acceptance on long prompts.
+`draft_context_window` limits an EAGLE-3 drafter to attending to its last N tokens, without editing the checkpoint:
+
+```python
+llm = LLM(
+    model="meta-llama/Llama-3.1-8B-Instruct",
+    speculative_config={
+        "model": "nebius/EAGLE3-Llama-3.1-8B-Instruct",
+        "method": "eagle3",
+        "num_speculative_tokens": 3,
+        "draft_context_window": 2048,
+    },
+)
+```
+
+The drafter's KV cache still keeps every token, so this saves attention work and not memory.
+To see the effect, compare `vllm:spec_decode_num_accepted_tokens` over `vllm:spec_decode_num_drafts` in `/metrics`, with and without the option.
+It applies to drafters that use the Llama EAGLE-3 model code, and vLLM raises an error at load time for other drafters.
+It does not support `parallel_drafting`.
+
 ## Pre-Trained Eagle Draft Models
 
 A variety of EAGLE draft models are available on the Hugging Face hub:

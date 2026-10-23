@@ -6638,12 +6638,16 @@ class GPUModelRunner(
             ``triton_attn``, ``num_qo_heads`` in FlashInfer) is sized by
             ``num_heads_q`` and assumes uniformity within the group; see
             ``get_num_attention_heads_from_layers`` in
-            ``vllm/v1/attention/backends/utils.py``.
+            ``vllm/v1/attention/backends/utils.py``. It also splits on the
+            layer's sliding window, which FlashInfer needs to be uniform and
+            which a draft layer under ``draft_context_window`` does not share
+            with its target.
             """
 
             attn_backend: type[AttentionBackend]
             kv_cache_spec: KVCacheSpec
             num_heads_q: int
+            sliding_window: int | None
 
         def get_attn_backends_for_group(
             kv_cache_group_spec: KVCacheGroupSpec,
@@ -6679,9 +6683,10 @@ class GPUModelRunner(
                 # fallback can never spuriously merge them with attention
                 # layers.
                 num_heads_q = getattr(layers[layer_name], "num_heads", 0)
-                key = (full_cls_name, layer_kv_cache_spec, num_heads_q)
+                sliding_window = getattr(layers[layer_name], "sliding_window", None)
+                key = (full_cls_name, layer_kv_cache_spec, num_heads_q, sliding_window)
                 attn_backends[key] = AttentionGroupKey(
-                    attn_backend, layer_kv_cache_spec, num_heads_q
+                    attn_backend, layer_kv_cache_spec, num_heads_q, sliding_window
                 )
                 attn_backend_layers[key].append(layer_name)
             return (

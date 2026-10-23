@@ -618,7 +618,15 @@ class Attention(nn.Module, AttentionLayerBase):
         # Should not be called for enc-dec attention.
         assert self.attn_type == AttentionType.DECODER
         quant_mode = get_kv_quant_mode(self.kv_cache_dtype)
-        if self.sliding_window is not None:
+        # A draft layer windowed by draft_context_window keeps every token's
+        # KV, so it stays in the target's KV cache group.
+        spec_config = vllm_config.speculative_config
+        retain_full_kv = (
+            self.is_draft_layer
+            and spec_config is not None
+            and spec_config.draft_context_window is not None
+        )
+        if self.sliding_window is not None and not retain_full_kv:
             assert not self.attn_backend.is_mla(), (
                 "MLA is not supported for sliding window"
             )

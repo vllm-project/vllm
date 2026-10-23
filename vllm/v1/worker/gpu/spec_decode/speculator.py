@@ -17,6 +17,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models import supports_multimodal_embeddings
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.spec_decode.utils import check_draft_context_window
 from vllm.v1.watermarking import create_watermarker
 from vllm.v1.watermarking.spec_decode import (
     DraftWatermarker,
@@ -236,6 +237,9 @@ class DraftModelSpeculator(BaseSpeculator):
         self.draft_attn_layer_names = set(all_attn_layers) - target_attn_layer_names
         for layer_name in self.draft_attn_layer_names:
             all_attn_layers[layer_name].is_draft_layer = True
+        check_draft_context_window(
+            self.speculative_config, all_attn_layers, self.draft_attn_layer_names
+        )
 
         target_supports_mm = self.vllm_config.model_config.supports_multimodal_inputs
         draft_supports_mm = supports_multimodal_embeddings(self.model)

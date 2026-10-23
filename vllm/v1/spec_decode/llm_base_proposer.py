@@ -57,6 +57,7 @@ from vllm.v1.spec_decode.utils import (
     _eagle_prepare_inputs_padded,
     _eagle_prepare_next_token_padded,
     _eagle_step_slot_mapping_metadata,
+    check_draft_context_window,
     compute_new_slot_mapping,
     eagle_step_update_slot_mapping_and_metadata,
     extend_all_queries_by_N,
@@ -1333,6 +1334,9 @@ class SpecDecodeBaseProposer:
         draft_attn_layer_names = set(all_attn_layers) - target_attn_layer_names
         for name in draft_attn_layer_names:
             all_attn_layers[name].is_draft_layer = True
+        check_draft_context_window(
+            self.speculative_config, all_attn_layers, draft_attn_layer_names
+        )
         # Filter to only layers that have KV cache specs.
         self._draft_attn_layer_names = {
             name

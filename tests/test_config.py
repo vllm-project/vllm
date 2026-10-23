@@ -2139,6 +2139,27 @@ def test_max_num_new_slots_for_drafting(method, parallel_drafting, expected_slot
     assert speculative_config.max_num_new_slots_for_drafting == expected_slots
 
 
+def test_draft_context_window_config():
+    with pytest.raises(ValidationError, match="only supported with method='eagle3'"):
+        SpeculativeConfig(
+            model="ngram", num_speculative_tokens=3, draft_context_window=2048
+        )
+    with pytest.raises(ValidationError):
+        SpeculativeConfig(
+            model="ngram", num_speculative_tokens=3, draft_context_window=0
+        )
+
+    speculative_config = SpeculativeConfig(model="ngram", num_speculative_tokens=3)
+    hash_without_window = speculative_config.compute_hash()
+    speculative_config.draft_context_window = 2048
+    assert speculative_config.compute_hash() != hash_without_window
+
+    speculative_config.method = "eagle3"
+    speculative_config.parallel_drafting = True
+    with pytest.raises(ValueError, match="does not support parallel_drafting"):
+        speculative_config._verify_args()
+
+
 @dataclass
 class _TestConfigFields:
     a: int
