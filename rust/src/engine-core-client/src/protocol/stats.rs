@@ -215,6 +215,27 @@ pub mod kv_connector {
         pub num_kv_expired_reqs: Vec<u64>,
     }
 
+    /// Mooncake connector transfer telemetry.
+    ///
+    /// Original Python definition: `MooncakeKVConnectorStats` in
+    /// `vllm/distributed/kv_transfer/kv_connector/v1/mooncake/stats.py`.
+    #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct MooncakeTransferStats {
+        /// Time spent transferring each successful request.
+        pub transfer_duration: Vec<f64>,
+        /// Bytes transferred by each successful request.
+        pub bytes_transferred: Vec<u64>,
+        /// Descriptor count for each successful request.
+        pub num_descriptors: Vec<u64>,
+        /// Failure counter increments collected since the previous update.
+        pub num_failed_transfers: Vec<u64>,
+        /// Receive failure counter increments collected since the previous update.
+        pub num_failed_recvs: Vec<u64>,
+        /// Expired-request counter increments collected since the previous update.
+        pub num_kv_expired_reqs: Vec<u64>,
+    }
+
     /// Mooncake store operation name.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
     #[serde(rename_all = "snake_case")]
@@ -281,6 +302,8 @@ pub mod kv_connector {
         pub nixl_pull: Option<NixlStats>,
         #[serde(rename = "NixlPushConnector")]
         pub nixl_push: Option<NixlStats>,
+        #[serde(rename = "MooncakeConnector")]
+        pub mooncake_transfer: Option<MooncakeTransferStats>,
         #[serde(rename = "MooncakeStoreConnector")]
         pub mooncake: Option<MooncakeStats>,
         /// Child connector payloads without a Rust telemetry implementation.
@@ -289,10 +312,14 @@ pub mod kv_connector {
     }
 
     /// Connector-specific scheduler telemetry.
+    ///
+    /// Variants are tried in order. `Multi` accepts any map, so every
+    /// connector payload with its own variant must come before it.
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     #[serde(untagged)]
     pub enum KvConnectorStats {
         Nixl(NixlStats),
+        MooncakeTransfer(MooncakeTransferStats),
         Mooncake(MooncakeStats),
         Multi(Box<MultiConnectorStats>),
         Other(BTreeMap<String, OpaqueValue>),

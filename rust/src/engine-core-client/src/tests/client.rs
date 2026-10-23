@@ -2774,6 +2774,8 @@ fn python_msgpack_fixtures_match_rust_encoding() {
         lines.next().expect("missing multipart prompt logprobs fixture line");
     let nixl_stats_hex = lines.next().expect("missing NIXL stats fixture line");
     let mooncake_stats_hex = lines.next().expect("missing Mooncake stats fixture line");
+    let mooncake_transfer_stats_hex =
+        lines.next().expect("missing Mooncake transfer stats fixture line");
     let multi_connector_stats_hex =
         lines.next().expect("missing MultiConnector stats fixture line");
     let ready_response_hex = lines.next().expect("missing ready response fixture line");
@@ -2991,12 +2993,20 @@ fn python_msgpack_fixtures_match_rust_encoding() {
             if stats.0.contains_key(&MooncakeOperation::LoadGet)
     ));
 
+    let mooncake_transfer_stats: KvConnectorStats =
+        rmp_serde::from_slice(&hex::decode(mooncake_transfer_stats_hex).unwrap()).unwrap();
+    assert!(matches!(
+        mooncake_transfer_stats,
+        KvConnectorStats::MooncakeTransfer(stats) if stats.num_failed_transfers == [1]
+    ));
+
     let multi_connector_stats: KvConnectorStats =
         rmp_serde::from_slice(&hex::decode(multi_connector_stats_hex).unwrap()).unwrap();
     assert!(matches!(
         multi_connector_stats,
         KvConnectorStats::Multi(stats)
             if stats.nixl.is_some()
+                && stats.mooncake_transfer.is_some()
                 && stats.mooncake.is_some()
                 && stats.other.contains_key("UnsupportedConnector")
     ));
