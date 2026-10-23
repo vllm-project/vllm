@@ -1635,6 +1635,38 @@ class KVCacheConfig:
         Required for Mamba layers, whose state is read before it is fully written
         (#35219), and for mixed-precision caches, where a block reused across
         groups can be reinterpreted under a different precision and decode stale
-        bytes to NaN/Inf. Uniform-precision caches skip zeroing.
+        bytes to NaN/Inf. NVFP4 caches with several page layouts need it too
+        (see ``has_mixed_layout_nvfp4_kv_cache``). Other uniform-precision caches
+        skip zeroing.
         """
-        return self.has_mamba_layers or self.has_mixed_precision_kv_cache
+        return (
+            self.has_mamba_layers
+            or self.has_mixed_precision_kv_cache
+            or self.has_mixed_layout_nvfp4_kv_cache
+        )
+
+    @property
+    def has_mixed_layout_nvfp4_kv_cache(self) -> bool:
+        """Whether NVFP4 KV groups with different page layouts share the pool.
+
+        An NVFP4 page holds packed E2M1 data followed by E4M3 block scales, and
+        where the scales start depends on the head size, KV head count and page
+        size in tokens. In a hybrid model (e.g. Gemma 4 with head_dim 256 and
+        512), a block reused across groups can expose stale E2M1 bytes as block
+        scales, and attention reads the unwritten tail of the last page
+        (0 * NaN = NaN). A single NVFP4 layout keeps scales where scales were,
+        so it needs no zeroing.
+        """
+        specs = [
+            spec
+            for group in self.kv_cache_groups
+            if not group.host_resident
+            for spec in iter_layer_specs(group.kv_cache_spec)
+            if isinstance(spec, AttentionSpec)
+        ]
+        if not any(spec.kv_quant_mode.is_nvfp4 for spec in specs):
+            return False
+        layouts = {
+            (spec.head_size, spec.num_kv_heads, spec.block_size) for spec in specs
+        }
+        return len(layouts) > 1
