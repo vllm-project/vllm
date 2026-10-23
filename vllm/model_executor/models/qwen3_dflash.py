@@ -118,20 +118,31 @@ def _rebuild_in_place(module: nn.Module, build: Callable[[], None]) -> None:
     A FULL CUDA graph records the context-KV step with the addresses of these
     tensors, so a reload must refresh them in place.
     """
-    old = {k: v for k, v in vars(module).items() if isinstance(v, torch.Tensor)}
+
+    def same_layout(a: object, b: object) -> bool:
+        return (
+            isinstance(a, torch.Tensor)
+            and isinstance(b, torch.Tensor)
+            and (a.shape, a.dtype, a.device) == (b.shape, b.dtype, b.device)
+        )
+
+    old = {
+        k: v
+        for k, v in vars(module).items()
+        if isinstance(v, torch.Tensor)
+        or (isinstance(v, tuple) and v and all(isinstance(t, torch.Tensor) for t in v))
+    }
     build()
-    for name, tensor in old.items():
+    for name, prev in old.items():
         new = getattr(module, name, None)
-        if (
-            isinstance(new, torch.Tensor)
-            and new is not tensor
-            and new.shape == tensor.shape
-            and new.dtype == tensor.dtype
-            and new.device == tensor.device
-        ):
+        olds = prev if isinstance(prev, tuple) else (prev,)
+        news = new if isinstance(new, tuple) else (new,)
+        if len(olds) == len(news) and all(map(same_layout, olds, news)):
             with torch.inference_mode():
-                tensor.copy_(new)
-            setattr(module, name, tensor)
+                for a, b in zip(olds, news):
+                    if a is not b:
+                        a.copy_(b)
+            setattr(module, name, prev)
 
 
 def _get_dflash_fc_input_size(vllm_config: VllmConfig) -> int:

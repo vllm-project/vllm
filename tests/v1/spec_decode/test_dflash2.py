@@ -787,9 +787,10 @@ def test_rebuild_in_place_keeps_captured_tensors():
     def build():
         module._fused = torch.cat([module.weight.data, module.weight.data])
         module._resized = module.weight.data[: module.out_features].clone()
+        module._splits = (module.weight.data[:, :2].contiguous(), module.bias.data * 2)
 
     build()
-    fused, resized = module._fused, module._resized
+    fused, resized, splits = module._fused, module._resized, module._splits
     with torch.no_grad():
         module.weight.add_(1.0)
     module.out_features = 1
@@ -798,6 +799,8 @@ def test_rebuild_in_place_keeps_captured_tensors():
     # Same shape: refreshed in the tensor a CUDA graph may have captured.
     assert module._fused is fused
     torch.testing.assert_close(fused, torch.cat([module.weight, module.weight]))
+    assert module._splits is splits
+    torch.testing.assert_close(splits[1], module.bias * 2)
     # Changed shape: replaced.
     assert module._resized is not resized
     assert module._resized.shape == (1, 4)
