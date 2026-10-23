@@ -6,7 +6,7 @@ from vllm.config import SpeculativeConfig
 from vllm.transformers_utils.configs.eagle import EAGLEConfig
 from vllm.transformers_utils.configs.speculators import SpeculatorsConfig
 from vllm.v1.worker.gpu.spec_decode.speculator_config import (
-    CheckpointSpeculatorConfig,
+    DraftModelSpeculatorConfig,
     TargetEmbedSharing,
 )
 
@@ -21,7 +21,7 @@ def wrap_eagle_hf_config(spec: SpeculativeConfig, method: str) -> None:
     spec.update_arch_()
 
 
-class EagleSpeculatorConfig(CheckpointSpeculatorConfig):
+class EagleSpeculatorConfig(DraftModelSpeculatorConfig):
     base_method = "eagle"
     speculator_class = "vllm.v1.worker.gpu.spec_decode.eagle.speculator.EagleSpeculator"
     supported_options = frozenset({"draft_lm_head_quantization"})
