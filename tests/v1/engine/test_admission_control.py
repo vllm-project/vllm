@@ -35,6 +35,7 @@ from vllm.exceptions import (
     MaxQueuedTokensError,
     QueueOverflowError,
     VLLMError,
+    VLLMValidationError,
 )
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
@@ -605,7 +606,7 @@ async def test_hidden_capture_rejects_streaming_input_before_admission():
     stream = prompt()
     plan = HiddenStateCapturePlan.from_window("request", 1, 0, 1, "collection")
     try:
-        with pytest.raises(ValueError, match="streaming input"):
+        with pytest.raises(VLLMValidationError, match="streaming input"):
             await AsyncLLM.add_request(
                 engine, "request", stream, SamplingParams(), hidden_state_capture=plan
             )
@@ -631,6 +632,6 @@ async def test_hidden_capture_checks_effective_engine_request_params(actual):
     request.hidden_state_capture = HiddenStateCapturePlan.from_window(
         "effective", 1, 0, 1, "audit"
     )
-    with pytest.raises(ValueError):
+    with pytest.raises(VLLMValidationError):
         await engine.add_request("effective", request, SamplingParams())
     engine.engine_core.add_request_async.assert_not_awaited()

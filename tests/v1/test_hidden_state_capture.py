@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 import torch
 
+from vllm.exceptions import VLLMValidationError
 from vllm.v1.hidden_state_capture import (
     HiddenStateCaptureBuffer,
     HiddenStateCapturePlan,
@@ -287,10 +288,13 @@ def test_hidden_capture_fails_closed_for_unmapped_runners():
         parallel_config=SimpleNamespace(
             prefill_context_parallel_size=1, decode_context_parallel_size=1
         ),
-        model_config=SimpleNamespace(is_encoder_decoder=False),
+        model_config=SimpleNamespace(is_encoder_decoder=False, is_diffusion=False),
         speculative_config=None,
     )
     assert hidden_state_capture_capability(config) is None
+    config.model_config.is_diffusion = True
+    assert "diffusion" in hidden_state_capture_capability(config)
+    config.model_config.is_diffusion = False
     config.scheduler_config.async_scheduling = True
     assert "async scheduling" in hidden_state_capture_capability(config)
     config.scheduler_config.async_scheduling = False
@@ -298,16 +302,24 @@ def test_hidden_capture_fails_closed_for_unmapped_runners():
     assert "CUDA" in hidden_state_capture_capability(config)
 
 
-def test_hidden_capture_rejects_unsupported_config_before_admission():
+@pytest.mark.parametrize(
+    ("device_type", "is_diffusion", "reason"),
+    [("npu", False, "only the CUDA GPU"), ("cuda", True, "diffusion")],
+)
+def test_hidden_capture_rejects_unsupported_config_before_admission(
+    device_type, is_diffusion, reason
+):
     from vllm.sampling_params import SamplingParams
 
     config = SimpleNamespace(
-        device_config=SimpleNamespace(device_type="npu"),
+        device_config=SimpleNamespace(device_type=device_type),
         scheduler_config=SimpleNamespace(async_scheduling=False),
         parallel_config=SimpleNamespace(
             prefill_context_parallel_size=1, decode_context_parallel_size=1
         ),
-        model_config=SimpleNamespace(is_encoder_decoder=False),
+        model_config=SimpleNamespace(
+            is_encoder_decoder=False, is_diffusion=is_diffusion
+        ),
         speculative_config=None,
     )
     request = SimpleNamespace(
@@ -317,7 +329,7 @@ def test_hidden_capture_rejects_unsupported_config_before_admission():
         params=SamplingParams(),
     )
     plan = HiddenStateCapturePlan.from_window("req", 2, 0, 1, "collection")
-    with pytest.raises(ValueError, match="only the CUDA GPU"):
+    with pytest.raises(VLLMValidationError, match=reason):
         validate_hidden_state_capture(plan, request, config)
 
 
@@ -334,7 +346,7 @@ def test_hidden_capture_rejects_frontend_stop_strings(stop):
     )
     plan = HiddenStateCapturePlan.from_window("req", 2, 0, 4, "collection", min_rows=1)
     request.params = SamplingParams(stop=stop)
-    with pytest.raises(ValueError, match="stop strings"):
+    with pytest.raises(VLLMValidationError, match="stop strings"):
         validate_hidden_state_capture(plan, request, None)
 
 

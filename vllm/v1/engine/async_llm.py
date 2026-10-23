@@ -443,7 +443,7 @@ class AsyncLLM(EngineClient):
 
         if isinstance(prompt, AsyncGenerator):
             if hidden_state_capture is not None:
-                raise ValueError(
+                raise VLLMValidationError(
                     "Hidden-state capture does not support streaming input"
                 )
             if reasoning_ended is not None or reasoning_parser_kwargs is not None:
@@ -530,7 +530,9 @@ class AsyncLLM(EngineClient):
 
         if hidden_state_capture is not None:
             if request.hidden_state_capture is not None:
-                raise ValueError("Hidden-state capture plan was supplied twice")
+                raise VLLMValidationError(
+                    "Hidden-state capture plan was supplied twice"
+                )
             request.hidden_state_capture = hidden_state_capture
         if (plan := request.hidden_state_capture) is not None:
             validate_hidden_state_capture(plan, request, self.vllm_config)

@@ -124,3 +124,18 @@ The file path is returned in `output.kv_transfer_params["hidden_states_path"]`. 
 
 !!! note
     Chunked prefill is not compatible with this feature and must be disabled.
+
+## Windowed Response Capture
+
+Request-local windowed capture is disabled by default. To enable it for one
+non-streaming `/v1/completions` request, include
+`"hidden_state_capture": {"start": 0, "end": 4, "collection_id": "rollout"}`
+in the request body. The response contains hidden states for the selected
+half-open response window and their absolute positions.
+
+This capture path requires a CUDA GPU runner, synchronous scheduling, and a
+single completion without stop strings. Encoder-decoder and diffusion models
+(including DiffusionGemma), context parallelism, and adaptive verification are
+unsupported because their hidden rows need a different position mapping.
+Unsupported requests return HTTP 400 with the validation reason; they do not
+produce a partial capture. Use `--no-async-scheduling` when starting the server.

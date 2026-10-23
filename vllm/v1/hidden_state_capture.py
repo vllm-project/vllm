@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING, Literal
 import numpy as np
 import torch
 
+from vllm.exceptions import VLLMValidationError
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.engine import EngineCoreRequest
@@ -88,6 +90,8 @@ def hidden_state_capture_capability(vllm_config: VllmConfig) -> str | None:
         return "decode context parallelism changes hidden-row ownership"
     if vllm_config.model_config.is_encoder_decoder:
         return "encoder-decoder hidden positions need a separate mapping"
+    if vllm_config.model_config.is_diffusion:
+        return "diffusion hidden positions need a separate mapping"
     if (
         vllm_config.speculative_config is not None
         and vllm_config.speculative_config.enable_adaptive_verification
@@ -108,16 +112,18 @@ def validate_hidden_state_capture(
     params = request.params
 
     if not isinstance(params, SamplingParams) or params.n != 1:
-        raise ValueError("Hidden-state capture requires a single completion")
+        raise VLLMValidationError("Hidden-state capture requires a single completion")
     if params.stop:
-        raise ValueError("Hidden-state capture does not support stop strings")
+        raise VLLMValidationError("Hidden-state capture does not support stop strings")
     prompt_len = length_from_prompt_token_ids_or_embeds(
         request.prompt_token_ids, request.prompt_embeds
     )
     if plan.prompt_len != prompt_len or plan.request_id != request.request_id:
-        raise ValueError("Hidden-state capture plan does not match the request")
+        raise VLLMValidationError(
+            "Hidden-state capture plan does not match the request"
+        )
     if reason := hidden_state_capture_capability(vllm_config):
-        raise ValueError(f"Hidden-state capture unavailable: {reason}")
+        raise VLLMValidationError(f"Hidden-state capture unavailable: {reason}")
 
 
 @dataclass
