@@ -19,8 +19,10 @@ from vllm.model_executor.kernels.linear import (
     AiterInt8ScaledMMLinearKernel,
     CPUInt8ScaledMMLinearKernel,
     HummingFP8ScaledMMLinearKernel,
+    HummingLinearKernel,
     Int8ScaledMMLinearKernel,
     Int8ScaledMMLinearLayerConfig,
+    MacheteLinearKernel,
     ScaledMMLinearKernel,
     TritonInt8ScaledMMLinearKernel,
     _get_linear_backend,
@@ -375,4 +377,19 @@ def test_humming_priority_only_reorders_humming_and_marlin(possible_kernels):
     assert "Marlin" in names[humming + 1]
     del names[humming]
     assert names == [k.__name__ for k in original if "Humming" not in k.__name__]
+    assert kernels == original
+
+
+def test_humming_priority_ahead_of_machete_only_reorders_humming():
+    """Moving Humming ahead of Machete must not move any other kernel."""
+    kernels = _POSSIBLE_KERNELS[PlatformEnum.CUDA]
+    original = list(kernels)
+
+    assert prioritize_humming(kernels, 80, ahead_of="machete") == original
+
+    reordered = prioritize_humming(kernels, 90, ahead_of="machete")
+    humming = reordered.index(HummingLinearKernel)
+    assert reordered[humming + 1] is MacheteLinearKernel
+    del reordered[humming]
+    assert reordered == [k for k in original if k is not HummingLinearKernel]
     assert kernels == original
