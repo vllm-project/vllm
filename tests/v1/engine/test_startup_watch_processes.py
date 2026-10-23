@@ -12,6 +12,7 @@ import torch
 import zmq
 
 import vllm.platforms as platforms
+from vllm.config import WatchdogConfig
 from vllm.utils import torch_utils
 from vllm.v1.engine import core as core_module
 from vllm.v1.engine import utils as engine_utils
@@ -224,11 +225,19 @@ def test_freeze_gc_after_clean_rocm_engine_core_shutdown(
     expected_calls: list[str],
 ):
     calls: list[str] = []
-    vllm_config = SimpleNamespace(shutdown_timeout=shutdown_timeout)
+    vllm_config = SimpleNamespace(
+        shutdown_timeout=shutdown_timeout,
+        # run_engine_core starts the watchdog from this field. The default
+        # config has no dump_dir, so start_watch_dog returns immediately.
+        watchdog_config=WatchdogConfig(),
+    )
     proc = SimpleNamespace(
         shutdown_state=EngineShutdownState.RUNNING,
         has_work=lambda: has_work,
         vllm_config=vllm_config,
+        # Mirrors EngineCore._send_engine_dead, which run_engine_core calls
+        # from its fatal-error handler.
+        _send_engine_dead=lambda: None,
     )
 
     def run_busy_loop():
