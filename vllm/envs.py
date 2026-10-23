@@ -1273,6 +1273,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # The following list of related ops
     # - scaled_mm (per-tensor / rowwise)
     # - use aiter tuned gemms for unquantized gemms
+    # - W4A16 int4 GEMM (GPTQ, AWQ, compressed-tensors) on gfx942, when the
+    #   installed aiter provides gemm_a16w4
     "VLLM_ROCM_USE_AITER_LINEAR": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_LINEAR", "True").lower() in ("true", "1")
     ),

@@ -1044,6 +1044,28 @@ def _rocm_aiter_triton_gemm_a8w8_blockscale_preshuffle_fake(
     return torch.empty(A.shape[0], B.shape[0], dtype=output_dtype, device=A.device)
 
 
+def _rocm_aiter_gemm_a16w4_impl(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    w_scales: torch.Tensor,
+    w_zeros: torch.Tensor | None = None,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    from aiter.ops.triton.gemm.basic.gemm_a16w4 import gemm_a16w4
+
+    return gemm_a16w4(x, w, w_scales, w_zeros, bias=bias)
+
+
+def _rocm_aiter_gemm_a16w4_fake(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    w_scales: torch.Tensor,
+    w_zeros: torch.Tensor | None = None,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    return torch.empty((x.shape[0], w.shape[0]), dtype=x.dtype, device=x.device)
+
+
 def _rocm_aiter_gemm_a8w8_blockscale_impl(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -2295,6 +2317,51 @@ class rocm_aiter_ops:
     def is_linear_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._LINEAR_ENABLED
 
+    @staticmethod
+    @functools.cache
+    def _gemm_a16w4_importable() -> bool:
+        try:
+            from aiter.ops.triton.gemm.basic.gemm_a16w4 import (  # noqa: F401
+                gemm_a16w4,
+            )
+
+            return True
+        except (ImportError, ModuleNotFoundError):
+            return False
+
+    @classmethod
+    @if_aiter_supported
+    def is_linear_w4a16_enabled(cls) -> bool:
+        """Use AITER's Triton W4A16 GEMM (``gemm_a16w4``) for int4 linears.
+
+        gfx942 only: among the archs vLLM builds AITER for, only gfx942 has
+        tuned configs. Older AITER builds (v0.1.26 and before) lack the op.
+        """
+        from vllm.platforms.rocm import on_gfx942
+
+        return cls.is_linear_enabled() and on_gfx942() and cls._gemm_a16w4_importable()
+
+    @classmethod
+    def linear_w4a16_compile_factor(cls) -> bool:
+        """Whether AiterW4A16LinearKernel can be selected, for compile cache keys.
+
+        The kernel changes the weight layout the compiled graph sees, so a graph
+        compiled with and without it must not share a cache entry. Unlike
+        is_linear_w4a16_enabled(), this does not import aiter (which initializes
+        HIP), since config hashes are also computed in the API server process.
+        """
+        from importlib.util import find_spec
+
+        from vllm.platforms.rocm import on_gfx942
+
+        if not (cls.is_linear_enabled() and on_gfx942()):
+            return False
+        spec = find_spec("aiter")
+        if spec is None or spec.origin is None:
+            return False
+        kernel = ("ops", "triton", "gemm", "basic", "gemm_a16w4.py")
+        return os.path.isfile(os.path.join(os.path.dirname(spec.origin), *kernel))
+
     @classmethod
     @if_aiter_supported
     def is_linear_fp8_enabled(cls) -> bool:
@@ -3106,6 +3173,13 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_gemm_a16w4",
+                op_func=_rocm_aiter_gemm_a16w4_impl,
+                mutates_args=[],
+                fake_impl=_rocm_aiter_gemm_a16w4_fake,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_triton_gemm_a8w8_blockscale",
                 op_func=_rocm_aiter_triton_gemm_a8w8_blockscale_impl,
                 fake_impl=_rocm_aiter_triton_gemm_a8w8_blockscale_fake,
@@ -3443,6 +3517,16 @@ class rocm_aiter_ops:
         output_dtype: torch.dtype = torch.bfloat16,
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_hipb_mm_fp8(A, B, As, Bs, bias, output_dtype)
+
+    @staticmethod
+    def gemm_a16w4(
+        x: torch.Tensor,
+        w: torch.Tensor,
+        w_scales: torch.Tensor,
+        w_zeros: torch.Tensor | None = None,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return torch.ops.vllm.rocm_aiter_gemm_a16w4(x, w, w_scales, w_zeros, bias)
 
     @staticmethod
     def triton_gemm_a8w8_blockscale(

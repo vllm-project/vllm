@@ -218,6 +218,13 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
 
     _warmup_gemm_rs_ar()
 
+    if enable_jit_warmup and current_platform.is_rocm():
+        from vllm.model_executor.warmup.aiter_w4a16_warmup import aiter_w4a16_warmup
+
+        aiter_w4a16_warmup(
+            worker.get_model(), worker.scheduler_config.max_num_batched_tokens
+        )
+
     if worker.vllm_config.kernel_config.enable_cutedsl_warmup:
         # TODO(roberto): Remove after registered CuTeDSL warmups are migrated
         # to the shared JIT warmup infrastructure.

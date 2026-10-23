@@ -17,9 +17,13 @@ from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
 if current_platform.is_rocm():
+    from vllm._aiter_ops import rocm_aiter_ops
     from vllm.platforms.rocm import on_gfx1x, on_gfx1100
+
+    def _aiter_w4a16_enabled() -> bool:
+        return bool(rocm_aiter_ops.is_linear_w4a16_enabled())
 else:
-    on_gfx1100 = on_gfx1x = lambda: False  # noqa: E731
+    on_gfx1100 = on_gfx1x = _aiter_w4a16_enabled = lambda: False  # noqa: E731
 
 # Group sizes the HIP skinny path of RDNAHybridW4A16LinearKernel instantiates.
 _HYBRID_GROUP_SIZES = (32, 64, 128)
@@ -27,12 +31,15 @@ _HYBRID_GROUP_SIZES = (32, 64, 128)
 
 def _expected_rocm_kernel(weight_type, group_size: int) -> str:
     """Mirror the ROCm priority order in ``_POSSIBLE_KERNELS[ROCM]``:
-    RDNA3 (gfx1100, symmetric uint4b8) -> Hybrid (gfx11/gfx12) -> Triton.
+    RDNA3 (gfx1100, symmetric uint4b8) -> Hybrid (gfx11/gfx12) -> AITER
+    (gfx942 with VLLM_ROCM_USE_AITER=1) -> Triton.
     """
     if on_gfx1100() and weight_type == scalar_types.uint4b8:
         return "RDNA3W4A16LinearKernel"
     if on_gfx1x() and group_size in _HYBRID_GROUP_SIZES:
         return "RDNAHybridW4A16LinearKernel"
+    if _aiter_w4a16_enabled():
+        return "AiterW4A16LinearKernel"
     return "TritonW4A16LinearKernel"
 
 
@@ -68,3 +75,27 @@ def test_choose_mp_linear_kernel_uint4_asymmetric():
 
     kernel_type = choose_mp_linear_kernel(config)
     assert kernel_type.__name__ == _expected_rocm_kernel(scalar_types.uint4, 64)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
+def test_aiter_w4a16_compile_factor_matches_selection():
+    # The HIP-free probe used in the compile cache key agrees with the gate
+    # that selects AiterW4A16LinearKernel.
+    assert rocm_aiter_ops.linear_w4a16_compile_factor() == _aiter_w4a16_enabled()
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
+def test_kernel_config_hash_tracks_aiter_w4a16(monkeypatch):
+    # AiterW4A16LinearKernel changes the weight layout the compiled graph sees,
+    # so the compile cache key must change with it.
+    from vllm.config import KernelConfig
+
+    hashes = {}
+    for enabled in (True, False):
+        monkeypatch.setattr(
+            rocm_aiter_ops,
+            "linear_w4a16_compile_factor",
+            classmethod(lambda cls, enabled=enabled: enabled),
+        )
+        hashes[enabled] = KernelConfig().compute_hash()
+    assert hashes[True] != hashes[False]
