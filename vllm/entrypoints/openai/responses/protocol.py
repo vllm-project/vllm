@@ -28,6 +28,10 @@ from openai.types.responses import (
     ResponseOutputMessage,
     ResponsePrompt,
     ResponseReasoningItem,
+    ResponseReasoningSummaryPartAddedEvent,
+    ResponseReasoningSummaryPartDoneEvent,
+    ResponseReasoningSummaryTextDeltaEvent,
+    ResponseReasoningSummaryTextDoneEvent,
     ResponseReasoningTextDeltaEvent,
     ResponseReasoningTextDoneEvent,
     ResponseStatus,
@@ -1054,6 +1058,10 @@ StreamingResponsesResponse: TypeAlias = (
     | ResponseCustomToolCallInputDoneEvent
     | ResponseReasoningTextDeltaEvent
     | ResponseReasoningTextDoneEvent
+    | ResponseReasoningSummaryPartAddedEvent
+    | ResponseReasoningSummaryPartDoneEvent
+    | ResponseReasoningSummaryTextDeltaEvent
+    | ResponseReasoningSummaryTextDoneEvent
     | ResponseCodeInterpreterCallInProgressEvent
     | ResponseCodeInterpreterCallCodeDeltaEvent
     | ResponseWebSearchCallInProgressEvent

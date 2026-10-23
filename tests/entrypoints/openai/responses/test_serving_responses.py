@@ -26,6 +26,7 @@ from openai.types.responses import (
 from openai.types.responses.response_format_text_json_schema_config import (
     ResponseFormatTextJSONSchemaConfig,
 )
+from openai.types.responses.response_reasoning_item import Summary
 from openai.types.responses.tool import (
     CodeInterpreterContainerCodeInterpreterToolAuto,
     LocalShell,
@@ -2346,7 +2347,9 @@ def _harmony_segments(msg, *, streamed: bool = True) -> list[Segment]:
     return (delta if streamed else []) + [completed]
 
 
-async def _harmony_stream_events(segment_chunks: list[list[Segment]]):
+async def _harmony_stream_events(
+    segment_chunks: list[list[Segment]], request: ResponsesRequest | None = None
+):
     serving = _make_serving_instance()
     serving.use_harmony = True
     parser = MagicMock(spec=HarmonyParser)
@@ -2364,7 +2367,7 @@ async def _harmony_stream_events(segment_chunks: list[list[Segment]]):
     return [
         event
         async for event in serving.responses_stream_generator(
-            request=ResponsesRequest(input="hi", stream=True, store=False),
+            request=request or ResponsesRequest(input="hi", stream=True, store=False),
             sampling_params=SamplingParams(max_tokens=16),
             result_generator=result_generator(),
             context=context,
@@ -2464,3 +2467,120 @@ async def test_streaming_parallel_tool_calls(
         if event.type == "response.output_item.done"
     ] == args[:num_calls]
     assert [item.arguments for item in events[-1].response.output] == args[:num_calls]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("summary", ["detailed", None])
+async def test_reasoning_summary_non_streaming(monkeypatch, summary):
+    """``reasoning.summary`` mirrors the reasoning text into the reasoning
+    item's summary; without it the summary stays empty (#63184)."""
+    monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
+    serving, tokenizer = _make_qwen3_serving()
+    request = ResponsesRequest(
+        input="hi", tools=[], stream=False, reasoning={"summary": summary}
+    )
+    response_parser = serving._make_response_parser(
+        request, tokenizer, serving._effective_chat_template_kwargs(request)
+    )
+    context = SimpleContext(response_parser=response_parser)
+    context.append_output(
+        _make_text_request_output("<think>reason</think>final", [1, 3, 2, 4])
+    )
+
+    response = await _run_full_generator(serving, request, context, tokenizer)
+
+    reasoning, _ = response.output
+    assert reasoning.content[0].text == "reason"
+    expected = [Summary(text="reason", type="summary_text")] if summary else []
+    assert reasoning.summary == expected
+
+
+async def _stream_reasoning_then_text(monkeypatch, request: ResponsesRequest):
+    monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
+    serving = _make_serving_instance_with_reasoning()
+    response_parser = _mock_parser_with_reasoning(
+        serving, [DeltaMessage(reasoning="think"), DeltaMessage(content="Hi")]
+    )
+    response_parser.count_reasoning_tokens = MagicMock(return_value=1)
+    context = SimpleContext(response_parser=response_parser)
+
+    async def result_generator():
+        for token_id, text in [(10, "think"), (20, "Hi")]:
+            context.append_output(_make_request_output(text, [token_id]))
+            yield context
+
+    return [
+        event
+        async for event in serving.responses_stream_generator(
+            request=request,
+            sampling_params=SamplingParams(max_tokens=16),
+            result_generator=result_generator(),
+            context=context,
+            model_name="test-model",
+            tokenizer=MagicMock(),
+            request_metadata=RequestResponseMetadata(request_id="req"),
+        )
+    ]
+
+
+_SUMMARY_EVENT_TYPES = [
+    "response.reasoning_summary_part.added",
+    "response.reasoning_summary_text.delta",
+    "response.reasoning_summary_text.done",
+    "response.reasoning_summary_part.done",
+    "response.output_item.done",
+]
+
+
+def _assert_streamed_reasoning_summary(events, text: str):
+    assert [event.sequence_number for event in events] == list(range(len(events)))
+    types = [event.type for event in events]
+    start = types.index("response.reasoning_summary_part.added")
+    assert types[start : start + 5] == _SUMMARY_EVENT_TYPES
+    added, delta, text_done, part_done, item_done = events[start : start + 5]
+    assert {event.item_id for event in (added, delta, text_done, part_done)} == {
+        item_done.item.id
+    }
+    assert delta.delta == text_done.text == part_done.part.text == text
+    assert item_done.item.summary == [Summary(text=text, type="summary_text")]
+    assert events[-1].response.output[0].summary == item_done.item.summary
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.asyncio
+async def test_stream_reasoning_summary(monkeypatch):
+    """With ``reasoning.summary``, the summary events come right before the
+    reasoning item's ``output_item.done`` and the sequence stays contiguous."""
+    events = await _stream_reasoning_then_text(
+        monkeypatch,
+        ResponsesRequest(
+            input="hi", stream=True, store=False, reasoning={"summary": "auto"}
+        ),
+    )
+
+    _assert_streamed_reasoning_summary(events, "think")
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.asyncio
+async def test_stream_without_reasoning_summary(monkeypatch):
+    events = await _stream_reasoning_then_text(
+        monkeypatch, ResponsesRequest(input="hi", stream=True, store=False)
+    )
+
+    assert not any("reasoning_summary" in event.type for event in events)
+    assert events[-1].response.output[0].summary == []
+
+
+@pytest.mark.asyncio
+async def test_harmony_stream_reasoning_summary():
+    messages = [_harmony_msg("analysis", "think"), _harmony_msg("final", "Sunny")]
+
+    events = await _harmony_stream_events(
+        [_harmony_segments(msg) for msg in messages],
+        request=ResponsesRequest(
+            input="hi", stream=True, store=False, reasoning={"summary": "detailed"}
+        ),
+    )
+
+    _assert_streamed_reasoning_summary(events, "think")
