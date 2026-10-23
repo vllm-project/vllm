@@ -139,14 +139,6 @@ def dispatch_topk_sigmoid_func(
     topk_indices: torch.Tensor | None = None,
     gating_output: torch.Tensor | None = None,
 ) -> Callable[..., tuple[torch.Tensor, ...]]:
-    """Pick the sigmoid top-k implementation for one launch.
-
-    AITER's legacy ``topk_sigmoid`` op ignores ``renormalize`` entirely, so on
-    ROCm with AITER we prefer ``topk_gating`` (score_func="sigmoid") whenever
-    the launch is one it supports: it implements ``renormalize`` correctly and
-    matches the torch reference exactly. Launches outside that support window
-    fall back to the legacy ``topk_sigmoid`` op, same as before.
-    """
     if use_rocm_aiter:
         if (
             rocm_aiter_ops.is_topk_gating_enabled()

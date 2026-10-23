@@ -3648,13 +3648,6 @@ class rocm_aiter_ops:
         gating_output: torch.Tensor,
         renormalize: bool,
     ) -> tuple[torch.Tensor, ...]:
-        """AITER's ``topk_gating`` launch with ``score_func="sigmoid"``.
-
-        Unlike ``topk_sigmoid`` (below), this launch natively supports
-        ``renormalize`` and matches the torch reference exactly; it is the
-        preferred AITER sigmoid implementation whenever the launch is
-        shape-eligible (see ``_aiter_topk_gating_supported``).
-        """
         return rocm_aiter_ops.topk_gating(
             topk_weights,
             topk_indices,
