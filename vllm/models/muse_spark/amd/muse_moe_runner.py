@@ -90,6 +90,27 @@ def _validate_tp_post_norm_deployment(
         )
 
 
+def aiter_returns_per_slot_routes() -> bool:
+    """Whether the AITER MXFP4 experts take their per-route rows from
+    ``fused_moe(per_slot_output=)`` rather than from top-1 over a per-route copy.
+    """
+    return envs.VLLM_ROCM_MUSE_MOE_ROUTE_MODE and bool(
+        rocm_aiter_ops.fused_moe_supports_per_slot_output()
+    )
+
+
+# Without expert parallelism, the expanded top-1 call is faster on MI355X up to
+# this many routed rows.
+_PER_SLOT_MIN_ROWS = 128
+
+
+def per_slot_routes_for_batch(
+    num_tokens: int, top_k: int, expert_parallel: bool
+) -> bool:
+    """Whether a batch takes the per-slot call when it is enabled."""
+    return expert_parallel or num_tokens * top_k > _PER_SLOT_MIN_ROWS
+
+
 def validate_bf16_deployment(moe_config: FusedMoEConfig) -> None:
     """Reject deployments whose BF16 finalization is not implemented."""
     _validate_tp_post_norm_deployment(moe_config, "BF16")
@@ -419,6 +440,19 @@ class MuseSparkAiterExperts(_RouteOutputHandoff, AiterMxfp4Experts):
         if quant_config.post_expert_norm_fn is None:
             raise ValueError("MuseSpark1x post-expert norm is not configured.")
         self._unit_weights_bufs: dict[int, torch.Tensor] = {}
+        self.per_slot_routes = aiter_returns_per_slot_routes()
+        self._local_route_map: tuple[torch.Tensor, torch.Tensor] | None = None
+
+    def _route_map(self, expert_mask: torch.Tensor) -> torch.Tensor:
+        """AITER's 0/1 expert_mask to finalize's expert map (<0 / >=0)."""
+        cached = self._local_route_map
+        if cached is not None and cached[0] is expert_mask:
+            return cached[1]
+        route_map = expert_mask.to(torch.int32) - 1
+        if not torch.cuda.is_current_stream_capturing():
+            # A tensor computed during capture only holds data on replay.
+            self._local_route_map = (expert_mask, route_map)
+        return route_map
 
     def _unit_weights(
         self, num_routes: int, width: int, device: torch.device
@@ -487,6 +521,37 @@ class MuseSparkAiterExperts(_RouteOutputHandoff, AiterMxfp4Experts):
                 f"{tuple(output.shape)}, expected {expected_output_shape}."
             )
 
+        if expert_tokens_meta is not None:
+            num_local_tokens = expert_tokens_meta.expert_num_tokens
+        else:
+            num_local_tokens = None
+
+        if self.per_slot_routes and per_slot_routes_for_batch(
+            num_tokens, top_k, self.moe_config.moe_parallel_config.use_ep
+        ):
+            # Slots on other ranks are unwritten, and finalize masks them out.
+            rocm_aiter_fused_experts(
+                hidden_states=hidden_states.contiguous(),
+                w1=w1,
+                w2=w2,
+                topk_weights=self._unit_weights(num_tokens, top_k, topk_ids.device),
+                topk_ids=topk_ids,
+                activation=activation,
+                expert_mask=expert_map,
+                quant_config=self.quant_config,
+                moe_config=self.moe_config,
+                a1q_scale=a1q_scale,
+                num_local_tokens=num_local_tokens,
+                output_dtype=output.dtype,
+                moe_sorting_dispatch_policy=rocm_aiter_ops.get_moe_dispatch_policy(),
+                apply_router_weight_on_input=False,
+                per_slot_output=output,
+            )
+            self._park_route_output(
+                output, None if expert_map is None else self._route_map(expert_map)
+            )
+            return
+
         expanded_hidden_states = take_expanded(hidden_states, top_k)
         if expanded_hidden_states is None:
             expanded_hidden_states = (
@@ -508,11 +573,6 @@ class MuseSparkAiterExperts(_RouteOutputHandoff, AiterMxfp4Experts):
         unit_topk_weights = self._unit_weights(
             num_routes, flat_topk_ids.shape[1], topk_ids.device
         )
-
-        if expert_tokens_meta is not None:
-            num_local_tokens = expert_tokens_meta.expert_num_tokens
-        else:
-            num_local_tokens = None
 
         route_output = rocm_aiter_fused_experts(
             hidden_states=expanded_hidden_states,
@@ -540,6 +600,7 @@ class MuseSparkAiterExperts(_RouteOutputHandoff, AiterMxfp4Experts):
             quant_config.post_expert_norm_fn,
             pre_norm_all_reduce=self.moe_config.moe_parallel_config.tp_size > 1,
             take_route_output=self._take_route_output,
+            take_route_expert_map=self._take_route_expert_map,
         )
 
 
@@ -820,6 +881,8 @@ __all__ = [
     "MuseSparkRoutedExperts",
     "MuseSparkTopKWeightAndReduce",
     "MuseSparkTritonExperts",
+    "aiter_returns_per_slot_routes",
+    "per_slot_routes_for_batch",
     "validate_bf16_deployment",
     "validate_fp8_deployment",
     "validate_mxfp4_deployment",

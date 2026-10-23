@@ -9,6 +9,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+import vllm.models.muse_spark.amd.muse_moe_runner as amd_muse_moe_runner
+from vllm import envs
 from vllm.config.kernel import MoEBackend
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
@@ -50,6 +52,8 @@ from vllm.models.muse_spark.amd.muse_moe_runner import (
     MuseSparkTritonExperts,
     MuseSparkUnquantizedFusedMoE,
     MuseSparkUnquantizedMoEQuantConfig,
+    aiter_returns_per_slot_routes,
+    per_slot_routes_for_batch,
     validate_bf16_deployment,
     validate_fp8_deployment,
     validate_mxfp4_deployment,
@@ -186,6 +190,7 @@ def _route_launcher(
 
 
 def test_muse_aiter_experts_expand_routes_with_unit_weights(monkeypatch) -> None:
+    monkeypatch.setattr(envs, "VLLM_ROCM_MUSE_MOE_ROUTE_MODE", False)
     config = _moe_config(parallel_config=_parallel_config(tp_size=8))
     experts = MuseSparkAiterExperts(
         config, _quant_config(_rms_norm, MuseSparkQuarkOCPMXMoEQuantConfig)
@@ -251,6 +256,94 @@ def test_muse_aiter_experts_expand_routes_with_unit_weights(monkeypatch) -> None
     reducer = experts.finalize_weight_and_reduce_impl()
     assert isinstance(reducer, MuseSparkTopKWeightAndReduce)
     assert reducer.pre_norm_all_reduce
+
+
+def test_per_slot_routes_only_when_supported_and_enabled(monkeypatch) -> None:
+    for supported in (True, False, None):
+        monkeypatch.setattr(
+            amd_muse_moe_runner.rocm_aiter_ops,
+            "fused_moe_supports_per_slot_output",
+            lambda s=supported: s,
+        )
+        monkeypatch.setattr(envs, "VLLM_ROCM_MUSE_MOE_ROUTE_MODE", True)
+        assert aiter_returns_per_slot_routes() is bool(supported)
+        monkeypatch.setattr(envs, "VLLM_ROCM_MUSE_MOE_ROUTE_MODE", False)
+        assert not aiter_returns_per_slot_routes()
+
+
+@pytest.mark.parametrize(
+    ("num_tokens", "expert_parallel", "routes_per_slot"),
+    [(16, False, False), (32, False, True), (1, True, True), (8, True, True)],
+)
+def test_per_slot_routes_for_batch(
+    num_tokens: int, expert_parallel: bool, routes_per_slot: bool
+) -> None:
+    assert per_slot_routes_for_batch(num_tokens, 8, expert_parallel) is routes_per_slot
+
+
+def test_muse_aiter_experts_take_per_slot_routes_from_aiter(monkeypatch) -> None:
+    monkeypatch.setattr(envs, "VLLM_ROCM_MUSE_MOE_ROUTE_MODE", True)
+    monkeypatch.setattr(
+        amd_muse_moe_runner.rocm_aiter_ops,
+        "fused_moe_supports_per_slot_output",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        amd_muse_moe_runner, "per_slot_routes_for_batch", lambda *args: True
+    )
+    config = _moe_config(parallel_config=_parallel_config(ep_size=2))
+    experts = MuseSparkAiterExperts(
+        config, _quant_config(_rms_norm, MuseSparkQuarkOCPMXMoEQuantConfig)
+    )
+    assert experts.per_slot_routes
+    calls: list[dict] = []
+
+    def _fake_aiter_fused_experts(**kwargs) -> torch.Tensor:
+        calls.append(kwargs)
+        per_slot_output = kwargs["per_slot_output"]
+        per_slot_output.copy_(
+            kwargs["hidden_states"][:, None, :]
+            + kwargs["topk_ids"][..., None].to(per_slot_output.dtype)
+        )
+        return per_slot_output
+
+    monkeypatch.setattr(
+        amd_muse_moe_runner, "rocm_aiter_fused_experts", _fake_aiter_fused_experts
+    )
+
+    hidden_states = torch.arange(16, dtype=torch.bfloat16).view(2, 8)
+    topk_ids = torch.tensor([[3, 1], [0, 2]], dtype=torch.int32)
+    topk_weights = torch.tensor([[0.7, 0.3], [0.4, 0.6]])
+    expert_mask = torch.tensor([0, 1, 0, 1, 0], dtype=torch.int32)
+    output, launch = _route_launcher(
+        experts,
+        hidden_states,
+        torch.empty(0, dtype=torch.bfloat16),
+        torch.empty(0, dtype=torch.bfloat16),
+        topk_weights,
+        topk_ids,
+        intermediate_size=8,
+        num_experts=4,
+        num_local_experts=2,
+        expert_map=expert_mask,
+    )
+    launch()
+
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["per_slot_output"] is output
+    assert call["hidden_states"] is hidden_states
+    assert call["topk_ids"] is topk_ids
+    assert call["expert_mask"] is expert_mask
+    torch.testing.assert_close(
+        call["topk_weights"], torch.ones(2, 2, dtype=torch.float32)
+    )
+    assert call["apply_router_weight_on_input"] is False
+    assert experts._take_route_output() is output
+    torch.testing.assert_close(
+        experts._take_route_expert_map(),
+        torch.tensor([-1, 0, -1, 0, -1], dtype=torch.int32),
+    )
 
 
 def test_muse_mxfp4_method_requires_w4a4_aiter(monkeypatch) -> None:
@@ -552,14 +645,67 @@ def _mxfp4_weights(
     return w13_quant, w2_quant, quant_config
 
 
+def _count_per_slot_calls(monkeypatch) -> list[int]:
+    calls: list[int] = []
+    fused_experts = amd_muse_moe_runner.rocm_aiter_fused_experts
+
+    def counting(**kwargs):
+        if kwargs.get("per_slot_output") is not None:
+            calls.append(kwargs["hidden_states"].shape[0])
+        return fused_experts(**kwargs)
+
+    monkeypatch.setattr(amd_muse_moe_runner, "rocm_aiter_fused_experts", counting)
+    return calls
+
+
+def _skip_without_aiter_per_slot_output() -> None:
+    if not rocm_aiter_ops.fused_moe_supports_per_slot_output():
+        pytest.skip("requires AITER fused_moe(per_slot_output=)")
+
+
+def _assert_as_accurate_as_aiter_moe(
+    recombined: torch.Tensor,
+    direct: torch.Tensor,
+    hidden_states: torch.Tensor,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+) -> None:
+    """The two quantize stage 2's input differently, so compare both to fp32."""
+    reference = (
+        _explicit_expert_outputs(hidden_states, w13, w2, topk_ids).float()
+        * topk_weights[..., None]
+    ).sum(dim=1)
+
+    def error(x: torch.Tensor) -> float:
+        return ((x.float() - reference).norm() / reference.norm()).item()
+
+    assert error(recombined) <= error(direct) + 1e-2
+
+
 @pytest.mark.skipif(not ROCM_GFX950, reason="requires a GFX950 GPU")
 @pytest.mark.skipif(not ROCM_AITER_SUPPORTED, reason="requires supported AITER")
+# The per-slot call starts above 128 routed rows: 16 tokens x top-4 stay expanded.
+@pytest.mark.parametrize(
+    "per_slot_routes,num_tokens,routes_per_slot",
+    [(False, 16, False), (True, 16, False), (True, 48, True)],
+    ids=["off-16", "on-16", "on-48"],
+)
 @torch.inference_mode()
 def test_rocm_aiter_mxfp4_route_expansion_numeric_and_graph_replay(
     enable_rocm_aiter,
+    monkeypatch,
+    per_slot_routes: bool,
+    num_tokens: int,
+    routes_per_slot: bool,
 ) -> None:
+    if per_slot_routes:
+        _skip_without_aiter_per_slot_output()
+    monkeypatch.setattr(envs, "VLLM_ROCM_MUSE_MOE_ROUTE_MODE", per_slot_routes)
+    per_slot_calls = _count_per_slot_calls(monkeypatch)
     torch.manual_seed(1234)
-    num_tokens, num_experts, top_k = 16, 8, 4
+    num_experts, top_k = 8, 4
     hidden_size, intermediate_size = 256, 256
     dtype = torch.bfloat16
     device = torch.device("cuda")
@@ -595,6 +741,7 @@ def test_rocm_aiter_mxfp4_route_expansion_numeric_and_graph_replay(
     )
     w13, w2, quant_config = _mxfp4_weights(w13_float, w2_float)
     experts = MuseSparkAiterExperts(config, quant_config)
+    assert experts.per_slot_routes == per_slot_routes
     reducer = experts.finalize_weight_and_reduce_impl()
 
     hidden_states = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
@@ -643,7 +790,19 @@ def test_rocm_aiter_mxfp4_route_expansion_numeric_and_graph_replay(
         .sum(dim=1)
         .to(dtype)
     )
-    torch.testing.assert_close(recombined, direct, rtol=5e-2, atol=5e-2)
+    assert bool(per_slot_calls) == routes_per_slot
+    if not routes_per_slot:
+        torch.testing.assert_close(recombined, direct, rtol=5e-2, atol=5e-2)
+    else:
+        _assert_as_accurate_as_aiter_moe(
+            recombined,
+            direct,
+            hidden_states,
+            w13_float,
+            w2_float,
+            topk_ids,
+            topk_weights,
+        )
     torch.testing.assert_close(actual, expected)
 
     for _ in range(3):
@@ -658,6 +817,116 @@ def test_rocm_aiter_mxfp4_route_expansion_numeric_and_graph_replay(
     graph.replay()
     torch.accelerator.synchronize()
     assert not torch.equal(first, captured)
+
+
+@pytest.mark.skipif(not ROCM_GFX950, reason="requires a GFX950 GPU")
+@pytest.mark.skipif(not ROCM_AITER_SUPPORTED, reason="requires supported AITER")
+@torch.inference_mode()
+def test_rocm_aiter_mxfp4_per_slot_routes_under_expert_parallel(
+    enable_rocm_aiter, monkeypatch
+) -> None:
+    _skip_without_aiter_per_slot_output()
+    monkeypatch.setattr(envs, "VLLM_ROCM_MUSE_MOE_ROUTE_MODE", True)
+    per_slot_calls = _count_per_slot_calls(monkeypatch)
+    torch.manual_seed(1234)
+    num_tokens, num_experts, top_k, ep_size = 64, 16, 4, 2
+    num_local_experts = num_experts // ep_size
+    hidden_size, intermediate_size = 256, 256
+    dtype = torch.bfloat16
+    device = torch.device("cuda")
+    config = _moe_config(
+        parallel_config=_parallel_config(ep_size=ep_size),
+        moe_backend="auto",
+        num_experts=num_experts,
+        top_k=top_k,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        device="cuda",
+        routing_method=RoutingMethodType.Renormalize,
+    )
+    w13_float = (
+        torch.randn(
+            num_local_experts,
+            2 * intermediate_size,
+            hidden_size,
+            dtype=dtype,
+            device=device,
+        )
+        / hidden_size**0.5
+    )
+    w2_float = (
+        torch.randn(
+            num_local_experts,
+            hidden_size,
+            intermediate_size,
+            dtype=dtype,
+            device=device,
+        )
+        / intermediate_size**0.5
+    )
+    w13, w2, quant_config = _mxfp4_weights(w13_float, w2_float)
+    experts = MuseSparkAiterExperts(config, quant_config)
+    assert experts.per_slot_routes
+    expert_mask = torch.zeros(num_experts + 1, dtype=torch.int32, device=device)
+    expert_mask[:num_local_experts] = 1
+
+    hidden_states = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
+    topk_logits, topk_ids = torch.topk(
+        torch.randn(num_tokens, num_experts, device=device), top_k, dim=-1
+    )
+    topk_weights = torch.softmax(topk_logits, dim=-1)
+    topk_ids = topk_ids.to(torch.int32)
+    routes, launch = _route_launcher(
+        experts,
+        hidden_states,
+        w13,
+        w2,
+        topk_weights,
+        topk_ids,
+        intermediate_size=intermediate_size,
+        num_experts=num_experts,
+        num_local_experts=num_local_experts,
+        expert_map=expert_mask,
+    )
+    routes.fill_(float("nan"))
+    launch()
+    assert per_slot_calls == [num_tokens]
+    output = torch.empty(num_tokens, hidden_size, device=device, dtype=dtype)
+    actual = experts.finalize_weight_and_reduce_impl().apply(
+        output, routes, topk_weights, topk_ids, False
+    )
+
+    local = (expert_mask[topk_ids.long()] > 0)[..., None]
+    local_routes = torch.where(local, routes.float(), 0.0)
+    direct = rocm_aiter_fused_experts(
+        hidden_states=hidden_states,
+        w1=w13,
+        w2=w2,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+        expert_mask=expert_mask,
+        moe_config=config,
+        activation=MoEActivation.SILU,
+        quant_config=quant_config,
+        output_dtype=dtype,
+    )
+    recombined = (local_routes * topk_weights[..., None]).sum(dim=1).to(dtype)
+    _assert_as_accurate_as_aiter_moe(
+        recombined,
+        direct,
+        hidden_states,
+        w13_float,
+        w2_float,
+        torch.where(local[..., 0], topk_ids, 0),
+        topk_weights * local[..., 0],
+    )
+    expected = (
+        (_rms_norm(local_routes, out_dtype=torch.float32) * topk_weights[..., None])
+        .sum(dim=1)
+        .to(dtype)
+    )
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual, expected)
 
 
 @pytest.mark.skipif(not ROCM_AVAILABLE, reason="requires a ROCm GPU")

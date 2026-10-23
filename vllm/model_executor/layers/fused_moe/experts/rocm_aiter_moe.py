@@ -290,6 +290,7 @@ def rocm_aiter_fused_experts(
     shared_w1_scale: torch.Tensor | None = None,
     shared_w2_scale: torch.Tensor | None = None,
     shared_expert_id: int = -1,
+    per_slot_output: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """ROCm AITER fused MoE expert computation."""
     if quant_config is None:
@@ -335,6 +336,9 @@ def rocm_aiter_fused_experts(
         )
         assert num_local_tokens is None, (
             "AITER tkw1 kernel does not support `num_local_tokens`"
+        )
+        assert per_slot_output is None, (
+            "AITER tkw1 kernel does not support `per_slot_output`"
         )
 
         return rocm_aiter_ops.asm_moe_tkw1(
@@ -439,7 +443,7 @@ def rocm_aiter_fused_experts(
                 else GateMode.SEPARATED.value
             )
 
-        return rocm_aiter_ops.fused_moe(
+        output = rocm_aiter_ops.fused_moe(
             hidden_states,
             w1,
             w2,
@@ -474,7 +478,9 @@ def rocm_aiter_fused_experts(
             shared_w2_scale=shared_w2_scale,
             shared_expert_id=shared_expert_id,
             q_dtype_a=q_dtype_a,
+            per_slot_output=per_slot_output,
         )
+        return output if per_slot_output is None else per_slot_output
 
 
 class AiterExperts(mk.FusedMoEExpertsModular):
