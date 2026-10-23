@@ -58,6 +58,26 @@ EC_SHARED_STORAGE_PATH="/tmp/my_ec_cache" bash ./tests/v1/ec_connector/integrati
 
 ## How It Works
 
+### NIXL EC failure isolation (1E + 1PD)
+
+```bash
+PATH="$PWD/.venv/bin:$PATH" CUDA_VISIBLE_DEVICES=0,1 \
+  .venv/bin/python -m pytest \
+  tests/v1/ec_connector/integration/test_nixl_failure.py -v -s
+```
+
+Requires two CUDA GPUs and NIXL. `MODEL` overrides the default
+`Qwen/Qwen2.5-VL-3B-Instruct`. The test starts real E/PD servers with CUDA
+graphs enabled and uses the proxy's rewrite helper. Only the failing request's
+control endpoint is replaced: a ZMQ peer returns `NACK_MISSING` and verifies
+that the consumer actually requested the encoding.
+
+Metadata-only requests must return a request-level error; requests retaining
+the image must succeed through local fallback. After each case, a fresh
+metadata-only image request must succeed through the real NIXL transfer path.
+No server restart, proxy retry, cache hit, or timeout race can mask the result.
+This is a correctness test, not a throughput benchmark.
+
 ### Mooncake EC (1E + 1PD)
 
 ```bash

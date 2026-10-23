@@ -24,31 +24,34 @@ from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_gemm
 from vllm.utils.math_utils import cdiv
 
-_DEEPGEMM_BLACKWELL_EXCLUDED_MODEL_TYPES: set[str] = {
-    "qwen3_5_text",
-    "qwen3_5_moe_text",
+# Model type -> Blackwell device capability families to auto-disable DeepGemm on.
+_DEEPGEMM_BLACKWELL_EXCLUDED_MODEL_TYPES: dict[str, tuple[int, ...]] = {
+    # Accuracy
+    "qwen3_5_text": (100, 120),
+    "qwen3_5_moe_text": (100, 120),
+    # Latency
+    "kolibri1": (120,),
 }
 
-# KV page sizes (in cache entries) supported by the paged-MQA logits kernels
-# (fp8_fp4_paged_mqa_logits / get_paged_mqa_logits_metadata). Larger storage
-# blocks must be virtually split into one of these page sizes.
-PAGED_MQA_PAGE_SIZES = (32, 64)
+
+def get_paged_mqa_page_sizes() -> tuple[int, ...]:
+    """KV page sizes (in cache entries) the paged-MQA logits kernels take (only
+    64 on SM120); larger storage blocks are split into one of these."""
+    return (64,) if current_platform.is_device_capability_family(120) else (32, 64)
 
 
 def should_auto_disable_deep_gemm(model_type: str | None) -> bool:
     """Check if DeepGemm should be auto-disabled for this model on Blackwell.
 
-    Returns True if the model is known to have accuracy degradation with
-    DeepGemm's E8M0 scale format on Blackwell GPUs (SM100+).
+    Returns True if DeepGemm is known to hurt this model's accuracy or
+    latency on the current Blackwell GPU family.
     """
     if model_type is None:
         return False
-    if not (
-        current_platform.is_device_capability_family(100)
-        or current_platform.is_device_capability_family(120)
-    ):
-        return False
-    return model_type in _DEEPGEMM_BLACKWELL_EXCLUDED_MODEL_TYPES
+    return any(
+        current_platform.is_device_capability_family(family)
+        for family in _DEEPGEMM_BLACKWELL_EXCLUDED_MODEL_TYPES.get(model_type, ())
+    )
 
 
 class DeepGemmQuantScaleFMT(Enum):
@@ -64,7 +67,7 @@ class DeepGemmQuantScaleFMT(Enum):
 
     @classmethod
     def init_oracle_cache(cls) -> None:
-        """Initialize the oracle decision and store it in the class cache"""
+        """Initialize the oracle decision and store it in the class cache."""
         cached = getattr(cls, "_oracle_cache", None)
         if cached is not None:
             return
@@ -112,7 +115,7 @@ def is_deep_gemm_supported() -> bool:
     Currently, only Hopper and Blackwell GPUs are supported.
     """
     is_supported_arch = current_platform.support_deep_gemm()
-    return envs.VLLM_USE_DEEP_GEMM and has_deep_gemm() and is_supported_arch
+    return is_supported_arch and envs.VLLM_USE_DEEP_GEMM and has_deep_gemm()
 
 
 @functools.cache
@@ -158,7 +161,13 @@ _grouped_fp4_impl: Callable[..., Any] | None = None
 _fp8_fp4_mqa_logits_impl: Callable[..., Any] | None = None
 _fp8_fp4_paged_mqa_logits_impl: Callable[..., Any] | None = None
 _get_paged_mqa_logits_metadata_impl: Callable[..., Any] | None = None
+_fp8_fp4_sparse_mqa_logits_impl: Callable[..., Any] | None = None
+_fp8_fp4_paged_sparse_mqa_logits_impl: Callable[..., Any] | None = None
+_get_sparse_mqa_logits_metadata_impl: Callable[..., Any] | None = None
+_get_paged_sparse_mqa_logits_metadata_impl: Callable[..., Any] | None = None
 _tf32_hc_prenorm_gemm_impl: Callable[..., Any] | None = None
+_mega_mhc_impl: Callable[..., Any] | None = None
+_bf16_mega_gate_impl: Callable[..., Any] | None = None
 _get_mn_major_tma_aligned_tensor_impl: Callable[..., Any] | None = None
 _get_mk_alignment_for_contiguous_layout_impl: Callable[..., Any] | None = None
 _get_theoretical_mk_alignment_for_contiguous_layout_impl: Callable[..., Any] | None = (
@@ -231,7 +240,11 @@ def _lazy_init() -> None:
     global _grouped_impl, _grouped_masked_impl, _grouped_fp4_impl
     global _fp8_fp4_mqa_logits_impl, _fp8_fp4_paged_mqa_logits_impl
     global _get_paged_mqa_logits_metadata_impl
-    global _tf32_hc_prenorm_gemm_impl
+    global _fp8_fp4_sparse_mqa_logits_impl, _fp8_fp4_paged_sparse_mqa_logits_impl
+    global _get_sparse_mqa_logits_metadata_impl
+    global _get_paged_sparse_mqa_logits_metadata_impl
+    global _tf32_hc_prenorm_gemm_impl, _mega_mhc_impl
+    global _bf16_mega_gate_impl
     global _get_mn_major_tma_aligned_tensor_impl
     global _get_mk_alignment_for_contiguous_layout_impl
     global _get_theoretical_mk_alignment_for_contiguous_layout_impl
@@ -251,6 +264,8 @@ def _lazy_init() -> None:
         or _fp8_fp4_paged_mqa_logits_impl is not None
         or _get_paged_mqa_logits_metadata_impl is not None
         or _tf32_hc_prenorm_gemm_impl is not None
+        or _mega_mhc_impl is not None
+        or _bf16_mega_gate_impl is not None
         or _get_mk_alignment_for_contiguous_layout_impl is not None
         or _transform_sf_into_required_layout_impl is not None
         or _pack_ue8m0_to_int_impl is not None
@@ -280,7 +295,11 @@ def _lazy_init() -> None:
     _fp8_gemm_nt_impl = getattr(_dg, "fp8_gemm_nt", None)
     _fp8_einsum_impl = getattr(_dg, "fp8_einsum", None)
     _grouped_impl = getattr(_dg, "m_grouped_fp8_gemm_nt_contiguous", None)
-    _grouped_masked_impl = getattr(_dg, "fp8_m_grouped_gemm_nt_masked", None)
+    # DeepGEMM 2.8.0 dropped the legacy `fp8_*` aliases; keep both spellings so
+    # an externally pinned older DeepGEMM still resolves.
+    _grouped_masked_impl = getattr(
+        _dg, "m_grouped_fp8_gemm_nt_masked", None
+    ) or getattr(_dg, "fp8_m_grouped_gemm_nt_masked", None)
     _grouped_fp4_impl = getattr(_dg, "m_grouped_fp8_fp4_gemm_nt_contiguous", None)
     # DeepGEMM exposes fp8_fp4_*_mqa_logits as the canonical symbols that
     # handle both the FP8 and FP4 Q/K paths via a tuple-typed `q`.
@@ -289,7 +308,20 @@ def _lazy_init() -> None:
     _get_paged_mqa_logits_metadata_impl = getattr(
         _dg, "get_paged_mqa_logits_metadata", None
     )
+    # Sparse-indexer kernels (DeepGEMM >= 2.8, SM100 only).
+    _fp8_fp4_sparse_mqa_logits_impl = getattr(_dg, "fp8_fp4_sparse_mqa_logits", None)
+    _fp8_fp4_paged_sparse_mqa_logits_impl = getattr(
+        _dg, "fp8_fp4_paged_sparse_mqa_logits", None
+    )
+    _get_sparse_mqa_logits_metadata_impl = getattr(
+        _dg, "get_sparse_mqa_logits_metadata", None
+    )
+    _get_paged_sparse_mqa_logits_metadata_impl = getattr(
+        _dg, "get_paged_sparse_mqa_logits_metadata", None
+    )
     _tf32_hc_prenorm_gemm_impl = getattr(_dg, "tf32_hc_prenorm_gemm", None)
+    _mega_mhc_impl = getattr(_dg, "mega_mhc", None)
+    _bf16_mega_gate_impl = getattr(_dg, "bf16_mega_gate", None)
     _get_mn_major_tma_aligned_tensor_impl = getattr(
         _dg, "get_mn_major_tma_aligned_tensor", None
     )
@@ -401,7 +433,7 @@ def mk_alignment_scope(value: int):
 
 
 def get_col_major_tma_aligned_tensor(x: torch.Tensor) -> torch.Tensor:
-    """Wrapper for DeepGEMM's get_mn_major_tma_aligned_tensor"""
+    """Wrapper for DeepGEMM's get_mn_major_tma_aligned_tensor."""
     _lazy_init()
     if _get_mn_major_tma_aligned_tensor_impl is None:
         return _missing()
@@ -455,6 +487,55 @@ def cublaslt_gemm_nt(*args, **kwargs):
     if _cublaslt_gemm_nt_impl is None:
         return _missing(*args, **kwargs)
     return _cublaslt_gemm_nt_impl(*args, **kwargs)
+
+
+def bf16_mega_gate(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    num_topk: int,
+    *,
+    scoring_func: str,
+    routed_scaling_factor: float,
+    ep_rank: int,
+    bias: torch.Tensor | None = None,
+    image_bias: torch.Tensor | None = None,
+    image_token_mask: torch.Tensor | None = None,
+    fix_routing_mask: torch.Tensor | None = None,
+    unmapped_topk_idx: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run DeepGEMM Mega Gate.
+
+    The output order follows vLLM's router contract: weights, then indices.
+    Passing PyTorch-owned outputs to DeepGEMM makes their storage part of CUDA
+    graph capture.
+    """
+    _lazy_init()
+    if _bf16_mega_gate_impl is None:
+        raise RuntimeError(
+            "DeepGEMM MegaMoE requires a DeepGEMM build with bf16_mega_gate."
+        )
+
+    topk_idx = torch.empty((x.shape[0], num_topk), dtype=torch.int64, device=x.device)
+    topk_weights = torch.empty(
+        (x.shape[0], num_topk), dtype=torch.float32, device=x.device
+    )
+    _bf16_mega_gate_impl(
+        x,
+        weight,
+        num_topk,
+        use_shared_as_routed=False,
+        num_shared_experts=0,
+        routed_scaling_factor=routed_scaling_factor,
+        ep_rank=ep_rank,
+        scoring_func=scoring_func,
+        bias=bias,
+        image_bias=image_bias,
+        image_token_mask=image_token_mask,
+        fix_routing_mask=fix_routing_mask,
+        unmapped_topk_idx=unmapped_topk_idx,
+        out=(topk_idx, topk_weights),
+    )
+    return topk_weights, topk_idx
 
 
 def fp8_gemm_nt(*args, **kwargs):
@@ -512,37 +593,80 @@ def transform_sf_into_required_layout(*args, **kwargs):
     )
 
 
+@functools.cache
+def mqa_logits_use_mx_scales() -> bool:
+    """Whether the MQA logits kernels take only MX-scaled inputs.
+
+    On SM100 they need MXFP8/MXFP4 Q and K with packed UE8M0 scales and BF16
+    weights, and return BF16 logits. FP8 indexer K caches then store each
+    token's power-of-two scale as four equal UE8M0 bytes instead of an fp32.
+    """
+    return current_platform.is_cuda() and current_platform.is_device_capability_family(
+        100
+    )
+
+
+# Four packed UE8M0 bytes encoding 1.0.
+_UNIT_UE8M0_X4 = 0x7F7F7F7F
+# Grown buffers are kept alive: CUDA graphs captured earlier still read them.
+_unit_mx_scales: dict[torch.device, list[torch.Tensor]] = {}
+
+
+def mqa_logits_mx_inputs(
+    q: torch.Tensor, q_scale: torch.Tensor | None, weights: torch.Tensor
+) -> tuple[torch.Tensor | None, torch.Tensor]:
+    """Adapt indexer Q scales and weights to the SM100 MQA logits kernels.
+
+    FP8 Q folds its per-(token, head) power-of-two scale into ``weights``, so
+    it is passed with unit MX scales, which is exact since relu commutes with
+    a positive scale. Returns ``(q_scale, weights)`` unchanged off SM100.
+    """
+    if not mqa_logits_use_mx_scales():
+        return q_scale, weights
+    if q_scale is None:
+        numel = q.numel() // q.shape[-1]
+        bufs = _unit_mx_scales.setdefault(q.device, [])
+        if not bufs or bufs[-1].numel() < numel:
+            size = max(numel, 2 * bufs[-1].numel() if bufs else 0)
+            bufs.append(
+                torch.full((size,), _UNIT_UE8M0_X4, dtype=torch.int32, device=q.device)
+            )
+        q_scale = bufs[-1][:numel].view(q.shape[:-1])
+    return q_scale, weights.to(torch.bfloat16)
+
+
 def fp8_fp4_mqa_logits(
     q: tuple[torch.Tensor, torch.Tensor | None],
     kv: tuple[torch.Tensor, torch.Tensor],
     weights: torch.Tensor,
     cu_seqlen_ks: torch.Tensor,
     cu_seqlen_ke: torch.Tensor,
-    clean_logits: bool,
+    max_seqlen_k: int,
 ) -> torch.Tensor:
     """Compute MQA logits for a single sequence without KV paging.
 
     Unified FP8/FP4 dispatch — the underlying DeepGEMM kernel takes
-    ``q = (values, scales_or_None)`` where ``scales`` is None for FP8 Q
-    (per-token scale is folded into ``weights``) and a packed block-scale
-    tensor for MXFP4 Q.
+    ``q = (values, scales_or_None)``. SM100 takes MXFP8 or MXFP4 with packed
+    UE8M0 block scales; SM90/SM120 also take FP8 Q with ``q_scale=None``
+    (per-token scale folded into ``weights``).
 
     Args:
-        q: Tuple ``(q_values, q_scale)``. FP8 path: q_values is [M, H, D]
-            float8_e4m3fn and q_scale is None (per-token scale is folded
-            into ``weights``). FP4 path: q_values is packed uint8 and
-            q_scale is the companion block-scale tensor.
-        kv: Tuple `(k_packed, k_scales)` — FP8 layout is [N, D]
-            float8_e4m3fn plus fp32 scales [N]; FP4 layout is packed uint8.
-        weights: weights of shape [M, H], dtype `torch.float32`.
+        q: Tuple ``(q_values, q_scale)``, q_values of shape [M, H, D] (packed
+            to D/2 bytes for MXFP4) and q_scale int32 [M, H] or None.
+        kv: Tuple ``(k_values, k_scales)`` of shape [N, D] and [N]; k_scales
+            is int32 packed UE8M0 with MX scales, fp32 otherwise.
+        weights: Tensor of shape [M, H], bf16 on SM100 and fp32 elsewhere.
         cu_seqlen_ks: Start indices (inclusive) for valid K per query
             position, shape [M], dtype int32.
         cu_seqlen_ke: End indices (exclusive) for valid K per query
             position, shape [M], dtype int32.
-        clean_logits: Whether to clean the unfilled logits into `-inf`.
+        max_seqlen_k: Upper bound on ``cu_seqlen_ke - cu_seqlen_ks``.
 
     Returns:
-        Logits tensor of shape [M, N], dtype `torch.float32`.
+        Compressed logits of shape [M, max_seqlen_k]: row ``i`` holds K
+        positions ``[cu_seqlen_ks[i], cu_seqlen_ke[i])`` starting at column
+        zero, and the tail is not cleaned. bf16 on SM100, fp32 elsewhere.
+
     """
     _lazy_init()
     if _fp8_fp4_mqa_logits_impl is None:
@@ -553,7 +677,7 @@ def fp8_fp4_mqa_logits(
         weights,
         cu_seqlen_ks,
         cu_seqlen_ke,
-        clean_logits=clean_logits,
+        max_seqlen_k,
     )
 
 
@@ -598,6 +722,7 @@ def get_paged_mqa_logits_metadata(
     Returns:
         Tensor of shape [slots + 1, 2] consumed by `fp8_fp4_paged_mqa_logits`
         to schedule work across SMs.
+
     """
     _lazy_init()
     if _get_paged_mqa_logits_metadata_impl is None:
@@ -618,24 +743,25 @@ def fp8_fp4_paged_mqa_logits(
     block_tables: torch.Tensor,
     schedule_metadata: torch.Tensor,
     max_model_len: int,
-    clean_logits: bool,
     indices: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Compute MQA logits using a paged KV-cache.
 
     Unified FP8/FP4 dispatch — the underlying DeepGEMM kernel takes
-    ``q = (values, scales_or_None)``; pass ``(q_tensor, None)`` for the FP8
-    path and ``(q_values, q_scale)`` for MXFP4.
+    ``q = (values, scales_or_None)``; see `fp8_fp4_mqa_logits` for the
+    per-architecture formats. SM100 requires the varlen form (``indices``
+    with next_n == 1).
 
     Args:
-        q: Tuple ``(q_values, q_scale)``. FP8 path: q_values is
-            [B, next_n, H, D] float8_e4m3fn and q_scale is None. FP4 path:
-            q_values is packed uint8 and q_scale is the companion
-            block-scale tensor.
-        kv_cache: Paged KV-cache. FP8 layout is [num_blocks, block_size, 1,
-            D+4], dtype `torch.uint8`, with the last 4 bytes per (block, pos)
-            storing the float dequant scale.
-        weights: Tensor of shape [B * next_n, H], dtype `torch.float32`.
+        q: Tuple ``(q_values, q_scale)``, q_values of shape
+            [B, next_n, H, D] (packed to D/2 bytes for MXFP4) and q_scale
+            int32 [B, next_n, H] or None.
+        kv_cache: Paged KV-cache of shape [num_blocks, block_size, 1, D+4]
+            (D/2+4 for MXFP4), dtype `torch.uint8`; the last 4 bytes per
+            (block, pos) hold the int32 packed UE8M0 scales with MX scales,
+            or the fp32 dequant scale otherwise.
+        weights: Tensor of shape [B * next_n, H], bf16 on SM100 and fp32
+            elsewhere.
         context_lens: Tensor of shape [B], dtype int32; effective context length
             for each batch element.
         block_tables: Tensor of shape [B, max_blocks], dtype int32; maps logical
@@ -643,12 +769,12 @@ def fp8_fp4_paged_mqa_logits(
         schedule_metadata: Returned by `get_paged_mqa_logits_metadata`;
             used to distribute work across SMs.
         max_model_len: Maximum sequence length used to size the logits output.
-        clean_logits: Whether to clean the unfilled logits into `-inf`.
         indices: Optional request index for each varlen row.
 
     Returns:
-        Logits tensor of shape [B * next_n, max_model_len], dtype
-        `torch.float32`.
+        Logits tensor of shape [B * next_n, max_model_len]; columns past each
+        row's context length are not cleaned. bf16 on SM100, fp32 elsewhere.
+
     """
     _lazy_init()
     if _fp8_fp4_paged_mqa_logits_impl is None:
@@ -669,8 +795,180 @@ def fp8_fp4_paged_mqa_logits(
         block_tables,
         schedule_metadata,
         max_model_len,
-        clean_logits=clean_logits,
         **kwargs,
+    )
+
+
+def has_deep_gemm_sparse_mqa() -> bool:
+    """Whether the installed DeepGEMM provides the sparse-indexer kernels
+    (``fp8_fp4_(paged_)sparse_mqa_logits``, added in DeepGEMM 2.8, SM100-only)."""
+    _lazy_init()
+    return (
+        _fp8_fp4_sparse_mqa_logits_impl is not None
+        and _fp8_fp4_paged_sparse_mqa_logits_impl is not None
+        and _get_sparse_mqa_logits_metadata_impl is not None
+        and _get_paged_sparse_mqa_logits_metadata_impl is not None
+    )
+
+
+def get_sparse_mqa_logits_metadata(
+    cu_seqlen_ks: torch.Tensor,
+    cu_seqlen_ke: torch.Tensor,
+    num_kv_tokens: int,
+    sparse_kv_block_indices: torch.Tensor,
+    qk_dtype: torch.dtype,
+    sparse_block_kv: int,
+) -> torch.Tensor:
+    """Build scheduling metadata for `fp8_fp4_sparse_mqa_logits`.
+
+    Always uses the unaligned-ks variant, which degenerates to the aligned
+    variant when ``cu_seqlen_ks % sparse_block_kv == 0``, so callers never
+    need a host-side sync to pick one.
+
+    Args:
+        cu_seqlen_ks: Per-row K range start bounds in the packed KV
+            workspace, shape [num_q_tokens], dtype int32.
+        cu_seqlen_ke: Per-row K range end bounds in the packed KV workspace,
+            shape [num_q_tokens], dtype int32.
+        num_kv_tokens: Total KV tokens in the packed workspace.
+        sparse_kv_block_indices: Per-row candidate block ids, shape
+            [num_q_tokens, num_max_sparse_blocks], dtype int32. Each row's
+            valid prefix must be sorted ascending (repeats are tolerated but
+            wasteful); pad by repeating the last valid block. Block ``i``
+            covers tokens
+            ``[i * sparse_block_kv + ks % sparse_block_kv, ...)``.
+        qk_dtype: dtype of the packed Q values (``torch.int8`` for MXFP4,
+            ``torch.float8_e4m3fn`` for FP8).
+        sparse_block_kv: Tokens per sparse block, 8 or 16.
+
+    """
+    _lazy_init()
+    if _get_sparse_mqa_logits_metadata_impl is None:
+        return _missing()
+    return _get_sparse_mqa_logits_metadata_impl(
+        cu_seqlen_ks,
+        cu_seqlen_ke,
+        num_kv_tokens,
+        sparse_kv_block_indices,
+        qk_dtype,
+        sparse_block_kv,
+        use_unaligned_ks=True,
+    )
+
+
+def get_paged_sparse_mqa_logits_metadata(
+    context_lens: torch.Tensor,
+    block_table: torch.Tensor,
+    indices: torch.Tensor,
+    page_kv: int,
+    sparse_kv_block_indices: torch.Tensor,
+    qk_dtype: torch.dtype,
+    sparse_block_kv: int,
+) -> torch.Tensor:
+    """Build scheduling metadata for `fp8_fp4_paged_sparse_mqa_logits`.
+
+    Args:
+        context_lens: Per-row context length, shape [num_q_tokens], int32.
+        block_table: Per-row page table, shape [num_q_tokens, max_pages],
+            int32; rows of queries paired with the same request must be
+            identical (expand it per query row before calling).
+        indices: Request index for each query row, shape [num_q_tokens].
+        page_kv: Tokens per KV page; must be a multiple of sparse_block_kv.
+        sparse_kv_block_indices: Per-row logical (context-relative) candidate
+            block ids, [num_q_tokens, num_max_sparse_blocks], int32.
+        qk_dtype: dtype of the packed Q values.
+        sparse_block_kv: Tokens per sparse block, 8 or 16.
+
+    """
+    _lazy_init()
+    if _get_paged_sparse_mqa_logits_metadata_impl is None:
+        return _missing()
+    return _get_paged_sparse_mqa_logits_metadata_impl(
+        context_lens,
+        block_table,
+        indices,
+        page_kv,
+        sparse_kv_block_indices,
+        qk_dtype,
+        sparse_block_kv,
+    )
+
+
+def fp8_fp4_sparse_mqa_logits(
+    q: tuple[torch.Tensor, torch.Tensor],
+    kv: tuple[torch.Tensor, torch.Tensor],
+    weights: torch.Tensor,
+    metadata: torch.Tensor,
+    num_max_sparse_blocks: int,
+    sparse_block_kv: int,
+) -> torch.Tensor:
+    """Compute MQA logits only at the candidate blocks (prefill path).
+
+    Args:
+        q: ``(q_values, q_scale)``. q_values is [M, H, D] (packed FP4 viewed
+            as int8, or FP8); q_scale is the packed UE8M0 scale tensor [M, H]
+            int32 (mandatory, unlike the dense kernels).
+        kv: ``(kv_values, kv_scale)`` — the packed KV workspace with UE8M0
+            int32 scales.
+        weights: [M, H] ``torch.bfloat16`` (the Q scale is NOT folded in).
+        metadata: From `get_sparse_mqa_logits_metadata`.
+        num_max_sparse_blocks: Width of each sparse-index row.
+        sparse_block_kv: Tokens per sparse block, 8 or 16.
+
+    Returns:
+        bf16 logits of shape [M, num_max_sparse_blocks * sparse_block_kv];
+        column ``j * sparse_block_kv + o`` scores the token at
+        ``sparse_kv_block_indices[row, j] * sparse_block_kv + ks % sbk + o``.
+
+    """
+    _lazy_init()
+    if _fp8_fp4_sparse_mqa_logits_impl is None:
+        return _missing()
+    return _fp8_fp4_sparse_mqa_logits_impl(
+        q,
+        kv,
+        weights,
+        metadata,
+        num_max_sparse_blocks,
+        sparse_block_kv,
+        use_unaligned_ks=True,
+    )
+
+
+def fp8_fp4_paged_sparse_mqa_logits(
+    q: tuple[torch.Tensor, torch.Tensor],
+    kv_cache: torch.Tensor,
+    weights: torch.Tensor,
+    metadata: torch.Tensor,
+    num_max_sparse_blocks: int,
+    sparse_block_kv: int,
+) -> torch.Tensor:
+    """Compute MQA logits only at the candidate blocks (paged decode path).
+
+    Args:
+        q: ``(q_values, q_scale)``; q_values is [num_q_tokens, 1, H, D].
+        kv_cache: Fused paged cache [num_pages, page_kv, 1, D' + 4] uint8,
+            page stride 256B-aligned.
+        weights: [num_q_tokens, H] ``torch.bfloat16``.
+        metadata: From `get_paged_sparse_mqa_logits_metadata`.
+        num_max_sparse_blocks: Candidate blocks per row.
+        sparse_block_kv: Tokens per sparse block, 8 or 16.
+
+    Returns:
+        bf16 logits of shape
+        [num_q_tokens, num_max_sparse_blocks * sparse_block_kv].
+
+    """
+    _lazy_init()
+    if _fp8_fp4_paged_sparse_mqa_logits_impl is None:
+        return _missing()
+    return _fp8_fp4_paged_sparse_mqa_logits_impl(
+        q,
+        kv_cache,
+        weights,
+        metadata,
+        num_max_sparse_blocks,
+        sparse_block_kv,
     )
 
 
@@ -681,8 +979,7 @@ def tf32_hc_prenorm_gemm(
     sqrsum: torch.Tensor,
     num_split: int,
 ) -> torch.Tensor:
-    """
-    Perform the following computation:
+    """Perform the following computation:
         out = x.float() @ fn.T
         sqrsum = x.float().square().sum(-1)
 
@@ -698,6 +995,15 @@ def tf32_hc_prenorm_gemm(
         sqrsum,
         num_split,
     )
+
+
+def mega_mhc(*args: Any, **kwargs: Any) -> None:
+    """Run DeepGEMM Mega mHC with caller-owned output tensors."""
+    _lazy_init()
+    if _mega_mhc_impl is None:
+        _missing()
+        return
+    _mega_mhc_impl(*args, **kwargs)
 
 
 def _ceil_to_ue8m0(x: torch.Tensor):
@@ -749,7 +1055,6 @@ def calc_diff(x: torch.Tensor, y: torch.Tensor):
     and report `1 - sim`.  Once kernel accuracy improves this helper can be
     removed.
     """
-
     x, y = x.double(), y.double()
     denominator = (x * x + y * y).sum()
     sim = 2 * (x * y).sum() / denominator
@@ -780,6 +1085,7 @@ def should_use_deepgemm_for_fp8_linear(
 
 __all__ = [
     "calc_diff",
+    "bf16_mega_gate",
     "DeepGemmQuantScaleFMT",
     "fp8_gemm_nt",
     "fp8_einsum",
@@ -789,10 +1095,13 @@ __all__ = [
     "fp8_fp4_mqa_logits",
     "fp8_fp4_paged_mqa_logits",
     "get_paged_mqa_logits_metadata",
+    "mqa_logits_mx_inputs",
+    "mqa_logits_use_mx_scales",
     "native_next_n_supported",
     "per_block_cast_to_fp8",
     "is_deep_gemm_e8m0_used",
     "is_deep_gemm_supported",
+    "mega_mhc",
     "get_num_sms",
     "set_num_sms",
     "should_use_deepgemm_for_fp8_linear",

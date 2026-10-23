@@ -9,6 +9,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_quantized_values_into_int32,
 )
 from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layout_
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
@@ -30,14 +31,6 @@ class ExllamaLinearKernel(MPLinearKernel):
             return (
                 False,
                 "Exllama is only supported on CUDA and ROCm",
-            )
-
-        if c.has_g_idx and c.partition_weight_shape[0] != c.full_weight_shape[0]:
-            return (
-                False,
-                "Act reordering currently not supported by Exllama, "
-                "when the input features are partitioned across "
-                "devices",
             )
 
         if c.partition_weight_shape[1] % (32 // c.weight_type.size_bits) != 0:
@@ -107,33 +100,13 @@ class ExllamaLinearKernel(MPLinearKernel):
                     "inference"
                 )
             zeros = pack_quantized_values_into_int32(zeros, c.weight_type, packed_dim=1)
-            setattr(
-                layer, self.w_zp_name, torch.nn.Parameter(zeros, requires_grad=False)
-            )
-
-        if c.has_g_idx:
-
-            def transform_w_g_idx(x):
-                # Exllama wants the permutation array instead of the group
-                # indices
-                return torch.argsort(x).to(torch.int)
-
-            self._transform_param(layer, self.w_gidx_name, transform_w_g_idx)  # type: ignore
-        else:
-            self.w_gidx_name = "g_idx"
-            empty_g_idx = torch.nn.Parameter(
-                torch.empty((0,), dtype=torch.int, device=device), requires_grad=False
-            )
-            setattr(layer, self.w_gidx_name, empty_g_idx)
+            replace_parameter(layer, self.w_zp_name, zeros)
 
         def transform_w_q(x):
             assert isinstance(x, BasevLLMParameter)
-            assert self.w_gidx_name is not None
-            g_idx = getattr(layer, self.w_gidx_name)
-
             permute_param_layout_(x, input_dim=0, output_dim=1, packed_dim=0)
             x_cont = x.data.contiguous()
-            ops.gptq_shuffle(x_cont, g_idx, c.weight_type.size_bits)
+            ops.gptq_shuffle(x_cont, c.weight_type.size_bits)
             return x_cont
 
         def transform_w_s(x):
@@ -157,17 +130,15 @@ class ExllamaLinearKernel(MPLinearKernel):
         x_2d = x.reshape(-1, x.shape[-1])
         out_shape = x.shape[:-1] + (c.partition_weight_shape[1],)
 
-        w_q, w_s, w_zp, w_g_idx = self._get_weight_params(layer)
-
+        w_q, w_s, w_zp = self._get_weight_params(layer)
         # gptq_gemm supports GPTQv2 format by passing use_v2_format=True.
         # However, the MPLinearLayerConfig doesn't contain format info.
         # So hardcode GPTQv1 format here, to keep its behavior unchanged.
         use_v2_format = False
 
         assert w_zp is not None, "Zero points are required by Exllama"
-        assert w_g_idx is not None, "Group index is required by Exllama"
         output = ops.gptq_gemm(
-            x_2d, w_q, w_zp, w_s, w_g_idx, True, use_v2_format, c.weight_type.size_bits
+            x_2d, w_q, w_zp, w_s, True, use_v2_format, c.weight_type.size_bits
         )
 
         if bias is not None:

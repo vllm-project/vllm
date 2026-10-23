@@ -35,6 +35,7 @@ def test_alloc_returns_unique_ascending_block_ids():
 def test_alloc_returns_tuple():
     cache = _cache()
     entry = cache.alloc("a", 2)
+    assert entry is not None
     assert isinstance(entry.block_ids, tuple)
 
 
@@ -67,6 +68,7 @@ def test_alloc_zero_blocks():
 def test_alloc_starts_not_ready():
     cache = _cache()
     entry = cache.alloc("a", 2)
+    assert entry is not None
     assert not entry.ready
     assert not entry.evictable
 
@@ -101,6 +103,7 @@ def test_mark_ready_transitions():
     cache = _cache()
     cache.alloc("a", 2)
     entry = cache.get("a")
+    assert entry is not None
     assert not entry.ready
     cache.mark_ready("a")
     assert entry.ready
@@ -137,6 +140,7 @@ def test_pin_unpin_basic():
     cache.mark_ready("a")
     cache.pin("a")
     entry = cache.get("a")
+    assert entry is not None
     assert not entry.evictable
     cache.unpin("a")
     assert entry.evictable
@@ -150,6 +154,7 @@ def test_nested_pin():
     cache.pin("a")
     cache.unpin("a")
     entry = cache.get("a")
+    assert entry is not None
     assert not entry.evictable  # still pinned (count=1)
     cache.unpin("a")
     assert entry.evictable
@@ -303,6 +308,7 @@ def test_concurrent_pin_unpin():
 
     assert not errors, errors
     entry = cache.get("a")
+    assert entry is not None
     assert entry.evictable  # all pins balanced
 
 
