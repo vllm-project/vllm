@@ -1687,8 +1687,7 @@ def test_mamba_n1_p_side_truncation():
     # A request that skips reading the prefix cache (prompt logprobs) is not
     # cut: the decoder loads nothing and recomputes its whole prompt.
     logprobs_req = create_request(num_tokens=10, do_remote_decode=True)
-    assert logprobs_req.sampling_params is not None
-    logprobs_req.sampling_params.skip_reading_prefix_cache = True
+    logprobs_req.skip_reading_prefix_cache = True
     swa_sched.on_new_request(logprobs_req)
     assert len(logprobs_req.prompt_token_ids) == 10
 

@@ -1022,7 +1022,7 @@ class MooncakeConnectorScheduler:
             and request.num_prompt_tokens > 1
             # A request that skips reading the prefix cache (prompt logprobs)
             # loads nothing on the decoder, which recomputes its whole prompt.
-            and not request.get_skip_reading_prefix_cache()
+            and not request.skip_reading_prefix_cache
         ):
             if request.prompt_token_ids is not None:
                 request.prompt_token_ids.pop()

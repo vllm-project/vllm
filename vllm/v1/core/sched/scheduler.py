@@ -2777,6 +2777,9 @@ class Scheduler(SchedulerInterface):
         return request_id in self.requests
 
     def add_request(self, request: Request) -> None:
+        if self.connector is not None and request.prefix_cache_hit_limit is not None:
+            # Connector hits are not bounded by prefix_cache_hit_limit.
+            request.skip_reading_prefix_cache = True
         existing = self.requests.get(request.request_id)
         if existing is not None:
             update = StreamingUpdate.from_request(request)

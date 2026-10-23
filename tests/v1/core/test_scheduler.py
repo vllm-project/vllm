@@ -3175,22 +3175,45 @@ def test_has_sync_kv_loads(
     assert output.has_sync_kv_loads is expected_has_sync_loads
 
 
-def test_kv_connector_honors_skip_reading_prefix_cache():
-    """A request that must score every prompt row takes no external hit."""
+@pytest.mark.parametrize("suffix_scoring", [False, True])
+@pytest.mark.parametrize("is_async", [False, True])
+def test_kv_connector_honors_skip_reading_prefix_cache(suffix_scoring, is_async):
+    """External hits cannot skip rows required by prompt scoring."""
     BLOCK_SIZE = 16
     scheduler = create_scheduler(
         enable_prefix_caching=True,
-        use_kv_connector=mock_kv(matched_tokens=BLOCK_SIZE * 2, is_async=False),
+        use_kv_connector=mock_kv(matched_tokens=BLOCK_SIZE * 2, is_async=is_async),
         block_size=BLOCK_SIZE,
     )
-    plain, scoring = create_requests(num_requests=2, num_tokens=BLOCK_SIZE * 4)
-    scoring.sampling_params.prompt_logprobs = 1
-    scoring.skip_reading_prefix_cache = True
+    scoring_params = (
+        SamplingParams(
+            prompt_logprob_token_ids=[[1]] * (BLOCK_SIZE * 3 - 1),
+            prompt_logprob_start=BLOCK_SIZE,
+            skip_reading_prefix_cache=False,
+        )
+        if suffix_scoring
+        else SamplingParams(prompt_logprobs=1)
+    )
+    (plain,) = create_requests(1, num_tokens=BLOCK_SIZE * 4, req_ids=["plain"])
+    (scoring,) = create_requests(
+        1,
+        num_tokens=BLOCK_SIZE * 4,
+        req_ids=["scoring"],
+        sampling_params=scoring_params,
+    )
+    admission = []
+    scheduler.connector.on_new_request = lambda req: admission.append(
+        req.skip_reading_prefix_cache
+    )
     scheduler.add_request(plain)
     scheduler.add_request(scoring)
+    assert admission == [False, True]
 
     output = scheduler.schedule()
-    assert output.num_scheduled_tokens[plain.request_id] == BLOCK_SIZE * 2
+    if is_async:
+        assert plain.request_id not in output.num_scheduled_tokens
+    else:
+        assert output.num_scheduled_tokens[plain.request_id] == BLOCK_SIZE * 2
     assert output.num_scheduled_tokens[scoring.request_id] == BLOCK_SIZE * 4
 
 

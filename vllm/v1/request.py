@@ -230,6 +230,7 @@ class Request:
         self.update_block_hashes()
 
         self.skip_reading_prefix_cache = self.get_skip_reading_prefix_cache()
+        self.prefix_cache_hit_limit = self.get_prefix_cache_hit_limit()
 
         # Used for streaming
         self.resumable = resumable
@@ -310,6 +311,27 @@ class Request:
     @property
     def has_encoder_inputs(self) -> bool:
         return self.num_encoder_inputs > 0
+
+    @property
+    def max_cache_hit_length(self) -> int:
+        # The last token is always recomputed to produce logits.
+        max_length = self.num_tokens - 1
+        if self.prefix_cache_hit_limit is not None:
+            max_length = min(max_length, self.prefix_cache_hit_limit)
+        return max_length
+
+    def get_prefix_cache_hit_limit(self) -> int | None:
+        """First prompt row that must be computed rather than read from the
+        cache, i.e. the first scored row; None when no prompt rows are scored.
+        See docs/training/prompt_token_id_logprobs.md."""
+        params = self.sampling_params
+        if params is None:
+            return None
+        if params.prompt_logprobs is not None:
+            return 0
+        if params.prompt_logprob_token_ids is not None:
+            return params.prompt_logprob_start or 0
+        return None
 
     def get_skip_reading_prefix_cache(self) -> bool:
         if (
