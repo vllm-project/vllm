@@ -588,6 +588,7 @@ class TestBackpressure:
         """A tier whose stores fail fast is put under pressure, so later
         stores are dropped instead of being submitted to it."""
         bp = self.tier.bp_detector
+        assert isinstance(bp, EMABackpressureDetector)
         bp._decay_half_life_s = 0.0
         # A healthy tier that starts failing must not keep bypassing the policy.
         bp._completions = _BP_WARMUP
@@ -603,7 +604,8 @@ class TestBackpressure:
         keys = to_keys(range(910, 913))
         self._store_blocks(keys)
         assert self.tier.num_store_submissions == _BP_FAILURE_THRESHOLD
-        assert all(self.primary._policy.get(k).ref_cnt == 0 for k in keys)
+        statuses = [self.primary._policy.get(k) for k in keys]
+        assert all(s is not None and s.ref_cnt == 0 for s in statuses)
 
 
 class TestStoreFailures:
