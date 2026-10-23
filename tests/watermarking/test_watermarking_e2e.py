@@ -72,11 +72,21 @@ def test_enforce_watermarks_opted_out_request(vllm_runner):
         enforce_eager=True,
         max_model_len=512,
         gpu_memory_utilization=0.2,
+        disable_log_stats=False,
     ) as runner:
         output = runner.llm.generate(
             "Tell me a story about an explorer who discovers a mysterious island.",
             SamplingParams(temperature=1.0, max_tokens=256, watermarking=False),
         )
+        metrics = runner.llm.get_metrics()
 
     result = detector.detect(list(output[0].outputs[0].token_ids))
     assert result.is_watermarked, result
+
+    # The enforced opt-out is counted as watermarked.
+    status = {
+        m.labels["status"]: m.value
+        for m in metrics
+        if isinstance(m, Counter) and m.name == "vllm:watermark_requests"
+    }
+    assert status == {"watermarked": 1, "skipped": 0, "not_watermarked": 0}
