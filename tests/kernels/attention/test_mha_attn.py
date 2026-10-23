@@ -6,6 +6,9 @@
 """
 
 import itertools
+import sys
+import types
+from typing import Any
 from unittest.mock import patch
 
 import numpy as np
@@ -506,15 +509,27 @@ def test_vit_long_seq_fa_version(
     from vllm.config.attention import AttentionConfig
     from vllm.v1.attention.backends import fa_utils
 
+    # `vllm.vllm_flash_attn` is CUDA-only, so patching through it by name would
+    # raise AttributeError on ROCm before the test body runs. Stub the module in
+    # sys.modules instead, which the lazy `from ... import` inside
+    # get_vit_long_seq_fa_version picks up on every platform.
+    fa_pkg: Any = types.ModuleType("vllm.vllm_flash_attn")
+    fa_mod: Any = types.ModuleType("vllm.vllm_flash_attn.flash_attn_interface")
+    fa_mod.is_fa_version_supported = lambda *a, **kw: fa4_supported
+    fa_pkg.flash_attn_interface = fa_mod
+
     config = VllmConfig(attention_config=AttentionConfig(flash_attn_version=pinned))
     with (
         set_current_vllm_config(config),
         patch.object(
             fa_utils.current_platform, "is_device_capability", return_value=is_sm90
         ),
-        patch(
-            "vllm.vllm_flash_attn.flash_attn_interface.is_fa_version_supported",
-            return_value=fa4_supported,
+        patch.dict(
+            sys.modules,
+            {
+                "vllm.vllm_flash_attn": fa_pkg,
+                "vllm.vllm_flash_attn.flash_attn_interface": fa_mod,
+            },
         ),
     ):
         assert fa_utils.get_vit_long_seq_fa_version(fa_version, head_size) == expected
