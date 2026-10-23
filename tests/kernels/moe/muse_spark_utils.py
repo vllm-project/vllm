@@ -86,7 +86,9 @@ def make_runner(
     loaded = list(routed.load_weights(list(ckpt.items())))
     assert len(loaded) == len(ckpt)
     routed.quant_method.process_weights_after_loading(routed)
-    experts = routed.quant_method.moe_kernel.fused_experts
+    moe_kernel = routed.quant_method.moe_kernel
+    assert moe_kernel is not None
+    experts = moe_kernel.fused_experts
     assert experts.post_gemm2_hook is runner.post_expert_finalize
     assert isinstance(runner.post_expert_finalize, MusePostExpertFinalize)
     assert not runner.post_expert_finalize.pre_norm_all_reduce
