@@ -192,7 +192,8 @@ class SpecializedDecode:
         step = None
         if reason is None:
             width = self.cfg.width_for(tokens)
-            assert width is not None
+            # step_reason declined micro-batched (list) metadata
+            assert width is not None and isinstance(fc.attn_metadata, dict)
             step = DecodeStep(tokens, width, positions, fc.attn_metadata)
             reason = layers.eligible(self.ctx, step)
         if reason is not None:
