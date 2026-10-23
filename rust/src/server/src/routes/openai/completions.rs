@@ -141,6 +141,7 @@ async fn collect_completion(
     ApiServerOptions {
         enable_log_requests,
         enable_prompt_tokens_details,
+        default_return_tokens_as_token_ids,
         enable_per_request_metrics,
         ..
     }: ApiServerOptions,
@@ -157,6 +158,8 @@ async fn collect_completion(
         return_tokens_as_token_ids,
     }: ResponseOptions,
 ) -> Result<CompletionResponse, ApiError> {
+    let return_tokens_as_token_ids =
+        return_tokens_as_token_ids.unwrap_or(default_return_tokens_as_token_ids);
     let collected = stream
         .collect_output()
         .await
@@ -247,6 +250,7 @@ async fn completion_chunk_stream(
     ApiServerOptions {
         enable_log_requests,
         enable_prompt_tokens_details,
+        default_return_tokens_as_token_ids,
         enable_per_request_metrics,
         ..
     }: ApiServerOptions,
@@ -263,6 +267,8 @@ async fn completion_chunk_stream(
     }: ResponseOptions,
     mut y: TryYielder<CompletionSseChunk, ApiError>,
 ) -> Result<(), ApiError> {
+    let return_tokens_as_token_ids =
+        return_tokens_as_token_ids.unwrap_or(default_return_tokens_as_token_ids);
     pin_mut!(stream);
     let envelope = Arc::new(StreamResponseEnvelope::new(
         request_id,
