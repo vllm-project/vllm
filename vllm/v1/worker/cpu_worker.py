@@ -7,6 +7,7 @@ import vllm.v1.worker.cpu.shm  # noqa # isort: skip
 import math
 import os
 import sys
+from typing import TYPE_CHECKING, cast
 
 import psutil
 import torch
@@ -26,6 +27,9 @@ from vllm.v1.worker.cpu_model_runner import CPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
 from vllm.v1.worker.worker_base import CompilationTimes
 
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
 logger = init_logger(__name__)
 
 
@@ -41,7 +45,9 @@ class CPUWorker(Worker):
         # TODO: use numactl for process setup
         # TODO: optimize for `interleaved` policy
         # Bind memory node
-        allowed_memory_nodes = get_visible_memory_node()
+        allowed_memory_nodes = get_visible_memory_node(
+            vllm_config.parallel_config.assigned_physical_gpu_ids
+        )
         allowed_cpu_list = get_allowed_cpu_list()
         cpu_core = allowed_cpu_list[0]
 
@@ -280,6 +286,17 @@ class CPUWorker(Worker):
         # Only compile here for models without kv cache
         if len(self.model_runner.kv_caches) == 0 and self._should_warm_up_model():
             self.model_runner.warming_up_model()
+        # profile_run skips the MRV2 scheduler-driven kernels, so without this
+        # their Triton JIT lands in the first request's TTFT.
+        kernel_config = self.vllm_config.kernel_config
+        if self.use_v2_model_runner and kernel_config.enable_jit_warmup:
+            from vllm.v1.worker.gpu.warmup import warmup_kernels
+
+            warmup_kernels(
+                cast("GPUModelRunner", self.model_runner),
+                self.execute_model,
+                self.sample_tokens,
+            )
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(
