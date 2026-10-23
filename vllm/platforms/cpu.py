@@ -343,6 +343,22 @@ class CpuPlatform(Platform):
             kv_cache_space = int(os.environ[env_key])
             cache_config.kv_cache_memory_bytes = kv_cache_space * GiB_bytes
 
+        # Encoder profiling only feeds the auto KV-cache size, and one
+        # maximum-size image through a vision encoder takes minutes on CPU.
+        # It also compiles the encoder, so keep it when that is enabled.
+        mm_config = model_config.multimodal_config if model_config else None
+        if (
+            mm_config is not None
+            and cache_config.kv_cache_memory_bytes is not None
+            and not mm_config.skip_mm_profiling
+            and not vllm_config.compilation_config.compile_mm_encoder
+        ):
+            logger.info(
+                "Skipping multimodal encoder profiling: the KV cache size is "
+                "set explicitly."
+            )
+            mm_config.skip_mm_profiling = True
+
         scheduler_config = vllm_config.scheduler_config
         # async scheduling is not required on CPU
         scheduler_config.async_scheduling = False
