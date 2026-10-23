@@ -2712,10 +2712,17 @@ class VllmConfig:
                 "decode CUDA graphs with decode_cudagraph_capture_request_sizes or "
                 "max_decode_cudagraph_capture_requests."
             )
+        from vllm.platforms import current_platform
+
         shared_sizes = compilation_config.cudagraph_capture_sizes
         shared_max = compilation_config.max_cudagraph_capture_size
         max_num_seqs = self.scheduler_config.max_num_seqs
         max_num_tokens = self.scheduler_config.max_num_batched_tokens
+        # On SM100, unset kinds default to wider grids; elsewhere, and with the
+        # deprecated fields, they default to the shared sizes resolved above.
+        wide_defaults = (
+            not legacy_sizes and current_platform.is_device_capability_family(100)
+        )
 
         def explicit(
             sizes: list[int], limit: int, cap: int | None, name: str, cap_name: str
@@ -2740,14 +2747,15 @@ class VllmConfig:
                 "prefill_cudagraph_capture_token_sizes",
                 "max_prefill_cudagraph_capture_tokens",
             )
-        elif max_prefill_tokens is not None:
+        elif max_prefill_tokens is not None or wide_defaults:
             prefill_sizes = prefill_cudagraph_capture_grid(
-                min(max_prefill_tokens, max_num_tokens),
+                min(
+                    8192 if max_prefill_tokens is None else max_prefill_tokens,
+                    max_num_tokens,
+                ),
                 self.performance_mode == "interactivity",
             )
         else:
-            # The defaults, like the deprecated fields, are the shared sizes
-            # resolved above.
             prefill_sizes = list(shared_sizes)
 
         if decode_sizes is not None:
@@ -2758,9 +2766,11 @@ class VllmConfig:
                 "decode_cudagraph_capture_request_sizes",
                 "max_decode_cudagraph_capture_requests",
             )
-        elif max_decode_requests is not None:
+        elif max_decode_requests is not None or wide_defaults:
             decode_sizes = decode_cudagraph_capture_grid(
-                min(max_decode_requests, max_num_seqs)
+                max_num_seqs
+                if max_decode_requests is None
+                else min(max_decode_requests, max_num_seqs)
             )
         else:
             # The request counts each target query length rounds the shared sizes

@@ -727,8 +727,8 @@ class CompilationConfig:
     above `max_num_batched_tokens` are dropped. None (default): the token-count
     grid up to `max_prefill_cudagraph_capture_tokens`."""
     max_prefill_cudagraph_capture_tokens: int | None = Field(default=None, ge=0)
-    """Largest token count of a prefill CUDA graph. None (default): the
-    platform's default `max_cudagraph_capture_size`; at most
+    """Largest token count of a prefill CUDA graph. None (default): 8192 on SM100
+    GPUs, otherwise the platform's default `max_cudagraph_capture_size`; at most
     `max_num_batched_tokens`. More and wider graphs take memory from the KV
     cache and lengthen startup."""
     decode_cudagraph_capture_request_sizes: list[int] | None = None
@@ -747,10 +747,11 @@ class CompilationConfig:
     max_decode_cudagraph_capture_requests: int | None = Field(default=None, ge=0)
     """Largest request count of a decode CUDA graph; with adaptive verification
     it also sets the decode token budget (see
-    `decode_cudagraph_capture_request_sizes`). None (default): the most requests
-    that the platform's default `max_cudagraph_capture_size` holds at the target
-    model's query lengths. Graphs no wider than the widest prefill graph mostly
-    reuse its memory in the shared graph pool. Wider graphs, and FULL graphs of
+    `decode_cudagraph_capture_request_sizes`). None (default): `max_num_seqs` on
+    SM100 GPUs, otherwise the most requests that the platform's default
+    `max_cudagraph_capture_size` holds at the target model's query lengths.
+    Graphs no wider than the widest prefill graph mostly reuse its memory in the
+    shared graph pool. Wider graphs, and FULL graphs of
     models with large per-token buffers (e.g. DeepSeek's indexer at a long
     `max_model_len`), take memory from the KV cache."""
     cudagraph_copy_inputs: bool = False
