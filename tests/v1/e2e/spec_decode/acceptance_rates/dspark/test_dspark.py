@@ -6,12 +6,47 @@ from dataclasses import dataclass
 import pytest
 
 from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k_offline
+from vllm import SamplingParams
 from vllm.config import CompilationConfig
 from vllm.platforms import current_platform
 
 from ...utils import compute_acceptance_len, compute_acceptance_rate
 
 REGRESSION_TOLERANCE = 0.95
+
+
+def test_dspark_adaptive_verification_floor(vllm_runner, monkeypatch):
+    """Serve batches below, at, and above the floor with accepted drafts."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setenv("VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN", "256")
+    with vllm_runner(
+        "Qwen/Qwen3-4B-FP8",
+        speculative_config={
+            "method": "dspark",
+            "model": "deepseek-ai/dspark_qwen3_4b_block7",
+            "num_speculative_tokens": 7,
+            "enable_adaptive_verification": True,
+            "adaptive_verification_floor": 2,
+        },
+        max_model_len=4096,
+        max_num_seqs=4,
+        max_num_batched_tokens=256,
+        gpu_memory_utilization=0.3,
+        enforce_eager=False,
+        enable_prefix_caching=False,
+        disable_log_stats=False,
+    ) as runner:
+        for batch_size in (1, 2, 3):
+            previous = runner.llm.get_metrics()
+            outputs = runner.llm.chat(
+                [[{"role": "user", "content": "Count from 1 to 100, one per line."}]]
+                * batch_size,
+                SamplingParams(temperature=0, max_tokens=128),
+                chat_template_kwargs={"enable_thinking": False},
+            )
+            assert len(outputs) == batch_size
+            assert all(output.outputs[0].text.strip() for output in outputs)
+            assert compute_acceptance_rate(runner.llm.get_metrics(), previous) > 0
 
 
 @dataclass(frozen=True)
