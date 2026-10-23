@@ -178,15 +178,15 @@ variants:
       - gb300
       - b200
       - b300
-    # MI355X re-quantizes the experts to MXFP8 at load: 413.1B x 1.03 bytes +
-    # 17.5 GB of other weights ≈ 444 GB, x 1.2 ≈ 533 GB.
-    vram_minimum_gb: 533
+    # NVFP4 experts as stored (Blackwell runs them natively): 413.1B x 0.53
+    # bytes + 17.5 GB of other weights ≈ 237 GB, x 1.2 ≈ 285 GB.
+    vram_minimum_gb: 285
     description: "MXFP8 dense layers + NVFP4 experts with NVFP4 KV and indexer K caches. Blackwell runs the NVFP4 experts natively; MI355X re-quantizes them to MXFP8 for the AITER MoE."
     hardware_overrides:
-      # GB200 runs the NVFP4 experts natively: 413.1B x 0.53 bytes + 17.5 GB
-      # ≈ 237 GB, x 1.2 ≈ 285 GB.
-      gb200:
-        vram_minimum_gb: 285
+      # MI355X re-quantizes the experts to MXFP8 at load: 413.1B x 1.03 bytes
+      # + 17.5 GB ≈ 444 GB (measured 105.0 GiB per TP4 rank), x 1.2 ≈ 533 GB.
+      mi355x:
+        vram_minimum_gb: 533
       # Only this checkpoint stores NVFP4 experts; the Quark export below
       # already holds MXFP4 ones.
       amd:
@@ -197,14 +197,14 @@ variants:
   mxfp4:
     # AMD's Quark export of the same model: routed experts in OCP MXFP4
     # (static weights, dynamic MXFP4 activations); every other layer and the
-    # dspark/ draft as in the base checkpoint. 48 shards, 237.2 GB, x 1.2 ≈
-    # 285 GB.
+    # dspark/ draft as in the base checkpoint. 48 shards, 237.2 GB; measured
+    # 56.9 GiB per TP4 rank (244.5 GB), x 1.2 ≈ 293 GB.
     model_id: "amd/MiniMax-M3.1-Flash-Quark-MXFP4"
     precision: mxfp4
     label: "MXFP4 (Quark)"
     supported_hardware:
       - mi355x
-    vram_minimum_gb: 285
+    vram_minimum_gb: 293
     description: "AMD Quark export: routed experts stored in OCP MXFP4 and run as W4A4 on the AITER MoE, with NVFP4 KV and indexer K caches. MI355X only."
     hardware_overrides:
       # The export's recommended MoE setup; the shared expert stays a separate
