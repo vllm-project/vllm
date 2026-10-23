@@ -415,7 +415,8 @@ def build(key: Build):
         from . import attn_frag
 
         assert W == 8 and key.attn in ("swa", "full"), key
-        FA = attn_frag.make(S // 8, key.attn == "swa")
+        # kvl = lbhnc: the vLLM build (bf16 LBHNC cache)
+        FA = attn_frag.make(S // 8, key.attn == "swa", kvl=key.kvl)
         FaLds = FA.Lds
         _KEYSTR = (
             _KEYSTR + FA.key
@@ -461,6 +462,7 @@ def build(key: Build):
         + _portion.name_tag(key.only)
         + (f"_fa{key.attn}{int(key.attn_olate)}" if key.attn else "")
         + ("_m1" if key.mult1 else "")
+        + (f"_kv{key.kvl}" if key.attn and key.kvl else "")
     )
     name_b = (
         f"muse_k5b_r{int(key.next_rope)}q{key.qkv_pf}_s{S}_t{int(TL)}_c{XCM}_m{int(key.hm)}{WN}"
@@ -473,7 +475,8 @@ def build(key: Build):
     VQK = key.vqk
     VKV = key.kvl == "lbhnc"
     assert key.kvl in ("", "lbhnc"), key.kvl
-    assert not ((VQK or VKV) and key.attn), key
+    # fused attention: SGLang (fp8 KV, q x qk_scale) or vLLM (bf16 LBHNC KV, q without qk_scale)
+    assert not key.attn or VQK == VKV, key
     ONLY = _portion.stage_set(
         key.only, _portion.K5A_STAGES + _portion.K5B_STAGES, _portion.K5_DEPS
     )
@@ -3857,5 +3860,8 @@ def build_vllm(S=32, W=8, next_rope=True, **over):
         vqk=True,
         kvl="lbhnc",
     )
+    if over.get("attn"):
+        # the fused verify attention (vLLM's bf16 cache): o_proj weights after it, as SGLang ships
+        kw["attn_olate"] = True
     kw.update(over)
     return Build(**kw)

@@ -25,6 +25,7 @@ from .decoder import (
     built_buckets,
     config_refusals,
     deployment_refusals,
+    fused_attention_layers,
     layer_refusals,
 )
 
@@ -47,7 +48,7 @@ def _load_kernels() -> tuple[MonoKernels | None, str | None]:
     try:
         modules = {
             name: importlib.import_module(f"{__name__}.kernels.{name}")
-            for name in ("k3", "k5", "k5m")
+            for name in ("k3", "k5", "k5m", "attn_frag")
         }
     except ImportError as e:
         return None, f"needs FlyDSL and AITER's FlyDSL helpers ({e})"
@@ -113,6 +114,17 @@ def maybe_attach_mono(lm: nn.Module) -> None:
         )
     assert kernels is not None
     buckets = built_buckets(lm.vllm_config.scheduler_config.max_num_seqs)
+    max_model_len = lm.vllm_config.model_config.max_model_len
+    fused = fused_attention_layers(
+        model.layers, max_model_len, kernels.attn_frag.VLLM_MAX_KEYS
+    )
+    if not fused:
+        logger.info(
+            "Muse Spark monokernel: verify attention unfused (max_model_len %d, "
+            "fused builds cover %d)",
+            max_model_len,
+            kernels.attn_frag.VLLM_MAX_KEYS,
+        )
     model.mono = MuseSparkMono(
         model,
         kernels,
@@ -121,6 +133,7 @@ def maybe_attach_mono(lm: nn.Module) -> None:
         device=torch.device("cuda", torch.accelerator.current_device_index()),
         dims=MonoDims.from_config(text_config, world_size),
         buckets=buckets,
+        fused_attention=fused,
     )
     logger.info(
         "Muse Spark monokernel attached: layers %d-%d of verify steps with "
