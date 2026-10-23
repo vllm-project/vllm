@@ -265,8 +265,8 @@ def test_unbind_restores_preexisting_callback():
     assert len(captured) == 1
 
 
-def test_binding_failure_restores_previous_callback():
-    class RejectCaptureSource(torch.nn.Module):
+def _make_rejecting_source(mode: str):
+    class RejectSource(torch.nn.Module):
         layer_id = 1
 
         @property
@@ -277,17 +277,6 @@ def test_binding_failure_restores_previous_callback():
         def capture_fn(self, value):
             raise ValueError("capture binding rejected")
 
-    source = _LifecycleCaptureSource()
-    captured: list[torch.Tensor] = []
-    source.capture_fn = captured.append
-    with pytest.raises(ValueError, match="capture binding rejected"):
-        _bind_sources(_capturer_with_buffer(), source, RejectCaptureSource())
-    source(torch.tensor([[1, 2]]))
-    assert len(captured) == 1
-    torch.testing.assert_close(captured[0], torch.tensor([[1, 2]]))
-
-
-def test_binding_rollback_restores_setter_that_mutated_before_raising():
     class MutateThenReject(torch.nn.Module):
         layer_id = 1
 
@@ -304,18 +293,6 @@ def test_binding_rollback_restores_setter_that_mutated_before_raising():
             self._capture_fn = value
             raise ValueError("capture binding rejected")
 
-    source = _LifecycleCaptureSource()
-    captured: list[torch.Tensor] = []
-    source.capture_fn = captured.append
-    rejected = MutateThenReject()
-    with pytest.raises(ValueError, match="capture binding rejected"):
-        _bind_sources(_capturer_with_buffer(), source, rejected)
-    assert rejected._capture_fn is None
-    source(torch.tensor([[1, 2]]))
-    assert len(captured) == 1
-
-
-def test_binding_rollback_does_not_mask_the_original_error():
     class RestoreFails(torch.nn.Module):
         layer_id = 1
 
@@ -334,13 +311,31 @@ def test_binding_rollback_does_not_mask_the_original_error():
             self._capture_fn = value
             raise ValueError("capture binding rejected")
 
+    return {
+        "reject": RejectSource,
+        "mutate": MutateThenReject,
+        "restore_fails": RestoreFails,
+    }[mode]()
+
+
+@pytest.mark.parametrize("mode", ["reject", "mutate", "restore_fails"])
+def test_binding_rollback_preserves_original_error(mode):
     source = _LifecycleCaptureSource()
     captured: list[torch.Tensor] = []
     source.capture_fn = captured.append
+    rejected = _make_rejecting_source(mode)
+
     with pytest.raises(ValueError, match="capture binding rejected"):
-        _bind_sources(_capturer_with_buffer(), source, RestoreFails())
+        _bind_sources(_capturer_with_buffer(), source, rejected)
+
     source(torch.tensor([[1, 2]]))
     assert len(captured) == 1
+    if mode == "mutate":
+        assert rejected._capture_fn is None
+    elif mode == "restore_fails":
+        # The restore setter raised before clearing the installed callback;
+        # the original binding error must still be the one observed.
+        assert rejected._capture_fn is not None
 
 
 def test_multilayer_binding_captures_each_layer():
@@ -880,6 +875,13 @@ def _connector_config(*, max_num_batched_tokens=32, max_bytes=None):
     )
 
 
+def _kv_cache_config(*, num_blocks=10):
+    return SimpleNamespace(
+        num_blocks=num_blocks,
+        kv_cache_groups=[_full_attention_kv_group(MLAAttentionSpec)],
+    )
+
+
 def _fake_capturer(capacity: int = 32) -> Any:
     return SimpleNamespace(
         shape_per_token=(2,),
@@ -912,6 +914,55 @@ def _install_fake_capturer(
     return capturer, events
 
 
+def _connector_with_capturer(monkeypatch, *, capacity: int = 32):
+    import vllm.distributed.aux_output_connector.worker as aux_output_worker
+
+    capturer, events = _install_fake_capturer(monkeypatch, capacity=capacity)
+    connector = aux_output_worker.AuxOutputWorkerConnector(_connector_config())
+    connector.initialize_routed_experts_capturer(object())
+    return connector, capturer, events
+
+
+def _install_storage(
+    monkeypatch,
+    *,
+    is_output_rank: bool = True,
+    buffer_error=None,
+    store=None,
+    on_store_close=None,
+):
+    import vllm.distributed.aux_output_connector.worker as aux_output_worker
+
+    store = store if store is not None else Mock()
+    if on_store_close is not None:
+        store.close.side_effect = on_store_close
+    store_constructor = Mock()
+    background_store_constructor = Mock(side_effect=lambda inner, **_: store)
+    monkeypatch.setattr(
+        aux_output_worker,
+        "get_tp_group",
+        lambda: SimpleNamespace(
+            is_first_rank=is_output_rank, world_size=1 if is_output_rank else 2
+        ),
+    )
+    monkeypatch.setattr(
+        aux_output_worker, "resolve_kv_cache_block_sizes", lambda *_: (32, 16)
+    )
+    monkeypatch.setattr(aux_output_worker, "BlockObjectStore", store_constructor)
+    monkeypatch.setattr(
+        aux_output_worker, "BackgroundBlockObjectStore", background_store_constructor
+    )
+    if buffer_error is None:
+        monkeypatch.setattr(aux_output_worker, "RoutedExpertsBuffer", Mock())
+    else:
+        monkeypatch.setattr(
+            aux_output_worker,
+            "RoutedExpertsBuffer",
+            Mock(side_effect=buffer_error),
+        )
+    return store, store_constructor, background_store_constructor
+
+
 def test_get_aux_output_connector_creates_early_connector(monkeypatch):
     import vllm.distributed.aux_output_connector.worker as aux_output_worker
 
@@ -925,12 +976,8 @@ def test_get_aux_output_connector_creates_early_connector(monkeypatch):
 
 
 def test_connector_initializes_capturer_once(monkeypatch):
-    import vllm.distributed.aux_output_connector.worker as aux_output_worker
+    connector, capturer, events = _connector_with_capturer(monkeypatch)
 
-    capturer, events = _install_fake_capturer(monkeypatch)
-    connector = aux_output_worker.AuxOutputWorkerConnector(_connector_config())
-
-    connector.initialize_routed_experts_capturer(object())
     connector.initialize_routed_experts_capturer(object())
 
     assert [event[0] for event in events] == ["allocate", "bind"]
@@ -953,39 +1000,19 @@ def test_connector_capturer_init_failure_leaves_no_owner(monkeypatch):
     connector.close()
 
 
-def test_connector_storage_uses_existing_capturer(monkeypatch):
-    import vllm.distributed.aux_output_connector.worker as aux_output_worker
+def test_connector_storage_uses_capturer_and_initializes_once(monkeypatch):
+    connector, capturer, _ = _connector_with_capturer(monkeypatch)
+    _, store_constructor, background_store_constructor = _install_storage(monkeypatch)
+    kv_cache_config = _kv_cache_config()
 
-    capturer, _ = _install_fake_capturer(monkeypatch)
-    store_constructor = Mock()
-    background_store_constructor = Mock(side_effect=lambda store, **_: store)
-    monkeypatch.setattr(
-        aux_output_worker,
-        "get_tp_group",
-        lambda: SimpleNamespace(is_first_rank=True, world_size=1),
-    )
-    monkeypatch.setattr(
-        aux_output_worker, "resolve_kv_cache_block_sizes", lambda *_: (32, 16)
-    )
-    monkeypatch.setattr(aux_output_worker, "BlockObjectStore", store_constructor)
-    monkeypatch.setattr(
-        aux_output_worker, "BackgroundBlockObjectStore", background_store_constructor
-    )
-    monkeypatch.setattr(aux_output_worker, "RoutedExpertsBuffer", Mock())
-
-    connector = aux_output_worker.AuxOutputWorkerConnector(_connector_config())
-    connector.initialize_routed_experts_capturer(object())
-    connector.initialize_storage(
-        SimpleNamespace(
-            num_blocks=10,
-            kv_cache_groups=[_full_attention_kv_group(MLAAttentionSpec)],
-        )
-    )
+    connector.initialize_storage(kv_cache_config)
 
     assert connector._capturer is capturer
     assert store_constructor.call_args.kwargs["max_bytes"] == 2560
     assert store_constructor.call_args.kwargs["object_nbytes"] == 128
     assert background_store_constructor.call_args.kwargs["max_pending_batches"] == 16
+    with pytest.raises(RuntimeError, match="already initialized"):
+        connector.initialize_storage(kv_cache_config)
 
 
 def test_connector_storage_requires_capturer(monkeypatch):
@@ -996,50 +1023,11 @@ def test_connector_storage_requires_capturer(monkeypatch):
         connector.initialize_storage(SimpleNamespace(num_blocks=1, kv_cache_groups=[]))
 
 
-def test_connector_storage_is_initialized_once(monkeypatch):
-    import vllm.distributed.aux_output_connector.worker as aux_output_worker
-
-    _install_fake_capturer(monkeypatch)
-    monkeypatch.setattr(
-        aux_output_worker,
-        "get_tp_group",
-        lambda: SimpleNamespace(is_first_rank=True, world_size=1),
-    )
-    monkeypatch.setattr(
-        aux_output_worker, "resolve_kv_cache_block_sizes", lambda *_: (32, 16)
-    )
-    monkeypatch.setattr(aux_output_worker, "BlockObjectStore", Mock())
-    monkeypatch.setattr(
-        aux_output_worker,
-        "BackgroundBlockObjectStore",
-        Mock(side_effect=lambda store, **_: store),
-    )
-    monkeypatch.setattr(aux_output_worker, "RoutedExpertsBuffer", Mock())
-
-    connector = aux_output_worker.AuxOutputWorkerConnector(_connector_config())
-    connector.initialize_routed_experts_capturer(object())
-    kv_cache_config = SimpleNamespace(
-        num_blocks=10,
-        kv_cache_groups=[_full_attention_kv_group(MLAAttentionSpec)],
-    )
-    connector.initialize_storage(kv_cache_config)
-    with pytest.raises(RuntimeError, match="already initialized"):
-        connector.initialize_storage(kv_cache_config)
-
-
 def test_connector_non_output_rank_keeps_capturer_without_storage(monkeypatch):
-    import vllm.distributed.aux_output_connector.worker as aux_output_worker
+    connector, capturer, _ = _connector_with_capturer(monkeypatch)
+    _install_storage(monkeypatch, is_output_rank=False)
 
-    capturer, _ = _install_fake_capturer(monkeypatch)
-    monkeypatch.setattr(
-        aux_output_worker,
-        "get_tp_group",
-        lambda: SimpleNamespace(is_first_rank=False, world_size=2),
-    )
-    connector = aux_output_worker.AuxOutputWorkerConnector(_connector_config())
-    connector.initialize_routed_experts_capturer(object())
-
-    connector.initialize_storage(SimpleNamespace(num_blocks=1, kv_cache_groups=[]))
+    connector.initialize_storage(_kv_cache_config(num_blocks=1))
 
     assert connector._capturer is not None
     assert id(connector._capturer) == id(capturer)
@@ -1052,53 +1040,38 @@ def test_connector_non_output_rank_keeps_capturer_without_storage(monkeypatch):
 
 def test_connector_rejects_undersized_capturer(monkeypatch):
     """Silently truncated snapshots would blame the wrong tokens on experts."""
-    import vllm.distributed.aux_output_connector.worker as aux_output_worker
-
-    _install_fake_capturer(monkeypatch, capacity=16)
-    monkeypatch.setattr(
-        aux_output_worker,
-        "get_tp_group",
-        lambda: SimpleNamespace(is_first_rank=True, world_size=1),
-    )
-    connector = aux_output_worker.AuxOutputWorkerConnector(_connector_config())
-    connector.initialize_routed_experts_capturer(object())
+    connector, _, _ = _connector_with_capturer(monkeypatch, capacity=16)
+    _install_storage(monkeypatch)
 
     with pytest.raises(AssertionError, match="smaller than the scheduler"):
-        connector.initialize_storage(SimpleNamespace(num_blocks=1, kv_cache_groups=[]))
+        connector.initialize_storage(_kv_cache_config(num_blocks=1))
 
 
 def test_connector_storage_failure_releases_store(monkeypatch):
-    import vllm.distributed.aux_output_connector.worker as aux_output_worker
-
-    _install_fake_capturer(monkeypatch)
-    store = Mock()
-    monkeypatch.setattr(
-        aux_output_worker,
-        "get_tp_group",
-        lambda: SimpleNamespace(is_first_rank=True, world_size=1),
-    )
-    monkeypatch.setattr(
-        aux_output_worker, "resolve_kv_cache_block_sizes", lambda *_: (32, 16)
-    )
-    monkeypatch.setattr(aux_output_worker, "BlockObjectStore", Mock())
-    monkeypatch.setattr(
-        aux_output_worker, "BackgroundBlockObjectStore", Mock(return_value=store)
-    )
-    monkeypatch.setattr(
-        aux_output_worker,
-        "RoutedExpertsBuffer",
-        Mock(side_effect=RuntimeError("buffer failed")),
+    connector, _, _ = _connector_with_capturer(monkeypatch)
+    store, _, _ = _install_storage(
+        monkeypatch, buffer_error=RuntimeError("buffer failed")
     )
 
-    connector = aux_output_worker.AuxOutputWorkerConnector(_connector_config())
-    connector.initialize_routed_experts_capturer(object())
     with pytest.raises(RuntimeError, match="buffer failed"):
-        connector.initialize_storage(
-            SimpleNamespace(
-                num_blocks=10,
-                kv_cache_groups=[_full_attention_kv_group(MLAAttentionSpec)],
-            )
-        )
+        connector.initialize_storage(_kv_cache_config())
+
+    store.close.assert_called_once_with()
+    assert connector._store is None
+    assert connector._buffer is None
+
+
+def test_connector_storage_failure_keeps_original_error_when_close_fails(monkeypatch):
+    connector, _, _ = _connector_with_capturer(monkeypatch)
+    store, _, _ = _install_storage(
+        monkeypatch,
+        buffer_error=RuntimeError("buffer failed"),
+        store=Mock(),
+    )
+    store.close.side_effect = RuntimeError("store close failed")
+
+    with pytest.raises(RuntimeError, match="buffer failed"):
+        connector.initialize_storage(_kv_cache_config())
 
     store.close.assert_called_once_with()
     assert connector._store is None
@@ -1106,33 +1079,12 @@ def test_connector_storage_failure_releases_store(monkeypatch):
 
 
 def test_connector_close_releases_storage_then_capturer(monkeypatch):
-    import vllm.distributed.aux_output_connector.worker as aux_output_worker
-
-    _, events = _install_fake_capturer(monkeypatch)
-    store = Mock()
-    store.close.side_effect = lambda: events.append(("store_close", None))
-    monkeypatch.setattr(
-        aux_output_worker,
-        "get_tp_group",
-        lambda: SimpleNamespace(is_first_rank=True, world_size=1),
+    connector, _, events = _connector_with_capturer(monkeypatch)
+    _install_storage(
+        monkeypatch,
+        on_store_close=lambda: events.append(("store_close", None)),
     )
-    monkeypatch.setattr(
-        aux_output_worker, "resolve_kv_cache_block_sizes", lambda *_: (32, 16)
-    )
-    monkeypatch.setattr(aux_output_worker, "BlockObjectStore", Mock())
-    monkeypatch.setattr(
-        aux_output_worker, "BackgroundBlockObjectStore", Mock(return_value=store)
-    )
-    monkeypatch.setattr(aux_output_worker, "RoutedExpertsBuffer", Mock())
-
-    connector = aux_output_worker.AuxOutputWorkerConnector(_connector_config())
-    connector.initialize_routed_experts_capturer(object())
-    connector.initialize_storage(
-        SimpleNamespace(
-            num_blocks=10,
-            kv_cache_groups=[_full_attention_kv_group(MLAAttentionSpec)],
-        )
-    )
+    connector.initialize_storage(_kv_cache_config())
 
     connector.close()
     connector.close()
@@ -1150,11 +1102,7 @@ def test_connector_close_releases_storage_then_capturer(monkeypatch):
 
 
 def test_connector_close_with_only_capturer_is_safe(monkeypatch):
-    import vllm.distributed.aux_output_connector.worker as aux_output_worker
-
-    _, events = _install_fake_capturer(monkeypatch)
-    connector = aux_output_worker.AuxOutputWorkerConnector(_connector_config())
-    connector.initialize_routed_experts_capturer(object())
+    connector, _, events = _connector_with_capturer(monkeypatch)
 
     connector.close()
     connector.close()
@@ -1196,7 +1144,27 @@ def test_v2_model_runner_accepts_routed_experts(monkeypatch):
     assert "routed experts capture" not in unsupported
 
 
-def test_release_capture_resources_orders_graphs_before_connector(monkeypatch):
+@pytest.mark.parametrize(
+    ("has_connector", "is_rocm", "expected", "second_expected"),
+    [
+        (
+            True,
+            False,
+            ["clear", "clear_breakable", "release_graphs", "connector_close"],
+            [],
+        ),
+        (False, False, [], []),
+        (
+            False,
+            True,
+            ["clear", "clear_breakable"],
+            ["clear", "clear_breakable"],
+        ),
+    ],
+)
+def test_release_capture_resources(
+    monkeypatch, has_connector, is_rocm, expected, second_expected
+):
     import vllm.v1.worker.gpu.model_runner as mrv2
 
     events: list[str] = []
@@ -1205,7 +1173,7 @@ def test_release_capture_resources_orders_graphs_before_connector(monkeypatch):
         return lambda *args, **kwargs: events.append(name)
 
     monkeypatch.setattr(
-        mrv2, "current_platform", SimpleNamespace(is_rocm=lambda: False)
+        mrv2, "current_platform", SimpleNamespace(is_rocm=lambda: is_rocm)
     )
     monkeypatch.setattr(
         mrv2, "CUDAGraphWrapper", SimpleNamespace(clear_all_graphs=recorder("clear"))
@@ -1215,79 +1183,24 @@ def test_release_capture_resources_orders_graphs_before_connector(monkeypatch):
         "BreakableCUDAGraphWrapper",
         SimpleNamespace(clear_all_graphs=recorder("clear_breakable")),
     )
+    manager = SimpleNamespace(release_graphs=recorder("release_graphs"))
+    connector = (
+        SimpleNamespace(close=recorder("connector_close")) if has_connector else None
+    )
     runner = SimpleNamespace(
-        cudagraph_manager=SimpleNamespace(release_graphs=recorder("release_graphs")),
-        aux_output_connector=SimpleNamespace(close=recorder("connector_close")),
+        cudagraph_manager=manager if (has_connector or not is_rocm) else None,
+        aux_output_connector=connector,
     )
 
     mrv2.GPUModelRunner._release_capture_resources(runner)
 
     # Graphs captured the R3 callbacks and are dropped before the connector
     # releases the buffers and unbinds the callbacks.
-    assert events == [
-        "clear",
-        "clear_breakable",
-        "release_graphs",
-        "connector_close",
-    ]
+    assert events == expected
     assert runner.aux_output_connector is None
-    assert runner.cudagraph_manager is None
+    if has_connector:
+        assert runner.cudagraph_manager is None
 
     events.clear()
     mrv2.GPUModelRunner._release_capture_resources(runner)
-    assert events == []
-
-
-def test_release_capture_resources_keeps_graphs_without_aux_output(monkeypatch):
-    import vllm.v1.worker.gpu.model_runner as mrv2
-
-    events: list[str] = []
-
-    def recorder(name: str):
-        return lambda *args, **kwargs: events.append(name)
-
-    monkeypatch.setattr(
-        mrv2, "current_platform", SimpleNamespace(is_rocm=lambda: False)
-    )
-    monkeypatch.setattr(
-        mrv2, "CUDAGraphWrapper", SimpleNamespace(clear_all_graphs=recorder("clear"))
-    )
-    monkeypatch.setattr(
-        mrv2,
-        "BreakableCUDAGraphWrapper",
-        SimpleNamespace(clear_all_graphs=recorder("clear_breakable")),
-    )
-    runner = SimpleNamespace(
-        cudagraph_manager=SimpleNamespace(release_graphs=recorder("release_graphs")),
-        aux_output_connector=None,
-    )
-
-    mrv2.GPUModelRunner._release_capture_resources(runner)
-
-    # Without auxiliary output the teardown keeps the existing semantics.
-    assert events == []
-    assert runner.cudagraph_manager is not None
-
-
-def test_release_capture_resources_clears_rocm_graphs_without_aux_output(monkeypatch):
-    import vllm.v1.worker.gpu.model_runner as mrv2
-
-    events: list[str] = []
-
-    def recorder(name: str):
-        return lambda *args, **kwargs: events.append(name)
-
-    monkeypatch.setattr(mrv2, "current_platform", SimpleNamespace(is_rocm=lambda: True))
-    monkeypatch.setattr(
-        mrv2, "CUDAGraphWrapper", SimpleNamespace(clear_all_graphs=recorder("clear"))
-    )
-    monkeypatch.setattr(
-        mrv2,
-        "BreakableCUDAGraphWrapper",
-        SimpleNamespace(clear_all_graphs=recorder("clear_breakable")),
-    )
-    runner = SimpleNamespace(cudagraph_manager=None, aux_output_connector=None)
-
-    mrv2.GPUModelRunner._release_capture_resources(runner)
-
-    assert events == ["clear", "clear_breakable"]
+    assert events == second_expected
