@@ -140,7 +140,10 @@ from vllm.model_executor.models.granitemoe import (
     GraniteMoeModel,
 )
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
+from vllm.utils.flashinfer import (
+    has_flashinfer_nvlink_one_sided,
+    has_flashinfer_trtllm_fused_moe,
+)
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 if current_platform.is_rocm():
@@ -1532,9 +1535,15 @@ def test_nvfp4_per_token_backend_contract() -> None:
 
 @pytest.mark.parametrize("per_token_activation", [False, True])
 @pytest.mark.parametrize("input_dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.skipif(
+    not has_flashinfer_nvlink_one_sided(), reason="Requires FI dispatch-format API"
+)
 def test_nvfp4_one_sided_sizes_dispatched_activations(
     monkeypatch, per_token_activation: bool, input_dtype: torch.dtype
 ) -> None:
+    from flashinfer.fused_moe import QuantFormat
+    from flashinfer.moe_ep import MoEEpCommParams
+
     from tests.kernels.moe.utils import make_dummy_moe_config
     from vllm.model_executor.layers.fused_moe.all2all_utils import (
         flashinfer_one_sided_dispatch_layout,
@@ -1558,14 +1567,24 @@ def test_nvfp4_one_sided_sizes_dispatched_activations(
         )
         if per_token_activation:
             assert input_dtype == config.in_dtype
-            assert (
-                layout.x_bytes_per_token == config.hidden_dim * config.in_dtype.itemsize
+            assert layout.dispatch_format == (
+                QuantFormat.FP16 if input_dtype == torch.float16 else QuantFormat.BF16
             )
-            assert layout.x_sf_bytes_per_token == 0
+            expected_bytes = config.hidden_dim * config.in_dtype.itemsize
         else:
             assert input_dtype is None
-            assert layout.x_bytes_per_token == config.hidden_dim // 2
-            assert layout.x_sf_bytes_per_token == config.hidden_dim // 16
+            assert layout.dispatch_format == QuantFormat.NVFP4
+            expected_bytes = config.hidden_dim // 2 + config.hidden_dim // 16
+        params = MoEEpCommParams(
+            num_experts=8,
+            top_k=2,
+            max_tokens_per_rank=32,
+            hidden_size=config.hidden_dim,
+            dtype=torch.bfloat16,
+            dispatch_format=layout.dispatch_format,
+        )
+        assert params.dispatch_bytes_per_token == expected_bytes
+        assert layout.extra_payload_bytes_per_token == 0
         assert expert_quant_config.quant_dtype == "nvfp4"
         raise RuntimeError("dispatch layout verified before allocation")
 
@@ -1582,6 +1601,48 @@ def test_nvfp4_one_sided_sizes_dispatched_activations(
             backend=nvfp4_oracle.NvFp4MoeBackend.FLASHINFER_TRTLLM,
             per_token_activation=per_token_activation,
         )
+
+
+@pytest.mark.parametrize(
+    "quant_dtype,block_shape,hidden,alignment,expected_format,expected_bytes",
+    [
+        (None, None, 256, 0, "BF16", 512),
+        ("nvfp4", None, 256, 0, "NVFP4", 144),
+        ("mxfp8", None, 256, 128, "MXFP8", 264),
+        ("mxfp8", None, 160, 128, "MXFP8", 168),
+        (torch.float8_e4m3fn, [128, 128], 256, 0, "DeepSeekFp8", 264),
+    ],
+)
+@pytest.mark.skipif(
+    not has_flashinfer_nvlink_one_sided(), reason="Requires FI dispatch-format API"
+)
+def test_one_sided_dispatch_format_preserves_payload_capacity(
+    quant_dtype, block_shape, hidden, alignment, expected_format, expected_bytes
+):
+    """Match the old payload sizes, including MXFP8's padded scale row."""
+    from flashinfer.moe_ep import MoEEpCommParams
+
+    from vllm.model_executor.layers.fused_moe.all2all_utils import (
+        flashinfer_one_sided_dispatch_layout,
+    )
+    from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+
+    quant_config = FusedMoEQuantConfig.make(quant_dtype, block_shape=block_shape)
+    quant_config.mx_alignment = alignment
+    layout = flashinfer_one_sided_dispatch_layout(hidden, quant_config)
+    assert layout.dispatch_format.name == expected_format
+    params = MoEEpCommParams(
+        num_experts=8,
+        top_k=2,
+        max_tokens_per_rank=32,
+        hidden_size=hidden,
+        dtype=torch.bfloat16,
+        dispatch_format=layout.dispatch_format,
+    )
+    assert (
+        params.dispatch_bytes_per_token + layout.extra_payload_bytes_per_token
+        == expected_bytes
+    )
 
 
 @pytest.mark.parametrize(
@@ -1806,11 +1867,14 @@ def test_online_quantization(
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1" if use_rocm_aiter else "0")
         rocm_aiter_ops.refresh_env_variables()
 
-    if current_platform.is_xpu() and quant_scheme in (
-        "fp8_per_block",
-        "fp8_per_channel",
-    ):
-        pytest.skip(f"Skip test for online {quant_scheme} on XPU platform.")
+    if current_platform.is_xpu():
+        if quant_scheme in ("fp8_per_block", "fp8_per_channel"):
+            pytest.skip(f"Skip test for online {quant_scheme} on XPU platform.")
+        if model_name == MODELOPT_NVFP4_MOE_MODEL_NAME:
+            pytest.skip(
+                "modelopt_fp4 quantization (base format of "
+                f"{MODELOPT_NVFP4_MOE_MODEL_NAME}) is not supported on XPU platform."
+            )
 
     runner_kwargs = dict(extra_runner_kwargs)
     kv_cache_dtype = runner_kwargs.get("kv_cache_dtype", "auto")
