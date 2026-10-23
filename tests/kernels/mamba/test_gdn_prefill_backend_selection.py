@@ -50,40 +50,18 @@ def sm75(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(gdn_module, "current_platform", _platform(7, 5))
 
 
-def test_sm8x_runs_flashinfer_when_the_build_has_it(
-    sm80, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Which architectures the build covers is asked of the build."""
-    monkeypatch.setattr(gdn_module, "has_flashinfer_gdn_prefill_sm8x", lambda: True)
-    assert _resolve_gdn_prefill_backend(_config("flashinfer"))[1] == "flashinfer"
-
-
-def test_sm8x_refuses_flashinfer_when_the_build_lacks_it(
-    sm80, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(gdn_module, "has_flashinfer_gdn_prefill_sm8x", lambda: False)
-    with pytest.raises(ValueError, match="no path for compute capability"):
-        _resolve_gdn_prefill_backend(_config("flashinfer"))
-
-
-def test_sm8x_is_runnable_but_not_the_default(
-    sm80, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_sm8x_is_runnable_but_not_the_default(sm80) -> None:
     """Runnable and preferred are different questions.
 
     The SM8x path is new here, so "auto" keeps the fallback until it has been
     measured against it, while a caller who names it still gets it.
     """
-    monkeypatch.setattr(gdn_module, "has_flashinfer_gdn_prefill_sm8x", lambda: True)
     assert _resolve_gdn_prefill_backend(_config("auto"))[1] == "triton"
     assert _resolve_gdn_prefill_backend(_config(None))[1] == "triton"
     assert _resolve_gdn_prefill_backend(_config("flashinfer"))[1] == "flashinfer"
 
 
-def test_sm8x_needs_the_head_dim_the_kernel_builds(
-    sm80, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(gdn_module, "has_flashinfer_gdn_prefill_sm8x", lambda: True)
+def test_sm8x_needs_the_head_dim_the_kernel_builds(sm80) -> None:
     with pytest.raises(ValueError, match="head_k_dim=64"):
         _resolve_gdn_prefill_backend(_config("flashinfer", head_k_dim=64))
 
@@ -287,14 +265,12 @@ def test_adapter_omits_the_batch_maximum_when_the_build_lacks_it(
     assert final_state is not None
 
 
-def test_the_probe_answers_from_the_signature_not_the_sm8x_gate(
+def test_the_probe_answers_from_the_signature(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A build may carry the SM8x entry point and not this argument."""
     probe = flashinfer_utils.flashinfer_gdn_prefill_takes
 
-    module = _install_stub(monkeypatch, _stub_without_max_seqlen({}))
-    module.chunk_gated_delta_rule_sm80 = lambda *a, **kw: None
+    _install_stub(monkeypatch, _stub_without_max_seqlen({}))
     assert not probe("max_seqlen") and not probe("cu_seqlens_cpu")
 
     _install_stub(monkeypatch, _stub_with_max_seqlen({}))

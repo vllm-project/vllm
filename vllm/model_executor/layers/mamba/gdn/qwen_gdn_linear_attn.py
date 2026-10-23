@@ -73,10 +73,7 @@ from vllm.third_party.flash_linear_attention.ops.fused_gdn_decode_post_conv_mtp 
     fused_gdn_decode_post_conv_mtp_triton,
 )
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
-from vllm.utils.flashinfer import (
-    flashinfer_gdn_prefill_takes,
-    has_flashinfer_gdn_prefill_sm8x,
-)
+from vllm.utils.flashinfer import flashinfer_gdn_prefill_takes
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     LayerNameType,
@@ -276,25 +273,18 @@ def _resolve_gdn_prefill_backend(
         # The in-tree CuteDSL kernel targets SM100 only, so it stays off here.
         can_run_flashinfer = True
         prefer_flashinfer = True
-    elif (
-        current_platform.is_device_capability_family(80)
-        and head_k_dim == 128
-        and has_flashinfer_gdn_prefill_sm8x()
-    ):
-        # Runnable wherever the installed build carries the SM8x prefill, and
-        # asked of the module because the build is what decides. Not preferred:
-        # "auto" keeps the fallback until this path has been measured against
-        # it on this architecture.
+    elif current_platform.is_device_capability_family(80) and head_k_dim == 128:
+        # Not preferred: "auto" keeps the fallback until this path has been
+        # measured against it on this architecture.
         can_run_flashinfer = True
 
     if backend == "flashinfer":
         if not can_run_flashinfer:
             raise ValueError(
                 "GDN prefill backend 'flashinfer' was requested, but the "
-                f"installed FlashInfer has no path for compute capability "
+                "FlashInfer GDN prefill does not cover compute capability "
                 f"{current_platform.get_device_capability()} with "
-                f"head_k_dim={head_k_dim}. Pass --gdn-prefill-backend triton, "
-                "or install a FlashInfer build that covers this device."
+                f"head_k_dim={head_k_dim}. Pass --gdn-prefill-backend triton."
             )
         return backend, "flashinfer"
     if backend == "cutedsl":
