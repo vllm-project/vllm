@@ -393,7 +393,9 @@ def _fused_norm_rope_kernel(
                 scale = 1.0
                 if not SKIP_MLA_SCALE:
                     scale = tl.load(mla_cache_scale_ptr)
-                kv_c_fp8 = (kv_c.to(tl.float32) / scale).to(fp8_dtype)
+                    kv_c_fp8 = (kv_c.to(tl.float32) / scale).to(fp8_dtype)
+                else:
+                    kv_c_fp8 = kv_c.to(tl.float32).to(fp8_dtype)
                 tl.store(dst + kv_block, kv_c_fp8)
             else:
                 tl.store(dst + kv_block, kv_c)
