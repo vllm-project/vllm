@@ -747,6 +747,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             or self.num_v_heads % self.num_k_heads != 0
             or self.num_v_heads // self.num_k_heads not in (2, 3)
             or self.conv_kernel_size != 4
+            or self.activation != "silu"
             or self.norm.activation != "silu"
             or vllm_config.model_config.dtype != torch.bfloat16
             or conv_state_dtype != torch.bfloat16
@@ -754,8 +755,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         ):
             return (
                 "the fused AITER kernel requires a BF16 GDN model with K=V=128, "
-                "2 or 3 value heads per key head, conv width 4, SiLU gating, "
-                "a BF16 convolution cache and a BF16 or FP32 recurrent state"
+                "2 or 3 value heads per key head, conv width 4, SiLU conv and gate "
+                "activations, a BF16 convolution cache and a BF16 or FP32 recurrent "
+                "state"
             )
         if not isinstance(self.out_proj.quant_method, UnquantizedLinearMethod):
             # The kernel emits the normed output, so the norm cannot be fused
@@ -1539,7 +1541,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self,
         qkvz: torch.Tensor,
         ba: torch.Tensor,
-        z_out: torch.Tensor,
+        z_out: torch.Tensor | None,
         core_attn_out: torch.Tensor,
     ):
         """ROCm AITER fast path: conv1d + recurrent attention from packed
@@ -1553,7 +1555,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             qkvz: packed [q, k, v, z] projection (num_tokens, qkvz_dim)
             ba:   packed [b, a] gating vectors    (num_tokens, 2*num_heads)
             z_out: **output** buffer for z        (num_tokens, num_heads,
-                   head_dim); mutated in-place.
+                   head_dim); mutated in-place. ``None`` when the layer uses the
+                   fused AITER kernel (``use_aiter_fused_gdn_decode``): the gated
+                   RMSNorm is then applied too and ``core_attn_out`` receives the
+                   normed output.
             core_attn_out: Pre-allocated output buffer for attention results.
 
         """
@@ -1575,6 +1580,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             and attn_metadata.num_prefills == 0
             and attn_metadata.num_decodes > 0
         ):
+            if self.use_aiter_fused_gdn_decode:
+                return self._forward_core_decode_aiter_fused(
+                    qkvz=qkvz,
+                    ba=ba,
+                    normed_out=core_attn_out,
+                    attn_metadata=attn_metadata,
+                )
             return self._forward_core_decode_aiter(
                 qkvz=qkvz,
                 ba=ba,
@@ -1588,13 +1600,22 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         mixed_qkv, z, b, a = self.prepare_gdn_attention_core_inputs(
             qkvz, ba, num_tokens_all
         )
-        z_out[:] = z
+        if not self.use_aiter_fused_gdn_decode:
+            assert z_out is not None
+            z_out[:] = z
         self._forward_core(
             mixed_qkv=mixed_qkv,
             b=b,
             a=a,
             core_attn_out=core_attn_out,
         )
+        if self.use_aiter_fused_gdn_decode:
+            num_actual_tokens = attn_metadata.num_actual_tokens
+            self._rms_norm_gated_cuda(
+                core_attn_out[:num_actual_tokens],
+                z[:num_actual_tokens],
+                core_attn_out[:num_actual_tokens],
+            )
 
     def _forward_core(
         self,
@@ -2021,45 +2042,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out=core_attn_out.reshape(-1),
         )
 
-    def _forward_core_rocm_fused_norm(
-        self,
-        qkvz: torch.Tensor,
-        ba: torch.Tensor,
-        normed_out: torch.Tensor,
-    ):
-        """``_forward_core_rocm`` + gated RMSNorm into ``normed_out`` [T, H_v, d_v];
-        decode-only batches run the fused AITER kernel."""
-        forward_context = get_forward_context()
-        attn_metadata_raw = forward_context.attn_metadata
-
-        attn_metadata = None
-        if isinstance(attn_metadata_raw, dict):
-            attn_metadata = attn_metadata_raw.get(self.prefix)
-        if attn_metadata is None:
-            v_dim = normed_out.shape[-1] * normed_out.shape[-2]
-            self._warmup_prefill_kernels(qkvz, v_dim)
-            return
-
-        assert isinstance(attn_metadata, GDNAttentionMetadata)
-
-        if (
-            attn_metadata.spec_sequence_masks is None
-            and attn_metadata.num_prefills == 0
-            and attn_metadata.num_decodes > 0
-        ):
-            return self._forward_core_decode_aiter_fused(
-                qkvz=qkvz,
-                ba=ba,
-                normed_out=normed_out,
-                attn_metadata=attn_metadata,
-            )
-
-        z = torch.empty_like(normed_out)
-        core_attn_out = torch.empty_like(normed_out)
-        self._forward_core_rocm(qkvz=qkvz, ba=ba, z_out=z, core_attn_out=core_attn_out)
-        # Eager inside the op: run the FLA gated norm straight into normed_out.
-        self._rms_norm_gated_cuda(core_attn_out, z, normed_out)
-
     def _forward_core_decode_aiter_fused(
         self,
         qkvz: torch.Tensor,
@@ -2416,6 +2398,7 @@ direct_register_custom_op(
 )
 
 
+@eager_break_during_capture
 def qwen_gdn_attention_core_fused_norm_rocm(
     qkvz: torch.Tensor,
     ba: torch.Tensor,
@@ -2426,7 +2409,7 @@ def qwen_gdn_attention_core_fused_norm_rocm(
     layer_name = _resolve_layer_name(layer_name)
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
-    self._forward_core_rocm_fused_norm(qkvz=qkvz, ba=ba, normed_out=normed_out)
+    self._forward_core_rocm(qkvz=qkvz, ba=ba, z_out=None, core_attn_out=normed_out)
 
 
 direct_register_custom_op(
