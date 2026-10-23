@@ -600,11 +600,9 @@ class Worker(WorkerBase):
     # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
     # to hijack tensor allocation.
     def load_model(self, *, load_dummy_weights: bool = False) -> None:
-        if (
-            self.use_v2_model_runner
-            and self.vllm_config.aux_output_config.enabled
-            and getattr(self.model_runner, "aux_output_connector", None) is not None
-        ):
+        use_r3 = self.use_v2_model_runner and self.vllm_config.aux_output_config.enabled
+        model_runner = cast("GPUModelRunnerV2", self.model_runner)
+        if use_r3 and model_runner.aux_output_connector is not None:
             raise RuntimeError(
                 "The auxiliary-output connector is already initialized for this "
                 "model runner; reloading the model would invalidate its capture "
@@ -619,10 +617,9 @@ class Worker(WorkerBase):
         ):
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
 
-        if self.use_v2_model_runner and self.vllm_config.aux_output_config.enabled:
+        if use_r3:
             # Capture must exist before KV-cache profiling and outside the
             # weights pool, so weight discard/reload cannot invalidate it.
-            model_runner = cast("GPUModelRunnerV2", self.model_runner)
             connector = get_aux_output_connector(self.vllm_config)
             try:
                 connector.initialize_routed_experts_capturer(model_runner.get_model())

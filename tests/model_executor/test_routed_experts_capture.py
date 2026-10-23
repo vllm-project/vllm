@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
 import gc
 import types
 import weakref
@@ -336,6 +337,24 @@ def test_binding_rollback_preserves_original_error(mode):
         # The restore setter raised before clearing the installed callback;
         # the original binding error must still be the one observed.
         assert rejected._capture_fn is not None
+
+
+def test_make_capture_fn_uses_partial_and_keeps_owner():
+    from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+        _CAPTURE_FN_OWNER_ATTR,
+        _make_capture_fn,
+    )
+
+    capturer = _capturer_with_buffer()
+    capture_fn = _make_capture_fn(capturer, layer_id=1)
+
+    assert isinstance(capture_fn, functools.partial)
+    assert getattr(capture_fn, _CAPTURE_FN_OWNER_ATTR) is capturer
+
+    topk_ids = torch.tensor([[1, 2]], dtype=torch.int32)
+    with _capture_context(num_tokens=1):
+        capture_fn(topk_ids)
+    torch.testing.assert_close(capturer.device_buffer[0, 1], topk_ids[0])
 
 
 def test_multilayer_binding_captures_each_layer():
