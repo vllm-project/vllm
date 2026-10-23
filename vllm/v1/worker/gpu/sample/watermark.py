@@ -1085,7 +1085,21 @@ def _row_sum(slot_ptr, values, scale, num_blocks):
     totals = tl.load(slots, volatile=True)
     while tl.min(totals) < done:
         totals = tl.load(slots, volatile=True)
-    return (totals - done).to(tl.float32) / scale
+    return totals - done
+
+
+@triton.jit
+def _apply_layer(probs, one_probs, zero_mass, one_mass):
+    """Return probs * (1 - m + g) and m, where one_probs is probs where g = 1.
+
+    For small m, apply the factor as an offset: rounding 1 - m to FP32 would
+    shift every token the same way and the error would build up over layers.
+    """
+    inv_total = 1.0 / (zero_mass + one_mass)
+    mean = one_mass * inv_total
+    offset = mean < 0.5
+    factor = tl.where(offset, -mean, zero_mass * inv_total)
+    return probs * factor + (probs * offset.to(tl.float32) + one_probs), mean
 
 
 @triton.jit(
@@ -1177,21 +1191,28 @@ def _synthid_kernel(
         sums_a, sums_b = tl.split(sums)
         total, mass_a = tl.split(sums_a)
         mass_b, mass_ab = tl.split(sums_b)
-        # 1 - m from the g = 0 mass: full precision when m is close to 1.
-        factor_a = mass_a / total
-        # p * (1 - m + g) without keeping g across the sync.
-        probs = probs * factor_a + (probs - probs_a)
+        # Masses by the (a, b) g bits, from exact fixed point differences.
+        mass_00 = mass_ab.to(tl.float32)
+        mass_01 = (mass_a - mass_ab).to(tl.float32)
+        mass_10 = (mass_b - mass_ab).to(tl.float32)
+        mass_11 = (total - mass_a - mass_b + mass_ab).to(tl.float32)
+        probs, mean_a = _apply_layer(
+            probs, probs - probs_a, mass_00 + mass_01, mass_10 + mass_11
+        )
         if 2 * chunk + 1 < DEPTH:
-            # Layer a keeps the total, so its g = 0 mass gives 1 - m of b.
-            mass_b = factor_a * mass_ab + (1.0 + factor_a) * (mass_b - mass_ab)
-            factor_b = mass_b / total
-            probs = probs * factor_b + tl.where(zero_b, 0.0, probs)
+            # Layer a scales the g = 0 masses by 1 - m and the rest by 2 - m.
+            probs, _ = _apply_layer(
+                probs,
+                tl.where(zero_b, 0.0, probs),
+                mass_00 + 2.0 * mass_10 - mean_a * (mass_00 + mass_10),
+                mass_01 + 2.0 * mass_11 - mean_a * (mass_01 + mass_11),
+            )
 
     # Fresh offsets and mask: reusing the first ones would keep them live in
     # registers through every layer.
     offsets = tl.arange(0, BLOCK_SIZE)
     mask = start + offsets < vocab_size
-    log_probs = tl.log(probs) - tl.log(total)
+    log_probs = tl.log(probs) - tl.log(total.to(tl.float32) / scale)
     # Underflow becomes the FP32 min and masked tokens stay -inf, as in the
     # eager path. Logits only matter where probs is 0 or NaN.
     logits = tl.load(logits_row + offsets, mask=mask & ~(probs > 0.0), other=0.0)
