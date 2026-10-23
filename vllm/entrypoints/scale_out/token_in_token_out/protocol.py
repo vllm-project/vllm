@@ -97,7 +97,6 @@ class ParseContext(BaseModel):
             tool_choice=self.tool_choice,
             parallel_tool_calls=self.parallel_tool_calls,
             include_reasoning=self.include_reasoning,
-            return_tokens_as_token_ids=self.return_tokens_as_token_ids,
             chat_template_kwargs=self.chat_template_kwargs,
         )
 
