@@ -92,6 +92,42 @@ _QWEN3_OMNI_TARGET_ARCHITECTURES = frozenset(
 _QWEN3_OMNI_DSPARK_ARCHITECTURE = "Qwen3OmniDSparkModel"
 _MUSE_SPARK_DSPARK_ARCHITECTURE = "MuseSparkDSparkModel"
 
+# DFlash and DSpark Qwen3 drafts ship the same architecture; the DSpark model
+# class serves both, since markov_rank == 0 makes its Markov head a no-op.
+_SELF_CONTAINED_QWEN3_DSPARK_ARCHITECTURES = frozenset(
+    {
+        "Qwen3DSparkModel",
+        _QWEN3_OMNI_DSPARK_ARCHITECTURE,
+    }
+)
+
+
+def _route_self_contained_qwen3_dspark_draft(
+    method: SpeculativeMethod | None,
+    draft_architectures: list[str],
+    model_name: str,
+) -> SpeculativeMethod | None:
+    """Serve a dflash-named self-contained Qwen3 DSpark draft with dspark.
+
+    "dflash" would EAGLE-rename the draft to an unregistered "DFlash<arch>".
+    """
+    if method != "dflash":
+        return method
+    matched = _SELF_CONTAINED_QWEN3_DSPARK_ARCHITECTURES.intersection(
+        draft_architectures
+    )
+    if not matched:
+        return method
+    logger.info_once(
+        "Draft model %s ships the self-contained %s architecture; using "
+        "speculative method 'dspark' instead of 'dflash' (the DSpark "
+        "implementation serves markov_rank == 0 DFlash checkpoints too).",
+        model_name,
+        ", ".join(sorted(matched)),
+    )
+    return "dspark"
+
+
 # Draft architectures that carry an XPress refiner. EAGLEConfig rewrites a dflash
 # draft's architecture to DFlash{arch}, so a checkpoint is seen under either name;
 # the dispatch in v1/worker/gpu/spec_decode reads this same set.
@@ -1440,6 +1476,14 @@ class SpeculativeConfig:
                     raise NotImplementedError(
                         f"Unsupported speculative method: '{self.method}'"
                     )
+
+                # A "dflash" method here, explicit or inferred from the model
+                # name, would break these drafts at load time.
+                self.method = _route_self_contained_qwen3_dspark_draft(
+                    self.method,
+                    self.draft_model_config.architectures,
+                    self.draft_model_config.model,
+                )
 
                 if self.method in ("eagle", "eagle3"):
                     # EAGLE drafts share the target's positional space; a
