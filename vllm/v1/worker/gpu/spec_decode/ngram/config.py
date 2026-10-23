@@ -13,7 +13,7 @@ class NgramSpeculatorConfig(SpeculatorConfig):
     speculator_class = (
         "vllm.v1.worker.gpu.spec_decode.ngram.speculator.NgramGPUSpeculator"
     )
-    needs_dense_token_history = True
+    prefer_dense_token_history = True
 
     @classmethod
     def default_model(cls, spec: "SpeculativeConfig") -> str | None:

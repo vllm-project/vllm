@@ -45,16 +45,13 @@ class SpeculatorConfig:
     # (e.g. "speculator_options" for a custom speculator's own options).
     supported_options: ClassVar[frozenset[str]] = frozenset()
 
-    # Drafts from the target's hidden states (EAGLE-style): reads the next
-    # prompt token in chunked prefill, and its trailing cache block's KV isn't
-    # prefix-cacheable.
+    # Drafts from the target's hidden states (EAGLE-style).
     uses_target_hidden_states: ClassVar[bool] = False
-    # Drafts in a separate query pass rather than in the target batch.
-    uses_separate_draft_pass: ClassVar[bool] = False
     # Drafts in its own workspace lane.
     uses_separate_workspace_lane: ClassVar[bool] = False
-    # Needs every request's full token history on the GPU.
-    needs_dense_token_history: ClassVar[bool] = False
+    # For performance, prefers requests' full token history on the GPU instead of
+    # UVA memory (e.g. ngram).
+    prefer_dense_token_history: ClassVar[bool] = False
     # Reuses the target's input embedding: never, always, or on target opt-in.
     target_embed_sharing: ClassVar[TargetEmbedSharing] = "never"
     # Proposes draft tokens (unlike e.g. hidden state extraction).
@@ -67,7 +64,6 @@ class SpeculatorConfig:
     supports_draft_lm_head_quantization: ClassVar[bool] = False
     # Prefill context parallelism.
     supports_pcp: ClassVar[bool] = False
-    # V1 model runner only.
     supports_heterogeneous_vocab: ClassVar[bool] = False
 
     # --- SpeculativeConfig setup ---
@@ -121,6 +117,13 @@ class SpeculatorConfig:
     def num_lookahead_tokens(self) -> int:
         """See `VllmConfig.num_lookahead_tokens`."""
         return 0
+
+    @property
+    def draft_query_len(self) -> int | None:
+        """The number of query tokens per request in the draft forward pass, if
+        it's fixed regardless of the target's scheduled tokens. Limits
+        max_num_active_seqs to fit in max_num_batched_tokens."""
+        return None
 
     @property
     def num_prefill_lookahead_tokens(self) -> int:
