@@ -22,6 +22,12 @@ def _has_device_capability(major: int) -> bool:
     return current_platform.is_cuda() and current_platform.has_device_capability(major)
 
 
+def _has_cooperative_topk() -> bool:
+    return _has_device_capability(
+        90
+    ) and not current_platform.is_device_capability_family(120)
+
+
 def _on_gfx950() -> bool:
     if not current_platform.is_rocm():
         return False
@@ -1515,6 +1521,43 @@ def test_deepseek_topk_backends_no_error_and_reference(
     )
 
 
+@pytest.mark.skipif(
+    not _has_cooperative_topk(), reason="cooperative_topk requires SM90+ (non-SM12x)"
+)
+@pytest.mark.parametrize("top_k", [512, 2048])
+# 1-4 rows take the 16-CTA cluster on SM100 (8-CTA below), then 8, 4 and 2.
+@pytest.mark.parametrize("num_rows", [1, 4, 8, 33, 64])
+@pytest.mark.parametrize("stride", [65536, 1048576])
+@torch.inference_mode()
+def test_cooperative_topk_rows_shorter_than_stride(
+    top_k: int, num_rows: int, stride: int
+) -> None:
+    """Each row picks its single-pass or streaming path from its own length,
+    so one launch over a wide logits buffer mixes both."""
+    torch.set_default_device("cuda:0")
+    set_random_seed(0)
+    # Trivial (<= top_k), register (<= 16384) and cluster paths, the longest
+    # rows streaming through two passes on small clusters.
+    row_lengths = [min(stride, 300000), 40000, 16384, 5000, 300]
+    lengths = [row_lengths[i % len(row_lengths)] for i in range(num_rows)]
+    logits = torch.randn(num_rows, stride)
+    workspace = torch.empty(RADIX_TOPK_WORKSPACE_SIZE, dtype=torch.uint8)
+    out = torch.empty(num_rows, top_k, dtype=torch.int32)
+    torch.ops._C.cooperative_topk(
+        logits, torch.tensor(lengths, dtype=torch.int32), out, workspace, top_k, stride
+    )
+    for row, length in enumerate(lengths):
+        k = min(top_k, length)
+        idx = out[row]
+        assert torch.all(idx[k:] == -1)
+        torch.testing.assert_close(
+            logits[row, idx[:k].long()].sort().values,
+            logits[row, :length].topk(k).values.sort().values,
+            atol=0,
+            rtol=0,
+        )
+
+
 @pytest.mark.skipif(not _has_device_capability(90), reason="This test requires SM90+")
 @torch.inference_mode()
 def test_cooperative_topk_512_tie_workspace_is_per_row() -> None:
@@ -2118,12 +2161,6 @@ def _has_flashinfer_topk() -> bool:
     import importlib.util
 
     return importlib.util.find_spec("flashinfer") is not None
-
-
-def _has_cooperative_topk() -> bool:
-    return _has_device_capability(
-        90
-    ) and not current_platform.is_device_capability_family(120)
 
 
 SPARSE_INDEXER_EXPLICIT_BACKENDS = [
