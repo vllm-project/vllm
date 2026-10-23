@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# Adapted from ROCm/aiter#6173 at c39b56c36 (Apache-2.0 License),
-# Copyright (c) 2025 FlyDSL Project Contributors:
-# aiter/ops/flydsl/kernels/glm5_mono/glm/layout.py
+# Adapted from the GLM-5 MonoKernel of ROCm/FlyDSL#1204 (@coderfeli),
+# kernels/monokernel/glm/layout.py, and ROCm/ATOM#2435 (@XiaobingSuper),
+# atom/model_ops/monokernel/glm/layout.py (Apache-2.0 License),
+# Copyright (c) 2025 FlyDSL Project Contributors.
 
 """Compile-time storage layout and CTA schedule of the GLM-5.3-Flash FFN launch."""
 
