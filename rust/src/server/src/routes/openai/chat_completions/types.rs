@@ -259,6 +259,10 @@ pub struct ChatCompletionRequest {
     /// tokens. Not supported yet.
     pub return_weight_versions: Option<bool>,
 
+    /// When the server records routed experts, `false` skips this request:
+    /// its routing is neither recorded nor returned.
+    pub return_routed_experts: Option<bool>,
+
     /// Salt for prefix cache isolation in multi-user environments
     #[validate(length(min = 1))]
     pub cache_salt: Option<String>,
@@ -346,6 +350,7 @@ impl Default for ChatCompletionRequest {
             return_token_ids: None,
             return_prompt_text: None,
             return_weight_versions: None,
+            return_routed_experts: None,
             cache_salt: None,
             kv_transfer_params: None,
             ec_transfer_params: None,

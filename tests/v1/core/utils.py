@@ -267,6 +267,7 @@ def create_requests(
     same_prompt: bool = False,
     block_size: int = 16,
     req_ids: list[str] | None = None,
+    return_routed_experts: bool = True,
 ) -> list[Request]:
     global _none_hash_initialized
     if not _none_hash_initialized:
@@ -279,6 +280,7 @@ def create_requests(
         max_tokens=max_tokens,
         stop_token_ids=stop_token_ids,
         prompt_logprobs=prompt_logprobs,
+        return_routed_experts=return_routed_experts,
     )
     sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
     requests = []

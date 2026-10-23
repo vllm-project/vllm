@@ -61,14 +61,16 @@ class AuxOutputSchedulerConnector:
         scheduled_requests: dict[str, int] = {}
         block_hashes_by_request: dict[str, PackedBlockHashes] = {}
         for request_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
-            self._sent_hash_counts.setdefault(request_id, 0)
             request = requests[request_id]
+            assert request.sampling_params is not None
+            if not request.sampling_params.return_routed_experts:
+                continue
+            self._sent_hash_counts.setdefault(request_id, 0)
             packed = self._take_new_hashes(
                 request, request.num_computed_tokens + num_tokens
             )
             if packed is not None:
                 block_hashes_by_request[request_id] = packed
-            assert request.sampling_params is not None
             # A P/D prefiller may cut the prompt short of the requested start.
             scheduled_requests[request_id] = max(
                 min(
@@ -108,6 +110,9 @@ class AuxOutputSchedulerConnector:
         output: dict[str, AuxRequestOutput] | None,
     ) -> np.ndarray | None:
         """Return the accepted R3 rows for one scheduled request."""
+        assert request.sampling_params is not None
+        if not request.sampling_params.return_routed_experts:
+            return None
         request_id = request.request_id
         assert output is not None and request_id in output, (
             f"auxiliary output worker output is missing {request_id}"

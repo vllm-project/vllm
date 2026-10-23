@@ -122,6 +122,27 @@ def test_routed_experts_offset_validated_before_engine_submission(offset):
     )
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+def test_return_routed_experts_opt_out_needs_recording(enabled):
+    """The opt-out is dropped when the server does not record routing."""
+    processor = Mock(spec=InputProcessor)
+    processor.tokenizer = None
+    processor.generation_config_fields = {}
+    processor.renderer = Mock()
+    processor.renderer.get_eos_token_id.return_value = None
+    processor.vllm_config = Mock()
+    processor.vllm_config.aux_output_config.enable_return_routed_experts = enabled
+    params = SamplingParams(return_routed_experts=False)
+    prompt = {"type": "token", "prompt_token_ids": [1, 2, 3]}
+
+    request = InputProcessor.process_inputs(
+        processor, "request", prompt, params, ("generate",)
+    )
+
+    assert request.sampling_params.return_routed_experts is not enabled
+    assert params.return_routed_experts is False
+
+
 def _process_inputs_with_max_model_len(
     params: SamplingParams, max_model_len: int = 2048
 ):

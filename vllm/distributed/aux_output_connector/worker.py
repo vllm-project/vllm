@@ -141,6 +141,10 @@ class AuxOutputWorkerConnector:
             return None
 
         request_ids = list(input_batch.req_ids)
+        with self._lock:
+            # Requests that skip routed experts are not tracked.
+            if not any(request_id in self._requests for request_id in request_ids):
+                return None
         query_start_loc = input_batch.query_start_loc_np[: len(request_ids) + 1]
         num_rows = int(query_start_loc[-1])
         pending_output = PendingAuxOutput(
@@ -156,7 +160,8 @@ class AuxOutputWorkerConnector:
             )
             self._pending_outputs.append(pending_output)
             for request_id in pending_output.request_ids:
-                self._requests[request_id].pending_outputs += 1
+                if (state := self._requests.get(request_id)) is not None:
+                    state.pending_outputs += 1
         return pending_output
 
     def process_output(self, pending: PendingAuxOutput) -> dict[str, AuxRequestOutput]:
@@ -173,7 +178,8 @@ class AuxOutputWorkerConnector:
             finally:
                 self._pending_outputs.remove(pending)
                 for request_id in pending.request_ids:
-                    state = self._requests[request_id]
+                    if (state := self._requests.get(request_id)) is None:
+                        continue
                     state.pending_outputs -= 1
                     if state.pending_outputs == 0 and state.finished:
                         teardown.append(request_id)
@@ -213,11 +219,12 @@ class AuxOutputWorkerConnector:
             num_rejected,
             strict=True,
         ):
+            if (state := self._requests.get(request_id)) is None:
+                continue
             request_num_tokens = end - start
             assert request_num_tokens > 0, (
                 "auxiliary output request token count must be positive"
             )
-            state = self._requests[request_id]
 
             # Capture precedes speculative acceptance, so discard the rejected
             # suffix. Batch boundaries still span the full executed range.
