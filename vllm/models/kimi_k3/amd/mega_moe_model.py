@@ -7,12 +7,15 @@ from typing import Any, cast
 import torch
 from torch import nn
 
+from vllm import envs
 from vllm.config import get_current_vllm_config
+from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tp_group,
     tensor_model_parallel_all_reduce,
 )
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
@@ -51,16 +54,64 @@ def model_pool(vllm_config, config):
         or p.prefill_context_parallel_size != 1
         or p.decode_context_parallel_size != 1
         or p.use_sequence_parallel_moe
-        or vllm_config.speculative_config is not None
         or vllm_config.lora_config is not None
         or extra.get("decode_backend", "auto") != "auto"
     ):
-        raise ValueError("K3 MegaMoE requires TP8/PP1/DP1, no EP/DBO/MTP/LoRA")
-    if not vllm_config.model_config.enforce_eager:
-        raise ValueError(
-            "K3 MegaMoE model integration currently requires enforce_eager=True; "
-            "whole-model graph execution failed quality validation"
-        )
+        raise ValueError("K3 MegaMoE requires TP8/PP1/DP1, no EP/DBO/LoRA")
+    spec = vllm_config.speculative_config
+    graph = not vllm_config.model_config.enforce_eager
+    if spec is not None:
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        if (
+            mode != "mega"
+            or spec.method != "dspark"
+            or spec.num_speculative_tokens != 3
+            or spec.draft_parallel_config.tensor_parallel_size != 8
+            or spec.attention_backend != AttentionBackendEnum.TRITON_MLA
+            or spec.draft_model_config.hf_config.architectures != ["K3DSparkModel"]
+        ):
+            raise ValueError(
+                "K3 MegaMoE supports only TP8 K3 DSpark with 3 draft tokens "
+                "and TRITON_MLA draft attention"
+            )
+    if graph or spec is not None:
+        cache = vllm_config.cache_config
+        scheduler = vllm_config.scheduler_config
+        if (
+            mode != "mega"
+            or not vllm_config.use_v2_model_runner
+            or vllm_config.model_config.max_model_len > 4096
+            or scheduler.max_num_seqs > 32
+            or scheduler.max_num_batched_tokens > 1024
+            or cache.enable_prefix_caching
+            or cache.cache_dtype != "auto"
+            or cache.kv_cache_memory_bytes != 8 * 1024**3
+        ):
+            raise ValueError(
+                "K3 MegaMoE graph/DSpark requires MRV2, max-model-len <=4096, "
+                "max-num-seqs <=32, max-num-batched-tokens <=1024, "
+                "8 GiB KV cache, auto KV dtype, and no prefix caching"
+            )
+    if graph:
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        compilation = vllm_config.compilation_config
+        attention = vllm_config.attention_config
+        capacity = 128 if spec is not None else 32
+        if (
+            compilation.mode != CompilationMode.NONE
+            or compilation.cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY
+            or max(compilation.cudagraph_capture_sizes or [], default=0) > capacity
+            or attention.backend not in (None, AttentionBackendEnum.ROCM_AITER_MLA)
+            or attention.backend_per_kind
+            or envs.VLLM_ROCM_AITER_MLA_ASM_PADDING != "gluon"
+        ):
+            raise ValueError(
+                "K3 MegaMoE graph requires no Inductor, FULL_DECODE_ONLY, "
+                "bounded capture sizes, and ROCM_AITER_MLA with "
+                "VLLM_ROCM_AITER_MLA_ASM_PADDING=gluon; padded ASM failed quality"
+            )
     if (
         vllm_config.model_config.dtype != torch.bfloat16
         or config.hidden_size != 7168
@@ -82,6 +133,32 @@ def model_pool(vllm_config, config):
     pool = K3MegaMoETPPool(group=get_tp_group().cpu_group)
     pool.model_mode = mode
     return pool
+
+
+def validate_graph_attention(layer_names: tuple[str, ...]) -> None:
+    """Refuse an actual MLA fallback before capture or eager decode executes."""
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAMetadata
+
+    metadata = get_forward_context().attn_metadata
+    if metadata is None:
+        return  # Memory profiling has no attention metadata.
+    if not isinstance(metadata, dict):
+        raise RuntimeError("K3 MegaMoE graph requires MRV2 attention metadata")
+    for name in layer_names:
+        layer = metadata[name]
+        if not isinstance(layer, AiterMLAMetadata):
+            raise RuntimeError("K3 MegaMoE graph requires ROCM_AITER_MLA")
+        if layer.num_decode_tokens:
+            decode = layer.decode
+            if not (
+                getattr(decode, "use_gluon_decode", False)
+                or getattr(decode, "use_gluon_verify", False)
+            ):
+                raise RuntimeError(
+                    "K3 MegaMoE graph requires actual Gluon MLA decode/verify; "
+                    "the selected backend or KV cache fell back to an "
+                    "unvalidated route"
+                )
 
 
 def pack_split_weights(w1, s1, w2, s2):

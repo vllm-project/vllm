@@ -798,6 +798,17 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             prefix=f"{prefix}.layers",
         )
 
+        self._megamoe_gluon_layers: tuple[str, ...] = ()
+        if (
+            self.mega_moe_pool is not None
+            and not vllm_config.model_config.enforce_eager
+        ):
+            self._megamoe_gluon_layers = tuple(
+                module.mla_attn.mla_attn.layer_name
+                for module in self.modules()
+                if isinstance(module, KimiMLAAttention)
+            )
+
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
             if config.attn_res_block_size is not None:
@@ -871,6 +882,10 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
         step=None,  # specialized_decode's plan
         **kwargs,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        if self._megamoe_gluon_layers:
+            from .mega_moe_model import validate_graph_attention
+
+            validate_graph_attention(self._megamoe_gluon_layers)
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
