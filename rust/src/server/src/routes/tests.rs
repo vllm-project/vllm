@@ -50,6 +50,7 @@ use vllm_llm::Llm;
 use vllm_metrics::METRICS;
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{Prompt, TextBackend, TextRequestProcessor};
+use vllm_tokenizer::Tokenizer as _;
 use vllm_tokenizer::test_utils::TestTokenizer;
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
@@ -132,6 +133,12 @@ fn bytes_to_token_ids(bytes: &[u8]) -> Vec<u32> {
     bytes.iter().map(|byte| u32::from(*byte)).collect()
 }
 
+/// Encode `text` with the fake chat tokenizer, so markers spelled in full are
+/// their dedicated tokens, as the model emits them.
+fn token_ids(text: &str) -> Vec<u32> {
+    fake_chat_tokenizer().encode(text, false).unwrap()
+}
+
 fn default_stream_output_specs() -> Vec<(Vec<u32>, Option<EngineCoreFinishReason>)> {
     vec![
         (vec![b'h' as u32], None),
@@ -142,7 +149,7 @@ fn default_stream_output_specs() -> Vec<(Vec<u32>, Option<EngineCoreFinishReason
 
 fn weather_tool_call_output_specs() -> Vec<(Vec<u32>, Option<EngineCoreFinishReason>)> {
     vec![
-        (bytes_to_token_ids(b"<think>Need tool.</think>"), None),
+        (token_ids("<think>Need tool.</think>"), None),
         (
             bytes_to_token_ids(b"<tool_call>\n{\"name\":\"get_weather\", "),
             None,
@@ -5906,9 +5913,9 @@ async fn reasoning_blocks_are_mapped_to_reasoning_sse_chunks() {
     let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
         Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
         vec![
-            (bytes_to_token_ids(b"<think>"), None),
+            (token_ids("<think>"), None),
             (bytes_to_token_ids(b"think "), None),
-            (bytes_to_token_ids(b"more</think>"), None),
+            (token_ids("more</think>"), None),
             (
                 bytes_to_token_ids(b"answer"),
                 Some(EngineCoreFinishReason::Length),
@@ -5953,7 +5960,7 @@ async fn include_reasoning_false_suppresses_reasoning_in_non_stream_chat() {
     let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
         Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
         vec![
-            (bytes_to_token_ids(b"<think>think</think>"), None),
+            (token_ids("<think>think</think>"), None),
             (
                 bytes_to_token_ids(b"answer"),
                 Some(EngineCoreFinishReason::Length),
@@ -6013,7 +6020,7 @@ async fn include_reasoning_false_suppresses_non_stream_output_metadata() {
                 let add = recv_engine_message(dealer).await;
                 let request: EngineCoreRequest =
                     rmp_serde::from_slice(&add[1]).expect("decode request");
-                let reasoning_token_ids = bytes_to_token_ids(b"<think>think</think>");
+                let reasoning_token_ids = token_ids("<think>think</think>");
                 let answer_token_ids = bytes_to_token_ids(b"answer");
 
                 send_outputs(
@@ -6238,11 +6245,11 @@ async fn tool_call_sse_chunks_can_carry_logprobs() {
                     RequestBatchOutputs {
                         outputs: vec![request_output_with_logprobs(
                             &request.request_id,
-                            bytes_to_token_ids(b"<think>Need tool.</think>"),
+                            token_ids("<think>Need tool.</think>"),
                             None,
                             None,
-                            Some(sample_logprobs_for_tokens(&bytes_to_token_ids(
-                                b"<think>Need tool.</think>",
+                            Some(sample_logprobs_for_tokens(&token_ids(
+                                "<think>Need tool.</think>",
                             ))),
                             None,
                         )],
