@@ -3,7 +3,7 @@
 import gc
 import itertools
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Hashable, Iterable, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from itertools import groupby, product
@@ -568,10 +568,12 @@ class CudaGraphManager:
         get_offloader().sync_prev_onload()
         self.graphs[desc].replay()
 
-    def init_breakable_cg_runner(self, model: nn.Module) -> None:
+    def init_breakable_cg_runner(
+        self, model: nn.Module, key_fn: Callable[..., Hashable] | None = None
+    ) -> None:
         if self.breakable_cg_runner is None:
             self.breakable_cg_runner = BreakableCUDAGraphWrapper(
-                model, self.vllm_config
+                model, self.vllm_config, key_fn=key_fn
             )
 
     def run_pw_graph(self, model: nn.Module, model_inputs: dict[str, Any]) -> Any:

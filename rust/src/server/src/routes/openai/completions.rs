@@ -36,7 +36,7 @@ use super::utils::logprobs::{
 use super::utils::metrics::PerRequestMetrics;
 use super::utils::types::{StreamResponseEnvelope, Usage};
 use crate::config::ApiServerOptions;
-use crate::error::{ApiError, bail_server_error, server_error, text_submit_error};
+use crate::error::{ApiError, bail_server_error, engine_error, server_error, text_submit_error};
 use crate::lora::LoraModelResolution;
 use crate::routes::openai::completions::types::{
     CompletionChoice, CompletionResponse, CompletionSseChunk, CompletionStreamChoice,
@@ -141,6 +141,7 @@ async fn collect_completion(
     ApiServerOptions {
         enable_log_requests,
         enable_prompt_tokens_details,
+        default_return_tokens_as_token_ids,
         enable_per_request_metrics,
         ..
     }: ApiServerOptions,
@@ -157,12 +158,15 @@ async fn collect_completion(
         return_tokens_as_token_ids,
     }: ResponseOptions,
 ) -> Result<CompletionResponse, ApiError> {
+    let return_tokens_as_token_ids =
+        return_tokens_as_token_ids.unwrap_or(default_return_tokens_as_token_ids);
     let collected = stream
         .collect_output()
         .await
         .map_err(|error| server_error!("completion stream failed: {}", error.to_report_string()))?;
     let finish_reason = collected.finish_reason.clone();
     let stop_reason = finish_reason.as_stop_reason().map(stop_reason_to_json);
+    let finish_reason = completion_finish_reason_to_openai(&finish_reason)?.to_string();
 
     let prompt_char_count = echo.as_ref().map(|prompt| text_len(prompt)).unwrap_or_default();
     let logprobs = if requested_logprobs.is_some() && prompt_only {
@@ -198,7 +202,6 @@ async fn collect_completion(
         Some(prompt) if prompt_only => prompt.clone(),
         Some(prompt) => format!("{prompt}{}", collected.text),
     };
-    let finish_reason = completion_finish_reason_to_openai(&finish_reason)?.to_string();
     let metrics = enable_per_request_metrics.then(|| {
         PerRequestMetrics::from_timestamps(collected.timestamps, collected.usage.output_token_count)
     });
@@ -247,6 +250,7 @@ async fn completion_chunk_stream(
     ApiServerOptions {
         enable_log_requests,
         enable_prompt_tokens_details,
+        default_return_tokens_as_token_ids,
         enable_per_request_metrics,
         ..
     }: ApiServerOptions,
@@ -263,6 +267,8 @@ async fn completion_chunk_stream(
     }: ResponseOptions,
     mut y: TryYielder<CompletionSseChunk, ApiError>,
 ) -> Result<(), ApiError> {
+    let return_tokens_as_token_ids =
+        return_tokens_as_token_ids.unwrap_or(default_return_tokens_as_token_ids);
     pin_mut!(stream);
     let envelope = Arc::new(StreamResponseEnvelope::new(
         request_id,
@@ -490,9 +496,7 @@ fn completion_finish_reason_to_openai(
         FinishReason::Repetition(_) => Ok("repetition"),
         FinishReason::Length => Ok("length"),
         FinishReason::Abort => Ok("abort"),
-        FinishReason::Error => {
-            bail_server_error!("Internal server error");
-        }
+        FinishReason::Error(error) => Err(engine_error(error.as_deref())),
     }
 }
 
@@ -662,7 +666,7 @@ mod tests {
 
     #[test]
     fn final_chunk_rejects_error_finish_reason() {
-        assert!(final_chunk(&stream_envelope(), FinishReason::Error).is_err());
+        assert!(final_chunk(&stream_envelope(), FinishReason::Error(None)).is_err());
     }
 
     #[tokio::test]

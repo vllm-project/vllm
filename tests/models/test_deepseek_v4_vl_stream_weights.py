@@ -11,7 +11,7 @@ from vllm.model_executor.models.utils import WeightsMapper
 from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="CUDA implementations"
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm implementations"
 )
 
 
@@ -44,7 +44,7 @@ def _v4_wrapper():
 
 
 def _v41_wrapper():
-    from vllm.models.deepseek_v41.nvidia.vl_model import DeepseekV41ForCausalLM
+    from vllm.models.deepseek_v41 import DeepseekV41ForCausalLM
 
     return DeepseekV41ForCausalLM
 

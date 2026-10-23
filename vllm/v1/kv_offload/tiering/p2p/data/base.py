@@ -51,6 +51,28 @@ Transfer lifecycle
    - mode="wait" returns ids still in PROC/PEND so the caller can poll
      them to completion
 
+Failure model
+-------------
+
+The transport decides each failure's scope:
+
+- Transfer: write_blocks() returned None or poll() listed the id in
+  ``failed``. The caller fails that round; the peer recomputes.
+- Peer: the registration for a peer is unusable (one decisive error, such
+  as any failed state check of an inflight transfer, or repeated transfer
+  failures with no success between). poll(peer_id) reports the cause in
+  ``PollResult.peer_fault`` until remove_remote_peer(). A transfer whose
+  state check failed stays inflight unless the failure proves it can no
+  longer write, so the peer's teardown is what bounds it.
+
+The transport never recovers a peer itself. The session turns a peer
+fault into the same connection death as a missed heartbeat, so the
+manager's reap is the only teardown: DisconnectMsg makes the peer tear
+down too, and the next connection re-registers both sides.
+
+write_blocks() and poll() report failures through their return values
+and must not raise for them.
+
 Implementor contracts
 ---------------------
 
@@ -92,11 +114,15 @@ class PollResult(NamedTuple):
     Attributes:
         done: Transfer IDs that completed successfully.
         failed: Transfer IDs that failed (error, timeout, etc.).
+        peer_fault: Set only on a peer-scoped poll() once the transport
+            has judged the peer unusable (see "Failure model"); a short
+            human-readable cause. None while the peer is healthy.
 
     """
 
     done: Sequence[int]
     failed: Sequence[int]
+    peer_fault: str | None = None
 
 
 class DataTransport(ABC):

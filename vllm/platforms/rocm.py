@@ -406,6 +406,12 @@ if (
 ):
     os.environ["HIP_ONLINE_TUNING"] = "1"
 
+# RCCL 2.30's RAS thread can abort the process at exit ("terminate called
+# without an active exception") when its shutdown notification fails.
+# https://github.com/ROCm/rocm-systems/issues/13572
+if torch.version.hip:
+    os.environ.setdefault("NCCL_RAS_ENABLE", "0")
+
 
 @cache
 def use_rocm_custom_paged_attention(
@@ -1178,6 +1184,17 @@ class RocmPlatform(Platform):
 
         # Default dispatch to rocm's sparse_attn_indexer implementation
         compilation_config.custom_ops.append("+sparse_attn_indexer")
+
+        # Default the gated RMSNorm custom op on for unquantized models. Quantized
+        # is untested in serving.
+        model_config = vllm_config.model_config
+        if (
+            model_config is not None
+            and model_config.quantization is None
+            and "+rms_norm_gated" not in compilation_config.custom_ops
+            and "-rms_norm_gated" not in compilation_config.custom_ops
+        ):
+            compilation_config.custom_ops.append("+rms_norm_gated")
 
     @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
