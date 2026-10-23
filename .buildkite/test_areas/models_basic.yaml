@@ -104,9 +104,14 @@ steps:
       - tests/models/test_dsv41_mono_decode.py
       - tests/models/test_muse_spark_rocm_loading.py
       - tests/models/test_deepseek_v4_vl_stream_weights.py
+      - vllm/models/muse_spark/
+      - vllm/transformers_utils/configs/muse_spark.py
+      - vllm/v1/worker/gpu/model_states/
+      - vllm/v1/attention/backends/rocm_aiter_fa.py
+      - tests/models/muse_spark/
       - tests/models/hy_v4/test_triton_ihc.py
       commands:
-      - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py models/test_deepseek_v4_vl_rocm.py models/transformers/test_layer_registry_e2e.py models/test_deepseek_v41_replay_start.py models/test_deepseek_v41_decoder_replay_layers.py models/test_deepseek_v41_replay_batch.py models/test_deepseek_v41_amd_replay_forward.py models/test_deepseek_v4_dspark_rocm.py models/test_deepseek_v4_rocm_wo_a.py models/test_deepseek_v4_rocm_compressor_gemm_fusion.py models/test_dsv41_mono_decode.py models/test_muse_spark_rocm_loading.py models/test_deepseek_v4_vl_stream_weights.py
+      - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py models/test_deepseek_v4_vl_rocm.py models/transformers/test_layer_registry_e2e.py models/test_deepseek_v41_replay_start.py models/test_deepseek_v41_decoder_replay_layers.py models/test_deepseek_v41_replay_batch.py models/test_deepseek_v41_amd_replay_forward.py models/test_deepseek_v4_dspark_rocm.py models/test_deepseek_v4_rocm_wo_a.py models/test_deepseek_v4_rocm_compressor_gemm_fusion.py models/test_dsv41_mono_decode.py models/test_muse_spark_rocm_loading.py models/test_deepseek_v4_vl_stream_weights.py models/muse_spark/amd_specialized_decode/test_runtime.py
       - VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'not distributed'
       - pytest -v -s models/hy_v4/test_triton_ihc.py
 
@@ -397,3 +402,24 @@ steps:
   - tests/models/kimi_k3/amd_specialized_decode/
   commands:
   - pytest -v -s tests/models/kimi_k3/amd_specialized_decode
+
+- label: ':amd: (MI355) Muse Spark Specialized Decode'
+  key: muse-spark-specialized-decode-amd
+  dind: false
+  device: mi355_8
+  num_devices: 8
+  timeout_in_minutes: 60
+  working_dir: /vllm-workspace/
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - docker/Dockerfile.rocm_base
+  - vllm/models/muse_spark/
+  - vllm/transformers_utils/configs/muse_spark.py
+  - vllm/v1/worker/gpu/model_states/
+  - vllm/v1/attention/backends/rocm_aiter_fa.py
+  - vllm/third_party/flash_linear_attention/ops/kda.py
+  - tests/models/muse_spark/
+  commands:
+  # test_runtime is CPU-only and runs in Basic Models (Other).
+  - pytest -v -s tests/models/muse_spark/amd_specialized_decode --ignore=tests/models/muse_spark/amd_specialized_decode/test_runtime.py
