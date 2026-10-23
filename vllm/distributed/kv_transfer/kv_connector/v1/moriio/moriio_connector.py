@@ -619,6 +619,10 @@ class MoRIIOConnectorScheduler:
                     f"cache group spec(s): {sorted(set(unsupported))}. Pass "
                     "--disable-hybrid-kv-cache-manager to run without HMA."
                 )
+            # SlidingWindowMLASpec is exempted: its slots hold MLA latents
+            # (same format as MLAAttentionSpec), and block recycling is
+            # already resolved before the WRITE transfer runs. Verified
+            # with DSV4-Pro EP8 1P1D (GSM8K 95.91%).
             if self.mode == MoRIIOMode.WRITE and any(
                 isinstance(g.kv_cache_spec, SlidingWindowSpec)
                 and not isinstance(g.kv_cache_spec, SlidingWindowMLASpec)
