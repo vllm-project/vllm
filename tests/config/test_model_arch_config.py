@@ -194,6 +194,42 @@ def test_head_size_falls_back_when_head_dim_is_zero():
     assert convertor.get_head_size() == 128
 
 
+@pytest.mark.parametrize(
+    "thinker_model_type,expected_architectures",
+    [
+        ("qwen3_forced_aligner", ["Qwen3ASRForcedAlignerForTokenClassification"]),
+        ("qwen3_asr", ["Qwen3ASRForConditionalGeneration"]),
+    ],
+)
+def test_qwen3_asr_forced_aligner_selects_token_classification(
+    thinker_model_type, expected_architectures
+):
+    """ForcedAligner checkpoints ship Qwen3ASRForConditionalGeneration in
+    config.json; the convertor reroutes them to the token-classification
+    class so model-class and `--runner auto` resolution pick up pooling."""
+    from vllm.model_executor.models.registry import _TOKEN_CLASSIFICATION_MODELS
+    from vllm.transformers_utils.configs.qwen3_asr import Qwen3ASRConfig
+
+    hf_config = Qwen3ASRConfig(
+        architectures=["Qwen3ASRForConditionalGeneration"],
+        thinker_config={"model_type": thinker_model_type},
+    )
+    model_config = SimpleNamespace(
+        hf_config=hf_config,
+        hf_text_config=hf_config.thinker_config.text_config,
+        _supports_multimodal_for_mm_prefix=lambda: True,
+    )
+
+    converted = ModelConfig.get_model_arch_config(model_config)
+
+    assert converted.architectures == expected_architectures
+    # Model-class resolution reads the raw attribute, so it must be rewritten.
+    assert hf_config.architectures == expected_architectures
+    if thinker_model_type == "qwen3_forced_aligner":
+        # The rewrite is only useful if the target resolves to a pooling model.
+        assert expected_architectures[0] in _TOKEN_CLASSIFICATION_MODELS
+
+
 def test_qk_rope_head_dim_recovery_uses_model_revision(monkeypatch: pytest.MonkeyPatch):
     hf_config = PreTrainedConfig(
         model_type="deepseek_v2",
