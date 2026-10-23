@@ -26,6 +26,9 @@ def make_manager(
     manager.num_speculative_steps = num_steps
     manager._stale_confidences = [SimpleNamespace(np=confidences)]  # type: ignore[list-item]  # CPU-only confidence buffer.
     manager._stale_idx = 0
+    manager._copy_events = [SimpleNamespace(synchronize=lambda: None)]  # type: ignore[list-item]
+    manager._copy_step = [1]  # Copied after every request below arrived.
+    manager._added_step = np.zeros(num_reqs, dtype=np.int64)
     manager.req_states = SimpleNamespace(
         req_id_to_index={"low": 0, "high": 1},
         num_computed_tokens_np=np.ones(num_reqs, dtype=np.int32),
@@ -306,3 +309,23 @@ def test_zero_budget_rebuilds_cpu_cu_num_logits():
     assert cu_num_logits_np.dtype == scheduled_cu_num_logits.dtype
     # The prefill keeps its scheduled tokens; only drafts are dropped.
     assert np.array_equal(compacted, np.array([1, 1, 40], dtype=np.int32))
+
+
+@pytest.mark.parametrize(
+    ("arrived_after_copy", "expected_budget"), [(True, 1), (False, 0)]
+)
+def test_budget_treats_rows_copied_before_their_request_as_confident(
+    arrived_after_copy, expected_budget
+):
+    # One draft pays for itself only at a survival above 0.8. "high"'s stale row
+    # says 0.0, but if its request arrived after the copy, that row belongs to a
+    # previous request and the budget must assume full confidence instead.
+    manager = make_manager(
+        np.array([[0.1, 0.1], [0.0, 0.0]], dtype=np.float32),
+        np.array([1.0, 1.0, 1.0, 1.4, 100.0, 100.0, 100.0]),
+    )
+    manager._added_step[1] = manager._copy_step[0] if arrived_after_copy else 0
+
+    manager.get_num_tokens({"low": 3, "high": 3}, {"low": [1, 2], "high": [3, 4]})
+    assert manager._batch_budget is not None
+    assert manager._batch_budget[2] == expected_budget
