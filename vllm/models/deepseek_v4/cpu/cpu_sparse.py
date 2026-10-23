@@ -15,7 +15,7 @@ import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import replace_parameter, retire_parameter
 from vllm.models.deepseek_v4.attention import (
     DeepseekV4Attention,
     DeepseekV4Indexer,
@@ -322,18 +322,17 @@ class DeepseekV4CPUAttention(DeepseekV4Attention):
             dequant = dequant.view(self.n_local_groups, self.o_lora_rank, k_dim)
             self._wo_a_packed = torch.ops._C.convert_weight_packed(dequant.contiguous())
             orig_pwal(layer)
-            # orig_pwal VNNI-repacks layer.weight/scale for ordinary-linear
-            # use that _o_proj never needs -- free them, same pattern as
-            # dispatch_cpu_unquantized_gemm's remove_weight=True.
-            replace_parameter(layer, "weight", layer.weight.new_empty(0))
+            # _o_proj reads only the packed copy: it becomes the loaded weight's
+            # storage, and the (small) scale keeps its data.
+            replace_parameter(layer, "weight", self._wo_a_packed)
+            self._wo_a_packed = layer.weight.data
             scale_attr = (
                 "weight_scale_inv"
                 if hasattr(layer, "weight_scale_inv")
                 else "weight_scale"
             )
             if hasattr(layer, scale_attr):
-                scale = getattr(layer, scale_attr)
-                replace_parameter(layer, scale_attr, scale.new_empty(0))
+                retire_parameter(layer, scale_attr)
 
         quant_method.process_weights_after_loading = (  # type: ignore[method-assign]
             _capture_and_pack

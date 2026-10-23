@@ -138,13 +138,13 @@ class CPUWNA16LinearKernel(MPLinearKernel):
         if layer.bias is not None:
             layer.bias.data = layer.bias.float()
 
-        packed_weight.data = blocked_w
-        scales.data = blocked_s
-        packed_zp.data = blocked_zp
+        replace_parameter(layer, self.w_q_name, blocked_w)
+        replace_parameter(layer, self.w_s_name, blocked_s)
+        replace_parameter(layer, self.w_zp_name, blocked_zp)
 
     def process_weights_after_loading(self, layer: torch.nn.Module):
         if not self.config.zero_points:
-            self._release_unused_zp(layer)
+            self._retire_unused_zp(layer)
 
         weights = getattr(layer, self.w_q_name)
         # Require GPTQ pack format

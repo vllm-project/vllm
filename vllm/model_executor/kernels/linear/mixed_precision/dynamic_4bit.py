@@ -5,6 +5,7 @@
 import torch
 
 from vllm.model_executor.layers.quantization.utils import replace_parameter
+from vllm.model_executor.utils import retire_parameter
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.scalar_type import scalar_types
 
@@ -111,8 +112,8 @@ class Dynamic4bitLinearKernel(MPLinearKernel):
         replace_parameter(
             layer, self.w_q_name, torch.nn.Parameter(w, requires_grad=False)
         )
-        # Scales are packed into the weight; keep the param with empty storage.
-        replace_parameter(layer, self.w_s_name, scales.new_empty(0))
+        # Scales are packed into the weight; the loaded param keeps its data.
+        retire_parameter(layer, self.w_s_name)
 
     def apply_weights(
         self,

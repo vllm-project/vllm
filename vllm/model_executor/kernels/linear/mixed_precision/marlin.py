@@ -170,6 +170,9 @@ class MarlinLinearKernel(MPLinearKernel):
                 ),
             )
         else:
+            # Marlin takes an empty zp; a loaded unused one keeps its data.
+            self._retire_unused_zp(layer)
+            self.w_zp_name = "w_zp"
             replace_parameter(layer, self.w_zp_name, marlin_make_empty(device))
         self._transform_param(layer, self.w_q_name, transform_w_q)
         self._transform_param(layer, self.w_s_name, transform_w_s)

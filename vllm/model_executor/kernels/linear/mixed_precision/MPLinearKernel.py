@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import torch
 
 from vllm.model_executor.layers.quantization.utils import replace_parameter
+from vllm.model_executor.utils import retire_parameter
 from vllm.scalar_type import ScalarType
 
 
@@ -69,11 +70,11 @@ class MPLinearKernel(ABC):
     ) -> torch.Tensor:
         raise NotImplementedError
 
-    def _release_unused_zp(self, layer: torch.nn.Module) -> None:
+    def _retire_unused_zp(self, layer: torch.nn.Module) -> None:
         name = self.w_zp_name
         if name is not None and getattr(layer, name, None) is not None:
-            # Loaded but unused: keep the param, free its data.
-            replace_parameter(layer, name, getattr(layer, name).new_empty(0))
+            # Loaded but unused: keep the param and its data.
+            retire_parameter(layer, name)
         self.w_zp_name = None
 
     def _transform_param(

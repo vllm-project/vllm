@@ -8,10 +8,12 @@ falls through to the next kernel in ``_POSSIBLE_KERNELS[PlatformEnum.CPU]``.
 """
 
 import torch
+from torch.nn import Parameter
 
 from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear.zentorch_utils import has_zentorch_op
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
@@ -19,6 +21,17 @@ from .cpu import _CPUWNA16_SUPPORTED_QUANT_TYPES, CPUWNA16LinearKernel
 from .MPLinearKernel import MPLinearLayerConfig
 
 logger = init_logger(__name__)
+
+
+def _store_in_param(layer: torch.nn.Module, attr: str, name: str | None) -> None:
+    """Back kernel tensor ``layer.<attr>`` by the storage of loaded param ``name``."""
+    tensor = getattr(layer, attr)
+    if name is None or tensor is None:
+        return
+    if not isinstance(getattr(layer, name, None), Parameter):
+        return
+    replace_parameter(layer, name, tensor)
+    setattr(layer, attr, getattr(layer, name).data)
 
 
 def _import_unpack_from_int32():
@@ -144,7 +157,7 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
         if (in_features // num_groups) % 4 != 0 or in_features % 2 != 0:
             return False
 
-        self._release_unused_zp(layer)
+        self._retire_unused_zp(layer)
 
         unpack_from_int32 = _import_unpack_from_int32()
 
@@ -164,10 +177,8 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
         # CT stores scales as [N, G]; DA8W4 wants per-group {G, N}.
         layer._zentorch_da8w4_scale = weight_scale.t().to(torch.bfloat16).contiguous()
 
-        for param_name in (self.w_q_name, self.w_s_name):
-            param = getattr(layer, param_name, None)
-            if param is not None and hasattr(param, "data"):
-                param.data = torch.empty(0)
+        _store_in_param(layer, "_zentorch_da8w4_packed", self.w_q_name)
+        _store_in_param(layer, "_zentorch_da8w4_scale", self.w_s_name)
 
         layer._zentorch_kind = "compressed_tensors_w4a8_da8w4"
         layer._zentorch_da8w4 = True
@@ -205,7 +216,7 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
             return
 
         if not self.config.zero_points:
-            self._release_unused_zp(layer)
+            self._retire_unused_zp(layer)
 
         weight_q = getattr(layer, self.w_q_name)
         weight_s = getattr(layer, self.w_s_name)
@@ -254,16 +265,9 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
         layer._zentorch_woq_scale = weight_scale.t().contiguous()
         layer._zentorch_woq_zero_point = zp_tc
 
-        for param_name in (self.w_q_name, self.w_s_name, self.w_zp_name):
-            if param_name is None:
-                continue
-            param = getattr(layer, param_name, None)
-            if param is None:
-                continue
-            if hasattr(param, "data"):
-                param.data = torch.empty(0)
-            else:
-                setattr(layer, param_name, torch.empty(0))
+        _store_in_param(layer, "_zentorch_woq_packed", self.w_q_name)
+        _store_in_param(layer, "_zentorch_woq_scale", self.w_s_name)
+        _store_in_param(layer, "_zentorch_woq_zero_point", self.w_zp_name)
 
         layer._zentorch_kind = "compressed_tensors_w4a16_gptq"
         layer._zentorch_processed_weights = True
