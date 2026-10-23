@@ -65,6 +65,19 @@ class KvHintsEnvelope(msgspec.Struct, frozen=True):
     actions: list[KvHintAction]
 
 
+class LoRARequest(
+    msgspec.Struct,
+    omit_defaults=True,
+    array_like=True,
+):
+    lora_name: str
+    lora_int_id: int
+    lora_path: str = ""
+    base_model_name: str | None = None
+    load_inplace: bool = False
+    is_3d_lora_weight: bool = False
+
+
 class EngineCoreRequest(
     msgspec.Struct,
     array_like=True,
@@ -76,7 +89,7 @@ class EngineCoreRequest(
     sampling_params: EngineCoreSamplingParams | None
     pooling_params: object | None
     arrival_time: float
-    lora_request: object | None = None
+    lora_request: LoRARequest | None = None
     cache_salt: str | None = None
     data_parallel_rank: int | None = None
     prompt_embeds: object | None = None
@@ -92,19 +105,6 @@ class EngineCoreRequest(
     abort_immediately: bool = False
     session_id: str | None = None
     kv_hints: KvHintsEnvelope | None = None
-
-
-class LoRARequest(
-    msgspec.Struct,
-    omit_defaults=True,
-    array_like=True,
-):
-    lora_name: str
-    lora_int_id: int
-    lora_path: str = ""
-    base_model_name: str | None = None
-    load_inplace: bool = False
-    is_3d_lora_weight: bool = False
 
 
 @dataclass(frozen=True)
@@ -214,13 +214,22 @@ defaults_request = EngineCoreRequest(
     arrival_time=1.0,
 )
 
-lora_request = LoRARequest(
-    lora_name="adapter-a",
-    lora_int_id=3,
-    lora_path="/adapters/a",
-    base_model_name="base-model",
-    load_inplace=True,
-    is_3d_lora_weight=True,
+# Embedded in a full request so the fixture also pins the `lora_request` slot.
+lora_request = EngineCoreRequest(
+    request_id="req-lora",
+    prompt_token_ids=[5, 6, 7],
+    mm_features=None,
+    sampling_params=EngineCoreSamplingParams(),
+    pooling_params=None,
+    arrival_time=2.0,
+    lora_request=LoRARequest(
+        lora_name="adapter-a",
+        lora_int_id=3,
+        lora_path="/adapters/a",
+        base_model_name="base-model",
+        load_inplace=True,
+        is_3d_lora_weight=True,
+    ),
 )
 inplace_lora_request = LoRARequest(
     lora_name="adapter-b",

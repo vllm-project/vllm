@@ -3060,11 +3060,19 @@ fn python_msgpack_fixtures_match_rust_encoding() {
         load_inplace: true,
         is_3d_lora_weight: true,
     };
-    let decoded_lora_request: LoraRequest = rmp_serde::from_slice(&lora_request_bytes).unwrap();
-    assert_eq!(decoded_lora_request, expected_lora_request);
+    let decoded_lora_request: EngineCoreRequest =
+        rmp_serde::from_slice(&lora_request_bytes).unwrap();
+    assert_eq!(
+        decoded_lora_request.lora_request,
+        Some(expected_lora_request.clone())
+    );
+    let python_lora_slot = match decode_value(&lora_request_bytes) {
+        Value::Array(items) => items.get(6).cloned().expect("request lora_request slot"),
+        other => panic!("request should encode as tuple array, got {other:?}"),
+    };
     assert_eq!(
         decode_value(&rmp_serde::to_vec_named(&expected_lora_request).unwrap()),
-        decode_value(&lora_request_bytes),
+        python_lora_slot,
     );
 
     let decoded_inplace_lora_request: LoraRequest =
