@@ -106,6 +106,7 @@ from vllm.models.muse_spark.amd.specialized_decode.mono.spec import (
 )
 from vllm.models.muse_spark.amd.specialized_decode.mono.stages import (
     experts,
+    experts_ep,
     pool,
     reduce,
     router,
@@ -134,16 +135,19 @@ REGIONS = spec.REGIONS  # debug.region_ids order of the wait records
 _STREAM = fx.Stream(None)
 
 
-def lds_structs(s: int, core: str = "tensor") -> dict:
+def lds_structs(s: int, core: str = "tensor", moe: str = "tp") -> dict:
     """The stage union's members at ``s`` rows (design 5.13): stage key ->
     ``fx.struct`` (or the ``xq_ug`` composite of two). A split build adds its
-    core's stages (DESIGN_BC 7.7); the others' union is Phase A's."""
+    core's stages (DESIGN_BC 7.7); the others' union is Phase A's. A TEP8 build
+    (``moe == "ep"``) has the EP down stage's struct."""
     lds = {
         "back": back.lds_struct(s),
         "seam": seam.lds_struct(s),
         "pool": pool.lds_struct(s),
         "xq_ug": {"xq": pool.xq_lds_struct(s), "ug": experts.ug_lds_struct(s)},
-        "down": experts.down_lds_struct(s),
+        "down": (
+            experts_ep.down_lds_struct(s) if moe == "ep" else experts.down_lds_struct(s)
+        ),
         "reduce": reduce.lds_struct(s),
         "unpool": unpool.lds_struct(s),
     }
@@ -153,11 +157,11 @@ def lds_structs(s: int, core: str = "tensor") -> dict:
     return lds
 
 
-def lds_bytes(s: int, core: str = "tensor") -> int:
+def lds_bytes(s: int, core: str = "tensor", moe: str = "tp") -> int:
     """K2's static LDS at ``s`` rows: ``red``, ``RouteLds``, the stage union
     (an upper bound of the ISA's group segment: fields no stage touches are
     dropped)."""
-    return lds_total_bytes(lds_structs(s, core))
+    return lds_total_bytes(lds_structs(s, core, moe))
 
 
 @traced
@@ -180,10 +184,10 @@ def split_roles(c) -> None:
 
 
 @traced
-def program(c, core: str = "tensor") -> None:
+def program(c, core: str = "tensor", moe: str = "tp") -> None:
     """K2's stages on CTA ``c["bid"]`` in the design's program order (5.2).
     Every call is CTA-uniform (predicated on the CTA, never on the thread), so
-    every thread reaches every barrier. ``core``: the build's (static)."""
+    every thread reaches every barrier. ``core``, ``moe``: the build's (static)."""
     s = c["S"]
     b = c["bid"]
     b32 = fx.Int32(b)
@@ -214,9 +218,14 @@ def program(c, core: str = "tensor") -> None:
         pool.stage_pool(c, b - P0, pops)
     # -- phase 3: the a1 rows (every CTA), the union, ug, down
     pool.load_xq(c)
-    nu = experts.load_route(c)
-    experts.run_ug(c, nu)
-    experts.run_down(c, b32, nu)
+    if const_expr(moe == "ep"):
+        nu = experts.load_route(c, ep=True)
+        experts.run_ug(c, nu, spec.EP_GEOM)
+        experts_ep.run_down_ep(c, b32, nu)
+    else:
+        nu = experts.load_route(c)
+        experts.run_ug(c, nu)
+        experts.run_down(c, b32, nu)
     # -- phase 4: owner reduce, unpooler (weights before the reduce's waits),
     # gather
     uops = unpool.unpool_loads(c, b)
@@ -280,8 +289,8 @@ def build(key: K2Build):
             f"K2 core {key.core!r}: no kernel variant yet (built: {tuple(ABI_BY_CORE)})"
         )
     s = key.tokens
-    lds = lds_structs(s, key.core)
-    nbytes = lds_bytes(s, key.core)
+    lds = lds_structs(s, key.core, key.moe)
+    nbytes = lds_bytes(s, key.core, key.moe)
     if nbytes > LDS_BYTES:
         raise ValueError(f"K2 at {s} rows: {nbytes} B of LDS > {LDS_BYTES}")
     keyed = key_tuple(key, SOURCES)
@@ -355,7 +364,7 @@ def _tensor(key: K2Build, s: int, lds: dict, keyed: tuple):
         }
         # a fault build's sync.stall is make_context's prologue
         c = make_context(s, args, lds, key=key)
-        program(c)
+        program(c, moe=key.moe)
 
     @flyc.jit
     def launch(

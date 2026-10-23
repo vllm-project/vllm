@@ -804,6 +804,105 @@ def test_k2_tp8_matches_vllm_ops_and_replays(monkeypatch: pytest.MonkeyPatch) ->
     multi_process_parallel(monkeypatch, 8, 1, _k2_worker)
 
 
+# TEP8 (K2Build.moe == "ep": attention TP8, the experts expert-parallel) against
+# TP8, the two cut from the same 256 logical experts.
+
+
+def _expert_weights(moe: str, rank: int, device) -> dict:
+    """``rank``'s experts under ``moe``, AITER-shuffled, from expert e's seeded
+    raw MXFP4 bytes and e8m0 codes (w13 [8192, 2048] B + [8192, 128] codes, w2
+    [4096, 2048] B + [4096, 128] codes): "tp" its 512-column slice of every
+    expert (gate and up rows 512 rank .., w2's K bytes 256 rank ..), "ep" its
+    32 whole experts."""
+    from aiter.ops.shuffle import shuffle_weight
+    from aiter.utility.fp4_utils import e8m0_shuffle
+
+    def u8(g, *shape, lo=0, hi=256):
+        return torch.randint(
+            lo, hi, shape, generator=g, device=device, dtype=torch.int64
+        ).to(torch.uint8)
+
+    def shuf_scale(c):
+        s0, s1, n = c.shape
+        return e8m0_shuffle(c.reshape(s0 * s1, n)).view(s0, s1, -1).contiguous()
+
+    w13, c13, w2, c2 = [], [], [], []
+    for e in range(32 * rank, 32 * rank + 32) if moe == "ep" else range(E):
+        g = torch.Generator(device=device).manual_seed(5000 + e)
+        a, ca = u8(g, 2 * 4096, 2048), u8(g, 2 * 4096, 128, lo=118, hi=123)
+        b, cb = u8(g, 4096, 2048), u8(g, 4096, 128, lo=118, hi=123)
+        if moe == "tp":
+            r0 = 512 * rank
+            rows = torch.cat(
+                [torch.arange(r0, r0 + 512), torch.arange(4096 + r0, 4096 + r0 + 512)]
+            ).to(device)
+            a, ca = a[rows], ca[rows]
+            b, cb = (
+                b[:, 256 * rank : 256 * rank + 256],
+                cb[:, 16 * rank : 16 * rank + 16],
+            )
+        w13.append(a)
+        c13.append(ca)
+        w2.append(b.contiguous())
+        c2.append(cb.contiguous())
+    return {
+        "w13": shuffle_weight(torch.stack(w13), layout=(16, 16)).contiguous(),
+        "w13s": shuf_scale(torch.stack(c13)),
+        "w2": shuffle_weight(torch.stack(w2), layout=(16, 16)).contiguous(),
+        "w2s": shuf_scale(torch.stack(c2)),
+    }
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def _tep8_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size: int,
+    pp_size: int,
+    rank: int,
+    distributed_init_port: str,
+) -> None:
+    device = _init_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port)
+
+    from vllm.models.muse_spark.amd.specialized_decode.runtime.runner import MonoRunner
+
+    runner = MonoRunner(device)
+    runner.set_wait_budget(STARTUP_WAIT_SECONDS)  # the first launches compile
+    base = _weights(rank, device)
+    experts = {m: _expert_weights(m, rank, device) for m in ("tp", "ep")}
+    S = 8
+    core, stream = _inputs(rank, device, S)
+    pad = _pad(device)
+    # skew 0: the model's routing; skew 4: every pick on rank 0's experts, so
+    # rank 0 has all 64 picks local (more than one EP staging chunk)
+    for skew in (0.0, 4.0):
+        bias = base["bias"].clone()
+        bias[:32] += skew
+        outs = {}
+        for moe in ("tp", "ep"):
+            w = {**base, "bias": bias, **experts[moe]}
+            key = spec.K2Build(tokens=S, moe=moe)
+            stream_out, branch_out = _launch(runner, w, core, stream, pad, key)
+            torch.accelerator.synchronize()
+            _assert_healthy(runner)
+            outs[moe] = (stream_out, branch_out, readback(runner, S)["ids"].clone())
+        (s_tp, b_tp, ids_tp), (s_ep, b_ep, ids_ep) = outs["tp"], outs["ep"]
+        with _tp_checks(f"TEP8 against TP8 (skew {skew})"):
+            assert torch.equal(ids_tp, ids_ep)  # the same routing
+            assert torch.equal(s_tp, s_ep)  # before the experts
+            if skew:
+                assert (ids_ep // spec.EXPERTS_LOCAL == 0).all()
+            # TP8 sums 8 bf16 partial rows, TEP8 rounds one fp32 row once
+            diff = (b_ep.float() - b_tp.float()).norm()
+            rel = (diff / b_tp.float().norm()).item()
+            assert rel < REL_CHAIN, (skew, rel)
+
+
+@needs_gfx950
+@multi_gpu_test(num_gpus=8)
+def test_k2_tep8_matches_tp8(monkeypatch: pytest.MonkeyPatch) -> None:
+    multi_process_parallel(monkeypatch, 8, 1, _tep8_worker)
+
+
 @ray.remote(num_gpus=1, max_calls=1)
 def _fault_worker(
     monkeypatch: pytest.MonkeyPatch,

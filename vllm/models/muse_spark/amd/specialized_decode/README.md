@@ -65,7 +65,7 @@ Everything else is refused (default-deny): startup fails with one `ValueError`
 listing every reason, in three stages, each voted across the TP ranks before
 anything collective runs:
 
-- **Config** (the model's `__init__`): any parallelism but TP8, EPLB, DBO, LoRA,
+- **Config** (the model's `__init__`): any parallelism but TP8 (and TEP8, below), EPLB, DBO, LoRA,
   KV connectors, sleep mode, CPU offload, prompt embeds, speculative methods
   other than static DSpark K = 7, the V1 model runner, PIECEWISE decode graphs,
   a non-bf16 model, an fp8 KV cache, another block size, attention backend or
@@ -73,10 +73,41 @@ anything collective runs:
   ROCm gfx950, FlyDSL missing, fewer than 256 CUs).
 - **Loaded weights** (when the model state builds the executor): each kernel
   layer's weight shapes, dtypes and layouts, norm epsilons and gain centres,
-  the folded router multiplier, the shuffled MXFP4 experts; with `k1` or
+  the folded router multiplier, the shuffled MXFP4 experts (TEP8: this rank's
+  32 whole experts and their linear expert map); with `k1` or
   `split`, also the qkv / norm weights, RoPE and attention options they read.
 - **KV caches** (at every bind): dtype, `[blocks, 2, 16, 128]` layout and the
   resolved decode CUDA-graph mode.
+
+## TEP8 (experts expert-parallel)
+
+`--enable-expert-parallel` on the TP8 deployment (attention TP8, data parallel
+1, `--expert-placement-strategy linear`, no EPLB; `mono_core` `tensor` and
+`mono_front` `stock` only) builds K2 with `K2Build.moe == "ep"`. Rank r then
+holds experts `[32 r, 32 r + 32)` whole (w13 `[32, 8192, 2048]`, w2 `[32, 4096,
+2048]`, vLLM's expert-parallel tensors) instead of a 512-column slice of all
+256. Only the experts' stages differ (`stages/experts_ep.py`, and `experts.py`
+at the expert-parallel geometry `spec.EP_GEOM`):
+
+- the union is the step's picks of this rank's experts (at most 32 slots);
+- gate/up is the TP8 stage at the full 4096 intermediate (128 tasks a slot);
+  its a2 rows go to `inter_ep` / `isc_ep`, past every other scratch region;
+- down: a CTA owns 16 pooled rows as before, but a local pick needs its whole
+  a2 row (32 K steps). The a2 rows of the (at most 32 a chunk) local picks are
+  staged in LDS in one poll round trip; wave w multiplies four consecutive K
+  steps (`4 w` through `4 w` plus 3) of every local slot's w2; the 8 waves'
+  fp32 parts are summed in wave order and rounded once to bf16;
+- every CTA still pushes all picks' rows to the column owner: a local pick its
+  row, any other pick exact zeros, so the owner's fp32 sum over the 8 ranks
+  (`stages/reduce.py`, unchanged) is the producing rank's row, and the
+  post-expert norm, the route weights and everything after are the TP8 code.
+
+TP8 builds are unchanged (the layout of every TP8 scratch region and every TP8
+binary stays). TEP8's expert rows are one fp32 sum rounded once, where TP8 sums
+8 bf16-rounded partials, so the two agree to about one bf16 rounding of the
+layer's branch (`test_numerics.py::test_k2_tep8_matches_tp8`, relative
+difference < 1e-2 against TP8 on the same logical experts). The TEP8 build uses
+all 256 VGPRs, so it has the least headroom of the K2 builds.
 
 ## Steps, widths and padding
 
@@ -176,5 +207,5 @@ mono/              kernel source
 ```
 
 Tests: `tests/models/muse_spark/amd_specialized_decode/` (`test_runtime.py`
-on CPU; `test_compile.py` with FlyDSL for gfx950, GPU-less; the TP8
+on CPU; `test_compile.py` with FlyDSL for gfx950, GPU-less; the TP8 and TEP8
 `test_numerics*.py` on MI355X).

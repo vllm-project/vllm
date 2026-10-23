@@ -34,7 +34,7 @@ bounds. Every stage here touching the stage LDS or ``red`` ends with a barrier
 
 import flydsl.expr as fx
 from aiter.ops.flydsl.kernels import buffer_ops as bo
-from flydsl.expr import gpu, range_constexpr
+from flydsl.expr import const_expr, gpu, range_constexpr
 from flydsl.expr.typing import T
 
 from vllm.models.muse_spark.amd.specialized_decode.mono.common.mx import (
@@ -68,7 +68,9 @@ from vllm.models.muse_spark.amd.specialized_decode.mono.spec import (
     AMAX_FLOOR,
     BLOCKS,
     DOWN_BATCH,
+    EP_GEOM,
     EXPERTS,
+    EXPERTS_LOCAL,
     INTER,
     MAX_PICKS,
     MAX_U,
@@ -79,6 +81,7 @@ from vllm.models.muse_spark.amd.specialized_decode.mono.spec import (
     ROWS,
     THREADS,
     TOPK,
+    TP_GEOM,
     UG_GROUPS,
     W2_STEPS,
     W13_K,
@@ -148,10 +151,10 @@ def down_lds_struct(s: int):
 # read the same formulas.
 
 
-def inter_word(pick, g, w):
+def inter_word(pick, g, w, geom=TP_GEOM):
     """``inter`` pair of a pick's a2 word w (columns 32 g + 8 w .. + 8) of
-    32-column group g."""
-    return pick * INTER_WORDS + 4 * g + w
+    32-column group g (EP: ``inter_ep``, with ``geom`` = ``EP_GEOM``)."""
+    return pick * geom.inter_words + 4 * g + w
 
 
 def inter_read_word(pick, st, kb, d):
@@ -161,9 +164,9 @@ def inter_read_word(pick, st, kb, d):
     return pick * INTER_WORDS + 16 * st + 4 * kb + d
 
 
-def isc_index(pick, g):
-    """``isc`` pair of a pick's group-g a2 code."""
-    return pick * UG_GROUPS + g
+def isc_index(pick, g, geom=TP_GEOM):
+    """``isc`` pair of a pick's group-g a2 code (EP: ``isc_ep``)."""
+    return pick * geom.ug_groups + g
 
 
 def xq_read_word(t, st, kb, d):
@@ -172,13 +175,13 @@ def xq_read_word(t, st, kb, d):
     return t * XQ_WORDS + 16 * st + 4 * kb + d
 
 
-def ug_row_group(wave, g):
+def ug_row_group(wave, g, geom=TP_GEOM):
     """The w13 16-row group wave ``wave`` multiplies for 32-column group ``g``:
     waves 0 / 4 gate rows 32 g .., 1 / 5 gate 32 g + 16 .., 2 / 6 up rows
     512 + 32 g .., 3 / 7 up 512 + 32 g + 16 .. (a 32-row scale block holds two
     gate or two up groups, never one of each)."""
     rgl = wave % 4
-    return (rgl // 2) * UP_GROUP0 + 2 * g + rgl % 2
+    return (rgl // 2) * geom.up_group0 + 2 * g + rgl % 2
 
 
 def rsx_elem(rank, pick, rgd, rp):
@@ -187,12 +190,16 @@ def rsx_elem(rank, pick, rgd, rp):
     return (rank * MAX_PICKS + pick) * OWN_COLS + (rgd % RED_TASKS) * ROWS + 2 * rp
 
 
-def slot_expert(c, slot):
+def slot_expert(c, slot, ep=False):
     """Union slot ``slot``'s expert id, wave-uniform, the slot clamped into
     [0, MAX_U) and the id into [0, EXPERTS): an in-bounds weight address for
-    any slot (past |U| ``expert`` holds 0) or garbage id."""
+    any slot (past |U| ``expert`` holds 0) or garbage id. ``ep``: the expert's
+    index in this rank's 32 (clamped into [0, 32))."""
     sl = fx.max(fx.min(slot, MAX_U - 1), 0)
-    return clamp_expert(uniform(fx.ptr_load(c["rt"]["expert"] + sl)))
+    e = clamp_expert(uniform(fx.ptr_load(c["rt"]["expert"] + sl)))
+    if const_expr(ep):
+        e = fx.max(fx.min(e - EXPERTS_LOCAL * c["rank"], EXPERTS_LOCAL - 1), 0)
+    return e
 
 
 def _pick_id(rt, pick):
@@ -204,17 +211,24 @@ def _live(e):
     return (e >= 0) & (e < EXPERTS)
 
 
+def _local(c, e):
+    """Expert ``e`` is one of this rank's 32 (TEP8, linear placement)."""
+    lo = EXPERTS_LOCAL * c["rank"]
+    return (e >= lo) & (e < lo + EXPERTS_LOCAL)
+
+
 # ---------------------------------------------------------------- union
 
 
 @traced
-def load_route(c):
+def load_route(c, ep=False):
     """ROUTE -> the LDS route table (ids, weight bits) and the union U of the
     live picks: ``flag[e]`` (U's slot of e), ``expert[slot]`` (ascending, 0
     past |U|), ``kof[slot 8 + t]`` (row t's top-k index of the slot's expert,
     -1 when t did not pick it). LDS is not zeroed at launch: every field read
     later is written here first. Returns |U| (wave-uniform), 0 when every row
-    is a pad."""
+    is a pad. ``ep``: U is the step's union within this rank's 32 experts (a
+    pick of another rank's expert is not a slot here; its kof stays -1)."""
     s, tid, lane, wave = c["S"], c["tid"], c["lane"], c["wave"]
     rt = c["rt"]
     tid32 = fx.Int32(tid)
@@ -229,7 +243,10 @@ def load_route(c):
     gpu.barrier()
     if tid < s * TOPK:
         e = _pick_id(rt, tid32)
-        if _live(e):
+        on = _live(e)
+        if const_expr(ep):
+            on = on & _local(c, e)
+        if on:
             fx.ptr_store(fx.Int32(1), rt["flag"] + clamp_expert(e))
     gpu.barrier()
     f = (tid < EXPERTS).select(
@@ -243,7 +260,10 @@ def load_route(c):
     gpu.barrier()
     if tid < s * TOPK:
         e = _pick_id(rt, tid32)
-        if _live(e):
+        on = _live(e)
+        if const_expr(ep):
+            on = on & _local(c, e)
+        if on:
             sl = fx.min(fx.ptr_load(rt["flag"] + clamp_expert(e)), MAX_U - 1)
             fx.ptr_store(tid32 % TOPK, rt["kof"] + (sl * 8 + tid32 // TOPK))
     gpu.barrier()
@@ -253,18 +273,18 @@ def load_route(c):
 # ---------------------------------------------------------------- ug
 
 
-def ug_loads(c, task):
+def ug_loads(c, task, geom=TP_GEOM):
     """Task ``task``'s w13 operands for this wave (its row group, its K half:
     16 dwordx4) and their scale words (8: a word serves 2 steps x 2 row
     groups), issued a task ahead (``stage_ug`` takes them). The task is the
     caller's, clamped to the step's last (``run_ug``)."""
     lane, wave = c["lane"], c["wave"]
     a = c["args"]
-    e = slot_expert(c, task // UG_GROUPS)
-    rg = ug_row_group(wave, task % UG_GROUPS)
+    e = slot_expert(c, task // geom.ug_groups, geom is EP_GEOM)
+    rg = ug_row_group(wave, task % geom.ug_groups, geom)
     st0 = (wave // 4) * HALF_STEPS
     r_w = rsrc(a["w13"])
-    base = e * W13_EXPERT_DWORDS
+    base = e * geom.w13_expert_dwords
     av = [
         fp4_tile_load(r_w, base, rg, W13_K, st0 + i, lane * 4)
         for i in range(HALF_STEPS)
@@ -273,7 +293,10 @@ def ug_loads(c, task):
     sw = [
         fx.Int32(
             bo.buffer_load(
-                r_s, w13_scale_word(e, rg, st0 + i, lane), vec_width=1, dtype=T.i32
+                r_s,
+                w13_scale_word(e, rg, st0 + i, lane, rows=geom.w13_rows),
+                vec_width=1,
+                dtype=T.i32,
             )
         )
         for i in range(0, HALF_STEPS, 2)
@@ -282,7 +305,7 @@ def ug_loads(c, task):
 
 
 @traced
-def stage_ug(c, task, ops):
+def stage_ug(c, task, ops, geom=TP_GEOM):
     """Slot task / 16, 32-column group g = task % 16: the gate rows 32 g .. and
     up rows 512 + 32 g .. of the slot's expert (``ops``: ``ug_loads``) against
     the MXFP4 rows; thread (row tt = tid / 32, column) sums its gate / up over
@@ -292,9 +315,9 @@ def stage_ug(c, task, ops):
     s, tid, lane, wave, red = c["S"], c["tid"], c["lane"], c["wave"], c["red"]
     rt, xq = c["rt"], c["lds"]["xq"]
     av_l = c["lds"]["ug"]["av"]
-    slot = fx.max(fx.min(task // UG_GROUPS, MAX_U - 1), 0)
-    g = task % UG_GROUPS
-    rg = ug_row_group(wave, g)
+    slot = fx.max(fx.min(task // geom.ug_groups, MAX_U - 1), 0)
+    g = task % geom.ug_groups
+    rg = ug_row_group(wave, g, geom)
     st0 = (wave // 4) * HALF_STEPS
     t = fx.min(lane % 16, s - 1)
     kb = lane // 16
@@ -339,27 +362,30 @@ def stage_ug(c, task, ops):
             x1 = fx.ptr_load(av_l + (tt * 32 + col * 8 + 2 * j + 1))
             pk = pk_fp4_f32(pk, x0, x1, scale, j)
         pick = tt * TOPK + k
-        c["put_words"](c["scr"]["inter"], inter_word(pick, g, col), [pk])
+        ep = geom is EP_GEOM
+        inter_r = c["scr"]["inter_ep" if ep else "inter"]
+        isc_r = c["scr"]["isc_ep" if ep else "isc"]
+        c["put_words"](inter_r, inter_word(pick, g, col, geom), [pk])
         if col == 0:
-            c["put"](c["scr"]["isc"], isc_index(pick, g), code)
+            c["put"](isc_r, isc_index(pick, g, geom), code)
     gpu.barrier()
 
 
 @traced
-def run_ug(c, nu):
+def run_ug(c, nu, geom=TP_GEOM):
     """Every ug task of the step (|U| x 16) over the grid, reversed placement
     (CTA b: tasks 255 - b, + 256, ...: the leftover tasks of the last round go
     to the high CTAs, whose early work ends first), the next task's weights in
     flight under this one's MFMAs. ``nu == 0`` runs no task (task index 0's
     loads, expert 0, are issued and unused)."""
-    total = nu * UG_GROUPS
+    total = nu * geom.ug_groups
     last = fx.max(total - 1, 0)
     task = BLOCKS - 1 - fx.Int32(c["bid"])
-    ops = ug_loads(c, fx.min(task, last))
+    ops = ug_loads(c, fx.min(task, last), geom)
     while task < total:
         nxt = task + BLOCKS
-        ops_n = ug_loads(c, fx.min(nxt, last))
-        stage_ug(c, task, ops)
+        ops_n = ug_loads(c, fx.min(nxt, last), geom)
+        stage_ug(c, task, ops, geom)
         task = nxt
         ops = ops_n
 

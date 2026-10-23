@@ -252,6 +252,10 @@ def make_context(
     for name, _, _ in spec.SCRATCH_PLAIN_BC:
         if name is not None:  # None: a reserved gap
             scr[name] = scratch + fx.Int64(lay[name][0])
+    # TEP8's a2 rows: EP builds only (a TP trace stays unchanged)
+    if getattr(key, "moe", "tp") == "ep":  # (a K1Build has no experts)
+        for r in spec.SCRATCH_REGIONS_EP:
+            scr[r] = sreg(scratch, lay[r][0], r)
     return {
         "S": S,
         "tid": tid,

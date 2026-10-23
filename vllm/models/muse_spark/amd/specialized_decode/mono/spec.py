@@ -230,6 +230,77 @@ def step_tag(epoch: int, slot: int) -> int:
     return (epoch & EPOCH_MASK) * TAG_SLOTS + slot + 1
 
 
+# --------------------------------------------------------------------------
+# TEP8 (K2Build.moe == "ep"): attention stays TP8; rank r owns the experts
+# [32 r, 32 r + 32) at the full intermediate (vLLM's expert-parallel tensors,
+# linear placement). Everything past the experts' rows (the column-owner
+# reduce, the post-expert norm, the unpooler) is the TP8 protocol: the rank
+# holding a pick's expert pushes its whole row, every other rank zeros.
+
+K2_MOES = ("tp", "ep")  # K2Build.moe
+EXPERTS_LOCAL = EXPERTS // TP  # 32 experts a rank under EP
+INTER_EP = 4096  # an expert's whole intermediate
+MAX_U_EP = EXPERTS_LOCAL  # a rank's local union
+
+
+@dataclass(frozen=True)
+class MoeGeom:
+    """The expert geometry a rank's weights have: ``inter`` columns of each of
+    ``experts`` experts (TP8: 512 of 256, EP8: 4096 of 32)."""
+
+    inter: int
+    experts: int
+
+    @property
+    def ug_groups(self) -> int:  # 32-column ug tasks a union slot
+        return self.inter // 32
+
+    @property
+    def up_group0(self) -> int:  # the first up 16-row group of an expert's w13
+        return self.inter // ROWS
+
+    @property
+    def w13_rows(self) -> int:  # gate | up
+        return 2 * self.inter
+
+    @property
+    def w2_steps(self) -> int:  # 128-K steps of an expert's w2
+        return self.inter // 128
+
+    @property
+    def inter_words(self) -> int:  # fp4 words of a pick's a2 row
+        return self.inter // 8
+
+    @property
+    def w13_expert_dwords(self) -> int:
+        return self.w13_rows * MOE_HIDDEN // 8
+
+    @property
+    def w2_expert_dwords(self) -> int:
+        return MOE_HIDDEN * self.inter // 8
+
+
+TP_GEOM = MoeGeom(INTER, EXPERTS)
+EP_GEOM = MoeGeom(INTER_EP, EXPERTS_LOCAL)
+
+
+def moe_geom(moe: str) -> MoeGeom:
+    return EP_GEOM if moe == "ep" else TP_GEOM
+
+
+# The EP down stage: a chunk of this rank's live local picks (EP_STAGE_PICKS at
+# most; more are rare and take another chunk) has its whole a2 row staged in
+# LDS; wave w multiplies the 128-K steps 4 w .. 4 w + 3 of every local slot.
+EP_STAGE_PICKS = 32
+EP_WAVE_STEPS = EP_GEOM.w2_steps // WAVES  # 4
+EP_PICK_WORDS = EP_GEOM.inter_words  # 512 a2 words a pick
+EP_PICK_CODES = EP_GEOM.ug_groups  # 128 a2 codes a pick
+DOWN_BATCH_EP = 4  # slots of w2 in flight a wave
+
+assert EP_GEOM.w2_steps == EP_WAVE_STEPS * WAVES and EP_PICK_WORDS == THREADS
+assert THREADS == EP_STAGE_PICKS * ROWS
+assert MAX_U_EP <= MAX_U
+
 assert P0 + P_TASKS <= BLOCKS and R0 + R_TASKS <= P0 and NA <= R0
 assert DOWN_TASKS == BLOCKS and U_TASKS == BLOCKS and O_TASKS == 2 * BLOCKS
 assert RED_TASKS * TP == DOWN_TASKS and MAX_ROWS <= MAX_TOKENS <= 8
@@ -305,6 +376,9 @@ class K2Build:
     # (C, q = 1 widths).
     core: str = "tensor"
     window: bool = False  # split only: a sliding layer's key window
+    # The experts' parallelism (K2_MOES): "tp" every expert's 512 columns a
+    # rank, "ep" (TEP8) this rank's 32 experts whole.
+    moe: str = "tp"
 
     def __post_init__(self):
         _check_key(
@@ -318,6 +392,10 @@ class K2Build:
             raise ValueError(f"K2Build.core {self.core!r} (one of {K2_CORES})")
         if self.window and self.core != "split":
             raise ValueError(f"K2Build.window with core {self.core!r} (split only)")
+        if type(self.moe) is not str or self.moe not in K2_MOES:
+            raise ValueError(f"K2Build.moe {self.moe!r} (one of {K2_MOES})")
+        if self.moe == "ep" and self.core != "tensor":
+            raise ValueError(f"K2Build.moe 'ep' with core {self.core!r} (tensor only)")
 
     @property
     def faulty(self) -> bool:
@@ -343,7 +421,8 @@ class K2Build:
             core = "_sw" if self.window else "_full"
         else:
             core = _CORE_SUFFIX[self.core]
-        return f"muse_mono_k2_s{self.tokens}{core}" + _fault_suffix(self)
+        moe = "_ep" if self.moe == "ep" else ""
+        return f"muse_mono_k2_s{self.tokens}{core}{moe}" + _fault_suffix(self)
 
 
 @dataclass(frozen=True)
@@ -497,9 +576,16 @@ SCRATCH_PAIRS_BC = (
 )
 SCRATCH_REGIONS_BC = tuple(n for n, _ in SCRATCH_PAIRS_BC)
 SCRATCH_REGIONS_ALL = SCRATCH_REGIONS + SCRATCH_REGIONS_BC
+# TEP8 (K2Build.moe == "ep"): a pick's whole a2 row, laid out past every other
+# region (their offsets, and the TP binaries, stay).
+SCRATCH_PAIRS_EP = (
+    ("inter_ep", _MP * EP_GEOM.inter_words),  # pick*512 + 4g + w: a2 fp4 words
+    ("isc_ep", _MP * EP_GEOM.ug_groups),  # pick*128 + g: a2 e8m0 code
+)
+SCRATCH_REGIONS_EP = tuple(n for n, _ in SCRATCH_PAIRS_EP)
 # Every region a wait record may name (debug.region_ids; ids are name CRCs, so
 # the order is free).
-REGIONS = SCRATCH_REGIONS_ALL + PEER_REGIONS
+REGIONS = SCRATCH_REGIONS_ALL + PEER_REGIONS + SCRATCH_REGIONS_EP
 
 # Plain (untagged) regions past the B/C mailboxes: (name, bytes, alignment).
 AROW = "arow"  # bf16 [MT, HIDDEN]: K1's attn_in rows (boundary -> GEMV)
@@ -559,6 +645,7 @@ def scratch_layout() -> dict[str, tuple[int, int]]:
         if name is not None:
             out[name] = (off, nbytes)
         off += nbytes
+    out.update(pair_layout(SCRATCH_PAIRS_EP, start=off))
     return out
 
 
@@ -639,6 +726,14 @@ def route_weight_pair(t, k):
 
 def pss_pair(j, pick):
     return j * _MP + pick
+
+
+def inter_ep_pair(pick, g, w):
+    return pick * EP_GEOM.inter_words + 4 * g + w
+
+
+def isc_ep_pair(pick, g):
+    return pick * EP_GEOM.ug_groups + g
 
 
 def upart_pair(g, q, t, r):

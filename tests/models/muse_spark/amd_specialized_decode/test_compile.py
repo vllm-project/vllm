@@ -42,11 +42,12 @@ def _compiles_for_gfx950() -> bool:
 
 
 _W = range(1, spec.MAX_ROWS + 1)
-# every build the runtime serves (Phase A, B1's K1, B2's gated and C's split
-# cores, at every width and attention kind) and the stalled-rank fault build
-# test_numerics launches
+# every build the runtime serves (Phase A, TEP8's expert-parallel experts, B1's
+# K1, B2's gated and C's split cores, at every width and attention kind) and the
+# stalled-rank fault build test_numerics launches
 BUILDS = [
     *(spec.K2Build(tokens=s) for s in _W),
+    *(spec.K2Build(tokens=s, moe="ep") for s in _W),
     spec.K2Build(
         tokens=8,
         fault_rank=3,

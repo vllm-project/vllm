@@ -50,6 +50,12 @@ def decode_widths(q: int, max_num_seqs: int | None) -> tuple[int, ...]:
     return tuple(w for w in range(q, MAX_ROWS + 1, q) if w <= cap)
 
 
+def moe_mode(vllm_config) -> str:
+    """The experts' parallelism K2 is built for: "ep" (TEP8: attention TP8,
+    this rank's 32 experts whole) under ``--enable-expert-parallel``, else "tp"."""
+    return "ep" if vllm_config.parallel_config.enable_expert_parallel else "tp"
+
+
 def decode_backend(vllm_config) -> str:
     """``additional_config["decode_backend"]``, "auto" when absent or when
     ``additional_config`` is not a dict."""
@@ -125,7 +131,12 @@ def refuse_config(vllm_config) -> list[str]:
         (pc.tensor_parallel_size != TP, f"TP {pc.tensor_parallel_size} (TP{TP} only)"),
         (pc.pipeline_parallel_size != 1, "pipeline parallelism"),
         (pc.data_parallel_size != 1, "data parallelism"),
-        (pc.enable_expert_parallel, "expert parallelism"),
+        # TEP8 (moe_mode "ep"): attention TP8, rank r's experts [32 r, 32 r + 32)
+        (
+            pc.enable_expert_parallel
+            and getattr(pc, "expert_placement_strategy", "linear") != "linear",
+            "expert parallelism with a non-linear expert placement",
+        ),
         (pc.enable_eplb, "EPLB"),
         (pc.decode_context_parallel_size != 1, "decode context parallelism"),
         (pc.prefill_context_parallel_size != 1, "prefill context parallelism"),

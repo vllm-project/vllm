@@ -293,12 +293,14 @@ class KernelLayer:
         kind: str,
         q: int = 1,
         phases: Phases = PHASE_A,
+        moe: str = "tp",
     ):
         if kind not in (FULL, SLIDING):
             raise ValueError(f"attention kind {kind!r} ({FULL!r} or {SLIDING!r})")
         self.layer, self.prev, self.runner, self.width = layer, prev, runner, width
         self.kind, self.q, self.phases = kind, q, phases
         self.core = phases.k2_core(q)  # K2's core at this width
+        self.moe = moe  # the experts' parallelism ("tp" | "ep", TEP8)
         self.name = layer.self_attn.attn.layer_name  # its metadata's key
         # the step's first kernel layer bumps the epoch (a graph captures it)
         self.first = layer.layer_idx == runner.first_layer
@@ -335,6 +337,7 @@ class KernelLayer:
             tokens=self.width,
             core=self.core,
             window=self.core == SPLIT and self.kind == SLIDING,
+            moe=self.moe,
             **self.runner.fault,
         )
 

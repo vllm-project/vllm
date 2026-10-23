@@ -55,12 +55,35 @@ def kernel_layers(backbone) -> dict[int, str]:
     return out
 
 
+def _linear_ep_map(m) -> bool:
+    """``m`` (vLLM's expert map, or AITER's 0/1 expert mask with its trailing
+    sentinel) gives this TP rank exactly the experts [32 r, 32 r + 32), in
+    order: TEP8's linear placement, the one K2(ep) indexes by."""
+    if not isinstance(m, torch.Tensor) or m.dim() != 1:
+        return False
+    from vllm.distributed import get_tp_group
+
+    r = get_tp_group().rank_in_group
+    lo, n = spec.EXPERTS_LOCAL * r, spec.EXPERTS_LOCAL
+    m = m.detach().to("cpu", torch.int64)
+    if m.numel() == spec.EXPERTS + 1:  # AITER expert_mask: 1 = local, sentinel 0
+        want = torch.zeros(spec.EXPERTS + 1, dtype=torch.int64)
+        want[lo : lo + n] = 1
+        return bool(torch.equal(m, want))
+    if m.numel() == spec.EXPERTS:  # global -> local id, -1 elsewhere
+        want = torch.full((spec.EXPERTS,), -1, dtype=torch.int64)
+        want[lo : lo + n] = torch.arange(n)
+        return bool(torch.equal(m, want))
+    return False
+
+
 def refuse_model(
     backbone,
     layers: Mapping[int, str],
     front: str = "stock",
     core: str = "tensor",
     max_model_len: int | None = None,
+    moe: str = "tp",
 ) -> list[str]:
     """Stage 2: every kernel layer's modules and weights as K2 reads them (in
     place, as contiguous views of the loaded parameters), and the previous
@@ -181,27 +204,32 @@ def refuse_model(
         need(f"{p} pre_expert_norm", _get(pre_exp, "weight"), (MH,), bf)
         if not norm_ok(pre_exp, spec.PRE_EXP_EPS, False):
             reasons.append(f"{p}: pre_expert_norm (gain 1, eps 1e-5, weight after)")
+        geom = spec.moe_geom(moe)
+        XE, XI = geom.experts, geom.inter  # TP8: 256 x 512, TEP8: 32 x 4096
         w13 = getattr(X, "w13_weight", None)
-        need(f"{p} w13", w13, (E, 2 * spec.INTER, MH // 2), fp4)
+        need(f"{p} w13", w13, (XE, 2 * XI, MH // 2), fp4)
         if not getattr(w13, "is_shuffled", False):
             reasons.append(f"{p}: w13 not AITER-shuffled")
         need(
             f"{p} w13 scale",
             getattr(X, "w13_weight_scale", None),
-            (E, 2 * spec.INTER, MH // 32),
+            (XE, 2 * XI, MH // 32),
             e8m0,
         )
         w2 = getattr(X, "w2_weight", None)
-        need(f"{p} w2", w2, (E, MH, spec.INTER // 2), fp4)
+        need(f"{p} w2", w2, (XE, MH, XI // 2), fp4)
         if not getattr(w2, "is_shuffled", False):
             reasons.append(f"{p}: w2 not AITER-shuffled")
         need(
             f"{p} w2 scale",
             getattr(X, "w2_weight_scale", None),
-            (E, MH, spec.INTER // 32),
+            (XE, MH, XI // 32),
             e8m0,
         )
-        if getattr(X, "expert_map", None) is not None:
+        if moe == "ep":
+            if not _linear_ep_map(getattr(X, "expert_map", None)):
+                reasons.append(f"{p}: the expert map is not this rank's linear 32")
+        elif getattr(X, "expert_map", None) is not None:
             reasons.append(f"{p}: an expert map (EP)")
         if getattr(X, "activation", None) != MoEActivation.SILU:
             reasons.append(f"{p}: expert activation {getattr(X, 'activation', None)}")

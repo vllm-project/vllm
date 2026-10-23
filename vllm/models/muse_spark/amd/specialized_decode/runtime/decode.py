@@ -38,7 +38,11 @@ from vllm.models.muse_spark.amd.specialized_decode.mono.abi import (
     WAIT_SECONDS,
 )
 from vllm.models.muse_spark.amd.specialized_decode.mono.spec import K2Build
-from vllm.models.muse_spark.amd.specialized_decode.runtime import HINT, DecodeConfig
+from vllm.models.muse_spark.amd.specialized_decode.runtime import (
+    HINT,
+    DecodeConfig,
+    moe_mode,
+)
 from vllm.models.muse_spark.amd.specialized_decode.runtime.guards import (
     FailStop,
     kernel_layers,
@@ -132,6 +136,7 @@ class SpecializedDecode:
         phases = self.phases = decode_phases(vllm_config)
         tp = get_tp_group()
         core = phases.k2_core(config.q)
+        moe = self.moe = moe_mode(vllm_config)
         layers = kernel_layers(backbone)
         agree(
             refuse_model(
@@ -140,6 +145,7 @@ class SpecializedDecode:
                 phases.front,
                 core,
                 getattr(vllm_config.model_config, "max_model_len", None),
+                moe,
             ),
             tp.cpu_group,
             "the loaded weights",
@@ -161,7 +167,9 @@ class SpecializedDecode:
         }
         self.kernels: dict[int, dict[int, KernelLayer]] = {
             w: {
-                i: KernelLayer(L[i], L[i - 1], runner, w, layers[i], config.q, phases)
+                i: KernelLayer(
+                    L[i], L[i - 1], runner, w, layers[i], config.q, phases, moe
+                )
                 for i in sorted(layers)
             }
             for w in config.widths

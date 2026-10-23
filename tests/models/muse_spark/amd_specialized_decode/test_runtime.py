@@ -33,6 +33,8 @@ from vllm.models.muse_spark.amd.specialized_decode import runtime  # noqa: E402
 from vllm.models.muse_spark.amd.specialized_decode.mono import spec  # noqa: E402
 from vllm.models.muse_spark.amd.specialized_decode.runtime import (  # noqa: E402
     DecodeConfig,
+    moe_mode,
+    refuse_config,
     specialized_decode_config,
 )
 from vllm.models.muse_spark.amd.specialized_decode.runtime import (  # noqa: E402
@@ -145,6 +147,23 @@ def test_supported_configs(on_mi355x, monkeypatch):
         )
 
 
+def test_expert_parallelism_selects_the_tep8_build(on_mi355x):
+    # attention stays TP8; the experts go expert-parallel (linear placement)
+    assert moe_mode(vllm_config()) == "tp"
+    ep = vllm_config(**{"parallel_config.enable_expert_parallel": True})
+    assert moe_mode(ep) == "ep"
+    assert refuse_config(ep) == []
+    assert specialized_decode_config(ep) == DecodeConfig(1, ALL_WIDTHS)
+    # EP still needs TP8 attention and no data parallelism
+    for over, reason in (
+        ({"parallel_config.tensor_parallel_size": 4}, "TP 4"),
+        ({"parallel_config.data_parallel_size": 2}, "data parallelism"),
+        ({"parallel_config.enable_eplb": True}, "EPLB"),
+    ):
+        bad = vllm_config(**{"parallel_config.enable_expert_parallel": True, **over})
+        assert any(reason in r for r in refuse_config(bad)), over
+
+
 def _text(**over):
     from .conftest import muse_text_config
 
@@ -157,7 +176,14 @@ _REFUSALS = [
     ({"parallel_config.tensor_parallel_size": 4}, {}, "TP 4 (TP8 only)"),
     ({"parallel_config.pipeline_parallel_size": 2}, {}, "pipeline parallelism"),
     ({"parallel_config.data_parallel_size": 2}, {}, "data parallelism"),
-    ({"parallel_config.enable_expert_parallel": True}, {}, "expert parallelism"),
+    (
+        {
+            "parallel_config.enable_expert_parallel": True,
+            "parallel_config.expert_placement_strategy": "round_robin",
+        },
+        {},
+        "non-linear expert placement",
+    ),
     ({"parallel_config.enable_eplb": True}, {}, "EPLB"),
     ({"parallel_config.decode_context_parallel_size": 8}, {}, "decode context"),
     ({"parallel_config.prefill_context_parallel_size": 2}, {}, "prefill context"),
@@ -489,6 +515,72 @@ def test_refuse_model_accepts_the_checkpoint_layout():
         X.w13_weight.is_shuffled = True
         X.w2_weight_scale = _meta(256, 4096, 16, dtype=torch.float8_e8m0fnu)
         assert refuse_model(bb, layers) == []
+
+
+def _to_ep(bb, rank, kind="mask"):
+    """Every kernel layer's experts as TEP8 loads them on TP rank ``rank``: 32
+    whole experts (w13 / w2 at the full intermediate) and the linear expert
+    map, as AITER's 0 / 1 mask (``kind="mask"``, a trailing sentinel) or vLLM's
+    global -> local ids (``kind="ids"``)."""
+    if kind == "mask":
+        emap = torch.zeros(257, dtype=torch.int64)
+        emap[32 * rank : 32 * rank + 32] = 1
+    else:
+        emap = torch.full((256,), -1, dtype=torch.int64)
+        emap[32 * rank : 32 * rank + 32] = torch.arange(32)
+    for L in bb.layers:
+        X = L.feed_forward.experts.routed_experts
+        X.w13_weight = _meta(32, 8192, 2048, dtype=U8)
+        X.w13_weight_scale = _meta(32, 8192, 128, dtype=U8)
+        X.w2_weight = _meta(32, 4096, 2048, dtype=U8)
+        X.w2_weight_scale = _meta(32, 4096, 128, dtype=U8)
+        X.w13_weight.is_shuffled = X.w2_weight.is_shuffled = True
+        X.expert_map = emap
+
+
+@pytest.mark.parametrize("kind", ["mask", "ids"])
+def test_refuse_model_accepts_the_tep8_layout(kind, monkeypatch):
+    monkeypatch.setattr(
+        "vllm.distributed.get_tp_group", lambda: SimpleNamespace(rank_in_group=5)
+    )
+    bb = _backbone()
+    layers = kernel_layers(bb)
+    _to_ep(bb, 5, kind)
+    assert refuse_model(bb, layers, moe="ep") == []
+    # the TP8 kernel reads neither the shapes nor the map
+    assert refuse_model(bb, layers, moe="tp") != []
+
+
+@pytest.mark.parametrize(
+    "what, reason",
+    [
+        ("tp weights", "layer 1 w13: (256, 1024, 2048)"),
+        ("no map", "the expert map is not this rank's linear 32"),
+        ("other rank's map", "the expert map is not this rank's linear 32"),
+        ("round-robin map", "the expert map is not this rank's linear 32"),
+    ],
+)
+def test_refuse_model_names_every_tep8_mismatch(what, reason, monkeypatch):
+    monkeypatch.setattr(
+        "vllm.distributed.get_tp_group", lambda: SimpleNamespace(rank_in_group=5)
+    )
+    bb = _backbone()
+    layers = kernel_layers(bb)
+    _to_ep(bb, 5)
+    X = bb.layers[1].feed_forward.experts.routed_experts
+    if what == "tp weights":
+        X.w13_weight = _meta(256, 1024, 2048, dtype=U8)
+        X.w13_weight.is_shuffled = True
+    elif what == "no map":
+        X.expert_map = None
+    elif what == "other rank's map":
+        X.expert_map = torch.zeros(257, dtype=torch.int64)
+        X.expert_map[32 * 4 : 32 * 4 + 32] = 1
+    else:  # rank 5 of a round-robin placement: experts 5, 13, 21, ...
+        X.expert_map = torch.zeros(257, dtype=torch.int64)
+        X.expert_map[5:256:8] = 1
+    reasons = [r for r in refuse_model(bb, layers, moe="ep") if r.startswith("layer 1")]
+    assert len(reasons) == 1 and reason in reasons[0], reasons
 
 
 def _break(bb, what):

@@ -77,6 +77,7 @@ def vllm_config(**over) -> SimpleNamespace:
             pipeline_parallel_size=1,
             data_parallel_size=1,
             enable_expert_parallel=False,
+            expert_placement_strategy="linear",
             enable_eplb=False,
             decode_context_parallel_size=1,
             prefill_context_parallel_size=1,
