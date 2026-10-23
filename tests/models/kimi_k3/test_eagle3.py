@@ -36,7 +36,7 @@ def test_kimi_linear_advertises_eagle3_support():
 
 
 def test_kimi_k3_uses_shared_eagle3_layer_configuration():
-    target = object.__new__(KimiK3ForConditionalGeneration)
+    target = object.__new__(KimiK3ForConditionalGeneration)  # type: ignore[type-abstract]
     torch.nn.Module.__init__(target)
     model = _make_kimi_linear_model()
     object.__setattr__(model, "layers", [None] * 93)
@@ -79,12 +79,14 @@ def test_kimi_linear_forward_extracts_standard_aux_hidden_states(monkeypatch):
         lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
     )
 
-    output, aux_hidden_states = model.forward(
+    result = model.forward(
         input_ids=None,
         positions=torch.tensor([0]),
         intermediate_tensors=None,
         inputs_embeds=initial_hidden_states,
     )
+    assert isinstance(result, tuple)
+    output, aux_hidden_states = result
 
     expected_layer_output = layer_hidden_states + layer_residual
     torch.testing.assert_close(output, expected_layer_output)
@@ -128,12 +130,14 @@ def test_kimi_linear_forward_extracts_attn_res_aux_hidden_states(monkeypatch):
     final_attn_res = Mock(return_value=final_hidden_states)
     monkeypatch.setattr(kimi_model, "attn_res", final_attn_res)
 
-    output, aux_hidden_states = model.forward(
+    result = model.forward(
         input_ids=None,
         positions=torch.tensor([0]),
         intermediate_tensors=None,
         inputs_embeds=initial_hidden_states,
     )
+    assert isinstance(result, tuple)
+    output, aux_hidden_states = result
 
     torch.testing.assert_close(output, final_hidden_states)
     torch.testing.assert_close(aux_hidden_states[0], initial_hidden_states)
@@ -187,12 +191,14 @@ def test_attn_res_stream_capture_receives_the_layer_outputs_in_order(monkeypatch
     capture = Mock(return_value=captured)
     monkeypatch.setattr(KimiLinearModel, "_capture_aux_hidden_stream", capture)
 
-    _, aux_hidden_states = model.forward(
+    result = model.forward(
         input_ids=None,
         positions=torch.tensor([0]),
         intermediate_tensors=None,
         inputs_embeds=initial_hidden_states,
     )
+    assert isinstance(result, tuple)
+    _, aux_hidden_states = result
 
     layer_idx, got_prefix, got_pending, got_residual = capture.call_args.args
     assert layer_idx == 0

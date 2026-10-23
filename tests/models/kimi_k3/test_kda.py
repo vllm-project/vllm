@@ -6,6 +6,7 @@ Compares chunk_kda against a naive recurrent reference (float32).
 Uses torch.rand for q/k/v to match FLA's test pattern.
 """
 
+from collections.abc import Callable
 from types import SimpleNamespace
 
 import pytest
@@ -75,7 +76,7 @@ PACKED_DECODE_IMPLS = {
     "nvidia": fused_recurrent_kda_packed_decode,
     "amd": fused_recurrent_kda_packed_decode_amd,
 }
-SPEC_DECODE_IMPLS = {
+SPEC_DECODE_IMPLS: dict[str, Callable[..., tuple[torch.Tensor, torch.Tensor]]] = {
     "nvidia": fused_recurrent_kda_nvidia,
     "amd": fused_recurrent_kda_amd,
 }
