@@ -57,7 +57,6 @@ from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Int32, Int64
 
 from . import k5 as k5m
-from . import portion as _portion
 from .dev import (
     BLOCKS,
     CM_DEV,
@@ -121,9 +120,6 @@ class BuildM:
     timeline: bool = False
     eplb: int = 0  # M7: replica expert slots (mk/eplb.py)
     W: int = 4  # TP = EP group (4 / 8)
-    only: str = (
-        ""  # ablation: stage mask (mk/portion.py; "" = every stage, the shipped kernel)
-    )
     unr: int = int(
         os.environ.get("MK5M_UNR", "-1")
     )  # down task-loop ring (unroll 3, fixed slots; PF_DN 2): 1 on, 0 off, -1 auto (on at W = 8, S != 96)
@@ -143,7 +139,6 @@ def build_vllm(S, W=8):
         timeline=False,
         eplb=0,
         W=W,
-        only="",
         unr=-1,
         shuffled_w=True,
         shuffled_s=True,
@@ -242,16 +237,10 @@ def build(key: BuildM):
         f"muse_k5m_s{S}_g{PF_GU}_d{PF_DN}_t{int(TL)}_eb{RB}"
         + ("" if W == 4 else f"_w{W}")
         + ("_u" if UNRD else "")
-        + _portion.name_tag(key.only)
         + ("_shw" if key.shuffled_w else "")
         + ("_shs" if key.shuffled_s else "")
     )
     SHUF_W, SHUF_S = key.shuffled_w, key.shuffled_s
-    ONLY = _portion.stage_set(key.only, _portion.HM_STAGES, _portion.K5_DEPS)
-
-    def on(stage):  # stage active in this build (const at trace time)
-        return ONLY is None or stage in ONLY
-
     def sel_peer(pl, d):
         p = pl[0]
         for r_ in range_constexpr(1, W):
@@ -943,151 +932,89 @@ def build(key: BuildM):
         ep = uniform(ld_i32(epoch, 0, CM_DEV))
         tag = (ep & 0x1FFFFFF) * 64 + layer + 1
         ept = None
-        if const_expr(RB > 0 and on("m_setup")):
+        if const_expr(RB > 0):
             ept = [ld_i32(eptab, lane + 64 * hh) for hh in range(4)]
-        if const_expr(on("m_setup")):
-            setup(ids, rank, tid, lane, wave, rt, ms.lists.ptr, nrows, ept)
+        setup(ids, rank, tid, lane, wave, rt, ms.lists.ptr, nrows, ept)
         V = uniform(fx.ptr_load(rt["nve"] + 0))
         t0 = bid * V
         t1 = t0 + V
         v0 = t0 >> 8
         v1 = (fx.max(t1, 1) - 1) >> 8
         q = []  # (a function-level name: the scf.while rewriter carries only names bound at this level)
-        if const_expr(on("m_gate_up")):
-            q = [
-                gu_loads(w13, w13s, rt, t0 + d, lane, wave, (t0 + d) < t1)
-                for d in range(PF_GU)
-            ]
-        if const_expr(on("m_setup")):
-            own_picks(rt, ms.lists.ptr, v0, v1, tid)
+        q = [
+            gu_loads(w13, w13s, rt, t0 + d, lane, wave, (t0 + d) < t1)
+            for d in range(PF_GU)
+        ]
+        own_picks(rt, ms.lists.ptr, v0, v1, tid)
         stamp(TL, tls, tid, 1)
         # gate_up over virtual expert v0, then (if the range crosses) v1
-        if const_expr(on("m_gate_up")):
-            load_rows_h(h, rt, 0, mg.h.ptr, tid)
+        load_rows_h(h, rt, 0, mg.h.ptr, tid)
         task = t0
         it = fx.Int32(0)
         tsplit = fx.min(t1, (v0 + 1) << 8)
-        if const_expr(on("m_gate_up")):
-            while task < tsplit:
-                nxt = gu_loads(
-                    w13, w13s, rt, task + PF_GU, lane, wave, (task + PF_GU) < t1
-                )
-                gu_compute(
-                    q[0],
-                    task,
-                    it,
-                    0,
-                    scratch,
-                    tag,
-                    rt,
-                    tid,
-                    lane,
-                    wave,
-                    mg.h.ptr,
-                    mg.red.ptr,
-                )
-                q = q[1:] + [nxt]
-                task = task + 1
-                it = it + 1
-            if task < t1:
-                gpu.barrier()
-                load_rows_h(h, rt, 1, mg.h.ptr, tid)
-            while task < t1:
-                nxt = gu_loads(
-                    w13, w13s, rt, task + PF_GU, lane, wave, (task + PF_GU) < t1
-                )
-                gu_compute(
-                    q[0],
-                    task,
-                    it,
-                    1,
-                    scratch,
-                    tag,
-                    rt,
-                    tid,
-                    lane,
-                    wave,
-                    mg.h.ptr,
-                    mg.red.ptr,
-                )
-                q = q[1:] + [nxt]
-                task = task + 1
-                it = it + 1
+        while task < tsplit:
+            nxt = gu_loads(
+                w13, w13s, rt, task + PF_GU, lane, wave, (task + PF_GU) < t1
+            )
+            gu_compute(
+                q[0],
+                task,
+                it,
+                0,
+                scratch,
+                tag,
+                rt,
+                tid,
+                lane,
+                wave,
+                mg.h.ptr,
+                mg.red.ptr,
+            )
+            q = q[1:] + [nxt]
+            task = task + 1
+            it = it + 1
+        if task < t1:
+            gpu.barrier()
+            load_rows_h(h, rt, 1, mg.h.ptr, tid)
+        while task < t1:
+            nxt = gu_loads(
+                w13, w13s, rt, task + PF_GU, lane, wave, (task + PF_GU) < t1
+            )
+            gu_compute(
+                q[0],
+                task,
+                it,
+                1,
+                scratch,
+                tag,
+                rt,
+                tid,
+                lane,
+                wave,
+                mg.h.ptr,
+                mg.red.ptr,
+            )
+            q = q[1:] + [nxt]
+            task = task + 1
+            it = it + 1
         stamp(TL, tls, tid, 2)
         # down: same tasks
         dq = []
-        if const_expr(on("m_down")):
-            dq = [
-                dn_loads(w2, w2s, w_post, rt, t0 + d, lane, wave, (t0 + d) < t1)
-                for d in range(PF_DN)
-            ]
-            gpu.barrier()
-            load_rows_a(scratch, tag, health, rt, 0, md.a.ptr, tid)
+        dq = [
+            dn_loads(w2, w2s, w_post, rt, t0 + d, lane, wave, (t0 + d) < t1)
+            for d in range(PF_DN)
+        ]
+        gpu.barrier()
+        load_rows_a(scratch, tag, health, rt, 0, md.a.ptr, tid)
         stamp(TL, tls, tid, 3)
-        if const_expr(on("m_down")):
-            task = t0
-            it = fx.Int32(0)
-            if const_expr(UNRD):
-                # ring: three tasks an iteration in fixed slots (dq[0], dq[1], dc): two tasks' loads stay in
-                # flight during each compute, no rotation copy waits for its data (the tail: the loop below)
-                while task + 2 < tsplit:
-                    dc = dn_loads(
-                        w2, w2s, w_post, rt, task + 2, lane, wave, (task + 2) < t1
-                    )
-                    dn_compute(
-                        dq[0],
-                        task,
-                        it,
-                        0,
-                        scratch,
-                        tag,
-                        rt,
-                        tid,
-                        lane,
-                        wave,
-                        md.a.ptr,
-                        md.red.ptr,
-                    )
-                    da = dn_loads(
-                        w2, w2s, w_post, rt, task + 3, lane, wave, (task + 3) < t1
-                    )
-                    dn_compute(
-                        dq[1],
-                        task + 1,
-                        it + 1,
-                        0,
-                        scratch,
-                        tag,
-                        rt,
-                        tid,
-                        lane,
-                        wave,
-                        md.a.ptr,
-                        md.red.ptr,
-                    )
-                    db = dn_loads(
-                        w2, w2s, w_post, rt, task + 4, lane, wave, (task + 4) < t1
-                    )
-                    dn_compute(
-                        dc,
-                        task + 2,
-                        it + 2,
-                        0,
-                        scratch,
-                        tag,
-                        rt,
-                        tid,
-                        lane,
-                        wave,
-                        md.a.ptr,
-                        md.red.ptr,
-                    )
-                    dq = [da, db]
-                    task = task + 3
-                    it = it + 3
-            while task < tsplit:
-                nxt = dn_loads(
-                    w2, w2s, w_post, rt, task + PF_DN, lane, wave, (task + PF_DN) < t1
+        task = t0
+        it = fx.Int32(0)
+        if const_expr(UNRD):
+            # ring: three tasks an iteration in fixed slots (dq[0], dq[1], dc): two tasks' loads stay in
+            # flight during each compute, no rotation copy waits for its data (the tail: the loop below)
+            while task + 2 < tsplit:
+                dc = dn_loads(
+                    w2, w2s, w_post, rt, task + 2, lane, wave, (task + 2) < t1
                 )
                 dn_compute(
                     dq[0],
@@ -1103,73 +1030,73 @@ def build(key: BuildM):
                     md.a.ptr,
                     md.red.ptr,
                 )
-                dq = dq[1:] + [nxt]
-                task = task + 1
-                it = it + 1
-            if task < t1:
-                gpu.barrier()
-                load_rows_a(scratch, tag, health, rt, 1, md.a.ptr, tid)
-            if const_expr(UNRD):
-                # ring: three tasks an iteration in fixed slots (dq[0], dq[1], dc): two tasks' loads stay in
-                # flight during each compute, no rotation copy waits for its data (the tail: the loop below)
-                while task + 2 < t1:
-                    dc = dn_loads(
-                        w2, w2s, w_post, rt, task + 2, lane, wave, (task + 2) < t1
-                    )
-                    dn_compute(
-                        dq[0],
-                        task,
-                        it,
-                        1,
-                        scratch,
-                        tag,
-                        rt,
-                        tid,
-                        lane,
-                        wave,
-                        md.a.ptr,
-                        md.red.ptr,
-                    )
-                    da = dn_loads(
-                        w2, w2s, w_post, rt, task + 3, lane, wave, (task + 3) < t1
-                    )
-                    dn_compute(
-                        dq[1],
-                        task + 1,
-                        it + 1,
-                        1,
-                        scratch,
-                        tag,
-                        rt,
-                        tid,
-                        lane,
-                        wave,
-                        md.a.ptr,
-                        md.red.ptr,
-                    )
-                    db = dn_loads(
-                        w2, w2s, w_post, rt, task + 4, lane, wave, (task + 4) < t1
-                    )
-                    dn_compute(
-                        dc,
-                        task + 2,
-                        it + 2,
-                        1,
-                        scratch,
-                        tag,
-                        rt,
-                        tid,
-                        lane,
-                        wave,
-                        md.a.ptr,
-                        md.red.ptr,
-                    )
-                    dq = [da, db]
-                    task = task + 3
-                    it = it + 3
-            while task < t1:
-                nxt = dn_loads(
-                    w2, w2s, w_post, rt, task + PF_DN, lane, wave, (task + PF_DN) < t1
+                da = dn_loads(
+                    w2, w2s, w_post, rt, task + 3, lane, wave, (task + 3) < t1
+                )
+                dn_compute(
+                    dq[1],
+                    task + 1,
+                    it + 1,
+                    0,
+                    scratch,
+                    tag,
+                    rt,
+                    tid,
+                    lane,
+                    wave,
+                    md.a.ptr,
+                    md.red.ptr,
+                )
+                db = dn_loads(
+                    w2, w2s, w_post, rt, task + 4, lane, wave, (task + 4) < t1
+                )
+                dn_compute(
+                    dc,
+                    task + 2,
+                    it + 2,
+                    0,
+                    scratch,
+                    tag,
+                    rt,
+                    tid,
+                    lane,
+                    wave,
+                    md.a.ptr,
+                    md.red.ptr,
+                )
+                dq = [da, db]
+                task = task + 3
+                it = it + 3
+        while task < tsplit:
+            nxt = dn_loads(
+                w2, w2s, w_post, rt, task + PF_DN, lane, wave, (task + PF_DN) < t1
+            )
+            dn_compute(
+                dq[0],
+                task,
+                it,
+                0,
+                scratch,
+                tag,
+                rt,
+                tid,
+                lane,
+                wave,
+                md.a.ptr,
+                md.red.ptr,
+            )
+            dq = dq[1:] + [nxt]
+            task = task + 1
+            it = it + 1
+        if task < t1:
+            gpu.barrier()
+            load_rows_a(scratch, tag, health, rt, 1, md.a.ptr, tid)
+        if const_expr(UNRD):
+            # ring: three tasks an iteration in fixed slots (dq[0], dq[1], dc): two tasks' loads stay in
+            # flight during each compute, no rotation copy waits for its data (the tail: the loop below)
+            while task + 2 < t1:
+                dc = dn_loads(
+                    w2, w2s, w_post, rt, task + 2, lane, wave, (task + 2) < t1
                 )
                 dn_compute(
                     dq[0],
@@ -1185,33 +1112,85 @@ def build(key: BuildM):
                     md.a.ptr,
                     md.red.ptr,
                 )
-                dq = dq[1:] + [nxt]
-                task = task + 1
-                it = it + 1
+                da = dn_loads(
+                    w2, w2s, w_post, rt, task + 3, lane, wave, (task + 3) < t1
+                )
+                dn_compute(
+                    dq[1],
+                    task + 1,
+                    it + 1,
+                    1,
+                    scratch,
+                    tag,
+                    rt,
+                    tid,
+                    lane,
+                    wave,
+                    md.a.ptr,
+                    md.red.ptr,
+                )
+                db = dn_loads(
+                    w2, w2s, w_post, rt, task + 4, lane, wave, (task + 4) < t1
+                )
+                dn_compute(
+                    dc,
+                    task + 2,
+                    it + 2,
+                    1,
+                    scratch,
+                    tag,
+                    rt,
+                    tid,
+                    lane,
+                    wave,
+                    md.a.ptr,
+                    md.red.ptr,
+                )
+                dq = [da, db]
+                task = task + 3
+                it = it + 3
+        while task < t1:
+            nxt = dn_loads(
+                w2, w2s, w_post, rt, task + PF_DN, lane, wave, (task + PF_DN) < t1
+            )
+            dn_compute(
+                dq[0],
+                task,
+                it,
+                1,
+                scratch,
+                tag,
+                rt,
+                tid,
+                lane,
+                wave,
+                md.a.ptr,
+                md.red.ptr,
+            )
+            dq = dq[1:] + [nxt]
+            task = task + 1
+            it = it + 1
         gpu.barrier()
         stamp(TL, tls, tid, 4)
         # per-CTA sums of squares of the picks of v0 / v1 -> slot (b - first CTA of the virtual expert)
         # (the down's epilogue: ssacc is the down's CTA-local sum, so it runs with m_down)
-        if const_expr(on("m_down")):
-            if (tid < 32) & (V > 0):
-                hs = tid // 16
-                n = tid % 16
-                pk = fx.ptr_load(rt["pk"] + tid)
-                v = (hs == 0).select(v0, v1)
-                okh = (pk >= 0) & ((hs == 0) | (v1 != v0))
-                cf = (v * 256) // fx.max(V, 1)
-                if okh:
-                    mb_put(
-                        tag,
-                        scratch + fx.Int64(lay["ss"][0]),
-                        pk * SSN + (bid - cf),
-                        fx.ptr_load(rt["ssacc"] + tid),
-                    )
-        if const_expr(on("m_rstd")):
-            stage_rstd(scratch, tag, health, rt, tid, bid)
+        if (tid < 32) & (V > 0):
+            hs = tid // 16
+            n = tid % 16
+            pk = fx.ptr_load(rt["pk"] + tid)
+            v = (hs == 0).select(v0, v1)
+            okh = (pk >= 0) & ((hs == 0) | (v1 != v0))
+            cf = (v * 256) // fx.max(V, 1)
+            if okh:
+                mb_put(
+                    tag,
+                    scratch + fx.Int64(lay["ss"][0]),
+                    pk * SSN + (bid - cf),
+                    fx.ptr_load(rt["ssacc"] + tid),
+                )
+        stage_rstd(scratch, tag, health, rt, tid, bid)
         stamp(TL, tls, tid, 5)
-        if const_expr(on("m_final")):
-            stage_final(scratch, sc, part_out, pl, tag, health, rt, tid, bid, rank)
+        stage_final(scratch, sc, part_out, pl, tag, health, rt, tid, bid, rank)
         stamp(TL, tls, tid, 6)
         if const_expr(TL):  # noqa: SIM102
             if tid < 8:

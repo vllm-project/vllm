@@ -65,7 +65,6 @@ from aiter.ops.flydsl.kernels import buffer_ops as bo
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Int32, Int64
 
-from . import portion as _portion
 from .dev import (
     BLOCKS,
     CM_DEV,
@@ -229,7 +228,6 @@ class Build:
         99  # debug: HA stops after stage `stop` (1 ng, 2 o, 3 ab, 4 a, 5 route/h)
     )
     hm: bool = False  # the MoE is HM (k5m), which pushes the EP partial itself: HB skips its push
-    only: str = ""  # ablation: stage mask (mk/portion.py; "" = every stage, the shipped kernels)
     # TEP8 c = 4 boundaries (W = 8, S = 32 only): 1 = #11 the K3-style attention boundary (O5 reduce-scatter to the
     # column-block owner + all-gather of the reduced o, the boundary on all 256 CTAs, local ffn_in for A5; the
     # stream input is replicated); 2 = #11 + #1 the replicated FFN boundary (post5's y to every rank, G on all 256
@@ -459,7 +457,6 @@ def build(key: Build):
     name_a = (
         f"muse_k5a_s{S}_t{int(TL)}_x{key.stop}_c{XCM}_y{YCM}_a{ACM}_i{os.environ.get('MK5_NOINV', '0')}{WN}"
         + BN
-        + _portion.name_tag(key.only)
         + (f"_fa{key.attn}{int(key.attn_olate)}" if key.attn else "")
         + ("_m1" if key.mult1 else "")
         + (f"_kv{key.kvl}" if key.attn and key.kvl else "")
@@ -467,7 +464,6 @@ def build(key: Build):
     name_b = (
         f"muse_k5b_r{int(key.next_rope)}q{key.qkv_pf}_s{S}_t{int(TL)}_c{XCM}_m{int(key.hm)}{WN}"
         + BN
-        + _portion.name_tag(key.only)
         + ("_vqk" if key.vqk else "")
         + (f"_kv{key.kvl}" if key.kvl else "")
     )
@@ -477,13 +473,6 @@ def build(key: Build):
     assert key.kvl in ("", "lbhnc"), key.kvl
     # fused attention: SGLang (fp8 KV, q x qk_scale) or vLLM (bf16 LBHNC KV, q without qk_scale)
     assert not key.attn or VQK == VKV, key
-    ONLY = _portion.stage_set(
-        key.only, _portion.K5A_STAGES + _portion.K5B_STAGES, _portion.K5_DEPS
-    )
-
-    def on(stage):  # stage active in this build (const at trace time)
-        return ONLY is None or stage in ONLY
-
     @traced
     def flush_range(tls, tl, tid, bid, lo, hi):
         if const_expr(TL):  # noqa: SIM102
@@ -1965,7 +1954,7 @@ def build(key: Build):
         stamp(TL, tls, tid, 0)
         ep = uniform(ld_i32(epoch, 0, CM_DEV))
         tag = (ep & 0x1FFFFFF) * 64 + layer + 1
-        if const_expr(on("O5") and (FA is None or not key.attn_olate)):
+        if const_expr(FA is None or not key.attn_olate):
             o_ops = o_loads(
                 w_o, bid, lane, wave
             )  # S4 #10: with FA, the o_proj weights land during the attention
@@ -1977,22 +1966,21 @@ def build(key: Build):
             )
             if const_expr(FA.AOT):  # ng polls the tagged rows (no all-rows wait)
                 attn_o, ao_t = attn_o
-        if const_expr(on("O5") and FA is not None and key.attn_olate):
+        if const_expr(FA is not None and key.attn_olate):
             o_ops = o_loads(w_o, bid, lane, wave)
-        if const_expr(on("ng")):
-            stage_ng(
-                attn_o,
-                attn_g,
-                g_stride,
-                scratch,
-                tag,
-                tid,
-                bid,
-                nrows,
-                (ao_t, health) if (FA is not None and FA.AOT) else None,
-            )
+        stage_ng(
+            attn_o,
+            attn_g,
+            g_stride,
+            scratch,
+            tag,
+            tid,
+            bid,
+            nrows,
+            (ao_t, health) if (FA is not None and FA.AOT) else None,
+        )
         stamp(TL, tls, tid, 1)
-        if const_expr(key.stop >= 2 and on("O5")):
+        if const_expr(key.stop >= 2):
             stage_o(
                 o_ops,
                 scratch,
@@ -2009,15 +1997,54 @@ def build(key: Build):
             )
         stamp(TL, tls, tid, 2)
         if const_expr(key.stop >= 3):
-            if const_expr(on("A5")):
-                wr, wp = a_loads(w_r, w_pre, bid, tid, lane, wave)
-            if const_expr(on("AB5")):
-                if const_expr(BND == 3):  # #11 + #20: all 256 CTAs, column groups
-                    stage_ab_c(
+            wr, wp = a_loads(w_r, w_pre, bid, tid, lane, wave)
+            if const_expr(BND == 3):  # #11 + #20: all 256 CTAs, column groups
+                stage_ab_c(
+                    own_peer,
+                    pl,
+                    scratch,
+                    stream_in,
+                    nrows,
+                    alpha_a,
+                    beta_a,
+                    w_pffn,
+                    tag,
+                    health,
+                    tid,
+                    bid,
+                    lane,
+                    wave,
+                    rank,
+                    misc.pr.ptr,
+                    tls,
+                )
+            elif const_expr(BND):  # #11: all 256 CTAs
+                stage_ab_b(
+                    own_peer,
+                    pl,
+                    scratch,
+                    stream_in,
+                    nrows,
+                    alpha_a,
+                    beta_a,
+                    w_pffn,
+                    tag,
+                    health,
+                    tid,
+                    bid,
+                    lane,
+                    rank,
+                    misc.rs.ptr,
+                    tls,
+                )
+            else:
+                if bid < TS:
+                    stage_ab(
                         own_peer,
                         pl,
                         scratch,
                         stream_in,
+                        s_full,
                         nrows,
                         alpha_a,
                         beta_a,
@@ -2029,52 +2056,11 @@ def build(key: Build):
                         lane,
                         wave,
                         rank,
-                        misc.pr.ptr,
+                        misc.red4.ptr,
                         tls,
                     )
-                elif const_expr(BND):  # #11: all 256 CTAs
-                    stage_ab_b(
-                        own_peer,
-                        pl,
-                        scratch,
-                        stream_in,
-                        nrows,
-                        alpha_a,
-                        beta_a,
-                        w_pffn,
-                        tag,
-                        health,
-                        tid,
-                        bid,
-                        lane,
-                        rank,
-                        misc.rs.ptr,
-                        tls,
-                    )
-                else:
-                    if bid < TS:
-                        stage_ab(
-                            own_peer,
-                            pl,
-                            scratch,
-                            stream_in,
-                            s_full,
-                            nrows,
-                            alpha_a,
-                            beta_a,
-                            w_pffn,
-                            tag,
-                            health,
-                            tid,
-                            bid,
-                            lane,
-                            wave,
-                            rank,
-                            misc.red4.ptr,
-                            tls,
-                        )
             stamp(TL, tls, tid, 3)
-            if const_expr(key.stop >= 4 and on("A5")):
+            if const_expr(key.stop >= 4):
                 stage_a(
                     wr,
                     wp,
@@ -2095,7 +2081,7 @@ def build(key: Build):
                     sa.x.ptr,
                 )
         stamp(TL, tls, tid, 4)
-        if const_expr(key.stop >= 5 and on("route_h")):
+        if const_expr(key.stop >= 5):
             if bid < S:
                 stage_route_h(
                     own_peer,
@@ -3103,28 +3089,68 @@ def build(key: Build):
         stamp(TL, tls, tid, 0)
         ep = uniform(ld_i32(epoch, 0, CM_DEV))
         tag = (ep & 0x1FFFFFF) * 64 + layer + 1
-        if const_expr(on("post5")):
-            ppo = pp_loads(w_pp, bid, lane, wave)
+        ppo = pp_loads(w_pp, bid, lane, wave)
         if const_expr(
-            (not key.hm) and on("ar5")
+            not key.hm
         ):  # the library-MoE push (not in the HM build)
             stage_push(part, pl, tag, tid, bid, rank)
         stamp(TL, tls, tid, 6)
-        if const_expr(on("ar5")):
-            if bid // CPR == rank:
-                stage_ar(own_peer, pl, tag, health, tid, bid, rank)
+        if bid // CPR == rank:
+            stage_ar(own_peer, pl, tag, health, tid, bid, rank)
         stamp(TL, tls, tid, 7)
-        if const_expr(on("post5")):
-            stage_post(
-                ppo, pl, scratch, tag, health, tid, bid, lane, wave, rank, sf.red.ptr
-            )
+        stage_post(
+            ppo, pl, scratch, tag, health, tid, bid, lane, wave, rank, sf.red.ptr
+        )
         stamp(TL, tls, tid, 8)
-        if const_expr(on("QKV5")):
-            qo = q_loads(w_qkvg, bid, lane, wave, 0, QPF)
-        if const_expr(on("G5")):
-            if const_expr(BND == 3):  # #1 + #20: all 256 CTAs, column groups
-                stage_g_c(
+        qo = q_loads(w_qkvg, bid, lane, wave, 0, QPF)
+        if const_expr(BND == 3):  # #1 + #20: all 256 CTAs, column groups
+            stage_g_c(
+                own_peer,
+                scratch,
+                w_pff,
+                alpha,
+                beta,
+                w_in,
+                stream_out,
+                so_stride,
+                so_off,
+                sfull_out,
+                gather,
+                tag,
+                health,
+                tid,
+                bid,
+                lane,
+                wave,
+                misc.pr.ptr,
+                tls,
+            )
+        elif const_expr(BND == 2):  # #1: all 256 CTAs
+            stage_g_b(
+                own_peer,
+                scratch,
+                w_pff,
+                alpha,
+                beta,
+                w_in,
+                stream_out,
+                so_stride,
+                so_off,
+                sfull_out,
+                gather,
+                tag,
+                health,
+                tid,
+                bid,
+                lane,
+                misc.rs.ptr,
+                tls,
+            )
+        else:
+            if bid < TS:
+                stage_g(
                     own_peer,
+                    pl,
                     scratch,
                     w_pff,
                     alpha,
@@ -3133,7 +3159,6 @@ def build(key: Build):
                     stream_out,
                     so_stride,
                     so_off,
-                    sfull_out,
                     gather,
                     tag,
                     health,
@@ -3141,90 +3166,44 @@ def build(key: Build):
                     bid,
                     lane,
                     wave,
-                    misc.pr.ptr,
+                    rank,
+                    misc.red4.ptr,
                     tls,
                 )
-            elif const_expr(BND == 2):  # #1: all 256 CTAs
-                stage_g_b(
-                    own_peer,
-                    scratch,
-                    w_pff,
-                    alpha,
-                    beta,
-                    w_in,
-                    stream_out,
-                    so_stride,
-                    so_off,
-                    sfull_out,
-                    gather,
-                    tag,
-                    health,
-                    tid,
-                    bid,
-                    lane,
-                    misc.rs.ptr,
-                    tls,
-                )
-            else:
-                if bid < TS:
-                    stage_g(
-                        own_peer,
-                        pl,
-                        scratch,
-                        w_pff,
-                        alpha,
-                        beta,
-                        w_in,
-                        stream_out,
-                        so_stride,
-                        so_off,
-                        gather,
-                        tag,
-                        health,
-                        tid,
-                        bid,
-                        lane,
-                        wave,
-                        rank,
-                        misc.red4.ptr,
-                        tls,
-                    )
         stamp(TL, tls, tid, 9)
-        if const_expr(on("QKV5")):
-            qo = qo + q_loads(w_qkvg, bid, lane, wave, QPF, NQT)
-            stage_qkv(
-                qo,
-                own_peer,
-                scratch,
-                g_out,
-                tag,
-                health,
-                tid,
-                bid,
-                lane,
-                wave,
-                sq.red.ptr,
-                sq.own.ptr,
-                tls,
-            )
+        qo = qo + q_loads(w_qkvg, bid, lane, wave, QPF, NQT)
+        stage_qkv(
+            qo,
+            own_peer,
+            scratch,
+            g_out,
+            tag,
+            health,
+            tid,
+            bid,
+            lane,
+            wave,
+            sq.red.ptr,
+            sq.own.ptr,
+            tls,
+        )
         stamp(TL, tls, tid, 10)
-        if const_expr(on("finish5")):
-            head_finish(
-                scratch,
-                q_out,
-                k_cache,
-                v_cache,
-                slots,
-                cos_sin,
-                pos,
-                tag,
-                health,
-                tid,
-                bid,
-                nrows,
-            )
+        head_finish(
+            scratch,
+            q_out,
+            k_cache,
+            v_cache,
+            slots,
+            cos_sin,
+            pos,
+            tag,
+            health,
+            tid,
+            bid,
+            nrows,
+        )
         stamp(TL, tls, tid, 11)
-        if const_expr(on("gather5") and not BG):  # bnd 2 / 3: G wrote sfull_out itself
+        if const_expr(not BG):  # bnd 2 / 3: G wrote sfull_out itself
             if (gather != 0) & (bid < nrows):
                 stage_gather(own_peer, sfull_out, tag, health, tid, bid)
         stamp(TL, tls, tid, 12)
@@ -3802,7 +3781,6 @@ def build_from_env(S=32, **over):
         timeline=os.environ.get("MK_TIMELINE", "0") == "1",
         stop=int(os.environ.get("MK5_STOP", "99")),
         hm=os.environ.get("MK5_HM", "1") == "1",
-        only=os.environ.get("MK5_ONLY", ""),
     )
     W_ = kw["W"] if "W" not in over else over["W"]
     # MK5_BND: the TEP8 c = 4 boundaries (W = 8, S = 32 only; other builds ignore it)
@@ -3851,7 +3829,6 @@ def build_vllm(S=32, W=8, next_rope=True, **over):
         timeline=False,
         stop=99,
         hm=True,
-        only="",
         bnd=3 if S == 32 else 0,
         qr1=S == 32,
         attn="",
