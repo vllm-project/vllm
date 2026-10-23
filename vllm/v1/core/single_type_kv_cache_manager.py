@@ -510,6 +510,13 @@ class SingleTypeKVCacheManager(ABC):
         reachable_boundaries = [*replay_boundaries]
         if request.shared_prefix_boundary:
             reachable_boundaries.append(request.shared_prefix_boundary)
+            if self.use_eagle:
+                # A sibling that diverges right after the junction cannot use
+                # the block past it as the EAGLE peek, so its hit lands one
+                # block lower.
+                reachable_boundaries.append(
+                    request.shared_prefix_boundary - self.block_size
+                )
 
         block_mask = self.reachable_block_mask(
             start_block=num_cached_blocks,
@@ -2094,6 +2101,10 @@ class MambaManager(SingleTypeKVCacheManager):
             return None
         source_block = blocks[block_idx]
         if source_block.is_null:
+            return None
+        # Already keyed here by a hit or an earlier step; re-caching would
+        # mark it cached this step and defer every sibling that hits it.
+        if source_block.block_hash_num_tokens == num_tokens:
             return None
 
         partial_hash = self.block_pool.cache_partial_block(
