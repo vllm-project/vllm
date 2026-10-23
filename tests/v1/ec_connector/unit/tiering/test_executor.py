@@ -60,6 +60,22 @@ def test_executor_round_trip_reports_one_completion_per_job(
         assert destination == b"abcdefXY"
         assert executor.stats().pending_read_jobs == 0
         assert executor.stats().pending_read_bytes == 0
+
+        delete_id = executor.submit_delete("delete-key", entry_path, 8)
+        assert delete_id is not None
+        delete_stats = executor.stats()
+        assert delete_stats.pending_delete_jobs == 1
+        assert delete_stats.pending_delete_bytes == 8
+        executor.drain()
+
+        delete_completions = executor.poll_completed()
+        assert len(delete_completions) == 1
+        assert delete_completions[0].job_id == delete_id
+        assert delete_completions[0].success
+        assert delete_completions[0].operation == "delete"
+        assert not entry_path.exists()
+        assert executor.stats().pending_delete_jobs == 0
+        assert executor.stats().pending_delete_bytes == 0
     finally:
         executor.shutdown()
 
