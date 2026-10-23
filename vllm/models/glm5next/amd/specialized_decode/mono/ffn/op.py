@@ -98,7 +98,11 @@ class FlashDsaWeights:
     @property
     def fp8(self) -> tuple[bool, bool, bool]:
         """Which of q_a | kv_a, q_b, o_proj are FP8 (scales present)."""
-        return tuple(sc is not None for sc in (self.s_qkv, self.s_qb, self.s_o))
+        return (
+            self.s_qkv is not None,
+            self.s_qb is not None,
+            self.s_o is not None,
+        )
 
 
 @dataclass

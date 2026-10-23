@@ -31,7 +31,7 @@ def model_refusals(backbone: nn.Module) -> list[str]:
             reasons.append(f"layer {idx}: sequence-parallel layer")
         if not hasattr(layer.self_attn, "o_proj"):
             reasons.append(f"layer {idx}: needs the attention's o_proj")
-        if is_kda(layer) and getattr(layer.self_attn, "num_spec", 0):
+        if is_kda(layer) and getattr(layer.self_attn, "num_spec", None):
             reasons.append(f"layer {idx}: KDA with speculative decoding")
         if is_dsa(layer) and getattr(layer.self_attn, "indexer", None) is None:
             reasons.append(f"layer {idx}: sparse attention without its indexer")

@@ -62,9 +62,11 @@ def _kernel_layers(model: nn.Module) -> list[int]:
 def pack(model: nn.Module, ctx: MonoContext) -> dict[int, Any]:
     """Per kernel layer (FFN weights, the attention weights, launch kind)."""
     inter = GLOBAL_INTER // ctx.tp_size
-    packed, reasons = {}, []
+    packed: dict[int, Any] = {}
+    reasons: list[str] = []
     for idx in _kernel_layers(model):
         layer = model.layers[idx]
+        attn: Any
         try:
             if flash_spec.is_kda(layer):
                 attn, kind = kda_weights(layer, ctx.tp_size), "kda"
