@@ -1162,6 +1162,26 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       "Building fused GDN decode for archs: ${FUSED_GDN_DECODE_ARCHS}")
   endif()
 
+  # Beam's kernels use NVLink multicast and thread-block clusters. Their norms
+  # must not contract into FMAs to keep the FP32 boundary exact.
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    cuda_archs_loose_intersection(BEAM_KERNEL_ARCHS
+      "9.0a;10.0f;10.3f" "${CUDA_ARCHS}")
+  else()
+    cuda_archs_loose_intersection(BEAM_KERNEL_ARCHS
+      "9.0a;10.0a;10.3a" "${CUDA_ARCHS}")
+  endif()
+  if(BEAM_KERNEL_ARCHS)
+    set(BEAM_KERNEL_SRCS "csrc/beam/allreduce_norm.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${BEAM_KERNEL_SRCS}"
+      CUDA_ARCHS "${BEAM_KERNEL_ARCHS}")
+    set_property(SOURCE ${BEAM_KERNEL_SRCS} APPEND PROPERTY
+      COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:CUDA>:--fmad=false>")
+    list(APPEND VLLM_STABLE_EXT_SRC "${BEAM_KERNEL_SRCS}")
+    message(STATUS "Building Beam kernels for archs: ${BEAM_KERNEL_ARCHS}")
+  endif()
+
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
     cuda_archs_loose_intersection(KIMI_K3_ATTN_RES_ARCHS
       "10.0f" "${CUDA_ARCHS}")
@@ -1262,6 +1282,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     if(KIMI_K3_ATTN_RES_ARCHS)
       target_compile_definitions(_C_stable_libtorch PRIVATE
         VLLM_ENABLE_KIMI_K3_ATTN_RES=1)
+    endif()
+    if(BEAM_KERNEL_ARCHS)
+      target_compile_definitions(_C_stable_libtorch PRIVATE
+        VLLM_ENABLE_BEAM_KERNELS=1)
     endif()
     # Needed by CUTLASS kernels
     target_compile_definitions(_C_stable_libtorch PRIVATE
@@ -1505,12 +1529,69 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   #
   # _rocm_C extension
   #
+  # The paged attention *instantiations* are split over one translation unit
+  # per (dtype, kv-cache dtype, head size) combination: compiling them all in a
+  # single file serializes ~10 min of device code generation onto one core.
+  # attention_dispatch.cu only holds the runtime dispatch, attention_kernels.cuh
+  # the kernels and launchers. A file listed here is dead weight unless
+  # attention_dispatch.cu also dispatches its entry point (guarded below).
   set(VLLM_ROCM_EXT_SRC
     "csrc/rocm/torch_bindings.cpp"
     "csrc/rocm/skinny_gemms.cu"
     "csrc/rocm/skinny_gemms_int4.cu"
-    "csrc/rocm/attention.cu")
-  set(VLLM_ROCM_EXT_FLAGS ${VLLM_GPU_FLAGS})
+    "csrc/rocm/attention_dispatch.cu"
+    "csrc/rocm/attention_paged_attn_h64_f16_auto.cu"
+    "csrc/rocm/attention_paged_attn_h128_f16_auto.cu"
+    "csrc/rocm/attention_paged_attn_h64_bf16_auto.cu"
+    "csrc/rocm/attention_paged_attn_h128_bf16_auto.cu"
+    "csrc/rocm/attention_paged_attn_h64_f16_fp8_f16.cu"
+    "csrc/rocm/attention_paged_attn_h128_f16_fp8_f16.cu"
+    "csrc/rocm/attention_paged_attn_h64_f16_fp8_fp8.cu"
+    "csrc/rocm/attention_paged_attn_h128_f16_fp8_fp8.cu"
+    "csrc/rocm/attention_paged_attn_h64_bf16_fp8_f16.cu"
+    "csrc/rocm/attention_paged_attn_h128_bf16_fp8_f16.cu"
+    "csrc/rocm/attention_paged_attn_h64_bf16_fp8_fp8.cu"
+    "csrc/rocm/attention_paged_attn_h128_bf16_fp8_fp8.cu")
+
+  # Each attention_paged_attn_*.cu file below instantiates one kernel set and
+  # exposes it as one entry point. That entry point is only reachable if
+  # paged_attention() in csrc/rocm/attention_dispatch.cu names it in one of its
+  # ATTN_HEAD_SWITCH() calls (the dispatch arms); otherwise the file is compiled
+  # and linked unnecessarily. Fail at configure time instead.
+  file(READ "${CMAKE_SOURCE_DIR}/csrc/rocm/attention_dispatch.cu" _attn_dispatch)
+  string(FIND "${_attn_dispatch}" "#define ATTN_HEAD_SWITCH" _attn_arms_pos)
+  if (_attn_arms_pos EQUAL -1)
+    message(FATAL_ERROR
+      "csrc/rocm/attention_dispatch.cu no longer defines ATTN_HEAD_SWITCH; "
+      "update the instantiation guard in CMakeLists.txt accordingly.")
+  endif()
+  string(SUBSTRING "${_attn_dispatch}" ${_attn_arms_pos} -1 _attn_arms)
+  foreach (_attn_src ${VLLM_ROCM_EXT_SRC})
+    if (_attn_src MATCHES "^csrc/rocm/attention_paged_attn_.*\\.cu$")
+      file(READ "${CMAKE_SOURCE_DIR}/${_attn_src}" _attn_tu)
+      string(REGEX MATCHALL "ATTN_ENTRY\\([A-Za-z0-9_]+\\)" _attn_entries
+        "${_attn_tu}")
+      foreach (_attn_entry ${_attn_entries})
+        string(REGEX REPLACE "ATTN_ENTRY\\((.*)\\)" "\\1" _attn_name
+          "${_attn_entry}")
+        if (NOT _attn_arms MATCHES "${_attn_name}[,)]")
+          message(FATAL_ERROR
+            "${_attn_src} instantiates ${_attn_name}, but "
+            "csrc/rocm/attention_dispatch.cu never dispatches it: the file "
+            "would be compiled and linked for nothing. Add it to one of the "
+            "ATTN_HEAD_SWITCH() calls in paged_attention().")
+        endif()
+      endforeach()
+    endif()
+  endforeach()
+  # Compress the offloaded device binaries. The 9-arch release build packs
+  # ~2 GiB of .hip_fatbin into _rocm_C.abi3.so, which pushes the module past
+  # the 2 GiB reach of the 32-bit PC-relative relocations in crtbegin's .text
+  # and makes both mold and lld fail with "relocation R_X86_64_PC32 against
+  # .eh_frame out of range". --offload-compress keeps the device debug info
+  # (so the RelWithDebInfo build type is unchanged) while shrinking the
+  # fatbin ~20x (2103 MiB -> 95.8 MiB, module ~2200 MiB -> 125.9 MiB).
+  set(VLLM_ROCM_EXT_FLAGS ${VLLM_GPU_FLAGS} --offload-compress)
 
   # skinny_gemms*.cu are built on gfx9/gfx11 ISA (MFMA, dot2/dot4, legacy
   # s_waitcnt asm) that gfx1250 (gfx12) does not provide. Exclude them from the
