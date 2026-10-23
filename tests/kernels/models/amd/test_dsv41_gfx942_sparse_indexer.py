@@ -64,7 +64,7 @@ def gfx942_step(monkeypatch):
     if paged_mqa_logits_module() is None:
         pytest.skip("AITER's paged MQA logits module is not installed")
     monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", True)
-    monkeypatch.setattr(ops, "_monokernel", True)
+    monkeypatch.setattr(ops, "_specialized_decode", True)
     ops.enabled.cache_clear()
     if not is_workspace_manager_initialized():
         init_workspace_manager(torch.device("cuda"))

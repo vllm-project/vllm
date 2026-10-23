@@ -100,7 +100,7 @@ DECODE_CONFIG = DecodeConfig()
 
 
 def specialized_decode_config(config: VllmConfig) -> DecodeConfig | None:
-    if not config.kernel_config.monokernel:
+    if not config.kernel_config.specialized_decode:
         return None
     layers = config.model_config.hf_text_config.num_hidden_layers
     spec = replace(DECODE_CONFIG, last_layer=layers - 1)

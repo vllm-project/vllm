@@ -15,18 +15,18 @@ import functools
 
 from vllm.platforms import current_platform
 
-# --monokernel (KernelConfig.monokernel) of this process's model. The helpers
-# run in forward passes, where vLLM's current config is not set, so the model
-# records the flag when it is created (record_monokernel).
-_monokernel = False
+# --monokernel (KernelConfig.specialized_decode) of this process's model. The
+# helpers run in forward passes, where vLLM's current config is not set, so the
+# model records the flag when it is created (record_specialized_decode).
+_specialized_decode = False
 
 
-def record_monokernel(vllm_config) -> None:
-    """Record whether this process's model runs with --monokernel. The mono
-    decode layer calls this when the model is created, before any helper
+def record_specialized_decode(vllm_config) -> None:
+    """Record whether this process's model runs with --monokernel. The
+    specialized decode records it when the model is created, before any helper
     runs."""
-    global _monokernel
-    _monokernel = bool(vllm_config.kernel_config.monokernel)
+    global _specialized_decode
+    _specialized_decode = bool(vllm_config.kernel_config.specialized_decode)
     enabled.cache_clear()
 
 
@@ -35,7 +35,7 @@ def enabled() -> bool:
     """True with --monokernel on a gfx942 GPU. Every helper keeps the result
     of vLLM's op it replaces, so each one returns False for a call it cannot
     take and vLLM then runs its own op. gfx950 always keeps vLLM's ops here."""
-    if not _monokernel or not current_platform.is_rocm():
+    if not _specialized_decode or not current_platform.is_rocm():
         return False
     from vllm.platforms.rocm import on_gfx942
 

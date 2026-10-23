@@ -36,7 +36,7 @@ def _set_gate(monkeypatch, on: bool):
 
     # The model records --monokernel when it is created. These tests have no
     # model, so they set the recorded flag themselves.
-    monkeypatch.setattr(ops, "_monokernel", on)
+    monkeypatch.setattr(ops, "_specialized_decode", on)
     ops.enabled.cache_clear()
 
 

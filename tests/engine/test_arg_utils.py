@@ -822,6 +822,55 @@ def test_ir_op_priority():
 
 
 @pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        ([], None),
+        (["--specialized-decode"], "auto"),
+        (["--specialized-decode", "auto"], "auto"),
+        (["--specialized-decode", "monokernel"], "monokernel"),
+        (["--monokernel"], "monokernel"),
+        (["--no-monokernel"], None),
+        # The named backend wins over the shorthand, whatever the order.
+        (["--monokernel", "--specialized-decode", "auto"], "auto"),
+        (["--specialized-decode", "auto", "--monokernel"], "auto"),
+    ],
+)
+def test_specialized_decode_cli(argv, expected):
+    """``--monokernel`` is shorthand for ``--specialized-decode monokernel``,
+    and a bare ``--specialized-decode`` means ``auto``."""
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = EngineArgs.from_cli_args(parser.parse_args(argv))
+    config = args.create_engine_config()
+    assert config.kernel_config.specialized_decode == expected
+
+
+def test_specialized_decode_rejects_an_unknown_backend():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--specialized-decode", "flydsl"])
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [
+        ({}, "monokernel"),
+        ({"monokernel": False}, None),
+        ({"specialized_decode": "auto"}, "auto"),
+    ],
+)
+def test_specialized_decode_overrides_the_kernel_config(flags, expected):
+    """``--no-monokernel`` turns off a specialized decode that a config file or
+    the Python API asked for, and absent flags leave it alone."""
+    from vllm.config.kernel import KernelConfig
+
+    config = EngineArgs(
+        kernel_config=KernelConfig(specialized_decode="monokernel"),
+        **flags,
+    ).create_engine_config()
+    assert config.kernel_config.specialized_decode == expected
+
+
+@pytest.mark.parametrize(
     ("input_json", "expected_json"),
     [
         # Decimal suffixes (lowercase)

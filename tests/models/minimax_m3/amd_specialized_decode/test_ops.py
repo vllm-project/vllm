@@ -611,6 +611,7 @@ RESET_EVERY = 997  # launches between collective epoch resets
 
 
 def _stress_rank(rank, port, results):
+    from vllm.models.common.specialized_decode import tp_agree
     from vllm.models.deepseek_v41.amd.mono.common import peer_memory
     from vllm.models.minimax_m3.amd.specialized_decode.runtime import executor as ex
 
@@ -650,7 +651,7 @@ def _stress_rank(rank, port, results):
     dist.barrier()
 
     # the executor's step hook, its epoch reset agreed over this group
-    ex.tp_agree = lambda ok: peer_memory.tp_agree(ok, dist.group.WORLD)
+    ex.tp_agree = lambda ok: tp_agree(ok, dist.group.WORLD)
     executor = object.__new__(ex.FfnExecutor)
     executor.rank, executor.runner, executor.peer = rank, runner, peer
     executor._layers = {0: None}

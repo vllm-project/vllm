@@ -514,13 +514,15 @@ class DeepseekV41Gfx942Indexer(DeepseekV4Indexer):
     attn_cls = Gfx942SparseAttnIndexer
 
 
-def _gfx942_monokernel() -> bool:
+def _gfx942_specialized_decode() -> bool:
     """True with --monokernel on a gfx942 GPU, read from the config of the
     model that is being built. ops.enabled() cannot answer here, because the
     mono decode layers record the flag only after their attention is built."""
     from vllm.platforms.rocm import on_gfx942
 
-    return bool(get_current_vllm_config().kernel_config.monokernel) and on_gfx942()
+    return (
+        bool(get_current_vllm_config().kernel_config.specialized_decode) and on_gfx942()
+    )
 
 
 class DeepseekV41ROCMAiterMLASparseBackend(DeepseekV4SparseMLABackend):
@@ -555,7 +557,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
     ) -> type[DeepseekV4Indexer]:
         if k_cache is not None and k_cache.rocm_mxfp4:
             return DeepseekV41RocmMxfp4Indexer
-        if _gfx942_monokernel():
+        if _gfx942_specialized_decode():
             return DeepseekV41Gfx942Indexer
         return super()._indexer_cls(k_cache)
 

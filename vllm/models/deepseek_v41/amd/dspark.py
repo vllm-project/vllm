@@ -43,6 +43,8 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_padding_mask,
     sp_shard,
 )
+from vllm.models.common.specialized_decode import SpecializedDecode, select_decode_spec
+from vllm.models.deepseek_v41.amd.specialized_decode.spec import DRAFT_DECODE_SPEC
 
 from .model import (
     DeepseekV4DecoderLayer,
@@ -55,7 +57,23 @@ from .ops import draft_lm_head
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
+if TYPE_CHECKING:
+    from vllm.models.deepseek_v41.amd.specialized_decode.runtime.decode import (
+        DSV41DraftKernel,
+    )
+
 logger = init_logger(__name__)
+
+# The draft heads built in this process, for the model runner's cache checks:
+# the draft is the speculator's, out of the target's ModelState's reach.
+_DRAFT_DECODES: list[SpecializedDecode] = []
+
+
+def bind_draft_decode_caches() -> None:
+    """Check every DSpark draft's caches, as the runner binds them."""
+    for decode in _DRAFT_DECODES:
+        decode.bind_caches()
+
 
 # MoE expert scale suffix differs by expert dtype (mirrors deepseek_v4 loaders):
 # fp4 experts register ``.weight_scale``; block-fp8 experts ``.weight_scale_inv``.
@@ -182,12 +200,20 @@ class DSparkDeepseekV4Model(nn.Module):
                 continue
             _insert_context_kv(attn, kv, context_positions, slot_mapping)
 
-    def forward(
+    def prologue(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        inputs_embeds: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, int]:
+        """Everything the draft's decoder layers need, before the first of them
+        runs.
+
+        Returns:
+            The stream the first layer takes, the (possibly sharded) input ids,
+            and the batch's token count before any sequence-parallel shard.
+
+        """
         if inputs_embeds is None:
             inputs_embeds = self.embed_input_ids(input_ids)
         full_num_tokens = positions.shape[0]
@@ -201,7 +227,38 @@ class DSparkDeepseekV4Model(nn.Module):
             input_ids = sp_shard(input_ids)
         # Expand to hc_mult copies for hyper-connections ([T, H] -> [T, hc, H]).
         hidden_states = inputs_embeds.unsqueeze(-2).repeat(1, self.hc_mult, 1)
+        return hidden_states, input_ids, full_num_tokens
 
+    def epilogue(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+        post_mix: torch.Tensor | None,
+        res_mix: torch.Tensor | None,
+        pre_mix: torch.Tensor | None,
+        full_num_tokens: int,
+    ) -> torch.Tensor:
+        """Everything after the draft's last decoder layer: the final post and
+        collapse."""
+        hidden_states = mhc_post_torch(hidden_states, residual, post_mix, res_mix)
+        if self.use_sequence_parallel:
+            hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
+            pre_mix = sp_all_gather(pre_mix)[:full_num_tokens]
+        # Collapse the hc copies with the pre-mix from the last layer's FFN
+        # mixes, the mix the reference forward_head applies (hc_pre with the
+        # last block's ffn pre-mix). Return the PRE-norm head hidden;
+        # compute_logits applies self.norm.
+        return DeepseekV4DecoderLayer._hc_collapse(hidden_states, pre_mix)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        hidden_states, input_ids, full_num_tokens = self.prologue(
+            input_ids, positions, inputs_embeds
+        )
         residual = post_mix = res_mix = pre_mix = None
         for layer in self.layers:
             hidden_states, residual, post_mix, res_mix, pre_mix = layer(
@@ -213,16 +270,9 @@ class DSparkDeepseekV4Model(nn.Module):
                 res_mix,
                 residual,
             )
-        hidden_states = mhc_post_torch(hidden_states, residual, post_mix, res_mix)
-        if self.use_sequence_parallel:
-            hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
-            pre_mix = sp_all_gather(pre_mix)[:full_num_tokens]
-        # Collapse the hc copies with the pre-mix from the last layer's FFN
-        # mixes — the mix the reference forward_head applies (hc_pre with the
-        # last block's ffn pre-mix). Return the PRE-norm head hidden;
-        # compute_logits applies self.norm.
-        hidden_states = DeepseekV4DecoderLayer._hc_collapse(hidden_states, pre_mix)
-        return hidden_states
+        return self.epilogue(
+            hidden_states, residual, post_mix, res_mix, pre_mix, full_num_tokens
+        )
 
 
 def _insert_context_kv(
@@ -305,6 +355,11 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         assert vllm_config.speculative_config is not None
+        self.vllm_config = vllm_config
+        self.specialized_decode_spec = select_decode_spec(
+            vllm_config, DRAFT_DECODE_SPEC
+        )
+        self.specialized_decode: SpecializedDecode[DSV41DraftKernel] | None = None
         self.draft_model_config = vllm_config.speculative_config.draft_model_config
         self.config = self.draft_model_config.hf_config
         self.quant_config = vllm_config.quant_config
@@ -317,6 +372,11 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         self.model = DSparkDeepseekV4Model(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+        from vllm.models.deepseek_v41.amd.specialized_decode.runtime.decode import (
+            prepare_weights,
+        )
+
+        prepare_weights(vllm_config, self.model, draft=True)
         # Shared with the target (aliased by the speculator's load utility).
         self.lm_head = ParallelLMHead(
             self.config.vocab_size,
@@ -355,6 +415,10 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # Returns the pre-norm collapsed head hidden ([T, hidden_size]).
+        if self.specialized_decode is not None:
+            step = self.specialized_decode.plan(positions)
+            if step is not None:
+                return self.specialized_decode.run(step, input_ids, inputs_embeds)
         return self.model(input_ids, positions, inputs_embeds)
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -512,14 +576,17 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
 
         if self.model.confidence_head is not None and not loaded_confidence_head:
             self.model.confidence_head = None
-        self.process_weights_after_loading()
         logger.info_once("DSpark draft model loaded: %d params", len(loaded_params))
         return loaded_params
 
     def process_weights_after_loading(self) -> None:
         # ROCm linears and fused-MoE runners finalize their own quantized
         # parameters. NVIDIA-only MegaMoE/WO-A requantization is not needed.
-        return
+        if self.specialized_decode_spec is not None and self.specialized_decode is None:
+            self.specialized_decode = SpecializedDecode(
+                self.model, self.vllm_config, self.specialized_decode_spec
+            )
+            _DRAFT_DECODES.append(self.specialized_decode)
 
     def _remap_dspark_name(self, name: str) -> str | None:
         """Map a checkpoint ``mtp.{i}.*`` name to this model's parameter path.
