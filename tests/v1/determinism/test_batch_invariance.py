@@ -12,6 +12,7 @@ from utils import (
     TEST_MODEL,
     _extract_step_logprobs,
     _random_prompt,
+    skip_if_not_cuda,
     skip_if_not_cuda_alike,
     skip_unsupported,
 )

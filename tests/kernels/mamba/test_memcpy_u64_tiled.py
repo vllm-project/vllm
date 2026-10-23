@@ -37,8 +37,8 @@ try:
     import pytest
 
     pytestmark = pytest.mark.skipif(
-        not current_platform.is_cuda_alike(),
-        reason="_memcpy_u64_tiled needs CUDA/Triton",
+        not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+        reason="_memcpy_u64_tiled needs CUDA/XPU Triton",
     )
     _parametrize = pytest.mark.parametrize
 except ModuleNotFoundError:  # allow running directly as ``python <thisfile>``
@@ -112,7 +112,7 @@ _TILE_BLOCK_CONFIGS = [
 def test_memcpy_u64_tiled_matches_slice_copy(
     copy_size, src_off, dst_off, num_tiles, copy_block_size
 ):
-    device = torch.device("cuda")
+    device = torch.device(current_platform.device_type)
     torch.manual_seed(0)
 
     # Pad by the max possible offset so the reference slice is in-bounds.

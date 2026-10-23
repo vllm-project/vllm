@@ -12,6 +12,8 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 )
 from vllm.platforms import current_platform
 
+DEVICE = current_platform.device_type
+
 
 def _dequant_gather_torch(
     ids: torch.Tensor,
@@ -32,8 +34,8 @@ def _dequant_gather_torch(
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda_alike(),
-    reason="Triton dequant kernel requires CUDA or ROCm",
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="Triton dequant kernel requires CUDA, ROCm or XPU",
 )
 @pytest.mark.parametrize("num_bits", [2, 4, 8])
 @pytest.mark.parametrize("group_size", [0, 256])  # 0 -> channel
@@ -41,7 +43,7 @@ def _dequant_gather_torch(
 @pytest.mark.parametrize("num_ids", [1, 17, 4096])
 def test_dequant_gather(num_bits, group_size, dtype, num_ids):
     torch.manual_seed(0)
-    device = "cuda"
+    device = DEVICE
     vocab, hidden = 1000, 2048
     pack_factor = 32 // num_bits
 
