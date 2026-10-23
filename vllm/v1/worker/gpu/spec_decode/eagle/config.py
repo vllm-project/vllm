@@ -24,10 +24,10 @@ def wrap_eagle_hf_config(spec: SpeculativeConfig, method: str) -> None:
 class EagleSpeculatorConfig(CheckpointSpeculatorConfig):
     base_method = "eagle"
     speculator_class = "vllm.v1.worker.gpu.spec_decode.eagle.speculator.EagleSpeculator"
+    supported_options = frozenset({"draft_lm_head_quantization"})
     uses_target_hidden_states = True
     target_embed_sharing: ClassVar[TargetEmbedSharing] = "always"
     supports_watermarking = True
-    supports_draft_lm_head_quantization = True
 
     @classmethod
     def matches(cls, spec: SpeculativeConfig) -> bool:
@@ -45,6 +45,19 @@ class EagleSpeculatorConfig(CheckpointSpeculatorConfig):
         )
         assert cls.base_method is not None
         wrap_eagle_hf_config(spec, cls.base_method)
+
+    @classmethod
+    def apply_options(cls, spec: SpeculativeConfig) -> None:
+        draft = spec.draft_model_config
+        if (
+            spec.draft_lm_head_quantization is not None
+            and draft is not None
+            and draft.head_dtype != draft.dtype
+        ):
+            raise ValueError(
+                "draft_lm_head_quantization needs the lm_head to run in the "
+                f"model dtype, got head_dtype={draft.head_dtype}."
+            )
 
     @property
     def num_lookahead_tokens(self) -> int:

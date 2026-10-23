@@ -103,6 +103,7 @@ _QWEN3_OMNI_DSPARK_ARCHITECTURE = "Qwen3OmniDSparkModel"
 # See `SpeculatorConfig.supported_options`.
 _METHOD_SPECIFIC_OPTIONS = (
     "dspark_draft_topk",
+    "draft_lm_head_quantization",
     "index_share_for_mtp_iteration",
     "xpress_topc",
     "speculator_options",
@@ -1655,20 +1656,6 @@ class SpeculativeConfig:
                 "speculative model unless the draft model config contains an "
                 "n_predict parameter."
             )
-
-        if self.draft_lm_head_quantization is not None:
-            # Gemma-4 MTP scores tied embedding rows directly; no lm_head to share.
-            if not self.speculator_config.supports_draft_lm_head_quantization:
-                raise ValueError(
-                    "draft_lm_head_quantization is not supported for method "
-                    f"{self.method!r}."
-                )
-            draft = self.draft_model_config
-            if draft is not None and draft.head_dtype != draft.dtype:
-                raise ValueError(
-                    "draft_lm_head_quantization needs the lm_head to run in the "
-                    f"model dtype, got head_dtype={draft.head_dtype}."
-                )
 
         if self.num_speculative_tokens <= 0:
             raise ValueError(

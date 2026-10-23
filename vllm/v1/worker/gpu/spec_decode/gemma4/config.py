@@ -8,4 +8,6 @@ class Gemma4MTPSpeculatorConfig(MTPSpeculatorConfig):
         "vllm.v1.worker.gpu.spec_decode.gemma4.speculator.Gemma4Speculator"
     )
     # Gemma-4 MTP scores tied embedding rows directly; no lm_head to share.
-    supports_draft_lm_head_quantization = False
+    supported_options = MTPSpeculatorConfig.supported_options - {
+        "draft_lm_head_quantization"
+    }
