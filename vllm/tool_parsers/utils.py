@@ -1080,14 +1080,12 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
 def schema_admits_any_value(schema: Any) -> bool:
     """Whether *schema* is explicitly untyped, i.e. admits any JSON value.
 
-    That covers an empty dict, a ``true`` boolean schema, and a union with
-    such an ``anyOf``/``oneOf`` branch.  Sibling keywords are conjunctive, so
-    every ``anyOf``/``oneOf`` present must admit any value, and each of those
-    admits any value only when one of its branches does.  An untyped
-    ``allOf`` branch constrains nothing, so every ``allOf`` branch must be
-    untyped.  A ``type``/``enum``/``const`` sibling narrows the schema, and
-    an unresolved ``$ref`` is unknown rather than untyped, so each of those
-    makes it constrained.
+    An empty dict or ``true`` schema is untyped, as is a union with an
+    untyped ``anyOf``/``oneOf`` branch.  Sibling keywords are conjunctive:
+    every present ``anyOf``/``oneOf`` must have an untyped branch, and
+    every ``allOf`` branch must be untyped.  ``type``/``enum``/``const``
+    narrow the schema, and an unresolved ``$ref`` is unknown rather than
+    untyped.
     """
     if schema is True:
         return True
@@ -1135,14 +1133,13 @@ def extract_types_from_schema(
 ) -> list[str]:
     """Extract all possible type strings from a JSON Schema definition.
 
-    Handles ``type`` (string or list), ``enum`` value inference, and
-    recursive ``anyOf``/``oneOf``/``allOf``.  Returns *fallback*
-    (``["string"]`` by default) when the schema is explicitly untyped (see
-    :func:`schema_admits_any_value`), including from an untyped union
-    branch.  Returns ``["string"]`` when the type is unknown rather than
-    untyped: an absent, non-dict, or ``false`` boolean schema, or one whose
-    only constraint is an unresolved ``$ref`` — explicit ``type``/``enum``
-    siblings of a ``$ref`` still take effect.
+    Handles ``type`` (string or list), ``enum``/``const`` value inference,
+    and recursive ``anyOf``/``oneOf``/``allOf``.  A schema with no declared
+    type returns *fallback* (default ``["string"]``), except that a non-dict
+    schema and one whose only constraint is an unresolved
+    ``$ref``/``$dynamicRef`` are unknown rather than untyped and return
+    ``["string"]``; explicit ``type``/``enum`` siblings of a ``$ref`` still
+    apply.
     """
     if fallback is None:
         fallback = ["string"]
