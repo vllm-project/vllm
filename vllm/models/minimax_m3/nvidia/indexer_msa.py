@@ -651,9 +651,8 @@ def prefill_local_score(
     """Score bounded query chunks, then exchange their candidates once per layer."""
     from vllm.models.minimax_m3.nvidia.ops.index_decode_score_sharded import (
         minimax_m3_index_merge_candidates,
-        minimax_m3_index_pack_candidates,
     )
-    from vllm.third_party.fmha_sm100.api import sparse_topk_select
+    from vllm.third_party.fmha_sm100.api import sparse_topk_select_prefill
 
     assert metadata.local_chunks is not None and metadata.local_scores is not None
     assert metadata.candidate_buffers is not None
@@ -691,18 +690,14 @@ def prefill_local_score(
                 score_out=scores.transpose(0, 1),
             )
         chunk_send = send[:, chunk.start : chunk.end]
-        candidates = chunk_send[..., TOPK : 2 * TOPK].transpose(0, 1)
         valid_pages = num_valid_pages[chunk.start : chunk.end]
-        sparse_topk_select(
+        sparse_topk_select_prefill(
             scores,
-            TOPK,
-            num_valid_pages=valid_pages,
+            valid_pages,
+            chunk_send,
             force_begin_blocks=init_blocks,
             force_end_blocks=local_blocks,
-            output=candidates,
-            max_score_layout="THK",
         )
-        minimax_m3_index_pack_candidates(scores, chunk_send)
     send = send.view(comm.world, comm.hpr, total_tokens, 2 * TOPK + 1)
     received = received.view_as(send)
     torch.distributed.all_to_all_single(received, send, group=comm.group.device_group)
