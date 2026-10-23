@@ -514,7 +514,7 @@ class DeepseekV41ModelState(DefaultModelState):
         )
         num_tokens = int(kept_lens.sum())
         num_padded = num_tokens
-        kept_replay_start = replay_start
+        first_kept: np.ndarray | None = None
         if self.pcp_manager is not None and (
             trailing := self.pcp_manager.get_trailing_rows(
                 input_batch,
@@ -528,9 +528,6 @@ class DeepseekV41ModelState(DefaultModelState):
             needs_replay_batch = (
                 force_replay_batch or num_padded < input_batch.num_tokens_after_padding
             )
-            kept_replay_start = torch.maximum(
-                replay_start, self._pcp_replay_start.copy_to_gpu(first_kept)
-            )
         dp_tokens = None
         if self.vllm_config.parallel_config.data_parallel_size > 1:
             needs_replay_batch, dp_tokens = self._agree_across_dp(
@@ -538,6 +535,12 @@ class DeepseekV41ModelState(DefaultModelState):
             )
         if not needs_replay_batch:
             return
+
+        kept_replay_start = replay_start
+        if first_kept is not None:
+            kept_replay_start = torch.maximum(
+                replay_start, self._pcp_replay_start.copy_to_gpu(first_kept)
+            )
 
         cudagraphs, run_graph = self.replay_cudagraphs, None
         cg_mode = CUDAGraphMode.NONE
