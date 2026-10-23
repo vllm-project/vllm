@@ -499,12 +499,16 @@ def test_jit_monitor_activation_follows_enable_jit_warmup(
     assert calls == []
 
 
-def test_extensible_init_settles_dcp_interleave_before_runner_reads_it():
-    """The runner caches the DCP interleave size in `initialize_kv_cache`; the
-    connector-time adjustment is deferred under the extensible cache, so the
-    worker must apply it beforehand."""
+def test_extensible_init_defers_the_connector(monkeypatch: pytest.MonkeyPatch):
+    """Under the extensible cache the connector is created at the final extend,
+    not at init, and the config is kept for it."""
+    from vllm.v1.worker import gpu_worker
     from vllm.v1.worker.gpu_worker import Worker
 
+    def fail(*args, **kwargs):
+        raise AssertionError("connector created at init")
+
+    monkeypatch.setattr(gpu_worker, "ensure_kv_transfer_initialized", fail)
     log: list[str] = []
     runner = SimpleNamespace(
         initialize_kv_cache=lambda *args, **kwargs: log.append("initialize_kv_cache"),
@@ -522,11 +526,6 @@ def test_extensible_init_settles_dcp_interleave_before_runner_reads_it():
     worker = SimpleNamespace(
         cache_config=SimpleNamespace(enable_extensible_kv_cache=True),
         model_config=SimpleNamespace(enable_return_routed_experts=False),
-        vllm_config=SimpleNamespace(
-            adjust_dcp_kv_cache_interleave_size=lambda config: log.append(
-                f"adjust_dcp:{config.num_blocks}"
-            )
-        ),
         model_runner=runner,
         _maybe_get_memory_pool_context=lambda tag: nullcontext(),
         _v2_model_runner=lambda: runner,
@@ -535,7 +534,7 @@ def test_extensible_init_settles_dcp_interleave_before_runner_reads_it():
     # the engine to agree on.
     assert Worker.initialize_from_config(worker, kv_cache_config) == 42
     assert runner.extensible_kv_cache.warmup_committable_blocks == 42
-    assert log == ["adjust_dcp:8", "initialize_kv_cache"]
+    assert log == ["initialize_kv_cache"]
     assert worker._kv_cache_config is kv_cache_config
 
 
