@@ -390,15 +390,8 @@ def sparse_attn_indexer_kpool(
             if logits.shape[1] == 0:
                 topk_dst.fill_(-1)
             else:
-                torch.ops._C.top_k_per_row_prefill(
-                    logits,
-                    torch.zeros_like(row_ends),
-                    row_ends,
-                    topk_dst,
-                    num_rows,
-                    logits.stride(0),
-                    logits.stride(1),
-                    select_k,
+                get_indexer_topk(topk_backend).forward_prefill(
+                    logits, None, row_ends, topk_dst, select_k
                 )
             # Local pool ids -> request-relative global pool ids.
             _merge_dcp_topk_global(

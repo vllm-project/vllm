@@ -176,6 +176,7 @@ SparseIndexerTopkBackend = Literal[
     "persistent",
     "per_row",
     "flashinfer",
+    "flashinfer_gvr2",
     "torch",
     "aiter",
 ]
@@ -350,6 +351,11 @@ class KernelConfig:
     - "persistent": Use vLLM's persistent_topk kernel
     - "per_row": Use vLLM's top_k_per_row_decode kernel
     - "flashinfer": Use FlashInfer's top_k_ragged_transform kernel
+    - "flashinfer_gvr2": Use FlashInfer's self-sampling GVR V2 top-k
+      (`top_k_varlen(backend="gvr_2")`). SM100 family, fp32 logits, topk in
+      {512, 1024, 2048}. Also routes prefill chunks of >= 1024 row-relative
+      rows to gvr_2. Its latency depends on the logit distribution (rows with
+      strong position skew or many ties at the k-th value are slower)
     - "torch": Use a plain torch.topk implementation (debug reference)
     - "aiter": Use AITER's top_k_per_row_decode kernel (ROCm gfx950 only,
       requires VLLM_ROCM_USE_AITER)

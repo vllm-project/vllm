@@ -3,16 +3,24 @@
 """Top-k kernels for the DSA sparse attention indexer."""
 
 import functools
+import time
 
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.config import get_current_vllm_config
+from vllm.config import get_current_vllm_config, get_current_vllm_config_or_none
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer
+from vllm.utils.flashinfer import has_flashinfer, has_flashinfer_topk_varlen_gvr2
 from vllm.v1.worker.workspace import current_workspace_manager
 
+logger = init_logger(__name__)
+
 RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
+
+# Prefill chunks with fewer rows run faster on top_k_per_row_prefill (GB300),
+# and their many distinct small shapes would JIT-compile gvr_2 mid-serving.
+GVR2_PREFILL_MIN_ROWS = 1024
 
 # cooperative_topk's hard row limit: one cluster wave covers at most this many
 # rows. "auto" uses cooperative_topk for every batch within the limit and falls
@@ -147,16 +155,31 @@ class SparseIndexerTopk(torch.nn.Module):
 
     def __init__(self, backend: str | None = None) -> None:
         super().__init__()
+        vllm_config = get_current_vllm_config_or_none()
         if backend is None:
-            backend = (
-                get_current_vllm_config().kernel_config.sparse_indexer_topk_backend
-            )
+            if vllm_config is None:
+                vllm_config = get_current_vllm_config()
+            backend = vllm_config.kernel_config.sparse_indexer_topk_backend
         self._backend = backend
+        # Decode rows per step (requests x tokens per request), used to warm
+        # up gvr_2 for every row count before the first CUDA-graph capture.
+        self._gvr2_max_rows = 256
+        if vllm_config is not None:
+            spec = vllm_config.speculative_config
+            self._gvr2_max_rows = vllm_config.scheduler_config.max_num_seqs * (
+                1 + (spec.num_speculative_tokens if spec is not None else 0)
+            )
+        self._gvr2_warmed: set[tuple[int, int, int]] = set()
         self._is_cuda = current_platform.is_cuda()
         self._has_deep_select = self._is_cuda and (
             current_platform.is_device_capability_family(100)
         )
         self._has_flashinfer_topk = has_flashinfer()
+        self._has_flashinfer_gvr2 = (
+            self._is_cuda
+            and current_platform.is_device_capability_family(100)
+            and has_flashinfer_topk_varlen_gvr2()
+        )
         self._cooperative_capable = self._is_cuda and (
             current_platform.has_device_capability(90)
             and not current_platform.is_device_capability_family(120)
@@ -226,6 +249,14 @@ class SparseIndexerTopk(torch.nn.Module):
                     f"requires fp32 logits with stride(1) == 1, got "
                     f"dtype={logits.dtype}, stride={logits.stride()}"
                 )
+        elif self._backend == "flashinfer_gvr2":
+            if not self._is_cuda:
+                failures.append("requires a CUDA platform")
+            elif not current_platform.is_device_capability_family(100):
+                failures.append("requires the SM100 device family")
+            elif not self._has_flashinfer_gvr2:
+                failures.append("flashinfer.top_k_varlen has no gvr_2 backend")
+            failures += self._gvr2_constraints(logits, topk_tokens)
         if failures:
             raise RuntimeError(
                 f"sparse_indexer_topk_backend='{self._backend}' was requested, but: "
@@ -237,7 +268,7 @@ class SparseIndexerTopk(torch.nn.Module):
         self, logits: torch.Tensor, topk_tokens: int, num_rows: int
     ) -> str:
         """The priority chain: cooperative -> persistent -> per_row.
-        aiter/deep_select/flashinfer/torch are opt-in only.
+        aiter/deep_select/flashinfer/flashinfer_gvr2/torch are opt-in only.
 
         cooperative_topk is preferred whenever it is applicable, i.e. within
         its AUTO_COOPERATIVE_MAX_ROWS row limit; larger batches go to
@@ -251,6 +282,139 @@ class SparseIndexerTopk(torch.nn.Module):
         if self._is_cuda and topk_tokens in (512, 1024, 2048):
             return "persistent"
         return "per_row"
+
+    def _gvr2_warmup(self, logits: torch.Tensor, topk_tokens: int) -> None:
+        """Compile gvr_2's kernel variants for every decode row count once.
+
+        The kernel family and template depend on the row count, and the
+        indexer runs eagerly (outside CUDA graphs) in some models, so without
+        this every new batch size would JIT-compile (~1 s) in the middle of
+        serving. Must run eagerly; the launchers are cached per row count.
+        """
+        key = (logits.shape[1], logits.stride(0), topk_tokens)
+        if key in self._gvr2_warmed:
+            return
+        from flashinfer.topk_varlen.kernels.gvr2_topk_host import warmup_varlen
+
+        # warmup_varlen allocates rows x stride fp32 once; keep it under 256MB.
+        rows_cap = max(1, (256 << 20) // (logits.stride(0) * 4))
+        max_rows = max(logits.shape[0], min(self._gvr2_max_rows, rows_cap))
+        start = time.perf_counter()
+        warmup_varlen(
+            top_k=topk_tokens,
+            max_seq_len=logits.shape[1],
+            compress_ratio=1,
+            next_n=1,
+            num_rows_list=range(1, max_rows + 1),
+            row_stride=logits.stride(0),
+        )
+        self._gvr2_warmed.add(key)
+        logger.info_once(
+            "Warmed up gvr_2 top-k for up to %d rows x %d (topk %d) in %.1fs",
+            max_rows,
+            logits.shape[1],
+            topk_tokens,
+            time.perf_counter() - start,
+        )
+
+    @staticmethod
+    def _gvr2_constraints(logits: torch.Tensor, topk_tokens: int) -> list[str]:
+        """Unmet input constraints of gvr_2 (empty when applicable)."""
+        failures = []
+        if topk_tokens not in (512, 1024, 2048):
+            failures.append(
+                f"topk_tokens must be in (512, 1024, 2048), got {topk_tokens}"
+            )
+        if logits.dtype != torch.float32 or logits.stride(1) != 1:
+            failures.append(
+                f"requires fp32 logits with stride(1) == 1, got "
+                f"dtype={logits.dtype}, stride={logits.stride()}"
+            )
+        # float4 row loads: the row pitch must be a multiple of 4 elements and
+        # the base 16-byte aligned; rows may not overlap (an expand view).
+        num_rows, width = logits.shape
+        row_pitch = logits.stride(0) if num_rows > 1 else width
+        if row_pitch % 4 != 0 or (num_rows > 1 and row_pitch < width):
+            failures.append(
+                f"logits row stride must be a multiple of 4 and at least the "
+                f"row width, got stride(0)={row_pitch}, width={width}"
+            )
+        elif num_rows > 1 and logits.untyped_storage().nbytes() < (
+            (logits.storage_offset() + num_rows * row_pitch) * logits.element_size()
+        ):
+            failures.append("logits storage must cover every row's full stride")
+        if logits.data_ptr() % 16 != 0:
+            failures.append("logits base pointer must be 16-byte aligned")
+        return failures
+
+    def resolve_prefill_backend(
+        self,
+        logits: torch.Tensor,
+        topk_tokens: int,
+        row_starts: torch.Tensor | None,
+    ) -> str:
+        """flashinfer_gvr2 for chunks of at least GVR2_PREFILL_MIN_ROWS
+        row-relative rows (row_starts is None) when it was requested
+        explicitly, otherwise per_row (top_k_per_row_prefill).
+
+        gvr_2 reads every row from column 0. Unmet gvr_2 constraints fall
+        back instead of raising, since the same backend setting also drives
+        decode.
+        """
+        if (
+            self._backend == "flashinfer_gvr2"
+            and row_starts is None
+            and logits.shape[0] >= GVR2_PREFILL_MIN_ROWS
+            and self._has_flashinfer_gvr2
+            and not self._gvr2_constraints(logits, topk_tokens)
+        ):
+            return "flashinfer_gvr2"
+        return "per_row"
+
+    def forward_prefill(
+        self,
+        logits: torch.Tensor,
+        row_starts: torch.Tensor | None,
+        row_ends: torch.Tensor,
+        topk_indices: torch.Tensor,
+        topk_tokens: int,
+    ) -> None:
+        """Prefill top-k: row ``r`` selects over
+        ``logits[r, row_starts[r]:row_ends[r]]`` (row_starts None means 0) and
+        writes indices relative to the row start (int32, -1 fill for rows
+        shorter than topk_tokens)."""
+        num_rows = logits.shape[0]
+        backend = self.resolve_prefill_backend(logits, topk_tokens, row_starts)
+        if backend == "flashinfer_gvr2":
+            logger.info_once("Sparse indexer prefill top-k backend: flashinfer_gvr2")
+            from flashinfer.topk_varlen.kernels.gvr2_topk_host import run_varlen
+
+            direct = topk_indices.is_contiguous() and topk_indices.data_ptr() % 16 == 0
+            out = topk_indices if direct else torch.empty_like(topk_indices)
+            # max_seq_len=row width avoids the host read of row_ends.max().
+            run_varlen(
+                logits,
+                None,
+                row_ends.contiguous(),
+                out,
+                next_n=1,
+                compress_ratio=1,
+                max_seq_len=logits.shape[1],
+                top_k=topk_tokens,
+            )
+            if not direct:
+                topk_indices.copy_(out)
+            return
+        ops.top_k_per_row_prefill(
+            logits,
+            torch.zeros_like(row_ends) if row_starts is None else row_starts,
+            row_ends,
+            topk_indices,
+            num_rows,
+            logits.stride(0),
+            logits.stride(1),
+            topk_tokens,
+        )
 
     def _cooperative_constraints(
         self, logits: torch.Tensor, topk_tokens: int, num_rows: int
@@ -312,6 +476,7 @@ class SparseIndexerTopk(torch.nn.Module):
         topk_indices (int32, -1 fill for rows shorter than topk_tokens).
         """
         backend = self.resolve_backend(logits, topk_tokens, logits.shape[0])
+        logger.info_once("Sparse indexer decode top-k backend: %s", backend)
         if backend == "deep_select":
             row_ends = self._row_ends(seq_lens, next_n, logits.shape[0])
             deep_select_topk(logits, topk_tokens, end=row_ends, output_idx=topk_indices)
@@ -356,6 +521,37 @@ class SparseIndexerTopk(torch.nn.Module):
             # row and -1-fills past the row length.
             indices = top_k_ragged_transform(logits, offsets, row_ends, topk_tokens)
             topk_indices.copy_(indices)
+        elif backend == "flashinfer_gvr2":
+            # The production varlen entry point; the public top_k_varlen
+            # wrapper adds ~50us of host-side validation per call, which the
+            # eager indexer path pays on every decode step.
+            from flashinfer.topk_varlen.kernels.gvr2_topk_host import run_varlen
+
+            if not torch.cuda.is_current_stream_capturing():
+                self._gvr2_warmup(logits, topk_tokens)
+            # Every row is its own request (next_n=1) with the per-row
+            # length as its kv length, so both seq_lens layouts map onto the
+            # kernel's contract; compress_ratio stays 1 because the logits
+            # and seq_lens are already in the same (possibly pooled) units.
+            # max_seq_len=row width keeps the call free of host syncs. The
+            # kernel needs a contiguous, 16B-aligned output and writes the
+            # -1 fill past a short row itself.
+            num_rows = logits.shape[0]
+            row_ends = self._row_ends(seq_lens, next_n, num_rows).contiguous()
+            direct = topk_indices.is_contiguous() and topk_indices.data_ptr() % 16 == 0
+            out = topk_indices if direct else torch.empty_like(topk_indices)
+            run_varlen(
+                logits,
+                None,
+                row_ends,
+                out,
+                next_n=1,
+                compress_ratio=1,
+                max_seq_len=logits.shape[1],
+                top_k=topk_tokens,
+            )
+            if not direct:
+                topk_indices.copy_(out)
         elif backend == "torch":
             # Debug reference: mask everything past each row's end, then topk.
             row_ends = self._row_ends(seq_lens, next_n, logits.shape[0])

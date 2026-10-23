@@ -305,14 +305,18 @@ def as_fp32_logits(logits: torch.Tensor, row_ends: torch.Tensor) -> torch.Tensor
     """Upcast SM100's BF16 MQA logits for the FP32 top-k kernels.
 
     Only columns below ``row_ends`` (int32, one per row) are converted, the
-    span the consumers read; DeepGEMM's aligned row stride is kept.
+    span the consumers read; DeepGEMM's aligned row stride is kept, with
+    storage for whole rows (gvr_2 reads the logits as [rows, stride]).
     """
     if logits.dtype == torch.float32:
         return logits
-    out = torch.empty_strided(
-        logits.shape, logits.stride(), dtype=torch.float32, device=logits.device
-    )
     num_rows, width = logits.shape
+    assert logits.stride(1) == 1
+    out = torch.empty(
+        (num_rows, max(logits.stride(0), width)),
+        dtype=torch.float32,
+        device=logits.device,
+    )[:, :width]
     if num_rows == 0 or width == 0:
         return out
     assert row_ends.numel() == num_rows and row_ends.dtype == torch.int32
@@ -735,7 +739,6 @@ def sparse_attn_indexer(
                         ),
                         row_ends,
                     )
-                num_rows = logits.shape[0]
                 if candidate_blocks is not None:
                     # Two-level selection (v4.1): the candidate source
                     # publishes its top blocks; later indexers mask their
@@ -760,15 +763,8 @@ def sparse_attn_indexer(
                             chunk_candidates,
                             candidate_block_size,
                         )
-                ops.top_k_per_row_prefill(
-                    logits,
-                    torch.zeros_like(row_ends) if row_starts is None else row_starts,
-                    row_ends,
-                    topk_indices,
-                    num_rows,
-                    logits.stride(0),
-                    logits.stride(1),
-                    topk_tokens,
+                get_indexer_topk(topk_backend).forward_prefill(
+                    logits, row_starts, row_ends, topk_indices, topk_tokens
                 )
 
             if deinterleave_idx is None:
@@ -1052,6 +1048,7 @@ class SparseAttnIndexer(CustomOp):
         vllm_config = get_current_vllm_config()
         parallel_config = vllm_config.parallel_config
         self.topk_backend = vllm_config.kernel_config.sparse_indexer_topk_backend
+        get_indexer_topk(self.topk_backend)
         self._parallel_config = parallel_config
         self.dcp_world_size = parallel_config.decode_context_parallel_size
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
