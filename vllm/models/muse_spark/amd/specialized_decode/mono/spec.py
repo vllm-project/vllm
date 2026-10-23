@@ -118,6 +118,15 @@ U_K = MOE_HIDDEN // U_PARTS  # 1024
 U_TASKS = U_GROUPS * U_PARTS  # 256: CTA b: g = b // U_PARTS, q = b % U_PARTS
 G_TASKS = HIDDEN // COLS  # 64 gather CTAs [0, G_TASKS)
 
+
+def ug_cta0(s: int) -> int:
+    """The first CTA that can get a ug task at S = ``s``: ``run_ug`` gives CTA
+    b the tasks 255 - b, + 256, ... of the step's |U| 16, and |U| <= min(8 S,
+    MAX_U) (only S 8 picks reach the union), so CTA b has a task only if
+    b >= 256 - 16 min(8 S, MAX_U). 128 at S = 1, 0 from S = 2 on."""
+    return max(0, BLOCKS - UG_GROUPS * min(s * TOPK, MAX_U))
+
+
 # MXFP4 activation rows (a1): words a pooled row
 XQ_WORDS = MOE_HIDDEN // 8  # 512 int32 words of packed fp4
 XSC_WORDS = MOE_HIDDEN // 32  # 128 e8m0 codes, one a word in LDS

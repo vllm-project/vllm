@@ -9,14 +9,15 @@ pre-expert norm + MXFP4 a1.
             (``gemv``); parts q > 0 hand their fp32 partials to part 0
             (PPART), which adds them in part order, rounds to bf16 once and
             all-gathers the rows (every rank's POOL).
-    load_xq (every CTA) all 4096 pooled columns of every row -> the
-            pre-expert RMSNorm (``fused_rmsnorm_expand``: x rsqrt(mean x^2 +
-            eps), times (w + 1), bf16) -> MXFP4 a1 by aiter's HIP RoundUp rule
+    load_xq (every CTA that can get a ug task: ``spec.ug_cta0``) all 4096
+            pooled columns of every row -> the pre-expert RMSNorm
+            (``fused_rmsnorm_expand``: x rsqrt(mean x^2 + eps), times
+            (w + 1), bf16) -> MXFP4 a1 by aiter's HIP RoundUp rule
             (``fused_dynamic_mx_quant_moe_sort``: a 32-group's amax floored at
             1e-10, the ceil code of amax * f32(1/6), RNE e2m1) -> LDS ``xq``
             (fp4 words) and ``xsc`` (codes), the ug stage's B operand.
 
-Every CTA computes identical a1 bytes from identical inputs, so nothing is
+Every such CTA computes identical a1 bytes from identical inputs, so nothing is
 handed off. A pad row's normed values are zeros by ``select`` (its a1 is fp4
 zeros with the floor's code 92).
 

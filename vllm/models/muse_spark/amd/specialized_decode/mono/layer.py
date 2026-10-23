@@ -12,8 +12,10 @@ input) to the layer's deferred FFN boundary, in one launch a layer and rank.
     router        CTAs 64 .. 95: one fp32 router row each -> every rank's logits
     pooler        CTAs 96 .. 223: 32 row groups x 4 K quarters -> every rank's
                   pooled rows
-    xq            every CTA: the pooled rows -> pre-expert norm -> MXFP4 (LDS)
-    union, ug     every CTA: the step's union of experts, gate/up tasks reversed
+    xq            every CTA that can get a ug task (b >= spec.ug_cta0(S): 128
+                  at S = 1, else every CTA): the pooled rows -> pre-expert
+                  norm -> MXFP4 (LDS)
+    union, ug     every CTA: the step's union of experts; gate/up tasks reversed
                   over the grid (CTA b: 255 - b, + 256, ...)
     down          every CTA b: pooled rows 16 b .. of every union expert ->
                   the column owner's ``rsx`` (always, zeros included)
@@ -216,10 +218,20 @@ def program(c, core: str = "tensor") -> None:
     if (b >= P0) & (b < P0 + P_TASKS):
         pops = pool.pool_loads(c, b - P0)
         pool.stage_pool(c, b - P0, pops)
-    # -- phase 3: the a1 rows (every CTA), the union, ug, down
-    pool.load_xq(c)
+    # -- phase 3: the a1 rows and ug (every CTA that can get a ug task:
+    # spec.ug_cta0; nothing else reads xq), the union, down (every CTA)
+    ug0 = spec.ug_cta0(s)
+    if const_expr(ug0 > 0):
+        if b >= ug0:
+            pool.load_xq(c)
+    else:
+        pool.load_xq(c)
     nu = experts.load_route(c)
-    experts.run_ug(c, nu)
+    if const_expr(ug0 > 0):
+        if b >= ug0:
+            experts.run_ug(c, nu)
+    else:
+        experts.run_ug(c, nu)
     experts.run_down(c, b32, nu)
     # -- phase 4: owner reduce, unpooler (weights before the reduce's waits),
     # gather

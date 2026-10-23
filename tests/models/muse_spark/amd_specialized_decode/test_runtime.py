@@ -1142,6 +1142,22 @@ def test_phases_default_to_phase_a_and_are_validated():
     assert not Phases(core="gated").reads_kv(1) and not Phases().reads_kv(1)
 
 
+@pytest.mark.parametrize("s", range(1, spec.MAX_ROWS + 1))
+def test_only_ctas_past_ug_cta0_get_a_ug_task(s):
+    """K2 skips load_xq and run_ug below ``spec.ug_cta0(S)``: run_ug's placement
+    (CTA b: tasks 255 - b, + 256, ... of |U| 16) gives no such CTA a task for any
+    union size |U| <= min(8 S, MAX_U), and the bound is tight at the largest."""
+    cta0 = spec.ug_cta0(s)
+    nu_max = min(s * spec.TOPK, spec.MAX_U)
+    for nu in range(nu_max + 1):
+        total = nu * spec.UG_GROUPS
+        busy = {(spec.BLOCKS - 1 - t) % spec.BLOCKS for t in range(total)}
+        assert all(b >= cta0 for b in busy), (s, nu)
+        if nu == nu_max:
+            assert min(busy) == cta0, (s, nu)
+    assert cta0 == (128 if s == 1 else 0)
+
+
 @pytest.mark.parametrize("q", [1, 8])
 @pytest.mark.parametrize(
     "front, core", [(f, c) for f in ("stock", "k1") for c in spec.K2_CORES]
