@@ -108,7 +108,6 @@ impl MultimodalModelInfo {
             let clip_options = VideoClipOptions {
                 sample_fps: clip.sample_fps,
                 max_long_side_pixel: clip.max_long_side_pixel,
-                sampling: clip.sampling.clone(),
             };
             // Prefer the borrowed-RGB fast path, which avoids materializing a
             // `DynamicImage` per sampled frame after media decode.

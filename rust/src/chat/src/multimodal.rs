@@ -348,27 +348,6 @@ fn load_preprocessor_config(
     Ok(Some(config))
 }
 
-/// Model-specific adjustments to the image preprocessor config, for places
-/// where the crate's defaults follow a different serving contract than
-/// vLLM's Python processors.
-fn adjust_image_preprocessor_config(
-    context: &MultimodalModelContext,
-    mut config: PreProcessorConfig,
-) -> PreProcessorConfig {
-    // MiniMax-M3: the crate's processor raises a short side below 112 px by
-    // default, but vLLM's Python only raises when `max_long_side_pixel` is
-    // set, and the reference checkpoint does not set it. Disable the floor
-    // unless the config names it explicitly.
-    if context.config.get("model_type").and_then(serde_json::Value::as_str) == Some("minimax_m3_vl")
-    {
-        config
-            .extra
-            .entry("min_short_side_pixel".to_string())
-            .or_insert(serde_json::Value::from(0));
-    }
-    config
-}
-
 /// Request-scoped fetched media, split per modality with tracker UUID
 /// metadata preserved in request order.
 struct FetchedMedia {
@@ -468,7 +447,6 @@ impl MultimodalModelInfo {
         audio_preprocessor_config: PreProcessorConfig,
         limit_mm_per_prompt: MmLimitPerPrompt,
     ) -> Result<Option<Self>> {
-        let preprocessor_config = adjust_image_preprocessor_config(&context, preprocessor_config);
         let (image, video) =
             Self::resolve_vision_lanes(&context, preprocessor_config, video_preprocessor_config)?;
         let audio = Self::resolve_audio_lane(&context, &audio_preprocessor_config)?;
@@ -1277,62 +1255,6 @@ mod tests {
         assert_eq!(llama4_info().video_sampling_policy(), None);
     }
 
-    fn minimax_m3_info(preprocessor_config: PreProcessorConfig) -> MultimodalModelInfo {
-        let context = MultimodalModelContext {
-            model_id: "MiniMaxAI/MiniMax-M3".to_string(),
-            model_type: Some("minimax_m3_vl".to_string()),
-            config: serde_json::json!({"model_type": "minimax_m3_vl"}),
-            tokenizer: TokenizerResolver(Arc::new(
-                TestTokenizer::new()
-                    .with_regular_token("]<]image[>[", 200_005)
-                    .with_regular_token("]<]start of image[>[", 200_006)
-                    .with_regular_token("]<]end of image[>[", 200_007),
-            )),
-        };
-        MultimodalModelInfo::from_loaded(
-            context,
-            preprocessor_config,
-            PreProcessorConfig::default(),
-            PreProcessorConfig::default(),
-            HashMap::new(),
-        )
-        .unwrap()
-        .expect("MiniMax-M3 multimodal support")
-    }
-
-    /// Python only raises a short side below 112 px when
-    /// `max_long_side_pixel` is set, and the reference checkpoint does not
-    /// set it: the rust path disables the crate's floor by default.
-    #[test]
-    fn minimax_m3_short_side_floor_follows_python_default() {
-        let image = ::image::DynamicImage::ImageRgb8(::image::RgbImage::from_pixel(
-            400,
-            40,
-            ::image::Rgb([128; 3]),
-        ));
-        let tokens = |info: &MultimodalModelInfo| {
-            info.image
-                .as_ref()
-                .unwrap()
-                .processor
-                .preprocess(std::slice::from_ref(&image))
-                .unwrap()
-                .feature_token_counts
-        };
-
-        assert_eq!(
-            tokens(&minimax_m3_info(PreProcessorConfig::default())),
-            vec![14]
-        );
-
-        // An explicitly configured floor keeps the crate's raise.
-        let mut with_floor = PreProcessorConfig::default();
-        with_floor
-            .extra
-            .insert("min_short_side_pixel".to_string(), serde_json::json!(112));
-        assert_eq!(tokens(&minimax_m3_info(with_floor)), vec![160]);
-    }
-
     #[test]
     fn qwen3_vl_resolves_image_and_video_support() {
         let info = qwen3_vl_info();
@@ -1439,10 +1361,8 @@ mod tests {
         let data = feature.data.as_ref().unwrap();
         // The 1x1 image is upscaled to the 1024-patch minimum grid of 16px
         // patches; the 2x2 pixel shuffle turns them into 256 feature tokens.
-        // The kwargs are the Python model's forward inputs: packed patch rows
-        // under `pixel_values_flat`, resized pixel (H, W) under `imgs_sizes`.
         assert!(matches!(
-            data["pixel_values_flat"].data.as_ref(),
+            data["pixel_values"].data.as_ref(),
             Some(MmKwargValue::Tensor(tensor)) if tensor.shape == [1024, 3 * 16 * 16]
         ));
         assert!(matches!(
@@ -1450,16 +1370,9 @@ mod tests {
             Some(MmKwargValue::Tensor(tensor)) if tensor.shape.is_empty()
         ));
         assert!(matches!(
-            data["num_tokens_per_image"].data.as_ref(),
-            Some(MmKwargValue::Tensor(tensor)) if tensor.shape.is_empty()
+            data["image_grid_hw"].data.as_ref(),
+            Some(MmKwargValue::Tensor(tensor)) if tensor.shape == [2]
         ));
-        assert_eq!(
-            data["imgs_sizes"].data,
-            Some(MmKwargValue::List(vec![
-                MmKwargValue::Int(512),
-                MmKwargValue::Int(512),
-            ]))
-        );
     }
 
     #[tokio::test]
@@ -1486,9 +1399,9 @@ mod tests {
                 .unwrap();
             let feature = &features[0];
             let Some(MmKwargValue::Tensor(pixel_values)) =
-                feature.data.as_ref().unwrap()["pixel_values_flat"].data.as_ref()
+                feature.data.as_ref().unwrap()["pixel_values"].data.as_ref()
             else {
-                panic!("pixel_values_flat should be a tensor");
+                panic!("pixel_values should be a tensor");
             };
             (feature.mm_position.length, pixel_values.shape[0])
         }
