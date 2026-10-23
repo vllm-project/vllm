@@ -3,11 +3,13 @@
 
 """SynthID-Text watermark generation primitives."""
 
+import functools
 import math
 
 import torch
 
 from vllm.config.watermarking import WatermarkPRFName
+from vllm.platforms import current_platform
 from vllm.v1.watermarking.detector import WatermarkDetector
 from vllm.v1.watermarking.prfs import PhiloxPRF, create_prf
 from vllm.v1.watermarking.watermarker import (
@@ -19,6 +21,19 @@ from vllm.v1.watermarking.watermarker import (
 
 # High stream word ("SYNT") keeps SynthID-Text off Gumbel-max's Philox streams.
 _STREAM_DOMAIN = 0x53594E54 << 32
+
+
+# Batches whose top-k is at most this are sampled by one program per row.
+_MAX_COMPACT_TOP_K = 1024
+
+
+@functools.cache
+def _has_fused_sampling() -> bool:
+    if not current_platform.is_cuda():
+        return False
+    from vllm.v1.worker.gpu.sample.synthid import HAS_GLUON
+
+    return HAS_GLUON
 
 
 def _validate_depth(depth: int) -> None:
@@ -44,6 +59,8 @@ class SynthIDWatermarker(Watermarker):
         self.prf = selected_prf
         self._context_width = context_width
         self.depth = depth
+        if type(self.prf) is PhiloxPRF and _has_fused_sampling():
+            self.max_compact_top_k = _MAX_COMPACT_TOP_K
 
     @property
     def context_width(self) -> int:
@@ -115,28 +132,65 @@ class SynthIDWatermarker(Watermarker):
         if random_sampler is None:
             raise ValueError("SynthID-Text requires a random sampler")
 
-        if self._use_triton(logits) and logits.dtype != torch.float64:
-            from vllm.v1.worker.gpu.sample.watermark import synthid_watermark_logits
+        if (
+            type(self.prf) is PhiloxPRF
+            and logits.device.type == "cuda"
+            and logits.dtype != torch.float64
+            and _has_fused_sampling()
+            and isinstance(random_sampler, RandomSampler)
+            and not random_sampler.is_drafting
+            and random_sampler.logits_cache is None
+        ):
+            from vllm.v1.worker.gpu.sample.synthid import synthid_sample
 
-            # The kernel applies skip_mask in its final pass, with the same
-            # result as the torch.where below.
-            watermarked_logits = synthid_watermark_logits(
+            token_ids = synthid_sample(
                 logits,
                 contexts,
                 self.prf.key,
                 self.depth,
+                random_sampler.expanded_idx_mapping,
+                random_sampler.temperatures,
+                random_sampler.seeds,
+                random_sampler.positions,
                 stream=_STREAM_DOMAIN,
                 skip_mask=skip_mask,
+                use_fp64=random_sampler.use_fp64,
             )
-        else:
-            watermarked_logits = self.watermark_logits(logits, contexts)
-            if skip_mask is not None:
-                watermarked_logits = torch.where(
-                    skip_mask.unsqueeze(-1), logits, watermarked_logits
-                )
+            return WatermarkSample(token_ids=token_ids, logits=logits)
+
+        watermarked_logits = self.watermark_logits(logits, contexts)
+        if skip_mask is not None:
+            watermarked_logits = torch.where(
+                skip_mask.unsqueeze(-1), logits, watermarked_logits
+            )
         return WatermarkSample(
             token_ids=random_sampler(watermarked_logits),
             logits=logits,
+        )
+
+    def sample_top_k(
+        self,
+        values: torch.Tensor,
+        token_ids: torch.Tensor,
+        contexts: torch.Tensor,
+        random_sampler: RandomSampler,
+        skip_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        from vllm.v1.worker.gpu.sample.synthid import synthid_sample_top_k
+
+        return synthid_sample_top_k(
+            values,
+            token_ids,
+            contexts,
+            self.prf.key,
+            self.depth,
+            random_sampler.expanded_idx_mapping,
+            random_sampler.temperatures,
+            random_sampler.seeds,
+            random_sampler.positions,
+            stream=_STREAM_DOMAIN,
+            skip_mask=skip_mask,
+            use_fp64=random_sampler.use_fp64,
         )
 
     def _sample_watermarked(

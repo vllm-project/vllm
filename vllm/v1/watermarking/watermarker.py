@@ -70,9 +70,26 @@ class DraftContextState:
 
 
 class Watermarker(ABC):
+    # Batches whose top-k is at most this sample through `sample_top_k`.
+    max_compact_top_k: int = 0
+
     @property
     @abstractmethod
     def context_width(self) -> int:
+        raise NotImplementedError
+
+    def sample_top_k(
+        self,
+        values: torch.Tensor,
+        token_ids: torch.Tensor,
+        contexts: torch.Tensor,
+        random_sampler: RandomSampler,
+        skip_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Sample from each row's kept `token_ids` [B, K] with logits `values`.
+
+        Masked entries of `values` are -inf.
+        """
         raise NotImplementedError
 
     def sample(

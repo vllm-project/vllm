@@ -6,13 +6,18 @@ from typing import Literal
 import numpy as np
 import torch
 
+from vllm.config.model import PROCESSED_LOGPROBS_MODES
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.watermarking.watermarker import RandomSampler, Watermarker
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.sample.sampler import Sampler
-from vllm.v1.worker.gpu.sample.watermark import repeated_context_mask
+from vllm.v1.worker.gpu.sample.watermark import (
+    repeated_context_mask,
+    watermark_contexts,
+    watermark_skip_mask,
+)
 
 logger = init_logger(__name__)
 
@@ -76,9 +81,23 @@ class GPUWatermarkSampler(Sampler):
                 use_fused_sampler,
             )
 
-        processed_logits = apply_top_k_top_p(
-            processed_logits, top_k, top_p, has_topp_only_rows=has_topp_only_rows
-        )
+        top_k_support = None
+        if (
+            top_k is not None
+            and getattr(self.watermarker, "max_compact_top_k", 0) > 0
+            and self.logprobs_mode not in PROCESSED_LOGPROBS_MODES
+            and not self.return_sampling_mask
+        ):
+            max_top_k = int(np.max(self.sampling_states.top_k.np[idx_mapping_np]))
+            if max_top_k <= self.watermarker.max_compact_top_k:
+                values, token_ids = torch.topk(processed_logits, max_top_k, dim=-1)
+                kept = torch.arange(max_top_k, device=values.device)
+                values.masked_fill_(kept >= top_k.unsqueeze(-1), float("-inf"))
+                top_k_support = apply_top_k_top_p(values, None, top_p), token_ids
+        if top_k_support is None:
+            processed_logits = apply_top_k_top_p(
+                processed_logits, top_k, top_p, has_topp_only_rows=has_topp_only_rows
+            )
         contexts = self._get_contexts(expanded_idx_mapping)
         repeated_contexts = None
         if self.deduplicate_contexts != "none":
@@ -86,10 +105,17 @@ class GPUWatermarkSampler(Sampler):
                 expanded_idx_mapping, contexts
             )
 
-        temperatures = self.sampling_states.temperature.gpu[expanded_idx_mapping]
         needs_mixed_sampling = repeated_contexts is not None or not np.all(enabled)
         skip_mask = None
-        if needs_mixed_sampling:
+        if needs_mixed_sampling and expanded_idx_mapping.is_cuda:
+            skip_mask = watermark_skip_mask(
+                expanded_idx_mapping,
+                self.watermarking.gpu,
+                self.sampling_states.temperature.gpu,
+                repeated_contexts,
+            )
+        elif needs_mixed_sampling:
+            temperatures = self.sampling_states.temperature.gpu[expanded_idx_mapping]
             watermarking = self.watermarking.gpu[expanded_idx_mapping] & (
                 temperatures != 0
             )
@@ -104,22 +130,32 @@ class GPUWatermarkSampler(Sampler):
             positions=pos,
             use_fp64=self.use_fp64_gumbel,
         )
-        output = self.watermarker.sample(
-            processed_logits,
-            contexts,
-            random_sampler,
-            skip_mask=skip_mask,
-        )
-        sampled = output.token_ids
-        output_logits = output.logits
+        if top_k_support is not None:
+            # Processed logprobs and sampling masks are excluded above, so the
+            # returned logits may stay unmasked.
+            sampled = self.watermarker.sample_top_k(
+                *top_k_support, contexts, random_sampler, skip_mask=skip_mask
+            )
+            output_logits = processed_logits
+        else:
+            output = self.watermarker.sample(
+                processed_logits,
+                contexts,
+                random_sampler,
+                skip_mask=skip_mask,
+            )
+            sampled = output.token_ids
+            output_logits = output.logits
         # Expanded rows each copy a request's temperature, so checking the
         # request temperatures covers all expanded rows
         if self.sampling_states.any_greedy(idx_mapping_np):
-            sampled = torch.where(
-                temperatures == 0,
-                processed_logits.argmax(dim=-1),
-                sampled,
+            greedy = (
+                top_k_support[1].gather(-1, top_k_support[0].argmax(-1, keepdim=True))
+                if top_k_support is not None
+                else processed_logits.argmax(dim=-1, keepdim=True)
             )
+            temperatures = self.sampling_states.temperature.gpu[expanded_idx_mapping]
+            sampled = torch.where(temperatures == 0, greedy.squeeze(-1), sampled)
         return sampled, output_logits
 
     def _get_repeated_contexts(
@@ -160,6 +196,18 @@ class GPUWatermarkSampler(Sampler):
         and ``[20, 21]``. The first verification row precedes the first draft.
         """
         context_width = self.watermarker.context_width
+        if (
+            expanded_local_pos is None
+            and draft_sampled is None
+            and expanded_idx_mapping.is_cuda
+        ):
+            return watermark_contexts(
+                expanded_idx_mapping,
+                self.req_states.all_token_ids.gpu,
+                self.req_states.prompt_len.gpu,
+                self.req_states.total_len.gpu,
+                context_width,
+            )
         req_indices = expanded_idx_mapping.to(torch.int64)
         valid_reqs = req_indices >= 0
         safe_req_indices = req_indices.clamp_min(0)

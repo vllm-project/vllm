@@ -35,6 +35,8 @@ from vllm.v1.worker.gpu.sample.watermark import (
     draft_watermarking_mask,
     philox_gumbel_sample,
     repeated_context_mask,
+    watermark_contexts,
+    watermark_skip_mask,
 )
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
@@ -460,6 +462,59 @@ def test_gpu_sampler_filters_top_k_top_p_before_watermarking(
     assert watermarker.captured_logits is not None
     assert torch.isneginf(watermarker.captured_logits[0, 2:]).all()
     assert sampled.item() in (0, 1)
+
+
+@pytest.mark.parametrize("return_sampling_mask", [False, True])
+def test_gpu_sampler_compacts_small_top_k_unless_masks_are_returned(
+    monkeypatch, make_gpu_watermark_sampler, return_sampling_mask
+):
+    """Compaction returns unmasked logits, which a sampling mask would read."""
+    monkeypatch.setattr(
+        "vllm.v1.watermarking.gpu_sampler.apply_top_k_top_p",
+        lambda logits, k, p: apply_top_k_top_p_pytorch(
+            logits, k, p, allow_cpu_sync=True
+        ),
+    )
+
+    class CompactingWatermarker:
+        context_width = 1
+        max_compact_top_k = 4
+        compacted = None
+
+        def sample(self, logits, contexts, random_sampler=None, skip_mask=None):
+            self.compacted = False
+            return WatermarkSample(logits.argmax(dim=-1), logits)
+
+        def sample_top_k(self, values, token_ids, contexts, random_sampler, **kwargs):
+            self.compacted = True
+            return token_ids.gather(-1, values.argmax(-1, keepdim=True)).view(-1)
+
+    watermarker = CompactingWatermarker()
+    sampler = make_gpu_watermark_sampler(
+        watermarker, max_num_reqs=1, vocab_size=8, deduplicate_contexts="none"
+    )
+    sampler.return_sampling_mask = return_sampling_mask
+    sampler.add_request(0, SamplingParams(top_k=2, watermarking=True))
+    sampler.apply_staged_writes()
+    sampler._get_contexts = lambda expanded_idx_mapping: torch.zeros(
+        1, 1, dtype=torch.int64
+    )
+    logits = torch.tensor([[1.0, 5.0, 4.0, 3.0, 2.0, 0.0, 0.0, 0.0]])
+
+    sampled, output_logits = sampler._sample_random(
+        logits,
+        torch.tensor([0]),
+        np.array([0]),
+        torch.zeros(1, dtype=torch.int64),
+        torch.tensor([2]),
+        None,
+        False,
+    )
+
+    assert sampled.item() == 1
+    assert watermarker.compacted is not return_sampling_mask
+    if return_sampling_mask:
+        assert torch.isfinite(output_logits[0]).sum() == 2
 
 
 def test_watermark_context_ignores_prefix_cache_bookkeeping():
@@ -1929,3 +1984,32 @@ def test_dspark_target_only_watermarking_leaves_drafts_unwatermarked(monkeypatch
     )
 
     assert torch.equal(sampled, torch.tensor([3, 4]))
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
+def test_watermark_context_and_skip_kernels_match_torch():
+    """The CUDA sampler builds contexts and skip masks in kernels."""
+    all_token_ids = torch.arange(40, dtype=torch.int32, device="cuda").view(4, 10)
+    prompt_len = torch.tensor([2, 8, 0, 5], dtype=torch.int32, device="cuda")
+    total_len = torch.tensor([7, 9, 10, 5], dtype=torch.int32, device="cuda")
+    expanded_idx_mapping = torch.tensor([3, 0, -1, 1, 2], device="cuda").int()
+
+    contexts = watermark_contexts(
+        expanded_idx_mapping, all_token_ids, prompt_len, total_len, 3
+    )
+
+    assert contexts.tolist() == [
+        [-1, -1, -1],
+        [4, 5, 6],
+        [-1, -1, -1],
+        [-1, -1, 18],
+        [27, 28, 29],
+    ]
+
+    watermarking = torch.tensor([True, False, True, True], device="cuda")
+    temperature = torch.tensor([1.0, 1.0, 0.0, 0.5], device="cuda")
+    repeated = torch.tensor([True, False, False, False, False], device="cuda")
+    skip_mask = watermark_skip_mask(
+        expanded_idx_mapping, watermarking, temperature, repeated
+    )
+    assert skip_mask.tolist() == [True, False, True, True, True]
