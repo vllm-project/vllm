@@ -194,7 +194,7 @@ def test_logprob_token_ids_without_topk_logprobs(logprobs_mode: str):
         )
         return logits, sampled, num_sampled
 
-    rejection_sampler._verify = MethodType(fake_verify, rejection_sampler)
+    rejection_sampler._verify = MethodType(fake_verify, rejection_sampler)  # type: ignore[method-assign]
     torch.manual_seed(0)
     logits = torch.randn(10, vocab_size, device=device)
 
@@ -302,7 +302,7 @@ def test_logprob_token_ids_with_topk_logprobs(logprobs_mode: str):
     dims = sampler.get_logprobs_dims(idx_mapping_np)
     assert dims == (1, 4)
     rejection_sampler = _make_rejection_sampler(sampler, num_speculative_steps=3)
-    rejection_sampler._verify = MethodType(
+    rejection_sampler._verify = MethodType(  # type: ignore[method-assign]
         _fake_verify(device, vocab_size), rejection_sampler
     )
     torch.manual_seed(0)
@@ -368,7 +368,7 @@ def test_logprob_token_ids_with_adaptive_verification():
             )
         rejection_sampler = _make_rejection_sampler(sampler, num_speculative_steps=3)
         rejection_sampler.enable_adaptive_verification = adaptive
-        rejection_sampler._verify = MethodType(
+        rejection_sampler._verify = MethodType(  # type: ignore[method-assign]
             _fake_verify(device, vocab_size), rejection_sampler
         )
         return rejection_sampler._verify_in_chunks(
