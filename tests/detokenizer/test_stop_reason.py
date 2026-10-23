@@ -40,10 +40,15 @@ def test_stop_reason(vllm_model, example_prompts):
             stop_token_ids=[stop_token_id],
         ),
     )
-    for output in outputs:
-        output = output.outputs[0]
-        assert output.finish_reason == "stop"
-        assert output.stop_reason == stop_token_id
+    # A sampled output can run to the length limit without the stop token.
+    completions = [output.outputs[0] for output in outputs]
+    assert any(output.finish_reason == "stop" for output in completions)
+    for output in completions:
+        if output.finish_reason == "stop":
+            assert output.stop_reason == stop_token_id
+        else:
+            assert output.finish_reason == "length"
+            assert stop_token_id not in output.token_ids
 
     # test stop string
     outputs = llm.generate(
@@ -52,10 +57,14 @@ def test_stop_reason(vllm_model, example_prompts):
             ignore_eos=True, seed=SEED, max_tokens=MAX_TOKENS, stop="."
         ),
     )
-    for output in outputs:
-        output = output.outputs[0]
-        assert output.finish_reason == "stop"
-        assert output.stop_reason == STOP_STR
+    completions = [output.outputs[0] for output in outputs]
+    assert any(output.finish_reason == "stop" for output in completions)
+    for output in completions:
+        if output.finish_reason == "stop":
+            assert output.stop_reason == STOP_STR
+        else:
+            assert output.finish_reason == "length"
+            assert STOP_STR not in output.text
 
     # test EOS token
     outputs = llm.generate(
