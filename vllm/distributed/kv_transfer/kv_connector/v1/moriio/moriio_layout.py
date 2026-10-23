@@ -300,9 +300,7 @@ def get_layer_transfer_geometry(
         # Standardized per-layer [B, H, N, C] view (MLA is just H == 1).
         num_blocks, num_heads, num_states, content_dim = shape
         slot_size_bytes = num_heads * content_dim * element_size
-        block_len = 1 + sum(
-            (s - 1) * st for s, st in zip(shape[1:], stride[1:])
-        )
+        block_len = 1 + sum((s - 1) * st for s, st in zip(shape[1:], stride[1:]))
         block_len *= element_size
         return LayerTransferGeometry(
             num_blocks=num_blocks,

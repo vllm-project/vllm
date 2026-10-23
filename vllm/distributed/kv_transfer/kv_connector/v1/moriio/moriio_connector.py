@@ -21,6 +21,7 @@ from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
     clip_ssm_state_blocks,
+    get_current_attn_backends,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -104,7 +105,6 @@ from vllm.utils.network_utils import (
     make_zmq_path,
     make_zmq_socket,
 )
-from vllm.distributed.kv_transfer.kv_connector.utils import get_current_attn_backends
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
