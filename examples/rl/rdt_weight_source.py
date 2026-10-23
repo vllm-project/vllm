@@ -76,25 +76,18 @@ class CheckpointNameSource(WeightSource):
         for name, param in self._module.named_parameters():
             m = _FUSED_EXPERT_RE.match(name)
             if m is None:
-                yield [(name, materialize_full_tensor(param))]
+                yield name, materialize_full_tensor(param)
                 continue
-            # One gather and one batch per FUSED param: the per-expert views
-            # below are into that one tensor, which stays resident while the
-            # engine consumes the batch.
+            # One gather per FUSED param, not per expert: the views below are
+            # into that one tensor, and every expert of a layer rides in the
+            # same gather group, so it stays resident exactly as long as needed.
             prefix, kind = m.group(1), m.group(2)
             full = materialize_full_tensor(param)
             if kind == "down_proj":
-                yield [
-                    (f"{prefix}.{e}.down_proj.weight", full[e])
-                    for e in range(full.shape[0])
-                ]
+                for e in range(full.shape[0]):
+                    yield f"{prefix}.{e}.down_proj.weight", full[e]
             else:
                 half = full.shape[1] // 2
-                yield [
-                    pair
-                    for e in range(full.shape[0])
-                    for pair in (
-                        (f"{prefix}.{e}.gate_proj.weight", full[e, :half, :]),
-                        (f"{prefix}.{e}.up_proj.weight", full[e, half:, :]),
-                    )
-                ]
+                for e in range(full.shape[0]):
+                    yield f"{prefix}.{e}.gate_proj.weight", full[e, :half, :]
+                    yield f"{prefix}.{e}.up_proj.weight", full[e, half:, :]

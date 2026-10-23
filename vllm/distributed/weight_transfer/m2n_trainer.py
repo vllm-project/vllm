@@ -221,13 +221,13 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
     def _initialize(
         self,
         init_info: M2NTrainerInitInfo,
-        source: WeightSource | None,
+        source: WeightSource,
     ) -> None:
         """Run source validation, metadata agreement, and NCCL rendezvous."""
         self._num_trainer_ranks = init_info.num_trainer_ranks
         local_source_error: str | None = None
         try:
-            if source is None or type(source).iter_local is WeightSource.iter_local:
+            if type(source).iter_local is WeightSource.iter_local:
                 raise TypeError(
                     "nccl_m2n sends each rank's local shard, but "
                     f"{type(source).__name__} does not implement iter_local()"
@@ -528,9 +528,8 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         # Optimizer work may have used another CUDA stream. Make prior writes
         # visible before a provider materializes current-stream local shards.
         torch.accelerator.synchronize(device_index)
-        shards = (pair for batch in self.source.iter_local() for pair in batch)
         sent = 0
-        for name, shard in shards:
+        for name, shard in self.source.iter_local():
             if sent >= len(self._metas):
                 raise RuntimeError(
                     "weight source yielded more parameters than metadata() "

@@ -42,7 +42,6 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferEngine,
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
-    local_shape,
     owned_names,
 )
 from vllm.distributed.weight_transfer.ipc_engine import (
@@ -1381,14 +1380,14 @@ class TestModuleSource:
     def test_iter_full_yields_materialized_tensors(self):
         w = torch.arange(6, dtype=torch.float32).reshape(2, 3)
         source = ModuleSource(_module_with(("w", w)))
-        pairs = [pair for batch in source.iter_full() for pair in batch]
+        pairs = list(source.iter_full())
         assert [name for name, _ in pairs] == ["w"]
         assert torch.equal(pairs[0][1], w)
 
     def test_source_is_reiterable(self):
         source = ModuleSource(_module_with(("w", torch.zeros(2))))
-        assert [b[0][0] for b in source.iter_full()] == ["w"]
-        assert [b[0][0] for b in source.iter_full()] == ["w"]
+        assert [n for n, _ in source.iter_full()] == ["w"]
+        assert [n for n, _ in source.iter_full()] == ["w"]
 
     def test_metadata_agrees_with_both_modes(self):
         """Engines declare the round from `metadata()` and send what a mode
@@ -1397,8 +1396,7 @@ class TestModuleSource:
             _module_with(("w", torch.zeros(2, 3)), ("b", torch.zeros(3)))
         )
         declared = [(m.name, m.dtype, m.shape) for m in source.metadata()]
-        for batches in (source.iter_full(), source.iter_local()):
-            pairs = [pair for batch in batches for pair in batch]
+        for pairs in (source.iter_full(), source.iter_local()):
             assert [(n, t.dtype, tuple(t.shape)) for n, t in pairs] == declared
 
 
@@ -1451,14 +1449,14 @@ class TestModuleSourceDTensor:
         assert r.owners == (0, 1, 2, 3)
         assert r.placements is None
 
-    def test_iter_local_yields_the_declared_local_shape(self, fake_world):
+    def test_iter_local_yields_this_ranks_shard(self, fake_world):
+        """Rank 1 is mesh coordinate (0, 1): rows 0:3 of 6, columns 2:4 of 4."""
         from torch.distributed.tensor import Shard as TS
 
         source = ModuleSource(self._dtensor_module({"w": [TS(0), TS(1)]}))
-        meta = source.metadata()
-        (((name, local),),) = list(source.iter_local())
+        ((name, local),) = list(source.iter_local())
         assert name == "w"
-        assert tuple(local.shape) == local_shape(meta[0], 1) == (3, 2)
+        assert tuple(local.shape) == (3, 2)
 
     def test_partial_placement_is_declared_replicated(self, fake_world):
         """`Partial` has no `Shard`/`Replicate` spelling, so the source declares
@@ -1477,7 +1475,8 @@ class TestParamMetaOwnership:
     on who holds what."""
 
     def test_owners_default_to_a_flat_mesh(self):
-        meta = ParamMeta("w", torch.float32, (4,), owners=[2, 3])
+        meta = ParamMeta("w", torch.float32, [4], owners=[2, 3])
+        assert meta.shape == (4,)  # engines compare against tuple(t.shape)
         assert meta.owners == (2, 3)
         assert meta.mesh_shape == (2,)
         assert meta.placements is None
@@ -1501,24 +1500,6 @@ class TestParamMetaOwnership:
     def test_inconsistent_layouts_are_rejected(self, kwargs, match):
         with pytest.raises(ValueError, match=match):
             ParamMeta("w", torch.float32, (4,), **kwargs)
-
-    def test_local_shape_follows_torch_chunk_outer_axis_first(self):
-        """Two axes sharding one uneven dim: 10 -> (5, 5) -> (3, 2), as DTensor
-        computes it."""
-        meta = ParamMeta(
-            "w",
-            torch.float32,
-            (10, 6),
-            owners=(0, 1, 2, 3),
-            mesh_shape=(2, 2),
-            placements=(Shard(0), Shard(0)),
-        )
-        assert [local_shape(meta, r) for r in range(4)] == [
-            (3, 6),
-            (2, 6),
-            (3, 6),
-            (2, 6),
-        ]
 
     def test_owned_names(self):
         """A PP=2 x TP=2 layout: each stage owns its own layers."""
@@ -1629,7 +1610,7 @@ class TestTrainerEngineBase:
             source=ModuleSource(_module_with(("w", torch.zeros(2)))),
         )
         assert engine.is_sender is True
-        assert [b[0][0] for b in engine.source.iter_full()] == ["w"]
+        assert [n for n, _ in engine.source.iter_full()] == ["w"]
 
     def test_shutdown_default_is_noop(self):
         engine = _DummyTrainerEngine(
@@ -1682,6 +1663,18 @@ def test_ipc_trainer_init_ships_packed_to_worker():
     assert engine.packed is True
     assert client.order == ["init"]
     assert client.last_init_info == {"packed": True}
+
+
+def test_ipc_trainer_init_rejects_a_partitioned_source():
+    """Each rank serves its colocated worker, so a rank that lacks a parameter
+    must fail at init, before any inference-side RPC."""
+    client = RecordingClient()
+    meta = [ParamMeta("w", torch.float32, (4,), owners=(1,))]
+    with pytest.raises(ValueError, match="rank 0 does not own every parameter"):
+        IPCTrainerWeightTransferEngine.trainer_init(
+            IPCTrainerInitInfo(rank=0), client=client, source=_ScriptedSource(meta, [])
+        )
+    assert client.order == []
 
 
 def test_nccl_trainer_init_ships_worker_init_info(monkeypatch):
@@ -1880,8 +1873,8 @@ def test_nccl_worker_reuses_metadata_per_model(monkeypatch):
 
 
 class _ScriptedSource(WeightSource):
-    """Declares `meta` but yields whatever `pairs` says, one per batch — used to
-    drive the metadata/iteration agreement checks."""
+    """Declares `meta` but yields whatever `pairs` says — used to drive the
+    metadata/iteration agreement checks."""
 
     def __init__(self, meta, pairs):
         self._meta = meta
@@ -1891,8 +1884,7 @@ class _ScriptedSource(WeightSource):
         return list(self._meta)
 
     def iter_full(self):
-        for pair in self._pairs:
-            yield [pair]
+        yield from self._pairs
 
 
 def _mock_group_engine(source, monkeypatch, **kwargs):
@@ -1980,9 +1972,9 @@ def test_nccl_trainer_non_sender_owner_drives_its_gathers(monkeypatch):
 
     class _Recording(_ScriptedSource):
         def iter_full(self):
-            for batch in super().iter_full():
-                yielded.extend(name for name, _ in batch)
-                yield batch
+            for name, tensor in super().iter_full():
+                yielded.append(name)
+                yield name, tensor
 
     engine = _mock_group_engine(
         _Recording(meta, [("w", torch.zeros(4))]),

@@ -444,28 +444,27 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         of `meta`.
         """
         sent = 0
-        for batch in source.iter_full():
-            for name, tensor in batch:
-                if sent >= len(meta):
-                    raise ValueError(
-                        f"WeightSource yielded more parameters than metadata() "
-                        f"declared ({len(meta)}); first extra is {name!r}."
-                    )
-                expected = meta[sent]
-                if (
-                    name != expected.name
-                    or tensor.dtype != expected.dtype
-                    or tuple(tensor.shape) != expected.shape
-                ):
-                    raise ValueError(
-                        "WeightSource metadata() disagrees with iteration at "
-                        f"index {sent}: declared {expected.name!r} "
-                        f"{expected.dtype} {tuple(expected.shape)}, got {name!r} "
-                        f"{tensor.dtype} {tuple(tensor.shape)}. Both channels "
-                        "must enumerate the same parameters in the same order."
-                    )
-                sent += 1
-                yield name, tensor
+        for name, tensor in source.iter_full():
+            if sent >= len(meta):
+                raise ValueError(
+                    f"WeightSource yielded more parameters than metadata() "
+                    f"declared ({len(meta)}); first extra is {name!r}."
+                )
+            expected = meta[sent]
+            if (
+                name != expected.name
+                or tensor.dtype != expected.dtype
+                or tuple(tensor.shape) != expected.shape
+            ):
+                raise ValueError(
+                    "WeightSource metadata() disagrees with iteration at index "
+                    f"{sent}: declared {expected.name!r} "
+                    f"{expected.dtype} {tuple(expected.shape)}, got {name!r} "
+                    f"{tensor.dtype} {tuple(tensor.shape)}. Both channels must "
+                    "enumerate the same parameters in the same order."
+                )
+            sent += 1
+            yield name, tensor
         if sent != len(meta):
             raise ValueError(
                 f"WeightSource yielded {sent} parameters but metadata() "

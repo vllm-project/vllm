@@ -174,8 +174,7 @@ class _StaticSource(WeightSource):
         return list(self._metadata)
 
     def iter_local(self):
-        for pair in self._values:
-            yield [pair]
+        yield from self._values
 
 
 def _fake_m2n():
@@ -1160,7 +1159,7 @@ def _m2n_trainer_send(
 
         class MixedLayoutSource(WeightSource):
             """Declares each layout on the base `ParamMeta`; both shards come
-            in one `iter_local` batch."""
+            from `iter_local`."""
 
             def metadata(self):
                 return [
@@ -1182,7 +1181,8 @@ def _m2n_trainer_send(
                 ]
 
             def iter_local(self):
-                yield [("row_sharded", row_local), ("column_sharded", column_local)]
+                yield "row_sharded", row_local
+                yield "column_sharded", column_local
 
         source = MixedLayoutSource()
         dst_mesh_dims = (2, 1)

@@ -105,9 +105,9 @@ def materialize_full_tensor(tensor: torch.Tensor) -> torch.Tensor:
     """Return a full, locally-materialized tensor ready to send.
 
     FSDP shards (DTensors) expose `full_tensor()`, a collective all-gather;
-    regular tensors do not and are returned unchanged. Trainer engines call
-    this at send time so the (potentially expensive) gather happens exactly
-    once — reading `.shape`/`.dtype` for metadata does not trigger it.
+    regular tensors do not and are returned unchanged. Sources call this at
+    iteration time, so the gather happens once per round; reading
+    `.shape`/`.dtype` for metadata does not trigger it.
     """
     full_tensor = getattr(tensor, "full_tensor", None)
     return full_tensor() if callable(full_tensor) else tensor
@@ -143,8 +143,10 @@ class ParamMeta:
         mesh_shape: Row-major shape of the mesh over `owners`. Defaults to
             `(len(owners),)`.
         placements: One `Replicate` or `Shard` per mesh axis, describing what
-            `WeightSource.iter_local` yields on each owner. `None` means
-            replicated; a source without `iter_local` leaves it unused.
+            `WeightSource.iter_local` yields on each owner; `Shard` splits the
+            way `torch.chunk` does, outer mesh axis first when two axes shard
+            one dim. `None` means replicated; a source without `iter_local`
+            leaves it unused.
 
     """
 
@@ -156,6 +158,7 @@ class ParamMeta:
     placements: tuple[Placement, ...] | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "shape", tuple(self.shape))
         if self.owners is None:
             if self.mesh_shape is not None or self.placements is not None:
                 raise ValueError(
@@ -213,45 +216,6 @@ def owned_names(metas: Sequence[ParamMeta], rank: int) -> list[str]:
     return [m.name for m in metas if m.owners is None or rank in m.owners]
 
 
-def _mesh_coords(meta: ParamMeta, rank: int) -> tuple[int, ...]:
-    """`rank`'s coordinate in `meta`'s owner mesh."""
-    if meta.owners is None or meta.mesh_shape is None:
-        raise ValueError(f"parameter {meta.name!r} declares no owner mesh")
-    if rank not in meta.owners:
-        raise ValueError(f"rank {rank} does not own parameter {meta.name!r}")
-    index = meta.owners.index(rank)
-    coords: list[int] = []
-    for size in reversed(meta.mesh_shape):
-        index, coord = divmod(index, size)
-        coords.append(coord)
-    return tuple(reversed(coords))
-
-
-def _chunk_len(length: int, chunks: int, index: int) -> int:
-    size = -(-length // chunks)
-    return max(0, min(size, length - index * size))
-
-
-def local_shape(meta: ParamMeta, rank: int) -> tuple[int, ...]:
-    """The shape of `rank`'s piece of `meta`, as `iter_local` yields it.
-
-    Shards apply in mesh-axis order, so two axes sharding one dim split it
-    outer axis first.
-    """
-    if meta.placements is None:
-        return meta.shape
-    assert meta.mesh_shape is not None
-    coords = _mesh_coords(meta, rank)
-    shape = list(meta.shape)
-    for axis, p in enumerate(meta.placements):
-        if isinstance(p, Shard):
-            shape[p.dim] = _chunk_len(shape[p.dim], meta.mesh_shape[axis], coords[axis])
-    return tuple(shape)
-
-
-WeightBatch = list[tuple[str, torch.Tensor]]
-
-
 class WeightSource(ABC):
     """The trainer's weights, as metadata plus one or two iteration modes.
 
@@ -266,18 +230,11 @@ class WeightSource(ABC):
     to the other. Each engine consumes the mode it needs: broadcast, IPC and
     RDT consume `iter_full`, NCCL M2N consumes `iter_local`.
 
-    Both modes yield batches of `(name, tensor)` pairs chosen by the source:
-    one tensor, one layer, one export task. Joined together, the batches are
-    exactly `owned_names(metadata(), rank)` in metadata order. A batch is
-    resident all at once, so its size is the source's memory trade-off; engines
-    re-chunk the stream for transfer themselves.
-
-    `iter_full` may gather, but only among the owners of the parameter being
-    gathered, and every owner iterates in metadata order so the gathers line up.
-    `iter_local` runs no collectives, yields `torch.Tensor`s only, and enqueues
-    any work on the caller's current stream.
-
-    Each call to a mode must start a fresh pass.
+    Both modes yield `(name, tensor)` pairs: exactly `owned_names(metadata(),
+    rank)`, in metadata order. Either may run collectives among a parameter's
+    owners (an FSDP all-gather, one per layer if it likes); every owner
+    iterates in metadata order, so the collectives line up. Work is enqueued
+    on the caller's current stream. Each call starts a fresh pass.
     """
 
     @abstractmethod
@@ -290,12 +247,12 @@ class WeightSource(ABC):
         """
         raise NotImplementedError
 
-    def iter_full(self) -> Iterator[WeightBatch]:
-        """Yield batches of full tensors for the names this rank owns."""
+    def iter_full(self) -> Iterator[tuple[str, torch.Tensor]]:
+        """Yield the full tensor of each name this rank owns."""
         raise NotImplementedError(f"{type(self).__name__} does not implement iter_full")
 
-    def iter_local(self) -> Iterator[WeightBatch]:
-        """Yield batches of this rank's pieces for the names it owns."""
+    def iter_local(self) -> Iterator[tuple[str, torch.Tensor]]:
+        """Yield this rank's piece of each name it owns."""
         raise NotImplementedError(
             f"{type(self).__name__} does not implement iter_local"
         )
@@ -368,22 +325,22 @@ class ModuleSource(WeightSource):
             )
         return metas
 
-    def iter_full(self) -> Iterator[WeightBatch]:
+    def iter_full(self) -> Iterator[tuple[str, torch.Tensor]]:
         for name, param in self._module.named_parameters():
             if _is_member(param):
-                yield [(name, materialize_full_tensor(param))]
+                yield name, materialize_full_tensor(param)
 
-    def iter_local(self) -> Iterator[WeightBatch]:
+    def iter_local(self) -> Iterator[tuple[str, torch.Tensor]]:
         for name, param in self._module.named_parameters():
             if not _is_member(param):
                 continue
             layout = _dtensor_layout(param)
             if layout is None:
-                yield [(name, param)]
+                yield name, param
             elif layout[2] is None:
-                yield [(name, materialize_full_tensor(param))]
+                yield name, materialize_full_tensor(param)
             else:
-                yield [(name, param.to_local())]  # type: ignore[attr-defined]
+                yield name, param.to_local()  # type: ignore[attr-defined]
 
 
 # Base protocols for backend-specific dataclasses

@@ -1435,11 +1435,10 @@ class ShardedRDTTrainerWeightTransferEngine(
     ) -> Iterator[tuple[list[str], list[torch.Tensor]]]:
         """This rank's groups, in `_owned_idx` order, as `(names, tensors)`.
 
-        The source's own batches need not match the layer groups: its stream is
-        re-chunked here, so how the source batches never changes the transfer.
+        The source yields one tensor at a time; they are grouped here.
         """
         assert self.source is not None
-        pairs = (pair for batch in self.source.iter_full() for pair in batch)
+        pairs = self.source.iter_full()
         for gi in self._owned_idx:
             expected = [n for n in self._groups[gi] if n in self._owned_names]
             got = list(itertools.islice(pairs, len(expected)))

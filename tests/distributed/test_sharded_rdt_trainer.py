@@ -42,8 +42,7 @@ class _ListSource(WeightSource):
         return [ParamMeta(n, t.dtype, tuple(t.shape)) for n, t in self._pairs]
 
     def iter_full(self):
-        for pair in self._pairs:
-            yield [pair]
+        yield from self._pairs
 
 
 class _FakeProducerServer:
@@ -229,7 +228,7 @@ def test_sharded_rdt_send_weights_group_order_mismatch_raises(monkeypatch):
         def iter_full(self):
             reordered = list(self._pairs)
             reordered[0], reordered[1] = reordered[1], reordered[0]
-            return ([pair] for pair in reordered)
+            return iter(reordered)
 
     server = _FakeProducerServer()
     engine = _rdt_engine_with_fake_server(
@@ -296,8 +295,8 @@ def test_sharded_rdt_send_weights_surfaces_update_error(monkeypatch):
 
 
 class _DeclaredSource(_ListSource):
-    """A source that declares owners per name and yields everything this rank
-    owns as ONE batch, so the engine must re-chunk it into layer groups."""
+    """A source that declares owners per name and yields only what this rank
+    owns."""
 
     def __init__(self, pairs, owners, rank):
         super().__init__(pairs)
@@ -311,11 +310,9 @@ class _DeclaredSource(_ListSource):
         ]
 
     def iter_full(self):
-        yield [
-            (n, t)
-            for n, t in self._pairs
-            if n not in self._owners or self._rank in self._owners[n]
-        ]
+        for n, t in self._pairs:
+            if n not in self._owners or self._rank in self._owners[n]:
+                yield n, t
 
 
 # embed and layer 0 on stage 0, layer 1 on stage 1, norm everywhere.
@@ -351,9 +348,9 @@ def test_sharded_rdt_plans_ownership_from_metadata(monkeypatch):
     not torch.cuda.is_available(),
     reason="the gather loop's CUDA-IPC export needs a device",
 )
-def test_sharded_rdt_rechunks_a_declared_stream_into_owned_groups(monkeypatch):
-    """The source yields one batch; the engine still publishes per layer group,
-    and only the groups this rank owns part of."""
+def test_sharded_rdt_publishes_only_the_groups_it_owns(monkeypatch):
+    """The engine groups the source's stream per layer and publishes only the
+    groups this rank owns part of."""
     server = _FakeProducerServer(auto_free=True)
     engine = _rdt_engine_with_fake_server(
         _DeclaredSource(_rdt_source_two_layers()._pairs, _PP_OWNERS, 1),

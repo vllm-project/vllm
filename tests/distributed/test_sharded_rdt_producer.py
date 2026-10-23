@@ -353,8 +353,8 @@ class TestFreeBarrier:
 
 
 class _CountingSource(WeightSource):
-    """`iter_full` yielding one CPU-tensor group per batch, built lazily so a
-    group's tensors exist only once the engine's credit gate lets it gather."""
+    """`iter_full` yielding CPU tensors built lazily, so a group's tensors exist
+    only once the engine's credit gate lets it gather."""
 
     def __init__(self, groups):
         self._groups = groups
@@ -366,7 +366,8 @@ class _CountingSource(WeightSource):
 
     def iter_full(self):
         for names in self._groups:
-            yield [(n, torch.zeros(16, dtype=torch.float32)) for n in names]
+            for n in names:
+                yield n, torch.zeros(16, dtype=torch.float32)
 
 
 class _ResidencyDict(dict):
