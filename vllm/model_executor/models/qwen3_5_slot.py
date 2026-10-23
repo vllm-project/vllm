@@ -5,13 +5,11 @@ prefix and question as two bidirectional PrefixLM blocks."""
 
 from vllm.config import VllmConfig
 from vllm.v1.core.sched.output import NewRequestData
+from vllm.v1.core.sched.prefix_lm_scheduler import prefix_lm_len
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
 from .qwen3_5 import Qwen3_5ForConditionalGeneration
-
-PREFIX_LM_LEN = "prefix_lm_len"
-"""`SamplingParams.extra_args` key of the length of a prompt's PrefixLM prefix."""
 
 
 class Qwen3_5SlotDecisionModelState(MambaHybridModelState):
@@ -27,10 +25,11 @@ class Qwen3_5SlotDecisionModelState(MambaHybridModelState):
         if new_req_data.mm_features:
             # The encoder budget can end a step inside the prompt.
             return
-        params = new_req_data.sampling_params
-        prefix_len = (params.extra_args or {}).get(PREFIX_LM_LEN) if params else None
-        length = len(new_req_data.prompt_token_ids or ())
-        if type(prefix_len) is int and 0 < prefix_len <= length:
+        ids = new_req_data.prompt_token_ids
+        prefix_len = prefix_lm_len(new_req_data.sampling_params, ids)
+        if prefix_len is not None:
+            assert ids is not None
+            length = len(ids)
             blocks = [(0, prefix_len - 1)]
             if prefix_len < length:
                 blocks.append((prefix_len, length - 1))

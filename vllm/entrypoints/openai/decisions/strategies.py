@@ -46,6 +46,7 @@ from vllm.sampling_params import MAX_LOGPROB_TOKEN_IDS, SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.math_utils import round_up
+from vllm.v1.core.sched.prefix_lm_scheduler import PREFIX_LM_LEN, prefix_lm_salt
 
 from . import slot_prompt
 from .question_types import (
@@ -376,6 +377,7 @@ class NextTokenStrategy(ReadStrategy):
         priority: int,
         cache_salt: str | None,
         trace_headers: Mapping[str, str] | None,
+        extra_args: dict[str, Any] | None = None,
     ) -> None:
         """Prefill the tokens every question starts with, before the reads.
 
@@ -396,7 +398,7 @@ class NextTokenStrategy(ReadStrategy):
             return
         generator = engine_client.generate(
             tokens_input(list(prompts[0][:shared]), cache_salt=cache_salt),
-            SamplingParams(max_tokens=1, temperature=0.0),
+            SamplingParams(max_tokens=1, temperature=0.0, extra_args=extra_args),
             f"{request_id}-prefix",
             lora_request=lora_request,
             trace_headers=trace_headers,
@@ -1451,8 +1453,6 @@ class SlotLMStrategy(NextTokenStrategy):
 
     MAX_SCORE_LEVELS = 10
     MAX_OPTIONS = 255
-    #: `SamplingParams.extra_args` key of the prefix length.
-    PREFIX_LEN = "prefix_lm_len"
 
     def __init__(self, context: ReadContext):
         model_config = context.engine_client.model_config
@@ -1555,6 +1555,19 @@ class SlotLMStrategy(NextTokenStrategy):
         marked = self._prompt(state, slot_prompt.PREFIX_MARK)
         prefix = self._tokens(marked[: marked.rindex(slot_prompt.PREFIX_MARK)])
         prefix_len = common_prefix_len([prefix, *prompts])
+        # The prefix's digest keys its prefix-cache blocks.
+        cache_salt = prefix_lm_salt(prompts[0][:prefix_len], cache_salt)
+
+        # Cache hits stop at the prefix, so prefill it alone for the questions.
+        await self._warm_shared_prefix(
+            [ids[:prefix_len] for ids in prompts],
+            request_id,
+            lora_request=lora_request,
+            priority=priority,
+            cache_salt=cache_salt,
+            trace_headers=trace_headers,
+            extra_args={PREFIX_LM_LEN: prefix_len},
+        )
         slots = [[[i] for i in self.slot_ids[: len(q.options)]] for q in questions]
         label_reads = await next_token_label_reads(
             self.context.engine_client,
@@ -1564,7 +1577,7 @@ class SlotLMStrategy(NextTokenStrategy):
                     max_tokens=1,
                     temperature=0.0,
                     logprob_token_ids=self.slot_ids[: len(groups)],
-                    extra_args={self.PREFIX_LEN: prefix_len},
+                    extra_args={PREFIX_LM_LEN: prefix_len},
                 )
                 for groups in slots
             ],

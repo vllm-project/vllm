@@ -1173,6 +1173,27 @@ class Qwen3_5ForSlotDecisionConfig(Qwen3_5ForConditionalGenerationConfig):
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         parallel_config = vllm_config.parallel_config
+        scheduler_config = vllm_config.scheduler_config
+        prefix_lm_schedulers = tuple(
+            f"vllm.v1.core.sched.prefix_lm_scheduler.PrefixLM{kind}Scheduler"
+            for kind in ("", "Async")
+        )
+        if cache_config.enable_prefix_caching:
+            from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+                _resolve_gdn_prefill_backend,
+            )
+
+            # Only FlashInfer's GDN prefill saves the Mamba states a prompt's
+            # prefix-cache hit resumes from, as the prompt is prefilled whole.
+            _, gdn_prefill_backend = _resolve_gdn_prefill_backend(vllm_config)
+            if gdn_prefill_backend != "flashinfer":
+                logger.info(
+                    "Disabling prefix caching for %s: the %s GDN prefill "
+                    "backend saves no Mamba prefix-cache states",
+                    model_config.architecture,
+                    gdn_prefill_backend,
+                )
+                cache_config.enable_prefix_caching = False
         unsupported = {
             "KV transfer connectors": vllm_config.kv_transfer_config,
             "--kv-offloading-size": cache_config.kv_offloading_size is not None,
@@ -1182,6 +1203,14 @@ class Qwen3_5ForSlotDecisionConfig(Qwen3_5ForConditionalGenerationConfig):
                 or parallel_config.decode_context_parallel_size > 1
             ),
             "micro-batching": parallel_config.use_ubatching,
+            "--prefix-match-unit": (
+                cache_config.enable_prefix_caching and cache_config.prefix_match_unit
+            ),
+            # Prefix caching needs PrefixLMScheduler.
+            "--scheduler-cls": (
+                cache_config.enable_prefix_caching
+                and scheduler_config.scheduler_cls not in (None, *prefix_lm_schedulers)
+            ),
         }
         if features := [name for name, enabled in unsupported.items() if enabled]:
             raise ValueError(
@@ -1204,11 +1233,14 @@ class Qwen3_5ForSlotDecisionConfig(Qwen3_5ForConditionalGenerationConfig):
                 f"backend for full attention, not {per_kind.name}"
             )
 
-        # Each prompt is prefilled in one step, so a step never ends inside a
-        # PrefixLM block.
-        scheduler_config = vllm_config.scheduler_config
-        cache_config.enable_prefix_caching = False
-        scheduler_config.enable_chunked_prefill = False
+        # The rest of each prompt after its prefix-cache hit is prefilled in one
+        # step, so a step never ends inside a PrefixLM block. Without prefix
+        # caching that is the scheduler's rule when chunked prefill is off. With
+        # it, PrefixLMScheduler applies the rule to PrefixLM requests, and the
+        # Mamba prefix cache needs chunked prefill.
+        scheduler_config.enable_chunked_prefill = cache_config.enable_prefix_caching
+        if cache_config.enable_prefix_caching:
+            scheduler_config.scheduler_cls = prefix_lm_schedulers[0]
         scheduler_config.long_prefill_token_threshold = 0
         # A prompt that does not fit beside the running requests' decode tokens
         # waits for them to finish, and holds the requests queued behind it.

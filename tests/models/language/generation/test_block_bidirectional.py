@@ -155,6 +155,7 @@ def test_block_attention_matches_transformers(vllm_runner, tmp_path, enforce_eag
         dtype="bfloat16",
         max_model_len=2048,
         max_num_batched_tokens=4096,
+        enable_prefix_caching=True,
         enforce_eager=enforce_eager,
         gpu_memory_utilization=0.4,
         limit_mm_per_prompt={"image": 0, "video": 0},
@@ -163,6 +164,11 @@ def test_block_attention_matches_transformers(vllm_runner, tmp_path, enforce_eag
         vllm_config = llm.llm_engine.vllm_config
         assert vllm_config.model_config.architecture == "Qwen3_5ForSlotDecision"
         assert vllm_config.model_config.head_dtype == torch.float32
+        # Prefix caching stays on with FlashInfer's GDN prefill only.
+        prefix_caching = vllm_config.cache_config.enable_prefix_caching
+        if prefix_caching:
+            scheduler_cls = vllm_config.scheduler_config.scheduler_cls
+            assert scheduler_cls.startswith("vllm.v1.core.sched.prefix_lm_scheduler.")
 
         # The three questions with their blocks, then q0 without a prefix length,
         # which is read causally.
@@ -184,3 +190,18 @@ def test_block_attention_matches_transformers(vllm_runner, tmp_path, enforce_eag
 
         for args in zip([*names, "q0 causal"], outputs, references, others):
             check(*args)
+
+        if not prefix_caching:
+            return
+        # The prefix alone, as the strategy's warm-up sends it. The questions
+        # then reuse its cache, and never past it: q1 and q2 share 40 more
+        # tokens, and q2 comes twice.
+        llm.generate(TokensPrompt(prompt_token_ids=prefix), params(p), use_tqdm=False)
+        for name in ("q1", "q2", "q2"):
+            (out,) = llm.generate(
+                TokensPrompt(prompt_token_ids=questions[name]),
+                params(p),
+                use_tqdm=False,
+            )
+            check(f"{name} cached", out, expected[name], causal[name])
+            assert 0 < (out.num_cached_tokens or 0) <= p, out.num_cached_tokens

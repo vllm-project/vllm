@@ -410,11 +410,15 @@ vllm serve baselabs/mammoth-1 --max-model-len 16384
   Blackwell GPUs), so a long prompt does not wait for running requests to
   finish. A value you set is kept. It must be at least `--max-model-len`, and
   vLLM warns when it is below that sum.
-- Prefix caching and chunked prefill are turned off.
+- Keep prefix caching on (the default) so the shared prefix is prefilled once
+  for all questions of a request. It needs FlashInfer's GatedDeltaNet prefill
+  (Hopper, or Blackwell with CUDA 13); with other GatedDeltaNet prefill
+  backends it is turned off.
 - The `TRITON_ATTN` attention backend is selected automatically; other
   backends are refused.
 - KV transfer connectors, `--kv-offloading-size`, speculative decoding,
-  context parallelism and micro-batching are refused.
+  context parallelism, micro-batching and `--prefix-match-unit` are refused, as
+  is `--scheduler-cls` with prefix caching on.
 - `instructions` returns 400, as does any `chat_template_kwargs` other than
   `{"enable_thinking": false}`, since the prompt is fixed.
 - `/v1/systemone` renders each question type as in training. `/v1/decisions`

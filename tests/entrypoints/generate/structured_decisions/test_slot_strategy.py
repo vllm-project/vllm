@@ -26,6 +26,7 @@ from vllm.entrypoints.openai.decisions.strategies import (
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.tokenizers import get_tokenizer
+from vllm.v1.core.sched.prefix_lm_scheduler import prefix_lm_salt
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
@@ -84,14 +85,18 @@ def tokenizer():
     return get_tokenizer("baselabs/elephant-1")
 
 
-def make_strategy(tokenizer, *, head_dtype=torch.float32):
+def make_strategy(tokenizer, *, head_dtype=torch.float32, prefix_caching=False):
     model_config = SimpleNamespace(
         hf_config=SimpleNamespace(modeling_overrides={}),
         head_dtype=head_dtype,
         max_model_len=32768,
+        is_hybrid=True,
     )
     engine = MagicMock(spec=EngineClient)
     engine.model_config = model_config
+    engine.vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(enable_prefix_caching=prefix_caching)
+    )
 
     async def generate(prompt, params, request_id, **kwargs):
         label_ids = params.logprob_token_ids or [0]
@@ -167,7 +172,10 @@ async def test_reads_match_qev_byte_for_byte(tokenizer):
         prompt, params = call.args[0], call.args[1]
         ids = tokenizer.encode(QEV_PROMPTS[q.id], add_special_tokens=False)
         assert prompt["prompt_token_ids"] == ids
-        assert prompt["cache_salt"] == "salt"
+        # The prefix's digest, then the caller's salt.
+        assert prompt["cache_salt"] == prefix_lm_salt(ids[:QEV_PREFIX_LEN], "salt")
+        assert prompt["cache_salt"].startswith("prefix-lm:")
+        assert prompt["cache_salt"].endswith(":salt")
         assert params.max_tokens == 1 and params.temperature == 0.0
         assert params.extra_args == {"prefix_lm_len": QEV_PREFIX_LEN}
         assert params.logprob_token_ids == strategy.slot_ids[: len(q.options)]
@@ -185,7 +193,7 @@ async def test_reads_match_qev_byte_for_byte(tokenizer):
 
 @pytest.mark.asyncio
 async def test_prefix_ends_at_the_state_block(tokenizer):
-    strategy, engine = make_strategy(tokenizer)
+    strategy, engine = make_strategy(tokenizer, prefix_caching=True)
     # Both questions start with the same words, so the token LCP runs past
     # the state block.
     questions = {
@@ -194,7 +202,8 @@ async def test_prefix_ends_at_the_state_block(tokenizer):
     }
     request = StructuredDecisionRequest(state="word " * 200, questions=questions)
     await read(strategy, request)
-    calls = engine.generate.call_args_list
+    # Cache hits stop at the prefix, so it is prefilled alone first.
+    warm_up, *calls = engine.generate.call_args_list
     assert len(calls) == 2
     prefix_len = calls[0].args[1].extra_args["prefix_lm_len"]
     first = calls[0].args[0]["prompt_token_ids"]
@@ -202,6 +211,12 @@ async def test_prefix_ends_at_the_state_block(tokenizer):
     for call in calls:
         assert call.args[1].extra_args == {"prefix_lm_len": prefix_len}
         assert call.args[0]["prompt_token_ids"][:prefix_len] == first[:prefix_len]
+    assert warm_up.args[0]["prompt_token_ids"] == first[:prefix_len]
+    assert warm_up.args[1].extra_args == {"prefix_lm_len": prefix_len}
+    # Every request carries the salt PrefixLMScheduler expects.
+    salt = prefix_lm_salt(first[:prefix_len], None)
+    for call in (warm_up, *calls):
+        assert call.args[0]["cache_salt"] == salt
 
 
 @pytest.mark.asyncio

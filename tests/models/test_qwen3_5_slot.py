@@ -7,19 +7,32 @@ import numpy as np
 import pytest
 from transformers.models.qwen3_5 import Qwen3_5Config
 
+from vllm.model_executor.layers.mamba.gdn import qwen_gdn_linear_attn
 from vllm.model_executor.models.config import Qwen3_5ForSlotDecisionConfig
-from vllm.model_executor.models.qwen3_5_slot import (
-    PREFIX_LM_LEN,
-    Qwen3_5SlotDecisionModelState,
-)
+from vllm.model_executor.models.qwen3_5_slot import Qwen3_5SlotDecisionModelState
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.model_arch_config_convertor import (
     Qwen3_5ModelArchConfigConvertor,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.core.sched.prefix_lm_scheduler import PREFIX_LM_LEN
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
 pytestmark = pytest.mark.cpu_test
+
+PREFIX_LM_SCHEDULER = "vllm.v1.core.sched.prefix_lm_scheduler.PrefixLMScheduler"
+
+
+@pytest.fixture(autouse=True)
+def gdn_prefill_backend(monkeypatch):
+    """The GDN prefill backend the hook sees, FlashInfer unless a test sets it."""
+    backend = {"name": "flashinfer"}
+    monkeypatch.setattr(
+        qwen_gdn_linear_attn,
+        "_resolve_gdn_prefill_backend",
+        lambda vllm_config: ("auto", backend["name"]),
+    )
+    return backend
 
 
 OVERRIDES = {
@@ -81,6 +94,7 @@ def make_vllm_config(**changes):
         cache_config=SimpleNamespace(
             enable_prefix_caching=True,
             mamba_ssm_cache_dtype="auto",
+            prefix_match_unit=None,
             kv_offloading_size=None,
         ),
         scheduler_config=SimpleNamespace(
@@ -90,6 +104,7 @@ def make_vllm_config(**changes):
             user_specified_max_num_batched_tokens=True,
             max_num_scheduled_tokens=None,
             max_num_seqs=256,
+            scheduler_cls=None,
         ),
         attention_config=SimpleNamespace(backend=None, backend_per_kind={}),
         parallel_config=SimpleNamespace(
@@ -107,14 +122,34 @@ def make_vllm_config(**changes):
 
 
 def test_config_prefills_each_prompt_in_one_step():
-    config = make_vllm_config()
+    config = make_vllm_config(**{"scheduler_config.enable_chunked_prefill": False})
     Qwen3_5ForSlotDecisionConfig.verify_and_update_config(config)
     assert config.attention_config.backend == AttentionBackendEnum.TRITON_ATTN
-    assert not config.cache_config.enable_prefix_caching
-    assert not config.scheduler_config.enable_chunked_prefill
+    # Prefix caching stays on, with the chunked prefill its Mamba cache needs,
+    # and PrefixLMScheduler prefills PrefixLM prompts whole.
+    assert config.cache_config.enable_prefix_caching
+    assert config.scheduler_config.enable_chunked_prefill
+    assert config.scheduler_config.scheduler_cls == PREFIX_LM_SCHEDULER
     assert config.scheduler_config.long_prefill_token_threshold == 0
     # Qwen3.5's own hook still caches the GatedDeltaNet state in fp32.
     assert config.cache_config.mamba_ssm_cache_dtype == "float32"
+
+
+@pytest.mark.parametrize("cause", ["flag", "triton GDN prefill"])
+def test_config_without_prefix_caching_turns_chunked_prefill_off(
+    cause, gdn_prefill_backend
+):
+    config = make_vllm_config()
+    if cause == "flag":
+        config.cache_config.enable_prefix_caching = False
+    else:
+        # Its prefill saves no Mamba states for prefix-cache hits.
+        gdn_prefill_backend["name"] = "triton"
+    Qwen3_5ForSlotDecisionConfig.verify_and_update_config(config)
+    assert not config.cache_config.enable_prefix_caching
+    # Chunked prefill off keeps every prompt whole in the stock scheduler.
+    assert not config.scheduler_config.enable_chunked_prefill
+    assert config.scheduler_config.scheduler_cls is None
 
 
 @pytest.mark.parametrize(
@@ -177,6 +212,10 @@ def test_config_accepts_triton_and_a_full_scheduled_budget():
                 "sliding_window": AttentionBackendEnum.FLASH_ATTN,
             },
             "scheduler_config.max_num_scheduled_tokens": 32768,
+            # As the hook and VllmConfig set it, for a second run of the hook.
+            "scheduler_config.scheduler_cls": PREFIX_LM_SCHEDULER.replace(
+                "LMScheduler", "LMAsyncScheduler"
+            ),
         }
     )
     Qwen3_5ForSlotDecisionConfig.verify_and_update_config(config)
@@ -199,12 +238,14 @@ def test_config_accepts_triton_and_a_full_scheduled_budget():
         ),
         ({"scheduler_config.max_num_batched_tokens": 8192}, "max-num-batched"),
         ({"scheduler_config.max_num_scheduled_tokens": 8192}, "max-num-scheduled"),
+        ({"cache_config.prefix_match_unit": 32}, "prefix-match-unit"),
         ({"speculative_config": object()}, "speculative decoding"),
         ({"kv_transfer_config": object()}, "KV transfer"),
         ({"cache_config.kv_offloading_size": 4.0}, "kv-offloading-size"),
         ({"parallel_config.prefill_context_parallel_size": 2}, "context parallel"),
         ({"parallel_config.decode_context_parallel_size": 2}, "context parallel"),
         ({"parallel_config.use_ubatching": True}, "micro-batching"),
+        ({"scheduler_config.scheduler_cls": "my.Scheduler"}, "scheduler-cls"),
     ],
 )
 def test_config_rejects_unsupported_features(change, match):
