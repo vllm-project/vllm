@@ -380,7 +380,14 @@ class RoutedExperts(PluggableLayer):
         return (num_experts, hidden_size, intermediate_size)
 
     def _local_global_expert_ids(self) -> tuple[int, ...]:
-        return tuple(self.expert_map_manager.get_local_expert_ids())
+        expert_map = self.expert_map_manager.expert_map
+        if expert_map is None:
+            return tuple(range(self.expert_map_manager.global_num_experts))
+        return tuple(
+            global_id
+            for global_id, local_id in enumerate(expert_map.tolist())
+            if local_id != -1
+        )
 
     def resolve_sharded_weight_target(
         self,

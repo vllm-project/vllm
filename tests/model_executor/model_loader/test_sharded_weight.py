@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import replace
 from math import prod
 from types import SimpleNamespace
 from typing import Any
@@ -8,6 +9,8 @@ from typing import Any
 import pytest
 import torch
 
+from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
+from vllm.model_executor.layers.fused_moe.expert_map_manager import ExpertMapManager
 from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     UnquantizedMoeBackend,
 )
@@ -133,22 +136,19 @@ def test_resolver_rejects_invalid_targets_and_supports_aliases():
         )
 
 
-class _LinearExpertMap:
-    placement_strategy = "linear"
-    num_fused_shared_experts = 0
-
-    def __init__(self, local_ids: tuple[int, ...], num_experts: int):
-        self._local_ids = local_ids
-        self._local_by_global = {
-            global_id: local_id for local_id, global_id in enumerate(local_ids)
-        }
-        self.global_num_experts = num_experts
-
-    def get_local_expert_ids(self) -> list[int]:
-        return list(self._local_ids)
-
-    def map_global_to_local(self, global_id: int) -> int:
-        return self._local_by_global.get(global_id, -1)
+def _expert_map(
+    parallel: FusedMoEParallelConfig, *, round_robin: bool = False
+) -> ExpertMapManager:
+    return ExpertMapManager(
+        max_num_batched_tokens=1,
+        top_k=1,
+        global_num_experts=4,
+        num_redundant_experts=0,
+        num_expert_group=2 if round_robin else None,
+        moe_parallel_config=parallel,
+        placement_strategy="round_robin" if round_robin else "linear",
+        enable_eplb=False,
+    )
 
 
 def _make_routed_experts(
@@ -163,17 +163,18 @@ def _make_routed_experts(
     ep_size = 2
     ep_rank = 1
     experts_per_rank = num_experts // ep_size
-    local_ids = tuple(
-        range(
-            ep_rank * experts_per_rank,
-            (ep_rank + 1) * experts_per_rank,
-        )
-    )
-    parallel = SimpleNamespace(
+    parallel = FusedMoEParallelConfig(
         tp_size=1,
+        pcp_size=1,
+        dp_size=ep_size,
         ep_size=ep_size,
+        tp_rank=0,
+        pcp_rank=0,
+        dp_rank=ep_rank,
         ep_rank=ep_rank,
+        sp_size=1,
         use_ep=True,
+        all2all_backend="allgather_reducescatter",
         enable_eplb=False,
     )
     w13_num_shards = 2 if gated else 1
@@ -212,7 +213,7 @@ def _make_routed_experts(
         layer.ckpt_up_proj_name,
     ) = projections
     layer.is_fused_checkpoint_transposed = False
-    layer.expert_map_manager = _LinearExpertMap(local_ids, num_experts)
+    layer.expert_map_manager = _expert_map(parallel)
 
     quant_method = object.__new__(UnquantizedFusedMoEMethod)
     object.__setattr__(quant_method, "use_global_sf", False)
@@ -421,7 +422,13 @@ def test_unsupported_logical_expert_target_is_declined(case: str):
     elif case == "eplb":
         layer.moe_config.moe_parallel_config.enable_eplb = True
     elif case == "placement":
-        layer.expert_map_manager.placement_strategy = "round_robin"
+        layer.expert_map_manager = _expert_map(
+            replace(
+                layer.moe_config.moe_parallel_config,
+                all2all_backend="deepep_low_latency",
+            ),
+            round_robin=True,
+        )
     elif case == "redundant":
         layer.moe_config.num_experts = 5
     elif case == "shared":
@@ -435,10 +442,35 @@ def test_unsupported_logical_expert_target_is_declined(case: str):
         layer.moe_config.num_logical_experts = 5
         request = _expert_request("gate_up_proj.weight", shape=(5, 6, 4))
     elif case == "owners":
-        layer.expert_map_manager._local_ids = 0, 1
+        layer.expert_map_manager.update(
+            replace(layer.moe_config.moe_parallel_config, ep_rank=0, dp_rank=0),
+            global_num_experts=4,
+        )
     elif case == "local_count":
         layer.moe_config.num_local_experts = 3
     assert layer.resolve_sharded_weight_target("gate_up_proj.weight", request) is None
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU expert map required")
+def test_expert_target_validates_actual_gpu_ownership_after_reconfiguration():
+    layer = _make_routed_experts()
+    parallel = layer.moe_config.moe_parallel_config
+    with torch.device("cuda"):
+        layer.expert_map_manager = _expert_map(parallel)
+    expert_map = layer.expert_map_manager.expert_map
+    assert expert_map is not None and expert_map.is_cuda
+    request = _expert_request("gate_up_proj.weight")
+    target = layer.resolve_sharded_weight_target("gate_up_proj.weight", request)
+    assert target is not None and target.spec.shard_index == 1
+
+    moved = replace(parallel, ep_rank=0, dp_rank=0)
+    layer.expert_map_manager.update(moved, global_num_experts=4)
+    assert layer.resolve_sharded_weight_target("gate_up_proj.weight", request) is None
+
+    layer.moe_config.moe_parallel_config = moved
+    target = layer.resolve_sharded_weight_target("gate_up_proj.weight", request)
+    assert target is not None and target.spec.shard_index == 0
+    assert target.spec.local_shape == (2, 6, 4)
 
 
 def test_malformed_logical_expert_shape_fails_closed():
