@@ -1472,7 +1472,18 @@ class Platform:
         """Validate environment variables for the current platform."""
         from vllm import envs
 
-        for env in os.environ:
+        for env, value in os.environ.items():
+            if env == "VLLM_USE_V2_MODEL_RUNNER":
+                if value != "1":
+                    raise ValueError(
+                        f"VLLM_USE_V2_MODEL_RUNNER={value} is no longer supported: "
+                        "Model Runner V1 has been removed. Unset this variable."
+                    )
+                logger.warning(
+                    "VLLM_USE_V2_MODEL_RUNNER=1 is redundant and can be unset: "
+                    "Model Runner V1 has been removed."
+                )
+                continue
             if hint := envs.removed_environment_variables.get(env):
                 raise ValueError(f"{env} has been removed. {hint}")
             if env.startswith("VLLM_") and env not in envs.environment_variables:

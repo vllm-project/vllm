@@ -197,7 +197,7 @@ class FlashNgramModel(FlashModel):
 
 
 class LongcatFlashNgramForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
-    """LongCat-Flash-Lite for causal LM (MRV2-only, n-gram embedding)."""
+    """LongCat-Flash-Lite for causal LM (n-gram embedding)."""
 
     # MTP weights are not part of this model.
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.mtp.": None})
@@ -209,12 +209,6 @@ class LongcatFlashNgramForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
-        if not vllm_config.use_v2_model_runner:
-            raise NotImplementedError(
-                "LongcatFlashNgramForCausalLM (LongCat-Flash-Lite) requires the "
-                "V2 model runner for its n-gram embedding state; it is selected "
-                "automatically unless VLLM_USE_V2_MODEL_RUNNER=0 is set."
-            )
         config = vllm_config.model_config.hf_config
         self.config = config
         self.quant_config = vllm_config.quant_config

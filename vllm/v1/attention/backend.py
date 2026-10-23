@@ -578,26 +578,22 @@ class AttentionCGSupport(Enum):
 def max_decode_query_len(vllm_config: "VllmConfig") -> int:
     """Widest request a spec-as-decode builder treats as a decode.
 
-    On model runner V2 this is the widest per-request query any forward pass
-    builds: a verification request (1 + num_speculative_tokens) plus the
-    drafter's extra slots, e.g. the standalone draft model's correction token.
-    The reorder threshold and the code that mirrors the builders'
-    decode/prefill split all read this, so they cannot drift apart.
+    This is the widest per-request query any forward pass builds: a verification
+    request (1 + num_speculative_tokens) plus the drafter's extra slots, e.g. the
+    standalone draft model's correction token. The reorder threshold and the code
+    that mirrors the builders' decode/prefill split all read this, so they cannot
+    drift apart.
     """
     speculative_config = getattr(vllm_config, "speculative_config", None)
     if speculative_config is None or speculative_config.num_speculative_tokens is None:
         return 1
-    num_speculative_tokens = speculative_config.num_speculative_tokens
-    max_query_len = 1 + num_speculative_tokens
-    if vllm_config.use_v2_model_runner:
-        # Account for additional drafting slots that some speculators append
-        # to the query.
-        max_query_len += speculative_config.max_num_new_slots_for_drafting
-    elif speculative_config.parallel_drafting:
-        # Model runner V1 only; remove with it. Its parallel drafter appends up
-        # to num_speculative_tokens mask slots to each verified request.
-        max_query_len += num_speculative_tokens
-    return max_query_len
+    # Account for additional drafting slots that some speculators append to the
+    # query.
+    return (
+        1
+        + speculative_config.num_speculative_tokens
+        + speculative_config.max_num_new_slots_for_drafting
+    )
 
 
 class AttentionMetadataBuilder(ABC, Generic[M]):

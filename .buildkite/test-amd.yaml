@@ -2322,7 +2322,6 @@ steps:
   - export PYTHON_BIN='python'
   - export PYTHONUNBUFFERED='1'
   - export VLLM_HOST_IP='127.0.0.1'
-  - export VLLM_USE_V2_MODEL_RUNNER='1'
   - export E_CUDAGRAPH_MM_ENCODER='1'
   - export E_MM_ENCODER_ATTN_BACKEND='TRITON_ATTN'
   - export MOONCAKE_EC_PROTOCOL='tcp'
