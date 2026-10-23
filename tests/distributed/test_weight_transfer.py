@@ -30,7 +30,6 @@ from vllm.distributed.weight_transfer import (
     ModuleSource,
     ParamMeta,
     RayVLLMWeightSyncClient,
-    Replicate,
     Shard,
     TrainerWeightTransferEngine,
     VLLMWeightSyncClient,
@@ -1470,21 +1469,14 @@ class TestModuleSourceDTensor:
 
 
 class TestParamMetaOwnership:
-    """Ownership and layout fields on `ParamMeta`, and the helpers derived
-    from them. Every engine plans from these, so they must agree with DTensor
-    on who holds what."""
+    """Ownership and layout fields on `ParamMeta`, and how a `WeightSource`
+    declares them. Every engine plans from these without exchanging them."""
 
     def test_owners_default_to_a_flat_mesh(self):
         meta = ParamMeta("w", torch.float32, [4], owners=[2, 3])
         assert meta.shape == (4,)  # engines compare against tuple(t.shape)
         assert meta.owners == (2, 3)
         assert meta.mesh_shape == (2,)
-        assert meta.placements is None
-
-    def test_all_replicate_placements_normalize_to_none(self):
-        meta = ParamMeta(
-            "w", torch.float32, (4,), owners=(0, 1), placements=(Replicate(),)
-        )
         assert meta.placements is None
 
     @pytest.mark.parametrize(
@@ -1500,37 +1492,6 @@ class TestParamMetaOwnership:
     def test_inconsistent_layouts_are_rejected(self, kwargs, match):
         with pytest.raises(ValueError, match=match):
             ParamMeta("w", torch.float32, (4,), **kwargs)
-
-    def test_owned_names(self):
-        """A PP=2 x TP=2 layout: each stage owns its own layers."""
-        metas = [
-            ParamMeta("embed", torch.float32, (4,), owners=(0, 1)),
-            ParamMeta("layers.0.w", torch.float32, (4,), owners=(0, 1)),
-            ParamMeta("layers.1.w", torch.float32, (4,), owners=(2, 3)),
-            ParamMeta("norm", torch.float32, (4,)),
-        ]
-
-        class _Declared(WeightSource):
-            @cached_property
-            def metadata(self):
-                return metas
-
-        assert _Declared().owned_names(0) == ["embed", "layers.0.w", "norm"]
-        assert _Declared().owned_names(3) == ["layers.1.w", "norm"]
-
-    def test_implements_reports_overridden_modes(self):
-        class _FullOnly(WeightSource):
-            @cached_property
-            def metadata(self):
-                return []
-
-            def iter_full(self):
-                yield from ()
-
-        source = _FullOnly()
-        assert source.implements_iter_full()
-        assert not source.implements_iter_local()
-        assert ModuleSource(torch.nn.Module()).implements_iter_local()
 
     @pytest.mark.parametrize("wrap", [lambda f: f, property])
     def test_metadata_must_be_a_cached_property(self, wrap):

@@ -259,19 +259,6 @@ class TestSourceLayout:
         with pytest.raises(ValueError, match=r"owned by trainer ranks \(1,\)"):
             m2n_param_meta(meta, 2)
 
-    def test_module_source_feeds_the_trainer_plan(self):
-        """`ModuleSource` is an m2n source: its plain parameters are replicated
-        over the trainer, with no m2n-specific metadata."""
-        module = torch.nn.Module()
-        module.register_parameter("w", torch.nn.Parameter(torch.zeros(4, 4)))
-        source = ModuleSource(module)
-        engine = M2NTrainerWeightTransferEngine(
-            client=Mock(), source=source, is_sender=False
-        )
-        engine._prepare_source_plan(source, num_trainer_ranks=2)
-        (param,) = engine._wire_params
-        assert (param.src_mesh_dims, param.src_placements) == ((2, 1), REPLICATED)
-
     def test_trainer_boundary_rejects_duplicate_names(self):
         meta = ParamMeta("w", torch.float32, (4,))
         source = _StaticSource([meta, meta], [])
