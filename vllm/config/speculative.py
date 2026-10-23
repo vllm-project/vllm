@@ -522,7 +522,11 @@ class SpeculativeConfig:
     """Enable parallel drafting, where all speculative tokens are generated
     in parallel rather than sequentially. This can improve performance but
     requires the speculative model be trained to support parallel drafting.
-    Only compatible with EAGLE and draft model methods."""
+    Only compatible with EAGLE and draft model methods.
+
+    Deprecated: V1 model runner only (the V2 model runner falls back to V1 for
+    it), and will be removed with it. V2 speculators that draft in parallel,
+    such as DFlash and DSpark, do so without this option."""
 
     # required configuration params passed from engine
     target_model_config: SkipValidation[ModelConfig] = None  # type: ignore
@@ -1322,11 +1326,6 @@ class SpeculativeConfig:
     def uses_separate_workspace_lane(self) -> bool:
         """See `SpeculatorConfig.uses_separate_workspace_lane`."""
         return self.speculator_config.uses_separate_workspace_lane
-
-    @property
-    def supports_parallel_drafting(self) -> bool:
-        """See `SpeculatorConfig.supports_parallel_drafting`."""
-        return self.speculator_config.supports_parallel_drafting
 
     def _validate_suffix_decoding(self):
         # V1 model runner only, to be removed with it.

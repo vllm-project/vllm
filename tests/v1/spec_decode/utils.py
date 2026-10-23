@@ -49,7 +49,6 @@ _SPECULATOR_CONFIG_SHORTCUTS = (
     "uses_target_hidden_states",
     "uses_aux_hidden_states",
     "uses_separate_workspace_lane",
-    "supports_parallel_drafting",
 )
 
 
