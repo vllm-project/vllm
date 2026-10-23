@@ -28,8 +28,10 @@ Pad rule: a dead pick (pad row, garbage id) is never in U and never polled; its
 contribution rows stay the zeros ``load_inter`` stores (``select``, never a mask
 multiply). Every expert id is clamped into [0, 256) and every slot into
 [0, MAX_U) at each address use, so a timed-out step keeps its addresses in
-bounds. Every stage here touching the stage LDS or ``red`` ends with a barrier
-(the LDS hand-over rule).
+bounds. A dead slot or task (past |U|) loads expert 256 instead, one past the
+sized w13 / w2 resources (``_expert_or_past``): out of range, its loads return
+zeros without a memory request, and its MFMAs are skipped. Every stage here
+touching the stage LDS or ``red`` ends with a barrier (the LDS hand-over rule).
 """
 
 import flydsl.expr as fx
@@ -45,7 +47,7 @@ from vllm.models.muse_spark.amd.specialized_decode.mono.common.mx import (
     mfma_scaled,
     pk_fp4_f32,
     pow2,
-    scale_byte,
+    scale_index,
     w13_scale_word,
 )
 from vllm.models.muse_spark.amd.specialized_decode.mono.common.ops import (
@@ -58,6 +60,7 @@ from vllm.models.muse_spark.amd.specialized_decode.mono.common.ops import (
     traced,
     uniform,
 )
+from vllm.models.muse_spark.amd.specialized_decode.mono.common.plan import cdiv
 from vllm.models.muse_spark.amd.specialized_decode.mono.common.ranks import peer_at
 from vllm.models.muse_spark.amd.specialized_decode.mono.common.route_lds import (
     clamp_expert,
@@ -96,6 +99,12 @@ W2_EXPERT_DWORDS = MOE_HIDDEN * INTER // 8  # 262144: an expert's fp4 w2
 W2_SCALE_COLS = INTER // 32  # 16 e8m0 codes a w2 row
 INTER_WORDS = INTER // 8  # 64 fp4 words of a pick's a2 row
 UP_GROUP0 = INTER // ROWS  # 32: the first up row group of an expert
+# the weights' bytes (runtime.guards checks their shapes): the num_records of
+# their buffer resources, expert EXPERTS past the end
+W13_BYTES = EXPERTS * W13_EXPERT_DWORDS * 4
+W13S_BYTES = EXPERTS * W13_ROWS * (W13_K // 32)
+W2_BYTES = EXPERTS * W2_EXPERT_DWORDS * 4
+W2S_BYTES = EXPERTS * MOE_HIDDEN * W2_SCALE_COLS
 _LAY = scratch_layout()
 # ISC's first pair counted from ROUTE's (``load_inter`` polls both over one base)
 ISC_FROM_ROUTE = (_LAY["isc"][0] - _LAY["route"][0]) // PAIR_BYTES
@@ -105,6 +114,15 @@ assert W13_STEPS % 2 == 0 and HALF_STEPS % 2 == 0 and WAVES == 8
 # load_inter: a wave's 64 INTER words are one pick's (its spec is wave-uniform)
 assert INTER_WORDS == 64 and THREADS % INTER_WORDS == 0
 assert ISC_FROM_ROUTE > 0 and (_LAY["isc"][0] - _LAY["route"][0]) % PAIR_BYTES == 0
+# _down_slot: a down lane's w2 code sits at byte 2 (st % 2) + rgd % 2 of its word
+assert all(
+    scale_index(MOE_HIDDEN + 16 * rgd + r, 4 * st + kb, W2_SCALE_COLS) % 4
+    == 2 * (st % 2) + rgd % 2
+    for rgd in range(4)
+    for r in range(16)
+    for st in range(W2_STEPS)
+    for kb in range(4)
+)
 
 
 # ---------------------------------------------------------------- LDS
@@ -195,6 +213,20 @@ def slot_expert(c, slot):
     return clamp_expert(uniform(fx.ptr_load(c["rt"]["expert"] + sl)))
 
 
+def _expert_or_past(c, slot, nu):
+    """``slot_expert`` of a live slot (``slot < nu``), else EXPERTS: the dead
+    slot's weight and scale loads land past the sized resources (out of range:
+    zeros, no memory request). Wave-uniform."""
+    return (slot < nu).select(slot_expert(c, slot), fx.Int32(EXPERTS))
+
+
+def down_width(s):
+    """The slots of a ``stage_down`` batch at S rows: |U| <= min(8 S, MAX_U)
+    (``load_route`` counts the distinct live ids of the S 8 picks) over the 8
+    waves, at most DOWN_BATCH (S = 1: one slot a wave)."""
+    return min(DOWN_BATCH, cdiv(min(s * TOPK, MAX_U), WAVES))
+
+
 def _pick_id(rt, pick):
     """The expert id of pick ``pick`` = t 8 + k in the LDS route table."""
     return fx.ptr_load(rt["route"] + id_index(pick // TOPK, pick % TOPK))
@@ -253,23 +285,23 @@ def load_route(c):
 # ---------------------------------------------------------------- ug
 
 
-def ug_loads(c, task):
+def ug_loads(c, task, nu):
     """Task ``task``'s w13 operands for this wave (its row group, its K half:
     16 dwordx4) and their scale words (8: a word serves 2 steps x 2 row
-    groups), issued a task ahead (``stage_ug`` takes them). The task is the
-    caller's, clamped to the step's last (``run_ug``)."""
+    groups), issued a task ahead (``stage_ug`` takes them). A task past the
+    step's last (its slot past |U| = ``nu``) loads zeros (``_expert_or_past``)."""
     lane, wave = c["lane"], c["wave"]
     a = c["args"]
-    e = slot_expert(c, task // UG_GROUPS)
+    e = _expert_or_past(c, task // UG_GROUPS, nu)
     rg = ug_row_group(wave, task % UG_GROUPS)
     st0 = (wave // 4) * HALF_STEPS
-    r_w = rsrc(a["w13"])
+    r_w = rsrc(a["w13"], W13_BYTES)
     base = e * W13_EXPERT_DWORDS
     av = [
         fp4_tile_load(r_w, base, rg, W13_K, st0 + i, lane * 4)
         for i in range(HALF_STEPS)
     ]
-    r_s = rsrc(a["w13s"])
+    r_s = rsrc(a["w13s"], W13S_BYTES)
     sw = [
         fx.Int32(
             bo.buffer_load(
@@ -350,15 +382,16 @@ def run_ug(c, nu):
     """Every ug task of the step (|U| x 16) over the grid, reversed placement
     (CTA b: tasks 255 - b, + 256, ...: the leftover tasks of the last round go
     to the high CTAs, whose early work ends first), the next task's weights in
-    flight under this one's MFMAs. ``nu == 0`` runs no task (task index 0's
-    loads, expert 0, are issued and unused)."""
+    flight under this one's MFMAs; the last task issues none. A CTA with no
+    task (``nu == 0`` included) issues its first loads out of range."""
     total = nu * UG_GROUPS
-    last = fx.max(total - 1, 0)
     task = BLOCKS - 1 - fx.Int32(c["bid"])
-    ops = ug_loads(c, fx.min(task, last))
+    ops = ug_loads(c, task, nu)
     while task < total:
         nxt = task + BLOCKS
-        ops_n = ug_loads(c, fx.min(nxt, last))
+        ops_n = ops
+        if nxt < total:  # CTA-uniform
+            ops_n = ug_loads(c, nxt, nu)
         stage_ug(c, task, ops)
         task = nxt
         ops = ops_n
@@ -367,28 +400,36 @@ def run_ug(c, nu):
 # ---------------------------------------------------------------- down
 
 
-def down_loads(c, rgd, nu, b0):
+def down_loads(c, rgd, nu, b0, width):
     """The w2 tiles (4 steps) and scale codes of a wave's batch of slots b0,
-    b0 + 8, ... (DOWN_BATCH; past |U| the last slot's, and expert 0 when U is
-    empty): flat, tiles then codes. Pooled rows 16 rgd .. of each expert."""
+    b0 + 8, ... (``width``, ``down_width``; past |U| out of range: zeros):
+    flat, tiles then scale words (``_down_slot`` takes a word's code). Pooled
+    rows 16 rgd .. of each expert."""
     lane = c["lane"]
     a = c["args"]
-    r_w = rsrc(a["w2"])
-    r_s = rsrc(a["w2s"])
-    es = [slot_expert(c, fx.min(b0 + WAVES * j, nu - 1)) for j in range(DOWN_BATCH)]
+    r_w = rsrc(a["w2"], W2_BYTES)
+    r_s = rsrc(a["w2s"], W2S_BYTES)
+    es = [_expert_or_past(c, b0 + WAVES * j, nu) for j in range(width)]
     av = [
         fp4_tile_load(r_w, es[j] * W2_EXPERT_DWORDS, rgd, INTER, st, lane * 4)
-        for j in range(DOWN_BATCH)
+        for j in range(width)
         for st in range(W2_STEPS)
     ]
     sa = [
-        scale_byte(
-            r_s,
-            es[j] * MOE_HIDDEN + rgd * ROWS + lane % 16,
-            4 * st + lane // 16,
-            W2_SCALE_COLS,
+        fx.Int32(
+            bo.buffer_load(
+                r_s,
+                scale_index(
+                    es[j] * MOE_HIDDEN + rgd * ROWS + lane % 16,
+                    4 * st + lane // 16,
+                    W2_SCALE_COLS,
+                )
+                // 4,
+                vec_width=1,
+                dtype=T.i32,
+            )
         )
-        for j in range(DOWN_BATCH)
+        for j in range(width)
         for st in range(W2_STEPS)
     ]
     return av + sa
@@ -467,62 +508,77 @@ def load_inter(c):
 
 
 @traced
+def _down_slot(c, rgd, ops, nbs, j, sl, nu):
+    """Slot ``sl`` (live: ``stage_down`` skips a dead one), the batch's j-th:
+    its w2 (``ops``) against its picks' a2 -> ``contrib``."""
+    lane = c["lane"]
+    rt, d = c["rt"], c["lds"]["down"]
+    t = fx.min(lane % 16, c["S"] - 1)
+    kb = lane // 16
+    tok = lane % 16 < c["S"]
+    slot = fx.max(fx.min(sl, nu - 1), 0)
+    k = fx.ptr_load(rt["kof"] + (slot * 8 + t))
+    picked = (k >= 0) & tok
+    pick = t * TOPK + fx.max(fx.min(k, TOPK - 1), 0)
+    acc = fx.Vector.filled(4, 0.0, fx.Float32)
+    for st in range_constexpr(W2_STEPS):
+        bw = fx.Vector(
+            fx.ptr_load(
+                d["interq"] + inter_read_word(pick, st, kb, 0),
+                result_type=fx.Vector.make_type(4, fx.Int32),
+            )
+        )
+        bw = fx.Vector.from_elements(
+            [picked.select(bw[q], fx.Int32(0)) for q in range(4)], fx.Int32
+        )
+        code = fx.ptr_load(d["intsc"] + isc_index(pick, 4 * st + kb))
+        sb = picked.select(code, fx.Int32(UNIT_SCALE))
+        # the code's byte in its word (``scale_byte``): 2 (st % 2) + rgd % 2
+        sa = (ops[nbs + j * W2_STEPS + st] >> ((2 * (st % 2) + rgd % 2) * 8)) & 0xFF
+        acc = mfma_scaled(
+            ops[j * W2_STEPS + st],
+            bw,
+            acc,
+            sa,
+            sb,
+            FP4,
+            FP4,
+            0,
+            0,
+        )
+    # lane: rows 4 (lane / 16) + i of row t's pick
+    if picked:
+        for i in range_constexpr(4):
+            fx.ptr_store(
+                bf16_round(acc[i]),
+                d["contrib"] + (pick * ROWS + 4 * kb + i),
+            )
+
+
+@traced
 def stage_down(c, rgd, nu, ops0):
     """Pooled rows 16 rgd ..: every slot's w2 against its picks' a2 (wave w the
-    slots w, w + 8, ...; DOWN_BATCH in flight, the next batch issued under this
-    one's MFMAs; ``ops0`` the first, issued before INTER was polled) -> one
-    bf16 row a pick, unweighted (stock stage 2: one top-1 row a route, unit
-    weight, bf16) -> the owner rank's RSX (``rgd // 32``). Every CTA pushes all
-    its S 8 picks, zeros included, so the owner never waits on a producer that
-    skipped."""
-    s, tid, lane, wave = c["S"], c["tid"], c["lane"], c["wave"]
-    rt, d = c["rt"], c["lds"]["down"]
-    t = fx.min(lane % 16, s - 1)
-    kb = lane // 16
-    tok = lane % 16 < s
-    nbs = DOWN_BATCH * W2_STEPS
-    b0 = fx.Int32(wave)
+    slots w, w + 8, ...; ``down_width`` in flight, the next batch, if any,
+    issued under this one's MFMAs; ``ops0`` the first, issued before INTER was
+    polled; a slot past |U| runs no MFMA) -> one bf16 row a pick, unweighted
+    (stock stage 2: one top-1 row a route, unit weight, bf16) -> the owner
+    rank's RSX (``rgd // 32``). Every CTA pushes all its S 8 picks, zeros
+    included, so the owner never waits on a producer that skipped."""
+    s, tid = c["S"], c["tid"]
+    d = c["lds"]["down"]
+    width = down_width(s)
+    nbs = width * W2_STEPS
+    b0 = fx.Int32(c["wave"])
     ops = ops0
     while b0 < nu:
-        nb = b0 + WAVES * DOWN_BATCH
-        ops_n = down_loads(c, rgd, nu, nb)
-        for j in range_constexpr(DOWN_BATCH):
+        nb = b0 + WAVES * width
+        ops_n = ops
+        if nb < nu:  # wave-uniform
+            ops_n = down_loads(c, rgd, nu, nb, width)
+        for j in range_constexpr(width):
             sl = b0 + WAVES * j
-            slot = fx.max(fx.min(sl, nu - 1), 0)
-            k = fx.ptr_load(rt["kof"] + (slot * 8 + t))
-            picked = (k >= 0) & tok & (sl < nu)
-            pick = t * TOPK + fx.max(fx.min(k, TOPK - 1), 0)
-            acc = fx.Vector.filled(4, 0.0, fx.Float32)
-            for st in range_constexpr(W2_STEPS):
-                bw = fx.Vector(
-                    fx.ptr_load(
-                        d["interq"] + inter_read_word(pick, st, kb, 0),
-                        result_type=fx.Vector.make_type(4, fx.Int32),
-                    )
-                )
-                bw = fx.Vector.from_elements(
-                    [picked.select(bw[q], fx.Int32(0)) for q in range(4)], fx.Int32
-                )
-                code = fx.ptr_load(d["intsc"] + isc_index(pick, 4 * st + kb))
-                sb = picked.select(code, fx.Int32(UNIT_SCALE))
-                acc = mfma_scaled(
-                    ops[j * W2_STEPS + st],
-                    bw,
-                    acc,
-                    ops[nbs + j * W2_STEPS + st],
-                    sb,
-                    FP4,
-                    FP4,
-                    0,
-                    0,
-                )
-            # lane: rows 4 (lane / 16) + i of row t's pick
-            if picked:
-                for i in range_constexpr(4):
-                    fx.ptr_store(
-                        bf16_round(acc[i]),
-                        d["contrib"] + (pick * ROWS + 4 * kb + i),
-                    )
+            if sl < nu:  # wave-uniform
+                _down_slot(c, rgd, ops, nbs, j, sl, nu)
         b0 = nb
         ops = ops_n
     gpu.barrier()
@@ -542,6 +598,6 @@ def stage_down(c, rgd, nu, ops0):
 def run_down(c, rgd, nu):
     """CTA ``rgd``'s down task (5.2 order): its first w2 batch issued before the
     INTER polls, then ``load_inter``, then ``stage_down``."""
-    ops = down_loads(c, rgd, nu, fx.Int32(c["wave"]))
+    ops = down_loads(c, rgd, nu, fx.Int32(c["wave"]), down_width(c["S"]))
     load_inter(c)
     stage_down(c, rgd, nu, ops)
