@@ -278,6 +278,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "FalconForCausalLM": _HfExamplesInfo("tiiuae/falcon-7b"),
     "FalconH1ForCausalLM": _HfExamplesInfo("tiiuae/Falcon-H1-0.5B-Base"),
+    "FlintForCausalLM": _HfExamplesInfo("RecursiveSI/flint", is_available_online=False),
     "FlexOlmoForCausalLM": _HfExamplesInfo("allenai/Flex-reddit-2x7B-1T"),
     "GemmaForCausalLM": _HfExamplesInfo("google/gemma-1.1-2b-it"),
     "Gemma2ForCausalLM": _HfExamplesInfo(
@@ -1105,6 +1106,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         transformers_version_reason={
             "hf": "Custom processor code is not compatible with Transformers v5."
         },
+    ),
+    "MiniCPMOcrForConditionalGeneration": _HfExamplesInfo(
+        "openbmb/MiniCPM-OCR-1.0",
+        min_transformers_version="5.19.0",
+        is_available_online=False,
     ),
     "MiniCPMV": _HfExamplesInfo(
         "openbmb/MiniCPM-Llama3-V-2_5",

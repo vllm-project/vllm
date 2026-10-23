@@ -106,6 +106,7 @@ _TEXT_GENERATION_MODELS = {
     "FalconForCausalLM": ("falcon", "FalconForCausalLM"),
     "FalconMambaForCausalLM": ("mamba", "MambaForCausalLM"),
     "FalconH1ForCausalLM": ("falcon_h1", "FalconH1ForCausalLM"),
+    "FlintForCausalLM": ("vllm.models.flint", "FlintForCausalLM"),
     "GemmaForCausalLM": ("gemma", "GemmaForCausalLM"),
     "Gemma2ForCausalLM": ("gemma2", "Gemma2ForCausalLM"),
     "Gemma3ForCausalLM": ("gemma3", "Gemma3ForCausalLM"),
@@ -521,6 +522,10 @@ _MULTIMODAL_MODELS = {
         "MiniMaxM3SparseForConditionalGeneration",
     ),
     "MiniCPMO": ("minicpmo", "MiniCPMO"),
+    "MiniCPMOcrForConditionalGeneration": (
+        "minicpm_ocr",
+        "MiniCPMOcrForConditionalGeneration",
+    ),
     "MiniCPMV": ("minicpmv", "MiniCPMV"),
     "MiniCPMV4_6ForConditionalGeneration": (
         "minicpmv4_6",
