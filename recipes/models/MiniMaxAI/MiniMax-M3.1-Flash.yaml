@@ -78,8 +78,10 @@ features:
     # Tested on the single-node TP4 engine only (not on a PD prefill node).
     strategies: [single_node_tp]
     default_mode: sp_dbo
+    # SP + DBO and SP were run on the default checkpoint only (MXFP8 MoE).
     modes:
       sp_dbo:
+        variants: [default]
         label: "SP + DBO"
         description: "SP prefill, and DBO on prefill steps of 16384+ tokens: each microbatch then has 8192+ tokens and stays on the SP path."
         # DBO needs the V2 model runner: without it, --enable-dbo selects the
@@ -111,6 +113,7 @@ features:
           hopper: unsupported
           blackwell: unsupported
       sp:
+        variants: [default]
         label: "SP"
         description: "SP prefill on steps of 4096+ tokens, no DBO."
         args: []
@@ -147,6 +150,35 @@ variants:
       # ≈ 237 GB, x 1.2 ≈ 285 GB.
       gb200:
         vram_minimum_gb: 285
+      # Only this checkpoint stores NVFP4 experts; the Quark export below
+      # already holds MXFP4 ones.
+      amd:
+        extra_args:
+          - "--quantization-config.moe"
+          - "mxfp8"
+
+  mxfp4:
+    # AMD's Quark export of the same model: routed experts in OCP MXFP4
+    # (static weights, dynamic MXFP4 activations); every other layer and the
+    # dspark/ draft as in the base checkpoint. 48 shards, 237.2 GB, x 1.2 ≈
+    # 285 GB.
+    model_id: "amd/MiniMax-M3.1-Flash-Quark-MXFP4"
+    precision: mxfp4
+    label: "MXFP4 (Quark)"
+    supported_hardware:
+      - mi355x
+    vram_minimum_gb: 285
+    description: "AMD Quark export: routed experts stored in OCP MXFP4 and run as W4A4 on the AITER MoE, with NVFP4 KV and indexer K caches. MI355X only."
+    hardware_overrides:
+      # The export's recommended MoE setup; the shared expert stays a separate
+      # MXFP8 MLP (no shared-expert fusion).
+      amd:
+        extra_args:
+          - "--moe-backend"
+          - "aiter"
+        extra_env:
+          VLLM_ROCM_USE_AITER_MOE: "1"
+          VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "0"
 
   fp8:
     # Same checkpoint on Hopper (no FP4 tensor cores): FP8 KV and indexer
@@ -191,8 +223,6 @@ hardware_overrides:
       - "nvfp4"
       - "--attention-config"
       - '{"indexer_kv_dtype": "nvfp4", "indexer_decode_cp": true}'
-      - "--quantization-config.moe"
-      - "mxfp8"
     extra_env:
       VLLM_ROCM_USE_AITER: "1"
       VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
