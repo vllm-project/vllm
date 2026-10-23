@@ -149,8 +149,6 @@ class QuarkOCP_MX(QuarkScheme):
         return 70
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.weight = torch.nn.Parameter(layer.weight.data, requires_grad=False)
-
         self.ocp_mx_linear.process_weights_after_loading(layer)
 
     def create_weights(
