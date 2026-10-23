@@ -109,9 +109,11 @@ impl MuseSparkVisionParams {
         self.patch_width * self.downsample_factor
     }
 
-    fn apply_preprocessor_config(&self, config: &PreProcessorConfig) -> Self {
-        let mut params = self.clone();
-        let patch = config.get_patch_size(self.patch_height);
+    /// Resolve from a preprocessor config, falling back to the defaults for
+    /// absent fields.
+    fn from_config(config: &PreProcessorConfig) -> Self {
+        let mut params = Self::default();
+        let patch = config.get_patch_size(params.patch_height);
         if config.patch_size.is_some() {
             params.patch_height = patch;
             params.patch_width = patch;
@@ -589,7 +591,7 @@ impl VisionPreProcessor for MuseSparkVisionProcessor {
         if images.is_empty() {
             return Err(TransformError::EmptyBatch);
         }
-        let params = MuseSparkVisionParams::default().apply_preprocessor_config(config);
+        let params = MuseSparkVisionParams::from_config(config);
 
         let mut pixels = Vec::new();
         let mut pixel_counts = Vec::with_capacity(images.len());
@@ -655,10 +657,7 @@ impl VisionPreProcessor for MuseSparkVisionProcessor {
             }
             rgb_frames.push(frame.to_rgb8());
         }
-        Self::preprocess_video_frames(
-            &MuseSparkVisionParams::default().apply_preprocessor_config(config),
-            &rgb_frames,
-        )
+        Self::preprocess_video_frames(&MuseSparkVisionParams::from_config(config), &rgb_frames)
     }
 
     fn preprocess_video_rgb(
@@ -679,10 +678,7 @@ impl VisionPreProcessor for MuseSparkVisionProcessor {
                 })?;
             rgb_frames.push(rgb);
         }
-        Self::preprocess_video_frames(
-            &MuseSparkVisionParams::default().apply_preprocessor_config(config),
-            &rgb_frames,
-        )
+        Self::preprocess_video_frames(&MuseSparkVisionParams::from_config(config), &rgb_frames)
     }
 
     fn calculate_num_tokens(
@@ -691,7 +687,7 @@ impl VisionPreProcessor for MuseSparkVisionProcessor {
         height: u32,
         config: &PreProcessorConfig,
     ) -> Result<usize, TransformError> {
-        let params = MuseSparkVisionParams::default().apply_preprocessor_config(config);
+        let params = MuseSparkVisionParams::from_config(config);
         find_resize_target(
             height as usize,
             width as usize,
@@ -740,7 +736,7 @@ mod tests {
         }))
         .unwrap();
         let processor = MuseSparkVisionProcessor;
-        let params = MuseSparkVisionParams::default().apply_preprocessor_config(&video_config);
+        let params = MuseSparkVisionParams::from_config(&video_config);
         assert_eq!(params.num_frames_per_video, 600);
         assert_eq!(params.max_num_tokens_per_frame, 256);
         // A 448px frame fits the configured 256-patch budget.
