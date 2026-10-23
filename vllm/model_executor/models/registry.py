@@ -535,7 +535,6 @@ _MULTIMODAL_MODELS = {
         "mistral3",
         "Mistral3ForConditionalGeneration",
     ),
-    "MolmoForCausalLM": ("molmo", "MolmoForCausalLM"),
     "Molmo2ForConditionalGeneration": ("molmo2", "Molmo2ForConditionalGeneration"),
     "Moondream3ForCausalLM": ("moondream3", "Moondream3ForCausalLM"),
     "MossAudioModel": ("moss_audio", "MossAudioModel"),
@@ -880,6 +879,7 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "MptForCausalLM": "0.28.0",
     "RWForCausalLM": "0.28.0",
     "StableLMEpochForCausalLM": "0.28.0",
+    "MolmoForCausalLM": "0.32.0",
     # Superseded by the generic "Terratorch" architecture
     "PrithviGeoSpatialMAE": "0.28.0",
 }

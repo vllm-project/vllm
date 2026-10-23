@@ -14,13 +14,7 @@ import pytest
 import regex as re
 import torch
 from PIL.Image import Image
-from transformers import (
-    AutoConfig,
-    AutoTokenizer,
-    BatchFeature,
-    GenerationConfig,
-    GenerationMixin,
-)
+from transformers import AutoConfig, AutoTokenizer, BatchFeature, GenerationMixin
 from transformers.masking_utils import create_causal_mask
 from transformers.video_utils import VideoMetadata
 
@@ -901,38 +895,6 @@ def minicpmv_26_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 
     def _generate(self, *args, image_sizes=None, **kwargs):
         return orig_generate(*args, decode_text=False, **kwargs)
-
-    hf_model.model.generate = types.MethodType(_generate, hf_model.model)
-
-    return hf_model
-
-
-def molmo_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
-    """Patches and returns an instance of the HfRunner to use for Molmo."""
-    hf_processor = hf_model.processor
-
-    def _processor(*args, **kwargs):
-        return hf_processor.process(*args, **kwargs)
-
-    hf_model.processor = _processor
-
-    def _generate(self, max_new_tokens=None, do_sample=None, **kwargs):
-        batch = {
-            k: kwargs.pop(k).unsqueeze(0)
-            for k in ("input_ids", "images", "image_input_idx", "image_masks")
-            if k in kwargs
-        }
-        batch = BatchFeature(batch).to(dtype=self.dtype)
-
-        return self.generate_from_batch(
-            batch,
-            generation_config=GenerationConfig(
-                max_new_tokens=max_new_tokens,
-                stop_strings="<|endoftext|>",
-                do_sample=do_sample,
-            ),
-            **kwargs,
-        )
 
     hf_model.model.generate = types.MethodType(_generate, hf_model.model)
 
