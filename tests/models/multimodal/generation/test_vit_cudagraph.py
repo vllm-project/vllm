@@ -218,13 +218,14 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
             "<|vision_start|><|video_pad|><|vision_end|>"
             "Describe this video in one sentence."
         ),
+        # Shrink the 30B thinker with random weights; the test only checks
+        # that encoder CG capture/replay runs, not output quality.
         vllm_runner_kwargs={
             "load_format": "dummy",
             "hf_overrides": partial(
                 dummy_hf_overrides,
                 model_arch="Qwen3OmniMoeForConditionalGeneration",
             ),
-            "limit_mm_per_prompt": {"image": 1, "video": 1, "audio": 0},
         },
     ),
     "qwen3_5": VitCudagraphTestConfig(
