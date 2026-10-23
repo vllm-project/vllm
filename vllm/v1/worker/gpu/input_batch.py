@@ -184,7 +184,7 @@ class InputBatch:
             input_buffers.positions[:num_tokens] = 0
             input_buffers.is_padding[:num_tokens] = is_padding
         else:
-            _init_dummy_batch_kernel[cdiv(max(max_num_reqs + 1, num_tokens), 1024)](
+            _init_dummy_batch_kernel[(cdiv(max(max_num_reqs + 1, num_tokens), 1024),)](
                 idx_mapping,
                 expanded_local_pos,
                 cu_num_logits,
