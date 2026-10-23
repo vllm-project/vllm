@@ -104,12 +104,21 @@ class _KimiGDNMergedColumnParallelLinear(MergedColumnParallelLinear):
         output_sizes: list[int],
         replicated_shard_id: int,
         tp_size: int,
+        padding_size: int = 0,
         **kwargs,
     ) -> None:
         self.replicated_shard_id = replicated_shard_id
+        self.padding_size = padding_size
         output_sizes = output_sizes.copy()
         output_sizes[replicated_shard_id] *= tp_size
         super().__init__(input_size, output_sizes, **kwargs)
+        if padding_size:
+            # Exclude padding rows from the load-completion count.
+            set_weight_attrs(
+                self.weight,
+                {"weight_loader_numel": self.weight[:-padding_size].numel()},
+            )
+            self.weight.data[-padding_size:].zero_()
 
     def weight_loader(
         self,
@@ -129,6 +138,8 @@ class _KimiGDNMergedColumnParallelLinear(MergedColumnParallelLinear):
                 param.tp_rank = 0
         try:
             super().weight_loader(param, loaded_weight, loaded_shard_id)
+            if self.padding_size and param is self.weight:
+                param.data[-self.padding_size :].zero_()
         finally:
             self.tp_rank = tp_rank
             if param_tp_rank is not None:
@@ -152,6 +163,8 @@ class _KimiGDNMergedColumnParallelLinear(MergedColumnParallelLinear):
                 param.tp_rank = 0
         try:
             super().weight_loader_v2(param, loaded_weight, loaded_shard_id)
+            if self.padding_size and param is self.weight:
+                param.data[-self.padding_size :].zero_()
         finally:
             self.tp_rank = tp_rank
             if param_tp_rank is not None:
@@ -202,9 +215,8 @@ def is_flashinfer_fused_kda_decode_supported(
     capability = current_platform.get_device_capability()
     if capability is None:
         return False
-    compute_capability = (capability.major, capability.minor)
     return (
-        compute_capability in ((10, 0), (10, 3))
+        current_platform.is_device_capability_family(100)
         and num_heads in (12, 24, 32, 48, 96)
         and head_dim == 128
         and conv_width == 4
@@ -331,7 +343,7 @@ def resolve_kda_decode_backend(
         return "flashinfer"
     if backend == "flashinfer":
         raise RuntimeError(
-            "FlashInfer fused KDA decode requires CUDA SM100 or SM103, "
+            "FlashInfer fused KDA decode requires CUDA SM100 family, "
             "bfloat16 activations and convolution state, bfloat16 or float32 "
             "recurrent state, head_dim=128, convolution width 4, no speculation."
         )
@@ -647,12 +659,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             in_proj_output_sizes,
             replicated_shard_id=4,
             tp_size=self.tp_size,
+            padding_size=self.in_proj_padding,
             bias=False,
             quant_config=self.quant_config,
             prefix=in_proj_prefix,
         )
-        if self.in_proj_padding:
-            self.in_proj_qkvgfab.weight.data[-self.in_proj_padding :].zero_()
 
         self.f_b_proj = ColumnParallelLinear(
             self.head_dim,
