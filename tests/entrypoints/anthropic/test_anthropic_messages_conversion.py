@@ -276,6 +276,25 @@ class TestToolResultContent:
             ]
         )
 
+    @pytest.mark.parametrize(
+        "block",
+        [
+            {"type": "document", "source": {"type": "text", "data": "report"}},
+            {
+                "type": "video",
+                "source": {"type": "url", "url": "https://example.com/a.mp4"},
+            },
+            {"type": "thinking", "thinking": "hidden"},
+            {"type": "unknown"},
+            {},
+        ],
+    )
+    def test_unsupported_nested_content_is_rejected(self, block):
+        with pytest.raises(ValidationError, match="Unsupported tool_result.content"):
+            self._make_tool_result_request(
+                [{"type": "text", "text": "A report follows"}, block]
+            )
+
     def test_tool_result_string_content(self):
         request = self._make_tool_result_request("file contents here")
         result = _convert(request)
