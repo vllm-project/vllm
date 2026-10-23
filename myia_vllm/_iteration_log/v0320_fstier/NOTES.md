@@ -384,11 +384,29 @@ pas de perte irréversible : tous les repos sont publics).
              (p 56409985->56642623 g 321175->321285), NOT restarting (1/10)
 ```
 
-Les deux épisodes sont sortis en `RECOVERED` au cycle de sonde suivant
+**Un troisième est tombé pendant la rédaction de cette note** :
+
+```
+2026-10-23 23:42:25 WEDGE health=200 decode=000 (fail 1/2; snapshot p=61295997 g=344122)
+2026-10-23 23:44:26 WEDGE-BUSY ... counters ADVANCED (p 61295997->61295997 g 344122->344293)
+```
+
+Détail qui compte : sur ce troisième, **`p` est resté plat alors que `g` avançait**
+— le moteur générait mais n'admettait plus de prefill (5 requêtes en attente).
+La porte teste `p` **ou** `g` en avant, donc elle a correctement conclu BUSY ;
+une porte qui n'aurait regardé que `p` aurait conclu à tort au wedge.
+
+Les trois épisodes sont sortis en `RECOVERED` au cycle de sonde suivant
 (`BUSY streak was 1`) : la fenêtre de famine s'est résorbée d'elle-même en
-≤ 2 min. **Sous v5, ces deux-là auraient été deux démarrages** (KV effacé,
-22 M de tokens de préfixe à re-prefill), soit les 20ᵉ et 21ᵉ restarts de la
+≤ 2 min. **Sous v5, ces trois-là auraient été trois démarrages** (KV effacé,
+60 M de tokens de prompt à re-prefill), soit les 20ᵉ à 22ᵉ restarts de la
 journée. Le plafond `BUSY_MAX=10` (~5 min) n'a jamais approché (streak max 1).
+
+**Dénouement mesuré à 23:47:03Z** : KV **99,6 % → 66,5 %**, 5 en cours + 5 en
+attente, `generation_tokens_total` 344 334 (en hausse), `num_preemptions_total`
+toujours 20 — la saturation s'est vidée **par reprise**, sans restart et sans
+nouvelle préemption. C'est exactement le comportement pour lequel la porte a
+été armée.
 
 **Point chaud en cours à la clôture de cette note** : le mode 5 « saturation
 KV » est **actif** — KV 98,2-99,6 %, 7 flux en cours + 1 en attente,
