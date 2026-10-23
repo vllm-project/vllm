@@ -9,6 +9,7 @@ through the dev ``/collective_rpc`` endpoint, which only forwards strings.
 """
 
 import os
+import time
 from typing import Any
 
 import torch
@@ -18,6 +19,7 @@ from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 
 FAULT_DIR_ENV = "VLLM_READY_FAULT_DIR"
 SCHEDULER_STALL = "scheduler_stall"
+UTILITY_HANG = "utility_hang"
 
 
 def _launch_illegal_memory_access() -> None:
@@ -64,6 +66,13 @@ class FaultInjectionWorkerExtension:
         # Dense DP engines keep data_parallel_rank=0; the index is the DP rank.
         rank = self.vllm_config.parallel_config.data_parallel_index
         return rank in {int(r) for r in dp_ranks.split(",")}
+
+    def fault_hang_while_flag_set(self, flag: str) -> None:
+        """Block this control call while the flag exists, like a weight
+        sync stuck waiting on its peers."""
+        path = os.path.join(os.environ[FAULT_DIR_ENV], flag)
+        while os.path.exists(path):
+            time.sleep(0.1)
 
     def fault_ima_now(self, dp_ranks: str) -> None:
         """Launch an illegal memory access without synchronizing.

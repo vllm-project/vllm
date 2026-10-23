@@ -7,7 +7,7 @@
 
 import pytest
 
-from .fault_injection import SCHEDULER_STALL
+from .fault_injection import SCHEDULER_STALL, UTILITY_HANG
 from .utils import STALL_TIMEOUT_S, ready_probe_server
 
 MODEL = "hmellor/tiny-random-LlamaForCausalLM"
@@ -35,6 +35,23 @@ def test_scheduler_stall(server):
         assert server.status("/health") == 200
     finally:
         server.clear_fault(SCHEDULER_STALL)
+    assert server.wait_until_ready()
+
+
+def test_blocked_utility_call_reports_operation(server):
+    """A busy loop blocked inside a control call (e.g. a stuck weight sync)
+    times out the probe, and the response names the call it is blocked in."""
+    server.set_fault(UTILITY_HANG)
+    try:
+        server.rpc("fault_hang_while_flag_set", UTILITY_HANG, background=True)
+        assert server.wait_until_unready() is not None
+        body = server.ready_body()
+        assert body["reason"] == "probe_timeout"
+        (operation,) = body["in_progress"]
+        assert operation["operation"] == "collective_rpc:fault_hang_while_flag_set"
+        assert server.status("/health") == 200
+    finally:
+        server.clear_fault(UTILITY_HANG)
     assert server.wait_until_ready()
 
 

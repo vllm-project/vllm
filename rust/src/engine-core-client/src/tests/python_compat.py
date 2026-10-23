@@ -126,12 +126,6 @@ class ExtendedEngineCoreOutput(EngineCoreOutput):
     new_prompt_len_snapshot: int | None = None
 
 
-class EngineCoreReadyState(IntEnum):
-    IDLE = 0
-    BUSY = 1
-    SLEEPING = 2
-
-
 class EngineCoreOutputs(
     msgspec.Struct,
     array_like=True,
@@ -146,9 +140,6 @@ class EngineCoreOutputs(
     wave_complete: int | None = None
     start_wave: int | None = None
     weight_version: str | None = None
-    ready_progress_seq: int | None = None
-    ready_state: EngineCoreReadyState | None = None
-    ready_operation: str | None = None
 
 
 request = EngineCoreRequest(
@@ -568,18 +559,3 @@ print(msgspec.msgpack.encode(mooncake_stats).hex())
 print(msgspec.msgpack.encode(multi_connector_stats).hex())
 print(msgspec.msgpack.encode(ready_response).hex())
 print(extended_outputs_bytes.hex())
-
-# EngineCore broadcasts readiness on its own and stamps it onto request batches.
-readiness_outputs = EngineCoreOutputs(
-    ready_progress_seq=7,
-    ready_state=EngineCoreReadyState.BUSY,
-    ready_operation="collective_rpc:update_weights",
-)
-stamped_outputs = EngineCoreOutputs(
-    outputs=outputs.outputs,
-    finished_requests=outputs.finished_requests,
-    ready_progress_seq=8,
-    ready_state=EngineCoreReadyState.BUSY,
-)
-print(msgspec.msgpack.encode(readiness_outputs).hex())
-print(msgspec.msgpack.encode(stamped_outputs).hex())

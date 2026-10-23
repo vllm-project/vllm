@@ -66,9 +66,9 @@ from vllm.v1.engine import (
     EngineCoreOutput,
     EngineCoreOutputs,
     EngineCoreReadyResponse,
-    EngineCoreReadyState,
     EngineCoreRequest,
     EngineCoreRequestType,
+    EngineHealthState,
     FinishReason,
     PauseMode,
     ReconfigureDistributedRequest,
@@ -106,13 +106,15 @@ logger = init_logger(__name__)
 
 
 HANDSHAKE_TIMEOUT_MINS = 5
-READY_PROGRESS_BROADCAST_CLIENT_INDEX = -2
-READY_PROGRESS_PUBLISH_INTERVAL_S = 1.0
 
 _R = TypeVar("_R")  # Return type for collective_rpc
 
+# Utility answered by the input thread, so it works while the busy loop is
+# blocked.
+CURRENT_OPERATION_UTILITY_METHOD = "get_current_operation"
 
-def _ready_operation_name(method_name: str, args: tuple) -> str:
+
+def _operation_name(method_name: str, args: tuple) -> str:
     if method_name == "collective_rpc" and args and isinstance(args[0], str):
         return f"collective_rpc:{args[0]}"
     return method_name
@@ -250,8 +252,12 @@ class EngineCore:
 
         self.aborts_queue = queue.Queue[list[str]]()
 
-        self._ready_progress_seq = 0
-        self._last_health_dummy_batch_at = 0.0
+        # /health_generate state: the busy-stall clock, the last passing GPU
+        # probe, and the utility call being executed (read by the input thread).
+        self._was_busy = False
+        self._last_progress_at = time.monotonic()
+        self._last_gpu_probe_at = 0.0
+        self._current_operation: tuple[str, float] | None = None
 
         self._idle_state_callbacks: list[Callable] = []
 
@@ -688,8 +694,6 @@ class EngineCore:
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
-        if scheduler_output.total_num_scheduled_tokens > 0:
-            self._record_ready_progress()
         self._attach_iteration_details(engine_core_outputs, iteration_details)
         self._attach_weight_version(engine_core_outputs)
 
@@ -792,8 +796,6 @@ class EngineCore:
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
-        if scheduler_output.total_num_scheduled_tokens > 0:
-            self._record_ready_progress()
         self._attach_iteration_details(engine_core_outputs, iteration_details)
         self._attach_weight_version(engine_core_outputs)
 
@@ -1053,39 +1055,73 @@ class EngineCore:
         """Check if engine is sleeping at any level."""
         return self.is_scheduler_paused() or self.model_executor.is_sleeping
 
-    def get_ready_state(self) -> EngineCoreReadyState:
-        if self.is_sleeping():
-            return EngineCoreReadyState.SLEEPING
-        if (
+    def _mark_progress(self) -> None:
+        self._last_progress_at = time.monotonic()
+        # Re-probe the GPU once the engine is idle again.
+        self._last_gpu_probe_at = 0.0
+
+    def _update_progress_clock(self) -> bool:
+        """Return whether the engine is awake and busy.
+
+        The stall clock restarts whenever the engine becomes busy, so time
+        spent idle or paused never counts as a stall.
+        """
+        busy = not self.is_sleeping() and (
             getattr(self, "engines_running", False)
             or self.scheduler.has_requests()
-            or self.batch_queue
+            or bool(self.batch_queue)
+        )
+        if busy and not self._was_busy:
+            self._mark_progress()
+        self._was_busy = busy
+        return busy
+
+    def check_health_gpu(
+        self, cache_ttl_s: float, stall_timeout_s: float
+    ) -> tuple[EngineHealthState, float]:
+        """Health check served by the busy loop between steps.
+
+        Returns:
+            The health state, and the seconds since the last model-step
+            progress (0 unless busy).
+
+        """
+        busy = self._update_progress_clock()
+        if self.is_sleeping():
+            return EngineHealthState.SLEEPING, 0.0
+        if busy:
+            since_progress = time.monotonic() - self._last_progress_at
+            if 0 < stall_timeout_s < since_progress:
+                return EngineHealthState.STALLED, since_progress
+            return EngineHealthState.BUSY, since_progress
+
+        if (
+            cache_ttl_s > 0
+            and self._last_gpu_probe_at > 0
+            and time.monotonic() - self._last_gpu_probe_at < cache_ttl_s
         ):
-            return EngineCoreReadyState.BUSY
-        return EngineCoreReadyState.IDLE
+            return EngineHealthState.OK, 0.0
+        self._probe_gpu()
+        self._last_gpu_probe_at = time.monotonic()
+        return EngineHealthState.OK, 0.0
+
+    def _probe_gpu(self) -> None:
+        self.model_executor.check_health_gpu()
+
+    def get_current_operation(self) -> tuple[str, float] | None:
+        """The utility call being executed and for how long, if any.
+
+        EngineCoreProc answers this from the input thread, so it gets a reply
+        while the busy loop is blocked inside the call.
+        """
+        operation = self._current_operation
+        if operation is None:
+            return None
+        name, started_at = operation
+        return name, time.monotonic() - started_at
 
     def execute_dummy_batch(self):
         self.model_executor.execute_dummy_batch()
-
-    def _record_ready_progress(self) -> None:
-        self._ready_progress_seq += 1
-        self._last_health_dummy_batch_at = 0.0
-
-    def check_health_gpu(self, cache_ttl_s: float) -> None:
-        """Run a GPU probe only when the engine is awake and idle."""
-        if self.get_ready_state() != EngineCoreReadyState.IDLE:
-            return
-
-        now = time.monotonic()
-        if (
-            cache_ttl_s > 0
-            and self._last_health_dummy_batch_at > 0
-            and now - self._last_health_dummy_batch_at < cache_ttl_s
-        ):
-            return
-
-        self.model_executor.check_health_gpu()
-        self._last_health_dummy_batch_at = time.monotonic()
 
     def compute_weight_checksums(self) -> list[dict[str, str]]:
         return self.collective_rpc("compute_weight_checksums")
@@ -1240,11 +1276,6 @@ class EngineCoreProc(EngineCore):
                 executor_fail_callback,
                 internal_dp_balancing,
             )
-
-            self._last_ready_published_state = EngineCoreReadyState.IDLE
-            self._last_ready_published_seq = self._ready_progress_seq
-            self._last_ready_published_at = time.monotonic()
-            self._ready_operation: str | None = None
 
             # Initialize fault tolerance settings.
             self.enable_fault_tolerance = (
@@ -1619,6 +1650,7 @@ class EngineCoreProc(EngineCore):
 
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
+        self._update_progress_clock()
         waited = False
         while not self.has_work() and self.is_running():
             # Notify callbacks waiting for engine to become idle.
@@ -1649,15 +1681,12 @@ class EngineCoreProc(EngineCore):
 
     def _process_engine_step(self) -> bool:
         """Called only when there are unfinished local requests."""
-        self._maybe_publish_ready_progress()
-
+        self._update_progress_clock()
         # Step the engine core.
         outputs, model_executed = self.step_fn()
-        if not self.scheduler.has_unfinished_requests():
-            # Only connector cleanup or pending KV pushes remain; that is not
-            # stalled generation.
-            self._record_ready_progress()
-        self._maybe_publish_ready_progress()
+        # Steps that only run connector cleanup or KV pushes are not stalled.
+        if model_executed or not self.scheduler.has_unfinished_requests():
+            self._mark_progress()
         # Put EngineCoreOutputs into the output queue.
         for output in outputs.items() if outputs else ():
             self.output_queue.put_nowait(output)
@@ -1671,33 +1700,6 @@ class EngineCoreProc(EngineCore):
             time.sleep(0.001)
 
         return model_executed
-
-    def _maybe_publish_ready_progress(self, *, force: bool = False) -> None:
-        now = time.monotonic()
-        ready_state = self.get_ready_state()
-        state_changed = ready_state != self._last_ready_published_state
-        if state_changed and ready_state == EngineCoreReadyState.BUSY:
-            self._last_health_dummy_batch_at = 0.0
-        progress_changed = self._ready_progress_seq != self._last_ready_published_seq
-        publish_progress = progress_changed and (
-            now - self._last_ready_published_at >= READY_PROGRESS_PUBLISH_INTERVAL_S
-        )
-        if not force and not state_changed and not publish_progress:
-            return
-
-        self.output_queue.put_nowait(
-            (
-                READY_PROGRESS_BROADCAST_CLIENT_INDEX,
-                EngineCoreOutputs(
-                    ready_progress_seq=self._ready_progress_seq,
-                    ready_state=ready_state,
-                    ready_operation=self._ready_operation,
-                ),
-            )
-        )
-        self._last_ready_published_state = ready_state
-        self._last_ready_published_seq = self._ready_progress_seq
-        self._last_ready_published_at = now
 
     def _notify_idle_state_callbacks(self) -> None:
         while self._idle_state_callbacks:
@@ -1777,15 +1779,14 @@ class EngineCoreProc(EngineCore):
                 converted_args = self._convert_msgspec_args(method, args)
                 if method_name == "check_health_gpu":
                     return method(*converted_args)
-                # Publish the operation before running it: the output thread
-                # still sends while the busy loop is blocked inside the call.
-                self._ready_operation = _ready_operation_name(method_name, args)
-                self._maybe_publish_ready_progress(force=True)
+                self._current_operation = (
+                    _operation_name(method_name, args),
+                    time.monotonic(),
+                )
                 try:
                     return method(*converted_args)
                 finally:
-                    self._ready_operation = None
-                    self._maybe_publish_ready_progress(force=True)
+                    self._current_operation = None
 
             enqueue_output = lambda out: self.output_queue.put_nowait(
                 (client_idx, EngineCoreOutputs(utility_output=out))
@@ -2010,6 +2011,15 @@ class EngineCoreProc(EngineCore):
                                 client_idx, call_id, args[0]
                             )
                             continue
+                        if method == CURRENT_OPERATION_UTILITY_METHOD:
+                            output = UtilityOutput(
+                                call_id,
+                                result=UtilityResult(self.get_current_operation()),
+                            )
+                            self.output_queue.put_nowait(
+                                (client_idx, EngineCoreOutputs(utility_output=output))
+                            )
+                            continue
                     else:
                         request = generic_decoder.decode(data_frames)
 
@@ -2072,12 +2082,6 @@ class EngineCoreProc(EngineCore):
                     # which will be very small.
                     assert coord_socket is not None
                     coord_socket.send_multipart(encoder.encode(outputs))
-                    continue
-
-                if client_index == READY_PROGRESS_BROADCAST_CLIENT_INDEX:
-                    buffers = encoder.encode(outputs)
-                    for socket in sockets:
-                        socket.send_multipart(buffers)
                     continue
 
                 # Reclaim buffers that zmq is finished with.
@@ -2371,13 +2375,11 @@ class DPEngineCoreProc(EngineCoreProc):
         if has_global_unfinished:
             self.engines_running = True
 
-    def check_health_gpu(self, cache_ttl_s: float) -> None:
-        """Liveness ping for MoE DP; intentionally runs no GPU work.
+    def _probe_gpu(self) -> None:
+        """Liveness only: the reply proves the busy loop is not wedged.
 
-        Utility calls are served by the busy loop, so a reply proves the loop
-        is not wedged (e.g. in a control RPC); a hung loop times out the probe
-        in the frontend. A dummy batch here would run outside the DP wave and
-        could deadlock against a peer's wave collectives.
+        A dummy batch here would run outside the DP wave and could deadlock
+        against a peer's wave collectives.
         """
 
     def barrier(self):
@@ -2472,7 +2474,7 @@ class DPEngineCoreProc(EngineCoreProc):
                     # A rank that holds requests but scheduled none is stalled,
                     # even though it keeps the wave alive with dummy batches.
                     if not local_unfinished_reqs:
-                        self._record_ready_progress()
+                        self._mark_progress()
                     if iteration_details is not None and not self.has_coordinator:
                         stats = self._make_iteration_details_stats(iteration_details)
                         self.output_queue.put_nowait(
@@ -2483,7 +2485,6 @@ class DPEngineCoreProc(EngineCoreProc):
             self.engines_running = self._has_global_unfinished_reqs(
                 local_unfinished_reqs
             )
-            self._maybe_publish_ready_progress()
 
             if not self.engines_running:
                 if self.dp_rank == 0 or not self.has_coordinator:

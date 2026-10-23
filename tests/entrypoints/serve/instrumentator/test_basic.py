@@ -232,72 +232,48 @@ async def test_health_check_engine_dead_error():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("error", [EngineDeadError(), EngineUnhealthyError()])
-async def test_ready_check_engine_error(error: Exception):
+@pytest.mark.parametrize(
+    ("error", "expected_body"),
+    [
+        (None, None),
+        (EngineDeadError(), {"status": "not_ready", "reason": "engine_dead"}),
+        (
+            EngineSleepingError("paused", engine_ranks=[0], in_progress=[]),
+            {
+                "status": "not_ready",
+                "reason": "sleeping",
+                "message": "paused",
+                "engine_ranks": [0],
+                "in_progress": [],
+            },
+        ),
+        (
+            EngineUnhealthyError(
+                "timed out",
+                reason="probe_timeout",
+                in_progress=[{"operation": "collective_rpc:update_weights"}],
+            ),
+            {
+                "status": "not_ready",
+                "reason": "probe_timeout",
+                "message": "timed out",
+                "in_progress": [{"operation": "collective_rpc:update_weights"}],
+            },
+        ),
+    ],
+)
+async def test_health_generate_response(error, expected_body):
     from vllm.entrypoints.serve.instrumentator.health import health_generate
 
     mock_request = Mock(spec=Request)
-    mock_app_state = Mock()
     mock_engine_client = AsyncMock()
     mock_engine_client.check_health_gpu.side_effect = error
-    mock_app_state.engine_client = mock_engine_client
-    mock_request.app.state = mock_app_state
+    mock_request.app.state.engine_client = mock_engine_client
 
     response = await health_generate(mock_request)
 
+    if expected_body is None:
+        assert response.status_code == 200
+        return
     assert response.status_code == 503
-
-
-@pytest.mark.asyncio
-async def test_ready_check_engine_sleeping_reason():
-    from vllm.entrypoints.serve.instrumentator.health import health_generate
-
-    mock_request = Mock(spec=Request)
-    mock_app_state = Mock()
-    mock_engine_client = AsyncMock()
-    mock_engine_client.check_health_gpu.side_effect = EngineSleepingError(
-        "paused", engine_ranks=[0], in_progress=[]
-    )
-    mock_app_state.engine_client = mock_engine_client
-    mock_request.app.state = mock_app_state
-
-    response = await health_generate(mock_request)
-
-    assert response.status_code == 503
-    assert json.loads(response.body) == {
-        "status": "not_ready",
-        "reason": "sleeping",
-        "message": "paused",
-        "engine_ranks": [0],
-        "in_progress": [],
-    }
-
-
-@pytest.mark.asyncio
-async def test_ready_check_reports_in_progress_operations():
-    """A probe stuck behind a long control call says what the engine is doing."""
-    from vllm.entrypoints.serve.instrumentator.health import health_generate
-
-    operation = {
-        "operation": "collective_rpc:update_weights",
-        "engine_rank": 0,
-        "elapsed_s": 42.0,
-    }
-    mock_request = Mock(spec=Request)
-    mock_app_state = Mock()
-    mock_engine_client = AsyncMock()
-    mock_engine_client.check_health_gpu.side_effect = EngineUnhealthyError(
-        "timed out",
-        reason="probe_timeout",
-        timeout_s=20.0,
-        in_progress=[operation],
-    )
-    mock_app_state.engine_client = mock_engine_client
-    mock_request.app.state = mock_app_state
-
-    response = await health_generate(mock_request)
-
-    assert response.status_code == 503
-    body = json.loads(response.body)
-    assert body["reason"] == "probe_timeout"
-    assert body["in_progress"] == [operation]
+    assert json.loads(response.body) == expected_body

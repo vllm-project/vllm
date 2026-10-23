@@ -45,10 +45,13 @@ class EEPNotificationType(enum.Enum):
     SHUTDOWN_COMPLETE = "SHUTDOWN_COMPLETE"
 
 
-class EngineCoreReadyState(enum.IntEnum):
-    IDLE = 0
-    BUSY = 1
-    SLEEPING = 2
+class EngineHealthState(str, enum.Enum):
+    """EngineCore answer to a ``check_health_gpu`` utility call."""
+
+    OK = "ok"
+    BUSY = "busy"
+    STALLED = "stalled"
+    SLEEPING = "sleeping"
 
 
 class FinishReason(enum.IntEnum):
@@ -290,14 +293,6 @@ class EngineCoreOutputs(
 
     # Weight version used for this step.
     weight_version: str | None = None
-
-    # Lightweight readiness progress published by EngineCore. These fields
-    # are consumed by the frontend and are not exposed in request results.
-    ready_progress_seq: int | None = None
-    ready_state: EngineCoreReadyState | None = None
-    # Utility call the EngineCore is executing, if any; valid when
-    # ready_state is set.
-    ready_operation: str | None = None
 
     def __post_init__(self):
         if self.timestamp == 0.0:

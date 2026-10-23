@@ -520,10 +520,6 @@ pub(crate) async fn run_output_dispatcher_loop(
                         );
                     }
                 }
-                EngineCoreOutputs::Readiness(readiness) => {
-                    // The Rust frontend does not serve /health_generate yet.
-                    trace!(?readiness, "ignoring engine readiness progress");
-                }
                 other => {
                     Err::<(), _>(unexpected_dispatcher_output!(
                         "received unexpected output on main dispatcher path: {other:?}"
