@@ -79,7 +79,14 @@ void fused_experts_cpu(at::Tensor& out, at::Tensor& hidden_states,
                        const std::optional<at::Tensor>& w2_bias,
                        const std::optional<double>& alpha,
                        const std::optional<double>& limit, bool is_vnni,
-                       int64_t act_method);
+                       int64_t act_method,
+                       const std::optional<at::Tensor>& w1_block_metadata,
+                       const std::optional<at::Tensor>& w2_block_metadata,
+                       const std::optional<at::Tensor>& w1_channel_metadata,
+                       const std::optional<at::Tensor>& w2_channel_metadata);
+
+at::Tensor mxfp4_moe_scale_metadata(const at::Tensor& scales);
+at::Tensor mxfp4_moe_channel_metadata(const at::Tensor& scales);
 
 at::Tensor int8_scaled_mm_with_quant(at::Tensor& mat1, at::Tensor& mat2,
                                      at::Tensor& scales2,
@@ -104,6 +111,8 @@ at::Tensor fp8_scaled_mm_with_quant(const at::Tensor& act,
                                     at::ScalarType output_dtype);
 std::tuple<at::Tensor, at::Tensor> quantize_fp8e4m3_vec(
     const at::Tensor& t, bool channelwise, c10::optional<at::Tensor> scale_opt);
+
+bool cpu_native_fp8_supported(at::ScalarType dtype);
 
 // Adapted from sglang: MLA CPU kernels (AMX-only)
 void decode_attention_cpu(at::Tensor& query, at::Tensor& k_buffer,
@@ -667,9 +676,16 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "int moe_comp_method, Tensor? w1_scale, Tensor? w2_scale, "
       "Tensor? w1_zero, Tensor? w2_zero, Tensor? a1_scale, int[]? block_size, "
       "Tensor? w1_bias, Tensor? w2_bias, float? alpha, float? limit, "
-      "bool is_vnni, int act_method) -> "
+      "bool is_vnni, int act_method, Tensor? w1_block_metadata=None, "
+      "Tensor? w2_block_metadata=None, Tensor? w1_channel_metadata=None, "
+      "Tensor? w2_channel_metadata=None) -> "
       "()");
   ops.impl("fused_experts_cpu", torch::kCPU, &fused_experts_cpu);
+  ops.def("mxfp4_moe_channel_metadata(Tensor scales) -> Tensor");
+  ops.impl("mxfp4_moe_channel_metadata", torch::kCPU,
+           &mxfp4_moe_channel_metadata);
+  ops.def("mxfp4_moe_scale_metadata(Tensor scales) -> Tensor");
+  ops.impl("mxfp4_moe_scale_metadata", torch::kCPU, &mxfp4_moe_scale_metadata);
   ops.def(
       "int8_scaled_mm_with_quant(Tensor mat1, Tensor mat2, Tensor scales2, "
       "Tensor? bias, ScalarType out_dtype, bool is_vnni) -> Tensor");
@@ -699,6 +715,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "quantize_fp8e4m3_vec(Tensor input, bool channelwise, Tensor? scale_opt) "
       "-> (Tensor, Tensor)");
   ops.impl("quantize_fp8e4m3_vec", torch::kCPU, &quantize_fp8e4m3_vec);
+  ops.def("cpu_native_fp8_supported(ScalarType dtype) -> bool",
+          &cpu_native_fp8_supported);
 
   // Adapted from sglang: MLA CPU kernels (AMX-only, DeepSeek V2/V3/R1)
   ops.def(

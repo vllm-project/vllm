@@ -3480,6 +3480,7 @@ class CPUQuantMethod(IntEnum):
     INT4_W4A8 = 3
     MXFP4 = 4
     FP8_W8A8 = 5
+    MXFP4_W4A8 = 6
 
 
 if hasattr(torch.ops._C, "dynamic_4bit_int_moe"):
@@ -3520,6 +3521,10 @@ def fused_experts_cpu(
     is_vnni: bool = True,
     a1_scale: torch.Tensor | None = None,
     act_method: CPUActMethod = CPUActMethod.SILU_AND_MUL,
+    w1_block_metadata: torch.Tensor | None = None,
+    w2_block_metadata: torch.Tensor | None = None,
+    w1_channel_metadata: torch.Tensor | None = None,
+    w2_channel_metadata: torch.Tensor | None = None,
 ) -> None:
     torch.ops._C.fused_experts_cpu(
         out,
@@ -3541,6 +3546,10 @@ def fused_experts_cpu(
         limit,
         is_vnni,
         act_method,
+        w1_block_metadata,
+        w2_block_metadata,
+        w1_channel_metadata,
+        w2_channel_metadata,
     )
 
 
@@ -3671,6 +3680,14 @@ def cpu_has_amx_fp8() -> bool:
     if not hasattr(torch.ops._C, "cpu_has_amx_fp8"):
         return False
     return bool(torch.ops._C.cpu_has_amx_fp8())
+
+
+@cache
+def cpu_native_fp8_supported(dtype: torch.dtype) -> bool:
+    """Whether the CPU supports native AMX-FP8 for the requested dtype."""
+    if not hasattr(torch.ops._C, "cpu_native_fp8_supported"):
+        return False
+    return bool(torch.ops._C.cpu_native_fp8_supported(dtype))
 
 
 if hasattr(torch.ops._C, "fp8_scaled_mm_with_quant"):

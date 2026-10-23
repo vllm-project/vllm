@@ -371,8 +371,9 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             self.w13_precision_config = w13_scale
             self.w2_precision_config = w2_scale
 
-        if w13_bias is not None and w2_bias is not None:
+        if w13_bias is not None:
             replace_parameter(layer, "w13_bias", w13_bias)
+        if w2_bias is not None:
             replace_parameter(layer, "w2_bias", w2_bias)
 
         # Build quant config
@@ -549,8 +550,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
     def __init__(self, moe: FusedMoEConfig, activation_key: QuantKey | None = None):
         super().__init__(moe)
         self.weight_dtype = "mxfp4"
-        # Checkpoint-declared activation quantization. Only backends that pick
-        # their activation format from the layer (Humming) consume it.
+        # Checkpoint-declared activation quantization.
         self.activation_key = activation_key
         self.is_k3_situ_aiter = _use_k3_situ_aiter(moe)
         self.is_k3_situ_int4_gfx942 = _use_k3_situ_int4_gfx942(moe)
@@ -574,6 +574,10 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 # config cannot keep bf16 activations.
                 # TODO: Remove once AITER takes this as a kernel argument.
                 os.environ["AITER_BF16_FP8_MOE_BOUND"] = "0"
+        elif current_platform.is_cpu():
+            self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
+                moe, activation_key
+            )
         else:
             self.mxfp4_backend, self.experts_cls = select_deepseek_v4_mxfp4_moe_backend(
                 moe
@@ -856,8 +860,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             self.w13_precision_config = w13_scale
             self.w2_precision_config = w2_scale
 
-        if w13_bias is not None and w2_bias is not None:
+        if w13_bias is not None:
             replace_parameter(layer, "w13_bias", w13_bias)
+        if w2_bias is not None:
             replace_parameter(layer, "w2_bias", w2_bias)
 
         # Build quant config

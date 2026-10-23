@@ -443,6 +443,25 @@ W8A8_NK_SIZES = [(128, 256), (256, 512), (64, 128)]
 
 
 @requires_cpu_fp8_w8a8
+def test_cpu_fp8_quantize_fp32_per_row_rounding():
+    """FP32 row quantization uses direct FP32-to-FP8 rounding."""
+    x = torch.zeros((3, 16), dtype=torch.float32)
+    x[1, 0] = 1e-8
+    x[2, -1] = FP8_MAX
+    # Values straddle an FP8 midpoint; FP16 rounds both to the midpoint.
+    x[2, 1] = 1.0625 - 2**-23
+    x[2, 2] = 1.0625 + 2**-23
+
+    quantized, scales = torch.ops._C.quantize_fp8e4m3_vec(x, True, None)
+
+    eps = torch.finfo(torch.float32).eps
+    expected_scales = torch.tensor([eps, eps, 1.0])
+    expected = (x * expected_scales.reciprocal()[:, None]).to(torch.float8_e4m3fn)
+    torch.testing.assert_close(scales, expected_scales, rtol=0, atol=0)
+    assert torch.equal(quantized.view(torch.uint8), expected.view(torch.uint8))
+
+
+@requires_cpu_fp8_w8a8
 @pytest.mark.parametrize("static_activation", [True, False])
 @pytest.mark.parametrize("M", W8A8_M_SIZES)
 @pytest.mark.parametrize("N,K", W8A8_NK_SIZES)

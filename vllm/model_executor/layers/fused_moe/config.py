@@ -748,13 +748,19 @@ def mxfp4_w4a8_moe_quant_config(
     w2_bias: torch.Tensor | None = None,
     block_shape: list[int] | None = None,
     gemm1_clamp_limit: float | None = None,
+    per_act_token_quant: bool = False,
+    gemm1_alpha: float | None = None,
+    gemm1_beta: float | None = None,
 ) -> FusedMoEQuantConfig:
     """Construct a quant config for fp8 activations and mxfp4 weights."""
+    activation_shape = GroupShape.PER_TOKEN if per_act_token_quant else None
     return FusedMoEQuantConfig(
-        _a1=FusedMoEQuantDesc("fp8", None, a1_scale, None, None, None),
-        _a2=FusedMoEQuantDesc("fp8", None, a2_scale, None, None, None),
+        _a1=FusedMoEQuantDesc("fp8", activation_shape, a1_scale, None, None, None),
+        _a2=FusedMoEQuantDesc("fp8", activation_shape, a2_scale, None, None, None),
         _w1=FusedMoEQuantDesc("mxfp4", None, w1_scale, None, None, w1_bias),
         _w2=FusedMoEQuantDesc("mxfp4", None, w2_scale, None, None, w2_bias),
+        gemm1_alpha=gemm1_alpha,
+        gemm1_beta=gemm1_beta,
         gemm1_clamp_limit=gemm1_clamp_limit,
     )
 

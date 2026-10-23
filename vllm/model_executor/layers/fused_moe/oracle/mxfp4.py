@@ -48,6 +48,7 @@ from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
+    kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
     kMxfp4Dynamic,
     kMxfp4Static,
@@ -163,6 +164,7 @@ class Mxfp4MoeBackend(Enum):
     XPU = "XPU"
     # CPU
     CPU = "CPU"
+    CPU_MXFP4_FP8 = "CPU_MXFP4_FP8"
     # Emulation
     EMULATION = "EMULATION"
     # Humming
@@ -330,6 +332,13 @@ def backend_to_kernel_cls(
 
         return [CPUExpertsMxfp4]
 
+    elif backend == Mxfp4MoeBackend.CPU_MXFP4_FP8:
+        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+            CPUExpertsMxfp4W4A8,
+        )
+
+        return [CPUExpertsMxfp4W4A8]
+
     elif backend == Mxfp4MoeBackend.EMULATION:
         from vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe import (
             OCP_MXQuantizationEmulationTritonExperts,
@@ -387,7 +396,7 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
         "aiter_triton_mxfp4_mxfp4": [Mxfp4MoeBackend.AITER_TRITON_MXFP4_MXFP4],
         "aiter_mxfp4_mxfp4": [Mxfp4MoeBackend.AITER_MXFP4_MXFP4],
         "xpu": [Mxfp4MoeBackend.XPU],
-        "cpu": [Mxfp4MoeBackend.CPU],
+        "cpu_mxfp4_bf16": [Mxfp4MoeBackend.CPU],
         "emulation": [Mxfp4MoeBackend.EMULATION],
     }
     if backends := mapping.get(runner_backend):
@@ -420,6 +429,7 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
         Mxfp4MoeBackend.HUMMING,
         Mxfp4MoeBackend.XPU,
         Mxfp4MoeBackend.CPU,
+        Mxfp4MoeBackend.CPU_MXFP4_FP8,
         Mxfp4MoeBackend.EMULATION,
     ]
     if current_platform.is_cuda() and current_platform.is_device_capability_family(120):
@@ -474,6 +484,8 @@ def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
         return kMxfp8Dynamic
     if backend == Mxfp4MoeBackend.AITER_MXFP4_FP8:
         return kFp8StaticTensorSym
+    if backend == Mxfp4MoeBackend.CPU_MXFP4_FP8:
+        return kFp8DynamicTokenSym
     if backend in (
         Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
         Mxfp4MoeBackend.AITER_TRITON_MXFP4_MXFP4,
@@ -602,10 +614,11 @@ def _filter_by_activation(
     backends: list[Mxfp4MoeBackend],
     requested_activation_key: QuantKey | None,
 ) -> list[Mxfp4MoeBackend]:
-    """Pick variants matching ``requested_activation_key``, followed by BF16
-    variants as a higher-precision fallback; without one, prefer BF16 if the
-    list has any, else keep the list as-is so explicit non-BF16 picks (e.g.
-    the ``_afp8`` aliases) still land."""
+    """Prefer matching variants, then BF16 fallbacks.
+
+    Automatic CPU selection tries dynamic FP8 first; other platforms retain
+    their existing BF16-first default when no activation key is requested.
+    """
     bf16 = [b for b in backends if _backend_activation_key(b) is None]
     if requested_activation_key is not None:
         matching = [
@@ -615,6 +628,12 @@ def _filter_by_activation(
             or b == Mxfp4MoeBackend.EMULATION
         ]
         return matching + [b for b in bf16 if b not in matching]
+    if current_platform.is_cpu():
+        cpu_auto: list[Mxfp4MoeBackend] = [
+            b for b in backends if b == Mxfp4MoeBackend.CPU_MXFP4_FP8
+        ]
+        if cpu_auto:
+            return cpu_auto + bf16
     return bf16 if bf16 else backends
 
 
@@ -895,7 +914,10 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
 
         intermediate_size = round_up(intermediate_size, intermediate_alignment)
         hidden_size = round_up(hidden_size, hidden_alignment)
-    elif backend == Mxfp4MoeBackend.CPU:
+    elif backend in (
+        Mxfp4MoeBackend.CPU,
+        Mxfp4MoeBackend.CPU_MXFP4_FP8,
+    ):
         # CPU AMX kernel uses BLOCK_N=32, align to 32
         intermediate_size = round_up(intermediate_size, 32)
         hidden_size = round_up(hidden_size, 32)
@@ -1476,7 +1498,10 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             w13_bias,
             w2_bias,
         )
-    elif mxfp4_backend == Mxfp4MoeBackend.CPU:
+    elif mxfp4_backend in (
+        Mxfp4MoeBackend.CPU,
+        Mxfp4MoeBackend.CPU_MXFP4_FP8,
+    ):
         from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
             prepare_mxfp4_moe_layer_for_cpu,
         )
@@ -2035,7 +2060,10 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w13_bias,
             w2_bias,
         )
-    elif mxfp4_backend == Mxfp4MoeBackend.CPU:
+    elif mxfp4_backend in (
+        Mxfp4MoeBackend.CPU,
+        Mxfp4MoeBackend.CPU_MXFP4_FP8,
+    ):
         from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
             prepare_mxfp4_moe_layer_for_cpu,
         )
@@ -2148,6 +2176,17 @@ def make_mxfp4_moe_quant_config(
             w1_bias=w1_bias,
             w2_bias=w2_bias,
             block_shape=None,
+            gemm1_clamp_limit=swiglu_limit,
+        )
+    elif mxfp4_backend == Mxfp4MoeBackend.CPU_MXFP4_FP8:
+        return mxfp4_w4a8_moe_quant_config(
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            w1_bias=w1_bias,
+            w2_bias=w2_bias,
+            per_act_token_quant=True,
+            gemm1_alpha=gemm1_alpha,
+            gemm1_beta=gemm1_beta,
             gemm1_clamp_limit=swiglu_limit,
         )
     elif mxfp4_backend in (
