@@ -22,7 +22,9 @@ use crate::client::state::{
 use crate::client::stream::EngineCoreStreamOutput;
 use crate::client::{AbortCause, AbortRequest};
 use crate::error::{client_closed, dispatcher_closed, unexpected_dispatcher_output};
-use crate::metrics::{IterationMetricHandles, LoraInfoExporter, SchedulerStatsRecorder};
+use crate::metrics::{
+    IterationMetricHandles, LoraInfoExporter, LoraLoadedExporter, SchedulerStatsRecorder,
+};
 use crate::protocol::encode_msgpack;
 use crate::protocol::output::{EngineCoreOutput, EngineCoreOutputs};
 use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
@@ -438,6 +440,7 @@ pub(crate) async fn run_output_dispatcher_loop(
     // LoRA phases come from request lifecycle events, which engines only emit
     // when they record stats.
     let mut lora_info = inner.engine_stats_enabled.then(LoraInfoExporter::default);
+    let mut lora_loaded = LoraLoadedExporter::default();
 
     let result: Result<()> = async {
         loop {
@@ -504,6 +507,15 @@ pub(crate) async fn run_output_dispatcher_loop(
                     if let Some(lora_info) = &mut lora_info {
                         let (running, waiting) = inner.lora_adapter_states();
                         lora_info.update(&METRICS.scheduler, running, waiting);
+                    }
+
+                    if let Some(event) = batch.lora_load_event.as_ref() {
+                        lora_loaded.update(
+                            &METRICS.scheduler,
+                            inner.model_name(),
+                            batch.engine_index,
+                            event,
+                        );
                     }
                 }
                 EngineCoreOutputs::Utility(utility) => {
