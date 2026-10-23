@@ -226,8 +226,13 @@ FoPE = "FoPE"
 k_ot = "k_ot"
 view_seperator = "view_seperator"
 inverse_std_variences = "inverse_std_variences"
+# Muse Spark K3 monokernel: threads an expert
+TPE = "TPE"
 
 [tool.typos.default.extend-words]
+# Muse Spark K3 monokernel: shuffled-weight / scale tags
+shs = "shs"
+shw = "shw"
 certifi = "certifi"
 MoNE = "MoNE"
 mone = "mone"
