@@ -13,6 +13,7 @@ from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.entrypoints.serve import create_error_response
+from vllm.exceptions import VLLMValidationError
 from vllm.multimodal.media import MediaConnector
 from vllm.multimodal.parse import parse_mm_uuids
 from vllm.multimodal.processing.processor import MultiModalProcessorCacheMissError
@@ -285,7 +286,7 @@ def test_multi_modal_uuids_length_mismatch_raises():
     mm_data_items = mm_processor.info.parse_mm_data(mm_data)
     mm_uuid_items = parse_mm_uuids(mm_uuids)
 
-    with pytest.raises(ValueError, match="must have same length as"):
+    with pytest.raises(VLLMValidationError, match="must have same length as"):
         renderer._process_mm_uuids(mm_data, mm_data_items, mm_uuid_items, "req-1a")
 
     # Mismatch: 2 items but only 1 uuid provided
@@ -295,7 +296,7 @@ def test_multi_modal_uuids_length_mismatch_raises():
     mm_data_items = mm_processor.info.parse_mm_data(mm_data)
     mm_uuid_items = parse_mm_uuids(mm_uuids)
 
-    with pytest.raises(ValueError, match="must have same length as"):
+    with pytest.raises(VLLMValidationError, match="must have same length as"):
         renderer._process_mm_uuids(mm_data, mm_data_items, mm_uuid_items, "req-1b")
 
 
@@ -314,7 +315,7 @@ def test_multi_modal_uuids_missing_modality_raises():
     mm_data_items = mm_processor.info.parse_mm_data(mm_data)
     mm_uuid_items = parse_mm_uuids(mm_uuids)
 
-    with pytest.raises(ValueError, match="is empty but .* is missing"):
+    with pytest.raises(VLLMValidationError, match="is empty but .* is missing"):
         renderer._process_mm_uuids(mm_data, mm_data_items, mm_uuid_items, "req-2")
 
 
