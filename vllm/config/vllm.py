@@ -3077,11 +3077,30 @@ class VllmConfig:
             )
         elif (
             self.kv_transfer_config is not None
+            and self.kv_transfer_config.has_connector("LMCacheMPConnector")
+        ):
+            unsupported = (
+                "LMCacheMPConnector shares the KV cache through legacy CUDA IPC, "
+                "which cannot export driver-mapped memory"
+            )
+        elif (
+            self.kv_transfer_config is not None
             and self.kv_transfer_config.uses_custom_mem_pool()
         ):
             unsupported = (
                 "custom_mem_pool allocates the KV cache from a connector's "
                 "memory pool, which a driver-mapped cache cannot use"
+            )
+        elif (
+            self.kv_transfer_config is not None
+            and current_platform.is_rocm()
+            and self.kv_transfer_config.registers_kv_cache_memory()
+        ):
+            # TODO: drop once UCX handles HSA_EXT_POINTER_TYPE_HSA_VMEM and
+            # hsa_amd_portable_export_dmabuf accepts VMM ranges.
+            unsupported = (
+                "on ROCm, UCX and RDMA cannot yet register driver-mapped memory, "
+                "which the NIXL, Mooncake and MoRIIO connectors require"
             )
         if requested is None:
             cache_config.enable_extensible_kv_cache = unsupported is None

@@ -7,6 +7,7 @@ from __future__ import annotations
 import ctypes
 import itertools
 import math
+import sys
 from collections.abc import Iterable, Sequence
 from contextlib import suppress
 from typing import Any
@@ -172,9 +173,13 @@ class _VirtualBuffer:
             self._driver.free_reserved(self.base_ptr, self.reserved_size)
         self.base_ptr = 0
 
-    def __del__(self, _suppress: Any = suppress) -> None:
-        # Bound as a default: module globals may be gone at interpreter exit.
-        if _suppress is None:
+    def __del__(
+        self, _suppress: Any = suppress, _is_finalizing: Any = sys.is_finalizing
+    ) -> None:
+        # Bound as defaults: module globals may be gone at interpreter exit.
+        # The process frees its mappings on exit, and the HIP runtime may
+        # already be torn down, where a driver call aborts the process.
+        if _suppress is None or _is_finalizing():
             return
         with _suppress(Exception):
             self.free()

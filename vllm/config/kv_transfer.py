@@ -47,6 +47,13 @@ def hisparse_host_pool_gib(
     return host_pool_gib
 
 
+# Connectors that register the device KV cache with an RDMA engine whatever
+# their buffer device; NIXL is checked separately as it can stage through host.
+_KV_CACHE_REGISTERING_CONNECTORS = frozenset(
+    {"MooncakeConnector", "MooncakeStoreConnector", "MoRIIOConnector"}
+)
+
+
 def kv_buffer_device_default_factory() -> str:
     from vllm.platforms import current_platform
 
@@ -148,6 +155,22 @@ class KVTransferConfig:
                 for child in self.kv_connector_extra_config.get("connectors", [])
             ]
         return any(config.get("custom_mem_pool") for config in configs)
+
+    def registers_kv_cache_memory(self) -> bool:
+        """Whether a connector registers the device KV cache itself with UCX or
+        RDMA (NIXL, Mooncake, MoRIIO), directly or in MultiConnector. NIXL with
+        a CPU ``kv_buffer_device`` registers only its host staging buffers."""
+        children = [{"kv_connector": self.kv_connector}]
+        if self.kv_connector == "MultiConnector":
+            children = self.kv_connector_extra_config.get("connectors", [])
+        for child in children:
+            name = child.get("kv_connector") or ""
+            if name in _KV_CACHE_REGISTERING_CONNECTORS:
+                return True
+            buffer_device = child.get("kv_buffer_device", self.kv_buffer_device)
+            if name.startswith("Nixl") and buffer_device != "cpu":
+                return True
+        return False
 
     def has_connector(self, connector_name: str) -> bool:
         """Whether ``connector_name`` is configured, directly or in MultiConnector."""
