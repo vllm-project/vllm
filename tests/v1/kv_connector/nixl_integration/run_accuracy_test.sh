@@ -218,6 +218,17 @@ run_tests_for_model() {
     PREFILL_PORTS+=("$PORT")
   done
 
+  # When decoders wrap onto the prefillers' GPUs, start them only after the
+  # prefillers are up: an instance that profiles memory while another loads
+  # weights on the same GPU counts those weights against its own budget.
+  GPUS_NEEDED=$((NUM_PREFILL_INSTANCES * PREFILLER_WORLD_SIZE + NUM_DECODE_INSTANCES * DECODER_TP_SIZE))
+  if (( GPUS_NEEDED > $(get_num_gpus) )); then
+    for PORT in "${PREFILL_PORTS[@]}"; do
+      echo "Waiting for prefill instance on port $PORT before starting decoders on shared GPUs..."
+      wait_for_server "$PORT"
+    done
+  fi
+
   # Start decode instances
   for i in $(seq 0 $((NUM_DECODE_INSTANCES-1))); do
     # Calculate GPU ID - we'll distribute across available GPUs, starting from after prefill GPUs
