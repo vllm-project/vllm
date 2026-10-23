@@ -13,6 +13,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
+from vllm.model_executor.layers.fused_moe.utils import fi_moe_largest_bucket
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_type,
 )
@@ -97,11 +98,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         self.tp_size = moe_config.moe_parallel_config.tp_size
         self.out_dtype = moe_config.in_dtype
         self.use_dp = moe_config.moe_parallel_config.dp_size > 1
-        # Upper bound on input.size(0) seen by the kernel. With DP the MoE
-        # input can be gathered across DP ranks before the experts run.
-        self._max_workspace_rows = moe_config.max_num_tokens * max(
-            1, moe_config.moe_parallel_config.dp_size
-        )
+        self._max_workspace_rows = fi_moe_largest_bucket(moe_config)
         self._workspace_nbytes: dict[tuple, int] = {}
         # Enables DeepSeek-style FP8 block-scale path:
         # - pass per-block weight scales to the kernel

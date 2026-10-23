@@ -29,6 +29,9 @@ from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import 
     is_valid_flashinfer_cutlass_fused_moe,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    activation_to_flashinfer_type,
+)
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     has_flashinfer_cutlass_fused_moe,
@@ -62,13 +65,22 @@ MNK_FACTORS = [
     not has_flashinfer_cutlass_fused_moe_workspace(),
     reason="Requires caller-owned CUTLASS MoE workspace support",
 )
-@pytest.mark.parametrize("dp_size", [1, 2])
+@pytest.mark.parametrize(
+    "max_num_tokens, dp_size, elastic_ep_max_dp_size, workspace_rows",
+    [(32, 1, None, 8192), (32, 2, None, 8192), (4096, 2, 4, 16384)],
+)
 @pytest.mark.parametrize("activation", [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL])
 @torch.inference_mode()
 def test_flashinfer_workspace_reused_after_lock(
-    dp_size, activation, workspace_init, monkeypatch
+    max_num_tokens,
+    dp_size,
+    elastic_ep_max_dp_size,
+    workspace_rows,
+    activation,
+    workspace_init,
+    monkeypatch,
 ):
-    """Small-first warmup must cover a gathered batch and reuse storage per layer."""
+    """Locked reuse must cover gathered inputs, autotuning and elastic DP."""
     parallel = FusedMoEParallelConfig.make_no_parallel()
     parallel.dp_size = dp_size
     config = FusedMoEConfig(
@@ -83,10 +95,11 @@ def test_flashinfer_workspace_reused_after_lock(
         moe_parallel_config=parallel,
         in_dtype=torch.bfloat16,
         routing_method=RoutingMethodType.TopK,
-        max_num_tokens=32,
+        max_num_tokens=max_num_tokens,
+        elastic_ep_max_dp_size=elastic_ep_max_dp_size,
     )
     layers = [FlashInferExperts(config, FusedMoEQuantConfig.make()) for _ in range(2)]
-    max_rows = 32 * dp_size
+    max_rows = max_num_tokens * dp_size
     x = torch.randn(max_rows, 256, device="cuda", dtype=torch.bfloat16) / 10
     w1 = (
         torch.randn(
@@ -101,6 +114,18 @@ def test_flashinfer_workspace_reused_after_lock(
     w2 = torch.randn(8, 256, 512, device="cuda", dtype=torch.bfloat16) / 10
     ids = torch.tensor([0, 1], device="cuda").expand(max_rows, 2)
     weights = torch.full((max_rows, 2), 0.5, device="cuda")
+    expected_nbytes = fi_moe.flashinfer_cutlass_fused_moe_workspace_size(
+        workspace_rows,
+        256,
+        512,
+        8,
+        2,
+        x_dtype=x.dtype,
+        weight_dtype=w1.dtype,
+        output_dtype=x.dtype,
+        activation_type=activation_to_flashinfer_type(activation),
+        device=x.device,
+    )
     buffers = []
     kernel = fi_moe.flashinfer_cutlass_fused_moe
 
@@ -108,6 +133,7 @@ def test_flashinfer_workspace_reused_after_lock(
         # Assert that the new path really ran, then compare the same kernel
         # with and without caller-owned scratch.
         buffers.append(kwargs["workspace_buffer"])
+        assert buffers[-1].nbytes >= expected_nbytes
         result = kernel(**kwargs)
         reference = torch.empty_like(kwargs["output"])
         kernel(**{**kwargs, "workspace_buffer": None, "output": reference})
