@@ -32,7 +32,11 @@ from vllm.parser.engine.adapters import (
     make_adapters,
 )
 from vllm.parser.engine.events import EventType, SemanticEvent
-from vllm.parser.engine.parser_engine import ParserEngine, ReasoningEnd
+from vllm.parser.engine.parser_engine import (
+    ParserEngine,
+    ReasoningEnd,
+    _ArgsRewriter,
+)
 from vllm.parser.engine.parser_engine_config import (
     ParserEngineConfig,
     ParserState,
@@ -41,6 +45,7 @@ from vllm.parser.engine.parser_engine_config import (
 from vllm.parser.glm47_moe import glm47_moe_config
 from vllm.parser.parser_manager import ParserManager
 from vllm.parser.qwen3 import Qwen3Parser
+from vllm.tool_parsers.utils import coerce_typed_value
 
 # ── Shared test configs ──────────────────────────────────────────────
 
@@ -2224,6 +2229,46 @@ class TestCoercionInstabilityRegression:
         """An aliased string property still holds a string, so its value may
         stream before it closes."""
         assert ParserEngine._streamable_string_keys({"zip": {"type": "str"}}) == {"zip"}
+
+
+_STREAMABLE_SCHEMA_SHAPES: list[dict] = [
+    {"type": "string"},
+    {"type": "str"},
+    {},
+    {"description": "Any JSON value."},
+    {"anyOf": [{"type": "string"}, {}]},
+    {"allOf": [{"type": "string"}]},
+    {"$ref": "#/$defs/Foo"},
+    {"type": "string", "enum": ["a", "b"]},
+    {"const": "fixed"},
+    {"type": ["string", "null"]},
+    {"anyOf": [{"type": "string"}, {"type": "integer"}]},
+    {"type": "integer"},
+]
+
+
+class TestStreamableStringKeyProperty:
+    """A key whose open string streams must never have that string rewritten.
+
+    ``_streamable_string_keys`` and the rewriter derive a property's type
+    through separate schema pipelines; streaming is prefix-safe only while
+    they agree.  This pins the agreement across schema shapes, so a change
+    that streams a key's string in one pipeline while coercing it in the
+    other fails here instead of silently truncating the call.
+    """
+
+    @pytest.mark.parametrize(
+        "schema", _STREAMABLE_SCHEMA_SHAPES, ids=lambda s: json.dumps(s)
+    )
+    @pytest.mark.parametrize(
+        "value", ["x", "", 'quote " and \\ backslash', "ünïcødé", "NaN"]
+    )
+    def test_streamable_key_string_never_rewritten(self, schema, value):
+        properties = {"k": schema}
+        text = json.dumps({"k": value})
+        if "k" in (ParserEngine._streamable_string_keys(properties) or set()):
+            assert coerce_typed_value(value, schema) == (value, False)
+            assert _ArgsRewriter(text, properties, final=True).rewrite() == text
 
 
 _DROP_VOCAB: dict[str, int] = {
