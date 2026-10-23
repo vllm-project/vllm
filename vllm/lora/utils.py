@@ -27,6 +27,8 @@ from vllm.lora.layers import (
     MergedColumnParallelLinearWithShardedLoRA,
     MergedQKVParallelLinearWithLoRA,
     MergedQKVParallelLinearWithShardedLoRA,
+    MiniMaxM3DenseQKVWithLoRA,
+    MiniMaxM3QKVIndexerWithLoRA,
     QKVParallelLinearWithLoRA,
     QKVParallelLinearWithShardedLoRA,
     ReplicatedLinearWithLoRA,
@@ -81,6 +83,8 @@ def get_lora_id():
 # Order matters here: more specific wrappers must be checked before generic
 # merged/column-parallel wrappers in from_layer().
 _all_lora_classes: tuple[type[BaseLayerWithLoRA], ...] = (
+    MiniMaxM3QKVIndexerWithLoRA,
+    MiniMaxM3DenseQKVWithLoRA,
     Step5FusedQKVIndexerWithLoRA,
     Step5SparseIndexerWWithLoRA,
     VocabParallelEmbeddingWithLoRA,
