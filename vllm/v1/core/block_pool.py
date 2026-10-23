@@ -191,6 +191,10 @@ class BlockPool:
         self.kv_event_queue: list[KVCacheEvent] = []
 
         self.metrics_collector = metrics_collector
+        # Device prefix-cache blocks dropped since the last stats drain.
+        # ``reset_prefix_cache`` clears hashes in bulk and does not increment
+        # this; only a block whose cached hashes are removed does.
+        self._prefix_cache_evictions = 0
         # Callbacks for blocks released with ``unpin_blocks`` whose contents
         # are still being read until the pool reuses them.
         self._reuse_watchers: dict[int, Callable[[KVCacheBlock], None]] = {}
@@ -746,8 +750,15 @@ class BlockPool:
             # The block doesn't have hash, eviction is not needed
             return False
 
+        self._prefix_cache_evictions += 1
         self._emit_block_removed_events(evicted_hashes)
         return True
+
+    def take_prefix_cache_evictions(self) -> int:
+        """Return and clear the number of prefix-cache blocks evicted."""
+        evictions = self._prefix_cache_evictions
+        self._prefix_cache_evictions = 0
+        return evictions
 
     def touch(self, blocks: Sequence[KVCacheBlock]) -> None:
         """Touch a block increases its reference count by 1, and may remove

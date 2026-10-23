@@ -59,6 +59,7 @@ struct SchedulerStatsHandles {
     // Prefix-cache counters, including the connector-backed external cache path.
     prefix_cache_queries: U64Counter,
     prefix_cache_hits: U64Counter,
+    prefix_cache_evictions: U64Counter,
     external_prefix_cache_queries: U64Counter,
     external_prefix_cache_hits: U64Counter,
     /// One handle per `CachedTokensBySource::SOURCES` entry.
@@ -164,6 +165,7 @@ fn resolve_scheduler_stats_handles(
         kv_cache_usage: metrics.kv_cache_usage.get_or_create_owned(&labels),
         prefix_cache_queries: metrics.prefix_cache_queries.get_or_create_owned(&labels),
         prefix_cache_hits: metrics.prefix_cache_hits.get_or_create_owned(&labels),
+        prefix_cache_evictions: metrics.prefix_cache_evictions.get_or_create_owned(&labels),
         external_prefix_cache_queries: metrics
             .external_prefix_cache_queries
             .get_or_create_owned(&labels),
@@ -232,6 +234,7 @@ fn record_scheduler_stats_with_handles(handles: &SchedulerStatsHandles, stats: &
     // Prefix-cache counters, including the connector-backed external cache path.
     handles.prefix_cache_queries.inc_by(stats.prefix_cache_stats.base.queries);
     handles.prefix_cache_hits.inc_by(stats.prefix_cache_stats.base.hits);
+    handles.prefix_cache_evictions.inc_by(stats.prefix_cache_evictions);
     // Local prefix-cache hits are the `device` tier.
     handles.prompt_tokens_cached_by_source[0].inc_by(stats.prefix_cache_stats.base.hits);
 
@@ -516,6 +519,23 @@ mod tests {
                 num_failed_keys: 0,
             }],
         )]))
+    }
+
+    #[test]
+    fn prefix_cache_evictions_are_recorded() {
+        let metrics = Metrics::new();
+        let handles = super::resolve_scheduler_stats_handles(&metrics.scheduler, "model", 0);
+        let stats = SchedulerStats {
+            prefix_cache_evictions: 3,
+            ..Default::default()
+        };
+
+        super::record_scheduler_stats_with_handles(&handles, &stats);
+
+        let rendered = metrics.render().unwrap();
+        assert!(rendered.contains(
+            "vllm:prefix_cache_evictions_total{model_name=\"model\",engine=\"0\"} 3"
+        ));
     }
 
     /// Records one MultiConnector payload into Mooncake and NIXL metrics.

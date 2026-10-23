@@ -243,6 +243,9 @@ class SchedulerStats:
 
     kv_cache_eviction_events: list[KVCacheEvictionEvent] = field(default_factory=list)
 
+    # Device prefix-cache blocks dropped since the previous stats publish.
+    prefix_cache_evictions: int = 0
+
     spec_decoding_stats: SpecDecodingStats | None = None
     kv_connector_stats: dict[str, Any] | None = None
     ec_connector_stats: dict[str, Any] | None = None

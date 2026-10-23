@@ -233,6 +233,14 @@ class KVCacheManager:
         """
         return self.block_pool.get_usage()
 
+    def take_prefix_cache_evictions(self) -> int:
+        """Return and clear device prefix-cache blocks evicted since last call.
+
+        A reset of the prefix cache does not count: those blocks are dropped
+        in bulk rather than reused under allocation pressure.
+        """
+        return self.block_pool.take_prefix_cache_evictions()
+
     def make_prefix_cache_stats(self) -> PrefixCacheStats | None:
         """Get (and reset) the prefix cache stats.
 
