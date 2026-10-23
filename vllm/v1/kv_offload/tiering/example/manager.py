@@ -129,8 +129,9 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
                           spec for reading chunks from the primary tier.
 
         """
-        keys = job_metadata.keys
-        chunk_ids = job_metadata.chunk_ids
+        keys_chunks = job_metadata.get()
+        assert keys_chunks is not None
+        keys, chunk_ids = keys_chunks
 
         assert len(keys) == len(chunk_ids), (
             f"Length mismatch: {len(keys)} keys but {len(chunk_ids)} chunk_ids"
@@ -155,8 +156,13 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
                           spec for writing chunks into the primary tier.
 
         """
-        keys = job_metadata.keys
-        chunk_ids = job_metadata.chunk_ids
+        if (keys_chunks := job_metadata.get()) is None:
+            # Materialization / Allocation failed.
+            self.completed_jobs.append(
+                JobResult(job_id=job_metadata.job_id, success=True)
+            )
+            return
+        keys, chunk_ids = keys_chunks
 
         assert len(keys) == len(chunk_ids), (
             f"Length mismatch: {len(keys)} keys but {len(chunk_ids)} chunk_ids"

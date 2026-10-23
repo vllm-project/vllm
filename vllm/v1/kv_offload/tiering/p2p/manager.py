@@ -502,8 +502,10 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     @override
     def submit_store(self, job_metadata: TransferJob) -> None:
         job_id = job_metadata.job_id
-        keys = list(job_metadata.keys)
-        block_ids = job_metadata.chunk_ids.tolist()
+        keys_chunks = job_metadata.get()
+        assert keys_chunks is not None
+        keys = list(keys_chunks[0])
+        block_ids = keys_chunks[1].tolist()
 
         assert len(keys) == len(block_ids)
 
@@ -576,10 +578,14 @@ class P2PSecondaryTierManager(SecondaryTierManager):
 
     @override
     def submit_load(self, job_metadata: TransferJob) -> None:
-        assert job_metadata.get() is not None, "Cannot materialize load job"
         job_id = job_metadata.job_id
-        keys = list(job_metadata.keys)
-        block_ids = job_metadata.chunk_ids
+        keys_chunks = job_metadata.get()
+        if keys_chunks is None:
+            # Allocation / Materialization failed.
+            self._finished_jobs.append(JobResult(job_id=job_id, success=True))
+            return
+        keys = list(keys_chunks[0])
+        block_ids = keys_chunks[1]
 
         source = job_metadata.req_context.get_state(P2PSourceInfo)
         logger.debug(

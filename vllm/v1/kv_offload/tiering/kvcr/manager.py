@@ -199,8 +199,10 @@ class _FrameworkPinAdapter:
                 return None
 
             job = parent.create_store_job(hit_keys, req_context)
-            job_keys = tuple(job.keys)
-            chunk_ids = tuple(int(chunk_id) for chunk_id in job.chunk_ids)
+            job_keys_chunks = job.get()
+            assert job_keys_chunks is not None
+            job_keys = tuple(job_keys_chunks[0])
+            chunk_ids = tuple(int(chunk_id) for chunk_id in job_keys_chunks[1])
             if len(job_keys) != len(chunk_ids) or set(job_keys) != set(hit_keys):
                 return None
 
@@ -491,12 +493,16 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
 
     @override
     def submit_load(self, job_metadata: TransferJob) -> None:
-        assert job_metadata.get() is not None, "Cannot materialize job"
+        keys_chunks = job_metadata.get()
+        if keys_chunks is None:
+            # Materialization / Allocation failed.
+            self._finished_jobs.append(
+                JobResult(job_id=job_metadata.job_id, success=True)
+            )
+            return
         blocks = {
             self._key_adapter.encode(key): [self._make_descriptor(int(chunk_id))]
-            for key, chunk_id in zip(
-                job_metadata.keys, job_metadata.chunk_ids, strict=True
-            )
+            for key, chunk_id in zip(*keys_chunks, strict=True)
         }
         if not blocks:
             self._finished_jobs.append(
@@ -516,11 +522,11 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
 
     @override
     def submit_store(self, job_metadata: TransferJob) -> None:
+        keys_chunks = job_metadata.get()
+        assert keys_chunks is not None
         blocks = {
             self._key_adapter.encode(key): [self._make_descriptor(int(chunk_id))]
-            for key, chunk_id in zip(
-                job_metadata.keys, job_metadata.chunk_ids, strict=True
-            )
+            for key, chunk_id in zip(*keys_chunks, strict=True)
         }
         if not blocks:
             self._finished_jobs.append(

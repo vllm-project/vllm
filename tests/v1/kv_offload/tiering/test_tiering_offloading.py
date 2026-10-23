@@ -248,29 +248,23 @@ def _make_deferred_promotion_job(alloc_fn, keys=None):
         job_id=1,
         req_context=_CTX,
         keys=keys,
-        chunk_ids=None,
         alloc_fn=alloc_fn,
     )
 
 
 class TestPromotionTransferJob:
     def test_materialization_contract(self):
-        """Accessing .keys/.chunk_ids before get() raises ValueError.
-        Accessing them after materialization should be fine.
+        """A deferred job is not materialized until get(); get() returns the
+        acquired keys/chunk_ids and materializes it.
         """
         keys = to_keys([1, 2])
         chunk_ids = np.array([3, 7], dtype=np.int32)
 
         job = _make_deferred_promotion_job(lambda keys, ctx: (list(keys), chunk_ids))
-        with pytest.raises(ValueError):
-            _ = job.keys
-        with pytest.raises(ValueError):
-            _ = job.chunk_ids
+        assert not job.is_materialized()
 
         assert job.get() == (keys, chunk_ids)
-
-        assert list(job.keys) == keys
-        assert np.array_equal(job.chunk_ids, chunk_ids)
+        assert job.is_materialized()
 
     def test_alloc_fn_receives_requested_keys_and_ctx(self):
         """alloc_fn is called with exactly the requested keys and req_context."""
@@ -290,7 +284,7 @@ class TestPromotionTransferJob:
 
     def test_allocation_failure_memoized(self):
         """A None alloc_fn result is memoized: get() stays None, alloc_fn runs
-        once, and properties keep raising."""
+        once, and the job never materializes."""
         calls = []
 
         def failing_alloc(keys, ctx):
@@ -302,8 +296,7 @@ class TestPromotionTransferJob:
         assert job.get() is None
         assert job.get() is None
         assert len(calls) == 1
-        with pytest.raises(ValueError):
-            _ = job.keys
+        assert not job.is_materialized()
 
     def test_get_is_idempotent(self):
         """Calling get() twice invokes alloc_fn exactly once."""
@@ -318,28 +311,22 @@ class TestPromotionTransferJob:
         assert job.get() == first
         assert call_count[0] == 1
 
-    def test_malformed_deferred_job_rejected(self):
-        """A deferred job without alloc_fn fails construction."""
-        with pytest.raises(AssertionError):
-            PromotionTransferJob(
-                job_id=1,
-                req_context=_CTX,
-                keys=to_keys([1]),
-                chunk_ids=None,
-            )
-
     def test_materialized_at_construction(self):
         """Equal-length keys/chunk_ids make the job materialized; get() returns
         the pre-set claim without an alloc_fn."""
         keys = to_keys([1, 2])
         chunk_ids = np.array([4, 5], dtype=np.int32)
         job = PromotionTransferJob(
-            job_id=1, req_context=_CTX, keys=keys, chunk_ids=chunk_ids
+            job_id=1,
+            req_context=_CTX,
+            keys=keys,
+            alloc_fn=lambda k, ctx: (keys, chunk_ids),
         )
 
-        assert job.get() == (keys, chunk_ids)
-        assert list(job.keys) == keys
-        assert np.array_equal(job.chunk_ids, chunk_ids)
+        keys_chunks = job.get()
+        assert keys_chunks is not None
+        assert list(keys_chunks[0]) == keys
+        assert np.array_equal(keys_chunks[1], chunk_ids)
 
 
 class TestCascadeTransferJob:
@@ -353,8 +340,7 @@ class TestCascadeTransferJob:
 
         assert job.get() == (keys, chunk_ids)
         assert job.get() == (keys, chunk_ids)
-        assert list(job.keys) == keys
-        assert np.array_equal(job.chunk_ids, chunk_ids)
+        assert job.is_materialized()
 
 
 class TestExampleSecondaryTierManager:
@@ -479,18 +465,23 @@ class TestTieringOffloadingManager:
         self._start_request()
         # Register an in-flight promotion job for tier1 by hand.
         job_id = self.manager._next_job_id()
-        # Hand-built job: simulate the allocation-side chunk-count recording
-        # that _promotion_allocation performs for real promotions.
-        self.manager._metrics.safe_counter_update(
-            0, TieringOffloadingMetrics.PRIMARY_WRITE_USAGE_PERC, 2
-        )
+
+        def alloc_fn_impl(keys, ctx):
+            self.manager._metrics.safe_counter_update(
+                0, TieringOffloadingMetrics.PRIMARY_WRITE_USAGE_PERC, 2
+            )
+            return keys, np.array([0, 1], dtype=np.int32)
+
         job = PromotionTransferJob(
             job_id=job_id,
             req_context=_CTX,
             keys=to_keys([1, 2]),
-            chunk_ids=np.array([0, 1], dtype=np.int32),
+            alloc_fn=alloc_fn_impl,
         )
         self.manager._register_job(job, 0)
+        # Hand-built job: the tier normally redeems the allocation in
+        # submit_load; do it here so the job is materialized.
+        job.get()
         failed = JobResult(job_id=job_id, success=False)
         with (
             patch.object(
@@ -508,16 +499,20 @@ class TestTieringOffloadingManager:
 
         self._start_request()
         job_id = self.manager._next_job_id()
-        self.manager._metrics.safe_counter_update(
-            0, TieringOffloadingMetrics.PRIMARY_WRITE_USAGE_PERC, 1
-        )
+
+        def alloc_fn_impl(keys, ctx):
+            self.manager._metrics.safe_counter_update(
+                0, TieringOffloadingMetrics.PRIMARY_WRITE_USAGE_PERC, 1
+            )
+            return (keys, np.array([0], dtype=np.int32))
+
         job = PromotionTransferJob(
-            job_id=job_id,
-            req_context=_CTX,
-            keys=to_keys([1]),
-            chunk_ids=np.array([0], dtype=np.int32),
+            job_id=job_id, req_context=_CTX, keys=to_keys([1]), alloc_fn=alloc_fn_impl
         )
+
         self.manager._register_job(job, 0)
+        job.get()
+
         ok = JobResult(job_id=job_id, success=True)
         with (
             patch.object(self.secondary_tier1, "get_finished_jobs", return_value=[ok]),
@@ -752,6 +747,9 @@ class TestTieringOffloadingManager:
             self.secondary_tier1.chunks[chunk] = True
 
         def submit_partial(job_metadata: TransferJob) -> None:
+            # The real submit_load redeems the deferred allocation; do the
+            # same so the job is materialized.
+            job_metadata.get()
             successful_keys = (
                 None
                 if successful_indices is None
@@ -1081,9 +1079,13 @@ class TestTieringOffloadingManager:
         calls = tier1_submit_load.call_args_list
         jm_a = calls[0].args[0]
         jm_b = calls[1].args[0]
-        assert set(jm_a.keys) == {chunks[0], chunks[1]}
+        jm_a_chunks = jm_a.get()
+        assert jm_a_chunks is not None
+        jm_b_chunks = jm_b.get()
+        assert jm_b_chunks is not None
+        assert set(jm_a_chunks[0]) == {chunks[0], chunks[1]}
         assert jm_a.req_context is ctx_a
-        assert set(jm_b.keys) == {chunks[2], chunks[3]}
+        assert set(jm_b_chunks[0]) == {chunks[2], chunks[3]}
         assert jm_b.req_context is ctx_b
 
     def test_lookup_shared_chunk_no_duplicate_promotion(
@@ -1117,7 +1119,9 @@ class TestTieringOffloadingManager:
         # Only one submit_load call despite two lookups
         tier1_submit_load.assert_called_once()
         job_metadata = tier1_submit_load.call_args.args[0]
-        assert list(job_metadata.keys) == [shared_chunk]
+        keys_chunks = job_metadata.get()
+        assert keys_chunks is not None
+        assert list(keys_chunks[0]) == [shared_chunk]
         assert job_metadata.req_context is ctx_a
 
     def test_complete_store_forwards_req_context_to_submit_store(
@@ -1421,7 +1425,9 @@ class TestTieringOffloadingManager:
         # New chunks are cascaded to ALL tiers later via complete_store().
         tier1_submit_store.assert_called_once()
         job_metadata = tier1_submit_store.call_args.args[0]
-        assert set(job_metadata.keys) == set(existing_chunks)
+        keys_chunks = job_metadata.get()
+        assert keys_chunks is not None
+        assert set(keys_chunks[0]) == set(existing_chunks)
 
         # tier2 (chunk-level) does not get existing chunks here.
         tier2_submit_store.assert_not_called()
@@ -1452,11 +1458,15 @@ class TestTieringOffloadingManager:
         # _make_request_level_request() wrapped submit_store in a MagicMock.
         submit_store = self.secondary_tier1.submit_store
         assert isinstance(submit_store, MagicMock)
-        return [
-            set(call.args[0].keys)
-            for call in submit_store.call_args_list
-            if call.args[0].req_context.req_id == req_id
-        ]
+        cascaded = []
+        for call in submit_store.call_args_list:
+            job = call.args[0]
+            if job.req_context.req_id != req_id:
+                continue
+            keys_chunks = job.get()
+            assert keys_chunks is not None
+            cascaded.append(set(keys_chunks[0]))
+        return cascaded
 
     def test_cascade_rejects_retry_from_primary(self, manager_setup, monkeypatch):
         """RETRY would be parked with no guarantee of ever draining, so the

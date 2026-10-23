@@ -616,10 +616,14 @@ class ServerRole:
         partway through.
         """
         meta = parent.create_store_job(keys, lookup.ctx)
+        keys_chunks = meta.get()
+        assert keys_chunks is not None
+        job_keys, job_chunk_ids = keys_chunks
+
         self.add_stored_blocks(
             lookup.kv_request_id,
-            list(meta.keys),
-            meta.chunk_ids.tolist(),
+            list(job_keys),
+            job_chunk_ids.tolist(),
             meta.job_id,
             round_seq=lookup.round_seq,
             from_lookup=True,

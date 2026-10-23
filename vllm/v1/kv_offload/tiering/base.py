@@ -111,22 +111,6 @@ class TransferJob(ABC):
         """
         pass
 
-    @property
-    @abstractmethod
-    def keys(self) -> Collection[OffloadKey]:
-        """Return transfer keys if already acquired and acquisition passed.
-        Raise ValueError otherwise.
-        """
-        pass
-
-    @property
-    @abstractmethod
-    def chunk_ids(self) -> np.ndarray:
-        """Return transfer chunk_ids if already acquired and acquisition passed.
-        Raise ValueError otherwise.
-        """
-        pass
-
 
 @dataclass
 class JobResult:
@@ -281,8 +265,9 @@ class SecondaryTierManager(ABC):
         calling thread.
 
         Preconditions (guaranteed by the framework):
-          - ``job_metadata.chunk_ids`` are valid primary-tier slots, pinned
-            (ref-counted) for the duration of the transfer.
+          - the job's chunk_ids (see ``TransferJob.get()``) are valid
+            primary-tier slots, pinned (ref-counted) for the duration of the
+            transfer.
 
         The implementation is responsible for:
           1. Filtering out chunks already present in this tier
@@ -309,8 +294,10 @@ class SecondaryTierManager(ABC):
         on the calling thread.
 
         Preconditions (guaranteed by the framework):
-          - ``job_metadata.chunk_ids`` are allocated primary-tier slots
-            ready to receive data.
+          - The job's chunk_ids are not allocated by caller. Implementations
+            are required to do job_metadata.get() to materialize the keys and
+            chunk_ids. Note that allocations could fail, the tiers should
+            mark the job success in that case.
 
         The implementation must copy data from this tier into the
         primary-tier slots identified by ``chunk_ids``.

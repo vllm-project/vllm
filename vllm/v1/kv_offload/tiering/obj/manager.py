@@ -291,20 +291,25 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         return LookupResult.HIT if result else LookupResult.MISS
 
     def submit_store(self, job_metadata: TransferJob) -> None:
+        keys_chunks = job_metadata.get()
+        assert keys_chunks is not None
+        keys, chunk_ids = keys_chunks
         if self.events is not None:
-            self._store_job_keys[job_metadata.job_id] = list(job_metadata.keys)
-        obj_keys = (self._file_mapper.get_file_name(k) for k in job_metadata.keys)
-        self._submit_transfer(
-            job_metadata.job_id, job_metadata.chunk_ids, obj_keys, NIXL_WRITE
-        )
+            self._store_job_keys[job_metadata.job_id] = list(keys)
+        obj_keys = (self._file_mapper.get_file_name(k) for k in keys)
+        self._submit_transfer(job_metadata.job_id, chunk_ids, obj_keys, NIXL_WRITE)
 
     def submit_load(self, job_metadata: TransferJob) -> None:
-        assert job_metadata.get() is not None, "Cannot materialize job"
-        self._load_job_keys[job_metadata.job_id] = list(job_metadata.keys)
-        obj_keys = (self._file_mapper.get_file_name(k) for k in job_metadata.keys)
-        self._submit_transfer(
-            job_metadata.job_id, job_metadata.chunk_ids, obj_keys, NIXL_READ
-        )
+        if (keys_chunks := job_metadata.get()) is None:
+            # Allocation / Materialization failed.
+            self._pending_results.append(
+                JobResult(job_id=job_metadata.job_id, success=True)
+            )
+            return
+        keys, chunk_ids = keys_chunks
+        self._load_job_keys[job_metadata.job_id] = list(keys)
+        obj_keys = (self._file_mapper.get_file_name(k) for k in keys)
+        self._submit_transfer(job_metadata.job_id, chunk_ids, obj_keys, NIXL_READ)
 
     def on_request_finished(self, req_context: ReqContext) -> None:
         self._lookup_manager.cleanup(req_context.req_id)

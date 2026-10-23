@@ -119,7 +119,6 @@ def make_job(
             job_id=job_id,
             req_context=_CTX,
             keys=keys,
-            chunk_ids=None,
             alloc_fn=lambda k, ctx: (
                 list(k),
                 np.array(chunk_ids_list, dtype=np.int32),
@@ -1032,8 +1031,9 @@ class TestFSPromotion:
             job_id=2,
             req_context=_CTX,
             keys=[key(1)],
-            chunk_ids=np.array([0], dtype=np.int32),
+            alloc_fn=lambda k, ctx: ([key(1)], np.array([0], dtype=np.int32)),
         )
+        job.get()  # Materialize here
         assert job.is_materialized()
         with pytest.raises(AssertionError, match="materialize"):
             tier.submit_load(job)
@@ -1049,7 +1049,6 @@ class TestFSPromotion:
             job_id=42,
             req_context=_CTX,
             keys=[key(1), key(2)],
-            chunk_ids=None,
             alloc_fn=lambda keys, ctx: None,
         )
         tier.submit_load(job)
@@ -1057,8 +1056,7 @@ class TestFSPromotion:
 
         # The claim was never acquired; the job finishes with zero keys.
         assert job.get() is None
-        with pytest.raises(ValueError):
-            _ = job.keys
+        assert not job.is_materialized()
 
         assert len(results) == 1
         result = results[0]
@@ -1086,7 +1084,6 @@ class TestFSPromotion:
             job_id=10,
             req_context=_CTX,
             keys=all_keys,
-            chunk_ids=None,
             alloc_fn=lambda req_keys, ctx: (
                 list(req_keys),
                 np.array([0, 1, 2, 3], dtype=np.int32),
@@ -1095,8 +1092,10 @@ class TestFSPromotion:
         tier.submit_load(job)
         result = drain(tier)[0]
         assert result.success is True
-        assert set(job.keys) == set(all_keys)
-        assert list(job.chunk_ids) == [0, 1, 2, 3]
+        keys_chunks = job.get()
+        assert keys_chunks is not None
+        assert set(keys_chunks[0]) == set(all_keys)
+        assert list(keys_chunks[1]) == [0, 1, 2, 3]
 
         # Half cached
         uncached = all_keys[2:]
@@ -1104,7 +1103,6 @@ class TestFSPromotion:
             job_id=11,
             req_context=_CTX,
             keys=all_keys,
-            chunk_ids=None,
             alloc_fn=lambda req_keys, ctx: (
                 list(uncached),
                 np.array([0, 1], dtype=np.int32),
@@ -1113,22 +1111,25 @@ class TestFSPromotion:
         tier.submit_load(job)
         result = drain(tier)[0]
         assert result.success is True
-        assert set(job.keys) == set(uncached)
-        assert list(job.chunk_ids) == [0, 1]
+        keys_chunks = job.get()
+        assert keys_chunks is not None
+        assert set(keys_chunks[0]) == set(uncached)
+        assert list(keys_chunks[1]) == [0, 1]
 
         # All cached
         job = PromotionTransferJob(
             job_id=12,
             req_context=_CTX,
             keys=all_keys,
-            chunk_ids=None,
             alloc_fn=lambda req_keys, ctx: ([], []),
         )
         tier.submit_load(job)
         result = drain(tier)[0]
         assert result.success is True
-        assert len(list(job.keys)) == 0
-        assert len(list(job.chunk_ids)) == 0
+        keys_chunks = job.get()
+        assert keys_chunks is not None
+        assert len(list(keys_chunks[0])) == 0
+        assert len(list(keys_chunks[1])) == 0
 
     def test_promotion_fs_file_availability(self, fs_tier):
         """FS file availability determines promotion success and partial-success
@@ -1150,7 +1151,6 @@ class TestFSPromotion:
             job_id=20,
             req_context=_CTX,
             keys=all_keys,
-            chunk_ids=None,
             alloc_fn=lambda req_keys, ctx: (
                 list(req_keys),
                 np.array([0, 1, 2, 3], dtype=np.int32),
@@ -1160,8 +1160,10 @@ class TestFSPromotion:
         result = drain(tier)[0]
         assert result.success is True
         assert result.successful_keys is None  # all loaded; no partial set reported
-        assert set(job.keys) == set(all_keys)
-        assert list(job.chunk_ids) == [0, 1, 2, 3]
+        keys_chunks = job.get()
+        assert keys_chunks is not None
+        assert set(keys_chunks[0]) == set(all_keys)
+        assert list(keys_chunks[1]) == [0, 1, 2, 3]
 
         # Half files deleted; partial failure
         # Delete files for key(3) and key(4); key(1) and key(2) remain on disk.
@@ -1174,7 +1176,6 @@ class TestFSPromotion:
             job_id=21,
             req_context=_CTX,
             keys=all_keys,
-            chunk_ids=None,
             alloc_fn=lambda req_keys, ctx: (
                 list(req_keys),
                 np.array([0, 1, 2, 3], dtype=np.int32),
@@ -1185,9 +1186,12 @@ class TestFSPromotion:
         assert result.success is False
         assert result.successful_keys is not None
         assert set(result.successful_keys) == {key(1), key(2)}
-        # job.keys reflects the full originally-requested set, not just what loaded
-        assert set(job.keys) == set(all_keys)
-        assert list(job.chunk_ids) == [0, 1, 2, 3]
+        # The claim reflects the full originally-requested set, not just what
+        # loaded
+        keys_chunks = job.get()
+        assert keys_chunks is not None
+        assert set(keys_chunks[0]) == set(all_keys)
+        assert list(keys_chunks[1]) == [0, 1, 2, 3]
 
         # All files deleted → nothing loaded
         for k in all_keys[:2]:
@@ -1199,7 +1203,6 @@ class TestFSPromotion:
             job_id=22,
             req_context=_CTX,
             keys=all_keys,
-            chunk_ids=None,
             alloc_fn=lambda req_keys, ctx: (
                 list(req_keys),
                 np.array([0, 1, 2, 3], dtype=np.int32),
@@ -1209,6 +1212,8 @@ class TestFSPromotion:
         result = drain(tier)[0]
         assert result.success is False
         assert result.successful_keys is None  # nothing loaded before the first failure
-        # job.keys still reflects the full originally-requested set
-        assert set(job.keys) == set(all_keys)
-        assert list(job.chunk_ids) == [0, 1, 2, 3]
+        # The claim still reflects the full originally-requested set
+        keys_chunks = job.get()
+        assert keys_chunks is not None
+        assert set(keys_chunks[0]) == set(all_keys)
+        assert list(keys_chunks[1]) == [0, 1, 2, 3]

@@ -566,8 +566,8 @@ class TestPromotionLatency:
         job = PromotionTransferJob(
             job_id=42,
             keys=[OffloadKey(b"key1")],
-            chunk_ids=np.array([0]),
             req_context=_req_context(_remote_prefiller_kv_params()),
+            alloc_fn=lambda keys, ctx: (list(keys), np.array([0])),
         )
         # Hand-built job: simulate the allocation-side chunk-count recording
         # that _promotion_allocation performs for real promotions.

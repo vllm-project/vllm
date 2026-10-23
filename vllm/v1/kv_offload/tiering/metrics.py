@@ -124,7 +124,9 @@ class TieringMetricsTracker:
             # TieringOffloadingManager::PromotionAllocation()
         else:
             state.active_cascade_count += 1
-            state.primary_read_chunk_count += len(transfer_job.chunk_ids)
+            keys_chunks = transfer_job.get()
+            assert keys_chunks is not None
+            state.primary_read_chunk_count += len(keys_chunks[1])
 
     def on_job_finished(
         self, job_metadata: _JobMetadataLike, result: JobResult
@@ -147,7 +149,9 @@ class TieringMetricsTracker:
         # allocation) are visible before the decrement; the worker records
         # them before reporting the job finished.
         self.drain_pending_updates()
-        chunk_count = len(transfer_job.chunk_ids)
+        keys_chunks = transfer_job.get()
+        assert keys_chunks is not None
+        chunk_count = len(keys_chunks[1])
         if transfer_job.is_promotion:
             state.primary_write_chunk_count -= chunk_count
             assert state.primary_write_chunk_count >= 0
@@ -262,10 +266,11 @@ class TieringMetricsTracker:
         completed_job: JobResult,
     ) -> None:
         transfer_job = job_metadata.transfer_job
-        assert transfer_job.is_materialized()
+        keys_chunks = transfer_job.get()
+        assert keys_chunks is not None
 
         labelvalues = self.tier_label(job_metadata.tier_idx)
-        completed_key_count = len(transfer_job.keys)
+        completed_key_count = len(keys_chunks[0])
         if not completed_job.success:
             failure_metric = (
                 TieringOffloadingMetrics.PROMOTION_JOB_FAILURES
