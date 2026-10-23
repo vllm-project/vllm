@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit tests for the get_fp8_min_max() helper function.
+"""Unit tests for the get_fp8_min_max() helper function.
 
 These tests verify the FP8 min/max value logic for both standard
 and fnuz (ROCm MI300) dtype handling.

@@ -3,7 +3,7 @@
 
 from typing import get_args
 
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config.speculative import MTPModelTypes, SpeculativeConfig
 from vllm.transformers_utils.model_arch_config_convertor import (
@@ -11,8 +11,8 @@ from vllm.transformers_utils.model_arch_config_convertor import (
 )
 
 
-def _bailing_config() -> PretrainedConfig:
-    config = PretrainedConfig(
+def _bailing_config() -> PreTrainedConfig:
+    config = PreTrainedConfig(
         architectures=["BailingMoeV2_5ForCausalLM"],
         hidden_size=4096,
         kv_lora_rank=512,

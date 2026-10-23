@@ -28,12 +28,13 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.parser.engine.adapters import make_adapters
 from vllm.parser.engine.events import EventType, SemanticEvent
-from vllm.parser.engine.parser_engine import ParserEngine
+from vllm.parser.engine.parser_engine import ParserEngine, ReasoningEnd
 from vllm.parser.engine.parser_engine_config import (
     ParserEngineConfig,
     ParserState,
     Transition,
 )
+from vllm.parser.glm47_moe import glm47_moe_config
 from vllm.parser.parser_manager import ParserManager
 
 # ── Shared test configs ──────────────────────────────────────────────
@@ -158,11 +159,17 @@ class TestReasoningEndTokenIds:
                 (EventType.REASONING_END, EventType.TOOL_CALL_START),
             ),
         )
-        assert _make_engine(cfg).reasoning_end_token_ids == {201, 202}
+        engine = _make_engine(cfg)
+        assert engine.reasoning_end_token_ids == {201, 202}
+        assert engine.implicit_reasoning_end_token_ids == {202}
+        assert engine.find_reasoning_end([5, 201]) == ReasoningEnd(1, False)
+        assert engine.find_reasoning_end([5, 202]) == ReasoningEnd(1, True)
 
     def test_transition_staying_in_reasoning_is_ignored(self):
         cfg = _with_reasoning_exits(("THINK_START", ParserState.REASONING, ()))
-        assert _make_engine(cfg).reasoning_end_token_ids == {201}
+        engine = _make_engine(cfg)
+        assert engine.reasoning_end_token_ids == {201}
+        assert engine.implicit_reasoning_end_token_ids == frozenset()
 
     def test_unreported_exit_fails_closed(self):
         cfg = _with_reasoning_exits(
@@ -182,17 +189,40 @@ class TestReasoningEndTokenIds:
     def test_config_without_reasoning_has_empty_set(self):
         assert _make_engine(_hermes_config()).reasoning_end_token_ids == frozenset()
 
-    def test_find_reasoning_end_offset_returns_first_match(self):
+    def test_find_reasoning_end_returns_first_match(self):
         engine = _make_engine()
-        assert engine.find_reasoning_end_offset([5, 201, 6, 201]) == 1
-        assert engine.find_reasoning_end_offset([5, 6]) is None
-        assert engine.find_reasoning_end_offset([]) is None
+        assert engine.find_reasoning_end([5, 201, 6, 201]) == ReasoningEnd(1, False)
+        assert engine.find_reasoning_end([5, 6]) == ReasoningEnd(2, False)
+        assert engine.find_reasoning_end([]) == ReasoningEnd(0, False)
         # Rejected-draft placeholders never match.
-        assert engine.find_reasoning_end_offset([-1, 201]) == 1
+        assert engine.find_reasoning_end([-1, 201]) == ReasoningEnd(1, False)
 
-    def test_find_reasoning_end_offset_with_empty_set_returns_none(self):
+    def test_find_reasoning_end_with_empty_set_returns_none(self):
         engine = _make_engine(_hermes_config())
-        assert engine.find_reasoning_end_offset([201]) is None
+        assert engine.find_reasoning_end([201]) is None
+
+
+@pytest.mark.parametrize(
+    ("config", "implicit_token"),
+    [
+        pytest.param(glm47_moe_config(), "<tool_call>", id="glm47_moe"),
+    ],
+)
+def test_implicit_reasoning_end_of_parsers(
+    config: ParserEngineConfig, implicit_token: str
+):
+    literals = sorted(set(config.token_id_terminals.values()))
+    vocab = {literal: 1000 + i for i, literal in enumerate(literals)}
+    engine = _make_engine(config, vocab=vocab)
+    implicit_ids = set()
+    for token_id in engine.reasoning_end_token_ids:
+        end = engine.find_reasoning_end([5, token_id, 6])
+        assert end is not None and end.offset == 1
+        kept = engine.extract_content_ids([5, token_id, 6]) == [token_id, 6]
+        assert end.implicit == kept
+        if end.implicit:
+            implicit_ids.add(token_id)
+    assert implicit_ids == {vocab[implicit_token]}
 
 
 # ── TestEventsToDelta ────────────────────────────────────────────────
@@ -1658,6 +1688,57 @@ class TestArgDeltaWithConverter:
         ]
 
 
+# ── TestArgValueExtender ──────────────────────────────────────────
+
+
+def _extender_config(structural: frozenset[str] | None = None) -> ParserEngineConfig:
+    """``_kv_converter`` plus an extender for its trailing ``k=v`` record,
+    which is open until whitespace follows it; mirrors
+    ``_glm47_arg_value_extender``."""
+
+    def factory(raw_args: str):
+        if re.search(r"\w+=\S+$", raw_args) is None:
+            return None
+
+        def extend(delta: str) -> str | None:
+            if re.search(r"\s", delta):
+                return None
+            return json.dumps(delta, ensure_ascii=False)[1:-1]
+
+        return extend
+
+    return dataclasses.replace(
+        _converter_config(),
+        arg_value_extender=factory,
+        arg_structural_chars=structural,
+    )
+
+
+class TestArgValueExtender:
+    """Engine contract for ``ParserEngineConfig.arg_value_extender``."""
+
+    def test_live_extender_sees_deltas_without_structural_chars(self):
+        """A delta without structural chars must still reach the live
+        extender: gating it out drops ``el`` from the streamed value and the
+        next accepted delta ``l=`` lands on the gap, so the converted JSON
+        no longer extends what was streamed."""
+        engine = _make_engine(_extender_config(structural=frozenset("= ")))
+        assert _run_streaming_tool(engine, "f", ["a", "=h", "el", "l=", "o "]) == {
+            "a": "hell=o"
+        }
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"arg_converter": None},
+            {"stream_arg_deltas": False},
+        ],
+    )
+    def test_extender_requires_streaming_conversion(self, overrides):
+        with pytest.raises(ValueError, match="arg_value_extender"):
+            dataclasses.replace(_extender_config(), **overrides)
+
+
 # ── TestSafeArgPrefix ────────────────────────────────────────────
 
 
@@ -1684,7 +1765,7 @@ class TestSafeArgPrefix:
         ],
     )
     def test_safe_arg_prefix(self, json_str, expected):
-        assert ParserEngine._safe_arg_prefix(json_str) == expected
+        assert ParserEngine._safe_arg_prefix(json_str)[0] == expected
 
 
 # ── Coercion instability regression tests ────────────────────────

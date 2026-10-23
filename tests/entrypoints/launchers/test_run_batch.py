@@ -509,9 +509,7 @@ def test_completions():
 
 
 def test_completions_invalid_input():
-    """
-    Ensure that we fail when the input doesn't conform to the openai api.
-    """
+    """Ensure that we fail when the input doesn't conform to the openai api."""
     with (
         tempfile.NamedTemporaryFile("w") as input_file,
         tempfile.NamedTemporaryFile("r") as output_file,
@@ -602,9 +600,7 @@ def test_score(input_batch):
 
 
 def test_reasoning_parser():
-    """
-    Test that reasoning_parser parameter works correctly in run_batch.
-    """
+    """Test that reasoning_parser parameter works correctly in run_batch."""
     with (
         tempfile.NamedTemporaryFile("w") as input_file,
         tempfile.NamedTemporaryFile("r") as output_file,
@@ -767,8 +763,7 @@ def test_translation():
 
 
 def test_tool_calling():
-    """
-    Test that tool calling works correctly in run_batch.
+    """Test that tool calling works correctly in run_batch.
     Verifies that requests with tools return tool_calls in the response.
     """
     with (
@@ -1076,17 +1071,32 @@ def _make_aiohttp_put_session(status: int = 200, body_text: str = ""):
 
 
 @pytest.mark.asyncio
-async def test_upload_data_uploads_once_on_success():
-    """A successful upload must not be retried (regression guard)."""
-    session = _make_aiohttp_put_session(status=200)
-    with patch(
-        "vllm.entrypoints.launchers.run_batch.aiohttp.ClientSession",
-        return_value=session,
+@pytest.mark.parametrize("status", [200, 201, 204])
+@pytest.mark.parametrize("from_file", [False, True])
+async def test_upload_data_uploads_once_on_success(status, from_file, tmp_path):
+    """Successful PUT responses must not retry either upload path."""
+    session = _make_aiohttp_put_session(status=status)
+    data_or_file = "payload"
+    if from_file:
+        path = tmp_path / "output.jsonl"
+        path.write_text(data_or_file, encoding="utf-8")
+        data_or_file = str(path)
+
+    with (
+        patch(
+            "vllm.entrypoints.launchers.run_batch.aiohttp.ClientSession",
+            return_value=session,
+        ),
+        patch(
+            "vllm.entrypoints.launchers.run_batch.asyncio.sleep",
+            new_callable=AsyncMock,
+        ) as sleep,
     ):
         await upload_data(
-            "https://example.com/output.jsonl", "payload", from_file=False
+            "https://example.com/output.jsonl", data_or_file, from_file=from_file
         )
     assert session.put.call_count == 1
+    sleep.assert_not_awaited()
 
 
 @pytest.mark.asyncio

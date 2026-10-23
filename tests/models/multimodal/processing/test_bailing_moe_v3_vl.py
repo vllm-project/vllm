@@ -8,7 +8,7 @@ import pytest
 import torch
 from PIL import Image
 from tokenizers import Tokenizer, decoders, models, pre_tokenizers
-from transformers import PreTrainedTokenizerFast
+from transformers import TokenizersBackend
 
 from vllm.model_executor.models.bailing_moe_v3_vl import (
     IMAGE_PLACEHOLDER,
@@ -34,7 +34,7 @@ def processor():
         add_prefix_space=False, use_regex=False
     )
     backend.decoder = decoders.ByteLevel()
-    tokenizer = PreTrainedTokenizerFast(
+    tokenizer = TokenizersBackend(
         tokenizer_object=backend,
         additional_special_tokens=[
             "<|vision_start|>",

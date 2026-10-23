@@ -31,8 +31,7 @@ def triton_scale_swizzle(
     BLOCK_ROWS: tl.constexpr,
     BLOCK_COLS: tl.constexpr,
 ):
-    """
-    Rearranges tensor data from row-major to block-scaled swizzle format.
+    """Rearranges tensor data from row-major to block-scaled swizzle format.
 
     Args:
         scale_ptr: Pointer to the input scale tensor
@@ -43,6 +42,7 @@ def triton_scale_swizzle(
         output_block_stride: Stride between blocks in the output tensor
         BLOCK_ROWS: Number of rows in a tile (compile-time constant)
         BLOCK_COLS: Number of columns in a tile (compile-time constant)
+
     """
     pid_row = tl.program_id(0)
     pid_col = tl.program_id(1)
@@ -86,8 +86,7 @@ def triton_scale_swizzle(
 
 @torch.library.custom_op("vllm::triton_mx_block_rearrange", mutates_args=())
 def triton_mx_block_rearrange(scale_tensor: torch.Tensor) -> torch.Tensor:
-    """
-    Rearranges an E8M0 tensor scale from row-major format to
+    """Rearranges an E8M0 tensor scale from row-major format to
     block-scaled swizzle format.
 
     This format is suitable for Tmem as described in NVIDIA documentation:
@@ -98,6 +97,7 @@ def triton_mx_block_rearrange(scale_tensor: torch.Tensor) -> torch.Tensor:
 
     Returns:
         Rearranged tensor in block-scaled swizzle format
+
     """
     assert scale_tensor.element_size() == 1, (
         "Expected element size to be 1 byte (8 bits)"
@@ -154,8 +154,7 @@ def _triton_mx_block_rearrange_fake(scale_tensor: torch.Tensor) -> torch.Tensor:
 def to_blocked(
     input_matrix: torch.Tensor, backend: Literal["torch", "triton"] = "triton"
 ) -> torch.Tensor:
-    """
-    Rearrange a large matrix by breaking it into blocks and applying
+    """Rearrange a large matrix by breaking it into blocks and applying
     the rearrangement pattern.
 
     See:
@@ -167,6 +166,7 @@ def to_blocked(
 
     Returns:
         Rearranged flattened tensor of size (32*cdiv(H,128) * 16*cdiv(W,4))
+
     """
     if backend == "triton":
         return triton_mx_block_rearrange(input_matrix).flatten()

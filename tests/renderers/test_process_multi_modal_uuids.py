@@ -23,7 +23,11 @@ from vllm.tokenizers.registry import cached_tokenizer_from_config
 
 cherry_pil_image = ImageAsset("cherry_blossom").pil_image
 stop_pil_image = ImageAsset("stop_sign").pil_image
-baby_reading_np_ndarrays = VideoAsset("baby_reading").np_ndarrays
+baby_reading_video_asset = VideoAsset("baby_reading")
+baby_reading_video = (
+    baby_reading_video_asset.np_ndarrays,
+    baby_reading_video_asset.metadata,
+)
 kimi_vision_chunk_image = {
     "type": "image",
     "image": cherry_pil_image,
@@ -31,7 +35,9 @@ kimi_vision_chunk_image = {
 }
 kimi_vision_chunk_video = {
     "type": "video_chunk",
-    "video_chunk": [Image.fromarray(frame) for frame in baby_reading_np_ndarrays[:4]],
+    "video_chunk": [
+        Image.fromarray(frame) for frame in baby_reading_video_asset.np_ndarrays[:4]
+    ],
     "uuid": "test-video-uuid",
     "video_idx": 0,
     "prompt": ("<|media_begin|>video<|media_content|><|media_pad|><|media_end|>"),
@@ -126,10 +132,10 @@ def _media_messages(name, *items):
     ("modality", "media", "skip_early_mm_lookup"),
     [
         pytest.param("image", cherry_pil_image, False, id="image"),
-        pytest.param("video", baby_reading_np_ndarrays, False, id="video"),
+        pytest.param("video", baby_reading_video, False, id="video"),
         pytest.param(
             "video",
-            baby_reading_np_ndarrays,
+            baby_reading_video,
             True,
             id="video-skip-early-mm-lookup",
         ),
@@ -177,7 +183,7 @@ def test_cached_uuid_skips_url_loading(
     ("modality", "media"),
     [
         pytest.param("image", cherry_pil_image, id="image"),
-        pytest.param("video", baby_reading_np_ndarrays, id="video"),
+        pytest.param("video", baby_reading_video, id="video"),
     ],
 )
 def test_uuid_cache_eviction_falls_back_to_url(
@@ -222,7 +228,7 @@ def test_partial_uuid_hit_retries_only_affected_conversation(monkeypatch, use_as
     """A miss reloads all URLs in its conversation without rerendering a batch peer."""
     renderer = _build_renderer()
     fetch_image = _mock_media(monkeypatch, "image", cherry_pil_image, use_async)
-    fetch_video = _mock_media(monkeypatch, "video", baby_reading_np_ndarrays, use_async)
+    fetch_video = _mock_media(monkeypatch, "video", baby_reading_video, use_async)
     cached = _media_messages("Cached conversation", ("image", "cached-image"))
     partial = _media_messages("Partial conversation", ("image", "partial-image"))
     params = ChatParams()
@@ -484,7 +490,7 @@ def test_multi_modal_uuids_accepts_none_and_passes_through(
 
     mm_data = {
         "image": [cherry_pil_image, stop_pil_image],
-        "video": baby_reading_np_ndarrays,
+        "video": baby_reading_video,
     }
 
     # Use a consistent two-image scenario across all configurations
@@ -533,17 +539,39 @@ def test_multi_modal_uuids_accepts_empty(
     assert processed_mm_uuids == mm_uuids
 
 
-def test_multi_modal_uuids_ignored_when_caching_disabled():
-    # When both processor cache is 0 and prefix caching disabled, the
-    # processor builds overrides from request id instead of using user UUIDs.
+@pytest.mark.parametrize(
+    "mm_uuids, expected",
+    [
+        (
+            {"image": ["hash_cherry", "hash_stop"], "video": ["hash_video"]},
+            {"image": ["hash_cherry", "hash_stop"], "video": ["hash_video"]},
+        ),
+        (
+            {"image": [None, "hash_stop"], "video": None},
+            {"image": ["req-42-image-0", "hash_stop"], "video": ["req-42-video-0"]},
+        ),
+        (
+            {"image": ["", None]},
+            {"image": ["", "req-42-image-1"], "video": ["req-42-video-0"]},
+        ),
+        (
+            {},
+            {
+                "image": ["req-42-image-0", "req-42-image-1"],
+                "video": ["req-42-video-0"],
+            },
+        ),
+    ],
+)
+def test_multi_modal_uuids_preserved_when_caching_disabled(mm_uuids, expected):
+    """Only missing UUIDs get request-local IDs when both caches are disabled."""
     renderer = _build_renderer(mm_cache_gb=0.0, enable_prefix_caching=False)
 
     request_id = "req-42"
     mm_data = {
         "image": [cherry_pil_image, stop_pil_image],
-        "video": baby_reading_np_ndarrays,
+        "video": baby_reading_video,
     }
-    mm_uuids = {"image": ["hash_cherry", "hash_stop"], "video": ["hash_video"]}
 
     mm_processor = renderer.get_mm_processor()
     mm_data_items = mm_processor.info.parse_mm_data(mm_data)
@@ -553,16 +581,4 @@ def test_multi_modal_uuids_ignored_when_caching_disabled():
         mm_data, mm_data_items, mm_uuid_items, request_id
     )
 
-    # Expect request-id-based overrides are passed through
-    assert set(mm_uuids.keys()) == {"image", "video"}
-    assert len(mm_uuids["image"]) == 2
-    assert len(mm_uuids["video"]) == 1
-    assert processed_mm_uuids["image"][0].startswith(
-        f"{request_id}-image-"
-    ) and processed_mm_uuids["image"][0].endswith("-0")
-    assert processed_mm_uuids["image"][1].startswith(
-        f"{request_id}-image-"
-    ) and processed_mm_uuids["image"][1].endswith("-1")
-    assert processed_mm_uuids["video"][0].startswith(
-        f"{request_id}-video-"
-    ) and processed_mm_uuids["video"][0].endswith("-0")
+    assert processed_mm_uuids == expected
