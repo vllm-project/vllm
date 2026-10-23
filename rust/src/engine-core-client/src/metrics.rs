@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use vllm_metrics::{
     CacheHitSourceLabels, EngineLabels, EnginePositionLabels, F64Gauge, Family, HistogramMetric,
-    LoraAdapterNames, LoraInfoLabels, LoraLoadedLabels, LoraLoadedLevel,
+    LoraAdapterNames, LoraInfoLabels, LoraLoadTransitionLabels, LoraLoadedLabels, LoraLoadedLevel,
     MooncakeOperationCounterFamily, MooncakeOperationHistogramFamily, MooncakeOperationLabels,
     RequestMetrics, SchedulerLogStatsAccumulator, SchedulerMetrics, U64Counter, U64Gauge,
     WaitingReasonLabels,
@@ -494,6 +494,17 @@ impl LoraLoadedExporter {
     ) {
         let model_name = model_name.into();
 
+        for timing in &event.loads {
+            metrics
+                .lora_load_seconds
+                .get_or_create(&LoraLoadTransitionLabels {
+                    model_name: model_name.clone(),
+                    engine,
+                    transition: timing.transition.clone(),
+                })
+                .observe(timing.seconds);
+        }
+
         let engine_labels = EngineLabels {
             model_name: model_name.clone(),
             engine,
@@ -573,6 +584,61 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn lora_load_timings_land_in_the_transition_histogram() {
+        use crate::metrics::LoraLoadedExporter;
+        use crate::protocol::lora::{LoraLoadEvent, LoraLoadTiming};
+
+        let metrics = Metrics::new();
+        let mut exporter = LoraLoadedExporter::default();
+        exporter.update(
+            &metrics.scheduler,
+            "model",
+            0,
+            &LoraLoadEvent {
+                gpu_adapters: vec!["a".to_string()],
+                cpu_adapters: vec!["a".to_string()],
+                loads: vec![
+                    LoraLoadTiming {
+                        adapter_name: "a".to_string(),
+                        transition: "load".to_string(),
+                        seconds: 0.4,
+                    },
+                    LoraLoadTiming {
+                        adapter_name: "a".to_string(),
+                        transition: "activate".to_string(),
+                        seconds: 0.05,
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+        let rendered = metrics.render().unwrap();
+        assert!(rendered.contains(
+            r#"vllm:lora_adapter_load_seconds_count{model_name="model",engine="0",transition="load"} 1"#
+        ));
+        assert!(rendered.contains(
+            r#"vllm:lora_adapter_load_seconds_sum{model_name="model",engine="0",transition="load"} 0.4"#
+        ));
+        assert!(rendered.contains(
+            r#"vllm:lora_adapter_load_seconds_sum{model_name="model",engine="0",transition="activate"} 0.05"#
+        ));
+        // A residency-only event leaves the histogram untouched.
+        exporter.update(
+            &metrics.scheduler,
+            "model",
+            0,
+            &LoraLoadEvent {
+                gpu_adapters: vec![],
+                cpu_adapters: vec!["a".to_string()],
+                ..Default::default()
+            },
+        );
+        assert!(metrics.render().unwrap().contains(
+            r#"vllm:lora_adapter_load_seconds_count{model_name="model",engine="0",transition="load"} 1"#
+        ));
     }
 
     #[test]
