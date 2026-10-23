@@ -235,10 +235,16 @@ impl DeepSeekDsmlToolParser {
     fn finish(&mut self) -> Result<ToolParserOutput> {
         let mut output = ToolParserOutput::default();
         match self.mode {
+            // A held-back tail that already spells part of a tool-call opener,
+            // such as `\n\n<｜DSML｜ ca` cut by max_tokens, is an unfinished
+            // tool call rather than text.
+            DsmlMode::Text if is_unfinished_opener(&self.buffer.text, &self.markers) => {
+                return Err(incomplete_tool_call!("incomplete DeepSeek DSML tool call"));
+            }
             DsmlMode::Text => output.push_text(&self.buffer.text),
             DsmlMode::Done => {}
             DsmlMode::ToolBlock { .. } => {
-                return Err(parsing_failed!("incomplete DeepSeek DSML tool call"));
+                return Err(incomplete_tool_call!("incomplete DeepSeek DSML tool call"));
             }
         }
         let _ = self.reset();
@@ -291,6 +297,20 @@ fn tool_calls_end_event(input: &mut DsmlInput<'_>) -> ModalResult<DsmlEvent> {
 /// Parse a trailing rest after DSML function calls.
 fn ignored_rest_event(input: &mut DsmlInput<'_>) -> ModalResult<DsmlEvent> {
     rest.value(DsmlEvent::IgnoredRest).parse_next(input)
+}
+
+/// Whether `text` is a proper prefix of a tool-call opener that already
+/// contains `<｜`.
+///
+/// Text mode holds back such a tail until it can tell whether an opener
+/// follows. Openers match only on a genuine `｜DSML｜` token, so a spelling
+/// made of ordinary tokens has already been emitted as text by then. A
+/// held-back tail without `<｜`, such as a trailing newline, is text.
+fn is_unfinished_opener(text: &str, markers: &DsmlMarkers) -> bool {
+    text.contains("<｜")
+        && [&markers.framed_tool_calls_start, &markers.tool_calls_start]
+            .iter()
+            .any(|opener| opener.as_str().len() > text.len() && opener.as_str().starts_with(text))
 }
 
 /// Parse a safe text run before the next DSML marker.
