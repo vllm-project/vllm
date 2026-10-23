@@ -251,7 +251,7 @@ def _check_indexer_forwards(config, device, rank, comm):
         BatchSpec(seq_lens=[2691], query_lens=[1027]),
         BatchSpec(seq_lens=[129, 2305], query_lens=[1, 1]),
     ]
-    for batch, active_layers in zip(batches, (5, 2, 1, 5, 5)):
+    for batch, active_layers in zip(batches, (5, 2, 1, 5, 5, 2, 1, 5), strict=True):
         # Exercise wrap-safe rotation, single-layer ACK fallback and mixed transitions.
         comm.num_layers = active_layers
         common = create_common_attn_metadata(
@@ -348,7 +348,7 @@ def _check_indexer_forwards(config, device, rank, comm):
                     run(True, metadata, queries)
             assert exchanges == [
                 (world, local_heads, metadata[1].num_prefill_tokens, 33)
-            ] * (3 * len(layers[1]))
+            ] * (3 * active_layers)
             check(metadata, queries, num_tokens)
             pages = torch.tensor([num_pages - 1, 0, 7, 0], device=device)
             gathered = [
