@@ -334,6 +334,33 @@ pull_request_rules:
       add:
         - minimax
 
+- name: label-m3
+  description: Automatically apply M3 label
+  conditions:
+    - label != stale
+    - or:
+      # M3 and M3.1 share the minimax_m3 implementation.
+      - files~=(?i)minimax[-_]m3(?![._]\d)(?:[^a-z0-9]|$)
+      - title~=(?i)\bminimax[-\s_]?m3\b(?![._]\d)
+  actions:
+    label:
+      add:
+        - M3
+        - minimax
+
+- name: label-m3-1
+  description: Automatically apply M3.1 label
+  conditions:
+    - label != stale
+    - or:
+      - files~=(?i)minimax[-_]m3(?:[._]1)?(?![._]\d)(?:[^a-z0-9]|$)
+      - title~=(?i)\bminimax[-\s_]?m3[._]1\b(?![._]\d)
+  actions:
+    label:
+      add:
+        - M3.1
+        - minimax
+
 - name: label-inkling
   description: Automatically apply inkling label
   conditions:
