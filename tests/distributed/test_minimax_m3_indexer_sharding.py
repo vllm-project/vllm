@@ -453,6 +453,12 @@ def _check_sharding_policy(config, original_comm):
             assert current is not before
             assert current.max_decode_tokens == cap * q
             assert msa.get_comm(policy, 4) is current
+            policy.model_config.max_model_len = length * 2
+            resized = msa.get_comm(policy, 4)
+            assert resized is not current
+            assert resized.scores.shape[-1] == 2 * current.scores.shape[-1]
+            policy.model_config.max_model_len = length
+            assert msa.get_comm(policy, 4) is not resized
     assert original_comm.num_layers == 5
     assert original_comm.max_decode_tokens == 4 * 8
 
