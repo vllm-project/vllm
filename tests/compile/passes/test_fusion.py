@@ -861,13 +861,11 @@ class TestGatedMxfp4Model(torch.nn.Module):
         out_features: int,
         eps: float,
         activation: str,
-        flatten_heads: bool,
-        out_flatten: bool = False,
+        out_flatten: bool,
     ):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = head_dim
-        self.flatten_heads = flatten_heads
         self.out_flatten = out_flatten
         self.norm = RMSNormGated(
             head_dim,
@@ -882,9 +880,6 @@ class TestGatedMxfp4Model(torch.nn.Module):
     def forward(self, x, z):
         x = torch.relu(x).reshape(-1, self.num_heads, self.head_dim)
         z = z.reshape(-1, self.num_heads, self.head_dim)
-        if self.flatten_heads:
-            x = x.reshape(-1, self.head_dim)
-            z = z.reshape(-1, self.head_dim)
         normed = self.norm(x, z)
         if self.out_flatten:
             # GDN's _output_projection: a reshape to the symbolic token count.
@@ -892,27 +887,28 @@ class TestGatedMxfp4Model(torch.nn.Module):
         return self.out_proj(normed.reshape(-1, self.num_heads * self.head_dim))
 
 
-@pytest.mark.parametrize("num_tokens", [8, 64])
-@pytest.mark.parametrize("activation", ["swish", "sigmoid"])
+# K=2048. N=2560 is in neither AITER's ASM nor its preshuffled tables, so the
+# linear runs the Triton GEMM and the gated norm + quant fuses. N=8192 is in
+# both, so the linear runs the ASM GEMM and nothing fuses.
+# GDN flattens heads with flatten(-2), which compiles to a reshape to the
+# symbolic token count and needs the pass's reshape rewrite to match.
 @pytest.mark.parametrize(
-    "flatten_heads, out_flatten", [(True, False), (False, False), (False, True)]
+    "out_features, activation, out_flatten, expect_fused",
+    [
+        pytest.param(2560, "sigmoid", True, True, id="triton-sigmoid-flatten"),
+        pytest.param(2560, "swish", False, True, id="triton-swish-reshape"),
+        pytest.param(8192, "sigmoid", True, False, id="asm-not-fused"),
+    ],
 )
-# K=2048. N=8192 is in AITER's ASM and preshuffled FP4 GEMM tables, so the
-# linear runs in ASM mode: M < 32 takes the fused quant and M >= 32 the
-# unfused fallback. N=2560 is in neither, so the linear runs the Triton GEMM
-# and every M takes the fused quant.
-@pytest.mark.parametrize("out_features, use_asm_gemm", [(8192, True), (2560, False)])
 @pytest.mark.skipif(
     (not current_platform.is_rocm() or not IS_AITER_FOUND),
     reason="Only test on ROCm with aiter package installed",
 )
 def test_aiter_fusion_rmsnorm_gated_mxfp4_gemm(
-    num_tokens: int,
     activation: str,
-    flatten_heads: bool,
     out_flatten: bool,
     out_features: int,
-    use_asm_gemm: bool,
+    expect_fused: bool,
     monkeypatch: pytest.MonkeyPatch,
 ):
     from vllm.platforms.rocm import on_gfx950
@@ -920,7 +916,7 @@ def test_aiter_fusion_rmsnorm_gated_mxfp4_gemm(
     if not on_gfx950():
         pytest.skip("The AITER MXFP4 GEMMs need gfx950")
 
-    num_heads, head_dim, eps = 16, 128, 1e-6
+    num_heads, head_dim, eps, num_tokens = 16, 128, 1e-6, 64
     dtype = torch.bfloat16
     vllm_config = VllmConfig(
         model_config=ModelConfig(dtype=dtype),
@@ -952,10 +948,9 @@ def test_aiter_fusion_rmsnorm_gated_mxfp4_gemm(
             out_features,
             eps,
             activation,
-            flatten_heads,
             out_flatten,
         )
-        assert model.out_proj.quant_method.kernel.use_asm_gemm == use_asm_gemm
+        assert model.out_proj.quant_method.kernel.use_asm_gemm == (not expect_fused)
 
         mock_gdn = _MockGDNLayer(num_v_heads=num_heads, head_v_dim=head_dim)
         # The mock is an uninitialized nn.Module, so bypass submodule
@@ -979,16 +974,16 @@ def test_aiter_fusion_rmsnorm_gated_mxfp4_gemm(
         torch._dynamo.mark_dynamic(z, 0)
 
         result_fused = torch.compile(model, backend=backend)(x, z)
+        if not expect_fused:
+            assert fusion_pass.matched_count == 0
+            return
         result_unfused = torch.compile(model, backend=backend2)(x, z)
 
         assert fusion_pass.matched_count == 1
         backend.check_after_ops([AiterRMSNormGatedMxfp4GemmPattern.FUSED_OP])
 
-        # In ASM mode below M=32 the unfused path quantizes with
-        # per_1x32_f4_quant_hip, which rounds differently from the fused
-        # Triton quant. Otherwise the fused quant matches dynamic_mxfp4_quant
-        # (or the ASM-mode fallback at M >= 32 runs the same ops in both graphs).
+        # The fused quant writes the codes and scales dynamic_mxfp4_quant does.
         err = (result_fused.float() - result_unfused.float()).norm() / (
             result_unfused.float().norm()
         )
-        assert err < (0.2 if use_asm_gemm and num_tokens < 32 else 1e-3), err
+        assert err < 1e-3, err

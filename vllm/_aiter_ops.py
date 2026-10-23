@@ -1612,65 +1612,35 @@ def _rocm_aiter_fused_rms_gated_mxfp4_gemm_impl(
     activation: str,
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
-    use_asm_gemm: bool,
     out_dtype: torch.dtype,
 ) -> torch.Tensor:
     """RMSNormGated (norm before gate, one group per norm_weight slice), then
-    an MXFP4 dynamic-quant linear (``gemm_with_dynamic_quant``). x and z are
-    (M, K).
+    the Triton MXFP4 dynamic-quant linear (``gemm_with_dynamic_quant`` without
+    the ASM GEMM). x and z are (M, K).
 
-    AITER's fused gated-RMSNorm + MXFP4 quant writes unshuffled per-1x32
-    scales. The Triton GEMM takes those at every M (column-major, as
-    dynamic_mxfp4_quant writes them), and in ASM mode the preshuffled Triton
-    GEMM takes them below M=32, so there the activation quant runs in the norm
-    kernel instead of as a separate launch. The other ASM-mode GEMMs take
-    shuffled scales and run the unfused sequence.
+    AITER's fused gated-RMSNorm + MXFP4 quant writes the per-1x32 scales
+    column-major, as ``dynamic_mxfp4_quant`` does, so the Triton GEMM reads
+    them as it would after the separate activation quant.
     """
-    m = x.shape[0]
-    if not use_asm_gemm or (
-        m < 32
-        and not envs.VLLM_BATCH_INVARIANT
-        and rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(
-            weight.shape[0], weight.shape[1]
-        )
-    ):
-        from aiter.ops.triton.quant import fused_rms_gated_mxfp4_quant
+    from aiter.ops.triton.quant import fused_rms_gated_mxfp4_quant
 
-        x_q, x_s = fused_rms_gated_mxfp4_quant(
-            x,
-            norm_weight,
-            z,
-            epsilon,
-            norm_before_gate=True,
-            activation=activation,
-            group_size=norm_weight.numel(),
-            transpose_scale=not use_asm_gemm,
-        )
-        return torch.ops.vllm.gemm_with_dynamic_quant(
-            x_q,
-            weight,
-            weight_scale,
-            rocm_use_aiter_fp4_asm_gemm=use_asm_gemm,
-            out_dtype=out_dtype,
-            x_scales=x_s,
-        )
-
-    from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
-        rmsnorm_fn,
-    )
-
-    group = norm_weight.numel()
-    normed = rmsnorm_fn(
-        x.view(-1, group),
+    x_q, x_s = fused_rms_gated_mxfp4_quant(
+        x,
         norm_weight,
-        None,
-        z=z.view(-1, group),
-        eps=epsilon,
+        z,
+        epsilon,
         norm_before_gate=True,
         activation=activation,
-    ).view(x.shape)
+        group_size=norm_weight.numel(),
+        transpose_scale=True,
+    )
     return torch.ops.vllm.gemm_with_dynamic_quant(
-        normed, weight, weight_scale, True, out_dtype
+        x_q,
+        weight,
+        weight_scale,
+        rocm_use_aiter_fp4_asm_gemm=False,
+        out_dtype=out_dtype,
+        x_scales=x_s,
     )
 
 
@@ -1682,7 +1652,6 @@ def _rocm_aiter_fused_rms_gated_mxfp4_gemm_fake(
     activation: str,
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
-    use_asm_gemm: bool,
     out_dtype: torch.dtype,
 ) -> torch.Tensor:
     return torch.empty((x.shape[0], weight.shape[0]), dtype=out_dtype, device=x.device)
