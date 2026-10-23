@@ -1832,7 +1832,8 @@ def test_humming_moe_method_matches_torch(monkeypatch, workspace_init, gemm_type
             )
         expected = torch_moe(
             x,
-            *reference_weights,
+            reference_weights[0],
+            reference_weights[1],
             scores,
             2,
             global_num_experts=4,
