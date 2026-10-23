@@ -612,6 +612,19 @@ def _get_tensor_dense_flag(tensor: torch.Tensor) -> bool | None:
     return None
 
 
+class MambaTransferGeometry(
+    msgspec.Struct,
+    frozen=True,  # type: ignore[call-arg]
+):
+    """A Mamba/GDN layer's state geometry, checked under heterogeneous TP."""
+
+    shapes: list[list[int]]
+    dtypes: list[str]
+    conv_layout: str
+    mamba_type: str
+    tp_replicated: bool
+
+
 class MooncakeXferMetadata(
     msgspec.Struct,
     omit_defaults=True,  # type: ignore[call-arg]
@@ -637,6 +650,11 @@ class MooncakeXferMetadata(
     # Random per register_kv_caches, so ids never repeat across restarts.
     # 0 means the peer sends the layout on every pull.
     layout_id: int = 0
+    # Mamba/GDN state geometry by layer, sent with the layout only when the
+    # TP sizes differ, so the equal-TP wire format is unchanged.
+    mamba_transfer_geometry: dict[str, MambaTransferGeometry] = msgspec.field(
+        default_factory=dict
+    )
 
 
 class MooncakeXferResponseStatus(IntEnum):
@@ -1378,10 +1396,10 @@ class MooncakeConnectorWorker:
         self._layer_specs: dict[str, KVCacheSpec] = {}
         # Registered SD-layout conv state regions, keyed by (layer, base
         # address): a packed row named after an attention layer can start at
-        # the same address. Their sub-projection splits are derived on first
+        # the same address. Conv sub-projection splits are derived on first
         # heterogeneous-TP use.
         self._sd_conv_regions: set[tuple[str, int]] = set()
-        self._sd_conv_splits: dict[str, MambaConvSplitInfo] = {}
+        self._conv_splits: dict[str, MambaConvSplitInfo] = {}
         for group in kv_cache_config.transfer_groups:
             group_spec = group.kv_cache_spec
             specs_by_layer = getattr(group_spec, "kv_cache_specs", {})
@@ -1619,33 +1637,32 @@ class MooncakeConnectorWorker:
                 )
                 await sock.send_multipart((identity, self._encoder.encode(response)))
                 return
-        validation_err = self._hetero_tp_mamba_layout_error(meta.remote_tp_size)
-        if validation_err is None:
-            # Attention and Mamba/GDN regions follow different TP rules.
-            regions_by_rule: dict[
-                tuple[bool, int | None],
-                tuple[list[TransferRegion], list[TransferRegion]],
-            ] = {}
-            for local_region, remote_region in zip(local_regions, remote_regions):
-                local_group, remote_group = regions_by_rule.setdefault(
-                    self._transfer_rule(local_region.layer_name), ([], [])
-                )
-                local_group.append(local_region)
-                remote_group.append(remote_region)
-            for (replicated, num_kv_heads), (
-                local_group,
-                remote_group,
-            ) in regions_by_rule.items():
-                validation_err = _validate_asymmetric_region_lengths(
-                    local_regions=local_group,
-                    remote_regions=remote_group,
-                    local_tp_size=self.tp_size,
-                    remote_tp_size=meta.remote_tp_size,
-                    producer_cache_replicated=replicated,
-                    total_num_kv_heads=num_kv_heads,
-                )
-                if validation_err is not None:
-                    break
+        validation_err: str | None = None
+        # Attention and Mamba/GDN regions follow different TP rules.
+        regions_by_rule: dict[
+            tuple[bool, int | None],
+            tuple[list[TransferRegion], list[TransferRegion]],
+        ] = {}
+        for local_region, remote_region in zip(local_regions, remote_regions):
+            local_group, remote_group = regions_by_rule.setdefault(
+                self._transfer_rule(local_region.layer_name), ([], [])
+            )
+            local_group.append(local_region)
+            remote_group.append(remote_region)
+        for (replicated, num_kv_heads), (
+            local_group,
+            remote_group,
+        ) in regions_by_rule.items():
+            validation_err = _validate_asymmetric_region_lengths(
+                local_regions=local_group,
+                remote_regions=remote_group,
+                local_tp_size=self.tp_size,
+                remote_tp_size=meta.remote_tp_size,
+                producer_cache_replicated=replicated,
+                total_num_kv_heads=num_kv_heads,
+            )
+            if validation_err is not None:
+                break
         if validation_err is not None:
             response = MooncakeXferResponse(
                 status=MooncakeXferResponseStatus.ERROR,
@@ -2469,6 +2486,8 @@ class MooncakeConnectorWorker:
         # Each peer settles its own requests, sharing the per-request counters.
         pull_metas = pull_metas.copy()
         req_ids = set(pull_metas)
+        remote_engine_id = next(iter(pull_metas.values())).remote_engine_id
+        include_mamba_geometry = self._tp_size.get(remote_engine_id) != self.tp_size
         include_layout = (
             not self._kv_layout_id or worker_addr not in self._acked_layout_peers
         )
@@ -2476,7 +2495,9 @@ class MooncakeConnectorWorker:
         # the layout after a LAYOUT_MISS.
         while True:
             metadata = self._build_pull_metadata(
-                pull_metas, include_layout=include_layout
+                pull_metas,
+                include_layout=include_layout,
+                include_mamba_geometry=include_mamba_geometry,
             )
             encoded_data = self._encoder.encode(metadata)
             logger.debug(
@@ -2802,6 +2823,7 @@ class MooncakeConnectorWorker:
             tuple(meta.registered_group_indices),
             tuple(tuple(groups) for groups in meta.registered_shared_group_ids),
             tuple(meta.registered_row_offsets),
+            msgspec.msgpack.encode(meta.mamba_transfer_geometry),
         )
         cached = self._prepared_transfer_regions.get(cache_key)
         if cached is not None:
@@ -2879,6 +2901,11 @@ class MooncakeConnectorWorker:
         )
         if head_err is not None:
             return finish([], [], head_err)
+        mamba_err = self._validate_mamba_unequal_tp(
+            meta.remote_tp_size, meta.mamba_transfer_geometry, local_regions
+        )
+        if mamba_err is not None:
+            return finish([], [], mamba_err)
         # Hetero TP indexes kv_block_len as one head-sharded payload. A merged
         # multi-layer span would land that offset on the wrong layer.
         # Replicated KV keeps that offset at 0. MLA is replicated in practice;
@@ -2947,6 +2974,7 @@ class MooncakeConnectorWorker:
         pull_metas: dict[ReqId, PullReqMeta],
         *,
         include_layout: bool,
+        include_mamba_geometry: bool = False,
     ) -> MooncakeXferMetadata:
         req_blocks = {
             req_id: (pull_meta.transfer_id, pull_meta.local_block_ids)
@@ -2983,6 +3011,9 @@ class MooncakeConnectorWorker:
                 list(groups) for groups in self.region_shared_groups
             ],
             registered_row_offsets=self.region_row_offsets,
+            mamba_transfer_geometry=(
+                self._mamba_transfer_geometry() if include_mamba_geometry else {}
+            ),
         )
 
     def _validate_head_resharding_layout(
@@ -3037,22 +3068,72 @@ class MooncakeConnectorWorker:
             row_offsets=row_offsets,
         )
 
-    def _hetero_tp_mamba_layout_error(self, remote_tp_size: int) -> str | None:
-        """Reject heterogeneous TP for a sharded SD-layout Mamba/GDN conv
-        state whose sub-projections cannot be derived (unsupported mamba
-        type), since it can only be resharded per row and sub-projection."""
-        if self.tp_size == remote_tp_size or is_conv_state_dim_first():
+    def _mamba_transfer_geometry(self) -> dict[str, MambaTransferGeometry]:
+        layout = "DS" if is_conv_state_dim_first() else "SD"
+        return {
+            name: MambaTransferGeometry(
+                shapes=[list(shape) for shape in spec.shapes],
+                dtypes=[str(dtype) for dtype in spec.dtypes],
+                conv_layout=layout,
+                mamba_type=spec.mamba_type.name,
+                tp_replicated=spec.tp_replicated,
+            )
+            for name, spec in self._layer_specs.items()
+            if isinstance(spec, MambaSpec)
+        }
+
+    def _validate_mamba_unequal_tp(
+        self,
+        remote_tp_size: int,
+        remote_geometry: dict[str, MambaTransferGeometry],
+        local_regions: list[TransferRegion],
+    ) -> str | None:
+        """Reject Mamba/GDN states that cannot be resharded across TP sizes.
+
+        Each sharded state must be an exact TP shard on both peers: the conv
+        state along its dim axis (the first axis in DS, the last in SD) and
+        the temporal states along their first axis, with sub-projections that
+        can be derived. Equal TP copies whole states and needs no geometry.
+        """
+        if self.tp_size == remote_tp_size:
             return None
-        for layer_name, spec in self._layer_specs.items():
-            if not isinstance(spec, MambaSpec) or spec.tp_replicated:
+        local_geometry = self._mamba_transfer_geometry()
+        for name in dict.fromkeys(region.layer_name for region in local_regions):
+            local = local_geometry.get(name)
+            if local is None:
                 continue
+            remote = remote_geometry.get(name)
+            if remote is None:
+                return f"Mooncake peer omitted Mamba transfer geometry for {name}."
+            if (
+                local.dtypes != remote.dtypes
+                or local.conv_layout != remote.conv_layout
+                or local.mamba_type != remote.mamba_type
+                or local.tp_replicated != remote.tp_replicated
+                or len(local.shapes) != len(remote.shapes)
+            ):
+                return f"Mooncake incompatible Mamba transfer geometry for {name}."
+            if local.tp_replicated:
+                if local.shapes != remote.shapes:
+                    return f"Mooncake Mamba state shape mismatch for {name}."
+                continue
+            conv_axis = 0 if local.conv_layout == "DS" else -1
+            for state, (a, b) in enumerate(zip(local.shapes, remote.shapes)):
+                shard_axis = (conv_axis if state == 0 else 0) % max(len(a), 1)
+                if len(a) != len(b) or any(
+                    x * self.tp_size != y * remote_tp_size
+                    if axis == shard_axis
+                    else x != y
+                    for axis, (x, y) in enumerate(zip(a, b))
+                ):
+                    return (
+                        "Mooncake Mamba state of "
+                        f"{name} is not an exact TP shard on both peers."
+                    )
             try:
-                self._sd_conv_split(layer_name)
+                self._conv_split(name)
             except (AssertionError, NotImplementedError) as e:
-                return (
-                    "Mooncake heterogeneous-TP transfer cannot reshard the SD "
-                    f"conv state of {layer_name}: {e}"
-                )
+                return f"Mooncake cannot reshard the conv state of {name}: {e}"
         return None
 
     def _transfer_rule(self, layer_name: str) -> tuple[bool, int | None]:
@@ -3128,7 +3209,7 @@ class MooncakeConnectorWorker:
             # Each SD conv row interleaves the sub-projections, so reshard
             # every (row, sub-projection) span on its own.
             spans = sd_conv_sub_spans(
-                self._sd_conv_split(local_region.layer_name),
+                self._conv_split(local_region.layer_name),
                 _get_tp_ratio(self.tp_size, agent_meta.remote_tp_size),
             )
             assert spans[-1][0] + spans[-1][2] == local_region.kv_block_len
@@ -3161,13 +3242,13 @@ class MooncakeConnectorWorker:
             )
         return copies
 
-    def _sd_conv_split(self, layer_name: str) -> MambaConvSplitInfo:
-        split = self._sd_conv_splits.get(layer_name)
+    def _conv_split(self, layer_name: str) -> MambaConvSplitInfo:
+        split = self._conv_splits.get(layer_name)
         if split is None:
             spec = self._layer_specs[layer_name]
             assert isinstance(spec, MambaSpec)
             split = derive_mamba_conv_split(spec, self.tp_size)
-            self._sd_conv_splits[layer_name] = split
+            self._conv_splits[layer_name] = split
         return split
 
     def _log_debug_cache_registration(

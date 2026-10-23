@@ -14,6 +14,7 @@ from math import prod
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import msgspec
 import pytest
 import torch
 
@@ -21,6 +22,7 @@ from tests.v1.attention.utils import dense_kv_cache_views
 from vllm.config import set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
     KVConnectorRole,
+    MambaTransferGeometry,
     MooncakeConnector,
     MooncakeConnectorScheduler,
     MooncakeConnectorWorker,
@@ -50,6 +52,16 @@ from .utils import create_request, create_vllm_config, maybe_update_block_size
 
 def noop_shutdown():
     pass
+
+
+def mamba_geometry(spec: MambaSpec, layout: str) -> MambaTransferGeometry:
+    return MambaTransferGeometry(
+        shapes=[list(shape) for shape in spec.shapes],
+        dtypes=[str(dtype) for dtype in spec.dtypes],
+        conv_layout=layout,
+        mamba_type=spec.mamba_type.name,
+        tp_replicated=spec.tp_replicated,
+    )
 
 
 def make_hybrid_gdn_kv_cache_config(block_size: int) -> KVCacheConfig:
@@ -985,7 +997,13 @@ def test_hetero_tp_keeps_sharded_gdn_states_uncoalesced(monkeypatch):
     """Adjacent conv and ssm regions must not merge under heterogeneous TP,
     even when the attention KV is replicated: the ratio split of a merged
     region would cut across the conv/ssm boundary."""
+    from vllm.model_executor.layers.mamba.mamba_utils import (
+        get_conv_state_layout,
+    )
+
     monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
+    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "SD")
+    get_conv_state_layout.cache_clear()
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector",
         kv_role="kv_consumer",
@@ -1002,6 +1020,21 @@ def test_hetero_tp_keeps_sharded_gdn_states_uncoalesced(monkeypatch):
         )
         worker = connector.connector_worker
         gdn_spec = kv_cache_config.kv_cache_groups[1].kv_cache_spec
+        # The same page as the fixture's state, shaped as an SD state that
+        # shards across TP2: conv (3 rows, Q/K/V dims 1/1/4), ssm (2, 2, 1).
+        sd_spec = MambaSpec(
+            block_size=gdn_spec.block_size,
+            shapes=((3, 6), (2, 2, 1)),
+            dtypes=(torch.float16, torch.float16),
+            mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+        )
+        worker._layer_specs["model.layers.1.linear_attn"] = sd_spec
+        consumer_spec = MambaSpec(
+            block_size=gdn_spec.block_size,
+            shapes=((3, 3), (1, 2, 1)),
+            dtypes=(torch.float16, torch.float16),
+            mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+        )
         stride = 128
         packed = torch.empty(kv_cache_config.num_blocks * stride, dtype=torch.int8)
         gdn_cache = packed.view(-1, stride)[:, : gdn_spec.page_size_bytes]
@@ -1025,6 +1058,9 @@ def test_hetero_tp_keeps_sharded_gdn_states_uncoalesced(monkeypatch):
             registered_group_indices=[1, 1],
             registered_shared_group_ids=[[1], [1]],
             registered_row_offsets=[-1, -1],
+            mamba_transfer_geometry={
+                "model.layers.1.linear_attn": mamba_geometry(consumer_spec, "SD")
+            },
         )
         local_regions, remote_regions, err = worker._prepare_transfer_regions(meta)
         assert err is None
@@ -1034,6 +1070,7 @@ def test_hetero_tp_keeps_sharded_gdn_states_uncoalesced(monkeypatch):
         worker.shutdown()
         worker.shutdown = noop_shutdown
         connector.connector_worker = None
+    get_conv_state_layout.cache_clear()
 
 
 def test_register_kv_caches_keeps_replicated_conv_state_whole(monkeypatch):
@@ -1085,14 +1122,29 @@ def test_register_kv_caches_keeps_replicated_conv_state_whole(monkeypatch):
         get_conv_state_layout.cache_clear()
 
 
-def test_hetero_tp_sd_conv_layout_requires_a_derivable_split(monkeypatch):
-    """SD conv states reshard per row and sub-projection, so heterogeneous TP
-    needs a mamba type whose sub-projections can be derived."""
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("field", "value", "expected_error"),
+    [
+        (None, None, "omitted Mamba transfer geometry"),
+        ("dtypes", ["torch.bfloat16", "torch.float16"], "incompatible"),
+        ("conv_layout", "DS", "incompatible"),
+        ("mamba_type", "MAMBA2", "incompatible"),
+        ("shapes", [[3, 6], [1, 2, 1]], "not an exact TP shard"),
+    ],
+)
+def test_prepared_regions_revalidate_changed_peer_geometry(
+    monkeypatch, field, value, expected_error
+):
+    """A cached valid peer must not hide missing or incompatible state
+    geometry (from #62251)."""
     from vllm.model_executor.layers.mamba.mamba_utils import (
         get_conv_state_layout,
     )
 
     monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
+    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "SD")
+    get_conv_state_layout.cache_clear()
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector",
         kv_role="kv_consumer",
@@ -1100,40 +1152,159 @@ def test_hetero_tp_sd_conv_layout_requires_a_derivable_split(monkeypatch):
     kv_cache_config = make_hybrid_gdn_kv_cache_config(
         vllm_config.cache_config.block_size
     )
+    layer = "model.layers.1.linear_attn"
+
+    def gdn(tp: int) -> MambaSpec:
+        return MambaSpec(
+            block_size=vllm_config.cache_config.block_size,
+            shapes=((3, 6 // tp), (2 // tp, 2, 1)),
+            dtypes=(torch.float16, torch.float16),
+            mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+        )
+
     with set_current_vllm_config(vllm_config), patch_worker_dependencies():
         connector = MooncakeConnector(
-            vllm_config,
-            KVConnectorRole.WORKER,
-            kv_cache_config,
+            vllm_config, KVConnectorRole.WORKER, kv_cache_config
         )
         worker = connector.connector_worker
         try:
-            monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "SD")
-            get_conv_state_layout.cache_clear()
-            # The fixture's GDN conv state (6, 3) is DS-shaped; SD is (3, 6).
-            worker._layer_specs["model.layers.1.linear_attn"] = MambaSpec(
-                block_size=vllm_config.cache_config.block_size,
-                shapes=((3, 6), (1, 2, 2)),
-                dtypes=(torch.float16, torch.float16),
-                mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+            worker._layer_specs[layer] = gdn(1)
+            stride = 128
+            packed = torch.empty(kv_cache_config.num_blocks * stride, dtype=torch.int8)
+            worker.register_kv_caches(
+                {layer: packed.view(-1, stride)[:, : gdn(1).page_size_bytes]}
             )
-            assert worker._hetero_tp_mamba_layout_error(worker.tp_size * 2) is None
+            geometry = mamba_geometry(gdn(2), "SD")
+            remote_base = 0x100000
+            meta = MooncakeXferMetadata(
+                remote_hostname="consumer-host",
+                remote_port=54321,
+                remote_tp_size=2,
+                remote_tp_rank=0,
+                req_blocks={},
+                kv_caches_base_addr=[remote_base, remote_base + 18],
+                block_lens=[stride, stride],
+                kv_block_lens=[18, 4],
+                registered_layer_names=[layer] * 2,
+                registered_layer_indices=[1, 1],
+                registered_group_indices=[1, 1],
+                registered_shared_group_ids=[[1], [1]],
+                registered_row_offsets=[-1, -1],
+                mamba_transfer_geometry={layer: geometry},
+            )
+            prepared = worker._prepare_transfer_regions(meta)
+            assert prepared[2] is None
+
+            if field is None:
+                meta.mamba_transfer_geometry = {}
+            else:
+                meta.mamba_transfer_geometry = {
+                    layer: msgspec.structs.replace(geometry, **{field: value})
+                }
+            local, remote, error = worker._prepare_transfer_regions(meta)
+            assert local == remote == []
+            assert expected_error in error
+
+            meta.mamba_transfer_geometry = {layer: geometry}
+            restored = worker._prepare_transfer_regions(meta)
+            assert restored[0] is prepared[0]
+            assert restored[1] is prepared[1]
+            assert restored[2] is None
+        finally:
+            get_conv_state_layout.cache_clear()
+            worker.shutdown()
+            worker.shutdown = noop_shutdown
+            connector.connector_worker = None
+
+
+def test_hetero_tp_validates_mamba_geometry(monkeypatch):
+    """Heterogeneous TP needs the peer's Mamba state geometry, an exact TP
+    shard of each state on both peers, and a derivable conv split."""
+    from vllm.model_executor.layers.mamba.mamba_utils import (
+        get_conv_state_layout,
+    )
+
+    monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
+    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "SD")
+    get_conv_state_layout.cache_clear()
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector",
+        kv_role="kv_consumer",
+    )
+    block_size = vllm_config.cache_config.block_size
+    kv_cache_config = make_hybrid_gdn_kv_cache_config(block_size)
+
+    def gdn(tp: int) -> MambaSpec:
+        # Q/K/V dims 1/1/4 and 2 value heads at TP1, in 3 SD rows.
+        return MambaSpec(
+            block_size=block_size,
+            shapes=((3, 6 // tp), (2 // tp, 2, 1)),
+            dtypes=(torch.float16, torch.float16),
+            mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+        )
+
+    gdn_layer, conv_layer = "model.layers.1.linear_attn", "model.layers.2.conv"
+    regions = [
+        TransferRegion(
+            layer_name=gdn_layer,
+            layer_index=1,
+            base_addr=0,
+            block_len=64,
+            kv_block_len=36,
+        )
+    ]
+    with set_current_vllm_config(vllm_config), patch_worker_dependencies():
+        connector = MooncakeConnector(
+            vllm_config, KVConnectorRole.WORKER, kv_cache_config
+        )
+        worker = connector.connector_worker
+        try:
+            worker._layer_specs[gdn_layer] = gdn(1)
+            peer = {gdn_layer: mamba_geometry(gdn(2), "SD")}
+            assert worker._validate_mamba_unequal_tp(2, peer, regions) is None
+            # Equal TP copies whole states and needs no geometry.
+            assert worker._validate_mamba_unequal_tp(1, {}, regions) is None
+
+            err = worker._validate_mamba_unequal_tp(2, {}, regions)
+            assert "omitted Mamba transfer geometry" in err
+            ds_peer = {gdn_layer: mamba_geometry(gdn(2), "DS")}
+            err = worker._validate_mamba_unequal_tp(2, ds_peer, regions)
+            assert "incompatible Mamba transfer geometry" in err
+            # A peer state that is not half of ours (e.g. Mamba2 B/C
+            # replicated across ranks) cannot be resharded by slicing.
+            padded = {gdn_layer: mamba_geometry(gdn(1), "SD")}
+            err = worker._validate_mamba_unequal_tp(2, padded, regions)
+            assert "not an exact TP shard" in err
 
             # A sharded short conv has no sub-projection split to reshard by.
-            worker._layer_specs["model.layers.2.conv"] = MambaSpec(
-                block_size=vllm_config.cache_config.block_size,
+            short_conv = MambaSpec(
+                block_size=block_size,
                 shapes=((3, 4),),
                 dtypes=(torch.float16,),
                 mamba_type=MambaAttentionBackendEnum.SHORT_CONV,
             )
-            err = worker._hetero_tp_mamba_layout_error(worker.tp_size * 2)
-            assert err is not None and "model.layers.2.conv" in err
-            # Homogeneous TP copies whole states, so any SD state is fine.
-            assert worker._hetero_tp_mamba_layout_error(worker.tp_size) is None
-
-            monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "DS")
-            get_conv_state_layout.cache_clear()
-            assert worker._hetero_tp_mamba_layout_error(worker.tp_size * 2) is None
+            worker._layer_specs[conv_layer] = short_conv
+            conv_peer = MambaSpec(
+                block_size=block_size,
+                shapes=((3, 2),),
+                dtypes=(torch.float16,),
+                mamba_type=MambaAttentionBackendEnum.SHORT_CONV,
+            )
+            err = worker._validate_mamba_unequal_tp(
+                2,
+                {**peer, conv_layer: mamba_geometry(conv_peer, "SD")},
+                [
+                    *regions,
+                    TransferRegion(
+                        layer_name=conv_layer,
+                        layer_index=2,
+                        base_addr=64,
+                        block_len=64,
+                        kv_block_len=24,
+                    ),
+                ],
+            )
+            assert "cannot reshard the conv state of model.layers.2.conv" in err
         finally:
             get_conv_state_layout.cache_clear()
             worker.shutdown()
@@ -1381,7 +1552,6 @@ async def _plan_and_apply_sd_reshard(
     d_tp = len(consumer_pages)
     worker.tp_size, worker.tp_rank = p_tp, p_rank
     worker.register_kv_caches({layer_name: producer_cache})
-    assert worker._hetero_tp_mamba_layout_error(d_tp) is None
     local_regions = worker._get_transfer_regions(
         worker.kv_caches_base_addr,
         worker.block_len_per_layer,
@@ -1390,6 +1560,8 @@ async def _plan_and_apply_sd_reshard(
         worker.registered_layer_indices,
         worker.registered_group_indices,
     )
+    peer_geometry = {layer_name: mamba_geometry(d_spec, "SD")}
+    assert worker._validate_mamba_unequal_tp(d_tp, peer_geometry, local_regions) is None
     ratio = max(p_tp, d_tp) // min(p_tp, d_tp)
     d_ranks = (
         [p_rank // ratio]
