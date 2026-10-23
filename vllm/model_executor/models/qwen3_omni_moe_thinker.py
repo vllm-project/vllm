@@ -22,7 +22,7 @@
 # limitations under the License.
 """Inference-only Qwen3-Omni-Moe model (thinker part)."""
 
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping, Sequence
 from functools import partial
 from typing import Any, ClassVar
 
@@ -89,10 +89,12 @@ from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
 
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsEagle3,
+    SupportsEncoderCudaGraph,
     SupportsLoRA,
     SupportsMRoPE,
     SupportsMultiModal,
@@ -123,7 +125,11 @@ from .utils import (
     _merge_multimodal_embeddings,
     maybe_prefix,
 )
-from .vision import get_vit_attn_backend
+from .vision import (
+    get_fp8_padded_hidden_size,
+    get_vit_attn_backend,
+    is_vit_use_data_parallel,
+)
 
 logger = init_logger(__name__)
 
@@ -777,6 +783,9 @@ class Qwen3Omni_VisionTransformer(nn.Module):
         self.num_grid_per_side = self.image_size // self.patch_size
         self.apply_vit_abs_pos_embed = vision_config.apply_vit_abs_pos_embed
         self.deepstack_visual_indexes = vision_config.deepstack_visual_indexes
+        self.tp_size = (
+            1 if is_vit_use_data_parallel() else get_tensor_model_parallel_world_size()
+        )
 
         self.patch_embed = Qwen3_VisionPatchEmbed(
             patch_size=self.patch_size,
@@ -795,6 +804,11 @@ class Qwen3Omni_VisionTransformer(nn.Module):
 
         norm_layer = partial(nn.LayerNorm, eps=norm_eps)
         head_dim = self.hidden_size // self.num_heads
+        # FP8 attention: Q/K/V become independent contiguous tensors after
+        # quantization, so FlashInfer cu_seqlens uses uniform stride.
+        self.fp8_padded_hidden_size = get_fp8_padded_hidden_size(
+            self.num_heads, head_dim
+        )
         self.rotary_pos_emb = get_rope(
             head_size=head_dim,
             max_position=8192,
@@ -853,8 +867,8 @@ class Qwen3Omni_VisionTransformer(nn.Module):
     def device(self) -> torch.device:
         return self.patch_embed.proj.weight.device
 
-    def rot_pos_emb(self, grid_thw):
-        max_grid_size = grid_thw[:, 1:].max()
+    def rot_pos_emb(self, grid_thw: Sequence[Sequence[int]]):
+        max_grid_size = max(max(h, w) for _, h, w in grid_thw)
 
         # Use pre-computed cos_sin_cache from RotaryEmbedding
         cos, sin = self.rotary_pos_emb.get_cos_sin(max_grid_size)
@@ -953,83 +967,113 @@ class Qwen3Omni_VisionTransformer(nn.Module):
 
         return torch.cat(outputs, dim=0)
 
-    def compute_attn_mask_seqlen(
+    def prepare_encoder_metadata(
         self,
-        cu_seqlens: torch.Tensor,
-    ) -> torch.Tensor:
-        max_seqlen = torch.zeros([], device=cu_seqlens.device)
-        if self.attn_backend in {
-            AttentionBackendEnum.FLASH_ATTN,
-            AttentionBackendEnum.ROCM_AITER_FA,
-            AttentionBackendEnum.TRITON_ATTN,
-        }:
-            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
-        return max_seqlen
+        grid_thw_list: Sequence[Sequence[int]],
+        *,
+        max_batch_size: int | None = None,
+        max_frames_per_batch: int | None = None,
+        max_seqlen_override: int | None = None,
+        device: torch.device | None = None,
+    ) -> dict[str, torch.Tensor | None]:
+        """Compute encoder metadata from grid_thw_list.
+
+        Shared by the eager forward path, CUDA graph capture, and
+        CUDA graph replay.
+
+        Args:
+            grid_thw_list: Grid configurations as list of [t, h, w].
+            max_batch_size: If set, pad cu_seqlens to this size
+                (needed for CUDA graph capture/replay).
+            max_frames_per_batch: If set, overrides max_batch_size for
+                cu_seqlens padding, since each video frame is its own
+                attention sequence.
+            max_seqlen_override: If set, use this value for max_seqlen
+                instead of computing it from cu_seqlens (needed for CUDA
+                graph capture to cover worst-case replay scenarios).
+            device: Device to place tensors on. Defaults to self.device.
+
+        """
+        if device is None:
+            device = self.device
+
+        metadata: dict[str, torch.Tensor | None] = {}
+
+        metadata["pos_embeds"] = (
+            self.fast_pos_embed_interpolate(grid_thw_list)
+            if self.apply_vit_abs_pos_embed
+            else None
+        )
+        rotary_cos, rotary_sin = self.rot_pos_emb(grid_thw_list)
+        metadata["rotary_pos_emb_cos"] = rotary_cos.to(device)
+        metadata["rotary_pos_emb_sin"] = rotary_sin.to(device)
+
+        grid_thw_np = np.array(grid_thw_list, dtype=np.int32)
+        patches_per_frame = grid_thw_np[:, 1] * grid_thw_np[:, 2]
+        cu_seqlens = np.repeat(patches_per_frame, grid_thw_np[:, 0]).cumsum(
+            dtype=np.int32
+        )
+        cu_seqlens = np.concatenate([np.zeros(1, dtype=np.int32), cu_seqlens])
+
+        pad_to = (
+            max_frames_per_batch if max_frames_per_batch is not None else max_batch_size
+        )
+        if pad_to is not None:
+            num_seqs = len(cu_seqlens) - 1
+            if num_seqs < pad_to:
+                cu_seqlens = np.concatenate(
+                    [
+                        cu_seqlens,
+                        np.full(pad_to - num_seqs, cu_seqlens[-1], dtype=np.int32),
+                    ]
+                )
+
+        metadata["sequence_lengths"] = MMEncoderAttention.maybe_compute_seq_lens(
+            self.attn_backend, cu_seqlens, device
+        )
+
+        if max_seqlen_override is not None:
+            max_seqlen_val = max_seqlen_override
+        else:
+            max_seqlen_val = MMEncoderAttention.compute_max_seqlen(
+                self.attn_backend, cu_seqlens
+            )
+        # Keep max_seqlen on CPU: the scalar is baked in at capture time.
+        metadata["max_seqlen"] = torch.tensor(max_seqlen_val, dtype=torch.int32)
+
+        metadata["cu_seqlens"] = MMEncoderAttention.maybe_recompute_cu_seqlens(
+            self.attn_backend,
+            cu_seqlens,
+            self.hidden_size,
+            self.tp_size,
+            device,
+            fp8_padded_hidden_size=self.fp8_padded_hidden_size,
+        )
+
+        return metadata
 
     def forward(
         self,
         x: torch.Tensor,
-        grid_thw: torch.Tensor,
+        grid_thw: torch.Tensor | list[list[int]] | None,
+        *,
+        encoder_metadata: dict[str, torch.Tensor | None] | None = None,
     ) -> torch.Tensor:
         hidden_states = x.to(device=self.device, dtype=self.dtype)
         hidden_states = self.patch_embed(hidden_states)
 
-        if self.apply_vit_abs_pos_embed:
-            pos_embeds = self.fast_pos_embed_interpolate(grid_thw)
+        if encoder_metadata is None:
+            assert grid_thw is not None
+            if isinstance(grid_thw, list):
+                grid_thw_list = grid_thw
+            else:
+                grid_thw_list = grid_thw.tolist()
+            encoder_metadata = self.prepare_encoder_metadata(grid_thw_list)
+
+        pos_embeds = encoder_metadata["pos_embeds"]
+        if pos_embeds is not None:
             hidden_states = hidden_states + pos_embeds
-        rotary_pos_emb_cos, rotary_pos_emb_sin = self.rot_pos_emb(grid_thw)
-
-        # RDNA3 (gfx11) specific bug workaround: torch.repeat_interleave triggers
-        # kernel crashes. We attempt the operation and catch the RuntimeError
-        # to switch to a vectorized cumsum + searchsorted approach.
-        try:
-            cu_seqlens = torch.repeat_interleave(
-                grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
-            ).cumsum(
-                dim=0,
-                dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
-            )
-            cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
-        except RuntimeError:
-            logger.warning(
-                "torch.repeat_interleave not executable, "
-                "switching to vectorized searchsorted implementation."
-            )
-            repeat_counts = grid_thw[:, 0]
-            values = grid_thw[:, 1] * grid_thw[:, 2]
-            repeat_cumsum = repeat_counts.cumsum(0)
-            total_items = repeat_cumsum[-1].item()
-
-            indices = torch.searchsorted(
-                repeat_cumsum,
-                torch.arange(total_items, device=grid_thw.device),
-                right=True,
-            )
-            cu_seqlens = values[indices].cumsum(
-                dim=0,
-                dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
-            )
-            cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
-
-        # Move cu_seqlens to GPU; grid_thw may be on CPU during profile_run
-        # and FA3 vit attention requires cu_seqlens on CUDA.
-        cu_seqlens = async_tensor_h2d(cu_seqlens, self.device)
         hidden_states = hidden_states.unsqueeze(1)
-        rotary_pos_emb_cos = rotary_pos_emb_cos.to(hidden_states.device)
-        rotary_pos_emb_sin = rotary_pos_emb_sin.to(hidden_states.device)
-        max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
-
-        # Recompute cu_seqlens in numpy from grid_thw to avoid GPU->CPU sync
-        grid_thw_np = grid_thw.cpu().numpy()
-        cu_seqlens_np = np.repeat(
-            grid_thw_np[:, 1] * grid_thw_np[:, 2], grid_thw_np[:, 0]
-        ).cumsum(axis=0, dtype=np.int32)
-        cu_seqlens_np = np.concatenate([np.zeros(1, dtype=np.int32), cu_seqlens_np])
-        sequence_lengths = MMEncoderAttention.maybe_compute_seq_lens(
-            self.attn_backend,
-            cu_seqlens_np,
-            self.device,
-        )
 
         hidden_states_list = []
         deepstack_visual_indexes = self.deepstack_visual_indexes
@@ -1037,11 +1081,11 @@ class Qwen3Omni_VisionTransformer(nn.Module):
         for layer_num, blk in enumerate(self.blocks):
             hidden_states = blk(
                 hidden_states,
-                cu_seqlens=cu_seqlens,
-                rotary_pos_emb_cos=rotary_pos_emb_cos,
-                rotary_pos_emb_sin=rotary_pos_emb_sin,
-                max_seqlen=max_seqlen,
-                sequence_lengths=sequence_lengths,
+                cu_seqlens=encoder_metadata["cu_seqlens"],
+                rotary_pos_emb_cos=encoder_metadata["rotary_pos_emb_cos"],
+                rotary_pos_emb_sin=encoder_metadata["rotary_pos_emb_sin"],
+                max_seqlen=encoder_metadata["max_seqlen"],
+                sequence_lengths=encoder_metadata["sequence_lengths"],
             )
             if (
                 deepstack_visual_indexes is not None
@@ -1615,6 +1659,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
     SupportsPP,
     SupportsMRoPE,
     SupportsEagle3,
+    SupportsEncoderCudaGraph,
     Qwen3OmniMoeConditionalGenerationMixin,
     SupportsTranscription,
 ):
@@ -1662,6 +1707,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.vllm_config = vllm_config  # needed for torch compile forward context
+        self.model_config = vllm_config.model_config
         thinker_config: Qwen3OmniMoeThinkerConfig = (
             vllm_config.model_config.hf_config.thinker_config
         )
@@ -1813,6 +1859,232 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
                     **kwargs
                 )
         return mm_input_by_modality
+
+    # -- SupportsEncoderCudaGraph protocol methods --
+    # Only the vision encoder is captured; the audio encoder stays eager.
+
+    def get_encoder_cudagraph_config(self):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphConfig,
+        )
+
+        return EncoderCudaGraphConfig(
+            modalities=["image", "video"],
+            buffer_keys=[
+                "pixel_values",
+                "pos_embeds",
+                "rotary_pos_emb_cos",
+                "rotary_pos_emb_sin",
+                "cu_seqlens",
+                "max_seqlen",
+                "sequence_lengths",
+            ],
+            # The vision encoder concatenates the deepstack features with
+            # the main features along the hidden dim.
+            out_hidden_size=self.visual_dim + self.multiscale_dim,
+            max_frames_per_video=self.get_max_frames_per_video(),
+        )
+
+    def get_input_modality(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> str:
+        if "image_grid_thw" in mm_kwargs:
+            return "image"
+        elif "video_grid_thw" in mm_kwargs:
+            return "video"
+        raise AssertionError("This line should be unreachable.")
+
+    def get_max_frames_per_video(self) -> int:
+        info = MULTIMODAL_REGISTRY.get_processing_info(self.model_config)
+        assert isinstance(info, Qwen3OmniMoeThinkerProcessingInfo)
+        return info.get_num_frames_with_most_features(
+            seq_len=self.model_config.max_model_len,
+            mm_counts={"video": self.multimodal_config.get_limit_per_prompt("video")},
+        )
+
+    def get_encoder_cudagraph_budget_range(
+        self,
+        vllm_config: VllmConfig,
+    ) -> tuple[int, int]:
+        # Min: estimated smallest possible encoder input.
+        # 224x224 image -> 14x14 patches (patch_size=16)
+        #                  spatial_merge_size=2 -> 7x7 = 49 tokens
+        min_budget = 49
+        # Max: capped by max_num_batched_tokens
+        max_budget = min(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            self.model_config.max_model_len,
+        )
+        return (min_budget, max_budget)
+
+    def _get_pixel_values_by_modality(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> torch.Tensor:
+        modality = self.get_input_modality(mm_kwargs)
+        if modality == "image":
+            return mm_kwargs["pixel_values"]
+        elif modality == "video":
+            return mm_kwargs["pixel_values_videos"]
+        raise AssertionError("This line should be unreachable.")
+
+    def _get_grid_thw_by_modality(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> list[list[int]]:
+        grid_thw = mm_kwargs[f"{self.get_input_modality(mm_kwargs)}_grid_thw"]
+        if not isinstance(grid_thw, list):
+            grid_thw = grid_thw.tolist()
+        return grid_thw
+
+    def get_encoder_cudagraph_item_specs(
+        self,
+        mm_kwargs: dict[str, Any],
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
+
+        m = self.visual.spatial_merge_size
+        return [
+            EncoderItemSpec(
+                input_size=t * h * w,
+                output_tokens=t * (h // m) * (w // m),
+            )
+            for t, h, w in self._get_grid_thw_by_modality(mm_kwargs)
+        ]
+
+    def select_encoder_cudagraph_items(
+        self,
+        mm_kwargs: dict[str, Any],
+        indices: list[int],
+    ) -> dict[str, Any]:
+        grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
+        pixel_values = self._get_pixel_values_by_modality(mm_kwargs)
+        if self.get_input_modality(mm_kwargs) == "image":
+            pixel_key, grid_key = "pixel_values", "image_grid_thw"
+        else:
+            pixel_key, grid_key = "pixel_values_videos", "video_grid_thw"
+
+        if len(indices) == 0:
+            return {pixel_key: pixel_values[:0], grid_key: []}
+
+        # Compute cumulative patch offsets for slicing pixel_values
+        cum_patches = [0]
+        for t, h, w in grid_thw:
+            cum_patches.append(cum_patches[-1] + t * h * w)
+
+        selected_pv = torch.cat(
+            [pixel_values[cum_patches[i] : cum_patches[i + 1]] for i in indices]
+        )
+        return {pixel_key: selected_pv, grid_key: [grid_thw[i] for i in indices]}
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphCaptureInputs,
+        )
+
+        spatial_merge_size = self.visual.spatial_merge_size
+        # Ceil so the buffer fits the worst case of one item using the full
+        # budget.
+        per_mm_item_output = (token_budget + max_batch_size - 1) // max_batch_size
+
+        frames_per_item = max_frames_per_batch // max_batch_size
+        if frames_per_item > 1:
+            # Video-format grid (T > 1 per item) so that cu_seqlens, which
+            # has one entry per frame, is sized for video replays.
+            tokens_per_frame = (
+                per_mm_item_output + frames_per_item - 1
+            ) // frames_per_item
+            grid_config = [
+                [
+                    frames_per_item,
+                    spatial_merge_size,
+                    tokens_per_frame * spatial_merge_size,
+                ]
+                for _ in range(max_batch_size)
+            ]
+        else:
+            grid_config = [
+                [1, spatial_merge_size, per_mm_item_output * spatial_merge_size]
+                for _ in range(max_batch_size)
+            ]
+
+        patch_embed = self.visual.patch_embed
+        total_patches = sum(t * h * w for t, h, w in grid_config)
+        flattened_patch_size = (
+            patch_embed.proj.in_channels
+            * patch_embed.temporal_patch_size
+            * patch_embed.patch_size
+            * patch_embed.patch_size
+        )
+        dummy_pixel_values = torch.zeros(
+            total_patches, flattened_patch_size, device=device, dtype=dtype
+        )
+
+        # max_seqlen is baked into the graph, so capture with the worst
+        # case: one item using the full budget.
+        metadata = self.visual.prepare_encoder_metadata(
+            grid_config,
+            max_batch_size=max_batch_size,
+            max_frames_per_batch=max_frames_per_batch,
+            max_seqlen_override=token_budget * (spatial_merge_size**2),
+            device=device,
+        )
+
+        # Image and video pixel values have the same layout, so one capture
+        # input serves both modalities.
+        return EncoderCudaGraphCaptureInputs(
+            values=metadata | {"pixel_values": dummy_pixel_values},
+        )
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        path: str = "default",
+    ):
+        grid_thw_list = self._get_grid_thw_by_modality(mm_kwargs)
+        if self.get_input_modality(mm_kwargs) == "image":
+            metadata = self.visual.prepare_encoder_metadata(
+                grid_thw_list, max_batch_size=max_batch_size
+            )
+        else:
+            metadata = self.visual.prepare_encoder_metadata(
+                grid_thw_list, max_frames_per_batch=max_frames_per_batch
+            )
+
+        return EncoderCudaGraphReplayBuffers(
+            values=metadata
+            | {"pixel_values": self._get_pixel_values_by_modality(mm_kwargs)}
+        )
+
+    def encoder_cudagraph_forward(
+        self,
+        values: dict[str, torch.Tensor],
+        path: str = "default",
+    ) -> torch.Tensor:
+        pixel_values = values.pop("pixel_values")
+        return self.visual(pixel_values, None, encoder_metadata=values)
+
+    def encoder_eager_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+        path: str = "default",
+    ) -> torch.Tensor:
+        return self.visual(
+            self._get_pixel_values_by_modality(mm_kwargs),
+            self._get_grid_thw_by_modality(mm_kwargs),
+        )
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)

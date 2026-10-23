@@ -209,6 +209,24 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         needs_video_metadata=True,
         marks=[pytest.mark.core_model],
     ),
+    "qwen3_omni": VitCudagraphTestConfig(
+        model="Qwen/Qwen3-Omni-30B-A3B-Instruct",
+        image_prompt=qwen_vl_chat_template(
+            "<|vision_start|><|image_pad|><|vision_end|>What is in this image?"
+        ),
+        video_prompt=qwen_vl_chat_template(
+            "<|vision_start|><|video_pad|><|vision_end|>"
+            "Describe this video in one sentence."
+        ),
+        vllm_runner_kwargs={
+            "load_format": "dummy",
+            "hf_overrides": partial(
+                dummy_hf_overrides,
+                model_arch="Qwen3OmniMoeForConditionalGeneration",
+            ),
+            "limit_mm_per_prompt": {"image": 1, "video": 1, "audio": 0},
+        },
+    ),
     "qwen3_5": VitCudagraphTestConfig(
         model="Qwen/Qwen3.5-0.8B",
         image_prompt=qwen_vl_chat_template(
