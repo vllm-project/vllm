@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# Adapted from ROCm/aiter#6173 at c39b56c36 (Apache-2.0 License),
-# Copyright (c) 2025 FlyDSL Project Contributors:
-# aiter/ops/flydsl/kernels/glm5_mono/packing.py
+# Adapted from the GLM-5 MonoKernel of ROCm/FlyDSL#1204 (@coderfeli),
+# kernels/monokernel/packing.py, and ROCm/ATOM#2435 (@XiaobingSuper),
+# atom/model_ops/monokernel/packing.py (Apache-2.0 License),
+# Copyright (c) 2025 FlyDSL Project Contributors.
 
 """Host-side weight packing for the FFN launch."""
 

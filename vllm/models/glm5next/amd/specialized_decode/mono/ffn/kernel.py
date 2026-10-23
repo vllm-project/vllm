@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# Adapted from ROCm/aiter#6173 at c39b56c36 (Apache-2.0 License),
-# Copyright (c) 2025 FlyDSL Project Contributors:
-# aiter/ops/flydsl/kernels/glm5_mono/glm/kernel.py
+# Adapted from the GLM-5 MonoKernel of ROCm/FlyDSL#1204 (@coderfeli),
+# kernels/monokernel/glm/kernel.py, and ROCm/ATOM#2435 (@XiaobingSuper),
+# atom/model_ops/monokernel/glm/kernel.py (Apache-2.0 License),
+# Copyright (c) 2025 FlyDSL Project Contributors.
 # ruff: noqa: B008, B023, E501, SIM102
 
 """GLM-5.3-Flash FFN-layer MonoKernel: one persistent launch per TP rank.
