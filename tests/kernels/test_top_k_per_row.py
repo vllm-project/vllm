@@ -46,6 +46,14 @@ requires_gfx950 = pytest.mark.skipif(
 )
 
 
+def _max_smem_per_block() -> int:
+    props = torch.cuda.get_device_properties(0)
+    # ROCm reports no opt-in limit; the default per-block limit is the maximum.
+    return getattr(
+        props, "shared_memory_per_block_optin", props.shared_memory_per_block
+    )
+
+
 COOPERATIVE_TOPK_BACKEND = pytest.param(
     "cooperative_topk",
     marks=pytest.mark.skipif(
@@ -56,8 +64,8 @@ COOPERATIVE_TOPK_BACKEND = pytest.param(
 PERSISTENT_TOPK_BACKEND = pytest.param(
     "persistent_topk",
     marks=pytest.mark.skipif(
-        not current_platform.is_cuda(),
-        reason="persistent_topk requires CUDA",
+        not current_platform.is_cuda_alike(),
+        reason="persistent_topk requires CUDA or ROCm",
     ),
 )
 WORKSPACE_TOPK_BACKENDS = [PERSISTENT_TOPK_BACKEND, COOPERATIVE_TOPK_BACKEND]
@@ -997,7 +1005,9 @@ def test_dsv4_native_top_k_window() -> None:
     assert prefers_native(num_rows=128, num_columns=524_288, topk_tokens=1024) is False
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
+)
 @pytest.mark.parametrize(
     "seq_len_range,test_id",
     [
@@ -1064,7 +1074,10 @@ def test_deepseek_workspace_topk(
     )
 
 
-@pytest.mark.skipif(not _has_device_capability(80), reason="Requires SM80+")
+@pytest.mark.skipif(
+    not (current_platform.is_rocm() or _has_device_capability(80)),
+    reason="Requires SM80+ or ROCm",
+)
 @pytest.mark.parametrize("rows", [65, 128])
 @pytest.mark.parametrize("top_k", [512, 1024, 2048])
 @pytest.mark.parametrize(
@@ -1075,7 +1088,7 @@ def test_persistent_topk_sampled_graph(
     rows: int, top_k: int, distribution: str
 ) -> None:
     """Sampling and both fallbacks preserve exact values across graph replays."""
-    if torch.cuda.get_device_properties(0).shared_memory_per_block_optin < 144 * 1024:
+    if _max_smem_per_block() < 144 * 1024:
         pytest.skip("Sampled top-k requires at least 144 KiB of shared memory")
     set_random_seed(42)
     min_sampled_length = 98304 if top_k == 512 else 65536
@@ -1322,7 +1335,9 @@ def test_cooperative_topk_cs2(top_k: int) -> None:
     )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
+)
 @pytest.mark.parametrize(
     "test_config",
     [
@@ -1422,7 +1437,9 @@ def test_workspace_topk_correctness(test_config: dict, backend: str) -> None:
     )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
+)
 @pytest.mark.parametrize(
     "test_config",
     [
@@ -1483,7 +1500,9 @@ def test_workspace_topk_algorithm_paths(test_config: dict, backend: str) -> None
     )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
+)
 @pytest.mark.parametrize("backend", WORKSPACE_TOPK_BACKENDS)
 @torch.inference_mode()
 def test_workspace_topk_stress(backend: str) -> None:
@@ -1925,7 +1944,9 @@ NAN_ORDERING_CASES = [
 ]
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
+)
 @pytest.mark.parametrize("backend,num_rows", NAN_ORDERING_CASES)
 @pytest.mark.parametrize("seq_len", [65536, 262144])
 @pytest.mark.parametrize("top_k", [512, 2048])
@@ -2010,7 +2031,9 @@ def _assert_topk_values_match_reference(
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
+)
 @pytest.mark.parametrize("top_k", [512, 1024, 2048])
 @pytest.mark.parametrize(
     ("seq_len", "stride", "score_kind", "candidate_count"),
@@ -2118,7 +2141,9 @@ def test_workspace_topk_candidate_overflow(
     _assert_topk_values_match_reference(logits, indices, seq_len, top_k)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
+)
 @pytest.mark.parametrize(
     "test_config",
     [
@@ -2199,7 +2224,9 @@ def test_workspace_topk(test_config: dict, top_k: int, backend: str) -> None:
     )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
+)
 @torch.inference_mode()
 def test_persistent_topk_reused_group_after_short_row() -> None:
     """A short row must not advance a group's radix histogram ring."""
@@ -2211,7 +2238,7 @@ def test_persistent_topk_reused_group_after_short_row() -> None:
     radix = 256
     fixed_smem = ((radix + radix + 5) * 4 + 15) & ~15
     props = torch.cuda.get_device_properties(0)
-    max_smem = props.shared_memory_per_block_optin
+    max_smem = _max_smem_per_block()
     if max_smem <= props.shared_memory_per_multiprocessor // 2:
         pytest.skip("Cannot force one persistent_topk CTA per SM")
 
@@ -2241,7 +2268,9 @@ def test_persistent_topk_reused_group_after_short_row() -> None:
     assert set(indices[target_row].cpu().tolist()) == set(expected.cpu().tolist())
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
+)
 @pytest.mark.parametrize("top_k", [512, 1024, 2048])
 @pytest.mark.parametrize("extra", [1, 2, 3, 4])
 @pytest.mark.parametrize("num_finite", [0, 100])
@@ -2282,7 +2311,9 @@ def test_persistent_topk_masked_row_tail(
         assert set(finite_cols[row].cpu().tolist()) <= set(selected)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
+)
 @pytest.mark.parametrize("top_k", [512, 2048])
 @pytest.mark.parametrize("backend", WORKSPACE_TOPK_BACKENDS)
 @torch.inference_mode()
@@ -2440,7 +2471,7 @@ SPARSE_INDEXER_EXPLICIT_BACKENDS = [
     pytest.param(
         "persistent",
         marks=pytest.mark.skipif(
-            not current_platform.is_cuda(), reason="requires CUDA"
+            not current_platform.is_cuda_alike(), reason="requires CUDA or ROCm"
         ),
     ),
     pytest.param(

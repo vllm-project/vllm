@@ -183,8 +183,8 @@ class SparseIndexerTopk(torch.nn.Module):
         if self._backend == "cooperative":
             failures = self._cooperative_constraints(logits, topk_tokens, num_rows)
         elif self._backend == "persistent":
-            if not self._is_cuda:
-                failures.append("requires a CUDA platform")
+            if not (self._is_cuda or self._is_rocm):
+                failures.append("requires a CUDA or ROCm platform")
             if topk_tokens not in (512, 1024, 2048):
                 failures.append(
                     f"topk_tokens must be in (512, 1024, 2048), got {topk_tokens}"
