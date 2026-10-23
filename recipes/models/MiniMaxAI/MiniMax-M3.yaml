@@ -4,7 +4,7 @@ meta:
   provider: "MiniMax"
   description: "MiniMax M3 vision-language MoE (427B total / 26B active) for frontier coding, agent toolchains, and 1M-token reasoning via MSA sparse attention — native multimodal (image + video + computer use); BF16 plus MXFP8, NVIDIA Blackwell NVFP4, and AMD MI355X MXFP4 variants. Runs on NVIDIA (Hopper/Blackwell) and AMD CDNA4/CDNA3."
   date_added: 2026-06-12
-  date_updated: 2026-10-20
+  date_updated: 2026-10-23
   tasks:
     - text
     - multimodal
@@ -796,6 +796,42 @@ guide: |
   ```bash
   --speculative-config '{"method":"eagle3","model":"Inferact/MiniMax-M3-EAGLE3-GQA","num_speculative_tokens":3,"attention_backend":"FLASHINFER","use_local_argmax_reduction":true}'
   ```
+
+  ## H200: InferenceX AgentX aggregated (vLLM)
+
+  The H200 AgentX lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`minimaxm3-fp8-h200-vllm-agentic-mtp`, [SemiAnalysisAI/InferenceX#4429](https://github.com/SemiAnalysisAI/InferenceX/pull/4429)) serves the MXFP8 checkpoint with the GQA EAGLE3 draft (three speculative tokens) as one aggregated vLLM worker on a single 8-GPU H200 node: TP8, no expert parallelism, no host KV offload. It ran on `vllm/vllm-openai:nightly-83c078d955cd6e0c63d3b12abe669c8de936a370@sha256:cb12c3016938a4ee98ed176ac833984089460689a0982cff4b5a60bb45b3cded` (vLLM `0.32.1rc1.dev361`). The command builder keeps its own pinned H200 MXFP8 image, an earlier nightly; use the image above to reproduce these points.
+
+  In the command builder, pick **H200** and the **MXFP8** variant (the builder keeps the current variant when you switch hardware, so select MXFP8 explicitly), turn on **Spec Decoding → GQA**, **Text-only** and **Thinking Always On**, and use **Single-node TP**. On an 8-GPU H200 node the builder sizes TP to 8. That renders every serving flag and environment variable below except the per-point `--max-num-seqs` and `--max-cudagraph-capture-size`, which stay in this guide. The lane does not set `--max-model-len`.
+
+  Every point uses `--gpu-memory-utilization 0.95`, which the builder already sets for H200. The scheduler batch is twice the client count, and the CUDA graph capture size covers it at four tokens per sequence (the sequence plus three draft tokens):
+
+  | Clients | `--max-num-seqs` | `--max-cudagraph-capture-size` |
+  |---:|---:|---:|
+  | 1 | 2 | 8 |
+  | 2 | 4 | 16 |
+  | 4 | 8 | 32 |
+  | 6 | 12 | 48 |
+  | 8 | 16 | 64 |
+  | 10 | 20 | 80 |
+  | 12 | 24 | 96 |
+  | 14 | 28 | 112 |
+
+  ### Command
+
+  ```bash
+  VLLM_MARLIN_USE_ATOMIC_ADD=1 \
+  vllm serve MiniMaxAI/MiniMax-M3-MXFP8 --tensor-parallel-size 8 --trust-remote-code \
+    --attention-backend FLASH_ATTN --linear-backend humming --kv-cache-dtype fp8 \
+    --attention-config '{"indexer_kv_dtype":"fp8"}' --block-size 128 --enable-prefix-caching \
+    --speculative-config '{"method":"eagle3","model":"Inferact/MiniMax-M3-EAGLE3-GQA","num_speculative_tokens":3,"attention_backend":"FLASH_ATTN"}' \
+    --max-num-seqs <S> --max-cudagraph-capture-size <N> --gpu-memory-utilization 0.95 --language-model-only \
+    --reasoning-parser minimax_m3 --tool-call-parser minimax_m3 --enable-auto-tool-choice \
+    --default-chat-template-kwargs '{"thinking_mode":"enabled"}'
+  ```
+
+  The lane passes `--trust-remote-code`; the builder's MXFP8 command does not.
+
+  The InferenceX throughput points replaced block verification with synthetic rejection at the committed golden EAGLE3-GQA acceptance length (2.78 for MiniMax-M3 with three draft tokens, thinking on; [`minimaxm3_eagle3_gqa.yaml`](https://github.com/SemiAnalysisAI/InferenceX/blob/main/inferencex-e2e/infx/golden_al_distribution/minimaxm3_eagle3_gqa.yaml)) so every point is measured at the same acceptance rate. The command above does not set it.
 
   ## B200: InferenceX AgentX aggregated (vLLM)
 
