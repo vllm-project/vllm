@@ -94,6 +94,13 @@ class EngineCoreRequest(
     kv_hints: KvHintsEnvelope | None = None
 
 
+@dataclass(frozen=True)
+class RequestError:
+    code: str
+    message: str
+    retryable: bool = False
+
+
 class EngineCoreOutput(
     msgspec.Struct,
     array_like=True,
@@ -117,6 +124,7 @@ class EngineCoreOutput(
     new_sampling_mask: object | None = None
     spec_decode_metrics: object | None = None
     prompt_token_id_logprobs: object | None = None
+    error: RequestError | None = None
 
 
 class ExtendedEngineCoreOutput(EngineCoreOutput):
@@ -237,7 +245,13 @@ outputs = EngineCoreOutputs(
         EngineCoreOutput(
             request_id="req-1",
             new_token_ids=[7, 8],
-            finish_reason=FinishReason.LENGTH,
+            finish_reason=FinishReason.ERROR,
+            error=RequestError("engine_paused", "Generation is paused.", True),
+            routed_experts=[
+                np.arange(4, dtype=np.uint8).reshape(2, 1, 2).dtype.str,
+                [2, 1, 2],
+                msgspec.msgpack.Ext(3, np.arange(4, dtype=np.uint8).tobytes()),
+            ],
         )
     ],
     finished_requests={"req-1"},
@@ -529,8 +543,17 @@ mooncake_stats = {
         }
     ]
 }
+mooncake_transfer_stats = {
+    "transfer_duration": [0.01, 0.02],
+    "bytes_transferred": [4096, 8192],
+    "num_descriptors": [2, 4],
+    "num_failed_transfers": [1],
+    "num_failed_recvs": [],
+    "num_kv_expired_reqs": [1],
+}
 multi_connector_stats = {
     "NixlConnector": nixl_stats,
+    "MooncakeConnector": mooncake_transfer_stats,
     "MooncakeStoreConnector": mooncake_stats,
     "UnsupportedConnector": {"sample_count": 1},
 }
@@ -556,6 +579,7 @@ print(
 )
 print(msgspec.msgpack.encode(nixl_stats).hex())
 print(msgspec.msgpack.encode(mooncake_stats).hex())
+print(msgspec.msgpack.encode(mooncake_transfer_stats).hex())
 print(msgspec.msgpack.encode(multi_connector_stats).hex())
 print(msgspec.msgpack.encode(ready_response).hex())
 print(extended_outputs_bytes.hex())
