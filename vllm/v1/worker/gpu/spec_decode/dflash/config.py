@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 from vllm.v1.worker.gpu.spec_decode.eagle.config import wrap_eagle_hf_config
 from vllm.v1.worker.gpu.spec_decode.speculator_config import (
-    CheckpointSpeculatorConfig,
+    DraftModelSpeculatorConfig,
     TargetEmbedSharing,
 )
 
@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from vllm.config import SpeculativeConfig
 
 
-class DFlashSpeculatorConfig(CheckpointSpeculatorConfig):
+class DFlashSpeculatorConfig(DraftModelSpeculatorConfig):
     base_method = "dflash"
     speculator_class = (
         "vllm.v1.worker.gpu.spec_decode.dflash.speculator.DFlashSpeculator"

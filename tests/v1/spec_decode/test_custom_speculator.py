@@ -23,7 +23,7 @@ from vllm.v1.worker.gpu.spec_decode.ngram.config import NgramGPUSpeculatorConfig
 from vllm.v1.worker.gpu.spec_decode.speculator import BaseSpeculator
 from vllm.v1.worker.gpu.spec_decode.speculator_config import SpeculatorConfig
 from vllm.v1.worker.gpu.spec_decode.standalone_ar.config import (
-    DraftModelSpeculatorConfig,
+    StandaloneARSpeculatorConfig,
 )
 from vllm.v1.worker.gpu.spec_decode.v1_speculator_configs import (
     V1CustomProposerConfig,
@@ -57,7 +57,7 @@ class DummyNgramGPUSpeculatorConfig(NgramGPUSpeculatorConfig):
     speculator_class = _qualname(DummySpeculator)
 
 
-class DummyDraftModelSpeculatorConfig(DraftModelSpeculatorConfig):
+class DummyStandaloneARSpeculatorConfig(StandaloneARSpeculatorConfig):
     speculator_class = _qualname(DummySpeculator)
 
 
@@ -126,7 +126,7 @@ def test_custom_speculator_inherits_builtin_config(register):
     assert type(spec_config.speculator_config) is DummyNgramGPUSpeculatorConfig
 
     # A draft model speculator needs a draft model.
-    register("my_draft", DummyDraftModelSpeculatorConfig)
+    register("my_draft", DummyStandaloneARSpeculatorConfig)
     with pytest.raises(ValueError, match="without speculative model"):
         _custom_spec_config("my_draft")
 

@@ -3,14 +3,14 @@
 from typing import TYPE_CHECKING
 
 from vllm.v1.worker.gpu.spec_decode.speculator_config import (
-    CheckpointSpeculatorConfig,
+    DraftModelSpeculatorConfig,
 )
 
 if TYPE_CHECKING:
     from vllm.config import SpeculativeConfig
 
 
-class DraftModelSpeculatorConfig(CheckpointSpeculatorConfig):
+class StandaloneARSpeculatorConfig(DraftModelSpeculatorConfig):
     """A speculator that drafts autoregressively with its own draft model."""
 
     base_method = "draft_model"

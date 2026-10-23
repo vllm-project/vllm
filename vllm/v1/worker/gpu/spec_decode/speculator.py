@@ -61,8 +61,9 @@ def _target_feeds_hc_residual(vllm_config: VllmConfig) -> bool:
 class BaseSpeculator(ABC):
     """Base class for V2 model runner speculators.
 
-    This is also the interface for custom speculators provided via
-    `speculative_config.speculator_class`. Speculators that run a draft model
+    This is also the interface for custom speculators, named by the
+    `speculator_class` of their registered `SpeculatorConfig` (see
+    `register_speculative_method`). Speculators that run a draft model
     should subclass `DraftModelSpeculator` (or `TargetDependentARSpeculator` if
     drafting consumes target model state), which the model runner loads and
     allocates draft KV cache for.
@@ -73,7 +74,8 @@ class BaseSpeculator(ABC):
     num_extra_query_per_req: int = 0
     supports_mm_inputs: bool = False
     # [max_num_reqs, num_speculative_steps, vocab_size] draft logits for
-    # probabilistic rejection sampling, or None for greedy-draft verification.
+    # probabilistic rejection sampling, or None for greedy-draft verification
+    # and for speculators without a draft model.
     draft_logits: torch.Tensor | None = None
 
     @abstractmethod

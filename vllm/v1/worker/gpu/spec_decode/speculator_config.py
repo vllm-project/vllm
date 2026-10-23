@@ -153,7 +153,7 @@ class SpeculatorConfig:
         )
 
 
-class CheckpointSpeculatorConfig(SpeculatorConfig):
+class DraftModelSpeculatorConfig(SpeculatorConfig):
     """A speculator whose draft model is loaded from the `model` checkpoint."""
 
     # Whether an explicitly configured method is checked against the draft
@@ -277,7 +277,7 @@ _CONFIG_BY_METHOD: dict[str, str] = {
     "extract_hidden_states": _builtin(
         "extract_hidden_states_config", "ExtractHiddenStatesSpeculatorConfig"
     ),
-    "draft_model": _builtin("standalone_ar.config", "DraftModelSpeculatorConfig"),
+    "draft_model": _builtin("standalone_ar.config", "StandaloneARSpeculatorConfig"),
     "ngram": _builtin("ngram.config", "NgramSpeculatorConfig"),
     "ngram_gpu": _builtin("ngram.config", "NgramGPUSpeculatorConfig"),
     "eagle": _builtin("eagle.config", "EagleSpeculatorConfig"),
@@ -393,8 +393,8 @@ _CHECKPOINT_DETECTION_ORDER = ("eagle", "eagle3", "dflash", "dspark", "mtp")
 
 def _resolve_checkpoint_config_class(
     spec_config: "SpeculativeConfig",
-    configured_cls: type[CheckpointSpeculatorConfig],
-) -> type[CheckpointSpeculatorConfig]:
+    configured_cls: type[DraftModelSpeculatorConfig],
+) -> type[DraftModelSpeculatorConfig]:
     """The built-in config for the draft checkpoint: detected if no method is
     configured, else the configured one (checked if it `validates_checkpoint`).
     """
@@ -414,7 +414,7 @@ def _resolve_checkpoint_config_class(
 
     declared_cls = _get_draft_declared_config_class(spec_config)
     if declared_cls is not None:
-        assert issubclass(declared_cls, CheckpointSpeculatorConfig)
+        assert issubclass(declared_cls, DraftModelSpeculatorConfig)
         return declared_cls
     for method in _CHECKPOINT_DETECTION_ORDER:
         config_cls = resolve_obj_by_qualname(_CONFIG_BY_METHOD[method])
