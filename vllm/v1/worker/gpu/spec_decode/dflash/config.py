@@ -18,7 +18,6 @@ class DFlashSpeculatorConfig(CheckpointSpeculatorConfig):
         "vllm.v1.worker.gpu.spec_decode.dflash.speculator.DFlashSpeculator"
     )
     uses_target_hidden_states = True
-    uses_separate_draft_pass = True
     target_embed_sharing: ClassVar[TargetEmbedSharing] = "always"
     supports_watermarking = True
     supports_parallel_drafting = True
@@ -41,6 +40,10 @@ class DFlashSpeculatorConfig(CheckpointSpeculatorConfig):
     def num_lookahead_tokens(self) -> int:
         # Fill-in drafting uses a bonus query plus one query per draft token.
         return self.num_speculative_tokens + 1
+
+    @property
+    def draft_query_len(self) -> int:
+        return self.num_lookahead_tokens
 
     @property
     def max_num_new_slots_for_drafting(self) -> int:

@@ -280,7 +280,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_prefill_lookahead = max(1, vllm_config.num_prefill_lookahead_tokens)
         use_dense_all_token_ids = (
             self.speculative_config is not None
-            and self.speculative_config.speculator_config.needs_dense_token_history
+            and self.speculative_config.speculator_config.prefer_dense_token_history
         )
 
         # General request states.

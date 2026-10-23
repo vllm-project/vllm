@@ -122,7 +122,7 @@ def test_custom_speculator_inherits_builtin_config(register):
     assert spec_config.base_method == "ngram_gpu"
     assert spec_config.use_ngram_gpu()
     assert spec_config.prompt_lookup_min == spec_config.prompt_lookup_max == 5
-    assert spec_config.speculator_config.needs_dense_token_history
+    assert spec_config.speculator_config.prefer_dense_token_history
     assert type(spec_config.speculator_config) is DummyNgramGPUSpeculatorConfig
 
     # A draft model speculator needs a draft model.
