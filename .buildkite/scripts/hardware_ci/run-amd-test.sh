@@ -73,11 +73,12 @@ export PYTEST_ADDOPTS="${PYTEST_ADDOPTS:-} \
   -o faulthandler_timeout=1500 \
   --timeout-method=thread"
 
-# After its summary, a pytest process leaves without native library teardown, where it
-# has crashed with SIGSEGV after every test passed (amd_ci_fast_exit.py).
+# A native fault prints its backtrace, and once pytest has its result, a fault in native
+# library teardown (where it has crashed with SIGSEGV after every test passed) exits with
+# that result instead of failing the job (amd_ci_teardown.py).
 ci_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 export PYTHONPATH="$ci_dir:$PYTHONPATH"
-export PYTEST_ADDOPTS="$PYTEST_ADDOPTS -p amd_ci_fast_exit"
+export PYTEST_ADDOPTS="$PYTEST_ADDOPTS -p amd_ci_teardown"
 
 [[ $gpus == 0 ]] && export VLLM_TARGET_DEVICE=cpu
 
