@@ -274,3 +274,21 @@ purgeés (bornés au `StartedAt` 11:30:42Z), 8,0 G / 13 % après, health 200 en
   post-restart est jeune). La veille continue.
 - Purge `/dev/shm` : **27 fichiers / 34,33 GiB** d'orphelins (bornés au
   StartedAt 15:14:12) → **8,1 G / 13 %**, health 200 en 5,8 ms. Commit 74,3 %.
+
+## 23/10 18:41Z — 18ᵉ wedge ; mais la course s'est tue et le hit préfixe monte à 86,7 %
+
+- **18ᵉ wedge 17:53:27** (restart 17:55:02), puis 45 min tenues (2 fail 1/2
+  non escaladés). KV 91,8 %, **0 préemption**, **hit préfixe 86,65 %** sur
+  19,3 M — meilleur ratio mesuré depuis le début du pilote : l'amortissement
+  fonctionne quand le moteur vit.
+- **0 ENOENT depuis 14:20:12** (4 h 20, **8 cycles de purge** consécutifs sans
+  incident, dont 38,5 GiB puis 29,0 GiB supprimés) et **0×500 sur 613
+  requêtes** en 2 h. La course est donc **intermittente**, pas systématique :
+  hypothèse (non testée) — les entrées périmées vivent dans l'index en mémoire
+  de la génération courante, qu'un restart reconstruit depuis le disque ; les
+  générations courtes (comme aujourd'hui) ne laissent pas le temps de former
+  ces pointeurs morts. À confronter à un moteur qui vivra longtemps.
+- Disque invité **92 %** (82 GB, mieux que 93 %), tier 63,8 GiB avant purge,
+  cap auto-serré 34,8. Q26 reste le levier structurel.
+- Charge 558 req/2 h dont 348 >100 K, pic 10/min. Commit 74,2 %.
+  Pruner 0 err, nbaudit ok, condensation repli 3 étages key=OK.
