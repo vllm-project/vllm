@@ -461,6 +461,44 @@ def test_flashinfer_autotune_off_grid_max_tokens_uses_op_buckets():
     ]
 
 
+@pytest.mark.parametrize(
+    "max_tokens,full_pass_uses_override",
+    [(16384, True), (21504, False), (2560, True), (3000, False)],
+)
+def test_flashinfer_autotune_override_follows_flashinfer_bucket_mapper(
+    max_tokens, full_pass_uses_override
+):
+    """Check the on-grid / off-grid split against FlashInfer's real mapper."""
+    fi_moe_utils = pytest.importorskip("flashinfer.fused_moe.utils")
+    runner = _make_runner([], max_tokens=max_tokens)
+
+    with (
+        patch(
+            "vllm.model_executor.warmup.kernel_warmup."
+            "_flashinfer_autotune_token_counts",
+            return_value=(max_tokens, 128),
+        ),
+        patch("vllm.utils.flashinfer.autotune") as autotune,
+    ):
+        _run_flashinfer_autotune_dummy_runs(runner)
+
+    expected = [
+        call(
+            tuning_buckets=fi_moe_utils.get_hybrid_num_tokens_buckets(128),
+            round_up=True,
+        )
+    ]
+    if full_pass_uses_override:
+        expected.insert(
+            0,
+            call(
+                tuning_buckets=fi_moe_utils.get_hybrid_num_tokens_buckets(max_tokens),
+                round_up=True,
+            ),
+        )
+    assert autotune.call_args_list == expected
+
+
 class _AutotuneGroup:
     def __init__(self, run, ranks):
         self.run = run
