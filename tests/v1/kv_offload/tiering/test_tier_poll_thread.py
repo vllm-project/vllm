@@ -260,8 +260,8 @@ def test_tier_that_did_not_opt_in_is_not_serviced_off_thread():
         with manager.lock:
             manager.on_schedule_end(_EMPTY_SCHEDULE_END)
 
-        # on_schedule_end still serves every tier, so the thread dying degrades
-        # to per-step servicing rather than to none.
+        # on_schedule_end serves every tier, so the unpolled tier is serviced
+        # once per step.
         assert quiet.serves == 1
     finally:
         manager.shutdown()
@@ -463,9 +463,11 @@ def test_off_thread_promotion_is_flushed_by_the_next_step():
 def test_dead_poll_thread_makes_the_manager_keep_the_engine_stepping(
     manager_and_tier,
 ):
-    """The tier-poll loop gives up after repeated failures and leaves a dead
-    thread object behind. Once no live thread services an opted-in tier, the
-    engine tick is the only driver again, so the manager must keep it stepping.
+    """With no live thread the engine tick is the only driver.
+
+    A failing loop now backs off rather than exiting, so this guards the
+    defensive branch: if the field ever holds a finished thread (for example a
+    join that failed to clear it), the manager must keep the engine stepping.
     """
     manager, tier = manager_and_tier
     assert tier.served.wait(_SETTLE_S)
@@ -473,7 +475,7 @@ def test_dead_poll_thread_makes_the_manager_keep_the_engine_stepping(
 
     manager._stop_tier_poll_thread()
     # _stop_tier_poll_thread() clears the field only when the join succeeds.
-    # Reproduce the give-up path, which leaves the finished thread in place.
+    # Simulate a finished thread left in the field.
     dead = threading.Thread(target=lambda: None)
     dead.start()
     dead.join()
@@ -541,7 +543,7 @@ def test_shutdown_raises_when_the_caller_holds_the_lock(manager_and_tier, monkey
 
 
 def test_failure_burst_does_not_stop_the_thread(manager_and_tier):
-    """The give-up budget is time, not rounds.
+    """The backoff budget is time, not rounds.
 
     At a 1 ms interval, a few hundred failing rounds take well under a second;
     a fault that short must not turn the tier-poll thread off for good.
@@ -564,8 +566,13 @@ def test_failure_burst_does_not_stop_the_thread(manager_and_tier):
     assert _live_control_threads()
 
 
-def test_sustained_failure_stops_the_thread(monkeypatch):
-    monkeypatch.setattr(tiering_manager, "_TIER_POLL_GIVE_UP_AFTER_S", 0.2)
+def test_sustained_failure_backs_off_but_keeps_serving(monkeypatch):
+    """The backoff path is non-terminal: an idle engine parks, so a thread that
+    exited after sustained failure would leave peers unserved with nothing to
+    wake the engine. It must back off and keep retrying, then resume the normal
+    interval once a round succeeds."""
+    monkeypatch.setattr(tiering_manager, "_TIER_POLL_BACK_OFF_AFTER_S", 0.2)
+    monkeypatch.setattr(tiering_manager, "_TIER_POLL_BACKOFF_S", 0.05)
     manager, tier = _make_manager()
     try:
         assert tier.served.wait(_SETTLE_S)
@@ -574,10 +581,12 @@ def test_sustained_failure_stops_the_thread(monkeypatch):
             raise RuntimeError("persistent")
 
         tier.on_serve = always_fails
-        deadline = time.monotonic() + 5
-        while _live_control_threads() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert not _live_control_threads()
+        time.sleep(0.5)
+        assert _live_control_threads(), "thread must survive sustained failure"
+
+        tier.served.clear()
+        tier.on_serve = None
+        assert tier.served.wait(_SETTLE_S * 2), "thread did not resume serving"
     finally:
         manager.shutdown()
 

@@ -284,18 +284,19 @@ Context:
 parked unbound stores, finished jobs awaiting hand-off, lookups owing
 `on_request_finished`), leaving idle peer polling to the tier-poll thread. The
 tiering manager keeps the engine stepping when no live poll thread services the
-tier (`tier_poll_interval_s <= 0`, or the thread gave up), and when a second
-secondary tier exists: a peer lookup served off-thread can promote a chunk out
-of that tier, and only an engine step submits and completes that promotion.
+tier (`tier_poll_interval_s <= 0`), and when a second secondary tier exists: a
+peer lookup served off-thread can promote a chunk out of that tier, and only an
+engine step submits and completes that promotion. A failing poll thread backs
+off instead of exiting, so it always remains a live thread -- which matters
+because an idle engine parks and only a step would otherwise service the tier.
 
 ### Open
 
 The multi-tier keep-alive restores the pre-fix busyness for a `[fs, p2p]`-style
-setup, so pause and graceful shutdown still do not complete there; the same
-holds for a single-tier setup whose poll thread dies while the engine is parked.
-Both are the same root problem: nothing wakes a parked engine when the tier-poll
-thread changes manager state. Settling them needs an engine wake path (see RFC
-#51476 and the poller PRs it tracks), which is outside B2.
+setup, so pause and graceful shutdown still do not complete there. That is the
+same root problem: nothing wakes a parked engine when the tier-poll thread
+changes manager state. Settling it needs an engine wake path (see RFC #51476 and
+the poller PRs it tracks), which is outside B2.
 
 ---
 
