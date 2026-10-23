@@ -26,6 +26,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+    kInt4Static32,
     kMxfp4Dynamic,
     kMxfp4Static,
 )
@@ -804,7 +805,8 @@ class AiterFp8ChannelExperts(AiterExperts):
 
 class AiterMxfp4Experts(AiterExperts):
     """MXFP4-quantized weights, with either unquantized (bf16/fp16) or
-    MXFP4-quantized dynamic activations. gfx950-only (not gfx1250)."""
+    MXFP4-quantized dynamic activations. gfx950-only (not gfx1250), except for
+    Kimi-K3's MXFP4 experts requantized to packed int4 at load on gfx942."""
 
     _AITER_QUANT_METHOD = QuantMethod.BLOCK_1X32
 
@@ -813,14 +815,16 @@ class AiterMxfp4Experts(AiterExperts):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
+        from vllm.platforms.rocm import on_gfx942, on_gfx950, on_gfx1250
+
+        if (weight_key, activation_key) == (kInt4Static32, None):
+            return on_gfx942()
         SUPPORTED_W_A = [
             (kMxfp4Static, None),
             (kMxfp4Static, kMxfp4Dynamic),
         ]
         if (weight_key, activation_key) not in SUPPORTED_W_A:
             return False
-        from vllm.platforms.rocm import on_gfx950, on_gfx1250
-
         return on_gfx950() and not on_gfx1250()
 
     def _extra_fused_moe_kwargs(self) -> dict:
