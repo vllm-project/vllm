@@ -1414,7 +1414,9 @@ class SpeculativeConfig:
         draft_hf_config: PreTrainedConfig,
         target_max_model_len: int,
     ) -> None:
-        """Raise a draft's max_position_embeddings up to the target's.
+        """Raise the max_position_embeddings of a draft that shares the
+        target's positional space (see `SpeculatorConfig`'s
+        `shares_target_positions`) up to the target's.
 
         The proposer feeds the draft positions up to the target's
         max_model_len, while max_position_embeddings sizes the draft's
@@ -1728,7 +1730,7 @@ class SpeculativeConfig:
         """Whether the draft's max_position_embeddings is raised to the
         target's max_model_len, so its length doesn't limit the target's."""
         return (
-            self.method != "draft_model"
+            self.speculator_config.shares_target_positions
             and self.draft_model_config is not None
             and _rope_only_sizes_cache(self.draft_model_config.hf_config)
         )

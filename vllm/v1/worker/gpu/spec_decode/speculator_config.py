@@ -60,6 +60,9 @@ class SpeculatorConfig:
     # The draft model has its own vocabulary, which must match the target's
     # unless use_heterogeneous_vocab.
     draft_has_own_vocab: ClassVar[bool] = False
+    # The draft model takes the target's positions, so its
+    # max_position_embeddings may be raised to the target's max_model_len.
+    shares_target_positions: ClassVar[bool] = False
 
     supports_watermarking: ClassVar[bool] = False
     # Prefill context parallelism.
@@ -156,6 +159,7 @@ class CheckpointSpeculatorConfig(SpeculatorConfig):
     # Whether an explicitly configured method is checked against the draft
     # checkpoint (otherwise it's trusted).
     validates_checkpoint: ClassVar[bool] = False
+    shares_target_positions = True
 
     @classmethod
     def default_model(cls, spec: "SpeculativeConfig") -> str | None:
@@ -206,6 +210,10 @@ class CheckpointSpeculatorConfig(SpeculatorConfig):
         if spec.method is None:
             spec.method = config_cls.base_method  # type: ignore[assignment]
 
+        if config_cls.shares_target_positions:
+            SpeculativeConfig._maybe_override_draft_max_position_embeddings(
+                spec.draft_model_config.hf_config, target.max_model_len
+            )
         config_cls.adapt_draft_model_config(spec)
         config_cls.resolve_num_speculative_tokens(spec)
         if spec.num_speculative_tokens is None:
