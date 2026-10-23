@@ -253,9 +253,9 @@ def use_aiter_triton_gemm(n, m, k, dtype):
 def wvsplitkrc_dispatch(n: int, k: int, m: int, cu_count: int) -> tuple[int, bool]:
     """Pick the K-shard split for wvSplitKrc and say whether the shape fits.
 
-    Mirrors wvSplitKrc() in csrc/rocm/skinny_gemms_wvsplitkrc.cu, which is also where the
-    shard cap is explained. Both must pick the same chunkk or the workspace
-    check here bounds the wrong k_rnd.
+    Mirrors wvSplitKrc() in csrc/rocm/skinny_gemms_wvsplitkrc.cu, which is also
+    where the shard cap is explained. Both must pick the same chunkk or the
+    workspace check here bounds the wrong k_rnd.
 
     Returns:
         The CHUNKK the kernel will dispatch with, and whether the CU budget and
@@ -462,8 +462,8 @@ def warmup_rocm_skinny_gemm_workspaces(device: torch.device) -> None:
     """Eagerly allocate wvSplitKrc's per-device split-K workspace pool.
 
     wvSplitKrc partitions one per-device allocation into ``kWvSlots`` slots
-    (csrc/rocm/skinny_gemms_wvsplitkrc.cu) and hands each stream one on first use, so that
-    two streams never share the split-K partials and counters.
+    (csrc/rocm/skinny_gemms_wvsplitkrc.cu) and hands each stream one on first
+    use, so that two streams never share the split-K partials and counters.
 
     The pool is otherwise created lazily on the first qualifying GEMM
     (csrc/rocm/skinny_gemms_wvsplitkrc.cu), which can be the first real request — after
