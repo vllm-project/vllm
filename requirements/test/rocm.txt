@@ -104,8 +104,10 @@ cachetools==7.0.5
     # via -r requirements/test/../common.txt
 cbor2==5.9.0
     # via -r requirements/test/../common.txt
-certifi==2026.2.25
+certifi==2026.10.19
     # via
+    #   -c requirements/common.txt
+    #   -r requirements/test/../common.txt
     #   httpcore
     #   httpx
     #   requests
@@ -606,7 +608,6 @@ numpy==2.2.6
     #   bitsandbytes
     #   bm25s
     #   contourpy
-    #   cupy-cuda12x
     #   datasets
     #   decord
     #   einx
@@ -721,6 +722,8 @@ optuna==3.6.1
     # via genai-perf
 orjson==3.11.7
     # via
+    #   -c requirements/common.txt
+    #   -r requirements/test/../common.txt
     #   -r requirements/test/rocm.in
     #   genai-perf
     #   kaleido
@@ -1282,7 +1285,7 @@ traitlets==5.16.1
     # via
     #   jupyter-client
     #   jupyter-core
-transformers==5.18.0
+transformers==5.20.2
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -1439,7 +1442,6 @@ zipp==3.23.0
 # cuda-bindings
 # cuda-pathfinder
 # cuda-toolkit
-# cupy-cuda12x
 # nvidia-cublas
 # nvidia-cuda-cupti
 # nvidia-cuda-nvrtc

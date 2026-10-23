@@ -12,12 +12,16 @@ from fnmatch import filter as fnmatch_filter
 from types import NoneType
 from typing import TYPE_CHECKING, Any, cast
 
-import numpy as np
 import torch
 import torch.nn as nn
 
 import vllm.envs as envs
-from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
+from vllm.config import (
+    CUDAGraphMode,
+    VllmConfig,
+    set_current_vllm_config,
+    update_config,
+)
 from vllm.config.compilation import CompilationMode
 from vllm.config.profiler import validate_profile_prefix
 from vllm.device_allocator import get_mem_allocator_instance
@@ -58,6 +62,10 @@ from vllm.distributed.weight_transfer import (
 )
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.layers.quantization.online.lm_head import (
+    restore_quantized_lm_heads,
+    share_source_lm_heads,
+)
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.weight_checksum import (
     compute_tensor_digests,
@@ -74,6 +82,8 @@ from vllm.profiler.wrapper import (
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.tracing import instrument
+from vllm.triton_utils import HAS_TRITON
+from vllm.utils.flashinfer import warn_if_flashinfer_kernels_missing
 from vllm.utils.gc_utils import freeze_gc_heap, maybe_attach_gc_debug_callback
 from vllm.utils.gpu_sync_debug import enable_gpu_sync_check, with_gpu_sync_check
 from vllm.utils.mem_constants import GiB_bytes
@@ -98,7 +108,6 @@ from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
     maybe_save_startup_plan,
 )
-from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
@@ -194,6 +203,10 @@ class Worker(WorkerBase):
         distributed_init_method: str,
         is_driver_worker: bool = False,
     ):
+        self.use_v2_model_runner = vllm_config.use_v2_model_runner
+        if self.use_v2_model_runner and not HAS_TRITON:
+            raise ValueError("Model Runner V2 requires Triton.")
+
         super().__init__(
             vllm_config=vllm_config,
             local_rank=local_rank,
@@ -230,8 +243,6 @@ class Worker(WorkerBase):
         self.profiler_config = vllm_config.profiler_config
         validate_worker_profiler_config(self.profiler_config)
 
-        self.use_v2_model_runner = vllm_config.use_v2_model_runner
-
         # Device handles of the previous step's PP intermediate-tensor send.
         self._pp_send_work: list[Handle] = []
 
@@ -250,16 +261,28 @@ class Worker(WorkerBase):
             )
         return self._sleep_mode_backend
 
+    def _get_sleep_parameters(self, model: nn.Module) -> dict[str, nn.Parameter]:
+        parameters = dict(model.named_parameters())
+        draft = self.get_draft_model()
+        if draft is not None:
+            shared = {id(parameter) for parameter in parameters.values()}
+            parameters.update(
+                (f"draft.{name}", parameter)
+                for name, parameter in draft.named_parameters()
+                if id(parameter) not in shared
+            )
+        return parameters
+
     def _save_sleep_parameters(self, model: nn.Module) -> None:
         patterns = self.model_config.sleep_preserve_parameter_names
         if not patterns:
             self._sleep_saved_parameters = {}
             return
-        parameters = dict(model.named_parameters())
+        parameters = self._get_sleep_parameters(model)
         names: set[str] = set()
         for pattern in patterns:
             matches = fnmatch_filter(parameters, pattern)
-            if not matches:
+            if not matches and pattern != "draft.*":
                 raise ValueError(f"No parameter matches sleep retention: {pattern}")
             names.update(matches)
         self._sleep_saved_parameters = {
@@ -270,8 +293,9 @@ class Worker(WorkerBase):
 
     @torch.no_grad()
     def _restore_sleep_parameters(self, model: nn.Module) -> None:
+        parameters = self._get_sleep_parameters(model)
         for name, value in self._sleep_saved_parameters.items():
-            model.get_parameter(name).copy_(value)
+            parameters[name].copy_(value)
         self._sleep_saved_parameters.clear()
 
     def sleep(self, level: int = 1) -> None:
@@ -291,6 +315,8 @@ class Worker(WorkerBase):
                     name: buffer.cpu().clone() for name, buffer in draft.named_buffers()
                 }
 
+        if has_kv_transfer_group():
+            get_kv_transfer_group().unregister_kv_caches()
         self.sleep_mode_backend.suspend(level)
         if self.vllm_config.model_config.enable_nccl_comm_suspend:
             suspend_device_comms()
@@ -314,6 +340,8 @@ class Worker(WorkerBase):
 
     def wake_up(self, tags: list[str] | None = None) -> None:
         self.sleep_mode_backend.resume(tags)
+        if has_kv_transfer_group() and (tags is None or "kv_cache" in tags):
+            get_kv_transfer_group().restore_kv_caches()
         if self.vllm_config.model_config.enable_nccl_comm_suspend:
             resume_device_comms()
 
@@ -339,6 +367,8 @@ class Worker(WorkerBase):
         self.synchronize_device()
 
     def discard(self, tags: tuple[str, ...]) -> None:
+        if has_kv_transfer_group() and "kv_cache" in tags:
+            get_kv_transfer_group().unregister_kv_caches()
         self.sleep_mode_backend.discard(tags)
 
     def checkpoint_prepare(self) -> None:
@@ -421,25 +451,7 @@ class Worker(WorkerBase):
             # This env var set by Ray causes exceptions with graph building.
             os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
             parallel_config = self.parallel_config
-            if (
-                parallel_config.distributed_executor_backend
-                not in ("ray", "external_launcher")
-                and parallel_config.data_parallel_backend != "ray"
-                and parallel_config.nnodes_within_dp == 1
-            ):
-                # Use local DP rank if available, otherwise use global DP rank.
-                dp_local_rank = self.parallel_config.data_parallel_rank_local
-                if dp_local_rank is None:
-                    dp_local_rank = self.parallel_config.data_parallel_index
-
-                tp_pcp_pp_world_size = (
-                    self.parallel_config.pipeline_parallel_size
-                    * self.parallel_config.prefill_context_parallel_size
-                    * self.parallel_config.tensor_parallel_size
-                )
-
-                # DP_LOCAL_RANK * TP_PCP_PP_WORLD_SIZE + TP_LOCAL_RANK
-                self.local_rank += dp_local_rank * tp_pcp_pp_world_size
+            self.local_rank = parallel_config.get_local_gpu_index(self.local_rank)
 
             # Publish the logical-to-physical mapping for topology queries
             # such as NIC affinity and P2P checks.
@@ -499,20 +511,34 @@ class Worker(WorkerBase):
 
             if self.use_v2_model_runner:
                 logger.info_once("Using V2 Model Runner")
+            warn_if_flashinfer_kernels_missing()
 
             # Set random seed.
             set_random_seed(self.model_config.seed)
+
+            # cuBLAS(Lt) asks CUDA for its handle memory directly. When torch's own
+            # cudaMalloc fails, torch frees its unused cache and retries, but a cuBLAS
+            # request never triggers that because torch doesn't see it. Profiling can
+            # grow torch's cache until the GPU is full, and the first cuBLAS call would
+            # then fail even though torch holds idle memory it could have given back.
+            # Create the handles now, before the snapshot, so they count as baseline
+            # like the NCCL buffers. mm uses cuBLAS; linear with a bias uses cuBLASLt.
+            x = torch.ones(16, 16, dtype=self.model_config.dtype, device=self.device)
+            torch.mm(x, x)
+            torch.nn.functional.linear(x, x, x[0])
+            del x
 
             # Now take memory snapshot after NCCL is initialized
             gc.collect()
             torch.accelerator.empty_cache()
 
-            # take current memory snapshot
-            self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)
             # Weights from external model loader process
             external_weight_memory = get_model_loader(
                 self.load_config
             ).get_external_weight_memory(self.vllm_config)
+
+            # take current memory snapshot after external weights are ready
+            self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)
             self.requested_memory = request_memory(
                 init_snapshot, self.cache_config, external_weight_memory
             )
@@ -591,7 +617,21 @@ class Worker(WorkerBase):
         set_torch_threads_for_runtime()
 
     def update_config(self, overrides: dict[str, Any]) -> None:
-        self.model_runner.update_config(overrides)
+        """Apply config overrides to the worker, its model runner and the
+        shared VllmConfig."""
+        allowed_config_names = {"load_config", "model_config"}
+        for config_name, config_overrides in overrides.items():
+            if config_name not in allowed_config_names:
+                allowed = ", ".join(sorted(allowed_config_names))
+                raise ValueError(
+                    f"Config override '{config_name}' is not supported. "
+                    f"Supported configs: {allowed}"
+                )
+            config = getattr(self.vllm_config, config_name)
+            new_config = update_config(config, config_overrides)
+            setattr(self.vllm_config, config_name, new_config)
+            setattr(self.model_runner, config_name, new_config)
+            setattr(self, config_name, new_config)
 
     def reload_weights(self, *args, **kwargs) -> None:
         with set_current_vllm_config(self.vllm_config):
@@ -823,10 +863,15 @@ class Worker(WorkerBase):
         # so that it's available to the warmup stage.
         self.cache_config.num_gpu_blocks = kv_cache_config.num_blocks
 
-        # Adopt the engine core's layout; workers spawned after resolution
-        # (e.g. elastic EP scale-up) only see it through the config.
+        # Adopt the engine core's layout and prefix-cache granularity; workers
+        # spawned after resolution (e.g. elastic EP scale-up) only see them
+        # through the config.
         if kv_cache_config.kv_cache_layout is not None:
             record_kv_cache_layout(self.cache_config, kv_cache_config.kv_cache_layout)
+        self.cache_config.hash_block_size = kv_cache_config.hash_block_size
+        self.cache_config.cache_hit_alignment_tokens = (
+            kv_cache_config.cache_hit_alignment_tokens
+        )
 
         # Init kv cache connector here, because it requires
         # `kv_cache_config`.
@@ -866,8 +911,27 @@ class Worker(WorkerBase):
         ):
             self.model_runner._init_kv_zero_meta()
 
+    def get_simple_cpu_offload_num_cpu_blocks(self) -> int | None:
+        from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (  # noqa: E501
+            _find_simple_cpu_offload_connector,
+        )
+
+        if not has_kv_transfer_group():
+            return None
+        connector = _find_simple_cpu_offload_connector(get_kv_transfer_group())
+        if connector is None:
+            return None
+        return connector.get_aligned_num_cpu_blocks()
+
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> CompilationTimes:
+        if not self.use_v2_model_runner:
+            return self._compile_or_warm_up_model()
+        # MRV2 warmup forwards record expert load like real ones.
+        with self.model_runner.eplb.suppress():  # type: ignore
+            return self._compile_or_warm_up_model()
+
+    def _compile_or_warm_up_model(self) -> CompilationTimes:
         warmup_sizes: list[int] = []
 
         if (
@@ -1273,45 +1337,10 @@ class Worker(WorkerBase):
 
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
-        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        all_gather_tensors = {}
-        compilation_config = self.vllm_config.compilation_config
-        parallel_config = self.vllm_config.parallel_config
-
-        if (
-            parallel_config.pipeline_parallel_size > 1
-            and compilation_config.pass_config.enable_sp
-            and forward_pass
-        ):
-            # currently only supported by V1 GPUModelRunner
-            assert not self.use_v2_model_runner
-            num_scheduled_tokens_np = np.array(
-                list(scheduler_output.num_scheduled_tokens.values()),
-                dtype=np.int32,
-            )
-            # TODO(lucas): This is pretty gross; ideally we should only ever call
-            # `_determine_batch_execution_and_padding` once (will get called again
-            # in `execute_model`) but this requires a larger refactor of PP.
-            _, batch_desc, _, _, _ = (
-                self.model_runner._determine_batch_execution_and_padding(
-                    num_tokens=num_scheduled_tokens,
-                    num_reqs=len(num_scheduled_tokens_np),
-                    num_scheduled_tokens_np=num_scheduled_tokens_np,
-                    max_num_scheduled_tokens=num_scheduled_tokens_np.max(),
-                    use_cascade_attn=False,  # TODO(lucas): Handle cascade attention
-                )
-            )
-            all_gather_tensors = {
-                "residual": not is_residual_scattered_for_sp(
-                    self.vllm_config, batch_desc.num_tokens
-                )
-            }
-
         if forward_pass and not get_pp_group().is_first_rank:
             tensor_dict, comm_handles, comm_postprocess = (
                 get_pp_group().irecv_tensor_dict(
                     all_gather_group=get_tp_group(),
-                    all_gather_tensors=all_gather_tensors,
                 )
             )
             assert tensor_dict is not None
@@ -1349,7 +1378,6 @@ class Worker(WorkerBase):
         handles = get_pp_group().isend_tensor_dict(
             output.tensors,
             all_gather_group=get_tp_group(),
-            all_gather_tensors=all_gather_tensors,
         )
         self._pp_send_work = handles[1:]
 
@@ -1493,6 +1521,15 @@ class Worker(WorkerBase):
         typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
         self.weight_transfer_engine.init_transfer_engine(typed_init_info)
 
+    def shutdown_weight_transfer_engine(self) -> None:
+        """Release a trainer connection without shutting down inference."""
+        if self._weight_update_active:
+            raise RuntimeError(
+                "Cannot release a trainer connection during a weight update"
+            )
+        if self.weight_transfer_engine is not None:
+            self.weight_transfer_engine.shutdown()
+
     def start_weight_update(self) -> None:
         """Start a new weight update session.
 
@@ -1526,12 +1563,19 @@ class Worker(WorkerBase):
                 "active. Call finish_weight_update first."
             )
 
+        draft_model = self.get_draft_model() if is_draft else None
         try:
             if is_draft:
                 self._set_draft_weight_update_target()
+            if draft_model is not None:
+                # Load through the unquantized target head, as without
+                # draft_lm_head_quantization; finish re-derives the copies.
+                share_source_lm_heads(draft_model)
             self.weight_transfer_engine.start_weight_update()
         except BaseException:
             self.weight_transfer_engine.reset_weight_update_target()
+            if draft_model is not None:
+                restore_quantized_lm_heads(draft_model, refresh=False)
             raise
         self._weight_update_active = True
         self._weight_update_is_draft = is_draft
@@ -1571,6 +1615,10 @@ class Worker(WorkerBase):
             except BaseException:
                 self._weight_update_active = False
                 self.weight_transfer_engine.reset_weight_update_target()
+                if self._weight_update_is_draft and (
+                    (draft_model := self.get_draft_model()) is not None
+                ):
+                    restore_quantized_lm_heads(draft_model, refresh=False)
                 raise
 
     def finish_weight_update(self) -> None:
@@ -1587,6 +1635,10 @@ class Worker(WorkerBase):
             self.weight_transfer_engine.finish_weight_update()
             self.weight_transfer_engine.reset_weight_update_target()
             self._weight_update_active = False
+            if self._weight_update_is_draft and (
+                (draft_model := self.get_draft_model()) is not None
+            ):
+                restore_quantized_lm_heads(draft_model)
 
         # Weight transfer bypasses GPUModelRunner.reload_weights().
         if not self._weight_update_is_draft:

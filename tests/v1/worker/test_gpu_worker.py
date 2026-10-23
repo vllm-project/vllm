@@ -19,6 +19,98 @@ from vllm.v1.worker.startup_plan import (
 )
 
 
+def test_v2_worker_requires_triton(monkeypatch):
+    monkeypatch.setattr(gpu_worker, "HAS_TRITON", False)
+    config = SimpleNamespace(use_v2_model_runner=True)
+    with pytest.raises(ValueError, match="Model Runner V2 requires Triton"):
+        gpu_worker.Worker(
+            config,
+            local_rank=0,
+            rank=0,
+            distributed_init_method="env://",
+        )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cpu(), reason="CPU worker test; needs the CPU platform"
+)
+def test_cpu_worker_without_triton(monkeypatch):
+    import vllm.config.vllm as config_module
+    from vllm.config import VllmConfig
+    from vllm.utils.cpu_resource_utils import MemoryNodeInfo
+    from vllm.v1.worker import cpu_worker
+
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    monkeypatch.setattr(config_module, "HAS_TRITON", False)
+    monkeypatch.setattr(gpu_worker, "HAS_TRITON", False)
+    monkeypatch.setattr(cpu_worker, "get_visible_memory_node", lambda: [0])
+    monkeypatch.setattr(
+        cpu_worker, "get_allowed_cpu_list", lambda: [SimpleNamespace(numa_node=0)]
+    )
+    monkeypatch.setattr(
+        cpu_worker,
+        "get_memory_node_info",
+        lambda node: MemoryNodeInfo(
+            total_memory=8 * GiB_bytes, available_memory=8 * GiB_bytes
+        ),
+    )
+    monkeypatch.setattr(
+        cpu_worker.torch.ops._C,
+        "init_cpu_memory_env",
+        lambda nodes: None,
+        raising=False,
+    )
+
+    config = VllmConfig()
+    worker = cpu_worker.CPUWorker(
+        config, local_rank=0, rank=0, distributed_init_method="env://"
+    )
+    assert not config.use_v2_model_runner
+    assert not worker.use_v2_model_runner
+
+
+def test_sleep_preservation_restores_private_draft_not_shared_target():
+    target = torch.nn.Linear(2, 2, bias=False)
+    draft = torch.nn.Module()
+    draft.private = torch.nn.Linear(2, 2, bias=False)
+    draft.shared = target.weight
+    expected = draft.private.weight.detach().clone()
+    pointer = draft.private.weight.data_ptr()
+    worker = object.__new__(gpu_worker.Worker)
+    worker.get_draft_model = lambda: draft  # type: ignore[method-assign]
+    assert set(worker._get_sleep_parameters(target)) == {
+        "weight",
+        "draft.private.weight",
+    }
+    worker._sleep_saved_parameters = {"draft.private.weight": expected}
+    with torch.no_grad():
+        target.weight.fill_(3.0)
+        draft.private.weight.zero_()
+    worker._restore_sleep_parameters(target)
+    torch.testing.assert_close(draft.private.weight, expected)
+    assert draft.private.weight.data_ptr() == pointer
+    assert torch.all(target.weight == 3.0)
+    assert worker._sleep_saved_parameters == {}
+
+
+@pytest.mark.parametrize("has_shared_draft", [False, True])
+def test_sleep_preservation_allows_empty_draft_but_rejects_target_typo(
+    has_shared_draft,
+):
+    target = torch.nn.Linear(2, 2, bias=False)
+    draft = torch.nn.Module() if has_shared_draft else None
+    if draft is not None:
+        draft.shared = target.weight
+    worker = object.__new__(gpu_worker.Worker)
+    worker.get_draft_model = lambda: draft  # type: ignore[method-assign]
+    worker.model_config = SimpleNamespace(sleep_preserve_parameter_names=["draft.*"])
+    worker._save_sleep_parameters(target)
+    assert worker._sleep_saved_parameters == {}
+    worker.model_config.sleep_preserve_parameter_names = ["missing"]
+    with pytest.raises(ValueError, match="No parameter matches sleep retention"):
+        worker._save_sleep_parameters(target)
+
+
 def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):
     """Profiling must use serving's thread count to keep Dynamo guards valid."""
     from torch._dynamo.testing import CompileCounter
@@ -378,15 +470,12 @@ def test_execute_model_waits_previous_pp_send_before_forward(
 
     worker = SimpleNamespace(
         vllm_config=SimpleNamespace(
-            compilation_config=SimpleNamespace(
-                pass_config=SimpleNamespace(enable_sp=False)
-            ),
             parallel_config=SimpleNamespace(
                 pipeline_parallel_size=2, distributed_executor_backend="mp"
             ),
         ),
-        use_v2_model_runner=False,
-        model_runner=SimpleNamespace(execute_model=run_model),
+        use_v2_model_runner=True,
+        model_runner=SimpleNamespace(execute_model=run_model, is_pooling_model=False),
         annotate_profile=lambda scheduler_output: nullcontext(),
         _pp_send_work=[previous_tensor_send],
     )

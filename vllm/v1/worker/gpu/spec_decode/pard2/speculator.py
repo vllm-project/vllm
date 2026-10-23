@@ -180,7 +180,7 @@ class Pard2Speculator(DraftModelSpeculator):
             causal=True,
             # DFlash bakes its context pass into the graph; PARD-2's is a
             # target-shaped forward that runs eagerly, so keep it out.
-            precompute_context_kv=lambda num_reqs: None,
+            prepare_forward=lambda num_reqs, attn_metadata: None,
             progress_bar_desc=f"Capturing {self._speculator_name.lower()} CUDA graphs",
         )
 
@@ -332,7 +332,7 @@ class Pard2Speculator(DraftModelSpeculator):
         temperature: torch.Tensor,
         # [max_num_reqs]
         seeds: torch.Tensor,
-        dp_sync: DPSyncState | None = None,
+        dp_sync_state: DPSyncState | None = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
@@ -460,8 +460,10 @@ class Pard2Speculator(DraftModelSpeculator):
             return self.draft_tokens[:num_reqs]
 
         batch_sync, num_batch_tokens = (
-            self._build_uniform_batch_dp_sync(dp_sync, num_reqs, self.num_query_per_req)
-            if dp_sync is not None
+            self._build_uniform_batch_dp_sync(
+                dp_sync_state, num_reqs, self.num_query_per_req
+            )
+            if dp_sync_state is not None
             else (None, num_query_tokens)
         )
         batch_desc, batch_sync = dispatch_cg_and_sync_dp(
@@ -472,7 +474,7 @@ class Pard2Speculator(DraftModelSpeculator):
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
             need_eager=is_profile,
-            dp_sync=batch_sync,
+            dp_sync_state=batch_sync,
         )
         num_tokens_padded = batch_desc.num_tokens
         num_tokens_across_dp = (

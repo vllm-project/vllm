@@ -18,6 +18,13 @@ from vllm.platforms import current_platform
 
 MODEL_NAME = "facebook/opt-125m"
 CHAT_TEMPLATE = VLLM_PATH / "examples/template_chatml.jinja"
+REASONING_CHAT_TEMPLATE = (
+    "{% for m in messages %}{{ '<|im_start|>' + m['role'] + '\\n' }}"
+    "{% if m.get('reasoning') %}"
+    "{{ '<think>' + m['reasoning'] + '</think>' }}{% endif %}"
+    "{{ m['content'] }}{{ '<|im_end|>\\n' }}{% endfor %}"
+    "{% if add_generation_prompt %}{{ '<|im_start|>assistant\\n' }}{% endif %}"
+)
 # Matches `--dtype` in `server_args` to avoid an implicit cast in
 # `safe_load_prompt_embeds` (mismatched floating-point dtypes are cast to the
 # model's dtype automatically, we match here just to skip the conversion).
@@ -38,6 +45,7 @@ def server_args() -> list[str]:
         str(CHAT_TEMPLATE),
         # Prompt Embeds server args
         "--enable-prompt-embeds",
+        "--trust-request-chat-template",
     ]
 
 
@@ -258,6 +266,58 @@ async def test_text_content_and_prompt_embeds_match(
     assert text_out is not None and len(text_out) > 0
     assert embeds_out is not None and len(embeds_out) > 0
     assert text_out == embeds_out
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reasoning_field", ["reasoning", "reasoning_content"])
+async def test_text_reasoning_and_prompt_embeds_match(
+    client: openai.AsyncOpenAI,
+    aligned_content_and_embeds_b64: tuple[str, str],
+    reasoning_field: str,
+):
+    """Token embeddings in reasoning preserve greedy output and prompt length."""
+    reasoning, encoded_embeds = aligned_content_and_embeds_b64
+
+    async def complete(value):
+        return await client.chat.completions.create(
+            model=MODEL_NAME,
+            temperature=0.0,
+            max_tokens=10,
+            messages=[
+                {"role": "assistant", "content": "", reasoning_field: value},
+                {"role": "user", "content": "Continue the thought."},
+            ],
+            extra_body={"chat_template": REASONING_CHAT_TEMPLATE},
+        )
+
+    text_resp, embeds_resp = await asyncio.gather(
+        complete(reasoning),
+        complete({"type": "prompt_embeds", "data": encoded_embeds}),
+    )
+    assert text_resp.choices[0].message.content
+    assert (
+        embeds_resp.choices[0].message.content == text_resp.choices[0].message.content
+    )
+    assert embeds_resp.usage.prompt_tokens == text_resp.usage.prompt_tokens
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reasoning",
+    [
+        {"type": "prompt_embeds"},
+        {"type": "prompt_embeds", "data": "not_valid_base64!!"},
+        {"type": "prompt_embeds", "data": ""},
+    ],
+)
+async def test_invalid_reasoning_embeds_return_bad_request(client, reasoning):
+    with pytest.raises(BadRequestError):
+        await client.chat.completions.create(
+            model=MODEL_NAME,
+            max_tokens=5,
+            messages=[{"role": "assistant", "reasoning": reasoning, "content": ""}],
+            extra_body={"chat_template": REASONING_CHAT_TEMPLATE},
+        )
 
 
 @pytest.mark.asyncio

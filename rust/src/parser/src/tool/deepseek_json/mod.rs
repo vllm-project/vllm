@@ -6,6 +6,7 @@ mod deepseek_v31;
 
 pub use deepseek_v3::DeepSeekV3ToolParser;
 pub use deepseek_v31::DeepSeekV31ToolParser;
+use vllm_tokenizer::DecodedText;
 use winnow::ascii::multispace0 as ws0;
 use winnow::combinator::{alt, seq};
 use winnow::prelude::*;
@@ -142,8 +143,8 @@ impl DeepSeekJsonToolParser {
         Ok(())
     }
 
-    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
-        self.buffer.push_str(chunk);
+    fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
+        self.buffer.push_str(&chunk.text);
 
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
             parse_next_deepseek_json_event(input, &mut self.mode, self.format)
