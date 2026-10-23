@@ -3,13 +3,15 @@
 """Lookup of the RDNA3.5 attention kernels built into ``_rocm_C``.
 
 Each entry of ``csrc/rocm/rdna_singleseq_{decode,prefill}_configs.h`` is one
-build, with its shape and launch knobs as compile-time constants.
+build, with its shape and launch knobs as compile-time constants; those of
+``rdna_singleseq_decode_batch_configs.h`` serve a batch.
 """
 
 import contextlib
 import functools
 from dataclasses import dataclass
 
+import numpy as np
 import torch
 
 
@@ -42,6 +44,8 @@ class KernelVariant:
     dtype: torch.dtype = torch.float16
     # Sliding window in keys; 0 is full causal attention.
     window: int = 0
+    # An entry of kDecodeBatchConfigs: a batch, one sequence per grid.y.
+    batched: int = 0
 
     def __post_init__(self) -> None:
         if self.dtype not in (torch.float16, torch.bfloat16):
@@ -50,7 +54,8 @@ class KernelVariant:
     @property
     def name(self) -> str:
         """The DecodeConfig fields joined by "_"."""
-        return "rdna_singleseq_decode_" + "_".join(map(str, config_fields(self)))
+        kernel = "decode_batch" if self.batched else "decode"
+        return f"rdna_singleseq_{kernel}_" + "_".join(map(str, config_fields(self)))
 
     @property
     def rows_padded(self) -> int:
@@ -116,12 +121,12 @@ def _lookup_key(v: KernelVariant) -> tuple:
         v.page_size,
         v.window,
         v.dtype,
+        v.batched,
     )
 
 
-def _built_configs(op_name: str, fields: tuple[str, ...]) -> list[dict[str, int]]:
-    """The builds in _rocm_C as fields, by index, with the dtype as a torch
-    dtype."""
+def _built_fields(op_name: str, fields: tuple[str, ...]) -> list[dict[str, int]]:
+    """The entries of a table in _rocm_C as fields, by index."""
     with contextlib.suppress(ImportError):
         import vllm._rocm_C  # noqa: F401
     try:
@@ -129,31 +134,41 @@ def _built_configs(op_name: str, fields: tuple[str, ...]) -> list[dict[str, int]
     except (AttributeError, RuntimeError):
         return []
     n = len(fields)
-    configs = []
-    for i in range(0, len(flat), n):
-        f = dict(zip(fields, flat[i : i + n], strict=True))
+    return [
+        dict(zip(fields, flat[i : i + n], strict=True)) for i in range(0, len(flat), n)
+    ]
+
+
+def _built_configs(op_name: str, fields: tuple[str, ...]) -> list[dict]:
+    """_built_fields with the dtype as a torch dtype."""
+    configs = _built_fields(op_name, fields)
+    for f in configs:
         f["dtype"] = torch.bfloat16 if f["dtype"] else torch.float16
-        configs.append(f)
     return configs
 
 
 @functools.cache
-def _builds() -> list[KernelVariant]:
+def _builds(batched: int = 0) -> list[KernelVariant]:
     """The decode builds in _rocm_C, by index."""
+    op = (
+        "rdna_singleseq_decode_batch_configs"
+        if batched
+        else "rdna_singleseq_decode_configs"
+    )
     return [
-        KernelVariant(**f, layout=_HND)
-        for f in _built_configs("rdna_singleseq_decode_configs", DECODE_CONFIG_FIELDS)
+        KernelVariant(**f, layout=_HND, batched=batched)
+        for f in _built_configs(op, DECODE_CONFIG_FIELDS)
     ]
 
 
 @functools.cache
 def _by_key() -> dict[tuple, KernelVariant]:
-    return {_lookup_key(v): v for v in _builds()}
+    return {_lookup_key(v): v for v in variants()}
 
 
 def variants() -> list[KernelVariant]:
     """Every decode build in _rocm_C."""
-    return list(_builds())
+    return _builds(0) + _builds(1)
 
 
 def variant_for(
@@ -165,6 +180,7 @@ def variant_for(
     layout: int,
     window: int,
     dtype: torch.dtype,
+    batch: bool = False,
 ) -> KernelVariant | None:
     """The build for one call, or None."""
     if layout != _HND:
@@ -178,6 +194,7 @@ def variant_for(
             page_size,
             window,
             dtype,
+            int(batch),
         )
     )
 
@@ -185,12 +202,19 @@ def variant_for(
 class _Builtin:
     """A decode build in _rocm_C."""
 
-    def __init__(self, index: int):
+    def __init__(self, index: int, batched: int):
         self.index = index
+        self.batched = bool(batched)
 
     def decode_attn(self, q, kv_cache, block_table, out, *scratch_and_args):
         torch.ops._rocm_C.rdna_singleseq_decode_attn(
-            self.index, q, kv_cache, block_table, out, *scratch_and_args
+            self.index,
+            q,
+            kv_cache,
+            block_table,
+            out,
+            *scratch_and_args,
+            batched=self.batched,
         )
 
 
@@ -200,26 +224,36 @@ _loaded: dict[KernelVariant, _Builtin | None] = {}
 def load(variant: KernelVariant) -> _Builtin | None:
     """The variant in _rocm_C, or None if unavailable."""
     if variant not in _loaded:
-        builds = _builds()
+        builds = _builds(variant.batched)
         _loaded[variant] = (
-            _Builtin(builds.index(variant)) if variant in builds else None
+            _Builtin(builds.index(variant), variant.batched)
+            if variant in builds
+            else None
         )
     return _loaded[variant]
 
 
 def make_scratch(
-    variant: KernelVariant, device: torch.device
+    variant: KernelVariant, device: torch.device, max_seqs: int = 0
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Allocate the split-KV scratch, outside CUDA-graph capture."""
+    """Allocate the split-KV scratch, outside CUDA-graph capture; max_seqs
+    sequences of it for a batched build."""
     acc_shape, ml_shape, cnt = variant.scratch_shapes()
+    lead = (max_seqs,) if max_seqs else ()
     opts = {"dtype": torch.float32, "device": device}
     return (
-        torch.empty(acc_shape, **opts),
-        torch.empty(ml_shape, **opts),
-        torch.empty(ml_shape, **opts),
+        torch.empty(lead + acc_shape, **opts),
+        torch.empty(lead + ml_shape, **opts),
+        torch.empty(lead + ml_shape, **opts),
         # Zeroed once; every launch leaves them zeroed.
-        torch.zeros(cnt, dtype=torch.int32, device=device),
+        torch.zeros(lead + (cnt,), dtype=torch.int32, device=device),
     )
+
+
+def scratch_bytes(variant: KernelVariant) -> int:
+    """Scratch bytes per sequence of a batch."""
+    acc_shape, ml_shape, cnt = variant.scratch_shapes()
+    return 4 * (acc_shape[0] * acc_shape[1] + 2 * ml_shape[0] + cnt)
 
 
 def expected_kv_cache_strides(variant: KernelVariant) -> tuple[int, int, int]:
@@ -380,15 +414,248 @@ def prefill_variant_for(
     return served[-1] if served else (rows[0] if rows else None)
 
 
+# ---------------------------------------------------------------- prefill batches
+#
+# A batch runs on the build and head group kPrefillBatchConfigs picks per shape
+# and cell of (mean query tokens, mean keys per token).
+
+# PrefillBatchConfig's fields in order.
+PREFILL_BATCH_CONFIG_FIELDS = (
+    "head_size",
+    "num_q_heads",
+    "num_kv_heads",
+    "window",
+    "page_size",
+    "min_mean_m",
+    "min_keys",
+    "min_query_len",
+    "head_group",
+)
+# The cells' lower bounds.
+PREFILL_BATCH_MEAN_M = (1, 16, 64, 256, 1024, 4096)
+PREFILL_BATCH_KEYS = (0, 512, 2048, 8192)
+
+
+def prefill_batch_features(
+    query_start_loc: np.ndarray, seq_lens: np.ndarray, window: int
+) -> tuple[float, float]:
+    """(mean query tokens, mean keys per token) of a batch, padding left out."""
+    q_lens = np.diff(query_start_loc.astype(np.int64))
+    seq_lens = seq_lens[: q_lens.shape[0]].astype(np.int64)
+    live = q_lens > 0
+    q_lens, seq_lens = q_lens[live], np.maximum(seq_lens[live], q_lens[live])
+    tokens = int(q_lens.sum())
+    if not tokens:
+        return 0.0, 0.0
+    keys = seq_lens - q_lens + (q_lens + 1) / 2
+    if window:
+        keys = np.minimum(keys, window)
+    return tokens / q_lens.shape[0], float((q_lens * keys).sum() / tokens)
+
+
+@functools.cache
+def _prefill_batch_table() -> dict[tuple, list[tuple[int, int, int, int]]]:
+    """Per (Hq, Hkv, D, page, window), its cells (min mean M, min keys,
+    min_query_len, head group)."""
+    table: dict[tuple, list[tuple[int, int, int, int]]] = {}
+    for f in _built_fields(
+        "rdna_singleseq_prefill_batch_configs", PREFILL_BATCH_CONFIG_FIELDS
+    ):
+        key = (
+            f["num_q_heads"],
+            f["num_kv_heads"],
+            f["head_size"],
+            f["page_size"],
+            f["window"],
+        )
+        table.setdefault(key, []).append(
+            (f["min_mean_m"], f["min_keys"], f["min_query_len"], f["head_group"])
+        )
+    return table
+
+
+def prefill_batch_cell(
+    num_q_heads: int,
+    num_kv_heads: int,
+    head_size: int,
+    page_size: int,
+    window: int,
+    mean_m: float,
+    keys: float,
+) -> tuple[int, int] | None:
+    """(min_query_len, head group) of the cell a batch falls in, or None."""
+    cells = _prefill_batch_table().get(
+        (num_q_heads, num_kv_heads, head_size, page_size, window)
+    )
+    if not cells:
+        return None
+    steps = sorted({c[0] for c in cells})
+    m_step = max((x for x in steps if x <= mean_m), default=steps[0])
+    row = [c for c in cells if c[0] == m_step]
+    below = [c for c in row if c[1] <= keys]
+    cell = max(below, key=lambda c: c[1]) if below else min(row, key=lambda c: c[1])
+    return cell[2], cell[3]
+
+
+def prefill_batch_variant_for(
+    num_q_heads: int,
+    num_kv_heads: int,
+    head_size: int,
+    page_size: int,
+    layout: int,
+    window: int,
+    dtype: torch.dtype,
+    query_start_loc: np.ndarray,
+    seq_lens: np.ndarray,
+) -> tuple[PrefillVariant | None, int]:
+    """The build and head group for a prefill batch: its cell's, else the
+    build of its tokens."""
+    mean_m, keys = prefill_batch_features(query_start_loc, seq_lens, window)
+    cell = prefill_batch_cell(
+        num_q_heads, num_kv_heads, head_size, page_size, window, mean_m, keys
+    )
+    rows = prefill_variants(
+        num_q_heads, num_kv_heads, head_size, page_size, window, dtype
+    )
+    if cell is not None and layout == _HND:
+        row = next((v for v in rows if v.min_query_len == cell[0]), None)
+        if row is not None:
+            return row, cell[1]
+    tokens = int(query_start_loc[-1] - query_start_loc[0])
+    v = prefill_variant_for(
+        num_q_heads,
+        num_kv_heads,
+        head_size,
+        page_size,
+        layout,
+        window,
+        dtype,
+        max(tokens, PREFILL_MIN_M),
+    )
+    return v, 0
+
+
+# The kernel's kMinSegmentSteps.
+_MIN_SEGMENT_STEPS = 16
+# Most segments a plan splits one tile into.
+PLAN_MAX_SEGMENTS = 16
+
+
+def plan_prefill(
+    query_start_loc: np.ndarray,
+    seq_lens: np.ndarray,
+    variant: PrefillVariant,
+    window: int,
+    target_workgroups: int,
+    head_group: int = 0,
+) -> tuple[np.ndarray, int]:
+    """The work list of a prefill launch over a batch.
+
+    An entry is one (sequence, tile, KV segment), run for every kv head,
+    heaviest first. Tiles heavier than the mean load per SIMD are split.
+
+    Args:
+        query_start_loc: The batch's query starts.
+        seq_lens: Each sequence's length, or an upper bound.
+        variant: The build that runs the launch.
+        window: Sliding window in keys, 0 for full causal.
+        target_workgroups: One per SIMD (prefill_target_workgroups).
+        head_group: Kv heads to interleave (0: the build's).
+
+    Returns:
+        The int32 [entries, 4] list {seq, tile | split tile << 16,
+        segment | segments << 16, first partials slot or -1}, and the head
+        group (all kv heads if a tile splits).
+
+    """
+    g = variant.num_q_heads // variant.num_kv_heads
+    rows, key_tile = variant.block_rows, variant.key_tile
+    q_lens = np.diff(query_start_loc.astype(np.int64))
+    nseq = q_lens.shape[0]
+    context = np.maximum(seq_lens[:nseq].astype(np.int64), q_lens) - q_lens
+    tiles = (q_lens * g + rows - 1) // rows
+    # Last (heaviest) tile first.
+    seq = np.repeat(np.arange(nseq), tiles)
+    starts = np.cumsum(tiles) - tiles
+    tile = np.repeat(starts + tiles - 1, tiles) - np.arange(seq.shape[0])
+    first = tile * rows // g
+    last = np.minimum(q_lens[seq] - 1, ((tile + 1) * rows - 1) // g)
+    key_end = context[seq] + last + 1
+    key_begin = (
+        np.maximum(0, context[seq] + first - window + 1) // key_tile * key_tile
+        if window
+        else 0
+    )
+    steps = (key_end - key_begin + key_tile - 1) // key_tile
+
+    load = max(
+        variant.num_kv_heads * int(steps.sum()) / target_workgroups,
+        float(_MIN_SEGMENT_STEPS),
+    )
+    split = steps > load
+    segments = np.where(
+        split,
+        np.clip(
+            np.minimum(-(-steps // load), steps // _MIN_SEGMENT_STEPS),
+            1,
+            PLAN_MAX_SEGMENTS,
+        ),
+        1,
+    ).astype(np.int64)
+    split &= segments > 1
+    split_index = np.cumsum(split) - 1
+    split_slots = np.where(split, segments, 0)
+    slot = np.where(split, np.cumsum(split_slots) - split_slots, -1)
+    assert int(split.sum()) * variant.num_kv_heads < target_workgroups
+    assert int(split_slots.sum()) * variant.num_kv_heads < 2 * target_workgroups
+    assert tile.size == 0 or int(tile.max()) < 1 << 16
+
+    owner = np.repeat(np.arange(tile.shape[0]), segments)
+    segment = np.arange(owner.shape[0]) - np.repeat(
+        np.cumsum(segments) - segments, segments
+    )
+    plan = np.stack(
+        [
+            seq[owner],
+            tile[owner] | np.where(split[owner], split_index[owner], 0) << 16,
+            segment | segments[owner] << 16,
+            slot[owner],
+        ],
+        axis=1,
+    )
+    order = np.argsort(-steps[owner] / segments[owner], kind="stable")
+    if split.any():
+        head_group = variant.num_kv_heads
+    return np.ascontiguousarray(plan[order], dtype=np.int32), head_group
+
+
 class _BuiltinPrefill:
     """A prefill build in _rocm_C."""
 
     def __init__(self, index: int):
         self.index = index
 
-    def prefill_attn(self, q, kv_cache, block_table, out, *scratch_and_args):
+    def prefill_attn(
+        self,
+        q,
+        kv_cache,
+        block_table,
+        out,
+        *scratch_and_args,
+        plan=None,
+        query_start_loc=None,
+        head_group=0,
+    ):
         torch.ops._rocm_C.rdna_singleseq_prefill_attn(
-            self.index, q, kv_cache, block_table, out, *scratch_and_args
+            self.index,
+            q,
+            kv_cache,
+            block_table,
+            out,
+            *scratch_and_args,
+            plan=plan,
+            query_start_loc=query_start_loc,
+            head_group=head_group,
         )
 
 
