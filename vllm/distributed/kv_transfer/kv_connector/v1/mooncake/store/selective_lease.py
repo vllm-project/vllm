@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Selective read leases for Mooncake store prefix lookups.
 
-``batch_is_exist`` leases every key it finds, so a lookup renews the whole
-prompt history, including the Mamba state at every earlier block boundary of a
-hybrid model. With ``VLLM_MOONCAKE_STORE_SELECTIVE_LEASE`` the lookup probes
-lease-free (``batch_probe_key``) and leases only the keys the hit will load.
+``batch_is_exist`` leases every key it finds, so a lookup renews every stored
+key of the prompt, including keys a load of the hit skips, such as blocks
+outside a sliding window or states at earlier block boundaries. With
+``VLLM_MOONCAKE_STORE_SELECTIVE_LEASE`` the lookup probes lease-free
+(``batch_probe_key``) and leases only the keys the hit will load.
 """
 
 import time
@@ -95,10 +96,12 @@ class SelectiveLookupLease:
         """Lease the keys a load of ``hit`` reads and return the hit to load.
 
         ``exists_set`` holds the probed ``(group, hash)`` pairs and
-        ``longest_hit`` recomputes the hit from them. A key evicted since the
-        probe shortens the hit, whose tail keys then differ, so the shorter hit
-        is leased in turn. Returns an empty hit if the lease fails or the hit
-        keeps shrinking.
+        ``longest_hit`` recomputes the hit from them. The lease covers only the
+        keys this hit loads, e.g. the state at its tail boundary but not states
+        at earlier boundaries. If a key was evicted since the probe, the shorter
+        hit can end at one of those unleased keys, so it is leased in another
+        round. Returns an empty hit if the lease fails or the hit keeps
+        shrinking.
         """
         try:
             for _ in range(_LEASE_ROUNDS):

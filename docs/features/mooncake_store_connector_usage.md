@@ -261,7 +261,6 @@ Strict isolation requires a Mooncake master started with `--enable_multi_tenants
 | `MOONCAKE_PREFERRED_SEGMENT` | Pin this rank's replicas to a specific owner segment (`host:port`); used in `standalone-store` mode | — |
 | `MOONCAKE_REQUESTER_LOCAL_HOSTNAME` | Override the hostname the vLLM rank registers with Mooncake as a requester. Defaults to the rank's resolved IP. | — |
 | `VLLM_MOONCAKE_STORE_TIER_LOG` | When `1`, logs a per-batch tier summary (memory vs disk hits) for observability | disabled |
-| `VLLM_MOONCAKE_STORE_SELECTIVE_LEASE` | When `1`, prefix lookups probe keys without a read lease and lease only the keys the hit loads, so Mamba states at earlier block boundaries stay evictable. Only helps hybrid (Mamba/SWA) models. Needs Mooncake >= 0.3.14 on the master and every client. | disabled |
 | `VLLM_MOONCAKE_DISK_STAGING_USABLE_RATIO` | Fraction of the owner's DirectIO staging buffer that the requester will fill in a single `batch_get_into_multi_buffers` call. Lower → more conservative pre-split, more round trips. | 0.9 |
 
 ## KV Transfer Config

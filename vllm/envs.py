@@ -1773,8 +1773,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_MOONCAKE_STORE_TIER_LOG", "False").lower() in ("true", "1")
     ),
     # Probe prefix-lookup keys without a read lease and lease only the keys the
-    # hit loads, so unused Mamba states at past block boundaries stay
-    # evictable. Needs Mooncake >= 0.3.14 on the master and every client.
+    # hit loads. Requires Mooncake >= 0.3.14.
     "VLLM_MOONCAKE_STORE_SELECTIVE_LEASE": lambda: (
         os.getenv("VLLM_MOONCAKE_STORE_SELECTIVE_LEASE", "False").lower()
         in ("true", "1")
