@@ -223,8 +223,10 @@ steps:
       - HIP_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
       - pytest -v -s v1/worker/test_worker_memory_snapshot.py
 
-- label: ":nvidia: (L4) Distributed Torchrun + Examples"
+- label: ":nvidia: (L4) [Nightly] Distributed Torchrun + Examples"
   key: distributed-torchrun-examples-4-gpus
+  # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
+  optional: true
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace"
   device: l4
@@ -267,6 +269,8 @@ steps:
   - RDT_MODEL=hmellor/tiny-random-DeepseekV2ForCausalLM python3 examples/rl/rlhf_sharded_rdt_small_ep.py
   mirror:
     amd:
+      # Run on PRs even when the L4 step is optional (nightly only).
+      optional: false
       label: ":amd: (MI355) Distributed Torchrun + Examples"
       dind: false
       device: mi355_4
@@ -361,8 +365,10 @@ steps:
       - pytest -v -s v1/engine/test_engine_core_client.py::test_kv_cache_events_dp
       - pytest -v -s distributed/test_utils.py
 
-- label: ":nvidia: (L4) Distributed Compile + Comm"
+- label: ":nvidia: (L4) [Nightly] Distributed Compile + Comm"
   key: distributed-compile-comm-4-gpus
+  # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
+  optional: true
   timeout_in_minutes: 70
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -384,6 +390,8 @@ steps:
   - pytest -v -s distributed/test_multiproc_executor.py::test_multiproc_executor_multi_node
   mirror:
     amd:
+      # Run on PRs even when the L4 step is optional (nightly only).
+      optional: false
       label: ':amd: (MI355) Distributed Compile + Comm'
       dind: false
       device: mi355_4
@@ -705,8 +713,10 @@ steps:
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (L4) RayExecutorV2"
+- label: ":nvidia: (L4) [Nightly] RayExecutorV2"
   key: rayexecutorv2-4-gpus
+  # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
+  optional: true
   automatic_shard: true
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
@@ -728,6 +738,8 @@ steps:
   - TARGET_TEST_SUITE=L4 pytest -v -s basic_correctness/models/test_basic_correctness.py -k "ray"
   mirror:
     amd:
+      # Run on PRs even when the L4 step is optional (nightly only).
+      optional: false
       label: ':amd: (MI355) RayExecutorV2'
       dind: false
       automatic_shard: true
