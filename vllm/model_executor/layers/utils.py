@@ -335,38 +335,24 @@ def lmhead_skinny_guard_permits(weight: torch.Tensor, n: int) -> bool:
     """Should this weight still take the wvSplitK skinny path at n?
 
     wvSplitK_hf_sml re-reads the weight matrix once per K-shard, so its
-    effective bandwidth collapses for weights far larger than L2. Measured
-    on MI355X (gfx950), DeepSeek-V4.1-Flash at TP=4, vocab-parallel
-    [32320, K] bf16 lm_head shards: the DSpark draft lm_head
-    [32320, 5120] (315.5 MiB, n=5, once per decode step) runs
-    wvSplitK_hf_sml<..., 2, 5> at 1.55 TB/s (213.8 us/call in-graph,
-    serving trace) while the generic fall-through class runs the same GEMM
-    at ~6.5 TB/s (~51-73 us); the n=6 target verify lm_head [32320, 7168]
-    (442 MiB) already dispatches to hipBLASLt Cijk MT64x16x512 (56.2
-    us/call in-graph, 7.9 TB/s), proving the fall-through kernel is fast
-    and CUDA-graph-capture-safe in this exact serving configuration; an
-    isolated microbench on the target-shape shard at n=5 measures wvSplitK
-    313.3 us vs torch.linear 71.2 us (4.4x). Weights above
+    effective bandwidth collapses on weights far larger than L2 (MI355X
+    measurements in the PR description). Weights above
     VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES (default 256 MiB) therefore skip the
-    skinny path at 1 < n <= 5 and fall through to the generic GEMM; at the
-    DSV4.1-Flash TP=4 serving point exactly one GEMM site matches (the DSpark
-    draft lm_head at n=5, once per decode step).
+    skinny path at 1 < n <= 5 and fall through to the generic GEMM.
 
-    n == 1 always keeps wvSplitK: the n=1 kernel variant
-    (wvSplitK_hf_sml<..., 2, 1>) shows no pathology on large weights
-    (measured 6.9 TB/s on the 442 MiB target-shape shard) and its fall-through
-    (LLMM1) is a numerics change with no speed win, so single-row calls
-    stay bit-identical to stock. The pathology is specific to the
-    2 <= n <= 5 kernel variant (wvSplitK_hf_sml<..., 2, 5>).
+    n == 1 always keeps wvSplitK: the n=1 kernel variant shows no
+    pathology on large weights, and its fall-through would be a numerics
+    change with no speed win, so single-row calls stay on the stock path.
 
     Returns True (keep wvSplitK) when the guard is disabled via
-    VLLM_DISABLE_LMHEAD_SKINNY_GEMM_GUARD, when n <= 1, or when the weight
-    is under the cap; otherwise returns False after emitting a census
-    WARNING (once per (shape, n) per process) naming the redirected site.
+    VLLM_DEBUG_DISABLE_LMHEAD_SKINNY_GEMM_GUARD, when n <= 1, or when the
+    weight is under the cap; otherwise returns False after emitting a
+    census WARNING (once per (shape, n) per process) naming the redirected
+    site.
     """
     if n <= 1:
         return True
-    if envs.VLLM_DISABLE_LMHEAD_SKINNY_GEMM_GUARD:
+    if envs.VLLM_DEBUG_DISABLE_LMHEAD_SKINNY_GEMM_GUARD:
         return True
     max_bytes = envs.VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES
     if weight.nbytes <= max_bytes:

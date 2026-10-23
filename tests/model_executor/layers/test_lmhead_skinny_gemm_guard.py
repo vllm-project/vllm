@@ -11,7 +11,7 @@ VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES (default 256 MiB) on the generic GEMM
 fall-through at 0 < n <= 5. The swap is NOT bit-exact (different GEMM
 kernel, different accumulation order) -- these tests check the decision
 table, dispatch selection, env behavior, and numerical agreement within
-bf16 GEMM tolerance. VLLM_DISABLE_LMHEAD_SKINNY_GEMM_GUARD=1 restores
+bf16 GEMM tolerance. VLLM_DEBUG_DISABLE_LMHEAD_SKINNY_GEMM_GUARD=1 restores
 the stock dispatch exactly.
 """
 
@@ -42,7 +42,7 @@ pytestmark = [
     ),
 ]
 
-_DISABLE_VAR = "VLLM_DISABLE_LMHEAD_SKINNY_GEMM_GUARD"
+_DISABLE_VAR = "VLLM_DEBUG_DISABLE_LMHEAD_SKINNY_GEMM_GUARD"
 _MAX_BYTES_VAR = "VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES"
 
 # The serving-site shape: the DSpark draft vocab-parallel lm_head shard at

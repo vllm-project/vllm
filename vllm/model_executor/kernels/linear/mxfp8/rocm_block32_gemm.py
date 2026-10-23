@@ -935,12 +935,10 @@ def rocm_mxfp8_block32_gemm(
 
 
 # --- tiny-M fused quant+GEMM ------------------------------------------------
-# Decode-sized batches (M <= 8) otherwise pay a full activation-quant launch
-# just to produce the e4m3 tiles + E8M0 scales the packed GEMM immediately
-# re-reads; the fused kernel above computes that quant inside the GEMM's K
-# loop, removing the launch and its global round-trip from the decode
-# critical path. VLLM_DISABLE_FUSED_MXFP8_QUANT_GEMM=1 restores the
-# two-launch path (identical results).
+# At M <= 8 (decode-sized batches) the fused kernel below computes the
+# activation quant inside the GEMM's K loop, saving one launch and its
+# global round-trip per call. VLLM_DEBUG_DISABLE_FUSED_MXFP8_QUANT_GEMM=1
+# restores the two-launch path (identical results).
 
 _TINY_M_FUSED_QUANT_MAX_M = 8
 # Shared with _mxfp8_quant_triton_kernel (the bit-exactness contract).
@@ -955,7 +953,7 @@ def _fused_quant_env_ok() -> bool:
     global _FUSED_QUANT_ENV_OK
     if _FUSED_QUANT_ENV_OK is None:
         _FUSED_QUANT_ENV_OK = (
-            os.environ.get("VLLM_DISABLE_FUSED_MXFP8_QUANT_GEMM", "0") != "1"
+            os.environ.get("VLLM_DEBUG_DISABLE_FUSED_MXFP8_QUANT_GEMM", "0") != "1"
         )
     return _FUSED_QUANT_ENV_OK
 
@@ -976,7 +974,7 @@ def _rocm_mxfp8_block32_gemm_quant_impl(
     ``mxfp8_e4m3_quantize`` + ``rocm_mxfp8_block32_gemm`` with one launch
     fewer on the decode critical path. Everything else (larger M,
     non-packed tiles, non-contiguous or non-bf16/fp16 x, or
-    ``VLLM_DISABLE_FUSED_MXFP8_QUANT_GEMM=1``) runs the stock two-launch
+    ``VLLM_DEBUG_DISABLE_FUSED_MXFP8_QUANT_GEMM=1``) runs the stock two-launch
     path with identical results. The branch is inside this opaque op so a
     compiled caller cannot freeze the token-count decision.
     """
@@ -1022,7 +1020,7 @@ def _rocm_mxfp8_block32_gemm_quant_impl(
         if eligible:
             logger.warning_once(
                 "tiny-M fused MXFP8 quant+GEMM fastpath is DISABLED (env "
-                "override VLLM_DISABLE_FUSED_MXFP8_QUANT_GEMM=1); using "
+                "override VLLM_DEBUG_DISABLE_FUSED_MXFP8_QUANT_GEMM=1); using "
                 "separate mxfp8_e4m3_quantize + block32 GEMM launches"
             )
         x_q, x_scale = mxfp8_e4m3_quantize(x)
@@ -1058,7 +1056,7 @@ def rocm_mxfp8_block32_gemm_quant(
     block-scaled MXFP8 ``weight`` [N, K] with ``weight_scale``
     [N / 32, K / 32]. Tiny-M batches quantize inside the packed GEMM (see
     ``_rocm_mxfp8_block32_gemm_quant_impl``); the kill switch is
-    ``VLLM_DISABLE_FUSED_MXFP8_QUANT_GEMM=1``.
+    ``VLLM_DEBUG_DISABLE_FUSED_MXFP8_QUANT_GEMM=1``.
     """
     return torch.ops.vllm.rocm_mxfp8_block32_gemm_quant(
         x, weight, weight_scale, out_dtype
