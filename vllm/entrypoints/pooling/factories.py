@@ -6,10 +6,10 @@ from typing import TYPE_CHECKING
 from fastapi import FastAPI
 
 from vllm.config import ModelConfig, VllmConfig
-from vllm.entrypoints.chat_utils import ChatTemplateConfig
 from vllm.logger import init_logger
 from vllm.plugins.io_processors import has_io_processor
 from vllm.renderers import BaseRenderer
+from vllm.renderers.chat_utils import ChatTemplateConfig
 from vllm.tasks import POOLING_TASKS, SCORE_TYPE_MAP, SupportedTask
 
 from .base.io_processor import PoolingIOProcessor
@@ -129,7 +129,11 @@ def register_pooling_api_routers(
 
         app.include_router(classify_router)
 
-    if "embed" in supported_tasks:
+    if pooling_task == "token_embed":
+        from .token_embed.api_router import router as token_embed_router
+
+        app.include_router(token_embed_router)
+    elif "embed" in supported_tasks:
         from .embed.api_router import router as embed_router
 
         app.include_router(embed_router)
@@ -151,13 +155,14 @@ def init_pooling_state(
     if model_config is None:
         return
 
-    from vllm.entrypoints.chat_utils import load_chat_template
+    from vllm.renderers.chat_utils import load_chat_template
     from vllm.tasks import POOLING_TASKS
 
     from .classify.serving import ServingClassification
     from .embed.serving import ServingEmbedding
     from .pooling.serving import ServingPooling
     from .scoring.serving import ServingScores
+    from .token_embed.serving import ServingTokenEmbedding
 
     resolved_chat_template = load_chat_template(args.chat_template)
     pooling_task = model_config.get_pooling_task(supported_tasks)
@@ -166,6 +171,7 @@ def init_pooling_state(
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
         trust_request_chat_template=args.trust_request_chat_template,
+        trust_request_mm_kwargs=args.trust_request_mm_kwargs,
     )
 
     state.serving_pooling = (
@@ -189,6 +195,16 @@ def init_pooling_state(
             chat_template_config=chat_template_config,
         )
         if pooling_task == "embed"
+        else None
+    )
+    state.serving_token_embedding = (
+        ServingTokenEmbedding(
+            engine_client,
+            state.openai_serving_models,
+            request_logger=request_logger,
+            chat_template_config=chat_template_config,
+        )
+        if pooling_task == "token_embed"
         else None
     )
     state.serving_classification = (

@@ -29,6 +29,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionReque
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import tokens_input
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.renderers.params import ChatParams
@@ -85,9 +86,10 @@ class MockModelConfig:
     generation_config: str = "auto"
     override_generation_config: dict[str, Any] = field(default_factory=dict)
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
-    skip_tokenizer_init = False
+    skip_tokenizer_init: bool = False
     is_encoder_decoder: bool = False
     is_multimodal_model: bool = False
+    supports_multimodal_inputs: bool = False
     renderer_num_workers: int = 1
     enable_prompt_embeds: bool = False
 
@@ -106,7 +108,9 @@ class CapturedRenderInputs:
 class RenderCapture:
     """Install a ``render_chat_async`` stub and record its HF-bound inputs."""
 
-    def __init__(self, online_renderer: OnlineRenderer) -> None:
+    def __init__(
+        self, online_renderer: OnlineRenderer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         self.online_renderer = online_renderer
         self.captured: CapturedRenderInputs | None = None
 
@@ -127,7 +131,9 @@ class RenderCapture:
                 tokens_input(prompt_token_ids=[0]),
             ]
 
-        online_renderer.renderer.render_chat_async = fake_render_chat_async
+        monkeypatch.setattr(
+            online_renderer.renderer, "render_chat_async", fake_render_chat_async
+        )
 
     def take(self) -> CapturedRenderInputs:
         assert self.captured is not None
@@ -139,8 +145,9 @@ class RenderCapture:
 async def _capture_chat(
     online_renderer: OnlineRenderer,
     request: ChatCompletionRequest,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> CapturedRenderInputs:
-    capture = RenderCapture(online_renderer)
+    capture = RenderCapture(online_renderer, monkeypatch)
     result = await online_renderer.render_chat(request)
     assert not isinstance(result, ErrorResponse), result
     return capture.take()
@@ -149,15 +156,18 @@ async def _capture_chat(
 async def _capture_responses(
     serving: OpenAIServingResponses,
     request: ResponsesRequest,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> CapturedRenderInputs:
-    capture = RenderCapture(serving.online_renderer)
-    await serving._make_request(request, prev_response=None)
+    capture = RenderCapture(serving.online_renderer, monkeypatch)
+    result = await serving.online_renderer.render_responses(request)
+    assert not isinstance(result, ErrorResponse), result
     return capture.take()
 
 
 async def _assert_parity(
     online_renderer: OnlineRenderer,
     serving: OpenAIServingResponses,
+    monkeypatch: pytest.MonkeyPatch,
     *,
     chat_kwargs: dict[str, Any],
     responses_kwargs: dict[str, Any],
@@ -165,8 +175,8 @@ async def _assert_parity(
     """Build paired requests, capture HF render inputs, and assert equality."""
     chat_req = ChatCompletionRequest(model=_MODEL, **chat_kwargs)
     responses_req = ResponsesRequest(model=_MODEL, **responses_kwargs)
-    chat = await _capture_chat(online_renderer, chat_req)
-    responses = await _capture_responses(serving, responses_req)
+    chat = await _capture_chat(online_renderer, chat_req, monkeypatch)
+    responses = await _capture_responses(serving, responses_req, monkeypatch)
 
     assert chat.messages == responses.messages
 
@@ -222,7 +232,7 @@ def online_renderer(model_config: MockModelConfig, request) -> OnlineRenderer:
     renderer.tokenizer = MagicMock()
 
     return OnlineRenderer(
-        model_config=model_config,  # type: ignore[arg-type]
+        model_config=model_config,
         renderer=renderer,
         request_logger=None,
         chat_template=None,
@@ -230,6 +240,7 @@ def online_renderer(model_config: MockModelConfig, request) -> OnlineRenderer:
         enable_auto_tools=True,
         tool_parser="openai",
         exclude_tools_when_tool_choice_none=exclude_tools_when_tool_choice_none,
+        trust_request_mm_kwargs=True,
     )
 
 
@@ -258,11 +269,14 @@ def serving_responses(
 
 @pytest.mark.asyncio
 class TestConversationRenderParity:
-    async def test_multiturn_tool_calling(self, online_renderer, serving_responses):
+    async def test_multiturn_tool_calling(
+        self, online_renderer, serving_responses, monkeypatch
+    ):
         """System/instructions, tool-call turn, and a follow-up user message."""
         await _assert_parity(
             online_renderer,
             serving_responses,
+            monkeypatch,
             chat_kwargs={
                 "messages": [
                     {"role": "system", "content": "Be helpful."},
@@ -333,11 +347,13 @@ class TestToolsRenderParity:
         serving_responses,
         chat_tool_choice,
         responses_tool_choice,
+        monkeypatch,
     ):
         chat_tools, responses_tools = _weather_tools()
         await _assert_parity(
             online_renderer,
             serving_responses,
+            monkeypatch,
             chat_kwargs={
                 "messages": _USER,
                 "tools": chat_tools,
@@ -357,12 +373,13 @@ class TestToolsRenderParity:
         ids=["include_tools", "exclude_tools"],
     )
     async def test_tools_with_tool_choice_none(
-        self, online_renderer, serving_responses
+        self, online_renderer, serving_responses, monkeypatch
     ):
         chat_tools, responses_tools = _weather_tools()
         await _assert_parity(
             online_renderer,
             serving_responses,
+            monkeypatch,
             chat_kwargs={
                 "messages": _USER,
                 "tools": chat_tools,
@@ -376,7 +393,7 @@ class TestToolsRenderParity:
         )
 
     async def test_function_tool_optional_fields(
-        self, online_renderer, serving_responses
+        self, online_renderer, serving_responses, monkeypatch
     ):
         """Optional FunctionDefinition fields dump the same on both APIs."""
         chat_tools, responses_tools = _weather_tools(
@@ -389,6 +406,7 @@ class TestToolsRenderParity:
         await _assert_parity(
             online_renderer,
             serving_responses,
+            monkeypatch,
             chat_kwargs={
                 "messages": _USER,
                 "tools": chat_tools,
@@ -409,11 +427,12 @@ class TestReasoningRenderParity:
         ["none", "minimal", "low", "medium", "high", "xhigh"],
     )
     async def test_reasoning_effort(
-        self, online_renderer, serving_responses, effort: str
+        self, online_renderer, serving_responses, effort: str, monkeypatch
     ):
         await _assert_parity(
             online_renderer,
             serving_responses,
+            monkeypatch,
             chat_kwargs={
                 "messages": _USER,
                 "reasoning_effort": effort,
@@ -426,12 +445,26 @@ class TestReasoningRenderParity:
             },
         )
 
+    async def test_reasoning_effort_none_rejected_by_harmony(self, online_renderer):
+        """Harmony rejects reasoning_effort="none" as invalid user input."""
+        request = ChatCompletionRequest(
+            model=_MODEL,
+            messages=_USER,
+            reasoning_effort="none",
+        )
+        with pytest.raises(
+            VLLMValidationError, match="Harmony does not support"
+        ) as exc_info:
+            online_renderer._make_request_with_harmony(request)
+        assert exc_info.value.parameter == "reasoning_effort"
+
     async def test_explicit_enable_thinking_not_overridden(
-        self, online_renderer, serving_responses
+        self, online_renderer, serving_responses, monkeypatch
     ):
         await _assert_parity(
             online_renderer,
             serving_responses,
+            monkeypatch,
             chat_kwargs={
                 "messages": _USER,
                 "reasoning_effort": "high",
@@ -449,11 +482,48 @@ class TestReasoningRenderParity:
 
 @pytest.mark.asyncio
 class TestTemplateKwargsRenderParity:
-    async def test_passthrough_fields(self, online_renderer, serving_responses):
+    async def test_unset_template_values_preserve_defaults(
+        self, online_renderer, serving_responses, monkeypatch
+    ):
+        """Null and auto inherit server defaults; explicit false overrides them."""
+        online_renderer.default_chat_template_kwargs = {
+            "reasoning_effort": "medium",
+            "mode": "strict",
+            "enable_thinking": True,
+        }
+        overrides = {
+            "reasoning_effort": None,
+            "mode": "auto",
+            "enable_thinking": False,
+        }
+        chat = await _capture_chat(
+            online_renderer,
+            ChatCompletionRequest(
+                model=_MODEL, messages=_USER, chat_template_kwargs=overrides
+            ),
+            monkeypatch,
+        )
+        responses = await _capture_responses(
+            serving_responses,
+            ResponsesRequest(model=_MODEL, input=_USER, chat_template_kwargs=overrides),
+            monkeypatch,
+        )
+        for captured in (chat, responses):
+            actual = captured.chat_params.chat_template_kwargs
+            assert {key: actual[key] for key in overrides} == {
+                "reasoning_effort": "medium",
+                "mode": "strict",
+                "enable_thinking": False,
+            }
+
+    async def test_passthrough_fields(
+        self, online_renderer, serving_responses, monkeypatch
+    ):
         """chat_template_kwargs / media_io_kwargs / mm_processor_kwargs parity."""
         await _assert_parity(
             online_renderer,
             serving_responses,
+            monkeypatch,
             chat_kwargs={
                 "messages": [
                     {"role": "system", "content": "Be helpful."},

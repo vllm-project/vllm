@@ -2,8 +2,14 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use vllm_tokenizer::{DecodedText, DynTokenizer};
+use xgrammar_structural_tag::format::Format;
 
-use super::{DelimitedReasoningParser, ReasoningDelta, ReasoningError, ReasoningParser, Result};
+use crate::output_grammar::{self, OutputGrammarContext};
+
+use super::{
+    DelimitedReasoningParser, DelimitedReasoningParserBuilder, ReasoningDelta, ReasoningError,
+    ReasoningParser, Result,
+};
 
 /// Internal HY reasoning stage used by the unified HY parsers.
 pub(crate) struct HyReasoningParser {
@@ -14,12 +20,12 @@ impl HyReasoningParser {
     /// Create a HY reasoning parser for the tokenizer-specific marker suffix.
     pub(crate) fn new(tokenizer: DynTokenizer, suffix: &str) -> Result<Self> {
         Ok(Self {
-            inner: DelimitedReasoningParser::new(
+            inner: DelimitedReasoningParserBuilder::new(
                 tokenizer,
                 format!("<think{suffix}>"),
                 format!("</think{suffix}>"),
-                false,
-            )?,
+            )
+            .build()?,
         })
     }
 }
@@ -37,8 +43,15 @@ impl ReasoningParser for HyReasoningParser {
     }
 
     fn initialize(&mut self, prompt_token_ids: &[u32]) -> Result<()> {
-        self.inner.initialize(prompt_token_ids);
-        Ok(())
+        self.inner.initialize(prompt_token_ids)
+    }
+
+    fn wrap_visible_format(
+        &self,
+        _ctx: &OutputGrammarContext<'_>,
+        visible: &Format,
+    ) -> output_grammar::Result<Option<Format>> {
+        Ok(Some(self.inner.wrap_visible_format(visible)))
     }
 
     fn push(&mut self, delta: DecodedText) -> Result<ReasoningDelta> {

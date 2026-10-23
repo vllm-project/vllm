@@ -76,6 +76,7 @@ def get_env_vars_to_copy(
         additional_vars: Extra individual env var names to copy.  Useful
             for caller-specific vars (e.g. platform env vars).
         destination: Label used in log messages only.
+
     """
     exclude = (exclude_vars or set()) | RAY_NON_CARRY_OVER_ENV_VARS
 
