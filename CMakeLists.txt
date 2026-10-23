@@ -1568,7 +1568,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/rocm/skinny_gemms_wvsplitk.cu"
     "csrc/rocm/skinny_gemms_wvsplitkrc.cu"
     "csrc/rocm/skinny_gemms_wvsplitkq.cu"
-    "csrc/rocm/skinny_gemms_int4.cu")
+    ${VLLM_SKINNY_INT4_SRC})
 
   # The paged attention instantiations are split over one generated translation
   # unit per (dtype, kv-cache dtype, head size, block size); compiling them in a
@@ -1650,6 +1650,17 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     message(STATUS "Paged attention generation is up to date.")
   endif()
 
+  # The int4 skinny GEMM is instantiated one unit per N_in (see
+  # WVSPLITK_INT4_LANE in skinny_gemms_int4.cu): with the whole op in one unit
+  # the 9-arch build spends its entire length compiling that single file.
+  # skinny_gemms_int4_api.cu keeps the public entry point and forwards on N_in.
+  set(VLLM_SKINNY_INT4_SRC
+    "csrc/rocm/skinny_gemms_int4_api.cu"
+    "csrc/rocm/skinny_gemms_int4_n1.cu"
+    "csrc/rocm/skinny_gemms_int4_n2.cu"
+    "csrc/rocm/skinny_gemms_int4_n3.cu"
+    "csrc/rocm/skinny_gemms_int4_n4.cu"
+    "csrc/rocm/skinny_gemms_int4_n5.cu")
   set(VLLM_ROCM_EXT_SRC
     "csrc/rocm/torch_bindings.cpp"
     ${VLLM_SKINNY_SRC}
