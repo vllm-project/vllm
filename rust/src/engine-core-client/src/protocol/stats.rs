@@ -211,8 +211,14 @@ pub mod kv_connector {
         pub num_failed_transfers: Vec<u64>,
         /// Notification failure counter increments collected since the previous update.
         pub num_failed_notifications: Vec<u64>,
+        /// Handshake failure counter increments collected since the previous update.
+        #[serde(default)]
+        pub num_failed_handshakes: Vec<u64>,
         /// Expired-request counter increments collected since the previous update.
         pub num_kv_expired_reqs: Vec<u64>,
+        /// Late notification counter increments collected since the previous update.
+        #[serde(default)]
+        pub num_notifications_after_expiry: Vec<u64>,
     }
 
     /// Mooncake store operation name.
