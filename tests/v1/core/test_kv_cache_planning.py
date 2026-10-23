@@ -1467,16 +1467,19 @@ def test_mla_draft_prefers_standard_layout_when_pages_can_be_unified():
     )
 
 
-def test_windowed_dspark_draft_gets_own_group_and_contiguous_caches():
+@pytest.mark.parametrize("draft_dcp_sharded", [True, False])
+def test_windowed_dspark_draft_gets_own_group_and_contiguous_caches(draft_dcp_sharded):
     """Sliding-window DSpark draft layers (non-causal marker) next to a sparse
     MLA target: the target stays one group and every layer gets a contiguous
-    per-layer cache; the bf16 draft cannot alias the target's pages."""
+    per-layer cache; the bf16 draft cannot alias the target's pages. Under a
+    DCP target the draft cache is replicated (not DCP-sharded)."""
     target = new_mla_spec(cache_dtype_str="fp8_ds_mla", block_size=64)
     draft = replace(
         new_swa_mla_spec(sliding_window=36),
         block_size=64,
         dtype=torch.bfloat16,
         non_causal_multi_token_decode=True,
+        dcp_sharded=draft_dcp_sharded,
     )
     specs = {
         "target.0.attn": target,
@@ -1491,6 +1494,8 @@ def test_windowed_dspark_draft_gets_own_group_and_contiguous_caches():
         ["target.0.attn", "target.0.indexer.k_cache", "target.1.attn"],
         ["draft.2.attn", "draft.3.attn"],
     ]
+    assert groups[0].kv_cache_spec.dcp_sharded
+    assert groups[1].kv_cache_spec.dcp_sharded is draft_dcp_sharded
 
     config.cache_config.num_gpu_blocks_override = None
     config.cache_config.prefix_cache_retention_interval = None

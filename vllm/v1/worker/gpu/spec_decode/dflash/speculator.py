@@ -42,14 +42,18 @@ class DFlashSpeculator(DraftModelSpeculator):
         parallel_config = vllm_config.parallel_config
         speculative_config = vllm_config.speculative_config
         assert speculative_config is not None
+        draft_model_config = speculative_config.draft_model_config
+        # Dense and sliding-window drafts keep a replicated cache under DCP.
+        draft_uses_dcp = (
+            draft_model_config.use_mla
+            and draft_model_config.get_sliding_window() is None
+        )
         vllm_config = copy.copy(vllm_config)
         vllm_config.parallel_config = replace(
             parallel_config,
             prefill_context_parallel_size=1,
             decode_context_parallel_size=(
-                parallel_config.decode_context_parallel_size
-                if speculative_config.draft_model_config.use_mla
-                else 1
+                parallel_config.decode_context_parallel_size if draft_uses_dcp else 1
             ),
         )
         super().__init__(vllm_config, device)

@@ -226,6 +226,7 @@ from vllm.config import (
 from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import (
     get_dcp_group,
+    get_dcp_world_size_and_rank,
     get_tp_group,
     is_global_first_rank,
 )
@@ -2316,6 +2317,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             speculative_config is None
             or getattr(speculative_config, "method", None) != "dspark"
             or parallel_config.decode_context_parallel_size <= 1
+            or not self.kv_cache_spec.dcp_sharded
         ):
             return
 
@@ -2453,11 +2455,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         )
         attention_layer = self.compilation_config.static_forward_context[layer_names[0]]
 
-        try:
-            self.dcp_world_size = get_dcp_group().world_size
-        except AssertionError:
-            # DCP might not be initialized in testing
-            self.dcp_world_size = 1
+        self.dcp_world_size, _ = get_dcp_world_size_and_rank(kv_cache_spec.dcp_sharded)
         self.dcp_local_block_size = parallel_config.cp_kv_cache_interleave_size
         self.dcp_virtual_block_size = self.dcp_local_block_size * self.dcp_world_size
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
