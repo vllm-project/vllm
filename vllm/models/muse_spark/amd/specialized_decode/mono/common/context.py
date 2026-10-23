@@ -8,9 +8,8 @@ noted):
 
     S                     launch rows (a Python int, a build constant)
     tid, bid, lane, wave  thread, CTA, tid % 64, tid // 64
-    rank, slot, e, par    ABI scalars; the step epoch (22 bits) and its parity
-    put, put_bf,          the launch's ``Mailbox`` methods (bound: the AST
-    put_words, poll       rewriter must see no method call on a local)
+    rank, slot            ABI scalars
+    has_peers             ``make_context``'s ``peers``
     red                   LDS f32[WAVES 64 4]: MFMA accumulators (``row_sum``)
     rt                    ``RouteLds`` field -> LDS pointer ({} without it)
     lds                   stage -> field -> LDS pointer (the stage union)
@@ -18,6 +17,13 @@ noted):
     scr                   scratch mailbox region -> ``Addr`` (Phases A, B and
                           C: ``spec.SCRATCH_REGIONS_ALL``); the plain regions
                           (``xrow``, ``spec.SCRATCH_PLAIN_BC``): Int64 bases
+
+and, from ``settle`` on (the launch's scalar words: a kernel loads them once
+its first loads are issued, so their wait never lands ahead of those):
+
+    e, par                the step epoch (22 bits) and its parity
+    put, put_bf,          the launch's ``Mailbox`` methods (bound: the AST
+    put_words, poll       rewriter must see no method call on a local)
     peer                  peer region -> [an ``Addr`` a rank], and
                           region + "_own" -> this rank's, parity-shifted ({}
                           without peers)
@@ -44,12 +50,19 @@ from vllm.models.muse_spark.amd.specialized_decode.mono import spec
 from vllm.models.muse_spark.amd.specialized_decode.mono.common.debug import (
     region_ids,
 )
-from vllm.models.muse_spark.amd.specialized_decode.mono.common.ops import load_ptr64
+from vllm.models.muse_spark.amd.specialized_decode.mono.common.ops import (
+    ld_s32,
+    pin_s,
+    ptr64,
+)
 from vllm.models.muse_spark.amd.specialized_decode.mono.common.plan import (
     LDS_BYTES,
     WAVES,
 )
-from vllm.models.muse_spark.amd.specialized_decode.mono.common.ranks import peer_bases
+from vllm.models.muse_spark.amd.specialized_decode.mono.common.ranks import (
+    peer_bases,
+    peer_words,
+)
 from vllm.models.muse_spark.amd.specialized_decode.mono.common.route_lds import (
     RouteLds,
     route_ptrs,
@@ -62,7 +75,9 @@ from vllm.models.muse_spark.amd.specialized_decode.mono.common.sync import (
     shift,
     sreg,
     stall,
+    step_epoch,
     step_tag,
+    wait_budget,
 )
 
 RED_WORDS = WAVES * 64 * 4  # a wave's 16x16 accumulator, 4 f32 a lane
@@ -168,11 +183,12 @@ def _stage_ptrs(alloc, lds_structs: Mapping | None) -> dict:
 # ---------------------------------------------------------------- the context
 
 
-def _peer_regions(peers, rank, par) -> dict:
+def _peer_regions(words, par) -> dict:
     """Peer region -> [an ``Addr`` a rank] and region + "_own" -> this rank's,
-    in the epoch parity ``par``'s half."""
-    bases = peer_bases(peers, spec.TP)
-    own = load_ptr64(peers, rank)
+    in the epoch parity ``par``'s half. ``words``: the peer table's, then this
+    rank's entry (``settle``)."""
+    bases = peer_bases(words[:-2])
+    own = ptr64(words[-2], words[-1])
     delta = fx.Int64(par) * spec.peer_half_bytes()
     peer: dict = {}
     for region, (off, _) in spec.peer_layout().items():
@@ -197,8 +213,9 @@ def make_context(
     ``lds_structs``: stage -> struct (or {member: struct}), the stage union.
     ``key``: a K2 or K1 build; a K2 fault build compiles ``sync.stall`` in first
     (its prologue).
-    ``peers``: build the peer regions from the ``peers`` argument (False: a
-    rank-local kernel, no ``peers`` argument read and ``peer`` empty).
+    ``peers``: ``settle`` builds the peer regions from the ``peers`` argument
+    (False: a rank-local kernel, no ``peers`` argument read and ``peer``
+    empty).
     ``route_lds``: allocate ``RouteLds`` (False: ``rt`` empty).
     """
     if not 1 <= S <= spec.MAX_ROWS:
@@ -211,12 +228,7 @@ def make_context(
     if lds_bytes > LDS_BYTES:
         raise ValueError(f"{lds_bytes} B of LDS > {LDS_BYTES} (a CU's)")
     scratch, rank = args["scratch"], args["rank"]
-    epoch, slot, health, alarm = (
-        args["epoch"],
-        args["slot"],
-        args["health"],
-        args["alarm"],
-    )
+    epoch, slot = args["epoch"], args["slot"]
     tid = fx.thread_idx.x
     bid = fx.block_idx.x
     alloc = fx.SharedAllocator()
@@ -233,16 +245,6 @@ def make_context(
             epoch,
             slot,
         )
-    e = load_epoch(epoch)
-    mb = Mailbox(
-        step_tag(e, slot) - 1,
-        health,
-        alarm,
-        region_ids(spec.REGIONS),
-        load_budget(health),
-    )
-    par = e & 1
-    peer = _peer_regions(args["peers"], rank, par) if peers else {}
     lay = spec.scratch_layout()
     scr: dict = {r: sreg(scratch, lay[r][0], r) for r in spec.SCRATCH_REGIONS}
     scr[spec.XROW] = scratch + fx.Int64(lay[spec.XROW][0])
@@ -260,17 +262,45 @@ def make_context(
         "wave": tid // 64,
         "rank": rank,
         "slot": slot,
-        "e": e,
-        "par": par,
-        "put": mb.put,
-        "put_bf": mb.put_bf,
-        "put_words": mb.put_words,
-        "poll": mb.poll,
+        "has_peers": peers,
         "red": fixed.red.ptr,
         "rt": route_ptrs(rl) if rl is not None else {},
         "lds": lds,
         "args": dict(args),
         "scr": scr,
-        "peer": peer,
         "key": key,
     }
+
+
+def settle(c) -> None:
+    """Loads the launch's scalar words (``ld_s32``: the epoch, the
+    ``WAIT_BUDGET`` word, the peer table and this rank's entry), pins them
+    (``pin_s``) and adds to ``c`` what is built from them: ``e``, ``par``, the
+    ``Mailbox`` methods and ``peer``. A kernel calls it right after its first
+    loads are issued, at top level or once in each CTA-uniform branch that
+    publishes or polls: the words' round trip (an lgkmcnt wait, never a vmcnt
+    one) then overlaps those loads (unpinned, a scalar load sinks to its first
+    use, a poll's, and exposes its round trip there). A stage that publishes
+    or polls before it fails at trace (no ``put`` / ``poll``)."""
+    a = c["args"]
+    words = [load_epoch(a["epoch"]), load_budget(a["health"])]
+    if c["has_peers"]:
+        words += peer_words(a["peers"], spec.TP)
+        words += [ld_s32(a["peers"], 2 * c["rank"] + h) for h in range(2)]
+    w = pin_s(words)
+    e = step_epoch(w[0])
+    mb = Mailbox(
+        step_tag(e, c["slot"]) - 1,
+        a["health"],
+        a["alarm"],
+        region_ids(spec.REGIONS),
+        wait_budget(w[1]),
+    )
+    par = e & 1
+    c["e"] = e
+    c["par"] = par
+    c["put"] = mb.put
+    c["put_bf"] = mb.put_bf
+    c["put_words"] = mb.put_words
+    c["poll"] = mb.poll
+    c["peer"] = _peer_regions(w[2:], par) if len(w) > 2 else {}

@@ -12,15 +12,23 @@ from flydsl.expr import range_constexpr
 
 from vllm.models.muse_spark.amd.specialized_decode.mono.common.ops import (
     bf2_f32,
-    load_ptr64,
+    ld_s32,
+    ptr64,
 )
 from vllm.models.muse_spark.amd.specialized_decode.mono.common.sync import Addr
 
 
-def peer_bases(peers, tp):
-    """Every rank's peer buffer base from the ``peers`` table (an i64 a rank),
-    loaded once: a put's address must not wait on a load of its own."""
-    return [load_ptr64(peers, p) for p in range(tp)]
+def peer_words(peers, tp):
+    """The ``peers`` table's words (an i64 a rank: low, high), scalar loads
+    (``ld_s32``) issued at once."""
+    return [ld_s32(peers, j) for j in range(2 * tp)]
+
+
+def peer_bases(words):
+    """Every rank's peer buffer base from the ``peers`` table's words
+    (``peer_words``), loaded once: a put's address must not wait on a load of
+    its own."""
+    return [ptr64(words[2 * p], words[2 * p + 1]) for p in range(len(words) // 2)]
 
 
 def peer_at(addrs, p):

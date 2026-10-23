@@ -378,11 +378,37 @@ def lanes_below(bal, lane):
     return popcount(bal & ((fx.Int64(1) << fx.Int64(lane)) - 1))
 
 
-def load_ptr64(table, i):
-    """Entry ``i`` of an i64 table in memory, wave-uniform (each half through
-    ``uniform``): a peer's buffer base, a kernel argument block's pointer."""
-    pw = fx.Vector(bo.buffer_load(rsrc(table), i * 2, vec_width=2, dtype=T.i32))
-    return (fx.Int64(uniform(pw[1])) << 32) | fx.Int64(fx.Uint32(uniform(pw[0])))
+def ld_s32(ptr, i):
+    """Word ``i`` of a buffer at a wave-uniform word index, a scalar (SMEM)
+    load: the word lands in an SGPR and its wait is on lgkmcnt, so the vector
+    loads in flight (a stage's weight stream) are not drained by it. Only for a
+    word written before the launch and not during it (the epoch, the
+    ``WAIT_BUDGET`` word, the peer table): the scalar cache, like the vector
+    L1, is coherent only through the dispatch's acquire, as the kernel
+    arguments are. LLVM sinks it to its first use (``pin_s`` keeps it put)."""
+    return fx.Int32(bo.buffer_load(rsrc(ptr), i, vec_width=1, is_scalar=True))
+
+
+def pin_s(vs):
+    """``vs`` (SGPR Int32s, e.g. ``ld_s32`` words) through one opaque asm that
+    emits nothing (each output tied to its input): their loads are issued
+    before it and waited for at it, together, and what is computed from them
+    is computed after (``fresh``'s scalar twin, for a batch)."""
+    n = len(vs)
+    ty = T.i32 if n == 1 else llvm.StructType.get_literal([T.i32] * n)
+    r = llvm.inline_asm(
+        ty, [fx.Int32(v).ir_value() for v in vs], "",
+        ",".join(["=s"] * n + [str(j) for j in range(n)]),
+        has_side_effects=True,
+    )  # fmt: skip
+    if n == 1:
+        return [fx.Int32(r)]
+    return [fx.Int32(llvm.extractvalue(T.i32, r, [j])) for j in range(n)]
+
+
+def ptr64(lo, hi):
+    """The i64 of two i32 words (low, high)."""
+    return (fx.Int64(hi) << 32) | fx.Int64(fx.Uint32(lo))
 
 
 def bf16_round(a):

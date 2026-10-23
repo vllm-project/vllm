@@ -63,6 +63,7 @@ from vllm.models.muse_spark.amd.specialized_decode.mono.common.context import (
     RED_WORDS,
     lds_total_bytes,
     make_context,
+    settle,
 )
 from vllm.models.muse_spark.amd.specialized_decode.mono.common.ops import traced
 from vllm.models.muse_spark.amd.specialized_decode.mono.common.plan import (
@@ -137,6 +138,7 @@ def program(c) -> None:
     if b < NA:
         pre = boundary.boundary_loads(c, b)
         epi = boundary.epilogue_inputs(c, b)
+        settle(c)
         boundary.stage_boundary(c, b, pre)
         if b32 < E_UNITS * s:
             epilogue.stage_epilogue(c, b32, epi)
@@ -144,6 +146,7 @@ def program(c) -> None:
     if b >= K1_GEMV0:
         g = b32 - K1_GEMV0
         wops = qkv.qkv_loads(c, g)
+        settle(c)
         qkv.stage_qkv(c, g, wops)
 
 

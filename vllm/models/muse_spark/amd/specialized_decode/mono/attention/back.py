@@ -116,9 +116,8 @@ def core_loads(c, core: str = "tensor"):
     weights, in ``load_core``), "split" -> None (its operands are the
     combine's rows, loaded behind ``crdy`` in ``load_core``; the split and
     combine stages ran before the weights). Scheduling barriers on both sides
-    keep them in place: the context's own loads and their uses before (a
-    context load sunk past them would have its use wait for them), the weights
-    after."""
+    keep them in place, the weights after (the context's scalar words load at
+    ``settle``, past the weights)."""
     _check_core(core)
     if core in ("tensor", "split"):
         return None

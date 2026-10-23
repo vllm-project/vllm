@@ -84,6 +84,7 @@ from vllm.models.muse_spark.amd.specialized_decode.mono.attention import (
 from vllm.models.muse_spark.amd.specialized_decode.mono.common.context import (
     lds_total_bytes,
     make_context,
+    settle,
 )
 from vllm.models.muse_spark.amd.specialized_decode.mono.common.ops import traced
 from vllm.models.muse_spark.amd.specialized_decode.mono.common.plan import (
@@ -191,12 +192,15 @@ def program(c, core: str = "tensor") -> None:
     # a split core's stages before them (DESIGN_BC 7.2), a gated core's own
     # loads (none for "tensor" and "split": DESIGN_BC 6.2)
     if const_expr(core == "split"):
+        settle(c)  # the split and combine stages publish and poll
         split_roles(c)
     # (not ``pre``: the seam's, assigned under a traced ``if`` below, must not
     # become that branch's state)
     core_pre = back.core_loads(c, core)
     ops0 = back.o_loads(c, b)
     ops1 = back.o_loads(c, b + BLOCKS)
+    if const_expr(core != "split"):
+        settle(c)  # the context words' wait behind the core's and o_proj's loads
     back.load_core(c, core, core_pre)
     back.stage_o(c, b, ops0)
     back.stage_o(c, b + BLOCKS, ops1)

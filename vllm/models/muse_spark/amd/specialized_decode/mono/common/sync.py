@@ -30,6 +30,7 @@ from vllm.models.muse_spark.amd.specialized_decode.mono.common.ops import (
     CM_SYS,
     bf16_pair,
     ld_i32,
+    ld_s32,
     memrealtime,
     rsrc,
     traced,
@@ -57,18 +58,30 @@ def step_tag(e, slot):
 
 
 def load_epoch(epoch):
-    """The step epoch word at ``epoch``, wave-uniform, masked to 22 bits (its
-    parity ``e & 1`` alternates across the mask's wrap: 2^22 is even)."""
-    return uniform(ld_i32(epoch, 0)) & EPOCH_MASK
+    """The step epoch word at ``epoch``, a scalar load (``ld_s32``): the runner
+    bumps it before the launch. ``step_epoch`` masks it."""
+    return ld_s32(epoch, 0)
+
+
+def step_epoch(w):
+    """The step epoch of its word ``w`` (``load_epoch``), masked to 22 bits
+    (its parity ``e & 1`` alternates across the mask's wrap: 2^22 is even)."""
+    return w & EPOCH_MASK
 
 
 def load_budget(health):
-    """An in-kernel wait's budget in seconds: this rank's ``WAIT_BUDGET`` health
-    word, wave-uniform, read once a launch. A zeroed header (health words reset
-    without a budget) falls back to ``WAIT_SECONDS`` instead of failing every
-    wait that is not satisfied at its first load."""
-    b = uniform(ld_health(health, WAIT_BUDGET))
-    return fx.Int32((b > 0).select(b, fx.Int32(WAIT_SECONDS)))
+    """This rank's ``WAIT_BUDGET`` health word, read once a launch, a scalar
+    load (``ld_s32``): the runner sets it between launches, no MonoKernel
+    writes it. ``wait_budget`` reads it."""
+    return ld_s32(health, WAIT_BUDGET)
+
+
+def wait_budget(w):
+    """An in-kernel wait's budget in seconds from its word ``w``
+    (``load_budget``). A zeroed header (health words reset without a budget)
+    falls back to ``WAIT_SECONDS`` instead of failing every wait that is not
+    satisfied at its first load."""
+    return fx.Int32((w > 0).select(w, fx.Int32(WAIT_SECONDS)))
 
 
 @traced
@@ -196,7 +209,7 @@ class Mailbox:
         """``tag``: this launch's tag - 1; ``health``: this rank's health words
         (FAILED, then a wait record a CTA); ``alarm``: this rank's flag word on
         the output rank; ``region_ids``: region name -> the id a record names it
-        by; ``budget``: a wait's budget in seconds (``load_budget``)."""
+        by; ``budget``: a wait's budget in seconds (``wait_budget``)."""
         self.tag = tag + 1
         self.health = health
         self.alarm = alarm
