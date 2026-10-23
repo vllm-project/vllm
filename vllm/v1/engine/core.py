@@ -232,6 +232,8 @@ class EngineCore:
         self.aborts_queue = queue.Queue[list[str]]()
 
         self._idle_state_callbacks: list[Callable] = []
+        # Set while requests arrive or wait; see _schedule.
+        self._gc_freeze_pending = False
 
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
@@ -546,6 +548,7 @@ class EngineCore:
             )
 
         self.scheduler.add_request(request)
+        self._gc_freeze_pending = True
         if request.abort_immediately:
             # Immediately abort so the connector's request_finished hook runs
             # to free any pre-admission KV-transfer resources.
@@ -656,11 +659,17 @@ class EngineCore:
 
     def _schedule(self) -> SchedulerOutput:
         scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
-        if scheduler_output.scheduled_new_reqs:
-            # Admitted requests and their KV block lists live until the request
-            # finishes and grow with context length. Freeze them like the
-            # startup heap so that full GC passes don't traverse them.
+        if scheduler_output.scheduled_new_reqs or self._gc_freeze_pending:
+            # Requests and their KV block lists live until the request finishes
+            # and grow with context length. Freeze them like the startup heap
+            # so that full GC passes don't traverse them. A waiting request
+            # gets its blocks without being scheduled, possibly steps after it
+            # arrived: one that waits for remote KV (WAITING_FOR_REMOTE_KVS,
+            # NIXL pull or push) only shows up in scheduled_new_reqs once its
+            # KV has landed. So keep freezing after each schedule() while any
+            # request waits; gc.freeze() is O(1).
             gc.freeze()
+        self._gc_freeze_pending = self.scheduler.get_request_counts()[1] > 0
         return scheduler_output
 
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
