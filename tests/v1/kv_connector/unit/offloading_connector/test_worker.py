@@ -280,7 +280,8 @@ def test_start_kv_transfers_non_writer_still_submits_load():
 
 @pytest.mark.parametrize("sync", [False, True])
 def test_load_completion(sync: bool):
-    """Sync loads are waited on, skip finished_recving, and count as loads."""
+    """Sync loads go to submit_sync_load and are waited on, skip
+    finished_recving, and count as loads."""
     worker, _ = _make_worker(
         KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
     )
@@ -288,6 +289,10 @@ def test_load_completion(sync: bool):
     worker.start_kv_transfers(_load_metadata(11, sync=sync))
 
     assert worker.worker is not None
+    submitted = worker.worker.submit_sync_load if sync else worker.worker.submit_load
+    skipped = worker.worker.submit_load if sync else worker.worker.submit_sync_load
+    submitted.assert_called_once()
+    skipped.assert_not_called()
     if sync:
         worker.worker.wait.assert_called_once_with({11})
     else:

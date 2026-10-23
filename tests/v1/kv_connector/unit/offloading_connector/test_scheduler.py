@@ -218,9 +218,10 @@ def _make_partial_tail_scheduler(
 def _make_partial_tail_request(
     scheduler: OffloadingConnectorScheduler,
     kv_transfer_params: dict[str, Any] | None = None,
+    request_id: str = "req",
 ) -> MagicMock:
     request = MagicMock()
-    request.request_id = "req"
+    request.request_id = request_id
     request.kv_transfer_params = kv_transfer_params
     request.kv_hints = None
     request.num_prompt_tokens = 30
@@ -467,13 +468,13 @@ def test_sync_partial_tail_load_targets_hashed_blocks():
     """A sync load's blocks are hashed at allocation; the partial-tail load
     must still target them, matching the async case."""
     scheduler = _make_partial_tail_scheduler()
-    scheduler.config = scheduler.config._replace(sync_load_max_tokens=64)
+    scheduler.config = scheduler.config._replace(sync_load_budget_bytes=1 << 40)
     request = _make_partial_tail_request(scheduler)
     req_status = scheduler._req_status["req"]
     scheduler.manager.lookup.return_value = LookupResult.HIT
 
     assert scheduler.get_num_new_matched_tokens(request, 0) == (28, False)
-    assert req_status.sync_load
+    assert "req" in scheduler._current_batch_sync_loads
     assert req_status.partial_tail_boundary == 28
 
     full_blocks = [KVCacheBlock(31), KVCacheBlock(32)]
@@ -493,6 +494,24 @@ def test_sync_partial_tail_load_targets_hashed_blocks():
     assert dst_spec.block_ids.tolist() == [31, 32, 41]
     assert dst_spec.group_sizes == [2, 1]
     assert dst_spec.block_indices == [0, 1]
+    # Sync-load keys are not held back for other requests.
+    assert not scheduler._chunks_being_loaded
+
+
+def test_sync_load_budget_is_shared_per_step():
+    """Sync loads share one per-step byte budget: a hit that does not fit
+    stays async."""
+    scheduler = _make_partial_tail_scheduler()
+    hit_bytes = 28 * scheduler.config.kv_bytes_per_token
+    assert hit_bytes > 0
+    scheduler.config = scheduler.config._replace(sync_load_budget_bytes=hit_bytes)
+    first = _make_partial_tail_request(scheduler, request_id="a")
+    second = _make_partial_tail_request(scheduler, request_id="b")
+    scheduler.manager.lookup.return_value = LookupResult.HIT
+
+    assert scheduler.get_num_new_matched_tokens(first, 0) == (28, False)
+    assert scheduler.get_num_new_matched_tokens(second, 0) == (28, True)
+    assert scheduler._current_batch_sync_loads == {"a"}
 
 
 def test_lookup_cap_stops_at_authoritative_prefix_boundary():
@@ -1457,7 +1476,11 @@ def test_small_hit_loads_synchronously(request_runner, async_scheduling: bool):
         num_gpu_blocks=100,
         async_scheduling=async_scheduling,
         blocks_per_chunk=blocks_per_chunk,
-        extra_config_overrides={"sync_load_max_tokens": tokens_per_chunk},
+    )
+    # Budget for exactly one chunk per step.
+    config = runner.connector_scheduler.config
+    runner.connector_scheduler.config = config._replace(
+        sync_load_budget_bytes=tokens_per_chunk * config.kv_bytes_per_token
     )
 
     def store_all():
@@ -1487,7 +1510,7 @@ def test_small_hit_loads_synchronously(request_runner, async_scheduling: bool):
     runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_stored=(0, 1, 2))
     runner.scheduler.reset_prefix_cache()
 
-    # A one-chunk hit within the limit loads in the same step. The mock worker
+    # A one-chunk hit fits the budget and loads in the same step. The mock worker
     # records the worker's wait on it as a flush.
     store_none()
     matched.clear()
@@ -1506,7 +1529,7 @@ def test_small_hit_loads_synchronously(request_runner, async_scheduling: bool):
     runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_stored=tuple(range(6)))
     runner.scheduler.reset_prefix_cache()
 
-    # A two-chunk hit exceeds the limit and stays an async load.
+    # A two-chunk hit exceeds the budget and stays an async load.
     store_none()
     matched.clear()
     runner.connector_scheduler._maximal_prefix_lookup = lambda keys, ctx, *_: 2
