@@ -66,7 +66,7 @@ def _deepseek_v4_cpu_prepare_and_attn(
     """
     layer_name_str = _resolve_layer_name(layer_name)
     self = get_forward_context().no_compile_layers[layer_name_str]
-    self._prepare_and_attn_fn(
+    self._prepare_and_attn(
         hidden_states,
         qr,
         kv,

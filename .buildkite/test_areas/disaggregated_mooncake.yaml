@@ -81,7 +81,6 @@ steps:
     PYTHON_BIN: "/vllm-workspace/.venv/bin/python"
     PYTHONUNBUFFERED: "1"
     VLLM_HOST_IP: "127.0.0.1"
-    VLLM_USE_V2_MODEL_RUNNER: "1"
     E_CUDAGRAPH_MM_ENCODER: "1"
     # FA padding NaNs are tracked separately in #57136.
     E_MM_ENCODER_ATTN_BACKEND: "TRITON_ATTN"
