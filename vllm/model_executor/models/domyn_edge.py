@@ -162,7 +162,7 @@ class DomynEdgeDecoderLayer(nn.Module):
             num_kv_heads=config.num_key_value_heads,
             rms_norm_eps=config.rms_norm_eps,
             qkv_bias=False,
-            head_dim=config.head_sizes[layer_idx],
+            head_dim=config.per_layer_config[layer_idx].head_dim,
             cache_config=cache_config,
             quant_config=quant_config,
             rope_parameters=rope_parameters,
