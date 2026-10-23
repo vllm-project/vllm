@@ -279,7 +279,7 @@ strategy_overrides:
   # nodes use the BLHNC KV layout, so NIXL reads one region per block instead
   # of one per layer.
   # GB200/GB300 1P1D as in the guide's NVIDIA PD section: a DEP2 prefill on
-  # GPUs 0-1 of one tray and a DEP4 decode on a second tray. vllm-router takes
+  # one tray and a DEP4 decode on a second tray. vllm-router takes
   # one DP size for both pools, so it sends each request to the endpoint and
   # each engine picks its own DP rank.
   pd_cluster:
@@ -315,7 +315,6 @@ strategy_overrides:
             - "--kv-transfer-config"
             - '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"engine_ttl":0}}'
           extra_env:
-            CUDA_VISIBLE_DEVICES: "0,1"
             VLLM_USE_V2_MODEL_RUNNER: "1"
         gb300: *m31_gb_prefill
         mi355x:
@@ -569,8 +568,8 @@ guide: |
 
   ### Prefill/decode disaggregation (1P1D, DEP2 + DEP4, NVIDIA GB200 / GB300)
 
-  A DEP2 prefill on GPUs 0-1 of one 4-GPU tray feeds a DEP4 decode on a second
-  tray over NIXL. Both roles run attention data parallel with the NVFP4 experts
+  A DEP2 prefill on one 4-GPU tray feeds a DEP4 decode on a second tray over
+  NIXL. Both roles run attention data parallel with the NVFP4 experts
   on the DeepGEMM MegaMoE kernel over expert parallelism, the V2 model runner,
   NUMA binding, and a seven-token DSpark draft on the FlashInfer PrimiTS
   (`FLASHINFER_TS`) backend. The settings were tuned on GB300; GB200 uses the
@@ -580,7 +579,7 @@ guide: |
 
   ```bash
   VLLM_FLOAT32_MATMUL_PRECISION=high VLLM_USE_V2_MODEL_RUNNER=1 \
-  CUDA_VISIBLE_DEVICES=0,1 VLLM_NIXL_SIDE_CHANNEL_HOST=<P_IP> \
+  VLLM_NIXL_SIDE_CHANNEL_HOST=<P_IP> \
   vllm serve MiniMaxAI/MiniMax-M3.1-Flash \
     --data-parallel-size 2 \
     --enable-expert-parallel \
