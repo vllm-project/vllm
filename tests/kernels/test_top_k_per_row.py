@@ -1852,6 +1852,89 @@ def test_cooperative_topk_overflow_mixed_lengths(num_rows: int, top_k: int) -> N
         )
 
 
+@pytest.mark.skipif(
+    not _has_cooperative_topk(), reason="This test requires cooperative_topk"
+)
+@pytest.mark.parametrize("num_rows", [1, 9, 64])
+@pytest.mark.parametrize("seq_len", [65536, 262144, 1048576])
+@torch.inference_mode()
+def test_cooperative_topk_overflow_nan(num_rows: int, seq_len: int) -> None:
+    # More NaNs than top_k overflow the top coarse bin. The exact keys must
+    # order NaN above +inf as the coarse bins do (and as torch.topk does).
+    top_k = 512
+    gen = torch.Generator(device="cuda").manual_seed(0)
+    logits = torch.randn((num_rows, seq_len), generator=gen, device="cuda")
+    nan_pos = torch.rand((num_rows, seq_len), generator=gen, device="cuda")
+    logits.scatter_(1, nan_pos.topk(4 * top_k, dim=1).indices, float("nan"))
+    lengths = torch.full((num_rows,), seq_len, dtype=torch.int32, device="cuda")
+    indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
+
+    _run_topk_backend("cooperative_topk", logits, lengths, indices, top_k, seq_len)
+    torch.accelerator.synchronize()
+    assert torch.all((indices >= 0) & (indices < seq_len))
+    sorted_indices = indices.sort(dim=1).values
+    assert torch.all(sorted_indices[:, 1:] != sorted_indices[:, :-1])
+    assert torch.isnan(logits.gather(1, indices.long())).all()
+
+
+NAN_ORDERING_CASES = [
+    # (backend, num_rows): persistent_topk runs its radix kernel at <= 32 rows,
+    # FilteredTopK at 33-64 rows, and sampled_topk above 64 rows once
+    # max_seq_len reaches its length gate (FilteredTopK fallback below it).
+    pytest.param(
+        "cooperative_topk",
+        1,
+        marks=pytest.mark.skipif(not _has_cooperative_topk(), reason="needs SM90+"),
+    ),
+    pytest.param(
+        "cooperative_topk",
+        9,
+        marks=pytest.mark.skipif(not _has_cooperative_topk(), reason="needs SM90+"),
+    ),
+    pytest.param(
+        "cooperative_topk",
+        64,
+        marks=pytest.mark.skipif(not _has_cooperative_topk(), reason="needs SM90+"),
+    ),
+    ("persistent_topk", 16),
+    ("persistent_topk", 48),
+    ("persistent_topk", 128),
+]
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.parametrize("backend,num_rows", NAN_ORDERING_CASES)
+@pytest.mark.parametrize("seq_len", [65536, 262144])
+@pytest.mark.parametrize("top_k", [512, 2048])
+@torch.inference_mode()
+def test_topk_nan_ordering_matches_torch(
+    backend: str, num_rows: int, seq_len: int, top_k: int
+) -> None:
+    # Fewer NaNs than top_k, mixed with +inf and the largest finite values:
+    # every kernel's ordered key must rank NaN above +inf, as torch.topk does.
+    gen = torch.Generator(device="cuda").manual_seed(0)
+    logits = torch.randn((num_rows, seq_len), generator=gen, device="cuda")
+    pos = torch.rand((num_rows, seq_len), generator=gen, device="cuda")
+    pos = pos.topk(top_k // 4 + 3 * (top_k // 8), dim=1).indices
+    n_nan, n_big = top_k // 4, top_k // 8
+    fmax = torch.finfo(torch.float32).max
+    logits.scatter_(1, pos[:, :n_nan], float("nan"))
+    logits.scatter_(1, pos[:, n_nan : n_nan + n_big], float("inf"))
+    logits.scatter_(1, pos[:, n_nan + n_big : n_nan + 2 * n_big], fmax)
+    logits.scatter_(1, pos[:, n_nan + 2 * n_big :], 1e30)
+    lengths = torch.full((num_rows,), seq_len, dtype=torch.int32, device="cuda")
+    indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
+
+    _run_topk_backend(backend, logits, lengths, indices, top_k, seq_len)
+    torch.accelerator.synchronize()
+    assert torch.all((indices >= 0) & (indices < seq_len))
+    sorted_indices = indices.sort(dim=1).values
+    assert torch.all(sorted_indices[:, 1:] != sorted_indices[:, :-1])
+    actual = logits.gather(1, indices.long()).sort(dim=1).values
+    expected = logits.topk(top_k, dim=1).values.sort(dim=1).values
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0, equal_nan=True)
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
 @pytest.mark.parametrize(
     "test_config",
