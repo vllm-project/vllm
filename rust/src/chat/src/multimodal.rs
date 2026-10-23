@@ -57,6 +57,8 @@ pub use self::timing::{mm_request_span, mm_timing_layer};
 #[derive(Clone)]
 pub struct MultimodalModelInfo {
     context: MultimodalModelContext,
+    /// Rendered placeholder marker IDs for all resolved modalities.
+    placeholder_token_ids: Vec<u32>,
     image: Option<VisionModalitySupport>,
     video: Option<VisionModalitySupport>,
     audio: Option<AudioModalitySupport>,
@@ -137,12 +139,7 @@ impl MultimodalModelContext {
         models::lookup_spec(&self.metadata())
     }
 
-    /// Resolve a vision preprocessor for one loaded model and modality.
-    ///
-    /// The spec builds the processor once, with the modality's preprocessor
-    /// config resolved into it; the processor is reused across requests. A
-    /// modality the spec does not declare keeps the old factory's
-    /// UnsupportedModality -> None semantics.
+    /// Build a vision preprocessor for one loaded model and modality.
     fn resolve_vision_processor(
         &self,
         model_spec: &'static dyn ModelProcessorSpec,
@@ -283,7 +280,7 @@ impl ResolvedPlaceholder {
     }
 }
 
-/// Registry vision preprocessor plus resolved placeholder tokens and
+/// Model-owned vision preprocessor plus resolved placeholder tokens and
 /// the model's shared tensor-layout spec.
 #[derive(Clone)]
 struct VisionModalitySupport {
@@ -471,8 +468,20 @@ impl MultimodalModelInfo {
             MediaConnectorConfig::default(),
         )?);
 
+        let placeholder_token_ids = [
+            image.as_ref().map(|support| support.placeholder.marker_token_ids.as_slice()),
+            video.as_ref().map(|support| support.placeholder.marker_token_ids.as_slice()),
+            audio.as_ref().map(|support| support.placeholder.marker_token_ids.as_slice()),
+        ]
+        .into_iter()
+        .flatten()
+        .flatten()
+        .copied()
+        .collect();
+
         Ok(Some(Self {
             context,
+            placeholder_token_ids,
             image,
             video,
             audio,
@@ -602,43 +611,17 @@ impl MultimodalModelInfo {
         }
     }
 
-    /// Request-scoped context for preprocessing one prompt's images.
-    ///
-    /// The token budget is `max_model_len` less the prompt's text tokens: those
-    /// outside the rendered placeholder markers, which expansion replaces.
-    /// Python's tiler takes the same `max_model_len - text_prompt_length`, but
-    /// the Python frontend calls the processor on placeholder-only dummy text,
-    /// so no prompt text is subtracted there; sizing against the actual prompt
-    /// is what the tiler's interface intends.
     fn vision_preprocessing_context(
         &self,
         prompt_token_ids: &[u32],
         max_model_len: Option<usize>,
     ) -> VisionPreprocessingContext {
-        let Some(max_model_len) = max_model_len else {
-            return VisionPreprocessingContext::default();
-        };
-        let markers = [&self.image, &self.video]
-            .into_iter()
-            .flatten()
-            .map(|support| &support.placeholder)
-            .chain(self.audio.as_ref().map(|support| &support.placeholder))
-            .map(|placeholder| placeholder.marker_token_ids.as_slice())
-            .collect::<Vec<_>>();
-
-        let mut text_prompt_len = 0;
-        let mut rest = prompt_token_ids;
-        while !rest.is_empty() {
-            match markers.iter().find(|marker| rest.starts_with(marker)) {
-                Some(marker) => rest = &rest[marker.len()..],
-                None => {
-                    text_prompt_len += 1;
-                    rest = &rest[1..];
-                }
-            }
-        }
+        let text_prompt_length = prompt_token_ids
+            .iter()
+            .filter(|token_id| !self.placeholder_token_ids.contains(token_id))
+            .count();
         VisionPreprocessingContext {
-            token_budget: Some(max_model_len.saturating_sub(text_prompt_len)),
+            token_budget: max_model_len.map(|limit| limit.saturating_sub(text_prompt_length)),
         }
     }
 }
@@ -1291,21 +1274,22 @@ mod tests {
     }
 
     #[test]
-    fn vision_token_budget_excludes_placeholder_markers() {
+    fn vision_preprocessing_context_uses_runtime_budget_and_text_tokens() {
         let info = qwen3_vl_info();
-        let budget = |prompt: &[u32], max_model_len| {
-            info.vision_preprocessing_context(prompt, max_model_len).token_budget
-        };
-
-        assert_eq!(
-            budget(
-                &[11, QWEN3_IMAGE_PAD_ID, 12, QWEN3_VIDEO_PAD_ID, 13],
-                Some(4096)
-            ),
-            Some(4096 - 3)
+        let context = info.vision_preprocessing_context(
+            &[11, QWEN3_IMAGE_PAD_ID, 12, QWEN3_VIDEO_PAD_ID, 13],
+            Some(4096),
         );
-        assert_eq!(budget(&[11, 12, 13], Some(2)), Some(0));
-        assert_eq!(budget(&[11], None), None);
+
+        assert_eq!(context.token_budget, Some(4096 - 3));
+        assert_eq!(
+            info.vision_preprocessing_context(&[11, 12, 13], Some(2)).token_budget,
+            Some(0)
+        );
+        assert_eq!(
+            info.vision_preprocessing_context(&[11], None).token_budget,
+            None
+        );
     }
 
     fn nemotron_omni_info() -> MultimodalModelInfo {

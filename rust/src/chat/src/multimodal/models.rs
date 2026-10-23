@@ -4,7 +4,7 @@
 //! Multimodal model support that lives in this repository until
 //! `llm-multimodal` ships it.
 //!
-//! The table is consulted before the `llm-multimodal` registry. Once
+//! Both tables are consulted before the `llm-multimodal` registry. Once
 //! `llm-multimodal` supports a model, delete its entry in the same change that
 //! bumps the dependency.
 

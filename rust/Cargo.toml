@@ -176,4 +176,3 @@ tokenizers = { opt-level = 3 }
 [profile.release]
 lto = "thin"
 panic = "abort"
-

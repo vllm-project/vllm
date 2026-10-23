@@ -98,13 +98,11 @@ impl ModelProcessorSpec for Step3VLVisionSpec {
     fn vision_processor(
         &self,
         _model_config: &Value,
-        preprocessor_config: &PreProcessorConfig,
+        config: &PreProcessorConfig,
         modality: Modality,
     ) -> RegistryResult<Box<dyn VisionPreProcessor>> {
         match modality {
-            Modality::Image => Ok(Box::new(Step3VLProcessor::from_preprocessor_config(
-                preprocessor_config,
-            ))),
+            Modality::Image => Ok(Box::new(Step3VLProcessor::from_preprocessor_config(config))),
             _ => Err(ModelRegistryError::UnsupportedModality {
                 spec: self.name(),
                 modality,
