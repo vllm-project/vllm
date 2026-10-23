@@ -16,6 +16,7 @@ from vllm.models.minimax_m3.nvidia.ops.index_decode_score import (
     _fp8_to_f16_mma_fragments,
 )
 from vllm.triton_utils import tl, triton
+from vllm.utils.platform_utils import num_compute_units
 
 BLOCK = 128
 SUPPORTED_TP = (2, 4)
@@ -583,117 +584,137 @@ def _index_k_merge_candidates_kernel(
     SPIN: tl.constexpr,
     launch_pdl: tl.constexpr,
 ):
-    if ROWS > 1:
-        t = tl.program_id(0) * ROWS + tl.arange(0, ROWS)[:, None]
-        k = tl.arange(0, W * 16)[None, :]
+    if TAGGED and W == 2:
+        if launch_pdl:
+            tl.extra.cuda.gdc_launch_dependents()
+        end = tl.cdiv(tokens, ROWS)
+        stride = tl.num_programs(0)
     else:
-        t = tl.program_id(0)
-        k = tl.arange(0, W * 16)
-    h = tl.program_id(1)
-    row = recv_ptr + h * recv_stride_h + t * recv_stride_t
-    source = row + k // 16 * recv_stride_src + k % 16
-    if PREFILL:
-        ids = tl.load(source + 16, mask=t < tokens, other=-1)
-        scores = tl.load(source, mask=t < tokens, other=0).to(tl.float32, bitcast=True)
-        pending = 0
-    elif TAGGED:
-        counter = expected_generations + h * (recv_stride_h // recv_stride_t) + t
-        generation = tl.load(counter).to(tl.uint32) + 1
-        generation = tl.where(generation == 0, 1, generation).to(tl.uint32)
-        pending, spins = 1, 0
-        score_words = tl.full((W * 16,), 0, tl.uint64)
-        id_words = tl.full((W * 16,), 0, tl.uint64)
-        while (pending > 0) & (spins < SPIN):
-            score_words = _index_k_load_tagged_word(source)
-            id_words = _index_k_load_tagged_word(source + 16)
-            matches = ((score_words >> 32) == generation) & (
-                (id_words >> 32) == generation
+        end = tl.program_id(0) + 1
+        stride = 1
+    for tile in range(tl.program_id(0), end, stride):
+        if ROWS > 1:
+            t = tile * ROWS + tl.arange(0, ROWS)[:, None]
+            k = tl.arange(0, W * 16)[None, :]
+        else:
+            t = tile
+            k = tl.arange(0, W * 16)
+        h = tl.program_id(1)
+        row = recv_ptr + h * recv_stride_h + t * recv_stride_t
+        source = row + k // 16 * recv_stride_src + k % 16
+        if TAGGED and ROWS > 1:
+            source = source - tl.maximum(t - (tokens - 1), 0) * recv_stride_t
+        if PREFILL:
+            ids = tl.load(source + 16, mask=t < tokens, other=-1)
+            scores = tl.load(source, mask=t < tokens, other=0).to(
+                tl.float32, bitcast=True
             )
-            pending = tl.sum((~matches).to(tl.int32), 0)
-            spins += 1
-        ids = id_words.to(tl.int32)
-        scores = score_words.to(tl.uint32).to(tl.float32, bitcast=True)
-    else:
-        ready = row + tl.arange(0, W) * recv_stride_src + 32
-        seen = tl.atomic_add(ready, 0, sem="acquire", scope="sys")
-        pending = tl.sum((seen != 1).to(tl.int32), 0)
-        spins = 0
-        while (pending > 0) & (spins < SPIN):
+            pending = 0
+        elif TAGGED:
+            counter = expected_generations + h * (recv_stride_h // recv_stride_t) + t
+            generation = tl.load(counter, mask=t < tokens, other=0).to(tl.uint32) + 1
+            generation = tl.where(generation == 0, 1, generation).to(tl.uint32)
+            pending, spins = 1, 0
+            score_words = tl.full(
+                (ROWS, W * 16) if ROWS > 1 else (W * 16,), 0, tl.uint64
+            )
+            id_words = tl.full((ROWS, W * 16) if ROWS > 1 else (W * 16,), 0, tl.uint64)
+            while (pending > 0) & (spins < SPIN):
+                score_words = _index_k_load_tagged_word(source)
+                id_words = _index_k_load_tagged_word(source + 16)
+                matches = ((score_words >> 32) == generation) & (
+                    (id_words >> 32) == generation
+                )
+                if ROWS > 1:
+                    pending = tl.sum(
+                        tl.sum((~matches & (t < tokens)).to(tl.int32), 1), 0
+                    )
+                else:
+                    pending = tl.sum((~matches).to(tl.int32), 0)
+                spins += 1
+            ids = id_words.to(tl.int32)
+            scores = score_words.to(tl.uint32).to(tl.float32, bitcast=True)
+        else:
+            ready = row + tl.arange(0, W) * recv_stride_src + 32
             seen = tl.atomic_add(ready, 0, sem="acquire", scope="sys")
             pending = tl.sum((seen != 1).to(tl.int32), 0)
-            spins += 1
-        ids = tl.load(source + 16)
-        scores = tl.load(source).to(tl.float32, bitcast=True)
-    if pending > 0:
-        tl.atomic_add(err_ptr, 1)
-        tl.inline_asm_elementwise(
-            "trap; mov.u32 $0, 0;", "=r", [], dtype=tl.int32, is_pure=False, pack=1
-        )
-    if ROWS > 1:
-        nvalid = tl.minimum(
-            tl.load(valid_ptr + t * valid_stride, mask=t < tokens, other=0),
-            MAX_TILES,
-        )
-    else:
-        nvalid = tl.minimum(tl.load(valid_ptr + t * valid_stride), MAX_TILES)
-    valid = (ids >= 0) & (ids < nvalid)
-    scores = tl.where(scores == scores, scores, -float("inf"))
-    if W != 2:
-        equal = (ids[:, None] == ids[None, :]) & valid[:, None] & valid[None, :]
-        scores = tl.max(tl.where(equal, scores[None, :], -float("inf")), 1)
-        first = tl.min(tl.where(equal, k[None, :], W * 16), 1)
-        unique = valid & (k == first)
-    forced = (ids < INIT) | (ids >= tl.maximum(0, nvalid - LOCAL))
-    scores = tl.where(forced, float("inf"), scores)
-    # Float ordering followed by inverse ID gives a stable cutoff tie break.
-    bits = tl.where(scores == 0, 0.0, scores).to(tl.uint32, bitcast=True)
-    ordered = tl.where((bits & 0x80000000) != 0, ~bits, bits ^ 0x80000000)
-    if W == 2:
-        # One candidate per lane; retain the maximum on the first matching lane.
-        ordered, leader = tl.inline_asm_elementwise(
-            """{
-                .reg .b32 peers, reversed, first, lane;
-                .reg .pred p;
-                match.any.sync.b32 peers, $2, 0xffffffff;
-                redux.sync.max.u32 $0, $3, peers;
-                brev.b32 reversed, peers;
-                clz.b32 first, reversed;
-                mov.u32 lane, %laneid;
-                setp.eq.u32 p, lane, first;
-                selp.u32 $1, 1, 0, p;
-            }""",
-            constraints="=r,=r,r,r",
-            args=[ids, ordered],
-            dtype=(tl.uint32, tl.int32),
-            is_pure=True,
-            pack=1,
-        )
-        unique = valid & (leader != 0)
-    keys = (ordered.to(tl.uint64) << 32) | (0xFFFFFFFF - ids.to(tl.uint32)).to(
-        tl.uint64
-    )
-    keys = tl.where(unique, keys, 0)
-    keys = tl.sort(keys, descending=True)
-    if ROWS > 1:
-        positions = tl.broadcast_to(tl.arange(0, 16)[None, :], (ROWS, 16))
-        selected_keys = tl.gather(keys, positions, 1)
-    else:
-        positions = tl.arange(0, 16)
-        selected_keys = tl.gather(keys, positions, 0)
-    selected = (0xFFFFFFFF - selected_keys.to(tl.uint32)).to(tl.int32)
-    selected = tl.where(selected_keys != 0, selected, 0x7FFFFFFF)
-    selected = tl.sort(selected, descending=False)
-    tl.store(
-        out_ptr + t * out_stride_t + h * out_stride_h + positions,
-        tl.where(selected == 0x7FFFFFFF, -1, selected),
-        mask=t < tokens if PREFILL else True,
-    )
-    if not PREFILL:
-        tl.debug_barrier()
-        if TAGGED:
-            tl.store(counter, generation)
+            spins = 0
+            while (pending > 0) & (spins < SPIN):
+                seen = tl.atomic_add(ready, 0, sem="acquire", scope="sys")
+                pending = tl.sum((seen != 1).to(tl.int32), 0)
+                spins += 1
+            ids = tl.load(source + 16)
+            scores = tl.load(source).to(tl.float32, bitcast=True)
+        if pending > 0:
+            tl.atomic_add(err_ptr, 1)
+            tl.inline_asm_elementwise(
+                "trap; mov.u32 $0, 0;", "=r", [], dtype=tl.int32, is_pure=False, pack=1
+            )
+        if ROWS > 1:
+            nvalid = tl.minimum(
+                tl.load(valid_ptr + t * valid_stride, mask=t < tokens, other=0),
+                MAX_TILES,
+            )
         else:
-            tl.atomic_xchg(ready, 0, sem="release", scope="sys")
+            nvalid = tl.minimum(tl.load(valid_ptr + t * valid_stride), MAX_TILES)
+        valid = (ids >= 0) & (ids < nvalid)
+        scores = tl.where(scores == scores, scores, -float("inf"))
+        if W != 2:
+            equal = (ids[:, None] == ids[None, :]) & valid[:, None] & valid[None, :]
+            scores = tl.max(tl.where(equal, scores[None, :], -float("inf")), 1)
+            first = tl.min(tl.where(equal, k[None, :], W * 16), 1)
+            unique = valid & (k == first)
+        forced = (ids < INIT) | (ids >= tl.maximum(0, nvalid - LOCAL))
+        scores = tl.where(forced, float("inf"), scores)
+        # Float ordering followed by inverse ID gives a stable cutoff tie break.
+        bits = tl.where(scores == 0, 0.0, scores).to(tl.uint32, bitcast=True)
+        ordered = tl.where((bits & 0x80000000) != 0, ~bits, bits ^ 0x80000000)
+        if W == 2:
+            # One candidate per lane; retain the maximum on the first matching lane.
+            ordered, leader = tl.inline_asm_elementwise(
+                """{
+                    .reg .b32 peers, reversed, first, lane;
+                    .reg .pred p;
+                    match.any.sync.b32 peers, $2, 0xffffffff;
+                    redux.sync.max.u32 $0, $3, peers;
+                    brev.b32 reversed, peers;
+                    clz.b32 first, reversed;
+                    mov.u32 lane, %laneid;
+                    setp.eq.u32 p, lane, first;
+                    selp.u32 $1, 1, 0, p;
+                }""",
+                constraints="=r,=r,r,r",
+                args=[ids, ordered],
+                dtype=(tl.uint32, tl.int32),
+                is_pure=True,
+                pack=1,
+            )
+            unique = valid & (leader != 0)
+        keys = (ordered.to(tl.uint64) << 32) | (0xFFFFFFFF - ids.to(tl.uint32)).to(
+            tl.uint64
+        )
+        keys = tl.where(unique, keys, 0)
+        keys = tl.sort(keys, descending=True)
+        if ROWS > 1:
+            positions = tl.broadcast_to(tl.arange(0, 16)[None, :], (ROWS, 16))
+            selected_keys = tl.gather(keys, positions, 1)
+        else:
+            positions = tl.arange(0, 16)
+            selected_keys = tl.gather(keys, positions, 0)
+        selected = (0xFFFFFFFF - selected_keys.to(tl.uint32)).to(tl.int32)
+        selected = tl.where(selected_keys != 0, selected, 0x7FFFFFFF)
+        selected = tl.sort(selected, descending=False)
+        tl.store(
+            out_ptr + t * out_stride_t + h * out_stride_h + positions,
+            tl.where(selected == 0x7FFFFFFF, -1, selected),
+            mask=t < tokens if PREFILL or ROWS > 1 else True,
+        )
+        if not PREFILL:
+            tl.debug_barrier()
+            if TAGGED:
+                tl.store(counter, generation, mask=t < tokens)
+            else:
+                tl.atomic_xchg(ready, 0, sem="release", scope="sys")
     if launch_pdl:
         # Do not let the next layer reuse scratch before this publisher exits.
         tl.extra.cuda.gdc_wait()
@@ -805,8 +826,14 @@ def minimax_m3_index_merge_candidates(
         assert expected_generations.is_contiguous()
     assert recv_slot.stride(-1) == output.stride(-1) == 1
     assert num_valid_pages.shape == (tokens,)
-    rows = 8 if prefill and world == 2 else 1
-    _index_k_merge_candidates_kernel[(triton.cdiv(tokens, rows), heads)](
+    rows = 8 if world == 2 and (prefill or tagged) else 1
+    grid = triton.cdiv(tokens, rows)
+    if tagged and world == 2:
+        # At most one 8-warp CTA per SM; larger batches loop over row tiles.
+        grid = min(
+            grid, max(1, num_compute_units(recv_slot.device.index or 0) // heads)
+        )
+    _index_k_merge_candidates_kernel[(grid, heads)](
         recv_slot,
         num_valid_pages,
         output,

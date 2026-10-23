@@ -2384,7 +2384,7 @@ def test_sharded_decode_prefetch_waits_for_current_qk(world):
 @pytest.mark.parametrize("init_blocks,local_blocks", [(0, 0), (1, 1), (3, 4)])
 @pytest.mark.parametrize("tagged", [False, True])
 def test_sharded_select_publish_reuses_slots_with_ties(
-    world, init_blocks, local_blocks, tagged
+    world, init_blocks, local_blocks, tagged, monkeypatch
 ):
     from vllm.models.minimax_m3.nvidia.ops.index_decode_score_sharded import (
         MAX_K_TILES,
@@ -2392,9 +2392,17 @@ def test_sharded_select_publish_reuses_slots_with_ties(
         minimax_m3_index_select_publish_candidates,
     )
 
+    if tagged and world == 2:
+        # Force persistent tile reuse and a masked final tile on every GPU.
+        monkeypatch.setattr(
+            "vllm.models.minimax_m3.nvidia.ops.index_decode_score_sharded.num_compute_units",
+            lambda _: 2,
+        )
     torch.manual_seed(17)
     valid = torch.tensor(
-        [0, 1, 15, 16, 17, 33, 1279, 1280, 8192], device="cuda", dtype=torch.int32
+        [0, 1, 15, 16, 17, 33, 1279, 1280, 1535, 1536, 1537, 8192],
+        device="cuda",
+        dtype=torch.int32,
     )
     tokens, heads = valid.numel(), 4
     capacity, hpr = tokens + 2, heads // world
