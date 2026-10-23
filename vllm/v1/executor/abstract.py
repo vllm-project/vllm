@@ -293,6 +293,9 @@ class Executor(ABC):
         output: list[DraftTokenIds] = self.collective_rpc("take_draft_token_ids")
         return output[0]
 
+    def generate_drafts(self) -> None:
+        self.collective_rpc("generate_drafts")
+
     def profile(
         self,
         is_start: bool = True,

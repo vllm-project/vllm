@@ -444,6 +444,13 @@ class MultiprocExecutor(Executor):
             timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
         )
 
+    def generate_drafts(self) -> None:
+        self.collective_rpc(
+            "generate_drafts",
+            unique_reply_rank=self.output_rank,
+            timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
+        )
+
     def collective_rpc(  # type: ignore[override]
         self,
         method: str | Callable,

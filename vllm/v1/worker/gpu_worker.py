@@ -1388,6 +1388,9 @@ class Worker(WorkerBase):
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.model_runner.take_draft_token_ids()
 
+    def generate_drafts(self) -> None:
+        self.model_runner.generate_drafts()
+
     def profile(
         self,
         is_start: bool = True,

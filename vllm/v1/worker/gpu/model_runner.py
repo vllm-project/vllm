@@ -2137,7 +2137,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ec_connector_output = self.execute_model_state.ec_connector_output
         cudagraph_stats = self.execute_model_state.cudagraph_stats
         num_spec_tokens = self.execute_model_state.num_spec_tokens_to_schedule
-        self.execute_model_state = None
+        # Keep execute_model_state but update it with sampler output for generate_drafts
 
         if not self.is_last_pp_rank:
             # Non-last PP rank: hidden_states is None because this rank produced
@@ -2317,7 +2317,121 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_connector.finalize_step()
         model_runner_output.ec_connector_output = ec_connector_output
 
+        # Store sampler output in execute_model_state for generate_drafts
+        self.execute_model_state = ExecuteModelState(
+            input_batch=input_batch,
+            attn_metadata=attn_metadata,
+            slot_mappings_by_layer=slot_mappings_by_layer,
+            hidden_states=hidden_states,
+            aux_hidden_states=aux_hidden_states,
+            dp_sync_state=dp_sync_state,
+            finished_req_ids=finished_req_ids,
+            ec_connector_output=ec_connector_output,
+            cudagraph_stats=cudagraph_stats,
+            num_spec_tokens_to_schedule=num_spec_tokens,
+            sampler_output=sampler_output,
+            num_sampled=num_sampled,
+            num_rejected=num_rejected,
+            draft_hidden_states=draft_hidden_states,
+        )
+
         return async_output
+
+    @torch.inference_mode()
+    @step_eplb_after()
+    def generate_drafts(self) -> None:
+        """Generate draft tokens for next step with updated grammar state."""
+        if self.execute_model_state is None:
+            return
+
+        input_batch = self.execute_model_state.input_batch
+        attn_metadata = self.execute_model_state.attn_metadata
+        slot_mappings_by_layer = self.execute_model_state.slot_mappings_by_layer
+        hidden_states = self.execute_model_state.hidden_states
+        aux_hidden_states = self.execute_model_state.aux_hidden_states
+        dp_sync_state = self.execute_model_state.dp_sync_state
+        finished_req_ids = self.execute_model_state.finished_req_ids
+        ec_connector_output = self.execute_model_state.ec_connector_output
+        cudagraph_stats = self.execute_model_state.cudagraph_stats
+        num_spec_tokens = self.execute_model_state.num_spec_tokens_to_schedule
+        sampler_output = self.execute_model_state.sampler_output
+        num_sampled = self.execute_model_state.num_sampled
+        num_rejected = self.execute_model_state.num_rejected
+        draft_hidden_states = self.execute_model_state.draft_hidden_states
+
+        self.execute_model_state = None
+
+        if not self.is_last_pp_rank:
+            if ec_connector_output is not None:
+                self.kv_connector.post_forward(finished_req_ids)
+            return
+
+        assert hidden_states is not None
+        assert sampler_output is not None
+        assert num_sampled is not None
+        assert num_rejected is not None
+        assert draft_hidden_states is not None
+
+        mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None
+        if (
+            self.speculator is not None
+            and self.speculator.supports_mm_inputs
+            and self.model_state.supports_mm_inputs
+        ):
+            mm_inputs = self.model_state.gather_mm_embeddings(
+                input_batch, draft_lookahead=1
+            )
+
+        if self.speculator is not None:
+            assert self.sampler is not None
+            if isinstance(self.speculator, DraftModelSpeculator):
+                self.speculator.observe_verification(
+                    input_batch.idx_mapping, num_sampled, num_rejected
+                )
+            spec_hidden_states = get_drafter_hidden_states(
+                self.model, draft_hidden_states
+            )
+            if isinstance(self.sampler, GPUWatermarkSampler):
+                self.speculator.prepare_watermarking(
+                    self.sampler, input_batch.idx_mapping
+                )
+            with use_workspace_lane(self._draft_workspace_lane):
+                draft_tokens = self.speculator.propose(
+                    input_batch,
+                    attn_metadata,
+                    slot_mappings_by_layer,
+                    spec_hidden_states,
+                    aux_hidden_states,
+                    num_sampled,
+                    num_rejected,
+                    self.req_states.last_sampled_tokens,
+                    self.req_states.next_prefill_tokens,
+                    self.sampler.sampling_states.temperature.gpu,
+                    self.sampler.sampling_states.seeds.gpu,
+                    num_speculative_tokens=num_spec_tokens,
+                    dp_sync_state=dp_sync_state,
+                    mm_inputs=mm_inputs,
+                )
+            if num_spec_tokens < self.num_speculative_steps:
+                draft_tokens[:, num_spec_tokens:] = -1
+            self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
+            if self.adaptive_verification is not None:
+                self.adaptive_verification.record_confidences(
+                    self.speculator.draft_token_confidence_probs, input_batch
+                )
+
+        if self.num_speculative_steps > 0:
+            self.draft_tokens_handler.set_draft_tokens(
+                input_batch,
+                self.req_states.draft_tokens[input_batch.idx_mapping, :num_spec_tokens],
+            )
+            if self.pp_handler is not None:
+                self.pp_handler.broadcast_drafts(
+                    self.req_states.draft_tokens, input_batch
+                )
+
+        if ec_connector_output is not None:
+            self.kv_connector.finalize_step()
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.draft_tokens_handler.get_draft_tokens()
@@ -2456,6 +2570,10 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: ECConnectorOutput | None
     cudagraph_stats: CUDAGraphStat | None
     num_spec_tokens_to_schedule: int
+    sampler_output: SamplerOutput | None = None
+    num_sampled: torch.Tensor | None = None
+    num_rejected: torch.Tensor | None = None
+    draft_hidden_states: torch.Tensor | None = None
 
 
 class BatchReqState(NamedTuple):
