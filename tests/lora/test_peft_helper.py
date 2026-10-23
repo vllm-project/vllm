@@ -258,3 +258,13 @@ def test_peft_helper_invalid_rank_pattern(bad_rank):
             target_modules=["q_proj"],
             rank_pattern={"q_proj": bad_rank},
         )
+
+
+@pytest.mark.parametrize("task_type", ["SEQ_CLS", "TOKEN_CLS"])
+def test_classification_task_saves_head(task_type):
+    # PEFT saves the head of these adapters even when the config has
+    # modules_to_save=None.
+    peft_helper = PEFTHelper.from_dict(
+        {"r": 8, "lora_alpha": 16, "target_modules": ["query"], "task_type": task_type}
+    )
+    assert peft_helper.modules_to_save == ["classifier", "score"]
