@@ -11,6 +11,7 @@ from tests.tool_parsers.utils import (
     run_tool_extraction_streaming,
 )
 from vllm.entrypoints.generate.base.protocol import FunctionCall
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser, ToolParserManager
 
@@ -129,7 +130,7 @@ NUL_BYTE_FUNCTION_CALL = FunctionCall(
 
 @pytest.fixture(scope="module")
 def lfm2_tokenizer() -> TokenizerLike:
-    return AutoTokenizer.from_pretrained("LiquidAI/LFM2.5-1.2B-Instruct")
+    return AutoTokenizer.from_pretrained("LiquidAI/LFM2.5-2.6B")
 
 
 def _wrap(tool_text: str, content_after: str = "") -> str:
@@ -603,6 +604,103 @@ def test_streaming_dotted_name_in_single_delta(lfm2_tokenizer: TokenizerLike):
 
     assert len(reconstructor.tool_calls) == 1
     assert reconstructor.tool_calls[0].function == DOTTED_NAME_FUNCTION_CALL
+
+
+HYPHENATED_TOOL_NAMES = ("search_contacts", "sub-task", "sub-task-ending")
+
+
+def _request_with_tools(*names: str) -> ChatCompletionRequest:
+    return ChatCompletionRequest(
+        messages=[],
+        model="test-model",
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+            for name in names
+        ],
+    )
+
+
+@pytest.mark.parametrize("streaming", [True, False])
+@pytest.mark.parametrize(
+    "tool_text, expected_tool_calls",
+    [
+        pytest.param(
+            "sub-task-ending(status='Completed', data='Found 2 friends')",
+            [
+                FunctionCall(
+                    name="sub-task-ending",
+                    arguments='{"status": "Completed", "data": "Found 2 friends"}',
+                )
+            ],
+            id="hyphenated_name",
+        ),
+        pytest.param(
+            "sub-task(step=1)",
+            [FunctionCall(name="sub-task", arguments='{"step": 1}')],
+            id="prefix_of_another_hyphenated_name",
+        ),
+        pytest.param(
+            "search_contacts(relationship='friend'), sub-task-ending(status='Done')",
+            [
+                FunctionCall(
+                    name="search_contacts", arguments='{"relationship": "friend"}'
+                ),
+                FunctionCall(name="sub-task-ending", arguments='{"status": "Done"}'),
+            ],
+            id="parallel_with_plain_name",
+        ),
+        pytest.param(
+            "sub-task-ending(data='then, sub-task-ending(again)')",
+            [
+                FunctionCall(
+                    name="sub-task-ending",
+                    arguments='{"data": "then, sub-task-ending(again)"}',
+                )
+            ],
+            id="name_inside_string_argument",
+        ),
+    ],
+)
+def test_hyphenated_tool_names(
+    streaming: bool,
+    tool_text: str,
+    expected_tool_calls: list[FunctionCall],
+    lfm2_tokenizer: TokenizerLike,
+):
+    """OpenAI tool names may contain hyphens and LFM2 emits them verbatim,
+    but Python parses `sub-task-ending(...)` as a subtraction, not a call."""
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("lfm2")(lfm2_tokenizer)
+
+    _, tool_calls = run_tool_extraction(
+        tool_parser,
+        _wrap(tool_text),
+        request=_request_with_tools(*HYPHENATED_TOOL_NAMES),
+        streaming=streaming,
+    )
+
+    assert [tool_call.function for tool_call in tool_calls] == expected_tool_calls
+
+
+def test_hyphenated_name_outside_request_tools_is_not_a_call(
+    lfm2_tokenizer: TokenizerLike,
+):
+    """Only requested tool names are rewritten, so a hyphenated name the
+    request does not offer is still not parsed as a call."""
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("lfm2")(lfm2_tokenizer)
+
+    _, tool_calls = run_tool_extraction(
+        tool_parser,
+        _wrap("sub-task-ending(status='Completed')"),
+        request=_request_with_tools("search_contacts"),
+    )
+
+    assert tool_calls == []
 
 
 def test_adjust_request_disables_skip_special_tokens(

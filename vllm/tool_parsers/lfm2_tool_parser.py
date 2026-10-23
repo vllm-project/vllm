@@ -110,6 +110,48 @@ class Lfm2ToolParser(ToolParser):
         return tool_call
 
     @staticmethod
+    def _alias_hyphenated_names(
+        tool_text: str, request: ChatCompletionRequest | ResponsesRequest
+    ) -> tuple[str, dict[str, str]]:
+        """Swap hyphenated tool names for parseable placeholders.
+
+        OpenAI tool names may contain hyphens, and LFM2 emits them verbatim
+        (``sub-task-ending(status='Completed')``), but Python parses that as
+        a subtraction, not a call. Each requested tool name that is not a
+        dotted identifier is replaced at call positions (after ``[`` or
+        ``,``); ``_unalias`` restores it in the name and arguments, so the
+        round trip is exact.
+        """
+        aliases: dict[str, str] = {}
+        for tool in getattr(request, "tools", None) or []:
+            function = getattr(tool, "function", None)
+            name = getattr(function, "name", None) or getattr(tool, "name", None)
+            if not name or all(part.isidentifier() for part in name.split(".")):
+                continue
+            alias = f"_lfm2_tool_alias_{len(aliases)}"
+            renamed = re.sub(
+                r"(?<=(?:^|[\[,])\s*)" + re.escape(name) + r"(?=\s*\()",
+                alias,
+                tool_text,
+            )
+            if renamed != tool_text:
+                aliases[alias] = name
+                tool_text = renamed
+        return tool_text, aliases
+
+    @staticmethod
+    def _unalias(tool_call, aliases: dict[str, str]):
+        """Undo ``_alias_hyphenated_names`` on a parsed tool call."""
+        for alias, name in aliases.items():
+            if tool_call.function.name == alias:
+                tool_call.function.name = name
+            if alias in tool_call.function.arguments:
+                tool_call.function.arguments = tool_call.function.arguments.replace(
+                    alias, name
+                )
+        return tool_call
+
+    @staticmethod
     def _strip_echo(raw_after: str) -> str:
         """Drop any orphan <|tool_call_end|> (and the preceding text) from
         trailing content. LFM2 occasionally echoes the call body after the
@@ -166,7 +208,7 @@ class Lfm2ToolParser(ToolParser):
                 tools_called=False, tool_calls=[], content=model_output
             )
 
-        tool_text = tool_text.strip()
+        tool_text, aliases = self._alias_hyphenated_names(tool_text.strip(), request)
 
         is_tool_call_pattern = False
         try:
@@ -230,6 +272,8 @@ class Lfm2ToolParser(ToolParser):
                 ]
                 if kw_renamed:
                     tool_calls = [self._restore_reserved(tc) for tc in tool_calls]
+                if aliases:
+                    tool_calls = [self._unalias(tc, aliases) for tc in tool_calls]
                 return ExtractedToolCallInformation(
                     tools_called=True,
                     tool_calls=tool_calls,
@@ -314,7 +358,7 @@ class Lfm2ToolParser(ToolParser):
             tool_text = tool_text.split(TOOL_CALL_END, 1)[0]
         # Leading whitespace after the start token would make every completion
         # candidate an IndentationError (the non-streaming path strips it too).
-        tool_text = tool_text.lstrip()
+        tool_text, aliases = self._alias_hyphenated_names(tool_text.lstrip(), request)
 
         def _content_only_or_none() -> DeltaMessage | None:
             """Return a content-only delta if any content arrived in this
@@ -377,6 +421,8 @@ class Lfm2ToolParser(ToolParser):
             ]
             if kw_renamed:
                 tool_calls = [self._restore_reserved(tc) for tc in tool_calls]
+            if aliases:
+                tool_calls = [self._unalias(tc, aliases) for tc in tool_calls]
 
             tool_deltas = []
             for index, new_call in enumerate(tool_calls):
