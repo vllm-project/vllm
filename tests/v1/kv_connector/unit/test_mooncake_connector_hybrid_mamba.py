@@ -240,7 +240,11 @@ def test_register_kv_caches_scales_attention_len_to_kernel_block(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("block_offsets", [(0,), (1, 0)], ids=["single", "descending"])
+@pytest.mark.parametrize(
+    "block_offsets",
+    [(0,), (1, 0), (2, 1, 0, 3, 4)],
+    ids=["single", "descending", "descending-prefix-ascending-tail"],
+)
 async def test_build_transfer_params_uses_non_overlapping_physical_pages(block_offsets):
     kv_cache_config = make_hybrid_gdn_kv_cache_config(block_size=16)
     worker = object.__new__(MooncakeConnectorWorker)
