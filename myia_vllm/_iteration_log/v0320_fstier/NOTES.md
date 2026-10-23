@@ -184,3 +184,55 @@ libre invité (formule min(48, invité−40, C:−12 %)).
 Reste ouvert : merge du profil fstier dans `medium-swift15-27b.yml` (propre,
 au prochain cycle calme — la prod tourne sur le profil fstier tel quel),
 vigie du rythme de remplissage vs cadence 30 min sous charge Minimax.
+
+## 23/10 — le pruneur et le moteur se courent après (course PROUVÉE), et la cadence des wedges n'est pas le tier
+
+**1. Course pruneur / lecture de bloc — corrélation 5/5, plus une hypothèse.**
+Le moteur loggue `Job N block I/O failed: [Errno 2] No such file or directory`
+depuis le tier fs. Relevé sur 20 000 lignes : **5 occurrences** — 00:20:05,
+03:20:02, 06:51:10, 06:51:38, 11:51:12Z. La tâche `fstier-prune` tourne aux
+bornes **:20 et :50** (`StartBoundary 00:20`, toutes les 30 min, `StartWhenAvailable`).
+Chaque échec tombe **2 à 72 s après un début de cycle** : le tier teste
+l'existence du fichier (c'est SON index), le pruneur le supprime entre le test
+et la lecture, le read échoue.
+
+Conséquence : `kv_load_failure_policy='fail'` (`config/kv_transfer.py:88`) fait
+**échouer la requête** au lieu de la recalculer. ~5 requêtes cassées en 12 h —
+peu, mais c'est un défaut de conception de notre dispositif, pas un aléa.
+
+**Correctif disponible sans changement de version** : la même ligne accepte
+`recompute` (`scheduler.py:183-184` → `self.recompute_kv_load_failures`), qui
+re-préfille au lieu d'abandonner. Coût d'un recompute sur un préfixe de 30-60 K :
+quelques secondes ; coût d'un `fail` : une erreur client + un retry.
+→ **Q27 (b)** : à appliquer dans la même fenêtre que la porte watchdog.
+
+**2. La cadence des wedges n'est PAS imputable au passage multi-tier.**
+17 h calmes après la fenêtre du 21/10 19:15Z (un seul wedge, 21/10 19:28Z,
+puis rien jusqu'au 22/10 12:41Z). L'explosion démarre au **mur Minimax du
+22/10 22:08Z** : 14 redémarrages en 23 h (22:08, 22:47, 00:20, 00:43, 00:57,
+01:11, 03:22, 03:36, 04:23, 09:00, 10:25, 10:39, 10:56, 11:29Z). Le facteur
+dominant est la **charge** (469 req/2 h dont 296 >100 K), pas le tier — le tier
+était déjà en place pendant les 17 h calmes. Corrélation, pas causalité ; la
+contre-épreuve serait une fenêtre à charge égale avec l'ancien tier.
+
+**3. Signal neuf : la préemption.** `num_preemptions_total` = **0** pendant
+des jours, **12 en 70 min** depuis le boot de 11:30:42Z, avec
+`kv_cache_usage_perc` monté à **92,5 %** (puis 86 %) et 3-5 requêtes en vol.
+Mécanisme probable du wedge : KV plein → le scheduler préempte → la séquence
+préemptée doit être re-préfillée → la sonde décodage de 24 tokens du watchdog
+attend derrière un prefill de plusieurs dizaines de milliers de tokens →
+`GEN_TIMEOUT` 90 s dépassé → 2 échecs → restart → **le KV est vidé** et la
+charge reconstruit le même état. La boucle est auto-entretenue.
+C'est exactement ce que la porte « prefill en vol » (Q27 (a)) casse : les
+compteurs `prompt_tokens_total` avancent pendant que la sonde expire, donc le
+moteur travaille et le restart est un dégât net.
+
+**Coût réel d'un restart, mesuré** : `shutdown` 10:57:53Z → `Application
+startup complete` ~10:59:5xZ = **~2 min**, pas les 15 min du boot à froid du
+22/10. Le coût n'est donc pas le boot mais (a) le KV vidé, (b) les 600 s de
+sommeil que le watchdog s'impose ensuite.
+
+**Hygiène /dev/shm** : 25 G utilisés au cycle pour un plancher légitime de
+8 GiB (tier RAM du profil fstier) → **14 fichiers / 17,28 GiB d'orphelins**
+purgeés (bornés au `StartedAt` 11:30:42Z), 8,0 G / 13 % après, health 200 en
+6,4 ms.
