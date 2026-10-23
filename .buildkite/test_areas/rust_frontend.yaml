@@ -39,7 +39,7 @@ steps:
   # The Rust frontend re-renders messages instead of reusing kv_transfer_params["prompt_token_ids"].
   - pytest -v -s entrypoints/openai/chat_completion/test_chat_completion.py -k "not test_kv_transfer_prompt_token_ids_round_trip and not test_kv_transfer_prompt_token_ids_streaming"
   - pytest -v -s entrypoints/openai/chat_completion/test_include_reasoning.py
-  - pytest -v -s entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py -k "not multiple"
+  - pytest -v -s entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py
   - pytest -v -s entrypoints/openai/chat_completion/test_chat_echo.py
   - pytest -v -s entrypoints/openai/chat_completion/test_logprob_token_ids.py
   # The Qwen3.5-35B FP8 MTP case needs two GPUs.
