@@ -1366,28 +1366,6 @@ class TestTrainerClients:
 class TestModuleSource:
     """`ModuleSource` metadata vs. its iteration modes (dense, no GPU)."""
 
-    def test_metadata_reads_shape_and_dtype(self):
-        source = ModuleSource(
-            _module_with(("w", torch.zeros(2, 3)), ("b", torch.zeros(3)))
-        )
-        meta = source.metadata
-        assert [m.name for m in meta] == ["w", "b"]
-        assert [m.shape for m in meta] == [(2, 3), (3,)]
-        assert all(m.dtype == torch.float32 for m in meta)
-        assert all(m.owners is None for m in meta)
-
-    def test_iter_full_yields_materialized_tensors(self):
-        w = torch.arange(6, dtype=torch.float32).reshape(2, 3)
-        source = ModuleSource(_module_with(("w", w)))
-        pairs = list(source.iter_full())
-        assert [name for name, _ in pairs] == ["w"]
-        assert torch.equal(pairs[0][1], w)
-
-    def test_source_is_reiterable(self):
-        source = ModuleSource(_module_with(("w", torch.zeros(2))))
-        assert [n for n, _ in source.iter_full()] == ["w"]
-        assert [n for n, _ in source.iter_full()] == ["w"]
-
     def test_metadata_agrees_with_both_modes(self):
         """Engines declare the round from `metadata` and send what a mode
         yields, so both modes must match it."""

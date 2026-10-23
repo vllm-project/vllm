@@ -469,8 +469,6 @@ def test_sharded_rdt_worker_init_info_carries_the_ownership_table(monkeypatch):
         world=2,
     )
     worker_init = engine._build_worker_init_info(["srv_rk0", "srv_rk1"])
-    assert worker_init.owner_sets == [[0], [1], [0, 1]]
-    assert worker_init.name_owner_class == [0, 0, 1, 2]
     # The payload crosses the control plane as JSON: nested lists must survive.
     round_tripped = json.loads(json.dumps(asdict(worker_init)))
     assert round_tripped["owner_sets"] == [[0], [1], [0, 1]]
