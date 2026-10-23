@@ -14,6 +14,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
     EngineId,
     clip_ssm_state_blocks,
+    get_sliding_window_blocks_per_group,
     yield_req_data,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -30,13 +31,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import zmq_ctx
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import make_zmq_path
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     MambaSpec,
-    SlidingWindowSpec,
 )
 
 if TYPE_CHECKING:
@@ -138,25 +137,11 @@ class NixlBaseConnectorScheduler:
         self._heartbeat_req_engine: dict[ReqId, tuple[EngineId, ReqId]] = {}
         self._last_heartbeat_time: float = 0.0
 
-        # Gather Sliding Window sizes for each kv cache group (if any) in number of
-        # blocks per KV cache group. This is used to clip the local attention window.
-        # The trailing tokens retained below the window are allocated and must
-        # be transferred too.
-        sw_sizes_tokens: list[tuple[int, int]] = [
-            (
-                g.kv_cache_spec.sliding_window + g.kv_cache_spec.extra_retained_tokens,
-                g.kv_cache_spec.block_size,
-            )
-            if isinstance(g.kv_cache_spec, SlidingWindowSpec)
-            else (0, self.block_size)
-            for g in kv_cache_config.transfer_groups
-        ]
-        # cdiv(n_tokens, block_size) gives blocks/window; add 1 to conservatively
-        # account for boundary overlap eg window isn't fully aligned with blocks.
-        self.blocks_per_sw = [
-            cdiv(n_tokens, block_size) + 1 if n_tokens else 0
-            for n_tokens, block_size in sw_sizes_tokens
-        ]
+        # Blocks per KV cache group the sliding window spans, used to clip the
+        # local attention window.
+        self.blocks_per_sw = get_sliding_window_blocks_per_group(
+            kv_cache_config, self.block_size
+        )
 
         # Trailing scratch slots that mamba managers co-allocate per request
         # for speculative decoding; None for non-SSM groups.

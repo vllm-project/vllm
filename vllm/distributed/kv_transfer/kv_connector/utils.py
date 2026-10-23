@@ -18,9 +18,14 @@ from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheConfig,
+    SlidingWindowSpec,
+)
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
@@ -42,6 +47,34 @@ def clip_ssm_state_blocks(blocks: list[int], num_spec_blocks: int) -> list[int]:
     if num_scratch := min(num_spec_blocks, len(blocks) - 1):
         blocks = blocks[:-num_scratch]
     return blocks[-1:]
+
+
+def get_sliding_window_blocks_per_group(
+    kv_cache_config: KVCacheConfig, default_block_size: int
+) -> list[int]:
+    """Blocks a connector transfers per transfer group, 0 for non-window groups.
+
+    A sliding-window group transfers its window plus the tokens retained below
+    it, and one more block for the window/block boundary overlap.
+
+    Args:
+        kv_cache_config: Config supplying the transfer groups.
+        default_block_size: Block size used for groups without a window.
+
+    Returns:
+        One block count per transfer group.
+
+    """
+    blocks_per_sw = []
+    for group in kv_cache_config.transfer_groups:
+        spec = group.kv_cache_spec
+        if isinstance(spec, SlidingWindowSpec):
+            n_tokens = spec.sliding_window + spec.extra_retained_tokens
+            block_size = spec.block_size
+        else:
+            n_tokens, block_size = 0, default_block_size
+        blocks_per_sw.append(cdiv(n_tokens, block_size) + 1 if n_tokens else 0)
+    return blocks_per_sw
 
 
 def get_kv_connector_cache_layout(vllm_config: VllmConfig | None = None):
