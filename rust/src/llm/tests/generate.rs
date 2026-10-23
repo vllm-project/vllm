@@ -677,28 +677,17 @@ async fn remote_prefill_cache_usage_preserves_decoder_metrics() {
             remote_count.unwrap_or(7),
         ));
 
+        // Decoder metrics keep counting the transferred KV as cached.
         let rendered = METRICS.render().unwrap();
-        for (metric, labels, value) in [
-            ("prompt_tokens_cached_total", "", 7),
-            (
-                "prompt_tokens_by_source_total",
-                ",source=\"external_kv_transfer\"",
-                7,
-            ),
-            ("request_prefill_kv_computed_tokens_sum", "", 1),
-        ] {
-            let expected =
-                format!("vllm:{metric}{{model_name=\"{model_name}\",engine=\"0\"{labels}}}");
-            let actual = rendered.lines().find_map(|line| {
-                let (name, value) = line.split_once(' ')?;
-                (name == expected).then(|| value.parse::<f64>().expect("numeric metric"))
-            });
-            assert_eq!(
-                actual,
-                Some(f64::from(value)),
-                "unexpected metric: {expected}"
-            );
-        }
+        assert!(rendered.contains(&format!(
+            "vllm:prompt_tokens_cached_total{{model_name=\"{model_name}\",engine=\"0\"}} 7"
+        )));
+        assert!(rendered.contains(&format!(
+            "vllm:prompt_tokens_by_source_total{{model_name=\"{model_name}\",engine=\"0\",source=\"external_kv_transfer\"}} 7"
+        )));
+        assert!(rendered.contains(&format!(
+            "vllm:request_prefill_kv_computed_tokens_sum{{model_name=\"{model_name}\",engine=\"0\"}} 1.0"
+        )));
         let _ = shutdown_tx.send(());
         engine_task.await.unwrap();
         llm.shutdown().await.unwrap();
