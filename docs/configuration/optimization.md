@@ -520,6 +520,8 @@ Prefill defaults to gathering index K and scoring the local query heads.
 To score local K and exchange Top16 candidates instead, use
 `--attention-config '{"indexer_kv_dtype":"fp8","indexer_cache_sharding":"on","indexer_prefill_cp":"local_score"}'`.
 Set `indexer_prefill_cp` to `gather` for the comparison path on the same cache layout.
+The experimental `local_score_unified` mode also includes decode queries in the
+local-score exchange during mixed batches; pure decode keeps its existing path.
 Both paths preserve logical 128-token block IDs; decode and main attention are
 unchanged. Local prefill scores bounded query chunks and accumulates candidates
 in reusable buffers for one NCCL exchange per layer.
