@@ -63,7 +63,7 @@ def kernel_paged_attention_2d(
     query_stride_0: tl.int64,  # int
     query_stride_1: tl.int64,  # int, should be equal to head_size
     output_stride_0: tl.int64,  # int
-    output_stride_1: tl.int64,  # int, should be equal to head_size
+    output_stride_1,  # int, should be equal to head_size
     BLOCK_SIZE: tl.constexpr,  # int
     PHYSICAL_BLOCK_SIZE: tl.constexpr,  # int
     HEAD_SIZE: tl.constexpr,  # int
@@ -282,10 +282,11 @@ def kernel_paged_attention_2d(
         acc = acc * tl.load(out_scale_inv)
         acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
 
-    output_offset = (
-        cur_batch_in_all_start_index * output_stride_0
-        + query_head_idx * output_stride_1
-    )
+    # The row base stays a 64-bit scalar and the per-head offsets 32-bit: with
+    # 64-bit vector offsets, Triton's AMD buffer_store drops the head stride
+    # for the dot-result layout and leaves most heads of the row unwritten.
+    output_ptr += cur_batch_in_all_start_index * output_stride_0
+    output_offset = query_head_idx * output_stride_1
 
     tl.store(
         output_ptr + output_offset[:, None] + tl.arange(0, HEAD_SIZE_PADDED)[None, :],
