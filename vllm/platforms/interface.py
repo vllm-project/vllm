@@ -21,7 +21,6 @@ if TYPE_CHECKING:
 
     from vllm.config import VllmConfig
     from vllm.config.kernel import IrOpPriorityConfig
-    from vllm.forward_context import ForwardContext
     from vllm.inputs import EngineInput
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
@@ -1437,26 +1436,6 @@ class Platform:
     def set_additional_forward_context(cls, *args, **kwargs) -> dict[str, Any]:
         """Set some additional forward context for the current platform if needs."""
         return {}
-
-    @classmethod
-    def get_routed_experts_local_rows(
-        cls,
-        topk_ids: torch.Tensor,
-        forward_context: "ForwardContext",
-        dp_rank: int,
-        tp_size: int,
-    ) -> torch.Tensor | None:
-        """Return this DP rank's routing rows after a platform-specific prepare.
-
-        Overrides must pick collectives from rank-invariant state (idle ranks
-        included) and issue device work on the current stream without host
-        reads of device values, so capture stays graph-capture/replay safe.
-        Capture currently runs from the Model Runner V2 aux-output connector.
-
-        Return the rows in token order, or ``None`` for the default
-        restoration. Empty tensors are valid.
-        """
-        return None
 
     @classmethod
     def num_compute_units(cls, device_id: int = 0) -> int:

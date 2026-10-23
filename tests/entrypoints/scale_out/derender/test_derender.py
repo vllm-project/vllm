@@ -1413,6 +1413,55 @@ async def test_e2e_harmony_plain_roundtrip(harmony_client, harmony_tokenizer):
     assert "Four" in content
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_choice", ["auto", "none"])
+async def test_e2e_harmony_tool_choice_none_drops_tool_calls(
+    harmony_client, harmony_tokenizer, tool_choice
+):
+    """HarmonyParser extracts tool calls whatever the tool_choice, so
+    /derender must drop them for "none", like coupled chat. "auto" checks
+    the tokens really parse as a tool call."""
+    messages = [{"role": "user", "content": "Weather in Paris?"}]
+    gen_req = await _e2e_render_chat(harmony_client, HARMONY_MODEL, messages)
+
+    assistant_msg = {
+        "role": "assistant",
+        "tool_calls": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "arguments": '{"city": "Paris"}',
+                },
+            }
+        ],
+    }
+    output_ids = _harmony_extract_assistant_ids(harmony_tokenizer, assistant_msg)
+    if "get_weather" not in harmony_tokenizer.decode(output_ids):
+        pytest.skip("Harmony template did not render the tool call")
+
+    resp = await harmony_client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": HARMONY_MODEL,
+            "generate_response": _e2e_generate_response(output_ids),
+            "prompt_tokens": len(gen_req["token_ids"]),
+            "chat_request": {
+                "model": HARMONY_MODEL,
+                "messages": messages,
+                "tools": _E2E_TOOLS,
+                "tool_choice": tool_choice,
+            },
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    choice = resp.json()["choices"][0]
+    assert bool(choice["message"].get("tool_calls")) == (tool_choice == "auto")
+    assert choice["finish_reason"] == (
+        "tool_calls" if tool_choice == "auto" else "stop"
+    )
+
+
 @pytest.fixture(scope="module")
 def harmony_default_server():
     """gpt-oss render server with NO parser flags.
@@ -1525,7 +1574,7 @@ _HERMES_TOOL_CALL_TEXT = (
 
 def _derender_hermes_chat(
     text: str,
-    tool_choice: str = "auto",
+    tool_choice: str | None = "auto",
     engine_finish_reason: str = "stop",
     parser_cls: type | None = None,
 ):
@@ -1596,6 +1645,8 @@ def test_derender_chat_keeps_parser_tool_call_id():
     multi-turn history."""
 
     class _KimiIdParser:
+        tool_parser_cls = object
+
         def __init__(self, *args, **kwargs):
             pass
 
@@ -1613,25 +1664,147 @@ def test_derender_chat_keeps_parser_tool_call_id():
     assert tool_call.id == "functions.get_weather:1"
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("return_token_ids", [None, False, True])
-@pytest.mark.parametrize("stream", [False, True])
-async def test_derender_completion_preserves_requested_token_ids(
-    tokenizer, return_token_ids, stream
-):
+@pytest.mark.parametrize("use_stub_parser", [False, True])
+def test_derender_chat_drops_tool_calls_without_tool_choice(use_stub_parser):
+    """/derender drops parsed tool calls for ``tool_choice=None`` and for a
+    parser that ignores ``tool_choice="none"`` (Harmony), like coupled chat."""
+
+    class _IgnoresToolChoiceParser:
+        tool_parser_cls = object
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def parse(self, model_output, request, **kwargs):
+            call = FunctionCall(name="get_weather", arguments='{"city": "Paris"}')
+            return None, None, [call]
+
+    choice = _derender_hermes_chat(
+        _HERMES_TOOL_CALL_TEXT,
+        tool_choice="none" if use_stub_parser else None,
+        parser_cls=_IgnoresToolChoiceParser if use_stub_parser else None,
+    )
+
+    assert not choice.message.tool_calls
+    assert choice.finish_reason == "stop"
+
+
+def _make_derenderer(tokenizer, generation_config: dict | None = None):
     renderer = MagicMock()
     renderer.get_tokenizer.return_value = tokenizer
+    renderer.get_eos_token_id.return_value = tokenizer.eos_token_id
     renderer._executor = None
     model_config = MagicMock()
     model_config.model = MODEL_NAME
     model_config.hf_config.model_type = "llama"
-    derenderer = OnlineDerenderer(
+    model_config.try_get_generation_config.return_value = generation_config or {}
+    return OnlineDerenderer(
         model_config,
         renderer,
         request_logger=None,
         chat_template=None,
         chat_template_content_format="string",
     )
+
+
+_STOP_TEXT = "one two three four"
+
+
+@pytest.mark.parametrize("endpoint", ["chat", "completion"])
+@pytest.mark.parametrize(
+    ("last", "finish_reason", "stop_reason", "request_kwargs", "text", "reason"),
+    [
+        # Current generate hosts report the matched stop string.
+        (None, "stop", "three", {}, "one two ", "three"),
+        (None, "stop", "three", {"include_stop_str_in_output": True},
+         "one two three", "three"),
+        # Older hosts report nothing, so the request's stop list is scanned.
+        (None, "stop", None, {"stop": ["three", "two"]}, "one ", "two"),
+        (None, "stop", None, {"stop": "two", "min_tokens": 2}, _STOP_TEXT, None),
+        (None, "length", None, {"stop": "two"}, _STOP_TEXT, None),
+        # A reported stop token means no stop string matched.
+        ("stop_id", "stop", "stop_id", {"stop": "two"}, _STOP_TEXT, "stop_id"),
+        # Unreported stop tokens. Only the primary EOS keeps stop_reason None.
+        ("eos", "stop", None, {}, _STOP_TEXT, None),
+        ("stop_id", "stop", None, {"stop_token_ids": True}, _STOP_TEXT, "stop_id"),
+        ("config_eos", "stop", None, {}, _STOP_TEXT, "config_eos"),
+        ("config_eos", "stop", None, {"ignore_eos": True}, _STOP_TEXT + " ?", None),
+        # The stop token is dropped first, then a stop string still wins.
+        ("eos", "stop", None, {"stop": "four"}, "one two three ", "four"),
+    ],
+)  # fmt: skip
+def test_derender_batch_trims_stop_like_engine(
+    tokenizer, endpoint, last, finish_reason, stop_reason, request_kwargs, text, reason
+):
+    """Generate returns every token, so batch derender must cut the stop
+    token and stop string from the text and report stop_reason the way the
+    engine's detokenizer and check_stop do. "stop_id" is a client stop token
+    ("!") and "config_eos" a generation_config EOS id ("?")."""
+    ids = {
+        "eos": tokenizer.eos_token_id,
+        "stop_id": tokenizer.encode("!", add_special_tokens=False)[-1],
+        "config_eos": tokenizer.encode("?", add_special_tokens=False)[-1],
+    }
+    stop_reason = ids.get(stop_reason, stop_reason)
+    reason = ids.get(reason, reason)
+    if request_kwargs.get("stop_token_ids"):
+        request_kwargs = {**request_kwargs, "stop_token_ids": [ids["stop_id"]]}
+    derenderer = _make_derenderer(
+        tokenizer, {"eos_token_id": [tokenizer.eos_token_id, ids["config_eos"]]}
+    )
+    token_ids = tokenizer.encode(_STOP_TEXT, add_special_tokens=False)
+    if last is not None:
+        token_ids.append(ids[last])
+    payload = _make_generate_response(token_ids, finish_reason=finish_reason)
+    payload["choices"][0]["stop_reason"] = stop_reason
+    response = GenerateTokensResponse.model_validate(payload)
+    # Keep special tokens so a leaked EOS would show up in the text.
+    request_kwargs = {"skip_special_tokens": False, **request_kwargs}
+
+    if endpoint == "chat":
+        request = ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": "Count"}],
+            **request_kwargs,
+        )
+        (choice,) = derenderer._derender_chat(response, request)
+        output_text = choice.message.content
+    else:
+        request = CompletionRequest(model=MODEL_NAME, prompt="Count", **request_kwargs)
+        (choice,), _, _ = derenderer._derender_completion([response], None, request)
+        output_text = choice.text
+
+    assert output_text == text
+    assert choice.stop_reason == reason
+
+
+@pytest.mark.asyncio
+async def test_derender_completion_stream_leaves_out_stop_token(tokenizer):
+    """Streaming completions drops the final stop token like chat does and
+    reports the stop_reason an older generate host leaves out."""
+    derenderer = _make_derenderer(tokenizer)
+    bang = tokenizer.encode("!", add_special_tokens=False)[-1]
+    payload = _make_generate_response(
+        tokenizer.encode(_STOP_TEXT, add_special_tokens=False) + [bang]
+    )
+    response, _ = await derenderer.derender_completion_stream(
+        MODEL_NAME,
+        GenerateTokensStreamResponse.model_validate(payload),
+        completion_request=CompletionRequest(
+            model=MODEL_NAME, prompt="Count", stop_token_ids=[bang]
+        ),
+    )
+    assert response.choices[0].text == _STOP_TEXT
+    assert response.choices[0].stop_reason == bang
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("return_token_ids", [None, False, True])
+@pytest.mark.parametrize("stream", [False, True])
+async def test_derender_completion_preserves_requested_token_ids(
+    tokenizer, return_token_ids, stream
+):
+    derenderer = _make_derenderer(tokenizer)
     token_ids = tokenizer.encode("Hello world", add_special_tokens=False)
     request = CompletionRequest(
         model=MODEL_NAME, prompt="Hi", return_token_ids=return_token_ids
