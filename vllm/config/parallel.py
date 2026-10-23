@@ -37,6 +37,7 @@ _NUMACTL_CPUSET_PATTERN = re.compile(r"^\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*$")
 ExpertPlacementStrategy = Literal["linear", "round_robin"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
+DataParallelLBPolicy = Literal["requests", "context_tokens"]
 EPLBPolicyOption = Literal["default"]
 DCPCommBackend = Literal["ag_rs", "a2a"]
 EPLBCommunicatorBackend = Literal[
@@ -180,6 +181,11 @@ class ParallelConfig:
     between local data parallel ranks, but an external LB balances
     between vLLM nodes/replicas. Set explicitly in conjunction with
     --data-parallel-start-rank."""
+    data_parallel_lb_policy: DataParallelLBPolicy = "requests"
+    """Load metric for internal DP load balancing. "requests" balances the
+    running and waiting request counts of each engine. "context_tokens"
+    balances the total tokens (prompt plus output so far) of each engine's
+    running and waiting requests, falling back to request counts on ties."""
     is_moe_model: bool | None = None
     """Whether the deployed model is MoE (if known)."""
     enable_hc_sp: bool = False
@@ -922,6 +928,7 @@ class ParallelConfig:
             "data_parallel_backend",
             "data_parallel_external_lb",
             "data_parallel_hybrid_lb",
+            "data_parallel_lb_policy",
             "data_parallel_master_ip",
             "data_parallel_master_port",
             "_data_parallel_master_port_list",

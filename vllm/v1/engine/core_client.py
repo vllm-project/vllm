@@ -32,6 +32,7 @@ from vllm.lora.request import LoRARequest
 from vllm.renderers import BaseRenderer
 from vllm.tasks import SupportedTask
 from vllm.tracing import instrument
+from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.async_utils import in_loop
 from vllm.utils.network_utils import (
     close_sockets,
@@ -1490,10 +1491,10 @@ class DPAsyncMPClient(AsyncMPClient):
             renderer,
         )
 
-        # List of [waiting, running, kv_cache_usage] per engine.
-        # Used only by DPLBAsyncMPClient subclass.
+        # List of [waiting, running, kv_cache_usage, context_tokens] per
+        # engine. Used only by DPLBAsyncMPClient subclass.
         self.lb_engines: list[list[int | float]] = [
-            [0, 0, 0.0] for _ in self.core_engines
+            [0, 0, 0.0, 0] for _ in self.core_engines
         ]
 
         self.eep_scaling_cache: ElasticScalingCache | None = None
@@ -1555,7 +1556,7 @@ class DPAsyncMPClient(AsyncMPClient):
                             self.engine_ranks_managed = list(range(dp_size))
                             if len(self.lb_engines) < new_engine_count:
                                 self.lb_engines += [
-                                    [0, 0, 0.0]
+                                    [0, 0, 0.0, 0]
                                     for _ in range(
                                         new_engine_count - len(self.lb_engines)
                                     )
@@ -1735,6 +1736,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
         assert len(self.core_engines) > 1
         self._prepared_elastic_ep: tuple[int, int] | None = None
+        self.balance_context_tokens = (
+            vllm_config.parallel_config.data_parallel_lb_policy == "context_tokens"
+        )
 
         self.eng_start_index = (
             len(self.core_engines) * self.client_index
@@ -1760,13 +1764,13 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             current_counts = self.lb_engines
             # TODO use P2C alg for larger DP sizes
             num_engines = len(current_counts)
-            min_score: float = sys.maxsize
+            min_load: tuple[float, ...] = (sys.maxsize,)
             eng_index = 0
             for i in range(num_engines):
                 # Start from client_index to help with balancing when engines
                 # are empty.
                 idx = (self.eng_start_index + i) % num_engines
-                waiting, running, kv_cache_usage = current_counts[idx]
+                waiting, running, kv_cache_usage = current_counts[idx][:3]
                 # Estimate engine load as the greater of the coordinator's
                 # latest (waiting + running) snapshot and this client's own
                 # in-flight count (scaled by the number of clients). The
@@ -1784,12 +1788,26 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                     # the penalty stays off, preserving exact round-robin.
                     # Ramps from 0 at <=50% usage to 3x waiting at 100%.
                     score += waiting * 6.0 * max(0.0, kv_cache_usage - 0.5)
-                if score < min_score:
-                    min_score = score
+                # Under the "context_tokens" policy, the engine with the fewest
+                # context tokens wins and the score breaks ties.
+                load = (
+                    (current_counts[idx][3], score)
+                    if self.balance_context_tokens
+                    else (score,)
+                )
+                if load < min_load:
+                    min_load = load
                     eng_index = idx
             # Increment local waiting count for better balancing between stats
             # updates from the coordinator (which happen every 100ms).
             current_counts[eng_index][0] += self.client_count
+            if self.balance_context_tokens:
+                current_counts[eng_index][3] += (
+                    self.client_count
+                    * length_from_prompt_token_ids_or_embeds(
+                        request.prompt_token_ids, request.prompt_embeds
+                    )
+                )
             # Rotate the scan start so that ties (equal scores, e.g. right
             # after a coordinator stats reset when engines look equally loaded)
             # don't systematically favor the same engine. This removes the

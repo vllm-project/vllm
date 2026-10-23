@@ -2773,6 +2773,14 @@ class Scheduler(SchedulerInterface):
         """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
         return self.kv_cache_manager.usage
 
+    def get_num_context_tokens(self) -> int:
+        """Returns the total tokens of the running and waiting requests."""
+        return sum(
+            req.num_tokens
+            for queue in (self.running, self.waiting, self.kv_holding_waiting)
+            for req in queue
+        )
+
     def has_request(self, request_id: str) -> bool:
         return request_id in self.requests
 

@@ -218,6 +218,7 @@ def _make_dplb_client(num_engines: int = 3, client_count: int = 1) -> DPLBAsyncM
     client.core_engines = [bytes([i, 0]) for i in range(num_engines)]
     client.lb_engines = [[0, 0, 0.0] for _ in range(num_engines)]
     client.eng_start_index = 0
+    client.balance_context_tokens = False
     client._kv_event_sources = {}
     client.vllm_config = SimpleNamespace(
         use_v2_model_runner=True,
@@ -395,6 +396,47 @@ def test_dplb_kv_pressure_amplifies_waiting_penalty():
         make_request(SamplingParams(max_tokens=1))
     )
     assert chosen == client.core_engines[0]
+
+
+def test_dplb_context_tokens_policy_prefers_fewest_tokens():
+    """Under the "context_tokens" policy the engine with the fewest context
+    tokens wins even with more requests; request load breaks ties."""
+    client = _make_dplb_client(num_engines=2)
+    client.balance_context_tokens = True
+    client.lb_engines = [[0, 2, 0.0, 50_000], [0, 8, 0.0, 10_000]]
+
+    chosen = client.get_core_engine_for_request(
+        make_request(SamplingParams(max_tokens=1))
+    )
+    assert chosen == client.core_engines[1]
+
+    client = _make_dplb_client(num_engines=2)
+    client.balance_context_tokens = True
+    client.lb_engines = [[0, 8, 0.0, 10_000], [0, 2, 0.0, 10_000]]
+
+    chosen = client.get_core_engine_for_request(
+        make_request(SamplingParams(max_tokens=1))
+    )
+    assert chosen == client.core_engines[1]
+
+
+def test_dplb_context_tokens_policy_counts_routed_prompts():
+    """Routed prompt tokens are added locally, so a burst between coordinator
+    snapshots spreads by tokens."""
+    client = _make_dplb_client(num_engines=2)
+    client.balance_context_tokens = True
+    client.lb_engines = [[0, 0, 0.0, 0], [0, 0, 0.0, 0]]
+
+    long_req = make_request(SamplingParams(max_tokens=1), [0] * 1000)
+    assert client.get_core_engine_for_request(long_req) == client.core_engines[0]
+    assert client.lb_engines[0][3] == 1000
+
+    # Short prompts go to engine 1 until it holds more tokens than engine 0.
+    chosen = []
+    for _ in range(3):
+        req = make_request(SamplingParams(max_tokens=1), [0] * 400)
+        chosen.append(client.get_core_engine_for_request(req))
+    assert chosen == [client.core_engines[1]] * 3
 
 
 def test_dplb_finished_requests_release_inflight():
