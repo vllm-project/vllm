@@ -9,21 +9,29 @@ import torch
 from vllm.model_executor.layers.attention import attention as attention_module
 from vllm.v1.attention.backend import PrequantizedQKV
 
+# (tokens, query heads, KV heads, head size) as seen by one rank: decode, an odd
+# mixed batch and a full prefill chunk, over the GQA ratios the backend admits
+# (TP1 to TP8 of a 16-query-head, 2-KV-head model, and a single KV head).
+WORKLOADS = pytest.mark.parametrize(
+    ("tokens", "num_heads", "num_kv_heads", "head_size"),
+    [
+        pytest.param(1, 16, 2, 256, id="decode-tp1"),
+        pytest.param(7, 8, 1, 256, id="mixed-tp2"),
+        pytest.param(129, 4, 1, 256, id="mixed-tp4"),
+        pytest.param(2048, 16, 1, 128, id="chunk-ratio16-hd128"),
+    ],
+)
 
-def _make_tensors():
-    query = torch.randn(2, 4, 8)
-    key = torch.randn(2, 1, 8)
-    value = torch.randn(2, 1, 8)
-    query_descale = torch.randn(2, 1)
-    key_descale = torch.randn(2, 1)
-    value_descale = torch.randn(2, 1)
+
+def _make_tensors(tokens, num_heads, num_kv_heads, head_size):
+    num_seqs = max(1, tokens // 4)
     return (
-        query,
-        key,
-        value,
-        query_descale,
-        key_descale,
-        value_descale,
+        torch.randn(tokens, num_heads, head_size),
+        torch.randn(tokens, num_kv_heads, head_size),
+        torch.randn(tokens, num_kv_heads, head_size),
+        torch.randn(num_seqs, num_kv_heads),
+        torch.randn(num_seqs, num_kv_heads),
+        torch.randn(num_seqs, num_kv_heads),
     )
 
 
@@ -33,24 +41,19 @@ def test_make_prequantized_qkv_requires_all_tensors():
         is None
     )
 
-    tensors = _make_tensors()
+    tensors = _make_tensors(2, 4, 1, 8)
     with pytest.raises(ValueError, match="requires query, key, value"):
-        attention_module._make_prequantized_qkv(
-            tensors[0],
-            tensors[1],
-            tensors[2],
-            tensors[3],
-            tensors[4],
-            None,
-        )
+        attention_module._make_prequantized_qkv(*tensors[:5], None)
 
 
-def test_make_prequantized_qkv_preserves_tensor_identity():
-    tensors = _make_tensors()
+@WORKLOADS
+def test_make_prequantized_qkv_preserves_tensor_identity(
+    tokens, num_heads, num_kv_heads, head_size
+):
+    tensors = _make_tensors(tokens, num_heads, num_kv_heads, head_size)
     result = attention_module._make_prequantized_qkv(*tensors)
 
     assert isinstance(result, PrequantizedQKV)
-    assert result is not None
     assert all(actual is expected for actual, expected in zip(result, tensors))
 
 
@@ -80,10 +83,13 @@ def _patch_attention_context(monkeypatch, impl):
     )
 
 
-def test_unified_attention_dispatches_prequantized_qkv(monkeypatch):
+@WORKLOADS
+def test_unified_attention_dispatches_prequantized_qkv(
+    monkeypatch, tokens, num_heads, num_kv_heads, head_size
+):
     impl = _RecordingAttentionImpl(supports_prequantized_qkv_input=True)
     _patch_attention_context(monkeypatch, impl)
-    tensors = _make_tensors()
+    tensors = _make_tensors(tokens, num_heads, num_kv_heads, head_size)
 
     attention_module.unified_attention_with_output(
         tensors[0],
@@ -125,7 +131,7 @@ def test_unified_attention_custom_op_schema_has_prequantized_qkv():
 def test_unified_attention_rejects_unsupported_prequantized_qkv(monkeypatch):
     impl = _RecordingAttentionImpl(supports_prequantized_qkv_input=False)
     _patch_attention_context(monkeypatch, impl)
-    tensors = _make_tensors()
+    tensors = _make_tensors(2, 4, 1, 8)
 
     with pytest.raises(ValueError, match="does not support prequantized QKV"):
         attention_module.unified_attention_with_output(
@@ -149,7 +155,7 @@ def test_unified_attention_rejects_unsupported_prequantized_qkv(monkeypatch):
 def test_unified_attention_standard_path_is_unchanged(monkeypatch):
     impl = _RecordingAttentionImpl(supports_prequantized_qkv_input=False)
     _patch_attention_context(monkeypatch, impl)
-    query, key, value, *_ = _make_tensors()
+    query, key, value, *_ = _make_tensors(2, 4, 1, 8)
 
     attention_module.unified_attention_with_output(
         query,

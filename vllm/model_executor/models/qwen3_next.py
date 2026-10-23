@@ -9,6 +9,7 @@ import torch
 from torch import nn
 from transformers import Qwen3NextConfig
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
@@ -400,11 +401,18 @@ class Qwen3NextAttention(nn.Module):
             and supports_dtype
             and (text_only or supports_mrope)
         )
+        # This file also runs on RDNA and on ROCm without AITER; the fused
+        # kernel exists only for AITER on CDNA4 (gfx950).
+        is_aiter_cdna4 = False
+        if current_platform.is_rocm() and rocm_aiter_ops.is_enabled():
+            from vllm.platforms.rocm import get_cdna_version
+
+            is_aiter_cdna4 = get_cdna_version() == 4
         self.use_prequantized_qkv = (
             self.attn_output_gate
             and getattr(self.rotary_emb, "is_neox_style", False)
             and getattr(self.rotary_emb, "dtype", None) == torch.bfloat16
-            and current_platform.is_rocm()
+            and is_aiter_cdna4
             and text_only
             and supports_prequantized_scheduler(max_num_seqs)
             and self.attn.supports_prequantized_qkv_input

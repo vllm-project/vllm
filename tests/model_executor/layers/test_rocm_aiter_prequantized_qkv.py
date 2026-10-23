@@ -17,10 +17,24 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _make_tensors(num_kv_heads: int = 1):
-    query = torch.randn(2, 4, 8)
-    key = torch.randn(2, num_kv_heads, 8)
-    value = torch.randn(2, num_kv_heads, 8)
+# (tokens, query heads, KV heads, head size) as seen by one rank: decode, an odd
+# mixed batch and a full prefill chunk, over the GQA ratios the backend admits
+# (TP1 to TP8 of a 16-query-head, 2-KV-head model, and a single KV head).
+WORKLOADS = pytest.mark.parametrize(
+    ("tokens", "num_heads", "num_kv_heads", "head_size"),
+    [
+        pytest.param(1, 16, 2, 256, id="decode-tp1"),
+        pytest.param(7, 8, 1, 256, id="mixed-tp2"),
+        pytest.param(129, 4, 1, 256, id="mixed-tp4"),
+        pytest.param(2048, 16, 1, 128, id="chunk-ratio16-hd128"),
+    ],
+)
+
+
+def _make_tensors(tokens=2, num_heads=4, num_kv_heads=1, head_size=8):
+    query = torch.randn(tokens, num_heads, head_size)
+    key = torch.randn(tokens, num_kv_heads, head_size)
+    value = torch.randn(tokens, num_kv_heads, head_size)
     return query, key, value
 
 
@@ -38,41 +52,52 @@ def _call_aiter_flash_attention(**kwargs):
     )
 
 
-def test_slice_prequantized_qkv_uses_mixed_batch_offsets():
-    num_tokens = 7
-    num_kv_heads = 2
-    query = torch.arange(num_tokens * 4 * 8).reshape(num_tokens, 4, 8)
-    key = torch.arange(num_tokens * num_kv_heads * 8).reshape(
-        num_tokens, num_kv_heads, 8
+@pytest.mark.parametrize(
+    "seq_lens",
+    [(1,), (1, 1, 1), (2, 3, 2), (1, 129, 5, 64)],
+    ids=["one-decode", "decodes", "mixed", "mixed-chunk"],
+)
+@pytest.mark.parametrize(
+    ("num_heads", "num_kv_heads", "head_size"),
+    [(8, 1, 256), (16, 2, 128)],
+    ids=["tp2", "tp1-hd128"],
+)
+def test_slice_prequantized_qkv_uses_mixed_batch_offsets(
+    seq_lens, num_heads, num_kv_heads, head_size
+):
+    num_tokens = sum(seq_lens)
+    num_seqs = len(seq_lens)
+    starts = [0]
+    for seq_len in seq_lens:
+        starts.append(starts[-1] + seq_len)
+    query = torch.arange(num_tokens * num_heads * head_size).reshape(
+        num_tokens, num_heads, head_size
+    )
+    key = torch.arange(num_tokens * num_kv_heads * head_size).reshape(
+        num_tokens, num_kv_heads, head_size
     )
     value = key + 1000
-    query_descale = torch.arange(3 * num_kv_heads).reshape(3, num_kv_heads)
+    query_descale = torch.arange(num_seqs * num_kv_heads).reshape(
+        num_seqs, num_kv_heads
+    )
     key_descale = query_descale + 10
     value_descale = query_descale + 20
     prequantized = PrequantizedQKV(
-        query,
-        key,
-        value,
-        query_descale,
-        key_descale,
-        value_descale,
+        query, key, value, query_descale, key_descale, value_descale
     )
 
-    extend = rocm_aiter_fa._slice_prequantized_qkv(
-        prequantized,
-        slice(1, 3),
-        slice(1, 2),
-    )
-    prefill = rocm_aiter_fa._slice_prequantized_qkv(
-        prequantized,
-        slice(3, 7),
-        slice(2, 3),
-    )
-
-    torch.testing.assert_close(extend.query, query[1:3])
-    torch.testing.assert_close(extend.key_descale, key_descale[1:2])
-    torch.testing.assert_close(prefill.value, value[3:7])
-    torch.testing.assert_close(prefill.value_descale, value_descale[2:3])
+    # Every single sequence, and the span from the second sequence to the end.
+    spans = [(i, i + 1) for i in range(num_seqs)] + [(min(1, num_seqs - 1), num_seqs)]
+    for first, last in spans:
+        tokens = slice(starts[first], starts[last])
+        seqs = slice(first, last)
+        sliced = rocm_aiter_fa._slice_prequantized_qkv(prequantized, tokens, seqs)
+        torch.testing.assert_close(sliced.query, query[tokens])
+        torch.testing.assert_close(sliced.key, key[tokens])
+        torch.testing.assert_close(sliced.value, value[tokens])
+        torch.testing.assert_close(sliced.query_descale, query_descale[seqs])
+        torch.testing.assert_close(sliced.key_descale, key_descale[seqs])
+        torch.testing.assert_close(sliced.value_descale, value_descale[seqs])
 
 
 def test_aiter_flash_attention_passes_no_descales_by_default(monkeypatch):
@@ -134,9 +159,13 @@ def test_aiter_flash_attention_rejects_partial_descales(monkeypatch):
         _call_aiter_flash_attention(q_descale=torch.randn(1, 1))
 
 
-def test_aiter_backend_uses_prequantized_qkv_for_prefill(monkeypatch):
+@WORKLOADS
+def test_aiter_backend_uses_prequantized_qkv_for_prefill(
+    monkeypatch, tokens, num_heads, num_kv_heads, head_size
+):
     impl = object.__new__(rocm_aiter_fa.AiterFlashAttentionImpl)
-    impl.head_size = 8
+    impl.head_size = head_size
+    impl.num_kv_heads = num_kv_heads
     impl.kv_cache_dtype = "auto"
     impl.scale = 1.0
     impl.sliding_window = (-1, -1)
@@ -145,22 +174,22 @@ def test_aiter_backend_uses_prequantized_qkv_for_prefill(monkeypatch):
     impl.logits_soft_cap = 0.0
     impl.kv_sharing_target_layer_name = None
 
-    query, key, value = _make_tensors()
+    query, key, value = _make_tensors(tokens, num_heads, num_kv_heads, head_size)
     prequantized = PrequantizedQKV(
         query=torch.randn_like(query),
         key=torch.randn_like(key),
         value=torch.randn_like(value),
-        query_descale=torch.randn(1, 1),
-        key_descale=torch.randn(1, 1),
-        value_descale=torch.randn(1, 1),
+        query_descale=torch.randn(1, num_kv_heads),
+        key_descale=torch.randn(1, num_kv_heads),
+        value_descale=torch.randn(1, num_kv_heads),
     )
     output = torch.empty_like(query)
     metadata = rocm_aiter_fa.AiterFlashAttentionMetadata(
-        num_actual_tokens=2,
-        query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
-        max_seq_len=2,
-        seq_lens=torch.tensor([2], dtype=torch.int32),
-        slot_mapping=torch.tensor([0, 1], dtype=torch.int64),
+        num_actual_tokens=tokens,
+        query_start_loc=torch.tensor([0, tokens], dtype=torch.int32),
+        max_seq_len=tokens,
+        seq_lens=torch.tensor([tokens], dtype=torch.int32),
+        slot_mapping=torch.arange(tokens, dtype=torch.int64),
         block_table=torch.zeros((1, 1), dtype=torch.int32),
         causal=True,
         num_decodes=0,
@@ -170,9 +199,9 @@ def test_aiter_backend_uses_prequantized_qkv_for_prefill(monkeypatch):
         num_extend_tokens=0,
         decode_metadata=None,
         prefill_metadata=rocm_aiter_fa.AiterFlashAttentionPrefillMetadata(
-            max_query_len=2,
-            max_seq_len=2,
-            query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
+            max_query_len=tokens,
+            max_seq_len=tokens,
+            query_start_loc=torch.tensor([0, tokens], dtype=torch.int32),
         ),
         extend_metadata=None,
         k_scale=None,
@@ -196,7 +225,7 @@ def test_aiter_backend_uses_prequantized_qkv_for_prefill(monkeypatch):
         query,
         key,
         value,
-        torch.empty((1, 1, 1, 16)),
+        torch.empty((1, num_kv_heads, 1, 2 * head_size)),
         metadata,
         output,
         output_scale=None,
@@ -399,16 +428,23 @@ def test_aiter_backend_gathers_context_for_fp8_attention(monkeypatch, num_kv_hea
 
 
 @pytest.mark.parametrize(
-    ("kv_cache_dtype", "expected"),
-    [("fp8", True), ("auto", False), ("bfloat16", False)],
+    ("cdna_version", "kv_cache_dtype", "expected"),
+    [
+        (4, "fp8", True),
+        (4, "auto", False),
+        (4, "bfloat16", False),
+        (3, "fp8", False),
+        (0, "fp8", False),
+    ],
+    ids=["cdna4-fp8", "cdna4-auto", "cdna4-bf16", "cdna3-fp8", "non-cdna-fp8"],
 )
 def test_aiter_backend_prequantized_qkv_cache_support(
-    monkeypatch, kv_cache_dtype, expected
+    monkeypatch, cdna_version, kv_cache_dtype, expected
 ):
     monkeypatch.setitem(
         sys.modules,
         "vllm.platforms.rocm",
-        SimpleNamespace(on_gfx950=lambda: True),
+        SimpleNamespace(get_cdna_version=lambda: cdna_version),
     )
 
     impl = rocm_aiter_fa.AiterFlashAttentionImpl(

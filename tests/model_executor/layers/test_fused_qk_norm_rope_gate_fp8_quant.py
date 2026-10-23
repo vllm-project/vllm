@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 import torch
 
+from tests.kernels.utils import opcheck
 from vllm.model_executor.layers import (
     fused_qk_norm_rope_gate_fp8_quant as prep_module,
 )
@@ -14,10 +15,22 @@ from vllm.model_executor.layers.attention import attention as attention_module
 from vllm.model_executor.models import qwen3_next as qwen3_next_model
 from vllm.v1.attention.backend import PrequantizedQKV
 
-NUM_QUERY_HEADS = 8
-NUM_KV_HEADS = 1
 HEAD_DIM = 256
 ROTARY_DIM = 64
+MAX_NUM_SEQS = 256
+
+# Query and KV heads per rank for a 16-query-head, 2-KV-head model at TP1, TP2
+# and TP4 (KV heads replicate once TP exceeds them). All have a GQA ratio the
+# backend admits.
+HEADS = pytest.mark.parametrize(
+    ("num_heads", "num_kv_heads"),
+    [(16, 2), (8, 1), (4, 1)],
+    ids=["tp1", "tp2", "tp4"],
+)
+# Prefill and extend tokens in one step: a short prompt, an odd count and a
+# full 2048-token chunk. Pure decode batches are in DECODE_BATCHES.
+PREFILL_TOKENS = pytest.mark.parametrize("tokens", [2, 7, 129, 2048])
+DECODE_BATCHES = pytest.mark.parametrize("tokens", [1, 7, 128, MAX_NUM_SEQS])
 
 
 @pytest.mark.parametrize(
@@ -35,92 +48,68 @@ def test_supports_prequantized_scheduler(
     assert prep_module.supports_prequantized_scheduler(max_num_seqs) is expected
 
 
-def test_fused_qk_norm_rope_gate_fp8_quant_is_cudagraph_unsafe():
-    op = torch.ops.vllm.fused_qk_norm_rope_gate_fp8_quant.default
-    assert torch.Tag.cudagraph_unsafe in op.tags
-
-
-def _make_inputs(tokens: int = 8):
-    q_gate = torch.randn(tokens, NUM_QUERY_HEADS * 2 * HEAD_DIM)
-    key = torch.randn(tokens, NUM_KV_HEADS * HEAD_DIM)
-    value = torch.randn_like(key)
-    query_norm_weight = torch.randn(HEAD_DIM)
-    key_norm_weight = torch.randn(HEAD_DIM)
-    cos_sin_cache = torch.randn(tokens, ROTARY_DIM)
-    positions = torch.arange(tokens)
+def _make_inputs(tokens, num_heads, num_kv_heads):
+    q_gate = torch.randn(tokens, num_heads * 2 * HEAD_DIM)
+    key = torch.randn(tokens, num_kv_heads * HEAD_DIM)
     return (
         q_gate,
         key,
-        value,
-        query_norm_weight,
-        key_norm_weight,
-        cos_sin_cache,
-        positions,
+        torch.randn_like(key),
+        torch.randn(HEAD_DIM),
+        torch.randn(HEAD_DIM),
+        torch.randn(tokens, ROTARY_DIM),
+        torch.arange(tokens),
     )
 
 
-def _make_outputs(inputs):
-    q_gate, key, value, *_ = inputs
+def _make_outputs(inputs, num_heads, num_kv_heads):
+    q_gate, key, *_ = inputs
     tokens = q_gate.shape[0]
-    query = torch.randn(tokens, NUM_QUERY_HEADS * HEAD_DIM)
-    output_key = torch.randn_like(key)
-    gate = torch.randn_like(query)
-    query_fp8 = torch.zeros(
-        tokens,
-        NUM_QUERY_HEADS,
-        HEAD_DIM,
-        dtype=torch.float8_e4m3fn,
-        device=q_gate.device,
-    )
+    device = q_gate.device
+    query = torch.randn(tokens, num_heads * HEAD_DIM)
     key_fp8 = torch.zeros(
-        tokens,
-        NUM_KV_HEADS,
-        HEAD_DIM,
-        dtype=torch.float8_e4m3fn,
-        device=key.device,
+        tokens, num_kv_heads, HEAD_DIM, dtype=torch.float8_e4m3fn, device=device
     )
-    value_fp8 = torch.zeros_like(key_fp8)
-    query_descale = torch.randn(256, NUM_KV_HEADS, device=q_gate.device)
-    key_descale = torch.randn_like(query_descale)
-    value_descale = torch.randn_like(query_descale)
+    query_descale = torch.randn(MAX_NUM_SEQS, num_kv_heads, device=device)
     return (
         query,
-        output_key,
-        gate,
-        query_fp8,
+        torch.randn_like(key),
+        torch.randn_like(query),
+        torch.zeros(
+            tokens, num_heads, HEAD_DIM, dtype=torch.float8_e4m3fn, device=device
+        ),
         key_fp8,
-        value_fp8,
+        torch.zeros_like(key_fp8),
         query_descale,
-        key_descale,
-        value_descale,
+        torch.randn_like(query_descale),
+        torch.randn_like(query_descale),
     )
 
 
-def _run_impl(inputs, outputs) -> None:
+def _run_impl(inputs, outputs, num_heads, num_kv_heads) -> None:
     prep_module._fused_qk_norm_rope_gate_fp8_quant_impl(
-        inputs[0],
-        inputs[1],
-        inputs[2],
-        inputs[3],
-        inputs[4],
-        inputs[5],
-        inputs[6],
+        *inputs,
         "layer",
         1.0e-6,
-        NUM_QUERY_HEADS,
-        NUM_KV_HEADS,
+        num_heads,
+        num_kv_heads,
         HEAD_DIM,
         ROTARY_DIM,
         *outputs,
     )
 
 
-def test_fused_qk_norm_rope_gate_fp8_quant_translates_attention_metadata(monkeypatch):
-    inputs = _make_inputs()
-    expected_outputs = _make_outputs(inputs)
-    query_start_loc = torch.tensor([0, 1, 7], dtype=torch.int32)
+@HEADS
+@PREFILL_TOKENS
+def test_fused_qk_norm_rope_gate_fp8_quant_translates_attention_metadata(
+    monkeypatch, tokens, num_heads, num_kv_heads
+):
+    inputs = _make_inputs(tokens, num_heads, num_kv_heads)
+    expected_outputs = _make_outputs(inputs, num_heads, num_kv_heads)
+    # One decode token, then one extend sequence with the rest.
+    query_start_loc = torch.tensor([0, 1, tokens], dtype=torch.int32)
     metadata = SimpleNamespace(
-        num_actual_tokens=7,
+        num_actual_tokens=tokens,
         query_start_loc=query_start_loc,
         num_decodes=1,
         num_decode_tokens=1,
@@ -160,30 +149,35 @@ def test_fused_qk_norm_rope_gate_fp8_quant_translates_attention_metadata(monkeyp
         fake_aiter_prep,
     )
 
-    actual_outputs = _make_outputs(inputs)
-    _run_impl(inputs, actual_outputs)
+    actual_outputs = _make_outputs(inputs, num_heads, num_kv_heads)
+    _run_impl(inputs, actual_outputs, num_heads, num_kv_heads)
 
     for actual, expected in zip(actual_outputs, expected_outputs):
         torch.testing.assert_close(actual, expected)
     assert recorded_kwargs is not None
-    assert recorded_kwargs["num_actual_tokens"] == 7
+    assert recorded_kwargs["num_actual_tokens"] == tokens
     assert recorded_kwargs["quant_token_start"] == 1
     assert recorded_kwargs["quant_sequence_start"] == 1
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA graph support")
+@HEADS
+@PREFILL_TOKENS
 def test_fused_qk_norm_rope_gate_fp8_quant_without_metadata_is_cuda_graph_safe(
-    monkeypatch,
+    monkeypatch, tokens, num_heads, num_kv_heads
 ):
-    inputs = tuple(tensor.to(device="cuda") for tensor in _make_inputs())
+    inputs = tuple(
+        tensor.to(device="cuda")
+        for tensor in _make_inputs(tokens, num_heads, num_kv_heads)
+    )
     monkeypatch.setattr(
         attention_module,
         "get_attention_context",
         lambda layer_name: (None, None, None, None),
     )
     recorded_cu_seqlens = None
-    outputs = _make_outputs(inputs)
-    expected_outputs = _make_outputs(inputs)
+    outputs = _make_outputs(inputs, num_heads, num_kv_heads)
+    expected_outputs = _make_outputs(inputs, num_heads, num_kv_heads)
 
     def fake_aiter_prep(*args, **kwargs):
         nonlocal recorded_cu_seqlens
@@ -214,31 +208,35 @@ def test_fused_qk_norm_rope_gate_fp8_quant_without_metadata_is_cuda_graph_safe(
     capture_stream = torch.cuda.Stream()
     capture_stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(capture_stream):
-        _run_impl(inputs, outputs)
+        _run_impl(inputs, outputs, num_heads, num_kv_heads)
     capture_stream.synchronize()
 
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph, stream=capture_stream):
-        _run_impl(inputs, outputs)
+        _run_impl(inputs, outputs, num_heads, num_kv_heads)
     graph.replay()
     torch.accelerator.synchronize()
 
     assert recorded_cu_seqlens is not None
     torch.testing.assert_close(
         recorded_cu_seqlens,
-        torch.tensor([0, inputs[0].shape[0]], dtype=torch.int32, device="cuda"),
+        torch.tensor([0, tokens], dtype=torch.int32, device="cuda"),
     )
     for actual, expected in zip(outputs, expected_outputs):
         torch.testing.assert_close(actual, expected)
 
 
-def test_fused_qk_norm_rope_gate_fp8_quant_pure_decode_uses_bf16_fallback(monkeypatch):
-    inputs = _make_inputs(tokens=4)
+@HEADS
+@DECODE_BATCHES
+def test_fused_qk_norm_rope_gate_fp8_quant_pure_decode_uses_bf16_fallback(
+    monkeypatch, tokens, num_heads, num_kv_heads
+):
+    inputs = _make_inputs(tokens, num_heads, num_kv_heads)
     metadata = SimpleNamespace(
-        num_actual_tokens=4,
-        query_start_loc=torch.arange(5, dtype=torch.int32),
-        num_decodes=4,
-        num_decode_tokens=4,
+        num_actual_tokens=tokens,
+        query_start_loc=torch.arange(tokens + 1, dtype=torch.int32),
+        num_decodes=tokens,
+        num_decode_tokens=tokens,
         num_extends=0,
         num_prefills=0,
     )
@@ -247,8 +245,8 @@ def test_fused_qk_norm_rope_gate_fp8_quant_pure_decode_uses_bf16_fallback(monkey
         "get_attention_context",
         lambda layer_name: (metadata, None, None, None),
     )
-    expected_query = torch.randn(4, NUM_QUERY_HEADS * HEAD_DIM)
-    expected_key = torch.randn(4, NUM_KV_HEADS * HEAD_DIM)
+    expected_query = torch.randn(tokens, num_heads * HEAD_DIM)
+    expected_key = torch.randn(tokens, num_kv_heads * HEAD_DIM)
     expected_gate = torch.randn_like(expected_query)
     recorded_weights = None
     recorded_kwargs = None
@@ -281,8 +279,8 @@ def test_fused_qk_norm_rope_gate_fp8_quant_pure_decode_uses_bf16_fallback(monkey
         ),
     )
 
-    outputs = _make_outputs(inputs)
-    _run_impl(inputs, outputs)
+    outputs = _make_outputs(inputs, num_heads, num_kv_heads)
+    _run_impl(inputs, outputs, num_heads, num_kv_heads)
 
     torch.testing.assert_close(outputs[0], expected_query)
     torch.testing.assert_close(outputs[1], expected_key)
@@ -295,51 +293,105 @@ def test_fused_qk_norm_rope_gate_fp8_quant_pure_decode_uses_bf16_fallback(monkey
     assert recorded_kwargs["query_out"] is outputs[0]
     assert recorded_kwargs["key_out"] is outputs[1]
     assert recorded_kwargs["gate_out"] is outputs[2]
-    assert outputs[3].shape == (4, NUM_QUERY_HEADS, HEAD_DIM)
-    assert outputs[4].shape == (4, NUM_KV_HEADS, HEAD_DIM)
-    assert outputs[6].shape == (256, NUM_KV_HEADS)
+    assert outputs[3].shape == (tokens, num_heads, HEAD_DIM)
+    assert outputs[4].shape == (tokens, num_kv_heads, HEAD_DIM)
+    assert outputs[6].shape == (MAX_NUM_SEQS, num_kv_heads)
 
 
-def test_fused_qk_norm_rope_gate_fp8_quant_custom_op_meta_shapes():
-    inputs = tuple(tensor.to(device="meta") for tensor in _make_inputs())
+@HEADS
+@PREFILL_TOKENS
+def test_fused_qk_norm_rope_gate_fp8_quant_custom_op_meta_shapes(
+    tokens, num_heads, num_kv_heads
+):
+    inputs = tuple(
+        tensor.to(device="meta")
+        for tensor in _make_inputs(tokens, num_heads, num_kv_heads)
+    )
     outputs = prep_module._allocate_outputs(
-        inputs[0],
-        inputs[1],
-        inputs[2],
-        NUM_QUERY_HEADS,
-        NUM_KV_HEADS,
-        HEAD_DIM,
+        inputs[0], inputs[1], inputs[2], num_heads, num_kv_heads, HEAD_DIM
     )
     result = torch.ops.vllm.fused_qk_norm_rope_gate_fp8_quant(
         *inputs,
         "layer",
         1.0e-6,
-        NUM_QUERY_HEADS,
-        NUM_KV_HEADS,
+        num_heads,
+        num_kv_heads,
         HEAD_DIM,
         ROTARY_DIM,
         *outputs,
     )
 
     assert result is None
-    assert outputs[0].shape == (8, NUM_QUERY_HEADS * HEAD_DIM)
-    assert outputs[1].shape == (8, NUM_KV_HEADS * HEAD_DIM)
-    assert outputs[3].shape == (8, NUM_QUERY_HEADS, HEAD_DIM)
-    assert outputs[4].shape == (8, NUM_KV_HEADS, HEAD_DIM)
-    assert outputs[6].shape == (256, NUM_KV_HEADS)
+    assert outputs[0].shape == (tokens, num_heads * HEAD_DIM)
+    assert outputs[1].shape == (tokens, num_kv_heads * HEAD_DIM)
+    assert outputs[3].shape == (tokens, num_heads, HEAD_DIM)
+    assert outputs[4].shape == (tokens, num_kv_heads, HEAD_DIM)
+    assert outputs[6].shape == (MAX_NUM_SEQS, num_kv_heads)
 
 
-def test_qwen3_next_model_builds_prequantized_bundle(monkeypatch):
-    inputs = _make_inputs()
-    expected_outputs = _make_outputs(inputs)
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a GPU")
+@HEADS
+def test_fused_qk_norm_rope_gate_fp8_quant_opcheck(
+    monkeypatch, num_heads, num_kv_heads
+):
+    tokens = 7
+    inputs = tuple(
+        tensor.to(device="cuda")
+        for tensor in _make_inputs(tokens, num_heads, num_kv_heads)
+    )
+    outputs = _make_outputs(inputs, num_heads, num_kv_heads)
+    metadata = SimpleNamespace(
+        num_actual_tokens=tokens,
+        query_start_loc=torch.tensor([0, tokens], dtype=torch.int32, device="cuda"),
+        num_decodes=0,
+        num_decode_tokens=0,
+    )
+    monkeypatch.setattr(
+        attention_module,
+        "get_attention_context",
+        lambda layer_name: (metadata, None, None, None),
+    )
+    # The AITER kernel itself is not under test; the op's schema, fake
+    # implementation and AOT dispatch are.
+    monkeypatch.setattr(
+        prep_module.rocm_aiter_ops,
+        "fused_qk_norm_rope_gate_fp8_quant",
+        lambda *args, **kwargs: None,
+    )
+
+    op = torch.ops.vllm.fused_qk_norm_rope_gate_fp8_quant
+    # Piecewise CUDA graphs would replay capture-time metadata offsets.
+    assert torch.Tag.cudagraph_unsafe in op.default.tags
+    opcheck(
+        op,
+        (
+            *inputs,
+            "layer",
+            1.0e-6,
+            num_heads,
+            num_kv_heads,
+            HEAD_DIM,
+            ROTARY_DIM,
+            *outputs,
+        ),
+    )
+
+
+@HEADS
+@PREFILL_TOKENS
+def test_qwen3_next_model_builds_prequantized_bundle(
+    monkeypatch, tokens, num_heads, num_kv_heads
+):
+    inputs = _make_inputs(tokens, num_heads, num_kv_heads)
+    expected_outputs = _make_outputs(inputs, num_heads, num_kv_heads)
     attention = object.__new__(qwen3_next_model.Qwen3NextAttention)
     torch.nn.Module.__init__(attention)
     attention.use_prequantized_qkv = True
     attention.use_fused_qk_norm_rope_gate = True
-    attention.q_size = NUM_QUERY_HEADS * HEAD_DIM
-    attention.kv_size = NUM_KV_HEADS * HEAD_DIM
-    attention.num_heads = NUM_QUERY_HEADS
-    attention.num_kv_heads = NUM_KV_HEADS
+    attention.q_size = num_heads * HEAD_DIM
+    attention.kv_size = num_kv_heads * HEAD_DIM
+    attention.num_heads = num_heads
+    attention.num_kv_heads = num_kv_heads
     attention.head_dim = HEAD_DIM
     attention.q_norm = SimpleNamespace(
         weight=inputs[3],

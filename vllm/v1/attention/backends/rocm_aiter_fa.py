@@ -1087,11 +1087,11 @@ class AiterFlashAttentionImpl(AttentionImpl):
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
-        from vllm.platforms.rocm import on_gfx950
+        from vllm.platforms.rocm import get_cdna_version
 
         self.supports_prequantized_qkv_input = (
             head_size == 256
-            and on_gfx950()
+            and get_cdna_version() == 4
             and self.num_queries_per_kv in (1, 2, 4, 8, 16)
             and self.logits_soft_cap == 0.0
             and self.sliding_window == (-1, -1)
