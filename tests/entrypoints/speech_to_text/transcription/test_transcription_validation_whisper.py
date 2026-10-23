@@ -312,17 +312,28 @@ async def test_audio_with_timestamp(mary_had_lamb, whisper_client):
 @pytest.mark.asyncio
 async def test_audio_with_timestamp_and_vad(mary_had_lamb, whisper_client):
     """VAD drops silence before sending speech to the model, but segment
-    timestamps must still refer to positions in the original audio."""
+    timestamps must still refer to positions in the original audio.
+
+    Layout: silence, two copies of the clip back to back, silence, a third
+    copy. The first two copies form one VAD span longer than 30 s, which is
+    RMS split; its remainder is packed with the third copy into one chunk,
+    with the silence between them removed.
+    """
     mary_had_lamb.seek(0)
     audio, sr = load_audio(mary_had_lamb)
     clip_s = len(audio) / sr
-    lead_silence_s, gap_silence_s = 10.0, 20.0
-    # silence + speech + silence + speech; each speech span is a VAD chunk.
+    lead_silence_s, copy_gap_s, gap_silence_s = 10.0, 0.5, 20.0
+
+    def silence(seconds: float) -> np.ndarray:
+        return np.zeros(int(seconds * sr), dtype=audio.dtype)
+
     padded_audio = np.concatenate(
         [
-            np.zeros(int(lead_silence_s * sr), dtype=audio.dtype),
+            silence(lead_silence_s),
             audio,
-            np.zeros(int(gap_silence_s * sr), dtype=audio.dtype),
+            silence(copy_gap_s),
+            audio,
+            silence(gap_silence_s),
             audio,
         ]
     )
@@ -347,33 +358,28 @@ async def test_audio_with_timestamp_and_vad(mary_had_lamb, whisper_client):
         extra_body={"vad_config.enabled": True},
     )
 
-    first_copy_start_s = lead_silence_s
-    second_copy_start_s = lead_silence_s + clip_s + gap_silence_s
-    first_copy = [
-        seg for seg in transcription.segments if seg.start < second_copy_start_s - 1
-    ]
-    second_copy = [
-        seg for seg in transcription.segments if seg.start >= second_copy_start_s - 1
-    ]
+    gap_start_s = lead_silence_s + 2 * clip_s + copy_gap_s
+    gap_end_s = gap_start_s + gap_silence_s
+    segments = transcription.segments
 
-    # VAD pads speech by a few tens of ms and Whisper timestamps are 20 ms
+    # VAD pads speech by a few hundred ms and Whisper timestamps are 20 ms
     # tokens, so allow some slack around the reference timings.
     tolerance_s = 1.0
     ref_start_s = reference.segments[0].start
     ref_end_s = reference.segments[-1].end
-    assert first_copy[0].start == pytest.approx(
-        first_copy_start_s + ref_start_s, abs=tolerance_s
+    assert segments[0].start == pytest.approx(
+        lead_silence_s + ref_start_s, abs=tolerance_s
     )
-    assert first_copy[-1].end == pytest.approx(
-        first_copy_start_s + ref_end_s, abs=tolerance_s
-    )
-    assert second_copy[0].start == pytest.approx(
-        second_copy_start_s + ref_start_s, abs=tolerance_s
-    )
-    assert second_copy[-1].end == pytest.approx(
-        second_copy_start_s + ref_end_s, abs=tolerance_s
-    )
-    assert transcription.segments[-1].end <= len(padded_audio) / sr + tolerance_s
+    assert segments[-1].end == pytest.approx(gap_end_s + ref_end_s, abs=tolerance_s)
+    assert any(seg.start >= gap_end_s for seg in segments)
+    # Nothing is placed inside the removed silence, which is where segments
+    # would land if times weren't mapped across the packed chunk's pieces.
+    # A segment may still span it when Whisper joins speech from both sides.
+    for seg in segments:
+        for t in (seg.start, seg.end):
+            assert not gap_start_s + tolerance_s < t < gap_end_s - tolerance_s
+    assert [seg.start for seg in segments] == sorted(seg.start for seg in segments)
+    assert segments[-1].end <= len(padded_audio) / sr + tolerance_s
 
 
 @pytest.mark.asyncio

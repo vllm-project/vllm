@@ -140,30 +140,39 @@ class TranscriptionRequest(OpenAIBaseModel):
     vad_threshold: float = Field(
         default=_DEFAULT_VAD_CONFIG.threshold,
         alias="vad_config.threshold",
+        ge=0.0,
+        le=1.0,
     )
     vad_neg_threshold: float | None = Field(
         default=_DEFAULT_VAD_CONFIG.neg_threshold,
         alias="vad_config.neg_threshold",
+        ge=0.0,
+        le=1.0,
     )
     vad_min_speech_duration_ms: int = Field(
         default=_DEFAULT_VAD_CONFIG.min_speech_duration_ms,
         alias="vad_config.min_speech_duration_ms",
+        ge=0,
     )
     vad_max_speech_duration_s: float = Field(
         default=_DEFAULT_VAD_CONFIG.max_speech_duration_s,
         alias="vad_config.max_speech_duration_s",
+        gt=0.0,
     )
     vad_min_silence_duration_ms: int = Field(
         default=_DEFAULT_VAD_CONFIG.min_silence_duration_ms,
         alias="vad_config.min_silence_duration_ms",
+        ge=0,
     )
     vad_speech_pad_ms: int = Field(
         default=_DEFAULT_VAD_CONFIG.speech_pad_ms,
         alias="vad_config.speech_pad_ms",
+        ge=0,
     )
     vad_min_silence_at_max_speech_ms: int = Field(
         default=_DEFAULT_VAD_CONFIG.min_silence_at_max_speech_ms,
         alias="vad_config.min_silence_at_max_speech_ms",
+        ge=0,
     )
     vad_use_max_poss_sil_at_max_speech: bool = Field(
         default=_DEFAULT_VAD_CONFIG.use_max_poss_sil_at_max_speech,

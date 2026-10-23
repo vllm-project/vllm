@@ -32,6 +32,7 @@ from vllm.logger import init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.model_executor.models import SupportsTranscription
 from vllm.multimodal.audio import (
+    ChunkTiming,
     ThreadLocalVADProvider,
     TimedAudioChunk,
     get_audio_duration,
@@ -297,7 +298,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         request: SpeechToTextRequest,
         audio_data: bytes,
         request_id: str,
-    ) -> tuple[list[EngineInput], float, list[float]]:
+    ) -> tuple[list[EngineInput], float, list[ChunkTiming]]:
         # Validate request
         request.language = self.model_cls.validate_language(request.language)
         request.to_language = (
@@ -320,9 +321,9 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             return [], duration, []
 
         chunks = [chunk.audio for chunk in timed_chunks]
-        # Start times come from the chunker rather than summing chunk lengths,
-        # since VAD drops non-speech audio between chunks.
-        chunk_start_offsets = [chunk.start_s for chunk in timed_chunks]
+        # Timings come from the chunker rather than summing chunk lengths,
+        # since VAD drops non-speech audio within and between chunks.
+        chunk_timings = [chunk.timing for chunk in timed_chunks]
 
         if request.language is None and getattr(
             self.model_cls, "supports_explicit_language_detection", False
@@ -353,7 +354,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
 
         engine_inputs = await self.renderer.render_cmpl_async(parsed_prompts)
 
-        return engine_inputs, duration, chunk_start_offsets
+        return engine_inputs, duration, chunk_timings
 
     def _preprocess_verbose_prompt(self, prompt: EncoderDecoderDictPrompt):
         dec_prompt = prompt["decoder_prompt"]
@@ -398,7 +399,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         log_probs: FlatLogprobs | list[dict[int, Logprob]],
         request: SpeechToTextRequest,
         segment_class: type[SpeechToTextSegment],
-        start_time: float = 0,
+        timing: ChunkTiming | None = None,
     ) -> list[SpeechToTextSegment]:
         """Convert tokens to verbose segments.
 
@@ -411,6 +412,8 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         in this implementation and will be None. See docs for details.
         """
         BASE_OFFSET = 0.02
+        if timing is None:
+            timing = ChunkTiming.contiguous(0.0)
         init_token = self.tokenizer.encode("<|0.00|>", add_special_tokens=False)[0]
         if tokens[-1] == self.tokenizer.eos_token_id:
             tokens = tokens[:-1]
@@ -437,9 +440,11 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                     SpeechToTextSegment,
                     segment_class(
                         id=len(segments),
-                        seek=int(start_time),
-                        start=start_time + BASE_OFFSET * start_timestamp,
-                        end=start_time + BASE_OFFSET * end_timestamp,
+                        seek=int(timing.start_s),
+                        start=timing.to_original_time(BASE_OFFSET * start_timestamp),
+                        end=timing.to_original_time(
+                            BASE_OFFSET * end_timestamp, is_end=True
+                        ),
                         temperature=request.temperature,
                         text=text,
                         # The compression ratio measures
@@ -589,7 +594,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         (
             engine_inputs,
             duration_s,
-            chunk_start_offsets,
+            chunk_timings,
         ) = await self._preprocess_speech_to_text(
             request=request,
             audio_data=audio_data,
@@ -720,17 +725,16 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 assert len(list_result_generator) == 1, (
                     "`max_audio_clip_s` is set to None, audio cannot be chunked"
                 )
-            assert len(chunk_start_offsets) == len(list_result_generator)
+            assert len(chunk_timings) == len(list_result_generator)
             result_generator = merge_async_iterators(*list_result_generator)
             async for idx, op in result_generator:
-                start_time = chunk_start_offsets[idx]
                 if request.response_format == "verbose_json":
                     assert op.outputs[0].logprobs
                     segments: list[SpeechToTextSegment] = self._get_verbose_segments(
                         tokens=tuple(op.outputs[0].token_ids),
                         segment_class=segment_class,
                         request=request,
-                        start_time=start_time,
+                        timing=chunk_timings[idx],
                         log_probs=op.outputs[0].logprobs,
                     )
 

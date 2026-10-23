@@ -84,41 +84,8 @@ async def test_chunk_offsets_are_cumulative_not_nominal():
 
     serving = _make_serving(audio)
     with patch("vllm.multimodal.audio.split_audio", return_value=chunks):
-        _, _, offsets = await _preprocess(serving, _make_request(vad_enabled=False))
+        _, _, timings = await _preprocess(serving, _make_request(vad_enabled=False))
+    offsets = [timing.start_s for timing in timings]
 
     assert offsets == pytest.approx(expected_offsets, abs=1e-6)
     assert offsets != pytest.approx(wrong_offsets, abs=1e-6)
-
-
-@pytest.mark.asyncio
-async def test_vad_chunk_offsets_follow_original_audio():
-    """With VAD, non-speech between chunks is dropped, so chunk offsets must be
-    the speech start times in the original audio, not cumulative chunk lengths.
-    Otherwise segment timestamps drift earlier after every removed silence.
-    """
-    audio = np.random.default_rng(0).standard_normal(100 * SR).astype(np.float32)
-    # The second span is longer than max_audio_clip_s, so it is RMS-split.
-    speech_spans_s = [(10.0, 20.0), (45.0, 85.0)]
-    vad = MagicMock(spec=VAD)
-    vad.get_speech_timestamps.return_value = [
-        {"start": int(start * SR), "end": int(end * SR)}
-        for start, end in speech_spans_s
-    ]
-
-    serving = _make_serving(audio, vad=vad)
-    request = _make_request(vad_enabled=True)
-    _, _, offsets = await _preprocess(serving, request)
-
-    chunk_audios = [
-        call.kwargs["audio"] for call in request.build_stt_params.call_args_list
-    ]
-    assert len(offsets) == len(chunk_audios) == 3
-    assert offsets[0] == pytest.approx(10.0)
-    assert offsets[1] == pytest.approx(45.0)
-    assert offsets[2] == pytest.approx(45.0 + chunk_audios[1].shape[-1] / SR)
-    # Each chunk sent to the model is the original audio at its offset.
-    for offset, chunk_audio in zip(offsets, chunk_audios):
-        start = round(offset * SR)
-        np.testing.assert_array_equal(
-            chunk_audio, audio[start : start + chunk_audio.shape[-1]]
-        )
