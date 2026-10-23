@@ -4,7 +4,7 @@ depends_on:
 steps:
 - label: ":nvidia: (H200 MIG 18GB) Rust Frontend OpenAI Coverage"
   key: rust-frontend-openai-coverage
-  timeout_in_minutes: 30
+  timeout_in_minutes: 40
   device: h200_18gb
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -28,14 +28,16 @@ steps:
   commands:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s benchmarks/test_serve_cli.py -k "not insecure and not (test_bench_serve and not test_bench_serve_chat)"
-  - pytest -v -s entrypoints/openai/chat_completion/test_chat_completion.py -k "not test_invalid_json_schema and not test_invalid_regex and not test_kv_transfer_prompt_token_ids_round_trip and not test_kv_transfer_prompt_token_ids_streaming"
+  - pytest -v -s benchmarks/test_serve_cli.py
+  # The Rust frontend re-renders messages instead of reusing kv_transfer_params["prompt_token_ids"].
+  - pytest -v -s entrypoints/openai/chat_completion/test_chat_completion.py -k "not test_kv_transfer_prompt_token_ids_round_trip and not test_kv_transfer_prompt_token_ids_streaming"
   - pytest -v -s entrypoints/openai/chat_completion/test_include_reasoning.py
   - pytest -v -s entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py -k "not multiple"
   - pytest -v -s entrypoints/openai/chat_completion/test_serving_chat.py -k "test_chat_per_request_metrics_follow_server_flag or test_streaming_reasoning_usage_counts_across_deltas or test_completion_tokens_details"
 
   # - pytest -v -s entrypoints/openai/completion/test_prompt_validation.py -k "not prompt_embeds"
-  - pytest -v -s entrypoints/launchers/test_shutdown.py -k "not engine_failure and not test_abort_timeout_exits_quickly"
+  # test_shutdown_on_engine_failure launches the Python API server directly, not the Rust frontend.
+  - pytest -v -s entrypoints/launchers/test_shutdown.py -k "not engine_failure"
   - pytest -v -s entrypoints/openai/test_return_token_ids.py
   - pytest -v -s entrypoints/serve/instrumentator/test_uds.py
   - pytest -v -s v1/sample/test_logprobs_e2e.py -k "test_prompt_logprobs_e2e_server"
@@ -44,7 +46,7 @@ steps:
       label: ":amd: (MI355 DPX) Rust Frontend OpenAI Coverage"
       dind: false
       device: mi355_dpx
-      timeout_in_minutes: 35
+      timeout_in_minutes: 45
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -67,7 +69,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 18GB) Rust Frontend Serve/Admin Coverage"
   key: rust-frontend-serve-admin-coverage
-  timeout_in_minutes: 25
+  timeout_in_minutes: 35
   device: h200_18gb
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -85,19 +87,20 @@ steps:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc/test_collective_rpc.py
-  # server_load can be flaky under the Rust frontend; keep it excluded for now.
-  - pytest -v -s entrypoints/serve/instrumentator/test_basic.py -k "not server_load"
-  # test_generate_logprobs expects Python-style top_logprobs truncation (dedup sampled + cap at max(k, 1)).
-  - pytest -v -s entrypoints/scale_out/token_in_token_out/test_serving_tokens.py -k "not stream and not lora and not test_generate_logprobs and not stop_string_workflow"
-  - pytest -v -s entrypoints/serve/instrumentator/test_metrics.py -k "text and not show and not run_batch and not test_metrics_counts and not test_metrics_exist"
-  # /tokenizer_info is not implemented in the Rust frontend (the CLI flag is accepted as a no-op).
+  - pytest -v -s entrypoints/serve/instrumentator/test_basic.py
+  # The Rust LoRA request still carries the removed tensorizer_config_dict field, so --lora-modules fails at startup.
+  - pytest -v -s entrypoints/scale_out/token_in_token_out/test_serving_tokens.py -k "not lora"
+  # run_batch drives the Python batch runner, not a server. test_metrics_exist needs
+  # vllm:admission_rejections (text) and image inputs (multimodal), which the Rust frontend lacks.
+  - pytest -v -s entrypoints/serve/instrumentator/test_metrics.py -k "not run_batch and not test_metrics_exist"
+  # /tokenizer_info returns 501 in the Rust frontend.
   - pytest -v -s entrypoints/serve/tokenize/test_tokenization.py -k "not tokenizer_info"
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Rust Frontend Serve/Admin Coverage"
       dind: false
       device: mi355_dpx
-      timeout_in_minutes: 30
+      timeout_in_minutes: 40
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -156,7 +159,8 @@ steps:
   commands:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s tool_use --ignore=tool_use/mistral --models llama3.2 -k "not test_response_format_with_tool_choice_required and not test_parallel_tool_calls_false and not test_tool_call_and_choice"
+  # The Rust frontend has no `mistral` tokenizer mode or renderer.
+  - pytest -v -s tool_use --ignore=tool_use/mistral --models llama3.2
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Rust Frontend Tool Use"
