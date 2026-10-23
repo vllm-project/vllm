@@ -56,6 +56,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.hisparse.block_pool import SharedEventQueueBlockPool
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -4121,6 +4122,43 @@ def test_block_removed_events_coalesce_consecutive_same_group():
     assert (events[0].group_idx, events[0].block_hashes) == (0, hashes)
     assert (events[1].group_idx, events[1].block_hashes) == (1, hashes[:1])
     assert (events[3].group_idx, events[3].block_hashes) == (1, hashes[:1])
+
+
+def test_block_removed_events_not_coalesced_across_media():
+    """HiSparse host and device pools share one event queue; their removals
+    must stay in separate events so each keeps its medium."""
+    block_size = 4
+    device_pool = BlockPool(
+        num_gpu_blocks=8,
+        enable_caching=True,
+        hash_block_size=block_size,
+        enable_kv_cache_events=True,
+    )
+    host_pool = SharedEventQueueBlockPool(
+        num_gpu_blocks=8,
+        enable_caching=True,
+        hash_block_size=block_size,
+        enable_kv_cache_events=True,
+        medium=MEDIUM_CPU,
+        event_owner=device_pool,
+    )
+    req = make_request("req", list(range(block_size * 2)), block_size, sha256)
+    device_blocks = device_pool.get_new_blocks(2)
+    device_pool.cache_full_blocks(req, device_blocks, 0, 2, block_size, 0)
+    host_blocks = host_pool.get_new_blocks(1)
+    host_pool.cache_full_blocks(req, host_blocks, 0, 1, block_size, 0)
+    device_pool.take_events()
+
+    device_pool._maybe_evict_cached_block(device_blocks[0])
+    host_pool._maybe_evict_cached_block(host_blocks[0])
+    device_pool._maybe_evict_cached_block(device_blocks[1])
+
+    events = device_pool.take_events()
+    assert [(type(e), e.medium, len(e.block_hashes)) for e in events] == [
+        (BlockRemoved, MEDIUM_GPU, 1),
+        (BlockRemoved, MEDIUM_CPU, 1),
+        (BlockRemoved, MEDIUM_GPU, 1),
+    ]
 
 
 @pytest.mark.parametrize("use_lora", [False, True])
