@@ -657,6 +657,7 @@ mod tests {
                 logprobs: None,
                 finish_reason: None,
                 cached_token_count: 0,
+                cache_creation_token_count: 0,
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 sampling_mask: None,
@@ -676,6 +677,7 @@ mod tests {
                 logprobs: None,
                 finish_reason: Some(FinishReason::stop_eos()),
                 cached_token_count: 2,
+                cache_creation_token_count: 0,
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 sampling_mask: None,
@@ -765,6 +767,7 @@ mod tests {
             logprobs: None,
             finish_reason,
             cached_token_count: 0,
+            cache_creation_token_count: 0,
             kv_transfer_params: None,
             ec_transfer_params: None,
             sampling_mask: None,
@@ -938,6 +941,7 @@ mod tests {
                 prompt_token_count: 2,
                 output_token_count: 1,
                 cached_token_count: 0,
+                ..Default::default()
             },
             kv_transfer_params: None,
             ec_transfer_params: None,
@@ -1140,6 +1144,7 @@ mod tests {
                 prompt_token_count: 2,
                 output_token_count: 1,
                 cached_token_count: 0,
+                ..Default::default()
             },
             kv_transfer_params: None,
             ec_transfer_params: None,
@@ -1178,6 +1183,7 @@ mod tests {
                 prompt_token_count: prompt_token_ids.len(),
                 output_token_count: 1,
                 cached_token_count: 0,
+                ..Default::default()
             },
             kv_transfer_params: None,
             ec_transfer_params: None,
@@ -1256,6 +1262,7 @@ mod tests {
                 prompt_token_count: 2,
                 output_token_count: 2,
                 cached_token_count: 0,
+                ..Default::default()
             },
             kv_transfer_params: None,
             ec_transfer_params: None,

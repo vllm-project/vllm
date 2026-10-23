@@ -92,6 +92,21 @@ completion = client.chat.completions.create(
 )
 ```
 
+## Prompt token usage details
+
+Start the server with `--enable-prompt-tokens-details` to include
+`usage.prompt_tokens_details` in Chat Completions responses. This option is
+disabled by default and is supported by both the Python and Rust frontends.
+
+The `created_cache_tokens` field reports prompt tokens newly admitted into the
+local prefix cache, as reported by the engine. A value of `0` means no tokens
+were reported as newly cached. The `cached_tokens` field reports cache hits.
+These details describe tokens already included in `prompt_tokens`; do not add
+them to the total again.
+
+For streaming requests, set `stream_options.include_usage` to `true` to receive
+these details in the final usage chunk before `data: [DONE]`.
+
 ## Extra HTTP Headers
 
 The `X-Request-Id` HTTP request header can be enabled with

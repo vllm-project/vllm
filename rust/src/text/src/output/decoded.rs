@@ -313,6 +313,7 @@ pub async fn decoded_text_event_stream(
                         prompt_token_count,
                         output_token_count,
                         cached_token_count,
+                        cache_creation_token_count: output.cache_creation_token_count,
                     },
                     finish_reason: reason,
                     kv_transfer_params,
@@ -574,6 +575,7 @@ mod tests {
                                 prompt_token_count: 0,
                                 output_token_count: 3,
                                 cached_token_count: 0,
+                                ..Default::default()
                             },
                             finish_reason: FinishReason::Length,
                             kv_transfer_params: None,
@@ -610,6 +612,7 @@ mod tests {
                                 prompt_token_count: 0,
                                 output_token_count: 2,
                                 cached_token_count: 0,
+                                ..Default::default()
                             },
                             finish_reason: FinishReason::Stop(Some(StopReason::TokenId(
                                 b'!' as u32,

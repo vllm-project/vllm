@@ -207,7 +207,7 @@ async fn collect_chat_completion(
     };
     let metrics = enable_per_request_metrics
         .then(|| PerRequestMetrics::from_timestamps(timestamps, usage.output_token_count));
-    let usage = Usage::from_token_usage(usage, enable_prompt_tokens_details);
+    let usage = Usage::from_chat_token_usage(usage, enable_prompt_tokens_details);
 
     if enable_log_requests {
         info!(
@@ -488,7 +488,7 @@ async fn chat_completion_chunk_stream(
                     });
                     y.yield_ok(usage_chunk(
                         &envelope,
-                        Usage::from_token_usage(final_usage, enable_prompt_tokens_details),
+                        Usage::from_chat_token_usage(final_usage, enable_prompt_tokens_details),
                         metrics,
                     ))
                     .await;
@@ -858,6 +858,7 @@ mod tests {
             prompt_token_count: prompt_tokens,
             output_token_count: output_tokens,
             cached_token_count: cached_tokens,
+            ..Default::default()
         }
         .into()
     }
@@ -1496,6 +1497,7 @@ mod tests {
                         prompt_token_count: 3,
                         output_token_count: 3,
                         cached_token_count: 0,
+                        ..Default::default()
                     },
                     reasoning_tokens: 2,
                 },
@@ -1568,6 +1570,7 @@ mod tests {
                         prompt_token_count: 1,
                         output_token_count: 2,
                         cached_token_count: 0,
+                        ..Default::default()
                     },
                     reasoning_tokens: 2,
                 },

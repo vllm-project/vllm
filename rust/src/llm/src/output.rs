@@ -42,6 +42,8 @@ pub struct TokenUsage {
     pub output_token_count: usize,
     /// Number of prompt tokens served from cache.
     pub cached_token_count: usize,
+    /// Prompt tokens newly admitted into the local prefix cache.
+    pub cache_creation_token_count: usize,
 }
 
 /// Final raw token output plus terminal stream metadata.
@@ -177,6 +179,8 @@ pub struct GenerateOutput {
     pub finish_reason: Option<FinishReason>,
     /// Number of prompt tokens served from cache, when reported by prefill stats.
     pub cached_token_count: usize,
+    /// Latest cache-creation count reported by prefill stats.
+    pub cache_creation_token_count: usize,
     /// Connector-specific KV transfer parameters for disaggregated serving.
     pub kv_transfer_params: Option<Box<serde_json::Value>>,
     /// Connector-specific encoder cache transfer parameters for disaggregated
@@ -245,6 +249,7 @@ impl GenerateOutput {
             }
         }
         self.cached_token_count = self.cached_token_count.max(next.cached_token_count);
+        self.cache_creation_token_count = next.cache_creation_token_count;
         self.finish_reason = next.finish_reason;
         self.kv_transfer_params = next.kv_transfer_params;
         self.ec_transfer_params = next.ec_transfer_params;
@@ -276,6 +281,7 @@ impl GenerateOutput {
             logprobs: None,
             finish_reason,
             cached_token_count: 0,
+            cache_creation_token_count: 0,
             kv_transfer_params: None,
             ec_transfer_params: None,
             sampling_mask: None,
@@ -300,6 +306,7 @@ pub struct GenerateOutputStream {
     /// (weight version, first output-token index) for each span.
     weight_version_starts: Vec<(Arc<str>, usize)>,
     num_output_tokens: usize,
+    cache_creation_token_count: usize,
     /// Routed-expert rows received so far, concatenated on the terminal output.
     routed_experts_chunks: Vec<WireNdArray>,
     /// Removes this request's external→internal tracking edge on drop. Held for
@@ -326,6 +333,7 @@ impl GenerateOutputStream {
             request_metrics,
             weight_version_starts: Vec::new(),
             num_output_tokens: 0,
+            cache_creation_token_count: 0,
             routed_experts_chunks: Vec::new(),
             _request_guard: request_guard,
         }
@@ -402,6 +410,9 @@ impl GenerateOutputStream {
             .as_ref()
             .map(|stats| stats.num_cached_tokens as usize)
             .unwrap_or(0);
+        if let Some(stats) = raw.prefill_stats.as_ref() {
+            self.cache_creation_token_count = stats.num_cache_creation_tokens as usize;
+        }
 
         // An engine error means the request was rejected before it ran.
         let rejected = raw.error.is_some();
@@ -430,6 +441,7 @@ impl GenerateOutputStream {
             logprobs,
             finish_reason,
             cached_token_count,
+            cache_creation_token_count: self.cache_creation_token_count,
             kv_transfer_params: raw.kv_transfer_params,
             ec_transfer_params: raw.ec_transfer_params,
             sampling_mask,
@@ -587,6 +599,7 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                             prompt_token_count: prompt_token_ids.as_ref().map_or(0, Vec::len),
                             output_token_count: 0,
                             cached_token_count,
+                            cache_creation_token_count: output.cache_creation_token_count,
                         },
                         kv_transfer_params: None,
                         ec_transfer_params: None,
@@ -604,6 +617,7 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                         prompt_token_count: collected.prompt_token_ids.len(),
                         output_token_count: collected.token_ids.len(),
                         cached_token_count,
+                        cache_creation_token_count: output.cache_creation_token_count,
                     };
                     collected.kv_transfer_params = output.kv_transfer_params.map(|value| *value);
                     collected.ec_transfer_params = output.ec_transfer_params.map(|value| *value);

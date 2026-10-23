@@ -680,6 +680,7 @@ mod tests {
                             prompt_token_count: 1,
                             output_token_count: 1,
                             cached_token_count: 0,
+                            ..Default::default()
                         },
                         finish_reason: FinishReason::stop_eos(),
                         kv_transfer_params: None,
@@ -779,6 +780,7 @@ mod tests {
                         prompt_token_count: 5,
                         output_token_count: 2,
                         cached_token_count: 3,
+                        ..Default::default()
                     },
                     finish_reason: FinishReason::Repetition(Some(StopReason::Text(
                         "repetition_detected".to_string(),
@@ -905,6 +907,7 @@ mod tests {
                         prompt_token_count: 2,
                         output_token_count: 2,
                         cached_token_count: 0,
+                        ..Default::default()
                     },
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
@@ -970,6 +973,7 @@ mod tests {
                         prompt_token_count: 2,
                         output_token_count: 1,
                         cached_token_count: 0,
+                        ..Default::default()
                     },
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
@@ -1024,6 +1028,7 @@ mod tests {
                         prompt_token_count: 1,
                         output_token_count: 1,
                         cached_token_count: 0,
+                        ..Default::default()
                     },
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
@@ -1081,6 +1086,7 @@ mod tests {
                         prompt_token_count: 2,
                         output_token_count: 1,
                         cached_token_count: 0,
+                        ..Default::default()
                     },
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
@@ -1155,6 +1161,7 @@ mod tests {
                         prompt_token_count: 1,
                         output_token_count: 1,
                         cached_token_count: 0,
+                        ..Default::default()
                     },
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
@@ -1231,6 +1238,7 @@ mod tests {
                         prompt_token_count: 2,
                         output_token_count: 1,
                         cached_token_count: 0,
+                        ..Default::default()
                     },
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,

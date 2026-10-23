@@ -179,6 +179,7 @@ mod tests {
                         prompt_token_count: 2,
                         output_token_count: 2,
                         cached_token_count: 0,
+                        ..Default::default()
                     },
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
@@ -303,6 +304,7 @@ mod tests {
                         prompt_token_count: 2,
                         output_token_count: 5,
                         cached_token_count: 0,
+                        ..Default::default()
                     },
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,

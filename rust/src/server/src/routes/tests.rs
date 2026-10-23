@@ -39,6 +39,7 @@ use vllm_engine_core_client::protocol::output::{
     StopReason, UtilityCallOutput,
 };
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
+use vllm_engine_core_client::protocol::stats::PrefillStats;
 use vllm_engine_core_client::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
 use vllm_engine_core_client::test_utils::{
     IpcNamespace, spawn_mock_engine_task, spawn_mock_engine_task_with_ready,
@@ -3038,6 +3039,86 @@ async fn chat_completions_empty_allowed_token_ids_returns_openai_error() {
             .expect("message string")
             .contains("allowed_token_ids should not be empty")
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_reports_engine_cache_creation_tokens() {
+    for stream in [false, true] {
+        for enabled in [false, true] {
+            for created in [None, Some(0), Some(15)] {
+                let (chat, engine_task) = test_models_with_engine_outputs_and_backend_inner(
+                    b"engine-chat-cache-creation",
+                    move |request_id| {
+                        let mut outputs =
+                            engine_outputs_for_request(request_id, default_stream_output_specs());
+                        let EngineCoreOutputs::RequestBatch(batch) = &mut outputs else {
+                            panic!("expected request batch");
+                        };
+                        batch.outputs[0].prefill_stats = created.map(|count| {
+                            Box::new(PrefillStats {
+                                num_prompt_tokens: 22,
+                                num_computed_tokens: 22,
+                                num_cache_creation_tokens: count,
+                                ..Default::default()
+                            })
+                        });
+                        outputs
+                    },
+                    |_| {},
+                    Arc::new(FakeChatBackend::new()),
+                )
+                .await;
+                let mut app = build_router(Arc::new(
+                    AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat)
+                        .with_api_server_options(ApiServerOptions {
+                            enable_prompt_tokens_details: enabled,
+                            ..Default::default()
+                        }),
+                ));
+                let response = app
+                    .call(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/v1/chat/completions")
+                            .header("content-type", "application/json")
+                            .body(Body::from(
+                                json!({
+                                    "model": "Qwen/Qwen1.5-0.5B-Chat",
+                                    "messages": [{"role": "user", "content": "hello"}],
+                                    "stream": stream,
+                                    "stream_options": stream.then(|| json!({"include_usage": true}))
+                                })
+                                .to_string(),
+                            ))
+                            .expect("build request"),
+                    )
+                    .await
+                    .expect("call app");
+                assert_eq!(response.status(), StatusCode::OK);
+                let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+                engine_task.await.expect("mock engine task");
+                let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+                let response: serde_json::Value = if stream {
+                    let payloads = sse_data_payloads(&text);
+                    assert_eq!(payloads.last().copied(), Some("[DONE]"));
+                    serde_json::from_str(payloads[payloads.len() - 2]).expect("usage chunk")
+                } else {
+                    serde_json::from_str(&text).expect("chat response")
+                };
+                let expected = enabled.then(
+                    || json!({"cached_tokens": 0, "created_cache_tokens": created.unwrap_or(0)}),
+                );
+                assert_eq!(
+                    response["usage"]["prompt_tokens_details"],
+                    serde_json::to_value(expected).unwrap(),
+                    "stream={stream}, enabled={enabled}, created={created:?}"
+                );
+                assert_eq!(response["usage"]["prompt_tokens"], 22);
+                assert_eq!(response["usage"]["completion_tokens"], 3);
+            }
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

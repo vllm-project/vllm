@@ -367,8 +367,8 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub enable_log_requests: bool,
 
-    /// Include prompt_tokens_details in usage when cached prompt tokens are
-    /// present.
+    /// Include prompt_tokens_details in usage, including cached and newly
+    /// cached prompt tokens for chat completions.
     #[arg(
         long,
         default_missing_value = "true",
