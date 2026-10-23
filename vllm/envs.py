@@ -309,8 +309,8 @@ if TYPE_CHECKING:
     VLLM_DEBUG_WORKSPACE: bool = False
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION: bool = False
-    VLLM_DISABLE_DRAFT_PREPARE_DEDUP: bool = False
-    VLLM_DISABLE_DFLASH_PREPARE_PAD_FIX: bool = False
+    VLLM_DEBUG_DISABLE_DRAFT_PREPARE_DEDUP: bool = False
+    VLLM_DEBUG_DISABLE_DFLASH_PREPARE_PAD_FIX: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
     VLLM_COHERE2_ATTN_MOE_DUAL_STREAM_TOKEN_THRESHOLD: int = 256
@@ -2138,13 +2138,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION": lambda: bool(
         int(os.getenv("VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION", "0"))
     ),
-    # Draft-prepare fastpaths (DSpark/dflash): shared-output dedup and
-    # the parallel pad-tail fix.
-    "VLLM_DISABLE_DRAFT_PREPARE_DEDUP": lambda: bool(
-        int(os.getenv("VLLM_DISABLE_DRAFT_PREPARE_DEDUP", "0"))
+    # Draft-prepare fastpaths (DSpark/dflash, ROCm-gated): shared-output
+    # dedup and the parallel pad-tail fix.
+    "VLLM_DEBUG_DISABLE_DRAFT_PREPARE_DEDUP": lambda: bool(
+        int(os.getenv("VLLM_DEBUG_DISABLE_DRAFT_PREPARE_DEDUP", "0"))
     ),
-    "VLLM_DISABLE_DFLASH_PREPARE_PAD_FIX": lambda: bool(
-        int(os.getenv("VLLM_DISABLE_DFLASH_PREPARE_PAD_FIX", "0"))
+    "VLLM_DEBUG_DISABLE_DFLASH_PREPARE_PAD_FIX": lambda: bool(
+        int(os.getenv("VLLM_DEBUG_DISABLE_DFLASH_PREPARE_PAD_FIX", "0"))
     ),
     # Limits when we run shared_experts in a separate stream.
     # We found out that for large batch sizes, the separate stream
