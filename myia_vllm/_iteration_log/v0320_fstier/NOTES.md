@@ -354,3 +354,20 @@ watchdog v6 actif, tiers fs intact.
 **Repli** : (a) = revert une ligne du service watchdog + recreate ; (b) = retirer
 la clé du JSON et recreater ; Q26 = re-téléchargement HF (coût bande passante,
 pas de perte irréversible : tous les repos sont publics).
+
+## 23/10 22:41Z — PREMIER CYCLE POST-FENÊTRE : tout vert
+
+- **62 min SANS restart** depuis la recréation 21:38:10Z (première heure
+  sans wedge depuis le matin ; 99 sondes OK, le fail 1/2 de 21:41:32 n'a pas
+  escaladé — pas encore de WEDGE-BUSY à arbitrer, la rafale ne s'est pas
+  représentée).
+- **Hit préfixe 95,85 %** (33,3 M/34,8 M) — 3ᵉ record consécutif. KV 19,6 %,
+  0 préemption, charge plus légère (85 req/15 min).
+- **Cap pruner à sa borne NOMINALE 48,0 GiB** pour la première fois depuis
+  l'armement (tier 70,9 avant purge, 938 blocs/22,9 GiB supprimés, 0 err) ;
+  disque invité **67 %** (317 GB libres).
+- **0 ENOENT** dans la génération post-fenêtre (purge de 22:20 sans un seul
+  miss) — `recompute` armé mais pas encore sollicité.
+- Le 1×400 du census (20:41:45, corps 922 570 o, UA Bun = hub) = signature
+  #431 connue (sur-fenêtre 262 144), pré-fenêtre, 1 occurrence/2 h = motif
+  habituel. Commit 76,5 % ; VRAM 20 917/19 992 MiB (sous la référence).
