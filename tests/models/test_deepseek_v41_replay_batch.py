@@ -99,11 +99,13 @@ def _input_batch(
     device_query_lens: list[int] | None = None,
     num_tokens_after_padding: int | None = None,
     max_query_len: int | None = None,
+    prefill_len: list[int] | None = None,
+    computed: list[int] | None = None,
 ) -> InputBatch:
     num_reqs, num_tokens = len(query_lens), sum(query_lens)
     num_padded = num_tokens_after_padding or num_tokens
     batch = InputBatch.make_dummy(num_reqs, num_tokens, InputBuffers(16, 1024, DEVICE))
-    return replace(
+    batch = replace(
         batch,
         num_tokens=num_tokens,
         num_tokens_after_padding=num_padded,
@@ -123,6 +125,14 @@ def _input_batch(
         is_padding=torch.arange(num_padded, device=DEVICE) >= num_tokens,
         max_query_len=max_query_len,
     )
+    if prefill_len is not None:
+        batch = replace(batch, prefill_len_np=np.array(prefill_len, dtype=np.int32))
+    if computed is not None:
+        batch = replace(
+            batch,
+            num_computed_prefill_tokens_np=np.array(computed, dtype=np.int32),
+        )
+    return batch
 
 
 def _slot_mappings(num_tokens: int) -> torch.Tensor:
@@ -213,6 +223,41 @@ def test_replay_batch_keeps_device_decode_boundaries(state):
     assert replay is not None
     assert replay.rows.tolist() == [0, 1, 2, 3, *range(304 - WINDOW, 304)]
     assert build.batch.query_start_loc.tolist() == [0, 1, 4, 4 + WINDOW]
+
+
+def test_rocm_unfinished_prefill_keeps_one_row(state, monkeypatch):
+    """Unfinished ROCm prefills keep one row. CUDA and prompt logprobs keep
+    the window."""
+    import vllm.models.deepseek_v41.nvidia.model_state as model_state
+
+    # 200 left, 50 left, the 50-token finish, one decode.
+    batch = _input_batch(
+        [200, 200, 50, 1],
+        [200, 200, 250, 10],
+        [True, True, True, False],
+        prefill_len=[400, 250, 250, 0],
+        computed=[0, 0, 200, 0],
+    )
+    one_row = [199, 399, *range(400, 451)]
+    full_window = [
+        *range(200 - WINDOW, 200),
+        *range(400 - WINDOW, 400),
+        *range(400, 451),
+    ]
+
+    monkeypatch.setattr(model_state.current_platform, "is_rocm", lambda: True)
+    replay, _ = _prepare(state, batch, CUDAGraphMode.NONE)
+    assert replay is not None and replay.rows.tolist() == one_row
+
+    state._keeps_rows_np[0] = True
+    replay, _ = _prepare(state, batch, CUDAGraphMode.NONE)
+    assert replay is not None
+    assert replay.rows.tolist() == [*range(200), *one_row[1:]]
+    state._keeps_rows_np[0] = False
+
+    monkeypatch.setattr(model_state.current_platform, "is_rocm", lambda: False)
+    replay, _ = _prepare(state, batch, CUDAGraphMode.NONE)
+    assert replay is not None and replay.rows.tolist() == full_window
 
 
 def test_prompt_logprobs_requests_keep_their_rows(state):

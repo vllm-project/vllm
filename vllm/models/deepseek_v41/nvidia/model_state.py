@@ -19,6 +19,7 @@ from vllm.models.deepseek_v41.decoder_replay_layers import (
 from vllm.models.deepseek_v41.nvidia.decoder_replay_cudagraph import (
     DecoderReplayCudaGraphManager,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadataBuilder
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
@@ -189,7 +190,8 @@ class DeepseekV41ModelState(DefaultModelState):
     window KV below them. With the decoder side on
     (``model.decoder_replay_layers``) it also prepares the replay layers'
     batch in eager steps: each prefill's last ``window`` rows as a sub-batch
-    with metadata and a forward context of its own, like a microbatch.
+    (one row for an unfinished chunk on ROCm) with metadata and a forward
+    context of its own, like a microbatch.
     """
 
     def __init__(
@@ -492,10 +494,19 @@ class DeepseekV41ModelState(DefaultModelState):
 
         num_reqs = input_batch.num_reqs
         query_lens = np.diff(input_batch.query_start_loc_np[: num_reqs + 1])
+        # is_prefilling stays true on the finishing chunk.
+        row_limit: int | np.ndarray = layers.window
+        if current_platform.is_rocm():
+            computed = input_batch.num_computed_prefill_tokens_np[:num_reqs]
+            prefill_len = input_batch.prefill_len_np[:num_reqs]
+            unfinished = input_batch.is_prefilling_np[:num_reqs] & (
+                computed + query_lens < prefill_len
+            )
+            row_limit = np.where(unfinished, 1, int(layers.window))
         kept_lens = np.where(
             self._keeps_rows_np[input_batch.idx_mapping_np[:num_reqs]],
             query_lens,
-            np.minimum(query_lens, layers.window),
+            np.minimum(query_lens, row_limit),
         )
         # A batch of context-free non-prefill rows is a dummy (an idle DP rank's):
         # nothing reads it and its idx_mapping hits stale slots, so keep one row.

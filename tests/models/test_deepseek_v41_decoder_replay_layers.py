@@ -145,6 +145,71 @@ def test_piecewise_graphs_break_out_by_size():
     write_batch_kv.assert_called_once_with(*states)
 
 
+def _replay_manager(
+    monkeypatch,
+    sizes,
+    *,
+    window=128,
+    max_capture=128,
+    max_seqs=2,
+    max_batched_tokens=512,
+    moe_backend="auto",
+    run_layers=None,
+):
+    monkeypatch.setattr(cudagraph_utils, "get_pp_group", MagicMock)
+    compilation = CompilationConfig(
+        decoder_replay_cudagraph_capture_sizes=sizes,
+        max_cudagraph_capture_size=max_capture,
+    )
+    cfg = MagicMock(compilation_config=compilation, speculative_config=None)
+    # True would capture into the cuMem pool, which breaks on ROCm.
+    cfg.use_cumem_cudagraph_pool = False
+    cfg.scheduler_config = MagicMock(
+        max_num_seqs=max_seqs, max_num_batched_tokens=max_batched_tokens
+    )
+    cfg.cache_config.use_kda_recoverssm = False
+    cfg.model_config.hf_config = MagicMock(hc_mult=HC, hidden_size=HIDDEN)
+    cfg.model_config.dtype = torch.float32
+    cfg.kernel_config.moe_backend = moe_backend
+    layers = DecoderReplayLayers(
+        window,
+        run_layers or (lambda *states: states[:2]),
+        MagicMock(),
+        set(),
+        "swa",
+    )
+    return DecoderReplayCudaGraphManager(cfg, DEVICE, layers)
+
+
+def test_rocm_empty_replay_capture_sizes_include_one(monkeypatch):
+    """ROCm's empty list captures below the window, including 1.
+    CUDA starts at the window."""
+    import vllm.models.deepseek_v41.nvidia.decoder_replay_cudagraph as replay_cg
+
+    small = (1, 2, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96)
+    monkeypatch.setattr(replay_cg.current_platform, "is_rocm", lambda: True)
+    rocm = _replay_manager(monkeypatch, [])
+    assert rocm.compilation_config.cudagraph_capture_sizes[: len(small)] == list(small)
+    assert 128 in rocm.compilation_config.cudagraph_capture_sizes
+
+    monkeypatch.setattr(replay_cg.current_platform, "is_rocm", lambda: False)
+    cuda = _replay_manager(monkeypatch, [])
+    assert 1 not in cuda.compilation_config.cudagraph_capture_sizes
+    assert cuda.compilation_config.cudagraph_capture_sizes[0] == 128
+
+
+def test_rocm_explicit_replay_capture_sizes_require_one(monkeypatch):
+    import vllm.models.deepseek_v41.nvidia.decoder_replay_cudagraph as replay_cg
+
+    monkeypatch.setattr(replay_cg.current_platform, "is_rocm", lambda: True)
+    with pytest.raises(ValueError, match="must include 1"):
+        _replay_manager(monkeypatch, [128, 256])
+
+    monkeypatch.setattr(replay_cg.current_platform, "is_rocm", lambda: False)
+    cuda = _replay_manager(monkeypatch, [128, 256], max_capture=256)
+    assert cuda.compilation_config.cudagraph_capture_sizes == [128, 256]
+
+
 @pytest.mark.parametrize(
     ("moe_backend", "ids_dtype"),
     [
@@ -157,24 +222,23 @@ def test_piecewise_graphs_break_out_by_size():
 def test_replay_graph_matches_eager(monkeypatch, moe_backend, ids_dtype):
     """The replay graph of the next captured size pads and runs the rows. Input ids
     arrive as the model passes them: int32, cast to int64 for native MegaMoE only."""
-    monkeypatch.setattr(cudagraph_utils, "get_pp_group", MagicMock)
     capture = torch.cuda.stream(torch.cuda.Stream())
     monkeypatch.setattr(cudagraph_utils, "graph_capture", lambda device: capture)
-    compilation = CompilationConfig(decoder_replay_cudagraph_capture_sizes=[4])
-    cfg = MagicMock(compilation_config=compilation, speculative_config=None)
-    # Mocking it true would capture into the cuMem pool, which breaks on ROCm.
-    cfg.use_cumem_cudagraph_pool = False
-    cfg.scheduler_config = MagicMock(max_num_seqs=2, max_num_batched_tokens=64)
-    cfg.cache_config.use_kda_recoverssm = False
-    cfg.model_config.hf_config = MagicMock(hc_mult=HC, hidden_size=HIDDEN)
-    cfg.model_config.dtype = torch.float32
-    cfg.kernel_config.moe_backend = moe_backend
 
     def run_layers(hidden, positions, ids, pre, post, mix, residual):
         return residual + hidden[:, None] + positions[:, None, None], pre + ids[:, None]
 
-    layers = DecoderReplayLayers(4, run_layers, MagicMock(), set(), "swa")
-    manager = DecoderReplayCudaGraphManager(cfg, DEVICE, layers)
+    # 1 is required on ROCm. dispatch(3) still uses the size-4 graph.
+    manager = _replay_manager(
+        monkeypatch,
+        [1, 4],
+        window=4,
+        max_capture=4,
+        max_batched_tokens=64,
+        moe_backend=moe_backend,
+        run_layers=run_layers,
+    )
+    layers = manager.layers
 
     def prepare(desc):
         rows = torch.arange(desc.num_tokens)
