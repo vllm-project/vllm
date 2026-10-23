@@ -1,15 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Single-sequence attention for gfx1151 (max_num_seqs=1, opt-in).
+"""Attention for gfx1151 (opt-in).
 
-Calls of up to MAX_M query tokens run csrc/rocm/rdna_singleseq_decode_attn.cu, longer
-ones csrc/rocm/rdna_singleseq_prefill_attn.cu, on TRITON_ATTN's KV cache. Anything the
-kernels do not support runs TRITON_ATTN.
+Decodes of up to MAX_M query tokens per sequence run
+csrc/rocm/rdna_singleseq_decode_attn.cu, other batches
+csrc/rocm/rdna_singleseq_prefill_attn.cu, on TRITON_ATTN's KV cache. Anything
+the kernels do not support runs TRITON_ATTN.
 """
 
-from dataclasses import dataclass, fields
-from typing import TYPE_CHECKING, Any, ClassVar
+from collections.abc import Callable
+from dataclasses import dataclass, field, fields
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
+import numpy as np
 import torch
 
 from vllm.config import get_current_vllm_config_or_none
@@ -27,6 +30,7 @@ from vllm.v1.attention.backends.triton_attn import (
     TritonAttentionMetadata,
     TritonAttentionMetadataBuilder,
 )
+from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.rocm_rdna_singleseq_hip import (
     MAX_M,
     PREFILL_MIN_M,
@@ -37,8 +41,12 @@ from vllm.v1.attention.ops.rocm_rdna_singleseq_hip import (
     load_prefill,
     make_prefill_scratch,
     make_scratch,
+    plan_prefill,
+    prefill_batch_variant_for,
+    prefill_target_workgroups,
     prefill_variant_for,
     prefill_variants,
+    scratch_bytes,
     variant_for,
 )
 from vllm.v1.kv_cache_interface import KVCacheLayout, KVQuantMode
@@ -61,21 +69,33 @@ def _on_gfx1151() -> bool:
 _Built = tuple[Any, tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]
 
 # Split-KV scratch shared by all layers; each launch leaves the counters zeroed.
-_SCRATCH: dict[tuple[KernelVariant, torch.device], Any] = {}
+# A larger batch than the budget holds runs on Triton.
+_SCRATCH: dict[tuple[KernelVariant, torch.device], tuple[int, Any]] = {}
+_SCRATCH_BUDGET = 64 * 1024**2
 _PREFILL_SCRATCH: dict[tuple, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
-# The decode kernel's multimodal ranges, [count, start0, end0, ...] per
-# device. The metadata builder rewrites them every step, so CUDA graphs replay
-# the current ones.
+# The decode kernel's multimodal ranges, a row [count, start0, end0, ...] per
+# request, per device. The metadata builder rewrites them every step, so CUDA
+# graphs replay the current ones.
 MM_RANGES_CAPACITY = 32
-_MM_RANGES: dict[torch.device, torch.Tensor] = {}
+_MM_RANGES: dict[tuple[torch.device, int], torch.Tensor] = {}
 
 
-def mm_ranges_buffer(device: torch.device) -> torch.Tensor:
-    if device not in _MM_RANGES:
-        _MM_RANGES[device] = torch.zeros(
-            1 + 2 * MM_RANGES_CAPACITY, dtype=torch.int32, device=device
+def mm_ranges_buffer(device: torch.device, rows: int) -> torch.Tensor:
+    if (device, rows) not in _MM_RANGES:
+        _MM_RANGES[device, rows] = torch.zeros(
+            rows, 1 + 2 * MM_RANGES_CAPACITY, dtype=torch.int32, device=device
         )
-    return _MM_RANGES[device]
+    return _MM_RANGES[device, rows]
+
+
+# Side stream for a mixed batch's decodes, per device.
+_SIDE_STREAMS: dict[torch.device, torch.cuda.Stream] = {}
+
+
+def _side_stream(device: torch.device) -> torch.cuda.Stream:
+    if device not in _SIDE_STREAMS:
+        _SIDE_STREAMS[device] = torch.cuda.Stream(device)
+    return _SIDE_STREAMS[device]
 
 
 def mm_query_overlap(md: CommonAttentionMetadata) -> tuple[bool, int]:
@@ -110,8 +130,12 @@ def mm_query_overlap(md: CommonAttentionMetadata) -> tuple[bool, int]:
     return future_keys, reach
 
 
-def mm_decode_ranges(md: CommonAttentionMetadata) -> list[tuple[int, int]] | None:
-    """Request 0's non-empty ranges that may hold one of the step's query tokens.
+def mm_decode_ranges(
+    md: CommonAttentionMetadata,
+) -> list[list[tuple[int, int]]] | None:
+    """Per request the decode kernel may serve (at most MAX_M query tokens),
+    its non-empty ranges that may hold one of its query tokens; none for the
+    others, which run on the prefill kernel.
 
     The kernel only bounds the mask of query tokens, so the others change
     nothing. On async spec-decode rows seq_lens_cpu_upper_bound may overshoot
@@ -121,16 +145,34 @@ def mm_decode_ranges(md: CommonAttentionMetadata) -> list[tuple[int, int]] | Non
     """
     if md.mm_req_doc_ranges is None:
         return None
-    spans = [(s, e) for s, e in md.mm_req_doc_ranges.get(0, []) if s < e]
-    if md.seq_lens_cpu_upper_bound is not None:
-        end = int(md.seq_lens_cpu_upper_bound[0])
-        m = int(md.query_start_loc_cpu[1] - md.query_start_loc_cpu[0])
-        spans = [(s, e) for s, e in spans if s <= end - 1 and e >= end - 2 * m + 1]
-    return spans
+    starts = md.query_start_loc_cpu
+    per_request: list[list[tuple[int, int]]] = [[] for _ in range(len(starts) - 1)]
+    for i, ranges in md.mm_req_doc_ranges.items():
+        m = int(starts[i + 1] - starts[i])
+        if m > MAX_M:
+            continue
+        spans = [(s, e) for s, e in ranges if s < e]
+        if md.seq_lens_cpu_upper_bound is not None:
+            end = int(md.seq_lens_cpu_upper_bound[i])
+            spans = [(s, e) for s, e in spans if s <= end - 1 and e >= end - 2 * m + 1]
+        per_request[i] = spans
+    return per_request
 
 
 @dataclass
 class RocmRdnaSingleSeqMetadata(TritonAttentionMetadata):
+    """Triton's metadata plus the host's copy of the batch for the prefill
+    plan."""
+
+    query_start_loc_cpu: torch.Tensor | None = None
+    # Upper bounds; they only balance the plan.
+    seq_lens_cpu: torch.Tensor | None = None
+    # Leading decodes of one query length.
+    num_decodes: int = 0
+    num_decode_tokens: int = 0
+    # (window, first sequence) -> (build, host plan, device plan, head group,
+    # query starts); the host plan outlives its non-blocking upload.
+    plans: dict = field(default_factory=dict)
     # mm_query_overlap of the step.
     mm_future_keys: bool = False
     mm_reach: int = -1
@@ -140,8 +182,17 @@ class RocmRdnaSingleSeqMetadata(TritonAttentionMetadata):
 
 
 class RocmRdnaSingleSeqMetadataBuilder(TritonAttentionMetadataBuilder):
-    # The decode kernel is built for a fixed M and ignores query_start_loc.
+    """Triton's builder, decodes first and counted. CUDA graphs only for
+    uniform decode batches: a prefill plan follows the host."""
+
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
+        if self.reorder_batch_threshold is not None:
+            self.reorder_batch_threshold = min(self.reorder_batch_threshold, MAX_M)
+        self._mm_rows = self.vllm_config.scheduler_config.max_num_seqs
 
     def build(
         self,
@@ -150,31 +201,48 @@ class RocmRdnaSingleSeqMetadataBuilder(TritonAttentionMetadataBuilder):
         fast_build: bool = False,
     ) -> RocmRdnaSingleSeqMetadata:
         md = super().build(common_prefix_len, common_attn_metadata, fast_build)
+        num_decodes = num_decode_tokens = 0
+        if self.reorder_batch_threshold is not None:
+            num_decodes, _, num_decode_tokens, _ = split_decodes_and_prefills(
+                common_attn_metadata,
+                decode_threshold=self.reorder_batch_threshold,
+                require_uniform=True,
+            )
         future_keys, reach = mm_query_overlap(common_attn_metadata)
         return RocmRdnaSingleSeqMetadata(
-            **{f.name: getattr(md, f.name) for f in fields(md)},
+            **{f.name: getattr(md, f.name) for f in fields(TritonAttentionMetadata)},
+            query_start_loc_cpu=common_attn_metadata.query_start_loc_cpu,
+            seq_lens_cpu=common_attn_metadata.seq_lens_cpu_upper_bound,
+            num_decodes=num_decodes,
+            num_decode_tokens=num_decode_tokens,
             mm_future_keys=future_keys,
             mm_reach=reach,
             mm_ranges_decode=self._mm_ranges_decode(common_attn_metadata),
         )
 
     def _mm_ranges_decode(self, md: CommonAttentionMetadata) -> torch.Tensor | None:
-        """Write mm_decode_ranges to mm_ranges_buffer."""
-        spans = mm_decode_ranges(md)
-        if spans is None:
+        """Write mm_decode_ranges to mm_ranges_buffer, a row per request."""
+        per_request = mm_decode_ranges(md)
+        if per_request is None:
             return None
-        buf = mm_ranges_buffer(self.device)
-        if len(spans) > MM_RANGES_CAPACITY:
+        buf = mm_ranges_buffer(self.device, self._mm_rows)
+        if len(per_request) > buf.shape[0] or any(
+            len(spans) > MM_RANGES_CAPACITY for spans in per_request
+        ):
             # A replayed CUDA graph must not read an earlier step's ranges.
-            buf[:1].fill_(0)
+            buf[:, 0].fill_(0)
             return None
-        flat = [len(spans), *(x for span in spans for x in span)]
-        buf[: len(flat)].copy_(torch.tensor(flat, dtype=torch.int32), non_blocking=True)
+        rows = torch.zeros(len(per_request), buf.shape[1], dtype=torch.int32)
+        for i, spans in enumerate(per_request):
+            if spans:
+                rows[i, 0] = len(spans)
+                rows[i, 1 : 1 + 2 * len(spans)] = torch.tensor(spans).flatten()
+        buf[: len(per_request)].copy_(rows, non_blocking=True)
         return buf
 
 
 class RocmRdnaSingleSeqAttentionBackend(TritonAttentionBackend):
-    """TRITON_ATTN with the RDNA3.5 kernels; requires max_num_seqs=1."""
+    """TRITON_ATTN with the RDNA3.5 kernels."""
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
@@ -192,7 +260,7 @@ class RocmRdnaSingleSeqAttentionBackend(TritonAttentionBackend):
         return RocmRdnaSingleSeqAttentionImpl
 
     @staticmethod
-    def get_builder_cls() -> type["RocmRdnaSingleSeqMetadataBuilder"]:
+    def get_builder_cls() -> type[RocmRdnaSingleSeqMetadataBuilder]:
         return RocmRdnaSingleSeqMetadataBuilder
 
     @classmethod
@@ -241,14 +309,8 @@ class RocmRdnaSingleSeqAttentionBackend(TritonAttentionBackend):
         return _on_gfx1151()
 
     @classmethod
-    def supports_combination(cls, *args, **kwargs) -> str | None:
-        vllm_config = get_current_vllm_config_or_none()
-        if vllm_config is None or vllm_config.scheduler_config.max_num_seqs != 1:
-            return "max_num_seqs must be 1"
-        return None
-
-    @classmethod
     def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+        # The kernels address a page as [H, N, K|V].
         return (KVCacheLayout.LBHNC,)
 
 
@@ -264,6 +326,12 @@ class RocmRdnaSingleSeqAttentionImpl(TritonAttentionImpl):
         self.kernel_calls = 0
         self.fallback_calls = 0
         self.prefill_calls = 0
+        vllm_config = get_current_vllm_config_or_none()
+        self._max_seqs = (
+            vllm_config.scheduler_config.max_num_seqs if vllm_config is not None else 1
+        )
+        # Sequences the batched scratch holds.
+        self._cap = 0
 
     def _reject(self, reason: str) -> None:
         """Log why this call falls back to Triton."""
@@ -277,10 +345,6 @@ class RocmRdnaSingleSeqAttentionImpl(TritonAttentionImpl):
 
     def _served_window(self, kwargs: dict) -> int | None:
         """The sliding window in keys (0: none), or None if unsupported."""
-        nseq = kwargs["seqused_k"].shape[0]
-        if nseq != 1:
-            self._reject(f"{nseq} sequences in one batch, the kernels take one")
-            return None
         if kwargs["alibi_slopes"] is not None or kwargs["sinks"] is not None:
             self._reject("alibi/sinks unsupported")
             return None
@@ -301,6 +365,7 @@ class RocmRdnaSingleSeqAttentionImpl(TritonAttentionImpl):
         if kwargs.get("chunk_lookback", -1) >= 0:
             self._reject("chunk lookback unsupported")
             return None
+        # Not the descales: unquantized, they are a 1.0 broadcast.
         if kwargs["kv_quant_mode"] != KVQuantMode.NONE:
             self._reject(f"KV quant mode {kwargs['kv_quant_mode']!r} unsupported")
             return None
@@ -352,9 +417,11 @@ class RocmRdnaSingleSeqAttentionImpl(TritonAttentionImpl):
         if kwargs.get("mm_future_keys") and kwargs.get("mm_ranges_decode") is None:
             self._reject("decode: multimodal ranges with later keys do not fit")
             return None
+        # One build per M.
+        nseq = kwargs["seqused_k"].shape[0]
         max_query_len = kwargs["max_seqlen_q"]
-        if kwargs["q"].shape[0] != max_query_len:
-            self._reject("query tokens do not match max_query_len")
+        if kwargs["q"].shape[0] != nseq * max_query_len:
+            self._reject("sequences of unequal query length")
             return None
         if max_query_len > MAX_M:
             self._reject(f"{max_query_len} query tokens, more than {MAX_M}")
@@ -362,6 +429,7 @@ class RocmRdnaSingleSeqAttentionImpl(TritonAttentionImpl):
         if not self._served_tensors(kv_cache, kwargs, SUPPORTED_HEAD_SIZES):
             return None
 
+        # Logical KV cache order is (num_blocks, num_kv_heads, block_size, 2*hs).
         q = kwargs["q"]
         variant = variant_for(
             self.num_heads,
@@ -372,6 +440,7 @@ class RocmRdnaSingleSeqAttentionImpl(TritonAttentionImpl):
             0 if kv_cache.stride(1) < kv_cache.stride(2) else 1,
             win,
             q.dtype,
+            nseq > 1,
         )
         if variant is None:
             self._reject("no build in _rocm_C for this shape and layout")
@@ -389,9 +458,20 @@ class RocmRdnaSingleSeqAttentionImpl(TritonAttentionImpl):
                 return None
             key = (variant, q.device)
             if key not in _SCRATCH:
-                _SCRATCH[key] = make_scratch(variant, q.device)
-            self._built = (module, _SCRATCH[key])
+                cap = 1
+                if variant.batched:
+                    per_seq = scratch_bytes(variant)
+                    cap = min(self._max_seqs, max(1, _SCRATCH_BUDGET // per_seq))
+                _SCRATCH[key] = (
+                    cap,
+                    make_scratch(variant, q.device, cap if variant.batched else 0),
+                )
+            self._cap, scratch = _SCRATCH[key]
+            self._built = (module, scratch)
             self._variant = variant
+        if nseq > self._cap:
+            self._reject(f"{nseq} sequences, the decode scratch holds {self._cap}")
+            return None
         return self._built
 
     def forward(
@@ -406,11 +486,13 @@ class RocmRdnaSingleSeqAttentionImpl(TritonAttentionImpl):
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        """The kernels when they can serve the call, else Triton's forward."""
         if (
             attn_metadata is None
             or output_scale is not None
             or output_block_scale is not None
         ):
+            # Profiling and quantized output: Triton's.
             return super().forward(
                 layer,
                 query,
@@ -445,53 +527,124 @@ class RocmRdnaSingleSeqAttentionImpl(TritonAttentionImpl):
             "chunk_lookback": self.chunk_lookback,
             "kv_quant_mode": self._kv_quant_mode,
         }
-        if n >= PREFILL_MIN_M:
-            if self._serve_prefill(kv_cache, attn_metadata, args):
-                self.kernel_calls += 1
-                self.prefill_calls += 1
-                return output
-        else:
+        nseq = attn_metadata.seq_lens.shape[0]
+        max_query_len = attn_metadata.max_query_len
+        if max_query_len <= MAX_M and n == nseq * max_query_len:
+            # Decode: every sequence the same M.
             built = self._prepare(kv_cache, **args)
             if built is not None:
                 self.kernel_calls += 1
                 self._launch(built, kv_cache, args)
                 return output
+        elif self._serve_mixed(kv_cache, attn_metadata, args) or self._serve_prefill(
+            kv_cache, attn_metadata, args
+        ):
+            self.kernel_calls += 1
+            self.prefill_calls += 1
+            return output
         self.fallback_calls += 1
         return super().forward(
             layer, query, key, value, kv_cache, attn_metadata, output
         )
 
+    def _serve_mixed(
+        self, kv_cache: torch.Tensor, md: TritonAttentionMetadata, kwargs: dict
+    ) -> bool:
+        """Leading decodes on the decode kernel, the rest on the prefill
+        kernel; False if a kernel cannot take its part."""
+        nd = getattr(md, "num_decodes", 0)
+        ndt = getattr(md, "num_decode_tokens", 0)
+        nseq = kwargs["seqused_k"].shape[0]
+        if not 0 < nd < nseq or torch.cuda.is_current_stream_capturing():
+            return False
+        decodes, prefills = dict(kwargs), dict(kwargs)
+        for k in ("q", "out"):
+            decodes[k], prefills[k] = kwargs[k][:ndt], kwargs[k][ndt:]
+        for k in ("seqused_k", "block_table"):
+            decodes[k], prefills[k] = kwargs[k][:nd], kwargs[k][nd:]
+        decodes["max_seqlen_q"] = ndt // nd
+        built = self._prepare(kv_cache, **decodes)
+        if built is None:
+            return False
+        launch_prefills = self._prepare_prefill(kv_cache, md, prefills, first=nd)
+        if launch_prefills is None:
+            return False
+        # Decodes on a side stream fill the SIMDs a narrow prefill leaves.
+        main = torch.cuda.current_stream()
+        side = _side_stream(main.device)
+        side.wait_stream(main)
+        with torch.cuda.stream(side):
+            self._launch(built, kv_cache, decodes)
+        launch_prefills()
+        main.wait_stream(side)
+        return True
+
     def _serve_prefill(
         self, kv_cache: torch.Tensor, md: RocmRdnaSingleSeqMetadata, kwargs: dict
     ) -> bool:
-        """Run the prefill kernel; False if it cannot serve the call.
+        """Run the prefill kernel; False if it cannot serve the call."""
+        launch = self._prepare_prefill(kv_cache, md, kwargs)
+        if launch is None:
+            return False
+        launch()
+        return True
+
+    def _prepare_prefill(
+        self,
+        kv_cache: torch.Tensor,
+        md: TritonAttentionMetadata,
+        kwargs: dict,
+        first: int = 0,
+    ) -> Callable[[], None] | None:
+        """The prefill launch for the sequences from `first` on, or None.
 
         Not under CUDA-graph capture: the launch depends on the host's M and S.
         """
         if torch.cuda.is_current_stream_capturing():
-            return False
+            return None
         win = self._served_window(kwargs)
         if win is None or not self._served_tensors(kv_cache, kwargs, None):
-            return False
-        # Ranges whose query tokens see no later keys leave the mask causal.
-        mm_ranges = kwargs["mm_prefix_range"] if kwargs["mm_future_keys"] else None
+            return None
         block_size = kv_cache.shape[2]
         kv_row = 2 * self.head_size
         hnd = (block_size * self.num_kv_heads * kv_row, block_size * kv_row, kv_row)
         if (kv_cache.stride(0), kv_cache.stride(1), kv_cache.stride(2)) != hnd:
             self._reject("prefill: KV cache is not the packed HND layout")
-            return False
+            return None
         q, out = kwargs["q"], kwargs["out"]
         m = q.shape[0]
+        nseq = kwargs["seqused_k"].shape[0]
+        # A batch, or fewer tokens than the first build serves: a plan.
+        planned = nseq > 1 or m < PREFILL_MIN_M
+        # Ranges whose query tokens see no later keys leave the mask causal.
+        mm_ranges = kwargs["mm_prefix_range"] if kwargs.get("mm_future_keys") else None
+        if mm_ranges is not None:
+            mm_ranges = mm_ranges[first : first + nseq] if planned else mm_ranges[first]
+        if planned:
+            # The host's copy must be this step's.
+            starts = getattr(md, "query_start_loc_cpu", None)
+            if (
+                starts is None
+                or starts.shape[0] != first + nseq + 1
+                or int(starts[-1]) - int(starts[first]) != m
+            ):
+                self._reject("prefill batch without the host's query starts")
+                return None
         hq, hkv, d = self.num_heads, self.num_kv_heads, self.head_size
-        variant = prefill_variant_for(hq, hkv, d, block_size, 1, win, q.dtype, m)
+        if planned:
+            variant, plan, head_group, starts = self._plan(
+                cast(RocmRdnaSingleSeqMetadata, md), block_size, win, first, q
+            )
+        else:
+            variant = prefill_variant_for(hq, hkv, d, block_size, 1, win, q.dtype, m)
         module = load_prefill(variant) if variant is not None else None
         if variant is None or module is None:
             self._reject(
                 f"prefill of {m} query tokens: no build in _rocm_C for "
                 f"{hq}/{hkv}/{d} window {win} page {block_size} {q.dtype}"
             )
-            return False
+            return None
+        # Sized for every build of the shape.
         shape = (hq, hkv, d, block_size, win, q.dtype)
         scratch_key = (shape, q.device)
         scratch = _PREFILL_SCRATCH.get(scratch_key)
@@ -500,22 +653,90 @@ class RocmRdnaSingleSeqAttentionImpl(TritonAttentionImpl):
                 [*prefill_variants(*shape), variant], q.device
             )
             _PREFILL_SCRATCH[scratch_key] = scratch
-        module.prefill_attn(
+        args = (
             q,
             kv_cache,
             kwargs["block_table"],
             out,
             *scratch,
             kwargs["seqused_k"],
-            # Only sizes the KV split.
-            max(md.max_seq_len, m),
-            kwargs["softmax_scale"],
-            mm_ranges[0] if mm_ranges is not None else None,
         )
-        return True
+        if not planned:
+            # Only sizes the KV split.
+            return lambda: module.prefill_attn(
+                *args, max(md.max_seq_len, m), kwargs["softmax_scale"], mm_ranges
+            )
+        if not plan.shape[0]:
+            return lambda: None
+        return lambda: module.prefill_attn(
+            *args,
+            md.max_seq_len,
+            kwargs["softmax_scale"],
+            mm_ranges,
+            plan=plan,
+            query_start_loc=starts,
+            head_group=head_group,
+        )
+
+    def _plan(
+        self,
+        md: RocmRdnaSingleSeqMetadata,
+        block_size: int,
+        win: int,
+        first: int,
+        q: torch.Tensor,
+    ) -> tuple[Any, torch.Tensor, int, torch.Tensor]:
+        """This step's build, plan, head group and device query starts for the
+        sequences from `first` on; made by the first layer, shared by the
+        rest."""
+        key = (win, first)
+        cached = md.plans.get(key)
+        if cached is None:
+            assert md.query_start_loc_cpu is not None
+            base = int(md.query_start_loc_cpu[first])
+            starts = (md.query_start_loc_cpu[first:] - base).numpy()
+            nseq = starts.shape[0] - 1
+            seq_lens = (
+                md.seq_lens_cpu[first : first + nseq].numpy()
+                if md.seq_lens_cpu is not None
+                else np.full(nseq, md.max_seq_len)
+            )
+            variant, head_group = prefill_batch_variant_for(
+                self.num_heads,
+                self.num_kv_heads,
+                self.head_size,
+                block_size,
+                1,
+                win,
+                q.dtype,
+                starts,
+                seq_lens,
+            )
+            plan = device_plan = None
+            if variant is not None:
+                plan, head_group = plan_prefill(
+                    starts,
+                    seq_lens,
+                    variant,
+                    win,
+                    prefill_target_workgroups(q.device),
+                    head_group,
+                )
+                plan = torch.from_numpy(plan).pin_memory()
+                device_plan = plan.to(q.device, non_blocking=True)
+            cached = md.plans[key] = (
+                variant,
+                plan,
+                device_plan,
+                head_group,
+                md.query_start_loc[first:] - base if first else md.query_start_loc,
+            )
+        variant, _, device_plan, head_group, device_starts = cached
+        return variant, device_plan, head_group, device_starts
 
     def _launch(self, built: _Built, kv_cache: torch.Tensor, kwargs: dict) -> None:
         module, (acc, softmax_max, softmax_sum, arrivals) = built
+        # Called directly: this runs under CUDA-graph capture.
         module.decode_attn(
             kwargs["q"],
             kv_cache,

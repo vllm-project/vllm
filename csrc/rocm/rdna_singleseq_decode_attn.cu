@@ -1,6 +1,7 @@
 // RDNA3.5 decode attention over the paged KV cache
 // (num_pages, NUM_KV_HEADS, PAGE_SIZE, 2 * HEAD_DIM), K and V packed per row,
-// as a template on one entry of rdna_singleseq_decode_configs.h.
+// as a template on one entry of rdna_singleseq_decode_configs.h, or of
+// rdna_singleseq_decode_batch_configs.h (one sequence per grid.y).
 //
 // One workgroup per (kv head, row group, KV segment) handles all query rows of
 // its kv head, so the KV is read once. Both products are WMMA 16x16x16:
@@ -18,6 +19,7 @@
 
 #include "rdna_singleseq_attn_common.cuh"
 #include "rdna_singleseq_attn_launch.h"
+#include "rdna_singleseq_decode_batch_configs.h"
 #include "rdna_singleseq_decode_configs.h"
 
 namespace rdna_singleseq {
@@ -38,8 +40,9 @@ struct u3w {
   __device__ unsigned operator[](int i) const { return w[i]; }
 };
 
-template <DecodeConfig C>
+template <DecodeConfig C, bool kBatchedBuild = false>
 struct Decode {
+  static constexpr bool kBatched = kBatchedBuild;
   static constexpr int kHeadDim = static_cast<int>(C.head_dim);
   static constexpr int kNumQHeads = C.num_q_heads;
   static constexpr int kNumKvHeads = C.num_kv_heads;
@@ -61,6 +64,8 @@ struct Decode {
 
   // Polls before a shared-merge waiter leaves its slice to the last arriver.
   static constexpr int kMaxSpins = 128;
+  // Workgroups per WGP a batch aims for.
+  static constexpr int kBatchWorkgroupsPerWgp = 4;
   static constexpr int kWaveSize = 32;
   static constexpr int kThreads = kWaves * kWaveSize;
   static constexpr int kQHeadsPerKvHead = kNumQHeads / kNumKvHeads;
@@ -648,8 +653,17 @@ struct Decode {
     const int firstBlock =
         kWindow ? max(0, seqLen - kMaxQueryLen - (kWindow - 1)) / kBlockKeys
                 : 0;
-    const int numSegments =
-        max(1, min(kMaxSegments, (numBlocks - firstBlock) / kMinSegmentBlocks));
+    int numSegments;
+    if constexpr (kBatched) {
+      // The host's segment cap is in the upper bits of cooperative.
+      const int segmentCap = cooperative >> 1;
+      cooperative &= 1;
+      numSegments = max(1, min(min(kMaxSegments, segmentCap),
+                               (numBlocks - firstBlock) / kMinSegmentBlocks));
+    } else {
+      numSegments = max(
+          1, min(kMaxSegments, (numBlocks - firstBlock) / kMinSegmentBlocks));
+    }
     if (segment >= numSegments) return;
     if constexpr (kWindow)
       pageIndices = block_pages(blockTable, firstBlock + segment, lane, seqLen);
@@ -1206,17 +1220,37 @@ struct Decode {
   static constexpr int kGrid = kDotProduct ? kDotGrid : kWmmaGrid;
 };
 
-template <DecodeConfig C, typename OutT>
-__global__ __launch_bounds__(Decode<C>::kThreads) void decode_attn(
-    const typename Decode<C>::elem_t* __restrict__ q,
-    const typename Decode<C>::elem_t* __restrict__ kv,
+// Per-sequence strides of a batch.
+struct DecodeBatch {
+  int blockTableStride, accStride, statStride, counterStride, mmStride;
+};
+
+template <DecodeConfig C, bool kBatched, typename OutT>
+__global__ __launch_bounds__((Decode<C, kBatched>::kThreads)) void decode_attn(
+    const typename Decode<C, kBatched>::elem_t* __restrict__ q,
+    const typename Decode<C, kBatched>::elem_t* __restrict__ kv,
     const int* __restrict__ blockTable, float* __restrict__ partialAcc,
     float* __restrict__ partialMax, float* __restrict__ partialSum,
     int* __restrict__ counters, OutT* __restrict__ out,
     const int* __restrict__ seqLens, int blockTableWidth, float scale,
-    int cooperative, const int* __restrict__ mmRanges, int mmCapacity) {
-  using K = Decode<C>;
+    int cooperative, DecodeBatch batch, const int* __restrict__ mmRanges,
+    int mmCapacity) {
+  using K = Decode<C, kBatched>;
   __shared__ __attribute__((aligned(16))) char lds[K::kLds];
+  if constexpr (kBatched) {
+    const int seq = blockIdx.y;
+    constexpr int kSeqElems = K::kMaxQueryLen * K::kNumQHeads * K::kHeadDim;
+    q += (size_t)seq * kSeqElems;
+    out += (size_t)seq * kSeqElems;
+    blockTable += (size_t)seq * batch.blockTableStride;
+    partialAcc += (size_t)seq * batch.accStride;
+    partialMax += (size_t)seq * batch.statStride;
+    partialSum += (size_t)seq * batch.statStride;
+    counters += (size_t)seq * batch.counterStride;
+    seqLens += seq;
+    // mmStride is 0 without ranges.
+    mmRanges += (size_t)seq * batch.mmStride;
+  }
   // Load S and the first pages together.
   const int seqLen = __builtin_amdgcn_readfirstlane(*seqLens);
   if constexpr (K::kDotProduct) {
@@ -1227,6 +1261,10 @@ __global__ __launch_bounds__(Decode<C>::kThreads) void decode_attn(
                                mmRanges, mmCapacity);
   } else {
     const int pageIndices = K::wmma_first_pages(blockTable, blockTableWidth);
+    if constexpr (kBatched) {
+      // CUDA-graph padding.
+      if (seqLen <= 0) return;
+    }
     K::template wmma_body<OutT>(q, kv, blockTable, partialAcc, partialMax,
                                 partialSum, counters, out, seqLen, pageIndices,
                                 blockTableWidth, scale, cooperative, lds,
@@ -1235,12 +1273,14 @@ __global__ __launch_bounds__(Decode<C>::kThreads) void decode_attn(
 }
 
 // Arguments are checked by rdna_singleseq_registry.cu.
-template <DecodeConfig C>
+template <DecodeConfig C, bool kBatched = false>
 void launch_decode(const LaunchArgs& a) {
-  using K = Decode<C>;
+  using K = Decode<C, kBatched>;
   using elem_t = typename K::elem_t;
+  static_assert(!kBatched || !K::kDotProduct,
+                "a batched build runs the WMMA decomposition");
   // Row group fastest, then kv head, then segment.
-  dim3 grid(K::kGrid), threads(K::kThreads);
+  dim3 grid(K::kGrid, a.nseq), threads(K::kThreads);
   static const int residentWorkgroups = [&] {
     if (!K::kSharedMerge) return 0;
     int device, numWgps, perWgp = 0;
@@ -1248,12 +1288,12 @@ void launch_decode(const LaunchArgs& a) {
     (void)hipDeviceGetAttribute(&numWgps, hipDeviceAttributeMultiprocessorCount,
                                 device);
     (void)hipOccupancyMaxActiveBlocksPerMultiprocessor(
-        &perWgp, decode_attn<C, elem_t>, K::kThreads, 0);
+        &perWgp, decode_attn<C, kBatched, elem_t>, K::kThreads, 0);
     // The runtime assumes 64 KiB of LDS per WGP; gfx1151 has 128 KiB.
     hipFuncAttributes attrs;
     hipDeviceProp_t prop;
-    if (hipFuncGetAttributes(
-            &attrs, reinterpret_cast<const void*>(decode_attn<C, elem_t>)) ==
+    if (hipFuncGetAttributes(&attrs, reinterpret_cast<const void*>(
+                                         decode_attn<C, kBatched, elem_t>)) ==
             hipSuccess &&
         hipGetDeviceProperties(&prop, device) == hipSuccess &&
         strstr(prop.gcnArchName, "gfx1151")) {
@@ -1268,12 +1308,28 @@ void launch_decode(const LaunchArgs& a) {
     return perWgp * numWgps;
   }();
   // The shared merge needs the whole grid resident.
-  const int cooperative = (int)(residentWorkgroups >= (int)grid.x);
-  hipLaunchKernelGGL((decode_attn<C, elem_t>), grid, threads, 0, a.stream,
-                     static_cast<const elem_t*>(a.q),
+  int cooperative = (int)(residentWorkgroups >= (int)(grid.x * grid.y));
+  DecodeBatch batch{};
+  if constexpr (kBatched) {
+    // Cap the segments per sequence near kBatchWorkgroupsPerWgp per WGP.
+    static const int batchTarget = [] {
+      int device, numWgps = 1;
+      (void)hipGetDevice(&device);
+      (void)hipDeviceGetAttribute(
+          &numWgps, hipDeviceAttributeMultiprocessorCount, device);
+      return K::kBatchWorkgroupsPerWgp * std::max(1, numWgps);
+    }();
+    const int groups = K::kGrid / K::kMaxSegments;
+    cooperative |=
+        std::max(1, (batchTarget + a.nseq * groups - 1) / (a.nseq * groups))
+        << 1;
+    batch = {a.bt_stride, a.acc_stride, a.ml_stride, a.cnt_stride, a.mm_stride};
+  }
+  hipLaunchKernelGGL((decode_attn<C, kBatched, elem_t>), grid, threads, 0,
+                     a.stream, static_cast<const elem_t*>(a.q),
                      static_cast<const elem_t*>(a.kv), a.bt, a.acc, a.m, a.l,
                      a.cnt, static_cast<elem_t*>(a.out), a.seq_lens, a.bt_width,
-                     a.scale, cooperative, a.mm_ranges, a.mm_capacity);
+                     a.scale, cooperative, batch, a.mm_ranges, a.mm_capacity);
 }
 
 }  // namespace rdna_singleseq

@@ -1,11 +1,13 @@
 // RDNA3.5 prefill attention for one sequence of M query tokens after a cached
-// prefix, causal and optionally windowed, over the paged KV cache
+// prefix, or a batch through plan_prefill's work list, causal and optionally
+// windowed, over the paged KV cache
 // (num_pages, NUM_KV_HEADS, PAGE_SIZE, 2 * HEAD_DIM), as a template on one
 // entry of rdna_singleseq_prefill_configs.h.
 //
 // PrefixLM: a token in a multimodal range [start, end] (absolute positions,
-// inclusive) also sees the range's later keys. The window still bounds its
-// earlier keys, as TRITON_ATTN with mm_prefix_clamp_sliding_window.
+// inclusive; per sequence in a batch) also sees the range's later keys. The
+// window still bounds its earlier keys, as TRITON_ATTN with
+// mm_prefix_clamp_sliding_window.
 //
 // FlashAttention-2 on WMMA 16x16x16. One workgroup per (kv head, query tile,
 // KV segment); row r of a kv head is token r / G, q head kvHead * G + r % G.
@@ -184,6 +186,9 @@ struct Prefill {
       std::min(kWaves >= 16 ? 8 : 6, 131072 / kLdsBytes * kWaves / 4) /
       kSimdWaves * kSimdWaves;
 
+  // kBatch: a batch through the work list, apart so that the one-sequence
+  // kernel keeps its registers.
+  template <bool kBatch>
   static __global__ void __launch_bounds__(kThreads)
       __attribute__((amdgpu_waves_per_eu(kWavesPerSimd > 1 ? kWavesPerSimd
                                                            : 1)))
@@ -192,7 +197,10 @@ struct Prefill {
                    const int* __restrict__ seqLens, int numTokens, float scale,
                    float* __restrict__ partialO, float* __restrict__ partialML,
                    int* __restrict__ counters, int numSegments, int firstRound,
-                   const int* __restrict__ mmRanges, int numMmRanges) {
+                   const int* __restrict__ mmRanges, int numMmRanges,
+                   const int4* __restrict__ plan,
+                   const int* __restrict__ queryStart, int numEntries,
+                   int blockTableStride, int headGroup) {
     __shared__ __attribute__((
         aligned(16))) elem_t kTile[kBuffers][kKeyTile][kRowPitch];
     __shared__ __attribute__((aligned(16))) elem_t
@@ -210,16 +218,43 @@ struct Prefill {
     const int rowWave = wave / (kDimParts * kKeyWaves);
     const int firstChunk = dimPart * kPartChunks;
 
-    // A tile's segments are adjacent; the heaviest tiles (last tokens) go
-    // first, interleaving kHeadGroup kv heads.
+    int segment, tile, kvHead;
+    // Split KV: this tile's counter and first partials slot.
+    int counter;
+    size_t groupSlot;
+    if constexpr (kBatch) {
+      // The work list entry: sequence, tile and segment.
+      const int groupBlocks = headGroup * numEntries;
+      const int within = (int)blockIdx.x % groupBlocks;
+      kvHead = (int)blockIdx.x / groupBlocks * headGroup + within % headGroup;
+      const int4 entry = plan[within / headGroup];
+      const int seq = entry.x;
+      tile = entry.y & 0xffff;
+      segment = entry.z & 0xffff;
+      numSegments = entry.z >> 16;
+      counter = (entry.y >> 16) * kNumKvHeads + kvHead;
+      groupSlot = (size_t)entry.w * kNumKvHeads + kvHead * numSegments;
+      const int queryBegin = queryStart[seq];
+      numTokens = queryStart[seq + 1] - queryBegin;
+      q += (size_t)queryBegin * kNumQHeads * kHeadDim;
+      out += (size_t)queryBegin * kNumQHeads * kHeadDim;
+      blockTable += (size_t)seq * blockTableStride;
+      seqLens += seq;
+      mmRanges += (size_t)seq * 2 * numMmRanges;
+    } else {
+      // A tile's segments are adjacent; the heaviest tiles (last tokens) go
+      // first, interleaving kHeadGroup kv heads.
+      const int numTiles = (numTokens * kG + kBlockRows - 1) / kBlockRows;
+      segment = (int)blockIdx.x % numSegments;
+      const int block = (int)blockIdx.x / numSegments;
+      const int groupBlocks = kHeadGroup * numTiles;
+      const int within = block % groupBlocks;
+      tile = numTiles - 1 - within / kHeadGroup;
+      kvHead = block / groupBlocks * kHeadGroup + within % kHeadGroup;
+      counter = block;
+      groupSlot = (size_t)block * numSegments;
+    }
     const int numRows = numTokens * kG;
-    const int numTiles = (numRows + kBlockRows - 1) / kBlockRows;
-    const int segment = (int)blockIdx.x % numSegments;
-    const int block = (int)blockIdx.x / numSegments;
-    const int groupBlocks = kHeadGroup * numTiles;
-    const int within = block % groupBlocks;
-    const int tile = numTiles - 1 - within / kHeadGroup;
-    const int kvHead = block / groupBlocks * kHeadGroup + within % kHeadGroup;
 
     const int seqLen = __builtin_amdgcn_readfirstlane(*seqLens);
     const int context = seqLen - numTokens;
@@ -765,8 +800,7 @@ struct Prefill {
 
     // Split KV: publish (O, max, sum); the last segment to arrive merges and
     // resets the counter.
-    const size_t partialBase =
-        ((size_t)block * numSegments + segment) * kBlockRows;
+    const size_t partialBase = (groupSlot + segment) * kBlockRows;
     if (owner) {
       const size_t partialRow = partialBase + rowWave * 16 + laneRow;
       float* dst = partialO + partialRow * kHeadDim + dimPart * kPartDims;
@@ -784,8 +818,8 @@ struct Prefill {
     __shared__ int isLast;
     __syncthreads();
     if (thread == 0) {
-      isLast = atomicAdd(&counters[block], 1) == numSegments - 1;
-      if (isLast) counters[block] = 0;
+      isLast = atomicAdd(&counters[counter], 1) == numSegments - 1;
+      if (isLast) counters[counter] = 0;
     }
     __syncthreads();
     if (!isLast) return;
@@ -800,7 +834,7 @@ struct Prefill {
       const int r = elem / kHeadDim, d = elem % kHeadDim;
       const int outRow = tileRow + r;
       if (elem >= kBlockRows * kHeadDim || outRow >= numRows) continue;
-      const size_t rowBase = (size_t)block * numSegments * kBlockRows + r;
+      const size_t rowBase = groupSlot * kBlockRows + r;
       float maxAll = -INFINITY, denominator = 0.f;
       f4 numerator = {};
 #pragma unroll 1
@@ -842,7 +876,8 @@ struct Prefill {
 };
 
 // Arguments are checked by rdna_singleseq_registry.cu. Splits the KV
-// until the GPU is full, keeping at least kMinSegmentSteps steps per segment.
+// until the GPU is full, keeping at least kMinSegmentSteps steps per segment;
+// a batch's plan has split it already.
 template <PrefillConfig C>
 void launch_prefill(const PrefillArgs& a) {
   using P = Prefill<C>;
@@ -856,6 +891,18 @@ void launch_prefill(const PrefillArgs& a) {
   }();
   constexpr int kWgpWorkgroups = std::max(
       1, std::min(131072 / P::kLdsBytes, P::kWavesPerSimd * 4 / P::kWaves));
+  if (a.plan) {
+    const int headGroup = a.head_group ? a.head_group : P::kHeadGroup;
+    hipLaunchKernelGGL(
+        P::template prefill_attn<true>, dim3(a.num_entries * P::kNumKvHeads),
+        dim3(P::kThreads), 0, a.stream, static_cast<const elem_t*>(a.q),
+        static_cast<const elem_t*>(a.kv), a.bt, static_cast<elem_t*>(a.out),
+        a.seq_lens, 0, a.scale, a.partial_o, a.partial_ml, a.counters, 1,
+        kWgpWorkgroups * numWgps, a.mm_ranges, a.num_mm_ranges,
+        reinterpret_cast<const int4*>(a.plan), a.query_start, a.num_entries,
+        a.bt_stride, headGroup);
+    return;
+  }
   const int targetWorkgroups = 4 * numWgps;
   const int numTiles =
       (a.num_tokens * P::kG + P::kBlockRows - 1) / P::kBlockRows;
@@ -873,11 +920,12 @@ void launch_prefill(const PrefillArgs& a) {
                   std::max(1, steps / P::kMinSegmentSteps)});
   }
   hipLaunchKernelGGL(
-      P::prefill_attn, dim3(groups * segments), dim3(P::kThreads), 0, a.stream,
-      static_cast<const elem_t*>(a.q), static_cast<const elem_t*>(a.kv), a.bt,
-      static_cast<elem_t*>(a.out), a.seq_lens, a.num_tokens, a.scale,
-      a.partial_o, a.partial_ml, a.counters, segments, kWgpWorkgroups * numWgps,
-      a.mm_ranges, a.num_mm_ranges);
+      P::template prefill_attn<false>, dim3(groups * segments),
+      dim3(P::kThreads), 0, a.stream, static_cast<const elem_t*>(a.q),
+      static_cast<const elem_t*>(a.kv), a.bt, static_cast<elem_t*>(a.out),
+      a.seq_lens, a.num_tokens, a.scale, a.partial_o, a.partial_ml, a.counters,
+      segments, kWgpWorkgroups * numWgps, a.mm_ranges, a.num_mm_ranges, nullptr,
+      nullptr, 0, 0, P::kHeadGroup);
 }
 
 }  // namespace

@@ -8,7 +8,7 @@
 # rdna_singleseq_<kernel>_configs() raise.
 #
 function(rdna_singleseq_attn_target TARGET ARCHES)
-  set(_KERNELS decode prefill)
+  set(_KERNELS decode decode_batch prefill)
   set(_HEAD_DIMS 64 96 128 256 512)
   set(_DTYPES Fp16 Bf16)
   set(_OUT ${CMAKE_CURRENT_BINARY_DIR}/rdna_singleseq_attn)
