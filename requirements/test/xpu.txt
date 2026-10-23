@@ -575,6 +575,7 @@ numpy==2.2.6
     #   sacrebleu
     #   scikit-learn
     #   scipy
+    #   sentence-transformers
     #   soundfile
     #   soxr
     #   tensorizer
@@ -990,7 +991,7 @@ scipy==1.18.0
     #   pytrec-eval-terrier
     #   scikit-learn
     #   sentence-transformers
-sentence-transformers==5.2.0
+sentence-transformers==5.6.0
     # via
     #   -r requirements/test/xpu.in
     #   mteb

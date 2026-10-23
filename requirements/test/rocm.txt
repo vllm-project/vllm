@@ -1133,7 +1133,7 @@ scipy==1.17.1
     #   vocos
 segmentation-models-pytorch==0.5.0
     # via -r requirements/test/rocm.in
-sentence-transformers==5.3.0
+sentence-transformers==5.6.0
     # via
     #   -r requirements/test/rocm.in
     #   mteb
