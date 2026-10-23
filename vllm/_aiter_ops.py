@@ -1757,7 +1757,7 @@ def _fused_mla_qkv_a_proj_dual_rms_norm_per_token_quant_impl(
             skip_reduce=True,
         )
     q, kv, k_pe = y.split([q_dim, kv_dim, weight.shape[0] - q_dim - kv_dim], dim=-1)
-    if 512 < x.shape[0] < 1024:
+    if 512 < x.shape[0] <= 1024:
         q_out, q_scale, kv_normed = _fused_mla_dual_rms_norm_per_token_quant_impl(
             q, q_weight, kv, kv_weight, q_epsilon, kv_epsilon
         )
