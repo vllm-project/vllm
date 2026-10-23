@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 import pytest
 import regex as re
 
+import vllm.parser.engine.parser_engine as parser_engine
 from tests.parser.engine.conftest import make_mock_tokenizer
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
@@ -36,6 +37,7 @@ from vllm.parser.engine.parser_engine import (
     ParserEngine,
     ReasoningEnd,
     _ArgsRewriter,
+    _StreamingArgs,
 )
 from vllm.parser.engine.parser_engine_config import (
     ParserEngineConfig,
@@ -45,7 +47,7 @@ from vllm.parser.engine.parser_engine_config import (
 from vllm.parser.glm47_moe import glm47_moe_config
 from vllm.parser.parser_manager import ParserManager
 from vllm.parser.qwen3 import Qwen3Parser
-from vllm.tool_parsers.utils import coerce_typed_value
+from vllm.tool_parsers.utils import coerce_typed_value, find_tool_properties
 
 # ── Shared test configs ──────────────────────────────────────────────
 
@@ -2247,6 +2249,143 @@ class TestCoercionInstabilityRegression:
         deep = "[" * 1000 + "]" * 1000
         args = _stream_tool_args(engine, "f", ['{"a": ' + deep + "}"])
         assert args == '{"a": ' + deep + "}"
+
+
+def _delta_arg_text(delta) -> str:
+    if delta is None:
+        return ""
+    return "".join(
+        tc.function.arguments
+        for tc in delta.tool_calls or []
+        if tc.function and tc.function.arguments
+    )
+
+
+def _stream_arg_deltas(engine, name: str, chunks: list[str]) -> tuple[list[str], str]:
+    """Stream a tool call; return per-chunk argument deltas and the flush."""
+    engine._events_to_delta([SemanticEvent(EventType.TOOL_CALL_START, tool_index=0)])
+    engine._events_to_delta([SemanticEvent(EventType.TOOL_NAME, name, tool_index=0)])
+    per_chunk = [
+        _delta_arg_text(
+            engine._events_to_delta(
+                [SemanticEvent(EventType.ARG_VALUE_CHUNK, chunk, tool_index=0)]
+            )
+        )
+        for chunk in chunks
+    ]
+    flush = _delta_arg_text(
+        engine._events_to_delta([SemanticEvent(EventType.TOOL_CALL_END, tool_index=0)])
+    )
+    return per_chunk, flush
+
+
+class TestIncrementalArgRewrite:
+    """The incremental rewrite must match a full pass tick for tick.
+
+    Deltas are the API-visible boundary, so resuming from the last final
+    member may not change when text becomes streamable.
+    """
+
+    @staticmethod
+    def _expected_deltas(tool, chunks: list[str]) -> list[str]:
+        properties = find_tool_properties([tool], "f")
+        string_keys = ParserEngine._streamable_string_keys(properties)
+        emitted = ""
+        deltas: list[str] = []
+        # The first chunk emits the tool name, so the first argument delta
+        # covers the first two chunks.
+        for i in range(2, len(chunks) + 1):
+            current = "".join(chunks[:i])
+            corrected = _ArgsRewriter(current, properties, final=False).rewrite()
+            safe, _ = ParserEngine._safe_arg_prefix(corrected, string_keys)
+            deltas.append(safe[len(emitted) :])
+            emitted = safe
+        return deltas
+
+    @pytest.mark.parametrize(
+        "schema,chunks",
+        [
+            (
+                {"n": {"type": "string"}, "s": {"type": "string"}},
+                ['{"n": ', "5", ', "s": "he', "llo", '"}'],
+            ),
+            (
+                {"n": {"type": "integer"}, "b": {"type": "boolean"}},
+                ['{"n": "', "4", '2", "b": ', "1", "}"],
+            ),
+            (
+                {"s": {"type": "string"}, "t": {"type": "integer"}},
+                ['{"s": "abc', '"', ",", " ", '"t"', ": 1", "}"],
+            ),
+            (
+                {"items": {"type": "array"}},
+                ['{"items": [', '{"a": ', "1", "}, ", '{"b": 2}', "]}"],
+            ),
+        ],
+    )
+    def test_deltas_match_full_pass(self, schema, chunks):
+        tool = _make_tool("f", schema)
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        actual, flush = _stream_arg_deltas(engine, "f", chunks)
+        expected = self._expected_deltas(tool, chunks)
+        assert [d for d in actual if d] == [d for d in expected if d]
+        fresh = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        assert "".join(actual) + flush == _stream_tool_args(fresh, "f", chunks)
+
+    def test_long_string_deltas_match_full_pass(self):
+        """Split escapes in an open string must not change the delta stream."""
+        tool = _make_tool("f", {"body": {"type": "string"}})
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        body = 'ab\\"cd\\\\ef' * 60
+        chunks = ['{"body": "'] + [body[i : i + 5] for i in range(0, len(body), 5)]
+        chunks.append('"}')
+        actual, flush = _stream_arg_deltas(engine, "f", chunks)
+        expected = self._expected_deltas(tool, chunks)
+        assert [d for d in actual if d] == [d for d in expected if d]
+        fresh = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        assert "".join(actual) + flush == _stream_tool_args(fresh, "f", chunks)
+
+    def test_split_quote_and_comma_stream_in_order(self):
+        """A closing quote and the following comma arriving in separate
+        deltas must not be appended blindly to an open string."""
+        tool = _make_tool("f", {"s": {"type": "string"}, "t": {"type": "integer"}})
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        chunks = ['{"s": "abc', '"', ",", ' "t": ', "1", "}"]
+        per_chunk, flush = _stream_arg_deltas(engine, "f", chunks)
+        assert "".join(per_chunk) == '{"s": "abc", "t": '
+        assert "".join(per_chunk) + flush == '{"s": "abc", "t": 1}'
+
+    def test_long_string_is_not_rewritten_per_delta(self, monkeypatch):
+        """An open string streams verbatim, so its deltas do not re-rewrite
+        the accumulated document."""
+        calls = 0
+
+        class CountingRewriter(_ArgsRewriter):
+            def rewrite(self):
+                nonlocal calls
+                calls += 1
+                return super().rewrite()
+
+        monkeypatch.setattr(parser_engine, "_ArgsRewriter", CountingRewriter)
+        tool = _make_tool("f", {"body": {"type": "string"}})
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        body = "x" * 4000
+        chunks = ['{"body": "'] + [body[i : i + 8] for i in range(0, len(body), 8)]
+        chunks.append('"}')
+        args = _stream_tool_args(engine, "f", chunks)
+        assert args == '{"body": "' + body + '"}'
+        assert calls < 10, f"rewrote {calls} times for {len(chunks)} deltas"
+
+    def test_non_extending_text_falls_back_to_full_pass(self):
+        tool = _make_tool("f", {"a": {"type": "integer"}})
+        properties = find_tool_properties([tool], "f")
+        string_keys = ParserEngine._streamable_string_keys(properties)
+        cache = _StreamingArgs()
+        corrected, safe, streams = _StreamingArgs.full_pass(
+            '{"a": 1}', properties, string_keys
+        )
+        cache.reset('{"a": 1}', corrected, safe, streams)
+        assert cache.delta('{"a": 2}', properties, string_keys) is None
 
 
 _STREAMABLE_SCHEMA_SHAPES: list[dict] = [

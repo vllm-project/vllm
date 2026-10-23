@@ -68,6 +68,7 @@ class ToolCallSlot:
         "name_sent",
         "properties",
         "string_keys",
+        "arg_cache",
         "_streamed_parts",
         "_streamed_joined",
         "extend_open_value",
@@ -82,6 +83,7 @@ class ToolCallSlot:
         self.name_sent: bool = False
         self.properties: dict | None = None
         self.string_keys: set[str] | None = None
+        self.arg_cache: _StreamingArgs | None = None
         self._streamed_parts: list[str] = []
         self._streamed_joined: str | None = ""
         self.extend_open_value: ArgValueExtender | None = None
@@ -356,6 +358,166 @@ class _ArgsRewriter:
                     return j
         out.append(text[i:j])
         return j
+
+
+def _top_level_commas(text: str, depth: int) -> list[int]:
+    """Offsets just past each comma at container *depth*, string-aware."""
+    in_string = False
+    escape = False
+    commas: list[int] = []
+    for i, c in enumerate(text):
+        if escape:
+            escape = False
+        elif in_string:
+            if c == "\\":
+                escape = True
+            elif c == '"':
+                in_string = False
+        elif c == '"':
+            in_string = True
+        elif c in "{[":
+            depth += 1
+        elif c in "}]":
+            depth -= 1
+        elif c == "," and depth == 1:
+            commas.append(i + 1)
+    return commas
+
+
+def _resume_point(
+    raw: str, corrected: str, emitted: int, depth: int
+) -> tuple[int, int] | None:
+    """Resume offsets in *raw* and *corrected*, or ``None`` before any comma.
+
+    Every top-level comma is copied verbatim, so the k-th comma lies at the
+    same index in both texts: the last comma at or before the emitted prefix
+    is the last member that is final in both.
+    """
+    raw_commas = _top_level_commas(raw, depth)
+    corrected_commas = _top_level_commas(corrected[:emitted], depth)
+    if not corrected_commas or len(corrected_commas) > len(raw_commas):
+        return None
+    return raw_commas[len(corrected_commas) - 1], corrected_commas[-1]
+
+
+def _unescaped_quote(text: str, escape: bool) -> tuple[bool, bool]:
+    """Whether *text* contains an unescaped quote; returns (closes, escape)."""
+    for c in text:
+        if escape:
+            escape = False
+        elif c == "\\":
+            escape = True
+        elif c == '"':
+            return True, escape
+    return False, escape
+
+
+def _odd_trailing_backslashes(text: str) -> bool:
+    count = 0
+    for c in reversed(text):
+        if c != "\\":
+            break
+        count += 1
+    return count % 2 == 1
+
+
+class _StreamingArgs:
+    """Incremental correction of streamed argument JSON.
+
+    A corrected document prefix is final once every member in it is
+    delimited, so each delta rewrites only the tail from the last top-level
+    comma at or before the emitted prefix instead of the whole document.
+    The emitted boundary matches a full :class:`_ArgsRewriter` pass plus
+    ``_safe_arg_prefix``, so delta boundaries are unchanged; text that does
+    not extend the cached document falls back to a full pass.  A trailing
+    open string under a streamable key streams its content verbatim, so a
+    long value is not rescanned on every delta.
+    """
+
+    __slots__ = (
+        "_raw",
+        "_raw_boundary",
+        "_corrected_boundary",
+        "_emitted",
+        "_streams",
+        "_at_end",
+        "_escape",
+    )
+
+    def __init__(self) -> None:
+        self._raw: str | None = None
+        self._raw_boundary = 0
+        self._corrected_boundary = 0
+        self._emitted = 0
+        self._streams = False
+        self._at_end = False
+        self._escape = False
+
+    @staticmethod
+    def full_pass(
+        args_json: str, properties: dict | None, string_keys: set[str] | None
+    ) -> tuple[str, str, bool]:
+        """Return (corrected text, safe prefix, value_streams) for *args_json*.
+
+        The correction rewrites value tokens in place (see
+        :class:`_ArgsRewriter`), so the corrected text of one delta extends
+        the corrected text of every earlier delta and the prefix invariant
+        holds however the model formats its JSON.  Trailing literals are
+        treated as still growing: they are only corrected once delimited.
+        """
+        corrected = _ArgsRewriter(args_json, properties, final=False).rewrite()
+        safe, streams = ParserEngine._safe_arg_prefix(corrected, string_keys)
+        return corrected, safe, streams
+
+    def reset(self, args_json: str, corrected: str, safe: str, streams: bool) -> None:
+        self._raw = args_json
+        self._raw_boundary = 0
+        self._corrected_boundary = 0
+        self._emitted = len(safe)
+        self._streams = streams
+        self._at_end = len(safe) == len(corrected)
+        self._escape = _odd_trailing_backslashes(args_json) if streams else False
+        point = _resume_point(args_json, corrected, len(safe), 0)
+        if point is not None:
+            self._raw_boundary, self._corrected_boundary = point
+
+    def delta(
+        self, args_json: str, properties: dict | None, string_keys: set[str] | None
+    ) -> tuple[str, bool] | None:
+        """Return (newly safe text, value_streams), or ``None`` for a full pass."""
+        raw = self._raw
+        if raw is None or not args_json.startswith(raw) or not raw.startswith("{"):
+            return None
+        if self._streams and self._at_end:
+            delta = args_json[len(raw) :]
+            closes, escape = _unescaped_quote(delta, self._escape)
+            if not closes:
+                self._raw = args_json
+                self._escape = escape
+                self._emitted += len(delta)
+                return delta, True
+        skip = 1 if self._raw_boundary else 0
+        tail = "{" + args_json[self._raw_boundary :] if skip else args_json
+        tail_out = _ArgsRewriter(tail, properties, final=False).rewrite()
+        safe_tail, streams = ParserEngine._safe_arg_prefix(tail_out, string_keys)
+        emit_rel = max(len(safe_tail) - skip, 0)
+        end = self._corrected_boundary + emit_rel
+        delta = ""
+        if end > self._emitted:
+            body = tail_out[skip:]
+            delta = body[self._emitted - self._corrected_boundary : emit_rel]
+            self._emitted = end
+        self._raw = args_json
+        self._streams = streams
+        self._at_end = end == self._corrected_boundary + len(tail_out) - skip
+        self._escape = _odd_trailing_backslashes(args_json) if streams else False
+        point = _resume_point(
+            args_json[self._raw_boundary :], tail_out[skip:], emit_rel, skip
+        )
+        if point is not None:
+            self._raw_boundary += point[0]
+            self._corrected_boundary += point[1]
+        return delta, streams
 
 
 class ParserEngine(Parser):
@@ -643,23 +805,6 @@ class ParserEngine(Parser):
         return _ArgsRewriter(
             args_json, find_tool_properties(self._tools, func_name), final=True
         ).rewrite()
-
-    def _streaming_safe_args(
-        self,
-        args_json: str,
-        properties: dict | None,
-        string_keys: set[str] | None,
-    ) -> tuple[str, bool]:
-        """Correct *args_json* and return its safe streamed prefix.
-
-        The correction rewrites value tokens in place (see
-        :class:`_ArgsRewriter`), so the corrected text of one delta extends
-        the corrected text of every earlier delta and the prefix invariant
-        holds however the model formats its JSON.  Trailing literals are
-        treated as still growing: they are only corrected once delimited.
-        """
-        rewritten = _ArgsRewriter(args_json, properties, final=False).rewrite()
-        return self._safe_arg_prefix(rewritten, string_keys)
 
     def _is_valid_tool_name(self, name: str) -> bool:
         if not self.parser_engine_config.validate_tool_names:
@@ -1282,6 +1427,9 @@ class ParserEngine(Parser):
                 if not diff or not slot.open_value_streams:
                     return None
                 slot.append_streamed(diff)
+                # Emitted outside the incremental state, which is resynced on
+                # the next converted delta.
+                slot.arg_cache = None
                 return diff
             slot.extend_open_value = None
         elif structural is not None and structural.isdisjoint(raw_delta):
@@ -1296,23 +1444,38 @@ class ParserEngine(Parser):
         if not current_json:
             return None
 
-        prev = slot.streamed_json
         # Reached only once the name was accepted, so slot.name is set.
-        safe_json, value_streams = self._streaming_safe_args(
-            current_json, slot.properties, slot.string_keys
+        cache = slot.arg_cache
+        result = (
+            cache.delta(current_json, slot.properties, slot.string_keys)
+            if cache is not None
+            else None
         )
+        if result is None:
+            properties, string_keys = slot.properties, slot.string_keys
+            corrected, safe_json, value_streams = _StreamingArgs.full_pass(
+                current_json, properties, string_keys
+            )
+            prev = slot.streamed_json
+            if prev and not safe_json.startswith(prev):
+                slot.arg_cache = None
+                return None
+            cache = slot.arg_cache = _StreamingArgs()
+            cache.reset(current_json, corrected, safe_json, value_streams)
+            if not safe_json:
+                return None
+            slot.streamed_json = safe_json
+            delta = safe_json[len(prev) :]
+        else:
+            delta, value_streams = result
+            if delta:
+                slot.append_streamed(delta)
 
-        if not safe_json:
-            return None
-        if prev and not safe_json.startswith(prev):
-            return None
-
-        slot.streamed_json = safe_json
         if self._arg_value_extender is not None:
             # Deltas that only extend the open value skip the conversion above.
             slot.extend_open_value = self._arg_value_extender(slot.args)
             slot.open_value_streams = value_streams
-        return safe_json[len(prev) :] or None
+        return delta or None
 
     def _flush_arg_converter(self, idx: int) -> str | None:
         converter = self._arg_converter
@@ -1335,6 +1498,7 @@ class ParserEngine(Parser):
                 return None
             diff = final_json[len(prev) :]
             slot.streamed_json = final_json
+            slot.arg_cache = None
             return diff
         return None
 
