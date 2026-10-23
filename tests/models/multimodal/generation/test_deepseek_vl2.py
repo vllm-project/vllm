@@ -30,5 +30,7 @@ def test_deepseek_vl2_encoder_cache_cropping(
                 SamplingParams(temperature=0, max_tokens=1),
             )
             output = outputs[0].outputs[0]
+            # A cache collision makes the scheduler reject the second request
+            # with finish_reason="error" due to mismatched embedding counts.
             assert output.finish_reason == "length"
             assert len(output.token_ids) == 1
