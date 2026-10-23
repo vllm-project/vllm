@@ -199,6 +199,9 @@ def build_flash_ffn_kernel(
     QKV8, QB8, O8 = dsa_fp8
     whole = kda or dsa
     FAULT = abi.fault_spec()
+    F_RANK, F_STEP, F_US = (
+        (FAULT.rank, FAULT.step, FAULT.us) if FAULT is not None else (0, 0, 0)
+    )
     expert_inter = inter
     SHARED = SHARED_EXPERT
     G = BLOCKS
@@ -335,9 +338,9 @@ def build_flash_ffn_kernel(
             fx.Uint32(_uniform(pv[0]))
         )
         if const_expr(FAULT is not None):
-            if (rank == FAULT.rank) & (step_value == FAULT.step) & (layer == 0):
+            if (rank == F_RANK) & (step_value == F_STEP) & (layer == 0):
                 t_fault = mem_realtime()
-                while mem_realtime() - t_fault < fx.Int64(FAULT.us * 100):
+                while mem_realtime() - t_fault < fx.Int64(F_US * 100):
                     spin_pause()
 
         # ------------------------------------------------------------ helpers
