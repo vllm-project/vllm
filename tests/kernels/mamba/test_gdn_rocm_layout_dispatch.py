@@ -178,7 +178,9 @@ def test_rocm_prefill_numerics_and_output_layout(state_dtype, correlated):
             model="Qwen/Qwen3.5-0.8B",
             revision="2fc06364715b967f1860aea9cf38778875588b17",
             max_model_len=1024,
-        )
+        ),
+        # auto picks AITER FlyDSL on gfx942/gfx950; this pins the Triton path.
+        additional_config={"gdn_prefill_backend": "triton"},
     )
     with set_current_vllm_config(config):
         prefill = ChunkGatedDeltaRule()
