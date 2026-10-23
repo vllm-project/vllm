@@ -18,13 +18,14 @@ steps:
     - docker/docker-bake-rocm.hcl
     - tests/tools/test_docker_build_metadata_args.py
     - tests/tools/test_rocm_build.py
-    - tests/tools/test_amd_ci_fast_exit.py
-    - .buildkite/scripts/hardware_ci/amd_ci_fast_exit.py
+    - tests/tools/test_amd_ci_teardown.py
+    - .buildkite/scripts/hardware_ci/amd_ci_teardown.py
+    - .buildkite/scripts/hardware_ci/amd_ci_fault_trap.c
     - tests/tools/test_kernel_symbol_map.py
     - tools/ci/kernel_symbol_map.py
     - tools/ci/rocm_kernel_symbol_map.py
   commands:
-    - pytest -v -s tools/test_docker_build_metadata_args.py tools/test_rocm_build.py tools/test_amd_ci_fast_exit.py
+    - pytest -v -s tools/test_docker_build_metadata_args.py tools/test_rocm_build.py tools/test_amd_ci_teardown.py
     - pytest -v -s tools/test_kernel_symbol_map.py
   mirror:
     amd:
@@ -43,8 +44,9 @@ steps:
       - .buildkite/scripts/rocm/build.sh
       - tests/tools/test_docker_build_metadata_args.py
       - tests/tools/test_rocm_build.py
-      - tests/tools/test_amd_ci_fast_exit.py
-      - .buildkite/scripts/hardware_ci/amd_ci_fast_exit.py
+      - tests/tools/test_amd_ci_teardown.py
+      - .buildkite/scripts/hardware_ci/amd_ci_teardown.py
+      - .buildkite/scripts/hardware_ci/amd_ci_fault_trap.c
       - tests/tools/test_kernel_symbol_map.py
       - tools/ci/kernel_symbol_map.py
       - tools/ci/rocm_kernel_symbol_map.py

@@ -539,6 +539,9 @@ RUN --mount=type=bind,source=.buildkite/scripts/rocm/select_aiter_nightly_wheel.
     fi
 
 FROM test-base AS test
+# Native fault trap for AMD CI pytest runs (.buildkite/scripts/hardware_ci/amd_ci_teardown.py).
+RUN --mount=type=bind,source=.buildkite/scripts/hardware_ci/amd_ci_fault_trap.c,target=/tmp/trap.c \
+    cc -O2 -shared -fPIC -o /usr/local/lib/libamd_ci_fault_trap.so /tmp/trap.c
 COPY --link --from=native /out /
 COPY --link --from=install /out /
 COPY --link --exclude=vllm --exclude=.git . /vllm-workspace/
