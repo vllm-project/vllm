@@ -611,7 +611,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                         cache_indices=non_spec_state_indices_tensor,
                         has_initial_state=has_initial_state,
                         activation="silu",
-                        block_m=8,
+                        # 128 runs ~2.2x faster than 8 on MI355X at K3 prefill
+                        # shapes, with bit-identical output.
+                        block_m=128,
                         metadata=m,
                         preserve_input_dtype=True,
                     )
