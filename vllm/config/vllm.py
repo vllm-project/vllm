@@ -3307,14 +3307,16 @@ class VllmConfig:
                 f"Model Runner V1 does not support: {', '.join(unsupported)}"
             )
 
-    def adjust_dcp_kv_cache_interleave_size(
+    def finalize_kv_cache_layout(
         self, kv_cache_groups: list["KVCacheGroupSpec"]
     ) -> None:
-        """Normalize DCP interleave size against block_size for NIXL P/D.
-
-        Called by the engine core before profiling, as compiled graphs and CUDA
-        graphs may bake the value in.
-        """
+        """Finalize layout-dependent config in the core and workers before profiling."""
+        if (
+            not kv_cache_groups
+            or self.kv_transfer_config is None
+            or not self.kv_transfer_config.is_kv_transfer_instance
+        ):
+            return
         dcp_size = self.parallel_config.decode_context_parallel_size
         if dcp_size <= 1:
             return
@@ -3331,9 +3333,7 @@ class VllmConfig:
                 "deprecated when PCP is fully supported."
             )
 
-        if self.kv_transfer_config is None or not self.kv_transfer_config.has_connector(
-            "NixlConnector"
-        ):
+        if not self.kv_transfer_config.has_connector("NixlConnector"):
             return
         if not self.parallel_config._allow_auto_resolve_cp_interleave_size:
             return
@@ -3363,7 +3363,7 @@ class VllmConfig:
         block_size = self.cache_config.block_size
 
         # Skip DCP interleave-size compatibility for NIXL P/D: the interleave
-        # size is pinned to block_size by each worker.
+        # size is finalized from the global KV cache groups.
         nixl_pd_active = (
             self.kv_transfer_config is not None
             and self.kv_transfer_config.has_connector("NixlConnector")

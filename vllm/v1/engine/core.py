@@ -285,20 +285,9 @@ class EngineCore:
             [s for specs in kv_cache_specs for s in specs.values()],
         )
 
-        # Likewise finalize the DCP interleave size, which compiled graphs and
-        # CUDA graphs bake in.
         global_kv_cache_groups = get_global_kv_cache_groups(vllm_config, kv_cache_specs)
-        kv_transfer_config = vllm_config.kv_transfer_config
-        if (
-            global_kv_cache_groups
-            and kv_transfer_config is not None
-            and kv_transfer_config.is_kv_transfer_instance
-        ):
-            vllm_config.adjust_dcp_kv_cache_interleave_size(global_kv_cache_groups)
-
-        self.model_executor.set_kv_cache_layout(
-            layout.name, vllm_config.parallel_config.cp_kv_cache_interleave_size
-        )
+        vllm_config.finalize_kv_cache_layout(global_kv_cache_groups)
+        self.model_executor.set_kv_cache_layout(layout.name, global_kv_cache_groups)
 
         has_kv_cache = any(kv_cache_spec for kv_cache_spec in kv_cache_specs)
         if has_kv_cache:
