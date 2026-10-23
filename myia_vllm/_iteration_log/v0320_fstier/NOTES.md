@@ -236,3 +236,23 @@ sommeil que le watchdog s'impose ensuite.
 8 GiB (tier RAM du profil fstier) → **14 fichiers / 17,28 GiB d'orphelins**
 purgeés (bornés au `StartedAt` 11:30:42Z), 8,0 G / 13 % après, health 200 en
 6,4 ms.
+
+## 23/10 14:41Z — course 8/8 ; les 500 du jour sont des fenêtres de boot ; KV 95,4 %
+
+- **Course pruneur/lecture : 8/8.** Trois nouveaux ENOENT (12:54:03, 13:20:37,
+  14:20:12Z) tombent à +63 s, +37 s et **+11 s** d'un début de cycle pruner.
+  Le cycle de 14:20:01 a supprimé **907 blocs / 22,2 GiB** (tier monté à
+  70,2 GiB) : plus le cycle est gros, plus la fenêtre de course est grande.
+- **Le ENOENT de 14:20:12 précède de 1 s le `fail 1/2` de 14:20:13** qui a
+  mené au wedge 14:22:13 — coïncidence suggestive (1 cas sur 3 ; les deux
+  autres ENOENT n'ont pas déclenché de wedge), pas une causalité établie.
+- **Les 4×500 du census 2 h sont des erreurs de fenêtre de boot**, pas la
+  course : 14:03:29 (+59 s après le restart 14:02:30) et 14:23:44 ×3 (+31 s
+  après le restart 14:22:13, IP 90.65.170.144 = front hub). Coût
+  client-visible direct des wedges.
+- **KV 95,4 %** avec 5 running et **4 préemptions 17 min après le boot** :
+  le moteur re-sature immédiatement ; 16 restarts en 25 h. Sans la porte
+  watchdog (Q27a) ni `recompute` (Q27b), la boucle continue.
+- Moteur `StartedAt 14:23:45Z`, health 200 en 3,8 ms au cycle. Commit 73,3 %,
+  invité 91 % (91 GB libres), pruner 0 err, nbaudit ok (vague `Image/` en
+  cours de livraison).
