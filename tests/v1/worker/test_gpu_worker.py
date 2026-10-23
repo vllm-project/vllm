@@ -335,40 +335,76 @@ def test_startup_plan_fingerprint_sensitivity(plan_env):
         assert base != fp(_plan_worker().vllm_config, 0, 1)
 
 
-def test_startup_plan_concurrent_save(plan_env, monkeypatch, caplog):
-    """Two workers with the same fingerprint saving at once (containers that
-    share VLLM_CACHE_ROOT on a network volume) both publish cleanly: no failed
-    save, one complete plan on disk, no staging files left behind."""
-    barrier = threading.Barrier(2, timeout=10)
-    real_replace = os.replace
+def _plan_dir():
+    return os.path.join(os.environ["VLLM_CACHE_ROOT"], "startup_plan")
 
-    def replace_after_both_wrote(src, dst):
-        barrier.wait()  # both staging files are written and closed here
+
+def _run_savers(payloads, hold_replace_until_all_written=True):
+    """Save plans for each payload on its own thread (same PID, same
+    fingerprint). With the hold, os.replace waits until every staging file is
+    written and closed, which is the ordering that breaks a shared staging
+    name. Re-raises any worker exception."""
+    barrier = threading.Barrier(len(payloads), timeout=10)
+    real_replace = os.replace
+    errors: list[BaseException] = []
+
+    def replace(src, dst):
+        if hold_replace_until_all_written:
+            barrier.wait()
         return real_replace(src, dst)
 
-    monkeypatch.setattr(startup_plan.os, "replace", replace_after_both_wrote)
-    payloads = (50 * GiB_bytes, 51 * GiB_bytes)
-    threads = [
-        threading.Thread(target=maybe_save_startup_plan, args=(_plan_worker(), kv))
-        for kv in payloads
-    ]
-    with caplog.at_level("WARNING", logger="vllm.v1.worker.startup_plan"):
+    def save(kv):
+        try:
+            maybe_save_startup_plan(_plan_worker(), kv)
+        except BaseException as e:  # noqa: BLE001
+            errors.append(e)
+
+    threads = [threading.Thread(target=save, args=(kv,)) for kv in payloads]
+    with patch.object(startup_plan.os, "replace", replace):
         for t in threads:
             t.start()
         for t in threads:
             t.join(timeout=10)
-    assert not any("Failed to save startup plan" in r.message for r in caplog.records)
+    assert not any(t.is_alive() for t in threads), "a saver did not finish"
+    if errors:
+        raise errors[0]
 
-    plan_dir = os.path.join(os.environ["VLLM_CACHE_ROOT"], "startup_plan")
-    (plan_file,) = [f for f in os.listdir(plan_dir) if f.endswith(".json")]
-    assert not [f for f in os.listdir(plan_dir) if f.endswith(".tmp")]
-    with open(os.path.join(plan_dir, plan_file)) as f:
+
+def test_startup_plan_concurrent_save(plan_env, caplog_vllm):
+    """Two workers with the same fingerprint saving at once (containers that
+    share VLLM_CACHE_ROOT on a network volume) both publish cleanly: no failed
+    save, one complete plan on disk, no staging files left behind."""
+    payloads = (50 * GiB_bytes, 51 * GiB_bytes)
+    _run_savers(payloads)
+    assert not [r for r in caplog_vllm.records if "Failed to save" in r.message]
+
+    (plan_file,) = [f for f in os.listdir(_plan_dir()) if f.endswith(".json")]
+    assert not [f for f in os.listdir(_plan_dir()) if f.endswith(".tmp")]
+    with open(os.path.join(_plan_dir(), plan_file)) as f:
         plan = json.load(f)
     assert plan["kv_cache_memory_bytes"] in payloads  # last writer wins
 
     applied = _plan_worker()
     maybe_apply_startup_plan(applied)
     assert applied.cache_config.kv_cache_memory_bytes == plan["kv_cache_memory_bytes"]
+
+
+def test_startup_plan_save_failure_keeps_old_plan(plan_env, caplog_vllm):
+    """A failed publish leaves the previous plan intact, logs, raises nothing,
+    and leaves no staging file behind."""
+    maybe_save_startup_plan(_plan_worker(), 50 * GiB_bytes)
+
+    def replace_fails(src, dst):
+        raise OSError("injected replace failure")
+
+    with patch.object(startup_plan.os, "replace", replace_fails):
+        maybe_save_startup_plan(_plan_worker(), 51 * GiB_bytes)
+    assert [r for r in caplog_vllm.records if "Failed to save" in r.message]
+    assert not [f for f in os.listdir(_plan_dir()) if f.endswith(".tmp")]
+
+    applied = _plan_worker()
+    maybe_apply_startup_plan(applied)
+    assert applied.cache_config.kv_cache_memory_bytes == 50 * GiB_bytes
 
 
 def test_startup_plan_apply_gate(plan_env):
