@@ -144,6 +144,9 @@ class ParallelConfig:
     prefill_context_parallel_size: int = Field(default=1, ge=1)
     """Number of ranks that split prefill sequence computation. PCP expands
     the process world size but does not increase the KV-cache shard count."""
+    enable_pcp_o_proj_tp: bool = False
+    """Shard MLA O-Proj weights over TP x PCP. This feature supports
+    eager execution with DCP disabled and a compatible O-Proj weight layout."""
     data_parallel_size: int = Field(default=1, ge=1)
     """Number of data parallel groups. MoE layers will be sharded according to
     the product of the tensor, prefill-context, and data parallel sizes."""
@@ -594,6 +597,11 @@ class ParallelConfig:
         tp = self.tensor_parallel_size
         pcp = self.prefill_context_parallel_size
         dcp = self.decode_context_parallel_size
+        if self.enable_pcp_o_proj_tp:
+            if pcp <= 1:
+                raise ValueError("PCP O-Proj TP requires PCP > 1.")
+            if dcp != 1:
+                raise ValueError("PCP O-Proj TP requires DCP = 1.")
         if pcp == 1:
             # DCP reuses the TP ranks when PCP is disabled.
             if tp % dcp != 0:
@@ -635,10 +643,12 @@ class ParallelConfig:
         PCP-only execution replicates the KV cache, so each decode request can
         have a single PCP owner. DCP shards the KV cache and therefore requires
         every decode request to run on every participating DCP rank.
+        PCP O-Proj TP also requires replicated queries for its output reduction.
         """
         return (
             self.prefill_context_parallel_size > 1
             and self.decode_context_parallel_size == 1
+            and not self.enable_pcp_o_proj_tp
         )
 
     @property
