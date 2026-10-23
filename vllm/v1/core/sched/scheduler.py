@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import copy
 import itertools
 import time
 from collections import defaultdict, deque
@@ -2784,9 +2783,7 @@ class Scheduler(SchedulerInterface):
             and params is not None
             and params.prompt_logprob_token_ids is not None
         ):
-            # Connector admission may truncate prompts before cache lookup.
-            request.sampling_params = copy.copy(params)
-            request.sampling_params.skip_reading_prefix_cache = True
+            # Connector hits are not bounded by max_cache_hit_length.
             request.skip_reading_prefix_cache = True
         existing = self.requests.get(request.request_id)
         if existing is not None:

@@ -3193,16 +3193,13 @@ def test_kv_connector_honors_skip_reading_prefix_cache(suffix_scoring, is_async)
     else:
         scoring.sampling_params.prompt_logprobs = 1
         scoring.skip_reading_prefix_cache = True
-    original_params = scoring.sampling_params
     admission = []
     scheduler.connector.on_new_request = lambda req: admission.append(
-        (req.skip_reading_prefix_cache, req.get_skip_reading_prefix_cache())
+        req.skip_reading_prefix_cache
     )
     scheduler.add_request(plain)
     scheduler.add_request(scoring)
-    if suffix_scoring:
-        assert admission[-1] == (True, True)
-        assert original_params.skip_reading_prefix_cache is False
+    assert admission == [False, True]
 
     output = scheduler.schedule()
     if is_async:
