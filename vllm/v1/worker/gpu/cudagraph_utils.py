@@ -150,8 +150,8 @@ class CudaGraphManager:
     """Captures and dispatches the CUDA graphs of one runner.
 
     Uniform decode batches of query length `q` take graphs of `n` requests, for
-    each `q` in `decode_query_lens` and `n` in
-    `decode_cudagraph_capture_request_sizes` up to the requests `q` maps to.
+    each `q` in `decode_query_lens` and `n` in `decode_request_sizes` (default
+    `decode_cudagraph_capture_request_sizes`) up to the requests `q` maps to.
     With `varlen_decode` (adaptive verification) they take token-keyed graphs of
     `get_varlen_decode_cudagraph_token_sizes` instead. Other batches, and all
     batches when one routine runs every batch, take token-keyed graphs of
@@ -167,8 +167,10 @@ class CudaGraphManager:
         lora_capture_cases: list[int] | None = None,
         varlen_decode: bool = False,
         ubatch_runner: "UBatchRunner | None" = None,
+        decode_request_sizes: Sequence[int] | None = None,
     ):
         self.vllm_config = vllm_config
+        self.decode_request_sizes = decode_request_sizes
         self.device = device
         self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.compilation_config = vllm_config.compilation_config
@@ -285,7 +287,10 @@ class CudaGraphManager:
         prefill_sizes = sorted(
             compilation_config.prefill_cudagraph_capture_token_sizes or []
         )
-        decode_sizes = compilation_config.decode_cudagraph_capture_request_sizes or []
+        decode_sizes = self.decode_request_sizes
+        if decode_sizes is None:
+            decode_sizes = compilation_config.decode_cudagraph_capture_request_sizes
+        decode_sizes = decode_sizes or []
         max_decode_tokens = self.max_num_reqs * self.decode_query_len
         decode_mode = self.cudagraph_mode.decode_mode()
         mixed_mode = self.cudagraph_mode.mixed_mode()

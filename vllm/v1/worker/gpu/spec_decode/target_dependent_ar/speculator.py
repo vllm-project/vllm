@@ -109,6 +109,9 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             self.device,
             cudagraph_mode,
             decode_query_lens={1: self.max_num_reqs},
+            decode_request_sizes=(
+                self.vllm_config.get_draft_decode_cudagraph_request_sizes()
+            ),
         )
 
     def capture(self) -> None:

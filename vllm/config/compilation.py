@@ -736,8 +736,10 @@ class CompilationConfig:
     requests all have the same query length `q`: `1 + num_speculative_tokens`
     for the target model, 1 for draft decodes. A runner captures `n` requests as
     `n * q` tokens, for each `n` up to the most requests its batches have and
-    `max_num_batched_tokens // q`. `[]` captures none. None (default): the
-    request-count grid up to `max_decode_cudagraph_capture_requests`.
+    `max_num_batched_tokens // q`. One-token draft decodes (EAGLE, EAGLE3, MTP)
+    extend these past their widest up to `max_num_seqs`. `[]` captures none.
+    None (default): the request-count grid up to
+    `max_decode_cudagraph_capture_requests`.
 
     With adaptive verification, the target model's decode batches mix query
     lengths, so they take token-keyed FULL graphs instead: the token-count grid

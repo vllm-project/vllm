@@ -733,6 +733,31 @@ class VllmConfig:
             if batch_size > 0
         }
 
+    def get_draft_decode_cudagraph_request_sizes(self) -> list[int]:
+        """Request counts of the FULL graphs of one-token draft decodes, the
+        draft steps after the first of EAGLE, EAGLE3 and single-module MTP: the
+        decode request counts, extended past their widest by the request-count
+        grid up to `max_num_seqs`. The target's decode cap can be far lower:
+        off SM100 its default is 512 / (1 + K) requests, 64 at K=7. Above it
+        the K - 1 draft steps would run eagerly and pay their host launch time
+        on every step, while their graphs are small. Empty without such steps
+        or decode graphs."""
+        speculative_config = self.speculative_config
+        sizes = self.compilation_config.decode_cudagraph_capture_request_sizes
+        if (
+            not sizes
+            or speculative_config is None
+            or self.num_speculative_tokens < 2
+            or speculative_config.method not in ("eagle", "eagle3", "mtp")
+            or (
+                speculative_config.use_multi_module_mtp()
+                and not speculative_config.use_gemma4_mtp()
+            )
+        ):
+            return []
+        grid = decode_cudagraph_capture_grid(self.scheduler_config.max_num_seqs)
+        return sorted({*sizes, *(n for n in grid if n > max(sizes))})
+
     def get_varlen_decode_cudagraph_token_sizes(
         self, decode_query_len: int
     ) -> list[int]:
@@ -2799,6 +2824,14 @@ class VllmConfig:
             n * q
             for n, q in decode_cudagraph_capture_shapes(
                 decode_sizes, query_lens, max_num_tokens
+            )
+        )
+        token_sizes.update(
+            n
+            for n, _ in decode_cudagraph_capture_shapes(
+                self.get_draft_decode_cudagraph_request_sizes(),
+                {1: max_num_seqs},
+                max_num_tokens,
             )
         )
         speculative_config = self.speculative_config

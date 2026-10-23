@@ -546,6 +546,7 @@ def _mock_config_for_cudagraph_sizes(
     max_num_batched_tokens: int,
     compilation_config: CompilationConfig,
     num_speculative_tokens_per_batch_size: list[tuple[int, int, int]] | None = None,
+    method: str = "eagle3",
 ) -> MagicMock:
     """Mock VllmConfig wired up enough to run `_set_cudagraph_sizes`.
 
@@ -568,9 +569,12 @@ def _mock_config_for_cudagraph_sizes(
     schedule = num_speculative_tokens_per_batch_size
     config.speculative_config = (
         SimpleNamespace(
+            method=method,
             num_speculative_tokens=num_speculative_tokens,
             num_speculative_tokens_per_batch_size=schedule,
             uses_dynamic_speculative_decoding=lambda: schedule is not None,
+            use_multi_module_mtp=lambda: False,
+            use_gemma4_mtp=lambda: False,
             enable_adaptive_verification=False,
         )
         if num_speculative_tokens
@@ -582,6 +586,9 @@ def _mock_config_for_cudagraph_sizes(
         lambda decode_query_len: VllmConfig.get_decode_cudagraph_query_lens(
             config, decode_query_len
         )
+    )
+    config.get_draft_decode_cudagraph_request_sizes = (
+        lambda: VllmConfig.get_draft_decode_cudagraph_request_sizes(config)
     )
     config.use_v2_model_runner = True
     config._split_cudagraph_capture_sizes = (
@@ -710,6 +717,41 @@ def test_deprecated_capture_sizes_set_both_kinds(monkeypatch):
 def test_capture_sizes_above_their_cap_raise(monkeypatch, kwargs):
     with pytest.raises(ValueError, match="above"):
         _resolve_capture_sizes(monkeypatch, sm100=True, **kwargs)
+
+
+@pytest.mark.usefixtures("off_sm100")
+@pytest.mark.parametrize(
+    ("method", "kwargs", "widest_draft_decode", "max_capture_size"),
+    [
+        # The target's default decode graphs stop at 512 // 8 = 64 requests.
+        ("eagle3", {}, 1024, 1024),
+        ("mtp", {"max_decode_cudagraph_capture_requests": 16}, 1024, 1024),
+        ("eagle3", {"decode_cudagraph_capture_request_sizes": []}, None, 512),
+        # Draft blocks of K tokens take the target's request counts.
+        ("dspark", {}, None, 512),
+    ],
+)
+def test_one_token_draft_decodes_cover_max_num_seqs(
+    method, kwargs, widest_draft_decode, max_capture_size
+):
+    """One-token draft decode graphs reach max_num_seqs past the target's
+    decode cap, and the recorded capture sizes hold them."""
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE, **kwargs
+    )
+    config = _mock_config_for_cudagraph_sizes(
+        max_num_seqs=1024,
+        num_speculative_tokens=7,
+        max_num_batched_tokens=16384,
+        compilation_config=compilation_config,
+        method=method,
+    )
+
+    VllmConfig._set_cudagraph_sizes(config)
+
+    draft_sizes = config.get_draft_decode_cudagraph_request_sizes()
+    assert max(draft_sizes, default=None) == widest_draft_decode
+    assert compilation_config.max_cudagraph_capture_size == max_capture_size
 
 
 @pytest.mark.usefixtures("off_sm100")
@@ -973,6 +1015,9 @@ def test_default_cudagraph_capture_size_caps_tokens():
         num_speculative_tokens=16,
         max_num_batched_tokens=1_000_000,
         compilation_config=compilation_config,
+        # One-token draft decodes reach max_num_seqs past the ceiling; see
+        # test_one_token_draft_decodes_cover_max_num_seqs.
+        method="ngram",
     )
 
     VllmConfig._set_cudagraph_sizes(config)
